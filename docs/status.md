@@ -1,6 +1,6 @@
 # Status
 
-Current status: **Post-Phase 5 — 146/146 tests passing (145 unit/functional + bench_phase5_all_kernels)**
+Current status: **Post-Phase 5 — 147/147 tests passing (146 unit/functional + bench_phase5_all_kernels)**
 
 Phase 4 is fully complete. Phase 5 performance work is complete.
 Intentional non-goals per §2.2 (CUDA Graphs, dynamic parallelism, texture objects,
@@ -92,6 +92,34 @@ Post-Phase 5 work completed (continued, part 2):
     - `cuMemcpy3D(pCopy)` / `cuMemcpy3DAsync(pCopy, hStream)` — 3D strided copy
       resolving host/device ptrs from `CUmemorytype` (UMA: both are host-accessible).
   Test: `functional_misc_extended_api` (6 sub-tests covering all new APIs).
+
+- **Extended APIs batch 2** (`runtime/api/`, `runtime/rt/`, `runtime/driver/`):
+  - **cuRAND**: `curandCreateGeneratorHost` — on Apple Silicon UMA host=device, aliases
+    `curandCreateGenerator` (no separate host/device distinction needed).
+  - **cuBLAS**: `cublasGetProperty(type, value)` — returns cuBLAS version (major/minor/patch)
+    via `libraryPropertyType` enum (same guard as `curand.h` to prevent double-definition).
+    Symmetric BLAS:
+    - `cublasSsyr`/`cublasDsyr` — symmetric rank-1 update: `A += alpha * x * x^T`
+      (column-major, only upper or lower triangle updated).
+    - `cublasSsyrk`/`cublasDsyrk` — symmetric rank-k update:
+      `C = alpha * op(A) * op(A)^T + beta * C`.
+    - `cublasSsyr2k`/`cublasDsyr2k` — symmetric rank-2k update:
+      `C = alpha * (op(A)*op(B)^T + op(B)*op(A)^T) + beta * C`.
+  - **Driver API**:
+    - `cuFuncSetAttribute` — no-op (Metal manages occupancy automatically).
+    - `cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags` — delegates to base function,
+      flags ignored.
+    - `cuCtxPushCurrent`/`cuCtxPopCurrent` — thin wrappers around `cuCtxSetCurrent`/`GetCurrent`.
+    - `cuDevicePrimaryCtxRetain`/`cuDevicePrimaryCtxRelease` — create/destroy primary context
+      (single GPU on Apple Silicon).
+    - `cuStreamGetPriority`/`cuStreamGetFlags` — return 0 (single-priority stream model).
+    - `cuModuleGetGlobal` — stub returning `CUDA_ERROR_NOT_FOUND` (no runtime-addressable
+      `__device__` globals in CuMetal).
+  - **Runtime peer copy**: `cudaMemcpyPeer`/`cudaMemcpyPeerAsync` — UMA single GPU;
+    forward to `cudaMemcpy`/`cudaMemcpyAsync` with `cudaMemcpyDefault`.
+  - `cudaLaunchHostFunc(stream, fn, userData)` — synchronizes stream then calls `fn(userData)`.
+  - `cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags` — delegates to base function.
+  Test: `functional_extended_api_v2` (18 sub-tests covering all new APIs).
 
 - **Threadgroup memory tiling hints** (`compiler/passes/src/threadgroup_tiling.cpp`):
   New `analyse_threadgroup_tiling()` pass that scans a PTX kernel's instruction

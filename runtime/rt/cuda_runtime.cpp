@@ -3484,6 +3484,42 @@ cudaError_t cudaDeviceGetLimit(size_t* pValue, cudaLimit limit) {
     return fail(cudaSuccess);
 }
 
+// Peer memcpy — single GPU; ignore device IDs and forward to standard memcpy.
+cudaError_t cudaMemcpyPeer(void* dst, int /*dstDevice*/,
+                            const void* src, int /*srcDevice*/,
+                            size_t count) {
+    return cudaMemcpy(dst, src, count, cudaMemcpyDefault);
+}
+
+cudaError_t cudaMemcpyPeerAsync(void* dst, int /*dstDevice*/,
+                                 const void* src, int /*srcDevice*/,
+                                 size_t count, cudaStream_t stream) {
+    return cudaMemcpyAsync(dst, src, count, cudaMemcpyDefault, stream);
+}
+
+// cudaLaunchHostFunc — synchronizes the stream then invokes fn(userData) on the host.
+cudaError_t cudaLaunchHostFunc(cudaStream_t stream, cudaHostFn_t fn, void* userData) {
+    if (fn == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaError_t sync_err = cudaStreamSynchronize(stream);
+    if (sync_err != cudaSuccess) {
+        return fail(sync_err);
+    }
+    fn(userData);
+    return fail(cudaSuccess);
+}
+
+// cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags — flags ignored on Metal.
+cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int* numBlocks,
+                                                                    const void* func,
+                                                                    int blockSize,
+                                                                    size_t dynamicSMemSize,
+                                                                    unsigned int /*flags*/) {
+    return cudaOccupancyMaxActiveBlocksPerMultiprocessor(numBlocks, func, blockSize,
+                                                         dynamicSMemSize);
+}
+
 // Cooperative kernel launch — grid-wide CG is not supported on Metal (no cross-
 // threadgroup barrier), but threadgroup-scoped CG works.  Forward to cudaLaunchKernel
 // so programs that only use thread_block CG continue to function (spec §8).

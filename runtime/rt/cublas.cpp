@@ -1864,4 +1864,228 @@ const char* cublasGetStatusString(cublasStatus_t status) {
     }
 }
 
+cublasStatus_t cublasGetProperty(libraryPropertyType type, int* value) {
+    if (value == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    switch (type) {
+        case MAJOR_VERSION: *value = 12; break;
+        case MINOR_VERSION: *value = 0;  break;
+        case PATCH_LEVEL:   *value = 0;  break;
+        default:
+            return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// Symmetric rank-1 update: A = alpha * x * x^T + A  (column-major, only upper/lower triangle updated)
+cublasStatus_t cublasSsyr(cublasHandle_t handle,
+                           cublasFillMode_t uplo,
+                           int n,
+                           const float* alpha,
+                           const float* x, int incx,
+                           float* a, int lda) {
+    if (handle == nullptr || alpha == nullptr || x == nullptr || a == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || incx == 0 || lda < n) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const float a_val = *alpha;
+    const bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int j = 0; j < n; ++j) {
+        const float xj = a_val * x[j * incx];
+        const int i_start = upper ? 0 : j;
+        const int i_end   = upper ? j + 1 : n;
+        for (int i = i_start; i < i_end; ++i) {
+            a[i + j * lda] += xj * x[i * incx];
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsyr(cublasHandle_t handle,
+                           cublasFillMode_t uplo,
+                           int n,
+                           const double* alpha,
+                           const double* x, int incx,
+                           double* a, int lda) {
+    if (handle == nullptr || alpha == nullptr || x == nullptr || a == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || incx == 0 || lda < n) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const double a_val = *alpha;
+    const bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int j = 0; j < n; ++j) {
+        const double xj = a_val * x[j * incx];
+        const int i_start = upper ? 0 : j;
+        const int i_end   = upper ? j + 1 : n;
+        for (int i = i_start; i < i_end; ++i) {
+            a[i + j * lda] += xj * x[i * incx];
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// Symmetric rank-k update: C = alpha * op(A) * op(A)^T + beta * C  (only upper/lower triangle)
+cublasStatus_t cublasSsyrk(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            int n, int k,
+                            const float* alpha, const float* a, int lda,
+                            const float* beta,  float* c, int ldc) {
+    if (handle == nullptr || alpha == nullptr || a == nullptr || beta == nullptr || c == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || k <= 0 || ldc < n) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    const bool no_trans = (trans == CUBLAS_OP_N);
+    // lda: if no_trans, A is n×k; else k×n
+    if (no_trans && lda < n) return CUBLAS_STATUS_INVALID_VALUE;
+    if (!no_trans && lda < k) return CUBLAS_STATUS_INVALID_VALUE;
+    const float av = *alpha, bv = *beta;
+    for (int j = 0; j < n; ++j) {
+        const int i_end = upper ? j + 1 : n;
+        for (int i = upper ? 0 : j; i < i_end; ++i) {
+            float sum = 0.0f;
+            for (int l = 0; l < k; ++l) {
+                const float ai = no_trans ? a[i + l * lda] : a[l + i * lda];
+                const float aj = no_trans ? a[j + l * lda] : a[l + j * lda];
+                sum += ai * aj;
+            }
+            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsyrk(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            int n, int k,
+                            const double* alpha, const double* a, int lda,
+                            const double* beta,  double* c, int ldc) {
+    if (handle == nullptr || alpha == nullptr || a == nullptr || beta == nullptr || c == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || k <= 0 || ldc < n) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    const bool no_trans = (trans == CUBLAS_OP_N);
+    if (no_trans && lda < n) return CUBLAS_STATUS_INVALID_VALUE;
+    if (!no_trans && lda < k) return CUBLAS_STATUS_INVALID_VALUE;
+    const double av = *alpha, bv = *beta;
+    for (int j = 0; j < n; ++j) {
+        const int i_end = upper ? j + 1 : n;
+        for (int i = upper ? 0 : j; i < i_end; ++i) {
+            double sum = 0.0;
+            for (int l = 0; l < k; ++l) {
+                const double ai = no_trans ? a[i + l * lda] : a[l + i * lda];
+                const double aj = no_trans ? a[j + l * lda] : a[l + j * lda];
+                sum += ai * aj;
+            }
+            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// Symmetric rank-2k update: C = alpha * (op(A)*op(B)^T + op(B)*op(A)^T) + beta * C
+cublasStatus_t cublasSsyr2k(cublasHandle_t handle,
+                             cublasFillMode_t uplo,
+                             cublasOperation_t trans,
+                             int n, int k,
+                             const float* alpha,
+                             const float* a, int lda,
+                             const float* b, int ldb,
+                             const float* beta,
+                             float* c, int ldc) {
+    if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr || beta == nullptr || c == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || k <= 0 || ldc < n) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    const bool no_trans = (trans == CUBLAS_OP_N);
+    if (no_trans && (lda < n || ldb < n)) return CUBLAS_STATUS_INVALID_VALUE;
+    if (!no_trans && (lda < k || ldb < k)) return CUBLAS_STATUS_INVALID_VALUE;
+    const float av = *alpha, bv = *beta;
+    for (int j = 0; j < n; ++j) {
+        const int i_end = upper ? j + 1 : n;
+        for (int i = upper ? 0 : j; i < i_end; ++i) {
+            float sum = 0.0f;
+            for (int l = 0; l < k; ++l) {
+                const float ai = no_trans ? a[i + l * lda] : a[l + i * lda];
+                const float bj = no_trans ? b[j + l * ldb] : b[l + j * ldb];
+                const float bi = no_trans ? b[i + l * ldb] : b[l + i * ldb];
+                const float aj = no_trans ? a[j + l * lda] : a[l + j * lda];
+                sum += ai * bj + bi * aj;
+            }
+            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsyr2k(cublasHandle_t handle,
+                             cublasFillMode_t uplo,
+                             cublasOperation_t trans,
+                             int n, int k,
+                             const double* alpha,
+                             const double* a, int lda,
+                             const double* b, int ldb,
+                             const double* beta,
+                             double* c, int ldc) {
+    if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr || beta == nullptr || c == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || k <= 0 || ldc < n) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    const bool no_trans = (trans == CUBLAS_OP_N);
+    if (no_trans && (lda < n || ldb < n)) return CUBLAS_STATUS_INVALID_VALUE;
+    if (!no_trans && (lda < k || ldb < k)) return CUBLAS_STATUS_INVALID_VALUE;
+    const double av = *alpha, bv = *beta;
+    for (int j = 0; j < n; ++j) {
+        const int i_end = upper ? j + 1 : n;
+        for (int i = upper ? 0 : j; i < i_end; ++i) {
+            double sum = 0.0;
+            for (int l = 0; l < k; ++l) {
+                const double ai = no_trans ? a[i + l * lda] : a[l + i * lda];
+                const double bj = no_trans ? b[j + l * ldb] : b[l + j * ldb];
+                const double bi = no_trans ? b[i + l * ldb] : b[l + i * ldb];
+                const double aj = no_trans ? a[j + l * lda] : a[l + j * lda];
+                sum += ai * bj + bi * aj;
+            }
+            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 }  // extern "C"

@@ -80,6 +80,18 @@ typedef enum cublasGemmAlgo_t {
 const char* cublasGetStatusName(cublasStatus_t status);
 const char* cublasGetStatusString(cublasStatus_t status);
 
+// libraryPropertyType — mirrors CUDA library_types.h; guarded for multi-header includes.
+#ifndef CUMETAL_LIBRARY_PROPERTY_TYPE_DEFINED
+#define CUMETAL_LIBRARY_PROPERTY_TYPE_DEFINED
+typedef enum libraryPropertyType_t {
+    MAJOR_VERSION = 0,
+    MINOR_VERSION = 1,
+    PATCH_LEVEL   = 2,
+} libraryPropertyType;
+#endif
+
+cublasStatus_t cublasGetProperty(libraryPropertyType type, int* value);
+
 cublasStatus_t cublasCreate(cublasHandle_t* handle);
 cublasStatus_t cublasDestroy(cublasHandle_t handle);
 cublasStatus_t cublasGetVersion(cublasHandle_t handle, int* version);
@@ -280,6 +292,58 @@ cublasStatus_t cublasDsymv(cublasHandle_t handle,
                            const double* beta,
                            double* y,
                            int incy);
+
+// Ssyr / Dsyr — symmetric rank-1 update: A := α·x·xᵀ + A.
+cublasStatus_t cublasSsyr(cublasHandle_t handle,
+                           cublasFillMode_t uplo,
+                           int n,
+                           const float* alpha,
+                           const float* x, int incx,
+                           float* a, int lda);
+cublasStatus_t cublasDsyr(cublasHandle_t handle,
+                           cublasFillMode_t uplo,
+                           int n,
+                           const double* alpha,
+                           const double* x, int incx,
+                           double* a, int lda);
+
+// Ssyrk / Dsyrk — symmetric rank-k update: C := α·op(A)·op(A)ᵀ + β·C.
+cublasStatus_t cublasSsyrk(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            int n, int k,
+                            const float* alpha,
+                            const float* a, int lda,
+                            const float* beta,
+                            float* c, int ldc);
+cublasStatus_t cublasDsyrk(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            int n, int k,
+                            const double* alpha,
+                            const double* a, int lda,
+                            const double* beta,
+                            double* c, int ldc);
+
+// Ssyr2k / Dsyr2k — symmetric rank-2k update: C := α·(A·Bᵀ + B·Aᵀ) + β·C.
+cublasStatus_t cublasSsyr2k(cublasHandle_t handle,
+                             cublasFillMode_t uplo,
+                             cublasOperation_t trans,
+                             int n, int k,
+                             const float* alpha,
+                             const float* a, int lda,
+                             const float* b, int ldb,
+                             const float* beta,
+                             float* c, int ldc);
+cublasStatus_t cublasDsyr2k(cublasHandle_t handle,
+                             cublasFillMode_t uplo,
+                             cublasOperation_t trans,
+                             int n, int k,
+                             const double* alpha,
+                             const double* a, int lda,
+                             const double* b, int ldb,
+                             const double* beta,
+                             double* c, int ldc);
 
 // GemmEx — extended GEMM with per-matrix data types and compute type.
 cublasStatus_t cublasGemmEx(cublasHandle_t handle,

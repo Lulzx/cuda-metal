@@ -526,6 +526,11 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int* numBlocks,
                                                           const void* func,
                                                           int blockSize,
                                                           size_t dynamicSMemSize);
+cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int* numBlocks,
+                                                                    const void* func,
+                                                                    int blockSize,
+                                                                    size_t dynamicSMemSize,
+                                                                    unsigned int flags);
 cudaError_t cudaOccupancyMaxPotentialBlockSize(int* minGridSize,
                                                int* blockSize,
                                                const void* func,
@@ -537,6 +542,13 @@ cudaError_t cudaChooseDevice(int* device, const cudaDeviceProp* prop);
 cudaError_t cudaDeviceCanAccessPeer(int* can_access_peer, int device, int peer_device);
 cudaError_t cudaDeviceEnablePeerAccess(int peer_device, unsigned int flags);
 cudaError_t cudaDeviceDisablePeerAccess(int peer_device);
+// Peer memcpy — single GPU on Apple Silicon; peer copies are local copies.
+cudaError_t cudaMemcpyPeer(void* dst, int dstDevice,
+                            const void* src, int srcDevice,
+                            size_t count);
+cudaError_t cudaMemcpyPeerAsync(void* dst, int dstDevice,
+                                 const void* src, int srcDevice,
+                                 size_t count, cudaStream_t stream);
 // Device-level L1/shared-memory config — no-ops on Metal (no configurable split).
 cudaError_t cudaDeviceSetCacheConfig(cudaFuncCache cacheConfig);
 cudaError_t cudaDeviceGetCacheConfig(cudaFuncCache* pCacheConfig);
@@ -558,6 +570,10 @@ typedef enum cudaLimit {
 
 cudaError_t cudaDeviceSetLimit(cudaLimit limit, size_t value);
 cudaError_t cudaDeviceGetLimit(size_t* pValue, cudaLimit limit);
+// cudaLaunchHostFunc — enqueues a host callback on the stream (spec §6.9).
+typedef void (*cudaHostFn_t)(void* userData);
+cudaError_t cudaLaunchHostFunc(cudaStream_t stream, cudaHostFn_t fn, void* userData);
+
 cudaError_t cudaLaunchCooperativeKernel(const void* func,
                                          dim3 gridDim,
                                          dim3 blockDim,

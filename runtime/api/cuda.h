@@ -100,15 +100,22 @@ CUresult cuCtxCreate(CUcontext* pctx, unsigned int flags, CUdevice dev);
 CUresult cuCtxDestroy(CUcontext ctx);
 CUresult cuCtxSetCurrent(CUcontext ctx);
 CUresult cuCtxGetCurrent(CUcontext* pctx);
+CUresult cuCtxPushCurrent(CUcontext ctx);
+CUresult cuCtxPopCurrent(CUcontext* pctx);
 CUresult cuCtxGetDevice(CUdevice* device);
 CUresult cuCtxGetFlags(unsigned int* flags);
 CUresult cuCtxSetFlags(unsigned int flags);
 CUresult cuCtxSynchronize(void);
+// Primary context management.
+CUresult cuDevicePrimaryCtxRetain(CUcontext* pctx, CUdevice dev);
+CUresult cuDevicePrimaryCtxRelease(CUdevice dev);
 
 CUresult cuStreamCreate(CUstream* phStream, unsigned int flags);
 CUresult cuStreamDestroy(CUstream hStream);
 CUresult cuStreamSynchronize(CUstream hStream);
 CUresult cuStreamQuery(CUstream hStream);
+CUresult cuStreamGetPriority(CUstream hStream, int* priority);
+CUresult cuStreamGetFlags(CUstream hStream, unsigned int* flags);
 CUresult cuStreamAddCallback(CUstream hStream,
                              CUstreamCallback callback,
                              void* userData,
@@ -124,6 +131,8 @@ CUresult cuEventQuery(CUevent hEvent);
 CUresult cuEventElapsedTime(float* pMilliseconds, CUevent hStart, CUevent hEnd);
 
 CUresult cuModuleLoad(CUmodule* module, const char* fname);
+CUresult cuModuleGetGlobal(CUdeviceptr* dptr, size_t* bytes,
+                            CUmodule hmod, const char* name);
 CUresult cuModuleLoadData(CUmodule* module, const void* image);
 CUresult cuModuleLoadDataEx(CUmodule* module,
                             const void* image,
@@ -233,6 +242,15 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
 
 CUresult cuMemcpy3D(const CUDA_MEMCPY3D* pCopy);
 CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D* pCopy, CUstream hStream);
+// Generic device-to-device async copy (infers direction from allocation table).
+CUresult cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src, size_t byteCount, CUstream hStream);
+// Peer copies — single GPU on Apple Silicon; behave as local D2D copies.
+CUresult cuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext,
+                      CUdeviceptr srcDevice, CUcontext srcContext,
+                      size_t ByteCount);
+CUresult cuMemcpyPeerAsync(CUdeviceptr dstDevice, CUcontext dstContext,
+                            CUdeviceptr srcDevice, CUcontext srcContext,
+                            size_t ByteCount, CUstream hStream);
 
 CUresult cuMemsetD16(CUdeviceptr dstDevice, unsigned short us, size_t N);
 CUresult cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N);
@@ -269,6 +287,11 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int* numBlocks,
                                                      CUfunction func,
                                                      int blockSize,
                                                      size_t dynamicSMemSize);
+CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int* numBlocks,
+                                                              CUfunction func,
+                                                              int blockSize,
+                                                              size_t dynamicSMemSize,
+                                                              unsigned int flags);
 CUresult cuOccupancyMaxPotentialBlockSize(int* minGridSize,
                                           int* blockSize,
                                           CUfunction func,
@@ -276,6 +299,7 @@ CUresult cuOccupancyMaxPotentialBlockSize(int* minGridSize,
                                           int blockSizeLimit);
 CUresult cuFuncGetAttribute(int* pi, CUfunc_attribute attrib, CUfunction hfunc);
 CUresult cuFuncSetCacheConfig(CUfunction hfunc, CUfunc_cache config);
+CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunc_attribute attrib, int value);
 
 #ifdef __cplusplus
 }

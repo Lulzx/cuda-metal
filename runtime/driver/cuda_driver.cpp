@@ -776,6 +776,37 @@ CUresult cuCtxGetCurrent(CUcontext* pctx) {
     return CUDA_SUCCESS;
 }
 
+// cuCtxPushCurrent — push context onto a per-thread stack (simplified: just sets current).
+CUresult cuCtxPushCurrent(CUcontext ctx) {
+    return cuCtxSetCurrent(ctx);
+}
+
+// cuCtxPopCurrent — pop context from per-thread stack (simplified: returns current, resets to null).
+CUresult cuCtxPopCurrent(CUcontext* pctx) {
+    if (pctx != nullptr) {
+        CUresult r = cuCtxGetCurrent(pctx);
+        if (r != CUDA_SUCCESS) return r;
+    }
+    return cuCtxSetCurrent(nullptr);
+}
+
+// Primary context — on Apple Silicon, the primary context *is* the only context.
+// Retain just creates a fresh context for device 0.
+CUresult cuDevicePrimaryCtxRetain(CUcontext* pctx, CUdevice dev) {
+    if (pctx == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    return cuCtxCreate(pctx, 0, dev);
+}
+
+CUresult cuDevicePrimaryCtxRelease(CUdevice /*dev*/) {
+    // Destroy the current context if any; ignore errors (idempotent).
+    CUcontext ctx = nullptr;
+    cuCtxGetCurrent(&ctx);
+    if (ctx != nullptr) {
+        cuCtxDestroy(ctx);
+    }
+    return CUDA_SUCCESS;
+}
+
 CUresult cuCtxGetDevice(CUdevice* device) {
     if (device == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
@@ -878,6 +909,22 @@ CUresult cuStreamQuery(CUstream hStream) {
         return ready;
     }
     return map_cuda_error(cudaStreamQuery(reinterpret_cast<cudaStream_t>(hStream)));
+}
+
+// Stream getters — Metal has no stream priority; both return 0.
+CUresult cuStreamGetPriority(CUstream /*hStream*/, int* priority) {
+    if (priority == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    *priority = 0;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamGetFlags(CUstream hStream, unsigned int* flags) {
+    if (flags == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    // hStream==null is legacy stream (default), non-null was created with CU_STREAM_DEFAULT (0)
+    // or CU_STREAM_NON_BLOCKING (1).  We don't store flags per stream; return 0.
+    (void)hStream;
+    *flags = 0;
+    return CUDA_SUCCESS;
 }
 
 CUresult cuStreamAddCallback(CUstream hStream,
@@ -999,6 +1046,16 @@ CUresult cuEventElapsedTime(float* pMilliseconds, CUevent hStart, CUevent hEnd) 
     return map_cuda_error(cudaEventElapsedTime(pMilliseconds,
                                                reinterpret_cast<cudaEvent_t>(hStart),
                                                reinterpret_cast<cudaEvent_t>(hEnd)));
+}
+
+// cuModuleGetGlobal — global device variable lookup.
+// CuMetal doesn't support runtime-addressable __device__ globals; return NOT_FOUND.
+CUresult cuModuleGetGlobal(CUdeviceptr* dptr, size_t* bytes,
+                            CUmodule /*hmod*/, const char* name) {
+    if (name == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    if (dptr)  *dptr  = 0;
+    if (bytes) *bytes = 0;
+    return CUDA_ERROR_NOT_FOUND;
 }
 
 CUresult cuModuleLoad(CUmodule* module, const char* fname) {
@@ -1473,6 +1530,30 @@ CUresult cuMemcpyDtoDAsync(CUdeviceptr dstDevice,
                                           reinterpret_cast<cudaStream_t>(hStream)));
 }
 
+// cuMemcpyAsync — generic async D2D copy (direction inferred; on UMA, same as D2D).
+CUresult cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src, size_t byteCount, CUstream hStream) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    return map_cuda_error(cudaMemcpyAsync(
+        reinterpret_cast<void*>(static_cast<std::uintptr_t>(dst)),
+        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(src)),
+        byteCount, cudaMemcpyDefault,
+        reinterpret_cast<cudaStream_t>(hStream)));
+}
+
+// cuMemcpyPeer / cuMemcpyPeerAsync — single GPU on Apple Silicon; same as D2D copy.
+CUresult cuMemcpyPeer(CUdeviceptr dstDevice, CUcontext /*dstContext*/,
+                      CUdeviceptr srcDevice, CUcontext /*srcContext*/,
+                      size_t ByteCount) {
+    return cuMemcpyDtoD(dstDevice, srcDevice, ByteCount);
+}
+
+CUresult cuMemcpyPeerAsync(CUdeviceptr dstDevice, CUcontext /*dstContext*/,
+                            CUdeviceptr srcDevice, CUcontext /*srcContext*/,
+                            size_t ByteCount, CUstream hStream) {
+    return cuMemcpyDtoDAsync(dstDevice, srcDevice, ByteCount, hStream);
+}
+
 CUresult cuMemcpy3D(const CUDA_MEMCPY3D* pCopy) {
     if (pCopy == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
@@ -1781,6 +1862,20 @@ CUresult cuFuncGetAttribute(int* pi, CUfunc_attribute attrib, CUfunction /*hfunc
 // No-op — Metal has no L1/shared-memory cache configuration.
 CUresult cuFuncSetCacheConfig(CUfunction /*hfunc*/, CUfunc_cache /*config*/) {
     return CUDA_SUCCESS;
+}
+
+// No-op — Metal manages thread occupancy automatically.
+CUresult cuFuncSetAttribute(CUfunction /*hfunc*/, CUfunc_attribute /*attrib*/, int /*value*/) {
+    return CUDA_SUCCESS;
+}
+
+// Delegates to base function, ignoring flags.
+CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int* numBlocks,
+                                                              CUfunction func,
+                                                              int blockSize,
+                                                              size_t dynamicSMemSize,
+                                                              unsigned int /*flags*/) {
+    return cuOccupancyMaxActiveBlocksPerMultiprocessor(numBlocks, func, blockSize, dynamicSMemSize);
 }
 
 }  // extern "C"

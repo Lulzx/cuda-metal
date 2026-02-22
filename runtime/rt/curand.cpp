@@ -24,6 +24,11 @@ constexpr int kCurandCompatVersion = 12000;
 
 extern "C" {
 
+// Host generator — on Apple Silicon UMA, host and device share memory; identical to device generator.
+curandStatus_t curandCreateGeneratorHost(curandGenerator_t* generator, curandRngType_t rng_type) {
+    return curandCreateGenerator(generator, rng_type);
+}
+
 curandStatus_t curandCreateGenerator(curandGenerator_t* generator, curandRngType_t rng_type) {
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;

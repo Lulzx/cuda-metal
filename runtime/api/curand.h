@@ -30,14 +30,19 @@ typedef enum curandRngType {
     CURAND_RNG_PSEUDO_DEFAULT = 100,
 } curandRngType_t;
 
-// libraryPropertyType — used by curandGetProperty (mirrors CUDA library_types.h).
+// libraryPropertyType — mirrors CUDA library_types.h; guarded for multi-header includes.
+#ifndef CUMETAL_LIBRARY_PROPERTY_TYPE_DEFINED
+#define CUMETAL_LIBRARY_PROPERTY_TYPE_DEFINED
 typedef enum libraryPropertyType_t {
     MAJOR_VERSION = 0,
     MINOR_VERSION = 1,
     PATCH_LEVEL   = 2,
 } libraryPropertyType;
+#endif
 
 curandStatus_t curandCreateGenerator(curandGenerator_t* generator, curandRngType_t rng_type);
+// Host generator — on Apple Silicon UMA, host and device share memory; identical to device generator.
+curandStatus_t curandCreateGeneratorHost(curandGenerator_t* generator, curandRngType_t rng_type);
 curandStatus_t curandDestroyGenerator(curandGenerator_t generator);
 curandStatus_t curandGetVersion(int* version);
 curandStatus_t curandSetStream(curandGenerator_t generator, cudaStream_t stream);
