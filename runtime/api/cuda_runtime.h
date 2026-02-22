@@ -446,6 +446,13 @@ cudaError_t cudaMemcpy2DAsync(void* dst, size_t dpitch,
                                cudaMemcpyKind kind, cudaStream_t stream);
 cudaError_t cudaMemset2D(void* dev_ptr, size_t pitch,
                           int value, size_t width, size_t height);
+cudaError_t cudaMemset2DAsync(void* dev_ptr, size_t pitch,
+                               int value, size_t width, size_t height,
+                               cudaStream_t stream);
+// 3D pitched fill — fills each row of each plane with value.
+cudaError_t cudaMemset3D(cudaPitchedPtr pitchedDevPtr, int value, cudaExtent extent);
+cudaError_t cudaMemset3DAsync(cudaPitchedPtr pitchedDevPtr, int value, cudaExtent extent,
+                               cudaStream_t stream);
 // 3D pitched copy — on UMA, copies plane-by-row.
 cudaError_t cudaMemcpy3D(const cudaMemcpy3DParms* p);
 cudaError_t cudaMemcpy3DAsync(const cudaMemcpy3DParms* p, cudaStream_t stream);

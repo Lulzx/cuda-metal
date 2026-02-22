@@ -2435,6 +2435,179 @@ cublasStatus_t cublasDtrmm(cublasHandle_t handle,
     return CUBLAS_STATUS_SUCCESS;
 }
 
+} // end extern "C" — templates must have C++ linkage
+
+// ── BLAS1: Srotm / Drotm — apply modified Givens rotation ───────────────────────────
+// param[0] = flag: -2 identity, -1 general H, 0 simplified (diag=1), 1 simplified (off-diag=±1)
+// H = [h11 h12; h21 h22] where encoding per flag:
+//   flag=-2: H=I (no-op)
+//   flag=-1: H=[p1 p2; p3 p4]
+//   flag= 0: H=[1  p2; p3  1]
+//   flag= 1: H=[p1  1; -1 p4]
+
+template<typename T>
+static void rotm_impl(int n, T* x, int incx, T* y, int incy, const T* param) {
+    const T flag = param[0];
+    if (flag == T(-2)) return; // identity
+    T h11, h12, h21, h22;
+    if (flag == T(-1)) {
+        h11 = param[1]; h12 = param[3];
+        h21 = param[2]; h22 = param[4];
+    } else if (flag == T(0)) {
+        h11 = T(1);     h12 = param[3];
+        h21 = param[2]; h22 = T(1);
+    } else { // flag == 1
+        h11 = param[1]; h12 = T(1);
+        h21 = T(-1);    h22 = param[4];
+    }
+    for (int i = 0; i < n; ++i) {
+        T xi = x[i * incx];
+        T yi = y[i * incy];
+        x[i * incx] = h11 * xi + h12 * yi;
+        y[i * incy] = h21 * xi + h22 * yi;
+    }
+}
+
+extern "C" {
+
+cublasStatus_t cublasSrotm(cublasHandle_t handle, int n,
+                            float* x, int incx, float* y, int incy,
+                            const float* param) {
+    if (handle == nullptr || x == nullptr || y == nullptr || param == nullptr)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (n <= 0 || incx == 0 || incy == 0) return CUBLAS_STATUS_SUCCESS;
+    rotm_impl(n, x, incx, y, incy, param);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDrotm(cublasHandle_t handle, int n,
+                            double* x, int incx, double* y, int incy,
+                            const double* param) {
+    if (handle == nullptr || x == nullptr || y == nullptr || param == nullptr)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (n <= 0 || incx == 0 || incy == 0) return CUBLAS_STATUS_SUCCESS;
+    rotm_impl(n, x, incx, y, incy, param);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+} // end extern "C" for rotm — rotmg template must have C++ linkage
+
+// ── BLAS1: Srotmg / Drotmg — construct modified Givens rotation ──────────────────────
+// Computes H such that H * [sqrt(d1)*x1; sqrt(d2)*y1] = [r; 0]
+// Updates d1, d2, x1 in-place; param[0..4] encodes flag and H elements.
+
+template<typename T>
+static void rotmg_impl(T* d1, T* d2, T* x1, T y1, T* param) {
+    // Based on Lawson et al. algorithm
+    constexpr T GAMMA = T(4096);
+    constexpr T GAMMA_SQ = GAMMA * GAMMA;
+    constexpr T INV_GAMMA_SQ = T(1) / GAMMA_SQ;
+
+    T flag, h11, h12, h21, h22;
+
+    if (*d1 < T(0)) {
+        // Force d1 >= 0 by making H identity → zeroes x1
+        flag = T(-1); h11 = T(0); h12 = T(0); h21 = T(0); h22 = T(0);
+        *d1 = T(0); *d2 = T(0); *x1 = T(0);
+        param[0] = flag; param[1] = h11; param[2] = h21; param[3] = h12; param[4] = h22;
+        return;
+    }
+
+    T p2 = (*d2) * y1;
+    if (p2 == T(0)) {
+        // H = identity: no rotation needed
+        param[0] = T(-2);
+        return;
+    }
+
+    T p1 = (*d1) * (*x1);
+    T q2 = p2 * y1;
+    T q1 = p1 * (*x1);
+
+    if (std::abs(q1) > std::abs(q2)) {
+        // flag = 0: h12, h21 stored; h11=h22=1
+        h21 = -y1 / (*x1);
+        h12 = p2 / p1;
+        T u = T(1) - h12 * h21;
+        if (u > T(0)) {
+            flag = T(0);
+            *d1 /= u;
+            *d2 /= u;
+            *x1 *= u;
+        } else {
+            flag = T(-1);
+            h11 = T(0); h22 = T(0);
+            *d1 = T(0); *d2 = T(0); *x1 = T(0);
+        }
+    } else {
+        if (q2 < T(0)) {
+            // Cannot make positive d1
+            flag = T(-1); h11 = T(0); h12 = T(0); h21 = T(0); h22 = T(0);
+            *d1 = T(0); *d2 = T(0); *x1 = T(0);
+            param[0] = flag; param[1] = h11; param[2] = h21; param[3] = h12; param[4] = h22;
+            return;
+        }
+        // flag = 1: h11, h22 stored; h12=1, h21=-1
+        flag = T(1);
+        h11 = p1 / p2;
+        h22 = (*x1) / y1;
+        T u = T(1) + h11 * h22;
+        T temp_d1 = *d2 / u;
+        *d2 = *d1 / u;
+        *d1 = temp_d1;
+        *x1 = y1 * u;
+        h12 = T(1); h21 = T(-1);
+    }
+
+    // Rescale to avoid overflow/underflow
+    if (flag != T(-1)) {
+        while (*d1 <= INV_GAMMA_SQ || *d1 >= GAMMA_SQ) {
+            if (*d1 <= INV_GAMMA_SQ) {
+                flag = T(-1); *d1 *= GAMMA_SQ; *d2 *= GAMMA_SQ;
+                if (flag == T(0)) { h11 /= GAMMA; h12 /= GAMMA; }
+                else               { h11 /= GAMMA; h22 /= GAMMA; }
+                *x1 /= GAMMA;
+            } else {
+                flag = T(-1); *d1 /= GAMMA_SQ; *d2 /= GAMMA_SQ;
+                if (flag == T(0)) { h11 *= GAMMA; h12 *= GAMMA; }
+                else               { h11 *= GAMMA; h22 *= GAMMA; }
+                *x1 *= GAMMA;
+            }
+        }
+    }
+
+    if (flag == T(0)) {
+        param[1] = T(1); param[2] = h21; param[3] = h12; param[4] = T(1);
+    } else if (flag == T(1)) {
+        param[1] = h11; param[2] = T(-1); param[3] = T(1); param[4] = h22;
+    } else {
+        param[1] = h11; param[2] = h21; param[3] = h12; param[4] = h22;
+    }
+    param[0] = flag;
+}
+
+extern "C" {
+
+cublasStatus_t cublasSrotmg(cublasHandle_t handle,
+                             float* d1, float* d2, float* x1, const float* y1,
+                             float* param) {
+    if (handle == nullptr || d1 == nullptr || d2 == nullptr || x1 == nullptr
+        || y1 == nullptr || param == nullptr)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    rotmg_impl(d1, d2, x1, *y1, param);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDrotmg(cublasHandle_t handle,
+                             double* d1, double* d2, double* x1, const double* y1,
+                             double* param) {
+    if (handle == nullptr || d1 == nullptr || d2 == nullptr || x1 == nullptr
+        || y1 == nullptr || param == nullptr)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    rotmg_impl(d1, d2, x1, *y1, param);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 // ── BLAS1: Srot / Drot — apply Givens rotation ───────────────────────────────────────
 
 cublasStatus_t cublasSrot(cublasHandle_t handle,

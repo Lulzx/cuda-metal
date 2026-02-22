@@ -1521,6 +1521,40 @@ int cumetalRuntimeIsDevicePointer(const void* ptr) {
     return state.allocations.resolve(ptr, &resolved) ? 1 : 0;
 }
 
+// Returns 1 if ptr is in a known allocation; sets *base_out and *size_out.
+// base_out = start of the containing allocation, size_out = total allocation size.
+int cumetalRuntimeGetAllocationInfo(const void* ptr, void** base_out, size_t* size_out) {
+    if (ptr == nullptr) {
+        return 0;
+    }
+    RuntimeState& state = runtime_state();
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!state.allocations.resolve(ptr, &resolved)) {
+        return 0;
+    }
+    const auto raw = reinterpret_cast<std::uintptr_t>(ptr);
+    // base = ptr - offset into allocation
+    const std::uintptr_t base_addr = raw - resolved.offset;
+    if (base_out) *base_out = reinterpret_cast<void*>(base_addr);
+    if (size_out) *size_out = resolved.offset + resolved.remaining_size;
+    return 1;
+}
+
+// Returns 1 if ptr is a managed (unified) allocation.
+int cumetalRuntimeIsManaged(const void* ptr) {
+    if (ptr == nullptr) {
+        return 0;
+    }
+    RuntimeState& state = runtime_state();
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!state.allocations.resolve(ptr, &resolved)) {
+        return 0;
+    }
+    // cuMemAllocManaged allocations have the same coherent UMA properties.
+    // We can distinguish them by host_alloc_flags (managed = no host flags set).
+    return (resolved.kind == cumetal::rt::AllocationKind::kDevice) ? 1 : 0;
+}
+
 cudaError_t cudaInit(unsigned int flags) {
     if (flags != 0) {
         return fail(cudaErrorInvalidValue);
@@ -2341,6 +2375,41 @@ cudaError_t cudaMemset2D(void* dev_ptr, size_t pitch,
     }
 
     return fail(cudaSuccess);
+}
+
+// cudaMemset2DAsync — UMA: stream ignored; same as synchronous variant.
+cudaError_t cudaMemset2DAsync(void* dev_ptr, size_t pitch,
+                               int value, size_t width, size_t height,
+                               cudaStream_t /*stream*/) {
+    return cudaMemset2D(dev_ptr, pitch, value, width, height);
+}
+
+// cudaMemset3D — fills a 3D pitched allocation plane-by-row.
+cudaError_t cudaMemset3D(cudaPitchedPtr pitchedDevPtr, int value, cudaExtent extent) {
+    if (pitchedDevPtr.ptr == nullptr && (extent.width > 0 && extent.height > 0 && extent.depth > 0)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+    auto* base = static_cast<uint8_t*>(pitchedDevPtr.ptr);
+    const size_t pitch      = pitchedDevPtr.pitch;
+    const size_t plane_size = pitch * pitchedDevPtr.ysize;
+    for (size_t z = 0; z < extent.depth; ++z) {
+        for (size_t y = 0; y < extent.height; ++y) {
+            if (extent.width > 0) {
+                std::memset(base + z * plane_size + y * pitch, value, extent.width);
+            }
+        }
+    }
+    return fail(cudaSuccess);
+}
+
+// cudaMemset3DAsync — UMA: stream ignored; same as synchronous variant.
+cudaError_t cudaMemset3DAsync(cudaPitchedPtr pitchedDevPtr, int value, cudaExtent extent,
+                               cudaStream_t /*stream*/) {
+    return cudaMemset3D(pitchedDevPtr, value, extent);
 }
 
 cudaError_t cudaMemcpy3D(const cudaMemcpy3DParms* p) {

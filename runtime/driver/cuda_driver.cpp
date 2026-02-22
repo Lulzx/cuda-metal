@@ -40,6 +40,8 @@ struct CUfunc_st {
 namespace {
 
 extern "C" int cumetalRuntimeIsDevicePointer(const void* ptr);
+extern "C" int cumetalRuntimeGetAllocationInfo(const void* ptr, void** base_out, size_t* size_out);
+extern "C" int cumetalRuntimeIsManaged(const void* ptr);
 
 constexpr int kCudaCompatVersion = 12000;
 constexpr std::uint32_t kFatbinWrapperMagic = 0x466243b1u;
@@ -1753,6 +1755,123 @@ CUresult cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us, size_t N,
 CUresult cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui, size_t N,
                            CUstream /*hStream*/) {
     return cuMemsetD32(dstDevice, ui, N);
+}
+
+// 2D strided memset — fills Width elements per row for Height rows (pitch stride).
+CUresult cuMemsetD2D8(CUdeviceptr dstDevice, size_t dstPitch,
+                       unsigned char uc, size_t Width, size_t Height) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    auto* base = reinterpret_cast<unsigned char*>(static_cast<std::uintptr_t>(dstDevice));
+    for (size_t row = 0; row < Height; ++row) {
+        std::memset(base + row * dstPitch, static_cast<int>(uc), Width);
+    }
+    return CUDA_SUCCESS;
+}
+
+CUresult cuMemsetD2D16(CUdeviceptr dstDevice, size_t dstPitch,
+                        unsigned short us, size_t Width, size_t Height) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    auto* base = reinterpret_cast<unsigned char*>(static_cast<std::uintptr_t>(dstDevice));
+    for (size_t row = 0; row < Height; ++row) {
+        auto* row_ptr = reinterpret_cast<unsigned short*>(base + row * dstPitch);
+        for (size_t col = 0; col < Width; ++col) row_ptr[col] = us;
+    }
+    return CUDA_SUCCESS;
+}
+
+CUresult cuMemsetD2D32(CUdeviceptr dstDevice, size_t dstPitch,
+                        unsigned int ui, size_t Width, size_t Height) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    auto* base = reinterpret_cast<unsigned char*>(static_cast<std::uintptr_t>(dstDevice));
+    for (size_t row = 0; row < Height; ++row) {
+        auto* row_ptr = reinterpret_cast<unsigned int*>(base + row * dstPitch);
+        for (size_t col = 0; col < Width; ++col) row_ptr[col] = ui;
+    }
+    return CUDA_SUCCESS;
+}
+
+// Async variants — UMA: stream ignored; same as synchronous.
+CUresult cuMemsetD2D8Async(CUdeviceptr d, size_t p, unsigned char uc,
+                            size_t W, size_t H, CUstream /*s*/) {
+    return cuMemsetD2D8(d, p, uc, W, H);
+}
+CUresult cuMemsetD2D16Async(CUdeviceptr d, size_t p, unsigned short us,
+                             size_t W, size_t H, CUstream /*s*/) {
+    return cuMemsetD2D16(d, p, us, W, H);
+}
+CUresult cuMemsetD2D32Async(CUdeviceptr d, size_t p, unsigned int ui,
+                             size_t W, size_t H, CUstream /*s*/) {
+    return cuMemsetD2D32(d, p, ui, W, H);
+}
+
+// cuMemGetAddressRange — returns the base address and size of the allocation
+// that contains dptr.
+CUresult cuMemGetAddressRange(CUdeviceptr* pbase, size_t* psize, CUdeviceptr dptr) {
+    if (pbase == nullptr && psize == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    void* base = nullptr;
+    size_t sz = 0;
+    const void* raw = reinterpret_cast<const void*>(static_cast<std::uintptr_t>(dptr));
+    if (!cumetalRuntimeGetAllocationInfo(raw, &base, &sz)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    if (pbase) *pbase = static_cast<CUdeviceptr>(reinterpret_cast<std::uintptr_t>(base));
+    if (psize) *psize = sz;
+    return CUDA_SUCCESS;
+}
+
+// cuPointerGetAttribute — query a single attribute of a device pointer.
+CUresult cuPointerGetAttribute(void* data, CUpointer_attribute attribute, CUdeviceptr ptr) {
+    if (data == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    const void* raw = reinterpret_cast<const void*>(static_cast<std::uintptr_t>(ptr));
+    const bool is_known = (cumetalRuntimeIsDevicePointer(raw) != 0);
+    switch (attribute) {
+        case CU_POINTER_ATTRIBUTE_MEMORY_TYPE: {
+            auto* out = static_cast<unsigned int*>(data);
+            // On UMA all allocations are accessible from both host and device.
+            // Return CU_MEMORYTYPE_UNIFIED for known allocations, HOST for host ptrs.
+            *out = is_known ? static_cast<unsigned int>(CU_MEMORYTYPE_UNIFIED)
+                            : static_cast<unsigned int>(CU_MEMORYTYPE_HOST);
+            return CUDA_SUCCESS;
+        }
+        case CU_POINTER_ATTRIBUTE_DEVICE_POINTER: {
+            auto* out = static_cast<CUdeviceptr*>(data);
+            *out = ptr;  // on UMA, device ptr == host ptr
+            return CUDA_SUCCESS;
+        }
+        case CU_POINTER_ATTRIBUTE_HOST_POINTER: {
+            auto* out = static_cast<void**>(data);
+            *out = reinterpret_cast<void*>(static_cast<std::uintptr_t>(ptr));
+            return CUDA_SUCCESS;
+        }
+        case CU_POINTER_ATTRIBUTE_IS_MANAGED: {
+            auto* out = static_cast<unsigned int*>(data);
+            *out = static_cast<unsigned int>(cumetalRuntimeIsManaged(raw));
+            return CUDA_SUCCESS;
+        }
+        case CU_POINTER_ATTRIBUTE_MAPPED: {
+            auto* out = static_cast<unsigned int*>(data);
+            *out = is_known ? 1u : 0u;
+            return CUDA_SUCCESS;
+        }
+        case CU_POINTER_ATTRIBUTE_CONTEXT: {
+            auto* out = static_cast<CUcontext*>(data);
+            cuCtxGetCurrent(out);
+            return CUDA_SUCCESS;
+        }
+        default:
+            return CUDA_ERROR_INVALID_VALUE;
+    }
 }
 
 // Compute capability — synthetic 8.0 (Ampere-equivalent, spec §6.8).

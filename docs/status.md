@@ -1,6 +1,6 @@
 # Status
 
-Current status: **Post-Phase 5 — 148/148 tests passing (147 unit/functional + bench_phase5_all_kernels)**
+Current status: **Post-Phase 5 — 149/149 tests passing (148 unit/functional + bench_phase5_all_kernels)**
 
 Phase 4 is fully complete. Phase 5 performance work is complete.
 Intentional non-goals per §2.2 (CUDA Graphs, dynamic parallelism, texture objects,
@@ -142,6 +142,29 @@ Post-Phase 5 work completed (continued, part 2):
   - **cuBLAS BLAS1**: `cublasSrotg`/`cublasDrotg` — construct Givens rotation:
     given (a,b) compute (c,s,r,z) such that [c s;-s c]·[a;b] = [r;0].
   Test: `functional_extended_api_v3` (14 sub-tests covering all new APIs).
+
+- **Extended APIs batch 4** (`runtime/api/`, `runtime/rt/`, `runtime/driver/`):
+  - **Runtime 3D memset**: `cudaMemset2DAsync` — async variant of 2D memset (stream ignored on UMA);
+    `cudaMemset3D`/`cudaMemset3DAsync` — fill 3D pitched volume plane-by-row using
+    `pitchedDevPtr.pitch × pitchedDevPtr.ysize` as the plane stride.
+  - **Driver 2D memset**: `cuMemsetD2D8`/`cuMemsetD2D16`/`cuMemsetD2D32` — strided per-row fill
+    (8-bit uses `memset`; 16/32-bit use typed element loops); `*Async` variants alias synchronous
+    versions (stream ignored; UMA).
+  - **Driver allocation query**: `cuMemGetAddressRange(pbase, psize, dptr)` — queries CuMetal's
+    allocation table via `cumetalRuntimeGetAllocationInfo` to return base address and allocation
+    size for any pointer within a `cudaMalloc`-ed block.
+  - **Driver pointer attributes**: `cuPointerGetAttribute(data, attribute, ptr)` — supports
+    `CU_POINTER_ATTRIBUTE_MEMORY_TYPE` (returns `CU_MEMORYTYPE_UNIFIED`),
+    `CU_POINTER_ATTRIBUTE_DEVICE_POINTER`, `CU_POINTER_ATTRIBUTE_HOST_POINTER` (both return
+    the pointer itself; UMA identity), `CU_POINTER_ATTRIBUTE_IS_MANAGED`,
+    `CU_POINTER_ATTRIBUTE_MAPPED`, and `CU_POINTER_ATTRIBUTE_CONTEXT`.
+  - **cuBLAS BLAS1**: `cublasSrotm`/`cublasDrotm` — apply modified Givens rotation H to (x,y);
+    flag encoding: -2 = identity no-op, -1 = general [h11 h12; h21 h22],
+    0 = diagonal-1 [1 h12; h21 1], 1 = off-diagonal [h11 1; -1 h22].
+  - **cuBLAS BLAS1**: `cublasSrotmg`/`cublasDrotmg` — construct modified Givens rotation using
+    Lawson et al. algorithm; encodes H into param[0..4] with rescaling loop to prevent
+    overflow/underflow; updates d1, d2, x1 in-place.
+  Test: `functional_extended_api_v4` (34 sub-tests covering all new APIs).
 
 - **Threadgroup memory tiling hints** (`compiler/passes/src/threadgroup_tiling.cpp`):
   New `analyse_threadgroup_tiling()` pass that scans a PTX kernel's instruction

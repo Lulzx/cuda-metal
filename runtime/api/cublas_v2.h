@@ -583,6 +583,32 @@ cublasStatus_t cublasDtrmm(cublasHandle_t handle,
                             const double* b, int ldb,
                             double* c, int ldc);
 
+// Srotm / Drotm — apply modified Givens rotation (BLAS1).
+// param[0] is the flag; param[1..4] are the 2x2 matrix coefficients h11,h21,h12,h22.
+cublasStatus_t cublasSrotm(cublasHandle_t handle,
+                            int n,
+                            float* x, int incx,
+                            float* y, int incy,
+                            const float* param);
+cublasStatus_t cublasDrotm(cublasHandle_t handle,
+                            int n,
+                            double* x, int incx,
+                            double* y, int incy,
+                            const double* param);
+
+// Srotmg / Drotmg — construct modified Givens rotation (BLAS1).
+// Given (d1,d2,x1,y1), computes param encoding the H matrix.
+cublasStatus_t cublasSrotmg(cublasHandle_t handle,
+                             float* d1, float* d2,
+                             float* x1,
+                             const float* y1,
+                             float* param);
+cublasStatus_t cublasDrotmg(cublasHandle_t handle,
+                             double* d1, double* d2,
+                             double* x1,
+                             const double* y1,
+                             double* param);
+
 // Srot / Drot — apply Givens rotation (BLAS1): x[i]=c·x[i]+s·y[i], y[i]=c·y[i]-s·x[i].
 cublasStatus_t cublasSrot(cublasHandle_t handle,
                            int n,

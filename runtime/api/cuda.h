@@ -257,6 +257,32 @@ CUresult cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N);
 CUresult cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us, size_t N,
                            CUstream hStream);
 CUresult cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui, size_t N, CUstream hStream);
+// 2D strided memset (per-row fill with pitch stride).
+CUresult cuMemsetD2D8(CUdeviceptr dstDevice, size_t dstPitch,
+                       unsigned char uc, size_t Width, size_t Height);
+CUresult cuMemsetD2D16(CUdeviceptr dstDevice, size_t dstPitch,
+                        unsigned short us, size_t Width, size_t Height);
+CUresult cuMemsetD2D32(CUdeviceptr dstDevice, size_t dstPitch,
+                        unsigned int ui, size_t Width, size_t Height);
+CUresult cuMemsetD2D8Async(CUdeviceptr dstDevice, size_t dstPitch,
+                            unsigned char uc, size_t Width, size_t Height, CUstream hStream);
+CUresult cuMemsetD2D16Async(CUdeviceptr dstDevice, size_t dstPitch,
+                             unsigned short us, size_t Width, size_t Height, CUstream hStream);
+CUresult cuMemsetD2D32Async(CUdeviceptr dstDevice, size_t dstPitch,
+                             unsigned int ui, size_t Width, size_t Height, CUstream hStream);
+// Query base address and size of an allocation from the allocation table.
+CUresult cuMemGetAddressRange(CUdeviceptr* pbase, size_t* psize, CUdeviceptr dptr);
+
+typedef enum CUpointer_attribute_enum {
+    CU_POINTER_ATTRIBUTE_CONTEXT         = 1,
+    CU_POINTER_ATTRIBUTE_MEMORY_TYPE     = 2,
+    CU_POINTER_ATTRIBUTE_DEVICE_POINTER  = 3,
+    CU_POINTER_ATTRIBUTE_HOST_POINTER    = 4,
+    CU_POINTER_ATTRIBUTE_MAPPED          = 7,
+    CU_POINTER_ATTRIBUTE_IS_MANAGED      = 8,
+} CUpointer_attribute;
+
+CUresult cuPointerGetAttribute(void* data, CUpointer_attribute attribute, CUdeviceptr ptr);
 
 CUresult cuDeviceComputeCapability(int* major, int* minor, CUdevice dev);
 CUresult cuDeviceCanAccessPeer(int* canAccessPeer, CUdevice dev, CUdevice peerDev);
