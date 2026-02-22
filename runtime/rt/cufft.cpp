@@ -639,4 +639,18 @@ cufftResult cufftEstimateMany(int rank, int* n,
     return CUFFT_SUCCESS;
 }
 
+cufftResult cufftGetProperty(libraryPropertyType type, int* value) {
+    if (value == nullptr) {
+        return CUFFT_INVALID_VALUE;
+    }
+    switch (type) {
+        case MAJOR_VERSION: *value = 10; break;
+        case MINOR_VERSION: *value = 5;  break;
+        case PATCH_LEVEL:   *value = 0;  break;
+        default:
+            return CUFFT_INVALID_VALUE;
+    }
+    return CUFFT_SUCCESS;
+}
+
 }  // extern "C"

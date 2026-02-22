@@ -506,6 +506,105 @@ cublasStatus_t cublasGetMatrixAsync(int rows, int cols, int elem_size,
                                     void* b, int ldb,
                                     cudaStream_t stream);
 
+// Ssyr2 / Dsyr2 — symmetric rank-2 update (BLAS2): A := α·x·yᵀ + α·y·xᵀ + A.
+cublasStatus_t cublasSsyr2(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            int n,
+                            const float* alpha,
+                            const float* x, int incx,
+                            const float* y, int incy,
+                            float* a, int lda);
+cublasStatus_t cublasDsyr2(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            int n,
+                            const double* alpha,
+                            const double* x, int incx,
+                            const double* y, int incy,
+                            double* a, int lda);
+
+// Ssymm / Dsymm — symmetric matrix-matrix multiply (BLAS3):
+//   SIDE_LEFT:  C := α·A·B + β·C   (A is m×m symmetric, B and C are m×n)
+//   SIDE_RIGHT: C := α·B·A + β·C   (A is n×n symmetric, B and C are m×n)
+cublasStatus_t cublasSsymm(cublasHandle_t handle,
+                            cublasSideMode_t side,
+                            cublasFillMode_t uplo,
+                            int m, int n,
+                            const float* alpha,
+                            const float* a, int lda,
+                            const float* b, int ldb,
+                            const float* beta,
+                            float* c, int ldc);
+cublasStatus_t cublasDsymm(cublasHandle_t handle,
+                            cublasSideMode_t side,
+                            cublasFillMode_t uplo,
+                            int m, int n,
+                            const double* alpha,
+                            const double* a, int lda,
+                            const double* b, int ldb,
+                            const double* beta,
+                            double* c, int ldc);
+
+// Strmv / Dtrmv — triangular matrix-vector multiply (BLAS2): x := op(A)·x.
+cublasStatus_t cublasStrmv(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            cublasDiagType_t diag,
+                            int n,
+                            const float* a, int lda,
+                            float* x, int incx);
+cublasStatus_t cublasDtrmv(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            cublasDiagType_t diag,
+                            int n,
+                            const double* a, int lda,
+                            double* x, int incx);
+
+// Strmm / Dtrmm — triangular matrix-matrix multiply (BLAS3):
+//   B := alpha · op(A) · B  (SIDE_LEFT)  or  B := alpha · B · op(A)  (SIDE_RIGHT)
+cublasStatus_t cublasStrmm(cublasHandle_t handle,
+                            cublasSideMode_t side,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            cublasDiagType_t diag,
+                            int m, int n,
+                            const float* alpha,
+                            const float* a, int lda,
+                            const float* b, int ldb,
+                            float* c, int ldc);
+cublasStatus_t cublasDtrmm(cublasHandle_t handle,
+                            cublasSideMode_t side,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            cublasDiagType_t diag,
+                            int m, int n,
+                            const double* alpha,
+                            const double* a, int lda,
+                            const double* b, int ldb,
+                            double* c, int ldc);
+
+// Srot / Drot — apply Givens rotation (BLAS1): x[i]=c·x[i]+s·y[i], y[i]=c·y[i]-s·x[i].
+cublasStatus_t cublasSrot(cublasHandle_t handle,
+                           int n,
+                           float* x, int incx,
+                           float* y, int incy,
+                           const float* c,
+                           const float* s);
+cublasStatus_t cublasDrot(cublasHandle_t handle,
+                           int n,
+                           double* x, int incx,
+                           double* y, int incy,
+                           const double* c,
+                           const double* s);
+
+// Srotg / Drotg — construct Givens rotation (BLAS1): given (a,b) → (c,s,r,z).
+cublasStatus_t cublasSrotg(cublasHandle_t handle,
+                            float* a, float* b,
+                            float* c, float* s);
+cublasStatus_t cublasDrotg(cublasHandle_t handle,
+                            double* a, double* b,
+                            double* c, double* s);
+
 #ifdef __cplusplus
 }
 #endif

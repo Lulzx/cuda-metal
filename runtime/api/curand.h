@@ -84,6 +84,14 @@ curandStatus_t curandGeneratePoisson(curandGenerator_t generator,
                                      double lambda);
 curandStatus_t curandGetProperty(libraryPropertyType type, int* value);
 
+// Exponential distribution: X ~ Exp(1) = -ln(U), U ~ Uniform(0,1).
+curandStatus_t curandGenerateExponential(curandGenerator_t generator,
+                                          float* output_ptr,
+                                          size_t num);
+curandStatus_t curandGenerateExponentialDouble(curandGenerator_t generator,
+                                               double* output_ptr,
+                                               size_t num);
+
 #ifdef __cplusplus
 }
 #endif

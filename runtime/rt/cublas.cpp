@@ -68,6 +68,13 @@ cublasStatus_t synchronize_handle_stream(cublasHandle_t handle) {
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// Helper: read element of symmetric n×n matrix (column-major, upper or lower stored).
+template<typename T>
+static inline T symm_elem(const T* a, int lda, int i, int j, bool upper) {
+    return upper ? (i <= j ? a[i + j * lda] : a[j + i * lda])
+                 : (i >= j ? a[i + j * lda] : a[j + i * lda]);
+}
+
 }  // namespace
 
 extern "C" {
@@ -2084,6 +2091,456 @@ cublasStatus_t cublasDsyr2k(cublasHandle_t handle,
             }
             c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
         }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── BLAS2: Ssyr2 / Dsyr2 — symmetric rank-2 update: A := α·x·yᵀ + α·y·xᵀ + A ────────
+
+cublasStatus_t cublasSsyr2(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            int n,
+                            const float* alpha,
+                            const float* x, int incx,
+                            const float* y, int incy,
+                            float* a, int lda) {
+    if (handle == nullptr || alpha == nullptr || x == nullptr || y == nullptr || a == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || incx == 0 || incy == 0 || lda < n) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const float av = *alpha;
+    const bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int j = 0; j < n; ++j) {
+        const int i_start = upper ? 0 : j;
+        const int i_end   = upper ? j + 1 : n;
+        for (int i = i_start; i < i_end; ++i) {
+            a[i + j * lda] += av * (x[i * incx] * y[j * incy] + y[i * incy] * x[j * incx]);
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsyr2(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            int n,
+                            const double* alpha,
+                            const double* x, int incx,
+                            const double* y, int incy,
+                            double* a, int lda) {
+    if (handle == nullptr || alpha == nullptr || x == nullptr || y == nullptr || a == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || incx == 0 || incy == 0 || lda < n) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const double av = *alpha;
+    const bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    for (int j = 0; j < n; ++j) {
+        const int i_start = upper ? 0 : j;
+        const int i_end   = upper ? j + 1 : n;
+        for (int i = i_start; i < i_end; ++i) {
+            a[i + j * lda] += av * (x[i * incx] * y[j * incy] + y[i * incy] * x[j * incx]);
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── BLAS3: Ssymm / Dsymm — symmetric matrix-matrix multiply ──────────────────────────
+
+cublasStatus_t cublasSsymm(cublasHandle_t handle,
+                            cublasSideMode_t side,
+                            cublasFillMode_t uplo,
+                            int m, int n,
+                            const float* alpha,
+                            const float* a, int lda,
+                            const float* b, int ldb,
+                            const float* beta,
+                            float* c, int ldc) {
+    if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr ||
+        beta == nullptr || c == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (m <= 0 || n <= 0 || ldc < m || ldb < m) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const float av = *alpha, bv = *beta;
+    const bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    const bool left  = (side == CUBLAS_SIDE_LEFT);
+    const int ka = left ? m : n;
+    if ((left && lda < m) || (!left && lda < n)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < m; ++i) {
+            float sum = 0.0f;
+            if (left) {
+                for (int k = 0; k < ka; ++k) {
+                    sum += symm_elem(a, lda, i, k, upper) * b[k + j * ldb];
+                }
+            } else {
+                for (int k = 0; k < ka; ++k) {
+                    sum += b[i + k * ldb] * symm_elem(a, lda, k, j, upper);
+                }
+            }
+            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDsymm(cublasHandle_t handle,
+                            cublasSideMode_t side,
+                            cublasFillMode_t uplo,
+                            int m, int n,
+                            const double* alpha,
+                            const double* a, int lda,
+                            const double* b, int ldb,
+                            const double* beta,
+                            double* c, int ldc) {
+    if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr ||
+        beta == nullptr || c == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (m <= 0 || n <= 0 || ldc < m || ldb < m) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const double av = *alpha, bv = *beta;
+    const bool upper = (uplo == CUBLAS_FILL_MODE_UPPER);
+    const bool left  = (side == CUBLAS_SIDE_LEFT);
+    const int ka = left ? m : n;
+    if ((left && lda < m) || (!left && lda < n)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < m; ++i) {
+            double sum = 0.0;
+            if (left) {
+                for (int k = 0; k < ka; ++k) {
+                    sum += symm_elem(a, lda, i, k, upper) * b[k + j * ldb];
+                }
+            } else {
+                for (int k = 0; k < ka; ++k) {
+                    sum += b[i + k * ldb] * symm_elem(a, lda, k, j, upper);
+                }
+            }
+            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── BLAS2: Strmv / Dtrmv — triangular matrix-vector multiply: x := op(A)·x ──────────
+
+cublasStatus_t cublasStrmv(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            cublasDiagType_t diag,
+                            int n,
+                            const float* a, int lda,
+                            float* x, int incx) {
+    if (handle == nullptr || a == nullptr || x == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || incx == 0 || lda < n) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const bool upper    = (uplo  == CUBLAS_FILL_MODE_UPPER);
+    const bool no_trans = (trans == CUBLAS_OP_N);
+    const bool unit     = (diag  == CUBLAS_DIAG_UNIT);
+    std::vector<float> tmp(n);
+    for (int i = 0; i < n; ++i) {
+        float sum = 0.0f;
+        for (int k = 0; k < n; ++k) {
+            bool in_tri;
+            float aik;
+            if (no_trans) {
+                in_tri = upper ? (k >= i) : (k <= i);
+                aik    = (k == i && unit) ? 1.0f : a[i + k * lda];
+            } else {
+                in_tri = upper ? (i >= k) : (i <= k);
+                aik    = (k == i && unit) ? 1.0f : a[k + i * lda];
+            }
+            if (in_tri) sum += aik * x[k * incx];
+        }
+        tmp[i] = sum;
+    }
+    for (int i = 0; i < n; ++i) x[i * incx] = tmp[i];
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrmv(cublasHandle_t handle,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            cublasDiagType_t diag,
+                            int n,
+                            const double* a, int lda,
+                            double* x, int incx) {
+    if (handle == nullptr || a == nullptr || x == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || incx == 0 || lda < n) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const bool upper    = (uplo  == CUBLAS_FILL_MODE_UPPER);
+    const bool no_trans = (trans == CUBLAS_OP_N);
+    const bool unit     = (diag  == CUBLAS_DIAG_UNIT);
+    std::vector<double> tmp(n);
+    for (int i = 0; i < n; ++i) {
+        double sum = 0.0;
+        for (int k = 0; k < n; ++k) {
+            bool in_tri;
+            double aik;
+            if (no_trans) {
+                in_tri = upper ? (k >= i) : (k <= i);
+                aik    = (k == i && unit) ? 1.0 : a[i + k * lda];
+            } else {
+                in_tri = upper ? (i >= k) : (i <= k);
+                aik    = (k == i && unit) ? 1.0 : a[k + i * lda];
+            }
+            if (in_tri) sum += aik * x[k * incx];
+        }
+        tmp[i] = sum;
+    }
+    for (int i = 0; i < n; ++i) x[i * incx] = tmp[i];
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── BLAS3: Strmm / Dtrmm — triangular matrix-matrix multiply ─────────────────────────
+// B := alpha · op(A) · B  (SIDE_LEFT)  or  B := alpha · B · op(A)  (SIDE_RIGHT)
+// cuBLAS v2 API: result written to C (B is input, C is output).
+
+cublasStatus_t cublasStrmm(cublasHandle_t handle,
+                            cublasSideMode_t side,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            cublasDiagType_t diag,
+                            int m, int n,
+                            const float* alpha,
+                            const float* a, int lda,
+                            const float* b, int ldb,
+                            float* c, int ldc) {
+    if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr || c == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (m <= 0 || n <= 0 || ldc < m || ldb < m) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const float av     = *alpha;
+    const bool upper   = (uplo  == CUBLAS_FILL_MODE_UPPER);
+    const bool no_trans = (trans == CUBLAS_OP_N);
+    const bool unit    = (diag  == CUBLAS_DIAG_UNIT);
+    const bool left    = (side  == CUBLAS_SIDE_LEFT);
+    const int ka = left ? m : n;
+    if ((left && lda < m) || (!left && lda < n)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < m; ++i) {
+            float sum = 0.0f;
+            for (int k = 0; k < ka; ++k) {
+                float aelem;
+                bool in_tri;
+                if (left) {
+                    int ar = no_trans ? i : k;
+                    int ac = no_trans ? k : i;
+                    in_tri = upper ? (ar <= ac) : (ar >= ac);
+                    aelem  = (ar == ac && unit) ? 1.0f : a[ar + ac * lda];
+                } else {
+                    int ar = no_trans ? k : j;
+                    int ac = no_trans ? j : k;
+                    in_tri = upper ? (ar <= ac) : (ar >= ac);
+                    aelem  = (ar == ac && unit) ? 1.0f : a[ar + ac * lda];
+                }
+                if (in_tri) sum += aelem * b[left ? (k + j * ldb) : (i + k * ldb)];
+            }
+            c[i + j * ldc] = av * sum;
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrmm(cublasHandle_t handle,
+                            cublasSideMode_t side,
+                            cublasFillMode_t uplo,
+                            cublasOperation_t trans,
+                            cublasDiagType_t diag,
+                            int m, int n,
+                            const double* alpha,
+                            const double* a, int lda,
+                            const double* b, int ldb,
+                            double* c, int ldc) {
+    if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr || c == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (m <= 0 || n <= 0 || ldc < m || ldb < m) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const double av    = *alpha;
+    const bool upper   = (uplo  == CUBLAS_FILL_MODE_UPPER);
+    const bool no_trans = (trans == CUBLAS_OP_N);
+    const bool unit    = (diag  == CUBLAS_DIAG_UNIT);
+    const bool left    = (side  == CUBLAS_SIDE_LEFT);
+    const int ka = left ? m : n;
+    if ((left && lda < m) || (!left && lda < n)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < m; ++i) {
+            double sum = 0.0;
+            for (int k = 0; k < ka; ++k) {
+                double aelem;
+                bool in_tri;
+                if (left) {
+                    int ar = no_trans ? i : k;
+                    int ac = no_trans ? k : i;
+                    in_tri = upper ? (ar <= ac) : (ar >= ac);
+                    aelem  = (ar == ac && unit) ? 1.0 : a[ar + ac * lda];
+                } else {
+                    int ar = no_trans ? k : j;
+                    int ac = no_trans ? j : k;
+                    in_tri = upper ? (ar <= ac) : (ar >= ac);
+                    aelem  = (ar == ac && unit) ? 1.0 : a[ar + ac * lda];
+                }
+                if (in_tri) sum += aelem * b[left ? (k + j * ldb) : (i + k * ldb)];
+            }
+            c[i + j * ldc] = av * sum;
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── BLAS1: Srot / Drot — apply Givens rotation ───────────────────────────────────────
+
+cublasStatus_t cublasSrot(cublasHandle_t handle,
+                           int n,
+                           float* x, int incx,
+                           float* y, int incy,
+                           const float* c,
+                           const float* s) {
+    if (handle == nullptr || x == nullptr || y == nullptr || c == nullptr || s == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || incx == 0 || incy == 0) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const float cv = *c, sv = *s;
+    for (int i = 0; i < n; ++i) {
+        const float xi = x[i * incx];
+        const float yi = y[i * incy];
+        x[i * incx] =  cv * xi + sv * yi;
+        y[i * incy] = -sv * xi + cv * yi;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDrot(cublasHandle_t handle,
+                           int n,
+                           double* x, int incx,
+                           double* y, int incy,
+                           const double* c,
+                           const double* s) {
+    if (handle == nullptr || x == nullptr || y == nullptr || c == nullptr || s == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n <= 0 || incx == 0 || incy == 0) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const double cv = *c, sv = *s;
+    for (int i = 0; i < n; ++i) {
+        const double xi = x[i * incx];
+        const double yi = y[i * incy];
+        x[i * incx] =  cv * xi + sv * yi;
+        y[i * incy] = -sv * xi + cv * yi;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── BLAS1: Srotg / Drotg — construct Givens rotation ─────────────────────────────────
+// Given (a,b): compute (c,s,r,z) such that [c s; -s c]*[a;b] = [r;0].
+// a is overwritten with r; b with z.
+
+cublasStatus_t cublasSrotg(cublasHandle_t handle,
+                            float* a, float* b,
+                            float* c, float* s) {
+    if (handle == nullptr || a == nullptr || b == nullptr || c == nullptr || s == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const float fa = std::fabs(*a), fb = std::fabs(*b);
+    if (fb == 0.0f) {
+        *c = 1.0f; *s = 0.0f; *b = 0.0f;
+    } else if (fa == 0.0f) {
+        *c = 0.0f; *s = (*b > 0.0f) ? 1.0f : -1.0f;
+        *a = fb; *b = 1.0f;
+    } else if (fb > fa) {
+        const float t  = *a / *b;
+        const float sg = (*b > 0.0f) ? 1.0f : -1.0f;
+        *s = sg / std::sqrt(1.0f + t * t);
+        *c = *s * t;
+        *a = *b / *s;
+        *b = (std::fabs(*c) > 0.0f && std::fabs(*c) < 1.0f) ? 1.0f / *c : 1.0f;
+    } else {
+        const float t  = *b / *a;
+        const float sg = (*a > 0.0f) ? 1.0f : -1.0f;
+        *c = sg / std::sqrt(1.0f + t * t);
+        *s = *c * t;
+        *a = *a / *c;
+        *b = (std::fabs(*s) < 1.0f) ? *s : (std::fabs(*c) > 0.0f ? 1.0f / *c : 1.0f);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDrotg(cublasHandle_t handle,
+                            double* a, double* b,
+                            double* c, double* s) {
+    if (handle == nullptr || a == nullptr || b == nullptr || c == nullptr || s == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const double fa = std::fabs(*a), fb = std::fabs(*b);
+    if (fb == 0.0) {
+        *c = 1.0; *s = 0.0; *b = 0.0;
+    } else if (fa == 0.0) {
+        *c = 0.0; *s = (*b > 0.0) ? 1.0 : -1.0;
+        *a = fb; *b = 1.0;
+    } else if (fb > fa) {
+        const double t  = *a / *b;
+        const double sg = (*b > 0.0) ? 1.0 : -1.0;
+        *s = sg / std::sqrt(1.0 + t * t);
+        *c = *s * t;
+        *a = *b / *s;
+        *b = (std::fabs(*c) > 0.0 && std::fabs(*c) < 1.0) ? 1.0 / *c : 1.0;
+    } else {
+        const double t  = *b / *a;
+        const double sg = (*a > 0.0) ? 1.0 : -1.0;
+        *c = sg / std::sqrt(1.0 + t * t);
+        *s = *c * t;
+        *a = *a / *c;
+        *b = (std::fabs(*s) < 1.0) ? *s : (std::fabs(*c) > 0.0 ? 1.0 / *c : 1.0);
     }
     return CUBLAS_STATUS_SUCCESS;
 }

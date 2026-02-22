@@ -376,6 +376,67 @@ curandStatus_t curandGeneratePoisson(curandGenerator_t generator,
     return CURAND_STATUS_SUCCESS;
 }
 
+curandStatus_t curandGenerateExponential(curandGenerator_t generator,
+                                          float* output_ptr,
+                                          size_t num) {
+    if (generator == nullptr) {
+        return CURAND_STATUS_NOT_INITIALIZED;
+    }
+    if (output_ptr == nullptr && num > 0) {
+        return CURAND_STATUS_NOT_INITIALIZED;
+    }
+    if (num == 0) {
+        return CURAND_STATUS_SUCCESS;
+    }
+    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
+        return CURAND_STATUS_TYPE_ERROR;
+    }
+    if (cudaStreamSynchronize(generator->stream) != cudaSuccess) {
+        return CURAND_STATUS_PREEXISTING_FAILURE;
+    }
+
+    std::lock_guard<std::mutex> lock(generator->mutex);
+    std::uniform_real_distribution<float> u(0.0f, 1.0f);
+    for (size_t i = 0; i < num; ++i) {
+        // X = -ln(U), U in (0,1); clamp to avoid -ln(0) = inf
+        float u_val = u(generator->engine);
+        if (u_val <= 0.0f) u_val = 1e-38f;
+        output_ptr[i] = -std::log(u_val);
+    }
+    generator->offset += static_cast<unsigned long long>(num);
+    return CURAND_STATUS_SUCCESS;
+}
+
+curandStatus_t curandGenerateExponentialDouble(curandGenerator_t generator,
+                                               double* output_ptr,
+                                               size_t num) {
+    if (generator == nullptr) {
+        return CURAND_STATUS_NOT_INITIALIZED;
+    }
+    if (output_ptr == nullptr && num > 0) {
+        return CURAND_STATUS_NOT_INITIALIZED;
+    }
+    if (num == 0) {
+        return CURAND_STATUS_SUCCESS;
+    }
+    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
+        return CURAND_STATUS_TYPE_ERROR;
+    }
+    if (cudaStreamSynchronize(generator->stream) != cudaSuccess) {
+        return CURAND_STATUS_PREEXISTING_FAILURE;
+    }
+
+    std::lock_guard<std::mutex> lock(generator->mutex);
+    std::uniform_real_distribution<double> u(0.0, 1.0);
+    for (size_t i = 0; i < num; ++i) {
+        double u_val = u(generator->engine);
+        if (u_val <= 0.0) u_val = 1e-300;
+        output_ptr[i] = -std::log(u_val);
+    }
+    generator->offset += static_cast<unsigned long long>(num);
+    return CURAND_STATUS_SUCCESS;
+}
+
 curandStatus_t curandGetProperty(libraryPropertyType type, int* value) {
     if (value == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;

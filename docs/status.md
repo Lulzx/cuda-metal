@@ -1,6 +1,6 @@
 # Status
 
-Current status: **Post-Phase 5 — 147/147 tests passing (146 unit/functional + bench_phase5_all_kernels)**
+Current status: **Post-Phase 5 — 148/148 tests passing (147 unit/functional + bench_phase5_all_kernels)**
 
 Phase 4 is fully complete. Phase 5 performance work is complete.
 Intentional non-goals per §2.2 (CUDA Graphs, dynamic parallelism, texture objects,
@@ -120,6 +120,28 @@ Post-Phase 5 work completed (continued, part 2):
   - `cudaLaunchHostFunc(stream, fn, userData)` — synchronizes stream then calls `fn(userData)`.
   - `cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags` — delegates to base function.
   Test: `functional_extended_api_v2` (18 sub-tests covering all new APIs).
+
+- **Extended APIs batch 3** (`runtime/api/`, `runtime/rt/`):
+  - **cuRAND**: `curandGenerateExponential`/`curandGenerateExponentialDouble` — exponential
+    distribution via inverse transform: X = -ln(U), U ~ Uniform(0,1).
+  - **cuFFT**: `cufftGetProperty(type, value)` — returns cuFFT version major/minor/patch
+    (consistent with `curandGetProperty`/`cublasGetProperty` pattern).
+  - **cuBLAS BLAS2**: `cublasSsyr2`/`cublasDsyr2` — symmetric rank-2 update:
+    A += α·(x·yᵀ + y·xᵀ); only upper or lower triangle updated.
+  - **cuBLAS BLAS2**: `cublasStrmv`/`cublasDtrmv` — triangular matrix-vector multiply:
+    x := op(A)·x; supports UPPER/LOWER, NO_TRANS/TRANS, UNIT/NON_UNIT diagonal;
+    uses temp buffer for in-place correctness.
+  - **cuBLAS BLAS3**: `cublasSsymm`/`cublasDsymm` — symmetric matrix-matrix multiply:
+    C = α·A·B + β·C (SIDE_LEFT) or C = α·B·A + β·C (SIDE_RIGHT); symmetric element
+    lookup reconstructs missing triangle from stored half.
+  - **cuBLAS BLAS3**: `cublasStrmm`/`cublasDtrmm` — triangular matrix-matrix multiply:
+    C = α·op(A)·B (SIDE_LEFT) or C = α·B·op(A) (SIDE_RIGHT); output written to C
+    (cuBLAS v2 API); supports all trans/diag/uplo/side combinations.
+  - **cuBLAS BLAS1**: `cublasSrot`/`cublasDrot` — apply Givens rotation:
+    x[i] = c·x[i] + s·y[i]; y[i] = c·y[i] - s·x[i].
+  - **cuBLAS BLAS1**: `cublasSrotg`/`cublasDrotg` — construct Givens rotation:
+    given (a,b) compute (c,s,r,z) such that [c s;-s c]·[a;b] = [r;0].
+  Test: `functional_extended_api_v3` (14 sub-tests covering all new APIs).
 
 - **Threadgroup memory tiling hints** (`compiler/passes/src/threadgroup_tiling.cpp`):
   New `analyse_threadgroup_tiling()` pass that scans a PTX kernel's instruction

@@ -55,6 +55,16 @@ typedef enum cufftType {
 #define CUFFT_FORWARD (-1)
 #define CUFFT_INVERSE  (1)
 
+// libraryPropertyType — mirrors CUDA library_types.h; guarded for multi-header includes.
+#ifndef CUMETAL_LIBRARY_PROPERTY_TYPE_DEFINED
+#define CUMETAL_LIBRARY_PROPERTY_TYPE_DEFINED
+typedef enum libraryPropertyType_t {
+    MAJOR_VERSION = 0,
+    MINOR_VERSION = 1,
+    PATCH_LEVEL   = 2,
+} libraryPropertyType;
+#endif
+
 cufftResult cufftGetVersion(int* version);
 // SetWorkArea — ignored on UMA (vDSP manages its own scratch buffers).
 cufftResult cufftSetWorkArea(cufftHandle plan, void* workArea);
@@ -121,6 +131,9 @@ cufftResult cufftExecD2Z(cufftHandle plan,
 cufftResult cufftExecZ2D(cufftHandle plan,
                           cufftDoubleComplex* idata,
                           cufftDoubleReal* odata);
+
+// cufftGetProperty — query cuFFT library version fields.
+cufftResult cufftGetProperty(libraryPropertyType type, int* value);
 
 #ifdef __cplusplus
 }
