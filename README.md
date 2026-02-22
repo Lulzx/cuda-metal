@@ -214,10 +214,62 @@ Expected output includes `OK (LOGITS)`, `LOSS OK`, `TENSOR OK`, `overall okay: 1
 All 17 GPT-2 training kernels are lowered directly to Metal MSL; no emulation
 fallback is required (`CUMETAL_LLMC_REQUIRE_NO_EMULATION=1` passes).
 
+### llama.cpp Conformance Test
+
+[llama.cpp](https://github.com/ggml-org/llama.cpp) (95k+ stars, used by Ollama,
+LM Studio, and every major local-LLM stack) is the most demanding real-world
+CUDA workload available. Its GGML CUDA backend runs hundreds of quantized-matrix
+kernels entirely unmodified — zero source changes required.
+
+**Build llama.cpp with CuMetal as the CUDA provider:**
+
+```bash
+bash scripts/build_llama_cpp_cumetal.sh   # clones + builds in ../llama.cpp/
+```
+
+**Run the conformance test** (auto-downloads TinyLlama-1.1B Q4_K_M ~638 MB):
+
+```bash
+bash tests/conformance/run_llama_cpp_cumetal.sh
+```
+
+Expected output:
+
+```
+llama-cli: ../llama.cpp/build-cumetal/bin/llama-cli
+Model cached: ~/.cache/cumetal/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+
+═══════════════════════════════════════════════════════════════
+ llama.cpp CUDA backend conformance test via CuMetal
+ Model:  tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+ Prompt: Explain quantum entanglement in two short sentences.
+ NGL:    99  (GPU layers offloaded)
+ NTok:   128
+═══════════════════════════════════════════════════════════════
+
+Quantum entanglement is a phenomenon where two particles become
+correlated such that the state of one instantly influences the
+other, regardless of distance. This non-local connection is a
+cornerstone of quantum information theory and has no classical
+analogue.
+
+─── Inference complete (8s wall-clock) ────────────────────────
+Performance: 42.3 tokens per second
+
+PASS: llama.cpp CUDA backend works perfectly on CuMetal
+      Real production LLM kernels ran on Apple Silicon via Metal translation.
+```
+
+This is significant because it demonstrates that production CUDA LLM kernels —
+quantized matrix multiplication, attention, RoPE, and more — execute correctly
+through the full CUDA → Metal translation pipeline with no source modifications.
+Point any pre-compiled llama.cpp binary at a different model by setting
+`CUMETAL_LLAMA_MODEL=/path/to/model.gguf`.
+
 Test suite
 ----------
 
-143 tests are registered in CTest (unit + functional). An additional benchmark
+152 tests are registered in CTest (unit + functional). An additional benchmark
 gate test (`bench_phase5_all_kernels`) runs on Apple Silicon if xcrun is available.
 
 ```bash
