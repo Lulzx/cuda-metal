@@ -1,6 +1,6 @@
 # Status
 
-Current status: **Phase 5 complete — 141/141 tests passing (140 unit/functional + bench_phase5_all_kernels)**
+Current status: **Post-Phase 5 — 143/143 tests passing (141 unit/functional + 2 heap auto-threshold + bench_phase5_all_kernels)**
 
 Phase 4 is fully complete. Phase 5 performance work is complete.
 Intentional non-goals per §2.2 (CUDA Graphs, dynamic parallelism, texture objects,
@@ -32,12 +32,19 @@ Phase 5 items implemented:
 - `bench_phase5_all_kernels` CTest — registered in CMakeLists.txt (APPLE only,
   SKIP_RETURN_CODE 77); enforces the 2× ceiling defined in spec §5.7.
 
-Phase 5 items remaining (deferred per spec §2.2):
+Post-Phase 5 work completed:
+
+- **MTLHeap auto-threshold**: MTLHeap sub-allocation now auto-enabled for allocations ≥ 4 MiB
+  (configurable via `CUMETAL_MTLHEAP_THRESHOLD_BYTES`). Three modes:
+  - `CUMETAL_MTLHEAP_ALLOC` unset → auto (heap for size ≥ threshold, default 4 MiB)
+  - `CUMETAL_MTLHEAP_ALLOC=1` → always use heap
+  - `CUMETAL_MTLHEAP_ALLOC=0` → never use heap
+  Tests: `functional_runtime_heap_auto_threshold`, `functional_runtime_heap_disabled`.
+
+Items remaining (deferred per spec §2.2):
 
 - Threadgroup memory tiling optimization hints (compiler pass, optional).
 - Kernel fusion via MLIR GPU dialect (optional, deferred to v2).
-- `MTLHeap`-backed sub-allocation as default path (currently opt-in via
-  `CUMETAL_MTLHEAP_ALLOC=1`; auto-enable deferred to v2).
 - Binary shim (`libcuda.dylib`) hardening beyond current opt-in path.
 
 Implemented:

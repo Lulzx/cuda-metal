@@ -267,6 +267,10 @@ add_executable(cumetal_runtime_malloc_pitch_test
     runtime_malloc_pitch_test.cpp
 )
 
+add_executable(cumetal_runtime_heap_auto_threshold_test
+    runtime_heap_auto_threshold_test.cpp
+)
+
 add_executable(cumetal_runtime_peer_access_test
     runtime_peer_access_test.cpp
 )
@@ -679,6 +683,11 @@ target_link_libraries(cumetal_runtime_device_properties_ext_test
 )
 
 target_link_libraries(cumetal_runtime_malloc_pitch_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_heap_auto_threshold_test
     PRIVATE
         cumetal_runtime
 )
@@ -1252,6 +1261,13 @@ target_compile_options(cumetal_runtime_malloc_pitch_test
         -Wpedantic
 )
 
+target_compile_options(cumetal_runtime_heap_auto_threshold_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
 target_compile_options(cumetal_runtime_peer_access_test
     PRIVATE
         -Wall
@@ -1817,6 +1833,24 @@ add_test(
 add_test(
     NAME functional_runtime_malloc_pitch
     COMMAND cumetal_runtime_malloc_pitch_test
+)
+
+# heap auto-threshold: lower threshold to 64 KiB so the 128 KiB allocation uses heap.
+add_test(
+    NAME functional_runtime_heap_auto_threshold
+    COMMAND cumetal_runtime_heap_auto_threshold_test
+)
+set_tests_properties(functional_runtime_heap_auto_threshold
+    PROPERTIES ENVIRONMENT "CUMETAL_MTLHEAP_THRESHOLD_BYTES=65536"
+)
+
+# heap disabled: CUMETAL_MTLHEAP_ALLOC=0 must not crash even for large allocations.
+add_test(
+    NAME functional_runtime_heap_disabled
+    COMMAND cumetal_runtime_heap_auto_threshold_test
+)
+set_tests_properties(functional_runtime_heap_disabled
+    PROPERTIES ENVIRONMENT "CUMETAL_MTLHEAP_ALLOC=0"
 )
 
 add_test(

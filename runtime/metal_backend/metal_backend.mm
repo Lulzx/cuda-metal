@@ -21,6 +21,15 @@ cudaError_t check_command_buffer_status(id<MTLCommandBuffer> command_buffer, std
 cudaError_t map_command_buffer_error(NSError* command_error);
 
 constexpr std::size_t kDefaultHeapChunkBytes = 64ull * 1024ull * 1024ull;
+// Default auto-enable threshold: 4 MiB.  Allocations at or above this size use
+// MTLHeap sub-allocation automatically (unless CUMETAL_MTLHEAP_ALLOC=0 disables it).
+constexpr std::size_t kDefaultHeapAutoThresholdBytes = 4ull * 1024ull * 1024ull;
+
+// CUMETAL_MTLHEAP_ALLOC controls heap sub-allocation:
+//   unset / "auto"  → heap used for allocations >= CUMETAL_MTLHEAP_THRESHOLD_BYTES (default 4 MiB)
+//   "1" / "true"    → heap always used
+//   "0" / "false"   → heap never used
+enum class HeapMode { kAuto, kAlways, kDisabled };
 
 bool env_truthy(const char* value) {
     if (value == nullptr) {
@@ -214,7 +223,8 @@ struct BackendState {
 
     std::mutex mutex;
     bool initialized = false;
-    bool heap_suballoc_enabled = false;
+    HeapMode heap_mode = HeapMode::kAuto;
+    std::size_t heap_auto_threshold = kDefaultHeapAutoThresholdBytes;
     std::size_t heap_chunk_bytes = kDefaultHeapChunkBytes;
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
@@ -253,7 +263,19 @@ bool ensure_initialized(std::string* error_message) {
             return false;
         }
 
-        backend.heap_suballoc_enabled = env_truthy(std::getenv("CUMETAL_MTLHEAP_ALLOC"));
+        {
+            const char* heap_env = std::getenv("CUMETAL_MTLHEAP_ALLOC");
+            if (heap_env == nullptr || heap_env[0] == '\0') {
+                backend.heap_mode = HeapMode::kAuto;
+            } else if (env_truthy(heap_env)) {
+                backend.heap_mode = HeapMode::kAlways;
+            } else {
+                backend.heap_mode = HeapMode::kDisabled;
+            }
+        }
+        backend.heap_auto_threshold =
+            parse_size_env(std::getenv("CUMETAL_MTLHEAP_THRESHOLD_BYTES"),
+                           kDefaultHeapAutoThresholdBytes);
         backend.heap_chunk_bytes =
             parse_size_env(std::getenv("CUMETAL_MTLHEAP_CHUNK_BYTES"), kDefaultHeapChunkBytes);
 
@@ -647,7 +669,10 @@ cudaError_t allocate_buffer(std::size_t size,
     std::lock_guard<std::mutex> lock(backend.mutex);
 
     id<MTLBuffer> buffer = nil;
-    if (backend.heap_suballoc_enabled) {
+    const bool use_heap = (backend.heap_mode == HeapMode::kAlways) ||
+                          (backend.heap_mode == HeapMode::kAuto &&
+                           size >= backend.heap_auto_threshold);
+    if (use_heap) {
         buffer = allocate_buffer_from_heap_locked(backend, size, error_message);
     }
     if (buffer == nil) {
