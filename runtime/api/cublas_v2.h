@@ -61,6 +61,8 @@ typedef enum cublasSideMode_t {
 typedef enum cudaDataType_t {
     CUDA_R_16F  =  2,
     CUDA_C_16F  =  6,
+    CUDA_R_16BF = 14,
+    CUDA_C_16BF = 15,
     CUDA_R_32F  =  0,
     CUDA_C_32F  =  4,
     CUDA_R_64F  =  1,

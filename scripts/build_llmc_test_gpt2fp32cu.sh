@@ -59,11 +59,14 @@ PATH="${ROOT_DIR}/scripts/cuda_toolchain:${PATH}" \
     -std=c++17 \
     -O2 \
     -DNDEBUG \
+    -D__CUDACC__=1 \
+    -D__NVCC__=1 \
     -Wno-pass-failed \
     --cuda-gpu-arch="${CUDA_ARCH}" \
     -nocudainc \
     -nocudalib \
     -I"${ROOT_DIR}/runtime/api" \
+    -include cuda_runtime.h \
     -I"${LLMC_DIR}" \
     -c "${PATCHED_SRC}" \
     -o "${OBJ_FILE}"
