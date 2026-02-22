@@ -2718,4 +2718,160 @@ cublasStatus_t cublasDrotg(cublasHandle_t handle,
     return CUBLAS_STATUS_SUCCESS;
 }
 
+// ── Complex GEMM / GEMV (batch 5) ────────────────────────────────────────────
+// Apple UMA: all MTLBuffers are StorageModeShared; CPU can access them directly.
+// MPS has no complex MPSMatrixMultiplication, so we use a reference CPU loop.
+
+static inline cuComplex cmul_f(cuComplex a, cuComplex b) {
+    return { a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x };
+}
+static inline cuComplex cadd_f(cuComplex a, cuComplex b) { return { a.x + b.x, a.y + b.y }; }
+static inline cuComplex cconj_f(cuComplex a) { return { a.x, -a.y }; }
+
+static inline cuDoubleComplex cmul_d(cuDoubleComplex a, cuDoubleComplex b) {
+    return { a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x };
+}
+static inline cuDoubleComplex cadd_d(cuDoubleComplex a, cuDoubleComplex b) {
+    return { a.x + b.x, a.y + b.y };
+}
+static inline cuDoubleComplex cconj_d(cuDoubleComplex a) { return { a.x, -a.y }; }
+
+// Column-major element accessor for op(A).
+static inline cuComplex celem_f(const cuComplex* A, int ld,
+                                 cublasOperation_t op, int row, int col) {
+    if (op == CUBLAS_OP_N) return A[(size_t)col * ld + row];
+    if (op == CUBLAS_OP_T) return A[(size_t)row * ld + col];
+    return cconj_f(A[(size_t)row * ld + col]);
+}
+static inline cuDoubleComplex celem_d(const cuDoubleComplex* A, int ld,
+                                       cublasOperation_t op, int row, int col) {
+    if (op == CUBLAS_OP_N) return A[(size_t)col * ld + row];
+    if (op == CUBLAS_OP_T) return A[(size_t)row * ld + col];
+    return cconj_d(A[(size_t)row * ld + col]);
+}
+
+cublasStatus_t cublasCgemm(cublasHandle_t handle,
+                            cublasOperation_t transa, cublasOperation_t transb,
+                            int m, int n, int k,
+                            const cuComplex* alpha,
+                            const cuComplex* A, int lda,
+                            const cuComplex* B, int ldb,
+                            const cuComplex* beta,
+                            cuComplex* C, int ldc) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_operation(transa) || !is_valid_operation(transb))
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (m < 0 || n < 0 || k < 0 || alpha == nullptr || beta == nullptr)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || B == nullptr || C == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+
+    const cublasStatus_t sync_st = synchronize_handle_stream(handle);
+    if (sync_st != CUBLAS_STATUS_SUCCESS) return sync_st;
+
+    const cuComplex al = *alpha, be = *beta;
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < m; ++i) {
+            cuComplex sum = {0.0f, 0.0f};
+            for (int l = 0; l < k; ++l)
+                sum = cadd_f(sum, cmul_f(celem_f(A, lda, transa, i, l),
+                                         celem_f(B, ldb, transb, l, j)));
+            cuComplex& cij = C[(size_t)j * ldc + i];
+            cij = cadd_f(cmul_f(al, sum), cmul_f(be, cij));
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZgemm(cublasHandle_t handle,
+                            cublasOperation_t transa, cublasOperation_t transb,
+                            int m, int n, int k,
+                            const cuDoubleComplex* alpha,
+                            const cuDoubleComplex* A, int lda,
+                            const cuDoubleComplex* B, int ldb,
+                            const cuDoubleComplex* beta,
+                            cuDoubleComplex* C, int ldc) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_operation(transa) || !is_valid_operation(transb))
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (m < 0 || n < 0 || k < 0 || alpha == nullptr || beta == nullptr)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || B == nullptr || C == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+
+    const cublasStatus_t sync_st = synchronize_handle_stream(handle);
+    if (sync_st != CUBLAS_STATUS_SUCCESS) return sync_st;
+
+    const cuDoubleComplex al = *alpha, be = *beta;
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < m; ++i) {
+            cuDoubleComplex sum = {0.0, 0.0};
+            for (int l = 0; l < k; ++l)
+                sum = cadd_d(sum, cmul_d(celem_d(A, lda, transa, i, l),
+                                         celem_d(B, ldb, transb, l, j)));
+            cuDoubleComplex& cij = C[(size_t)j * ldc + i];
+            cij = cadd_d(cmul_d(al, sum), cmul_d(be, cij));
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasCgemv(cublasHandle_t handle,
+                            cublasOperation_t trans,
+                            int m, int n,
+                            const cuComplex* alpha,
+                            const cuComplex* A, int lda,
+                            const cuComplex* x, int incx,
+                            const cuComplex* beta,
+                            cuComplex* y, int incy) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_operation(trans)) return CUBLAS_STATUS_INVALID_VALUE;
+    if (m < 0 || n < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || x == nullptr || y == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+
+    const cublasStatus_t sync_st = synchronize_handle_stream(handle);
+    if (sync_st != CUBLAS_STATUS_SUCCESS) return sync_st;
+
+    const cuComplex al = *alpha, be = *beta;
+    const int rows_y = (trans == CUBLAS_OP_N) ? m : n;
+    const int cols_x = (trans == CUBLAS_OP_N) ? n : m;
+    for (int i = 0; i < rows_y; ++i) {
+        cuComplex dot = {0.0f, 0.0f};
+        for (int j = 0; j < cols_x; ++j)
+            dot = cadd_f(dot, cmul_f(celem_f(A, lda, trans, i, j), x[(size_t)j * incx]));
+        y[(size_t)i * incy] = cadd_f(cmul_f(al, dot), cmul_f(be, y[(size_t)i * incy]));
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasZgemv(cublasHandle_t handle,
+                            cublasOperation_t trans,
+                            int m, int n,
+                            const cuDoubleComplex* alpha,
+                            const cuDoubleComplex* A, int lda,
+                            const cuDoubleComplex* x, int incx,
+                            const cuDoubleComplex* beta,
+                            cuDoubleComplex* y, int incy) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_operation(trans)) return CUBLAS_STATUS_INVALID_VALUE;
+    if (m < 0 || n < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || x == nullptr || y == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+
+    const cublasStatus_t sync_st = synchronize_handle_stream(handle);
+    if (sync_st != CUBLAS_STATUS_SUCCESS) return sync_st;
+
+    const cuDoubleComplex al = *alpha, be = *beta;
+    const int rows_y = (trans == CUBLAS_OP_N) ? m : n;
+    const int cols_x = (trans == CUBLAS_OP_N) ? n : m;
+    for (int i = 0; i < rows_y; ++i) {
+        cuDoubleComplex dot = {0.0, 0.0};
+        for (int j = 0; j < cols_x; ++j)
+            dot = cadd_d(dot, cmul_d(celem_d(A, lda, trans, i, j), x[(size_t)j * incx]));
+        y[(size_t)i * incy] = cadd_d(cmul_d(al, dot), cmul_d(be, y[(size_t)i * incy]));
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 }  // extern "C"

@@ -70,6 +70,7 @@ struct DriverState {
     std::unordered_set<CUmod_st*> modules;
     std::unordered_set<CUfunc_st*> functions;
     CUctx_st* current_context = nullptr;
+    unsigned int primary_ctx_flags = 0;
 };
 
 struct DriverStreamCallbackPayload {
@@ -806,6 +807,47 @@ CUresult cuDevicePrimaryCtxRelease(CUdevice /*dev*/) {
     if (ctx != nullptr) {
         cuCtxDestroy(ctx);
     }
+    return CUDA_SUCCESS;
+}
+
+CUresult cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int* flags, int* active) {
+    if (dev != 0) return CUDA_ERROR_INVALID_DEVICE;
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (flags != nullptr) *flags = state.primary_ctx_flags;
+    if (active != nullptr) *active = (state.current_context != nullptr) ? 1 : 0;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuDevicePrimaryCtxSetFlags(CUdevice dev, unsigned int flags) {
+    if (dev != 0) return CUDA_ERROR_INVALID_DEVICE;
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.primary_ctx_flags = flags;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuDevicePrimaryCtxReset(CUdevice dev) {
+    if (dev != 0) return CUDA_ERROR_INVALID_DEVICE;
+    // Release current context, if any.
+    CUcontext ctx = nullptr;
+    cuCtxGetCurrent(&ctx);
+    if (ctx != nullptr) {
+        cuCtxDestroy(ctx);
+    }
+    return CUDA_SUCCESS;
+}
+
+CUresult cuDeviceGetUuid(CUuuid* uuid, CUdevice dev) {
+    if (uuid == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    if (dev != 0) return CUDA_ERROR_INVALID_DEVICE;
+    // Return a deterministic fixed UUID for the single Apple Silicon device.
+    // Bytes: "CuMetal1" prefix + zeros + version byte 1.
+    static const unsigned char kUuid[16] = {
+        0x43, 0x75, 0x4d, 0x65, 0x74, 0x61, 0x6c, 0x31,  // "CuMetal1"
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01
+    };
+    for (int i = 0; i < 16; ++i) uuid->bytes[i] = kUuid[i];
     return CUDA_SUCCESS;
 }
 

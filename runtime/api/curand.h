@@ -27,8 +27,26 @@ typedef enum curandStatus {
 } curandStatus_t;
 
 typedef enum curandRngType {
-    CURAND_RNG_PSEUDO_DEFAULT = 100,
+    CURAND_RNG_PSEUDO_DEFAULT      = 100,
+    CURAND_RNG_PSEUDO_XORWOW       = 101,
+    CURAND_RNG_PSEUDO_MRG32K3A     = 121,
+    CURAND_RNG_PSEUDO_MTGP32       = 141,
+    CURAND_RNG_PSEUDO_MT19937      = 142,
+    CURAND_RNG_PSEUDO_PHILOX4_32_10 = 161,
+    CURAND_RNG_QUASI_DEFAULT       = 200,
+    CURAND_RNG_QUASI_SOBOL32       = 201,
+    CURAND_RNG_QUASI_SCRAMBLED_SOBOL32 = 202,
+    CURAND_RNG_QUASI_SOBOL64       = 203,
+    CURAND_RNG_QUASI_SCRAMBLED_SOBOL64 = 204,
 } curandRngType_t;
+
+typedef enum curandOrdering {
+    CURAND_ORDERING_PSEUDO_BEST    = 100,
+    CURAND_ORDERING_PSEUDO_DEFAULT = 101,
+    CURAND_ORDERING_PSEUDO_SEEDED  = 102,
+    CURAND_ORDERING_PSEUDO_LEGACY  = 103,
+    CURAND_ORDERING_QUASI_DEFAULT  = 201,
+} curandOrdering_t;
 
 // libraryPropertyType — mirrors CUDA library_types.h; guarded for multi-header includes.
 #ifndef CUMETAL_LIBRARY_PROPERTY_TYPE_DEFINED
@@ -83,6 +101,12 @@ curandStatus_t curandGeneratePoisson(curandGenerator_t generator,
                                      size_t num,
                                      double lambda);
 curandStatus_t curandGetProperty(libraryPropertyType type, int* value);
+
+// Generator type / ordering / quasi-random dimensions (batch 5).
+curandStatus_t curandGetGeneratorType(curandGenerator_t generator, curandRngType_t* rng_type);
+curandStatus_t curandSetGeneratorOrdering(curandGenerator_t generator, curandOrdering_t order);
+curandStatus_t curandSetQuasiRandomGeneratorDimensions(curandGenerator_t generator,
+                                                        unsigned int num_dimensions);
 
 // Exponential distribution: X ~ Exp(1) = -ln(U), U ~ Uniform(0,1).
 curandStatus_t curandGenerateExponential(curandGenerator_t generator,

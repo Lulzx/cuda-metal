@@ -77,6 +77,13 @@ typedef enum cublasGemmAlgo_t {
     CUBLAS_GEMM_DEFAULT_TENSOR_OP  = 99,
 } cublasGemmAlgo_t;
 
+// Complex scalar types used by cublasCgemm / cublasZgemm / cublasCgemv / cublasZgemv.
+#ifndef CUMETAL_CUCOMPLEX_DEFINED
+#define CUMETAL_CUCOMPLEX_DEFINED
+typedef struct { float  x; float  y; } cuComplex;
+typedef struct { double x; double y; } cuDoubleComplex;
+#endif
+
 const char* cublasGetStatusName(cublasStatus_t status);
 const char* cublasGetStatusString(cublasStatus_t status);
 
@@ -630,6 +637,42 @@ cublasStatus_t cublasSrotg(cublasHandle_t handle,
 cublasStatus_t cublasDrotg(cublasHandle_t handle,
                             double* a, double* b,
                             double* c, double* s);
+
+// Complex GEMM — C = alpha * op(A) * op(B) + beta * C.
+cublasStatus_t cublasCgemm(cublasHandle_t handle,
+                            cublasOperation_t transa, cublasOperation_t transb,
+                            int m, int n, int k,
+                            const cuComplex* alpha,
+                            const cuComplex* A, int lda,
+                            const cuComplex* B, int ldb,
+                            const cuComplex* beta,
+                            cuComplex* C, int ldc);
+cublasStatus_t cublasZgemm(cublasHandle_t handle,
+                            cublasOperation_t transa, cublasOperation_t transb,
+                            int m, int n, int k,
+                            const cuDoubleComplex* alpha,
+                            const cuDoubleComplex* A, int lda,
+                            const cuDoubleComplex* B, int ldb,
+                            const cuDoubleComplex* beta,
+                            cuDoubleComplex* C, int ldc);
+
+// Complex GEMV — y = alpha * op(A) * x + beta * y.
+cublasStatus_t cublasCgemv(cublasHandle_t handle,
+                            cublasOperation_t trans,
+                            int m, int n,
+                            const cuComplex* alpha,
+                            const cuComplex* A, int lda,
+                            const cuComplex* x, int incx,
+                            const cuComplex* beta,
+                            cuComplex* y, int incy);
+cublasStatus_t cublasZgemv(cublasHandle_t handle,
+                            cublasOperation_t trans,
+                            int m, int n,
+                            const cuDoubleComplex* alpha,
+                            const cuDoubleComplex* A, int lda,
+                            const cuDoubleComplex* x, int incx,
+                            const cuDoubleComplex* beta,
+                            cuDoubleComplex* y, int incy);
 
 #ifdef __cplusplus
 }

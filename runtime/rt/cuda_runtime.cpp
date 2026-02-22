@@ -3601,4 +3601,23 @@ cudaError_t cudaLaunchCooperativeKernel(const void* func,
     return cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
 }
 
+// ── Legacy thread API (batch 5) ───────────────────────────────────────────────
+// These functions were deprecated in CUDA 5.0 but remain common in legacy code.
+
+cudaError_t cudaThreadExit(void) {
+    return cudaDeviceReset();
+}
+
+cudaError_t cudaThreadSynchronize(void) {
+    return cudaDeviceSynchronize();
+}
+
+cudaError_t cudaThreadGetCacheConfig(cudaFuncCache* pCacheConfig) {
+    return cudaDeviceGetCacheConfig(pCacheConfig);
+}
+
+cudaError_t cudaThreadSetCacheConfig(cudaFuncCache cacheConfig) {
+    return cudaDeviceSetCacheConfig(cacheConfig);
+}
+
 }  // extern "C"

@@ -588,6 +588,12 @@ cudaError_t cudaLaunchCooperativeKernel(const void* func,
                                          size_t sharedMem,
                                          cudaStream_t stream);
 
+// Legacy thread API — deprecated aliases retained for source compatibility.
+cudaError_t cudaThreadExit(void);
+cudaError_t cudaThreadSynchronize(void);
+cudaError_t cudaThreadGetCacheConfig(cudaFuncCache* pCacheConfig);
+cudaError_t cudaThreadSetCacheConfig(cudaFuncCache cacheConfig);
+
 #ifdef __cplusplus
 }
 #endif

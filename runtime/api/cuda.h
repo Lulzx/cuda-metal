@@ -109,6 +109,13 @@ CUresult cuCtxSynchronize(void);
 // Primary context management.
 CUresult cuDevicePrimaryCtxRetain(CUcontext* pctx, CUdevice dev);
 CUresult cuDevicePrimaryCtxRelease(CUdevice dev);
+CUresult cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int* flags, int* active);
+CUresult cuDevicePrimaryCtxSetFlags(CUdevice dev, unsigned int flags);
+CUresult cuDevicePrimaryCtxReset(CUdevice dev);
+
+// Device UUID.
+typedef struct { unsigned char bytes[16]; } CUuuid;
+CUresult cuDeviceGetUuid(CUuuid* uuid, CUdevice dev);
 
 CUresult cuStreamCreate(CUstream* phStream, unsigned int flags);
 CUresult cuStreamDestroy(CUstream hStream);

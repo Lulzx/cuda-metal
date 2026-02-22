@@ -13,6 +13,9 @@ struct curandGenerator_st {
     unsigned long long seed = 0;
     unsigned long long offset = 0;
     cudaStream_t stream = nullptr;
+    curandRngType_t rng_type = CURAND_RNG_PSEUDO_DEFAULT;
+    curandOrdering_t ordering = CURAND_ORDERING_PSEUDO_DEFAULT;
+    unsigned int quasi_dimensions = 1;
     std::mutex mutex;
 };
 
@@ -33,7 +36,20 @@ curandStatus_t curandCreateGenerator(curandGenerator_t* generator, curandRngType
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
-    if (rng_type != CURAND_RNG_PSEUDO_DEFAULT) {
+    // Accept all pseudo and quasi types; on Apple Silicon UMA all generators
+    // use the same host-side PRNG since there is no distinct device memory.
+    const bool pseudo = (rng_type == CURAND_RNG_PSEUDO_DEFAULT   ||
+                         rng_type == CURAND_RNG_PSEUDO_XORWOW    ||
+                         rng_type == CURAND_RNG_PSEUDO_MRG32K3A  ||
+                         rng_type == CURAND_RNG_PSEUDO_MTGP32    ||
+                         rng_type == CURAND_RNG_PSEUDO_MT19937   ||
+                         rng_type == CURAND_RNG_PSEUDO_PHILOX4_32_10);
+    const bool quasi  = (rng_type == CURAND_RNG_QUASI_DEFAULT    ||
+                         rng_type == CURAND_RNG_QUASI_SOBOL32    ||
+                         rng_type == CURAND_RNG_QUASI_SCRAMBLED_SOBOL32 ||
+                         rng_type == CURAND_RNG_QUASI_SOBOL64    ||
+                         rng_type == CURAND_RNG_QUASI_SCRAMBLED_SOBOL64);
+    if (!pseudo && !quasi) {
         return CURAND_STATUS_TYPE_ERROR;
     }
 
@@ -41,7 +57,7 @@ curandStatus_t curandCreateGenerator(curandGenerator_t* generator, curandRngType
     if (created == nullptr) {
         return CURAND_STATUS_ALLOCATION_FAILED;
     }
-
+    created->rng_type = rng_type;
     *generator = created;
     return CURAND_STATUS_SUCCESS;
 }
@@ -448,6 +464,47 @@ curandStatus_t curandGetProperty(libraryPropertyType type, int* value) {
         default:
             return CURAND_STATUS_TYPE_ERROR;
     }
+    return CURAND_STATUS_SUCCESS;
+}
+
+// ── Generator introspection / ordering / quasi-dimensions (batch 5) ──────────
+
+curandStatus_t curandGetGeneratorType(curandGenerator_t generator, curandRngType_t* rng_type) {
+    if (generator == nullptr || rng_type == nullptr) {
+        return CURAND_STATUS_NOT_INITIALIZED;
+    }
+    std::lock_guard<std::mutex> lock(generator->mutex);
+    *rng_type = generator->rng_type;
+    return CURAND_STATUS_SUCCESS;
+}
+
+curandStatus_t curandSetGeneratorOrdering(curandGenerator_t generator, curandOrdering_t order) {
+    if (generator == nullptr) {
+        return CURAND_STATUS_NOT_INITIALIZED;
+    }
+    // Validate ordering is a known value.
+    if (order != CURAND_ORDERING_PSEUDO_BEST    &&
+        order != CURAND_ORDERING_PSEUDO_DEFAULT &&
+        order != CURAND_ORDERING_PSEUDO_SEEDED  &&
+        order != CURAND_ORDERING_PSEUDO_LEGACY  &&
+        order != CURAND_ORDERING_QUASI_DEFAULT) {
+        return CURAND_STATUS_OUT_OF_RANGE;
+    }
+    std::lock_guard<std::mutex> lock(generator->mutex);
+    generator->ordering = order;
+    return CURAND_STATUS_SUCCESS;
+}
+
+curandStatus_t curandSetQuasiRandomGeneratorDimensions(curandGenerator_t generator,
+                                                        unsigned int num_dimensions) {
+    if (generator == nullptr) {
+        return CURAND_STATUS_NOT_INITIALIZED;
+    }
+    if (num_dimensions == 0 || num_dimensions > 20000) {
+        return CURAND_STATUS_OUT_OF_RANGE;
+    }
+    std::lock_guard<std::mutex> lock(generator->mutex);
+    generator->quasi_dimensions = num_dimensions;
     return CURAND_STATUS_SUCCESS;
 }
 
