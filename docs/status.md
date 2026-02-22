@@ -1,6 +1,6 @@
 # Status
 
-Current status: **Post-Phase 5 — 144/144 tests passing (142 unit/functional + bench_phase5_all_kernels)**
+Current status: **Post-Phase 5 — 145/145 tests passing (143 unit/functional + bench_phase5_all_kernels)**
 
 Phase 4 is fully complete. Phase 5 performance work is complete.
 Intentional non-goals per §2.2 (CUDA Graphs, dynamic parallelism, texture objects,
@@ -51,9 +51,20 @@ Post-Phase 5 work completed:
   logs fatbinary format detection, JIT compile path (Metal vs LLVM IR lowering),
   cache hits/misses, arg count inference, and kernel/symbol registration events.
 
+Post-Phase 5 work completed (continued):
+
+- **Threadgroup memory tiling hints** (`compiler/passes/src/threadgroup_tiling.cpp`):
+  New `analyse_threadgroup_tiling()` pass that scans a PTX kernel's instruction
+  stream for shared-memory bank-conflict patterns.  The pass detects `mul.lo`/`shl`
+  stride constants (window of 4) immediately preceding `ld.shared`/`st.shared`/
+  `atom.shared`/`red.shared` accesses and emits `TilingHint` entries for every
+  power-of-2 stride ≥ 16 that aligns to the 32-bank, 4-byte-per-bank Metal
+  threadgroup memory boundary.  Each hint carries the detected stride, element
+  size, recommended padding (1 element = `elem_bytes`), and a human-readable
+  reason string.  Covered by `unit_threadgroup_tiling` (9 sub-cases).
+
 Items remaining (deferred per spec §2.2):
 
-- Threadgroup memory tiling optimization hints (compiler pass, optional).
 - Kernel fusion via MLIR GPU dialect (optional, deferred to v2).
 
 Implemented:

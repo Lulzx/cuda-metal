@@ -58,6 +58,7 @@ add_library(cumetal_passes STATIC
     compiler/passes/src/metadata.cpp
     compiler/passes/src/phase1_pipeline.cpp
     compiler/passes/src/printf_lower.cpp
+    compiler/passes/src/threadgroup_tiling.cpp
 )
 
 target_include_directories(cumetal_passes

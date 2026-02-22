@@ -57,6 +57,10 @@ add_executable(cumetal_cuda_vector_types_test
     cuda_vector_types_test.cpp
 )
 
+add_executable(cumetal_threadgroup_tiling_test
+    threadgroup_tiling_test.cpp
+)
+
 target_include_directories(cumetal_allocation_table_test
     PRIVATE
         ${CMAKE_SOURCE_DIR}/runtime/api
@@ -227,6 +231,18 @@ target_compile_options(cumetal_cuda_vector_types_test
         -Wpedantic
 )
 
+target_link_libraries(cumetal_threadgroup_tiling_test
+    PRIVATE
+        cumetal_passes
+)
+
+target_compile_options(cumetal_threadgroup_tiling_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
 add_test(
     NAME unit_allocation_table
     COMMAND cumetal_allocation_table_test
@@ -315,6 +331,11 @@ add_test(
 add_test(
     NAME unit_cuda_vector_types
     COMMAND cumetal_cuda_vector_types_test
+)
+
+add_test(
+    NAME unit_threadgroup_tiling
+    COMMAND cumetal_threadgroup_tiling_test
 )
 
 add_test(
