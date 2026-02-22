@@ -1,6 +1,6 @@
 # Status
 
-Current status: **Post-Phase 5 — 143/143 tests passing (141 unit/functional + 2 heap auto-threshold + bench_phase5_all_kernels)**
+Current status: **Post-Phase 5 — 144/144 tests passing (142 unit/functional + bench_phase5_all_kernels)**
 
 Phase 4 is fully complete. Phase 5 performance work is complete.
 Intentional non-goals per §2.2 (CUDA Graphs, dynamic parallelism, texture objects,
@@ -41,11 +41,20 @@ Post-Phase 5 work completed:
   - `CUMETAL_MTLHEAP_ALLOC=0` → never use heap
   Tests: `functional_runtime_heap_auto_threshold`, `functional_runtime_heap_disabled`.
 
+- **Binary shim JIT cache**: Registration-path PTX→metallib compilations are now cached
+  persistently at `$CUMETAL_CACHE_DIR/registration-jit/<hash>.metallib` (default:
+  `$HOME/Library/Caches/io.cumetal/registration-jit/`), keyed by FNV-1a-64 hash of
+  `ptx_source + kernel_name`. Persistent cache files survive `__cudaUnregisterFatBinary`
+  and process restart — second registration of the same kernel skips xcrun.
+  Test: `functional_runtime_registration_jit_cache`.
+- **`CUMETAL_DEBUG_REGISTRATION=1`** — opt-in stderr trace for binary shim diagnostics:
+  logs fatbinary format detection, JIT compile path (Metal vs LLVM IR lowering),
+  cache hits/misses, arg count inference, and kernel/symbol registration events.
+
 Items remaining (deferred per spec §2.2):
 
 - Threadgroup memory tiling optimization hints (compiler pass, optional).
 - Kernel fusion via MLIR GPU dialect (optional, deferred to v2).
-- Binary shim (`libcuda.dylib`) hardening beyond current opt-in path.
 
 Implemented:
 

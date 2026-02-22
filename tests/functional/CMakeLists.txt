@@ -2121,6 +2121,16 @@ if(CUMETAL_ENABLE_BINARY_SHIM)
     set_tests_properties(functional_runtime_registration_fatbin_ptx PROPERTIES SKIP_RETURN_CODE 77)
 
     add_test(
+        NAME functional_runtime_registration_jit_cache
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_registration_jit_cache_test.sh
+                $<TARGET_FILE:cumetal_runtime_registration_fatbin_ptx_test>
+                ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx
+    )
+
+    set_tests_properties(functional_runtime_registration_jit_cache PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
         NAME functional_runtime_legacy_launch_registration
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
                 ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
