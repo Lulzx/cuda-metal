@@ -268,6 +268,61 @@ int main() {
         return 1;
     }
 
+    // Regression coverage for the real generic PTX→LLVM path:
+    // - parser preserves labels as control-flow targets
+    // - inline `.reg ...; mov...` on one line keeps the trailing instruction
+    // - `.param .b8 name[N]` aggregate symbols can be addressed via mov.b64 + ld.param
+    const std::string generic_branch_ptx = R"PTX(
+.version 8.0
+.target sm_90
+.visible .entry branchy_generic(
+    .param .u64 branchy_param_0,
+    .param .u64 branchy_param_1,
+    .param .align 4 .b8 branchy_param_2[12]
+)
+{
+    .reg .pred %p<2>;
+    .reg .b16  %rs<4>;
+    .reg .b32  %r<8>;
+    .reg .b64  %rd<4>;
+    mov.u32 %r1, %tid.x;
+    setp.gt.u32 %p1, %r1, 15;
+    @%p1 bra $L1;
+    { .reg .b16 tmp; mov.b32 {tmp, %rs1}, %r1; }
+$L1:
+    mov.b64 %rd1, branchy_param_2;
+    ld.param.b32 %r2, [%rd1+4];
+    ret;
+}
+)PTX";
+
+    cumetal::ptx::LowerToLlvmOptions generic_branch_options;
+    generic_branch_options.entry_name = "branchy_generic";
+    generic_branch_options.strict = true;
+    generic_branch_options.module_id = "unit.ptx.branchy_generic";
+    const auto generic_branch_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(generic_branch_ptx, generic_branch_options);
+    if (!expect(generic_branch_lowered.ok, "generic branchy PTX lowering succeeds")) {
+        return 1;
+    }
+    if (!expect(contains(generic_branch_lowered.llvm_ir,
+                         "air.thread_position_in_threadgroup"),
+                "generic PTX lowering injects threadgroup builtin metadata")) {
+        return 1;
+    }
+    if (!expect(contains(generic_branch_lowered.llvm_ir, "cm_bb_"),
+                "generic PTX lowering emits structured control-flow blocks")) {
+        return 1;
+    }
+    if (!expect(!contains(generic_branch_lowered.llvm_ir, "ptx.lower opcode="),
+                "generic PTX lowering should not fall back to comment-only stub body")) {
+        return 1;
+    }
+    if (!expect(generic_branch_lowered.warnings.empty(),
+                "generic branchy PTX lowering should not emit warnings")) {
+        return 1;
+    }
+
     std::printf("PASS: ptx lower-to-llvm unit tests\n");
     return 0;
 }

@@ -464,6 +464,12 @@ IntrinsicLowerResult lower_intrinsics(const cumetal::ptx::EntryFunction& entry,
         lowered.operands = instruction.operands;
         lowered.translated = false;
 
+        if (instruction.opcode == "ptx.label") {
+            lowered.translated = true;
+            result.instructions.push_back(std::move(lowered));
+            continue;
+        }
+
         bool translated = false;
         translated = translated || map_special_register_mov(instruction, &lowered);
         translated = translated || map_barrier(instruction, &lowered);
