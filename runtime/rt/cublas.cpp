@@ -2,11 +2,14 @@
 #include "metal_backend.h"
 #include "runtime_internal.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cmath>
+#include <cstring>
 #include <mutex>
 #include <new>
 #include <string>
+#include <vector>
 
 struct cublasContext {
     cudaStream_t stream = nullptr;
@@ -1390,6 +1393,438 @@ cublasStatus_t cublasDsymv(cublasHandle_t handle,
         y[row * incy] = alpha_value * sum + beta_value * y[row * incy];
     }
     return CUBLAS_STATUS_SUCCESS;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GemmEx / GemmStridedBatchedEx
+// ─────────────────────────────────────────────────────────────────────────────
+
+cublasStatus_t cublasGemmEx(cublasHandle_t handle,
+                            cublasOperation_t transa,
+                            cublasOperation_t transb,
+                            int m, int n, int k,
+                            const void* alpha,
+                            const void* a, cudaDataType_t atype, int lda,
+                            const void* b, cudaDataType_t btype, int ldb,
+                            const void* beta,
+                            void* c, cudaDataType_t ctype, int ldc,
+                            cublasComputeType_t compute_type,
+                            cublasGemmAlgo_t /* algo */) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_operation(transa) || !is_valid_operation(transb))
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (m < 0 || n < 0 || k < 0 || alpha == nullptr || beta == nullptr)
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+    // Route to the appropriate typed GEMM based on compute/data types.
+    if ((compute_type == CUBLAS_COMPUTE_32F ||
+         compute_type == CUBLAS_COMPUTE_32F_FAST_TF32) &&
+        atype == CUDA_R_32F && btype == CUDA_R_32F && ctype == CUDA_R_32F) {
+        return cublasSgemm(handle, transa, transb, m, n, k,
+                           static_cast<const float*>(alpha),
+                           static_cast<const float*>(a), lda,
+                           static_cast<const float*>(b), ldb,
+                           static_cast<const float*>(beta),
+                           static_cast<float*>(c), ldc);
+    }
+
+    if (compute_type == CUBLAS_COMPUTE_64F &&
+        atype == CUDA_R_64F && btype == CUDA_R_64F && ctype == CUDA_R_64F) {
+        return cublasDgemm(handle, transa, transb, m, n, k,
+                           static_cast<const double*>(alpha),
+                           static_cast<const double*>(a), lda,
+                           static_cast<const double*>(b), ldb,
+                           static_cast<const double*>(beta),
+                           static_cast<double*>(c), ldc);
+    }
+
+    // FP16 compute or mixed types: upconvert to float, compute, downconvert.
+    if (m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (a == nullptr || b == nullptr || c == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+
+    // Helper: read one scalar element as float from a typed buffer.
+    auto read_f32 = [](const void* ptr, int idx, cudaDataType_t t) -> float {
+        switch (t) {
+            case CUDA_R_32F: return static_cast<const float*>(ptr)[idx];
+            case CUDA_R_64F: return static_cast<float>(static_cast<const double*>(ptr)[idx]);
+            case CUDA_R_16F: return static_cast<float>(static_cast<const __half*>(ptr)[idx]);
+            default:         return 0.0f;
+        }
+    };
+    auto write_f32 = [](void* ptr, int idx, float val, cudaDataType_t t) {
+        switch (t) {
+            case CUDA_R_32F: static_cast<float*>(ptr)[idx] = val; break;
+            case CUDA_R_64F: static_cast<double*>(ptr)[idx] = static_cast<double>(val); break;
+            case CUDA_R_16F: static_cast<__half*>(ptr)[idx] = static_cast<__half>(val); break;
+            default: break;
+        }
+    };
+
+    const float alpha_f = read_f32(alpha, 0, (atype == CUDA_R_64F) ? CUDA_R_64F : CUDA_R_32F);
+    const float beta_f  = read_f32(beta,  0, (ctype == CUDA_R_64F) ? CUDA_R_64F : CUDA_R_32F);
+
+    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
+    if (sync_status != CUBLAS_STATUS_SUCCESS) return sync_status;
+
+    // Naive reference implementation for mixed/fp16 types.
+    for (int col = 0; col < n; ++col) {
+        for (int row = 0; row < m; ++row) {
+            float sum = 0.0f;
+            for (int p = 0; p < k; ++p) {
+                float a_val = 0.0f, b_val = 0.0f;
+                if (transa == CUBLAS_OP_N) {
+                    a_val = read_f32(a, row + p * lda, atype);
+                } else {
+                    a_val = read_f32(a, p + row * lda, atype);
+                }
+                if (transb == CUBLAS_OP_N) {
+                    b_val = read_f32(b, p + col * ldb, btype);
+                } else {
+                    b_val = read_f32(b, col + p * ldb, btype);
+                }
+                sum += a_val * b_val;
+            }
+            const float c_old = read_f32(c, row + col * ldc, ctype);
+            write_f32(c, row + col * ldc, alpha_f * sum + beta_f * c_old, ctype);
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
+                                          cublasOperation_t transa,
+                                          cublasOperation_t transb,
+                                          int m, int n, int k,
+                                          const void* alpha,
+                                          const void* a, cudaDataType_t atype, int lda,
+                                          long long int stridea,
+                                          const void* b, cudaDataType_t btype, int ldb,
+                                          long long int strideb,
+                                          const void* beta,
+                                          void* c, cudaDataType_t ctype, int ldc,
+                                          long long int stridec,
+                                          int batch_count,
+                                          cublasComputeType_t compute_type,
+                                          cublasGemmAlgo_t algo) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (batch_count < 0) return CUBLAS_STATUS_INVALID_VALUE;
+
+    // Route fp32 strided batched via cublasSgemmStridedBatched.
+    if ((compute_type == CUBLAS_COMPUTE_32F ||
+         compute_type == CUBLAS_COMPUTE_32F_FAST_TF32) &&
+        atype == CUDA_R_32F && btype == CUDA_R_32F && ctype == CUDA_R_32F) {
+        return cublasSgemmStridedBatched(handle, transa, transb, m, n, k,
+                                         static_cast<const float*>(alpha),
+                                         static_cast<const float*>(a), lda, stridea,
+                                         static_cast<const float*>(b), ldb, strideb,
+                                         static_cast<const float*>(beta),
+                                         static_cast<float*>(c), ldc, stridec,
+                                         batch_count);
+    }
+    if (compute_type == CUBLAS_COMPUTE_64F &&
+        atype == CUDA_R_64F && btype == CUDA_R_64F && ctype == CUDA_R_64F) {
+        return cublasDgemmStridedBatched(handle, transa, transb, m, n, k,
+                                         static_cast<const double*>(alpha),
+                                         static_cast<const double*>(a), lda, stridea,
+                                         static_cast<const double*>(b), ldb, strideb,
+                                         static_cast<const double*>(beta),
+                                         static_cast<double*>(c), ldc, stridec,
+                                         batch_count);
+    }
+
+    // Delegate each batch slice to GemmEx.
+    auto byte_offset = [](const void* base, long long int elems, cudaDataType_t t) -> const void* {
+        std::size_t sz = 4;
+        if (t == CUDA_R_64F) sz = 8;
+        else if (t == CUDA_R_16F) sz = 2;
+        return static_cast<const char*>(base) + elems * sz;
+    };
+    auto byte_offset_mutable = [](void* base, long long int elems, cudaDataType_t t) -> void* {
+        std::size_t sz = 4;
+        if (t == CUDA_R_64F) sz = 8;
+        else if (t == CUDA_R_16F) sz = 2;
+        return static_cast<char*>(base) + elems * sz;
+    };
+
+    for (int bi = 0; bi < batch_count; ++bi) {
+        const cublasStatus_t s =
+            cublasGemmEx(handle, transa, transb, m, n, k, alpha,
+                         byte_offset(a, stridea * bi, atype), atype, lda,
+                         byte_offset(b, strideb * bi, btype), btype, ldb,
+                         beta,
+                         byte_offset_mutable(c, stridec * bi, ctype), ctype, ldc,
+                         compute_type, algo);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hgemm — half-precision GEMM (implemented via fp32 upconvert)
+// ─────────────────────────────────────────────────────────────────────────────
+
+cublasStatus_t cublasHgemm(cublasHandle_t handle,
+                           cublasOperation_t transa,
+                           cublasOperation_t transb,
+                           int m, int n, int k,
+                           const __half* alpha,
+                           const __half* a, int lda,
+                           const __half* b, int ldb,
+                           const __half* beta,
+                           __half* c, int ldc) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const float falpha = static_cast<float>(*alpha);
+    const float fbeta  = static_cast<float>(*beta);
+    return cublasGemmEx(handle, transa, transb, m, n, k,
+                        &falpha, a, CUDA_R_16F, lda,
+                                 b, CUDA_R_16F, ldb,
+                        &fbeta,  c, CUDA_R_16F, ldc,
+                        CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SgemmBatched / DgemmBatched — array-of-pointers batched GEMM
+// ─────────────────────────────────────────────────────────────────────────────
+
+cublasStatus_t cublasSgemmBatched(cublasHandle_t handle,
+                                  cublasOperation_t transa,
+                                  cublasOperation_t transb,
+                                  int m, int n, int k,
+                                  const float* alpha,
+                                  const float* const a_array[], int lda,
+                                  const float* const b_array[], int ldb,
+                                  const float* beta,
+                                  float* const c_array[], int ldc,
+                                  int batch_count) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_operation(transa) || !is_valid_operation(transb))
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (m < 0 || n < 0 || k < 0 || batch_count < 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (a_array == nullptr || b_array == nullptr || c_array == nullptr)
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+    for (int bi = 0; bi < batch_count; ++bi) {
+        const cublasStatus_t s =
+            cublasSgemm(handle, transa, transb, m, n, k,
+                        alpha, a_array[bi], lda, b_array[bi], ldb,
+                        beta, c_array[bi], ldc);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDgemmBatched(cublasHandle_t handle,
+                                  cublasOperation_t transa,
+                                  cublasOperation_t transb,
+                                  int m, int n, int k,
+                                  const double* alpha,
+                                  const double* const a_array[], int lda,
+                                  const double* const b_array[], int ldb,
+                                  const double* beta,
+                                  double* const c_array[], int ldc,
+                                  int batch_count) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_operation(transa) || !is_valid_operation(transb))
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (m < 0 || n < 0 || k < 0 || batch_count < 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (a_array == nullptr || b_array == nullptr || c_array == nullptr)
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+    for (int bi = 0; bi < batch_count; ++bi) {
+        const cublasStatus_t s =
+            cublasDgemm(handle, transa, transb, m, n, k,
+                        alpha, a_array[bi], lda, b_array[bi], ldb,
+                        beta, c_array[bi], ldc);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Strsm / Dtrsm — triangular solve with multiple RHS
+// Solves: op(A) * X = alpha * B  (CUBLAS_SIDE_LEFT)
+//      or X * op(A) = alpha * B  (CUBLAS_SIDE_RIGHT)
+// Result is written back into B.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Macro to generate trsm body for float/double (avoids template inside extern "C").
+// TRSM: solve op(A) * X = alpha * B  (side=LEFT) or  X * op(A) = alpha * B  (side=RIGHT).
+// B is m×n, A is m×m (LEFT) or n×n (RIGHT). Result written into B.
+#define CUMETAL_TRSM_BODY(T, zero_val, one_val)                                     \
+    do {                                                                             \
+        if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;                \
+        if (alpha == nullptr) return CUBLAS_STATUS_INVALID_VALUE;                   \
+        if (side != CUBLAS_SIDE_LEFT && side != CUBLAS_SIDE_RIGHT)                  \
+            return CUBLAS_STATUS_INVALID_VALUE;                                     \
+        if (!is_valid_fill_mode(uplo)) return CUBLAS_STATUS_INVALID_VALUE;          \
+        if (!is_valid_operation(trans)) return CUBLAS_STATUS_INVALID_VALUE;         \
+        if (diag != CUBLAS_DIAG_NON_UNIT && diag != CUBLAS_DIAG_UNIT)              \
+            return CUBLAS_STATUS_INVALID_VALUE;                                     \
+        if (m < 0 || n < 0) return CUBLAS_STATUS_INVALID_VALUE;                    \
+        if (m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;                         \
+        if (a == nullptr || b == nullptr) return CUBLAS_STATUS_INVALID_VALUE;       \
+        const cublasStatus_t _sync = synchronize_handle_stream(handle);             \
+        if (_sync != CUBLAS_STATUS_SUCCESS) return _sync;                           \
+        const T alpha_val = *alpha;                                                  \
+        const bool _unit = (diag == CUBLAS_DIAG_UNIT);                              \
+        const bool _lower = (uplo == CUBLAS_FILL_MODE_LOWER);                       \
+        const bool _notrans = (trans == CUBLAS_OP_N);                               \
+        if (alpha_val != one_val) {                                                  \
+            for (int _c = 0; _c < n; ++_c)                                          \
+                for (int _r = 0; _r < m; ++_r)                                      \
+                    b[_r + _c * ldb] *= alpha_val;                                  \
+        }                                                                            \
+        auto _ae = [&](int r, int c) -> T {                                         \
+            return _notrans ? a[r + c * lda] : a[c + r * lda]; };                  \
+        auto _ad = [&](int i) -> T {                                                \
+            return _unit ? one_val : a[i + i * lda]; };                             \
+        if (side == CUBLAS_SIDE_LEFT) {                                              \
+            for (int _c = 0; _c < n; ++_c) {                                        \
+                if ((_lower && _notrans) || (!_lower && !_notrans)) {               \
+                    for (int _r = 0; _r < m; ++_r) {                               \
+                        T _s = b[_r + _c * ldb];                                    \
+                        for (int _p = 0; _p < _r; ++_p) _s -= _ae(_r,_p)*b[_p+_c*ldb];\
+                        b[_r + _c * ldb] = _s / _ad(_r);                           \
+                    }                                                                \
+                } else {                                                             \
+                    for (int _r = m-1; _r >= 0; --_r) {                            \
+                        T _s = b[_r + _c * ldb];                                    \
+                        for (int _p = _r+1; _p < m; ++_p) _s -= _ae(_r,_p)*b[_p+_c*ldb];\
+                        b[_r + _c * ldb] = _s / _ad(_r);                           \
+                    }                                                                \
+                }                                                                    \
+            }                                                                        \
+        } else {                                                                     \
+            if ((!_lower && _notrans) || (_lower && !_notrans)) {                   \
+                for (int _c = 0; _c < n; ++_c) {                                   \
+                    T _dv = _ad(_c);                                                 \
+                    for (int _r = 0; _r < m; ++_r) b[_r+_c*ldb] /= _dv;           \
+                    for (int _p = _c+1; _p < n; ++_p) {                            \
+                        T _f = _ae(_c,_p);                                           \
+                        for (int _r = 0; _r < m; ++_r) b[_r+_p*ldb] -= _f*b[_r+_c*ldb];\
+                    }                                                                \
+                }                                                                    \
+            } else {                                                                 \
+                for (int _c = n-1; _c >= 0; --_c) {                               \
+                    T _dv = _ad(_c);                                                 \
+                    for (int _r = 0; _r < m; ++_r) b[_r+_c*ldb] /= _dv;           \
+                    for (int _p = 0; _p < _c; ++_p) {                              \
+                        T _f = _ae(_c,_p);                                           \
+                        for (int _r = 0; _r < m; ++_r) b[_r+_p*ldb] -= _f*b[_r+_c*ldb];\
+                    }                                                                \
+                }                                                                    \
+            }                                                                        \
+        }                                                                            \
+        return CUBLAS_STATUS_SUCCESS;                                                \
+    } while (0)
+
+cublasStatus_t cublasStrsm(cublasHandle_t handle,
+                           cublasSideMode_t side,
+                           cublasFillMode_t uplo,
+                           cublasOperation_t trans,
+                           cublasDiagType_t diag,
+                           int m, int n,
+                           const float* alpha,
+                           const float* a, int lda,
+                           float* b, int ldb) {
+    CUMETAL_TRSM_BODY(float, 0.0f, 1.0f);
+}
+
+cublasStatus_t cublasDtrsm(cublasHandle_t handle,
+                           cublasSideMode_t side,
+                           cublasFillMode_t uplo,
+                           cublasOperation_t trans,
+                           cublasDiagType_t diag,
+                           int m, int n,
+                           const double* alpha,
+                           const double* a, int lda,
+                           double* b, int ldb) {
+    CUMETAL_TRSM_BODY(double, 0.0, 1.0);
+}
+
+#undef CUMETAL_TRSM_BODY
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SetVector / GetVector / SetMatrix / GetMatrix
+// On Apple Silicon UMA all memory is coherent; these are strided memcpy helpers.
+// ─────────────────────────────────────────────────────────────────────────────
+
+cublasStatus_t cublasSetVector(int n, int elem_size,
+                               const void* x, int incx,
+                               void* y, int incy) {
+    if (n < 0 || elem_size <= 0 || incx <= 0 || incy <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (x == nullptr || y == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const std::size_t es = static_cast<std::size_t>(elem_size);
+    for (int i = 0; i < n; ++i) {
+        std::memcpy(static_cast<char*>(y) + static_cast<std::size_t>(i * incy) * es,
+                    static_cast<const char*>(x) + static_cast<std::size_t>(i * incx) * es,
+                    es);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasGetVector(int n, int elem_size,
+                               const void* x, int incx,
+                               void* y, int incy) {
+    return cublasSetVector(n, elem_size, x, incx, y, incy);
+}
+
+cublasStatus_t cublasSetMatrix(int rows, int cols, int elem_size,
+                               const void* a, int lda,
+                               void* b, int ldb) {
+    if (rows < 0 || cols < 0 || elem_size <= 0 || lda < rows || ldb < rows)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (rows == 0 || cols == 0) return CUBLAS_STATUS_SUCCESS;
+    if (a == nullptr || b == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const std::size_t es  = static_cast<std::size_t>(elem_size);
+    const std::size_t row_bytes = static_cast<std::size_t>(rows) * es;
+    for (int col = 0; col < cols; ++col) {
+        std::memcpy(static_cast<char*>(b) + static_cast<std::size_t>(col * ldb) * es,
+                    static_cast<const char*>(a) + static_cast<std::size_t>(col * lda) * es,
+                    row_bytes);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasGetMatrix(int rows, int cols, int elem_size,
+                               const void* a, int lda,
+                               void* b, int ldb) {
+    return cublasSetMatrix(rows, cols, elem_size, a, lda, b, ldb);
+}
+
+cublasStatus_t cublasSetVectorAsync(int n, int elem_size,
+                                    const void* x, int incx,
+                                    void* y, int incy,
+                                    cudaStream_t /* stream */) {
+    return cublasSetVector(n, elem_size, x, incx, y, incy);
+}
+
+cublasStatus_t cublasGetVectorAsync(int n, int elem_size,
+                                    const void* x, int incx,
+                                    void* y, int incy,
+                                    cudaStream_t /* stream */) {
+    return cublasSetVector(n, elem_size, x, incx, y, incy);
+}
+
+cublasStatus_t cublasSetMatrixAsync(int rows, int cols, int elem_size,
+                                    const void* a, int lda,
+                                    void* b, int ldb,
+                                    cudaStream_t /* stream */) {
+    return cublasSetMatrix(rows, cols, elem_size, a, lda, b, ldb);
+}
+
+cublasStatus_t cublasGetMatrixAsync(int rows, int cols, int elem_size,
+                                    const void* a, int lda,
+                                    void* b, int ldb,
+                                    cudaStream_t /* stream */) {
+    return cublasSetMatrix(rows, cols, elem_size, a, lda, b, ldb);
 }
 
 }  // extern "C"

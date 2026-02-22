@@ -139,6 +139,10 @@ add_executable(cumetal_cublas_api_test
     cublas_api_test.cpp
 )
 
+add_executable(cumetal_cublas_extended_api_test
+    cublas_extended_api_test.cpp
+)
+
 add_executable(cumetal_cufft_c2c_test
     cufft_c2c_test.cpp
 )
@@ -523,6 +527,11 @@ target_link_libraries(cumetal_curand_uniform_test
 )
 
 target_link_libraries(cumetal_cublas_api_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cublas_extended_api_test
     PRIVATE
         cumetal_runtime
 )
@@ -1718,6 +1727,11 @@ add_test(
 add_test(
     NAME functional_cublas_api
     COMMAND cumetal_cublas_api_test
+)
+
+add_test(
+    NAME functional_cublas_extended_api
+    COMMAND cumetal_cublas_extended_api_test
 )
 
 add_test(

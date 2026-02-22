@@ -1,6 +1,6 @@
 # Status
 
-Current status: **Post-Phase 5 — 144/144 tests passing (143 unit/functional + bench_phase5_all_kernels)**
+Current status: **Post-Phase 5 — 145/145 tests passing (144 unit/functional + bench_phase5_all_kernels)**
 
 Phase 4 is fully complete. Phase 5 performance work is complete.
 Intentional non-goals per §2.2 (CUDA Graphs, dynamic parallelism, texture objects,
@@ -51,7 +51,23 @@ Post-Phase 5 work completed:
   logs fatbinary format detection, JIT compile path (Metal vs LLVM IR lowering),
   cache hits/misses, arg count inference, and kernel/symbol registration events.
 
-Post-Phase 5 work completed (continued):
+Post-Phase 5 work completed (continued, part 2):
+
+- **cuBLAS extended APIs** (`runtime/rt/cublas.cpp`, `runtime/api/cublas_v2.h`):
+  Added `cudaDataType_t`, `cublasDiagType_t`, `cublasSideMode_t`, `cublasGemmAlgo_t` enums.
+  New functions:
+  - `cublasGemmEx` — extended GEMM: routes CUDA_R_32F → cublasSgemm, CUDA_R_64F → cublasDgemm,
+    FP16/mixed types via scalar upconvert loop.
+  - `cublasGemmStridedBatchedEx` — batched strided GemmEx; routes fp32/fp64 to typed variants.
+  - `cublasHgemm` — half-precision GEMM via upconvert to float through GemmEx.
+  - `cublasSgemmBatched` / `cublasDgemmBatched` — array-of-pointers batched GEMM.
+  - `cublasStrsm` / `cublasDtrsm` — triangular solve (BLAS3); supports LEFT/RIGHT side,
+    UPPER/LOWER fill, N/T/C transpose, UNIT/NON_UNIT diagonal, alpha scaling.
+  - `cublasSetVector` / `cublasGetVector` / `cublasSetMatrix` / `cublasGetMatrix` —
+    strided host↔device copy helpers (no-op overhead on Apple Silicon UMA).
+  - Async variants (`*Async`) alias to their synchronous counterparts (stream ignored; UMA).
+  Test: `functional_cublas_extended_api`.
+
 
 - **Threadgroup memory tiling hints** (`compiler/passes/src/threadgroup_tiling.cpp`):
   New `analyse_threadgroup_tiling()` pass that scans a PTX kernel's instruction

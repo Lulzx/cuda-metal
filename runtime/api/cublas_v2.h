@@ -3,6 +3,7 @@
 #include <stddef.h>
 
 #include "cuda_runtime.h"
+#include "cuda_fp16.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,6 +46,36 @@ typedef enum cublasComputeType_t {
     CUBLAS_COMPUTE_64F = 70,
     CUBLAS_COMPUTE_32F_FAST_TF32 = 77,
 } cublasComputeType_t;
+
+typedef enum cublasDiagType_t {
+    CUBLAS_DIAG_NON_UNIT = 0,
+    CUBLAS_DIAG_UNIT     = 1,
+} cublasDiagType_t;
+
+typedef enum cublasSideMode_t {
+    CUBLAS_SIDE_LEFT  = 0,
+    CUBLAS_SIDE_RIGHT = 1,
+} cublasSideMode_t;
+
+// cudaDataType_t — element types used by GemmEx and other extended APIs.
+typedef enum cudaDataType_t {
+    CUDA_R_16F  =  2,
+    CUDA_C_16F  =  6,
+    CUDA_R_32F  =  0,
+    CUDA_C_32F  =  4,
+    CUDA_R_64F  =  1,
+    CUDA_C_64F  =  5,
+    CUDA_R_8I   =  3,
+    CUDA_R_8U   =  8,
+    CUDA_R_32I  = 10,
+} cudaDataType_t;
+typedef cudaDataType_t cudaDataType;
+
+typedef enum cublasGemmAlgo_t {
+    CUBLAS_GEMM_DEFAULT            = -1,
+    CUBLAS_GEMM_ALGO0              =  0,
+    CUBLAS_GEMM_DEFAULT_TENSOR_OP  = 99,
+} cublasGemmAlgo_t;
 
 cublasStatus_t cublasCreate(cublasHandle_t* handle);
 cublasStatus_t cublasDestroy(cublasHandle_t handle);
@@ -246,6 +277,167 @@ cublasStatus_t cublasDsymv(cublasHandle_t handle,
                            const double* beta,
                            double* y,
                            int incy);
+
+// GemmEx — extended GEMM with per-matrix data types and compute type.
+cublasStatus_t cublasGemmEx(cublasHandle_t handle,
+                            cublasOperation_t transa,
+                            cublasOperation_t transb,
+                            int m,
+                            int n,
+                            int k,
+                            const void* alpha,
+                            const void* a,
+                            cudaDataType_t atype,
+                            int lda,
+                            const void* b,
+                            cudaDataType_t btype,
+                            int ldb,
+                            const void* beta,
+                            void* c,
+                            cudaDataType_t ctype,
+                            int ldc,
+                            cublasComputeType_t compute_type,
+                            cublasGemmAlgo_t algo);
+
+// GemmStridedBatchedEx — batched strided GemmEx.
+cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
+                                          cublasOperation_t transa,
+                                          cublasOperation_t transb,
+                                          int m,
+                                          int n,
+                                          int k,
+                                          const void* alpha,
+                                          const void* a,
+                                          cudaDataType_t atype,
+                                          int lda,
+                                          long long int stridea,
+                                          const void* b,
+                                          cudaDataType_t btype,
+                                          int ldb,
+                                          long long int strideb,
+                                          const void* beta,
+                                          void* c,
+                                          cudaDataType_t ctype,
+                                          int ldc,
+                                          long long int stridec,
+                                          int batch_count,
+                                          cublasComputeType_t compute_type,
+                                          cublasGemmAlgo_t algo);
+
+// Hgemm — half-precision GEMM.
+cublasStatus_t cublasHgemm(cublasHandle_t handle,
+                           cublasOperation_t transa,
+                           cublasOperation_t transb,
+                           int m,
+                           int n,
+                           int k,
+                           const __half* alpha,
+                           const __half* a,
+                           int lda,
+                           const __half* b,
+                           int ldb,
+                           const __half* beta,
+                           __half* c,
+                           int ldc);
+
+// SgemmBatched / DgemmBatched — batched GEMM with array-of-pointers interface.
+cublasStatus_t cublasSgemmBatched(cublasHandle_t handle,
+                                  cublasOperation_t transa,
+                                  cublasOperation_t transb,
+                                  int m,
+                                  int n,
+                                  int k,
+                                  const float* alpha,
+                                  const float* const a_array[],
+                                  int lda,
+                                  const float* const b_array[],
+                                  int ldb,
+                                  const float* beta,
+                                  float* const c_array[],
+                                  int ldc,
+                                  int batch_count);
+
+cublasStatus_t cublasDgemmBatched(cublasHandle_t handle,
+                                  cublasOperation_t transa,
+                                  cublasOperation_t transb,
+                                  int m,
+                                  int n,
+                                  int k,
+                                  const double* alpha,
+                                  const double* const a_array[],
+                                  int lda,
+                                  const double* const b_array[],
+                                  int ldb,
+                                  const double* beta,
+                                  double* const c_array[],
+                                  int ldc,
+                                  int batch_count);
+
+// Strsm / Dtrsm — triangular solve with multiple right-hand sides.
+cublasStatus_t cublasStrsm(cublasHandle_t handle,
+                           cublasSideMode_t side,
+                           cublasFillMode_t uplo,
+                           cublasOperation_t trans,
+                           cublasDiagType_t diag,
+                           int m,
+                           int n,
+                           const float* alpha,
+                           const float* a,
+                           int lda,
+                           float* b,
+                           int ldb);
+
+cublasStatus_t cublasDtrsm(cublasHandle_t handle,
+                           cublasSideMode_t side,
+                           cublasFillMode_t uplo,
+                           cublasOperation_t trans,
+                           cublasDiagType_t diag,
+                           int m,
+                           int n,
+                           const double* alpha,
+                           const double* a,
+                           int lda,
+                           double* b,
+                           int ldb);
+
+// SetVector / GetVector — transfer a strided vector between host and device.
+cublasStatus_t cublasSetVector(int n, int elem_size,
+                               const void* x, int incx,
+                               void* y, int incy);
+
+cublasStatus_t cublasGetVector(int n, int elem_size,
+                               const void* x, int incx,
+                               void* y, int incy);
+
+// SetMatrix / GetMatrix — transfer a column-major matrix subregion.
+cublasStatus_t cublasSetMatrix(int rows, int cols, int elem_size,
+                               const void* a, int lda,
+                               void* b, int ldb);
+
+cublasStatus_t cublasGetMatrix(int rows, int cols, int elem_size,
+                               const void* a, int lda,
+                               void* b, int ldb);
+
+// Async variants (identical to sync on Apple Silicon UMA).
+cublasStatus_t cublasSetVectorAsync(int n, int elem_size,
+                                    const void* x, int incx,
+                                    void* y, int incy,
+                                    cudaStream_t stream);
+
+cublasStatus_t cublasGetVectorAsync(int n, int elem_size,
+                                    const void* x, int incx,
+                                    void* y, int incy,
+                                    cudaStream_t stream);
+
+cublasStatus_t cublasSetMatrixAsync(int rows, int cols, int elem_size,
+                                    const void* a, int lda,
+                                    void* b, int ldb,
+                                    cudaStream_t stream);
+
+cublasStatus_t cublasGetMatrixAsync(int rows, int cols, int elem_size,
+                                    const void* a, int lda,
+                                    void* b, int ldb,
+                                    cudaStream_t stream);
 
 #ifdef __cplusplus
 }
