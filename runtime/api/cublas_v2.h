@@ -20,6 +20,7 @@ typedef enum cublasStatus_t {
     CUBLAS_STATUS_MAPPING_ERROR = 11,
     CUBLAS_STATUS_EXECUTION_FAILED = 13,
     CUBLAS_STATUS_INTERNAL_ERROR = 14,
+    CUBLAS_STATUS_NOT_SUPPORTED = 15,
 } cublasStatus_t;
 
 typedef enum cublasOperation_t {
@@ -449,6 +450,27 @@ cublasStatus_t cublasDgemmBatched(cublasHandle_t handle,
                                   int ldc,
                                   int batch_count);
 
+cublasStatus_t cublasGemmBatchedEx(cublasHandle_t handle,
+                                   cublasOperation_t transa,
+                                   cublasOperation_t transb,
+                                   int m,
+                                   int n,
+                                   int k,
+                                   const void* alpha,
+                                   const void* const a_array[],
+                                   cudaDataType_t atype,
+                                   int lda,
+                                   const void* const b_array[],
+                                   cudaDataType_t btype,
+                                   int ldb,
+                                   const void* beta,
+                                   void* const c_array[],
+                                   cudaDataType_t ctype,
+                                   int ldc,
+                                   int batch_count,
+                                   cublasComputeType_t compute_type,
+                                   cublasGemmAlgo_t algo);
+
 // Strsm / Dtrsm — triangular solve with multiple right-hand sides.
 cublasStatus_t cublasStrsm(cublasHandle_t handle,
                            cublasSideMode_t side,
@@ -475,6 +497,34 @@ cublasStatus_t cublasDtrsm(cublasHandle_t handle,
                            int lda,
                            double* b,
                            int ldb);
+
+cublasStatus_t cublasStrsmBatched(cublasHandle_t handle,
+                                  cublasSideMode_t side,
+                                  cublasFillMode_t uplo,
+                                  cublasOperation_t trans,
+                                  cublasDiagType_t diag,
+                                  int m,
+                                  int n,
+                                  const float* alpha,
+                                  const float* const a_array[],
+                                  int lda,
+                                  float* const b_array[],
+                                  int ldb,
+                                  int batch_count);
+
+cublasStatus_t cublasDtrsmBatched(cublasHandle_t handle,
+                                  cublasSideMode_t side,
+                                  cublasFillMode_t uplo,
+                                  cublasOperation_t trans,
+                                  cublasDiagType_t diag,
+                                  int m,
+                                  int n,
+                                  const double* alpha,
+                                  const double* const a_array[],
+                                  int lda,
+                                  double* const b_array[],
+                                  int ldb,
+                                  int batch_count);
 
 // SetVector / GetVector — transfer a strided vector between host and device.
 cublasStatus_t cublasSetVector(int n, int elem_size,

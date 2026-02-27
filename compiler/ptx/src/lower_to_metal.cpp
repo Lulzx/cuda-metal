@@ -1168,7 +1168,8 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         metal << ",\n    constant uint& __printf_cap [[buffer(" << buf_idx << ")]]";
         ++buf_idx;
     }
-    metal << ",\n    uint gid [[thread_position_in_grid]]) {\n";
+    metal << ",\n    uint gid [[thread_position_in_grid]],\n"
+          << "    ushort __laneid [[thread_index_in_simdgroup]]) {\n";
 
     // Metal variable name for a PTX register: %rd0 → vrd0, %f1 → vf1
     auto mvar = [](const std::string& r) -> std::string {
@@ -1245,6 +1246,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         return true;
     };
 
+    int shfl_tmp_id = 0;
     for (const auto& instr : entry->instructions) {
         const auto& op = instr.opcode;
         const auto& ops = instr.operands;
@@ -1350,36 +1352,76 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         // ── Unconditional branch → unsupported ──────────────────────────────
         if (op == "bra") return {};
 
-        // ── bar.sync / bar.arrive → no-op (single wave assumption) ─────────
-        if (op.size() >= 3 && op.substr(0, 3) == "bar") continue;
+        // ── bar.* → force fallback ───────────────────────────────────────────
+        // Generic PTX→Metal translation cannot safely preserve threadgroup
+        // barrier semantics for multi-warp blocks. Dropping bar.sync was okay
+        // for llm.c single-warp kernels but is incorrect for ggml reductions.
+        if (op.size() >= 3 && op.substr(0, 3) == "bar") return {};
 
         // ── fence / membar → no-op (UMA — all memory is coherent) ────────────
         if (op.find("fence") == 0 || op.find("membar") == 0) continue;
 
         // ── shfl.sync: warp shuffle → Metal simd_shuffle* ────────────────────
-        // shfl.sync.{idx,down,up,bfly}.b32 d, src, lane/delta, width, mask
-        // Conservative: ignore width and mask (full-group operations on UMA model).
+        // shfl.sync.{idx,down,up,bfly}.b32 d|p, src, lane/delta, clamp, mask
+        // Honor PTX clamp-encoded width to preserve sub-warp shuffle semantics used
+        // by ggml reductions. membermask remains conservatively ignored (full group).
         if (op.find("shfl.sync") == 0 && ops.size() >= 3) {
             if (!all_sources_defined(ops, 1)) return {};
             // ops[0] may be "dst|pred_dst"; extract the value register.
             const std::string raw0 = ops[0];
             const auto pipe = raw0.find('|');
             const std::string dest = get_reg(pipe != std::string::npos ? raw0.substr(0, pipe) : raw0);
+            const std::string pred_dest = pipe != std::string::npos ? get_reg(raw0.substr(pipe + 1)) : "";
             const std::string src = resolve(ops[1]);
             const std::string lane = resolve(ops[2]);
+            const std::string clamp = ops.size() >= 4 ? resolve(ops[3]) : "31";
             const std::string dtype = reg_type(dest);
-            std::string shuffle_fn;
+            const int sid = shfl_tmp_id++;
+            const std::string lane_id_v = "__cm_shfl_lane_" + std::to_string(sid);
+            const std::string clamp_v = "__cm_shfl_clamp_" + std::to_string(sid);
+            const std::string width_v = "__cm_shfl_width_" + std::to_string(sid);
+            const std::string base_v = "__cm_shfl_base_" + std::to_string(sid);
+            const std::string local_v = "__cm_shfl_local_" + std::to_string(sid);
+            const std::string target_v = "__cm_shfl_target_" + std::to_string(sid);
+            const std::string valid_v = "__cm_shfl_valid_" + std::to_string(sid);
+            const std::string val_v = "__cm_shfl_val_" + std::to_string(sid);
+            metal << "    uint " << lane_id_v << " = (uint)__laneid & 31u;\n";
+            metal << "    uint " << clamp_v << " = (uint)(" << clamp << ");\n";
+            metal << "    uint " << width_v << " = 32u - ((" << clamp_v << " >> 8) & 0x1fu);\n";
+            metal << "    " << width_v << " = (" << width_v << " == 0u) ? 32u : " << width_v << ";\n";
+            metal << "    uint " << base_v << " = (" << lane_id_v << " / " << width_v << ") * " << width_v << ";\n";
+            metal << "    uint " << local_v << " = " << lane_id_v << " - " << base_v << ";\n";
             if (op.find(".down.") != std::string::npos) {
-                shuffle_fn = "simd_shuffle_down";
+                const std::string delta_v = "__cm_shfl_delta_" + std::to_string(sid);
+                metal << "    uint " << delta_v << " = (uint)(" << lane << ");\n";
+                metal << "    uint " << target_v << " = " << lane_id_v << " + " << delta_v << ";\n";
+                metal << "    bool " << valid_v << " = " << target_v << " < (" << base_v << " + " << width_v << ");\n";
             } else if (op.find(".up.") != std::string::npos) {
-                shuffle_fn = "simd_shuffle_up";
+                const std::string delta_v = "__cm_shfl_delta_" + std::to_string(sid);
+                metal << "    uint " << delta_v << " = (uint)(" << lane << ");\n";
+                metal << "    uint " << target_v << " = " << lane_id_v << " - " << delta_v << ";\n";
+                metal << "    bool " << valid_v << " = " << local_v << " >= " << delta_v << ";\n";
             } else if (op.find(".bfly.") != std::string::npos) {
-                shuffle_fn = "simd_shuffle_xor";
+                const std::string xor_v = "__cm_shfl_xor_" + std::to_string(sid);
+                const std::string tlocal_v = "__cm_shfl_tlocal_" + std::to_string(sid);
+                metal << "    uint " << xor_v << " = (uint)(" << lane << ");\n";
+                metal << "    uint " << tlocal_v << " = " << local_v << " ^ " << xor_v << ";\n";
+                metal << "    uint " << target_v << " = " << base_v << " + " << tlocal_v << ";\n";
+                metal << "    bool " << valid_v << " = " << tlocal_v << " < " << width_v << ";\n";
             } else {
-                shuffle_fn = "simd_shuffle";
+                const std::string src_local_v = "__cm_shfl_src_local_" + std::to_string(sid);
+                metal << "    uint " << src_local_v << " = ((uint)(" << lane << ")) & (" << width_v << " - 1u);\n";
+                metal << "    uint " << target_v << " = " << base_v << " + " << src_local_v << ";\n";
+                metal << "    bool " << valid_v << " = true;\n";
             }
+            metal << "    " << dtype << " " << val_v
+                  << " = (" << dtype << ")simd_shuffle(" << src << ", (ushort)" << target_v << ");\n";
             metal << "    " << dtype << " " << mvar(dest)
-                  << " = (" << dtype << ")" << shuffle_fn << "(" << src << ", (ushort)" << lane << ");\n";
+                  << " = " << valid_v << " ? " << val_v << " : (" << dtype << ")(" << src << ");\n";
+            if (!pred_dest.empty()) {
+                metal << "    bool " << mvar(pred_dest) << " = " << valid_v << ";\n";
+                defined_regs.insert(pred_dest);
+            }
             defined_regs.insert(dest);
             continue;
         }

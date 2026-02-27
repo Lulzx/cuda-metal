@@ -169,6 +169,7 @@ inline __half2 operator-(const __half2& a, const __half2& b) { return __hsub2(a,
 inline __half2 operator*(const __half2& a, const __half2& b) { return __hmul2(a, b); }
 inline __half2& operator+=(__half2& a, const __half2& b) { a = __hadd2(a, b); return a; }
 inline __half2& operator-=(__half2& a, const __half2& b) { a = __hsub2(a, b); return a; }
+inline __half2& operator*=(__half2& a, const __half2& b) { a = __hmul2(a, b); return a; }
 
 #else  // Device code path (clang CUDA)
 
@@ -192,7 +193,7 @@ static __device__ __forceinline__ float __half2float(__half h) {
     return static_cast<float>(h);
 }
 static __device__ __forceinline__ __half2 make_half2(__half x, __half y) { return {x, y}; }
-static __device__ __forceinline__ __half2 make_half2(float x, float y) {
+static __device__ __forceinline__ __half2 __floats2half2_rn(float x, float y) {
     return {__float2half_rn(x), __float2half_rn(y)};
 }
 static __device__ __forceinline__ __half __low2half(__half2 h2) { return h2.x; }
@@ -221,34 +222,49 @@ static __device__ __forceinline__ float2 __half22float2(__half2 h2) {
 }
 static __device__ __forceinline__ __half2 __shfl_sync(unsigned int mask, __half2 val, int srcLane, int width = 32) {
     float2 f = __half22float2(val);
-    (void)mask;
-    (void)width;
-    f.x = __nvvm_shfl_idx_f32(f.x, srcLane, 0x1f);
-    f.y = __nvvm_shfl_idx_f32(f.y, srcLane, 0x1f);
+    int x_bits, y_bits, out_bits;
+    __builtin_memcpy(&x_bits, &f.x, sizeof(x_bits));
+    out_bits = __cumetal_shfl_sync_idx_i32(mask, x_bits, srcLane, ((32 - width) << 8) | 0x1f);
+    __builtin_memcpy(&f.x, &out_bits, sizeof(f.x));
+    __builtin_memcpy(&y_bits, &f.y, sizeof(y_bits));
+    out_bits = __cumetal_shfl_sync_idx_i32(mask, y_bits, srcLane, ((32 - width) << 8) | 0x1f);
+    __builtin_memcpy(&f.y, &out_bits, sizeof(f.y));
     return __float22half2_rn(f);
 }
 static __device__ __forceinline__ __half2 __shfl_down_sync(unsigned int mask, __half2 val, unsigned int delta, int width = 32) {
     float2 f = __half22float2(val);
-    (void)mask;
-    (void)width;
-    f.x = __nvvm_shfl_down_f32(f.x, delta, 0x1f);
-    f.y = __nvvm_shfl_down_f32(f.y, delta, 0x1f);
+    int x_bits, y_bits, out_bits;
+    __builtin_memcpy(&x_bits, &f.x, sizeof(x_bits));
+    out_bits = __cumetal_shfl_sync_down_i32(mask, x_bits, delta, ((32 - width) << 8) | 0x1f);
+    __builtin_memcpy(&f.x, &out_bits, sizeof(f.x));
+    __builtin_memcpy(&y_bits, &f.y, sizeof(y_bits));
+    out_bits = __cumetal_shfl_sync_down_i32(mask, y_bits, delta, ((32 - width) << 8) | 0x1f);
+    __builtin_memcpy(&f.y, &out_bits, sizeof(f.y));
     return __float22half2_rn(f);
 }
 static __device__ __forceinline__ __half2 __shfl_up_sync(unsigned int mask, __half2 val, unsigned int delta, int width = 32) {
     float2 f = __half22float2(val);
-    (void)mask;
-    (void)width;
-    f.x = __nvvm_shfl_up_f32(f.x, delta, 0);
-    f.y = __nvvm_shfl_up_f32(f.y, delta, 0);
+    int x_bits, y_bits, out_bits;
+    __builtin_memcpy(&x_bits, &f.x, sizeof(x_bits));
+    out_bits = __cumetal_shfl_sync_up_i32(mask, x_bits, delta, ((32 - width) << 8) | 0);
+    __builtin_memcpy(&f.x, &out_bits, sizeof(f.x));
+    __builtin_memcpy(&y_bits, &f.y, sizeof(y_bits));
+    out_bits = __cumetal_shfl_sync_up_i32(mask, y_bits, delta, ((32 - width) << 8) | 0);
+    __builtin_memcpy(&f.y, &out_bits, sizeof(f.y));
     return __float22half2_rn(f);
 }
 static __device__ __forceinline__ __half2 __shfl_xor_sync(unsigned int mask, __half2 val, int laneMask, int width = 32) {
     float2 f = __half22float2(val);
-    (void)mask;
-    (void)width;
-    f.x = __nvvm_shfl_bfly_f32(f.x, laneMask, 0x1f);
-    f.y = __nvvm_shfl_bfly_f32(f.y, laneMask, 0x1f);
+    unsigned int laneid;
+    asm("mov.u32 %0, %%laneid;" : "=r"(laneid));
+    const int srcLane = static_cast<int>(laneid) ^ laneMask;
+    int x_bits, y_bits, out_bits;
+    __builtin_memcpy(&x_bits, &f.x, sizeof(x_bits));
+    out_bits = __cumetal_shfl_sync_idx_i32(mask, x_bits, srcLane, ((32 - width) << 8) | 0x1f);
+    __builtin_memcpy(&f.x, &out_bits, sizeof(f.x));
+    __builtin_memcpy(&y_bits, &f.y, sizeof(y_bits));
+    out_bits = __cumetal_shfl_sync_idx_i32(mask, y_bits, srcLane, ((32 - width) << 8) | 0x1f);
+    __builtin_memcpy(&f.y, &out_bits, sizeof(f.y));
     return __float22half2_rn(f);
 }
 #endif
@@ -275,6 +291,7 @@ static __device__ __forceinline__ __half2 operator-(__half2 a, __half2 b) { retu
 static __device__ __forceinline__ __half2 operator*(__half2 a, __half2 b) { return __hmul2(a, b); }
 static __device__ __forceinline__ __half2& operator+=(__half2& a, __half2 b) { a = __hadd2(a, b); return a; }
 static __device__ __forceinline__ __half2& operator-=(__half2& a, __half2 b) { a = __hsub2(a, b); return a; }
+static __device__ __forceinline__ __half2& operator*=(__half2& a, __half2 b) { a = __hmul2(a, b); return a; }
 // Half ↔ integer conversions for device code.
 static __device__ __forceinline__ int __half2int_rn(__half h) { return static_cast<int>(h); }
 static __device__ __forceinline__ unsigned int __half2uint_rn(__half h) { return static_cast<unsigned int>(h); }

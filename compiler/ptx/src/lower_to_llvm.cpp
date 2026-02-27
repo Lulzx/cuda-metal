@@ -134,6 +134,10 @@ bool is_constant_buffer_pointer(const std::string& llvm_type) {
     return llvm_type.find("addrspace(2)*") != std::string::npos;
 }
 
+bool is_threadgroup_buffer_pointer(const std::string& llvm_type) {
+    return llvm_type.find("addrspace(3)*") != std::string::npos;
+}
+
 std::string pointee_type_from_pointer(const std::string& llvm_type) {
     const std::size_t star = llvm_type.find('*');
     if (star == std::string::npos) {
@@ -155,7 +159,19 @@ std::string air_type_name_for_param(const ParamInfo& param, bool is_thread_posit
     if (is_device_buffer_pointer(param.llvm_type)) {
         return pointee_type_from_pointer(param.llvm_type) == "double" ? "double" : "float";
     }
+    if (is_threadgroup_buffer_pointer(param.llvm_type)) {
+        const std::string pointee = pointee_type_from_pointer(param.llvm_type);
+        if (pointee == "i8") return "uchar";
+        if (pointee == "i16") return "ushort";
+        if (pointee == "i32") return "uint";
+        if (pointee == "float") return "float";
+        return "uint";
+    }
     if (is_constant_buffer_pointer(param.llvm_type)) {
+        // Use pointee type to pick the correct AIR type name.
+        const std::string p = pointee_type_from_pointer(param.llvm_type);
+        if (p.find("i64") != std::string::npos || p == "double") return "ulong";
+        if (p.find("i16") != std::string::npos || p == "half")   return "ushort";
         return "uint";
     }
     if (param.llvm_type == "float") {
@@ -174,6 +190,13 @@ std::string air_type_name_for_param(const ParamInfo& param, bool is_thread_posit
 }
 
 int byte_size_for_llvm_type(const std::string& llvm_type) {
+    if (llvm_type.find('*') != std::string::npos) {
+        const std::string pointee = pointee_type_from_pointer(llvm_type);
+        if (pointee == "i8") return 1;
+        if (pointee == "i16" || pointee == "half") return 2;
+        if (pointee == "i32" || pointee == "float") return 4;
+        if (pointee == "i64" || pointee == "double") return 8;
+    }
     if (llvm_type == "<3 x i32>") {
         return 12;
     }
@@ -688,6 +711,20 @@ class GenericLlvmEmitter {
             result.error = error_;
             return result;
         }
+        // Scalar params (i64, i32, float, etc.) must be constant-buffer pointers in Metal AIR.
+        // Metal passes them via setBytes:length:atIndex:, which creates a small constant buffer
+        // and gives the kernel a pointer to it. The function parameter type must be T addrspace(2)*
+        // so the kernel can load the actual value from the buffer.
+        for (std::size_t i = 0; i < params_->size(); ++i) {
+            ParamInfo& p = (*params_)[i];
+            if (is_builtin_param(p)) continue;
+            if (is_pointer_type(p.llvm_type)) continue;
+            if (p.llvm_type == "<3 x i32>") continue;
+            // Convert plain scalar type to constant-buffer pointer
+            const std::string new_type = p.llvm_type + " addrspace(2)*";
+            p.llvm_type = new_type;
+            (*arg_decls_)[i] = new_type + " %" + p.name;
+        }
         if (!index_control_flow()) {
             result.error = error_;
             return result;
@@ -721,6 +758,15 @@ class GenericLlvmEmitter {
         kUnknown = 0,
         kGlobal = 1,
         kParam = 2,
+        kShared = 3,
+        kLocal = 4,
+    };
+
+    struct LocalSymbolInfo {
+        std::string alloca_name;
+        std::string base_ptr_name;
+        int size_bytes = 256;
+        int align_bytes = 16;
     };
 
     const cumetal::ptx::EntryFunction& entry_;
@@ -731,6 +777,8 @@ class GenericLlvmEmitter {
     std::unordered_map<std::string, std::string> builtin_vector_arg_name_;
     std::unordered_map<std::string, std::string> builtin_scalar_arg_name_;
     std::vector<ParamInfo> builtin_params_added_;
+    bool has_threadgroup_buffer_param_ = false;
+    std::string threadgroup_buffer_arg_name_ = "__air_tg0";
 
     std::vector<int> exec_indices_;
     std::unordered_map<int, int> exec_pos_by_instr_index_;
@@ -739,6 +787,7 @@ class GenericLlvmEmitter {
 
     std::unordered_map<std::string, RegSlot> reg_slots_;
     std::unordered_map<std::string, PointerAs> reg_pointer_as_;
+    std::unordered_map<std::string, LocalSymbolInfo> local_symbols_;
     std::unordered_map<std::string, int> call_param_bits_;
     std::unordered_map<std::string, std::string> call_param_slots_;
 
@@ -890,9 +939,11 @@ class GenericLlvmEmitter {
             return out;
         }
         if (operand.size() == 10 && operand[0] == '0' && operand[1] == 'f' && bits == 32) {
-            const std::string hex = "0x" + operand.substr(2);
+            // Use decimal integer constant to avoid LLVM 20 "float constant invalid for type" error
+            uint32_t bit_pattern = 0;
+            try { bit_pattern = static_cast<uint32_t>(std::stoul(operand.substr(2), nullptr, 16)); } catch (...) {}
             const std::string int_bits = next_tmp("fimm");
-            os << "  " << int_bits << " = or i32 0, " << hex << "\n";
+            os << "  " << int_bits << " = or i32 0, " << static_cast<int32_t>(bit_pattern) << "\n";
             const std::string cast = next_tmp("fimmbc");
             os << "  " << cast << " = bitcast i32 " << int_bits << " to float\n";
             Value out;
@@ -902,9 +953,10 @@ class GenericLlvmEmitter {
             return out;
         }
         if (operand.size() == 18 && operand[0] == '0' && operand[1] == 'd' && bits == 64) {
-            const std::string hex = "0x" + operand.substr(2);
+            uint64_t bit_pattern64 = 0;
+            try { bit_pattern64 = std::stoull(operand.substr(2), nullptr, 16); } catch (...) {}
             const std::string int_bits = next_tmp("dimm");
-            os << "  " << int_bits << " = or i64 0, " << hex << "\n";
+            os << "  " << int_bits << " = or i64 0, " << static_cast<int64_t>(bit_pattern64) << "\n";
             const std::string cast = next_tmp("dimmbc");
             os << "  " << cast << " = bitcast i64 " << int_bits << " to double\n";
             Value out;
@@ -991,12 +1043,29 @@ class GenericLlvmEmitter {
         return true;
     }
 
+    bool append_threadgroup_buffer_param() {
+        if (has_threadgroup_buffer_param_) {
+            return true;
+        }
+        ParamInfo p;
+        p.ptx_type = ".builtin.air.threadgroup_buffer.0";
+        p.llvm_type = "i8 addrspace(3)*";
+        p.name = threadgroup_buffer_arg_name_;
+        p.raw_name = threadgroup_buffer_arg_name_;
+        p.builtin_air_type_name = "uchar";
+        params_->push_back(p);
+        arg_decls_->push_back("i8 addrspace(3)* %" + threadgroup_buffer_arg_name_);
+        has_threadgroup_buffer_param_ = true;
+        return true;
+    }
+
     bool append_required_builtin_params() {
         bool needs_tid = false;
         bool needs_bid = false;
         bool needs_tpg = false;
         bool needs_gpg = false;
         bool needs_lane = false;
+        bool needs_threadgroup_buffer = false;
         for (const auto& instr : entry_.instructions) {
             const std::vector<std::string> scan_operands = [&]() {
                 std::vector<std::string> o = instr.operands;
@@ -1012,12 +1081,22 @@ class GenericLlvmEmitter {
                 if (op.find("%nctaid.") != std::string::npos) needs_gpg = true;
                 if (op.find("%laneid") != std::string::npos) needs_lane = true;
             }
+            if (instr.opcode.find(".shared") != std::string::npos ||
+                starts_with(instr.opcode, "bar.sync") ||
+                starts_with(instr.opcode, "bar.warp.sync") ||
+                starts_with(instr.opcode, "shfl.sync")) {
+                needs_threadgroup_buffer = true;
+            }
+            if (starts_with(instr.opcode, "shfl.sync")) {
+                needs_lane = true;
+            }
         }
         if (needs_tid && !append_builtin_vec3("air.thread_position_in_threadgroup", "__air_tid3")) return false;
         if (needs_bid && !append_builtin_vec3("air.threadgroup_position_in_grid", "__air_bid3")) return false;
         if (needs_tpg && !append_builtin_vec3("air.threads_per_threadgroup", "__air_tpg3")) return false;
         if (needs_gpg && !append_builtin_vec3("air.threadgroups_per_grid", "__air_gpg3")) return false;
         if (needs_lane && !append_builtin_scalar("air.thread_index_in_simdgroup", "__air_laneid")) return false;
+        if (needs_threadgroup_buffer && !append_threadgroup_buffer_param()) return false;
         return true;
     }
 
@@ -1125,7 +1204,44 @@ class GenericLlvmEmitter {
             return std::nullopt;
         }
         const std::string tmp = next_tmp("p2i");
-        os << "  " << tmp << " = ptrtoint i8 addrspace(2)* %" << p.name << " to i64\n";
+        os << "  " << tmp << " = ptrtoint " << p.llvm_type << " %" << p.name << " to i64\n";
+        return tmp;
+    }
+
+    std::optional<std::string> resolve_threadgroup_symbol_address(std::ostringstream& os,
+                                                                  const std::string& symbol) {
+        if (starts_with(symbol, "__local_depot")) {
+            return std::nullopt;
+        }
+        if (!has_threadgroup_buffer_param_) {
+            return std::nullopt;
+        }
+        const std::string tmp = next_tmp("tg_p2i");
+        os << "  " << tmp << " = ptrtoint i8 addrspace(3)* %" << threadgroup_buffer_arg_name_ << " to i64\n";
+        return tmp;
+    }
+
+    std::optional<std::string> resolve_local_symbol_address(std::ostringstream& os,
+                                                            const std::string& symbol) {
+        if (!starts_with(symbol, "__local_depot")) {
+            return std::nullopt;
+        }
+        auto it = local_symbols_.find(symbol);
+        if (it == local_symbols_.end()) {
+            LocalSymbolInfo info;
+            const std::string sanitized = sanitize_llvm_identifier(symbol, "local_depot");
+            info.alloca_name = "%cm_local_" + sanitized + "_" + std::to_string(slot_id_++);
+            info.base_ptr_name = "%cm_local_base_" + sanitized + "_" + std::to_string(slot_id_++);
+            entry_allocas_ << "  " << info.alloca_name << " = alloca [" << info.size_bytes << " x i8], align "
+                           << info.align_bytes << "\n";
+            entry_allocas_ << "  " << info.base_ptr_name << " = getelementptr [" << info.size_bytes
+                           << " x i8], [" << info.size_bytes << " x i8]* " << info.alloca_name
+                           << ", i32 0, i32 0\n";
+            auto inserted = local_symbols_.emplace(symbol, std::move(info));
+            it = inserted.first;
+        }
+        const std::string tmp = next_tmp("loc_p2i");
+        os << "  " << tmp << " = ptrtoint i8* " << it->second.base_ptr_name << " to i64\n";
         return tmp;
     }
 
@@ -1197,10 +1313,18 @@ class GenericLlvmEmitter {
             return std::to_string(*imm);
         }
         if (bits == 32 && operand.size() == 10 && operand[0] == '0' && operand[1] == 'f') {
-            return "0x" + operand.substr(2);
+            // PTX float hex bit-pattern in integer context: convert to decimal
+            try {
+                const auto v = static_cast<int32_t>(
+                    static_cast<uint32_t>(std::stoul(operand.substr(2), nullptr, 16)));
+                return std::to_string(v);
+            } catch (...) {}
         }
         if (bits == 64 && operand.size() == 18 && operand[0] == '0' && operand[1] == 'd') {
-            return "0x" + operand.substr(2);
+            try {
+                const auto v = static_cast<int64_t>(std::stoull(operand.substr(2), nullptr, 16));
+                return std::to_string(v);
+            } catch (...) {}
         }
         if (const auto addr = resolve_param_symbol_address(os, operand)) {
             if (bits == 64) {
@@ -1208,6 +1332,22 @@ class GenericLlvmEmitter {
             }
             const std::string cast = next_tmp("addrtr");
             os << "  " << cast << " = trunc i64 " << *addr << " to " << llvm_int_type(bits) << "\n";
+            return cast;
+        }
+        if (const auto local = resolve_local_symbol_address(os, operand)) {
+            if (bits == 64) {
+                return *local;
+            }
+            const std::string cast = next_tmp("loc_addrtr");
+            os << "  " << cast << " = trunc i64 " << *local << " to " << llvm_int_type(bits) << "\n";
+            return cast;
+        }
+        if (const auto tg = resolve_threadgroup_symbol_address(os, operand)) {
+            if (bits == 64) {
+                return *tg;
+            }
+            const std::string cast = next_tmp("tg_addrtr");
+            os << "  " << cast << " = trunc i64 " << *tg << " to " << llvm_int_type(bits) << "\n";
             return cast;
         }
         return std::nullopt;
@@ -1265,6 +1405,10 @@ class GenericLlvmEmitter {
         const int src_bits = std::max(dst_bits, ty.bits > 0 ? ty.bits : dst_bits);
         if (resolve_param_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kParam;
+        } else if (resolve_local_symbol_address(os, src).has_value()) {
+            reg_pointer_as_[dst] = PointerAs::kLocal;
+        } else if (resolve_threadgroup_symbol_address(os, src).has_value()) {
+            reg_pointer_as_[dst] = PointerAs::kShared;
         }
         return emit_store_reg_bits(os, dst, dst_bits, *iv, src_bits);
     }
@@ -1283,6 +1427,8 @@ class GenericLlvmEmitter {
             reg_pointer_as_[dst] = PointerAs::kGlobal;
         } else if (instr.opcode.find(".to.const") != std::string::npos || instr.opcode.find(".to.param") != std::string::npos) {
             reg_pointer_as_[dst] = PointerAs::kParam;
+        } else if (instr.opcode.find(".to.local") != std::string::npos) {
+            reg_pointer_as_[dst] = PointerAs::kLocal;
         }
         return emit_store_reg_bits(os, dst, 64, *src_v, 64);
     }
@@ -1346,7 +1492,7 @@ class GenericLlvmEmitter {
         if (!bitsv.has_value()) {
             return fail(instr, "float op result encode failed");
         }
-        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ty.bits);
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
     }
 
     bool emit_mad_or_fma(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
@@ -1368,7 +1514,7 @@ class GenericLlvmEmitter {
             Value v{.ir = add, .type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = bits}, .bits = bits};
             auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
             if (!bitsv) return fail(instr, "mad/fma float encode failed");
-            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, bits);
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
         }
         const int bits = (ty.bits > 0) ? ty.bits : ensure_reg_slot(dst).bits;
         auto a = emit_integer_from_any(os, instr.operands[1], bits, ty.is_signed);
@@ -1396,7 +1542,7 @@ class GenericLlvmEmitter {
             Value v{.ir = out, .type = a->type, .bits = a->bits};
             auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
             if (!bitsv) return fail(instr, "neg float encode failed");
-            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, a->bits);
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
         }
         const int bits = (ty.bits > 0) ? ty.bits : ensure_reg_slot(dst).bits;
         auto a = emit_integer_from_any(os, instr.operands[1], bits, true);
@@ -1422,7 +1568,7 @@ class GenericLlvmEmitter {
         Value v{.ir = out, .type = ty, .bits = 32};
         auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
         if (!bitsv) return fail(instr, "rcp encode failed");
-        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, 32);
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
     }
 
     bool emit_cvt(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
@@ -1468,7 +1614,8 @@ class GenericLlvmEmitter {
         dst_value.bits = cvt.dst.bits;
 
         if (cvt.dst.kind == PtxTypeSpec::Kind::kFloat) {
-            const std::string fty = (cvt.dst.bits == 32) ? "float" : (cvt.dst.bits == 64 ? "double" : "");
+            const std::string fty =
+                (cvt.dst.bits == 16) ? "half" : (cvt.dst.bits == 32 ? "float" : (cvt.dst.bits == 64 ? "double" : ""));
             if (fty.empty()) return fail(instr, "unsupported cvt float dst width");
             if (cvt.src.kind == PtxTypeSpec::Kind::kFloat) {
                 if (cvt.src.bits == cvt.dst.bits) {
@@ -1480,7 +1627,8 @@ class GenericLlvmEmitter {
                     dst_value.ir = t;
                 } else {
                     const std::string t = next_tmp("fptrunc");
-                    os << "  " << t << " = fptrunc double " << src_value.ir << " to " << fty << "\n";
+                    os << "  " << t << " = fptrunc " << (cvt.src.bits == 64 ? "double" : "float") << " "
+                       << src_value.ir << " to " << fty << "\n";
                     dst_value.ir = t;
                 }
             } else if (cvt.src.kind == PtxTypeSpec::Kind::kInt) {
@@ -1525,7 +1673,7 @@ class GenericLlvmEmitter {
 
         auto bitsv = encode_value_to_reg_bits(os, dst_value, ensure_reg_slot(dst).bits);
         if (!bitsv) return fail(instr, "cvt encode failed");
-        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, dst_value.bits);
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
     }
 
     bool emit_setp(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
@@ -1640,12 +1788,20 @@ class GenericLlvmEmitter {
 
         auto emit_ptr_from_i64 = [&](const std::string& addr_i64, int as, int elem_bits, bool float_elem) -> std::string {
             const std::string ptr_i8 = next_tmp("i2p");
-            os << "  " << ptr_i8 << " = inttoptr i64 " << addr_i64 << " to i8 addrspace(" << as << ")*\n";
+            if (as == 0) {
+                os << "  " << ptr_i8 << " = inttoptr i64 " << addr_i64 << " to i8*\n";
+            } else {
+                os << "  " << ptr_i8 << " = inttoptr i64 " << addr_i64 << " to i8 addrspace(" << as << ")*\n";
+            }
             const std::string ptr_t = next_tmp("bcptr");
             const std::string elem_ty = float_elem ? (elem_bits == 32 ? "float" : (elem_bits == 64 ? "double" : "half"))
                                                    : llvm_int_type(elem_bits);
-            os << "  " << ptr_t << " = bitcast i8 addrspace(" << as << ")* " << ptr_i8 << " to "
-               << elem_ty << " addrspace(" << as << ")*\n";
+            if (as == 0) {
+                os << "  " << ptr_t << " = bitcast i8* " << ptr_i8 << " to " << elem_ty << "*\n";
+            } else {
+                os << "  " << ptr_t << " = bitcast i8 addrspace(" << as << ")* " << ptr_i8 << " to "
+                   << elem_ty << " addrspace(" << as << ")*\n";
+            }
             return ptr_t;
         };
 
@@ -1657,14 +1813,46 @@ class GenericLlvmEmitter {
                     if (!is_load || !is_register_name(data_token)) return fail(instr, "ld.param scalar form unsupported");
                     const std::string& dst = data_token;
                     if (ty.kind == PtxTypeSpec::Kind::kFloat) {
-                        Value v{.ir = "%" + p.name, .type = ty, .bits = ty.bits};
-                        auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
+                        std::string fv;
+                        if ((p.llvm_type == "float" && ty.bits == 32) || (p.llvm_type == "double" && ty.bits == 64) ||
+                            (p.llvm_type == "half" && ty.bits == 16)) {
+                            fv = "%" + p.name;
+                        } else if ((p.llvm_type == "i32" && ty.bits == 32) || (p.llvm_type == "i64" && ty.bits == 64) ||
+                                   (p.llvm_type == "i16" && ty.bits == 16)) {
+                            const std::string bc = next_tmp("param_i2f");
+                            const std::string fty = (ty.bits == 16) ? "half" : (ty.bits == 32 ? "float" : "double");
+                            os << "  " << bc << " = bitcast " << p.llvm_type << " %" << p.name
+                               << " to " << fty << "\n";
+                            fv = bc;
+                        } else {
+                            return fail(instr, "ld.param scalar float type mismatch");
+                        }
+                        Value v{.ir = fv, .type = ty, .bits = ty.bits};
+                        const int ldp_slot_bits = ensure_reg_slot(dst).bits;
+                        auto bitsv = encode_value_to_reg_bits(os, v, ldp_slot_bits);
                         if (!bitsv) return fail(instr, "ld.param scalar float encode failed");
-                        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ty.bits);
+                        return emit_store_reg_bits(os, dst, ldp_slot_bits, *bitsv, ldp_slot_bits);
                     }
                     if (ty.kind == PtxTypeSpec::Kind::kInt) {
-                        std::string srcv = "%" + p.name;
-                        const int src_bits = byte_size_for_param_metadata(p) * 8;
+                        std::string srcv;
+                        int src_bits = 0;
+                        if (is_pointer_type(p.llvm_type)) {
+                            const std::string p2i = next_tmp("paramptr2i");
+                            os << "  " << p2i << " = ptrtoint " << p.llvm_type << " %" << p.name << " to i64\n";
+                            srcv = p2i;
+                            src_bits = 64;
+                        } else if (p.llvm_type == "float" || p.llvm_type == "double" || p.llvm_type == "half") {
+                            // Float param loaded as integer (bitcast preserving bits)
+                            const int float_src_bits = (p.llvm_type == "double") ? 64 : (p.llvm_type == "half" ? 16 : 32);
+                            const std::string bc = next_tmp("paramfbc");
+                            os << "  " << bc << " = bitcast " << p.llvm_type << " %" << p.name
+                               << " to " << llvm_int_type(float_src_bits) << "\n";
+                            srcv = bc;
+                            src_bits = float_src_bits;
+                        } else {
+                            srcv = "%" + p.name;
+                            src_bits = byte_size_for_param_metadata(p) * 8;
+                        }
                         if (src_bits != ty.bits) {
                             const std::string cast = next_tmp("paramcast");
                             if (src_bits < ty.bits) {
@@ -1699,7 +1887,7 @@ class GenericLlvmEmitter {
                         Value v{.ir = ld, .type = ty, .bits = ty.bits};
                         auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(data_token).bits);
                         if (!bitsv) return fail(instr, "ld.param register-base encode failed");
-                        return emit_store_reg_bits(os, data_token, ensure_reg_slot(data_token).bits, *bitsv, ty.bits);
+                        return emit_store_reg_bits(os, data_token, ensure_reg_slot(data_token).bits, *bitsv, ensure_reg_slot(data_token).bits);
                     }
                     return fail(instr, "st.param register-base unsupported");
                 }
@@ -1711,7 +1899,7 @@ class GenericLlvmEmitter {
                     return fail(instr, "param offset load on scalar param unsupported");
                 }
                 const std::string base_i64 = next_tmp("p2i_param");
-                os << "  " << base_i64 << " = ptrtoint i8 addrspace(2)* %" << p.name << " to i64\n";
+                os << "  " << base_i64 << " = ptrtoint " << p.llvm_type << " %" << p.name << " to i64\n";
                 const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
                 if (is_load) {
                     if (!is_register_name(data_token)) return fail(instr, "ld.param destination must be register");
@@ -1725,7 +1913,7 @@ class GenericLlvmEmitter {
                     Value v{.ir = ld, .type = ty, .bits = ty.bits};
                     auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(data_token).bits);
                     if (!bitsv) return fail(instr, "ld.param aggregate encode failed");
-                    return emit_store_reg_bits(os, data_token, ensure_reg_slot(data_token).bits, *bitsv, ty.bits);
+                    return emit_store_reg_bits(os, data_token, ensure_reg_slot(data_token).bits, *bitsv, ensure_reg_slot(data_token).bits);
                 }
                 return fail(instr, "st.param to kernel param unsupported");
             }
@@ -1760,13 +1948,17 @@ class GenericLlvmEmitter {
             }
         }
 
-        int addr_space = 0;
+        int addr_space = -1;
         if (instr.opcode.find(".global") != std::string::npos) {
             addr_space = 1;
+        } else if (instr.opcode.find(".shared") != std::string::npos) {
+            addr_space = 3;
         } else if (instr.opcode.find(".const") != std::string::npos) {
             addr_space = 2;
+        } else if (instr.opcode.find(".local") != std::string::npos) {
+            addr_space = 0;
         } else {
-            return fail(instr, "only global/const/param ld/st supported in generic LLVM path");
+            return fail(instr, "only global/const/param/shared/local ld/st supported in generic LLVM path");
         }
 
         std::string base_i64;
@@ -1774,8 +1966,10 @@ class GenericLlvmEmitter {
             base_i64 = emit_load_reg_bits(os, mem.base, 64);
         } else if (const auto sym = resolve_param_symbol_address(os, mem.base)) {
             base_i64 = *sym;
+        } else if (const auto local = resolve_local_symbol_address(os, mem.base)) {
+            base_i64 = *local;
         } else {
-            return fail(instr, "memory base must be register or param symbol");
+            return fail(instr, "memory base must be register or param/local symbol");
         }
         const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
 
@@ -1787,12 +1981,19 @@ class GenericLlvmEmitter {
                                             ? (ty.bits == 32 ? "float" : ty.bits == 64 ? "double" : "half")
                                             : llvm_int_type(ty.bits);
             const std::string ld = next_tmp("ld");
-            os << "  " << ld << " = load " << elem_ty << ", " << elem_ty << " addrspace(" << addr_space << ")* "
-               << ptr << ", align " << std::max(1, ty.bits / 8) << "\n";
+            if (addr_space == 0) {
+                os << "  " << ld << " = load " << elem_ty << ", " << elem_ty << "* " << ptr
+                   << ", align " << std::max(1, ty.bits / 8) << "\n";
+            } else {
+                os << "  " << ld << " = load " << elem_ty << ", " << elem_ty << " addrspace(" << addr_space << ")* "
+                   << ptr << ", align " << std::max(1, ty.bits / 8) << "\n";
+            }
             Value v{.ir = ld, .type = ty, .bits = ty.bits};
-            auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(data_token).bits);
+            const int slot_bits = ensure_reg_slot(data_token).bits;
+            auto bitsv = encode_value_to_reg_bits(os, v, slot_bits);
             if (!bitsv) return fail(instr, "load encode failed");
-            return emit_store_reg_bits(os, data_token, ensure_reg_slot(data_token).bits, *bitsv, ty.bits);
+            // bitsv has already been extended/truncated to slot_bits by encode_value_to_reg_bits
+            return emit_store_reg_bits(os, data_token, slot_bits, *bitsv, slot_bits);
         }
 
         if (ty.kind == PtxTypeSpec::Kind::kFloat) {
@@ -1801,16 +2002,26 @@ class GenericLlvmEmitter {
             const std::string ptr =
                 emit_ptr_from_i64(addr_i64, addr_space, ty.bits, true);
             const std::string elem_ty = (ty.bits == 32 ? "float" : ty.bits == 64 ? "double" : "half");
-            os << "  store " << elem_ty << " " << fv->ir << ", " << elem_ty << " addrspace(" << addr_space << ")* "
-               << ptr << ", align " << std::max(1, ty.bits / 8) << "\n";
+            if (addr_space == 0) {
+                os << "  store " << elem_ty << " " << fv->ir << ", " << elem_ty << "* " << ptr
+                   << ", align " << std::max(1, ty.bits / 8) << "\n";
+            } else {
+                os << "  store " << elem_ty << " " << fv->ir << ", " << elem_ty << " addrspace(" << addr_space << ")* "
+                   << ptr << ", align " << std::max(1, ty.bits / 8) << "\n";
+            }
             return true;
         }
         auto iv = emit_integer_from_any(os, data_token, ty.bits, ty.is_signed);
         if (!iv) return fail(instr, "store int source unsupported");
         const std::string ptr =
             emit_ptr_from_i64(addr_i64, addr_space, ty.bits, false);
-        os << "  store " << llvm_int_type(ty.bits) << " " << *iv << ", " << llvm_int_type(ty.bits)
-           << " addrspace(" << addr_space << ")* " << ptr << ", align " << std::max(1, ty.bits / 8) << "\n";
+        if (addr_space == 0) {
+            os << "  store " << llvm_int_type(ty.bits) << " " << *iv << ", " << llvm_int_type(ty.bits)
+               << "* " << ptr << ", align " << std::max(1, ty.bits / 8) << "\n";
+        } else {
+            os << "  store " << llvm_int_type(ty.bits) << " " << *iv << ", " << llvm_int_type(ty.bits)
+               << " addrspace(" << addr_space << ")* " << ptr << ", align " << std::max(1, ty.bits / 8) << "\n";
+        }
         return true;
     }
 
@@ -1901,9 +2112,9 @@ class GenericLlvmEmitter {
             if (!bits) return fail(instr, "__nv_rsqrtf arg missing");
             const std::string f = next_tmp("rsqrtf_bc");
             os << "  " << f << " = bitcast i32 " << *bits << " to float\n";
-            declarations_.insert("declare float @llvm.sqrt.f32(float)");
+            declarations_.insert("declare float @air.fast_sqrt.f32(float)");
             const std::string s = next_tmp("rsqrtf_sqrt");
-            os << "  " << s << " = call float @llvm.sqrt.f32(float " << f << ")\n";
+            os << "  " << s << " = call float @air.fast_sqrt.f32(float " << f << ")\n";
             const std::string r = next_tmp("rsqrtf_div");
             os << "  " << r << " = fdiv float 1.000000e+00, " << s << "\n";
             const std::string rbits = next_tmp("rsqrtf_i");
@@ -1964,36 +2175,36 @@ class GenericLlvmEmitter {
             if (arg_names.empty()) return fail(instr, "__nv_expf expects 1 arg");
             auto x = load_call_slot_f32(arg_names[0]);
             if (!x) return fail(instr, "__nv_expf arg missing");
-            declarations_.insert("declare float @llvm.exp.f32(float)");
+            declarations_.insert("declare float @air.fast_exp.f32(float)");
             const std::string out = next_tmp("expf");
-            os << "  " << out << " = call float @llvm.exp.f32(float " << *x << ")\n";
+            os << "  " << out << " = call float @air.fast_exp.f32(float " << *x << ")\n";
             return store_ret_f32(out);
         }
         if (callee == "__nv_logf") {
             if (arg_names.empty()) return fail(instr, "__nv_logf expects 1 arg");
             auto x = load_call_slot_f32(arg_names[0]);
             if (!x) return fail(instr, "__nv_logf arg missing");
-            declarations_.insert("declare float @llvm.log.f32(float)");
+            declarations_.insert("declare float @air.fast_log.f32(float)");
             const std::string out = next_tmp("logf");
-            os << "  " << out << " = call float @llvm.log.f32(float " << *x << ")\n";
+            os << "  " << out << " = call float @air.fast_log.f32(float " << *x << ")\n";
             return store_ret_f32(out);
         }
         if (callee == "__nv_sinf") {
             if (arg_names.empty()) return fail(instr, "__nv_sinf expects 1 arg");
             auto x = load_call_slot_f32(arg_names[0]);
             if (!x) return fail(instr, "__nv_sinf arg missing");
-            declarations_.insert("declare float @llvm.sin.f32(float)");
+            declarations_.insert("declare float @air.fast_sin.f32(float)");
             const std::string out = next_tmp("sinf");
-            os << "  " << out << " = call float @llvm.sin.f32(float " << *x << ")\n";
+            os << "  " << out << " = call float @air.fast_sin.f32(float " << *x << ")\n";
             return store_ret_f32(out);
         }
         if (callee == "__nv_cosf") {
             if (arg_names.empty()) return fail(instr, "__nv_cosf expects 1 arg");
             auto x = load_call_slot_f32(arg_names[0]);
             if (!x) return fail(instr, "__nv_cosf arg missing");
-            declarations_.insert("declare float @llvm.cos.f32(float)");
+            declarations_.insert("declare float @air.fast_cos.f32(float)");
             const std::string out = next_tmp("cosf");
-            os << "  " << out << " = call float @llvm.cos.f32(float " << *x << ")\n";
+            os << "  " << out << " = call float @air.fast_cos.f32(float " << *x << ")\n";
             return store_ret_f32(out);
         }
         if (callee == "__nv_powf") {
@@ -2001,9 +2212,9 @@ class GenericLlvmEmitter {
             auto x = load_call_slot_f32(arg_names[0]);
             auto y = load_call_slot_f32(arg_names[1]);
             if (!x || !y) return fail(instr, "__nv_powf args missing");
-            declarations_.insert("declare float @llvm.pow.f32(float, float)");
+            declarations_.insert("declare float @air.fast_pow.f32(float, float)");
             const std::string out = next_tmp("powf");
-            os << "  " << out << " = call float @llvm.pow.f32(float " << *x << ", float " << *y << ")\n";
+            os << "  " << out << " = call float @air.fast_pow.f32(float " << *x << ", float " << *y << ")\n";
             return store_ret_f32(out);
         }
 
@@ -2097,7 +2308,7 @@ class GenericLlvmEmitter {
             Value v{.ir = sel, .type = ty, .bits = ty.bits};
             auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
             if (!bitsv) return fail(instr, "selp float encode failed");
-            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ty.bits);
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
         }
 
         const int bits = (ty.bits > 0) ? ty.bits : ensure_reg_slot(dst).bits;
@@ -2108,6 +2319,144 @@ class GenericLlvmEmitter {
         os << "  " << sel << " = select i1 " << p << ", " << llvm_int_type(bits) << " " << *a << ", "
            << llvm_int_type(bits) << " " << *b << "\n";
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, sel, bits);
+    }
+
+    bool emit_shfl(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (!starts_with(instr.opcode, "shfl.sync") || instr.operands.size() < 4) {
+            return fail(instr, "unsupported shfl form");
+        }
+        if (instr.opcode.find(".b32") == std::string::npos) {
+            return fail(instr, "only shfl.*.b32 supported");
+        }
+
+        const std::string raw_dest = instr.operands[0];
+        std::string dst_token = raw_dest;
+        std::string pred_token;
+        if (const std::size_t pipe = raw_dest.find('|'); pipe != std::string::npos) {
+            dst_token = trim(raw_dest.substr(0, pipe));
+            pred_token = trim(raw_dest.substr(pipe + 1));
+        }
+        if (!is_register_name(dst_token)) {
+            return fail(instr, "shfl destination must be register");
+        }
+        if (!pred_token.empty() && !is_register_name(pred_token)) {
+            return fail(instr, "shfl predicate destination must be register");
+        }
+
+        auto src = emit_integer_from_any(os, instr.operands[1], 32, false);
+        auto sel = emit_integer_from_any(os, instr.operands[2], 32, false);
+        auto clamp = emit_integer_from_any(os, instr.operands[3], 32, false);
+        if (!src || !sel || !clamp) {
+            return fail(instr, "shfl operands unsupported");
+        }
+        (void)instr.operands.size();  // membermask currently ignored
+
+        const auto lane_it = builtin_scalar_arg_name_.find("air.thread_index_in_simdgroup");
+        if (lane_it == builtin_scalar_arg_name_.end()) {
+            return fail(instr, "shfl requires thread_index_in_simdgroup builtin");
+        }
+        const std::string lane = "%" + lane_it->second;
+
+        // PTX clamp encoding: width = 32 - ((clamp >> 8) & 0x1f); 0 means 32.
+        const std::string clamp_shr = next_tmp("shfl_cshr");
+        os << "  " << clamp_shr << " = lshr i32 " << *clamp << ", 8\n";
+        const std::string clamp_wraw = next_tmp("shfl_wraw");
+        os << "  " << clamp_wraw << " = and i32 " << clamp_shr << ", 31\n";
+        const std::string width0 = next_tmp("shfl_w0");
+        os << "  " << width0 << " = sub i32 32, " << clamp_wraw << "\n";
+        const std::string width0_is_zero = next_tmp("shfl_w0z");
+        os << "  " << width0_is_zero << " = icmp eq i32 " << width0 << ", 0\n";
+        const std::string width = next_tmp("shfl_w");
+        os << "  " << width << " = select i1 " << width0_is_zero << ", i32 32, i32 " << width0 << "\n";
+        const std::string div = next_tmp("shfl_div");
+        os << "  " << div << " = udiv i32 " << lane << ", " << width << "\n";
+        const std::string base = next_tmp("shfl_base");
+        os << "  " << base << " = mul i32 " << div << ", " << width << "\n";
+        const std::string local = next_tmp("shfl_local");
+        os << "  " << local << " = sub i32 " << lane << ", " << base << "\n";
+
+        std::string target;
+        std::string valid;
+        if (instr.opcode.find(".down.") != std::string::npos) {
+            const std::string t = next_tmp("shfl_t");
+            os << "  " << t << " = add i32 " << lane << ", " << *sel << "\n";
+            const std::string limit = next_tmp("shfl_limit");
+            os << "  " << limit << " = add i32 " << base << ", " << width << "\n";
+            const std::string ok = next_tmp("shfl_ok");
+            os << "  " << ok << " = icmp ult i32 " << t << ", " << limit << "\n";
+            target = t;
+            valid = ok;
+            declarations_.insert("declare i32 @air.simd_shuffle_down.u.i32(i32, i16)");
+        } else if (instr.opcode.find(".up.") != std::string::npos) {
+            const std::string t = next_tmp("shfl_t");
+            os << "  " << t << " = sub i32 " << lane << ", " << *sel << "\n";
+            const std::string ok = next_tmp("shfl_ok");
+            os << "  " << ok << " = icmp uge i32 " << local << ", " << *sel << "\n";
+            target = t;
+            valid = ok;
+            declarations_.insert("declare i32 @air.simd_shuffle_up.u.i32(i32, i16)");
+        } else if (instr.opcode.find(".bfly.") != std::string::npos) {
+            const std::string tlocal = next_tmp("shfl_tlocal");
+            os << "  " << tlocal << " = xor i32 " << local << ", " << *sel << "\n";
+            const std::string t = next_tmp("shfl_t");
+            os << "  " << t << " = add i32 " << base << ", " << tlocal << "\n";
+            const std::string ok = next_tmp("shfl_ok");
+            os << "  " << ok << " = icmp ult i32 " << tlocal << ", " << width << "\n";
+            target = t;
+            valid = ok;
+            declarations_.insert("declare i32 @air.simd_shuffle_xor.u.i32(i32, i16)");
+        } else {
+            // idx (default)
+            const std::string width_minus_1 = next_tmp("shfl_wm1");
+            os << "  " << width_minus_1 << " = sub i32 " << width << ", 1\n";
+            const std::string src_local = next_tmp("shfl_src_local");
+            os << "  " << src_local << " = and i32 " << *sel << ", " << width_minus_1 << "\n";
+            const std::string t = next_tmp("shfl_t");
+            os << "  " << t << " = add i32 " << base << ", " << src_local << "\n";
+            target = t;
+            valid = "true";
+            declarations_.insert("declare i32 @air.simd_shuffle.u.i32(i32, i16)");
+        }
+
+        const std::string target16 = next_tmp("shfl_t16");
+        os << "  " << target16 << " = trunc i32 " << target << " to i16\n";
+        const std::string call = next_tmp("shfl_call");
+        if (instr.opcode.find(".down.") != std::string::npos) {
+            os << "  " << call << " = call i32 @air.simd_shuffle_down.u.i32(i32 " << *src
+               << ", i16 " << target16 << ")\n";
+        } else if (instr.opcode.find(".up.") != std::string::npos) {
+            os << "  " << call << " = call i32 @air.simd_shuffle_up.u.i32(i32 " << *src
+               << ", i16 " << target16 << ")\n";
+        } else if (instr.opcode.find(".bfly.") != std::string::npos) {
+            os << "  " << call << " = call i32 @air.simd_shuffle_xor.u.i32(i32 " << *src
+               << ", i16 " << target16 << ")\n";
+        } else {
+            os << "  " << call << " = call i32 @air.simd_shuffle.u.i32(i32 " << *src
+               << ", i16 " << target16 << ")\n";
+        }
+
+        const std::string result = next_tmp("shfl_res");
+        os << "  " << result << " = select i1 " << valid << ", i32 " << call << ", i32 " << *src << "\n";
+        if (!emit_store_reg_bits(os, dst_token, ensure_reg_slot(dst_token).bits, result, 32)) {
+            return false;
+        }
+        if (!pred_token.empty()) {
+            if (!emit_store_reg_bits(os, pred_token, 1, valid, 1)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool emit_barrier(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (starts_with(instr.opcode, "bar.sync") || starts_with(instr.opcode, "bar.warp.sync")) {
+            declarations_.insert("declare void @air.wg.barrier(i32, i32)");
+            // From xcrun AIR LLVM for threadgroup_barrier(mem_flags::mem_threadgroup):
+            //   @air.wg.barrier(i32 2, i32 1)
+            os << "  call void @air.wg.barrier(i32 2, i32 1)\n";
+            return true;
+        }
+        return fail(instr, "unsupported barrier opcode");
     }
 
     bool emit_branch(std::ostringstream& os,
@@ -2195,6 +2544,8 @@ class GenericLlvmEmitter {
             return emit_setp(os, instr);
         }
         if (root == "selp") return emit_selp(os, instr);
+        if (root == "shfl") return emit_shfl(os, instr);
+        if (root == "bar") return emit_barrier(os, instr);
         if (root == "add") return opcode_uses_float_math(instr.opcode) ? emit_binary_float_op(os, instr, "fadd") : emit_binary_int_op(os, instr, "add");
         if (root == "sub") return opcode_uses_float_math(instr.opcode) ? emit_binary_float_op(os, instr, "fsub") : emit_binary_int_op(os, instr, "sub");
         if (root == "mul") return opcode_uses_float_math(instr.opcode) ? emit_binary_float_op(os, instr, "fmul") : emit_binary_int_op(os, instr, "mul");
@@ -2623,6 +2974,16 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
             ir << "!" << arg_meta_ids[i]
                << " = !{i32 " << i << ", !\"air.buffer\", !\"air.location_index\", i32 " << i
                << ", i32 1, !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 "
+               << arg_size << ", !\"air.arg_type_align_size\", i32 " << arg_align
+               << ", !\"air.arg_type_name\", !\"" << air_type_name << "\", !\"air.arg_name\", !\""
+               << param.name << "\"}\n";
+            continue;
+        }
+
+        if (is_threadgroup_buffer_pointer(param.llvm_type)) {
+            ir << "!" << arg_meta_ids[i]
+               << " = !{i32 " << i << ", !\"air.buffer\", !\"air.location_index\", i32 0"
+               << ", i32 1, !\"air.read_write\", !\"air.address_space\", i32 3, !\"air.arg_type_size\", i32 "
                << arg_size << ", !\"air.arg_type_align_size\", i32 " << arg_align
                << ", !\"air.arg_type_name\", !\"" << air_type_name << "\", !\"air.arg_name\", !\""
                << param.name << "\"}\n";

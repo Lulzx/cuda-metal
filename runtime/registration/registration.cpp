@@ -69,6 +69,43 @@ std::string jit_cache_key(const std::string& ptx_source, const std::string& kern
     return oss.str();
 }
 
+std::string sanitize_filename_component(std::string s) {
+    for (char& c : s) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+        if (!ok) {
+            c = '_';
+        }
+    }
+    if (s.empty()) {
+        s = "kernel";
+    }
+    return s;
+}
+
+void maybe_dump_ptx_for_llvm_debug(const std::string& kernel_name, const std::string& ptx_source) {
+    const char* dir_env = std::getenv("CUMETAL_DEBUG_DUMP_PTX_DIR");
+    if (dir_env == nullptr || dir_env[0] == '\0') {
+        return;
+    }
+
+    std::error_code ec;
+    const std::filesystem::path dir(dir_env);
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        return;
+    }
+
+    const std::filesystem::path out = dir / (sanitize_filename_component(kernel_name) + ".ptx");
+    if (std::filesystem::exists(out, ec) && !ec) {
+        return;
+    }
+
+    std::string io_error;
+    const std::vector<std::uint8_t> bytes(ptx_source.begin(), ptx_source.end());
+    (void) cumetal::common::write_file_bytes(out, bytes, &io_error);
+}
+
 std::filesystem::path jit_cache_root() {
     if (const char* d = std::getenv("CUMETAL_CACHE_DIR"); d != nullptr && d[0] != '\0') {
         return std::filesystem::path(d) / "registration-jit";
@@ -138,6 +175,8 @@ struct ParsedFatbinImage {
 struct RegistrationModule {
     std::string metallib_path;
     std::string ptx_source;
+    bool kernel_arg_info_index_built = false;
+    std::unordered_map<std::string, std::vector<cumetalKernelArgInfo_t>> kernel_arg_info_index;
     std::unordered_map<std::string, std::string> emitted_kernel_metallibs;
     std::unordered_map<std::string, std::vector<std::string>> emitted_kernel_printf_formats;
     std::vector<std::string> owned_metallibs;
@@ -365,6 +404,25 @@ ParsedFatbinImage parse_fatbin_image(const void* fat_cubin) {
     return parsed;
 }
 
+// Extract the array element count from a PTX param name like "foo[12]" → 12.
+// Returns 0 if the name has no array suffix.
+std::uint32_t parse_param_array_bytes(std::string_view name) {
+    const std::size_t open = name.rfind('[');
+    const std::size_t close = name.rfind(']');
+    if (open == std::string_view::npos || close == std::string_view::npos || close <= open + 1) {
+        return 0u;
+    }
+    std::uint32_t value = 0;
+    for (std::size_t i = open + 1; i < close; ++i) {
+        const unsigned char c = static_cast<unsigned char>(name[i]);
+        if (c < '0' || c > '9') {
+            return 0u;
+        }
+        value = value * 10u + static_cast<std::uint32_t>(c - '0');
+    }
+    return value;
+}
+
 std::uint32_t scalar_size_bytes_for_ptx_type(std::string_view ptx_type) {
     if (ptx_type == ".u8" || ptx_type == ".s8" || ptx_type == ".b8") {
         return 1u;
@@ -405,7 +463,8 @@ std::vector<cumetalKernelArgInfo_t> infer_arg_info_from_ptx_entry(const std::str
                 info.size_bytes = static_cast<std::uint32_t>(sizeof(void*));
             } else {
                 info.kind = CUMETAL_ARG_BYTES;
-                info.size_bytes = scalar_size_bytes_for_ptx_type(param.type);
+                const std::uint32_t arr_bytes = parse_param_array_bytes(param.name);
+                info.size_bytes = (arr_bytes > 0) ? arr_bytes : scalar_size_bytes_for_ptx_type(param.type);
             }
             arg_info.push_back(info);
         }
@@ -413,6 +472,42 @@ std::vector<cumetalKernelArgInfo_t> infer_arg_info_from_ptx_entry(const std::str
     }
 
     return {};
+}
+
+std::unordered_map<std::string, std::vector<cumetalKernelArgInfo_t>>
+build_arg_info_index_from_ptx(const std::string& ptx_source) {
+    std::unordered_map<std::string, std::vector<cumetalKernelArgInfo_t>> out;
+    if (ptx_source.empty()) {
+        return out;
+    }
+
+    cumetal::ptx::ParseOptions parse_options;
+    parse_options.strict = false;
+    const auto parsed = cumetal::ptx::parse_ptx(ptx_source, parse_options);
+    if (!parsed.ok) {
+        return out;
+    }
+
+    out.reserve(parsed.module.entries.size());
+    for (const auto& entry : parsed.module.entries) {
+        std::vector<cumetalKernelArgInfo_t> arg_info;
+        arg_info.reserve(entry.params.size());
+        for (const auto& param : entry.params) {
+            cumetalKernelArgInfo_t info{};
+            if (param.is_pointer) {
+                info.kind = CUMETAL_ARG_BUFFER;
+                info.size_bytes = static_cast<std::uint32_t>(sizeof(void*));
+            } else {
+                info.kind = CUMETAL_ARG_BYTES;
+                const std::uint32_t arr_bytes = parse_param_array_bytes(param.name);
+                info.size_bytes = (arr_bytes > 0) ? arr_bytes : scalar_size_bytes_for_ptx_type(param.type);
+            }
+            arg_info.push_back(info);
+        }
+        out.emplace(entry.name, std::move(arg_info));
+    }
+
+    return out;
 }
 
 // out_is_persistent: set to true if the output lives in the persistent JIT cache
@@ -464,8 +559,8 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     emit_options.output = metallib_path;
     emit_options.mode = cumetal::air_emitter::EmitMode::kXcrun;
     emit_options.overwrite = true;
-    emit_options.validate_output = false;
-    emit_options.fallback_to_experimental = true;
+    emit_options.validate_output = true;
+    emit_options.fallback_to_experimental = false;
     emit_options.kernel_name = kernel_name;
 
     std::string io_error;
@@ -494,10 +589,16 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         }
     } else {
         REG_DEBUG("using LLVM IR lowering path for '%s'", kernel_name.c_str());
+        maybe_dump_ptx_for_llvm_debug(kernel_name, ptx_source);
         cumetal::ptx::LowerToLlvmOptions lower_options;
         lower_options.entry_name = kernel_name;
+        lower_options.strict = true;
         const auto lowered = cumetal::ptx::lower_ptx_to_llvm_ir(ptx_source, lower_options);
         if (!lowered.ok || lowered.llvm_ir.empty()) {
+            if (!lowered.error.empty()) {
+                REG_DEBUG("lower_ptx_to_llvm_ir error for '%s': %s",
+                          kernel_name.c_str(), lowered.error.c_str());
+            }
             REG_DEBUG("lower_ptx_to_llvm_ir failed for kernel '%s'", kernel_name.c_str());
             return false;
         }
@@ -512,10 +613,33 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
 
     REG_DEBUG("invoking emit_metallib: input=%s output=%s",
               staged_input.c_str(), metallib_path.c_str());
+    // Optionally save the generated LLVM IR for debugging (set CUMETAL_DEBUG_DUMP_IR_DIR).
+    if (const char* dump_dir = std::getenv("CUMETAL_DEBUG_DUMP_IR_DIR")) {
+        if (dump_dir[0] != '\0' && std::filesystem::exists(ll_path)) {
+            const std::string sanitized = [&]() {
+                std::string s = kernel_name;
+                for (char& c : s) { if (c != '_' && !std::isalnum(static_cast<unsigned char>(c))) c = '_'; }
+                return s.substr(0, 80);
+            }();
+            const std::filesystem::path dest =
+                std::filesystem::path(dump_dir) / (sanitized + ".ll");
+            std::error_code ec;
+            std::filesystem::copy_file(ll_path, dest,
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+        }
+    }
     const auto emitted = cumetal::air_emitter::emit_metallib(emit_options);
     remove_path_if_exists(ll_path.string());
     remove_path_if_exists(metal_path.string());
     if (!emitted.ok || emitted.output.empty()) {
+        REG_DEBUG("emit_metallib error for '%s': %s",
+                  kernel_name.c_str(),
+                  emitted.error.empty() ? "<none>" : emitted.error.c_str());
+        for (const std::string& log_line : emitted.logs) {
+            if (!log_line.empty()) {
+                REG_DEBUG("emit_metallib log: %s", log_line.c_str());
+            }
+        }
         REG_DEBUG("emit_metallib failed for kernel '%s'", kernel_name.c_str());
         remove_path_if_exists(metallib_path.string());
         return false;
@@ -646,17 +770,44 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
         return false;
     }
 
-    RegistrationState& s = state();
-    std::lock_guard<std::mutex> lock(s.mutex);
-    const auto found = s.kernels.find(host_function);
-    if (found == s.kernels.end()) {
-        return false;
+    RegistrationRecord record;
+    {
+        RegistrationState& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        const auto found = s.kernels.find(host_function);
+        if (found == s.kernels.end()) {
+            return false;
+        }
+        record = found->second;
     }
 
-    out->metallib_path = found->second.metallib_path;
-    out->kernel_name = found->second.kernel_name;
-    out->arg_info = found->second.arg_info;
-    out->printf_formats = found->second.printf_formats;
+    if (record.metallib_path.empty()) {
+        std::vector<std::string> printf_formats;
+        std::string metallib_path =
+            resolve_metallib_path_for_kernel(record.module_handle, record.kernel_name, &printf_formats);
+        if (metallib_path.empty()) {
+            metallib_path = fallback_metallib_path_from_env();
+        }
+
+        RegistrationState& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        const auto found = s.kernels.find(host_function);
+        if (found == s.kernels.end()) {
+            return false;
+        }
+        if (found->second.metallib_path.empty()) {
+            found->second.metallib_path = std::move(metallib_path);
+            if (!printf_formats.empty()) {
+                found->second.printf_formats = std::move(printf_formats);
+            }
+        }
+        record = found->second;
+    }
+
+    out->metallib_path = record.metallib_path;
+    out->kernel_name = record.kernel_name;
+    out->arg_info = record.arg_info;
+    out->printf_formats = record.printf_formats;
     return true;
 }
 
@@ -813,26 +964,43 @@ void __cudaRegisterFunction(void** fat_cubin_handle,
     void* handle = fat_cubin_handle == nullptr ? nullptr : reinterpret_cast<void*>(fat_cubin_handle);
 
     std::vector<std::string> printf_formats;
-    std::string metallib_path =
-        cumetal::registration::resolve_metallib_path_for_kernel(handle, chosen_name, &printf_formats);
-    if (metallib_path.empty()) {
-        metallib_path = cumetal::registration::fallback_metallib_path_from_env();
-    }
-
-    std::string module_ptx_source;
+    bool lazy_metallib_resolution = true;
+    std::string metallib_path;
     {
         cumetal::registration::RegistrationState& s = cumetal::registration::state();
         std::lock_guard<std::mutex> lock(s.mutex);
         const auto module_it = s.modules.find(handle);
         if (module_it != s.modules.end() && module_it->second != nullptr) {
-            module_ptx_source = module_it->second->ptx_source;
+            metallib_path = module_it->second->metallib_path;
+            lazy_metallib_resolution = metallib_path.empty();
         }
     }
-    std::vector<cumetalKernelArgInfo_t> inferred_arg_info =
-        cumetal::registration::infer_arg_info_from_ptx_entry(module_ptx_source, chosen_name);
+    if (metallib_path.empty()) {
+        metallib_path = cumetal::registration::fallback_metallib_path_from_env();
+    }
 
-    REG_DEBUG("__cudaRegisterFunction: kernel='%s' metallib='%s' args=%zu",
-              chosen_name, metallib_path.c_str(), inferred_arg_info.size());
+    std::vector<cumetalKernelArgInfo_t> inferred_arg_info;
+    {
+        cumetal::registration::RegistrationState& s = cumetal::registration::state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        const auto module_it = s.modules.find(handle);
+        if (module_it != s.modules.end() && module_it->second != nullptr) {
+            auto& module = *module_it->second;
+            if (!module.kernel_arg_info_index_built && !module.ptx_source.empty()) {
+                module.kernel_arg_info_index =
+                    cumetal::registration::build_arg_info_index_from_ptx(module.ptx_source);
+                module.kernel_arg_info_index_built = true;
+            }
+            const auto arg_it = module.kernel_arg_info_index.find(chosen_name);
+            if (arg_it != module.kernel_arg_info_index.end()) {
+                inferred_arg_info = arg_it->second;
+            }
+        }
+    }
+
+    REG_DEBUG("__cudaRegisterFunction: kernel='%s' metallib='%s' args=%zu (lazy=%d)",
+              chosen_name, metallib_path.c_str(), inferred_arg_info.size(),
+              lazy_metallib_resolution ? 1 : 0);
 
     cumetal::registration::RegistrationState& s = cumetal::registration::state();
     std::lock_guard<std::mutex> lock(s.mutex);

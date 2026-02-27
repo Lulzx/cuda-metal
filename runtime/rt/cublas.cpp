@@ -1,10 +1,12 @@
 #include "cublas_v2.h"
+#include "cuda_bf16.h"
 #include "metal_backend.h"
 #include "runtime_internal.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <new>
@@ -22,6 +24,31 @@ extern "C" int cumetalRuntimeIsDevicePointer(const void* ptr);
 namespace {
 
 constexpr int kCublasCompatVersion = 12000;
+
+bool debug_cublas_enabled() {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* v = std::getenv("CUMETAL_DEBUG_CUBLAS");
+        enabled = (v != nullptr && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+cudaDataType_t scale_type_for_compute(cublasComputeType_t compute_type, cudaDataType_t atype) {
+    switch (compute_type) {
+        case CUBLAS_COMPUTE_64F:
+            return CUDA_R_64F;
+        case CUBLAS_COMPUTE_16F:
+            return CUDA_R_16F;
+        case CUBLAS_COMPUTE_32F:
+        case CUBLAS_COMPUTE_32F_FAST_TF32:
+            return CUDA_R_32F;
+        default:
+            break;
+    }
+    // Fallback to operand type for older/less common modes.
+    return atype;
+}
 
 bool is_valid_operation(cublasOperation_t op) {
     return op == CUBLAS_OP_N || op == CUBLAS_OP_T || op == CUBLAS_OP_C;
@@ -63,6 +90,10 @@ cublasStatus_t synchronize_handle_stream(cublasHandle_t handle) {
     }
     const cudaError_t status = cudaStreamSynchronize(handle->stream);
     if (status != cudaSuccess) {
+        if (debug_cublas_enabled()) {
+            fprintf(stderr, "CUMETAL_DEBUG_CUBLAS: synchronize_handle_stream failed err=%d stream=%p\n",
+                    static_cast<int>(status), static_cast<void*>(handle->stream));
+        }
         return CUBLAS_STATUS_EXECUTION_FAILED;
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -180,9 +211,11 @@ cublasStatus_t cublasSaxpy(cublasHandle_t handle,
         return CUBLAS_STATUS_INVALID_VALUE;
     }
 
-    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
-    if (sync_status != CUBLAS_STATUS_SUCCESS) {
-        return sync_status;
+    {
+        const cudaError_t st = cudaDeviceSynchronize();
+        if (st != cudaSuccess) {
+            return map_cuda_status_to_cublas(st);
+        }
     }
 
     const float alpha_value = *alpha;
@@ -209,9 +242,11 @@ cublasStatus_t cublasSscal(cublasHandle_t handle, int n, const float* alpha, flo
         return CUBLAS_STATUS_INVALID_VALUE;
     }
 
-    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
-    if (sync_status != CUBLAS_STATUS_SUCCESS) {
-        return sync_status;
+    {
+        const cudaError_t st = cudaDeviceSynchronize();
+        if (st != cudaSuccess) {
+            return map_cuda_status_to_cublas(st);
+        }
     }
 
     const float alpha_value = *alpha;
@@ -243,9 +278,11 @@ cublasStatus_t cublasScopy(cublasHandle_t handle,
         return CUBLAS_STATUS_INVALID_VALUE;
     }
 
-    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
-    if (sync_status != CUBLAS_STATUS_SUCCESS) {
-        return sync_status;
+    {
+        const cudaError_t st = cudaDeviceSynchronize();
+        if (st != cudaSuccess) {
+            return map_cuda_status_to_cublas(st);
+        }
     }
 
     for (int i = 0; i < n; ++i) {
@@ -879,6 +916,17 @@ cublasStatus_t cublasSgemm(cublasHandle_t handle,
         ldc,
         nullptr,
         &error);
+    if (gemm_status != cudaSuccess && debug_cublas_enabled()) {
+        fprintf(stderr,
+                "CUMETAL_DEBUG_CUBLAS: cublasSgemm failed err=%d transa=%d transb=%d m=%d n=%d k=%d "
+                "lda=%d ldb=%d ldc=%d a_off=%zu b_off=%zu c_off=%zu msg=%s\n",
+                static_cast<int>(gemm_status),
+                static_cast<int>(transa != CUBLAS_OP_N),
+                static_cast<int>(transb != CUBLAS_OP_N),
+                m, n, k, lda, ldb, ldc,
+                a_resolved.offset, b_resolved.offset, c_resolved.offset,
+                error.c_str());
+    }
     return map_cuda_status_to_cublas(gemm_status);
 }
 
@@ -1466,6 +1514,7 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
             case CUDA_R_32F: return static_cast<const float*>(ptr)[idx];
             case CUDA_R_64F: return static_cast<float>(static_cast<const double*>(ptr)[idx]);
             case CUDA_R_16F: return static_cast<float>(static_cast<const __half*>(ptr)[idx]);
+            case CUDA_R_16BF: return static_cast<float>(static_cast<const __nv_bfloat16*>(ptr)[idx]);
             default:         return 0.0f;
         }
     };
@@ -1474,12 +1523,15 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
             case CUDA_R_32F: static_cast<float*>(ptr)[idx] = val; break;
             case CUDA_R_64F: static_cast<double*>(ptr)[idx] = static_cast<double>(val); break;
             case CUDA_R_16F: static_cast<__half*>(ptr)[idx] = static_cast<__half>(val); break;
+            case CUDA_R_16BF: static_cast<__nv_bfloat16*>(ptr)[idx] = __nv_bfloat16(val); break;
             default: break;
         }
     };
 
-    const float alpha_f = read_f32(alpha, 0, (atype == CUDA_R_64F) ? CUDA_R_64F : CUDA_R_32F);
-    const float beta_f  = read_f32(beta,  0, (ctype == CUDA_R_64F) ? CUDA_R_64F : CUDA_R_32F);
+    const cudaDataType_t alpha_type = scale_type_for_compute(compute_type, atype);
+    const cudaDataType_t beta_type  = scale_type_for_compute(compute_type, ctype);
+    const float alpha_f = read_f32(alpha, 0, alpha_type);
+    const float beta_f  = read_f32(beta,  0, beta_type);
 
     const cublasStatus_t sync_status = synchronize_handle_stream(handle);
     if (sync_status != CUBLAS_STATUS_SUCCESS) return sync_status;
@@ -1554,13 +1606,13 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
     auto byte_offset = [](const void* base, long long int elems, cudaDataType_t t) -> const void* {
         std::size_t sz = 4;
         if (t == CUDA_R_64F) sz = 8;
-        else if (t == CUDA_R_16F) sz = 2;
+        else if (t == CUDA_R_16F || t == CUDA_R_16BF) sz = 2;
         return static_cast<const char*>(base) + elems * sz;
     };
     auto byte_offset_mutable = [](void* base, long long int elems, cudaDataType_t t) -> void* {
         std::size_t sz = 4;
         if (t == CUDA_R_64F) sz = 8;
-        else if (t == CUDA_R_16F) sz = 2;
+        else if (t == CUDA_R_16F || t == CUDA_R_16BF) sz = 2;
         return static_cast<char*>(base) + elems * sz;
     };
 
@@ -1624,6 +1676,11 @@ cublasStatus_t cublasSgemmBatched(cublasHandle_t handle,
     if (a_array == nullptr || b_array == nullptr || c_array == nullptr)
         return CUBLAS_STATUS_INVALID_VALUE;
 
+    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
+    if (sync_status != CUBLAS_STATUS_SUCCESS) {
+        return sync_status;
+    }
+
     for (int bi = 0; bi < batch_count; ++bi) {
         const cublasStatus_t s =
             cublasSgemm(handle, transa, transb, m, n, k,
@@ -1653,12 +1710,78 @@ cublasStatus_t cublasDgemmBatched(cublasHandle_t handle,
     if (a_array == nullptr || b_array == nullptr || c_array == nullptr)
         return CUBLAS_STATUS_INVALID_VALUE;
 
+    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
+    if (sync_status != CUBLAS_STATUS_SUCCESS) {
+        return sync_status;
+    }
+
     for (int bi = 0; bi < batch_count; ++bi) {
         const cublasStatus_t s =
             cublasDgemm(handle, transa, transb, m, n, k,
                         alpha, a_array[bi], lda, b_array[bi], ldb,
                         beta, c_array[bi], ldc);
         if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasGemmBatchedEx(cublasHandle_t handle,
+                                   cublasOperation_t transa,
+                                   cublasOperation_t transb,
+                                   int m, int n, int k,
+                                   const void* alpha,
+                                   const void* const a_array[], cudaDataType_t atype, int lda,
+                                   const void* const b_array[], cudaDataType_t btype, int ldb,
+                                   const void* beta,
+                                   void* const c_array[], cudaDataType_t ctype, int ldc,
+                                   int batch_count,
+                                   cublasComputeType_t compute_type,
+                                   cublasGemmAlgo_t algo) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_operation(transa) || !is_valid_operation(transb)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (m < 0 || n < 0 || k < 0 || batch_count < 0) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (alpha == nullptr || beta == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if ((batch_count > 0) && (a_array == nullptr || b_array == nullptr || c_array == nullptr)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+
+    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
+    if (sync_status != CUBLAS_STATUS_SUCCESS) {
+        return sync_status;
+    }
+
+    for (int bi = 0; bi < batch_count; ++bi) {
+        const cublasStatus_t s =
+            cublasGemmEx(handle, transa, transb, m, n, k,
+                         alpha,
+                         a_array[bi], atype, lda,
+                         b_array[bi], btype, ldb,
+                         beta,
+                         c_array[bi], ctype, ldc,
+                         compute_type, algo);
+        if (s != CUBLAS_STATUS_SUCCESS) {
+            if (debug_cublas_enabled()) {
+                const void* a_ptr = a_array[bi];
+                const void* b_ptr = b_array[bi];
+                const void* c_ptr = c_array[bi];
+                std::fprintf(stderr,
+                             "CUMETAL_DEBUG_CUBLAS: cublasGemmBatchedEx failed batch=%d status=%d m=%d n=%d k=%d lda=%d ldb=%d ldc=%d atype=%d btype=%d ctype=%d compute=%d a=%p b=%p c=%p dev(a,b,c)=(%d,%d,%d)\n",
+                             bi, static_cast<int>(s), m, n, k, lda, ldb, ldc,
+                             static_cast<int>(atype), static_cast<int>(btype), static_cast<int>(ctype),
+                             static_cast<int>(compute_type),
+                             a_ptr, b_ptr, c_ptr,
+                             cumetalRuntimeIsDevicePointer(a_ptr),
+                             cumetalRuntimeIsDevicePointer(b_ptr),
+                             cumetalRuntimeIsDevicePointer(c_ptr));
+            }
+            return s;
+        }
     }
     return CUBLAS_STATUS_SUCCESS;
 }
@@ -1763,6 +1886,56 @@ cublasStatus_t cublasDtrsm(cublasHandle_t handle,
                            const double* a, int lda,
                            double* b, int ldb) {
     CUMETAL_TRSM_BODY(double, 0.0, 1.0);
+}
+
+cublasStatus_t cublasStrsmBatched(cublasHandle_t handle,
+                                  cublasSideMode_t side,
+                                  cublasFillMode_t uplo,
+                                  cublasOperation_t trans,
+                                  cublasDiagType_t diag,
+                                  int m, int n,
+                                  const float* alpha,
+                                  const float* const a_array[], int lda,
+                                  float* const b_array[], int ldb,
+                                  int batch_count) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (batch_count < 0) return CUBLAS_STATUS_INVALID_VALUE;
+    if (alpha == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (batch_count > 0 && (a_array == nullptr || b_array == nullptr)) return CUBLAS_STATUS_INVALID_VALUE;
+
+    for (int bi = 0; bi < batch_count; ++bi) {
+        const cublasStatus_t s = cublasStrsm(handle, side, uplo, trans, diag,
+                                             m, n, alpha,
+                                             a_array[bi], lda,
+                                             b_array[bi], ldb);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDtrsmBatched(cublasHandle_t handle,
+                                  cublasSideMode_t side,
+                                  cublasFillMode_t uplo,
+                                  cublasOperation_t trans,
+                                  cublasDiagType_t diag,
+                                  int m, int n,
+                                  const double* alpha,
+                                  const double* const a_array[], int lda,
+                                  double* const b_array[], int ldb,
+                                  int batch_count) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (batch_count < 0) return CUBLAS_STATUS_INVALID_VALUE;
+    if (alpha == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (batch_count > 0 && (a_array == nullptr || b_array == nullptr)) return CUBLAS_STATUS_INVALID_VALUE;
+
+    for (int bi = 0; bi < batch_count; ++bi) {
+        const cublasStatus_t s = cublasDtrsm(handle, side, uplo, trans, diag,
+                                             m, n, alpha,
+                                             a_array[bi], lda,
+                                             b_array[bi], ldb);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 #undef CUMETAL_TRSM_BODY

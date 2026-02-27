@@ -78,6 +78,57 @@ bool command_exists(const std::string& name) {
     return result.output[0] == '0';
 }
 
+// Returns absolute path to a tool, checking PATH first, then common macOS/Homebrew locations.
+// Returns empty string if not found.
+std::string find_tool(const std::string& name) {
+    // Check env override first (CUMETAL_TOOL_<NAME> e.g. CUMETAL_TOOL_LLVM_AS)
+    std::string env_key = "CUMETAL_TOOL_";
+    for (char c : name) {
+        env_key += static_cast<char>(std::toupper(static_cast<unsigned char>(c == '-' ? '_' : c)));
+    }
+    if (const char* env_val = std::getenv(env_key.c_str())) {
+        if (std::filesystem::exists(env_val)) {
+            return env_val;
+        }
+    }
+    // Check if tool is in PATH via `command -v`
+    const CommandResult cv = run_command_capture("command -v " + name + " 2>/dev/null");
+    if (cv.started && cv.exit_code == 0 && !cv.output.empty()) {
+        const std::string path = cv.output.substr(0, cv.output.find('\n'));
+        if (!path.empty() && std::filesystem::exists(path)) {
+            return path;
+        }
+    }
+    // Try common absolute locations
+    static const std::vector<std::string> search_prefixes = {
+        "/usr/bin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/opt/homebrew/opt/llvm/bin",
+        "/opt/homebrew/opt/llvm@20/bin",
+        "/opt/homebrew/opt/llvm@19/bin",
+        "/opt/homebrew/opt/llvm@18/bin",
+        "/opt/homebrew/opt/llvm@17/bin",
+    };
+    for (const auto& prefix : search_prefixes) {
+        const std::string full = prefix + "/" + name;
+        if (std::filesystem::exists(full)) {
+            return full;
+        }
+    }
+    // Try glob-style search for versioned Homebrew Cellar llvm
+    const CommandResult glob = run_command_capture(
+        "ls /opt/homebrew/Cellar/llvm@20/*/bin/" + name + " /opt/homebrew/Cellar/llvm/*/bin/" +
+        name + " 2>/dev/null | head -1");
+    if (glob.started && !glob.output.empty()) {
+        const std::string path = glob.output.substr(0, glob.output.find('\n'));
+        if (!path.empty() && std::filesystem::exists(path)) {
+            return path;
+        }
+    }
+    return "";
+}
+
 std::filesystem::path make_temp_dir() {
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto pid = static_cast<long long>(::getpid());
@@ -450,7 +501,9 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
         prepared_air = true;
         result.logs.push_back("using provided .air payload");
     } else if (extension == ".metal") {
-        const std::string command = "xcrun metal -c " + quote_shell(options.input.string()) +
+        const std::string xcrun_for_metal = find_tool("xcrun");
+        const std::string xcrun_metal_bin = xcrun_for_metal.empty() ? "xcrun" : xcrun_for_metal;
+        const std::string command = xcrun_metal_bin + " metal -c " + quote_shell(options.input.string()) +
                                     " -o " + quote_shell(temp_air.string()) + " 2>&1";
         const CommandResult cmd = run_command_capture(command);
         result.logs.push_back("$ " + command);
@@ -462,32 +515,57 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
         }
         prepared_air = true;
     } else if (extension == ".ll" || extension == ".llvm") {
-        if (command_exists("llvm-as")) {
-            const std::string command = "llvm-as " + quote_shell(options.input.string()) + " -o " +
-                                        quote_shell(temp_air.string()) + " 2>&1";
+        // Compile LLVM IR directly to a fully-linked metallib (AOT, GPU ISA included).
+        // This avoids Metal JIT crashes that occur when packaging only Air bitcode via
+        // `metal -c` + `metallib` and then JIT-compiling at pipeline creation time.
+        {
+            const std::string xcrun_path = find_tool("xcrun");
+            const std::string xcrun_bin = xcrun_path.empty() ? "xcrun" : xcrun_path;
+            // Full AOT compilation: metal input.ll -o output.metallib (no -c flag)
+            const std::string command = xcrun_bin + " metal " + quote_shell(options.input.string()) + " -o " +
+                                        quote_shell(options.output.string()) + " 2>&1";
             const CommandResult cmd = run_command_capture(command);
             result.logs.push_back("$ " + command);
             result.logs.push_back(cmd.output);
-            if (!cmd.started || cmd.exit_code != 0) {
-                result.error = "failed to assemble LLVM IR with llvm-as";
+            if (cmd.started && cmd.exit_code == 0) {
+                result.logs.push_back("used xcrun metal AOT for LLVM IR -> metallib");
                 std::filesystem::remove_all(temp_dir);
+                result.ok = true;
+                result.output = options.output;
                 return result;
             }
-            prepared_air = true;
-        } else {
-            const std::string command = "xcrun metal -c " + quote_shell(options.input.string()) + " -o " +
-                                        quote_shell(temp_air.string()) + " 2>&1";
-            const CommandResult cmd = run_command_capture(command);
-            result.logs.push_back("$ " + command);
-            result.logs.push_back(cmd.output);
-            if (!cmd.started || cmd.exit_code != 0) {
-                result.error =
-                    "failed to compile LLVM IR with xcrun metal fallback (llvm-as unavailable)";
-                std::filesystem::remove_all(temp_dir);
-                return result;
+            // AOT compilation failed — fall back to Air bitcode path
+            result.logs.push_back("xcrun metal AOT failed, falling back to Air bitcode path");
+            const std::string fallback_cmd = xcrun_bin + " metal -c " + quote_shell(options.input.string()) + " -o " +
+                                             quote_shell(temp_air.string()) + " 2>&1";
+            const CommandResult fallback = run_command_capture(fallback_cmd);
+            result.logs.push_back("$ " + fallback_cmd);
+            result.logs.push_back(fallback.output);
+            if (fallback.started && fallback.exit_code == 0) {
+                result.logs.push_back("used xcrun metal -c for LLVM IR -> AIR");
+                prepared_air = true;
+            } else {
+                const std::string llvm_as_path = find_tool("llvm-as");
+                if (!llvm_as_path.empty()) {
+                    const std::string llvm_as_cmd =
+                        llvm_as_path + " " + quote_shell(options.input.string()) + " -o " +
+                        quote_shell(temp_air.string()) + " 2>&1";
+                    const CommandResult llvm_as_result = run_command_capture(llvm_as_cmd);
+                    result.logs.push_back("$ " + llvm_as_cmd);
+                    result.logs.push_back(llvm_as_result.output);
+                    if (!llvm_as_result.started || llvm_as_result.exit_code != 0) {
+                        result.error = "failed to compile LLVM IR with xcrun metal and assemble fallback";
+                        std::filesystem::remove_all(temp_dir);
+                        return result;
+                    }
+                    result.logs.push_back("used llvm-as fallback for LLVM IR -> AIR");
+                    prepared_air = true;
+                } else {
+                    result.error = "failed to compile LLVM IR with xcrun metal (and llvm-as unavailable)";
+                    std::filesystem::remove_all(temp_dir);
+                    return result;
+                }
             }
-            result.logs.push_back("used xcrun metal fallback for LLVM IR assembly (no llvm-as)");
-            prepared_air = true;
         }
     } else if (extension == ".bc") {
         std::filesystem::copy_file(options.input, temp_air,
@@ -506,7 +584,9 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
         return result;
     }
 
-    const std::string metallib_command = "xcrun metallib " + quote_shell(temp_air.string()) +
+    const std::string xcrun_for_metallib = find_tool("xcrun");
+    const std::string xcrun_metallib_bin = xcrun_for_metallib.empty() ? "xcrun" : xcrun_for_metallib;
+    const std::string metallib_command = xcrun_metallib_bin + " metallib " + quote_shell(temp_air.string()) +
                                          " -o " + quote_shell(options.output.string()) + " 2>&1";
     const CommandResult pack_cmd = run_command_capture(metallib_command);
     result.logs.push_back("$ " + metallib_command);

@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <dlfcn.h>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -207,6 +208,22 @@ cudaError_t ensure_initialized() {
 }
 
 cudaError_t fail(cudaError_t error) {
+    if (error != cudaSuccess) {
+        static int debug_errors = -1;
+        if (debug_errors < 0) {
+            const char* v = std::getenv("CUMETAL_DEBUG_ERRORS");
+            debug_errors = (v != nullptr && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+        }
+        if (debug_errors) {
+            Dl_info info{};
+            const void* caller = __builtin_return_address(0);
+            const bool have_symbol = caller != nullptr && dladdr(caller, &info) != 0 && info.dli_sname != nullptr;
+            std::fprintf(stderr,
+                         "CUMETAL_DEBUG_ERRORS: %s -> %d\n",
+                         have_symbol ? info.dli_sname : "<unknown>",
+                         static_cast<int>(error));
+        }
+    }
     set_last_error(error);
     return error;
 }
@@ -319,6 +336,16 @@ cudaError_t validate_host_alloc_flags(unsigned int flags) {
     constexpr unsigned int kSupportedHostAllocFlags =
         cudaHostAllocPortable | cudaHostAllocMapped | cudaHostAllocWriteCombined;
     if ((flags & ~kSupportedHostAllocFlags) != 0) {
+        return cudaErrorInvalidValue;
+    }
+    return cudaSuccess;
+}
+
+cudaError_t validate_host_register_flags(unsigned int flags) {
+    constexpr unsigned int kSupportedHostRegisterFlags =
+        cudaHostRegisterPortable | cudaHostRegisterMapped |
+        cudaHostRegisterIoMemory | cudaHostRegisterReadOnly;
+    if ((flags & ~kSupportedHostRegisterFlags) != 0) {
         return cudaErrorInvalidValue;
     }
     return cudaSuccess;
@@ -1705,9 +1732,12 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     prop->maxGridSize[2] = 65535;
     prop->sharedMemPerBlock =
         backend_props.shared_mem_per_block > 0 ? backend_props.shared_mem_per_block : (32 * 1024);
+    prop->sharedMemPerBlockOptin = static_cast<size_t>(prop->sharedMemPerBlock);
     prop->regsPerBlock = 65536;
-    prop->major = 8;
-    prop->minor = 0;
+    // Report a conservative CUDA CC to keep ggml-cuda on compatibility paths
+    // until CuMetal's fp16/bf16 fast paths are numerically validated.
+    prop->major = 6;
+    prop->minor = 1;
     prop->unifiedAddressing = 1;        // UMA: CPU and GPU share physical DRAM
     prop->managedMemory = 1;            // cudaMallocManaged == cudaMalloc on UMA
     prop->concurrentManagedAccess = 1;  // CPU+GPU can access managed memory simultaneously
@@ -1806,6 +1836,9 @@ cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device) {
         case cudaDevAttrPageableMemoryAccessUsesHostPageTables:
             *value = 1;
             break;
+        case cudaDevAttrCooperativeLaunch:
+            *value = 0;
+            break;
         case cudaDevAttrMemoryBusWidth:
             *value = 128;
             break;
@@ -1830,7 +1863,7 @@ cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device) {
         case cudaDevAttrSharedMemPerBlockOptin: {
             cudaDeviceProp prop{};
             cudaGetDeviceProperties(&prop, device);
-            *value = static_cast<int>(prop.sharedMemPerBlock);
+            *value = static_cast<int>(prop.sharedMemPerBlockOptin);
             break;
         }
         default:
@@ -1979,6 +2012,38 @@ cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags) {
 
 cudaError_t cudaMallocHost(void** ptr, size_t size) {
     return cudaHostAlloc(ptr, size, cudaHostAllocDefault);
+}
+
+cudaError_t cudaHostRegister(void* ptr, size_t size, unsigned int flags) {
+    if (ptr == nullptr || size == 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+
+    const cudaError_t flags_status = validate_host_register_flags(flags);
+    if (flags_status != cudaSuccess) {
+        return fail(flags_status);
+    }
+
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+
+    // CuMetal uses unified memory on Apple Silicon; host registration is a compatibility no-op.
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaHostUnregister(void* ptr) {
+    if (ptr == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+
+    return fail(cudaSuccess);
 }
 
 cudaError_t cudaHostGetDevicePointer(void** dev_ptr, void* host_ptr, unsigned int flags) {
@@ -2452,6 +2517,22 @@ cudaError_t cudaMemcpy3DAsync(const cudaMemcpy3DParms* p, cudaStream_t stream) {
     return cudaMemcpy3D(p);
 }
 
+cudaError_t cudaMemcpy3DPeerAsync(const cudaMemcpy3DPeerParms* p, cudaStream_t stream) {
+    if (p == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    cudaMemcpy3DParms local{};
+    local.srcPos = p->srcPos;
+    local.srcPtr = p->srcPtr;
+    local.dstPos = p->dstPos;
+    local.dstPtr = p->dstPtr;
+    local.extent = p->extent;
+    local.kind = cudaMemcpyDefault;
+    (void)p->srcDevice;
+    (void)p->dstDevice;
+    return cudaMemcpy3DAsync(&local, stream);
+}
+
 cudaError_t cudaDeviceReset(void) {
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {
@@ -2652,6 +2733,34 @@ cudaError_t cudaStreamQuery(cudaStream_t stream) {
         return fail(query_status);
     }
     return fail(complete ? cudaSuccess : cudaErrorNotReady);
+}
+
+cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode mode) {
+    switch (mode) {
+        case cudaStreamCaptureModeGlobal:
+        case cudaStreamCaptureModeThreadLocal:
+        case cudaStreamCaptureModeRelaxed:
+            break;
+        default:
+            return fail(cudaErrorInvalidValue);
+    }
+
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+
+    if (!is_legacy_stream_handle(stream)) {
+        std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
+        const cudaError_t resolve_status = resolve_runtime_stream(stream, &backend_stream, nullptr);
+        if (resolve_status != cudaSuccess || backend_stream == nullptr) {
+            return fail(resolve_status == cudaSuccess ? cudaErrorInvalidValue : resolve_status);
+        }
+    }
+
+    // CUDA graphs are not implemented in CuMetal yet; capture begin is accepted as a no-op so
+    // codepaths compiled with graph support can still run with graphs disabled at runtime.
+    return fail(cudaSuccess);
 }
 
 cudaError_t cudaStreamAddCallback(cudaStream_t stream,
@@ -2866,14 +2975,32 @@ cudaError_t cudaLaunchKernel(const void* func,
                              void** args,
                              size_t shared_mem,
                              cudaStream_t stream) {
+    auto launch_fail = [&](cudaError_t err, const char* why) -> cudaError_t {
+        static int debug_launch = -1;
+        if (debug_launch < 0) {
+            const char* v = std::getenv("CUMETAL_DEBUG_LAUNCH");
+            debug_launch = (v != nullptr && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+        }
+        if (debug_launch && err != cudaSuccess) {
+            std::fprintf(stderr,
+                         "CUMETAL_DEBUG_LAUNCH: cudaLaunchKernel fail err=%d why=%s func=%p grid=(%u,%u,%u) block=(%u,%u,%u)\n",
+                         static_cast<int>(err),
+                         why != nullptr ? why : "?",
+                         func,
+                         grid_dim.x, grid_dim.y, grid_dim.z,
+                         block_dim.x, block_dim.y, block_dim.z);
+        }
+        return fail(err);
+    };
+
     if (func == nullptr || grid_dim.x == 0 || grid_dim.y == 0 || grid_dim.z == 0 || block_dim.x == 0 ||
         block_dim.y == 0 || block_dim.z == 0) {
-        return fail(cudaErrorInvalidValue);
+        return launch_fail(cudaErrorInvalidValue, "invalid launch dims/func");
     }
 
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {
-        return fail(init_status);
+        return launch_fail(init_status, "ensure_initialized");
     }
 
     cumetal::registration::RegisteredKernel registered_kernel;
@@ -2888,7 +3015,13 @@ cudaError_t cudaLaunchKernel(const void* func,
     if (use_registered_kernel) {
         if (registered_kernel.metallib_path.empty() || registered_kernel.kernel_name.empty() ||
             args == nullptr) {
-            return fail(cudaErrorInvalidValue);
+            std::fprintf(stderr,
+                         "CUMETAL: registered kernel missing metallib/name/args: func=%p kernel='%s' metallib='%s' args=%p\n",
+                         func,
+                         registered_kernel.kernel_name.c_str(),
+                         registered_kernel.metallib_path.c_str(),
+                         static_cast<const void*>(args));
+            return launch_fail(cudaErrorInvalidValue, "registered kernel missing metallib/name/args");
         }
 
         if (!registered_kernel.arg_info.empty()) {
@@ -2915,7 +3048,7 @@ cudaError_t cudaLaunchKernel(const void* func,
                     }
                 }
                 if (inferred_count == 31) {
-                    return fail(cudaErrorInvalidValue);
+                    return launch_fail(cudaErrorInvalidValue, "arg-count inference hit sentinel limit");
                 }
                 arg_count = static_cast<std::uint32_t>(inferred_count);
             }
@@ -2924,10 +3057,10 @@ cudaError_t cudaLaunchKernel(const void* func,
         std::memcpy(&kernel_copy, func, sizeof(kernel_copy));
         kernel = &kernel_copy;
         if (kernel->metallib_path == nullptr || kernel->kernel_name == nullptr || kernel->arg_count > 31) {
-            return fail(cudaErrorInvalidValue);
+            return launch_fail(cudaErrorInvalidValue, "inline kernel descriptor invalid");
         }
         if (kernel->arg_count > 0 && args == nullptr) {
-            return fail(cudaErrorInvalidValue);
+            return launch_fail(cudaErrorInvalidValue, "inline kernel args null");
         }
         arg_count = kernel->arg_count;
         arg_info = kernel->arg_info;
@@ -2938,13 +3071,13 @@ cudaError_t cudaLaunchKernel(const void* func,
     const cudaError_t resolve_status =
         resolve_runtime_stream(stream, &backend_stream, &legacy_stream);
     if (resolve_status != cudaSuccess) {
-        return fail(resolve_status);
+        return launch_fail(resolve_status, "resolve_runtime_stream");
     }
     if (legacy_stream) {
         std::string error;
         const cudaError_t sync_status = cumetal::metal_backend::synchronize(&error);
         if (sync_status != cudaSuccess) {
-            return fail(sync_status);
+            return launch_fail(sync_status, "legacy-stream pre-sync");
         }
     }
 
@@ -2961,12 +3094,123 @@ cudaError_t cudaLaunchKernel(const void* func,
                                                backend_stream,
                                                &emulated);
         if (emulation_status != cudaSuccess) {
-            return fail(emulation_status);
+            return launch_fail(emulation_status, "llmc emulation");
         }
         if (emulated) {
             note_llmc_emulation_hit(registered_kernel.kernel_name, arg_count);
-            return fail(cudaSuccess);
+            return launch_fail(cudaSuccess, "llmc emulated");
         }
+    }
+
+    RuntimeState& state = runtime_state();
+
+    // ggml CUDA uses this helper kernel only to populate batched cuBLAS pointer arrays.
+    // The current generic PTX->Metal path can launch it but does not reliably materialize
+    // pointer stores. Perform the pointer math directly on the host for CuMetal.
+    if (use_registered_kernel && kernel_name_contains(registered_kernel.kernel_name, "k_compute_batched_ptrs")) {
+        if (args == nullptr || arg_count < 16) {
+            return launch_fail(cudaErrorInvalidValue, "k_compute_batched_ptrs arg count");
+        }
+
+        const cudaError_t host_sync = synchronize_stream_for_host_op(stream, nullptr);
+        if (host_sync != cudaSuccess) {
+            return launch_fail(host_sync, "k_compute_batched_ptrs pre-sync");
+        }
+
+        auto read_ptr_arg = [&](std::uint32_t idx, void** out_ptr) -> bool {
+            if (idx >= arg_count || args[idx] == nullptr || out_ptr == nullptr) {
+                return false;
+            }
+            std::memcpy(out_ptr, args[idx], sizeof(void*));
+            return true;
+        };
+        auto read_i64_arg = [&](std::uint32_t idx, std::int64_t* out) -> bool {
+            if (idx >= arg_count || args[idx] == nullptr || out == nullptr) {
+                return false;
+            }
+            std::memcpy(out, args[idx], sizeof(std::int64_t));
+            return true;
+        };
+        auto read_size_arg = [&](std::uint32_t idx, std::size_t* out) -> bool {
+            if (idx >= arg_count || args[idx] == nullptr || out == nullptr) {
+                return false;
+            }
+            std::memcpy(out, args[idx], sizeof(std::size_t));
+            return true;
+        };
+
+        void* src0_ptr = nullptr;
+        void* src1_ptr = nullptr;
+        void* dst_ptr = nullptr;
+        void* ptrs_src_ptr = nullptr;
+        void* ptrs_dst_ptr = nullptr;
+        std::int64_t ne12 = 0, ne13 = 0, ne23 = 0;
+        std::int64_t r2 = 0, r3 = 0;
+        std::size_t nb02 = 0, nb03 = 0, nb12 = 0, nb13 = 0, nbd2 = 0, nbd3 = 0;
+
+        const bool parsed =
+            read_ptr_arg(0, &src0_ptr) &&
+            read_ptr_arg(1, &src1_ptr) &&
+            read_ptr_arg(2, &dst_ptr) &&
+            read_ptr_arg(3, &ptrs_src_ptr) &&
+            read_ptr_arg(4, &ptrs_dst_ptr) &&
+            read_i64_arg(5, &ne12) &&
+            read_i64_arg(6, &ne13) &&
+            read_i64_arg(7, &ne23) &&
+            read_size_arg(8, &nb02) &&
+            read_size_arg(9, &nb03) &&
+            read_size_arg(10, &nb12) &&
+            read_size_arg(11, &nb13) &&
+            read_size_arg(12, &nbd2) &&
+            read_size_arg(13, &nbd3) &&
+            read_i64_arg(14, &r2) &&
+            read_i64_arg(15, &r3);
+        if (!parsed || ne12 < 0 || ne13 < 0 || ne23 < 0 || r2 <= 0 || r3 <= 0) {
+            return launch_fail(cudaErrorInvalidValue, "k_compute_batched_ptrs parse");
+        }
+
+        cumetal::rt::AllocationTable::ResolvedAllocation src0_resolved;
+        cumetal::rt::AllocationTable::ResolvedAllocation src1_resolved;
+        cumetal::rt::AllocationTable::ResolvedAllocation dst_resolved;
+        cumetal::rt::AllocationTable::ResolvedAllocation ptrs_src_resolved;
+        cumetal::rt::AllocationTable::ResolvedAllocation ptrs_dst_resolved;
+        if (!state.allocations.resolve(src0_ptr, &src0_resolved) ||
+            !state.allocations.resolve(src1_ptr, &src1_resolved) ||
+            !state.allocations.resolve(dst_ptr, &dst_resolved) ||
+            !state.allocations.resolve(ptrs_src_ptr, &ptrs_src_resolved) ||
+            !state.allocations.resolve(ptrs_dst_ptr, &ptrs_dst_resolved)) {
+            return launch_fail(cudaErrorInvalidDevicePointer, "k_compute_batched_ptrs resolve");
+        }
+
+        auto* src0_base = static_cast<const char*>(src0_resolved.buffer->contents()) + src0_resolved.offset;
+        auto* src1_base = static_cast<const char*>(src1_resolved.buffer->contents()) + src1_resolved.offset;
+        auto* dst_base = static_cast<char*>(dst_resolved.buffer->contents()) + dst_resolved.offset;
+        auto* ptrs_src_base =
+            reinterpret_cast<const void**>(static_cast<char*>(ptrs_src_resolved.buffer->contents()) +
+                                           ptrs_src_resolved.offset);
+        auto* ptrs_dst_base =
+            reinterpret_cast<void**>(static_cast<char*>(ptrs_dst_resolved.buffer->contents()) +
+                                     ptrs_dst_resolved.offset);
+
+        if (ne23 != ne12 * ne13) {
+            return launch_fail(cudaErrorInvalidValue, "k_compute_batched_ptrs ne23 mismatch");
+        }
+
+        for (std::int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (std::int64_t i12 = 0; i12 < ne12; ++i12) {
+                const std::int64_t i03 = i13 / r3;
+                const std::int64_t i02 = i12 / r2;
+                const std::int64_t index = i12 + i13 * ne12;
+                ptrs_src_base[0 * ne23 + index] = src0_base + i02 * static_cast<std::int64_t>(nb02) +
+                                                  i03 * static_cast<std::int64_t>(nb03);
+                ptrs_src_base[1 * ne23 + index] = src1_base + i12 * static_cast<std::int64_t>(nb12) +
+                                                  i13 * static_cast<std::int64_t>(nb13);
+                ptrs_dst_base[0 * ne23 + index] = dst_base + i12 * static_cast<std::int64_t>(nbd2) +
+                                                  i13 * static_cast<std::int64_t>(nbd3);
+            }
+        }
+
+        return launch_fail(cudaSuccess, "k_compute_batched_ptrs host-emulated");
     }
 
     // Printf ring buffer size: 1 MB default, overridable via CUMETAL_PRINTF_BUFFER_SIZE (bytes).
@@ -2984,11 +3228,9 @@ cudaError_t cudaLaunchKernel(const void* func,
     std::vector<cumetal::metal_backend::KernelArg> launch_args;
     launch_args.reserve(static_cast<std::size_t>(arg_count) + (needs_printf ? 2u : 0u));
 
-    RuntimeState& state = runtime_state();
-
     for (std::uint32_t i = 0; i < arg_count; ++i) {
         if (args == nullptr || args[i] == nullptr) {
-            return fail(cudaErrorInvalidValue);
+            return launch_fail(cudaErrorInvalidValue, "arg slot pointer null");
         }
 
         cumetalKernelArgInfo_t info{
@@ -3020,7 +3262,37 @@ cudaError_t cudaLaunchKernel(const void* func,
 
             cumetal::rt::AllocationTable::ResolvedAllocation resolved;
             if (!state.allocations.resolve(device_ptr, &resolved)) {
-                return fail(cudaErrorInvalidDevicePointer);
+                if (use_registered_kernel) {
+                    std::uintptr_t raw_value = 0;
+                    std::memcpy(&raw_value, args[i], sizeof(raw_value));
+                    // PTX param inference can over-classify some unannotated .u64 scalars
+                    // as pointers. If the "pointer" is a tiny integer, preserve forward
+                    // progress by treating it as an immediate 64-bit kernel argument.
+                    if (raw_value != 0 && raw_value <= 0xFFFFFFFFull) {
+                        cumetal::metal_backend::KernelArg scalar_arg;
+                        scalar_arg.kind = cumetal::metal_backend::KernelArg::Kind::kBytes;
+                        scalar_arg.bytes.resize(sizeof(std::uint64_t));
+                        std::memcpy(scalar_arg.bytes.data(), &raw_value, sizeof(raw_value));
+                        launch_args.push_back(std::move(scalar_arg));
+                        continue;
+                    }
+                }
+                static int debug_launch = -1;
+                if (debug_launch < 0) {
+                    const char* v = std::getenv("CUMETAL_DEBUG_LAUNCH");
+                    debug_launch = (v != nullptr && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+                }
+                if (debug_launch) {
+                    const char* which_name = use_registered_kernel ? registered_kernel.kernel_name.c_str() :
+                                                              (kernel != nullptr ? kernel->kernel_name : "<null>");
+                    std::fprintf(stderr,
+                                 "CUMETAL_DEBUG_LAUNCH: buffer arg resolve failed kernel=%s arg=%u raw=%p arg_count=%u\n",
+                                 which_name != nullptr ? which_name : "<null>",
+                                 i,
+                                 device_ptr,
+                                 arg_count);
+                }
+                return launch_fail(cudaErrorInvalidDevicePointer, "buffer arg resolve");
             }
 
             cumetal::metal_backend::KernelArg arg;
@@ -3030,7 +3302,7 @@ cudaError_t cudaLaunchKernel(const void* func,
             launch_args.push_back(std::move(arg));
         } else {
             if (info.size_bytes == 0 || info.size_bytes > 4096) {
-                return fail(cudaErrorInvalidValue);
+                return launch_fail(cudaErrorInvalidValue, "byte arg size invalid");
             }
 
             cumetal::metal_backend::KernelArg arg;
@@ -3050,7 +3322,7 @@ cudaError_t cudaLaunchKernel(const void* func,
         const cudaError_t alloc_status =
             cumetal::metal_backend::allocate_buffer(kBufBytes, &printf_buffer, &alloc_error);
         if (alloc_status != cudaSuccess) {
-            return fail(alloc_status);
+            return launch_fail(alloc_status, "printf buffer alloc");
         }
         std::memset(printf_buffer->contents(), 0, kBufBytes);
         {
@@ -3085,6 +3357,24 @@ cudaError_t cudaLaunchKernel(const void* func,
     const cudaError_t status =
         cumetal::metal_backend::launch_kernel(metallib_path, kernel_name, config, launch_args,
                                               backend_stream, &error);
+    if (status != cudaSuccess) {
+        static int debug_launch = -1;
+        if (debug_launch < 0) {
+            const char* v = std::getenv("CUMETAL_DEBUG_LAUNCH");
+            debug_launch = (v != nullptr && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+        }
+        if (debug_launch) {
+            const char* which_name = use_registered_kernel ? registered_kernel.kernel_name.c_str() :
+                                                          (kernel != nullptr ? kernel->kernel_name : "<null>");
+            std::fprintf(stderr,
+                         "CUMETAL_DEBUG_LAUNCH: launch_kernel failed err=%d kernel=%s args=%u shared=%zu msg=%s\n",
+                         static_cast<int>(status),
+                         which_name != nullptr ? which_name : "<null>",
+                         arg_count,
+                         shared_mem,
+                         error.c_str());
+        }
+    }
 
     // Drain device printf output after kernel completes.
     if (needs_printf && printf_buffer != nullptr && status == cudaSuccess) {
@@ -3097,7 +3387,7 @@ cudaError_t cudaLaunchKernel(const void* func,
                             registered_kernel.printf_formats);
     }
 
-    return fail(status);
+    return launch_fail(status, "metal_backend::launch_kernel");
 }
 
 cudaError_t cudaConfigureCall(dim3 grid_dim,
@@ -3621,3 +3911,24 @@ cudaError_t cudaThreadSetCacheConfig(cudaFuncCache cacheConfig) {
 }
 
 }  // extern "C"
+
+// Homebrew LLVM's libc++ headers can emit references to the internal
+// std::__1::__hash_memory symbol from CUDA host-pass objects. When the final
+// executable links against Apple's system libc++, that symbol may be missing.
+// Export a compatible implementation from CuMetal to bridge the mismatch.
+namespace std {
+namespace __1 {
+
+size_t __hash_memory(const void* data, size_t size) noexcept {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    // 64-bit FNV-1a; stable and sufficient for unordered_map internals used by ggml-cuda.
+    size_t hash = static_cast<size_t>(1469598103934665603ull);
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<size_t>(bytes[i]);
+        hash *= static_cast<size_t>(1099511628211ull);
+    }
+    return hash;
+}
+
+}  // namespace __1
+}  // namespace std

@@ -33,7 +33,7 @@
 #define __forceinline__ __inline__ __attribute__((always_inline))
 #endif
 #ifndef __launch_bounds__
-#define __launch_bounds__(t, b) __attribute__((launch_bounds(t, b)))
+#define __launch_bounds__(...) __attribute__((launch_bounds(__VA_ARGS__)))
 #endif
 #endif
 
@@ -57,6 +57,8 @@ typedef enum cudaError {
     cudaErrorLaunchTimeout = 6,
     cudaErrorInvalidDevicePointer = 17,
     cudaErrorNotReady = 34,
+    cudaErrorPeerAccessAlreadyEnabled = 50,
+    cudaErrorPeerAccessNotEnabled = 51,
     cudaErrorDevicesUnavailable = 46,
     cudaErrorIllegalAddress = 700,
     cudaErrorUnknown = 999,
@@ -153,6 +155,7 @@ static inline constexpr uchar4  make_uchar4(unsigned char x, unsigned char y, un
 static inline constexpr ushort2 make_ushort2(unsigned short x, unsigned short y) { return {x, y}; }
 static inline constexpr ushort4 make_ushort4(unsigned short x, unsigned short y, unsigned short z, unsigned short w) { return {x,y,z,w}; }
 static inline constexpr uint2   make_uint2(unsigned int x, unsigned int y) { return {x, y}; }
+static inline constexpr uint3   make_uint3(unsigned int x, unsigned int y, unsigned int z) { return {x, y, z}; }
 static inline constexpr uint4   make_uint4(unsigned int x, unsigned int y, unsigned int z, unsigned int w) { return {x,y,z,w}; }
 static inline constexpr ulong2  make_ulong2(unsigned long int x, unsigned long int y) { return {x, y}; }
 static inline constexpr ulonglong2 make_ulonglong2(unsigned long long int x, unsigned long long int y) { return {x, y}; }
@@ -172,6 +175,7 @@ typedef struct cudaDeviceProp {
     int maxThreadsDim[3];
     int maxGridSize[3];
     int sharedMemPerBlock;
+    size_t sharedMemPerBlockOptin;
     int regsPerBlock;
     int major;
     int minor;
@@ -238,6 +242,7 @@ typedef enum cudaDeviceAttr {
     cudaDevAttrPageableMemoryAccess = 92,
     cudaDevAttrPageableMemoryAccessUsesHostPageTables = 93,
     cudaDevAttrPciDomainId = 50,
+    cudaDevAttrCooperativeLaunch = 95,
     cudaDevAttrSharedMemPerBlockOptin = 97,
 } cudaDeviceAttr;
 
@@ -315,6 +320,20 @@ enum {
 };
 
 enum {
+    cudaHostRegisterDefault = 0x0,
+    cudaHostRegisterPortable = 0x1,
+    cudaHostRegisterMapped = 0x2,
+    cudaHostRegisterIoMemory = 0x4,
+    cudaHostRegisterReadOnly = 0x8,
+};
+
+typedef enum cudaStreamCaptureMode {
+    cudaStreamCaptureModeGlobal = 0,
+    cudaStreamCaptureModeThreadLocal = 1,
+    cudaStreamCaptureModeRelaxed = 2,
+} cudaStreamCaptureMode;
+
+enum {
     cudaDeviceScheduleAuto = 0x00,
     cudaDeviceScheduleSpin = 0x01,
     cudaDeviceScheduleYield = 0x02,
@@ -386,6 +405,16 @@ typedef struct cudaMemcpy3DParms {
     cudaMemcpyKind   kind;
 } cudaMemcpy3DParms;
 
+typedef struct cudaMemcpy3DPeerParms {
+    struct cudaPos srcPos;
+    struct cudaPitchedPtr srcPtr;
+    int srcDevice;
+    struct cudaPos dstPos;
+    struct cudaPitchedPtr dstPtr;
+    int dstDevice;
+    struct cudaExtent extent;
+} cudaMemcpy3DPeerParms;
+
 #ifdef __cplusplus
 static inline cudaExtent make_cudaExtent(size_t w, size_t h, size_t d) {
     cudaExtent e; e.width = w; e.height = h; e.depth = d; return e;
@@ -408,6 +437,8 @@ cudaError_t cudaMallocPitch(void** dev_ptr, size_t* pitch, size_t width, size_t 
 cudaError_t cudaMalloc3D(cudaPitchedPtr* pitchedDevPtr, cudaExtent extent);
 cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags);
 cudaError_t cudaMallocHost(void** ptr, size_t size);
+cudaError_t cudaHostRegister(void* ptr, size_t size, unsigned int flags);
+cudaError_t cudaHostUnregister(void* ptr);
 cudaError_t cudaHostGetDevicePointer(void** dev_ptr, void* host_ptr, unsigned int flags);
 cudaError_t cudaHostGetFlags(unsigned int* flags, void* host_ptr);
 cudaError_t cudaFreeHost(void* ptr);
@@ -463,6 +494,7 @@ cudaError_t cudaMemset3DAsync(cudaPitchedPtr pitchedDevPtr, int value, cudaExten
 // 3D pitched copy — on UMA, copies plane-by-row.
 cudaError_t cudaMemcpy3D(const cudaMemcpy3DParms* p);
 cudaError_t cudaMemcpy3DAsync(const cudaMemcpy3DParms* p, cudaStream_t stream);
+cudaError_t cudaMemcpy3DPeerAsync(const cudaMemcpy3DPeerParms* p, cudaStream_t stream);
 // Unified Memory advisory APIs — no-ops on Apple Silicon UMA (all memory is already managed).
 typedef enum cudaMemoryAdvise {
     cudaMemAdviseSetReadMostly = 1,
@@ -490,6 +522,7 @@ cudaError_t cudaDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPr
 cudaError_t cudaStreamDestroy(cudaStream_t stream);
 cudaError_t cudaStreamSynchronize(cudaStream_t stream);
 cudaError_t cudaStreamQuery(cudaStream_t stream);
+cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode mode);
 cudaError_t cudaStreamAddCallback(cudaStream_t stream,
                                   cudaStreamCallback_t callback,
                                   void* user_data,
@@ -605,6 +638,60 @@ cudaError_t cudaThreadSetCacheConfig(cudaFuncCache cacheConfig);
 }
 #endif
 
+#ifdef __cplusplus
+// CUDA headers provide C++ overloads for kernel-function pointers on several
+// runtime APIs. CuMetal's core C ABI uses `const void *`; these wrappers keep
+// source compatibility with code that passes typed kernel pointers directly.
+template <typename KernelFn>
+static inline cudaError_t cudaFuncGetAttributes(cudaFuncAttributes* attr, KernelFn* func) {
+    return ::cudaFuncGetAttributes(attr, reinterpret_cast<const void*>(func));
+}
+
+template <typename KernelFn>
+static inline cudaError_t cudaFuncSetCacheConfig(KernelFn* func, cudaFuncCache cacheConfig) {
+    return ::cudaFuncSetCacheConfig(reinterpret_cast<const void*>(func), cacheConfig);
+}
+
+template <typename KernelFn>
+static inline cudaError_t cudaFuncSetSharedMemConfig(KernelFn* func, cudaSharedMemConfig config) {
+    return ::cudaFuncSetSharedMemConfig(reinterpret_cast<const void*>(func), config);
+}
+
+template <typename KernelFn>
+static inline cudaError_t cudaFuncSetAttribute(KernelFn* func, cudaFuncAttribute attr, int value) {
+    return ::cudaFuncSetAttribute(reinterpret_cast<const void*>(func), attr, value);
+}
+
+template <typename KernelFn>
+static inline cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        int* numBlocks, KernelFn* func, int blockSize, size_t dynamicSMemSize) {
+    return ::cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        numBlocks, reinterpret_cast<const void*>(func), blockSize, dynamicSMemSize);
+}
+
+template <typename KernelFn>
+static inline cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+        int* numBlocks, KernelFn* func, int blockSize, size_t dynamicSMemSize, unsigned int flags) {
+    return ::cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+        numBlocks, reinterpret_cast<const void*>(func), blockSize, dynamicSMemSize, flags);
+}
+
+template <typename KernelFn>
+static inline cudaError_t cudaOccupancyMaxPotentialBlockSize(
+        int* minGridSize, int* blockSize, KernelFn* func, size_t dynamicSMemSize, int blockSizeLimit) {
+    return ::cudaOccupancyMaxPotentialBlockSize(
+        minGridSize, blockSize, reinterpret_cast<const void*>(func), dynamicSMemSize, blockSizeLimit);
+}
+
+static inline cudaError_t cudaMallocManaged(void** dev_ptr, size_t size) {
+    return ::cudaMallocManaged(dev_ptr, size, 0);
+}
+
+static inline cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event) {
+    return ::cudaStreamWaitEvent(stream, event, 0);
+}
+#endif
+
 #if defined(__cplusplus) && defined(__clang__) && defined(__CUDA__)
 
 #include <limits.h>
@@ -621,13 +708,21 @@ cudaError_t cudaThreadSetCacheConfig(cudaFuncCache cacheConfig);
 #endif
 
 // Optional workaround for CUDA codepaths that reference device-side printf in
-// unreachable branches while building with -nocudalib.
-#if defined(__CUDA_ARCH__) && defined(CUMETAL_NO_DEVICE_PRINTF)
-#ifdef printf
-#undef printf
+// unreachable branches while building with -nocudalib. Use a device stub
+// instead of a macro so system headers can still declare host-side printf.
+#if defined(CUMETAL_NO_DEVICE_PRINTF)
+template <typename... Args>
+static __device__ __forceinline__ int printf(const char*, Args...) {
+    return 0;
+}
 #endif
-#define printf(...) (0)
-#endif
+
+// Device-safe fallback for unqualified `isinf(...)` in CUDA sources when libc++
+// only surfaces host overloads in the current include order.
+template <typename T>
+static __device__ __forceinline__ int isinf(T x) {
+    return __builtin_isinf_sign(x) != 0;
+}
 
 static __host__ __forceinline__ int max(int a, int b) {
     return a > b ? a : b;
@@ -640,6 +735,12 @@ static __host__ __forceinline__ int min(int a, int b) {
 template <typename T>
 static __device__ __forceinline__ T __ldcs(const T* ptr) {
     return *ptr;
+}
+
+static __device__ __forceinline__ unsigned int __cvta_generic_to_shared(const void* generic_ptr) {
+    unsigned int shared_ptr;
+    asm("cvta.to.shared.u32 %0, %1;" : "=r"(shared_ptr) : "l"(generic_ptr));
+    return shared_ptr;
 }
 
 // __ldg: load via read-only (texture) cache. On UMA Apple Silicon there is no
@@ -767,47 +868,128 @@ static __device__ __forceinline__ unsigned int atomicXor(unsigned int* ptr, unsi
 }
 
 // ── Synchronization, memory fences, bit ops, FMA ────────────────────────────
-// Only define when clang's __clang_cuda_device_functions.h hasn't already
-// provided these (it uses the guard __CLANG_CUDA_DEVICE_FUNCTIONS_H__).
-#ifndef __CLANG_CUDA_DEVICE_FUNCTIONS_H__
+// Sync shuffle/vote/reduce wrappers live in clang's __clang_cuda_intrinsics.h.
+// When building with -nocudainc we don't include that header, so provide them.
+#ifndef __CLANG_CUDA_INTRINSICS_H__
 
 static __device__ __forceinline__ void __syncwarp(unsigned int mask = 0xffffffffu) {
     __nvvm_bar_warp_sync(mask);
 }
 
+static __device__ __forceinline__ int __cumetal_shfl_clamp(int width, int lane_mask) {
+    return ((32 - width) << 8) | lane_mask;
+}
+
+static __device__ __forceinline__ int __cumetal_shfl_sync_idx_i32(unsigned int mask, int val, int srcLane, int clamp) {
+    int out;
+    asm volatile("shfl.sync.idx.b32 %0, %1, %2, %3, %4;"
+                 : "=r"(out)
+                 : "r"(val), "r"(srcLane), "r"(clamp), "r"(mask));
+    return out;
+}
+
+static __device__ __forceinline__ int __cumetal_shfl_sync_down_i32(unsigned int mask, int val, unsigned int delta, int clamp) {
+    int out;
+    asm volatile("shfl.sync.down.b32 %0, %1, %2, %3, %4;"
+                 : "=r"(out)
+                 : "r"(val), "r"(delta), "r"(clamp), "r"(mask));
+    return out;
+}
+
+static __device__ __forceinline__ int __cumetal_shfl_sync_up_i32(unsigned int mask, int val, unsigned int delta, int clamp) {
+    int out;
+    asm volatile("shfl.sync.up.b32 %0, %1, %2, %3, %4;"
+                 : "=r"(out)
+                 : "r"(val), "r"(delta), "r"(clamp), "r"(mask));
+    return out;
+}
+
+static __device__ __forceinline__ float __cumetal_shfl_i32_bits_to_f32(int bits) {
+    float out;
+    __builtin_memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+static __device__ __forceinline__ int __cumetal_shfl_f32_bits_to_i32(float val) {
+    int bits;
+    __builtin_memcpy(&bits, &val, sizeof(bits));
+    return bits;
+}
+
+static __device__ __forceinline__ int __cumetal_shfl_u32_bits_to_i32(unsigned int val) {
+    int bits;
+    __builtin_memcpy(&bits, &val, sizeof(bits));
+    return bits;
+}
+
+static __device__ __forceinline__ unsigned int __cumetal_shfl_i32_bits_to_u32(int bits) {
+    unsigned int out;
+    __builtin_memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
 // Warp shuffle intrinsics (spec §5.3).
 // On Apple Silicon the full warp participates; partial masks are conservative no-ops.
 static __device__ __forceinline__ int __shfl_sync(unsigned int mask, int val, int srcLane, int width = 32) {
-    (void)mask; (void)width;
-    return __nvvm_shfl_idx_i32(val, srcLane, 0x1f);
+    return __cumetal_shfl_sync_idx_i32(mask, val, srcLane, __cumetal_shfl_clamp(width, 0x1f));
 }
 static __device__ __forceinline__ float __shfl_sync(unsigned int mask, float val, int srcLane, int width = 32) {
-    (void)mask; (void)width;
-    return __nvvm_shfl_idx_f32(val, srcLane, 0x1f);
+    const int out_bits = __cumetal_shfl_sync_idx_i32(mask, __cumetal_shfl_f32_bits_to_i32(val), srcLane,
+                                                     __cumetal_shfl_clamp(width, 0x1f));
+    return __cumetal_shfl_i32_bits_to_f32(out_bits);
+}
+static __device__ __forceinline__ unsigned int __shfl_sync(unsigned int mask, unsigned int val, int srcLane, int width = 32) {
+    const int out_bits = __cumetal_shfl_sync_idx_i32(mask, __cumetal_shfl_u32_bits_to_i32(val), srcLane,
+                                                     __cumetal_shfl_clamp(width, 0x1f));
+    return __cumetal_shfl_i32_bits_to_u32(out_bits);
 }
 static __device__ __forceinline__ int __shfl_down_sync(unsigned int mask, int val, unsigned int delta, int width = 32) {
-    (void)mask; (void)width;
-    return __nvvm_shfl_down_i32(val, delta, 0x1f);
+    return __cumetal_shfl_sync_down_i32(mask, val, delta, __cumetal_shfl_clamp(width, 0x1f));
 }
 static __device__ __forceinline__ float __shfl_down_sync(unsigned int mask, float val, unsigned int delta, int width = 32) {
-    (void)mask; (void)width;
-    return __nvvm_shfl_down_f32(val, delta, 0x1f);
+    const int out_bits = __cumetal_shfl_sync_down_i32(mask, __cumetal_shfl_f32_bits_to_i32(val), delta,
+                                                      __cumetal_shfl_clamp(width, 0x1f));
+    return __cumetal_shfl_i32_bits_to_f32(out_bits);
+}
+static __device__ __forceinline__ unsigned int __shfl_down_sync(unsigned int mask, unsigned int val, unsigned int delta, int width = 32) {
+    const int out_bits = __cumetal_shfl_sync_down_i32(mask, __cumetal_shfl_u32_bits_to_i32(val), delta,
+                                                      __cumetal_shfl_clamp(width, 0x1f));
+    return __cumetal_shfl_i32_bits_to_u32(out_bits);
 }
 static __device__ __forceinline__ int __shfl_up_sync(unsigned int mask, int val, unsigned int delta, int width = 32) {
-    (void)mask; (void)width;
-    return __nvvm_shfl_up_i32(val, delta, 0);
+    return __cumetal_shfl_sync_up_i32(mask, val, delta, __cumetal_shfl_clamp(width, 0));
 }
 static __device__ __forceinline__ float __shfl_up_sync(unsigned int mask, float val, unsigned int delta, int width = 32) {
-    (void)mask; (void)width;
-    return __nvvm_shfl_up_f32(val, delta, 0);
+    const int out_bits = __cumetal_shfl_sync_up_i32(mask, __cumetal_shfl_f32_bits_to_i32(val), delta,
+                                                    __cumetal_shfl_clamp(width, 0));
+    return __cumetal_shfl_i32_bits_to_f32(out_bits);
+}
+static __device__ __forceinline__ unsigned int __shfl_up_sync(unsigned int mask, unsigned int val, unsigned int delta, int width = 32) {
+    const int out_bits = __cumetal_shfl_sync_up_i32(mask, __cumetal_shfl_u32_bits_to_i32(val), delta,
+                                                    __cumetal_shfl_clamp(width, 0));
+    return __cumetal_shfl_i32_bits_to_u32(out_bits);
 }
 static __device__ __forceinline__ int __shfl_xor_sync(unsigned int mask, int val, int laneMask, int width = 32) {
-    (void)mask; (void)width;
-    return __nvvm_shfl_bfly_i32(val, laneMask, 0x1f);
+    unsigned int laneid;
+    asm("mov.u32 %0, %%laneid;" : "=r"(laneid));
+    const int srcLane = static_cast<int>(laneid) ^ laneMask;
+    return __cumetal_shfl_sync_idx_i32(mask, val, srcLane, __cumetal_shfl_clamp(width, 0x1f));
 }
 static __device__ __forceinline__ float __shfl_xor_sync(unsigned int mask, float val, int laneMask, int width = 32) {
-    (void)mask; (void)width;
-    return __nvvm_shfl_bfly_f32(val, laneMask, 0x1f);
+    unsigned int laneid;
+    asm("mov.u32 %0, %%laneid;" : "=r"(laneid));
+    const int srcLane = static_cast<int>(laneid) ^ laneMask;
+    const int out_bits = __cumetal_shfl_sync_idx_i32(mask, __cumetal_shfl_f32_bits_to_i32(val), srcLane,
+                                                     __cumetal_shfl_clamp(width, 0x1f));
+    return __cumetal_shfl_i32_bits_to_f32(out_bits);
+}
+static __device__ __forceinline__ unsigned int __shfl_xor_sync(unsigned int mask, unsigned int val, int laneMask, int width = 32) {
+    unsigned int laneid;
+    asm("mov.u32 %0, %%laneid;" : "=r"(laneid));
+    const int srcLane = static_cast<int>(laneid) ^ laneMask;
+    const int out_bits = __cumetal_shfl_sync_idx_i32(mask, __cumetal_shfl_u32_bits_to_i32(val), srcLane,
+                                                     __cumetal_shfl_clamp(width, 0x1f));
+    return __cumetal_shfl_i32_bits_to_u32(out_bits);
 }
 
 // Warp vote intrinsics (spec §5.3).
@@ -823,10 +1005,6 @@ static __device__ __forceinline__ unsigned int __ballot_sync(unsigned int mask, 
     (void)mask;
     return __nvvm_vote_ballot(predicate);
 }
-
-static __device__ __forceinline__ void __threadfence(void) { __nvvm_membar_gl(); }
-static __device__ __forceinline__ void __threadfence_block(void) { __nvvm_membar_cta(); }
-static __device__ __forceinline__ void __threadfence_system(void) { __nvvm_membar_sys(); }
 
 static __device__ __forceinline__ unsigned int __activemask(void) {
     return __nvvm_activemask();
@@ -856,44 +1034,75 @@ static __device__ __forceinline__ unsigned int __lanemask_ge(void) {
 }
 
 // Warp-wide reduction intrinsics (Ampere+, __reduce_*_sync).
-// On Apple Silicon, use NVVM simdgroup reduce builtins.
+// Implement via warp shuffles for broad clang/PTX compatibility.
 static __device__ __forceinline__ unsigned int __reduce_add_sync(unsigned int mask, unsigned int val) {
-    (void)mask;
-    return __nvvm_redux_sync_add(val, mask);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        val += __shfl_xor_sync(mask, val, offset);
+    }
+    return val;
 }
 static __device__ __forceinline__ int __reduce_add_sync(unsigned int mask, int val) {
-    (void)mask;
-    return static_cast<int>(__nvvm_redux_sync_add(static_cast<unsigned>(val), mask));
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        val += __shfl_xor_sync(mask, val, offset);
+    }
+    return val;
 }
 static __device__ __forceinline__ unsigned int __reduce_and_sync(unsigned int mask, unsigned int val) {
-    (void)mask;
-    return __nvvm_redux_sync_and(val, mask);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        val &= __shfl_xor_sync(mask, val, offset);
+    }
+    return val;
 }
 static __device__ __forceinline__ unsigned int __reduce_or_sync(unsigned int mask, unsigned int val) {
-    (void)mask;
-    return __nvvm_redux_sync_or(val, mask);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        val |= __shfl_xor_sync(mask, val, offset);
+    }
+    return val;
 }
 static __device__ __forceinline__ unsigned int __reduce_xor_sync(unsigned int mask, unsigned int val) {
-    (void)mask;
-    return __nvvm_redux_sync_xor(val, mask);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        val ^= __shfl_xor_sync(mask, val, offset);
+    }
+    return val;
 }
 static __device__ __forceinline__ unsigned int __reduce_min_sync(unsigned int mask, unsigned int val) {
-    (void)mask;
-    return __nvvm_redux_sync_umin(val, mask);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        const unsigned int other = __shfl_xor_sync(mask, val, offset);
+        val = other < val ? other : val;
+    }
+    return val;
 }
 static __device__ __forceinline__ int __reduce_min_sync(unsigned int mask, int val) {
-    (void)mask;
-    return __nvvm_redux_sync_min(val, mask);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        const int other = __shfl_xor_sync(mask, val, offset);
+        val = other < val ? other : val;
+    }
+    return val;
 }
 static __device__ __forceinline__ unsigned int __reduce_max_sync(unsigned int mask, unsigned int val) {
-    (void)mask;
-    return __nvvm_redux_sync_umax(val, mask);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        const unsigned int other = __shfl_xor_sync(mask, val, offset);
+        val = other > val ? other : val;
+    }
+    return val;
 }
 static __device__ __forceinline__ int __reduce_max_sync(unsigned int mask, int val) {
-    (void)mask;
-    return __nvvm_redux_sync_max(val, mask);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        const int other = __shfl_xor_sync(mask, val, offset);
+        val = other > val ? other : val;
+    }
+    return val;
 }
 
+#endif  // !__CLANG_CUDA_INTRINSICS_H__
+
+// Only define when clang's __clang_cuda_device_functions.h hasn't already
+// provided these (it uses the guard __CLANG_CUDA_DEVICE_FUNCTIONS_H__).
+#ifndef __CLANG_CUDA_DEVICE_FUNCTIONS_H__
+
+static __device__ __forceinline__ void __threadfence(void) { __nvvm_membar_gl(); }
+static __device__ __forceinline__ void __threadfence_block(void) { __nvvm_membar_cta(); }
+static __device__ __forceinline__ void __threadfence_system(void) { __nvvm_membar_sys(); }
 
 // Bit manipulation intrinsics
 static __device__ __forceinline__ int __popc(unsigned int x) {

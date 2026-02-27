@@ -451,12 +451,15 @@ cudaError_t check_command_buffer_status(id<MTLCommandBuffer> command_buffer, std
 
     NSError* command_error = [command_buffer error];
     const cudaError_t mapped_error = map_command_buffer_error(command_error);
-    if (error_message != nullptr) {
-        *error_message = "command buffer failed";
-        if (command_error != nil) {
-            *error_message += " (" + std::string([[command_error localizedDescription] UTF8String]) + ")";
-        }
+    std::string msg = "command buffer failed";
+    if (command_error != nil) {
+        msg += " (" + std::string([[command_error localizedDescription] UTF8String]) + ")";
     }
+    if (error_message != nullptr) {
+        *error_message = msg;
+    }
+    // Always log command buffer failures to stderr so they are visible.
+    std::fprintf(stderr, "cumetal: MTL command buffer error: %s\n", msg.c_str());
     return mapped_error;
 }
 

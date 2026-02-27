@@ -239,6 +239,9 @@ exec "\${REAL_CLANG}" \\
     -nocudainc -nocudalib \\
     -I"\${CUMETAL_API}" \\
     -include cuda_runtime.h \\
+    -DCUMETAL_NO_DEVICE_PRINTF=1 \\
+    -DCUDA_VERSION=11060 \\
+    -DCUDART_VERSION=11060 \\
     -D__CUDACC__=1 \\
     -D__NVCC__=1 \\
     -Wno-pass-failed \\
@@ -270,6 +273,9 @@ cmake -S "${LLAMA_DIR}" -B "${LLAMA_BUILD}" \
     -DLLAMA_NATIVE=OFF \
     -DLLAMA_BUILD_TESTS=OFF \
     -DLLAMA_BUILD_EXAMPLES=ON \
+    -DGGML_CUDA_GRAPHS=OFF \
+    -DGGML_CUDA_NO_VMM=ON \
+    -DGGML_CUDA_FORCE_CUBLAS=ON \
     -DBUILD_SHARED_LIBS=OFF \
     2>&1
 

@@ -43,9 +43,9 @@ struct __nv_bfloat16 {
     uint16_t __x;
 
     __host__ __device__ __forceinline__ __nv_bfloat16() = default;
-    __host__ __device__ __forceinline__ explicit __nv_bfloat16(float f)
+    __host__ __device__ __forceinline__ __nv_bfloat16(float f)
         : __x(__cumetal_float_to_bf16_bits(f)) {}
-    __host__ __device__ __forceinline__ explicit operator float() const {
+    __host__ __device__ __forceinline__ operator float() const {
         return __cumetal_bf16_bits_to_float(__x);
     }
 };
