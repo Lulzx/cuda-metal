@@ -494,13 +494,52 @@ void parse_instructions(const std::string& body,
         if (line_text.empty()) {
             continue;
         }
+        // PTX allows lexical scope braces to appear on the same line as
+        // declarations/instructions. Strip standalone leading/trailing braces so
+        // lines like "{ .reg .b32 %r<4>;" parse correctly.
+        bool stripped_brace = false;
+        do {
+            stripped_brace = false;
+            if (!line_text.empty() && (line_text.front() == '{' || line_text.front() == '}')) {
+                line_text = trim(line_text.substr(1));
+                stripped_brace = true;
+            }
+            if (!line_text.empty() && (line_text.back() == '{' || line_text.back() == '}')) {
+                line_text.pop_back();
+                line_text = trim(line_text);
+                stripped_brace = true;
+            }
+        } while (stripped_brace);
+        if (line_text.empty()) {
+            continue;
+        }
         if (line_text == "{" || line_text == "}") {
             continue;
         }
-        if (line_text.back() == ':') {
+
+        // PTX sometimes emits inline lexical declarations followed by a real
+        // instruction on the same source line:
+        //   { .reg .b16 tmp; mov.b32 {tmp, %rs35}, %r1; }
+        // Consume leading directives and keep the trailing instruction.
+        while (!line_text.empty() && line_text[0] == '.') {
+            const std::size_t semi = line_text.find(';');
+            if (semi == std::string::npos) {
+                line_text.clear();
+                break;
+            }
+            line_text = trim(line_text.substr(semi + 1));
+        }
+        if (line_text.empty()) {
             continue;
         }
-        if (!line_text.empty() && line_text[0] == '.') {
+
+        if (line_text.back() == ':') {
+            EntryFunction::Instruction label;
+            label.line = current_line;
+            label.opcode = "ptx.label";
+            label.operands.push_back(trim(line_text.substr(0, line_text.size() - 1)));
+            label.supported = true;
+            entry->instructions.push_back(std::move(label));
             continue;
         }
         if (!line_text.empty() && line_text.back() == ';') {

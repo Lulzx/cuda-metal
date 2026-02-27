@@ -7,6 +7,9 @@
 #ifndef CUDA_VERSION
 #define CUDA_VERSION 12000
 #endif
+#ifndef CUDART_VERSION
+#define CUDART_VERSION CUDA_VERSION
+#endif
 
 #ifndef __host__
 #define __host__ __attribute__((host))
@@ -130,6 +133,10 @@ typedef struct { float x, y, z; } float3;
 typedef struct { double x, y; }  double2;
 typedef struct { double x, y, z; } double3;
 typedef struct { double x, y, z, w; } double4;
+
+#ifndef CUMETAL_CUDA_VECTOR_TYPES_DEFINED
+#define CUMETAL_CUDA_VECTOR_TYPES_DEFINED 1
+#endif
 
 #ifdef __cplusplus
 static inline constexpr char2   make_char2(char x, char y)   { return {x, y}; }
@@ -613,6 +620,15 @@ cudaError_t cudaThreadSetCacheConfig(cudaFuncCache cacheConfig);
 #define assert(expr) ((void)0)
 #endif
 
+// Optional workaround for CUDA codepaths that reference device-side printf in
+// unreachable branches while building with -nocudalib.
+#if defined(__CUDA_ARCH__) && defined(CUMETAL_NO_DEVICE_PRINTF)
+#ifdef printf
+#undef printf
+#endif
+#define printf(...) (0)
+#endif
+
 static __host__ __forceinline__ int max(int a, int b) {
     return a > b ? a : b;
 }
@@ -843,39 +859,39 @@ static __device__ __forceinline__ unsigned int __lanemask_ge(void) {
 // On Apple Silicon, use NVVM simdgroup reduce builtins.
 static __device__ __forceinline__ unsigned int __reduce_add_sync(unsigned int mask, unsigned int val) {
     (void)mask;
-    return __nvvm_redux_sync_add(val);
+    return __nvvm_redux_sync_add(val, mask);
 }
 static __device__ __forceinline__ int __reduce_add_sync(unsigned int mask, int val) {
     (void)mask;
-    return static_cast<int>(__nvvm_redux_sync_add(static_cast<unsigned>(val)));
+    return static_cast<int>(__nvvm_redux_sync_add(static_cast<unsigned>(val), mask));
 }
 static __device__ __forceinline__ unsigned int __reduce_and_sync(unsigned int mask, unsigned int val) {
     (void)mask;
-    return __nvvm_redux_sync_and(val);
+    return __nvvm_redux_sync_and(val, mask);
 }
 static __device__ __forceinline__ unsigned int __reduce_or_sync(unsigned int mask, unsigned int val) {
     (void)mask;
-    return __nvvm_redux_sync_or(val);
+    return __nvvm_redux_sync_or(val, mask);
 }
 static __device__ __forceinline__ unsigned int __reduce_xor_sync(unsigned int mask, unsigned int val) {
     (void)mask;
-    return __nvvm_redux_sync_xor(val);
+    return __nvvm_redux_sync_xor(val, mask);
 }
 static __device__ __forceinline__ unsigned int __reduce_min_sync(unsigned int mask, unsigned int val) {
     (void)mask;
-    return __nvvm_redux_sync_umin(val);
+    return __nvvm_redux_sync_umin(val, mask);
 }
 static __device__ __forceinline__ int __reduce_min_sync(unsigned int mask, int val) {
     (void)mask;
-    return __nvvm_redux_sync_min(val);
+    return __nvvm_redux_sync_min(val, mask);
 }
 static __device__ __forceinline__ unsigned int __reduce_max_sync(unsigned int mask, unsigned int val) {
     (void)mask;
-    return __nvvm_redux_sync_umax(val);
+    return __nvvm_redux_sync_umax(val, mask);
 }
 static __device__ __forceinline__ int __reduce_max_sync(unsigned int mask, int val) {
     (void)mask;
-    return __nvvm_redux_sync_max(val);
+    return __nvvm_redux_sync_max(val, mask);
 }
 
 
@@ -967,5 +983,13 @@ static __device__ __forceinline__ float __frcp_rn(float x){ return 1.0f / x; }
 static __device__ __forceinline__ float __fsqrt_rn(float x){ return __builtin_sqrtf(x); }
 
 #endif  // !__CLANG_CUDA_DEVICE_FUNCTIONS_H__
+
+// Integer dot-product intrinsic (4x int8 -> int32 accumulate). Clang's CUDA
+// headers may not provide __dp4a in CUDA mode without NVIDIA headers.
+static __device__ __forceinline__ int __dp4a(int a, int b, int c) {
+    const int8_t* a8 = reinterpret_cast<const int8_t*>(&a);
+    const int8_t* b8 = reinterpret_cast<const int8_t*>(&b);
+    return c + a8[0] * b8[0] + a8[1] * b8[1] + a8[2] * b8[2] + a8[3] * b8[3];
+}
 
 #endif  // device code section
