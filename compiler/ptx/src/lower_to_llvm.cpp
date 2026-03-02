@@ -2382,6 +2382,14 @@ class GenericLlvmEmitter {
             base_i64 = *cst;
         } else if (const auto local = resolve_local_symbol_address(os, mem.base)) {
             base_i64 = *local;
+        } else if (addr_space == 3) {
+            // Named .shared/.extern .shared symbol (e.g. extern __shared__ float sdata[]).
+            // All shared symbols map to offset 0 within the threadgroup buffer.
+            if (const auto tg = resolve_threadgroup_symbol_address(os, mem.base)) {
+                base_i64 = *tg;
+            } else {
+                return fail(instr, "ld/st.shared: cannot resolve shared symbol address");
+            }
         } else {
             return fail(instr, "memory base must be register or param/local/const symbol");
         }

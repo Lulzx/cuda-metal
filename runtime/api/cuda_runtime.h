@@ -687,6 +687,13 @@ static inline cudaError_t cudaMallocManaged(void** dev_ptr, size_t size) {
     return ::cudaMallocManaged(dev_ptr, size, 0);
 }
 
+// Typed cudaMalloc overload — matches the real CUDA SDK signature so that
+// code written as `cudaMalloc(&d_ptr, size)` compiles without explicit casts.
+template <typename T>
+static inline cudaError_t cudaMalloc(T** dev_ptr, size_t size) {
+    return ::cudaMalloc(reinterpret_cast<void**>(dev_ptr), size);
+}
+
 static inline cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event) {
     return ::cudaStreamWaitEvent(stream, event, 0);
 }
