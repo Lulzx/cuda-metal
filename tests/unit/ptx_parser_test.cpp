@@ -76,7 +76,7 @@ L_done:
                 "vector_add param0 name")) {
         return 1;
     }
-    if (!expect(parsed.module.entries[0].instructions.size() == 5,
+    if (!expect(parsed.module.entries[0].instructions.size() == 6,
                 "vector_add instruction count")) {
         return 1;
     }

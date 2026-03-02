@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -476,6 +477,117 @@ std::optional<std::int64_t> parse_signed_immediate(std::string token) {
     }
 }
 
+struct ParsedConstB8Array {
+    std::string symbol;
+    std::vector<std::uint8_t> bytes;
+    int align = 1;
+};
+
+struct ConstSymbolInfo {
+    std::string llvm_global_name;
+    std::size_t byte_count = 0;
+};
+
+std::string quote_llvm_global_name(const std::string& symbol) {
+    std::string out;
+    out.reserve(symbol.size() + 4);
+    out.push_back('@');
+    out.push_back('"');
+    for (const char c : symbol) {
+        if (c == '"' || c == '\\') {
+            out.push_back('\\');
+        }
+        out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+}
+
+std::vector<ParsedConstB8Array> parse_ptx_const_b8_arrays(std::string_view ptx_text) {
+    std::vector<ParsedConstB8Array> out;
+    std::istringstream lines{std::string(ptx_text)};
+    std::string line;
+    while (std::getline(lines, line)) {
+        const std::string t = trim(line);
+        if (t.find(".const") == std::string::npos || t.find(".b8") == std::string::npos ||
+            t.find('{') == std::string::npos || t.find('}') == std::string::npos) {
+            continue;
+        }
+
+        int align = 1;
+        if (const std::size_t align_pos = t.find(".align"); align_pos != std::string::npos) {
+            std::size_t pos = align_pos + 6;
+            while (pos < t.size() && std::isspace(static_cast<unsigned char>(t[pos])) != 0) ++pos;
+            std::size_t end = pos;
+            while (end < t.size() && std::isdigit(static_cast<unsigned char>(t[end])) != 0) ++end;
+            if (end > pos) {
+                try {
+                    align = std::max(1, std::stoi(t.substr(pos, end - pos)));
+                } catch (...) {
+                    align = 1;
+                }
+            }
+        }
+
+        const std::size_t b8_pos = t.find(".b8");
+        if (b8_pos == std::string::npos) {
+            continue;
+        }
+        std::size_t sym_begin = b8_pos + 3;
+        while (sym_begin < t.size() && std::isspace(static_cast<unsigned char>(t[sym_begin])) != 0) ++sym_begin;
+        const std::size_t bracket_open = t.find('[', sym_begin);
+        const std::size_t bracket_close =
+            (bracket_open == std::string::npos) ? std::string::npos : t.find(']', bracket_open + 1);
+        if (bracket_open == std::string::npos || bracket_close == std::string::npos) {
+            continue;
+        }
+        const std::string symbol = trim(t.substr(sym_begin, bracket_open - sym_begin));
+        if (symbol.empty()) {
+            continue;
+        }
+
+        std::size_t declared_count = 0;
+        try {
+            declared_count = static_cast<std::size_t>(
+                std::stoull(trim(t.substr(bracket_open + 1, bracket_close - bracket_open - 1))));
+        } catch (...) {
+            continue;
+        }
+
+        const std::size_t brace_open = t.find('{', bracket_close);
+        const std::size_t brace_close = t.find('}', brace_open == std::string::npos ? 0 : brace_open + 1);
+        if (brace_open == std::string::npos || brace_close == std::string::npos || brace_close <= brace_open) {
+            continue;
+        }
+
+        const std::string init_text = t.substr(brace_open + 1, brace_close - brace_open - 1);
+        const std::vector<std::string> items = split_comma_list(init_text);
+        std::vector<std::uint8_t> bytes;
+        bytes.reserve(std::max(declared_count, items.size()));
+        for (const std::string& item : items) {
+            if (const auto v = parse_signed_immediate(item)) {
+                bytes.push_back(static_cast<std::uint8_t>(*v & 0xff));
+            }
+        }
+        if (bytes.size() < declared_count) {
+            bytes.resize(declared_count, 0);
+        } else if (declared_count > 0 && bytes.size() > declared_count) {
+            bytes.resize(declared_count);
+        }
+        if (bytes.empty()) {
+            continue;
+        }
+
+        out.push_back(ParsedConstB8Array{
+            .symbol = symbol,
+            .bytes = std::move(bytes),
+            .align = align,
+        });
+    }
+
+    return out;
+}
+
 struct ParsedMemOperand {
     bool ok = false;
     std::string base;
@@ -678,15 +790,16 @@ ParsedCvtTypes parse_cvt_types(const std::string& opcode) {
 }
 
 bool opcode_uses_float_math(const std::string& opcode) {
-    return opcode.find(".f32") != std::string::npos || opcode.find(".f64") != std::string::npos;
+    return parse_primary_type_from_opcode(opcode).kind == PtxTypeSpec::Kind::kFloat;
 }
 
 class GenericLlvmEmitter {
   public:
     GenericLlvmEmitter(const cumetal::ptx::EntryFunction& entry,
                       std::vector<ParamInfo>* params,
-                      std::vector<std::string>* arg_decls)
-        : entry_(entry), params_(params), arg_decls_(arg_decls) {
+                      std::vector<std::string>* arg_decls,
+                      const std::unordered_map<std::string, ConstSymbolInfo>* const_symbols)
+        : entry_(entry), params_(params), arg_decls_(arg_decls), const_symbols_(const_symbols) {
         if (params_ != nullptr) {
             for (std::size_t i = 0; i < params_->size(); ++i) {
                 param_by_raw_[(*params_)[i].raw_name] = static_cast<int>(i);
@@ -772,6 +885,7 @@ class GenericLlvmEmitter {
     const cumetal::ptx::EntryFunction& entry_;
     std::vector<ParamInfo>* params_ = nullptr;
     std::vector<std::string>* arg_decls_ = nullptr;
+    const std::unordered_map<std::string, ConstSymbolInfo>* const_symbols_ = nullptr;
 
     std::unordered_map<std::string, int> param_by_raw_;
     std::unordered_map<std::string, std::string> builtin_vector_arg_name_;
@@ -807,6 +921,12 @@ class GenericLlvmEmitter {
     std::string llvm_int_type(int bits) const {
         if (bits <= 1) return "i1";
         return "i" + std::to_string(bits);
+    }
+
+    std::string llvm_float_type(int bits) const {
+        if (bits == 16) return "half";
+        if (bits == 64) return "double";
+        return "float";
     }
 
     std::string slot_name_for_reg(const std::string& reg) {
@@ -857,7 +977,8 @@ class GenericLlvmEmitter {
                              const std::string& reg,
                              int bits_hint,
                              std::string value,
-                             int value_bits) {
+                             int value_bits,
+                             bool sign_extend = false) {
         RegSlot& slot = ensure_reg_slot(reg, bits_hint);
         if (value_bits <= 0) {
             value_bits = slot.bits;
@@ -865,7 +986,8 @@ class GenericLlvmEmitter {
         if (value_bits != slot.bits) {
             const std::string cast = next_tmp("cast");
             if (value_bits < slot.bits) {
-                os << "  " << cast << " = zext " << llvm_int_type(value_bits) << " " << value
+                os << "  " << cast << " = " << (sign_extend ? "sext " : "zext ")
+                   << llvm_int_type(value_bits) << " " << value
                    << " to " << llvm_int_type(slot.bits) << "\n";
             } else {
                 os << "  " << cast << " = trunc " << llvm_int_type(value_bits) << " " << value
@@ -964,6 +1086,40 @@ class GenericLlvmEmitter {
             out.type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = 64, .is_signed = false};
             out.bits = 64;
             return out;
+        }
+        // Decimal float literal (e.g. "0.0", "1.0", "-2.5") — convert via bit pattern
+        {
+            char* end_ptr = nullptr;
+            const float fval = std::strtof(operand.c_str(), &end_ptr);
+            if (end_ptr != operand.c_str() && (*end_ptr == '\0' || *end_ptr == 'f' || *end_ptr == 'F')) {
+                if (bits == 32) {
+                    uint32_t bp = 0;
+                    std::memcpy(&bp, &fval, 4);
+                    const std::string int_bits = next_tmp("dfimm");
+                    os << "  " << int_bits << " = or i32 0, " << static_cast<int32_t>(bp) << "\n";
+                    const std::string cast = next_tmp("dfimmbc");
+                    os << "  " << cast << " = bitcast i32 " << int_bits << " to float\n";
+                    Value out;
+                    out.ir = cast;
+                    out.type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = 32, .is_signed = false};
+                    out.bits = 32;
+                    return out;
+                }
+                if (bits == 64) {
+                    const double dval = static_cast<double>(fval);
+                    uint64_t bp64 = 0;
+                    std::memcpy(&bp64, &dval, 8);
+                    const std::string int_bits = next_tmp("dfimm64");
+                    os << "  " << int_bits << " = or i64 0, " << static_cast<int64_t>(bp64) << "\n";
+                    const std::string cast = next_tmp("dfimmbc64");
+                    os << "  " << cast << " = bitcast i64 " << int_bits << " to double\n";
+                    Value out;
+                    out.ir = cast;
+                    out.type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = 64, .is_signed = false};
+                    out.bits = 64;
+                    return out;
+                }
+            }
         }
         return std::nullopt;
     }
@@ -1245,6 +1401,24 @@ class GenericLlvmEmitter {
         return tmp;
     }
 
+    std::optional<std::string> resolve_const_symbol_address(std::ostringstream& os,
+                                                            const std::string& symbol) {
+        if (const_symbols_ == nullptr) {
+            return std::nullopt;
+        }
+        const auto it = const_symbols_->find(symbol);
+        if (it == const_symbols_->end() || it->second.byte_count == 0) {
+            return std::nullopt;
+        }
+        const std::string gep = next_tmp("const_gep");
+        os << "  " << gep << " = getelementptr inbounds [" << it->second.byte_count << " x i8], ["
+           << it->second.byte_count << " x i8] addrspace(2)* " << it->second.llvm_global_name
+           << ", i64 0, i64 0\n";
+        const std::string p2i = next_tmp("const_p2i");
+        os << "  " << p2i << " = ptrtoint i8 addrspace(2)* " << gep << " to i64\n";
+        return p2i;
+    }
+
     std::string pointer_add_bytes(std::ostringstream& os, const std::string& base_i64, std::int64_t offset) {
         if (offset == 0) {
             return base_i64;
@@ -1350,6 +1524,14 @@ class GenericLlvmEmitter {
             os << "  " << cast << " = trunc i64 " << *tg << " to " << llvm_int_type(bits) << "\n";
             return cast;
         }
+        if (const auto cst = resolve_const_symbol_address(os, operand)) {
+            if (bits == 64) {
+                return *cst;
+            }
+            const std::string cast = next_tmp("const_addrtr");
+            os << "  " << cast << " = trunc i64 " << *cst << " to " << llvm_int_type(bits) << "\n";
+            return cast;
+        }
         return std::nullopt;
     }
 
@@ -1409,6 +1591,8 @@ class GenericLlvmEmitter {
             reg_pointer_as_[dst] = PointerAs::kLocal;
         } else if (resolve_threadgroup_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kShared;
+        } else if (resolve_const_symbol_address(os, src).has_value()) {
+            reg_pointer_as_[dst] = PointerAs::kParam;
         }
         return emit_store_reg_bits(os, dst, dst_bits, *iv, src_bits);
     }
@@ -1482,7 +1666,7 @@ class GenericLlvmEmitter {
             return fail(instr, "float op source unsupported");
         }
         const std::string out = next_tmp("fbin");
-        os << "  " << out << " = " << llvm_op << " " << (ty.bits == 32 ? "float" : "double")
+        os << "  " << out << " = " << llvm_op << " " << llvm_float_type(ty.bits)
            << " " << a->ir << ", " << b->ir << "\n";
         Value v;
         v.ir = out;
@@ -1493,6 +1677,114 @@ class GenericLlvmEmitter {
             return fail(instr, "float op result encode failed");
         }
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
+    }
+
+    bool emit_mul(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (opcode_uses_float_math(instr.opcode)) {
+            return emit_binary_float_op(os, instr, "fmul");
+        }
+        if (instr.opcode.find(".hi.") == std::string::npos) {
+            return emit_binary_int_op(os, instr, "mul");
+        }
+        if (instr.operands.size() < 3 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "mul.hi requires dst, a, b");
+        }
+
+        const std::string& dst = instr.operands[0];
+        const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
+        const int bits = (ty.bits > 0) ? ty.bits : ensure_reg_slot(dst).bits;
+        if (bits <= 0 || bits > 64) {
+            return fail(instr, "mul.hi only supports <=64-bit integers");
+        }
+
+        auto a = emit_integer_from_any(os, instr.operands[1], bits, ty.is_signed);
+        auto b = emit_integer_from_any(os, instr.operands[2], bits, ty.is_signed);
+        if (!a || !b) {
+            return fail(instr, "mul.hi source unsupported");
+        }
+
+        if (bits == 64) {
+            if (ty.is_signed) {
+                return fail(instr, "mul.hi.s64 is not yet supported");
+            }
+            const std::string a_lo = next_tmp("mulhi_a_lo");
+            const std::string b_lo = next_tmp("mulhi_b_lo");
+            const std::string a_hi_sh = next_tmp("mulhi_a_hi_sh");
+            const std::string b_hi_sh = next_tmp("mulhi_b_hi_sh");
+            const std::string a_hi = next_tmp("mulhi_a_hi");
+            const std::string b_hi = next_tmp("mulhi_b_hi");
+            os << "  " << a_lo << " = trunc i64 " << *a << " to i32\n";
+            os << "  " << b_lo << " = trunc i64 " << *b << " to i32\n";
+            os << "  " << a_hi_sh << " = lshr i64 " << *a << ", 32\n";
+            os << "  " << b_hi_sh << " = lshr i64 " << *b << ", 32\n";
+            os << "  " << a_hi << " = trunc i64 " << a_hi_sh << " to i32\n";
+            os << "  " << b_hi << " = trunc i64 " << b_hi_sh << " to i32\n";
+
+            const std::string a_lo64 = next_tmp("mulhi_a_lo64");
+            const std::string b_lo64 = next_tmp("mulhi_b_lo64");
+            const std::string a_hi64 = next_tmp("mulhi_a_hi64");
+            const std::string b_hi64 = next_tmp("mulhi_b_hi64");
+            os << "  " << a_lo64 << " = zext i32 " << a_lo << " to i64\n";
+            os << "  " << b_lo64 << " = zext i32 " << b_lo << " to i64\n";
+            os << "  " << a_hi64 << " = zext i32 " << a_hi << " to i64\n";
+            os << "  " << b_hi64 << " = zext i32 " << b_hi << " to i64\n";
+
+            const std::string p0 = next_tmp("mulhi_p0");
+            const std::string p1 = next_tmp("mulhi_p1");
+            const std::string p2 = next_tmp("mulhi_p2");
+            const std::string p3 = next_tmp("mulhi_p3");
+            os << "  " << p0 << " = mul i64 " << a_lo64 << ", " << b_lo64 << "\n";
+            os << "  " << p1 << " = mul i64 " << a_lo64 << ", " << b_hi64 << "\n";
+            os << "  " << p2 << " = mul i64 " << a_hi64 << ", " << b_lo64 << "\n";
+            os << "  " << p3 << " = mul i64 " << a_hi64 << ", " << b_hi64 << "\n";
+
+            const std::string carry0 = next_tmp("mulhi_c0");
+            os << "  " << carry0 << " = lshr i64 " << p0 << ", 32\n";
+            const std::string sum12 = next_tmp("mulhi_s12");
+            os << "  " << sum12 << " = add i64 " << p1 << ", " << p2 << "\n";
+            const std::string ov1 = next_tmp("mulhi_ov1");
+            os << "  " << ov1 << " = icmp ult i64 " << sum12 << ", " << p1 << "\n";
+            const std::string ov1i = next_tmp("mulhi_ov1i");
+            os << "  " << ov1i << " = zext i1 " << ov1 << " to i64\n";
+
+            const std::string sum = next_tmp("mulhi_sum");
+            os << "  " << sum << " = add i64 " << sum12 << ", " << carry0 << "\n";
+            const std::string ov2 = next_tmp("mulhi_ov2");
+            os << "  " << ov2 << " = icmp ult i64 " << sum << ", " << sum12 << "\n";
+            const std::string ov2i = next_tmp("mulhi_ov2i");
+            os << "  " << ov2i << " = zext i1 " << ov2 << " to i64\n";
+
+            const std::string carry = next_tmp("mulhi_carry");
+            os << "  " << carry << " = add i64 " << ov1i << ", " << ov2i << "\n";
+            const std::string mid_hi = next_tmp("mulhi_mid_hi");
+            os << "  " << mid_hi << " = lshr i64 " << sum << ", 32\n";
+            const std::string carry_sh = next_tmp("mulhi_carry_sh");
+            os << "  " << carry_sh << " = shl i64 " << carry << ", 32\n";
+
+            const std::string hi0 = next_tmp("mulhi_hi0");
+            os << "  " << hi0 << " = add i64 " << p3 << ", " << mid_hi << "\n";
+            const std::string hi = next_tmp("mulhi_hi");
+            os << "  " << hi << " = add i64 " << hi0 << ", " << carry_sh << "\n";
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, hi, 64);
+        }
+
+        const int wide_bits = bits * 2;
+        const std::string wide_ty = llvm_int_type(wide_bits);
+        const std::string a_w = next_tmp("mulhi_a");
+        const std::string b_w = next_tmp("mulhi_b");
+        os << "  " << a_w << " = " << (ty.is_signed ? "sext " : "zext ")
+           << llvm_int_type(bits) << " " << *a << " to " << wide_ty << "\n";
+        os << "  " << b_w << " = " << (ty.is_signed ? "sext " : "zext ")
+           << llvm_int_type(bits) << " " << *b << " to " << wide_ty << "\n";
+
+        const std::string prod = next_tmp("mulhi_prod");
+        os << "  " << prod << " = mul " << wide_ty << " " << a_w << ", " << b_w << "\n";
+        const std::string shr = next_tmp("mulhi_shr");
+        os << "  " << shr << " = " << (ty.is_signed ? "ashr " : "lshr ")
+           << wide_ty << " " << prod << ", " << bits << "\n";
+        const std::string hi = next_tmp("mulhi_hi");
+        os << "  " << hi << " = trunc " << wide_ty << " " << shr << " to " << llvm_int_type(bits) << "\n";
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, hi, bits);
     }
 
     bool emit_mad_or_fma(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
@@ -1509,8 +1801,8 @@ class GenericLlvmEmitter {
             if (!a || !b || !c) return fail(instr, "mad/fma float source unsupported");
             const std::string mul = next_tmp("fmul");
             const std::string add = next_tmp("fadd");
-            os << "  " << mul << " = fmul " << (bits == 32 ? "float" : "double") << " " << a->ir << ", " << b->ir << "\n";
-            os << "  " << add << " = fadd " << (bits == 32 ? "float" : "double") << " " << mul << ", " << c->ir << "\n";
+            os << "  " << mul << " = fmul " << llvm_float_type(bits) << " " << a->ir << ", " << b->ir << "\n";
+            os << "  " << add << " = fadd " << llvm_float_type(bits) << " " << mul << ", " << c->ir << "\n";
             Value v{.ir = add, .type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = bits}, .bits = bits};
             auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
             if (!bitsv) return fail(instr, "mad/fma float encode failed");
@@ -1528,6 +1820,48 @@ class GenericLlvmEmitter {
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, add, bits);
     }
 
+    bool emit_minmax(std::ostringstream& os,
+                     const cumetal::ptx::EntryFunction::Instruction& instr,
+                     bool is_min) {
+        if (instr.operands.size() < 3 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "min/max requires dst, a, b");
+        }
+        const std::string& dst = instr.operands[0];
+        const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
+
+        if (opcode_uses_float_math(instr.opcode)) {
+            const int bits = (ty.bits > 0) ? ty.bits : 32;
+            auto a = decode_float_operand(os, instr.operands[1], bits);
+            auto b = decode_float_operand(os, instr.operands[2], bits);
+            if (!a || !b) return fail(instr, "min/max float source unsupported");
+            const std::string fty = (bits == 64) ? "double" : (bits == 16 ? "half" : "float");
+            const std::string cmp = next_tmp(is_min ? "fmin_cmp" : "fmax_cmp");
+            const std::string sel = next_tmp(is_min ? "fmin_sel" : "fmax_sel");
+            os << "  " << cmp << " = fcmp " << (is_min ? "olt" : "ogt") << " "
+               << fty << " " << a->ir << ", " << b->ir << "\n";
+            os << "  " << sel << " = select i1 " << cmp << ", " << fty << " " << a->ir
+               << ", " << fty << " " << b->ir << "\n";
+            Value v{.ir = sel, .type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = bits}, .bits = bits};
+            auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
+            if (!bitsv) return fail(instr, "min/max float encode failed");
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
+        }
+
+        const int bits = (ty.bits > 0) ? ty.bits : ensure_reg_slot(dst).bits;
+        auto a = emit_integer_from_any(os, instr.operands[1], bits, ty.is_signed);
+        auto b = emit_integer_from_any(os, instr.operands[2], bits, ty.is_signed);
+        if (!a || !b) return fail(instr, "min/max int source unsupported");
+        const std::string cmp = next_tmp(is_min ? "imin_cmp" : "imax_cmp");
+        const std::string sel = next_tmp(is_min ? "imin_sel" : "imax_sel");
+        const std::string cc = is_min ? (ty.is_signed ? "slt" : "ult")
+                                      : (ty.is_signed ? "sgt" : "ugt");
+        os << "  " << cmp << " = icmp " << cc << " " << llvm_int_type(bits)
+           << " " << *a << ", " << *b << "\n";
+        os << "  " << sel << " = select i1 " << cmp << ", " << llvm_int_type(bits) << " "
+           << *a << ", " << llvm_int_type(bits) << " " << *b << "\n";
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, sel, bits);
+    }
+
     bool emit_neg(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
         if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
             return fail(instr, "neg requires dst, src");
@@ -1535,10 +1869,11 @@ class GenericLlvmEmitter {
         const std::string& dst = instr.operands[0];
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         if (opcode_uses_float_math(instr.opcode)) {
-            auto a = decode_float_operand(os, instr.operands[1], ty.bits == 64 ? 64 : 32);
+            const int bits = (ty.bits > 0) ? ty.bits : 32;
+            auto a = decode_float_operand(os, instr.operands[1], bits);
             if (!a) return fail(instr, "neg float source unsupported");
             const std::string out = next_tmp("fneg");
-            os << "  " << out << " = fneg " << (a->type.bits == 32 ? "float" : "double") << " " << a->ir << "\n";
+            os << "  " << out << " = fneg " << llvm_float_type(a->type.bits) << " " << a->ir << "\n";
             Value v{.ir = out, .type = a->type, .bits = a->bits};
             auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
             if (!bitsv) return fail(instr, "neg float encode failed");
@@ -1550,6 +1885,20 @@ class GenericLlvmEmitter {
         const std::string out = next_tmp("ineg");
         os << "  " << out << " = sub " << llvm_int_type(bits) << " 0, " << *a << "\n";
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, out, bits);
+    }
+
+    bool emit_not(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "not requires dst, src");
+        }
+        const std::string& dst = instr.operands[0];
+        const int bits = ensure_reg_slot(dst).bits;
+        auto a = emit_integer_from_any(os, instr.operands[1], bits, false);
+        if (!a) return fail(instr, "not source unsupported");
+        // PTX `not` is bitwise complement: dst = ~src = xor(src, all-ones)
+        const std::string out = next_tmp("bnot");
+        os << "  " << out << " = xor " << llvm_int_type(bits) << " " << *a << ", -1\n";
+        return emit_store_reg_bits(os, dst, bits, out, bits);
     }
 
     bool emit_rcp(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
@@ -1598,8 +1947,9 @@ class GenericLlvmEmitter {
             os << "  " << b_i16 << " = bitcast half " << b_h << " to i16\n";
             const std::string lo_i32 = next_tmp("cvtf16x2_lo");
             const std::string hi_i32 = next_tmp("cvtf16x2_hi");
-            os << "  " << lo_i32 << " = zext i16 " << a_i16 << " to i32\n";
-            os << "  " << hi_i32 << " = zext i16 " << b_i16 << " to i32\n";
+            // PTX f16x2 packs operand 1 into high lane and operand 2 into low lane.
+            os << "  " << lo_i32 << " = zext i16 " << b_i16 << " to i32\n";
+            os << "  " << hi_i32 << " = zext i16 " << a_i16 << " to i32\n";
             const std::string hi_sh = next_tmp("cvtf16x2_hish");
             os << "  " << hi_sh << " = shl i32 " << hi_i32 << ", 16\n";
             const std::string packed = next_tmp("cvtf16x2_pack");
@@ -1616,8 +1966,29 @@ class GenericLlvmEmitter {
         Value src_value;
         if (cvt.src.kind == PtxTypeSpec::Kind::kFloat) {
             auto fv = decode_float_operand(os, src, cvt.src.bits);
-            if (!fv) return fail(instr, "cvt float source unsupported");
-            src_value = *fv;
+            if (!fv && is_register_name(src)) {
+                // Float source in a wider integer register (e.g., cvt.f32.f16 with %r src).
+                // Load the raw bits, truncate to the source width, then bitcast to float.
+                const std::string raw = emit_load_reg_bits(os, src);
+                const int slot_bits = ensure_reg_slot(src).bits;
+                std::string trunc_bits = raw;
+                if (slot_bits > cvt.src.bits) {
+                    trunc_bits = next_tmp("cvt_srct");
+                    os << "  " << trunc_bits << " = trunc " << llvm_int_type(slot_bits) << " "
+                       << raw << " to " << llvm_int_type(cvt.src.bits) << "\n";
+                }
+                const std::string fty_src = (cvt.src.bits == 16) ? "half"
+                                          : (cvt.src.bits == 32) ? "float" : "double";
+                const std::string bc = next_tmp("cvt_srcbc");
+                os << "  " << bc << " = bitcast " << llvm_int_type(cvt.src.bits) << " "
+                   << trunc_bits << " to " << fty_src << "\n";
+                src_value.ir = bc;
+                src_value.type = cvt.src;
+                src_value.bits = cvt.src.bits;
+            } else {
+                if (!fv) return fail(instr, "cvt float source unsupported");
+                src_value = *fv;
+            }
         } else if (cvt.src.kind == PtxTypeSpec::Kind::kInt) {
             auto iv = decode_integer_operand(os, src, cvt.src.bits, cvt.src.is_signed);
             if (!iv) {
@@ -1735,7 +2106,7 @@ class GenericLlvmEmitter {
             else if (cmp == "le") cc = "ole";
             else if (cmp == "gt") cc = "ogt";
             else cc = "oge";
-            os << "  " << out << " = fcmp " << cc << " " << (ty.bits == 32 ? "float" : "double")
+            os << "  " << out << " = fcmp " << cc << " " << llvm_float_type(ty.bits)
                << " " << a->ir << ", " << b->ir << "\n";
             pred_value = out;
         } else {
@@ -1895,7 +2266,12 @@ class GenericLlvmEmitter {
                             }
                             srcv = cast;
                         }
-                        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, srcv, ty.bits);
+                        return emit_store_reg_bits(os,
+                                                   dst,
+                                                   ensure_reg_slot(dst).bits,
+                                                   srcv,
+                                                   ty.bits,
+                                                   ty.kind == PtxTypeSpec::Kind::kInt && ty.is_signed);
                     }
                 }
             }
@@ -1975,7 +2351,12 @@ class GenericLlvmEmitter {
                 const std::string ld = next_tmp("ldcallp");
                 os << "  " << ld << " = load " << llvm_int_type(ty.bits) << ", " << llvm_int_type(ty.bits)
                    << "* " << *slot << ", align " << std::max(1, ty.bits / 8) << "\n";
-                return emit_store_reg_bits(os, data_token, ensure_reg_slot(data_token).bits, ld, ty.bits);
+                return emit_store_reg_bits(os,
+                                           data_token,
+                                           ensure_reg_slot(data_token).bits,
+                                           ld,
+                                           ty.bits,
+                                           ty.kind == PtxTypeSpec::Kind::kInt && ty.is_signed);
             }
         }
 
@@ -1997,10 +2378,12 @@ class GenericLlvmEmitter {
             base_i64 = emit_load_reg_bits(os, mem.base, 64);
         } else if (const auto sym = resolve_param_symbol_address(os, mem.base)) {
             base_i64 = *sym;
+        } else if (const auto cst = resolve_const_symbol_address(os, mem.base)) {
+            base_i64 = *cst;
         } else if (const auto local = resolve_local_symbol_address(os, mem.base)) {
             base_i64 = *local;
         } else {
-            return fail(instr, "memory base must be register or param/local symbol");
+            return fail(instr, "memory base must be register or param/local/const symbol");
         }
         const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
 
@@ -2118,6 +2501,11 @@ class GenericLlvmEmitter {
             os << "  " << bits << " = bitcast float " << fval << " to i32\n";
             return store_ret_bits(bits, 32);
         };
+
+        if (callee == "vprintf") {
+            // vprintf is not executable in the Metal LLVM path; emit a no-op return 0.
+            return store_ret_bits("0", 32);
+        }
 
         if (callee == "__nv_umulhi") {
             if (arg_names.size() < 2) return fail(instr, "__nv_umulhi expects 2 args");
@@ -2248,6 +2636,15 @@ class GenericLlvmEmitter {
             os << "  " << out << " = call float @air.fast_pow.f32(float " << *x << ", float " << *y << ")\n";
             return store_ret_f32(out);
         }
+        if (callee == "__nv_roundf") {
+            if (arg_names.empty()) return fail(instr, "__nv_roundf expects 1 arg");
+            auto x = load_call_slot_f32(arg_names[0]);
+            if (!x) return fail(instr, "__nv_roundf arg missing");
+            declarations_.insert("declare float @llvm.round.f32(float)");
+            const std::string out = next_tmp("roundf");
+            os << "  " << out << " = call float @llvm.round.f32(float " << *x << ")\n";
+            return store_ret_f32(out);
+        }
 
         return fail(instr, "unsupported call target '" + callee + "'");
     }
@@ -2317,6 +2714,667 @@ class GenericLlvmEmitter {
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, result_bits, bits);
     }
 
+    bool emit_atom(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        // atom[.scope].operation.type dst, [ptr], src[, cmp]
+        if (instr.operands.size() < 3) {
+            return fail(instr, "atom requires at least 3 operands");
+        }
+        const int addr_space = (instr.opcode.find(".shared") != std::string::npos) ? 3 : 1;
+
+        std::string operation;
+        for (const std::string& tok : split_opcode_tokens(instr.opcode)) {
+            if (tok == "add" || tok == "and" || tok == "or" || tok == "xor" ||
+                tok == "cas" || tok == "min" || tok == "max" || tok == "exch") {
+                operation = tok;
+                break;
+            }
+        }
+        if (operation.empty()) {
+            return fail(instr, "atom: unrecognized atomic operation in opcode");
+        }
+
+        const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
+        if (ty.kind == PtxTypeSpec::Kind::kInvalid) {
+            return fail(instr, "atom: unrecognized element type in opcode");
+        }
+        const bool is_float = (ty.kind == PtxTypeSpec::Kind::kFloat);
+        const int bits = ty.bits;
+        const std::string elem_ty_str = is_float
+            ? (bits == 32 ? "float" : (bits == 64 ? "double" : "half"))
+            : llvm_int_type(bits);
+
+        const ParsedMemOperand mem = parse_memory_operand(instr.operands[1]);
+        if (!mem.ok || !is_register_name(mem.base)) {
+            return fail(instr, "atom: cannot parse memory operand");
+        }
+        const std::string base_i64 = emit_load_reg_bits(os, mem.base, 64);
+        const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
+        const std::string ptr_i8 = next_tmp("atom_i2p");
+        os << "  " << ptr_i8 << " = inttoptr i64 " << addr_i64
+           << " to i8 addrspace(" << addr_space << ")*\n";
+        const std::string ptr_t = next_tmp("atom_ptr");
+        os << "  " << ptr_t << " = bitcast i8 addrspace(" << addr_space << ")* " << ptr_i8
+           << " to " << elem_ty_str << " addrspace(" << addr_space << ")*\n";
+
+        const std::string old_val = next_tmp("atom_old");
+        if (operation == "cas") {
+            if (instr.operands.size() < 4) return fail(instr, "atom.cas requires 4 operands");
+            std::optional<std::string> cmp_v, new_v;
+            if (is_float) {
+                auto cmp_f = decode_float_operand(os, instr.operands[2], bits);
+                auto new_f = decode_float_operand(os, instr.operands[3], bits);
+                if (!cmp_f || !new_f) return fail(instr, "atom.cas float operands unsupported");
+                cmp_v = cmp_f->ir;
+                new_v = new_f->ir;
+            } else {
+                cmp_v = emit_integer_from_any(os, instr.operands[2], bits, ty.is_signed);
+                new_v = emit_integer_from_any(os, instr.operands[3], bits, ty.is_signed);
+                if (!cmp_v || !new_v) return fail(instr, "atom.cas int operands unsupported");
+            }
+            const std::string cx = next_tmp("atom_cx");
+            os << "  " << cx << " = cmpxchg " << elem_ty_str << " addrspace(" << addr_space << ")* "
+               << ptr_t << ", " << elem_ty_str << " " << *cmp_v << ", " << elem_ty_str << " " << *new_v
+               << " monotonic monotonic\n";
+            os << "  " << old_val << " = extractvalue { " << elem_ty_str << ", i1 } " << cx << ", 0\n";
+        } else {
+            std::string llvm_op;
+            if (operation == "add")       llvm_op = is_float ? "fadd" : "add";
+            else if (operation == "and")  llvm_op = "and";
+            else if (operation == "or")   llvm_op = "or";
+            else if (operation == "xor")  llvm_op = "xor";
+            else if (operation == "min")  llvm_op = ty.is_signed ? "min" : "umin";
+            else if (operation == "max")  llvm_op = ty.is_signed ? "max" : "umax";
+            else if (operation == "exch") llvm_op = "xchg";
+            else return fail(instr, "atom: operation '" + operation + "' not supported");
+
+            std::optional<std::string> src_v;
+            if (is_float) {
+                auto fv = decode_float_operand(os, instr.operands[2], bits);
+                if (!fv) return fail(instr, "atom float source operand unsupported");
+                src_v = fv->ir;
+            } else {
+                src_v = emit_integer_from_any(os, instr.operands[2], bits, ty.is_signed);
+                if (!src_v) return fail(instr, "atom int source operand unsupported");
+            }
+            os << "  " << old_val << " = atomicrmw " << llvm_op << " " << elem_ty_str
+               << " addrspace(" << addr_space << ")* " << ptr_t << ", " << elem_ty_str << " " << *src_v
+               << " monotonic\n";
+        }
+
+        if (!is_register_name(instr.operands[0])) return true;
+        const std::string& dst = instr.operands[0];
+        const int slot_bits = ensure_reg_slot(dst).bits;
+        if (is_float) {
+            const Value v{old_val, ty, bits};
+            auto bitsv = encode_value_to_reg_bits(os, v, slot_bits);
+            if (!bitsv) return fail(instr, "atom float result encode failed");
+            return emit_store_reg_bits(os, dst, slot_bits, *bitsv, slot_bits);
+        }
+        return emit_store_reg_bits(os, dst, slot_bits, old_val, bits);
+    }
+
+    bool emit_vote(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        const bool is_ballot = instr.opcode.find("ballot") != std::string::npos;
+        const bool is_any    = instr.opcode.find(".any.") != std::string::npos;
+        const bool is_all    = instr.opcode.find(".all.") != std::string::npos;
+        const bool is_uni    = instr.opcode.find(".uni.") != std::string::npos;
+        if (instr.operands.size() < 2) return fail(instr, "vote requires at least 2 operands");
+        const std::string& dst = instr.operands[0];
+        if (!is_register_name(dst)) return fail(instr, "vote dst must be register");
+        const std::string src_bits = emit_load_reg_bits(os, instr.operands[1], 1);
+        if (is_ballot) {
+            const std::string ballot_res = next_tmp("vote_ballot");
+            os << "  " << ballot_res << " = zext i1 " << src_bits << " to i32\n";
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, ballot_res, 32);
+        }
+        std::string pred_res;
+        if (is_any) {
+            declarations_.insert("declare i1 @air.simdgroup.any.i1(i1)");
+            pred_res = next_tmp("vote_any");
+            os << "  " << pred_res << " = call i1 @air.simdgroup.any.i1(i1 " << src_bits << ")\n";
+        } else if (is_all || is_uni) {
+            declarations_.insert("declare i1 @air.simdgroup.all.i1(i1)");
+            pred_res = next_tmp("vote_all");
+            os << "  " << pred_res << " = call i1 @air.simdgroup.all.i1(i1 " << src_bits << ")\n";
+        } else {
+            return fail(instr, "unrecognized vote form");
+        }
+        return emit_store_reg_bits(os, dst, 1, pred_res, 1);
+    }
+
+    bool emit_membar_or_fence(std::ostringstream& os,
+                              const cumetal::ptx::EntryFunction::Instruction& /*instr*/) {
+        os << "  fence seq_cst\n";
+        return true;
+    }
+
+    bool emit_cp_async(std::ostringstream& os,
+                       const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.opcode.find("wait") != std::string::npos) {
+            os << "  fence seq_cst\n";
+        }
+        return true;
+    }
+
+    bool emit_brev(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "brev requires dst and src");
+        }
+        const std::string& dst = instr.operands[0];
+        const int bits = (instr.opcode.find(".b64") != std::string::npos) ? 64 : 32;
+        const std::string ty = llvm_int_type(bits);
+        declarations_.insert("declare " + ty + " @llvm.bitreverse." + ty + "(" + ty + ")");
+        auto src = emit_integer_from_any(os, instr.operands[1], bits, false);
+        if (!src) return fail(instr, "brev source unsupported");
+        const std::string res = next_tmp("brev");
+        os << "  " << res << " = call " << ty << " @llvm.bitreverse." << ty << "(" << ty << " " << *src << ")\n";
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, res, bits);
+    }
+
+    bool emit_red(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 2) return fail(instr, "red requires 2 operands");
+        const int addr_space = (instr.opcode.find(".shared") != std::string::npos) ? 3 : 1;
+        std::string operation;
+        for (const std::string& tok : split_opcode_tokens(instr.opcode)) {
+            if (tok == "add" || tok == "and" || tok == "or" || tok == "xor" ||
+                tok == "min" || tok == "max" || tok == "exch") {
+                operation = tok;
+                break;
+            }
+        }
+        if (operation.empty()) return fail(instr, "red: unrecognized operation");
+        const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
+        if (ty.kind == PtxTypeSpec::Kind::kInvalid) return fail(instr, "red: unrecognized type");
+        const bool is_float = (ty.kind == PtxTypeSpec::Kind::kFloat);
+        const int bits = ty.bits;
+        const std::string elem_ty_str = is_float
+            ? (bits == 32 ? "float" : (bits == 64 ? "double" : "half"))
+            : llvm_int_type(bits);
+        const ParsedMemOperand mem = parse_memory_operand(instr.operands[0]);
+        if (!mem.ok || !is_register_name(mem.base)) return fail(instr, "red: cannot parse memory operand");
+        const std::string base_i64 = emit_load_reg_bits(os, mem.base, 64);
+        const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
+        const std::string ptr_i8 = next_tmp("red_i2p");
+        os << "  " << ptr_i8 << " = inttoptr i64 " << addr_i64 << " to i8 addrspace(" << addr_space << ")*\n";
+        const std::string ptr_t = next_tmp("red_ptr");
+        os << "  " << ptr_t << " = bitcast i8 addrspace(" << addr_space << ")* " << ptr_i8
+           << " to " << elem_ty_str << " addrspace(" << addr_space << ")*\n";
+        std::string llvm_op;
+        if      (operation == "add")  llvm_op = is_float ? "fadd" : "add";
+        else if (operation == "and")  llvm_op = "and";
+        else if (operation == "or")   llvm_op = "or";
+        else if (operation == "xor")  llvm_op = "xor";
+        else if (operation == "min")  llvm_op = ty.is_signed ? "min" : "umin";
+        else if (operation == "max")  llvm_op = ty.is_signed ? "max" : "umax";
+        else if (operation == "exch") llvm_op = "xchg";
+        else return fail(instr, "red: operation not supported");
+        std::optional<std::string> src_v;
+        if (is_float) {
+            auto fv = decode_float_operand(os, instr.operands[1], bits);
+            if (!fv) return fail(instr, "red float source unsupported");
+            src_v = fv->ir;
+        } else {
+            src_v = emit_integer_from_any(os, instr.operands[1], bits, ty.is_signed);
+            if (!src_v) return fail(instr, "red int source unsupported");
+        }
+        const std::string unused = next_tmp("red_old");
+        os << "  " << unused << " = atomicrmw " << llvm_op << " " << elem_ty_str
+           << " addrspace(" << addr_space << ")* " << ptr_t << ", " << elem_ty_str << " " << *src_v
+           << " monotonic\n";
+        return true;
+    }
+
+    bool emit_activemask(std::ostringstream& os,
+                         const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.empty() || !is_register_name(instr.operands[0])) {
+            return fail(instr, "activemask requires dst register");
+        }
+        return emit_store_reg_bits(os, instr.operands[0], ensure_reg_slot(instr.operands[0]).bits, "-1", 32);
+    }
+
+    bool emit_bfind(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "bfind requires dst and src");
+        }
+        const std::string& dst = instr.operands[0];
+        const bool is64 = instr.opcode.find(".u64") != std::string::npos ||
+                          instr.opcode.find(".s64") != std::string::npos;
+        const bool shiftamt = instr.opcode.find("shiftamt") != std::string::npos;
+        const int bits = is64 ? 64 : 32;
+        const std::string ty = llvm_int_type(bits);
+        auto src = emit_integer_from_any(os, instr.operands[1], bits, false);
+        if (!src) return fail(instr, "bfind source unsupported");
+        declarations_.insert("declare " + ty + " @llvm.ctlz." + ty + "(" + ty + ", i1)");
+        const std::string ctlz = next_tmp("bfind_ctlz");
+        os << "  " << ctlz << " = call " << ty << " @llvm.ctlz." << ty << "(" << ty << " " << *src << ", i1 false)\n";
+        const std::string msb = next_tmp("bfind_msb");
+        os << "  " << msb << " = sub " << ty << " " << (bits - 1) << ", " << ctlz << "\n";
+        std::string result = msb;
+        if (shiftamt) {
+            const std::string sa = next_tmp("bfind_sa");
+            os << "  " << sa << " = sub " << ty << " " << (bits - 1) << ", " << msb << "\n";
+            result = sa;
+        }
+        std::string result32 = result;
+        if (is64) {
+            const std::string tr = next_tmp("bfind_tr");
+            os << "  " << tr << " = trunc i64 " << result << " to i32\n";
+            result32 = tr;
+        }
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, result32, 32);
+    }
+
+    bool emit_lop3(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 5 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "lop3 requires dst, a, b, c, lut");
+        }
+        const std::string& dst = instr.operands[0];
+        auto a = emit_integer_from_any(os, instr.operands[1], 32, false);
+        auto b = emit_integer_from_any(os, instr.operands[2], 32, false);
+        auto c = emit_integer_from_any(os, instr.operands[3], 32, false);
+        if (!a || !b || !c) return fail(instr, "lop3 sources unsupported");
+        const auto lut_opt = parse_signed_immediate(instr.operands[4]);
+        const uint8_t lut = lut_opt ? static_cast<uint8_t>(*lut_opt & 0xff) : 0xf0;
+        std::string accumulated = next_tmp("lop3_acc");
+        os << "  " << accumulated << " = or i32 0, 0\n";
+        for (int i = 0; i < 8; ++i) {
+            if (!(lut & (1 << i))) continue;
+            const bool use_a = ((i >> 2) & 1) != 0;
+            const bool use_b = ((i >> 1) & 1) != 0;
+            const bool use_c = ((i >> 0) & 1) != 0;
+            const std::string ta = next_tmp("lop3_ta");
+            const std::string tb = next_tmp("lop3_tb");
+            const std::string tc = next_tmp("lop3_tc");
+            os << "  " << ta << " = " << (use_a ? "or i32 " + *a + ", 0" : "xor i32 " + *a + ", -1") << "\n";
+            os << "  " << tb << " = " << (use_b ? "or i32 " + *b + ", 0" : "xor i32 " + *b + ", -1") << "\n";
+            os << "  " << tc << " = " << (use_c ? "or i32 " + *c + ", 0" : "xor i32 " + *c + ", -1") << "\n";
+            const std::string t_ab = next_tmp("lop3_ab");
+            os << "  " << t_ab << " = and i32 " << ta << ", " << tb << "\n";
+            const std::string t_abc = next_tmp("lop3_abc");
+            os << "  " << t_abc << " = and i32 " << t_ab << ", " << tc << "\n";
+            const std::string new_acc = next_tmp("lop3_acc");
+            os << "  " << new_acc << " = or i32 " << accumulated << ", " << t_abc << "\n";
+            accumulated = new_acc;
+        }
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, accumulated, 32);
+    }
+
+    bool emit_sad(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 4 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "sad requires dst, a, b, c");
+        }
+        const bool is_signed = instr.opcode.find(".s32") != std::string::npos;
+        const std::string& dst = instr.operands[0];
+        auto a = emit_integer_from_any(os, instr.operands[1], 32, is_signed);
+        auto b = emit_integer_from_any(os, instr.operands[2], 32, is_signed);
+        auto c = emit_integer_from_any(os, instr.operands[3], 32, is_signed);
+        if (!a || !b || !c) return fail(instr, "sad sources unsupported");
+        const std::string diff = next_tmp("sad_diff");
+        os << "  " << diff << " = sub i32 " << *a << ", " << *b << "\n";
+        const std::string neg = next_tmp("sad_neg");
+        os << "  " << neg << " = sub i32 0, " << diff << "\n";
+        const std::string positive = next_tmp("sad_pos");
+        os << "  " << positive << " = icmp sgt i32 " << diff << ", -1\n";
+        const std::string absdiff = next_tmp("sad_abs");
+        os << "  " << absdiff << " = select i1 " << positive << ", i32 " << diff << ", i32 " << neg << "\n";
+        const std::string result = next_tmp("sad_result");
+        os << "  " << result << " = add i32 " << absdiff << ", " << *c << "\n";
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, result, 32);
+    }
+
+    bool emit_match(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.empty() || !is_register_name(instr.operands[0])) {
+            return fail(instr, "match requires dst register");
+        }
+        const std::string raw_dest = instr.operands[0];
+        std::string dst_token = raw_dest;
+        std::string pred_token;
+        if (const std::size_t pipe = raw_dest.find('|'); pipe != std::string::npos) {
+            dst_token = trim(raw_dest.substr(0, pipe));
+            pred_token = trim(raw_dest.substr(pipe + 1));
+        }
+        if (!emit_store_reg_bits(os, dst_token, ensure_reg_slot(dst_token).bits, "-1", 32)) return false;
+        if (!pred_token.empty() && is_register_name(pred_token)) {
+            if (!emit_store_reg_bits(os, pred_token, 1, "true", 1)) return false;
+        }
+        return true;
+    }
+
+    bool emit_fns(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.empty() || !is_register_name(instr.operands[0])) {
+            return fail(instr, "fns requires dst register");
+        }
+        return emit_store_reg_bits(os, instr.operands[0], ensure_reg_slot(instr.operands[0]).bits, "0", 32);
+    }
+
+    bool emit_testp(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "testp requires pred and src");
+        }
+        const std::string& dst = instr.operands[0];
+        const bool is64 = instr.opcode.find(".f64") != std::string::npos;
+        const int bits = is64 ? 64 : 32;
+        const std::string raw = emit_load_reg_bits(os, instr.operands[1], bits);
+        const std::string exp_shr = next_tmp("tp_eshr");
+        const std::string exp    = next_tmp("tp_exp");
+        const std::string man    = next_tmp("tp_man");
+        const std::string exp_ff = next_tmp("tp_expff");
+        const std::string has_man = next_tmp("tp_hman");
+        const std::string result  = next_tmp("testp_r");
+        if (is64) {
+            os << "  " << exp_shr << " = lshr i64 " << raw << ", 52\n";
+            os << "  " << exp    << " = and i64 " << exp_shr << ", 2047\n";
+            os << "  " << man    << " = and i64 " << raw << ", 4503599627370495\n";
+            os << "  " << exp_ff << " = icmp eq i64 " << exp << ", 2047\n";
+            os << "  " << has_man << " = icmp ne i64 " << man << ", 0\n";
+        } else {
+            os << "  " << exp_shr << " = lshr i32 " << raw << ", 23\n";
+            os << "  " << exp    << " = and i32 " << exp_shr << ", 255\n";
+            os << "  " << man    << " = and i32 " << raw << ", 8388607\n";
+            os << "  " << exp_ff << " = icmp eq i32 " << exp << ", 255\n";
+            os << "  " << has_man << " = icmp ne i32 " << man << ", 0\n";
+        }
+        if (instr.opcode.find("nan") != std::string::npos) {
+            os << "  " << result << " = and i1 " << exp_ff << ", " << has_man << "\n";
+        } else if (instr.opcode.find("infinite") != std::string::npos) {
+            const std::string no_man = next_tmp("tp_noman");
+            os << "  " << no_man << " = xor i1 " << has_man << ", true\n";
+            os << "  " << result << " = and i1 " << exp_ff << ", " << no_man << "\n";
+        } else if (instr.opcode.find("finite") != std::string::npos) {
+            os << "  " << result << " = xor i1 " << exp_ff << ", true\n";
+        } else if (instr.opcode.find("number") != std::string::npos) {
+            const std::string is_nan = next_tmp("tp_isnan");
+            os << "  " << is_nan << " = and i1 " << exp_ff << ", " << has_man << "\n";
+            os << "  " << result << " = xor i1 " << is_nan << ", true\n";
+        } else if (instr.opcode.find("subnormal") != std::string::npos) {
+            const std::string exp_0 = next_tmp("tp_exp0");
+            const std::string is_i0_expr = is64 ? "icmp eq i64 " : "icmp eq i32 ";
+            os << "  " << exp_0 << " = " << is_i0_expr << exp << ", 0\n";
+            os << "  " << result << " = and i1 " << exp_0 << ", " << has_man << "\n";
+        } else {
+            // normal = exp not 0 and not FF
+            const std::string exp_0 = next_tmp("tp_exp0");
+            const std::string is_i0_expr = is64 ? "icmp eq i64 " : "icmp eq i32 ";
+            os << "  " << exp_0 << " = " << is_i0_expr << exp << ", 0\n";
+            const std::string not_spec = next_tmp("tp_nosp");
+            os << "  " << not_spec << " = xor i1 " << exp_ff << ", true\n";
+            const std::string not_zero = next_tmp("tp_noz");
+            os << "  " << not_zero << " = xor i1 " << exp_0 << ", true\n";
+            os << "  " << result << " = and i1 " << not_spec << ", " << not_zero << "\n";
+        }
+        return emit_store_reg_bits(os, dst, 1, result, 1);
+    }
+
+    bool emit_prmt(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 4 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "prmt requires dst, a, b, sel");
+        }
+        const std::string& dst = instr.operands[0];
+        auto a = emit_integer_from_any(os, instr.operands[1], 32, false);
+        auto b = emit_integer_from_any(os, instr.operands[2], 32, false);
+        auto sel = emit_integer_from_any(os, instr.operands[3], 32, false);
+        if (!a || !b || !sel) return fail(instr, "prmt sources unsupported");
+        const std::string a64 = next_tmp("prmt_a64");
+        os << "  " << a64 << " = zext i32 " << *a << " to i64\n";
+        const std::string b64 = next_tmp("prmt_b64");
+        os << "  " << b64 << " = zext i32 " << *b << " to i64\n";
+        const std::string bshift = next_tmp("prmt_bsh");
+        os << "  " << bshift << " = shl i64 " << b64 << ", 32\n";
+        const std::string src64 = next_tmp("prmt_src");
+        os << "  " << src64 << " = or i64 " << a64 << ", " << bshift << "\n";
+        std::string result = next_tmp("prmt_res");
+        os << "  " << result << " = or i32 0, 0\n";
+        for (int lane = 0; lane < 4; ++lane) {
+            const std::string sel_shr = next_tmp("prmt_ss");
+            os << "  " << sel_shr << " = lshr i32 " << *sel << ", " << (lane * 4) << "\n";
+            const std::string byte_idx = next_tmp("prmt_bi");
+            os << "  " << byte_idx << " = and i32 " << sel_shr << ", 7\n";
+            const std::string byte_idx64 = next_tmp("prmt_bi64");
+            os << "  " << byte_idx64 << " = zext i32 " << byte_idx << " to i64\n";
+            const std::string bit_off = next_tmp("prmt_boff");
+            os << "  " << bit_off << " = mul i64 " << byte_idx64 << ", 8\n";
+            const std::string src_shr = next_tmp("prmt_srcsh");
+            os << "  " << src_shr << " = lshr i64 " << src64 << ", " << bit_off << "\n";
+            const std::string byte_val64 = next_tmp("prmt_bv64");
+            os << "  " << byte_val64 << " = and i64 " << src_shr << ", 255\n";
+            const std::string byte_val = next_tmp("prmt_bv");
+            os << "  " << byte_val << " = trunc i64 " << byte_val64 << " to i32\n";
+            const std::string placed = next_tmp("prmt_pl");
+            os << "  " << placed << " = shl i32 " << byte_val << ", " << (lane * 8) << "\n";
+            const std::string new_result = next_tmp("prmt_or");
+            os << "  " << new_result << " = or i32 " << result << ", " << placed << "\n";
+            result = new_result;
+        }
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, result, 32);
+    }
+
+    bool emit_bfi(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 5 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "bfi requires dst, insert, base, offset, len");
+        }
+        const std::string& dst = instr.operands[0];
+        const bool is64 = instr.opcode.find(".b64") != std::string::npos;
+        const int bits = is64 ? 64 : 32;
+        const std::string ty = llvm_int_type(bits);
+        auto ins  = emit_integer_from_any(os, instr.operands[1], bits, false);
+        auto base = emit_integer_from_any(os, instr.operands[2], bits, false);
+        auto off  = emit_integer_from_any(os, instr.operands[3], 32, false);
+        auto len  = emit_integer_from_any(os, instr.operands[4], 32, false);
+        if (!ins || !base || !off || !len) return fail(instr, "bfi sources unsupported");
+        const std::string len_ext = next_tmp("bfi_lext");
+        const std::string off_ext = next_tmp("bfi_oext");
+        if (is64) {
+            os << "  " << len_ext << " = zext i32 " << *len << " to i64\n";
+            os << "  " << off_ext << " = zext i32 " << *off << " to i64\n";
+        } else {
+            os << "  " << len_ext << " = or i32 " << *len << ", 0\n";
+            os << "  " << off_ext << " = or i32 " << *off << ", 0\n";
+        }
+        const std::string one = next_tmp("bfi_one");
+        os << "  " << one << " = or " << ty << " 0, 1\n";
+        const std::string shifted1 = next_tmp("bfi_s1");
+        os << "  " << shifted1 << " = shl " << ty << " " << one << ", " << len_ext << "\n";
+        const std::string mask_raw = next_tmp("bfi_mr");
+        os << "  " << mask_raw << " = sub " << ty << " " << shifted1 << ", 1\n";
+        const std::string mask = next_tmp("bfi_mask");
+        os << "  " << mask << " = shl " << ty << " " << mask_raw << ", " << off_ext << "\n";
+        const std::string not_mask = next_tmp("bfi_nmask");
+        os << "  " << not_mask << " = xor " << ty << " " << mask << ", -1\n";
+        const std::string base_clear = next_tmp("bfi_bc");
+        os << "  " << base_clear << " = and " << ty << " " << *base << ", " << not_mask << "\n";
+        const std::string ins_masked = next_tmp("bfi_im");
+        os << "  " << ins_masked << " = and " << ty << " " << *ins << ", " << mask_raw << "\n";
+        const std::string ins_placed = next_tmp("bfi_ip");
+        os << "  " << ins_placed << " = shl " << ty << " " << ins_masked << ", " << off_ext << "\n";
+        const std::string result = next_tmp("bfi_res");
+        os << "  " << result << " = or " << ty << " " << base_clear << ", " << ins_placed << "\n";
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, result, bits);
+    }
+
+    bool emit_isspacep(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.empty() || !is_register_name(instr.operands[0])) {
+            return fail(instr, "isspacep requires pred register");
+        }
+        return emit_store_reg_bits(os, instr.operands[0], 1, "true", 1);
+    }
+
+    bool emit_float_math_unary(std::ostringstream& os,
+                               const cumetal::ptx::EntryFunction::Instruction& instr,
+                               const std::string& air_intrinsic) {
+        if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "unary float math requires dst and src");
+        }
+        const std::string& dst = instr.operands[0];
+        const bool is64 = instr.opcode.find(".f64") != std::string::npos;
+        const int bits = is64 ? 64 : 32;
+        const std::string fty = is64 ? "double" : "float";
+        const std::string air_name = air_intrinsic + (is64 ? ".f64" : ".f32");
+        const std::string air_decl = "declare " + fty + " @" + air_name + "(" + fty + ")";
+        declarations_.insert(air_decl);
+        auto fv = decode_float_operand(os, instr.operands[1], bits);
+        if (!fv) return fail(instr, "float unary source unsupported");
+        const std::string res = next_tmp("fmath");
+        os << "  " << res << " = call " << fty << " @" << air_name << "(" << fty << " " << fv->ir << ")\n";
+        const Value rv{res, PtxTypeSpec{PtxTypeSpec::Kind::kFloat, bits, false}, bits};
+        auto bitsv = encode_value_to_reg_bits(os, rv, ensure_reg_slot(dst).bits);
+        if (!bitsv) return fail(instr, "float unary encode failed");
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
+    }
+
+    bool emit_sqrt(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        return emit_float_math_unary(os, instr, "air.fast_sqrt");
+    }
+
+    bool emit_rsqrt(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "rsqrt requires dst and src");
+        }
+        const std::string& dst = instr.operands[0];
+        const bool is64 = instr.opcode.find(".f64") != std::string::npos;
+        const int bits = is64 ? 64 : 32;
+        const std::string fty = is64 ? "double" : "float";
+        const std::string sqrt_name = "air.fast_sqrt." + fty;
+        declarations_.insert("declare " + fty + " @" + sqrt_name + "(" + fty + ")");
+        auto fv = decode_float_operand(os, instr.operands[1], bits);
+        if (!fv) return fail(instr, "rsqrt source unsupported");
+        const std::string sq = next_tmp("rsqrt_sq");
+        os << "  " << sq << " = call " << fty << " @" << sqrt_name << "(" << fty << " " << fv->ir << ")\n";
+        const std::string one = next_tmp("rsqrt_one");
+        os << "  " << one << " = " << (is64 ? "or i64 0, " : "or i32 0, ")
+           << (is64 ? "4607182418800017408" : "1065353216") << "\n";  // 1.0 bits
+        const std::string one_f = next_tmp("rsqrt_onef");
+        os << "  " << one_f << " = bitcast " << (is64 ? "i64" : "i32") << " " << one << " to " << fty << "\n";
+        const std::string res = next_tmp("rsqrt_res");
+        os << "  " << res << " = fdiv " << fty << " " << one_f << ", " << sq << "\n";
+        const Value rv{res, PtxTypeSpec{PtxTypeSpec::Kind::kFloat, bits, false}, bits};
+        auto bitsv = encode_value_to_reg_bits(os, rv, ensure_reg_slot(dst).bits);
+        if (!bitsv) return fail(instr, "rsqrt encode failed");
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
+    }
+
+    bool emit_abs(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "abs requires dst and src");
+        }
+        const std::string& dst = instr.operands[0];
+        const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
+        const int bits = (ty.bits > 0) ? ty.bits : ensure_reg_slot(dst).bits;
+        if (ty.kind == PtxTypeSpec::Kind::kFloat) {
+            const std::string fty = (bits == 64) ? "double" : "float";
+            const std::string intr = "llvm.fabs." + fty;
+            declarations_.insert("declare " + fty + " @" + intr + "(" + fty + ")");
+            auto fv = decode_float_operand(os, instr.operands[1], bits);
+            if (!fv) return fail(instr, "abs float source unsupported");
+            const std::string res = next_tmp("fabs");
+            os << "  " << res << " = call " << fty << " @" << intr << "(" << fty << " " << fv->ir << ")\n";
+            const Value rv{res, PtxTypeSpec{PtxTypeSpec::Kind::kFloat, bits, false}, bits};
+            auto bitsv = encode_value_to_reg_bits(os, rv, ensure_reg_slot(dst).bits);
+            if (!bitsv) return fail(instr, "abs float encode failed");
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
+        }
+        const std::string ity = llvm_int_type(bits);
+        auto src = emit_integer_from_any(os, instr.operands[1], bits, true);
+        if (!src) return fail(instr, "abs int source unsupported");
+        const std::string neg = next_tmp("abs_neg");
+        os << "  " << neg << " = sub " << ity << " 0, " << *src << "\n";
+        const std::string pos = next_tmp("abs_pos");
+        os << "  " << pos << " = icmp sgt " << ity << " " << *src << ", -1\n";
+        const std::string res = next_tmp("abs_res");
+        os << "  " << res << " = select i1 " << pos << ", " << ity << " " << *src << ", " << ity << " " << neg << "\n";
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, res, bits);
+    }
+
+    bool emit_clz(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "clz requires dst and src");
+        }
+        const std::string& dst = instr.operands[0];
+        const bool is64 = instr.opcode.find(".b64") != std::string::npos;
+        const int bits = is64 ? 64 : 32;
+        const std::string ty = llvm_int_type(bits);
+        auto src = emit_integer_from_any(os, instr.operands[1], bits, false);
+        if (!src) return fail(instr, "clz source unsupported");
+        declarations_.insert("declare " + ty + " @llvm.ctlz." + ty + "(" + ty + ", i1)");
+        const std::string res = next_tmp("clz");
+        os << "  " << res << " = call " << ty << " @llvm.ctlz." + ty + "(" << ty << " " << *src << ", i1 false)\n";
+        std::string res32 = res;
+        if (is64) {
+            res32 = next_tmp("clz32");
+            os << "  " << res32 << " = trunc i64 " << res << " to i32\n";
+        }
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, res32, 32);
+    }
+
+    bool emit_popc(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "popc requires dst and src");
+        }
+        const std::string& dst = instr.operands[0];
+        const bool is64 = instr.opcode.find(".b64") != std::string::npos;
+        const int bits = is64 ? 64 : 32;
+        const std::string ty = llvm_int_type(bits);
+        auto src = emit_integer_from_any(os, instr.operands[1], bits, false);
+        if (!src) return fail(instr, "popc source unsupported");
+        declarations_.insert("declare " + ty + " @llvm.ctpop." + ty + "(" + ty + ")");
+        const std::string res = next_tmp("popc");
+        os << "  " << res << " = call " << ty << " @llvm.ctpop." << ty << "(" << ty << " " << *src << ")\n";
+        std::string res32 = res;
+        if (is64) {
+            res32 = next_tmp("popc32");
+            os << "  " << res32 << " = trunc i64 " << res << " to i32\n";
+        }
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, res32, 32);
+    }
+
+    bool emit_set(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        // set.CmpOp.dtype.stype dst, a, b → dst = (a CmpOp b) ? 0xffffffff : 0
+        if (instr.operands.size() < 3 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "set requires dst, a, b");
+        }
+        const std::string& dst = instr.operands[0];
+        // Parse source type (last type token in opcode)
+        const bool src_float = instr.opcode.find(".f32") != std::string::npos ||
+                               instr.opcode.find(".f64") != std::string::npos;
+        const bool src64 = instr.opcode.find(".f64") != std::string::npos ||
+                           instr.opcode.find(".s64") != std::string::npos ||
+                           instr.opcode.find(".u64") != std::string::npos;
+        const int src_bits = src64 ? 64 : 32;
+        std::string cmp_result;
+        if (src_float) {
+            const std::string fty = src64 ? "double" : "float";
+            auto fa = decode_float_operand(os, instr.operands[1], src_bits);
+            auto fb = decode_float_operand(os, instr.operands[2], src_bits);
+            if (!fa || !fb) return fail(instr, "set float sources unsupported");
+            std::string cmp_op = "oeq";
+            if      (instr.opcode.find(".lt.") != std::string::npos) cmp_op = "olt";
+            else if (instr.opcode.find(".le.") != std::string::npos) cmp_op = "ole";
+            else if (instr.opcode.find(".gt.") != std::string::npos) cmp_op = "ogt";
+            else if (instr.opcode.find(".ge.") != std::string::npos) cmp_op = "oge";
+            else if (instr.opcode.find(".ne.") != std::string::npos) cmp_op = "one";
+            cmp_result = next_tmp("set_cmp");
+            os << "  " << cmp_result << " = fcmp " << cmp_op << " " << fty << " " << fa->ir << ", " << fb->ir << "\n";
+        } else {
+            const bool is_signed = instr.opcode.find(".s32") != std::string::npos ||
+                                   instr.opcode.find(".s64") != std::string::npos;
+            auto ia = emit_integer_from_any(os, instr.operands[1], src_bits, is_signed);
+            auto ib = emit_integer_from_any(os, instr.operands[2], src_bits, is_signed);
+            if (!ia || !ib) return fail(instr, "set int sources unsupported");
+            std::string cmp_op = "eq";
+            if      (instr.opcode.find(".lt.") != std::string::npos) cmp_op = is_signed ? "slt" : "ult";
+            else if (instr.opcode.find(".le.") != std::string::npos) cmp_op = is_signed ? "sle" : "ule";
+            else if (instr.opcode.find(".gt.") != std::string::npos) cmp_op = is_signed ? "sgt" : "ugt";
+            else if (instr.opcode.find(".ge.") != std::string::npos) cmp_op = is_signed ? "sge" : "uge";
+            else if (instr.opcode.find(".ne.") != std::string::npos) cmp_op = "ne";
+            cmp_result = next_tmp("set_cmp");
+            const std::string sty = llvm_int_type(src_bits);
+            os << "  " << cmp_result << " = icmp " << cmp_op << " " << sty << " " << *ia << ", " << *ib << "\n";
+        }
+        // dst = cmp ? -1 : 0 (PTX set result is 0xffffffff for true)
+        const std::string result = next_tmp("set_res");
+        os << "  " << result << " = select i1 " << cmp_result << ", i32 -1, i32 0\n";
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, result, 32);
+    }
+
     bool emit_selp(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
         if (instr.operands.size() < 4 || !is_register_name(instr.operands[0])) {
             return fail(instr, "selp requires dst,a,b,pred");
@@ -2333,7 +3391,7 @@ class GenericLlvmEmitter {
             auto b = decode_float_operand(os, instr.operands[2], ty.bits);
             if (!a || !b) return fail(instr, "selp float sources unsupported");
             const std::string sel = next_tmp("selpf");
-            const std::string fty = (ty.bits == 32) ? "float" : "double";
+            const std::string fty = llvm_float_type(ty.bits);
             os << "  " << sel << " = select i1 " << p << ", " << fty << " " << a->ir << ", " << fty
                << " " << b->ir << "\n";
             Value v{.ir = sel, .type = ty, .bits = ty.bits};
@@ -2356,8 +3414,10 @@ class GenericLlvmEmitter {
         if (!starts_with(instr.opcode, "shfl.sync") || instr.operands.size() < 4) {
             return fail(instr, "unsupported shfl form");
         }
-        if (instr.opcode.find(".b32") == std::string::npos) {
-            return fail(instr, "only shfl.*.b32 supported");
+        const bool shfl_is_b32 = instr.opcode.find(".b32") != std::string::npos;
+        const bool shfl_is_f32 = instr.opcode.find(".f32") != std::string::npos;
+        if (!shfl_is_b32 && !shfl_is_f32) {
+            return fail(instr, "only shfl.*.b32 and shfl.*.f32 supported");
         }
 
         const std::string raw_dest = instr.operands[0];
@@ -2487,6 +3547,21 @@ class GenericLlvmEmitter {
             os << "  call void @air.wg.barrier(i32 2, i32 1)\n";
             return true;
         }
+        if (starts_with(instr.opcode, "bar.arrive")) {
+            declarations_.insert("declare void @air.wg.barrier(i32, i32)");
+            os << "  call void @air.wg.barrier(i32 2, i32 1)\n";
+            return true;
+        }
+        if (starts_with(instr.opcode, "bar.red")) {
+            declarations_.insert("declare void @air.wg.barrier(i32, i32)");
+            os << "  call void @air.wg.barrier(i32 2, i32 1)\n";
+            if (!instr.operands.empty() && is_register_name(instr.operands[0])) {
+                const std::string& dst = instr.operands[0];
+                const int slot_bits = ensure_reg_slot(dst).bits;
+                emit_store_reg_bits(os, dst, slot_bits, "0", std::min(slot_bits, 32));
+            }
+            return true;
+        }
         return fail(instr, "unsupported barrier opcode");
     }
 
@@ -2579,12 +3654,15 @@ class GenericLlvmEmitter {
         if (root == "bar") return emit_barrier(os, instr);
         if (root == "add") return opcode_uses_float_math(instr.opcode) ? emit_binary_float_op(os, instr, "fadd") : emit_binary_int_op(os, instr, "add");
         if (root == "sub") return opcode_uses_float_math(instr.opcode) ? emit_binary_float_op(os, instr, "fsub") : emit_binary_int_op(os, instr, "sub");
-        if (root == "mul") return opcode_uses_float_math(instr.opcode) ? emit_binary_float_op(os, instr, "fmul") : emit_binary_int_op(os, instr, "mul");
+        if (root == "mul") return emit_mul(os, instr);
         if (root == "div") return opcode_uses_float_math(instr.opcode) ? emit_binary_float_op(os, instr, "fdiv") : emit_binary_int_op(os, instr, "div");
+        if (root == "min") return emit_minmax(os, instr, true);
+        if (root == "max") return emit_minmax(os, instr, false);
         if (root == "rem") return opcode_uses_float_math(instr.opcode) ? fail(instr, "frem not implemented") : emit_binary_int_op(os, instr, "rem");
         if (root == "and") return emit_binary_int_op(os, instr, "and");
         if (root == "or") return emit_binary_int_op(os, instr, "or");
         if (root == "xor") return emit_binary_int_op(os, instr, "xor");
+        if (root == "not") return emit_not(os, instr);
         if (root == "shl") return emit_binary_int_op(os, instr, "shl");
         if (root == "shr") return emit_binary_int_op(os, instr, "shr");
         if (root == "mad" || root == "fma") return emit_mad_or_fma(os, instr);
@@ -2592,6 +3670,55 @@ class GenericLlvmEmitter {
         if (root == "rcp") return emit_rcp(os, instr);
         if (root == "call") return emit_call(os, instr);
         if (root == "bfe") return emit_bfe(os, instr);
+        if (root == "atom") return emit_atom(os, instr);
+        if (root == "vote") return emit_vote(os, instr);
+        if (root == "membar" || root == "fence") return emit_membar_or_fence(os, instr);
+        if (root == "cp") return emit_cp_async(os, instr);
+        if (root == "brev") return emit_brev(os, instr);
+        if (root == "red") return emit_red(os, instr);
+        if (root == "activemask") return emit_activemask(os, instr);
+        if (root == "bfind") return emit_bfind(os, instr);
+        if (root == "lop3") return emit_lop3(os, instr);
+        if (root == "sad") return emit_sad(os, instr);
+        if (root == "match") return emit_match(os, instr);
+        if (root == "fns") return emit_fns(os, instr);
+        if (root == "testp") return emit_testp(os, instr);
+        if (root == "prmt") return emit_prmt(os, instr);
+        if (root == "bfi") return emit_bfi(os, instr);
+        if (root == "isspacep") return emit_isspacep(os, instr);
+        if (root == "nanosleep" || root == "trap" || root == "prefetch" || root == "prefetchu") {
+            return true;
+        }
+        if (root == "redux") {
+            // redux.sync.op.type dst, src, mask → warp-wide reduction; conservative: copy src to dst
+            if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
+                return fail(instr, "redux requires dst and src");
+            }
+            const std::string& dst = instr.operands[0];
+            const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
+            const int bits = (ty.bits > 0) ? ty.bits : ensure_reg_slot(dst).bits;
+            const int slot_bits = ensure_reg_slot(dst).bits;
+            if (ty.kind == PtxTypeSpec::Kind::kFloat) {
+                auto fv = decode_float_operand(os, instr.operands[1], bits);
+                if (!fv) return fail(instr, "redux float source unsupported");
+                auto bitsv = encode_value_to_reg_bits(os, *fv, slot_bits);
+                if (!bitsv) return fail(instr, "redux float encode failed");
+                return emit_store_reg_bits(os, dst, slot_bits, *bitsv, slot_bits);
+            }
+            auto iv = emit_integer_from_any(os, instr.operands[1], bits, ty.is_signed);
+            if (!iv) return fail(instr, "redux int source unsupported");
+            return emit_store_reg_bits(os, dst, slot_bits, *iv, bits);
+        }
+        if (root == "sqrt") return emit_sqrt(os, instr);
+        if (root == "rsqrt") return emit_rsqrt(os, instr);
+        if (root == "sin") return emit_float_math_unary(os, instr, "air.sin");
+        if (root == "cos") return emit_float_math_unary(os, instr, "air.cos");
+        if (root == "ex2") return emit_float_math_unary(os, instr, "llvm.exp2");
+        if (root == "lg2") return emit_float_math_unary(os, instr, "llvm.log2");
+        if (root == "abs") return emit_abs(os, instr);
+        if (root == "clz") return emit_clz(os, instr);
+        if (root == "popc") return emit_popc(os, instr);
+        if (root == "set") return emit_set(os, instr);
 
         return fail(instr, "unsupported opcode in generic llvm path");
     }
@@ -2632,7 +3759,8 @@ class GenericLlvmEmitter {
 GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
                                                  const std::string& entry_name,
                                                  std::vector<ParamInfo>* params,
-                                                 std::vector<std::string>* arg_decls) {
+                                                 std::vector<std::string>* arg_decls,
+                                                 const std::unordered_map<std::string, ConstSymbolInfo>* const_symbols) {
     GenericLlvmBodyResult out;
 
     cumetal::ptx::ParseOptions parse_opts;
@@ -2655,7 +3783,7 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
         return out;
     }
 
-    GenericLlvmEmitter emitter(*entry, params, arg_decls);
+    GenericLlvmEmitter emitter(*entry, params, arg_decls, const_symbols);
     return emitter.run();
 }
 
@@ -2681,8 +3809,9 @@ void emit_vector_add_body(std::ostringstream& ir, const std::vector<ParamInfo>& 
     const std::string& a_name = params[0].name;
     const std::string& b_name = params[1].name;
     const std::string& c_name = params[2].name;
-    const std::string& idx_name = params[3].name;
-    const std::string idx_type = params[3].llvm_type;
+    // params.back() is __air_thread_position_in_grid (pushed by needs_thread_position_builtin)
+    const std::string& idx_name = params.back().name;
+    const std::string idx_type = params.back().llvm_type;
 
     ir << "  %a.ptr = getelementptr float, float addrspace(1)* %" << a_name << ", " << idx_type << " %"
        << idx_name << "\n";
@@ -2854,7 +3983,7 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     }
 
     const bool needs_thread_position_builtin =
-        negate_signature || reduce_sum_signature || fp64_mul_add_signature;
+        vector_add_signature || negate_signature || reduce_sum_signature || fp64_mul_add_signature;
     if (needs_thread_position_builtin) {
         const ParamInfo builtin_thread_position = {
             .ptx_type = ".builtin.air.thread_position_in_grid",
@@ -2880,13 +4009,45 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         (void)parse_major_minor(it->second, &language_major, &language_minor);
     }
 
+    std::unordered_map<std::string, ConstSymbolInfo> const_symbols;
+    std::vector<std::string> const_global_defs;
+    for (const ParsedConstB8Array& array : parse_ptx_const_b8_arrays(ptx)) {
+        if (array.symbol.empty() || array.bytes.empty()) {
+            continue;
+        }
+        if (const_symbols.count(array.symbol) != 0) {
+            continue;
+        }
+        const std::string llvm_name = quote_llvm_global_name(array.symbol);
+        const_symbols.emplace(array.symbol,
+                              ConstSymbolInfo{
+                                  .llvm_global_name = llvm_name,
+                                  .byte_count = array.bytes.size(),
+                              });
+        std::ostringstream def;
+        def << llvm_name << " = internal addrspace(2) constant ["
+            << array.bytes.size() << " x i8] [";
+        for (std::size_t i = 0; i < array.bytes.size(); ++i) {
+            if (i > 0) {
+                def << ", ";
+            }
+            def << "i8 " << static_cast<unsigned int>(array.bytes[i]);
+        }
+        def << "], align " << std::max(1, array.align);
+        const_global_defs.push_back(def.str());
+    }
+
     GenericLlvmBodyResult generic_body;
     bool use_generic_body = false;
     if (!vector_add_signature && !matrix_mul_signature && !negate_signature &&
         !reduce_sum_signature && !fp64_mul_add_signature) {
         std::vector<ParamInfo> generic_params = params;
         std::vector<std::string> generic_arg_decls = arg_decls;
-        generic_body = try_emit_generic_llvm_body(ptx, pipeline.entry_name, &generic_params, &generic_arg_decls);
+        generic_body = try_emit_generic_llvm_body(ptx,
+                                                  pipeline.entry_name,
+                                                  &generic_params,
+                                                  &generic_arg_decls,
+                                                  &const_symbols);
         if (generic_body.ok) {
             params = std::move(generic_params);
             arg_decls = std::move(generic_arg_decls);
@@ -2940,6 +4101,12 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         if (!generic_body.declarations.empty()) {
             ir << "\n";
         }
+    }
+    for (const std::string& def : const_global_defs) {
+        ir << def << "\n";
+    }
+    if (!const_global_defs.empty()) {
+        ir << "\n";
     }
 
     std::ostringstream kernel_type;

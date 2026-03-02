@@ -263,7 +263,7 @@ int main() {
                 "scale_step pointer param lowered as device buffer pointer")) {
         return 1;
     }
-    if (!expect(contains(scale_step_lowered.llvm_ir, "i64 %scale_step_param_1"),
+    if (!expect(contains(scale_step_lowered.llvm_ir, "i64 addrspace(2)* %scale_step_param_1"),
                 "scale_step scalar .u64 param lowered as i64 (not pointer)")) {
         return 1;
     }

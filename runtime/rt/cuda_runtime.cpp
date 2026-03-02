@@ -1734,10 +1734,8 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
         backend_props.shared_mem_per_block > 0 ? backend_props.shared_mem_per_block : (32 * 1024);
     prop->sharedMemPerBlockOptin = static_cast<size_t>(prop->sharedMemPerBlock);
     prop->regsPerBlock = 65536;
-    // Report a conservative CUDA CC to keep ggml-cuda on compatibility paths
-    // until CuMetal's fp16/bf16 fast paths are numerically validated.
-    prop->major = 6;
-    prop->minor = 1;
+    prop->major = 8;   // Synthetic Ampere-equivalent per spec §6.8
+    prop->minor = 0;
     prop->unifiedAddressing = 1;        // UMA: CPU and GPU share physical DRAM
     prop->managedMemory = 1;            // cudaMallocManaged == cudaMalloc on UMA
     prop->concurrentManagedAccess = 1;  // CPU+GPU can access managed memory simultaneously

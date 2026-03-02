@@ -1251,8 +1251,9 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         const auto& op = instr.opcode;
         const auto& ops = instr.operands;
 
-        // ── Structural: parameter loads, ret ────────────────────────────────
+        // ── Structural: parameter loads, labels, ret ────────────────────────
         if (op.size() >= 8 && op.substr(0, 8) == "ld.param") continue;
+        if (op == "ptx.label") continue;
         if (op == "ret") continue;
 
         // mov %r, %tid/ntid/ctaid.x → structural

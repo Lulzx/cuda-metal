@@ -362,7 +362,11 @@ void infer_pointer_parameters(EntryFunction* entry) {
             }
         }
 
-        if (is_memory_opcode(instruction.opcode)) {
+        // ld.param brackets denote PTX parameter syntax, not pointer dereferences.
+        // Skipping them prevents incorrectly marking params as address_use=true.
+        if (is_memory_opcode(instruction.opcode) &&
+            !starts_with(instruction.opcode, "ld.param") &&
+            !starts_with(instruction.opcode, "st.param")) {
             for (const std::string& operand : instruction.operands) {
                 const std::string bracket = extract_bracket_contents(operand);
                 if (bracket.empty()) {
