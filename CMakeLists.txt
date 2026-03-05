@@ -514,6 +514,10 @@ install(FILES
 install(FILES
     runtime/api/thrust/iterator/counting_iterator.h
     runtime/api/thrust/iterator/zip_iterator.h
+    runtime/api/thrust/iterator/transform_iterator.h
+    runtime/api/thrust/iterator/constant_iterator.h
+    runtime/api/thrust/iterator/discard_iterator.h
+    runtime/api/thrust/iterator/permutation_iterator.h
     DESTINATION include/thrust/iterator
 )
 
@@ -526,6 +530,8 @@ install(FILES
     runtime/api/cub/block/block_reduce.h
     runtime/api/cub/block/block_scan.h
     runtime/api/cub/block/block_exchange.h
+    runtime/api/cub/block/block_load.h
+    runtime/api/cub/block/block_store.h
     DESTINATION include/cub/block
 )
 
@@ -539,5 +545,8 @@ install(FILES
     runtime/api/cub/device/device_reduce.h
     runtime/api/cub/device/device_scan.h
     runtime/api/cub/device/device_radix_sort.h
+    runtime/api/cub/device/device_select.h
+    runtime/api/cub/device/device_histogram.h
+    runtime/api/cub/device/device_run_length_encode.h
     DESTINATION include/cub/device
 )

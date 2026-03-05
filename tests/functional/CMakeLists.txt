@@ -437,6 +437,14 @@ add_executable(cumetal_nvtx_api_test
     nvtx_api_test.cpp
 )
 
+add_executable(cumetal_thrust_iterators_test
+    thrust_iterators_test.cpp
+)
+
+add_executable(cumetal_cub_extended_test
+    cub_extended_test.cpp
+)
+
 target_link_libraries(cumetal_runtime_vector_add_test
     PRIVATE
         cumetal_runtime
@@ -976,6 +984,20 @@ target_link_libraries(cumetal_nvtx_api_test
     PRIVATE
         cumetal_runtime
 )
+
+target_link_libraries(cumetal_thrust_iterators_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_compile_options(cumetal_thrust_iterators_test PRIVATE -Wall -Wextra -Wpedantic -std=c++17)
+
+target_link_libraries(cumetal_cub_extended_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_compile_options(cumetal_cub_extended_test PRIVATE -Wall -Wextra -Wpedantic -std=c++17)
 
 target_link_libraries(cumetal_thrust_api_test
     PRIVATE
@@ -2507,4 +2529,14 @@ add_test(
 add_test(
     NAME functional_nvtx_api
     COMMAND cumetal_nvtx_api_test
+)
+
+add_test(
+    NAME functional_thrust_iterators
+    COMMAND cumetal_thrust_iterators_test
+)
+
+add_test(
+    NAME functional_cub_extended
+    COMMAND cumetal_cub_extended_test
 )
