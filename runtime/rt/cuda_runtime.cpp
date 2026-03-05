@@ -110,6 +110,17 @@ struct CaptureState {
 std::mutex g_capture_mutex;
 std::unordered_map<cudaStream_t, CaptureState> g_captures;
 
+// Check if a stream is being captured; if so, return its graph for recording.
+// Caller must hold no lock — this function acquires g_capture_mutex.
+cudaGraph_t get_capture_graph(cudaStream_t stream) {
+    std::lock_guard<std::mutex> lock(g_capture_mutex);
+    auto it = g_captures.find(stream);
+    if (it != g_captures.end() && it->second.capturing) {
+        return it->second.graph;
+    }
+    return nullptr;
+}
+
 struct PendingLaunchArgument {
     size_t offset = 0;
     size_t size = 0;
@@ -2208,6 +2219,18 @@ cudaError_t cudaMemcpyAsync(void* dst,
         return fail(init_status);
     }
 
+    // Graph capture: record memcpy node instead of executing
+    if (cudaGraph_t g = get_capture_graph(stream)) {
+        auto* node = new cudaGraphNode_st();
+        node->type = cudaGraphNodeTypeMemcpy;
+        node->dst = dst;
+        node->src = src;
+        node->count = count;
+        node->memcpy_kind = kind;
+        g->nodes.push_back(node);
+        return fail(cudaSuccess);
+    }
+
     cudaMemcpyKind resolved_kind = cudaMemcpyDefault;
     const cudaError_t kind_status = resolve_memcpy_kind(dst, src, kind, &resolved_kind);
     if (kind_status != cudaSuccess) {
@@ -2418,6 +2441,17 @@ cudaError_t cudaMemsetAsync(void* dev_ptr, int value, size_t count, cudaStream_t
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {
         return fail(init_status);
+    }
+
+    // Graph capture: record memset node instead of executing
+    if (cudaGraph_t g = get_capture_graph(stream)) {
+        auto* node = new cudaGraphNode_st();
+        node->type = cudaGraphNodeTypeMemset;
+        node->dst = dev_ptr;
+        node->memset_value = value;
+        node->count = count;
+        g->nodes.push_back(node);
+        return fail(cudaSuccess);
     }
 
     const cudaError_t sync_status = synchronize_stream_for_host_op(stream, nullptr);
@@ -2886,8 +2920,7 @@ cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
                                         node.kernel_args, node.shared_mem, stream);
                 break;
             case cudaGraphNodeTypeMemcpy:
-                err = cudaMemcpyAsync(const_cast<void*>(static_cast<const void*>(node.dst)),
-                                       node.src, node.count, node.memcpy_kind, stream);
+                err = cudaMemcpyAsync(node.dst, node.src, node.count, node.memcpy_kind, stream);
                 break;
             case cudaGraphNodeTypeMemset:
                 err = cudaMemsetAsync(node.dst, node.memset_value, node.count, stream);
@@ -3176,6 +3209,19 @@ cudaError_t cudaLaunchKernel(const void* func,
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {
         return launch_fail(init_status, "ensure_initialized");
+    }
+
+    // Graph capture: record kernel node instead of launching
+    if (cudaGraph_t g = get_capture_graph(stream)) {
+        auto* node = new cudaGraphNode_st();
+        node->type = cudaGraphNodeTypeKernel;
+        node->func = func;
+        node->grid_dim = grid_dim;
+        node->block_dim = block_dim;
+        node->kernel_args = args;
+        node->shared_mem = shared_mem;
+        g->nodes.push_back(node);
+        return fail(cudaSuccess);
     }
 
     cumetal::registration::RegisteredKernel registered_kernel;

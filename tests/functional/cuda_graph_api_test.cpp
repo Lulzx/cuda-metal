@@ -115,11 +115,124 @@ static bool test_graph_null_args() {
     return true;
 }
 
+static bool test_capture_memcpy_replay() {
+    // Capture a memcpyAsync during stream capture, then replay via graph launch
+    float src[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float* dev = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&dev), sizeof(src));
+    std::memset(dev, 0, sizeof(src));
+
+    cudaStream_t stream = nullptr;
+    cudaStreamCreate(&stream);
+
+    // Begin capture
+    cudaError_t err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: BeginCapture returned %d\n", err);
+        return false;
+    }
+
+    // This should be recorded, not executed
+    cudaMemcpyAsync(dev, src, sizeof(src), cudaMemcpyHostToDevice, stream);
+
+    // Verify data was NOT copied yet (capture should defer execution)
+    float check[4] = {};
+    std::memcpy(check, dev, sizeof(check));
+    if (check[0] != 0.0f) {
+        std::fprintf(stderr, "FAIL: memcpy should be deferred during capture\n");
+        return false;
+    }
+
+    // End capture
+    cudaGraph_t graph = nullptr;
+    err = cudaStreamEndCapture(stream, &graph);
+    if (err != cudaSuccess || graph == nullptr) {
+        std::fprintf(stderr, "FAIL: EndCapture returned %d\n", err);
+        return false;
+    }
+
+    // Graph should have 1 node
+    size_t numNodes = 0;
+    cudaGraphGetNodes(graph, nullptr, &numNodes);
+    if (numNodes != 1) {
+        std::fprintf(stderr, "FAIL: expected 1 captured node, got %zu\n", numNodes);
+        return false;
+    }
+
+    // Instantiate and launch
+    cudaGraphExec_t exec = nullptr;
+    cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+    cudaGraphLaunch(exec, stream);
+    cudaStreamSynchronize(stream);
+
+    // Now data should be copied
+    float result[4] = {};
+    std::memcpy(result, dev, sizeof(result));
+    for (int i = 0; i < 4; ++i) {
+        if (result[i] != src[i]) {
+            std::fprintf(stderr, "FAIL: replay memcpy mismatch at [%d]: %f != %f\n",
+                         i, result[i], src[i]);
+            return false;
+        }
+    }
+
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
+    cudaFree(dev);
+    return true;
+}
+
+static bool test_capture_memset_replay() {
+    float* dev = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&dev), 64);
+    std::memset(dev, 0xFF, 64);
+
+    cudaStream_t stream = nullptr;
+    cudaStreamCreate(&stream);
+
+    cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+    cudaMemsetAsync(dev, 0, 64, stream);
+
+    cudaGraph_t graph = nullptr;
+    cudaStreamEndCapture(stream, &graph);
+
+    size_t numNodes = 0;
+    cudaGraphGetNodes(graph, nullptr, &numNodes);
+    if (numNodes != 1) {
+        std::fprintf(stderr, "FAIL: expected 1 memset node, got %zu\n", numNodes);
+        return false;
+    }
+
+    cudaGraphExec_t exec = nullptr;
+    cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+    cudaGraphLaunch(exec, stream);
+    cudaStreamSynchronize(stream);
+
+    // Verify memset took effect after replay
+    unsigned char check[64];
+    std::memcpy(check, dev, 64);
+    for (int i = 0; i < 64; ++i) {
+        if (check[i] != 0) {
+            std::fprintf(stderr, "FAIL: memset replay didn't zero byte %d\n", i);
+            return false;
+        }
+    }
+
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
+    cudaFree(dev);
+    return true;
+}
+
 int main() {
     if (!test_graph_create_destroy()) return 1;
     if (!test_graph_instantiate_launch()) return 1;
     if (!test_stream_capture_status()) return 1;
     if (!test_graph_null_args()) return 1;
+    if (!test_capture_memcpy_replay()) return 1;
+    if (!test_capture_memset_replay()) return 1;
 
     std::printf("PASS: CUDA Graph API tests\n");
     return 0;

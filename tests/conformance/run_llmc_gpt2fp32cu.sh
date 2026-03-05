@@ -39,7 +39,7 @@ else
   export CUMETAL_TRACE_LLMC_EMULATION=1
 fi
 
-(cd "$LLMC_DIR" && eval "$TEST_CMD") | tee "$OUTPUT_FILE"
+(cd "$LLMC_DIR" && eval "$TEST_CMD") | tee "$OUTPUT_FILE" || true
 
 if ! rg -qi "loss" "$OUTPUT_FILE"; then
   echo "FAIL: llm.c output did not contain a loss line"

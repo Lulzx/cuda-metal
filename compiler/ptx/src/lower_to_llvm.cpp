@@ -2029,6 +2029,76 @@ class GenericLlvmEmitter {
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, hi, bits);
     }
 
+    // Dekker FMA emulation: fma(a, b, c) ≈ dekker_mul(a, b) + c using double-single pairs
+    bool emit_fp64_emulated_fma(std::ostringstream& os,
+                                 const std::string& dst,
+                                 const Value& a, const Value& b, const Value& c) {
+        // Decompose a, b, c to (hi, lo) FP32 pairs
+        const std::string a_hi = next_tmp("fma_ahi"), b_hi = next_tmp("fma_bhi"), c_hi = next_tmp("fma_chi");
+        os << "  " << a_hi << " = fptrunc double " << a.ir << " to float\n";
+        os << "  " << b_hi << " = fptrunc double " << b.ir << " to float\n";
+        os << "  " << c_hi << " = fptrunc double " << c.ir << " to float\n";
+
+        const std::string a_hi_ext = next_tmp("fma_ahiext"), b_hi_ext = next_tmp("fma_bhiext"), c_hi_ext = next_tmp("fma_chiext");
+        os << "  " << a_hi_ext << " = fpext float " << a_hi << " to double\n";
+        os << "  " << b_hi_ext << " = fpext float " << b_hi << " to double\n";
+        os << "  " << c_hi_ext << " = fpext float " << c_hi << " to double\n";
+
+        const std::string a_lo_d = next_tmp("fma_alo"), b_lo_d = next_tmp("fma_blo"), c_lo_d = next_tmp("fma_clo");
+        os << "  " << a_lo_d << " = fsub double " << a.ir << ", " << a_hi_ext << "\n";
+        os << "  " << b_lo_d << " = fsub double " << b.ir << ", " << b_hi_ext << "\n";
+        os << "  " << c_lo_d << " = fsub double " << c.ir << ", " << c_hi_ext << "\n";
+
+        const std::string a_lo = next_tmp("fma_alo32"), b_lo = next_tmp("fma_blo32"), c_lo = next_tmp("fma_clo32");
+        os << "  " << a_lo << " = fptrunc double " << a_lo_d << " to float\n";
+        os << "  " << b_lo << " = fptrunc double " << b_lo_d << " to float\n";
+        os << "  " << c_lo << " = fptrunc double " << c_lo_d << " to float\n";
+
+        // Dekker multiply: p = a_hi * b_hi, cross = a_hi*b_lo + a_lo*b_hi
+        const std::string p = next_tmp("fma_p");
+        os << "  " << p << " = fmul float " << a_hi << ", " << b_hi << "\n";
+        const std::string cr1 = next_tmp("fma_cr1"), cr2 = next_tmp("fma_cr2"), cross = next_tmp("fma_cross");
+        os << "  " << cr1 << " = fmul float " << a_hi << ", " << b_lo << "\n";
+        os << "  " << cr2 << " = fmul float " << a_lo << ", " << b_hi << "\n";
+        os << "  " << cross << " = fadd float " << cr1 << ", " << cr2 << "\n";
+
+        // TwoSum: s = p + c_hi, with error tracking
+        const std::string s = next_tmp("fma_s");
+        os << "  " << s << " = fadd float " << p << ", " << c_hi << "\n";
+        const std::string v1 = next_tmp("fma_v");
+        os << "  " << v1 << " = fsub float " << s << ", " << p << "\n";
+        const std::string err_c = next_tmp("fma_errc");
+        os << "  " << err_c << " = fsub float " << c_hi << ", " << v1 << "\n";
+        const std::string err_p = next_tmp("fma_errp");
+        os << "  " << err_p << " = fsub float " << p << ", " << s << "\n";
+        const std::string err_p2 = next_tmp("fma_errp2");
+        os << "  " << err_p2 << " = fadd float " << err_p << ", " << v1 << "\n";
+        const std::string round_err = next_tmp("fma_rerr");
+        os << "  " << round_err << " = fadd float " << err_p2 << ", " << err_c << "\n";
+
+        // lo = round_err + cross + c_lo
+        const std::string lo1 = next_tmp("fma_lo1"), lo2 = next_tmp("fma_lo2");
+        os << "  " << lo1 << " = fadd float " << round_err << ", " << cross << "\n";
+        os << "  " << lo2 << " = fadd float " << lo1 << ", " << c_lo << "\n";
+
+        // Reconstruct
+        const std::string final_f32 = next_tmp("fma_sum");
+        os << "  " << final_f32 << " = fadd float " << s << ", " << lo2 << "\n";
+        const std::string result_d = next_tmp("fma_result");
+        os << "  " << result_d << " = fpext float " << final_f32 << " to double\n";
+
+        Value v;
+        v.ir = result_d;
+        v.type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = 64, .is_signed = false};
+        v.bits = 64;
+        auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
+        if (!bitsv.has_value()) {
+            error_ = "fp64 emulate fma result encode failed";
+            return false;
+        }
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
+    }
+
     bool emit_mad_or_fma(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
         if (instr.operands.size() < 4 || !is_register_name(instr.operands[0])) {
             return fail(instr, "mad/fma requires dst, a, b, c");
@@ -2041,6 +2111,12 @@ class GenericLlvmEmitter {
             auto b = decode_float_operand(os, instr.operands[2], bits);
             auto c = decode_float_operand(os, instr.operands[3], bits);
             if (!a || !b || !c) return fail(instr, "mad/fma float source unsupported");
+
+            // FP64 emulation: decompose fma to Dekker double-single pairs
+            if (bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                return emit_fp64_emulated_fma(os, dst, *a, *b, *c);
+            }
+
             const std::string mul = next_tmp("fmul");
             const std::string add = next_tmp("fadd");
             os << "  " << mul << " = fmul " << llvm_float_type(bits) << " " << a->ir << ", " << b->ir << "\n";
