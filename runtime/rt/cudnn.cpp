@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <vector>
 
 // cuDNN shim: CPU-backed convolution and tensor ops via im2col + GEMM (Accelerate).
 // Sufficient for inference workloads on Apple Silicon UMA.
@@ -72,6 +73,17 @@ struct cudnnReduceTensorStruct {
     cudnnNanPropagation_t nanOpt = CUDNN_NOT_PROPAGATE_NAN;
     cudnnReduceTensorIndices_t indices = CUDNN_REDUCE_TENSOR_NO_INDICES;
     cudnnIndicesType_t indicesType = CUDNN_32BIT_INDICES;
+};
+
+struct cudnnRNNStruct {
+    int hiddenSize = 0;
+    int numLayers = 1;
+    cudnnDropoutDescriptor_t dropoutDesc = nullptr;
+    cudnnRNNInputMode_t inputMode = CUDNN_LINEAR_INPUT;
+    cudnnDirectionMode_t direction = CUDNN_UNIDIRECTIONAL;
+    cudnnRNNMode_t cellMode = CUDNN_LSTM;
+    cudnnRNNAlgo_t algo = CUDNN_RNN_ALGO_STANDARD;
+    cudnnDataType_t mathPrec = CUDNN_DATA_FLOAT;
 };
 
 namespace {
@@ -1881,6 +1893,334 @@ cudnnStatus_t cudnnReduceTensor(cudnnHandle_t /*handle*/,
         }
     }
     return CUDNN_STATUS_SUCCESS;
+}
+
+// --- RNN ---
+
+cudnnStatus_t cudnnCreateRNNDescriptor(cudnnRNNDescriptor_t* rnnDesc) {
+    if (!rnnDesc) return CUDNN_STATUS_BAD_PARAM;
+    *rnnDesc = new (std::nothrow) cudnnRNNStruct;
+    return *rnnDesc ? CUDNN_STATUS_SUCCESS : CUDNN_STATUS_ALLOC_FAILED;
+}
+
+cudnnStatus_t cudnnDestroyRNNDescriptor(cudnnRNNDescriptor_t rnnDesc) {
+    delete rnnDesc;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnSetRNNDescriptor_v6(cudnnHandle_t, cudnnRNNDescriptor_t rnnDesc,
+                                        int hiddenSize, int numLayers,
+                                        cudnnDropoutDescriptor_t dropoutDesc,
+                                        cudnnRNNInputMode_t inputMode,
+                                        cudnnDirectionMode_t direction,
+                                        cudnnRNNMode_t cellMode,
+                                        cudnnRNNAlgo_t algo,
+                                        cudnnDataType_t mathPrec) {
+    if (!rnnDesc) return CUDNN_STATUS_BAD_PARAM;
+    rnnDesc->hiddenSize = hiddenSize;
+    rnnDesc->numLayers = numLayers;
+    rnnDesc->dropoutDesc = dropoutDesc;
+    rnnDesc->inputMode = inputMode;
+    rnnDesc->direction = direction;
+    rnnDesc->cellMode = cellMode;
+    rnnDesc->algo = algo;
+    rnnDesc->mathPrec = mathPrec;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetRNNParamsSize(cudnnHandle_t, cudnnRNNDescriptor_t rnnDesc,
+                                     cudnnTensorDescriptor_t xDesc,
+                                     size_t* sizeInBytes, cudnnDataType_t) {
+    if (!rnnDesc || !xDesc || !sizeInBytes) return CUDNN_STATUS_BAD_PARAM;
+    int H = rnnDesc->hiddenSize;
+    int inputSize = (xDesc->h == 1 && xDesc->w == 1) ? xDesc->c :
+                    (xDesc->w > 0 ? xDesc->w : xDesc->c);
+    int numDirs = (rnnDesc->direction == CUDNN_BIDIRECTIONAL) ? 2 : 1;
+    int numLayers = rnnDesc->numLayers;
+    int gateCount = 1;
+    switch (rnnDesc->cellMode) {
+        case CUDNN_LSTM: gateCount = 4; break;
+        case CUDNN_GRU:  gateCount = 3; break;
+        default:         gateCount = 1; break;
+    }
+    // Layer 0: W_ih(gateCount*H, inputSize) + W_hh(gateCount*H, H) + biases
+    // Layer L>0: W_ih(gateCount*H, H*numDirs) + W_hh(gateCount*H, H) + biases
+    size_t params = 0;
+    for (int l = 0; l < numLayers; l++) {
+        for (int d = 0; d < numDirs; d++) {
+            int inSz = (l == 0) ? inputSize : H * numDirs;
+            params += (size_t)gateCount * H * inSz;  // W_ih
+            params += (size_t)gateCount * H * H;      // W_hh
+            params += (size_t)gateCount * H * 2;       // bias_ih + bias_hh
+        }
+    }
+    *sizeInBytes = params * sizeof(float);
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetRNNWorkspaceSize(cudnnHandle_t, cudnnRNNDescriptor_t rnnDesc,
+                                        int seqLength, const cudnnTensorDescriptor_t*,
+                                        size_t* sizeInBytes) {
+    if (!rnnDesc || !sizeInBytes) return CUDNN_STATUS_BAD_PARAM;
+    int H = rnnDesc->hiddenSize;
+    int numDirs = (rnnDesc->direction == CUDNN_BIDIRECTIONAL) ? 2 : 1;
+    int gateCount = (rnnDesc->cellMode == CUDNN_LSTM) ? 4 :
+                    (rnnDesc->cellMode == CUDNN_GRU) ? 3 : 1;
+    // Workspace for intermediate gate activations
+    *sizeInBytes = (size_t)seqLength * numDirs * gateCount * H * sizeof(float);
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetRNNTrainingReserveSize(cudnnHandle_t, cudnnRNNDescriptor_t rnnDesc,
+                                              int seqLength, const cudnnTensorDescriptor_t*,
+                                              size_t* sizeInBytes) {
+    if (!rnnDesc || !sizeInBytes) return CUDNN_STATUS_BAD_PARAM;
+    int H = rnnDesc->hiddenSize;
+    int numDirs = (rnnDesc->direction == CUDNN_BIDIRECTIONAL) ? 2 : 1;
+    int gateCount = (rnnDesc->cellMode == CUDNN_LSTM) ? 4 :
+                    (rnnDesc->cellMode == CUDNN_GRU) ? 3 : 1;
+    // Reserve space stores pre-activation gate values + hidden states for backward
+    *sizeInBytes = (size_t)seqLength * rnnDesc->numLayers * numDirs * (gateCount + 1) * H * sizeof(float);
+    return CUDNN_STATUS_SUCCESS;
+}
+
+namespace {
+
+// Simple GEMM: C = alpha*A*B + beta*C  (A: MxK, B: KxN, C: MxN, row-major)
+static void rnn_gemm(int M, int N, int K, float alpha,
+                     const float* A, int lda,
+                     const float* B, int ldb,
+                     float beta, float* C, int ldc) {
+    // Use Accelerate cblas in col-major form: interpret row-major A*B as col-major B^T * A^T
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+static inline float rnn_sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
+static inline float rnn_tanh(float x) { return std::tanh(x); }
+
+// Run one LSTM step: given input x[inputSize], prev h[H], prev c[H],
+// compute new h[H] and c[H].
+// W_ih: (4H, inputSize), W_hh: (4H, H), b_ih: (4H), b_hh: (4H)
+static void lstm_step(int inputSize, int H,
+                      const float* x, const float* h_prev, const float* c_prev,
+                      const float* W_ih, const float* W_hh,
+                      const float* b_ih, const float* b_hh,
+                      float* h_out, float* c_out, float* gates_buf) {
+    // gates = W_ih * x + b_ih + W_hh * h_prev + b_hh
+    int gateSize = 4 * H;
+    for (int i = 0; i < gateSize; i++) gates_buf[i] = b_ih[i] + b_hh[i];
+    rnn_gemm(gateSize, 1, inputSize, 1.0f, W_ih, inputSize, x, 1, 1.0f, gates_buf, 1);
+    rnn_gemm(gateSize, 1, H, 1.0f, W_hh, H, h_prev, 1, 1.0f, gates_buf, 1);
+
+    // Split into i, f, g, o gates
+    const float* gi = gates_buf;
+    const float* gf = gates_buf + H;
+    const float* gg = gates_buf + 2 * H;
+    const float* go = gates_buf + 3 * H;
+
+    for (int j = 0; j < H; j++) {
+        float i_val = rnn_sigmoid(gi[j]);
+        float f_val = rnn_sigmoid(gf[j]);
+        float g_val = rnn_tanh(gg[j]);
+        float o_val = rnn_sigmoid(go[j]);
+        c_out[j] = f_val * c_prev[j] + i_val * g_val;
+        h_out[j] = o_val * rnn_tanh(c_out[j]);
+    }
+}
+
+// Run one vanilla RNN step (RELU or TANH)
+static void rnn_step(int inputSize, int H, cudnnRNNMode_t mode,
+                     const float* x, const float* h_prev,
+                     const float* W_ih, const float* W_hh,
+                     const float* b_ih, const float* b_hh,
+                     float* h_out, float* gates_buf) {
+    for (int i = 0; i < H; i++) gates_buf[i] = b_ih[i] + b_hh[i];
+    rnn_gemm(H, 1, inputSize, 1.0f, W_ih, inputSize, x, 1, 1.0f, gates_buf, 1);
+    rnn_gemm(H, 1, H, 1.0f, W_hh, H, h_prev, 1, 1.0f, gates_buf, 1);
+    for (int j = 0; j < H; j++) {
+        h_out[j] = (mode == CUDNN_RNN_RELU) ? std::max(0.0f, gates_buf[j]) : rnn_tanh(gates_buf[j]);
+    }
+}
+
+// Run one GRU step
+static void gru_step(int inputSize, int H,
+                     const float* x, const float* h_prev,
+                     const float* W_ih, const float* W_hh,
+                     const float* b_ih, const float* b_hh,
+                     float* h_out, float* gates_buf) {
+    // gates_ih = W_ih * x + b_ih  (3H)
+    // gates_hh = W_hh * h + b_hh  (3H)
+    int gateSize = 3 * H;
+    float* g_ih = gates_buf;
+    float* g_hh = gates_buf + gateSize;
+    for (int i = 0; i < gateSize; i++) { g_ih[i] = b_ih[i]; g_hh[i] = b_hh[i]; }
+    rnn_gemm(gateSize, 1, inputSize, 1.0f, W_ih, inputSize, x, 1, 1.0f, g_ih, 1);
+    rnn_gemm(gateSize, 1, H, 1.0f, W_hh, H, h_prev, 1, 1.0f, g_hh, 1);
+
+    // r = sigmoid(g_ih[0:H] + g_hh[0:H])
+    // z = sigmoid(g_ih[H:2H] + g_hh[H:2H])
+    // n = tanh(g_ih[2H:3H] + r * g_hh[2H:3H])
+    // h = (1 - z) * n + z * h_prev
+    for (int j = 0; j < H; j++) {
+        float r = rnn_sigmoid(g_ih[j] + g_hh[j]);
+        float z = rnn_sigmoid(g_ih[H + j] + g_hh[H + j]);
+        float n = rnn_tanh(g_ih[2 * H + j] + r * g_hh[2 * H + j]);
+        h_out[j] = (1.0f - z) * n + z * h_prev[j];
+    }
+}
+
+} // anonymous namespace
+
+// Core RNN forward implementation (shared by inference and training)
+static cudnnStatus_t rnn_forward_impl(cudnnHandle_t, cudnnRNNDescriptor_t rnnDesc,
+                                       int seqLength, const cudnnTensorDescriptor_t* xDesc,
+                                       const float* x, const float* hx, const float* cx,
+                                       const float* w, float* y, float* hy, float* cy) {
+    if (!rnnDesc || !xDesc || !x || !w || !y) return CUDNN_STATUS_BAD_PARAM;
+
+    int H = rnnDesc->hiddenSize;
+    int numLayers = rnnDesc->numLayers;
+    int numDirs = (rnnDesc->direction == CUDNN_BIDIRECTIONAL) ? 2 : 1;
+    int batchSize = xDesc[0] ? xDesc[0]->n : 0;
+    int inputSize = xDesc[0] ? (xDesc[0]->w > 0 ? xDesc[0]->w : xDesc[0]->c) : 0;
+    if (batchSize <= 0 || inputSize <= 0) return CUDNN_STATUS_BAD_PARAM;
+
+    int gateCount = 1;
+    switch (rnnDesc->cellMode) {
+        case CUDNN_LSTM: gateCount = 4; break;
+        case CUDNN_GRU:  gateCount = 3; break;
+        default:         gateCount = 1; break;
+    }
+
+    // Temp buffers
+    int maxGateBuf = gateCount * H * 2; // enough for GRU's double-buffer
+    std::vector<float> gates_buf(maxGateBuf);
+    std::vector<float> h_cur(numLayers * numDirs * batchSize * H, 0.0f);
+    std::vector<float> h_next(numLayers * numDirs * batchSize * H, 0.0f);
+    std::vector<float> c_cur, c_next;
+    if (rnnDesc->cellMode == CUDNN_LSTM) {
+        c_cur.resize(numLayers * numDirs * batchSize * H, 0.0f);
+        c_next.resize(numLayers * numDirs * batchSize * H, 0.0f);
+    }
+
+    // Initialize hidden state from hx
+    if (hx) {
+        std::memcpy(h_cur.data(), hx, numLayers * numDirs * batchSize * H * sizeof(float));
+    }
+    if (cx && rnnDesc->cellMode == CUDNN_LSTM) {
+        std::memcpy(c_cur.data(), cx, numLayers * numDirs * batchSize * H * sizeof(float));
+    }
+
+    // Input buffer: starts as x, then becomes y from previous layer
+    // y layout: (seqLength, batchSize, H * numDirs)
+    int yFeatureSize = H * numDirs;
+    std::vector<float> layer_input(seqLength * batchSize * std::max(inputSize, yFeatureSize));
+    std::memcpy(layer_input.data(), x, seqLength * batchSize * inputSize * sizeof(float));
+
+    const float* wPtr = w;
+
+    for (int layer = 0; layer < numLayers; layer++) {
+        for (int dir = 0; dir < numDirs; dir++) {
+            int dirIdx = layer * numDirs + dir;
+            int inSz = (layer == 0) ? inputSize : yFeatureSize;
+            size_t wih_sz = (size_t)gateCount * H * inSz;
+            size_t whh_sz = (size_t)gateCount * H * H;
+            size_t bih_sz = (size_t)gateCount * H;
+            size_t bhh_sz = (size_t)gateCount * H;
+
+            const float* W_ih = wPtr; wPtr += wih_sz;
+            const float* W_hh = wPtr; wPtr += whh_sz;
+            const float* b_ih = wPtr; wPtr += bih_sz;
+            const float* b_hh = wPtr; wPtr += bhh_sz;
+
+            // Process sequence
+            for (int t_raw = 0; t_raw < seqLength; t_raw++) {
+                int t = (dir == 0) ? t_raw : (seqLength - 1 - t_raw);
+                for (int b = 0; b < batchSize; b++) {
+                    const float* inp = layer_input.data() + t * batchSize * inSz + b * inSz;
+                    float* h_prev = h_cur.data() + dirIdx * batchSize * H + b * H;
+                    float* h_out = h_next.data() + dirIdx * batchSize * H + b * H;
+
+                    switch (rnnDesc->cellMode) {
+                        case CUDNN_LSTM: {
+                            float* c_p = c_cur.data() + dirIdx * batchSize * H + b * H;
+                            float* c_o = c_next.data() + dirIdx * batchSize * H + b * H;
+                            lstm_step(inSz, H, inp, h_prev, c_p, W_ih, W_hh, b_ih, b_hh, h_out, c_o, gates_buf.data());
+                            std::memcpy(c_p, c_o, H * sizeof(float));
+                            break;
+                        }
+                        case CUDNN_GRU:
+                            gru_step(inSz, H, inp, h_prev, W_ih, W_hh, b_ih, b_hh, h_out, gates_buf.data());
+                            break;
+                        default:
+                            rnn_step(inSz, H, rnnDesc->cellMode, inp, h_prev, W_ih, W_hh, b_ih, b_hh, h_out, gates_buf.data());
+                            break;
+                    }
+
+                    // Write to output y at position (t, b, dir*H)
+                    float* yOut = y + t * batchSize * yFeatureSize + b * yFeatureSize + dir * H;
+                    std::memcpy(yOut, h_out, H * sizeof(float));
+
+                    // Update h_cur for next timestep
+                    std::memcpy(h_prev, h_out, H * sizeof(float));
+                }
+            }
+        }
+
+        // Prepare input for next layer: copy from y
+        if (layer < numLayers - 1) {
+            std::memcpy(layer_input.data(), y, seqLength * batchSize * yFeatureSize * sizeof(float));
+        }
+    }
+
+    // Copy final hidden states
+    if (hy) {
+        std::memcpy(hy, h_cur.data(), numLayers * numDirs * batchSize * H * sizeof(float));
+    }
+    if (cy && rnnDesc->cellMode == CUDNN_LSTM) {
+        std::memcpy(cy, c_cur.data(), numLayers * numDirs * batchSize * H * sizeof(float));
+    }
+
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnRNNForwardInference(cudnnHandle_t handle,
+                                        cudnnRNNDescriptor_t rnnDesc,
+                                        int seqLength,
+                                        const cudnnTensorDescriptor_t* xDesc,
+                                        const void* x,
+                                        cudnnTensorDescriptor_t, const void* hx,
+                                        cudnnTensorDescriptor_t, const void* cx,
+                                        cudnnFilterDescriptor_t, const void* w,
+                                        const cudnnTensorDescriptor_t* yDesc, void* y,
+                                        cudnnTensorDescriptor_t, void* hy,
+                                        cudnnTensorDescriptor_t, void* cy,
+                                        void*, size_t) {
+    (void)yDesc;
+    return rnn_forward_impl(handle, rnnDesc, seqLength, xDesc,
+                            (const float*)x, (const float*)hx, (const float*)cx,
+                            (const float*)w, (float*)y, (float*)hy, (float*)cy);
+}
+
+cudnnStatus_t cudnnRNNForwardTraining(cudnnHandle_t handle,
+                                       cudnnRNNDescriptor_t rnnDesc,
+                                       int seqLength,
+                                       const cudnnTensorDescriptor_t* xDesc,
+                                       const void* x,
+                                       cudnnTensorDescriptor_t, const void* hx,
+                                       cudnnTensorDescriptor_t, const void* cx,
+                                       cudnnFilterDescriptor_t, const void* w,
+                                       const cudnnTensorDescriptor_t* yDesc, void* y,
+                                       cudnnTensorDescriptor_t, void* hy,
+                                       cudnnTensorDescriptor_t, void* cy,
+                                       void*, size_t,
+                                       void*, size_t) {
+    (void)yDesc;
+    // Training forward is identical to inference for outputs; reserveSpace is for backward
+    return rnn_forward_impl(handle, rnnDesc, seqLength, xDesc,
+                            (const float*)x, (const float*)hx, (const float*)cx,
+                            (const float*)w, (float*)y, (float*)hy, (float*)cy);
 }
 
 } // extern "C"

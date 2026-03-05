@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 static bool test_handle_lifecycle() {
     cudnnHandle_t handle = nullptr;
@@ -729,6 +730,129 @@ static bool test_fused_conv_bias_activation() {
     return true;
 }
 
+static bool test_rnn_lstm_basic() {
+    cudnnHandle_t handle; cudnnCreate(&handle);
+
+    // Simple LSTM: seqLength=2, batchSize=1, inputSize=3, hiddenSize=2, 1 layer, unidirectional
+    int seqLen = 2, batch = 1, inputSize = 3, H = 2;
+
+    cudnnRNNDescriptor_t rnnDesc;
+    cudnnCreateRNNDescriptor(&rnnDesc);
+    cudnnSetRNNDescriptor_v6(handle, rnnDesc, H, 1, nullptr,
+                              CUDNN_LINEAR_INPUT, CUDNN_UNIDIRECTIONAL,
+                              CUDNN_LSTM, CUDNN_RNN_ALGO_STANDARD, CUDNN_DATA_FLOAT);
+
+    // Create tensor descriptors for each timestep
+    cudnnTensorDescriptor_t xDescs[2], yDescs[2];
+    for (int t = 0; t < seqLen; t++) {
+        cudnnCreateTensorDescriptor(&xDescs[t]);
+        cudnnSetTensor4dDescriptor(xDescs[t], CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, batch, inputSize, 1, 1);
+        cudnnCreateTensorDescriptor(&yDescs[t]);
+        cudnnSetTensor4dDescriptor(yDescs[t], CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, batch, H, 1, 1);
+    }
+
+    // Query parameter size
+    size_t paramsSize = 0;
+    cudnnGetRNNParamsSize(handle, rnnDesc, xDescs[0], &paramsSize, CUDNN_DATA_FLOAT);
+    // LSTM: 4 gates, W_ih(4*2, 3) + W_hh(4*2, 2) + b_ih(4*2) + b_hh(4*2)
+    // = 4*2*3 + 4*2*2 + 4*2 + 4*2 = 24 + 16 + 8 + 8 = 56 floats = 224 bytes
+    if (paramsSize != 56 * sizeof(float)) {
+        std::fprintf(stderr, "FAIL: RNN params size = %zu, expected %zu\n", paramsSize, 56 * sizeof(float));
+        return false;
+    }
+
+    // Initialize weights to small values, biases to 0
+    size_t numParams = paramsSize / sizeof(float);
+    std::vector<float> w(numParams, 0.0f);
+    // Set some non-trivial weights for W_ih (first 24 elements)
+    for (int i = 0; i < 24; i++) w[i] = 0.1f * (i % 5 - 2);
+    // W_hh (next 16)
+    for (int i = 24; i < 40; i++) w[i] = 0.05f * (i % 3 - 1);
+    // biases remain 0
+
+    // Input
+    float x[6] = {1.0f, 0.5f, -0.5f,  0.0f, 1.0f, 0.5f}; // seqLen=2, batch=1, inputSize=3
+    float y[4] = {0}; // seqLen=2, batch=1, H=2
+    float hy[2] = {0}, cy[2] = {0};
+
+    // Query workspace
+    size_t wsSize = 0;
+    cudnnGetRNNWorkspaceSize(handle, rnnDesc, seqLen, xDescs, &wsSize);
+    std::vector<char> workspace(wsSize);
+
+    cudnnFilterDescriptor_t wDesc;
+    cudnnCreateFilterDescriptor(&wDesc);
+
+    cudnnTensorDescriptor_t hDesc, cDesc;
+    cudnnCreateTensorDescriptor(&hDesc);
+    cudnnSetTensor4dDescriptor(hDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, batch, H, 1);
+    cudnnCreateTensorDescriptor(&cDesc);
+    cudnnSetTensor4dDescriptor(cDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, batch, H, 1);
+
+    auto st = cudnnRNNForwardInference(handle, rnnDesc, seqLen,
+                                        xDescs, x,
+                                        hDesc, nullptr,  // hx=0
+                                        cDesc, nullptr,  // cx=0
+                                        wDesc, w.data(),
+                                        yDescs, y,
+                                        hDesc, hy,
+                                        cDesc, cy,
+                                        workspace.data(), wsSize);
+    if (st != CUDNN_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cudnnRNNForwardInference returned %d\n", st);
+        return false;
+    }
+
+    // Verify outputs are finite and non-trivial
+    for (int i = 0; i < 4; i++) {
+        if (!std::isfinite(y[i])) {
+            std::fprintf(stderr, "FAIL: RNN output y[%d] = %f not finite\n", i, y[i]);
+            return false;
+        }
+    }
+    // hy should match last timestep of y
+    bool hy_match = (std::fabs(hy[0] - y[2]) < 1e-6f && std::fabs(hy[1] - y[3]) < 1e-6f);
+    if (!hy_match) {
+        std::fprintf(stderr, "FAIL: hy doesn't match last y output (hy=[%f,%f], y[2:3]=[%f,%f])\n",
+                     hy[0], hy[1], y[2], y[3]);
+        return false;
+    }
+
+    // Cleanup
+    for (int t = 0; t < seqLen; t++) {
+        cudnnDestroyTensorDescriptor(xDescs[t]);
+        cudnnDestroyTensorDescriptor(yDescs[t]);
+    }
+    cudnnDestroyTensorDescriptor(hDesc);
+    cudnnDestroyTensorDescriptor(cDesc);
+    cudnnDestroyFilterDescriptor(wDesc);
+    cudnnDestroyRNNDescriptor(rnnDesc);
+    cudnnDestroy(handle);
+    std::printf("  test_rnn_lstm_basic: PASS\n");
+    return true;
+}
+
+static bool test_rnn_descriptor_lifecycle() {
+    cudnnHandle_t handle; cudnnCreate(&handle);
+    cudnnRNNDescriptor_t rnnDesc;
+    auto st = cudnnCreateRNNDescriptor(&rnnDesc);
+    if (st != CUDNN_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cudnnCreateRNNDescriptor\n");
+        return false;
+    }
+    st = cudnnSetRNNDescriptor_v6(handle, rnnDesc, 128, 2, nullptr,
+                                   CUDNN_LINEAR_INPUT, CUDNN_UNIDIRECTIONAL,
+                                   CUDNN_GRU, CUDNN_RNN_ALGO_STANDARD, CUDNN_DATA_FLOAT);
+    if (st != CUDNN_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cudnnSetRNNDescriptor_v6\n");
+        return false;
+    }
+    cudnnDestroyRNNDescriptor(rnnDesc);
+    cudnnDestroy(handle);
+    std::printf("  test_rnn_descriptor_lifecycle: PASS\n");
+    return true;
+}
+
 int main() {
     if (!test_handle_lifecycle()) return 1;
     if (!test_tensor_descriptor()) return 1;
@@ -752,6 +876,8 @@ int main() {
     if (!test_op_tensor_add()) return 1;
     if (!test_reduce_tensor_sum()) return 1;
     if (!test_fused_conv_bias_activation()) return 1;
+    if (!test_rnn_descriptor_lifecycle()) return 1;
+    if (!test_rnn_lstm_basic()) return 1;
 
     std::printf("PASS: cuDNN API tests\n");
     return 0;
