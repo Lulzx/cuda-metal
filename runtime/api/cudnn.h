@@ -437,6 +437,21 @@ cudnnStatus_t cudnnBatchNormalizationForwardInference(
     const void* estimatedMean, const void* estimatedVariance,
     double epsilon);
 
+// Fused convolution + bias + activation (used heavily by inference frameworks)
+cudnnStatus_t cudnnConvolutionBiasActivationForward(
+    cudnnHandle_t handle,
+    const void* alpha1,
+    cudnnTensorDescriptor_t xDesc, const void* x,
+    cudnnFilterDescriptor_t wDesc, const void* w,
+    cudnnConvolutionDescriptor_t convDesc,
+    cudnnConvolutionFwdAlgo_t algo,
+    void* workSpace, size_t workSpaceSizeInBytes,
+    const void* alpha2,
+    cudnnTensorDescriptor_t zDesc, const void* z,
+    cudnnTensorDescriptor_t biasDesc, const void* bias,
+    cudnnActivationDescriptor_t activationDesc,
+    cudnnTensorDescriptor_t yDesc, void* y);
+
 // Batch normalization training + backward
 cudnnStatus_t cudnnBatchNormalizationForwardTraining(
     cudnnHandle_t handle,

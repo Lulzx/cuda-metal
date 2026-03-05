@@ -674,6 +674,61 @@ static bool test_reduce_tensor_sum() {
     return true;
 }
 
+static bool test_fused_conv_bias_activation() {
+    // 1x1x3x3 conv with 1x1x1x1 identity kernel, bias=10, relu activation
+    float input[9] = {-1, -2, -3, 4, 5, 6, -7, 8, 9};
+    float kernel[1] = {1.0f};
+    float bias_val[1] = {10.0f}; // add 10 to each element
+    float output[9] = {};
+    float alpha1 = 1.0f, alpha2 = 0.0f;
+
+    cudnnHandle_t handle = nullptr;
+    cudnnCreate(&handle);
+
+    cudnnTensorDescriptor_t xDesc = nullptr, yDesc = nullptr, biasDesc = nullptr;
+    cudnnFilterDescriptor_t wDesc = nullptr;
+    cudnnConvolutionDescriptor_t convDesc = nullptr;
+    cudnnActivationDescriptor_t act = nullptr;
+
+    cudnnCreateTensorDescriptor(&xDesc);
+    cudnnCreateTensorDescriptor(&yDesc);
+    cudnnCreateTensorDescriptor(&biasDesc);
+    cudnnCreateFilterDescriptor(&wDesc);
+    cudnnCreateConvolutionDescriptor(&convDesc);
+    cudnnCreateActivationDescriptor(&act);
+
+    cudnnSetTensor4dDescriptor(xDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 3, 3);
+    cudnnSetFilter4dDescriptor(wDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, 1, 1, 1, 1);
+    cudnnSetConvolution2dDescriptor(convDesc, 0, 0, 1, 1, 1, 1,
+                                    CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
+    cudnnSetTensor4dDescriptor(yDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 3, 3);
+    cudnnSetTensor4dDescriptor(biasDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 1, 1);
+    cudnnSetActivationDescriptor(act, CUDNN_ACTIVATION_RELU, CUDNN_NOT_PROPAGATE_NAN, 0.0);
+
+    cudnnConvolutionBiasActivationForward(handle, &alpha1,
+        xDesc, input, wDesc, kernel, convDesc,
+        CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM, nullptr, 0,
+        &alpha2, nullptr, nullptr, biasDesc, bias_val, act, yDesc, output);
+
+    // After conv: same as input. After +10: {9,8,7,14,15,16,3,18,19}. After relu: all positive
+    float expected[] = {9, 8, 7, 14, 15, 16, 3, 18, 19};
+    for (int i = 0; i < 9; ++i) {
+        if (std::fabs(output[i] - expected[i]) > 1e-5f) {
+            std::fprintf(stderr, "FAIL: fused[%d]=%f expected %f\n", i, output[i], expected[i]);
+            return false;
+        }
+    }
+
+    cudnnDestroyActivationDescriptor(act);
+    cudnnDestroyConvolutionDescriptor(convDesc);
+    cudnnDestroyFilterDescriptor(wDesc);
+    cudnnDestroyTensorDescriptor(biasDesc);
+    cudnnDestroyTensorDescriptor(yDesc);
+    cudnnDestroyTensorDescriptor(xDesc);
+    cudnnDestroy(handle);
+    return true;
+}
+
 int main() {
     if (!test_handle_lifecycle()) return 1;
     if (!test_tensor_descriptor()) return 1;
@@ -696,6 +751,7 @@ int main() {
     if (!test_softmax_backward()) return 1;
     if (!test_op_tensor_add()) return 1;
     if (!test_reduce_tensor_sum()) return 1;
+    if (!test_fused_conv_bias_activation()) return 1;
 
     std::printf("PASS: cuDNN API tests\n");
     return 0;

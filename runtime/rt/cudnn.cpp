@@ -986,6 +986,60 @@ cudnnStatus_t cudnnBatchNormalizationForwardInference(
     return CUDNN_STATUS_SUCCESS;
 }
 
+// ── Fused conv + bias + activation ──
+
+cudnnStatus_t cudnnConvolutionBiasActivationForward(
+    cudnnHandle_t handle,
+    const void* alpha1,
+    cudnnTensorDescriptor_t xDesc, const void* x,
+    cudnnFilterDescriptor_t wDesc, const void* w,
+    cudnnConvolutionDescriptor_t convDesc,
+    cudnnConvolutionFwdAlgo_t algo,
+    void* workSpace, size_t workSpaceSizeInBytes,
+    const void* alpha2,
+    cudnnTensorDescriptor_t zDesc, const void* z,
+    cudnnTensorDescriptor_t biasDesc, const void* bias,
+    cudnnActivationDescriptor_t activationDesc,
+    cudnnTensorDescriptor_t yDesc, void* y) {
+    if (!handle || !alpha1 || !xDesc || !x || !wDesc || !w || !convDesc ||
+        !alpha2 || !yDesc || !y)
+        return CUDNN_STATUS_BAD_PARAM;
+
+    // Step 1: y = conv(x, w) with alpha1
+    float zero = 0.0f;
+    cudnnStatus_t st = cudnnConvolutionForward(handle, alpha1, xDesc, x, wDesc, w,
+                                                convDesc, algo, workSpace, workSpaceSizeInBytes,
+                                                &zero, yDesc, y);
+    if (st != CUDNN_STATUS_SUCCESS) return st;
+
+    // Step 2: y = y + alpha2 * z (residual add)
+    float a2 = *static_cast<const float*>(alpha2);
+    if (zDesc && z && a2 != 0.0f) {
+        float* yf = static_cast<float*>(y);
+        const float* zf = static_cast<const float*>(z);
+        int count = yDesc->n * yDesc->c * yDesc->h * yDesc->w;
+        cblas_saxpy(count, a2, zf, 1, yf, 1);
+    }
+
+    // Step 3: y = y + bias (broadcast over N,H,W)
+    if (biasDesc && bias) {
+        float one = 1.0f;
+        float one2 = 1.0f;
+        st = cudnnAddTensor(handle, &one, biasDesc, bias, &one2, yDesc, y);
+        if (st != CUDNN_STATUS_SUCCESS) return st;
+    }
+
+    // Step 4: activation in-place
+    if (activationDesc && activationDesc->mode != CUDNN_ACTIVATION_IDENTITY) {
+        float one = 1.0f;
+        float zero2 = 0.0f;
+        st = cudnnActivationForward(handle, activationDesc, &one, yDesc, y, &zero2, yDesc, y);
+        if (st != CUDNN_STATUS_SUCCESS) return st;
+    }
+
+    return CUDNN_STATUS_SUCCESS;
+}
+
 // ── Activation backward ──
 
 cudnnStatus_t cudnnActivationBackward(cudnnHandle_t /*handle*/,
