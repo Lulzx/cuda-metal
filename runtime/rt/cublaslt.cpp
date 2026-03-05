@@ -261,6 +261,55 @@ cublasStatus_t cublasLtMatrixLayoutSetAttribute(cublasLtMatrixLayout_t matLayout
     return CUBLAS_STATUS_SUCCESS;
 }
 
+cublasStatus_t cublasLtMatrixLayoutGetAttribute(cublasLtMatrixLayout_t matLayout,
+                                                 cublasLtMatrixLayoutAttribute_t attr,
+                                                 void* buf, size_t sizeInBytes,
+                                                 size_t* sizeWritten) {
+    if (!matLayout || !buf) return CUBLAS_STATUS_INVALID_VALUE;
+    switch (attr) {
+        case CUBLASLT_MATRIX_LAYOUT_TYPE:
+            if (sizeInBytes < sizeof(cudaDataType_t)) return CUBLAS_STATUS_INVALID_VALUE;
+            std::memcpy(buf, &matLayout->type, sizeof(cudaDataType_t));
+            if (sizeWritten) *sizeWritten = sizeof(cudaDataType_t);
+            break;
+        case CUBLASLT_MATRIX_LAYOUT_ROWS:
+            if (sizeInBytes < sizeof(uint64_t)) return CUBLAS_STATUS_INVALID_VALUE;
+            std::memcpy(buf, &matLayout->rows, sizeof(uint64_t));
+            if (sizeWritten) *sizeWritten = sizeof(uint64_t);
+            break;
+        case CUBLASLT_MATRIX_LAYOUT_COLS:
+            if (sizeInBytes < sizeof(uint64_t)) return CUBLAS_STATUS_INVALID_VALUE;
+            std::memcpy(buf, &matLayout->cols, sizeof(uint64_t));
+            if (sizeWritten) *sizeWritten = sizeof(uint64_t);
+            break;
+        case CUBLASLT_MATRIX_LAYOUT_LD:
+            if (sizeInBytes < sizeof(int64_t)) return CUBLAS_STATUS_INVALID_VALUE;
+            std::memcpy(buf, &matLayout->ld, sizeof(int64_t));
+            if (sizeWritten) *sizeWritten = sizeof(int64_t);
+            break;
+        case CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT:
+            if (sizeInBytes < sizeof(int32_t)) return CUBLAS_STATUS_INVALID_VALUE;
+            std::memcpy(buf, &matLayout->batch_count, sizeof(int32_t));
+            if (sizeWritten) *sizeWritten = sizeof(int32_t);
+            break;
+        case CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET:
+            if (sizeInBytes < sizeof(int64_t)) return CUBLAS_STATUS_INVALID_VALUE;
+            std::memcpy(buf, &matLayout->strided_batch_offset, sizeof(int64_t));
+            if (sizeWritten) *sizeWritten = sizeof(int64_t);
+            break;
+        case CUBLASLT_MATRIX_LAYOUT_ORDER: {
+            int32_t order = 0; // CUBLASLT_ORDER_COL
+            if (sizeInBytes < sizeof(int32_t)) return CUBLAS_STATUS_INVALID_VALUE;
+            std::memcpy(buf, &order, sizeof(int32_t));
+            if (sizeWritten) *sizeWritten = sizeof(int32_t);
+            break;
+        }
+        default:
+            return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 // --- Matmul preference ---
 
 cublasStatus_t cublasLtMatmulPreferenceCreate(cublasLtMatmulPreference_t* pref) {

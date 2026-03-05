@@ -77,6 +77,10 @@ cublasStatus_t cublasLtMatrixLayoutDestroy(cublasLtMatrixLayout_t matLayout);
 cublasStatus_t cublasLtMatrixLayoutSetAttribute(cublasLtMatrixLayout_t matLayout,
                                                  cublasLtMatrixLayoutAttribute_t attr,
                                                  const void* buf, size_t sizeInBytes);
+cublasStatus_t cublasLtMatrixLayoutGetAttribute(cublasLtMatrixLayout_t matLayout,
+                                                 cublasLtMatrixLayoutAttribute_t attr,
+                                                 void* buf, size_t sizeInBytes,
+                                                 size_t* sizeWritten);
 
 // Matmul preference
 cublasStatus_t cublasLtMatmulPreferenceCreate(cublasLtMatmulPreference_t* pref);

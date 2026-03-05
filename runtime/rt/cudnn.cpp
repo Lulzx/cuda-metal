@@ -118,6 +118,34 @@ void im2col_f32(const float* data_im, int C, int H, int W,
     }
 }
 
+// col2im: inverse of im2col — accumulate columns back into image
+void col2im_f32(const float* data_col, int C, int H, int W,
+                int kH, int kW, int pad_h, int pad_w,
+                int stride_h, int stride_w, int dilation_h, int dilation_w,
+                float* data_im) {
+    int outH = (H + 2 * pad_h - (dilation_h * (kH - 1) + 1)) / stride_h + 1;
+    int outW = (W + 2 * pad_w - (dilation_w * (kW - 1) + 1)) / stride_w + 1;
+
+    std::memset(data_im, 0, C * H * W * sizeof(float));
+
+    for (int c = 0; c < C; ++c) {
+        for (int kh = 0; kh < kH; ++kh) {
+            for (int kw = 0; kw < kW; ++kw) {
+                for (int oh = 0; oh < outH; ++oh) {
+                    for (int ow = 0; ow < outW; ++ow) {
+                        int ih = oh * stride_h - pad_h + kh * dilation_h;
+                        int iw = ow * stride_w - pad_w + kw * dilation_w;
+                        int col_idx = ((c * kH + kh) * kW + kw) * outH * outW + oh * outW + ow;
+                        if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
+                            data_im[(c * H + ih) * W + iw] += data_col[col_idx];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 } // namespace
 
 extern "C" {
@@ -414,6 +442,269 @@ cudnnStatus_t cudnnConvolutionForward(cudnnHandle_t /*handle*/,
     }
 
     if (own_col) std::free(col_buf);
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── v7 algorithm finder (same as FindAlgorithm, just the modern name) ──
+
+cudnnStatus_t cudnnGetConvolutionForwardAlgorithm_v7(cudnnHandle_t handle,
+                                                      cudnnTensorDescriptor_t xDesc,
+                                                      cudnnFilterDescriptor_t wDesc,
+                                                      cudnnConvolutionDescriptor_t convDesc,
+                                                      cudnnTensorDescriptor_t yDesc,
+                                                      int requestedAlgoCount,
+                                                      int* returnedAlgoCount,
+                                                      cudnnConvolutionFwdAlgoPerf_t* perfResults) {
+    return cudnnFindConvolutionForwardAlgorithm(handle, xDesc, wDesc, convDesc, yDesc,
+                                                 requestedAlgoCount, returnedAlgoCount, perfResults);
+}
+
+// ── Backward convolution (data) ──
+
+cudnnStatus_t cudnnGetConvolutionBackwardDataWorkspaceSize(cudnnHandle_t /*handle*/,
+                                                            cudnnFilterDescriptor_t wDesc,
+                                                            cudnnTensorDescriptor_t dyDesc,
+                                                            cudnnConvolutionDescriptor_t convDesc,
+                                                            cudnnTensorDescriptor_t /*dxDesc*/,
+                                                            cudnnConvolutionBwdDataAlgo_t /*algo*/,
+                                                            size_t* sizeInBytes) {
+    if (!sizeInBytes || !wDesc || !dyDesc || !convDesc) return CUDNN_STATUS_BAD_PARAM;
+    int C = wDesc->c;
+    int kH = wDesc->h, kW = wDesc->w;
+    int outH = dyDesc->h, outW = dyDesc->w;
+    *sizeInBytes = (size_t)C * kH * kW * outH * outW * sizeof(float);
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnFindConvolutionBackwardDataAlgorithm(cudnnHandle_t /*handle*/,
+                                                         cudnnFilterDescriptor_t /*wDesc*/,
+                                                         cudnnTensorDescriptor_t /*dyDesc*/,
+                                                         cudnnConvolutionDescriptor_t /*convDesc*/,
+                                                         cudnnTensorDescriptor_t /*dxDesc*/,
+                                                         int requestedAlgoCount,
+                                                         int* returnedAlgoCount,
+                                                         cudnnConvolutionBwdDataAlgoPerf_t* perfResults) {
+    if (!returnedAlgoCount) return CUDNN_STATUS_BAD_PARAM;
+    int count = std::min(requestedAlgoCount, 1);
+    if (count > 0 && perfResults) {
+        std::memset(&perfResults[0], 0, sizeof(cudnnConvolutionBwdDataAlgoPerf_t));
+        perfResults[0].algo = CUDNN_CONVOLUTION_BWD_DATA_ALGO_0;
+        perfResults[0].status = CUDNN_STATUS_SUCCESS;
+    }
+    *returnedAlgoCount = count;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnConvolutionBackwardData(cudnnHandle_t /*handle*/,
+                                            const void* alpha,
+                                            cudnnFilterDescriptor_t wDesc, const void* w,
+                                            cudnnTensorDescriptor_t dyDesc, const void* dy,
+                                            cudnnConvolutionDescriptor_t convDesc,
+                                            cudnnConvolutionBwdDataAlgo_t /*algo*/,
+                                            void* workSpace, size_t /*workSpaceSizeInBytes*/,
+                                            const void* beta,
+                                            cudnnTensorDescriptor_t dxDesc, void* dx) {
+    if (!alpha || !wDesc || !w || !dyDesc || !dy || !convDesc || !beta || !dxDesc || !dx)
+        return CUDNN_STATUS_BAD_PARAM;
+
+    float a = *static_cast<const float*>(alpha);
+    float b = *static_cast<const float*>(beta);
+    const float* wf = static_cast<const float*>(w);
+    const float* dyf = static_cast<const float*>(dy);
+    float* dxf = static_cast<float*>(dx);
+
+    int N = dyDesc->n;
+    int K = wDesc->k;
+    int C_in = wDesc->c;
+    int H = dxDesc->h, W = dxDesc->w;
+    int kH = wDesc->h, kW = wDesc->w;
+    int groups = convDesc->groupCount;
+    int C_per_group = C_in / groups;
+    int K_per_group = K / groups;
+    int outH = dyDesc->h, outW = dyDesc->w;
+    int col_size = C_per_group * kH * kW;
+    int spatial = outH * outW;
+
+    float* col_buf = static_cast<float*>(workSpace);
+    bool own_col = false;
+    if (!col_buf) {
+        col_buf = static_cast<float*>(std::malloc(col_size * spatial * sizeof(float)));
+        if (!col_buf) return CUDNN_STATUS_ALLOC_FAILED;
+        own_col = true;
+    }
+
+    // Scale dx by beta
+    int dx_size = N * C_in * H * W;
+    if (b != 1.0f) {
+        if (b == 0.0f) std::memset(dxf, 0, dx_size * sizeof(float));
+        else cblas_sscal(dx_size, b, dxf, 1);
+    }
+
+    // dx = alpha * wT * dy, then col2im
+    for (int n = 0; n < N; ++n) {
+        for (int g = 0; g < groups; ++g) {
+            const float* w_g = wf + g * K_per_group * C_per_group * kH * kW;
+            const float* dy_g = dyf + n * K * outH * outW + g * K_per_group * outH * outW;
+            float* dx_g = dxf + n * C_in * H * W + g * C_per_group * H * W;
+
+            // col = wT * dy: (col_size x K_per_group) * (K_per_group x spatial) = (col_size x spatial)
+            cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                        col_size, spatial, K_per_group,
+                        a, w_g, col_size, dy_g, spatial,
+                        0.0f, col_buf, spatial);
+
+            // Accumulate col2im into dx
+            col2im_f32(col_buf, C_per_group, H, W, kH, kW,
+                       convDesc->pad_h, convDesc->pad_w,
+                       convDesc->stride_h, convDesc->stride_w,
+                       convDesc->dilation_h, convDesc->dilation_w,
+                       dx_g);
+        }
+    }
+
+    if (own_col) std::free(col_buf);
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── Backward convolution (filter) ──
+
+cudnnStatus_t cudnnGetConvolutionBackwardFilterWorkspaceSize(cudnnHandle_t /*handle*/,
+                                                              cudnnTensorDescriptor_t xDesc,
+                                                              cudnnTensorDescriptor_t /*dyDesc*/,
+                                                              cudnnConvolutionDescriptor_t convDesc,
+                                                              cudnnFilterDescriptor_t dwDesc,
+                                                              cudnnConvolutionBwdFilterAlgo_t /*algo*/,
+                                                              size_t* sizeInBytes) {
+    if (!sizeInBytes || !xDesc || !convDesc || !dwDesc) return CUDNN_STATUS_BAD_PARAM;
+    int C = xDesc->c / convDesc->groupCount;
+    int kH = dwDesc->h, kW = dwDesc->w;
+    int pH = convDesc->pad_h, pW = convDesc->pad_w;
+    int sH = convDesc->stride_h, sW = convDesc->stride_w;
+    int dH = convDesc->dilation_h, dW = convDesc->dilation_w;
+    int outH = (xDesc->h + 2 * pH - (dH * (kH - 1) + 1)) / sH + 1;
+    int outW = (xDesc->w + 2 * pW - (dW * (kW - 1) + 1)) / sW + 1;
+    *sizeInBytes = (size_t)C * kH * kW * outH * outW * sizeof(float);
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnFindConvolutionBackwardFilterAlgorithm(cudnnHandle_t /*handle*/,
+                                                           cudnnTensorDescriptor_t /*xDesc*/,
+                                                           cudnnTensorDescriptor_t /*dyDesc*/,
+                                                           cudnnConvolutionDescriptor_t /*convDesc*/,
+                                                           cudnnFilterDescriptor_t /*dwDesc*/,
+                                                           int requestedAlgoCount,
+                                                           int* returnedAlgoCount,
+                                                           cudnnConvolutionBwdFilterAlgoPerf_t* perfResults) {
+    if (!returnedAlgoCount) return CUDNN_STATUS_BAD_PARAM;
+    int count = std::min(requestedAlgoCount, 1);
+    if (count > 0 && perfResults) {
+        std::memset(&perfResults[0], 0, sizeof(cudnnConvolutionBwdFilterAlgoPerf_t));
+        perfResults[0].algo = CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0;
+        perfResults[0].status = CUDNN_STATUS_SUCCESS;
+    }
+    *returnedAlgoCount = count;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnConvolutionBackwardFilter(cudnnHandle_t /*handle*/,
+                                              const void* alpha,
+                                              cudnnTensorDescriptor_t xDesc, const void* x,
+                                              cudnnTensorDescriptor_t dyDesc, const void* dy,
+                                              cudnnConvolutionDescriptor_t convDesc,
+                                              cudnnConvolutionBwdFilterAlgo_t /*algo*/,
+                                              void* workSpace, size_t /*workSpaceSizeInBytes*/,
+                                              const void* beta,
+                                              cudnnFilterDescriptor_t dwDesc, void* dw) {
+    if (!alpha || !xDesc || !x || !dyDesc || !dy || !convDesc || !beta || !dwDesc || !dw)
+        return CUDNN_STATUS_BAD_PARAM;
+
+    float a = *static_cast<const float*>(alpha);
+    float b = *static_cast<const float*>(beta);
+    const float* xf = static_cast<const float*>(x);
+    const float* dyf = static_cast<const float*>(dy);
+    float* dwf = static_cast<float*>(dw);
+
+    int N = xDesc->n;
+    int C_in = xDesc->c;
+    int H = xDesc->h, W = xDesc->w;
+    int K = dwDesc->k;
+    int kH = dwDesc->h, kW = dwDesc->w;
+    int groups = convDesc->groupCount;
+    int C_per_group = C_in / groups;
+    int K_per_group = K / groups;
+
+    int outH = dyDesc->h, outW = dyDesc->w;
+    int col_size = C_per_group * kH * kW;
+    int spatial = outH * outW;
+
+    float* col_buf = static_cast<float*>(workSpace);
+    bool own_col = false;
+    if (!col_buf) {
+        col_buf = static_cast<float*>(std::malloc(col_size * spatial * sizeof(float)));
+        if (!col_buf) return CUDNN_STATUS_ALLOC_FAILED;
+        own_col = true;
+    }
+
+    // Scale dw by beta
+    int dw_size = K * C_per_group * kH * kW;
+    if (b != 1.0f) {
+        if (b == 0.0f) std::memset(dwf, 0, dw_size * sizeof(float));
+        else cblas_sscal(dw_size, b, dwf, 1);
+    }
+
+    // dw += alpha * dy * col^T  (accumulated over batch)
+    for (int n = 0; n < N; ++n) {
+        for (int g = 0; g < groups; ++g) {
+            const float* x_g = xf + n * C_in * H * W + g * C_per_group * H * W;
+            const float* dy_g = dyf + n * K * outH * outW + g * K_per_group * outH * outW;
+            float* dw_g = dwf + g * K_per_group * C_per_group * kH * kW;
+
+            im2col_f32(x_g, C_per_group, H, W, kH, kW,
+                       convDesc->pad_h, convDesc->pad_w,
+                       convDesc->stride_h, convDesc->stride_w,
+                       convDesc->dilation_h, convDesc->dilation_w,
+                       col_buf);
+
+            // dw_g += alpha * dy_g * col_buf^T: (K_per_group x spatial) * (spatial x col_size)
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        K_per_group, col_size, spatial,
+                        a, dy_g, spatial, col_buf, spatial,
+                        1.0f, dw_g, col_size);
+        }
+    }
+
+    if (own_col) std::free(col_buf);
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── Backward bias ──
+
+cudnnStatus_t cudnnConvolutionBackwardBias(cudnnHandle_t /*handle*/,
+                                            const void* alpha,
+                                            cudnnTensorDescriptor_t dyDesc, const void* dy,
+                                            const void* beta,
+                                            cudnnTensorDescriptor_t dbDesc, void* db) {
+    if (!alpha || !dyDesc || !dy || !beta || !dbDesc || !db) return CUDNN_STATUS_BAD_PARAM;
+
+    float a = *static_cast<const float*>(alpha);
+    float b = *static_cast<const float*>(beta);
+    const float* dyf = static_cast<const float*>(dy);
+    float* dbf = static_cast<float*>(db);
+
+    int N = dyDesc->n, C = dyDesc->c, H = dyDesc->h, W = dyDesc->w;
+
+    // db[c] = beta * db[c] + alpha * sum_over(n,h,w) dy[n,c,h,w]
+    for (int c = 0; c < C; ++c) {
+        float sum = 0.0f;
+        for (int n = 0; n < N; ++n) {
+            for (int h = 0; h < H; ++h) {
+                for (int w = 0; w < W; ++w) {
+                    sum += dyf[((n * C + c) * H + h) * W + w];
+                }
+            }
+        }
+        dbf[c] = b * dbf[c] + a * sum;
+    }
     return CUDNN_STATUS_SUCCESS;
 }
 
