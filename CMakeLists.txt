@@ -475,7 +475,19 @@ install(FILES
     runtime/api/math_functions.h
     runtime/api/cuda_profiler_api.h
     runtime/api/cuda_occupancy.h
+    runtime/api/nvToolsExt.h
+    runtime/api/sm_20_intrinsics.h
+    runtime/api/sm_30_intrinsics.h
+    runtime/api/sm_60_intrinsics.h
+    runtime/api/sm_70_intrinsics.h
+    runtime/api/sm_80_intrinsics.h
+    runtime/api/cublas_api.h
     DESTINATION include
+)
+
+install(FILES
+    runtime/api/nvtx3/nvToolsExt.h
+    DESTINATION include/nvtx3
 )
 
 install(FILES

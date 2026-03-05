@@ -197,7 +197,7 @@ Point any pre-compiled llama.cpp binary at a different model by setting
 Test suite
 ----------
 
-164 tests are registered in CTest (unit + functional). An additional benchmark
+167 tests are registered in CTest (unit + functional). An additional benchmark
 gate test (`bench_phase5_all_kernels`) runs on Apple Silicon if xcrun is available.
 
 ```bash

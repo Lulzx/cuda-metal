@@ -1,6 +1,6 @@
 # Status
 
-Current status: **Post-Phase 5 — 149/149 tests passing (148 unit/functional + bench_phase5_all_kernels)**
+Current status: **Post-Phase 5 — 167/167 tests passing**
 
 Phase 4 is fully complete. Phase 5 performance work is complete.
 Intentional non-goals per §2.2 (CUDA Graphs, dynamic parallelism, texture objects,
@@ -433,8 +433,31 @@ Supported driver API subset:
 - `cuDeviceComputeCapability` (returns 8.0 — synthetic Ampere-equivalent)
 - `cuDeviceCanAccessPeer` (returns 0; single GPU on Apple Silicon)
 
-Public headers now installed: `cuda.h`, `cuda_runtime.h`, `cuda_fp16.h`, `cublas_v2.h`,
-`cufft.h`, `curand.h`, `cooperative_groups.h`, `cooperative_groups/reduce.h`.
+Public headers now installed: `cuda.h`, `cuda_runtime.h`, `cuda_fp16.h`, `cuda_bf16.h`,
+`cublas_v2.h`, `cublas_api.h`, `cublasLt.h`, `cufft.h`, `curand.h`, `cusparse.h`,
+`cusolver_common.h`, `cusolverDn.h`, `cudnn.h`, `nvml.h`, `nccl.h`,
+`cooperative_groups.h`, `cooperative_groups/reduce.h`, `cuComplex.h`,
+`nvToolsExt.h`, `nvtx3/nvToolsExt.h`.
+
+Forwarding headers (route to existing implementations):
+`device_launch_parameters.h`, `driver_types.h`, `library_types.h`,
+`channel_descriptor.h`, `device_atomic_functions.h`, `math_functions.h`,
+`cuda_profiler_api.h`, `cuda_occupancy.h`, `cuda_runtime_api.h`,
+`sm_20_intrinsics.h`, `sm_30_intrinsics.h`, `sm_60_intrinsics.h`,
+`sm_70_intrinsics.h`, `sm_80_intrinsics.h`.
+
+Header-only library shims:
+- **thrust** (`thrust/`): `device_vector`, `host_vector`, `device_ptr`, `sort`,
+  `sort_by_key`, `stable_sort`, `reduce`, `transform_reduce`, `inclusive_scan`,
+  `exclusive_scan`, `transform`, `fill`, `copy`, `for_each`, `unique`, `sequence`,
+  `counting_iterator`, `zip_iterator`, `execution_policy`, `functional`, `pair`.
+  CPU-backed on UMA (device memory is host-accessible).
+- **CUB** (`cub/`): `BlockReduce`, `BlockScan`, `BlockExchange`, `WarpReduce`,
+  `WarpScan`, `DeviceReduce` (Sum/Min/Max/ArgMin/ArgMax), `DeviceScan`
+  (Inclusive/Exclusive), `DeviceRadixSort` (SortKeys/SortPairs, ascending/descending).
+  Sequential fallback for host-side compilation; device ops run on UMA.
+- **NVTX** (`nvtx3/nvToolsExt.h`): No-op stubs for profiling annotations.
+  Range push/pop, mark, domain API, naming API all silently ignored.
 `cuda_fp16.h` provides host-side `__half` (IEEE 754 float16 via bit manipulation) and
 device-side `__half = _Float16`; `atomicAdd(__half*, __half)` via CAS loop (spec §8).
 
