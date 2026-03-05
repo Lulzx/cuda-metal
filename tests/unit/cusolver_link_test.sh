@@ -4,7 +4,7 @@ set -euo pipefail
 
 LIB_DIR="$1"
 
-for lib in libcusparse.dylib libcusolver.dylib libcublasLt.dylib libcudnn.dylib libnvidia-ml.dylib; do
+for lib in libcusparse.dylib libcusolver.dylib libcublasLt.dylib libcudnn.dylib libnvidia-ml.dylib libnccl.dylib; do
     target="$LIB_DIR/$lib"
     if [ ! -e "$target" ]; then
         echo "FAIL: $target does not exist"
