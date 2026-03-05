@@ -117,6 +117,7 @@ add_library(cumetal_runtime SHARED
     runtime/rt/curand.cpp
     runtime/rt/cusparse.cpp
     runtime/rt/cusolver.cpp
+    runtime/rt/cublaslt.cpp
     runtime/rt/cuda_runtime.cpp
     runtime/metal_backend/metal_backend.mm
 )
@@ -179,6 +180,9 @@ if(APPLE)
         COMMAND ${CMAKE_COMMAND} -E create_symlink
                 $<TARGET_FILE_NAME:cumetal_runtime>
                 $<TARGET_FILE_DIR:cumetal_runtime>/libcusolver.dylib
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+                $<TARGET_FILE_NAME:cumetal_runtime>
+                $<TARGET_FILE_DIR:cumetal_runtime>/libcublasLt.dylib
     )
 
     if(CUMETAL_ENABLE_BINARY_SHIM)
@@ -406,6 +410,10 @@ if(APPLE)
             COMMAND "${CMAKE_COMMAND}" -E create_symlink
                     "libcumetal.dylib"
                     "${CMAKE_INSTALL_PREFIX}/lib/libcusolver.dylib")
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E create_symlink
+                    "libcumetal.dylib"
+                    "${CMAKE_INSTALL_PREFIX}/lib/libcublasLt.dylib")
     ]])
 
     if(CUMETAL_ENABLE_BINARY_SHIM)
@@ -429,6 +437,7 @@ install(FILES
     runtime/api/cusparse.h
     runtime/api/cusolver_common.h
     runtime/api/cusolverDn.h
+    runtime/api/cublasLt.h
     runtime/api/cooperative_groups.h
     DESTINATION include
 )

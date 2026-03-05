@@ -756,6 +756,73 @@ cudaError_t cudaDestroySurfaceObject(cudaSurfaceObject_t surfObject);
 cudaChannelFormatDesc cudaCreateChannelDesc(int x, int y, int z, int w,
                                              cudaChannelFormatKind f);
 
+// Async memory pool API — on Apple Silicon UMA these alias synchronous allocation.
+typedef struct cudaMemPool_st* cudaMemPool_t;
+
+typedef enum cudaMemPoolAttr {
+    cudaMemPoolReuseFollowEventDependencies = 1,
+    cudaMemPoolReuseAllowOpportunistic = 2,
+    cudaMemPoolReuseAllowInternalDependencies = 3,
+    cudaMemPoolAttrReleaseThreshold = 4,
+    cudaMemPoolAttrReservedMemCurrent = 5,
+    cudaMemPoolAttrReservedMemHigh = 6,
+    cudaMemPoolAttrUsedMemCurrent = 7,
+    cudaMemPoolAttrUsedMemHigh = 8,
+} cudaMemPoolAttr;
+
+typedef struct cudaMemPoolProps {
+    int allocType;
+    int handleTypes;
+    int location_type;
+    int location_id;
+    unsigned char reserved[56];
+} cudaMemPoolProps;
+
+cudaError_t cudaMallocAsync(void** dev_ptr, size_t size, cudaStream_t stream);
+cudaError_t cudaFreeAsync(void* dev_ptr, cudaStream_t stream);
+cudaError_t cudaMemPoolCreate(cudaMemPool_t* pool, const cudaMemPoolProps* poolProps);
+cudaError_t cudaMemPoolDestroy(cudaMemPool_t pool);
+cudaError_t cudaMemPoolSetAttribute(cudaMemPool_t pool, cudaMemPoolAttr attr, void* value);
+cudaError_t cudaMemPoolGetAttribute(cudaMemPool_t pool, cudaMemPoolAttr attr, void* value);
+cudaError_t cudaDeviceGetDefaultMemPool(cudaMemPool_t* pool, int device);
+cudaError_t cudaDeviceSetMemPool(int device, cudaMemPool_t pool);
+cudaError_t cudaMallocFromPoolAsync(void** dev_ptr, size_t size, cudaMemPool_t pool, cudaStream_t stream);
+
+// Graph node addition APIs
+typedef struct cudaKernelNodeParams {
+    const void* func;
+    dim3 gridDim;
+    dim3 blockDim;
+    void** kernelParams;
+    unsigned int sharedMemBytes;
+    void* extra;
+} cudaKernelNodeParams;
+
+typedef struct cudaMemsetParams {
+    void* dst;
+    size_t pitch;
+    unsigned int value;
+    unsigned int elementSize;
+    size_t width;
+    size_t height;
+} cudaMemsetParams;
+
+cudaError_t cudaGraphAddKernelNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                    const cudaGraphNode_t* pDependencies, size_t numDependencies,
+                                    const cudaKernelNodeParams* pNodeParams);
+cudaError_t cudaGraphAddMemcpyNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                    const cudaGraphNode_t* pDependencies, size_t numDependencies,
+                                    const cudaMemcpy3DParms* pCopyParams);
+cudaError_t cudaGraphAddMemsetNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                    const cudaGraphNode_t* pDependencies, size_t numDependencies,
+                                    const cudaMemsetParams* pMemsetParams);
+cudaError_t cudaGraphAddHostNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                  const cudaGraphNode_t* pDependencies, size_t numDependencies,
+                                  cudaHostFn_t fn, void* userData);
+cudaError_t cudaGraphNodeGetType(cudaGraphNode_t node, cudaGraphNodeType* pType);
+cudaError_t cudaStreamGetCaptureInfo(cudaStream_t stream, cudaStreamCaptureStatus* pCaptureStatus,
+                                      unsigned long long* pId);
+
 // Legacy thread API — deprecated aliases retained for source compatibility.
 cudaError_t cudaThreadExit(void);
 cudaError_t cudaThreadSynchronize(void);

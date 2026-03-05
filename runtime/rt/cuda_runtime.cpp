@@ -2971,6 +2971,86 @@ cudaError_t cudaGraphGetRootNodes(cudaGraph_t graph, cudaGraphNode_t* pRootNodes
     return cudaGraphGetNodes(graph, pRootNodes, pNumRootNodes);
 }
 
+cudaError_t cudaGraphAddKernelNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                    const cudaGraphNode_t* /*pDependencies*/, size_t /*numDependencies*/,
+                                    const cudaKernelNodeParams* pNodeParams) {
+    if (!pGraphNode || !graph || !pNodeParams) return fail(cudaErrorInvalidValue);
+    auto* node = new cudaGraphNode_st();
+    node->type = cudaGraphNodeTypeKernel;
+    node->func = pNodeParams->func;
+    node->grid_dim = pNodeParams->gridDim;
+    node->block_dim = pNodeParams->blockDim;
+    node->kernel_args = pNodeParams->kernelParams;
+    node->shared_mem = pNodeParams->sharedMemBytes;
+    graph->nodes.push_back(node);
+    *pGraphNode = node;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphAddMemcpyNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                    const cudaGraphNode_t* /*pDependencies*/, size_t /*numDependencies*/,
+                                    const cudaMemcpy3DParms* pCopyParams) {
+    if (!pGraphNode || !graph || !pCopyParams) return fail(cudaErrorInvalidValue);
+    auto* node = new cudaGraphNode_st();
+    node->type = cudaGraphNodeTypeMemcpy;
+    // Simplified: store src/dst/count from the 3D params for linear replay
+    node->src = pCopyParams->srcPtr.ptr;
+    node->dst = pCopyParams->dstPtr.ptr;
+    node->count = pCopyParams->extent.width * pCopyParams->extent.height * pCopyParams->extent.depth;
+    node->memcpy_kind = pCopyParams->kind;
+    graph->nodes.push_back(node);
+    *pGraphNode = node;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphAddMemsetNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                    const cudaGraphNode_t* /*pDependencies*/, size_t /*numDependencies*/,
+                                    const cudaMemsetParams* pMemsetParams) {
+    if (!pGraphNode || !graph || !pMemsetParams) return fail(cudaErrorInvalidValue);
+    auto* node = new cudaGraphNode_st();
+    node->type = cudaGraphNodeTypeMemset;
+    node->dst = pMemsetParams->dst;
+    node->memset_value = static_cast<int>(pMemsetParams->value);
+    node->count = pMemsetParams->width * pMemsetParams->height * pMemsetParams->elementSize;
+    graph->nodes.push_back(node);
+    *pGraphNode = node;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphAddHostNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                  const cudaGraphNode_t* /*pDependencies*/, size_t /*numDependencies*/,
+                                  cudaHostFn_t fn, void* userData) {
+    if (!pGraphNode || !graph || !fn) return fail(cudaErrorInvalidValue);
+    auto* node = new cudaGraphNode_st();
+    node->type = cudaGraphNodeTypeHost;
+    node->host_fn = fn;
+    node->host_user_data = userData;
+    graph->nodes.push_back(node);
+    *pGraphNode = node;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphNodeGetType(cudaGraphNode_t node, cudaGraphNodeType* pType) {
+    if (!node || !pType) return fail(cudaErrorInvalidValue);
+    *pType = node->type;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaStreamGetCaptureInfo(cudaStream_t stream, cudaStreamCaptureStatus* pCaptureStatus,
+                                      unsigned long long* pId) {
+    if (!pCaptureStatus) return fail(cudaErrorInvalidValue);
+    std::lock_guard<std::mutex> lock(g_capture_mutex);
+    auto it = g_captures.find(stream);
+    if (it != g_captures.end() && it->second.capturing) {
+        *pCaptureStatus = cudaStreamCaptureStatusActive;
+        if (pId) *pId = reinterpret_cast<unsigned long long>(it->second.graph);
+    } else {
+        *pCaptureStatus = cudaStreamCaptureStatusNone;
+        if (pId) *pId = 0;
+    }
+    return fail(cudaSuccess);
+}
+
 cudaError_t cudaStreamAddCallback(cudaStream_t stream,
                                   cudaStreamCallback_t callback,
                                   void* user_data,
@@ -3989,6 +4069,76 @@ cudaError_t cudaMemRangeGetAttribute(void* data,
         *reinterpret_cast<int*>(data) = 0;
     }
     return fail(cudaSuccess);
+}
+
+// ── Async memory pool API ────────────────────────────────────────────────────
+// On Apple Silicon UMA, async allocation is equivalent to synchronous allocation.
+// Memory pools are no-op wrappers; cudaMallocAsync/cudaFreeAsync delegate to
+// cudaMalloc/cudaFree after stream synchronization.
+
+struct cudaMemPool_st {
+    int device = 0;
+};
+
+static cudaMemPool_st g_default_mempool;
+
+cudaError_t cudaMallocAsync(void** dev_ptr, size_t size, cudaStream_t stream) {
+    if (stream) cudaStreamSynchronize(stream);
+    return cudaMalloc(dev_ptr, size);
+}
+
+cudaError_t cudaFreeAsync(void* dev_ptr, cudaStream_t stream) {
+    if (stream) cudaStreamSynchronize(stream);
+    return cudaFree(dev_ptr);
+}
+
+cudaError_t cudaMemPoolCreate(cudaMemPool_t* pool, const cudaMemPoolProps* /*poolProps*/) {
+    if (!pool) return fail(cudaErrorInvalidValue);
+    *pool = new cudaMemPool_st();
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaMemPoolDestroy(cudaMemPool_t pool) {
+    if (pool && pool != &g_default_mempool) delete pool;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaMemPoolSetAttribute(cudaMemPool_t /*pool*/, cudaMemPoolAttr /*attr*/, void* /*value*/) {
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaMemPoolGetAttribute(cudaMemPool_t /*pool*/, cudaMemPoolAttr attr, void* value) {
+    if (!value) return fail(cudaErrorInvalidValue);
+    // Return zero for all counters
+    switch (attr) {
+        case cudaMemPoolAttrReleaseThreshold:
+            *static_cast<size_t*>(value) = 0;
+            break;
+        case cudaMemPoolAttrReservedMemCurrent:
+        case cudaMemPoolAttrReservedMemHigh:
+        case cudaMemPoolAttrUsedMemCurrent:
+        case cudaMemPoolAttrUsedMemHigh:
+            *static_cast<size_t*>(value) = 0;
+            break;
+        default:
+            *static_cast<int*>(value) = 1;
+            break;
+    }
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaDeviceGetDefaultMemPool(cudaMemPool_t* pool, int /*device*/) {
+    if (!pool) return fail(cudaErrorInvalidValue);
+    *pool = &g_default_mempool;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaDeviceSetMemPool(int /*device*/, cudaMemPool_t /*pool*/) {
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaMallocFromPoolAsync(void** dev_ptr, size_t size, cudaMemPool_t /*pool*/, cudaStream_t stream) {
+    return cudaMallocAsync(dev_ptr, size, stream);
 }
 
 // Pointer attribute query — classifies a pointer as host, device, or managed.

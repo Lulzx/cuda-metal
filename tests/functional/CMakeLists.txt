@@ -401,6 +401,14 @@ add_executable(cumetal_texture_surface_api_test
     texture_surface_api_test.cpp
 )
 
+add_executable(cumetal_cublaslt_api_test
+    cublaslt_api_test.cpp
+)
+
+add_executable(cumetal_async_mempool_api_test
+    async_mempool_api_test.cpp
+)
+
 target_link_libraries(cumetal_runtime_vector_add_test
     PRIVATE
         cumetal_runtime
@@ -899,10 +907,22 @@ target_link_libraries(cumetal_texture_surface_api_test
         cumetal_runtime
 )
 
+target_link_libraries(cumetal_cublaslt_api_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_async_mempool_api_test
+    PRIVATE
+        cumetal_runtime
+)
+
 target_compile_options(cumetal_cusparse_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_cusolver_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_cuda_graph_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_texture_surface_api_test PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(cumetal_cublaslt_api_test PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(cumetal_async_mempool_api_test PRIVATE -Wall -Wextra -Wpedantic)
 
 target_compile_options(cumetal_runtime_vector_add_test
     PRIVATE
@@ -2373,4 +2393,14 @@ add_test(
 add_test(
     NAME functional_texture_surface_api
     COMMAND cumetal_texture_surface_api_test
+)
+
+add_test(
+    NAME functional_cublaslt_api
+    COMMAND cumetal_cublaslt_api_test
+)
+
+add_test(
+    NAME functional_async_mempool_api
+    COMMAND cumetal_async_mempool_api_test
 )
