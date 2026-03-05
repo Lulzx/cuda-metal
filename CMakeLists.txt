@@ -118,6 +118,8 @@ add_library(cumetal_runtime SHARED
     runtime/rt/cusparse.cpp
     runtime/rt/cusolver.cpp
     runtime/rt/cublaslt.cpp
+    runtime/rt/cudnn.cpp
+    runtime/rt/nvml.cpp
     runtime/rt/cuda_runtime.cpp
     runtime/metal_backend/metal_backend.mm
 )
@@ -183,6 +185,12 @@ if(APPLE)
         COMMAND ${CMAKE_COMMAND} -E create_symlink
                 $<TARGET_FILE_NAME:cumetal_runtime>
                 $<TARGET_FILE_DIR:cumetal_runtime>/libcublasLt.dylib
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+                $<TARGET_FILE_NAME:cumetal_runtime>
+                $<TARGET_FILE_DIR:cumetal_runtime>/libcudnn.dylib
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+                $<TARGET_FILE_NAME:cumetal_runtime>
+                $<TARGET_FILE_DIR:cumetal_runtime>/libnvidia-ml.dylib
     )
 
     if(CUMETAL_ENABLE_BINARY_SHIM)
@@ -414,6 +422,14 @@ if(APPLE)
             COMMAND "${CMAKE_COMMAND}" -E create_symlink
                     "libcumetal.dylib"
                     "${CMAKE_INSTALL_PREFIX}/lib/libcublasLt.dylib")
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E create_symlink
+                    "libcumetal.dylib"
+                    "${CMAKE_INSTALL_PREFIX}/lib/libcudnn.dylib")
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E create_symlink
+                    "libcumetal.dylib"
+                    "${CMAKE_INSTALL_PREFIX}/lib/libnvidia-ml.dylib")
     ]])
 
     if(CUMETAL_ENABLE_BINARY_SHIM)
@@ -438,6 +454,8 @@ install(FILES
     runtime/api/cusolver_common.h
     runtime/api/cusolverDn.h
     runtime/api/cublasLt.h
+    runtime/api/cudnn.h
+    runtime/api/nvml.h
     runtime/api/cooperative_groups.h
     DESTINATION include
 )

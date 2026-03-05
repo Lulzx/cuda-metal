@@ -409,6 +409,14 @@ add_executable(cumetal_async_mempool_api_test
     async_mempool_api_test.cpp
 )
 
+add_executable(cumetal_cudnn_api_test
+    cudnn_api_test.cpp
+)
+
+add_executable(cumetal_nvml_api_test
+    nvml_api_test.cpp
+)
+
 target_link_libraries(cumetal_runtime_vector_add_test
     PRIVATE
         cumetal_runtime
@@ -917,12 +925,24 @@ target_link_libraries(cumetal_async_mempool_api_test
         cumetal_runtime
 )
 
+target_link_libraries(cumetal_cudnn_api_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_nvml_api_test
+    PRIVATE
+        cumetal_runtime
+)
+
 target_compile_options(cumetal_cusparse_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_cusolver_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_cuda_graph_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_texture_surface_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_cublaslt_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_async_mempool_api_test PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(cumetal_cudnn_api_test PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(cumetal_nvml_api_test PRIVATE -Wall -Wextra -Wpedantic)
 
 target_compile_options(cumetal_runtime_vector_add_test
     PRIVATE
@@ -2403,4 +2423,14 @@ add_test(
 add_test(
     NAME functional_async_mempool_api
     COMMAND cumetal_async_mempool_api_test
+)
+
+add_test(
+    NAME functional_cudnn_api
+    COMMAND cumetal_cudnn_api_test
+)
+
+add_test(
+    NAME functional_nvml_api
+    COMMAND cumetal_nvml_api_test
 )

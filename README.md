@@ -78,12 +78,15 @@ Library shims
 - cuSOLVER Dense (LU, QR, Cholesky, SVD, eigenvalue — backed by Apple Accelerate LAPACK)
 - CUDA Graphs (stream capture, instantiate, launch — sequential replay)
 - cublasLt (lightweight BLAS matmul with epilogues: bias, relu, gelu)
+- cuDNN (convolution forward via im2col+GEMM, activations, softmax, batch norm, tensor ops)
+- NVML (device info, memory queries, driver version — Apple Silicon adapted)
 - Async memory pool API (cudaMallocAsync/cudaFreeAsync — UMA synchronous aliases)
 - Texture/Surface objects (array allocation, memcpy, object lifecycle)
 
 Build/install also provides dylib aliases so software linked against CUDA library
-names can find the shims: `libcublas.dylib`, `libcublasLt.dylib`, `libcurand.dylib`,
-`libcufft.dylib`, `libcusparse.dylib`, `libcusolver.dylib`.
+names can find the shims: `libcublas.dylib`, `libcublasLt.dylib`, `libcudnn.dylib`,
+`libcurand.dylib`, `libcufft.dylib`, `libcusparse.dylib`, `libcusolver.dylib`,
+`libnvidia-ml.dylib`.
 With `CUMETAL_ENABLE_BINARY_SHIM=ON`, `libcuda.dylib` is also provided.
 
 
@@ -192,7 +195,7 @@ Point any pre-compiled llama.cpp binary at a different model by setting
 Test suite
 ----------
 
-160 tests are registered in CTest (unit + functional). An additional benchmark
+162 tests are registered in CTest (unit + functional). An additional benchmark
 gate test (`bench_phase5_all_kernels`) runs on Apple Silicon if xcrun is available.
 
 ```bash
