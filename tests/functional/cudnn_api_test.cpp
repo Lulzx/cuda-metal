@@ -294,6 +294,197 @@ static bool test_version_and_error() {
     return true;
 }
 
+static bool test_activation_backward() {
+    float x[] = {-1.0f, 0.5f, 2.0f};
+    float y[] = {0.0f, 0.5f, 2.0f}; // relu(x)
+    float dy[] = {1.0f, 1.0f, 1.0f};
+    float dx[3] = {};
+    float alpha = 1.0f, beta = 0.0f;
+
+    cudnnHandle_t handle = nullptr;
+    cudnnCreate(&handle);
+
+    cudnnActivationDescriptor_t act = nullptr;
+    cudnnCreateActivationDescriptor(&act);
+    cudnnSetActivationDescriptor(act, CUDNN_ACTIVATION_RELU, CUDNN_NOT_PROPAGATE_NAN, 0.0);
+
+    cudnnTensorDescriptor_t desc = nullptr;
+    cudnnCreateTensorDescriptor(&desc);
+    cudnnSetTensor4dDescriptor(desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 1, 3);
+
+    cudnnActivationBackward(handle, act, &alpha, desc, y, desc, dy, desc, x, &beta, desc, dx);
+
+    // relu backward: dx = dy * (x > 0)
+    float expected[] = {0.0f, 1.0f, 1.0f};
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(dx[i] - expected[i]) > 1e-5f) {
+            std::fprintf(stderr, "FAIL: relu backward[%d]=%f expected %f\n", i, dx[i], expected[i]);
+            return false;
+        }
+    }
+
+    cudnnDestroyActivationDescriptor(act);
+    cudnnDestroyTensorDescriptor(desc);
+    cudnnDestroy(handle);
+    return true;
+}
+
+static bool test_pooling_max() {
+    // 1x1x4x4 input, 2x2 max pool, stride 2 => 1x1x2x2
+    float x[16] = {1,2,3,4, 5,6,7,8, 9,10,11,12, 13,14,15,16};
+    float y[4] = {};
+    float alpha = 1.0f, beta = 0.0f;
+
+    cudnnHandle_t handle = nullptr;
+    cudnnCreate(&handle);
+
+    cudnnTensorDescriptor_t xDesc = nullptr, yDesc = nullptr;
+    cudnnCreateTensorDescriptor(&xDesc);
+    cudnnCreateTensorDescriptor(&yDesc);
+    cudnnSetTensor4dDescriptor(xDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 4, 4);
+    cudnnSetTensor4dDescriptor(yDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 2, 2);
+
+    cudnnPoolingDescriptor_t pool = nullptr;
+    cudnnCreatePoolingDescriptor(&pool);
+    cudnnSetPooling2dDescriptor(pool, CUDNN_POOLING_MAX, CUDNN_NOT_PROPAGATE_NAN,
+                                 2, 2, 0, 0, 2, 2);
+
+    // Verify output dims
+    int n, c, h, w;
+    cudnnGetPooling2dForwardOutputDim(pool, xDesc, &n, &c, &h, &w);
+    if (h != 2 || w != 2) {
+        std::fprintf(stderr, "FAIL: pool output dim %dx%d expected 2x2\n", h, w);
+        return false;
+    }
+
+    cudnnPoolingForward(handle, pool, &alpha, xDesc, x, &beta, yDesc, y);
+
+    // Max of each 2x2 block: {6, 8, 14, 16}
+    float expected[] = {6.0f, 8.0f, 14.0f, 16.0f};
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(y[i] - expected[i]) > 1e-5f) {
+            std::fprintf(stderr, "FAIL: maxpool[%d]=%f expected %f\n", i, y[i], expected[i]);
+            return false;
+        }
+    }
+
+    cudnnDestroyPoolingDescriptor(pool);
+    cudnnDestroyTensorDescriptor(yDesc);
+    cudnnDestroyTensorDescriptor(xDesc);
+    cudnnDestroy(handle);
+    return true;
+}
+
+static bool test_pooling_avg() {
+    // 1x1x2x2 input, 2x2 avg pool => 1x1x1x1
+    float x[4] = {2.0f, 4.0f, 6.0f, 8.0f};
+    float y[1] = {};
+    float alpha = 1.0f, beta = 0.0f;
+
+    cudnnHandle_t handle = nullptr;
+    cudnnCreate(&handle);
+
+    cudnnTensorDescriptor_t xDesc = nullptr, yDesc = nullptr;
+    cudnnCreateTensorDescriptor(&xDesc);
+    cudnnCreateTensorDescriptor(&yDesc);
+    cudnnSetTensor4dDescriptor(xDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 2, 2);
+    cudnnSetTensor4dDescriptor(yDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 1, 1);
+
+    cudnnPoolingDescriptor_t pool = nullptr;
+    cudnnCreatePoolingDescriptor(&pool);
+    cudnnSetPooling2dDescriptor(pool, CUDNN_POOLING_AVERAGE_COUNT_INCLUDE_PADDING,
+                                 CUDNN_NOT_PROPAGATE_NAN, 2, 2, 0, 0, 2, 2);
+
+    cudnnPoolingForward(handle, pool, &alpha, xDesc, x, &beta, yDesc, y);
+
+    // avg = (2+4+6+8)/4 = 5.0
+    if (std::fabs(y[0] - 5.0f) > 1e-5f) {
+        std::fprintf(stderr, "FAIL: avgpool=%f expected 5.0\n", y[0]);
+        return false;
+    }
+
+    cudnnDestroyPoolingDescriptor(pool);
+    cudnnDestroyTensorDescriptor(yDesc);
+    cudnnDestroyTensorDescriptor(xDesc);
+    cudnnDestroy(handle);
+    return true;
+}
+
+static bool test_dropout_passthrough() {
+    // dropout=0 should be identity
+    float x[] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float y[4] = {};
+
+    cudnnHandle_t handle = nullptr;
+    cudnnCreate(&handle);
+
+    cudnnDropoutDescriptor_t drop = nullptr;
+    cudnnCreateDropoutDescriptor(&drop);
+    cudnnSetDropoutDescriptor(drop, handle, 0.0f, nullptr, 0, 42);
+
+    cudnnTensorDescriptor_t desc = nullptr;
+    cudnnCreateTensorDescriptor(&desc);
+    cudnnSetTensor4dDescriptor(desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 1, 4);
+
+    cudnnDropoutForward(handle, drop, desc, x, desc, y, nullptr, 0);
+
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(y[i] - x[i]) > 1e-5f) {
+            std::fprintf(stderr, "FAIL: dropout passthrough[%d]=%f expected %f\n", i, y[i], x[i]);
+            return false;
+        }
+    }
+
+    cudnnDestroyDropoutDescriptor(drop);
+    cudnnDestroyTensorDescriptor(desc);
+    cudnnDestroy(handle);
+    return true;
+}
+
+static bool test_dropout_states_size() {
+    cudnnHandle_t handle = nullptr;
+    cudnnCreate(&handle);
+
+    size_t size = 0;
+    cudnnDropoutGetStatesSize(handle, &size);
+    if (size == 0) {
+        std::fprintf(stderr, "FAIL: dropout states size is 0\n");
+        return false;
+    }
+
+    cudnnDestroy(handle);
+    return true;
+}
+
+static bool test_tensor_nd_descriptor() {
+    cudnnTensorDescriptor_t desc = nullptr;
+    cudnnCreateTensorDescriptor(&desc);
+
+    int dims[] = {2, 3, 4, 5};
+    int strides[] = {60, 20, 5, 1};
+    cudnnSetTensorNdDescriptor(desc, CUDNN_DATA_FLOAT, 4, dims, strides);
+
+    cudnnDataType_t dt;
+    int nbDims = 0;
+    int outDims[4] = {}, outStrides[4] = {};
+    cudnnGetTensorNdDescriptor(desc, 4, &dt, &nbDims, outDims, outStrides);
+
+    if (dt != CUDNN_DATA_FLOAT || nbDims != 4) {
+        std::fprintf(stderr, "FAIL: Nd descriptor dt=%d nbDims=%d\n", dt, nbDims);
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (outDims[i] != dims[i] || outStrides[i] != strides[i]) {
+            std::fprintf(stderr, "FAIL: Nd dim[%d]=%d/%d stride=%d/%d\n",
+                         i, outDims[i], dims[i], outStrides[i], strides[i]);
+            return false;
+        }
+    }
+
+    cudnnDestroyTensorDescriptor(desc);
+    return true;
+}
+
 int main() {
     if (!test_handle_lifecycle()) return 1;
     if (!test_tensor_descriptor()) return 1;
@@ -305,6 +496,12 @@ int main() {
     if (!test_find_algo_v7()) return 1;
     if (!test_batch_norm_inference()) return 1;
     if (!test_version_and_error()) return 1;
+    if (!test_activation_backward()) return 1;
+    if (!test_pooling_max()) return 1;
+    if (!test_pooling_avg()) return 1;
+    if (!test_dropout_passthrough()) return 1;
+    if (!test_dropout_states_size()) return 1;
+    if (!test_tensor_nd_descriptor()) return 1;
 
     std::printf("PASS: cuDNN API tests\n");
     return 0;

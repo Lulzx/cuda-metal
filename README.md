@@ -78,7 +78,7 @@ Library shims
 - cuSOLVER Dense (LU, QR, Cholesky, SVD, eigenvalue — backed by Apple Accelerate LAPACK)
 - CUDA Graphs (stream capture, instantiate, launch — sequential replay)
 - cublasLt (lightweight BLAS matmul with epilogues: bias, relu, gelu)
-- cuDNN (convolution forward via im2col+GEMM, activations, softmax, batch norm, tensor ops)
+- cuDNN (convolution fwd/bwd via im2col+GEMM, pooling, activations fwd/bwd, dropout, softmax, batch norm, Nd tensor, tensor ops)
 - NVML (device info, memory queries, driver version — Apple Silicon adapted)
 - NCCL (single-rank collectives: allreduce, broadcast, reduce, allgather — identity ops on single GPU)
 - Async memory pool API (cudaMallocAsync/cudaFreeAsync — UMA synchronous aliases)

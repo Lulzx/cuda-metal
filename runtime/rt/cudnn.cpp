@@ -45,6 +45,21 @@ struct cudnnActivationStruct {
     double coef = 0.0;
 };
 
+struct cudnnPoolingStruct {
+    cudnnPoolingMode_t mode = CUDNN_POOLING_MAX;
+    cudnnNanPropagation_t nanOpt = CUDNN_NOT_PROPAGATE_NAN;
+    int windowH = 1, windowW = 1;
+    int padH = 0, padW = 0;
+    int strideH = 1, strideW = 1;
+};
+
+struct cudnnDropoutStruct {
+    float dropout = 0.0f;
+    void* states = nullptr;
+    size_t stateSize = 0;
+    unsigned long long seed = 0;
+};
+
 namespace {
 
 bool debug_cudnn() {
@@ -954,6 +969,382 @@ cudnnStatus_t cudnnBatchNormalizationForwardInference(
             }
         }
     }
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── Activation backward ──
+
+cudnnStatus_t cudnnActivationBackward(cudnnHandle_t /*handle*/,
+                                       cudnnActivationDescriptor_t activationDesc,
+                                       const void* alpha,
+                                       cudnnTensorDescriptor_t yDesc, const void* y,
+                                       cudnnTensorDescriptor_t dyDesc, const void* dy,
+                                       cudnnTensorDescriptor_t xDesc, const void* x,
+                                       const void* beta,
+                                       cudnnTensorDescriptor_t dxDesc, void* dx) {
+    if (!activationDesc || !alpha || !yDesc || !y || !dyDesc || !dy ||
+        !xDesc || !x || !beta || !dxDesc || !dx)
+        return CUDNN_STATUS_BAD_PARAM;
+
+    float a = *static_cast<const float*>(alpha);
+    float b = *static_cast<const float*>(beta);
+    const float* yf = static_cast<const float*>(y);
+    const float* dyf = static_cast<const float*>(dy);
+    const float* xf = static_cast<const float*>(x);
+    float* dxf = static_cast<float*>(dx);
+    int count = xDesc->n * xDesc->c * xDesc->h * xDesc->w;
+
+    for (int i = 0; i < count; ++i) {
+        float grad = 0.0f;
+        switch (activationDesc->mode) {
+            case CUDNN_ACTIVATION_SIGMOID: {
+                float s = yf[i];
+                grad = dyf[i] * s * (1.0f - s);
+                break;
+            }
+            case CUDNN_ACTIVATION_RELU:
+                grad = xf[i] > 0.0f ? dyf[i] : 0.0f;
+                break;
+            case CUDNN_ACTIVATION_TANH: {
+                float t = yf[i];
+                grad = dyf[i] * (1.0f - t * t);
+                break;
+            }
+            case CUDNN_ACTIVATION_CLIPPED_RELU:
+                grad = (xf[i] > 0.0f && xf[i] < (float)activationDesc->coef) ? dyf[i] : 0.0f;
+                break;
+            case CUDNN_ACTIVATION_ELU:
+                grad = xf[i] > 0.0f ? dyf[i] : dyf[i] * (yf[i] + (float)activationDesc->coef);
+                break;
+            case CUDNN_ACTIVATION_SWISH: {
+                float sig = 1.0f / (1.0f + std::exp(-xf[i]));
+                grad = dyf[i] * (sig + xf[i] * sig * (1.0f - sig));
+                break;
+            }
+            case CUDNN_ACTIVATION_IDENTITY:
+            default:
+                grad = dyf[i];
+                break;
+        }
+        dxf[i] = a * grad + b * dxf[i];
+    }
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── Pooling ──
+
+cudnnStatus_t cudnnCreatePoolingDescriptor(cudnnPoolingDescriptor_t* poolingDesc) {
+    if (!poolingDesc) return CUDNN_STATUS_BAD_PARAM;
+    *poolingDesc = new (std::nothrow) cudnnPoolingStruct;
+    return *poolingDesc ? CUDNN_STATUS_SUCCESS : CUDNN_STATUS_ALLOC_FAILED;
+}
+
+cudnnStatus_t cudnnDestroyPoolingDescriptor(cudnnPoolingDescriptor_t poolingDesc) {
+    delete poolingDesc;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnSetPooling2dDescriptor(cudnnPoolingDescriptor_t poolingDesc,
+                                           cudnnPoolingMode_t mode,
+                                           cudnnNanPropagation_t maxpoolingNanOpt,
+                                           int windowHeight, int windowWidth,
+                                           int verticalPadding, int horizontalPadding,
+                                           int verticalStride, int horizontalStride) {
+    if (!poolingDesc) return CUDNN_STATUS_BAD_PARAM;
+    poolingDesc->mode = mode;
+    poolingDesc->nanOpt = maxpoolingNanOpt;
+    poolingDesc->windowH = windowHeight;
+    poolingDesc->windowW = windowWidth;
+    poolingDesc->padH = verticalPadding;
+    poolingDesc->padW = horizontalPadding;
+    poolingDesc->strideH = verticalStride;
+    poolingDesc->strideW = horizontalStride;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetPooling2dForwardOutputDim(cudnnPoolingDescriptor_t poolingDesc,
+                                                 cudnnTensorDescriptor_t inputTensorDesc,
+                                                 int* n, int* c, int* h, int* w) {
+    if (!poolingDesc || !inputTensorDesc) return CUDNN_STATUS_BAD_PARAM;
+    if (n) *n = inputTensorDesc->n;
+    if (c) *c = inputTensorDesc->c;
+    if (h) *h = (inputTensorDesc->h + 2 * poolingDesc->padH - poolingDesc->windowH) / poolingDesc->strideH + 1;
+    if (w) *w = (inputTensorDesc->w + 2 * poolingDesc->padW - poolingDesc->windowW) / poolingDesc->strideW + 1;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnPoolingForward(cudnnHandle_t /*handle*/,
+                                   cudnnPoolingDescriptor_t poolingDesc,
+                                   const void* alpha,
+                                   cudnnTensorDescriptor_t xDesc, const void* x,
+                                   const void* beta,
+                                   cudnnTensorDescriptor_t yDesc, void* y) {
+    if (!poolingDesc || !alpha || !xDesc || !x || !beta || !yDesc || !y)
+        return CUDNN_STATUS_BAD_PARAM;
+
+    float a = *static_cast<const float*>(alpha);
+    float b = *static_cast<const float*>(beta);
+    const float* xf = static_cast<const float*>(x);
+    float* yf = static_cast<float*>(y);
+
+    int N = xDesc->n, C = xDesc->c, H = xDesc->h, W = xDesc->w;
+    int kH = poolingDesc->windowH, kW = poolingDesc->windowW;
+    int pH = poolingDesc->padH, pW = poolingDesc->padW;
+    int sH = poolingDesc->strideH, sW = poolingDesc->strideW;
+    int outH = (H + 2 * pH - kH) / sH + 1;
+    int outW = (W + 2 * pW - kW) / sW + 1;
+    bool is_max = (poolingDesc->mode == CUDNN_POOLING_MAX ||
+                   poolingDesc->mode == CUDNN_POOLING_MAX_DETERMINISTIC);
+    bool exclude_pad = (poolingDesc->mode == CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING);
+
+    for (int n = 0; n < N; ++n) {
+        for (int c = 0; c < C; ++c) {
+            for (int oh = 0; oh < outH; ++oh) {
+                for (int ow = 0; ow < outW; ++ow) {
+                    float val = is_max ? -1e30f : 0.0f;
+                    int pool_count = 0;
+                    for (int wh = 0; wh < kH; ++wh) {
+                        for (int ww = 0; ww < kW; ++ww) {
+                            int ih = oh * sH - pH + wh;
+                            int iw = ow * sW - pW + ww;
+                            if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
+                                float v = xf[((n * C + c) * H + ih) * W + iw];
+                                if (is_max) val = std::max(val, v);
+                                else val += v;
+                                ++pool_count;
+                            }
+                        }
+                    }
+                    if (!is_max) {
+                        int divisor = exclude_pad ? pool_count : (kH * kW);
+                        if (divisor > 0) val /= divisor;
+                    }
+                    int oidx = ((n * C + c) * outH + oh) * outW + ow;
+                    yf[oidx] = a * val + b * yf[oidx];
+                }
+            }
+        }
+    }
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnPoolingBackward(cudnnHandle_t /*handle*/,
+                                    cudnnPoolingDescriptor_t poolingDesc,
+                                    const void* alpha,
+                                    cudnnTensorDescriptor_t yDesc, const void* y,
+                                    cudnnTensorDescriptor_t dyDesc, const void* dy,
+                                    cudnnTensorDescriptor_t xDesc, const void* x,
+                                    const void* beta,
+                                    cudnnTensorDescriptor_t dxDesc, void* dx) {
+    if (!poolingDesc || !alpha || !yDesc || !y || !dyDesc || !dy ||
+        !xDesc || !x || !beta || !dxDesc || !dx)
+        return CUDNN_STATUS_BAD_PARAM;
+
+    float a = *static_cast<const float*>(alpha);
+    float b = *static_cast<const float*>(beta);
+    const float* yf = static_cast<const float*>(y);
+    const float* dyf = static_cast<const float*>(dy);
+    const float* xf = static_cast<const float*>(x);
+    float* dxf = static_cast<float*>(dx);
+
+    int N = xDesc->n, C = xDesc->c, H = xDesc->h, W = xDesc->w;
+    int kH = poolingDesc->windowH, kW = poolingDesc->windowW;
+    int pH = poolingDesc->padH, pW = poolingDesc->padW;
+    int sH = poolingDesc->strideH, sW = poolingDesc->strideW;
+    int outH = (H + 2 * pH - kH) / sH + 1;
+    int outW = (W + 2 * pW - kW) / sW + 1;
+    bool is_max = (poolingDesc->mode == CUDNN_POOLING_MAX ||
+                   poolingDesc->mode == CUDNN_POOLING_MAX_DETERMINISTIC);
+    bool exclude_pad = (poolingDesc->mode == CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING);
+
+    // Scale dx by beta
+    int dx_size = N * C * H * W;
+    if (b == 0.0f) std::memset(dxf, 0, dx_size * sizeof(float));
+    else if (b != 1.0f) cblas_sscal(dx_size, b, dxf, 1);
+
+    for (int n = 0; n < N; ++n) {
+        for (int c = 0; c < C; ++c) {
+            for (int oh = 0; oh < outH; ++oh) {
+                for (int ow = 0; ow < outW; ++ow) {
+                    int oidx = ((n * C + c) * outH + oh) * outW + ow;
+                    float dy_val = dyf[oidx];
+                    if (is_max) {
+                        float y_val = yf[oidx];
+                        for (int wh = 0; wh < kH; ++wh) {
+                            for (int ww = 0; ww < kW; ++ww) {
+                                int ih = oh * sH - pH + wh;
+                                int iw = ow * sW - pW + ww;
+                                if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
+                                    int iidx = ((n * C + c) * H + ih) * W + iw;
+                                    if (xf[iidx] == y_val)
+                                        dxf[iidx] += a * dy_val;
+                                }
+                            }
+                        }
+                    } else {
+                        int pool_count = 0;
+                        for (int wh = 0; wh < kH; ++wh) {
+                            for (int ww = 0; ww < kW; ++ww) {
+                                int ih = oh * sH - pH + wh;
+                                int iw = ow * sW - pW + ww;
+                                if (ih >= 0 && ih < H && iw >= 0 && iw < W)
+                                    ++pool_count;
+                            }
+                        }
+                        int divisor = exclude_pad ? pool_count : (kH * kW);
+                        float grad = (divisor > 0) ? (a * dy_val / divisor) : 0.0f;
+                        for (int wh = 0; wh < kH; ++wh) {
+                            for (int ww = 0; ww < kW; ++ww) {
+                                int ih = oh * sH - pH + wh;
+                                int iw = ow * sW - pW + ww;
+                                if (ih >= 0 && ih < H && iw >= 0 && iw < W)
+                                    dxf[((n * C + c) * H + ih) * W + iw] += grad;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── Dropout ──
+
+cudnnStatus_t cudnnCreateDropoutDescriptor(cudnnDropoutDescriptor_t* dropoutDesc) {
+    if (!dropoutDesc) return CUDNN_STATUS_BAD_PARAM;
+    *dropoutDesc = new (std::nothrow) cudnnDropoutStruct;
+    return *dropoutDesc ? CUDNN_STATUS_SUCCESS : CUDNN_STATUS_ALLOC_FAILED;
+}
+
+cudnnStatus_t cudnnDestroyDropoutDescriptor(cudnnDropoutDescriptor_t dropoutDesc) {
+    delete dropoutDesc;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnSetDropoutDescriptor(cudnnDropoutDescriptor_t dropoutDesc,
+                                         cudnnHandle_t /*handle*/,
+                                         float dropout,
+                                         void* states, size_t stateSizeInBytes,
+                                         unsigned long long seed) {
+    if (!dropoutDesc) return CUDNN_STATUS_BAD_PARAM;
+    dropoutDesc->dropout = dropout;
+    dropoutDesc->states = states;
+    dropoutDesc->stateSize = stateSizeInBytes;
+    dropoutDesc->seed = seed;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnDropoutGetStatesSize(cudnnHandle_t /*handle*/, size_t* sizeInBytes) {
+    if (!sizeInBytes) return CUDNN_STATUS_BAD_PARAM;
+    *sizeInBytes = 64; // minimal state for our RNG seed
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnDropoutForward(cudnnHandle_t /*handle*/,
+                                   cudnnDropoutDescriptor_t dropoutDesc,
+                                   cudnnTensorDescriptor_t xdesc, const void* x,
+                                   cudnnTensorDescriptor_t ydesc, void* y,
+                                   void* reserveSpace, size_t reserveSpaceSizeInBytes) {
+    if (!dropoutDesc || !xdesc || !x || !ydesc || !y)
+        return CUDNN_STATUS_BAD_PARAM;
+
+    const float* xf = static_cast<const float*>(x);
+    float* yf = static_cast<float*>(y);
+    int count = xdesc->n * xdesc->c * xdesc->h * xdesc->w;
+
+    if (dropoutDesc->dropout <= 0.0f) {
+        std::memcpy(yf, xf, count * sizeof(float));
+        if (reserveSpace && reserveSpaceSizeInBytes >= (size_t)count)
+            std::memset(reserveSpace, 1, count); // all kept
+        return CUDNN_STATUS_SUCCESS;
+    }
+
+    // Simple xorshift64 RNG from seed
+    unsigned long long state = dropoutDesc->seed ? dropoutDesc->seed : 42;
+    unsigned char* mask = static_cast<unsigned char*>(reserveSpace);
+    float scale = 1.0f / (1.0f - dropoutDesc->dropout);
+    unsigned int threshold = (unsigned int)(dropoutDesc->dropout * 4294967295.0f);
+
+    for (int i = 0; i < count; ++i) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        bool drop = ((unsigned int)(state & 0xFFFFFFFF)) < threshold;
+        if (mask && (size_t)i < reserveSpaceSizeInBytes)
+            mask[i] = drop ? 0 : 1;
+        yf[i] = drop ? 0.0f : xf[i] * scale;
+    }
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnDropoutBackward(cudnnHandle_t /*handle*/,
+                                    cudnnDropoutDescriptor_t dropoutDesc,
+                                    cudnnTensorDescriptor_t dydesc, const void* dy,
+                                    cudnnTensorDescriptor_t dxdesc, void* dx,
+                                    void* reserveSpace, size_t reserveSpaceSizeInBytes) {
+    if (!dropoutDesc || !dydesc || !dy || !dxdesc || !dx)
+        return CUDNN_STATUS_BAD_PARAM;
+
+    const float* dyf = static_cast<const float*>(dy);
+    float* dxf = static_cast<float*>(dx);
+    int count = dydesc->n * dydesc->c * dydesc->h * dydesc->w;
+
+    if (dropoutDesc->dropout <= 0.0f) {
+        std::memcpy(dxf, dyf, count * sizeof(float));
+        return CUDNN_STATUS_SUCCESS;
+    }
+
+    const unsigned char* mask = static_cast<const unsigned char*>(reserveSpace);
+    float scale = 1.0f / (1.0f - dropoutDesc->dropout);
+
+    for (int i = 0; i < count; ++i) {
+        bool kept = mask && (size_t)i < reserveSpaceSizeInBytes && mask[i];
+        dxf[i] = kept ? dyf[i] * scale : 0.0f;
+    }
+    return CUDNN_STATUS_SUCCESS;
+}
+
+// ── Nd tensor descriptor ──
+
+cudnnStatus_t cudnnSetTensorNdDescriptor(cudnnTensorDescriptor_t tensorDesc,
+                                          cudnnDataType_t dataType,
+                                          int nbDims,
+                                          const int dimA[],
+                                          const int strideA[]) {
+    if (!tensorDesc || !dimA || !strideA || nbDims < 1)
+        return CUDNN_STATUS_BAD_PARAM;
+
+    tensorDesc->dataType = dataType;
+    // Map Nd dims to our 4d representation (pad leading dims with 1)
+    tensorDesc->n = nbDims >= 1 ? dimA[0] : 1;
+    tensorDesc->c = nbDims >= 2 ? dimA[1] : 1;
+    tensorDesc->h = nbDims >= 3 ? dimA[2] : 1;
+    tensorDesc->w = nbDims >= 4 ? dimA[3] : 1;
+    tensorDesc->nStride = nbDims >= 1 ? strideA[0] : 1;
+    tensorDesc->cStride = nbDims >= 2 ? strideA[1] : 1;
+    tensorDesc->hStride = nbDims >= 3 ? strideA[2] : 1;
+    tensorDesc->wStride = nbDims >= 4 ? strideA[3] : 1;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+cudnnStatus_t cudnnGetTensorNdDescriptor(cudnnTensorDescriptor_t tensorDesc,
+                                          int nbDimsRequested,
+                                          cudnnDataType_t* dataType,
+                                          int* nbDims,
+                                          int dimA[],
+                                          int strideA[]) {
+    if (!tensorDesc) return CUDNN_STATUS_BAD_PARAM;
+    if (dataType) *dataType = tensorDesc->dataType;
+    if (nbDims) *nbDims = 4;
+    if (dimA && nbDimsRequested >= 1) dimA[0] = tensorDesc->n;
+    if (dimA && nbDimsRequested >= 2) dimA[1] = tensorDesc->c;
+    if (dimA && nbDimsRequested >= 3) dimA[2] = tensorDesc->h;
+    if (dimA && nbDimsRequested >= 4) dimA[3] = tensorDesc->w;
+    if (strideA && nbDimsRequested >= 1) strideA[0] = tensorDesc->nStride;
+    if (strideA && nbDimsRequested >= 2) strideA[1] = tensorDesc->cStride;
+    if (strideA && nbDimsRequested >= 3) strideA[2] = tensorDesc->hStride;
+    if (strideA && nbDimsRequested >= 4) strideA[3] = tensorDesc->wStride;
     return CUDNN_STATUS_SUCCESS;
 }
 

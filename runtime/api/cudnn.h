@@ -300,6 +300,82 @@ cudnnStatus_t cudnnActivationForward(cudnnHandle_t handle,
                                       const void* beta,
                                       cudnnTensorDescriptor_t yDesc, void* y);
 
+cudnnStatus_t cudnnActivationBackward(cudnnHandle_t handle,
+                                       cudnnActivationDescriptor_t activationDesc,
+                                       const void* alpha,
+                                       cudnnTensorDescriptor_t yDesc, const void* y,
+                                       cudnnTensorDescriptor_t dyDesc, const void* dy,
+                                       cudnnTensorDescriptor_t xDesc, const void* x,
+                                       const void* beta,
+                                       cudnnTensorDescriptor_t dxDesc, void* dx);
+
+// Pooling
+typedef enum cudnnPoolingMode_t {
+    CUDNN_POOLING_MAX = 0,
+    CUDNN_POOLING_AVERAGE_COUNT_INCLUDE_PADDING = 1,
+    CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING = 2,
+    CUDNN_POOLING_MAX_DETERMINISTIC = 3,
+} cudnnPoolingMode_t;
+
+cudnnStatus_t cudnnCreatePoolingDescriptor(cudnnPoolingDescriptor_t* poolingDesc);
+cudnnStatus_t cudnnDestroyPoolingDescriptor(cudnnPoolingDescriptor_t poolingDesc);
+cudnnStatus_t cudnnSetPooling2dDescriptor(cudnnPoolingDescriptor_t poolingDesc,
+                                           cudnnPoolingMode_t mode,
+                                           cudnnNanPropagation_t maxpoolingNanOpt,
+                                           int windowHeight, int windowWidth,
+                                           int verticalPadding, int horizontalPadding,
+                                           int verticalStride, int horizontalStride);
+cudnnStatus_t cudnnGetPooling2dForwardOutputDim(cudnnPoolingDescriptor_t poolingDesc,
+                                                 cudnnTensorDescriptor_t inputTensorDesc,
+                                                 int* n, int* c, int* h, int* w);
+cudnnStatus_t cudnnPoolingForward(cudnnHandle_t handle,
+                                   cudnnPoolingDescriptor_t poolingDesc,
+                                   const void* alpha,
+                                   cudnnTensorDescriptor_t xDesc, const void* x,
+                                   const void* beta,
+                                   cudnnTensorDescriptor_t yDesc, void* y);
+cudnnStatus_t cudnnPoolingBackward(cudnnHandle_t handle,
+                                    cudnnPoolingDescriptor_t poolingDesc,
+                                    const void* alpha,
+                                    cudnnTensorDescriptor_t yDesc, const void* y,
+                                    cudnnTensorDescriptor_t dyDesc, const void* dy,
+                                    cudnnTensorDescriptor_t xDesc, const void* x,
+                                    const void* beta,
+                                    cudnnTensorDescriptor_t dxDesc, void* dx);
+
+// Dropout
+cudnnStatus_t cudnnCreateDropoutDescriptor(cudnnDropoutDescriptor_t* dropoutDesc);
+cudnnStatus_t cudnnDestroyDropoutDescriptor(cudnnDropoutDescriptor_t dropoutDesc);
+cudnnStatus_t cudnnSetDropoutDescriptor(cudnnDropoutDescriptor_t dropoutDesc,
+                                         cudnnHandle_t handle,
+                                         float dropout,
+                                         void* states, size_t stateSizeInBytes,
+                                         unsigned long long seed);
+cudnnStatus_t cudnnDropoutGetStatesSize(cudnnHandle_t handle, size_t* sizeInBytes);
+cudnnStatus_t cudnnDropoutForward(cudnnHandle_t handle,
+                                   cudnnDropoutDescriptor_t dropoutDesc,
+                                   cudnnTensorDescriptor_t xdesc, const void* x,
+                                   cudnnTensorDescriptor_t ydesc, void* y,
+                                   void* reserveSpace, size_t reserveSpaceSizeInBytes);
+cudnnStatus_t cudnnDropoutBackward(cudnnHandle_t handle,
+                                    cudnnDropoutDescriptor_t dropoutDesc,
+                                    cudnnTensorDescriptor_t dydesc, const void* dy,
+                                    cudnnTensorDescriptor_t dxdesc, void* dx,
+                                    void* reserveSpace, size_t reserveSpaceSizeInBytes);
+
+// Nd tensor descriptor (used by frameworks instead of 4d)
+cudnnStatus_t cudnnSetTensorNdDescriptor(cudnnTensorDescriptor_t tensorDesc,
+                                          cudnnDataType_t dataType,
+                                          int nbDims,
+                                          const int dimA[],
+                                          const int strideA[]);
+cudnnStatus_t cudnnGetTensorNdDescriptor(cudnnTensorDescriptor_t tensorDesc,
+                                          int nbDimsRequested,
+                                          cudnnDataType_t* dataType,
+                                          int* nbDims,
+                                          int dimA[],
+                                          int strideA[]);
+
 // Tensor operations
 cudnnStatus_t cudnnAddTensor(cudnnHandle_t handle,
                               const void* alpha,
