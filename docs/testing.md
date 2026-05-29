@@ -127,6 +127,7 @@ Phase 4 conformance gate over functional tests:
 ```bash
 ctest --test-dir build -R conformance_phase4_functional --output-on-failure
 ctest --test-dir build -R conformance_llmc_gpt2fp32cu --output-on-failure
+ctest --test-dir build -R functional_cuda_projects_ --output-on-failure
 ```
 
 Notes:
@@ -134,8 +135,13 @@ Notes:
 - Override per-test timeout with `CUMETAL_CONFORMANCE_SINGLE_TEST_TIMEOUT` (seconds, default `120`).
 - `air_abi_xcode_matrix_regression` uses `CUMETAL_XCODE15_DEVELOPER_DIR`/`CUMETAL_XCODE16_DEVELOPER_DIR` when set.
   If unset, it falls back to `xcode-select -p` for both slots (single-Xcode mode).
+- `functional_cuda_projects_*` compiles and runs standalone CUDA sample programs under
+  `tests/cuda_projects/` (SGEMM naive/shmem/2d, reduction, transpose). Requires `xcrun metal`
+  and `libcumetal` in `build/`. Skips with exit code 77 when the Metal toolchain is unavailable.
 - `conformance_llmc_gpt2fp32cu` is registered only when llm.c is configured (set `CUMETAL_LLMC_DIR`
   before CMake configure, or place checkout at `../llm.c` relative to this repo root).
+- `conformance_llmc_gpt2fp32cu` skips when `gpt2_124M.bin` is missing from the llm.c checkout
+  (place under checkout root or `dev/data/` per upstream layout).
 - When registered, `conformance_llmc_gpt2fp32cu` auto-wires CuMetal's LLVM+fatbin shim flow:
   `scripts/build_llmc_test_gpt2fp32cu.sh` + `scripts/run_llmc_test_gpt2fp32cu.sh`.
 - `conformance_llmc_gpt2fp32cu` fails on any `TENSOR NOT OK` marker and requires
@@ -159,6 +165,7 @@ Optional llm.c stress harness setup:
 
 ```bash
 export CUMETAL_LLMC_DIR="/path/to/llm.c"
+bash scripts/fetch_llmc_assets.sh   # gpt2_124M.bin + debug state (once)
 # optional overrides:
 export CUMETAL_LLMC_BUILD_CMD="scripts/build_llmc_test_gpt2fp32cu.sh"
 export CUMETAL_LLMC_TEST_CMD="scripts/run_llmc_test_gpt2fp32cu.sh"

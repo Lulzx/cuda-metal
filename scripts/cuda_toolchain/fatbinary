@@ -19,6 +19,12 @@ while [[ $# -gt 0 ]]; do
             images+=("${image_spec##*file=}")
             shift
             ;;
+        --image3=*)
+            # LLVM 17+ passes --image3=kind=elf,sm=52,file=/path/to/device.o
+            image_spec="${1#--image3=}"
+            images+=("${image_spec##*file=}")
+            shift
+            ;;
         -*)
             shift
             ;;

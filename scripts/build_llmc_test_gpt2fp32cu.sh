@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=scripts/cumetal_cuda_flags.sh
+source "${SCRIPT_DIR}/cumetal_cuda_flags.sh"
 
 LLMC_DIR="${CUMETAL_LLMC_DIR:-${1:-}}"
 if [[ -z "${LLMC_DIR}" ]]; then
@@ -23,7 +25,7 @@ if [[ -z "${CLANG_BIN}" ]]; then
     exit 2
 fi
 
-CUDA_ARCH="${CUMETAL_LLMC_CUDA_ARCH:-sm_80}"
+cumetal_cuda_device_flags
 OUTPUT_NAME="${CUMETAL_LLMC_TEST_BINARY:-test_gpt2fp32cu}"
 GRAD_TOL="${CUMETAL_LLMC_GRAD_TOL:-1.2e-2}"
 OBJ_DIR="${LLMC_DIR}/build/cumetal"
@@ -62,7 +64,7 @@ PATH="${ROOT_DIR}/scripts/cuda_toolchain:${PATH}" \
     -D__CUDACC__=1 \
     -D__NVCC__=1 \
     -Wno-pass-failed \
-    --cuda-gpu-arch="${CUDA_ARCH}" \
+    "${CUMETAL_CUDA_DEVICE_FLAGS[@]}" \
     -nocudainc \
     -nocudalib \
     -I"${ROOT_DIR}/runtime/api" \

@@ -14,12 +14,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=scripts/cumetal_cuda_flags.sh
+source "${SCRIPT_DIR}/cumetal_cuda_flags.sh"
 
 # ── configuration ─────────────────────────────────────────────────────────────
 LLAMA_DIR="${CUMETAL_LLAMA_DIR:-${1:-${ROOT_DIR}/../llama.cpp}}"
 LLAMA_REPO="${CUMETAL_LLAMA_REPO:-https://github.com/ggml-org/llama.cpp}"
 LLAMA_TAG="${CUMETAL_LLAMA_TAG:-}"        # empty = latest main
-CUDA_ARCH="${CUMETAL_CUDA_ARCH:-sm_80}"
+cumetal_cuda_device_flags
+CUDA_ARCH="$(cumetal_cuda_arch)"
+CUDA_DEVICE_FLAGS_STR=""
+for f in "${CUMETAL_CUDA_DEVICE_FLAGS[@]}"; do
+    CUDA_DEVICE_FLAGS_STR+=" ${f}"
+done
 NCPUS="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 # ── find clang++ ──────────────────────────────────────────────────────────────
@@ -234,8 +241,7 @@ if [[ \${IS_CMAKE_PROBE} -eq 1 && \${COMPILE_ONLY} -eq 0 ]]; then
 fi
 
 exec "\${REAL_CLANG}" \\
-    -x cuda \\
-    --cuda-gpu-arch="${CUDA_ARCH}" \\
+    -x cuda \\${CUDA_DEVICE_FLAGS_STR} \\
     -nocudainc -nocudalib \\
     -I"\${CUMETAL_API}" \\
     -include cuda_runtime.h \\

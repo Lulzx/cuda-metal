@@ -2,16 +2,18 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+# shellcheck source=scripts/cumetal_cuda_flags.sh
+source "${ROOT_DIR}/scripts/cumetal_cuda_flags.sh"
 CLANG_BIN="${CUMETAL_CLANG:-/opt/homebrew/opt/llvm/bin/clang++}"
 [[ -x "${CLANG_BIN}" ]] || CLANG_BIN="$(command -v clang++)"
-CUDA_ARCH="${CUMETAL_CUDA_ARCH:-sm_80}"
+cumetal_cuda_device_flags
 OUT_DIR="${SCRIPT_DIR}/build"; mkdir -p "${OUT_DIR}"
 
 echo "Compiling reduction_standalone.cu..."
 PATH="${ROOT_DIR}/scripts/cuda_toolchain:${PATH}" \
 "${CLANG_BIN}" -x cuda -std=c++17 -O2 -DNDEBUG \
     -D__CUDACC__=1 -D__NVCC__=1 -Wno-pass-failed \
-    --cuda-gpu-arch="${CUDA_ARCH}" -nocudainc -nocudalib \
+    "${CUMETAL_CUDA_DEVICE_FLAGS[@]}" -nocudainc -nocudalib \
     -I"${ROOT_DIR}/runtime/api" -include cuda_runtime.h \
     -c "${SCRIPT_DIR}/reduction_standalone.cu" -o "${OUT_DIR}/reduction.o"
 echo "Linking..."

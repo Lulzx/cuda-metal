@@ -8,3 +8,9 @@ tools/metal_library_archive_bridge/.swiftpm/
 .DS_Store
 tests/cuda_projects/softmax/build/
 tests/cuda_projects/*/build/
+# Built conformance binaries (keep build/ dirs but ignore executables)
+tests/cuda_projects/**/build/sgemm_*
+tests/cuda_projects/**/build/reduction_*
+tests/cuda_projects/**/build/transpose_*
+tests/cuda_projects/**/build/softmax
+tests/cuda_projects/**/build/flash_*

@@ -6,6 +6,8 @@
 - Binary-shim registration supports CuMetal envelopes (`CMTL`), direct PTX images, and basic CUDA
   fatbin PTX images (wrapper and direct blob) with `FatBinary/FatBinary2/FatBinary3` entry points, plus
   host-function and basic symbol-variable mapping, but not full NVCC fatbinary variants.
+- Homebrew LLVM (PTX 4.2 default) needs `scripts/cumetal_cuda_flags.sh` feature flags when targeting
+  `sm_70+`; the `scripts/cuda_toolchain/fatbinary` shim accepts LLVM 17+ `--image3=...` arguments.
 - Warp-primitive intrinsic lowering (`shfl.sync.*`, `vote.sync.{ballot,any,all}`, `bar.warp.sync`)
   is implemented in the `intrinsic_lower` pass (LLVM→AIR path), mapping to
   `air.simdgroup.{shuffle,shuffle_down,shuffle_up,shuffle_xor,ballot,any,all,barrier}`.

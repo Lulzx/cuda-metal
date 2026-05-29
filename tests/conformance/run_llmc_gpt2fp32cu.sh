@@ -16,6 +16,17 @@ if [[ ! -d "$LLMC_DIR" ]]; then
   exit 77
 fi
 
+if [[ ! -f "$LLMC_DIR/gpt2_124M.bin" && ! -f "$LLMC_DIR/dev/data/gpt2_124M.bin" ]]; then
+  echo "SKIP: llm.c checkpoint gpt2_124M.bin not found under $LLMC_DIR"
+  echo "      Run from cumetal repo: bash scripts/fetch_llmc_assets.sh \"$LLMC_DIR\""
+  exit 77
+fi
+if [[ ! -f "$LLMC_DIR/gpt2_124M_debug_state.bin" && ! -f "$LLMC_DIR/dev/data/gpt2_124M_debug_state.bin" ]]; then
+  echo "SKIP: llm.c debug state gpt2_124M_debug_state.bin not found under $LLMC_DIR"
+  echo "      Run: bash scripts/fetch_llmc_assets.sh (from cumetal repo)"
+  exit 77
+fi
+
 if [[ -n "$BUILD_CMD" ]]; then
   (cd "$LLMC_DIR" && eval "$BUILD_CMD")
 fi

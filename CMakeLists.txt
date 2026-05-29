@@ -366,6 +366,7 @@ if(CUMETAL_BUILD_TESTS)
     add_subdirectory(tests/air_abi)
     add_subdirectory(tests/conformance)
     add_subdirectory(tests/functional)
+    add_subdirectory(tests/cuda_projects)
     add_subdirectory(tests/ptx_sweep)
     add_subdirectory(tests/unit)
 
