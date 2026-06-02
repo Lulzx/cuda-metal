@@ -53,8 +53,7 @@ cumetal_cuda_projects_compile_link() {
         "${CUMETAL_CUDA_DEVICE_FLAGS[@]}" -nocudainc -nocudalib \
         -I"${root_dir}/runtime/api" -include cuda_runtime.h \
         -c "${src_dir}/${src_cu}" -o "${out_dir}/${src_cu%.cu}.o" 2>&1 || true ) \
-        | grep -v '+ptx[0-9][0-9]*' is not a recognized feature \
-        | grep -v 'implicit conversion from .* to float changes value' || true
+        | grep -v -E 'ptx[0-9]+ is not a recognized feature|\+ptx[0-9]+|Wimplicit-const-int-float-conversion|warnings generated when compiling for' || true
     xcrun clang++ "${out_dir}/${src_cu%.cu}.o" \
         -L"${root_dir}/build" -lcumetal -Wl,-rpath,"${root_dir}/build" \
         -o "${out_dir}/${out_bin}"
