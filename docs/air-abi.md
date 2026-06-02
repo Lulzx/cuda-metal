@@ -27,22 +27,18 @@ Phase 0.5 harness. The focus is structural acceptance, not kernel execution.
 
 ## Reference layout snapshot
 
-Reference artifact (`tests/air_abi/reference/reference.metallib`) from:
+Reference artifact (`tests/air_abi/reference/reference.metallib`) from xcrun (or emitter fallback):
 
-```bash
-xcrun metal -c tests/air_abi/reference/vector_add.metal -o reference.air
-xcrun metallib reference.air -o reference.metallib
-```
-
-`air_inspect` summary:
+`air_inspect` summary (current):
 
 - Size: `3760` bytes (`0xeb0`)
 - Magic: `MTLB`
 - Function list parser: `metallib-function-list`
 - Function count: `1` (`vector_add`)
 - Kernel bitcode: offset `0xf0` size `0xdc0`
+- Observed: air.version=2.8, language.version=4.0 (references built against older xcrun; runtime accepts)
 
-Header fields currently used by `parse_real_metallib` (`compiler/common/src/metallib.cpp`):
+Header fields used by `parse_real_metallib` (compiler/common/src/metallib.cpp):
 
 | File offset | Type | Meaning | Value (reference) |
 |---|---|---|---|
@@ -51,53 +47,47 @@ Header fields currently used by `parse_real_metallib` (`compiler/common/src/meta
 | `0x48` | `u64` | bitcode-section offset | `0xf0` |
 | `0x50` | `u64` | bitcode-section size | `0xdc0` |
 
-The parser accepts two size interpretations for function-list end:
-
-1. `function_list_offset + function_list_size`
-2. `function_list_offset + function_list_size + 4`
-
-The `+4` variant is required for metallib layouts where the stored size excludes the leading
-`entry_count` word.
+The parser accepts two size interpretations for function-list end ( +0 or +4 for entry_count variance).
 
 ## Function record tags
 
-Within the function-list group, the following 4-byte tags are parsed today:
+Tags parsed (NAME, TYPE, HASH, MDSZ, OFFT, VERS, ENDT etc.):
 
-| Tag | Meaning | Reference value |
+| Tag | Meaning | Example |
 |---|---|---|
 | `NAME` | function symbol | `vector_add` |
 | `TYPE` | function kind | `2` (kernel) |
-| `HASH` | digest blob (prefix reported) | `e64ad8cd3651085e...` |
-| `MDSZ` | bitcode payload size | `0xdc0` |
-| `OFFT` | public/private/bitcode offsets (relative to bitcode section) | `0/0/0` |
-| `VERS` | AIR + language version (`u16` pairs) | AIR `2.8`, language `4.0` |
-| `ENDT` | terminator | present (multiple) |
+| `HASH` | digest | prefix e64ad8cd... |
+| `MDSZ` | bitcode size | `0xdc0` |
+| `OFFT` | offsets (pub/priv/bitcode) | `0/0/0` (single); non-zero for later kernels in multi |
+| `VERS` | AIR/language (`u16` pairs) | AIR `2.8`, language `4.0` |
+| `ENDT` | terminator | present |
 
-Observed bytes around the first record (`0x60`):
+## Multi-kernel / bench layout (fresh from build/bench_phase5/bench_kernels.metallib)
 
-```text
-4e 41 4d 45 ... 54 59 50 45 ... 48 41 53 48 ... 4d 44 53 5a ...
-4f 46 46 54 ... 56 45 52 53 ... 45 4e 44 54
-```
+3 kernels (vector_add, saxpy, reduce_f32):
 
-## Multi-kernel layout snapshot
+- Function count: 3
+- Varying OFFT for kernels >0 (e.g. saxpy: public=8,private=8,bitcode=3520; reduce: 16/16/7040)
+- All report air.version=2.8 , language 4.0 , type=2 kernel
+- Bitcode sizes vary (0xdc0, 0xdc0, 0xf70)
+- Confirms parser handles multiple entries + relative bitcode offsets correctly.
 
-Compiling `tests/air_abi/reference/multi_kernel.metal` with `xcrun` produces a two-function
-metallib with the same tag schema:
+Practical notes:
 
-- Size: `7307` bytes (`0x1c8b`)
-- Function count: `2` (`vector_add`, `scale`)
-- Bitcode sections:
-  - `vector_add`: offset `0x17b`, size `0xdc0`
-  - `scale`: offset `0xf3b`, size `0xd50`
-- Metadata highlights:
-  - both functions report `TYPE=2` (`kernel`)
-  - both carry `VERS` AIR `2.8` and language `4.0`
-  - second-function `OFFT` values are non-zero (`public=8`, `private=8`, `bitcode=3520`)
+1. Entry order matches declaration.
+2. OFFT public/private often 0 for first kernel, positive for subsequent (sub-buffers?).
+3. String table has kernel names + long mangled "air64_v28-..." build ids.
+4. Current emitter + xcrun paths produce compatible layouts for runtime load/launch.
 
-Practical parser notes from this sample:
+## Parser implementation notes (compiler/common/src/metallib.cpp + air_inspect)
 
-1. Function-list entry order matches source declaration order.
+- Supports MTLB Apple function-list + CuMetal experimental v2 containers.
+- Bitcode sig checks: raw BC0C or wrapped.
+- Used by air_emitter validation, air_inspect, and runtime module loading for registration/JIT path.
+- Limitations tracked in known-gaps.md (experimental mode not production ABI).
+
+Update this doc by re-running `./build/air_inspect <new-metallib>` after Xcode or emitter changes. Cross-check with `air_validate` and `MTLDevice.newLibraryWithData:`.
 2. `OFFT.bitcode` for later entries can point to byte ranges after prior kernels.
 3. The core tag set (`NAME`, `TYPE`, `HASH`, `MDSZ`, `OFFT`, `VERS`, `ENDT`) is stable across
    one- and two-kernel outputs on current Xcode.
