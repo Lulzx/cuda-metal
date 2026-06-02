@@ -43,11 +43,12 @@ as gaps have been closed.
   and llama.cpp GGML CUDA backend.
 
 ## Tooling / build notes
-- `air_emitter` "experimental" mode produces test containers, not production metallib ABI.
+- `air_emitter` "experimental" mode produces test containers, not production metallib ABI (for validation/air_abi only; runtime execution requires real metallib from xcrun or prebuilt).
 - AIR metadata validation relies on MetalLibraryArchive + xcrun where available; the
   bridge is optional at build time.
 - Homebrew LLVM users targeting sm_70+ need the feature-flag shim
   (`scripts/cumetal_cuda_flags.sh`) because of PTX version defaults; the in-tree
+- cuda_projects conformance harness now runs its compile step (clang -x cuda shim + fatbin registration setup) in environments without xcrun metal/metallib (only base xcrun + clang++ needed); runtime exec still limited by PTX lowering coverage for complex kernels (sgemm etc.) and falls back gracefully to SKIP (see run_standalone_cu.sh). This reduces skip-only coverage for the harness itself.
   `scripts/cuda_toolchain/fatbinary` accepts modern `--image3` args.
 - Full AIR ABI reverse-engineering continues to be refined as Xcode releases change
   undocumented fields (regression tests in `tests/air_abi/` + `air_validate` catch breaks).
