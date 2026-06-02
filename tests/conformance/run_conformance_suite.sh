@@ -36,7 +36,12 @@ trap 'rm -f "$JSON_FILE"' EXIT
 
 ctest --test-dir "$BUILD_DIR" --show-only=json-v1 >"$JSON_FILE"
 
-readarray -t TEST_NAMES < <(
+TEST_NAMES=()
+while IFS= read -r name; do
+    if [ -n "$name" ]; then
+        TEST_NAMES+=("$name")
+    fi
+done < <(
     python3 - "$JSON_FILE" "$TEST_REGEX" <<'PY'
 import json
 import re

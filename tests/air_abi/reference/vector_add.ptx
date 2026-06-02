@@ -1,14 +1,38 @@
-.version 8.0
-.target sm_90
+.version 7.0
+.target sm_80
 .address_size 64
 
 .visible .entry vector_add(
     .param .u64 vector_add_param_0,
     .param .u64 vector_add_param_1,
-    .param .u64 vector_add_param_2,
-    .param .u32 vector_add_param_3
+    .param .u64 vector_add_param_2
 )
 {
-    mov.u32 %r0, %tid.x;
+    .reg .u64 %rd<5>;
+    .reg .u32 %r<6>;
+    .reg .f32 %f<3>;
+
+    ld.param.u64 %rd0, [vector_add_param_0];
+    ld.param.u64 %rd1, [vector_add_param_1];
+    ld.param.u64 %rd2, [vector_add_param_2];
+
+    mov.u32 %r0, %ctaid.x;
+    mov.u32 %r1, %ntid.x;
+    mul.lo.u32 %r0, %r0, %r1;
+    mov.u32 %r1, %tid.x;
+    add.u32 %r0, %r0, %r1;   // gid = ctaid.x * ntid.x + tid.x
+
+    cvt.u64.u32 %rd3, %r0;
+    shl.b64     %rd3, %rd3, 2;  // byte offset for float
+
+    add.u64 %rd0, %rd0, %rd3;
+    add.u64 %rd1, %rd1, %rd3;
+    add.u64 %rd2, %rd2, %rd3;
+
+    ld.global.f32 %f0, [%rd0];
+    ld.global.f32 %f1, [%rd1];
+    add.f32     %f2, %f0, %f1;
+    st.global.f32 [%rd2], %f2;
+
     ret;
 }

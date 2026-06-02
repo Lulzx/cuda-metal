@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(cumetal VERSION 0.1.0 LANGUAGES C CXX OBJCXX)
+project(cumetal VERSION 1.0.0 LANGUAGES C CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -122,6 +122,7 @@ add_library(cumetal_runtime SHARED
     runtime/rt/nvml.cpp
     runtime/rt/nccl.cpp
     runtime/rt/cuda_runtime.cpp
+    runtime/rt/hash_shim.cpp
     runtime/metal_backend/metal_backend.mm
 )
 

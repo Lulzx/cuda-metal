@@ -4462,23 +4462,5 @@ cudaError_t cudaThreadSetCacheConfig(cudaFuncCache cacheConfig) {
 
 }  // extern "C"
 
-// Homebrew LLVM's libc++ headers can emit references to the internal
-// std::__1::__hash_memory symbol from CUDA host-pass objects. When the final
-// executable links against Apple's system libc++, that symbol may be missing.
-// Export a compatible implementation from CuMetal to bridge the mismatch.
-namespace std {
-namespace __1 {
-
-size_t __hash_memory(const void* data, size_t size) noexcept {
-    const auto* bytes = static_cast<const unsigned char*>(data);
-    // 64-bit FNV-1a; stable and sufficient for unordered_map internals used by ggml-cuda.
-    size_t hash = static_cast<size_t>(1469598103934665603ull);
-    for (size_t i = 0; i < size; ++i) {
-        hash ^= static_cast<size_t>(bytes[i]);
-        hash *= static_cast<size_t>(1099511628211ull);
-    }
-    return hash;
-}
-
-}  // namespace __1
-}  // namespace std
+// Hash memory shim moved to runtime/rt/hash_shim.cpp to avoid redefinition
+// conflicts with libc++ headers from the active SDK (see that file for details).

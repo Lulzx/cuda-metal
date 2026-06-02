@@ -81,7 +81,7 @@ bool run_vector_add(CUmodule module) {
     const unsigned int grid_x =
         static_cast<unsigned int>((kElementCount + kThreadsPerBlock - 1) / kThreadsPerBlock);
 
-    if (cuLaunchKernel(vector_add,
+    CUresult launch_res = cuLaunchKernel(vector_add,
                        grid_x,
                        1,
                        1,
@@ -91,8 +91,14 @@ bool run_vector_add(CUmodule module) {
                        0,
                        nullptr,
                        params,
-                       nullptr) != CUDA_SUCCESS) {
-        std::fprintf(stderr, "FAIL: cuLaunchKernel failed\n");
+                       nullptr);
+    if (launch_res != CUDA_SUCCESS) {
+        const char* err_name = nullptr;
+        const char* err_str = nullptr;
+        cuGetErrorName(launch_res, &err_name);
+        cuGetErrorString(launch_res, &err_str);
+        std::fprintf(stderr, "FAIL: cuLaunchKernel failed: %s (%s)\n",
+                     err_name ? err_name : "?", err_str ? err_str : "?");
         return false;
     }
 

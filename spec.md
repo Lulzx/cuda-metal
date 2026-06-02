@@ -1,6 +1,6 @@
 # CuMetal — CUDA Compiler & Runtime for Apple Silicon
 
-**Status:** Design Specification v0.1  
+**Status:** Design Specification v0.1 (implementation of primary v1 goals complete per README.md and docs/status.md; see Phase 4/5 and post-Phase 5 work)  
 **Target Platform:** macOS 14+ on Apple Silicon (M1 / M2 / M3 / M4 families)  
 **License (proposed):** Apache 2.0  
 **Changelog from v0.2:** See §16 for a categorized list of changes.

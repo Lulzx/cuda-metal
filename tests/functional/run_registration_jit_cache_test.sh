@@ -15,7 +15,7 @@ if ! command -v xcrun >/dev/null 2>&1; then
     exit 77
 fi
 if ! xcrun --find metal >/dev/null 2>&1; then
-    echo "SKIP: xcrun metal not available"
+    echo "SKIP: xcrun metal not available (jit cache test for vector_add direct lowering requires it)"
     exit 77
 fi
 if ! xcrun --find metallib >/dev/null 2>&1; then

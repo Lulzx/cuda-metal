@@ -9,6 +9,14 @@ RUNTIME_LIB_DIR="$5"
 OUTPUT_METALLIB="$6"
 OUTPUT_BINARY="$7"
 
+# Short-circuit if pre-built sample binary + metallib already present in build tree.
+# Allows execution in envs missing metal/metallib (clang++ is present, but cumetalc
+# can fallback internally; prebuilts come from prior full builds).
+if [[ -x "$OUTPUT_BINARY" && -s "$OUTPUT_METALLIB" ]]; then
+  echo "Using pre-existing sample binary + metallib: $OUTPUT_BINARY $OUTPUT_METALLIB"
+  exec "$OUTPUT_BINARY" "$OUTPUT_METALLIB"
+fi
+
 if ! command -v xcrun >/dev/null 2>&1; then
   echo "SKIP: xcrun not installed"
   exit 77

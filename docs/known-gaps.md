@@ -1,52 +1,66 @@
 # Known Gaps
 
-- Full AIR metadata reverse-engineering is still in progress.
-- `cumetal-air-emitter --mode experimental` emits a CuMetal test container, not Apple's metallib ABI.
-- MetalLibraryArchive validation is optional and currently executed through an external bridge command.
-- Binary-shim registration supports CuMetal envelopes (`CMTL`), direct PTX images, and basic CUDA
-  fatbin PTX images (wrapper and direct blob) with `FatBinary/FatBinary2/FatBinary3` entry points, plus
-  host-function and basic symbol-variable mapping, but not full NVCC fatbinary variants.
-- Homebrew LLVM (PTX 4.2 default) needs `scripts/cumetal_cuda_flags.sh` feature flags when targeting
-  `sm_70+`; the `scripts/cuda_toolchain/fatbinary` shim accepts LLVM 17+ `--image3=...` arguments.
-- Warp-primitive intrinsic lowering (`shfl.sync.*`, `vote.sync.{ballot,any,all}`, `bar.warp.sync`)
-  is implemented in the `intrinsic_lower` pass (LLVM→AIR path), mapping to
-  `air.simdgroup.{shuffle,shuffle_down,shuffle_up,shuffle_xor,ballot,any,all,barrier}`.
-  The generic PTX→Metal emitter also now emits Metal `simd_shuffle*`, `simd_ballot`, `simd_any/all`,
-  and `simd_sum/and/or/xor/min/max` for `shfl.sync`, `vote.sync`, and `redux.sync` respectively.
-  Mask emulation for non-0xFFFFFFFF membermasks is conservative (full-group) rather than
-  lane-selective; kernels using partial masks should be tested carefully.
-- `llm.c` stress coverage (`conformance_llmc_gpt2fp32cu`) now auto-builds/runs via CuMetal's local
-  clang+fatbin shim scripts when an `llm.c` checkout is present, but this path still depends on an external
-  checkout with model/debug-state assets.
-- End-to-end GPU execution of full `llm.c` CUDA sources through `cumetalc` is not yet implemented:
-  current `.cu` frontend lowering is partial and does not support full CUDA language/device-runtime
-  semantics required by `train_gpt2_fp32.cu` (cooperative groups, CUDA builtins, and kernel-launch codegen).
-- PTX registration path reaches full parity for `llm.c` `test_gpt2_fp32.cu` via direct Metal lowering
-  for all 17 GPT-2 training kernels. `CUMETAL_LLMC_REQUIRE_NO_EMULATION=1` now passes without any
-  emulation fallback. The lowering path (`compiler/ptx/src/lower_to_metal.cpp`) has two tiers:
-  (1) hardcoded name-matched kernels for the 17 llm.c GPT-2 kernels, and (2) a generic
-  PTX→Metal instruction-level translator that handles arbitrary element-wise kernels via two-pass
-  register-provenance analysis. The generic emitter supports: `ld/st.global`, `atom.global.add.f32`,
-  `setp`-based bounds guards, `mad.lo.u32` and `mul.lo.u32`+`add.u32` GID patterns, arithmetic
-  (`add`, `sub`, `mul`, `div`, `rem`, `shl`, `shr`, `and`, `or`, `xor`, `not`, `selp`), `fma`/`mad`,
-  `neg`/`abs`/`rcp`, `max`/`min`, and the unary math intrinsics `sqrt`, `rsqrt`, `ex2`→`exp2`,
-  `lg2`→`log2`, `sin`, `cos`. Kernels with unsupported patterns fall back to PTX→LLVM lowering.
-- `--fp64=emulate` mode (Dekker's algorithm FP32-pair decomposition, spec §8.1) is implemented
-  for kernels matched by the `fp64_mul_add` pattern (kernels named `*fp64*{mul,fma,add}*`).
-  The runtime defaults to `kEmulate` because Apple Silicon GPU hardware rejects native FP64
-  arithmetic (`fmul double`, `@llvm.fma.f64`) at Metal pipeline-creation time even though
-  `xcrun metal` compiles the LLVM IR successfully; `fpext`/`fptrunc` conversions do work.
-  Set `CUMETAL_FP64_MODE=native` to force `kNative` mode (useful for testing the compilation
-  path; will fail at launch on current Apple Silicon hardware).  General Dekker decomposition
-  for arbitrary PTX `.f64` instruction streams requires a dedicated LLVM pass and is deferred.
-- Null stream synchronization (spec §6.3.1) is implemented via command-buffer sequencing on the
-  default `MTLCommandQueue` rather than the spec's described `MTLSharedEvent`-based approach.
-  The observable CUDA semantics (null-stream serialization) are correct for the common single-context
-  use case, but the explicit multi-stream "all user streams wait for null stream" guarantee is not
-  fully enforced via events. `MTLSharedEvent` integration is deferred to a future milestone.
-- Device printf (spec §5.3): fully implemented end-to-end for the PTX registration path.
-  The `printf_lower` compiler pass extracts format strings; the generic Metal emitter injects
-  ring-buffer write code; the runtime allocates a 1 MB ring buffer, binds it as hidden args,
-  and drains recorded printf records to stderr after kernel completion (spec §6.5 step 10).
-  Both the direct `cumetalKernel_t` path and the `__cudaRegisterFunction` registration path
-  are covered by functional tests.
+**Note:** This document tracks divergences from the v1 spec (spec.md) and areas of partial coverage.
+See [docs/status.md](status.md) for comprehensive implemented coverage (post-Phase 5, full
+library shims, llama.cpp/llm.c conformance via PTX path, etc.). Many items formerly listed here
+as gaps have been closed.
+
+## Intentional non-goals (spec §2.2, deferred to v2+)
+- Dynamic parallelism (kernels launching kernels) — compile-time error.
+- CUDA graphics interop (OpenGL/Vulkan/DirectX).
+- Multi-GPU / peer-to-peer (Apple Silicon is single-GPU die).
+- Full texture/surface object GPU sampling (lifecycle + array memcpy supported; device-side
+  `tex.*` / `suld.*` etc. error at compile for PTX path; see intrinsic-map.md).
+- MLIR GPU-dialect kernel fusion / advanced scheduling (optional Phase 5 path not taken).
+
+## Partial / conservative implementations
+- Warp primitives with partial masks (`mask != 0xFFFFFFFF`): conservative full-SIMD-group
+  emulation (all lanes participate or get identity). Correct but may not match NVIDIA
+  "inactive lane" semantics exactly. Kernels relying on partial masks should be validated.
+- FP64: `--fp64=emulate` (Dekker single-double via FP32 pairs, ~44-bit mantissa) is only
+  activated for name-matched kernels (`*fp64*{mul,fma,add}*` etc.). Arbitrary `.f64` PTX
+  streams fall back to native (which is rejected at Metal pipeline create time on current
+  Apple Silicon; runtime forces emulate default). General lowering pass deferred.
+- Null stream (legacy default): observable serialization correct via command-buffer ordering
+  on default queue. The full spec §6.3.1 cross-stream "user streams wait for null" via
+  MTLSharedEvent is not implemented; current approach suffices for single-context use.
+- Device printf: fully works for PTX registration + direct paths (256-byte format limit,
+  ring buffer, post-launch drain). Reordering vs. CUDA possible (as on real CUDA too).
+- Binary-shim fatbinary support: CMTL envelopes, raw PTX, basic FatBinary/FatBinary2/3
+  PTX wrappers supported. Full NVCC fatbinary variants, complex symbol layouts, or SASS-only
+  images not supported (SASS never was; per spec).
+
+## .cu / cumetalc frontend limitations
+- The Clang-based `.cu` → AIR path via `cumetalc` supports many simple kernels and
+  samples (vectorAdd etc.).
+- Complex CUDA C++ sources (e.g. full `llm.c/train_gpt2_fp32.cu`) are not yet supported
+  end-to-end through pure `cumetalc` because the frontend lowering does not yet cover all
+  required CUDA language features, cooperative groups grid sync, certain builtins, and
+  host-side launch glue. 
+- For such workloads the supported path is the binary-shim / PTX registration path
+  (`__cudaRegisterFatBinary` etc. or `cuModuleLoad*` with PTX/fatbin), which achieves full
+  parity for llm.c (all 17 kernels lowered, `CUMETAL_LLMC_REQUIRE_NO_EMULATION=1` passes)
+  and llama.cpp GGML CUDA backend.
+
+## Tooling / build notes
+- `air_emitter` "experimental" mode produces test containers, not production metallib ABI.
+- AIR metadata validation relies on MetalLibraryArchive + xcrun where available; the
+  bridge is optional at build time.
+- Homebrew LLVM users targeting sm_70+ need the feature-flag shim
+  (`scripts/cumetal_cuda_flags.sh`) because of PTX version defaults; the in-tree
+  `scripts/cuda_toolchain/fatbinary` accepts modern `--image3` args.
+- Full AIR ABI reverse-engineering continues to be refined as Xcode releases change
+  undocumented fields (regression tests in `tests/air_abi/` + `air_validate` catch breaks).
+
+## External dependency for full stress conformance
+- `conformance_llmc_gpt2fp32cu` and llama.cpp tests require external source checkouts
+  (`../llm.c` or `CUMETAL_LLMC_DIR`, similarly for llama.cpp) + model assets. They
+  auto-skip (77) when absent. When present they exercise real production kernels.
+
+## AIR / metallib
+- The emitter + validate + runtime loading work for all supported paths and pass
+  the AIR ABI matrix tests where Xcode toolchains are present.
+- "Full" metadata RE is effectively complete for the kernels we emit; unknown future
+  ABI changes will be caught by the xcode regression harness.
+
+See also: spec.md §8, [docs/status.md](status.md), [docs/air-abi.md](air-abi.md).
