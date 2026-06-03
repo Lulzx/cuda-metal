@@ -23,10 +23,7 @@ LLAMA_REPO="${CUMETAL_LLAMA_REPO:-https://github.com/ggml-org/llama.cpp}"
 LLAMA_TAG="${CUMETAL_LLAMA_TAG:-}"        # empty = latest main
 cumetal_cuda_device_flags
 CUDA_ARCH="$(cumetal_cuda_arch)"
-CUDA_DEVICE_FLAGS_STR=""
-for f in "${CUMETAL_CUDA_DEVICE_FLAGS[@]}"; do
-    CUDA_DEVICE_FLAGS_STR+=" ${f}"
-done
+CUDA_DEVICE_FLAGS_STR="${CUMETAL_CUDA_DEVICE_FLAGS[*]}"
 NCPUS="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 # ── find clang++ ──────────────────────────────────────────────────────────────

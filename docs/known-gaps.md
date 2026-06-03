@@ -33,14 +33,24 @@ as gaps have been closed.
 ## .cu / cumetalc frontend limitations
 - The Clang-based `.cu` → AIR path via `cumetalc` supports many simple kernels and
   samples (vectorAdd etc.).
-- Complex CUDA C++ sources (e.g. full `llm.c/train_gpt2_fp32.cu`) are not yet supported
-  end-to-end through pure `cumetalc` because the frontend lowering does not yet cover all
-  required CUDA language features, cooperative groups grid sync, certain builtins, and
-  host-side launch glue. 
-- For such workloads the supported path is the binary-shim / PTX registration path
-  (`__cudaRegisterFatBinary` etc. or `cuModuleLoad*` with PTX/fatbin), which achieves full
-  parity for llm.c (all 17 kernels lowered, `CUMETAL_LLMC_REQUIRE_NO_EMULATION=1` passes)
-  and llama.cpp GGML CUDA backend.
+- Complex CUDA C++ sources (e.g. full `llm.c/train_gpt2_fp32.cu` or GGML's 100+ kernels in
+  llama.cpp) exercise only partial coverage: build succeeds (nvcc shim + clang -x cuda +
+  fake CUDA toolkit), device init reports "Apple M4 Pro, compute capability 8.0", and
+  fatbin/PTX registration succeeds for the kernels present in the objects.
+- Execution hits gaps on first non-trivial kernel dispatch:
+  - llama.cpp (GGML CUDA): aborts in ggml_cuda_compute_forward (ADD) with cudaErrorInvalidValue
+    on templated k_bin_bcast (e.g. `_ZL11k_bin_bcastIXadL_ZL6op_addffEE...`); the metallib
+    resolved via registration-jit was an "experimental container" (produced by air_emitter
+    fallback when no `xcrun metal` in PATH) which Metal rejects as "Invalid library file".
+  - llm.c: aborts with cudaErrorInvalidValue inside train (e.g. around encoder/forward paths)
+    even with CUMETAL_DISABLE_LLMC_EMULATION; some of the 17 kernels rely on special cases in
+    lower_to_metal.cpp or direct MSL emission, but not all GGML-style or full combinations are
+    covered, and JIT/experimental path can still be hit depending on binary registration.
+- The binary-shim / PTX reg + lower path (plus special llm.c cases) gets further than pure
+  generic emitter, but full llama.cpp / llm.c numerical end-to-end requires broader PTX
+  pattern coverage (tiled matmul, dequant block, fused attn, quant, complex shared+sync)
+  and a complete xcrun metal toolchain for producing loadable standard metallibs from the
+  generic/LLVM lowering path. Experimental containers are for AIR tooling only.
 
 ## Tooling / build notes
 - `air_emitter` "experimental" mode produces test containers, not production metallib ABI (for validation/air_abi only; runtime execution requires real metallib from xcrun or prebuilt).
@@ -50,6 +60,10 @@ as gaps have been closed.
   (`scripts/cumetal_cuda_flags.sh`) because of PTX version defaults; the in-tree
 - cuda_projects conformance harness now runs its compile step (clang -x cuda shim + fatbin registration setup) in environments without xcrun metal/metallib (only base xcrun + clang++ needed); runtime exec still limited by PTX lowering coverage for complex kernels (sgemm etc.) and falls back gracefully to SKIP (see run_standalone_cu.sh). This reduces skip-only coverage for the harness itself.
   `scripts/cuda_toolchain/fatbinary` accepts modern `--image3` args.
+- "Bigger project" tries (llama.cpp GGML full CUDA backend, llm.c gpt2 train) via the dedicated
+  build_*_cumetal.sh + run_*_cumetal.sh + fake toolkit succeed at compile+link+device init+reg;
+  first kernel launch for complex ops fails as described above (experimental metallib or
+  uncovered lowering). See run logs and the kernel name from k_bin_bcast example.
 - Full AIR ABI reverse-engineering continues to be refined as Xcode releases change
   undocumented fields (regression tests in `tests/air_abi/` + `air_validate` catch breaks).
 

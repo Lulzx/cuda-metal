@@ -607,7 +607,7 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     emit_options.mode = cumetal::air_emitter::EmitMode::kXcrun;
     emit_options.overwrite = true;
     emit_options.validate_output = true;
-    emit_options.fallback_to_experimental = false;
+    emit_options.fallback_to_experimental = true;
     emit_options.kernel_name = kernel_name;
 
     std::string io_error;
