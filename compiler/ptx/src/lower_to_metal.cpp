@@ -653,6 +653,122 @@ kernel_template = R"METAL(kernel void __KERNEL_NAME__(
     }
 }
 )METAL";
+    } else if (kernel_name_contains(entry_name, "k_bin_bcast") && kernel_name_contains(entry_name, "op_addff")) {
+        // GGML bin_bcast for float add (common in residuals, etc.). Supports basic broadcast + optional extra src1.
+        kernel_template = R"METAL(kernel void __KERNEL_NAME__(
+    device const float* src0 [[buffer(0)]],
+    device const float* src1 [[buffer(1)]],
+    device float* dst [[buffer(2)]],
+    constant uint& ne0 [[buffer(3)]],
+    constant uint& ne1 [[buffer(4)]],
+    constant uint& ne2 [[buffer(5)]],
+    constant packed_uint3& ne3 [[buffer(6)]],
+    constant packed_uint3& ne10 [[buffer(7)]],
+    constant packed_uint3& ne11 [[buffer(8)]],
+    constant packed_uint3& ne12 [[buffer(9)]],
+    constant packed_uint3& ne13 [[buffer(10)]],
+    constant uint& s1 [[buffer(11)]],
+    constant uint& s2 [[buffer(12)]],
+    constant uint& s3 [[buffer(13)]],
+    constant uint& s00 [[buffer(14)]],
+    constant uint& s01 [[buffer(15)]],
+    constant uint& s02 [[buffer(16)]],
+    constant uint& s03 [[buffer(17)]],
+    constant uint& s10 [[buffer(18)]],
+    constant uint& s11 [[buffer(19)]],
+    constant uint& s12 [[buffer(20)]],
+    constant uint& s13 [[buffer(21)]],
+    device const float* extra_src1 [[buffer(22)]],
+    uint3 pos [[thread_position_in_grid]],
+    uint3 grid_size [[threads_per_grid]]
+) {
+    uint i0s = pos.x;
+    uint i1 = pos.y;
+    uint zidx = pos.z;
+    uint i2 = (ne3.z > 0) ? (zidx / ne3.z) : 0u;
+    uint i3 = zidx - i2 * ne3.z;
+    if (i0s >= ne0 || i1 >= ne1 || i2 >= ne2 || i3 >= ne3.z) {
+        return;
+    }
+    uint i11 = (ne11.z > 0) ? (i1 % ne11.z) : i1;
+    uint i12 = (ne12.z > 0) ? (i2 % ne12.z) : i2;
+    uint i13 = (ne13.z > 0) ? (i3 % ne13.z) : i3;
+    size_t i_src0 = (size_t)i3 * s03 + (size_t)i2 * s02 + (size_t)i1 * s01;
+    size_t i_src1 = (size_t)i13 * s13 + (size_t)i12 * s12 + (size_t)i11 * s11;
+    size_t i_dst  = (size_t)i3 * s3  + (size_t)i2 * s2  + (size_t)i1 * s1;
+    const device float* src0_row = (src0 != nullptr) ? (src0 + i_src0) : nullptr;
+    device float* dst_row = dst + i_dst;
+    uint xstride = grid_size.x;
+    for (uint i0 = i0s; i0 < ne0; i0 += xstride) {
+        uint i10 = (ne10.z > 0) ? (i0 % ne10.z) : i0;
+        float result = (src0_row != nullptr) ? src0_row[i0 * s00] : 0.0f;
+        float v1 = (src1 != nullptr) ? src1[i_src1 + i10 * s10] : 0.0f;
+        if (extra_src1 != nullptr) {
+            v1 = extra_src1[i_src1 + i10 * s10];
+        }
+        result = result + v1;
+        dst_row[i0] = result;
+    }
+}
+)METAL";
+    } else if (kernel_name_contains(entry_name, "k_bin_bcast") && kernel_name_contains(entry_name, "op_addDF16")) {
+        // f16 variant of bin_bcast add
+        kernel_template = R"METAL(kernel void __KERNEL_NAME__(
+    device const half* src0 [[buffer(0)]],
+    device const half* src1 [[buffer(1)]],
+    device half* dst [[buffer(2)]],
+    constant uint& ne0 [[buffer(3)]],
+    constant uint& ne1 [[buffer(4)]],
+    constant uint& ne2 [[buffer(5)]],
+    constant packed_uint3& ne3 [[buffer(6)]],
+    constant packed_uint3& ne10 [[buffer(7)]],
+    constant packed_uint3& ne11 [[buffer(8)]],
+    constant packed_uint3& ne12 [[buffer(9)]],
+    constant packed_uint3& ne13 [[buffer(10)]],
+    constant uint& s1 [[buffer(11)]],
+    constant uint& s2 [[buffer(12)]],
+    constant uint& s3 [[buffer(13)]],
+    constant uint& s00 [[buffer(14)]],
+    constant uint& s01 [[buffer(15)]],
+    constant uint& s02 [[buffer(16)]],
+    constant uint& s03 [[buffer(17)]],
+    constant uint& s10 [[buffer(18)]],
+    constant uint& s11 [[buffer(19)]],
+    constant uint& s12 [[buffer(20)]],
+    constant uint& s13 [[buffer(21)]],
+    device const half* extra_src1 [[buffer(22)]],
+    uint3 pos [[thread_position_in_grid]],
+    uint3 grid_size [[threads_per_grid]]
+) {
+    uint i0s = pos.x;
+    uint i1 = pos.y;
+    uint zidx = pos.z;
+    uint i2 = (ne3.z > 0) ? (zidx / ne3.z) : 0u;
+    uint i3 = zidx - i2 * ne3.z;
+    if (i0s >= ne0 || i1 >= ne1 || i2 >= ne2 || i3 >= ne3.z) {
+        return;
+    }
+    uint i11 = (ne11.z > 0) ? (i1 % ne11.z) : i1;
+    uint i12 = (ne12.z > 0) ? (i2 % ne12.z) : i2;
+    uint i13 = (ne13.z > 0) ? (i3 % ne13.z) : i3;
+    size_t i_src0 = (size_t)i3 * s03 + (size_t)i2 * s02 + (size_t)i1 * s01;
+    size_t i_src1 = (size_t)i13 * s13 + (size_t)i12 * s12 + (size_t)i11 * s11;
+    size_t i_dst  = (size_t)i3 * s3  + (size_t)i2 * s2  + (size_t)i1 * s1;
+    const device half* src0_row = (src0 != nullptr) ? (src0 + i_src0) : nullptr;
+    device half* dst_row = dst + i_dst;
+    uint xstride = grid_size.x;
+    for (uint i0 = i0s; i0 < ne0; i0 += xstride) {
+        uint i10 = (ne10.z > 0) ? (i0 % ne10.z) : i0;
+        half result = (src0_row != nullptr) ? src0_row[i0 * s00] : (half)0.0h;
+        half v1 = (src1 != nullptr) ? src1[i_src1 + i10 * s10] : (half)0.0h;
+        if (extra_src1 != nullptr) {
+            v1 = extra_src1[i_src1 + i10 * s10];
+        }
+        result = result + v1;
+        dst_row[i0] = result;
+    }
+}
+)METAL";
     }
 
     if (kernel_template.empty()) {

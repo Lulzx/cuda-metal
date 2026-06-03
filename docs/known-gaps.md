@@ -63,7 +63,13 @@ as gaps have been closed.
 - "Bigger project" tries (llama.cpp GGML full CUDA backend, llm.c gpt2 train) via the dedicated
   build_*_cumetal.sh + run_*_cumetal.sh + fake toolkit succeed at compile+link+device init+reg;
   first kernel launch for complex ops fails as described above (experimental metallib or
-  uncovered lowering). See run logs and the kernel name from k_bin_bcast example.
+  uncovered lowering). Direct MSL lowering + runtime newLibraryWithSource was added for the
+  common k_bin_bcast<op_addff> (and f16) family to allow elementwise broadcast adds on GPU
+  without needing CLI metal tools. Other GGML kernels (mul_mat variants, dequants, flash attn
+  tiles, rms_norm etc.) still hit lowering gaps and will report clear "failed to find kernel
+  function (lowering not supported)" or experimental hints suggesting n-gpu-layers=0.
+  See the bin_bcast special case in compiler/ptx/src/lower_to_metal.cpp and Metal source path
+  in runtime/metal_backend.
 - Full AIR ABI reverse-engineering continues to be refined as Xcode releases change
   undocumented fields (regression tests in `tests/air_abi/` + `air_validate` catch breaks).
 

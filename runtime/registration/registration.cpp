@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -579,11 +580,45 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     const std::filesystem::path cached_metallib = jit_cache_path_for(ptx_source, kernel_name);
     if (!cached_metallib.empty()) {
         std::error_code ec;
+        bool hit = false;
+        std::filesystem::path hit_path;
         if (std::filesystem::exists(cached_metallib, ec) && !ec) {
-            REG_DEBUG("jit cache hit: %s", cached_metallib.c_str());
-            *out_path = cached_metallib.string();
+            // Check for stale unrunnable experimental container from before we started
+            // refusing to cache them. Treat as miss so we get a clean failure path.
+            bool bad_experimental = false;
+            {
+                auto f = std::fopen(cached_metallib.string().c_str(), "rb");
+                if (f) {
+                    char buf[256] = {0};
+                    size_t n = std::fread(buf, 1, sizeof(buf)-1, f);
+                    std::fclose(f);
+                    if (n > 0 && memmem(buf, n, "cumetal-experimental", 20) != nullptr) {
+                        bad_experimental = true;
+                    }
+                }
+            }
+            if (bad_experimental) {
+                REG_DEBUG("jit cache hit but contains experimental container (unusable); removing and treating as miss: %s",
+                          cached_metallib.c_str());
+                std::filesystem::remove(cached_metallib, ec);
+            } else {
+                hit = true;
+                hit_path = cached_metallib;
+            }
+        }
+        if (!hit) {
+            // Support for direct MSL source caches (written as <hash>.metal for runtime newLibraryWithSource)
+            auto msl_p = cached_metallib;
+            msl_p.replace_extension(".metal");
+            if (std::filesystem::exists(msl_p, ec) && !ec) {
+                hit = true;
+                hit_path = msl_p;
+            }
+        }
+        if (hit) {
+            REG_DEBUG("jit cache hit: %s", hit_path.c_str());
+            *out_path = hit_path.string();
             if (out_is_persistent != nullptr) *out_is_persistent = true;
-            // printf_formats are not cached across runs; callers handle the empty case gracefully.
             return true;
         }
         REG_DEBUG("jit cache miss: %s", cached_metallib.c_str());
@@ -634,6 +669,19 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         if (out_printf_formats != nullptr) {
             *out_printf_formats = lowered_metal.printf_formats;
         }
+        // Short-circuit: deliver the .metal source directly. The Metal backend will
+        // compile it at runtime with newLibraryWithSource (no offline metal tools needed).
+        // Store under a .metal path (derived from cache key if persistent).
+        std::filesystem::path msl_final = metal_path;
+        if (!cached_metallib.empty()) {
+            msl_final = cached_metallib;
+            msl_final.replace_extension(".metal");
+            std::error_code ec;
+            std::filesystem::copy_file(metal_path, msl_final, std::filesystem::copy_options::overwrite_existing, ec);
+        }
+        *out_path = msl_final.string();
+        if (out_is_persistent != nullptr) *out_is_persistent = !cached_metallib.empty();
+        return true;
     } else {
         REG_DEBUG("using LLVM IR lowering path for '%s'", kernel_name.c_str());
         maybe_dump_ptx_for_llvm_debug(kernel_name, ptx_source);
@@ -689,6 +737,16 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         }
         REG_DEBUG("emit_metallib failed for kernel '%s'", kernel_name.c_str());
         remove_path_if_exists(metallib_path.string());
+        return false;
+    }
+
+    if (emitted.mode_used == cumetal::air_emitter::EmitMode::kExperimentalContainer) {
+        REG_DEBUG("emit_metallib for '%s' only produced an experimental test container "
+                  "(metal toolchain was not available during lowering/JIT) - this kernel "
+                  "is not executable on Metal; refusing to cache or use it",
+                  kernel_name.c_str());
+        remove_path_if_exists(emitted.output.string());
+        // Do not treat as success; caller will fall back (leading to clear launch error)
         return false;
     }
 

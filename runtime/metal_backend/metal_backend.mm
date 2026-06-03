@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -372,6 +374,50 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
             return nil;
         }
 
+        bool is_cumetal_experimental = false;
+        {
+            const char* bytes = static_cast<const char*>([data bytes]);
+            const size_t len = [data length];
+            if (len > 32 &&
+                (memmem(bytes, len, "cumetal-experimental", 20) != nullptr ||
+                 memmem(bytes, len, "CuMetal experimental", 20) != nullptr ||
+                 memmem(bytes, len, "experimental container", 20) != nullptr)) {
+                is_cumetal_experimental = true;
+            }
+        }
+
+        // Support runtime-compiled MSL sources (for direct-lowered kernels from PTX path).
+        // These are stored with .metal suffix and compiled via newLibraryWithSource
+        // (uses the system's Metal shader compiler; no xcrun metal CLI tools required).
+        NSString* pathStr = [NSString stringWithUTF8String:metallib_path.c_str()];
+        if ([pathStr hasSuffix:@".metal"]) {
+            NSError* srcErr = nil;
+            NSString* src = [NSString stringWithContentsOfFile:pathStr encoding:NSUTF8StringEncoding error:&srcErr];
+            if (src == nil || src.length == 0) {
+                if (error_message != nullptr) {
+                    *error_message = "failed to read MSL source file: " + metallib_path;
+                    if (srcErr != nil) {
+                        *error_message += " (" + std::string([[srcErr localizedDescription] UTF8String]) + ")";
+                    }
+                }
+                return nil;
+            }
+            MTLCompileOptions* compileOpts = [[MTLCompileOptions alloc] init];
+            NSError* libErr = nil;
+            id<MTLLibrary> srcLib = [backend.device newLibraryWithSource:src options:compileOpts error:&libErr];
+            if (srcLib == nil) {
+                if (error_message != nullptr) {
+                    *error_message = "newLibraryWithSource (MSL) failed for: " + metallib_path;
+                    if (libErr != nil) {
+                        *error_message += " (" + std::string([[libErr localizedDescription] UTF8String]) + ")";
+                    }
+                }
+                return nil;
+            }
+            backend.library_cache.emplace(metallib_path, srcLib);
+            return srcLib;
+        }
+
         dispatch_data_t dispatch_data = dispatch_data_create(
             [data bytes], [data length], dispatch_get_main_queue(), DISPATCH_DATA_DESTRUCTOR_DEFAULT);
 
@@ -383,6 +429,16 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
                 if (library_error != nil) {
                     *error_message +=
                         " (" + std::string([[library_error localizedDescription] UTF8String]) + ")";
+                }
+                if (is_cumetal_experimental) {
+                    *error_message +=
+                        " [CuMetal experimental test container - NOT a loadable production .metallib. "
+                        "This occurs when the 'metal'/'metallib' tools were unavailable (CLT-only env, no full Xcode) "
+                        "at the time this kernel was lowered or JIT-compiled. The kernel cannot execute on Metal/GPU. "
+                        "Re-run with --n-gpu-layers 0 to force CPU, or install the metal toolchain for offload support.]";
+                    // Auto-purge bad experimental from cache to avoid repeated failures on re-runs.
+                    std::error_code ec;
+                    std::filesystem::remove(metallib_path, ec);
                 }
             }
             return nil;
@@ -414,6 +470,10 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
         if (function == nil) {
             if (error_message != nullptr) {
                 *error_message = "failed to find kernel function: " + kernel_name;
+                *error_message +=
+                    " (possible cause: kernel was not emitted into this metallib because the CuMetal "
+                    "lowering/emitter did not support constructs in the original .cu/PTX, or only an "
+                    "experimental container was produced due to missing metal toolchain)";
             }
             return nil;
         }
