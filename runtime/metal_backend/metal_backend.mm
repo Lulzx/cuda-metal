@@ -406,6 +406,9 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
             NSError* libErr = nil;
             id<MTLLibrary> srcLib = [backend.device newLibraryWithSource:src options:compileOpts error:&libErr];
             if (srcLib == nil) {
+                if (libErr != nil) {
+                    fprintf(stderr, "CUMETAL MSL COMPILE ERROR for %s: %s\n", metallib_path.c_str(), [[libErr localizedDescription] UTF8String]);
+                }
                 if (error_message != nullptr) {
                     *error_message = "newLibraryWithSource (MSL) failed for: " + metallib_path;
                     if (libErr != nil) {

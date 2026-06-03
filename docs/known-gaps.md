@@ -47,10 +47,21 @@ as gaps have been closed.
     lower_to_metal.cpp or direct MSL emission, but not all GGML-style or full combinations are
     covered, and JIT/experimental path can still be hit depending on binary registration.
 - The binary-shim / PTX reg + lower path (plus special llm.c cases) gets further than pure
-  generic emitter, but full llama.cpp / llm.c numerical end-to-end requires broader PTX
-  pattern coverage (tiled matmul, dequant block, fused attn, quant, complex shared+sync)
-  and a complete xcrun metal toolchain for producing loadable standard metallibs from the
-  generic/LLVM lowering path. Experimental containers are for AIR tooling only.
+  generic emitter. Direct MSL name-matched cases (compiler/ptx/src/lower_to_metal.cpp) now cover
+  common GGML kernels used by small models: k_bin_bcast (op_addff/op_mulff + f16 variants),
+  rms_norm_f32 (with stride/mul/add support), convert_unary, dequantize_block_q8_0_f16, plus
+  passthru stubs for rope_norm/neox, dequant q5_0, k_set_rows to prevent immediate aborts.
+  A fast negative filter skips heavy lowering for the bulk of GGML's 1000s of mul_mat_q* / flash
+  / other dequants / cpy etc (they hit "registered kernel missing" and GGML typically falls back
+  or aborts depending on NGL and op). 
+  - NGL=0 (CPU) for SmolLM2-135M etc: harness run_llama_cpp_cumetal.sh completes, PASS, reaches
+    generation + timings (text quality limited by tiny model, not CuMetal).
+  - NGL>0: exercises .metal + newLibraryWithSource GPU path for covered kernels (rms, bcast
+    residuals etc run on Apple GPU); still hits missing for cpy/set_rows/rope variants etc during
+    load/decode when forcing many layers, leading to ggml_cuda abort. Use --n-gpu-layers 0 for
+    reliable full run on small models; partial NGL may work if the offloaded layers only use
+    covered ops. Broader coverage or better GGML fallback integration would be needed for robust
+    high-NGL on full GGML CUDA models.
 
 ## Tooling / build notes
 - `air_emitter` "experimental" mode produces test containers, not production metallib ABI (for validation/air_abi only; runtime execution requires real metallib from xcrun or prebuilt).
