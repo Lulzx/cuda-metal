@@ -1756,7 +1756,8 @@ endif()
 
 add_test(
     NAME functional_runtime_vector_add
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_vector_add_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -1766,7 +1767,8 @@ set_tests_properties(functional_runtime_vector_add PROPERTIES SKIP_RETURN_CODE 7
 
 add_test(
     NAME functional_runtime_vector_add_heap_alloc
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_vector_add_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -1808,7 +1810,8 @@ set_tests_properties(functional_sample_vector_add PROPERTIES SKIP_RETURN_CODE 77
 
 add_test(
     NAME functional_runtime_matrix_mul
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_matrix_mul_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/matrix_mul.metal
             ${CMAKE_CURRENT_BINARY_DIR}/matrix_mul.metallib
@@ -1818,7 +1821,8 @@ set_tests_properties(functional_runtime_matrix_mul PROPERTIES SKIP_RETURN_CODE 7
 
 add_test(
     NAME functional_runtime_matrix_mul_tiled
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_matrix_mul_tiled_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/matrix_mul_tiled.metal
             ${CMAKE_CURRENT_BINARY_DIR}/matrix_mul_tiled.metallib
@@ -1828,7 +1832,8 @@ set_tests_properties(functional_runtime_matrix_mul_tiled PROPERTIES SKIP_RETURN_
 
 add_test(
     NAME functional_runtime_printf
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_printf_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/printf_kernel.metal
             ${CMAKE_CURRENT_BINARY_DIR}/printf_kernel.metallib
@@ -1838,7 +1843,8 @@ set_tests_properties(functional_runtime_printf PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
     NAME functional_runtime_dynamic_shared
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_dynamic_shared_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/dynamic_shared_reduce.metal
             ${CMAKE_CURRENT_BINARY_DIR}/dynamic_shared_reduce.metallib
@@ -1848,7 +1854,8 @@ set_tests_properties(functional_runtime_dynamic_shared PROPERTIES SKIP_RETURN_CO
 
 add_test(
     NAME functional_runtime_struct_arg
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_struct_arg_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/struct_arg.metal
             ${CMAKE_CURRENT_BINARY_DIR}/struct_arg.metallib
@@ -1858,7 +1865,8 @@ set_tests_properties(functional_runtime_struct_arg PROPERTIES SKIP_RETURN_CODE 7
 
 add_test(
     NAME functional_runtime_barrier_order
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_barrier_order_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/barrier_order.metal
             ${CMAKE_CURRENT_BINARY_DIR}/barrier_order.metallib
@@ -1868,7 +1876,8 @@ set_tests_properties(functional_runtime_barrier_order PROPERTIES SKIP_RETURN_COD
 
 add_test(
     NAME functional_runtime_cp_async_emul
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_cp_async_emul_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/cp_async_emul.metal
             ${CMAKE_CURRENT_BINARY_DIR}/cp_async_emul.metallib
@@ -1878,7 +1887,8 @@ set_tests_properties(functional_runtime_cp_async_emul PROPERTIES SKIP_RETURN_COD
 
 add_test(
     NAME functional_runtime_warp_partial_mask
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_warp_partial_mask_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/warp_partial_mask.metal
             ${CMAKE_CURRENT_BINARY_DIR}/warp_partial_mask.metallib
@@ -1888,7 +1898,8 @@ set_tests_properties(functional_runtime_warp_partial_mask PROPERTIES SKIP_RETURN
 
 add_test(
     NAME functional_runtime_warp_size_lane
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_warp_size_lane_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/warp_size_lane.metal
             ${CMAKE_CURRENT_BINARY_DIR}/warp_size_lane.metallib
@@ -1898,7 +1909,8 @@ set_tests_properties(functional_runtime_warp_size_lane PROPERTIES SKIP_RETURN_CO
 
 add_test(
     NAME functional_runtime_stream_vector_add
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_stream_vector_add_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -1908,7 +1920,8 @@ set_tests_properties(functional_runtime_stream_vector_add PROPERTIES SKIP_RETURN
 
 add_test(
     NAME functional_runtime_null_stream_sync
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_null_stream_sync_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -1918,7 +1931,8 @@ set_tests_properties(functional_runtime_null_stream_sync PROPERTIES SKIP_RETURN_
 
 add_test(
     NAME functional_runtime_stream_per_thread
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_stream_per_thread_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -1928,7 +1942,8 @@ set_tests_properties(functional_runtime_stream_per_thread PROPERTIES SKIP_RETURN
 
 add_test(
     NAME functional_runtime_async_memops
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_async_memops_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -1938,7 +1953,8 @@ set_tests_properties(functional_runtime_async_memops PROPERTIES SKIP_RETURN_CODE
 
 add_test(
     NAME functional_runtime_event
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_event_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -1948,7 +1964,8 @@ set_tests_properties(functional_runtime_event PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
     NAME functional_runtime_stream_wait_event
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_stream_wait_event_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -1958,7 +1975,8 @@ set_tests_properties(functional_runtime_stream_wait_event PROPERTIES SKIP_RETURN
 
 add_test(
     NAME functional_runtime_stream_query
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_stream_query_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -1989,7 +2007,8 @@ add_test(
 
 add_test(
     NAME functional_runtime_host_alloc
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_host_alloc_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2114,7 +2133,8 @@ add_test(
 
 add_test(
     NAME functional_driver_vector_add
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_driver_vector_add_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2124,7 +2144,8 @@ set_tests_properties(functional_driver_vector_add PROPERTIES SKIP_RETURN_CODE 77
 
 add_test(
     NAME functional_driver_null_stream_sync
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_driver_null_stream_sync_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2134,7 +2155,8 @@ set_tests_properties(functional_driver_null_stream_sync PROPERTIES SKIP_RETURN_C
 
 add_test(
     NAME functional_driver_matrix_mul
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_driver_matrix_mul_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/matrix_mul.metal
             ${CMAKE_CURRENT_BINARY_DIR}/driver_matrix_mul.metallib
@@ -2174,7 +2196,8 @@ add_test(
 
 add_test(
     NAME functional_driver_stream_per_thread
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_driver_stream_per_thread_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2252,7 +2275,8 @@ add_test(
 
 add_test(
     NAME functional_driver_async_memcpy
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_driver_async_memcpy_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2277,7 +2301,8 @@ add_test(
 
 add_test(
     NAME functional_driver_host_alloc
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_driver_host_alloc_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2292,7 +2317,8 @@ add_test(
 
 add_test(
     NAME functional_driver_module_load_data
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_driver_module_load_data_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2312,7 +2338,8 @@ set_tests_properties(functional_driver_module_load_data_ptx PROPERTIES SKIP_RETU
 
 add_test(
     NAME functional_driver_launch_extra
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_driver_launch_extra_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2322,7 +2349,8 @@ set_tests_properties(functional_driver_launch_extra PROPERTIES SKIP_RETURN_CODE 
 
 add_test(
     NAME functional_driver_launch_extra_scalar
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_driver_launch_extra_scalar_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/matrix_mul_scalar.metal
             ${CMAKE_CURRENT_BINARY_DIR}/matrix_mul_scalar.metallib
@@ -2332,7 +2360,8 @@ set_tests_properties(functional_driver_launch_extra_scalar PROPERTIES SKIP_RETUR
 
 add_test(
     NAME functional_driver_stream_wait_event
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_driver_stream_wait_event_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2342,7 +2371,8 @@ set_tests_properties(functional_driver_stream_wait_event PROPERTIES SKIP_RETURN_
 
 add_test(
     NAME functional_runtime_axpy_offset
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_axpy_offset_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/axpy.metal
             ${CMAKE_CURRENT_BINARY_DIR}/axpy.metallib
@@ -2352,7 +2382,8 @@ set_tests_properties(functional_runtime_axpy_offset PROPERTIES SKIP_RETURN_CODE 
 
 add_test(
     NAME functional_runtime_atomic
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_atomic_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/atomic_inc.metal
             ${CMAKE_CURRENT_BINARY_DIR}/atomic_inc.metallib
@@ -2362,7 +2393,8 @@ set_tests_properties(functional_runtime_atomic PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
     NAME functional_runtime_atomic_shared
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_atomic_shared_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/atomic_shared.metal
             ${CMAKE_CURRENT_BINARY_DIR}/atomic_shared.metallib
@@ -2372,7 +2404,8 @@ set_tests_properties(functional_runtime_atomic_shared PROPERTIES SKIP_RETURN_COD
 
 add_test(
     NAME functional_runtime_warp_shuffle
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_warp_shuffle_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/warp_shuffle.metal
             ${CMAKE_CURRENT_BINARY_DIR}/warp_shuffle.metallib
@@ -2382,7 +2415,8 @@ set_tests_properties(functional_runtime_warp_shuffle PROPERTIES SKIP_RETURN_CODE
 
 add_test(
     NAME functional_runtime_warp_vote
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_warp_vote_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/warp_vote.metal
             ${CMAKE_CURRENT_BINARY_DIR}/warp_vote.metallib
@@ -2392,7 +2426,8 @@ set_tests_properties(functional_runtime_warp_vote PROPERTIES SKIP_RETURN_CODE 77
 
 add_test(
     NAME functional_runtime_fp16_ops
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_fp16_ops_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/fp16_ops.metal
             ${CMAKE_CURRENT_BINARY_DIR}/fp16_ops.metallib
@@ -2402,7 +2437,8 @@ set_tests_properties(functional_runtime_fp16_ops PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
     NAME functional_runtime_shared_reduce
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_shared_reduce_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/shared_reduce.metal
             ${CMAKE_CURRENT_BINARY_DIR}/shared_reduce.metallib
@@ -2412,7 +2448,8 @@ set_tests_properties(functional_runtime_shared_reduce PROPERTIES SKIP_RETURN_COD
 
 add_test(
     NAME functional_runtime_grid_2d
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_grid_2d_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/grid_2d.metal
             ${CMAKE_CURRENT_BINARY_DIR}/grid_2d.metallib
@@ -2422,7 +2459,8 @@ set_tests_properties(functional_runtime_grid_2d PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
     NAME functional_runtime_grid_3d
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_grid_3d_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/grid_3d.metal
             ${CMAKE_CURRENT_BINARY_DIR}/grid_3d.metallib
@@ -2453,7 +2491,8 @@ set_tests_properties(functional_runtime_ptx_lowering_regression PROPERTIES SKIP_
 
 add_test(
     NAME functional_runtime_cooperative_launch
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_cooperative_launch_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2464,7 +2503,8 @@ set_tests_properties(functional_runtime_cooperative_launch PROPERTIES SKIP_RETUR
 if(CUMETAL_ENABLE_BINARY_SHIM)
     add_test(
         NAME functional_runtime_registration_path
-        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
                 ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
                 $<TARGET_FILE:cumetal_runtime_registration_path_test>
                 ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2474,7 +2514,8 @@ if(CUMETAL_ENABLE_BINARY_SHIM)
 
     add_test(
         NAME functional_runtime_call_config_registration
-        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
                 ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
                 $<TARGET_FILE:cumetal_runtime_call_config_registration_test>
                 ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2504,7 +2545,8 @@ if(CUMETAL_ENABLE_BINARY_SHIM)
 
     add_test(
         NAME functional_runtime_legacy_launch_registration
-        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
                 ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
                 $<TARGET_FILE:cumetal_runtime_legacy_launch_registration_test>
                 ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
@@ -2514,7 +2556,8 @@ if(CUMETAL_ENABLE_BINARY_SHIM)
 
     add_test(
         NAME functional_runtime_registration_fatbinary2_symbols
-        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
                 ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
                 $<TARGET_FILE:cumetal_runtime_registration_fatbinary2_symbols_test>
                 ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib

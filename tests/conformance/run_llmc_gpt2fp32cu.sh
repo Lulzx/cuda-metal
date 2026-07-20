@@ -27,6 +27,23 @@ if [[ ! -f "$LLMC_DIR/gpt2_124M_debug_state.bin" && ! -f "$LLMC_DIR/dev/data/gpt
   exit 77
 fi
 
+# test_gpt2fp32cu links against libcumetal and needs the CUDA runtime
+# registration symbols (__cudaRegisterFatBinary et al.), which are only present
+# when the binary shim is enabled (default off in Release builds). Detect the
+# missing-shim case and skip cleanly instead of failing the build/link opaquely.
+CUMETAL_ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CUMETAL_LIB="${CUMETAL_ROOT_DIR}/build/libcumetal.dylib"
+if [[ -f "${CUMETAL_LIB}" ]] && command -v nm >/dev/null 2>&1; then
+  # Capture into a variable (no pipe): `nm | grep -q` under `set -o pipefail`
+  # can report failure when grep closes the pipe early (SIGPIPE on nm).
+  CUMETAL_SYMS="$(nm -gU "${CUMETAL_LIB}" 2>/dev/null || true)"
+  if [[ "${CUMETAL_SYMS}" != *cudaRegisterFatBinary* ]]; then
+    echo "SKIP: libcumetal built without the binary shim (CUMETAL_ENABLE_BINARY_SHIM=OFF);"
+    echo "      rebuild with -DCUMETAL_ENABLE_BINARY_SHIM=ON to run this conformance test"
+    exit 77
+  fi
+fi
+
 if [[ -n "$BUILD_CMD" ]]; then
   (cd "$LLMC_DIR" && eval "$BUILD_CMD")
 fi
@@ -45,12 +62,15 @@ trap 'rm -f "$OUTPUT_FILE"' EXIT
 
 if [[ "$REQUIRE_NO_EMULATION" == "1" ]]; then
   export CUMETAL_DISABLE_LLMC_EMULATION=1
+  export CUMETAL_ENABLE_LLMC_CPU_EMULATION=0
+  export CUMETAL_TRACE_GPU=1
   echo "INFO: llm.c conformance requires PTX lowering path (LLMC emulation disabled)"
 else
+  export CUMETAL_ENABLE_LLMC_CPU_EMULATION=1
   export CUMETAL_TRACE_LLMC_EMULATION=1
 fi
 
-(cd "$LLMC_DIR" && eval "$TEST_CMD") | tee "$OUTPUT_FILE" || true
+(cd "$LLMC_DIR" && eval "$TEST_CMD") 2>&1 | tee "$OUTPUT_FILE" || true
 
 if ! rg -qi "loss" "$OUTPUT_FILE"; then
   echo "FAIL: llm.c output did not contain a loss line"
@@ -73,6 +93,18 @@ if rg -q "CUMETAL_LLMC_EMULATION" "$OUTPUT_FILE"; then
     exit 1
   fi
   echo "WARN: llm.c used runtime emulation fallback (not pure PTX->LLVM lowering)"
+fi
+
+if [[ "$REQUIRE_NO_EMULATION" == "1" ]]; then
+  if ! rg -q 'CUMETAL_PROVENANCE .*source=(generic_ptx|specialized_msl|metallib) device=apple_gpu .*launch_success=true' \
+      "$OUTPUT_FILE"; then
+    echo "FAIL: llm.c recorded no successful Apple-GPU kernel launch"
+    exit 1
+  fi
+  if rg -q 'CUMETAL_PROVENANCE .*source=(cpu_fallback|stub)' "$OUTPUT_FILE"; then
+    echo "FAIL: llm.c used a CPU fallback or stub"
+    exit 1
+  fi
 fi
 
 if rg -q "overall okay: 1" "$OUTPUT_FILE"; then

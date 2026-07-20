@@ -35,27 +35,16 @@ PATCHED_SRC="${OBJ_DIR}/test_gpt2_fp32.cumetal.cu"
 
 mkdir -p "${OBJ_DIR}"
 
-python3 - "${LLMC_DIR}/test_gpt2_fp32.cu" "${PATCHED_SRC}" "${GRAD_TOL}" <<'PY'
-import pathlib
-import re
-import sys
+PATCHED_TMP="${PATCHED_SRC}.tmp"
+/usr/bin/sed "s/fabsf(a\\[i\\] - b\\[i\\]) <= 1e-2/fabsf(a[i] - b[i]) <= ${GRAD_TOL}/" \
+    "${LLMC_DIR}/test_gpt2_fp32.cu" > "${PATCHED_TMP}"
+if ! grep -q "fabsf(a\\[i\\] - b\\[i\\]) <= ${GRAD_TOL}" "${PATCHED_TMP}"; then
+    echo "failed to patch llm.c check_tensor tolerance" >&2
+    exit 1
+fi
+mv "${PATCHED_TMP}" "${PATCHED_SRC}"
 
-src_path = pathlib.Path(sys.argv[1])
-dst_path = pathlib.Path(sys.argv[2])
-tol = sys.argv[3]
-
-source = src_path.read_text()
-pattern = re.compile(
-    r"(int\s+check_tensor\s*\([^)]*\)\s*\{.*?fabsf\(a\[i\]\s*-\s*b\[i\]\)\s*<=\s*)(1e-2)(\s*\)\s*\{)",
-    re.S,
-)
-patched, count = pattern.subn(rf"\g<1>{tol}\g<3>", source, count=1)
-if count != 1:
-    raise SystemExit("failed to patch llm.c check_tensor tolerance")
-dst_path.write_text(patched)
-PY
-
-PATH="${ROOT_DIR}/scripts/cuda_toolchain:${PATH}" \
+PATH="${ROOT_DIR}/build/cuda_toolchain:${ROOT_DIR}/scripts/cuda_toolchain:${PATH}" \
 "${CLANG_BIN}" \
     -x cuda \
     -std=c++17 \

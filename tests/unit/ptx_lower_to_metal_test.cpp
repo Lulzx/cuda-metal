@@ -267,6 +267,241 @@ DONE:
                 "math_kernel global store to param_1"))
         return 1;
 
+    // ── Test: passthru stub is flagged approximate ──────────────────────────
+    // GGML rope is lowered to a passthru copy (no real rotary embedding), so its
+    // output is numerically wrong. It must be matched AND flagged approximate so
+    // the runtime can refuse it by default instead of silently emitting garbage.
+    const std::string rope_ptx = R"PTX(
+.version 8.0
+.target sm_90
+.address_size 64
+.visible .entry rope_norm_f32(
+    .param .u64 rope_norm_f32_param_0,
+    .param .u64 rope_norm_f32_param_1
+) {
+    mov.u32 %r0, %tid.x;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions opts_rope;
+    opts_rope.entry_name = "rope_norm_f32";
+    const auto r_rope = cumetal::ptx::lower_ptx_to_metal_source(rope_ptx, opts_rope);
+    if (!expect(r_rope.ok, "rope stub lowering ok")) return 1;
+    if (!expect(r_rope.matched, "rope stub matched by direct-MSL emitter")) return 1;
+    if (!expect(r_rope.approximate, "rope passthru stub flagged approximate")) return 1;
+    if (!expect(r_rope.lowering_kind == cumetal::ptx::MetalLoweringKind::kApproximateStub,
+                "rope provenance is approximate_stub"))
+        return 1;
+
+    // ── Test: a genuine kernel is NOT flagged approximate ────────────────────
+    // encoder_forward_kernel3 is a real llm.c lowering — it must match without
+    // the approximate flag so the runtime uses it normally.
+    const std::string encoder_ptx = R"PTX(
+.version 8.0
+.target sm_90
+.address_size 64
+.visible .entry encoder_forward_kernel3(
+    .param .u64 encoder_forward_kernel3_param_0,
+    .param .u64 encoder_forward_kernel3_param_1
+) {
+    mov.u32 %r0, %tid.x;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions opts_enc;
+    opts_enc.entry_name = "encoder_forward_kernel3";
+    const auto r_enc = cumetal::ptx::lower_ptx_to_metal_source(encoder_ptx, opts_enc);
+    if (!expect(r_enc.ok, "encoder kernel lowering ok")) return 1;
+    if (!expect(r_enc.matched, "encoder kernel matched by direct-MSL emitter")) return 1;
+    if (!expect(!r_enc.approximate, "real encoder kernel not flagged approximate")) return 1;
+    if (!expect(r_enc.lowering_kind == cumetal::ptx::MetalLoweringKind::kSpecializedMsl,
+                "encoder provenance is specialized_msl"))
+        return 1;
+
+    // ── Regression: k_bin_bcast op_addff must ADD, op_mulff must MUL ──────────
+    // The op tag lives in the PTX .entry name (the parser derives entry_name from
+    // it, not from opts). A single shared template once hardcoded `*` for both,
+    // turning every offloaded residual add into a multiply (token salad).
+    const auto bcast_ptx = [](const char* op) {
+        return std::string(R"PTX(
+.version 8.0
+.target sm_90
+.address_size 64
+.visible .entry k_bin_bcast_)PTX") + op + R"PTX((
+    .param .u64 src0,
+    .param .u64 src1
+) {
+    mov.u32 %r0, %tid.x;
+    ret;
+}
+)PTX";
+    };
+
+    cumetal::ptx::LowerToMetalOptions opts_add;
+    opts_add.entry_name = "k_bin_bcast_op_addff";
+    const auto r_add = cumetal::ptx::lower_ptx_to_metal_source(bcast_ptx("op_addff"), opts_add);
+    if (!expect(r_add.ok, "op_addff lowering ok")) return 1;
+    if (!expect(r_add.matched, "op_addff matched by direct-MSL emitter")) return 1;
+    if (!expect(!r_add.approximate, "op_addff is a real kernel, not approximate")) return 1;
+    if (!expect(contains(r_add.metal_source, "result = result + v1"),
+                "op_addff emits ADD (result + v1), not multiply"))
+        return 1;
+
+    cumetal::ptx::LowerToMetalOptions opts_mul;
+    opts_mul.entry_name = "k_bin_bcast_op_mulff";
+    const auto r_mul = cumetal::ptx::lower_ptx_to_metal_source(bcast_ptx("op_mulff"), opts_mul);
+    if (!expect(r_mul.ok, "op_mulff lowering ok")) return 1;
+    if (!expect(r_mul.matched, "op_mulff matched by direct-MSL emitter")) return 1;
+    if (!expect(!r_mul.approximate, "op_mulff is a real kernel, not approximate")) return 1;
+    if (!expect(contains(r_mul.metal_source, "result = result * v1"),
+                "op_mulff emits MUL (result * v1)"))
+        return 1;
+
+    // ── Regression: GGML RMS norm preserves its 3D/strided ABI ─────────────
+    const std::string rms_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry rms_norm_f32(
+    .param .u64 src,
+    .param .u64 dst
+) {
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions opts_rms;
+    opts_rms.entry_name = "rms_norm_f32";
+    const auto r_rms =
+        cumetal::ptx::lower_ptx_to_metal_source(rms_ptx, opts_rms);
+    if (!expect(r_rms.ok && r_rms.matched, "GGML RMS norm matched")) return 1;
+    if (!expect(!r_rms.approximate, "GGML RMS norm is exact, not approximate"))
+        return 1;
+    if (!expect(contains(r_rms.metal_source,
+                         "(size_t)sample * stride_sample"),
+                "RMS source uses sample/channel/row strides"))
+        return 1;
+    if (!expect(contains(r_rms.metal_source,
+                         "* nrows + row)"),
+                "RMS destination uses dense 3D row indexing"))
+        return 1;
+    if (!expect(!contains(r_rms.metal_source,
+                          "dst + (size_t)row * stride_row"),
+                "RMS destination does not reuse a non-contiguous source stride"))
+        return 1;
+    if (!expect(contains(r_rms.metal_source,
+                         "row % mul_nrows_packed.z"),
+                "fused RMS multiply honors broadcast row shape"))
+        return 1;
+    if (!expect(contains(r_rms.metal_source,
+                         "(uint)i % mul_ncols_packed.z"),
+                "fused RMS multiply honors broadcast column shape"))
+        return 1;
+    if (!expect(contains(r_rms.metal_source, "simd_sum(partial)"),
+                "RMS uses native 32-lane SIMD reduction"))
+        return 1;
+    if (!expect(contains(r_rms.metal_source,
+                         "threadgroup float shared[32]"),
+                "RMS stores one subtotal per SIMD group"))
+        return 1;
+
+    // ── Regression: GGML Q8_0 conversion is a real dequantizer ──────────────
+    const std::string q8_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry dequantize_block_q8_0_f16(
+    .param .u64 src,
+    .param .u64 dst,
+    .param .u64 k
+) {
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions opts_q8;
+    opts_q8.entry_name = "dequantize_block_q8_0_f16";
+    const auto r_q8 = cumetal::ptx::lower_ptx_to_metal_source(q8_ptx, opts_q8);
+    if (!expect(r_q8.ok && r_q8.matched, "Q8_0 f16 dequantizer matched")) return 1;
+    if (!expect(!r_q8.approximate, "Q8_0 f16 dequantizer is not a passthru stub")) return 1;
+    if (!expect(contains(r_q8.metal_source, "bytes_per_block = 34"),
+                "Q8_0 dequantizer uses the packed 34-byte block layout"))
+        return 1;
+    if (!expect(contains(r_q8.metal_source, "float(scale) * float(quant)"),
+                "Q8_0 dequantizer applies the block scale"))
+        return 1;
+
+    // ── Regression: GGML strided f32/f16 conversion keeps its ABI ──────────
+    const auto convert_ptx = [](const std::string& entry) {
+        return std::string(R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry )PTX") + entry + R"PTX((
+    .param .u64 src,
+    .param .u64 dst,
+    .param .u64 ne00,
+    .param .u64 ne01,
+    .param .u64 ne0203,
+    .param .align 4 .b8 ne02_fd[12],
+    .param .u64 s01,
+    .param .u64 s02,
+    .param .u64 s03
+) {
+    ret;
+}
+)PTX";
+    };
+    const std::string f32_f16_name =
+        "_ZL13convert_unaryIfDF16_EvPKvPT0_xxx5uint3xxx";
+    cumetal::ptx::LowerToMetalOptions opts_f32_f16;
+    opts_f32_f16.entry_name = f32_f16_name;
+    const auto r_f32_f16 =
+        cumetal::ptx::lower_ptx_to_metal_source(convert_ptx(f32_f16_name),
+                                                 opts_f32_f16);
+    if (!expect(r_f32_f16.ok && r_f32_f16.matched,
+                "GGML float-to-half convert matched"))
+        return 1;
+    if (!expect(!r_f32_f16.approximate,
+                "GGML float-to-half convert is not approximate"))
+        return 1;
+    if (!expect(contains(r_f32_f16.metal_source,
+                         "const device float* typed_src"),
+                "float-to-half convert reads float"))
+        return 1;
+    if (!expect(contains(r_f32_f16.metal_source,
+                         "device half* typed_dst"),
+                "float-to-half convert writes half"))
+        return 1;
+    if (!expect(contains(r_f32_f16.metal_source,
+                         "i03 * s03 + i02 * s02 + i01 * s01 + i00"),
+                "convert preserves GGML source strides"))
+        return 1;
+
+    const std::string f16_f32_name =
+        "_ZL13convert_unaryIDF16_fEvPKvPT0_xxx5uint3xxx";
+    cumetal::ptx::LowerToMetalOptions opts_f16_f32;
+    opts_f16_f32.entry_name = f16_f32_name;
+    const auto r_f16_f32 =
+        cumetal::ptx::lower_ptx_to_metal_source(convert_ptx(f16_f32_name),
+                                                 opts_f16_f32);
+    if (!expect(r_f16_f32.ok && r_f16_f32.matched,
+                "GGML half-to-float convert matched"))
+        return 1;
+    if (!expect(!r_f16_f32.approximate,
+                "GGML half-to-float convert is not approximate"))
+        return 1;
+    if (!expect(contains(r_f16_f32.metal_source,
+                         "const device half* typed_src"),
+                "half-to-float convert reads half"))
+        return 1;
+    if (!expect(contains(r_f16_f32.metal_source,
+                         "device float* typed_dst"),
+                "half-to-float convert writes float"))
+        return 1;
+
+    if (!expect(r_math.lowering_kind == cumetal::ptx::MetalLoweringKind::kGenericPtx,
+                "ordinary math kernel provenance is generic_ptx"))
+        return 1;
+
     std::printf("PASS: ptx lower-to-metal unit tests\n");
     return 0;
 }

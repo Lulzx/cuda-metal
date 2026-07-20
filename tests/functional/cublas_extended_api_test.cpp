@@ -195,6 +195,194 @@ int main() {
         cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
     }
 
+    // ── llama.cpp output-head shape: half A^T × half B → half C ─────────────
+    {
+        constexpr int M = 5;
+        constexpr int N = 3;
+        constexpr int K = 7;
+        constexpr int lda = K;  // A storage is K×M; op(A) is M×K.
+        constexpr int ldb = K;
+        constexpr int ldc = M;
+        std::vector<__half> h_a(lda * M);
+        std::vector<__half> h_b(ldb * N);
+        std::vector<__half> h_c(ldc * N, static_cast<__half>(0.0f));
+        std::vector<float> expected(ldc * N, 0.0f);
+        for (int col = 0; col < M; ++col) {
+            for (int row = 0; row < K; ++row) {
+                h_a[row + col * lda] =
+                    static_cast<__half>(0.0625f * (1 + row + 2 * col));
+            }
+        }
+        for (int col = 0; col < N; ++col) {
+            for (int row = 0; row < K; ++row) {
+                h_b[row + col * ldb] =
+                    static_cast<__half>(0.03125f * (1 + 3 * row - col));
+            }
+        }
+        for (int col = 0; col < N; ++col) {
+            for (int row = 0; row < M; ++row) {
+                float sum = 0.0f;
+                for (int inner = 0; inner < K; ++inner) {
+                    sum += static_cast<float>(h_a[inner + row * lda]) *
+                           static_cast<float>(h_b[inner + col * ldb]);
+                }
+                expected[row + col * ldc] = sum;
+            }
+        }
+
+        __half *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
+        cudaMalloc(reinterpret_cast<void**>(&d_a), h_a.size() * sizeof(__half));
+        cudaMalloc(reinterpret_cast<void**>(&d_b), h_b.size() * sizeof(__half));
+        cudaMalloc(reinterpret_cast<void**>(&d_c), h_c.size() * sizeof(__half));
+        cudaMemcpy(d_a, h_a.data(), h_a.size() * sizeof(__half),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(d_b, h_b.data(), h_b.size() * sizeof(__half),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(d_c, h_c.data(), h_c.size() * sizeof(__half),
+                   cudaMemcpyHostToDevice);
+
+        const __half alpha = static_cast<__half>(1.0f);
+        const __half beta = static_cast<__half>(0.0f);
+        const cublasStatus_t st = cublasGemmEx(
+            handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K,
+            &alpha, d_a, CUDA_R_16F, lda,
+                    d_b, CUDA_R_16F, ldb,
+            &beta,  d_c, CUDA_R_16F, ldc,
+            CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+        if (!expect(st == CUBLAS_STATUS_SUCCESS,
+                    "llama-shaped mixed GemmEx status"))
+            return 1;
+        cudaMemcpy(h_c.data(), d_c, h_c.size() * sizeof(__half),
+                   cudaMemcpyDeviceToHost);
+        for (std::size_t i = 0; i < h_c.size(); ++i) {
+            if (!expect(near_f(static_cast<float>(h_c[i]), expected[i], 2e-2f),
+                        "llama-shaped mixed GemmEx result"))
+                return 1;
+        }
+        cudaFree(d_a);
+        cudaFree(d_b);
+        cudaFree(d_c);
+    }
+
+    // ── SmolLM2 output projection dimensions used by the coherence gate ────
+    {
+        constexpr int M = 49152;
+        constexpr int N = 35;
+        constexpr int K = 576;
+        constexpr int lda = K;
+        constexpr int ldb = K;
+        constexpr int ldc = M;
+        std::vector<__half> h_a(static_cast<std::size_t>(lda) * M,
+                                static_cast<__half>(0.0f));
+        std::vector<__half> h_b(static_cast<std::size_t>(ldb) * N,
+                                static_cast<__half>(0.0f));
+        std::vector<__half> h_c(static_cast<std::size_t>(ldc) * N,
+                                static_cast<__half>(0.0f));
+        for (int row = 0; row < M; ++row) {
+            h_a[static_cast<std::size_t>(row) * lda] =
+                static_cast<__half>(0.125f * static_cast<float>(1 + row % 7));
+        }
+        for (int col = 0; col < N; ++col) {
+            h_b[static_cast<std::size_t>(col) * ldb] =
+                static_cast<__half>(0.25f * static_cast<float>(1 + col % 5));
+        }
+
+        __half *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
+        cudaMalloc(reinterpret_cast<void**>(&d_a), h_a.size() * sizeof(__half));
+        cudaMalloc(reinterpret_cast<void**>(&d_b), h_b.size() * sizeof(__half));
+        cudaMalloc(reinterpret_cast<void**>(&d_c), h_c.size() * sizeof(__half));
+        cudaMemcpy(d_a, h_a.data(), h_a.size() * sizeof(__half),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(d_b, h_b.data(), h_b.size() * sizeof(__half),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(d_c, h_c.data(), h_c.size() * sizeof(__half),
+                   cudaMemcpyHostToDevice);
+
+        const __half alpha = static_cast<__half>(1.0f);
+        const __half beta = static_cast<__half>(0.0f);
+        const cublasStatus_t st = cublasGemmEx(
+            handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K,
+            &alpha, d_a, CUDA_R_16F, lda,
+                    d_b, CUDA_R_16F, ldb,
+            &beta,  d_c, CUDA_R_16F, ldc,
+            CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+        if (!expect(st == CUBLAS_STATUS_SUCCESS,
+                    "SmolLM2-shaped GemmEx status"))
+            return 1;
+        cudaMemcpy(h_c.data(), d_c, h_c.size() * sizeof(__half),
+                   cudaMemcpyDeviceToHost);
+        for (int col = 0; col < N; ++col) {
+            for (int row : {0, 1, 777, M - 1}) {
+                const float expected =
+                    static_cast<float>(h_a[static_cast<std::size_t>(row) * lda]) *
+                    static_cast<float>(h_b[static_cast<std::size_t>(col) * ldb]);
+                if (!expect(near_f(
+                                static_cast<float>(
+                                    h_c[static_cast<std::size_t>(col) * ldc + row]),
+                                expected, 2e-2f),
+                            "SmolLM2-shaped GemmEx result"))
+                    return 1;
+            }
+        }
+        cudaFree(d_a);
+        cudaFree(d_b);
+        cudaFree(d_c);
+    }
+
+    // ── Mixed GemmEx observes asynchronous producers on its handle stream ───
+    {
+        const int M = 2, N = 2, K = 2;
+        __half h_a[4], h_b[4];
+        const float fa[4] = {1.f, 0.f, 0.f, 1.f};
+        const float fb[4] = {1.f, 3.f, 2.f, 4.f};
+        for (int i = 0; i < 4; ++i) {
+            h_a[i] = static_cast<__half>(fa[i]);
+            h_b[i] = static_cast<__half>(fb[i]);
+        }
+
+        __half *d_a = nullptr, *d_b = nullptr;
+        float* d_c = nullptr;
+        void* delay_buffer = nullptr;
+        cudaStream_t stream = nullptr;
+        constexpr std::size_t delay_bytes = 32u * 1024u * 1024u;
+        cudaMalloc(reinterpret_cast<void**>(&d_a), sizeof(h_a));
+        cudaMalloc(reinterpret_cast<void**>(&d_b), sizeof(h_b));
+        cudaMalloc(reinterpret_cast<void**>(&d_c), 4 * sizeof(float));
+        cudaMalloc(&delay_buffer, delay_bytes);
+        cudaStreamCreate(&stream);
+        cublasSetStream(handle, stream);
+
+        // Keep the tiny operand copies behind real queued work. GemmEx must
+        // synchronize this stream before its CPU-side FP16 upconversion.
+        cudaMemsetAsync(delay_buffer, 0x5a, delay_bytes, stream);
+        cudaMemcpyAsync(d_a, h_a, sizeof(h_a), cudaMemcpyHostToDevice, stream);
+        cudaMemcpyAsync(d_b, h_b, sizeof(h_b), cudaMemcpyHostToDevice, stream);
+        cudaMemsetAsync(d_c, 0, 4 * sizeof(float), stream);
+
+        const float alpha = 1.f;
+        const float beta = 0.f;
+        const cublasStatus_t st = cublasGemmEx(
+            handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K,
+            &alpha, d_a, CUDA_R_16F, M,
+                    d_b, CUDA_R_16F, K,
+            &beta,  d_c, CUDA_R_32F, M,
+            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        if (!expect(st == CUBLAS_STATUS_SUCCESS,
+                    "mixed GemmEx async-producer status"))
+            return 1;
+        if (!expect(near_f(d_c[0], 1.f) && near_f(d_c[1], 3.f) &&
+                    near_f(d_c[2], 2.f) && near_f(d_c[3], 4.f),
+                    "mixed GemmEx waits for async producer operands"))
+            return 1;
+
+        cublasSetStream(handle, nullptr);
+        cudaStreamDestroy(stream);
+        cudaFree(delay_buffer);
+        cudaFree(d_a);
+        cudaFree(d_b);
+        cudaFree(d_c);
+    }
+
     // ── cublasSgemmBatched ───────────────────────────────────────────────────
     // Two 2×2 identity × [[1,2],[3,4]] batches.
     {
