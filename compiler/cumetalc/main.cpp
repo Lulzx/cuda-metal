@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <cstdlib>
 #include <string>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -31,6 +32,8 @@ void print_usage(const char* argv0) {
                  " [--mode xcrun|experimental] [--fallback-experimental]"
                  " [--overwrite] [--skip-validate] [--xcrun-validate]"
                  " [--kernel-name name] [--entry name] [--ptx-strict]"
+                 " [--cuda-device] [--cuda-arch sm_XX] [--cuda-clang path]"
+                 " [-I path] [-D name[=value]] [--cuda-include path]"
                  " [--fp64=native|emulate|warn]\n";
 }
 
@@ -100,6 +103,25 @@ bool xcrun_tool_exists(const std::string& tool_name) {
         return false;
     }
     return result.output[0] == '0';
+}
+
+std::filesystem::path find_cuda_clang(const std::filesystem::path& requested) {
+    if (!requested.empty()) {
+        return requested;
+    }
+    if (const char* configured = std::getenv("CUMETAL_CUDA_CLANG");
+        configured != nullptr && configured[0] != '\0') {
+        return configured;
+    }
+    for (const std::filesystem::path& candidate : {
+             std::filesystem::path("/opt/homebrew/opt/llvm/bin/clang++"),
+             std::filesystem::path("/usr/local/opt/llvm/bin/clang++"),
+         }) {
+        if (std::filesystem::exists(candidate)) {
+            return candidate;
+        }
+    }
+    return {};
 }
 
 bool try_emit_vector_add_air_ir_from_cu(const std::filesystem::path& input_cu,
@@ -188,6 +210,12 @@ int main(int argc, char** argv) {
     std::string ptx_entry_name;
     bool ptx_strict = false;
     cumetal::ptx::Fp64Mode ptx_fp64_mode = cumetal::ptx::Fp64Mode::kNative;
+    bool cuda_device_frontend = false;
+    std::string cuda_arch = "sm_80";
+    std::filesystem::path cuda_clang;
+    std::vector<std::filesystem::path> cuda_include_dirs;
+    std::vector<std::string> cuda_defines;
+    std::vector<std::filesystem::path> cuda_forced_includes;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -241,6 +269,42 @@ int main(int argc, char** argv) {
             ptx_entry_name = argv[++i];
         } else if (arg == "--ptx-strict") {
             ptx_strict = true;
+        } else if (arg == "--cuda-device") {
+            cuda_device_frontend = true;
+        } else if (arg == "--cuda-arch") {
+            if (i + 1 >= argc) {
+                std::cerr << "--cuda-arch expects a value such as sm_80\n";
+                return 2;
+            }
+            cuda_arch = argv[++i];
+        } else if (arg == "--cuda-clang") {
+            if (i + 1 >= argc) {
+                std::cerr << "--cuda-clang expects a path\n";
+                return 2;
+            }
+            cuda_clang = argv[++i];
+        } else if (arg == "-I") {
+            if (i + 1 >= argc) {
+                std::cerr << "-I expects a path\n";
+                return 2;
+            }
+            cuda_include_dirs.emplace_back(argv[++i]);
+        } else if (arg.size() > 2 && arg.substr(0, 2) == "-I") {
+            cuda_include_dirs.emplace_back(arg.substr(2));
+        } else if (arg == "-D") {
+            if (i + 1 >= argc) {
+                std::cerr << "-D expects a definition\n";
+                return 2;
+            }
+            cuda_defines.emplace_back(argv[++i]);
+        } else if (arg.size() > 2 && arg.substr(0, 2) == "-D") {
+            cuda_defines.emplace_back(arg.substr(2));
+        } else if (arg == "--cuda-include") {
+            if (i + 1 >= argc) {
+                std::cerr << "--cuda-include expects a path\n";
+                return 2;
+            }
+            cuda_forced_includes.emplace_back(argv[++i]);
         } else if (arg.size() > 7 && arg.substr(0, 7) == "--fp64=") {
             const std::string fp64_mode_str = arg.substr(7);
             if (fp64_mode_str == "native") {
@@ -282,8 +346,71 @@ int main(int argc, char** argv) {
         options.mode = cumetal::air_emitter::EmitMode::kXcrun;
     }
 
+    std::vector<std::filesystem::path> temp_files;
     std::filesystem::path temp_stage_file;
-    const std::string input_ext = lower_ext(options.input);
+    std::string input_ext = lower_ext(options.input);
+    if (input_ext == ".cu" && cuda_device_frontend) {
+        const std::filesystem::path compiler = find_cuda_clang(cuda_clang);
+        if (compiler.empty() || !std::filesystem::exists(compiler)) {
+            std::cerr
+                << "cumetalc failed: CUDA-capable clang++ not found; install Homebrew LLVM or "
+                   "pass --cuda-clang/CUMETAL_CUDA_CLANG\n";
+            return 1;
+        }
+        if (cuda_arch.size() < 4 || cuda_arch.substr(0, 3) != "sm_") {
+            std::cerr << "cumetalc failed: --cuda-arch must use sm_XX form\n";
+            return 2;
+        }
+
+        const std::filesystem::path input_cu = options.input;
+        const std::filesystem::path runtime_api_dir =
+            std::filesystem::path(CUMETAL_SOURCE_DIR) / "runtime" / "api";
+        temp_stage_file = make_temp_path(".ptx");
+        std::string command =
+            quote_shell(compiler.string()) +
+            " -x cuda --cuda-device-only -S -std=c++17 -O1 -fno-jump-tables"
+            " --cuda-gpu-arch=" +
+            quote_shell(cuda_arch) +
+            " -Xclang -target-feature -Xclang +ptx70"
+            " -nocudainc -nocudalib -Wno-unknown-cuda-version -Wno-pass-failed"
+            " -D__CUDACC__=1 -D__NVCC__=1";
+        if (std::filesystem::exists(runtime_api_dir) &&
+            std::filesystem::is_directory(runtime_api_dir)) {
+            command += " -I " + quote_shell(runtime_api_dir.string()) +
+                       " -include " + quote_shell("cuda_runtime.h");
+        }
+        for (const auto& include_dir : cuda_include_dirs) {
+            command += " -I " + quote_shell(include_dir.string());
+        }
+        for (const auto& define : cuda_defines) {
+            command += " -D " + quote_shell(define);
+        }
+        for (const auto& forced_include : cuda_forced_includes) {
+            command += " -include " + quote_shell(forced_include.string());
+        }
+        command += " " + quote_shell(input_cu.string()) + " -o " +
+                   quote_shell(temp_stage_file.string()) + " 2>&1";
+
+        const CommandResult frontend_result = run_command_capture(command);
+        if (!frontend_result.output.empty()) {
+            std::cerr << frontend_result.output;
+            if (frontend_result.output.back() != '\n') {
+                std::cerr << '\n';
+            }
+        }
+        if (!frontend_result.started || frontend_result.exit_code != 0 ||
+            !std::filesystem::exists(temp_stage_file)) {
+            std::error_code ec;
+            std::filesystem::remove(temp_stage_file, ec);
+            std::cerr << "cumetalc failed: CUDA device frontend compilation failed\n";
+            return 1;
+        }
+        temp_files.push_back(temp_stage_file);
+        options.input = temp_stage_file;
+        input_ext = ".ptx";
+        temp_stage_file.clear();
+    }
+
     if (input_ext == ".ptx") {
         std::string io_error;
         const std::vector<std::uint8_t> ptx_bytes = cumetal::common::read_file_bytes(options.input, &io_error);
@@ -319,6 +446,7 @@ int main(int argc, char** argv) {
             }
             options.input = temp_stage_file;
             options.kernel_name = lowered_metal.entry_name;
+            temp_files.push_back(temp_stage_file);
         } else {
             cumetal::ptx::LowerToLlvmOptions lower_options;
             lower_options.strict = ptx_strict;
@@ -341,6 +469,7 @@ int main(int argc, char** argv) {
             }
             options.input = temp_stage_file;
             options.kernel_name = lowered.entry_name;
+            temp_files.push_back(temp_stage_file);
         }
     } else if (input_ext == ".cu") {
         const bool needs_fallback_air_ll =
@@ -351,6 +480,7 @@ int main(int argc, char** argv) {
             if (try_emit_vector_add_air_ir_from_cu(options.input, temp_stage_file, &fallback_error)) {
                 options.input = temp_stage_file;
                 options.kernel_name = "vector_add";
+                temp_files.push_back(temp_stage_file);
             } else {
                 std::cerr << "cumetalc warning: " << fallback_error
                           << "; attempting generic .cu frontend lowering\n";
@@ -394,13 +524,14 @@ int main(int argc, char** argv) {
         }
 
         options.input = temp_stage_file;
+        temp_files.push_back(temp_stage_file);
         }
     }
 
     const auto result = cumetal::air_emitter::emit_metallib(options);
-    if (!temp_stage_file.empty()) {
+    for (const auto& temp_file : temp_files) {
         std::error_code ec;
-        std::filesystem::remove(temp_stage_file, ec);
+        std::filesystem::remove(temp_file, ec);
     }
     for (const auto& log : result.logs) {
         if (!log.empty()) {

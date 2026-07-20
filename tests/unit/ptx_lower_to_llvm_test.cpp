@@ -323,6 +323,50 @@ $L1:
         return 1;
     }
 
+    // CUDA frontends use vectorized memory operations for ordinary struct
+    // copies. Scalarize both v2 and v4 forms so large CUDA projects do not
+    // require source changes merely to express the same contiguous accesses.
+    const std::string vector_memory_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry vector_memory_generic(
+    .param .u64 vector_memory_param_0,
+    .param .u64 vector_memory_param_1
+)
+{
+    .reg .b32 %r<7>;
+    .reg .b64 %rd<3>;
+    .param .b32 call_arg;
+    .param .b32 call_ret;
+    ld.param.u64 %rd1, [vector_memory_param_0];
+    ld.param.u64 %rd2, [vector_memory_param_1];
+    ld.global.v4.b32 {%r1, %r2, %r3, %r4}, [%rd1];
+    st.global.v4.b32 [%rd2], {%r1, %r2, %r3, %r4};
+    ld.global.v2.b32 {%r5, %r6}, [%rd1+16];
+    st.global.v2.b32 [%rd2+16], {%r5, %r6};
+    st.param.b32 [call_arg], %r1;
+    call.uni (call_ret), __nv_sqrtf, (call_arg);
+    ld.param.b32 %r1, [call_ret];
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions vector_memory_options;
+    vector_memory_options.entry_name = "vector_memory_generic";
+    vector_memory_options.strict = true;
+    const auto vector_memory_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(vector_memory_ptx, vector_memory_options);
+    if (!expect(vector_memory_lowered.ok, "v2/v4 vector memory lowering succeeds")) {
+        return 1;
+    }
+    if (!expect(vector_memory_lowered.warnings.empty(),
+                "v2/v4 vector memory lowering emits no warnings")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sqrt.f32"),
+                "__nv_sqrtf lowers to Metal sqrt intrinsic")) {
+        return 1;
+    }
+
     std::printf("PASS: ptx lower-to-llvm unit tests\n");
     return 0;
 }

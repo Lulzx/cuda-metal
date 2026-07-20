@@ -1,4 +1,5 @@
-#include "cuda_runtime.h"
+#include <vector_types.h>
+#include <vector_functions.h>
 
 #include <cstdio>
 #include <cstring>

@@ -1,0 +1,120 @@
+diff --git a/physx/compiler/public/CMakeLists.txt b/physx/compiler/public/CMakeLists.txt
+index a0d770ced..1c3e59ab4 100644
+--- a/physx/compiler/public/CMakeLists.txt
++++ b/physx/compiler/public/CMakeLists.txt
+@@ -39,6 +39,7 @@ project(PhysXSDK C CXX)
+ OPTION(PX_BUILDSNIPPETS "Generate the snippets" OFF)
+ OPTION(PX_BUILDPVDRUNTIME "Generate the OmniPVD project" OFF)
+ OPTION(PX_CMAKE_SUPPRESS_REGENERATION "Disable zero_check projects" OFF)
++OPTION(PX_CUMETAL_GPU_SUBSET "Compile the minimal GPU kernel subset with CuMetal." OFF)
+ 
+ SET(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+ 
+@@ -105,6 +106,11 @@ IF(PX_GENERATE_GPU_PROJECTS OR PX_GENERATE_GPU_PROJECTS_ONLY)
+ 	MESSAGE("Added PhysX GPU")
+ ENDIF()
+ 
++IF(PX_CUMETAL_GPU_SUBSET)
++	ADD_SUBDIRECTORY(${PHYSX_ROOT_DIR}/source/compiler/cmakegpu/cumetal ${CMAKE_CURRENT_BINARY_DIR}/sdk_cumetal_gpu_source_bin)
++	MESSAGE("Added PhysX CuMetal GPU kernel subset")
++ENDIF()
++
+ 
+ IF(PX_BUILDPVDRUNTIME)
+ 	IF(TARGET_BUILD_PLATFORM STREQUAL "windows" OR TARGET_BUILD_PLATFORM STREQUAL "linux")
+diff --git a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+new file mode 100644
+index 000000000..f9bda874a
+--- /dev/null
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -0,0 +1,90 @@
++# Minimal PhysX GPU kernel build for CuMetal. This deliberately starts with
++# the sphere narrowphase kernel exercised by the reduced SnippetHelloGRB scene;
++# subsequent bring-up adds only kernels observed on that scene's dispatch path.
++
++IF(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
++	MESSAGE(FATAL_ERROR "PX_CUMETAL_GPU_SUBSET requires macOS on Apple Silicon")
++ENDIF()
++
++SET(CUMETALC_EXECUTABLE "" CACHE FILEPATH "Path to the CuMetal compiler driver")
++IF(NOT CUMETALC_EXECUTABLE OR NOT EXISTS "${CUMETALC_EXECUTABLE}")
++	MESSAGE(FATAL_ERROR "Set CUMETALC_EXECUTABLE to a built cumetalc executable")
++ENDIF()
++
++SET(PX_CUMETAL_EMIT_MODE "xcrun" CACHE STRING "cumetalc output mode (xcrun or experimental)")
++SET_PROPERTY(CACHE PX_CUMETAL_EMIT_MODE PROPERTY STRINGS xcrun experimental)
++IF(NOT PX_CUMETAL_EMIT_MODE STREQUAL "xcrun" AND
++   NOT PX_CUMETAL_EMIT_MODE STREQUAL "experimental")
++	MESSAGE(FATAL_ERROR "PX_CUMETAL_EMIT_MODE must be xcrun or experimental")
++ENDIF()
++
++SET(PX_CUMETAL_KERNEL_OUTPUT_DIR
++	"${CMAKE_CURRENT_BINARY_DIR}/kernels"
++	CACHE PATH "Output directory for CuMetal PhysX GPU kernels")
++FILE(MAKE_DIRECTORY "${PX_CUMETAL_KERNEL_OUTPUT_DIR}")
++
++SET(PHYSX_SOURCE_DIR "${PHYSX_ROOT_DIR}/source")
++SET(PX_CUMETAL_INCLUDE_DIRS
++	"${PHYSX_ROOT_DIR}/include"
++	"${PHYSX_SOURCE_DIR}/common/include"
++	"${PHYSX_SOURCE_DIR}/common/src"
++	"${PHYSX_SOURCE_DIR}/physxgpu/include"
++	"${PHYSX_SOURCE_DIR}/geomutils/include"
++	"${PHYSX_SOURCE_DIR}/geomutils/src"
++	"${PHYSX_SOURCE_DIR}/geomutils/src/contact"
++	"${PHYSX_SOURCE_DIR}/geomutils/src/pcm"
++	"${PHYSX_SOURCE_DIR}/geomutils/src/mesh"
++	"${PHYSX_SOURCE_DIR}/lowlevel/api/include"
++	"${PHYSX_SOURCE_DIR}/lowlevel/api/include/windows"
++	"${PHYSX_SOURCE_DIR}/lowlevel/common/include/pipeline"
++	"${PHYSX_SOURCE_DIR}/lowlevel/common/include/utils"
++	"${PHYSX_SOURCE_DIR}/lowlevelaabb/include"
++	"${PHYSX_SOURCE_DIR}/lowleveldynamics/include"
++	"${PHYSX_SOURCE_DIR}/lowleveldynamics/shared"
++	"${PHYSX_SOURCE_DIR}/lowleveldynamics/src"
++	"${PHYSX_SOURCE_DIR}/lowlevel/software/include"
++	"${PHYSX_SOURCE_DIR}/gpusolver/include"
++	"${PHYSX_SOURCE_DIR}/gpubroadphase/include"
++	"${PHYSX_SOURCE_DIR}/gpunarrowphase/include"
++	"${PHYSX_SOURCE_DIR}/gpunarrowphase/src/CUDA"
++	"${PHYSX_SOURCE_DIR}/gpucommon/include"
++	"${PHYSX_SOURCE_DIR}/gpucommon/src/CUDA"
++	"${PHYSX_SOURCE_DIR}/gpusimulationcontroller/include"
++	"${PHYSX_SOURCE_DIR}/gpusimulationcontroller/src/CUDA"
++	"${PHYSX_SOURCE_DIR}/gpuarticulation/include"
++	"${PHYSX_SOURCE_DIR}/cudamanager/include")
++
++SET(PX_CUMETAL_INCLUDE_ARGS)
++FOREACH(include_dir IN LISTS PX_CUMETAL_INCLUDE_DIRS)
++	LIST(APPEND PX_CUMETAL_INCLUDE_ARGS -I "${include_dir}")
++ENDFOREACH()
++
++SET(SPHERE_SOURCE "${PHYSX_SOURCE_DIR}/gpunarrowphase/src/CUDA/cudaSphere.cu")
++SET(SPHERE_METALLIB "${PX_CUMETAL_KERNEL_OUTPUT_DIR}/sphereNphase_Kernel.metallib")
++
++ADD_CUSTOM_COMMAND(
++	OUTPUT "${SPHERE_METALLIB}"
++	COMMAND "${CMAKE_COMMAND}" -E make_directory "${PX_CUMETAL_KERNEL_OUTPUT_DIR}"
++	COMMAND "${CUMETALC_EXECUTABLE}"
++		--cuda-device
++		--mode "${PX_CUMETAL_EMIT_MODE}"
++		--ptx-strict
++		--entry sphereNphase_Kernel
++		--overwrite
++		-D PX_PHYSX_STATIC_LIB=1
++		-D PX_PUBLIC_RELEASE=1
++		-D NDEBUG
++		${PX_CUMETAL_INCLUDE_ARGS}
++		"${SPHERE_SOURCE}"
++		-o "${SPHERE_METALLIB}"
++	DEPENDS "${SPHERE_SOURCE}" "${CUMETALC_EXECUTABLE}"
++	COMMENT "Compiling PhysX sphereNphase_Kernel with CuMetal"
++	COMMAND_EXPAND_LISTS
++	VERBATIM)
++
++SET(PX_CUMETAL_KERNEL_MANIFEST "${PX_CUMETAL_KERNEL_OUTPUT_DIR}/kernels.json")
++FILE(GENERATE OUTPUT "${PX_CUMETAL_KERNEL_MANIFEST}" CONTENT
++"{\n  \"schema\": 1,\n  \"target\": \"SnippetHelloGRB-sphere-plane\",\n  \"kernels\": [\n    {\"name\": \"sphereNphase_Kernel\", \"source\": \"gpunarrowphase/src/CUDA/cudaSphere.cu\", \"metallib\": \"${SPHERE_METALLIB}\"}\n  ]\n}\n")
++
++ADD_CUSTOM_TARGET(PhysXCumetalGpuKernels
++	DEPENDS "${SPHERE_METALLIB}" "${PX_CUMETAL_KERNEL_MANIFEST}")

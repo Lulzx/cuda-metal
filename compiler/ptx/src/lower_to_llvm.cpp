@@ -2457,26 +2457,38 @@ class GenericLlvmEmitter {
             return fail(instr, "ld/st requires 2 operands");
         }
 
-        if (is_load && instr.opcode.find(".v2.") != std::string::npos) {
-            const std::vector<std::string> dst_parts = split_comma_list(instr.operands[0]);
-            if (dst_parts.size() != 2) {
-                return fail(instr, "vector load expects 2 destination registers");
+        int vector_width = 0;
+        std::size_t vector_pos = instr.opcode.find(".v2.");
+        if (vector_pos != std::string::npos) {
+            vector_width = 2;
+        } else {
+            vector_pos = instr.opcode.find(".v4.");
+            if (vector_pos != std::string::npos) {
+                vector_width = 4;
+            }
+        }
+        if (vector_width != 0) {
+            const std::size_t data_operand_index = is_load ? 0 : 1;
+            const std::size_t memory_operand_index = is_load ? 1 : 0;
+            const std::vector<std::string> data_parts =
+                split_comma_list(instr.operands[data_operand_index]);
+            if (data_parts.size() != static_cast<std::size_t>(vector_width)) {
+                return fail(instr,
+                            std::string("vector ") + (is_load ? "load" : "store") +
+                                " expects " + std::to_string(vector_width) + " registers");
             }
             const PtxTypeSpec elem_ty = parse_primary_type_from_opcode(instr.opcode);
             if (elem_ty.kind == PtxTypeSpec::Kind::kInvalid) {
-                return fail(instr, "unable to parse vector load element type");
+                return fail(instr, "unable to parse vector memory element type");
             }
-            const ParsedMemOperand mem = parse_memory_operand(instr.operands[1]);
+            const ParsedMemOperand mem = parse_memory_operand(instr.operands[memory_operand_index]);
             if (!mem.ok) {
-                return fail(instr, "unable to parse vector load memory operand");
+                return fail(instr, "unable to parse vector memory operand");
             }
 
-            for (int lane = 0; lane < 2; ++lane) {
+            for (int lane = 0; lane < vector_width; ++lane) {
                 cumetal::ptx::EntryFunction::Instruction scalar = instr;
-                const std::size_t vec_pos = scalar.opcode.find(".v2.");
-                if (vec_pos != std::string::npos) {
-                    scalar.opcode.replace(vec_pos, 4, ".");
-                }
+                scalar.opcode.replace(vector_pos, 4, ".");
                 std::ostringstream mem_op;
                 const std::int64_t lane_offset =
                     mem.offset + static_cast<std::int64_t>(lane) * std::max(1, elem_ty.bits / 8);
@@ -2487,7 +2499,10 @@ class GenericLlvmEmitter {
                     mem_op << lane_offset;
                 }
                 mem_op << "]";
-                scalar.operands = {trim(dst_parts[static_cast<std::size_t>(lane)]), mem_op.str()};
+                const std::string data_part = trim(data_parts[static_cast<std::size_t>(lane)]);
+                scalar.operands =
+                    is_load ? std::vector<std::string>{data_part, mem_op.str()}
+                            : std::vector<std::string>{mem_op.str(), data_part};
                 if (!emit_ld_st(os, scalar)) {
                     return false;
                 }
@@ -2865,6 +2880,20 @@ class GenericLlvmEmitter {
             const std::string rbits = next_tmp("rsqrtf_i");
             os << "  " << rbits << " = bitcast float " << r << " to i32\n";
             return store_ret_bits(rbits, 32);
+        }
+
+        if (callee == "__nv_sqrtf") {
+            if (arg_names.empty()) return fail(instr, "__nv_sqrtf expects 1 arg");
+            auto bits = load_call_slot_value(os, arg_names[0], 32);
+            if (!bits) return fail(instr, "__nv_sqrtf arg missing");
+            const std::string f = next_tmp("sqrtf_bc");
+            os << "  " << f << " = bitcast i32 " << *bits << " to float\n";
+            declarations_.insert("declare float @air.fast_sqrt.f32(float)");
+            const std::string result = next_tmp("sqrtf");
+            os << "  " << result << " = call float @air.fast_sqrt.f32(float " << f << ")\n";
+            const std::string result_bits = next_tmp("sqrtf_i");
+            os << "  " << result_bits << " = bitcast float " << result << " to i32\n";
+            return store_ret_bits(result_bits, 32);
         }
 
         if (callee == "__nv_fabsf") {

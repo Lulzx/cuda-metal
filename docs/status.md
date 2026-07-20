@@ -225,7 +225,11 @@ Implemented:
   - parser: targeted error diagnostics for Hopper cluster ops (`cluster.*`, `mbarrier.*`),
     TMA (`cp.async.bulk.tensor.*`), and FP8 (`cvt.rn.f8*`) with specific messages
   - `cumetalc` accepts `.ptx` input via internal PTX->LLVM lowering (`--entry`, `--ptx-strict`)
-  - `cumetalc` accepts initial `.cu` input via xcrun clang++ frontend lowering to LLVM IR
+  - `cumetalc` keeps the initial qualifier-stripping `.cu` prototype and now
+    provides an opt-in real CUDA device frontend (`--cuda-device`) using
+    Homebrew LLVM CUDA→PTX, with include/define/forced-include forwarding
+  - generic PTX LLVM lowering scalarizes `ld/st.v2` and `ld/st.v4` memory
+    operations and lowers CUDA libdevice `__nv_sqrtf`
   - expanded PTX sweep harness (`tests/ptx_sweep`) for strict-mode supported/unsupported opcode checks
   - initial `intrinsic_lower` pass for thread-index/barrier/basic-math mappings
   - initial `printf_lower` pass for PTX `printf`/`vprintf` call extraction and format-table metadata

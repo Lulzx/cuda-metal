@@ -44,6 +44,16 @@ as gaps have been closed.
   images not supported (SASS never was; per spec).
 
 ## .cu / cumetalc frontend limitations
+- `cumetalc --cuda-device` is the real source frontend for project-scale CUDA:
+  it requires a CUDA-capable Homebrew LLVM Clang (or
+  `--cuda-clang`/`CUMETAL_CUDA_CLANG`) and forwards `-I`, `-D`,
+  `--cuda-include`, and `--cuda-arch`. It deliberately uses
+  `-fno-jump-tables`; `brx.idx`/`.branchtargets` remain unsupported in the PTX
+  lowering path. CUDA source compilation can therefore succeed while later
+  strict PTX lowering still rejects an unimplemented opcode or libdevice call.
+- The older `.cu` mode without `--cuda-device` remains a qualifier-stripping
+  host-LLVM prototype suitable only for simple patterns; it is not a general
+  CUDA frontend.
 - The Clang-based `.cu`/PTX registration path supports many simple kernels and
   samples (vectorAdd etc.) and dispatches them through Metal on the Apple GPU.
   CUDA kernel CPU emulation is disabled by default. The legacy llm.c host

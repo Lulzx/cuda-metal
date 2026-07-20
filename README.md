@@ -63,6 +63,8 @@ Tools
   rejects native FP64 in Metal pipelines at runtime)
 - `--entry <name>` — select a single PTX entry point
 - `--ptx-strict` — treat unsupported PTX opcodes as errors
+- `--cuda-device` — compile `.cu` with a CUDA-capable Clang to PTX before
+  CuMetal lowering; accepts `-I`, `-D`, `--cuda-include`, and `--cuda-arch`
 
 Library shims
 -------------

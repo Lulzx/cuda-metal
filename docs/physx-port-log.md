@@ -87,4 +87,45 @@ report.
   current CuMetal tests passed; platform/dependency-gated cases were reported
   as skips.
 
-Phase 2 has not started.
+## 2026-07-20 — Phase 2 CUDA source compilation
+
+- Audited `cumetalc` before integrating PhysX and found that its original
+  `.cu` path strips CUDA qualifiers and compiles host C++ LLVM IR. Preserved
+  that prototype for compatibility and added an explicit `--cuda-device`
+  path using CUDA-capable Homebrew Clang, device-only PTX emission, and the
+  existing PTX-to-Metal pipeline.
+- Added project-build arguments for include directories, preprocessor
+  definitions, forced includes, CUDA architecture, and compiler override.
+  The frontend defines the CUDA compiler identity macros used by the existing
+  CuMetal source builds and disables PTX jump tables because `brx.idx` target
+  tables are not yet lowered.
+- Added clean-room `vector_types.h` and `vector_functions.h` compatibility
+  headers. PhysX includes both directly; CuMetal already supplied their vector
+  ABI types and `make_*` constructors through `cuda_runtime.h`.
+- Fixed two PTX gaps exposed by the unmodified PhysX source:
+  - scalarize both load and store forms of `.v2` and `.v4` memory operations;
+  - lower the CUDA libdevice `__nv_sqrtf` call to the Metal sqrt intrinsic.
+  Each fix has focused unit or AIR ABI regression coverage.
+- Compiled the unmodified
+  `gpunarrowphase/src/CUDA/cudaSphere.cu` translation unit through
+  `cumetalc --cuda-device --ptx-strict`. Clang emitted a single
+  `sphereNphase_Kernel` PTX entry (1,636 PTX lines in the initial audit run),
+  and CuMetal produced a validated one-kernel metallib container.
+- Added the revision-pinned `0002-cumetal-gpu-subset.patch`. Its opt-in
+  `PhysXCumetalGpuKernels` CMake target does not enable nvcc/CMake CUDA; it
+  invokes `cumetalc` for the explicit minimized-HelloGRB manifest and emits
+  `kernels.json`.
+- Added `build_physx_cumetal_kernels_macos.sh`. Production output defaults to
+  `xcrun`; `CUMETAL_PHYSX_EMIT_MODE=experimental` is available only for
+  compile/validation on machines without the optional Xcode Metal Toolchain.
+- Verified the patched PhysX CMake target in experimental mode on this host.
+  `air_validate` and `air_inspect` confirmed one kernel named
+  `sphereNphase_Kernel`. This host's `xcrun` is installed, but its optional
+  Metal Toolchain component is not, so a GPU-executable production metallib
+  could not be packaged locally. This is an environment dependency, not a
+  CUDA/PTX compilation failure.
+- The manifest is intentionally the static bootstrap boundary from the Phase
+  0 report. Phase 3 must trace lazy `KernelWrangler` lookups/launches and grow
+  it with only the broadphase, bookkeeping, simulation-controller, and PGS
+  kernels actually requested by the one-sphere scene; eager compilation of all
+  501 registered names remains out of scope.
