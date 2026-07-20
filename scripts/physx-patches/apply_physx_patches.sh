@@ -40,6 +40,12 @@ patch_marker_is_present() {
                 grep -q -- '--cuda-inline-threshold 1000000' \
                     "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
             ;;
+        0005-cumetal-runtime-grb.patch)
+            grep -q 'CUMETAL_PHYSX_KERNEL_DIR' \
+                "${PHYSX_REPO}/physx/source/cudamanager/src/CudaKernelWrangler.cpp" &&
+                grep -q 'partial warp masks as a full SIMD group' \
+                    "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/preIntegration.cuh"
+            ;;
         *)
             return 1
             ;;

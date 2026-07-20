@@ -1,5 +1,6 @@
 #include "cumetal/common/metallib.h"
 
+#include <cstring>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -17,6 +18,17 @@ bool expect(bool condition, const char* message) {
 bool has_metadata_key(const cumetal::common::KernelRecord& kernel, const std::string& key) {
     for (const auto& field : kernel.metadata) {
         if (field.key == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool has_metadata_value(const cumetal::common::KernelRecord& kernel,
+                        const std::string& key,
+                        const std::string& value) {
+    for (const auto& field : kernel.metadata) {
+        if (field.key == key && field.value == value) {
             return true;
         }
     }
@@ -84,6 +96,23 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Production xcrun metallibs do not retain CuMetal's custom metadata, but
+    // PTX-lowered AIR preserves <kernel>_param_N reflection names. Verify the
+    // parser recovers an exact, contiguous argument count from those strings.
+    std::vector<std::uint8_t> reflected_apple = apple_bytes;
+    for (const char* name : {"vector_add_param_0", "vector_add_param_1",
+                             "vector_add_param_2_12_"}) {
+        reflected_apple.insert(reflected_apple.end(), name, name + std::strlen(name) + 1);
+    }
+    const auto reflected_summary =
+        cumetal::common::inspect_metallib_bytes("reflected-reference.metallib",
+                                                reflected_apple, 0);
+    if (!expect(has_metadata_value(reflected_summary.kernels.front(),
+                                   "kernel.arg_count", "3"),
+                "Apple metallib AIR reflection yields exact argument count")) {
+        return 1;
+    }
+
     std::vector<std::uint8_t> truncated_apple;
     if (apple_bytes.size() > 64) {
         truncated_apple.assign(apple_bytes.begin(), apple_bytes.begin() + 64);
@@ -127,6 +156,10 @@ int main(int argc, char** argv) {
     }
     if (!expect(has_metadata_key(experimental_summary.kernels.front(), "air.version"),
                 "experimental metadata includes air.version")) {
+        return 1;
+    }
+    if (!expect(has_metadata_value(experimental_summary.kernels.front(), "kernel.arg_count", "3"),
+                "experimental metadata includes exact kernel argument count")) {
         return 1;
     }
 

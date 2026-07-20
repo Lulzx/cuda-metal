@@ -209,6 +209,48 @@ DONE:
     if (!expect(r_unsup.ok, "unsupported instruction lowering returns ok=true")) return 1;
     if (!expect(!r_unsup.matched, "unsupported instruction not matched by generic emitter")) return 1;
 
+    // Regression: pointer-provenance registers are not MSL variables. A
+    // general arithmetic instruction that consumes one must force the LLVM
+    // fallback instead of emitting an undeclared vrd* identifier.
+    const std::string pointer_arithmetic_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry pointer_distance(
+    .param .u64 pointer_distance_param_0,
+    .param .u64 pointer_distance_param_1
+) {
+    .reg .u64 %rd<8>;
+    .reg .u32 %r<8>;
+    .reg .f32 %f<2>;
+
+    ld.param.u64 %rd0, [pointer_distance_param_0];
+    ld.param.u64 %rd1, [pointer_distance_param_1];
+    sub.s64 %rd2, %rd1, %rd0;
+
+    mov.u32 %r0, %ctaid.x;
+    mov.u32 %r1, %ntid.x;
+    mov.u32 %r2, %tid.x;
+    mad.lo.u32 %r3, %r0, %r1, %r2;
+    cvt.u64.u32 %rd3, %r3;
+    shl.b64 %rd3, %rd3, 2;
+    add.u64 %rd4, %rd0, %rd3;
+    ld.global.f32 %f0, [%rd4];
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions opts_pointer_arithmetic;
+    opts_pointer_arithmetic.entry_name = "pointer_distance";
+    const auto r_pointer_arithmetic =
+        cumetal::ptx::lower_ptx_to_metal_source(pointer_arithmetic_ptx,
+                                                 opts_pointer_arithmetic);
+    if (!expect(r_pointer_arithmetic.ok,
+                "pointer arithmetic lowering returns ok for LLVM fallback"))
+        return 1;
+    if (!expect(!r_pointer_arithmetic.matched,
+                "pointer arithmetic does not emit undeclared MSL registers"))
+        return 1;
+
     // ── Test 5: unary math intrinsics (sqrt, ex2, lg2, rsqrt) in generic emitter ──
     const std::string math_ptx = R"PTX(
 .version 8.0

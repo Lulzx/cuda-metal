@@ -1,0 +1,706 @@
+diff --git a/physx/compiler/public/CMakeLists.txt b/physx/compiler/public/CMakeLists.txt
+index a919d5c..2add8da 100644
+--- a/physx/compiler/public/CMakeLists.txt
++++ b/physx/compiler/public/CMakeLists.txt
+@@ -41,6 +41,17 @@ OPTION(PX_BUILDSNIPPETS "Generate the snippets" OFF)
+ OPTION(PX_BUILDPVDRUNTIME "Generate the OmniPVD project" OFF)
+ OPTION(PX_CMAKE_SUPPRESS_REGENERATION "Disable zero_check projects" OFF)
+ OPTION(PX_CUMETAL_GPU_SUBSET "Compile the minimal GPU kernel subset with CuMetal." OFF)
++OPTION(PX_CUMETAL_GPU_RUNTIME "Build the PhysX GPU host runtime against CuMetal." OFF)
++
++IF(PX_CUMETAL_GPU_RUNTIME)
++	IF(NOT EXISTS "${CUMETAL_ROOT_DIR}/runtime/api/cuda.h")
++		MESSAGE(FATAL_ERROR "CUMETAL_ROOT_DIR must point to the CuMetal source tree")
++	ENDIF()
++	# PX_SUPPORT_GPU_PHYSX is derived while every SDK translation unit parses
++	# PxPreprocessor.h, so the platform marker must be visible SDK-wide.
++	ADD_COMPILE_DEFINITIONS(PX_CUMETAL=1)
++	INCLUDE_DIRECTORIES("${CUMETAL_ROOT_DIR}/runtime/api")
++ENDIF()
+ 
+ SET(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+ 
+@@ -111,4 +122,3 @@ IF(PX_BUILDSNIPPETS)
+ 
+ 	MESSAGE("Added Snippets")
+ ENDIF()
+-
+diff --git a/physx/snippets/compiler/cmake/CMakeLists.txt b/physx/snippets/compiler/cmake/CMakeLists.txt
+index 63f7b2f..e342ed8 100644
+--- a/physx/snippets/compiler/cmake/CMakeLists.txt
++++ b/physx/snippets/compiler/cmake/CMakeLists.txt
+@@ -81,7 +81,7 @@ SET(GPU_SNIPPET_LIST
+ 	RBDirectGPUAPI DirectGPUAPIArticulation)
+ 
+ #TODO, create a propper define for whether GPU features are enabled or not!
+-IF (PX_GENERATE_GPU_PROJECTS AND 
++IF ((PX_GENERATE_GPU_PROJECTS OR PX_CUMETAL_GPU_RUNTIME) AND
+     (NOT (CMAKE_CROSSCOMPILING OR CMAKE_GENERATOR_PLATFORM STREQUAL "NX64")))
+     LIST(APPEND SNIPPETS_LIST ${GPU_SNIPPET_LIST})
+ ENDIF()
+diff --git a/physx/snippets/compiler/cmake/SnippetTemplate.cmake b/physx/snippets/compiler/cmake/SnippetTemplate.cmake
+index 953cc3c..88ad334 100644
+--- a/physx/snippets/compiler/cmake/SnippetTemplate.cmake
++++ b/physx/snippets/compiler/cmake/SnippetTemplate.cmake
+@@ -53,6 +53,12 @@ TARGET_COMPILE_DEFINITIONS(Snippet${SNIPPET_NAME}
+ 	PRIVATE ${SNIPPET_COMPILE_DEFS}
+ )
+ 
++IF(PX_CUMETAL_GPU_RUNTIME)
++	TARGET_COMPILE_DEFINITIONS(Snippet${SNIPPET_NAME} PRIVATE PX_CUMETAL=1)
++	TARGET_INCLUDE_DIRECTORIES(Snippet${SNIPPET_NAME}
++		PRIVATE "${CUMETAL_ROOT_DIR}/runtime/api")
++ENDIF()
++
+ SET_TARGET_PROPERTIES(Snippet${SNIPPET_NAME} PROPERTIES 
+     RUNTIME_OUTPUT_DIRECTORY_DEBUG ${PX_EXE_OUTPUT_DIRECTORY_DEBUG}${EXE_PLATFORM_DIR}
+     RUNTIME_OUTPUT_DIRECTORY_PROFILE ${PX_EXE_OUTPUT_DIRECTORY_PROFILE}${EXE_PLATFORM_DIR}
+@@ -82,4 +88,4 @@ IF(PX_GENERATE_SOURCE_DISTRO)
+ 	LIST(APPEND SOURCE_DISTRO_FILE_LIST ${SNIPPET_PLATFORM_SOURCES})
+ 	LIST(APPEND SOURCE_DISTRO_FILE_LIST ${SnippetSources})
+ 	LIST(APPEND SOURCE_DISTRO_FILE_LIST ${SnippetHeaders})
+-ENDIF()
+\ No newline at end of file
++ENDIF()
+diff --git a/physx/snippets/compiler/cmake/linux/CMakeLists.txt b/physx/snippets/compiler/cmake/linux/CMakeLists.txt
+index dbb372c..b9277f5 100644
+--- a/physx/snippets/compiler/cmake/linux/CMakeLists.txt
++++ b/physx/snippets/compiler/cmake/linux/CMakeLists.txt
+@@ -49,7 +49,7 @@ ENDIF()
+ # Include all of the projects
+ SET(PLATFORM_SNIPPETS_LIST LoadCollection)
+ 
+-IF(APPLE)
++IF(APPLE OR PX_CUMETAL_GPU_RUNTIME)
+ 	SET(SNIPPET_RENDER_ENABLED 0)
+ ELSE()
+ 	SET(SNIPPET_RENDER_ENABLED 1)
+diff --git a/physx/snippets/compiler/cmake/linux/SnippetTemplate.cmake b/physx/snippets/compiler/cmake/linux/SnippetTemplate.cmake
+index 202b7fb..0aae7c2 100644
+--- a/physx/snippets/compiler/cmake/linux/SnippetTemplate.cmake
++++ b/physx/snippets/compiler/cmake/linux/SnippetTemplate.cmake
+@@ -28,7 +28,7 @@
+ # Build Snippet linux template
+ #
+ 
+-IF(APPLE)
++IF(APPLE OR PX_CUMETAL_GPU_RUNTIME)
+ 	SET(SNIPPET_RENDER_DEF "")
+ ELSE()
+ 	SET(SNIPPET_RENDER_DEF "RENDER_SNIPPET")
+@@ -52,7 +52,7 @@ SET(SNIPPET_PLATFORM_SOURCES
+ SET(SNIPPET_PLATFORM_INCLUDES
+ )
+ 
+-IF(APPLE)
++IF(APPLE OR PX_CUMETAL_GPU_RUNTIME)
+ 	SET(SNIPPET_PLATFORM_LINKED_LIBS "")
+ ELSE()
+ 	# gwoolery: aarch64 requires glut library to be lower case, for whatever reason
+diff --git a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+index 49c4156..d07e879 100644
+--- a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
++++ b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+@@ -35,6 +35,7 @@
+ 
+ #include <ctype.h>
+ #include "PxPhysicsAPI.h"
++#include "cudamanager/PxCudaContextManager.h"
+ #include "../snippetcommon/SnippetPrint.h"
+ #include "../snippetcommon/SnippetPVD.h"
+ #include "../snippetutils/SnippetUtils.h"
+@@ -50,6 +51,8 @@ static PxScene*					gScene				= NULL;
+ static PxMaterial*				gMaterial			= NULL;
+ static PxPvd*					gPvd				= NULL;
+ static PxCudaContextManager*	gCudaContextManager	= NULL;
++static PxRigidDynamic*			gBall				= NULL;
++static bool						gGpuReady			= false;
+ 
+ static PxReal stackZ = 10.0f;
+ 
+@@ -82,19 +85,20 @@ static void createStack(const PxTransform& t, PxU32 size, PxReal halfExtent)
+ void initPhysics(bool /*interactive*/)
+ {
+ 	gFoundation = PxCreateFoundation(PX_PHYSICS_VERSION, gAllocator, gErrorCallback);
+-	gPvd = PxCreatePvd(*gFoundation);
+-	PxPvdTransport* transport = PxDefaultPvdSocketTransportCreate(PVD_HOST, 5425, 10);
+-	gPvd->connect(*transport, PxPvdInstrumentationFlag::ePROFILE);
+-
+-	gPhysics = PxCreatePhysics(PX_PHYSICS_VERSION, *gFoundation, PxTolerancesScale(), true, gPvd);
++	gPhysics = PxCreatePhysics(PX_PHYSICS_VERSION, *gFoundation, PxTolerancesScale(), true, NULL);
+ 	
+ 	PxCudaContextManagerDesc cudaContextManagerDesc;
+ 	gCudaContextManager = PxCreateCudaContextManager(*gFoundation, cudaContextManagerDesc, PxGetProfilerCallback());	//Create the CUDA context manager, required for GRB to dispatch CUDA kernels.
+-	if( gCudaContextManager )
++	if(gCudaContextManager)
+ 	{
+-		if( !gCudaContextManager->contextIsValid() )
++		if(!gCudaContextManager->contextIsValid())
+ 			PX_RELEASE(gCudaContextManager);
+-	}	
++	}
++	if(!gCudaContextManager)
++	{
++		printf("CuMetal GRB ERROR: GPU context initialization failed.\n");
++		return;
++	}
+ 
+ 	PxSceneDesc sceneDesc(gPhysics->getTolerancesScale());
+ 	sceneDesc.gravity = PxVec3(0.0f, -9.81f, 0.0f);
+@@ -107,21 +111,17 @@ void initPhysics(bool /*interactive*/)
+ 	sceneDesc.flags |= PxSceneFlag::eENABLE_GPU_DYNAMICS;	//Enable GPU dynamics - without this enabled, simulation (contact gen and solver) will run on the CPU.
+ 	sceneDesc.flags |= PxSceneFlag::eENABLE_PCM;			//Enable PCM. PCM NP is supported on GPU. Legacy contact gen will fall back to CPU
+ 	sceneDesc.flags |= PxSceneFlag::eENABLE_STABILIZATION;	//Improve solver stability by enabling post-stabilization.
+-	sceneDesc.broadPhaseType = PxBroadPhaseType::eGPU;		//Enable GPU broad phase. Without this set, broad phase will run on the CPU.
++	sceneDesc.broadPhaseType = PxBroadPhaseType::eABP;
+ 	sceneDesc.gpuMaxNumPartitions = 8;						//Defines the maximum number of partitions used by the solver. Only power-of-2 values are valid. 
+ 															//A value of 8 generally gives best balance between performance and stability.
+ 
+ 	gScene = gPhysics->createScene(sceneDesc);
+-
+-
+-	PxPvdSceneClient* pvdClient = gScene->getScenePvdClient();
+-	if (pvdClient)
++	if(!gScene)
+ 	{
+-		pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_CONSTRAINTS, false);
+-		pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_CONTACTS, false);
+-		pvdClient->setScenePvdFlag(PxPvdSceneFlag::eTRANSMIT_SCENEQUERIES, false);
++		printf("CuMetal GRB ERROR: GPU scene creation failed.\n");
++		return;
+ 	}
+-
++	gGpuReady = true;
+ 
+ 
+ 	gMaterial = gPhysics->createMaterial(0.5f, 0.5f, 0.6f);
+@@ -129,14 +129,8 @@ void initPhysics(bool /*interactive*/)
+ 	PxRigidStatic* groundPlane = PxCreatePlane(*gPhysics, PxPlane(0,1,0,0), *gMaterial);
+ 	gScene->addActor(*groundPlane);
+ 
+-	for(PxU32 i=0;i<40;i++)
+-		createStack(PxTransform(PxVec3(0,0,stackZ-=10.0f)), 20, 1.0f);
+-
+-	//if(!interactive)
+-	{
+-		PxRigidDynamic* ball = createDynamic(PxTransform(PxVec3(0,20,100)), PxSphereGeometry(5), PxVec3(0,-25,-100));
+-		PxRigidBodyExt::updateMassAndInertia(*ball, 1000.f);
+-	}
++	gBall = createDynamic(PxTransform(PxVec3(0, 10, 0)), PxSphereGeometry(1));
++	PxRigidBodyExt::updateMassAndInertia(*gBall, 10.0f);
+ }
+ 
+ void stepPhysics(bool /*interactive*/)
+@@ -181,8 +175,21 @@ int snippetMain(int, const char*const*)
+ #else
+ 	static const PxU32 frameCount = 100;
+ 	initPhysics(false);
++	if(!gGpuReady)
++	{
++		cleanupPhysics(false);
++		return 1;
++	}
++	{
++		const PxTransform pose = gBall->getGlobalPose();
++		printf("CuMetal GRB initial pose: %.9g %.9g %.9g\n", double(pose.p.x), double(pose.p.y), double(pose.p.z));
++	}
+ 	for(PxU32 i=0; i<frameCount; i++)
+ 		stepPhysics(false);
++	const PxTransform pose = gBall->getGlobalPose();
++	printf("CuMetal GRB final pose: %.9g %.9g %.9g\n", double(pose.p.x), double(pose.p.y), double(pose.p.z));
++	const PxVec3 velocity = gBall->getLinearVelocity();
++	printf("CuMetal GRB final velocity: %.9g %.9g %.9g\n", double(velocity.x), double(velocity.y), double(velocity.z));
+ 	cleanupPhysics(false);
+ #endif
+ 
+diff --git a/physx/source/compiler/cmake/linux/CMakeLists.txt b/physx/source/compiler/cmake/linux/CMakeLists.txt
+index b4c865b..60aed01 100644
+--- a/physx/source/compiler/cmake/linux/CMakeLists.txt
++++ b/physx/source/compiler/cmake/linux/CMakeLists.txt
+@@ -178,7 +178,8 @@ ELSE()
+ ENDIF()
+ 
+ # Set DISABLE_CUDA_PHYSX when GPU projects are not enabled
+-IF(NOT PX_GENERATE_GPU_PROJECTS_ONLY AND NOT PX_GENERATE_GPU_PROJECTS)
++IF(NOT PX_GENERATE_GPU_PROJECTS_ONLY AND NOT PX_GENERATE_GPU_PROJECTS AND
++   NOT PX_CUMETAL_GPU_RUNTIME)
+ 	# CMake automatically adds the appropriate prefix (-D for GCC/Clang) when the definition
+ 	# is added to the target via target_compile_definitions or add_definitions
+ 	SET(DISABLE_CUDA_DEF "DISABLE_CUDA_PHYSX")
+diff --git a/physx/source/compiler/cmakegpu/PhysXArticulationGpu.cmake b/physx/source/compiler/cmakegpu/PhysXArticulationGpu.cmake
+index a81d2dd..88b5780 100644
+--- a/physx/source/compiler/cmakegpu/PhysXArticulationGpu.cmake
++++ b/physx/source/compiler/cmakegpu/PhysXArticulationGpu.cmake
+@@ -133,7 +133,7 @@ TARGET_COMPILE_DEFINITIONS(PhysXArticulationGpu
+ 
+ # Since we are setting the C++ standard explicitly for Linux
+ # we need to do this for CUDA as well.
+-IF(TARGET_BUILD_PLATFORM STREQUAL "linux")
++IF(TARGET_BUILD_PLATFORM STREQUAL "linux" AND NOT PX_CUMETAL_GPU_RUNTIME)
+ 	TARGET_COMPILE_FEATURES(PhysXArticulationGpu PRIVATE cuda_std_11)
+ ENDIF()
+ 
+diff --git a/physx/source/compiler/cmakegpu/PhysXBroadphaseGpu.cmake b/physx/source/compiler/cmakegpu/PhysXBroadphaseGpu.cmake
+index d0db171..e1c80fe 100644
+--- a/physx/source/compiler/cmakegpu/PhysXBroadphaseGpu.cmake
++++ b/physx/source/compiler/cmakegpu/PhysXBroadphaseGpu.cmake
+@@ -130,7 +130,7 @@ TARGET_COMPILE_DEFINITIONS(PhysXBroadphaseGpu
+ 
+ # Since we are setting the C++ standard explicitly for Linux
+ # we need to do this for CUDA as well.
+-IF(TARGET_BUILD_PLATFORM STREQUAL "linux")
++IF(TARGET_BUILD_PLATFORM STREQUAL "linux" AND NOT PX_CUMETAL_GPU_RUNTIME)
+ 	TARGET_COMPILE_FEATURES(PhysXBroadphaseGpu PRIVATE cuda_std_11)
+ ENDIF()
+ 
+@@ -146,4 +146,3 @@ ENDIF()
+ SET_TARGET_PROPERTIES(PhysXBroadphaseGpu PROPERTIES
+ 	POSITION_INDEPENDENT_CODE TRUE
+ )
+-
+diff --git a/physx/source/compiler/cmakegpu/PhysXCommonGpu.cmake b/physx/source/compiler/cmakegpu/PhysXCommonGpu.cmake
+index 65b1064..0d05854 100644
+--- a/physx/source/compiler/cmakegpu/PhysXCommonGpu.cmake
++++ b/physx/source/compiler/cmakegpu/PhysXCommonGpu.cmake
+@@ -173,7 +173,7 @@ TARGET_COMPILE_DEFINITIONS(PhysXCommonGpu
+ 
+ # Since we are setting the C++ standard explicitly for Linux
+ # we need to do this for CUDA as well.
+-IF(TARGET_BUILD_PLATFORM STREQUAL "linux")
++IF(TARGET_BUILD_PLATFORM STREQUAL "linux" AND NOT PX_CUMETAL_GPU_RUNTIME)
+ 	TARGET_COMPILE_FEATURES(PhysXCommonGpu PRIVATE cuda_std_11)
+ ENDIF()
+ 
+@@ -190,4 +190,3 @@ ENDIF()
+ SET_TARGET_PROPERTIES(PhysXCommonGpu PROPERTIES
+ 	POSITION_INDEPENDENT_CODE TRUE
+ )
+-
+diff --git a/physx/source/compiler/cmakegpu/PhysXNarrowphaseGpu.cmake b/physx/source/compiler/cmakegpu/PhysXNarrowphaseGpu.cmake
+index c0cbfbf..76b0857 100644
+--- a/physx/source/compiler/cmakegpu/PhysXNarrowphaseGpu.cmake
++++ b/physx/source/compiler/cmakegpu/PhysXNarrowphaseGpu.cmake
+@@ -190,7 +190,7 @@ TARGET_COMPILE_DEFINITIONS(PhysXNarrowphaseGpu
+ 
+ # Since we are setting the C++ standard explicitly for Linux
+ # we need to do this for CUDA as well.
+-IF(TARGET_BUILD_PLATFORM STREQUAL "linux")
++IF(TARGET_BUILD_PLATFORM STREQUAL "linux" AND NOT PX_CUMETAL_GPU_RUNTIME)
+ 	TARGET_COMPILE_FEATURES(PhysXNarrowphaseGpu PRIVATE cuda_std_11)
+ ENDIF()
+ 
+diff --git a/physx/source/compiler/cmakegpu/PhysXSimulationControllerGpu.cmake b/physx/source/compiler/cmakegpu/PhysXSimulationControllerGpu.cmake
+index 463c149..63893ba 100644
+--- a/physx/source/compiler/cmakegpu/PhysXSimulationControllerGpu.cmake
++++ b/physx/source/compiler/cmakegpu/PhysXSimulationControllerGpu.cmake
+@@ -216,7 +216,7 @@ TARGET_COMPILE_DEFINITIONS(PhysXSimulationControllerGpu
+ 
+ # Since we are setting the C++ standard explicitly for Linux
+ # we need to do this for CUDA as well.
+-IF(TARGET_BUILD_PLATFORM STREQUAL "linux")
++IF(TARGET_BUILD_PLATFORM STREQUAL "linux" AND NOT PX_CUMETAL_GPU_RUNTIME)
+ 	TARGET_COMPILE_FEATURES(PhysXSimulationControllerGpu PRIVATE cuda_std_11)
+ ENDIF()
+ 
+diff --git a/physx/source/compiler/cmakegpu/PhysXSolverGpu.cmake b/physx/source/compiler/cmakegpu/PhysXSolverGpu.cmake
+index f26033f..55e51e3 100644
+--- a/physx/source/compiler/cmakegpu/PhysXSolverGpu.cmake
++++ b/physx/source/compiler/cmakegpu/PhysXSolverGpu.cmake
+@@ -186,7 +186,7 @@ TARGET_COMPILE_DEFINITIONS(PhysXSolverGpu
+ 
+ # Since we are setting the C++ standard explicitly for Linux
+ # we need to do this for CUDA as well.
+-IF(TARGET_BUILD_PLATFORM STREQUAL "linux")
++IF(TARGET_BUILD_PLATFORM STREQUAL "linux" AND NOT PX_CUMETAL_GPU_RUNTIME)
+ 	TARGET_COMPILE_FEATURES(PhysXSolverGpu PRIVATE cuda_std_11)
+ ENDIF()
+ 
+@@ -203,4 +203,3 @@ ENDIF()
+ SET_TARGET_PROPERTIES(PhysXSolverGpu PROPERTIES
+ 	POSITION_INDEPENDENT_CODE TRUE
+ )
+-
+diff --git a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+index 980b37f..d7c199a 100644
+--- a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -189,3 +189,54 @@ LIST(LENGTH PX_CUMETAL_KERNEL_SPECS PX_CUMETAL_KERNEL_COUNT)
+ MESSAGE(STATUS "Configured ${PX_CUMETAL_KERNEL_COUNT} CuMetal kernels for reduced SnippetHelloGRB")
+ ADD_CUSTOM_TARGET(PhysXCumetalGpuKernels
+ 	DEPENDS ${PX_CUMETAL_KERNEL_OUTPUTS} "${PX_CUMETAL_KERNEL_MANIFEST}")
++
++IF(PX_CUMETAL_GPU_RUNTIME)
++	SET(CUMETAL_ROOT_DIR "" CACHE PATH "Path to the CuMetal source tree")
++	SET(CUMETAL_LIBRARY "" CACHE FILEPATH "Path to libcumetal.dylib")
++	IF(NOT EXISTS "${CUMETAL_ROOT_DIR}/runtime/api/cuda.h")
++		MESSAGE(FATAL_ERROR "CUMETAL_ROOT_DIR must point to the CuMetal source tree")
++	ENDIF()
++	IF(NOT EXISTS "${CUMETAL_LIBRARY}")
++		MESSAGE(FATAL_ERROR "CUMETAL_LIBRARY must point to libcumetal.dylib")
++	ENDIF()
++
++	# PhysX's GPU CMake lists combine host C++ and nvcc translation units.
++	# The latter are built above by cumetalc, so expose them to CMake only as
++	# source/header dependencies while compiling the existing host runtime.
++	FILE(GLOB_RECURSE PX_CUMETAL_CUDA_SOURCES
++		"${PHYSX_SOURCE_DIR}/gpuarticulation/*.cu"
++		"${PHYSX_SOURCE_DIR}/gpubroadphase/*.cu"
++		"${PHYSX_SOURCE_DIR}/gpucommon/*.cu"
++		"${PHYSX_SOURCE_DIR}/gpunarrowphase/*.cu"
++		"${PHYSX_SOURCE_DIR}/gpusimulationcontroller/*.cu"
++		"${PHYSX_SOURCE_DIR}/gpusolver/*.cu")
++	SET_SOURCE_FILES_PROPERTIES(${PX_CUMETAL_CUDA_SOURCES}
++		PROPERTIES HEADER_FILE_ONLY TRUE)
++
++	SET(PX_GENERATE_GPU_STATIC_LIBRARIES ON)
++	SET(PROJECT_CMAKE_FILES_DIR source/compiler/cmakegpu)
++	INCLUDE("${PHYSX_ROOT_DIR}/${PROJECT_CMAKE_FILES_DIR}/PhysXBroadphaseGpu.cmake")
++	INCLUDE("${PHYSX_ROOT_DIR}/${PROJECT_CMAKE_FILES_DIR}/PhysXCommonGpu.cmake")
++	INCLUDE("${PHYSX_ROOT_DIR}/${PROJECT_CMAKE_FILES_DIR}/PhysXNarrowphaseGpu.cmake")
++	INCLUDE("${PHYSX_ROOT_DIR}/${PROJECT_CMAKE_FILES_DIR}/PhysXSimulationControllerGpu.cmake")
++	INCLUDE("${PHYSX_ROOT_DIR}/${PROJECT_CMAKE_FILES_DIR}/PhysXSolverGpu.cmake")
++	INCLUDE("${PHYSX_ROOT_DIR}/${PROJECT_CMAKE_FILES_DIR}/PhysXCudaContextManager.cmake")
++	INCLUDE("${PHYSX_ROOT_DIR}/${PROJECT_CMAKE_FILES_DIR}/PhysXArticulationGpu.cmake")
++	INCLUDE("${PHYSX_ROOT_DIR}/${PROJECT_CMAKE_FILES_DIR}/PhysXGpuDependencies.cmake")
++	INCLUDE("${PHYSX_ROOT_DIR}/${PROJECT_CMAKE_FILES_DIR}/PhysXGpu.cmake")
++
++	SET(PX_CUMETAL_GPU_TARGETS
++		PhysXBroadphaseGpu PhysXCommonGpu PhysXNarrowphaseGpu
++		PhysXSimulationControllerGpu PhysXSolverGpu
++		PhysXCudaContextManager PhysXArticulationGpu
++		PhysXGpuDependencies PhysXGpu)
++	FOREACH(gpu_target IN LISTS PX_CUMETAL_GPU_TARGETS)
++		TARGET_INCLUDE_DIRECTORIES(${gpu_target} PRIVATE
++			"${CUMETAL_ROOT_DIR}/runtime/api")
++		TARGET_COMPILE_DEFINITIONS(${gpu_target} PRIVATE PX_CUMETAL=1)
++	ENDFOREACH()
++	TARGET_SOURCES(PhysXGpu PRIVATE
++		"${PHYSX_SOURCE_DIR}/cudamanager/src/CuMetalKernelInitStubs.cpp")
++	TARGET_LINK_LIBRARIES(PhysXGpu PUBLIC "${CUMETAL_LIBRARY}")
++	ADD_DEPENDENCIES(PhysXGpu PhysXCumetalGpuKernels)
++ENDIF()
+diff --git a/physx/source/cudamanager/include/CudaKernelWrangler.h b/physx/source/cudamanager/include/CudaKernelWrangler.h
+index a0a20f6..51c7cbd 100644
+--- a/physx/source/cudamanager/include/CudaKernelWrangler.h
++++ b/physx/source/cudamanager/include/CudaKernelWrangler.h
+@@ -55,7 +55,7 @@ class KernelWrangler : public PxUserAllocated
+ 	PX_NOCOPY(KernelWrangler)
+ public:
+ 	KernelWrangler(PxCudaContextManager& cudaContextManager, PxErrorCallback& errorCallback, const char** funcNames, uint16_t numFuncs);
+-	virtual ~KernelWrangler() {}
++	virtual ~KernelWrangler();
+ 
+ 	PX_FORCE_INLINE	CUfunction getCuFunction(uint16_t funcIndex) const
+ 	{
+@@ -72,6 +72,9 @@ protected:
+ 	bool					mError;
+ 	const char**			mKernelNames;
+ 	PxArray<CUfunction>		mCuFunctions;
++#if PX_CUMETAL
++	PxArray<CUmodule>		mCuModules;
++#endif
+ 	PxCudaContextManager&	mCudaContextManager;
+ 	PxCudaContext*			mCudaContext;
+ 	PxErrorCallback&		mErrorCallback;
+diff --git a/physx/source/cudamanager/src/CudaContextManager.cpp b/physx/source/cudamanager/src/CudaContextManager.cpp
+index a6a511c..04d3f7a 100644
+--- a/physx/source/cudamanager/src/CudaContextManager.cpp
++++ b/physx/source/cudamanager/src/CudaContextManager.cpp
+@@ -91,7 +91,9 @@ typedef unsigned int GLenum;
+ typedef unsigned int GLuint;
+ 
+ //#include <GL/gl.h>
++#if !PX_CUMETAL
+ #include <cudaGL.h>
++#endif
+ #include <assert.h>
+ 
+ #include "foundation/PxErrors.h"
+@@ -684,6 +686,10 @@ CudaCtxMgr::CudaCtxMgr(const PxCudaContextManagerDesc& desc, PxErrorCallback& er
+  */
+ bool CudaCtxMgr::safeDelayImport(PxErrorCallback& errorCallback)
+ {
++#if PX_CUMETAL
++	PX_UNUSED(errorCallback);
++	return cuDriverGetVersion(&mDriverVersion) == CUDA_SUCCESS;
++#else
+ #if PX_WIN32 || PX_WIN64
+ 	HMODULE hCudaDriver = LoadLibrary("nvcuda.dll");
+ #elif PX_LINUX
+@@ -745,6 +751,7 @@ bool CudaCtxMgr::safeDelayImport(PxErrorCallback& errorCallback)
+ #endif
+ 
+ 	return true;
++#endif
+ }
+ 
+ void CudaCtxMgr::release()
+@@ -1503,5 +1510,3 @@ PxCudaContextManager* createCudaContextManager(const PxCudaContextManagerDesc& d
+ #endif
+ 
+ } // end physx namespace
+-
+-
+diff --git a/physx/source/cudamanager/src/CudaKernelWrangler.cpp b/physx/source/cudamanager/src/CudaKernelWrangler.cpp
+index 05c49de..f0f8ce0 100644
+--- a/physx/source/cudamanager/src/CudaKernelWrangler.cpp
++++ b/physx/source/cudamanager/src/CudaKernelWrangler.cpp
+@@ -25,6 +25,7 @@
+ // Copyright (c) 2008-2025 NVIDIA Corporation. All rights reserved.
+ 
+ #include <stdio.h>
++#include <stdlib.h>
+ 
+ #include "foundation/PxPreprocessor.h"
+ #include "foundation/PxAssert.h"
+@@ -47,7 +48,9 @@
+ #pragma clang diagnostic pop
+ #endif
+ 
++#if !PX_CUMETAL
+ #include <texture_types.h>
++#endif
+ #include <vector_types.h>
+ 
+ #include "cudamanager/PxCudaContextManager.h"
+@@ -68,6 +71,9 @@ KernelWrangler::KernelWrangler(PxCudaContextManager& cudaContextManager, PxError
+ 	: mError(false)
+ 	, mKernelNames(NULL)
+ 	, mCuFunctions("CuFunctions")
++#if PX_CUMETAL
++	, mCuModules("CuMetalModules")
++#endif
+ 	, mCudaContextManager(cudaContextManager)
+ 	, mCudaContext(cudaContextManager.getCudaContext())
+ 	, mErrorCallback(errorCallback)
+@@ -79,13 +85,67 @@ KernelWrangler::KernelWrangler(PxCudaContextManager& cudaContextManager, PxError
+ 	PX_ASSERT(funcNames);
+ 	mKernelNames = funcNames;
+ 
++	mCuFunctions.resize(numFuncs, NULL);
++
++#if PX_CUMETAL
++	const char* kernelDirectory = getenv("CUMETAL_PHYSX_KERNEL_DIR");
++	if (!kernelDirectory || !kernelDirectory[0])
++	{
++		mErrorCallback.reportError(PxErrorCode::eINTERNAL_ERROR,
++			"CUMETAL_PHYSX_KERNEL_DIR must point to the compiled PhysX kernel directory.", PX_FL);
++		mError = true;
++		return;
++	}
++
++	if (mCudaContextManager.tryAcquireContext())
++	{
++		for (uint32_t i = 0; i < numFuncs; ++i)
++		{
++			char path[1024];
++			Pxsnprintf(path, sizeof(path), "%s/%s.metallib", kernelDirectory, funcNames[i]);
++
++			// The reduced bring-up build intentionally compiles only the kernels
++			// needed by SnippetHelloGRB. Missing artifacts remain unresolved until
++			// a scene actually asks for them.
++			FILE* file = fopen(path, "rb");
++			if (!file)
++				continue;
++			fclose(file);
++
++			CUmodule module = NULL;
++			PxCUresult ret = mCudaContext->moduleLoadDataEx(&module, path, 0, NULL, NULL);
++			if (ret == CUDA_SUCCESS)
++				ret = mCudaContext->moduleGetFunction(&mCuFunctions[i], module, funcNames[i]);
++
++			if (ret != CUDA_SUCCESS)
++			{
++				if (module)
++					mCudaContext->moduleUnload(module);
++
++				char buffer[1280];
++				Pxsnprintf(buffer, sizeof(buffer), "Could not load CuMetal kernel '%s' from '%s' (CUDA error %d).",
++					funcNames[i], path, int(ret));
++				mErrorCallback.reportError(PxErrorCode::eINTERNAL_ERROR, buffer, PX_FL);
++				mError = true;
++				continue;
++			}
++
++			mCuModules.pushBack(module);
++		}
++		mCudaContextManager.releaseContext();
++	}
++	else
++	{
++		mErrorCallback.reportError(PxErrorCode::eINTERNAL_ERROR, "Failed to acquire the CuMetal context.", PX_FL);
++		mError = true;
++	}
++	return;
++#else
+ 	// matchup funcNames to CUDA modules, get CUfunction handles
+ 	CUmodule* cuModules = cudaContextManager.getCuModules();
+ 	PxKernelIndex* cuFunctionTable = PxGpuGetCudaFunctionTable();
+ 	const PxU32 cuFunctionTableSize = PxGpuGetCudaFunctionTableSize();
+ 
+-	mCuFunctions.resize(numFuncs, NULL);
+-
+ 	if (mCudaContextManager.tryAcquireContext())
+ 	{
+ 		for (uint32_t i = 0; i < numFuncs; ++i)
+@@ -129,6 +189,25 @@ KernelWrangler::KernelWrangler(PxCudaContextManager& cudaContextManager, PxError
+ 		mErrorCallback.reportError(PxErrorCode::eINTERNAL_ERROR, buffer, PX_FL);
+ 		mError = true;
+ 	}
++#endif
++}
++
++#if PX_CUMETAL
++KernelWrangler::~KernelWrangler()
++{
++	if (mCuModules.empty())
++		return;
++
++	if (mCudaContextManager.tryAcquireContext())
++	{
++		for (PxU32 i = 0; i < mCuModules.size(); ++i)
++			mCudaContext->moduleUnload(mCuModules[i]);
++		mCudaContextManager.releaseContext();
++	}
++}
++#else
++KernelWrangler::~KernelWrangler()
++{
+ }
+ 
+ /*
+@@ -201,6 +280,7 @@ cudaError_t CUDARTAPI cudaLaunchKernel( const void* , dim3 , dim3 , void** , siz
+ {
+ 	return cudaSuccess;
+ }
++#endif
+ 
+ extern "C"
+ cudaError_t CUDARTAPI cudaSetupArgument(const void*, size_t, size_t)
+@@ -229,4 +309,4 @@ cudaError_t CUDARTAPI __cudaPopCallConfiguration(
+   void         *)
+ {
+ 	return cudaSuccess;
+-}
+\ No newline at end of file
++}
+diff --git a/physx/source/gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu b/physx/source/gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu
+index cdb214b..26aa1eb 100644
+--- a/physx/source/gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu
++++ b/physx/source/gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu
+@@ -84,6 +84,21 @@ extern "C" __global__ void updateBodiesLaunch(const PxgNewBodiesDesc* scDesc)
+ 
+ 	const PxU32 idx = threadIdx.x + blockIdx.x * blockDim.x;
+ 
++#if PX_CUMETAL
++	// CuMetal intentionally emulates partial warp masks as full SIMD-group
++	// operations. Use a body-per-thread copy for this initialization path so
++	// the 16-lane ballot/shuffle protocol below is not required.
++	if(idx < totalNbBodies)
++	{
++		const PxU32* src = reinterpret_cast<const PxU32*>(gBodySim);
++		PxU32* dst = reinterpret_cast<PxU32*>(gBodySimPool);
++		const PxU32 wordsPerBody = sizeof(PxgBodySim) / sizeof(PxU32);
++		const PxU32 bodyIndex =
++			src[idx * wordsPerBody + PXG_BODY_SIM_BODYSIM_INDEX_IND * 4 + 3];
++		for(PxU32 j = 0; j < wordsPerBody; ++j)
++			dst[bodyIndex * wordsPerBody + j] = src[idx * wordsPerBody + j];
++	}
++#else
+ 	//each PxgBodySim has 224 bytes, so we need to use 16 threads to read one body. In fact,
+ 	//we just need to use 14 threads(each thread read one 16 bytes), however, we should use 16 threads because shfl is working in a warp
+ 	//for (PxU32 i = idx / 16; i < totalNbBodies; i += (blockDim.x * gridDim.x) / 16)
+@@ -100,6 +115,7 @@ extern "C" __global__ void updateBodiesLaunch(const PxgNewBodiesDesc* scDesc)
+ 		if (index < PXG_BODY_SIM_UINT4_SIZE)
+ 			gBodySimPool[bodyIndex * PXG_BODY_SIM_UINT4_SIZE + index] = data;
+ 	}
++#endif
+ }
+ 
+ extern "C" __global__ void updateBodiesLaunchDirectAPI(const PxgNewBodiesDesc* scDesc)
+diff --git a/physx/source/gpusolver/src/CUDA/preIntegration.cuh b/physx/source/gpusolver/src/CUDA/preIntegration.cuh
+index a629a75..3cbf5cf 100644
+--- a/physx/source/gpusolver/src/CUDA/preIntegration.cuh
++++ b/physx/source/gpusolver/src/CUDA/preIntegration.cuh
+@@ -178,6 +178,76 @@ static __device__ void preIntegration(const uint32_t offset, const uint32_t nbSo
+ 	PxU32* PX_RESTRICT solverBodyIndices,
+ 	bool skipGravityApplication = false)
+ {
++#if PX_CUMETAL
++	{
++	// CuMetal currently emulates partial warp masks as a full SIMD group.
++	// The CUDA path below uses warp-cooperative swizzled loads whose active
++	// lanes depend on the body count. Use the equivalent body-per-thread
++	// formulation until masked SIMD operations have exact CUDA semantics.
++	const uint32_t idx = threadIdx.x + blockIdx.x * blockDim.x;
++	const uint32_t a = idx + offset;
++	if(a >= nbSolverBodies)
++		return;
++
++	const PxU32 nodeIndex = islandNodeIndices[a].index();
++	solverBodyIndices[nodeIndex] = a;
++	const PxgBodySim& bodySim = bodySimPool[nodeIndex];
++
++	float4 linearVelocity = bodySim.linearVelocityXYZ_inverseMassW;
++	float4 angularVelocity = bodySim.angularVelocityXYZ_maxPenBiasW;
++	const float4 linearAccel = skipGravityApplication ? make_float4(0.0f) : bodySim.externalLinearAcceleration;
++	const float4 angularAccel = skipGravityApplication ? make_float4(0.0f) : bodySim.externalAngularAcceleration;
++	bodyCoreComputeUnconstrainedVelocity(
++		bodySim.maxLinearVelocitySqX_maxAngularVelocitySqY_linearDampingZ_angularDampingW,
++		linearVelocity, angularVelocity, bodySim.lockFlags,
++		bodySim.disableGravity || skipGravityApplication,
++		bodySim.sleepAngVelAccXYZ_accelScaleW.w, gravity,
++		linearAccel, angularAccel, dt);
++
++	const PxVec3 inverseInertia(
++		bodySim.inverseInertiaXYZ_contactReportThresholdW.x,
++		bodySim.inverseInertiaXYZ_contactReportThresholdW.y,
++		bodySim.inverseInertiaXYZ_contactReportThresholdW.z);
++	const PxVec3 safeSqrtInvInertia = computeSafeSqrtInertia(inverseInertia);
++	const PxMat33 rotation(reinterpret_cast<const PxQuat&>(bodySim.body2World.q));
++	PxMat33 sqrtInvInertia;
++	transformInertiaTensor(safeSqrtInvInertia, rotation, sqrtInvInertia);
++
++	gOutVelocityPool[a] = linearVelocity;
++	const PxVec3 sqrtInertiaV(
++		safeSqrtInvInertia.x == 0.f ? 0.f : 1.f / safeSqrtInvInertia.x,
++		safeSqrtInvInertia.y == 0.f ? 0.f : 1.f / safeSqrtInvInertia.y,
++		safeSqrtInvInertia.z == 0.f ? 0.f : 1.f / safeSqrtInvInertia.z);
++	PxMat33 sqrtInertia;
++	transformInertiaTensor(sqrtInertiaV, rotation, sqrtInertia);
++	const PxVec3 angularVelocity3(angularVelocity.x, angularVelocity.y, angularVelocity.z);
++	const PxVec3 angularMomocity = sqrtInertia * angularVelocity3;
++	gOutVelocityPool[a + nbSolverBodies] =
++		make_float4(angularMomocity.x, angularMomocity.y, angularMomocity.z, angularVelocity.w);
++	gTransforms[a] = bodySim.body2World;
++
++	PxgSolverBodyData& data = solverBodyDataPool[a];
++	data.body2World = bodySim.body2World;
++	data.initialLinVelXYZ_invMassW = linearVelocity;
++	data.initialAngVelXYZ_penBiasClamp = angularVelocity;
++	data.offsetSlop = bodySim.offsetSlop;
++	data.reportThreshold = bodySim.inverseInertiaXYZ_contactReportThresholdW.w;
++	data.islandNodeIndex = PxNodeIndex(nodeIndex);
++	data.maxImpulse = bodySim.body2Actor_maxImpulseW.p.w;
++	PxU32 flags = 0;
++	if(bodySim.internalFlags & PxsRigidBody::eSPECULATIVE_CCD)
++		flags |= PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD;
++	if(bodySim.internalFlags & PxsRigidBody::eENABLE_GYROSCOPIC)
++		flags |= PxRigidBodyFlag::eENABLE_GYROSCOPIC_FORCES;
++	data.flags = flags;
++
++	solverTxIDataPool[a].sqrtInvInertia = sqrtInvInertia;
++	solverTxIDataPool[a].deltaBody2World = PxTransform(PxIdentity);
++	(void)solverBodySleepDataPool;
++	return;
++	}
++#endif
++
+ 	const uint32_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+ 	const uint32_t a = idx + offset;
+ 
+@@ -436,4 +506,3 @@ static __device__ void preIntegration(const uint32_t offset, const uint32_t nbSo
+ 
+ 	}
+ }
+-

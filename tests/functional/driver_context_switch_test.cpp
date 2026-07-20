@@ -1,6 +1,8 @@
 #include "cuda.h"
 
+#include <atomic>
 #include <cstdio>
+#include <thread>
 
 int main() {
     if (cuInit(0) != CUDA_SUCCESS) {
@@ -28,6 +30,26 @@ int main() {
     const unsigned int create_flags = CU_CTX_SCHED_BLOCKING_SYNC | CU_CTX_MAP_HOST;
     if (cuCtxCreate(&ctx3, create_flags, device) != CUDA_SUCCESS || ctx3 == nullptr) {
         std::fprintf(stderr, "FAIL: cuCtxCreate(ctx3, flags) failed\n");
+        return 1;
+    }
+
+    std::atomic<bool> worker_ok{true};
+    std::thread worker([&]() {
+        CUcontext worker_current = reinterpret_cast<CUcontext>(0x1);
+        worker_ok = cuCtxGetCurrent(&worker_current) == CUDA_SUCCESS &&
+                    worker_current == nullptr;
+        worker_ok = worker_ok && cuCtxPushCurrent(ctx2) == CUDA_SUCCESS;
+        worker_ok = worker_ok && cuCtxGetCurrent(&worker_current) == CUDA_SUCCESS &&
+                    worker_current == ctx2;
+        CUcontext popped = nullptr;
+        worker_ok = worker_ok && cuCtxPopCurrent(&popped) == CUDA_SUCCESS &&
+                    popped == ctx2;
+        worker_ok = worker_ok && cuCtxGetCurrent(&worker_current) == CUDA_SUCCESS &&
+                    worker_current == nullptr;
+    });
+    worker.join();
+    if (!worker_ok) {
+        std::fprintf(stderr, "FAIL: worker thread context stack is not isolated\n");
         return 1;
     }
 

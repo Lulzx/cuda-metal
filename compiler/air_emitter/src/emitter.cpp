@@ -34,6 +34,36 @@ struct KernelInput {
     std::vector<cumetal::common::KernelMetadataField> metadata;
 };
 
+std::size_t count_explicit_kernel_arguments(const std::string& arguments) {
+    std::size_t count = 0;
+    std::size_t start = 0;
+    int nesting = 0;
+    for (std::size_t i = 0; i <= arguments.size(); ++i) {
+        const bool at_end = i == arguments.size();
+        const char c = at_end ? ',' : arguments[i];
+        if (!at_end) {
+            if (c == '<' || c == '[' || c == '{' || c == '(') {
+                ++nesting;
+            } else if (c == '>' || c == ']' || c == '}' || c == ')') {
+                --nesting;
+            }
+        }
+        if (c != ',' || nesting != 0) {
+            continue;
+        }
+
+        const std::string argument = arguments.substr(start, i - start);
+        if (argument.find("%__air_") != std::string::npos) {
+            break;
+        }
+        if (argument.find_first_not_of(" \t") != std::string::npos) {
+            ++count;
+        }
+        start = i + 1;
+    }
+    return count;
+}
+
 std::string quote_shell(const std::string& value) {
     std::string quoted;
     quoted.reserve(value.size() + 2);
@@ -195,6 +225,7 @@ std::vector<KernelInput> parse_kernels_from_llvm_ir(const std::vector<std::uint8
     struct FunctionDecl {
         std::string name;
         int attr_id = -1;
+        std::size_t argument_count = 0;
     };
 
     std::vector<FunctionDecl> decls;
@@ -204,7 +235,7 @@ std::vector<KernelInput> parse_kernels_from_llvm_ir(const std::vector<std::uint8
     bool saw_air_language_version = false;
 
     const std::regex define_re(
-        R"(^\s*define\b.*@([A-Za-z_.$][A-Za-z0-9_.$]*)\(.*\)\s*(?:#([0-9]+))?)");
+        R"(^\s*define\b.*@([A-Za-z_.$][A-Za-z0-9_.$]*)\((.*)\)\s*(?:#([0-9]+))?)");
     const std::regex attr_re(R"(^\s*attributes\s+#([0-9]+)\s*=\s*\{(.*)\}\s*$)");
     const std::regex quoted_key_re(R"re("([^"]+)"(?:="([^"]*)")?)re");
 
@@ -223,8 +254,9 @@ std::vector<KernelInput> parse_kernels_from_llvm_ir(const std::vector<std::uint8
         if (std::regex_search(line, define_match, define_re)) {
             FunctionDecl decl;
             decl.name = define_match[1].str();
-            if (define_match[2].matched) {
-                decl.attr_id = std::stoi(define_match[2].str());
+            decl.argument_count = count_explicit_kernel_arguments(define_match[2].str());
+            if (define_match[3].matched) {
+                decl.attr_id = std::stoi(define_match[3].str());
             }
             decls.push_back(std::move(decl));
             continue;
@@ -267,6 +299,8 @@ std::vector<KernelInput> parse_kernels_from_llvm_ir(const std::vector<std::uint8
                     kernel.metadata = found->second;
                 }
             }
+            kernel.metadata.push_back(
+                {.key = "kernel.arg_count", .value = std::to_string(decl.argument_count)});
 
             bool has_air_kernel = false;
             bool has_air_version = false;

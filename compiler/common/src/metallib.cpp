@@ -574,6 +574,60 @@ void scan_string_candidates(MetallibSummary* summary,
     }
 }
 
+void infer_air_reflection_argument_counts(MetallibSummary* summary,
+                                          const std::vector<std::uint8_t>& bytes) {
+    if (summary == nullptr || summary->cumetal.parsed) {
+        return;
+    }
+
+    for (auto& kernel : summary->kernels) {
+        if (kernel.name.empty()) {
+            continue;
+        }
+
+        const std::string prefix = kernel.name + "_param_";
+        std::array<bool, 32> seen{};
+        for (std::size_t i = 0; i + prefix.size() < bytes.size(); ++i) {
+            if (std::memcmp(bytes.data() + i, prefix.data(), prefix.size()) != 0) {
+                continue;
+            }
+            std::size_t cursor = i + prefix.size();
+            std::size_t index = 0;
+            bool have_digit = false;
+            while (cursor < bytes.size() &&
+                   std::isdigit(static_cast<unsigned char>(bytes[cursor])) != 0) {
+                have_digit = true;
+                index = index * 10 + static_cast<std::size_t>(bytes[cursor] - '0');
+                ++cursor;
+            }
+            // Aggregate source arguments are flattened in AIR and reflected
+            // as <kernel>_param_<source-index>_<byte-offset>_. They remain one
+            // CUDA Driver API kernelParams slot, so count the source index
+            // rather than the flattened AIR fields.
+            if (have_digit && index < seen.size() && cursor < bytes.size() &&
+                (bytes[cursor] == 0 || bytes[cursor] == '_')) {
+                seen[index] = true;
+            }
+        }
+
+        if (!seen[0]) {
+            continue;
+        }
+        std::size_t count = 0;
+        while (count < seen.size() && seen[count]) {
+            ++count;
+        }
+        bool has_gap = false;
+        for (std::size_t i = count; i < seen.size(); ++i) {
+            has_gap = has_gap || seen[i];
+        }
+        if (!has_gap) {
+            kernel.metadata.push_back(
+                {.key = "kernel.arg_count", .value = std::to_string(count)});
+        }
+    }
+}
+
 }  // namespace
 
 std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path, std::string* error) {
@@ -659,6 +713,13 @@ MetallibSummary inspect_metallib_bytes(const std::string& path,
     } else {
         (void)parse_real_metallib(&summary, bytes);
     }
+
+    // CuMetal's PTX lowering names explicit AIR arguments
+    // <kernel>_param_<index>. Apple's production metallib preserves these
+    // reflection strings even though it does not preserve CuMetal's custom
+    // metadata fields. Recover the exact Driver API kernelParams bound without
+    // relying on CUDA's non-existent null terminator.
+    infer_air_reflection_argument_counts(&summary, bytes);
 
     scan_bitcode_sections(&summary, bytes);
     std::sort(summary.bitcode_sections.begin(), summary.bitcode_sections.end(),

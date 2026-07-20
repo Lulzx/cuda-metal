@@ -2,6 +2,7 @@
 #include "cumetal/common/metallib.h"
 #include "cumetal/ptx/lower_to_metal.h"
 #include "cumetal/ptx/lower_to_llvm.h"
+#include "cumetal/ptx/parser.h"
 
 #include <cctype>
 #include <chrono>
@@ -25,6 +26,49 @@ struct CommandResult {
     int exit_code = -1;
     std::string output;
 };
+
+std::uint32_t ptx_scalar_size(std::string_view type) {
+    if (type == ".u8" || type == ".s8" || type == ".b8") return 1;
+    if (type == ".u16" || type == ".s16" || type == ".b16") return 2;
+    if (type == ".u64" || type == ".s64" || type == ".b64" || type == ".f64") return 8;
+    return 4;
+}
+
+std::uint32_t ptx_param_size(const cumetal::ptx::Parameter& param) {
+    const auto open = param.name.rfind('[');
+    const auto close = param.name.rfind(']');
+    if (open != std::string::npos && close == param.name.size() - 1 && close > open + 1) {
+        const std::string count_text = param.name.substr(open + 1, close - open - 1);
+        char* end = nullptr;
+        const unsigned long count = std::strtoul(count_text.c_str(), &end, 10);
+        if (end != count_text.c_str() && *end == '\0' && count <= 4096) {
+            return static_cast<std::uint32_t>(count) * ptx_scalar_size(param.type);
+        }
+    }
+    return ptx_scalar_size(param.type);
+}
+
+std::string build_ptx_abi_sidecar(std::string_view ptx_source,
+                                  const std::string& requested_entry) {
+    cumetal::ptx::ParseOptions parse_options;
+    parse_options.strict = false;
+    const auto parsed = cumetal::ptx::parse_ptx(ptx_source, parse_options);
+    if (!parsed.ok) {
+        return {};
+    }
+    for (const auto& entry : parsed.module.entries) {
+        if (!requested_entry.empty() && entry.name != requested_entry) {
+            continue;
+        }
+        std::string text = "CUMETAL_ABI_V1\nkernel " + entry.name + "\n";
+        for (const auto& param : entry.params) {
+            text += param.is_pointer ? "arg buffer 8\n"
+                                     : "arg bytes " + std::to_string(ptx_param_size(param)) + "\n";
+        }
+        return text;
+    }
+    return {};
+}
 
 void print_usage(const char* argv0) {
     std::cerr << "Usage: " << argv0
@@ -361,6 +405,7 @@ int main(int argc, char** argv) {
 
     std::vector<std::filesystem::path> temp_files;
     std::filesystem::path temp_stage_file;
+    std::string abi_sidecar;
     std::string input_ext = lower_ext(options.input);
     if (input_ext == ".cu" && cuda_device_frontend) {
         const std::filesystem::path compiler = find_cuda_clang(cuda_clang);
@@ -437,6 +482,7 @@ int main(int argc, char** argv) {
         }
 
         const std::string ptx_source(reinterpret_cast<const char*>(ptx_bytes.data()), ptx_bytes.size());
+        abi_sidecar = build_ptx_abi_sidecar(ptx_source, ptx_entry_name);
 
         cumetal::ptx::LowerToMetalOptions lower_to_metal_options;
         lower_to_metal_options.strict = ptx_strict;
@@ -561,6 +607,17 @@ int main(int argc, char** argv) {
     if (!result.ok) {
         std::cerr << "cumetalc failed: " << result.error << "\n";
         return 1;
+    }
+
+    if (!abi_sidecar.empty()) {
+        const std::filesystem::path abi_path = options.output.string() + ".cumetal-abi";
+        const std::vector<std::uint8_t> abi_bytes(abi_sidecar.begin(), abi_sidecar.end());
+        std::string abi_error;
+        if (!cumetal::common::write_file_bytes(abi_path, abi_bytes, &abi_error)) {
+            std::cerr << "cumetalc failed: unable to write kernel ABI sidecar: "
+                      << abi_error << "\n";
+            return 1;
+        }
     }
 
     std::cout << "wrote " << result.output << "\n";

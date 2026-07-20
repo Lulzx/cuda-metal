@@ -1756,10 +1756,16 @@ std::string emit_metal_source_generic(const std::string& entry_name,
     // Source operands that refer to undefined registers indicate the PTX body
     // is not self-contained (e.g. it relies on LLVM-synthesised setup) — bail.
     std::unordered_set<std::string> defined_regs;
-    // Registers that are structural (resolved via parameter bindings or gid)
-    // are always "defined" from the Metal kernel's perspective.
+    // Only structural registers that resolve to an actual MSL expression are
+    // "defined". Pointer-provenance and byte-offset registers are consumed by
+    // the specialized global load/store paths, but no MSL variable is emitted
+    // for them. Treating those as generally defined allowed pointer arithmetic
+    // to reference undeclared vrd* variables in generated MSL.
     for (const auto& kv : reg) {
-        defined_regs.insert(kv.first);
+        if (kv.second.kind == RegKind::ThreadGid ||
+            kv.second.kind == RegKind::ParamScalar) {
+            defined_regs.insert(kv.first);
+        }
     }
 
     // Helper: return false if any source register in `src_ops` (starting at

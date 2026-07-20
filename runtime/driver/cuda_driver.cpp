@@ -36,6 +36,9 @@ struct CUmod_st {
 struct CUfunc_st {
     CUmod_st* module = nullptr;
     std::string kernel_name;
+    std::uint32_t argument_count = 0;
+    bool has_argument_count = false;
+    std::vector<cumetalKernelArgInfo_t> argument_info;
 };
 
 namespace {
@@ -43,6 +46,7 @@ namespace {
 extern "C" int cumetalRuntimeIsDevicePointer(const void* ptr);
 extern "C" int cumetalRuntimeGetAllocationInfo(const void* ptr, void** base_out, size_t* size_out);
 extern "C" int cumetalRuntimeIsManaged(const void* ptr);
+extern "C" void* cumetalRuntimeGetHostPointer(const void* ptr, size_t count);
 
 constexpr int kCudaCompatVersion = 12000;
 constexpr std::uint32_t kFatbinWrapperMagic = 0x466243b1u;
@@ -70,9 +74,11 @@ struct DriverState {
     std::unordered_set<CUctx_st*> contexts;
     std::unordered_set<CUmod_st*> modules;
     std::unordered_set<CUfunc_st*> functions;
-    CUctx_st* current_context = nullptr;
     unsigned int primary_ctx_flags = 0;
 };
+
+thread_local CUctx_st* g_current_context = nullptr;
+thread_local std::vector<CUctx_st*> g_context_stack;
 
 struct DriverStreamCallbackPayload {
     CUstream stream = nullptr;
@@ -111,7 +117,8 @@ CUresult map_cuda_error(cudaError_t error) {
 }
 
 bool has_current_context_locked(const DriverState& state) {
-    return state.current_context != nullptr;
+    return g_current_context != nullptr &&
+           state.contexts.find(g_current_context) != state.contexts.end();
 }
 
 CUresult require_initialized_context() {
@@ -128,6 +135,71 @@ CUresult require_initialized_context() {
 
 bool is_valid_function_locked(const DriverState& state, CUfunction function) {
     return function != nullptr && state.functions.find(function) != state.functions.end();
+}
+
+void load_function_argument_count(CUfunc_st* function) {
+    if (function == nullptr || function->module == nullptr) {
+        return;
+    }
+    const std::filesystem::path abi_path =
+        function->module->metallib_path + ".cumetal-abi";
+    std::ifstream abi(abi_path);
+    if (abi) {
+        std::string header;
+        std::string kernel_keyword;
+        std::string kernel_name;
+        if (std::getline(abi, header) && header == "CUMETAL_ABI_V1" &&
+            (abi >> kernel_keyword >> kernel_name) && kernel_keyword == "kernel" &&
+            kernel_name == function->kernel_name) {
+            std::vector<cumetalKernelArgInfo_t> info;
+            std::string arg_keyword;
+            std::string kind;
+            unsigned long size = 0;
+            while (abi >> arg_keyword >> kind >> size) {
+                if (arg_keyword != "arg" || size == 0 || size > 4096 ||
+                    (kind != "buffer" && kind != "bytes") || info.size() >= 31) {
+                    info.clear();
+                    break;
+                }
+                info.push_back(cumetalKernelArgInfo_t{
+                    .kind = kind == "buffer" ? CUMETAL_ARG_BUFFER : CUMETAL_ARG_BYTES,
+                    .size_bytes = static_cast<std::uint32_t>(size),
+                });
+            }
+            if (!info.empty() && abi.eof()) {
+                function->argument_count = static_cast<std::uint32_t>(info.size());
+                function->has_argument_count = true;
+                function->argument_info = std::move(info);
+                return;
+            }
+        }
+    }
+
+    std::string error;
+    const auto bytes =
+        cumetal::common::read_file_bytes(function->module->metallib_path, &error);
+    if (bytes.empty()) {
+        return;
+    }
+    const auto summary = cumetal::common::inspect_metallib_bytes(
+        function->module->metallib_path, bytes, 0);
+    for (const auto& kernel : summary.kernels) {
+        if (kernel.name != function->kernel_name) {
+            continue;
+        }
+        for (const auto& field : kernel.metadata) {
+            if (field.key != "kernel.arg_count") {
+                continue;
+            }
+            char* end = nullptr;
+            const unsigned long count = std::strtoul(field.value.c_str(), &end, 10);
+            if (end != field.value.c_str() && *end == '\0' && count <= 31) {
+                function->argument_count = static_cast<std::uint32_t>(count);
+                function->has_argument_count = true;
+            }
+            return;
+        }
+    }
 }
 
 bool is_valid_module_locked(const DriverState& state, CUmodule module) {
@@ -732,8 +804,8 @@ CUresult cuCtxCreate(CUcontext* pctx, unsigned int flags, CUdevice dev) {
     {
         std::lock_guard<std::mutex> lock(state.mutex);
         state.contexts.insert(context);
-        if (state.current_context == nullptr) {
-            state.current_context = context;
+        if (g_current_context == nullptr) {
+            g_current_context = context;
         }
     }
 
@@ -753,8 +825,9 @@ CUresult cuCtxDestroy(CUcontext ctx) {
             return CUDA_ERROR_INVALID_CONTEXT;
         }
         state.contexts.erase(ctx);
-        if (state.current_context == ctx) {
-            state.current_context = state.contexts.empty() ? nullptr : *state.contexts.begin();
+        if (g_current_context == ctx) {
+            g_current_context = nullptr;
+            g_context_stack.clear();
         }
     }
 
@@ -773,7 +846,7 @@ CUresult cuCtxSetCurrent(CUcontext ctx) {
         return CUDA_ERROR_INVALID_CONTEXT;
     }
 
-    state.current_context = ctx;
+    g_current_context = ctx;
     return CUDA_SUCCESS;
 }
 
@@ -788,22 +861,41 @@ CUresult cuCtxGetCurrent(CUcontext* pctx) {
         return CUDA_ERROR_NOT_INITIALIZED;
     }
 
-    *pctx = state.current_context;
+    *pctx = has_current_context_locked(state) ? g_current_context : nullptr;
     return CUDA_SUCCESS;
 }
 
-// cuCtxPushCurrent — push context onto a per-thread stack (simplified: just sets current).
 CUresult cuCtxPushCurrent(CUcontext ctx) {
-    return cuCtxSetCurrent(ctx);
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.initialized) {
+        return CUDA_ERROR_NOT_INITIALIZED;
+    }
+    if (ctx == nullptr || state.contexts.find(ctx) == state.contexts.end()) {
+        return CUDA_ERROR_INVALID_CONTEXT;
+    }
+    g_context_stack.push_back(g_current_context);
+    g_current_context = ctx;
+    return CUDA_SUCCESS;
 }
 
-// cuCtxPopCurrent — pop context from per-thread stack (simplified: returns current, resets to null).
 CUresult cuCtxPopCurrent(CUcontext* pctx) {
-    if (pctx != nullptr) {
-        CUresult r = cuCtxGetCurrent(pctx);
-        if (r != CUDA_SUCCESS) return r;
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.initialized) {
+        return CUDA_ERROR_NOT_INITIALIZED;
     }
-    return cuCtxSetCurrent(nullptr);
+    if (!has_current_context_locked(state)) {
+        return CUDA_ERROR_INVALID_CONTEXT;
+    }
+    if (pctx != nullptr) {
+        *pctx = g_current_context;
+    }
+    g_current_context = g_context_stack.empty() ? nullptr : g_context_stack.back();
+    if (!g_context_stack.empty()) {
+        g_context_stack.pop_back();
+    }
+    return CUDA_SUCCESS;
 }
 
 // Primary context — on Apple Silicon, the primary context *is* the only context.
@@ -828,7 +920,7 @@ CUresult cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int* flags, int* acti
     DriverState& state = driver_state();
     std::lock_guard<std::mutex> lock(state.mutex);
     if (flags != nullptr) *flags = state.primary_ctx_flags;
-    if (active != nullptr) *active = (state.current_context != nullptr) ? 1 : 0;
+    if (active != nullptr) *active = state.contexts.empty() ? 0 : 1;
     return CUDA_SUCCESS;
 }
 
@@ -878,7 +970,7 @@ CUresult cuCtxGetDevice(CUdevice* device) {
         return CUDA_ERROR_INVALID_CONTEXT;
     }
 
-    *device = state.current_context->device;
+    *device = g_current_context->device;
     return CUDA_SUCCESS;
 }
 
@@ -896,7 +988,7 @@ CUresult cuCtxGetFlags(unsigned int* flags) {
         return CUDA_ERROR_INVALID_CONTEXT;
     }
 
-    *flags = state.current_context->flags;
+    *flags = g_current_context->flags;
     return CUDA_SUCCESS;
 }
 
@@ -914,7 +1006,7 @@ CUresult cuCtxSetFlags(unsigned int flags) {
         return CUDA_ERROR_INVALID_CONTEXT;
     }
 
-    state.current_context->flags = flags;
+    g_current_context->flags = flags;
     return CUDA_SUCCESS;
 }
 
@@ -1266,6 +1358,7 @@ CUresult cuModuleGetFunction(CUfunction* hfunc, CUmodule hmod, const char* name)
     }
     function->module = hmod;
     function->kernel_name = name;
+    load_function_argument_count(function);
 
     {
         std::lock_guard<std::mutex> lock(state.mutex);
@@ -1376,23 +1469,43 @@ CUresult cuLaunchKernel(CUfunction f,
         }
     } else if (kernelParams != nullptr) {
         std::size_t arg_count = 0;
-        for (; arg_count < 31; ++arg_count) {
-            if (kernelParams[arg_count] == nullptr) {
-                break;
+        if (f->has_argument_count) {
+            arg_count = f->argument_count;
+        } else {
+            // Legacy/prebuilt metallibs do not yet carry CuMetal's ABI
+            // metadata. Preserve their existing compatibility path; all
+            // source-recompiled modules use the exact metadata count above.
+            for (; arg_count < 31; ++arg_count) {
+                if (kernelParams[arg_count] == nullptr) {
+                    break;
+                }
             }
-        }
-        if (arg_count == 31 && kernelParams[31] != nullptr) {
-            return CUDA_ERROR_INVALID_VALUE;
+            if (arg_count == 31 && kernelParams[31] != nullptr) {
+                return CUDA_ERROR_INVALID_VALUE;
+            }
         }
 
         launch_params.reserve(arg_count);
         arg_info.reserve(arg_count);
         for (std::size_t i = 0; i < arg_count; ++i) {
+            if (reinterpret_cast<std::uintptr_t>(kernelParams[i]) < 4096) {
+                std::fprintf(stderr,
+                             "CuMetal Driver API: kernel '%s' argument %zu of %zu has invalid address %p\n",
+                             f->kernel_name.c_str(), i, arg_count, kernelParams[i]);
+                return CUDA_ERROR_INVALID_VALUE;
+            }
             launch_params.push_back(kernelParams[i]);
-            arg_info.push_back(cumetalKernelArgInfo_t{
-                .kind = CUMETAL_ARG_BUFFER,
-                .size_bytes = 0,
-            });
+            std::uintptr_t value = 0;
+            std::memcpy(&value, kernelParams[i], sizeof(value));
+            const bool is_pointer = is_runtime_device_pointer_word(value);
+            if (f->argument_info.size() == arg_count) {
+                arg_info.push_back(f->argument_info[i]);
+            } else {
+                arg_info.push_back(cumetalKernelArgInfo_t{
+                    .kind = is_pointer ? CUMETAL_ARG_BUFFER : CUMETAL_ARG_BYTES,
+                    .size_bytes = is_pointer ? 0u : (value <= 0xFFFFFFFFull ? 4u : 8u),
+                });
+            }
         }
     }
 
@@ -1619,23 +1732,36 @@ CUresult cuMemcpy3D(const CUDA_MEMCPY3D* pCopy) {
     if (ready != CUDA_SUCCESS) {
         return ready;
     }
-    // Resolve src / dst to host-accessible pointers (UMA — device pointers are host pointers).
-    const char* src_base =
-        (pCopy->srcMemoryType == CU_MEMORYTYPE_HOST)
-            ? static_cast<const char*>(pCopy->srcHost)
-            : reinterpret_cast<const char*>(static_cast<std::uintptr_t>(pCopy->srcDevice));
-    char* dst_base =
-        (pCopy->dstMemoryType == CU_MEMORYTYPE_HOST)
-            ? static_cast<char*>(pCopy->dstHost)
-            : reinterpret_cast<char*>(static_cast<std::uintptr_t>(pCopy->dstDevice));
-
-    if (src_base == nullptr || dst_base == nullptr) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
     const size_t src_pitch  = pCopy->srcPitch  ? pCopy->srcPitch  : pCopy->WidthInBytes;
     const size_t dst_pitch  = pCopy->dstPitch  ? pCopy->dstPitch  : pCopy->WidthInBytes;
     const size_t src_height = pCopy->srcHeight ? pCopy->srcHeight : pCopy->Height;
     const size_t dst_height = pCopy->dstHeight ? pCopy->dstHeight : pCopy->Height;
+    const size_t src_span = pCopy->Depth == 0 || pCopy->Height == 0
+                                ? 0
+                                : (pCopy->srcZ + pCopy->Depth - 1) * src_pitch * src_height +
+                                      (pCopy->srcY + pCopy->Height - 1) * src_pitch +
+                                      pCopy->srcXInBytes + pCopy->WidthInBytes;
+    const size_t dst_span = pCopy->Depth == 0 || pCopy->Height == 0
+                                ? 0
+                                : (pCopy->dstZ + pCopy->Depth - 1) * dst_pitch * dst_height +
+                                      (pCopy->dstY + pCopy->Height - 1) * dst_pitch +
+                                      pCopy->dstXInBytes + pCopy->WidthInBytes;
+    const char* src_base =
+        (pCopy->srcMemoryType == CU_MEMORYTYPE_HOST)
+            ? static_cast<const char*>(pCopy->srcHost)
+            : static_cast<const char*>(cumetalRuntimeGetHostPointer(
+                  reinterpret_cast<const void*>(static_cast<std::uintptr_t>(pCopy->srcDevice)),
+                  src_span));
+    char* dst_base =
+        (pCopy->dstMemoryType == CU_MEMORYTYPE_HOST)
+            ? static_cast<char*>(pCopy->dstHost)
+            : static_cast<char*>(cumetalRuntimeGetHostPointer(
+                  reinterpret_cast<const void*>(static_cast<std::uintptr_t>(pCopy->dstDevice)),
+                  dst_span));
+
+    if (src_base == nullptr || dst_base == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
 
     for (size_t z = 0; z < pCopy->Depth; ++z) {
         const size_t sz_off = (pCopy->srcZ + z) * src_pitch * src_height;
@@ -1794,7 +1920,12 @@ CUresult cuMemsetD16(CUdeviceptr dstDevice, unsigned short us, size_t N) {
     if (dstDevice == 0) {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    unsigned short* ptr = reinterpret_cast<unsigned short*>(static_cast<uintptr_t>(dstDevice));
+    auto* ptr = static_cast<unsigned short*>(cumetalRuntimeGetHostPointer(
+        reinterpret_cast<const void*>(static_cast<uintptr_t>(dstDevice)),
+        N * sizeof(unsigned short)));
+    if (ptr == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
     for (size_t i = 0; i < N; ++i) {
         ptr[i] = us;
     }
@@ -1805,7 +1936,12 @@ CUresult cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
     if (dstDevice == 0) {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    unsigned int* ptr = reinterpret_cast<unsigned int*>(static_cast<uintptr_t>(dstDevice));
+    auto* ptr = static_cast<unsigned int*>(cumetalRuntimeGetHostPointer(
+        reinterpret_cast<const void*>(static_cast<uintptr_t>(dstDevice)),
+        N * sizeof(unsigned int)));
+    if (ptr == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
     for (size_t i = 0; i < N; ++i) {
         ptr[i] = ui;
     }
@@ -1827,7 +1963,10 @@ CUresult cuMemsetD2D8(CUdeviceptr dstDevice, size_t dstPitch,
                        unsigned char uc, size_t Width, size_t Height) {
     const CUresult ready = require_initialized_context();
     if (ready != CUDA_SUCCESS) return ready;
-    auto* base = reinterpret_cast<unsigned char*>(static_cast<std::uintptr_t>(dstDevice));
+    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
+        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(dstDevice)),
+        Height == 0 ? 0 : (Height - 1) * dstPitch + Width));
+    if (base == nullptr && Width > 0 && Height > 0) return CUDA_ERROR_INVALID_VALUE;
     for (size_t row = 0; row < Height; ++row) {
         std::memset(base + row * dstPitch, static_cast<int>(uc), Width);
     }
@@ -1838,7 +1977,10 @@ CUresult cuMemsetD2D16(CUdeviceptr dstDevice, size_t dstPitch,
                         unsigned short us, size_t Width, size_t Height) {
     const CUresult ready = require_initialized_context();
     if (ready != CUDA_SUCCESS) return ready;
-    auto* base = reinterpret_cast<unsigned char*>(static_cast<std::uintptr_t>(dstDevice));
+    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
+        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(dstDevice)),
+        Height == 0 ? 0 : (Height - 1) * dstPitch + Width * sizeof(unsigned short)));
+    if (base == nullptr && Width > 0 && Height > 0) return CUDA_ERROR_INVALID_VALUE;
     for (size_t row = 0; row < Height; ++row) {
         auto* row_ptr = reinterpret_cast<unsigned short*>(base + row * dstPitch);
         for (size_t col = 0; col < Width; ++col) row_ptr[col] = us;
@@ -1850,7 +1992,10 @@ CUresult cuMemsetD2D32(CUdeviceptr dstDevice, size_t dstPitch,
                         unsigned int ui, size_t Width, size_t Height) {
     const CUresult ready = require_initialized_context();
     if (ready != CUDA_SUCCESS) return ready;
-    auto* base = reinterpret_cast<unsigned char*>(static_cast<std::uintptr_t>(dstDevice));
+    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
+        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(dstDevice)),
+        Height == 0 ? 0 : (Height - 1) * dstPitch + Width * sizeof(unsigned int)));
+    if (base == nullptr && Width > 0 && Height > 0) return CUDA_ERROR_INVALID_VALUE;
     for (size_t row = 0; row < Height; ++row) {
         auto* row_ptr = reinterpret_cast<unsigned int*>(base + row * dstPitch);
         for (size_t col = 0; col < Width; ++col) row_ptr[col] = ui;
@@ -2104,6 +2249,35 @@ CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
 CUresult cuGraphExecDestroy(CUgraphExec hGraphExec) {
     cudaError_t err = cudaGraphExecDestroy(reinterpret_cast<cudaGraphExec_t>(hGraphExec));
     return err == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
+}
+
+// Texture objects are part of the public Driver API surface, but CuMetal does
+// not yet wire Metal texture sampling. Keep unsupported callers deterministic.
+CUresult cuArray3DCreate(CUarray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pAllocateArray) {
+    if (pHandle == nullptr || pAllocateArray == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *pHandle = nullptr;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuArrayDestroy(CUarray hArray) {
+    return hArray == nullptr ? CUDA_SUCCESS : CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuTexObjectCreate(CUtexObject* pTexObject,
+                           const CUDA_RESOURCE_DESC* pResDesc,
+                           const CUDA_TEXTURE_DESC* pTexDesc,
+                           const void* /*pResViewDesc*/) {
+    if (pTexObject == nullptr || pResDesc == nullptr || pTexDesc == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *pTexObject = 0;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuTexObjectDestroy(CUtexObject texObject) {
+    return texObject == 0 ? CUDA_SUCCESS : CUDA_ERROR_NOT_SUPPORTED;
 }
 
 }  // extern "C"

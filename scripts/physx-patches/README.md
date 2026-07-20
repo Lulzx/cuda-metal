@@ -29,6 +29,11 @@ deliberately excludes articulations, joints, aggregates, freezing, threshold
 reporting, convex/mesh/SDF collision, deformables, particles, and Direct GPU
 API-only entry points.
 
+The fifth patch builds and links the GPU host runtime against
+`libcumetal.dylib`, loads the source-recompiled per-kernel metallibs through
+`CudaKernelWrangler`, minimizes `SnippetHelloGRB`, and uses a body-per-thread
+pre-integration path for CuMetal's documented partial-warp-mask limitation.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -54,3 +59,14 @@ GPU-executable.
 The build script requires macOS on arm64, CMake, Ninja, and `xcrun`. It
 compiles all 83 manifest entries, validates and inspects every output, and
 prints a machine-readable `PASS` line.
+
+Build and run the reduced GPU rigid-body snippet end to end:
+
+```bash
+scripts/physx-patches/build_physx_cumetal_grb_macos.sh
+```
+
+This enables native Metal GPU virtual addresses for CUDA device allocations,
+which is required for the nested device pointers in PhysX descriptor structs.
+The script verifies successful Apple GPU kernel dispatch and non-zero gravity
+integration before printing `PASS`.

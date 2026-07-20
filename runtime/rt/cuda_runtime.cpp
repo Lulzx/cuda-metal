@@ -462,6 +462,33 @@ bool is_device_pointer(const void* ptr) {
     return state.allocations.resolve(ptr, &resolved);
 }
 
+bool use_metal_device_addresses() {
+    const char* value = std::getenv("CUMETAL_USE_METAL_DEVICE_ADDRESSES");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0 &&
+           std::strcmp(value, "false") != 0 && std::strcmp(value, "FALSE") != 0;
+}
+
+const void* host_accessible_pointer(const void* ptr, std::size_t count) {
+    if (ptr == nullptr) {
+        return nullptr;
+    }
+    RuntimeState& state = runtime_state();
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!state.allocations.resolve(ptr, &resolved)) {
+        return ptr;
+    }
+    if (count > resolved.remaining_size || resolved.buffer == nullptr ||
+        resolved.buffer->contents() == nullptr) {
+        return nullptr;
+    }
+    return static_cast<const unsigned char*>(resolved.buffer->contents()) + resolved.offset;
+}
+
+void* host_accessible_pointer(void* ptr, std::size_t count) {
+    return const_cast<void*>(
+        host_accessible_pointer(static_cast<const void*>(ptr), count));
+}
+
 cudaError_t resolve_memcpy_kind(void* dst, const void* src, cudaMemcpyKind kind, cudaMemcpyKind* resolved_kind) {
     if (resolved_kind == nullptr) {
         return cudaErrorInvalidValue;
@@ -1668,6 +1695,10 @@ int cumetalRuntimeGetAllocationInfo(const void* ptr, void** base_out, size_t* si
     return 1;
 }
 
+void* cumetalRuntimeGetHostPointer(const void* ptr, size_t count) {
+    return const_cast<void*>(host_accessible_pointer(ptr, count));
+}
+
 // Returns 1 if ptr is a managed (unified) allocation.
 int cumetalRuntimeIsManaged(const void* ptr) {
     if (ptr == nullptr) {
@@ -2016,10 +2047,14 @@ cudaError_t cudaMalloc(void** dev_ptr, size_t size) {
         return fail(alloc_status == cudaSuccess ? cudaErrorMemoryAllocation : alloc_status);
     }
 
-    void* base = buffer->contents();
-    if (base == nullptr) {
+    void* host_base = buffer->contents();
+    const std::uintptr_t device_address = buffer->device_address();
+    if (host_base == nullptr || (use_metal_device_addresses() && device_address == 0)) {
         return fail(cudaErrorMemoryAllocation);
     }
+    void* base = use_metal_device_addresses()
+                     ? reinterpret_cast<void*>(device_address)
+                     : host_base;
 
     RuntimeState& state = runtime_state();
     if (!state.allocations.insert(base, size, cumetal::rt::AllocationKind::kDevice,
@@ -2244,7 +2279,12 @@ cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind 
     }
 
     if (count > 0) {
-        std::memcpy(dst, src, count);
+        void* host_dst = host_accessible_pointer(dst, count);
+        const void* host_src = host_accessible_pointer(src, count);
+        if (host_dst == nullptr || host_src == nullptr) {
+            return fail(cudaErrorInvalidValue);
+        }
+        std::memcpy(host_dst, host_src, count);
     }
 
     if (trace_enabled()) {
@@ -2295,7 +2335,12 @@ cudaError_t cudaMemcpyAsync(void* dst,
     }
 
     if (count > 0) {
-        std::memcpy(dst, src, count);
+        void* host_dst = host_accessible_pointer(dst, count);
+        const void* host_src = host_accessible_pointer(src, count);
+        if (host_dst == nullptr || host_src == nullptr) {
+            return fail(cudaErrorInvalidValue);
+        }
+        std::memcpy(host_dst, host_src, count);
     }
 
     if (trace_enabled()) {
@@ -2484,7 +2529,11 @@ cudaError_t cudaMemset(void* dev_ptr, int value, size_t count) {
     }
 
     if (count > 0) {
-        std::memset(dev_ptr, value, count);
+        void* host_ptr = host_accessible_pointer(dev_ptr, count);
+        if (host_ptr == nullptr) {
+            return fail(cudaErrorInvalidValue);
+        }
+        std::memset(host_ptr, value, count);
     }
 
     if (trace_enabled()) {
@@ -2522,7 +2571,11 @@ cudaError_t cudaMemsetAsync(void* dev_ptr, int value, size_t count, cudaStream_t
     }
 
     if (count > 0) {
-        std::memset(dev_ptr, value, count);
+        void* host_ptr = host_accessible_pointer(dev_ptr, count);
+        if (host_ptr == nullptr) {
+            return fail(cudaErrorInvalidValue);
+        }
+        std::memset(host_ptr, value, count);
     }
 
     if (trace_enabled()) {
@@ -2547,8 +2600,13 @@ cudaError_t cudaMemcpy2D(void* dst, size_t dpitch,
         return fail(init_status);
     }
 
-    auto* d = static_cast<uint8_t*>(dst);
-    const auto* s = static_cast<const uint8_t*>(src);
+    auto* d = static_cast<uint8_t*>(host_accessible_pointer(
+        dst, height == 0 ? 0 : (height - 1) * dpitch + width));
+    const auto* s = static_cast<const uint8_t*>(host_accessible_pointer(
+        src, height == 0 ? 0 : (height - 1) * spitch + width));
+    if ((d == nullptr || s == nullptr) && width > 0 && height > 0) {
+        return fail(cudaErrorInvalidValue);
+    }
     for (size_t row = 0; row < height; ++row) {
         if (width > 0) {
             std::memcpy(d + row * dpitch, s + row * spitch, width);
@@ -2581,7 +2639,11 @@ cudaError_t cudaMemset2D(void* dev_ptr, size_t pitch,
         return fail(init_status);
     }
 
-    auto* d = static_cast<uint8_t*>(dev_ptr);
+    auto* d = static_cast<uint8_t*>(host_accessible_pointer(
+        dev_ptr, height == 0 ? 0 : (height - 1) * pitch + width));
+    if (d == nullptr && width > 0 && height > 0) {
+        return fail(cudaErrorInvalidValue);
+    }
     for (size_t row = 0; row < height; ++row) {
         if (width > 0) {
             std::memset(d + row * pitch, value, width);
@@ -2607,9 +2669,17 @@ cudaError_t cudaMemset3D(cudaPitchedPtr pitchedDevPtr, int value, cudaExtent ext
     if (init_status != cudaSuccess) {
         return fail(init_status);
     }
-    auto* base = static_cast<uint8_t*>(pitchedDevPtr.ptr);
     const size_t pitch      = pitchedDevPtr.pitch;
     const size_t plane_size = pitch * pitchedDevPtr.ysize;
+    const size_t span = extent.depth == 0 || extent.height == 0
+                            ? 0
+                            : (extent.depth - 1) * plane_size +
+                                  (extent.height - 1) * pitch + extent.width;
+    auto* base = static_cast<uint8_t*>(
+        host_accessible_pointer(pitchedDevPtr.ptr, span));
+    if (base == nullptr && extent.width > 0 && extent.height > 0 && extent.depth > 0) {
+        return fail(cudaErrorInvalidValue);
+    }
     for (size_t z = 0; z < extent.depth; ++z) {
         for (size_t y = 0; y < extent.height; ++y) {
             if (extent.width > 0) {
@@ -2640,12 +2710,28 @@ cudaError_t cudaMemcpy3D(const cudaMemcpy3DParms* p) {
         return fail(init_status);
     }
 
-    const char* src_base  = static_cast<const char*>(p->srcPtr.ptr);
-    char*       dst_base  = static_cast<char*>(p->dstPtr.ptr);
     size_t      src_pitch  = p->srcPtr.pitch  ? p->srcPtr.pitch  : p->extent.width;
     size_t      dst_pitch  = p->dstPtr.pitch  ? p->dstPtr.pitch  : p->extent.width;
     size_t      src_height = p->srcPtr.ysize  ? p->srcPtr.ysize  : p->extent.height;
     size_t      dst_height = p->dstPtr.ysize  ? p->dstPtr.ysize  : p->extent.height;
+    const size_t src_span = p->extent.depth == 0 || p->extent.height == 0
+                                ? 0
+                                : (p->srcPos.z + p->extent.depth - 1) * src_pitch * src_height +
+                                      (p->srcPos.y + p->extent.height - 1) * src_pitch +
+                                      p->srcPos.x + p->extent.width;
+    const size_t dst_span = p->extent.depth == 0 || p->extent.height == 0
+                                ? 0
+                                : (p->dstPos.z + p->extent.depth - 1) * dst_pitch * dst_height +
+                                      (p->dstPos.y + p->extent.height - 1) * dst_pitch +
+                                      p->dstPos.x + p->extent.width;
+    const char* src_base = static_cast<const char*>(
+        host_accessible_pointer(p->srcPtr.ptr, src_span));
+    char* dst_base = static_cast<char*>(
+        host_accessible_pointer(p->dstPtr.ptr, dst_span));
+    if ((src_base == nullptr || dst_base == nullptr) &&
+        p->extent.width > 0 && p->extent.height > 0 && p->extent.depth > 0) {
+        return fail(cudaErrorInvalidValue);
+    }
 
     for (size_t z = 0; z < p->extent.depth; ++z) {
         const size_t src_z_off = (p->srcPos.z + z) * src_pitch * src_height;
@@ -3648,7 +3734,10 @@ cudaError_t cudaLaunchKernel(const void* func,
 
         if (info.kind == CUMETAL_ARG_BUFFER) {
             void* device_ptr = *reinterpret_cast<void**>(args[i]);
-            if (use_registered_kernel && device_ptr == nullptr) {
+            // A null pointer is a valid CUDA kernel argument value. Whether
+            // dereferencing it is legal is kernel-dependent; binding it must
+            // not be rejected by the launch API.
+            if (device_ptr == nullptr) {
                 cumetal::metal_backend::KernelArg arg;
                 arg.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer;
                 arg.buffer = nullptr;

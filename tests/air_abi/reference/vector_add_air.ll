@@ -3,11 +3,11 @@
 
 target triple = "air64-apple-macosx14.0.0"
 
-define void @vector_add(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %c, i32 %id, ptr addrspace(1) %printf_buf) #0 {
+define void @vector_add(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %c, i32 %__air_tid, ptr addrspace(1) %__air_printf_buf) #0 {
 entry:
-  %pa = getelementptr float, ptr addrspace(1) %a, i32 %id
-  %pb = getelementptr float, ptr addrspace(1) %b, i32 %id
-  %pc = getelementptr float, ptr addrspace(1) %c, i32 %id
+  %pa = getelementptr float, ptr addrspace(1) %a, i32 %__air_tid
+  %pb = getelementptr float, ptr addrspace(1) %b, i32 %__air_tid
+  %pc = getelementptr float, ptr addrspace(1) %c, i32 %__air_tid
   %va = load float, ptr addrspace(1) %pa, align 4
   %vb = load float, ptr addrspace(1) %pb, align 4
   %vc = fadd float %va, %vb

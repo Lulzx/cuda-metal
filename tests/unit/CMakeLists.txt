@@ -57,6 +57,10 @@ add_executable(cumetal_cuda_vector_types_test
     cuda_vector_types_test.cpp
 )
 
+add_executable(cumetal_cuda_host_qualifiers_test
+    cuda_host_qualifiers_test.cpp
+)
+
 add_executable(cumetal_threadgroup_tiling_test
     threadgroup_tiling_test.cpp
 )
@@ -129,6 +133,11 @@ target_include_directories(cumetal_cuda_fp16_host_test
 )
 
 target_include_directories(cumetal_cuda_vector_types_test
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/runtime/api
+)
+
+target_include_directories(cumetal_cuda_host_qualifiers_test
     PRIVATE
         ${CMAKE_SOURCE_DIR}/runtime/api
 )
@@ -331,6 +340,11 @@ add_test(
 add_test(
     NAME unit_cuda_vector_types
     COMMAND cumetal_cuda_vector_types_test
+)
+
+add_test(
+    NAME unit_cuda_host_qualifiers
+    COMMAND cumetal_cuda_host_qualifiers_test
 )
 
 add_test(

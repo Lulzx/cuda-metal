@@ -75,6 +75,10 @@ public:
         return [buffer_ contents];
     }
 
+    std::uintptr_t device_address() const override {
+        return static_cast<std::uintptr_t>([buffer_ gpuAddress]);
+    }
+
     std::size_t length() const override {
         return static_cast<std::size_t>([buffer_ length]);
     }

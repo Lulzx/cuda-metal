@@ -240,6 +240,23 @@ runtime tracing disproves this static result, stop and evaluate:
 3. move the scheduling loop to the CPU/command-buffer layer
    (roughly 1–3 weeks depending on state that must be externalized).
 
+Phase 3 runtime tracing confirmed this static conclusion for the minimized
+sphere-plane scene: PhysX schedules broadphase and solver work as ordinary
+host-side kernel dispatches, and CuMetal executes those dispatches without a
+cross-threadgroup synchronization blocker. After installing Apple's Metal
+Toolchain, all 83 selected kernels compile as production metallibs and the
+scene executes on the Apple GPU.
+
+Two compatibility workarounds are required. PhysX stores device pointers
+inside device-resident descriptor structs, so the runtime must expose
+`MTLBuffer.gpuAddress` values rather than CPU mappings. This is enabled with
+`CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`; CUDA memory APIs translate those
+addresses back to shared-memory mappings for host copies. Also,
+`preIntegration` uses body-count-dependent warp-cooperative swizzled loads.
+CuMetal's full-group partial-mask emulation is not exact for this construct,
+so the PhysX patch selects an equivalent body-per-thread implementation under
+`PX_CUMETAL`. Neither issue requires cross-threadgroup synchronization.
+
 ## Reproduction commands
 
 Run from the CuMetal root:

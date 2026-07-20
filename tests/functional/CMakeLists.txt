@@ -263,6 +263,14 @@ add_executable(cumetal_driver_module_load_data_test
     driver_module_load_data_test.cpp
 )
 
+add_executable(cumetal_driver_kernel_params_bounds_test
+    driver_kernel_params_bounds_test.cpp
+)
+
+add_executable(cumetal_nested_device_pointer_test
+    nested_device_pointer_test.cpp
+)
+
 add_executable(cumetal_driver_module_load_data_ptx_test
     driver_module_load_data_ptx_test.cpp
 )
@@ -798,6 +806,16 @@ target_link_libraries(cumetal_driver_host_pointer_api_test
 )
 
 target_link_libraries(cumetal_driver_module_load_data_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_driver_kernel_params_bounds_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_nested_device_pointer_test
     PRIVATE
         cumetal_runtime
 )
@@ -1536,6 +1554,13 @@ target_compile_options(cumetal_driver_host_pointer_api_test
 )
 
 target_compile_options(cumetal_driver_module_load_data_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_driver_kernel_params_bounds_test
     PRIVATE
         -Wall
         -Wextra
@@ -2325,6 +2350,25 @@ add_test(
 )
 
 set_tests_properties(functional_driver_module_load_data PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_driver_kernel_params_bounds
+    COMMAND cumetal_driver_kernel_params_bounds_test
+            ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.experimental.metallib
+)
+set_tests_properties(functional_driver_kernel_params_bounds PROPERTIES
+    DEPENDS unit_metallib_parser)
+
+add_test(
+    NAME functional_nested_device_pointer
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_nested_device_pointer.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nested_device_pointer.cu
+            $<TARGET_FILE:cumetal_nested_device_pointer_test>
+            ${CMAKE_CURRENT_BINARY_DIR}/nested_device_pointer.metallib
+)
+set_tests_properties(functional_nested_device_pointer PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
     NAME functional_driver_module_load_data_ptx

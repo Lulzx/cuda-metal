@@ -160,3 +160,55 @@ report.
 - Ran the required pre-commit gate:
   `ctest --test-dir build --output-on-failure`. All 187 registered tests
   passed; platform/toolchain-gated tests reported as skips.
+
+## 2026-07-20 — Phase 3 runtime bring-up
+
+- Built the PhysX GPU host implementation as ordinary arm64 C++ and linked a
+  static `SnippetHelloGRB` against `libcumetal.dylib`. The SDK-wide
+  `PX_CUMETAL` marker is required so `PX_SUPPORT_GPU_PHYSX` remains enabled on
+  Apple arm64; without it PhysX accepts the scene flags but silently builds and
+  runs the CPU implementation.
+- Replaced nvcc-only static-link anchors with CuMetal no-op anchors and taught
+  `KernelWrangler` to load source-recompiled kernels directly from
+  `CUMETAL_PHYSX_KERNEL_DIR/<kernel>.metallib`. Missing artifacts are left
+  unresolved so the reduced manifest does not need all 501 registered kernels.
+- Reduced `SnippetHelloGRB` to one dynamic sphere and one static plane, removed
+  PVD/network setup, and made GPU context/scene initialization failures fatal
+  to the snippet instead of silently accepting CPU fallback.
+- Added the clean-room host-side CUDA qualifier/constant/texture ABI surface
+  needed to compile PhysX without nvcc. Texture object/array creation is an
+  explicit `CUDA_ERROR_NOT_SUPPORTED` path because Metal texture sampling is
+  still not wired.
+- Runtime tracing found that CUDA Driver API `kernelParams` arrays were being
+  scanned for a null sentinel. CUDA specifies an exact array with one slot per
+  parameter and no sentinel; PhysX therefore exposed an out-of-bounds read.
+  Experimental CuMetal containers now carry `kernel.arg_count` compiler
+  metadata, `CUfunction` consumes it, and a protected-page regression proves
+  that a non-terminated argument array is not scanned.
+- Installed Apple's optional Metal Toolchain and compiled all 83 selected
+  kernels as production metallibs. AIR reflection does not preserve CUDA's
+  source argument grouping, so `cumetalc` now writes an exact
+  `.cumetal-abi` sidecar and the Driver API consumes it when loading a module.
+- Made the current CUDA context and context stack thread-local. PhysX performs
+  GPU work from worker threads; the former process-global current context
+  violated Driver API semantics and intermittently rejected valid launches.
+- Found the central address-model mismatch after launches became stable.
+  PhysX descriptor structs contain nested device pointers. A CPU mapping from
+  `[MTLBuffer contents]` is not a GPU virtual address and cannot be
+  dereferenced by Metal. The opt-in
+  `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1` mode returns public
+  `MTLBuffer.gpuAddress` values for device allocations while CUDA memcpy and
+  memset APIs translate them to the shared CPU mapping. A focused functional
+  kernel now tests a nested pointer plus scalar argument end to end.
+- The audited partial-warp-mask limitation affected `preIntegration`: its
+  warp-swizzled body loads depend on a body-count-specific active mask.
+  Patch 0005 uses an equivalent body-per-thread implementation under
+  `PX_CUMETAL`; the upstream CUDA path is unchanged.
+- Verified real Apple GPU execution with provenance tracing. The reduced
+  scene runs 100 steps without a crash, launches solver and integration
+  kernels from production metallibs, moves the sphere from `y=10` to
+  `y=-3.76124477`, and reports `vy=-16.3499889`.
+- The reduced CPU-broadphase target does not yet generate the plane contact
+  on the GPU path, so the sphere falls through the plane after the early
+  free-fall interval. Phase 4 compares the deterministic pre-contact window
+  and records this longer-run divergence explicitly.

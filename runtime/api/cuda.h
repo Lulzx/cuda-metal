@@ -3,6 +3,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef CUDA_VERSION
+#define CUDA_VERSION 12000
+#endif
+#ifndef CUDAAPI
+#define CUDAAPI
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,6 +33,13 @@ typedef uint64_t CUtexObject;
 enum {
     CU_STREAM_DEFAULT = 0x0,
     CU_STREAM_NON_BLOCKING = 0x1,
+};
+
+enum {
+    CU_EVENT_DEFAULT = 0x0,
+    CU_EVENT_BLOCKING_SYNC = 0x1,
+    CU_EVENT_DISABLE_TIMING = 0x2,
+    CU_EVENT_INTERPROCESS = 0x4,
 };
 
 enum {
@@ -62,12 +76,28 @@ typedef enum CUresult {
     CUDA_ERROR_INVALID_DEVICE = 101,
     CUDA_ERROR_INVALID_IMAGE = 200,
     CUDA_ERROR_INVALID_CONTEXT = 201,
+    CUDA_ERROR_NO_BINARY_FOR_GPU = 209,
     CUDA_ERROR_NOT_FOUND = 500,
     CUDA_ERROR_NOT_READY = 600,
     CUDA_ERROR_ILLEGAL_ADDRESS = 700,
     CUDA_ERROR_LAUNCH_TIMEOUT = 702,
+    CUDA_ERROR_NOT_SUPPORTED = 801,
     CUDA_ERROR_UNKNOWN = 999,
 } CUresult;
+
+typedef enum CUjit_option {
+    CU_JIT_MAX_REGISTERS = 0,
+    CU_JIT_THREADS_PER_BLOCK = 1,
+    CU_JIT_WALL_TIME = 2,
+    CU_JIT_INFO_LOG_BUFFER = 3,
+    CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES = 4,
+    CU_JIT_ERROR_LOG_BUFFER = 5,
+    CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES = 6,
+    CU_JIT_OPTIMIZATION_LEVEL = 7,
+    CU_JIT_TARGET_FROM_CUCONTEXT = 8,
+    CU_JIT_TARGET = 9,
+    CU_JIT_FALLBACK_STRATEGY = 10,
+} CUjit_option;
 
 typedef void (*CUstreamCallback)(CUstream hStream, CUresult status, void* userData);
 typedef void (*CUhostFn)(void* userData);
@@ -84,6 +114,8 @@ typedef enum CUdevice_attribute {
     CU_DEVICE_ATTRIBUTE_WARP_SIZE = 10,
     CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK = 12,
     CU_DEVICE_ATTRIBUTE_CLOCK_RATE = 13,
+    CU_DEVICE_ATTRIBUTE_INTEGRATED = 18,
+    CU_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY = 19,
     CU_DEVICE_ATTRIBUTE_GPU_OVERLAP = 15,
     CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 16,
     CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING = 41,
@@ -91,6 +123,7 @@ typedef enum CUdevice_attribute {
     CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76,
     CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY = 83,
     CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS = 89,
+    CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR = 81,
 } CUdevice_attribute;
 
 CUresult cuInit(unsigned int flags);
@@ -175,6 +208,74 @@ typedef enum CUmemorytype_enum {
 // Opaque CUDA array handle (not implemented; present for struct compatibility).
 typedef void* CUarray;
 
+typedef enum CUarray_format_enum {
+    CU_AD_FORMAT_UNSIGNED_INT8 = 0x01,
+    CU_AD_FORMAT_UNSIGNED_INT16 = 0x02,
+    CU_AD_FORMAT_UNSIGNED_INT32 = 0x03,
+    CU_AD_FORMAT_SIGNED_INT8 = 0x08,
+    CU_AD_FORMAT_SIGNED_INT16 = 0x09,
+    CU_AD_FORMAT_SIGNED_INT32 = 0x0a,
+    CU_AD_FORMAT_HALF = 0x10,
+    CU_AD_FORMAT_FLOAT = 0x20,
+} CUarray_format;
+
+typedef struct CUDA_ARRAY3D_DESCRIPTOR_st {
+    size_t Width;
+    size_t Height;
+    size_t Depth;
+    CUarray_format Format;
+    unsigned int NumChannels;
+    unsigned int Flags;
+} CUDA_ARRAY3D_DESCRIPTOR;
+
+typedef enum CUresourcetype_enum {
+    CU_RESOURCE_TYPE_ARRAY = 0x00,
+    CU_RESOURCE_TYPE_MIPMAPPED_ARRAY = 0x01,
+    CU_RESOURCE_TYPE_LINEAR = 0x02,
+    CU_RESOURCE_TYPE_PITCH2D = 0x03,
+} CUresourcetype;
+
+typedef enum CUaddress_mode_enum {
+    CU_TR_ADDRESS_MODE_WRAP = 0,
+    CU_TR_ADDRESS_MODE_CLAMP = 1,
+    CU_TR_ADDRESS_MODE_MIRROR = 2,
+    CU_TR_ADDRESS_MODE_BORDER = 3,
+} CUaddress_mode;
+
+typedef enum CUfilter_mode_enum {
+    CU_TR_FILTER_MODE_POINT = 0,
+    CU_TR_FILTER_MODE_LINEAR = 1,
+} CUfilter_mode;
+
+typedef struct CUDA_RESOURCE_DESC_st {
+    CUresourcetype resType;
+    union {
+        struct {
+            CUarray hArray;
+        } array;
+        struct {
+            CUdeviceptr devPtr;
+            CUarray_format format;
+            unsigned int numChannels;
+            size_t sizeInBytes;
+        } linear;
+    } res;
+    unsigned int flags;
+} CUDA_RESOURCE_DESC;
+
+typedef struct CUDA_TEXTURE_DESC_st {
+    CUaddress_mode addressMode[3];
+    CUfilter_mode filterMode;
+    unsigned int flags;
+    unsigned int maxAnisotropy;
+    CUfilter_mode mipmapFilterMode;
+    float mipmapLevelBias;
+    float minMipmapLevelClamp;
+    float maxMipmapLevelClamp;
+    float borderColor[4];
+    int reserved[12];
+} CUDA_TEXTURE_DESC;
+
 typedef struct CUDA_MEMCPY3D_st {
     size_t          srcXInBytes;
     size_t          srcY;
@@ -253,6 +354,13 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
 
 CUresult cuMemcpy3D(const CUDA_MEMCPY3D* pCopy);
 CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D* pCopy, CUstream hStream);
+CUresult cuArray3DCreate(CUarray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pAllocateArray);
+CUresult cuArrayDestroy(CUarray hArray);
+CUresult cuTexObjectCreate(CUtexObject* pTexObject,
+                           const CUDA_RESOURCE_DESC* pResDesc,
+                           const CUDA_TEXTURE_DESC* pTexDesc,
+                           const void* pResViewDesc);
+CUresult cuTexObjectDestroy(CUtexObject texObject);
 // Generic device-to-device async copy (infers direction from allocation table).
 CUresult cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src, size_t byteCount, CUstream hStream);
 // Peer copies — single GPU on Apple Silicon; behave as local D2D copies.

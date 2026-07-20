@@ -14,6 +14,9 @@ class Buffer {
 public:
     virtual ~Buffer() = default;
     virtual void* contents() const = 0;
+    virtual std::uintptr_t device_address() const {
+        return reinterpret_cast<std::uintptr_t>(contents());
+    }
     virtual std::size_t length() const = 0;
 };
 

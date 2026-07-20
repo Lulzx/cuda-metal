@@ -41,10 +41,12 @@ if ! echo "$first_run_stderr" | grep -q "jit cache miss"; then
     exit 1
 fi
 
-# The cache file must exist after the first run.
-cache_file=$(find "$JIT_CACHE_DIR/registration-jit" -name "*.metallib" 2>/dev/null | head -1)
+# The direct PTX-to-MSL path caches source for newLibraryWithSource; the LLVM
+# path caches an AOT metallib. Either is a valid persistent JIT artifact.
+cache_file=$(find "$JIT_CACHE_DIR/registration-jit" \
+    \( -name "*.metallib" -o -name "*.metal" \) 2>/dev/null | head -1)
 if [ -z "$cache_file" ]; then
-    echo "FAIL: no .metallib file found in JIT cache dir after first run"
+    echo "FAIL: no .metallib or .metal file found in JIT cache dir after first run"
     exit 1
 fi
 

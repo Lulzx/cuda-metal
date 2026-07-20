@@ -5,6 +5,10 @@
 
 #include "cuda.h"
 
+#ifndef CUDARTAPI
+#define CUDARTAPI
+#endif
+
 #if defined(__clang__) && defined(__CUDA__)
 #ifndef CUDA_VERSION
 #define CUDA_VERSION 12000
@@ -39,6 +43,40 @@
 #endif
 #ifndef __builtin_align__
 #define __builtin_align__(n) __attribute__((aligned(n)))
+#endif
+#else
+// CUDA's public headers keep shared host/device declarations parseable when
+// included by an ordinary C++ compiler.  Projects such as PhysX rely on this
+// for headers containing __host__ __device__ helpers.
+#ifndef __host__
+#define __host__
+#endif
+#ifndef __device__
+#define __device__
+#endif
+#ifndef __global__
+#define __global__
+#endif
+#ifndef __shared__
+#define __shared__
+#endif
+#ifndef __constant__
+#define __constant__
+#endif
+#ifndef __managed__
+#define __managed__
+#endif
+#ifndef __forceinline__
+#define __forceinline__ inline __attribute__((always_inline))
+#endif
+#ifndef __launch_bounds__
+#define __launch_bounds__(...)
+#endif
+#ifndef __builtin_align__
+#define __builtin_align__(n) __attribute__((aligned(n)))
+#endif
+#ifndef __device_builtin__
+#define __device_builtin__
 #endif
 #endif
 
