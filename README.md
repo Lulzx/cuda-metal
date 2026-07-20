@@ -131,6 +131,25 @@ All measured ratios are well within the 2× spec gate (§5.7).
 Conformance
 -----------
 
+For the complete implementation record, GPU proof criteria, diagnostic switches,
+and verified results, see
+[docs/apple-gpu-execution.md](docs/apple-gpu-execution.md).
+
+### Upstream CUDA source on Apple GPU
+
+The upstream NVIDIA `cuda-samples` vectorAdd source can be compiled without
+source modifications and executed through CuMetal:
+
+```bash
+CUMETAL_CUDA_SAMPLES_DIR=/path/to/cuda-samples \
+  bash tests/cuda_projects/run_cuda_samples_vectoradd_gpu.sh "$PWD"
+```
+
+The gate requires the sample's numerical `Test PASSED` result and a provenance
+record with `source=generic_ptx`, `device=apple_gpu`, and
+`launch_success=true`; it rejects CPU fallbacks and stubs. This proves the
+documented simple-kernel subset, not general CUDA or llama.cpp compatibility.
+
 The llm.c GPT-2 FP32 training binary can be built and executed via CuMetal:
 
 ```bash
@@ -138,16 +157,24 @@ bash scripts/build_llmc_test_gpt2fp32cu.sh
 bash scripts/run_llmc_test_gpt2fp32cu.sh
 ```
 
-Expected output includes `OK (LOGITS)`, `LOSS OK`, `TENSOR OK`, `overall okay: 1`.
-All 17 GPT-2 training kernels are lowered directly to Metal MSL; no emulation
-fallback is required (`CUMETAL_LLMC_REQUIRE_NO_EMULATION=1` passes).
+The conformance gate requires `OK (LOGITS)`, `LOSS OK`, `TENSOR OK`,
+`overall okay: 1`, plus at least one successful Apple-GPU provenance record.
+On the tested Apple M4 Pro, the strict gate passes for the llm.c GPT-2 FP32
+workload with CPU emulation disabled. Its kernels use CuMetal's
+`specialized_msl` path; this is not evidence that arbitrary PTX is supported.
+The legacy llm.c CPU implementation is available only when explicitly requested
+with `CUMETAL_ENABLE_LLMC_CPU_EMULATION=1`.
+Set `CUMETAL_TRACE_GPU=1` to print a machine-readable `CUMETAL_PROVENANCE`
+record for each Metal compute command, including whether it came from generic
+PTX or a specialized MSL replacement, the execution device, launch status,
+dimensions, and GPU duration when available.
 
 ### llama.cpp Conformance Test
 
 [llama.cpp](https://github.com/ggml-org/llama.cpp) (95k+ stars, used by Ollama,
 LM Studio, and every major local-LLM stack) is the most demanding real-world
-CUDA workload available. Its GGML CUDA backend runs hundreds of quantized-matrix
-kernels entirely unmodified — zero source changes required.
+CUDA workload available. Its GGML CUDA backend is built **unmodified** against
+libcumetal as the CUDA provider — zero source changes required.
 
 **Build llama.cpp with CuMetal as the CUDA provider:**
 
@@ -155,50 +182,51 @@ kernels entirely unmodified — zero source changes required.
 bash scripts/build_llama_cpp_cumetal.sh   # clones + builds in ../llama.cpp/
 ```
 
-**Run the conformance test** (auto-downloads TinyLlama-1.1B Q4_K_M ~638 MB):
+**Run the conformance test** (auto-downloads SmolLM2-135M-Instruct Q4_K_M ~105 MB):
 
 ```bash
 bash tests/conformance/run_llama_cpp_cumetal.sh
 ```
 
-Expected output:
+**Status — verified on 2026-07-18:**
 
-```
-llama-cli: ../llama.cpp/build-cumetal/bin/llama-cli
-Model cached: ~/.cache/cumetal/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+| What | Result |
+| --- | --- |
+| Build llama.cpp's GGML CUDA backend unmodified against libcumetal | ✅ works |
+| Load model, init CUDA device, register fatbins/kernels, run end-to-end | ✅ works |
+| SmolLM2-135M greedy output with one GPU-offloaded layer | ✅ coherent |
 
-═══════════════════════════════════════════════════════════════
- llama.cpp CUDA backend conformance test via CuMetal
- Model:  tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
- Prompt: Explain quantum entanglement in two short sentences.
- NGL:    99  (GPU layers offloaded)
- NTok:   128
-═══════════════════════════════════════════════════════════════
+Measured on SmolLM2-135M, greedy decode of "The capital of France is":
 
-Quantum entanglement is a phenomenon where two particles become
-correlated such that the state of one instantly influences the
-other, regardless of distance. This non-local connection is a
-cornerstone of quantum information theory and has no classical
-analogue.
+- Stock CPU llama.cpp → `Paris.` ✅
+- llama.cpp via libcumetal (NGL=0) → `Paris.` ✅
+- llama.cpp via libcumetal (NGL=1) → `The capital of France is Paris.` ✅
+  (Apple M4 Pro, 5.8 tokens/s generation in the verified run)
 
-─── Inference complete (8s wall-clock) ────────────────────────
-Performance: 42.3 tokens per second
+Registered fatbinary launches are conservatively synchronized by default because
+the experimental asynchronous path can violate ordering when GGML uses adjacent
+suballocations of a shared Metal arena. Direct/source-first launches remain
+asynchronous. `CUMETAL_ENABLE_ASYNC_REGISTERED_LAUNCH=1` opts into the incomplete
+asynchronous path for development. This result is a focused NGL=1 smoke test;
+arbitrary models and high offload counts still require broader GGML kernel coverage.
 
-PASS: llama.cpp CUDA backend works perfectly on CuMetal
-      Real production LLM kernels ran on Apple Silicon via Metal translation.
-```
-
-This is significant because it demonstrates that production CUDA LLM kernels —
-quantized matrix multiplication, attention, RoPE, and more — execute correctly
-through the full CUDA → Metal translation pipeline with no source modifications.
-Point any pre-compiled llama.cpp binary at a different model by setting
-`CUMETAL_LLAMA_MODEL=/path/to/model.gguf`.
+The conformance test enforces a **coherence gate**: a greedy decode must contain the
+expected answer (`CUMETAL_LLAMA_EXPECT`, default `Paris`). With `NGL>0` it also
+requires a successful Apple-GPU provenance record and rejects CPU fallbacks and
+stubs, so it FAILS on garbage or non-GPU execution rather than passing on "some
+tokens were generated." The default NGL=1 probe is expected to pass on the
+verified Apple M4 Pro path; unsupported models or larger offload counts fail
+honestly instead of being reported as compatible.
+Point it at another model/answer with `CUMETAL_LLAMA_MODEL` / `CUMETAL_LLAMA_EXPECT`.
 
 Test suite
 ----------
 
-182 tests are registered in CTest (unit + functional). An additional benchmark
-gate test (`bench_phase5_all_kernels`) runs on Apple Silicon if xcrun is available.
+CTest registers unit, functional, conformance, and benchmark tests. Results must
+be reported as separate pass/skip/fail counts because external-project and
+toolchain-dependent tests legitimately skip; registration is not a passing
+compatibility claim. The `bench_phase5_all_kernels` gate runs only when its
+required Metal toolchain is available.
 
 ```bash
 ctest --test-dir build --output-on-failure      # run all tests

@@ -1,8 +1,21 @@
 # Status
 
-Current status: **Post-Phase 5 — 182/182 tests passing (modulo env skips for missing Xcode metal toolchain)**
+Current status: **experimental CUDA compatibility stack with a documented PTX
+subset and real Metal GPU execution for covered kernels.**
 
-Phase 4 is fully complete. Phase 5 performance work is complete.
+The July 2026 Apple-GPU execution work, including the exact llama.cpp result,
+runtime policy, provenance contract, toolchain shims, and completion validation,
+is recorded in [apple-gpu-execution.md](apple-gpu-execution.md).
+
+Do not interpret the number of CTest registrations as a pass count. The suite
+contains environment-dependent skips and external-project conformance gates;
+each run must report passed, skipped, and failed totals separately with the
+machine/Xcode configuration. General CUDA compatibility and broad llama.cpp GPU
+offload are not complete.
+
+Earlier phase labels below describe implemented project milestones, not proof
+that arbitrary CUDA programs are supported. Phase 5 benchmark infrastructure is
+implemented for the covered kernels.
 Intentional non-goals per §2.2 (CUDA Graphs, dynamic parallelism, texture objects,
 multi-GPU, graphics interop) remain deferred to v2.
 
@@ -249,15 +262,17 @@ Implemented:
   - legacy runtime launch path (`cudaConfigureCall` / `cudaSetupArgument` / `cudaLaunch`)
   - llm.c FP32 CUDA stress binary can be built and executed through CuMetal registration path
     using `scripts/build_llmc_test_gpt2fp32cu.sh` + `scripts/run_llmc_test_gpt2fp32cu.sh`
-  - `conformance_llmc_gpt2fp32cu` now enforces numerical parity markers and passes with
-    `OK (LOGITS)`, `LOSS OK`, `TENSOR OK`, and `overall okay: 1`
+  - `conformance_llmc_gpt2fp32cu` enforces numerical parity markers plus
+    successful Apple-GPU launch provenance; measured on Apple M4 Pro, it passes
+    with `overall okay: 1` and CPU emulation disabled
   - llm.c harness build shim supports `CUMETAL_LLMC_GRAD_TOL` (default `1.2e-2`) to tune
     gradient-check tolerance applied to the generated test translation unit
-  - llm.c runtime emulation fallback is now explicitly traceable (`CUMETAL_TRACE_LLMC_EMULATION=1`)
-    and can be disabled (`CUMETAL_DISABLE_LLMC_EMULATION=1`) to validate pure PTX-lowered execution
-  - direct Metal lowering for all 17 llm.c GPT-2 training kernels
-    (`compiler/ptx/src/lower_to_metal.cpp`); `CUMETAL_LLMC_REQUIRE_NO_EMULATION=1` now passes
-    (`OK (LOGITS)`, `LOSS OK`, `TENSOR OK`, `overall okay: 1`) without any emulation fallback
+  - llm.c runtime CPU emulation is disabled by default and can be explicitly enabled only for
+    diagnostics (`CUMETAL_ENABLE_LLMC_CPU_EMULATION=1`); it remains traceable with
+    `CUMETAL_TRACE_LLMC_EMULATION=1`. Use `CUMETAL_TRACE_GPU=1` to verify Metal dispatch.
+  - the passing llm.c workload uses specialized Metal replacements in
+    `compiler/ptx/src/lower_to_metal.cpp`; it does not establish general PTX
+    compatibility
   - PTX sweep extended with 30+ new test cases: `shfl.sync.{idx,down,up,bfly}`,
     `vote.sync.{ballot,any,all}`, `bar.warp.sync`, `membar.{gl,cta,sys}`,
     `cp.async.{ca,commit_group,wait_all}`, `redux.sync.{add,and,or,xor,min,max}`,

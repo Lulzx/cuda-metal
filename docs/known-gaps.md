@@ -17,13 +17,26 @@ as gaps have been closed.
 - Warp primitives with partial masks (`mask != 0xFFFFFFFF`): conservative full-SIMD-group
   emulation (all lanes participate or get identity). Correct but may not match NVIDIA
   "inactive lane" semantics exactly. Kernels relying on partial masks should be validated.
+- Grid-wide cooperative sync (`this_grid().sync()`): a no-op on Metal (no cross-threadgroup
+  barrier). A multi-block `cudaLaunchCooperativeKernel` / `cuLaunchCooperativeKernel` now prints
+  a one-time `CUMETAL WARNING` so code that depends on grid-wide sync for correctness is not
+  silently wrong. Single-block launches are safe (block-scoped CG works).
 - FP64: `--fp64=emulate` (Dekker single-double via FP32 pairs, ~44-bit mantissa) is only
   activated for name-matched kernels (`*fp64*{mul,fma,add}*` etc.). Arbitrary `.f64` PTX
   streams fall back to native (which is rejected at Metal pipeline create time on current
-  Apple Silicon; runtime forces emulate default). General lowering pass deferred.
+  Apple Silicon; runtime forces emulate default). General lowering pass deferred. When a
+  driver-JIT kernel actually contains `.f64` ops under the emulate default, the runtime prints a
+  one-time `CUMETAL WARNING` noting the reduced (~44-bit) precision; `CUMETAL_FP64_MODE=native`
+  compiles true doubles (which fail at launch on current hardware, useful only for testing).
 - Null stream (legacy default): observable serialization correct via command-buffer ordering
   on default queue. The full spec §6.3.1 cross-stream "user streams wait for null" via
   MTLSharedEvent is not implemented; current approach suffices for single-context use.
+- Registered fatbinary launches are synchronized before returning by default. This
+  correctness-first policy avoids stale reads when frameworks use multiple CUDA
+  streams over adjacent suballocations of one large Metal buffer. Direct/source-first
+  launches remain asynchronous. `CUMETAL_ENABLE_ASYNC_REGISTERED_LAUNCH=1` restores
+  the experimental asynchronous registration path, which is known to corrupt
+  llama.cpp inference until cross-command-queue resource fencing is complete.
 - Device printf: fully works for PTX registration + direct paths (256-byte format limit,
   ring buffer, post-launch drain). Reordering vs. CUDA possible (as on real CUDA too).
 - Binary-shim fatbinary support: CMTL envelopes, raw PTX, basic FatBinary/FatBinary2/3
@@ -31,37 +44,51 @@ as gaps have been closed.
   images not supported (SASS never was; per spec).
 
 ## .cu / cumetalc frontend limitations
-- The Clang-based `.cu` → AIR path via `cumetalc` supports many simple kernels and
-  samples (vectorAdd etc.).
-- Complex CUDA C++ sources (e.g. full `llm.c/train_gpt2_fp32.cu` or GGML's 100+ kernels in
-  llama.cpp) exercise only partial coverage: build succeeds (nvcc shim + clang -x cuda +
-  fake CUDA toolkit), device init reports "Apple M4 Pro, compute capability 8.0", and
-  fatbin/PTX registration succeeds for the kernels present in the objects.
-- Execution hits gaps on first non-trivial kernel dispatch:
-  - llama.cpp (GGML CUDA): aborts in ggml_cuda_compute_forward (ADD) with cudaErrorInvalidValue
-    on templated k_bin_bcast (e.g. `_ZL11k_bin_bcastIXadL_ZL6op_addffEE...`); the metallib
-    resolved via registration-jit was an "experimental container" (produced by air_emitter
-    fallback when no `xcrun metal` in PATH) which Metal rejects as "Invalid library file".
-  - llm.c: aborts with cudaErrorInvalidValue inside train (e.g. around encoder/forward paths)
-    even with CUMETAL_DISABLE_LLMC_EMULATION; some of the 17 kernels rely on special cases in
-    lower_to_metal.cpp or direct MSL emission, but not all GGML-style or full combinations are
-    covered, and JIT/experimental path can still be hit depending on binary registration.
+- The Clang-based `.cu`/PTX registration path supports many simple kernels and
+  samples (vectorAdd etc.) and dispatches them through Metal on the Apple GPU.
+  CUDA kernel CPU emulation is disabled by default. The legacy llm.c host
+  implementation is diagnostic-only and requires
+  `CUMETAL_ENABLE_LLMC_CPU_EMULATION=1`; GGML's host helper fallback similarly
+  requires `CUMETAL_ENABLE_HOST_KERNEL_FALLBACKS=1`. Both modes emit a warning.
+  `CUMETAL_TRACE_GPU=1` provides positive dispatch evidence.
+- Complex CUDA C++ sources exercise mixed coverage. The strict llm.c GPT-2 FP32
+  conformance workload passes numerical parity on Apple M4 Pro with CPU emulation
+  disabled, using specialized MSL replacements. llama.cpp's much broader GGML
+  CUDA kernel set remains incomplete.
 - The binary-shim / PTX reg + lower path (plus special llm.c cases) gets further than pure
   generic emitter. Direct MSL name-matched cases (compiler/ptx/src/lower_to_metal.cpp) now cover
   common GGML kernels used by small models: k_bin_bcast (op_addff/op_mulff + f16 variants),
-  rms_norm_f32 (with stride/mul/add support), convert_unary, dequantize_block_q8_0_f16, plus
-  passthru stubs for rope_norm/neox, dequant q5_0, k_set_rows to prevent immediate aborts.
+  rms_norm_f32 (with stride/mul/add support), and Q8_0-to-f16 dequantization.
   A fast negative filter skips heavy lowering for the bulk of GGML's 1000s of mul_mat_q* / flash
   / other dequants / cpy etc (they hit "registered kernel missing" and GGML typically falls back
-  or aborts depending on NGL and op). 
-  - NGL=0 (CPU) for SmolLM2-135M etc: harness run_llama_cpp_cumetal.sh completes, PASS, reaches
-    generation + timings (text quality limited by tiny model, not CuMetal).
-  - NGL>0: exercises .metal + newLibraryWithSource GPU path for covered kernels (rms, bcast
-    residuals etc run on Apple GPU); still hits missing for cpy/set_rows/rope variants etc during
-    load/decode when forcing many layers, leading to ggml_cuda abort. Use --n-gpu-layers 0 for
-    reliable full run on small models; partial NGL may work if the offloaded layers only use
-    covered ops. Broader coverage or better GGML fallback integration would be needed for robust
-    high-NGL on full GGML CUDA models.
+  or aborts depending on NGL and op).
+- **Approximate/passthru stubs are refused by default (no silent wrong answers).** A handful of
+  templates (`convert_unary`, `rope_norm`/`rope_neox`, `dequantize_q5_0`/`_block_q5`,
+  `k_set_rows`, `cpy_`/`k_cpy`) exist only as passthru placeholders — they copy or zero data
+  instead of computing the real quantized/rotary/copy result. Their output is numerically wrong,
+  so the runtime **skips them by default** (the kernel falls through to the same clean "registered
+  kernel missing metallib" abort as any unsupported op) and prints a one-time
+  `CUMETAL WARNING: kernel '…' has only an approximate/passthru lowering and was skipped …`.
+  Set `CUMETAL_ENABLE_APPROX_KERNELS=1` to run them anyway for experimentation — the run then
+  completes but the output is not correct, and a warning says so. This trades "it launches but
+  lies" for "it fails loudly," which is the safer default for a translation layer.
+- **The covered llama.cpp SmolLM2 smoke path is numerically coherent.** Rechecked
+  2026-07-18 on SmolLM2-135M-Instruct-Q4_K_M, greedy decode of
+  "The capital of France is":
+  - Stock CPU llama.cpp (no CuMetal): `Paris.` ✅
+  - llama.cpp linked against libcumetal, **NGL=0**: `Paris.` ✅
+  - llama.cpp linked against libcumetal, **NGL=1**: `The capital of France is
+    Paris.` ✅ at 5.8 tokens/s generation on Apple M4 Pro. Registered launches
+    use the correctness-first synchronization policy described above; enabling
+    experimental asynchronous registered launches reproduces incoherent output.
+  - The conformance harness (`run_llama_cpp_cumetal.sh`) now enforces a **coherence gate**: greedy
+    decode must contain the expected answer (`CUMETAL_LLAMA_EXPECT`, default `Paris`) and an
+    NGL>0 run must include completed Apple-GPU provenance, so the test correctly
+    FAILS on garbage instead of passing on "some bytes were generated". Set
+    `CUMETAL_LLAMA_EXPECT=""` to opt out explicitly.
+  - This is a focused NGL=1 smoke result, not a claim that arbitrary models or
+    high layer-offload counts are supported. Broader GGML kernel coverage is
+    still required for robust high-NGL inference.
 
 ## Tooling / build notes
 - `air_emitter` "experimental" mode produces test containers, not production metallib ABI (for validation/air_abi only; runtime execution requires real metallib from xcrun or prebuilt).
@@ -71,14 +98,10 @@ as gaps have been closed.
   (`scripts/cumetal_cuda_flags.sh`) because of PTX version defaults; the in-tree
 - cuda_projects conformance harness now runs its compile step (clang -x cuda shim + fatbin registration setup) in environments without xcrun metal/metallib (only base xcrun + clang++ needed); runtime exec still limited by PTX lowering coverage for complex kernels (sgemm etc.) and falls back gracefully to SKIP (see run_standalone_cu.sh). This reduces skip-only coverage for the harness itself.
   `scripts/cuda_toolchain/fatbinary` accepts modern `--image3` args.
-- "Bigger project" tries (llama.cpp GGML full CUDA backend, llm.c gpt2 train) via the dedicated
-  build_*_cumetal.sh + run_*_cumetal.sh + fake toolkit succeed at compile+link+device init+reg;
-  first kernel launch for complex ops fails as described above (experimental metallib or
-  uncovered lowering). Direct MSL lowering + runtime newLibraryWithSource was added for the
-  common k_bin_bcast<op_addff> (and f16) family to allow elementwise broadcast adds on GPU
-  without needing CLI metal tools. Other GGML kernels (mul_mat variants, dequants, flash attn
-  tiles, rms_norm etc.) still hit lowering gaps and will report clear "failed to find kernel
-  function (lowering not supported)" or experimental hints suggesting n-gpu-layers=0.
+- The external llm.c stress gate now passes through specialized Metal kernels.
+  llama.cpp builds, links, initializes, and executes a covered subset, but other
+  GGML kernels (mul_mat variants, dequants, flash attention, conversions, and
+  rotary operations) still hit lowering gaps or are refused placeholder paths.
   See the bin_bcast special case in compiler/ptx/src/lower_to_metal.cpp and Metal source path
   in runtime/metal_backend.
 - Full AIR ABI reverse-engineering continues to be refined as Xcode releases change

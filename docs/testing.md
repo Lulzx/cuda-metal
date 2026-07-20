@@ -1,5 +1,10 @@
 # Testing and Benchmarking
 
+The GPU-only proof strategy and July 2026 validation record are documented in
+[apple-gpu-execution.md](apple-gpu-execution.md). In particular, a numerical
+result is not a GPU pass unless the test also observes completed Apple-GPU
+provenance and rejects CPU fallback/stub sources.
+
 Runtime execution tests
 -----------------------
 
@@ -136,8 +141,9 @@ Notes:
 - `air_abi_xcode_matrix_regression` uses `CUMETAL_XCODE15_DEVELOPER_DIR`/`CUMETAL_XCODE16_DEVELOPER_DIR` when set.
   If unset, it falls back to `xcode-select -p` for both slots (single-Xcode mode).
 - `functional_cuda_projects_*` compiles and runs standalone CUDA sample programs under
-  `tests/cuda_projects/` (SGEMM naive/shmem/2d, reduction, transpose). Requires `xcrun metal`
-  and `libcumetal` in `build/`. Skips with exit code 77 when the Metal toolchain is unavailable.
+  `tests/cuda_projects/` (SGEMM naive/shmem/2d, reduction, transpose). It requires
+  Clang, `xcrun`, and the matching `libcumetal` build. Unsupported lowering is
+  reported as an exit-77 skip.
 - `conformance_llmc_gpt2fp32cu` is registered only when llm.c is configured (set `CUMETAL_LLMC_DIR`
   before CMake configure, or place checkout at `../llm.c` relative to this repo root).
 - `conformance_llmc_gpt2fp32cu` skips when `gpt2_124M.bin` is missing from the llm.c checkout
@@ -146,8 +152,9 @@ Notes:
   `scripts/build_llmc_test_gpt2fp32cu.sh` + `scripts/run_llmc_test_gpt2fp32cu.sh`.
 - `conformance_llmc_gpt2fp32cu` fails on any `TENSOR NOT OK` marker and requires
   `overall okay: 1` in output.
-- By default, the harness traces runtime fallback markers (`CUMETAL_LLMC_EMULATION`) so you can
-  see when launches are still handled by the llm.c emulation path.
+- By default, the gate disables llm.c CPU emulation, requires numerical parity,
+  and requires successful Apple-GPU provenance. CPU fallback and stub
+  provenance are failures.
 - To force pure PTX-lowered execution (no llm.c emulation fallback), run:
 
 ```bash
@@ -173,6 +180,7 @@ export CUMETAL_LLMC_TEST_CMD="scripts/run_llmc_test_gpt2fp32cu.sh"
 export CUMETAL_LLMC_GRAD_TOL="1.2e-2"
 # optional: hard-disable llm.c runtime emulation fallback
 export CUMETAL_DISABLE_LLMC_EMULATION="1"
+export CUMETAL_ENABLE_LLMC_CPU_EMULATION="0"
 ```
 
 Kernel argument notes:
