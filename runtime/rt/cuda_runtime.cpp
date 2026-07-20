@@ -5,6 +5,7 @@
 #include "library_conflict.h"
 #include "metal_backend.h"
 #include "registration.h"
+#include "native_registration.h"
 
 #include <algorithm>
 #include <atomic>
@@ -777,7 +778,8 @@ void note_llmc_emulation_hit(const std::string& kernel_name, std::uint32_t arg_c
     if (cumetal::diag_env_truthy("CUMETAL_TRACE_GPU")) {
         std::fprintf(stderr,
                      "CUMETAL_PROVENANCE event=kernel_launch kernel=\"%s\" "
-                     "source=cpu_fallback device=cpu compile_cache_hit=false "
+                     "source=cpu_fallback provenance=cpu_fallback "
+                     "semantic_quality=cpu_fallback device=cpu compile_cache_hit=false "
                      "launch_success=true duration_ns=-1 grid=unknown block=unknown "
                      "unsupported_reason=\"explicit llm.c CPU emulation\"\n",
                      kernel_name.c_str());
@@ -2720,6 +2722,7 @@ cudaError_t cudaDeviceReset(void) {
     }
 
     state.allocations.clear();
+    cumetal::native_registration::clear();
     cumetal::registration::clear();
     clear_pending_launch_state();
     state.current_device = 0;
@@ -3373,6 +3376,7 @@ cudaError_t cudaLaunchKernel(const void* func,
 
     cumetal::registration::RegisteredKernel registered_kernel;
     const bool use_registered_kernel =
+        cumetal::native_registration::lookup_kernel(func, &registered_kernel) ||
         cumetal::registration::lookup_registered_kernel(func, &registered_kernel);
 
     if (trace_enabled()) {
@@ -3493,7 +3497,8 @@ cudaError_t cudaLaunchKernel(const void* func,
         if (cumetal::diag_env_truthy("CUMETAL_TRACE_GPU")) {
             std::fprintf(stderr,
                          "CUMETAL_PROVENANCE event=kernel_launch "
-                         "kernel=\"%s\" source=cpu_fallback device=cpu "
+                         "kernel=\"%s\" source=cpu_fallback provenance=cpu_fallback "
+                         "semantic_quality=cpu_fallback device=cpu "
                          "compile_cache_hit=false launch_success=queued duration_ns=-1 "
                          "grid=(%u,%u,%u) block=(%u,%u,%u) "
                          "unsupported_reason=\"explicit GGML host helper fallback\"\n",
@@ -3750,6 +3755,10 @@ cudaError_t cudaLaunchKernel(const void* func,
         .grid = grid_dim,
         .block = block_dim,
         .shared_memory_bytes = effective_shared_mem,
+        .provenance =
+            use_registered_kernel ? registered_kernel.provenance : "precompiled_metallib",
+        .semantic_quality =
+            use_registered_kernel ? registered_kernel.semantic_quality : "exact",
     };
 
     const char* metallib_path =
@@ -4186,6 +4195,10 @@ const char* cudaGetErrorName(cudaError_t error) {
             return "cudaErrorNotReady";
         case cudaErrorDevicesUnavailable:
             return "cudaErrorDevicesUnavailable";
+        case cudaErrorPeerAccessAlreadyEnabled:
+            return "cudaErrorPeerAccessAlreadyEnabled";
+        case cudaErrorPeerAccessNotEnabled:
+            return "cudaErrorPeerAccessNotEnabled";
         case cudaErrorIllegalAddress:
             return "cudaErrorIllegalAddress";
         case cudaErrorUnknown:
@@ -4212,6 +4225,10 @@ const char* cudaGetErrorString(cudaError_t error) {
             return "cudaErrorNotReady";
         case cudaErrorDevicesUnavailable:
             return "cudaErrorDevicesUnavailable";
+        case cudaErrorPeerAccessAlreadyEnabled:
+            return "cudaErrorPeerAccessAlreadyEnabled";
+        case cudaErrorPeerAccessNotEnabled:
+            return "cudaErrorPeerAccessNotEnabled";
         case cudaErrorIllegalAddress:
             return "cudaErrorIllegalAddress";
         case cudaErrorUnknown:

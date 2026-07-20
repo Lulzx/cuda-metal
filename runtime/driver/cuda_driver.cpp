@@ -104,6 +104,10 @@ CUresult map_cuda_error(cudaError_t error) {
             return CUDA_ERROR_ILLEGAL_ADDRESS;
         case cudaErrorDevicesUnavailable:
             return CUDA_ERROR_DEVICES_UNAVAILABLE;
+        case cudaErrorPeerAccessAlreadyEnabled:
+            return CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED;
+        case cudaErrorPeerAccessNotEnabled:
+            return CUDA_ERROR_PEER_ACCESS_NOT_ENABLED;
         case cudaErrorUnknown:
             return CUDA_ERROR_UNKNOWN;
     }
@@ -1725,6 +1729,12 @@ CUresult cuGetErrorName(CUresult error, const char** pStr) {
             break;
         case CUDA_ERROR_LAUNCH_TIMEOUT:
             *pStr = "CUDA_ERROR_LAUNCH_TIMEOUT";
+            break;
+        case CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED:
+            *pStr = "CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED";
+            break;
+        case CUDA_ERROR_PEER_ACCESS_NOT_ENABLED:
+            *pStr = "CUDA_ERROR_PEER_ACCESS_NOT_ENABLED";
             break;
         case CUDA_ERROR_UNKNOWN:
             *pStr = "CUDA_ERROR_UNKNOWN";

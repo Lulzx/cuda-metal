@@ -1,9 +1,50 @@
 # CuMetal — CUDA Compiler & Runtime for Apple Silicon
 
-**Status:** Design Specification v0.1 (implementation of primary v1 goals complete per README.md and docs/status.md; see Phase 4/5 and post-Phase 5 work)  
+**Status:** Design Specification v0.3 (CuMetal IR/MSL architecture amendment in progress)
 **Target Platform:** macOS 14+ on Apple Silicon (M1 / M2 / M3 / M4 families)  
 **License (proposed):** Apache 2.0  
 **Changelog from v0.2:** See §16 for a categorized list of changes.
+
+## 0. Normative Compiler Architecture Amendment
+
+This section supersedes older compiler-path descriptions in §§1–5, 9–11 and 13
+where they describe direct production AIR emission, PTX-to-LLVM as the canonical
+frontend, qualifier-stripping CUDA compilation, or LLVM/AIR as the shared
+compiler representation. Runtime/API requirements in those sections remain
+normative.
+
+CuMetal's canonical architecture is:
+
+```text
+CUDA C++ → stock Clang CUDA device LLVM/NVVM ─┐
+                                               ├→ verified CuMetal GPU IR
+PTX → parser → CFG → register SSA ─────────────┘
+  → Metal legalization → CFG structurization → typed MSL AST
+  → Apple metal/metallib tools → .metallib
+```
+
+- CuMetal GPU IR is a custom, typed SSA/CFG representation. It has block
+  arguments, explicit address spaces, pointer provenance, typed memory scopes
+  and orderings, kernel ABI metadata, source locations, and separate core/GPU
+  operation families.
+- Every frontend import and transformation runs the verifier. Undefined values,
+  invalid dominance, illegal casts/barriers/atomics, indirect or recursive
+  device calls, and unsupported semantics are compile-time failures.
+- Metal legalization is an explicit legality boundary. GPU-semantic operations
+  are forbidden after legalization; Metal operations are forbidden before it.
+- MSL is the stable production backend contract. Production `.metallib` output
+  is delegated to Apple's supported compiler. Direct AIR emission remains
+  research, inspection, validation, and regression tooling only.
+- Source AOT uses the versioned CuMetal-native registration ABI. NVIDIA
+  fatbinary and `__cudaRegister*` handling are compatibility-only.
+- MLIR is deferred until measured compiler maintenance needs justify migration.
+- Unsupported behavior fails explicitly. Legacy lowering, substitutions,
+  approximate semantics, and CPU fallback are never selected silently.
+
+The migration backend is selected explicitly with `--backend=cumetal-ir`.
+`--backend=legacy` remains temporarily available while the conformance gate is
+being built. The default changes only after the new path matches the legacy
+generic correctness count with no silent fallback.
 
 ---
 
@@ -16,8 +57,8 @@ on Apple's Metal GPU stack.
 
 The gap is two-layered:
 
-1. **Compiler gap** — no toolchain that compiles CUDA device code (`.cu` kernels) into valid
-   Apple AIR (the LLVM-bitcode format the Metal driver consumes).
+1. **Compiler gap** — no toolchain that translates CUDA device semantics into
+   supported Metal source and libraries.
 2. **Runtime gap** — no `libcuda.dylib` that maps CUDA driver/runtime API calls to
    Metal objects.
 
@@ -47,8 +88,9 @@ path is legally unambiguous, technically simpler, and invulnerable to vendor kil
   Apple Silicon GPUs via `cumetalc`, requiring only a recompile — no source changes.
 - **Secondary:** Provide an opt-in `libcuda.dylib` shim that satisfies CUDA Driver/Runtime
   API symbol tables, enabling PTX-shipping programs to run via JIT without recompilation.
-- Compile PTX and CUDA C++ to Apple AIR through an LLVM-based pipeline with no dependency
-  on Apple's closed Metal toolchain for the compilation path (only the driver ABI).
+- Compile PTX and CUDA C++ through verified CuMetal GPU IR and typed MSL.
+- Treat Apple's supported Metal compiler as a required build/JIT toolchain
+  component; AOT-produced applications do not require Xcode at runtime.
 - Achieve functional correctness as the first priority; performance parity as a later milestone.
 - Remain legally clean: no NVIDIA header redistribution, clean-room runtime ABI, no
   proprietary PTX opcode documentation required.
@@ -67,16 +109,14 @@ path is legally unambiguous, technically simpler, and invulnerable to vendor kil
   mapping is complex; deferred to v2 (see §8).
 - Drop-in compatibility for closed-source commercial binaries (see §12.1).
 
-### 2.3 Why Not MLIR?
+### 2.3 Why Not MLIR Yet?
 
-LLVM was chosen because the Clang CUDA frontend emits LLVM IR directly, and the NVPTX
-backend's intrinsic vocabulary is what we need to lower from. Starting with MLIR's GPU
-dialect would add a translation hop with no correctness benefit in v1.
-
-However, MLIR is an excellent fit for Phase 5 performance optimization — the GPU dialect
-enables kernel fusion, tiling, and other transforms that are painful to express as LLVM
-passes. The architecture explicitly preserves this option: the `air_emitter` accepts any
-conforming LLVM IR module regardless of what produced it.
+The first shared representation is a lightweight custom C++ IR so the project
+can establish its semantic model, diagnostics, verifier, and backend without
+adding dialect and toolchain-version complexity. MLIR will be evaluated against
+measured needs for pass composition, serialization, canonicalization, and reuse
+of `scf`, `vector`, and `gpu`. Migration is justified only if a prototype
+reduces implementation or maintenance cost without weakening diagnostics.
 
 ---
 

@@ -38,7 +38,7 @@ fi
 
 if [[ -z "${FAIL_REASON}" && "${NGL}" -gt 0 ]]; then
     if ! LC_ALL=C grep -aqE \
-        'CUMETAL_PROVENANCE .*source=(generic_ptx|specialized_msl|metallib) device=apple_gpu .*launch_success=true' \
+        'CUMETAL_PROVENANCE .*source=(generic_ptx|specialized_msl|metallib) provenance=(generic_ptx_lowering|library_substitution|workload_specialization|precompiled_metallib) semantic_quality=(exact|tolerance_bounded|semantic_emulation|performance_degraded) device=apple_gpu .*launch_success=true' \
         "${OUTPUT_FILE}"; then
         FAIL_REASON="no successful Apple-GPU kernel provenance was recorded"
     elif LC_ALL=C grep -aqE \

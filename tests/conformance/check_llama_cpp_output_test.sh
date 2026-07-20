@@ -11,6 +11,7 @@ VALID="${TMP_DIR}/valid-invalid-utf8.log"
     printf '\377llama.cpp output with a torn UTF-8 byte sequence\n'
     printf 'The capital of France is Par'
     printf 'CUMETAL_PROVENANCE event=kernel_launch source=specialized_msl '
+    printf 'provenance=workload_specialization semantic_quality=exact '
     printf 'device=apple_gpu launch_success=true\n'
     printf 'is.\n'
 } > "${VALID}"
@@ -58,6 +59,7 @@ if [[ " $* " != *" --simple-io "* ]]; then
 fi
 printf '%060d\n' 0
 printf 'CUMETAL_PROVENANCE event=kernel_launch source=specialized_msl '
+printf 'provenance=workload_specialization semantic_quality=exact '
 printf 'device=apple_gpu launch_success=true\n'
 printf 'The capital of France is Paris.\n'
 EOF

@@ -71,6 +71,72 @@ target_compile_options(cumetal_ptx
         -Wpedantic
 )
 
+add_library(cumetal_ir STATIC
+    compiler/ir/src/ir.cpp
+    compiler/ir/src/nvvm_importer.cpp
+    compiler/ir/src/ptx_importer.cpp
+)
+
+target_include_directories(cumetal_ir
+    PUBLIC
+        compiler/ir/include
+)
+
+target_link_libraries(cumetal_ir
+    PUBLIC
+        cumetal_ptx
+)
+
+find_package(LLVM CONFIG QUIET
+    HINTS
+        /opt/homebrew/opt/llvm/lib/cmake/llvm
+        /usr/local/opt/llvm/lib/cmake/llvm
+)
+
+if(LLVM_FOUND AND LLVM_PACKAGE_VERSION VERSION_GREATER_EQUAL 18)
+    message(STATUS "CuMetal NVVM importer enabled with LLVM ${LLVM_PACKAGE_VERSION}")
+    llvm_map_components_to_libnames(CUMETAL_LLVM_LIBS
+        Core
+        IRReader
+        Support
+    )
+    target_include_directories(cumetal_ir SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+    target_link_libraries(cumetal_ir PUBLIC ${CUMETAL_LLVM_LIBS})
+    target_compile_definitions(cumetal_ir PUBLIC CUMETAL_HAVE_LLVM=1)
+else()
+    message(WARNING "LLVM 18+ not found; genuine CUDA/NVVM import will be unavailable")
+    target_compile_definitions(cumetal_ir PUBLIC CUMETAL_HAVE_LLVM=0)
+endif()
+
+target_compile_options(cumetal_ir
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+add_library(cumetal_metal_codegen STATIC
+    compiler/metal/src/msl_ast.cpp
+    compiler/metal/src/lower_to_msl.cpp
+)
+
+target_include_directories(cumetal_metal_codegen
+    PUBLIC
+        compiler/metal/include
+)
+
+target_link_libraries(cumetal_metal_codegen
+    PUBLIC
+        cumetal_ir
+)
+
+target_compile_options(cumetal_metal_codegen
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
 add_library(cumetal_passes STATIC
     compiler/passes/src/addrspace.cpp
     compiler/passes/src/intrinsic_lower.cpp
@@ -109,6 +175,7 @@ target_include_directories(cumetal_ptx_codegen
 
 target_link_libraries(cumetal_ptx_codegen
     PUBLIC
+        cumetal_metal_codegen
         cumetal_passes
 )
 
@@ -129,6 +196,7 @@ add_library(cumetal_runtime SHARED
     runtime/cache/module_cache.cpp
     runtime/driver/cuda_driver.cpp
     runtime/error/library_conflict.cpp
+    runtime/registration/native_registration.cpp
     ${CUMETAL_REGISTRATION_SOURCE}
     runtime/rt/allocation_table.cpp
     runtime/rt/cublas.cpp
@@ -502,6 +570,7 @@ if(APPLE)
 endif()
 
 install(FILES
+    runtime/api/cumetal_native.h
     runtime/api/cublas_v2.h
     runtime/api/cuda.h
     runtime/api/cuda_fp16.h

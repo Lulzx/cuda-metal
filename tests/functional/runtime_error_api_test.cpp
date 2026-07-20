@@ -108,6 +108,18 @@ int main() {
         return 1;
     }
 
+    if (std::strcmp(cudaGetErrorName(cudaErrorPeerAccessAlreadyEnabled),
+                    "cudaErrorPeerAccessAlreadyEnabled") != 0 ||
+        std::strcmp(cudaGetErrorString(cudaErrorPeerAccessAlreadyEnabled),
+                    "cudaErrorPeerAccessAlreadyEnabled") != 0 ||
+        std::strcmp(cudaGetErrorName(cudaErrorPeerAccessNotEnabled),
+                    "cudaErrorPeerAccessNotEnabled") != 0 ||
+        std::strcmp(cudaGetErrorString(cudaErrorPeerAccessNotEnabled),
+                    "cudaErrorPeerAccessNotEnabled") != 0) {
+        std::fprintf(stderr, "FAIL: peer-access error name/string mismatch\n");
+        return 1;
+    }
+
     std::printf("PASS: runtime error APIs behave correctly\n");
     return 0;
 }

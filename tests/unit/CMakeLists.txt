@@ -21,6 +21,26 @@ add_executable(cumetal_ptx_parser_test
     ptx_parser_test.cpp
 )
 
+add_executable(cumetal_ir_test
+    ir_test.cpp
+)
+
+add_executable(cumetal_msl_ast_test
+    msl_ast_test.cpp
+)
+
+add_executable(cumetal_ptx_ir_msl_test
+    ptx_ir_msl_test.cpp
+)
+
+add_executable(cumetal_nvvm_ir_msl_test
+    nvvm_ir_msl_test.cpp
+)
+
+add_executable(cumetal_native_registration_test
+    native_registration_test.cpp
+)
+
 add_executable(cumetal_intrinsic_lower_test
     intrinsic_lower_test.cpp
 )
@@ -86,6 +106,31 @@ target_link_libraries(cumetal_metallib_parser_test
 target_link_libraries(cumetal_ptx_parser_test
     PRIVATE
         cumetal_ptx
+)
+
+target_link_libraries(cumetal_ir_test
+    PRIVATE
+        cumetal_ir
+)
+
+target_link_libraries(cumetal_msl_ast_test
+    PRIVATE
+        cumetal_metal_codegen
+)
+
+target_link_libraries(cumetal_ptx_ir_msl_test
+    PRIVATE
+        cumetal_metal_codegen
+)
+
+target_link_libraries(cumetal_nvvm_ir_msl_test
+    PRIVATE
+        cumetal_metal_codegen
+)
+
+target_link_libraries(cumetal_native_registration_test
+    PRIVATE
+        cumetal_runtime
 )
 
 target_link_libraries(cumetal_intrinsic_lower_test
@@ -167,6 +212,12 @@ target_compile_options(cumetal_ptx_parser_test
         -Wextra
         -Wpedantic
 )
+
+target_compile_options(cumetal_ir_test PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(cumetal_msl_ast_test PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(cumetal_ptx_ir_msl_test PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(cumetal_nvvm_ir_msl_test PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(cumetal_native_registration_test PRIVATE -Wall -Wextra -Wpedantic)
 
 target_compile_options(cumetal_intrinsic_lower_test
     PRIVATE
@@ -286,6 +337,21 @@ add_test(
 add_test(
     NAME unit_ptx_parser
     COMMAND cumetal_ptx_parser_test
+)
+
+add_test(NAME unit_cumetal_ir COMMAND cumetal_ir_test)
+add_test(NAME unit_msl_ast COMMAND cumetal_msl_ast_test)
+add_test(NAME unit_ptx_ir_msl COMMAND cumetal_ptx_ir_msl_test)
+add_test(NAME unit_nvvm_ir_msl COMMAND cumetal_nvvm_ir_msl_test)
+add_test(NAME unit_native_registration COMMAND cumetal_native_registration_test)
+add_test(
+    NAME unit_cumetalc_shared_ir
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_shared_ir_test.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx
+            ${CMAKE_SOURCE_DIR}/tests/cuda_projects/vector_add/vector_add.cu
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/unsupported_shared_ir.ptx
 )
 
 add_test(
