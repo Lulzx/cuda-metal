@@ -51,3 +51,40 @@ This log records progress and decisions for the PhysX GPU-on-CuMetal port.
 
 Next action is intentionally paused pending author review of the Phase 0
 report.
+
+## 2026-07-20 — Phase 1 CPU SDK on macOS arm64
+
+- Reused PhysX's Unix/Linux CMake source lists for the CPU-only build while
+  retaining the compiler-selected `PX_OSX`, `PX_APPLE_FAMILY`, and `PX_A64`
+  code paths. No CUDA language or GPU target is enabled.
+- Added a revision-pinned, idempotent patch workflow under
+  `scripts/physx-patches/`. The patch applies cleanly to
+  `107.3-physx-5.6.1` at
+  `5ca9f472105a90d70d957c243cb0ef36fe251a9f`.
+- Kept the port narrow:
+  - recognize CMake's `AppleClang` compiler ID and libc++ rather than applying
+    libstdc++ ABI flags;
+  - remove Linux-only `rt`, `dl`, `-m64`, `$ORIGIN`, X11, GL, and GLUT
+    assumptions for a static, non-rendering macOS build;
+  - use the scalar vector store path on every ARM-family target;
+  - avoid x86 MXCSR intrinsics in macOS arm64 FPU guards;
+  - resolve an AppleClang `size_t` overload ambiguity in the temporary
+    allocator;
+  - add a distinct `MA64` / `macaarch64` binary serialization platform tag.
+- Added `build_physx_cpu_macos.sh`, which writes all generated build artifacts
+  under CuMetal's `build/physx-cpu-macos-arm64` directory rather than
+  polluting the PhysX checkout.
+- Built the static Release CPU SDK dependencies and stock non-rendering
+  `SnippetHelloWorld`. The result is a single-architecture Mach-O arm64
+  executable.
+- Ran the snippet's stock 100 fixed simulation steps. It completed with
+  `SnippetHelloWorld done.` and the wrapper reported:
+  `PASS: PhysX CPU SnippetHelloWorld completed 100 steps on macOS arm64`.
+- The upstream build emits non-fatal AppleClang warnings and a final duplicate
+  static-library linker warning; neither affects the successful build or
+  simulation.
+- Ran `ctest --test-dir build --output-on-failure` before commit. All 186
+  current CuMetal tests passed; platform/dependency-gated cases were reported
+  as skips.
+
+Phase 2 has not started.
