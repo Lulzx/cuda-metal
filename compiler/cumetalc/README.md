@@ -25,9 +25,11 @@ only supports simple prototype kernels.
 `--cuda-device` selects the real CUDA source frontend. It invokes a CUDA-capable
 Homebrew LLVM `clang++` (or `--cuda-clang`/`CUMETAL_CUDA_CLANG`) in device-only mode,
 emits PTX, then runs CuMetal's PTX lowering and AIR emitter. `-I`, `-D`,
-`--cuda-include`, and `--cuda-arch` are available for project builds. Jump tables are
-disabled because CuMetal currently lowers structured PTX branches rather than
-`brx.idx` target tables.
+`--cuda-include`, and `--cuda-arch` are available for project builds.
+`--cuda-inline-threshold <n>` forwards Clang's GPU inlining threshold; it is useful
+for projects whose PTX contains helper `.func` definitions, which CuMetal does not
+yet lower independently. Jump tables are disabled because CuMetal currently lowers
+structured PTX branches rather than `brx.idx` target tables.
 
 When built from a CuMetal source checkout, this `.cu` frontend path automatically adds
 `runtime/api/` to the include path for clean-room CUDA headers.

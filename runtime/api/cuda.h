@@ -13,11 +13,12 @@ typedef uint64_t CUdeviceptr;
 typedef struct CUctx_st* CUcontext;
 typedef struct CUmod_st* CUmodule;
 typedef struct CUfunc_st* CUfunction;
-typedef struct cudaStream_st* CUstream;
-typedef struct cudaEvent_st* CUevent;
+typedef struct CUstream_st* CUstream;
+typedef struct CUevent_st* CUevent;
 typedef struct cudaGraph_st* CUgraph;
 typedef struct cudaGraphExec_st* CUgraphExec;
 typedef struct cudaGraphNode_st* CUgraphNode;
+typedef uint64_t CUtexObject;
 
 #define CU_STREAM_LEGACY ((CUstream)0x1)
 #define CU_STREAM_PER_THREAD ((CUstream)0x2)

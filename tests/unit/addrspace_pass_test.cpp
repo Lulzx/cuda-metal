@@ -33,6 +33,8 @@ int main() {
     cvta.to.shared.u64 %rd4, %rd1;
     cvta.to.global.u64 %rd5, %rd2;
     cvta.to.local.u64 %rd6, %rd3;
+    ld.volatile.shared.u32 %r9, [%rd1];
+    st.volatile.shared.u32 [%rd1], %r9;
     foo.shared.u32 %r7, %r8;
     ret;
 }
@@ -97,6 +99,18 @@ int main() {
     if (!expect(rewritten.instructions[8].rewritten &&
                     rewritten.instructions[8].opcode == "llvm.addrspacecast.to.as5",
                 "cvta local rewritten")) {
+        return 1;
+    }
+    if (!expect(rewritten.instructions[9].rewritten &&
+                    rewritten.instructions[9].opcode == "llvm.load" &&
+                    rewritten.instructions[9].address_space == 3,
+                "qualified volatile shared load rewritten")) {
+        return 1;
+    }
+    if (!expect(rewritten.instructions[10].rewritten &&
+                    rewritten.instructions[10].opcode == "llvm.store" &&
+                    rewritten.instructions[10].address_space == 3,
+                "qualified volatile shared store rewritten")) {
         return 1;
     }
     if (!expect(!rewritten.warnings.empty(), "unknown .shared opcode emits warning")) {

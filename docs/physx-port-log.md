@@ -118,14 +118,45 @@ report.
 - Added `build_physx_cumetal_kernels_macos.sh`. Production output defaults to
   `xcrun`; `CUMETAL_PHYSX_EMIT_MODE=experimental` is available only for
   compile/validation on machines without the optional Xcode Metal Toolchain.
-- Verified the patched PhysX CMake target in experimental mode on this host.
-  `air_validate` and `air_inspect` confirmed one kernel named
+- Verified the initial patched PhysX CMake target in experimental mode on this
+  host. `air_validate` and `air_inspect` confirmed the bootstrap kernel named
   `sphereNphase_Kernel`. This host's `xcrun` is installed, but its optional
   Metal Toolchain component is not, so a GPU-executable production metallib
   could not be packaged locally. This is an environment dependency, not a
   CUDA/PTX compilation failure.
-- The manifest is intentionally the static bootstrap boundary from the Phase
-  0 report. Phase 3 must trace lazy `KernelWrangler` lookups/launches and grow
-  it with only the broadphase, bookkeeping, simulation-controller, and PGS
-  kernels actually requested by the one-sphere scene; eager compilation of all
-  501 registered names remains out of scope.
+
+### Phase 2 completion sweep
+
+- Mapped the reduced scene's broadphase, rigid simulation-controller,
+  sphere/plane narrowphase, contact bookkeeping, and PGS solver dispatches to
+  14 CUDA translation units.
+- Added the clean-room CUDA declarations required by those sources:
+  driver-compatible opaque stream/event spellings, `CUtexObject`,
+  `__builtin_align__`, cache-hinted load/store shims, 64-bit/double shuffle
+  overloads, and `sm_35_intrinsics.h`.
+- Fixed PTX lowering exposed by the sweep:
+  qualified shared-memory address-space operations; generic pointer loads and
+  stores; destination-less calls; scalar bit reinterpretation; popcount;
+  `fminf`; fast division; and fast sin/cos with local pointer outputs.
+  Focused unit or AIR frontend regressions cover each compatibility class.
+- Added `--cuda-inline-threshold`. Clang's GPU inliner removes PhysX's
+  `updateCacheAndBound` helper `.func` without modifying NVIDIA source;
+  standalone PTX `.func` lowering remains explicitly documented as a gap.
+- Strict-lowered all 127 entries emitted by the selected translation units:
+  122 lower directly. Four convex/joint entries remain outside the chosen
+  scene, and the transform entry lowers when compiled with the new inlining
+  option.
+- Replaced the one-kernel bootstrap manifest with 83 entry points for reduced
+  `SnippetHelloGRB` (PGS, sphere/plane). The manifest excludes articulations,
+  joints, aggregates, freezing, threshold reporting, convex/mesh/SDF paths,
+  deformables, particles, and Direct GPU API-only kernels.
+- Compiled and individually validated/inspected all 83 entries using
+  `CUMETAL_PHYSX_EMIT_MODE=experimental`; the build wrapper reports
+  `PASS: 83 PhysX CuMetal sphere-plane PGS kernels compiled (experimental)`.
+  Production `xcrun` packaging still requires downloading this host's optional
+  Xcode Metal Toolchain component.
+- Phase 2 only establishes compiler coverage and artifacts. Wiring these
+  metallibs into `KernelWrangler`/Driver API module lookup belongs to Phase 3.
+- Ran the required pre-commit gate:
+  `ctest --test-dir build --output-on-failure`. All 187 registered tests
+  passed; platform/toolchain-gated tests reported as skips.

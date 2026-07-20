@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-typedef struct cudaStream_st* cudaStream_t;
+typedef struct CUstream_st* cudaStream_t;
 typedef struct cusolverDnContext* cusolverDnHandle_t;
 
 typedef enum cublasFillMode_t {

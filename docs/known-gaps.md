@@ -51,6 +51,9 @@ as gaps have been closed.
   `-fno-jump-tables`; `brx.idx`/`.branchtargets` remain unsupported in the PTX
   lowering path. CUDA source compilation can therefore succeed while later
   strict PTX lowering still rejects an unimplemented opcode or libdevice call.
+  Standalone PTX `.func` bodies are not lowered; projects can request aggressive
+  device inlining with `--cuda-inline-threshold`. The reduced PhysX rigid-body
+  subset uses this to inline `updateCacheAndBound`.
 - The older `.cu` mode without `--cuda-device` remains a qualifier-stripping
   host-LLVM prototype suitable only for simple patterns; it is not a general
   CUDA frontend.

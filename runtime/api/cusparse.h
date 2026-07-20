@@ -24,7 +24,7 @@ typedef struct cusparseSpMatDescr* cusparseSpMatDescr_t;
 typedef struct cusparseDnVecDescr* cusparseDnVecDescr_t;
 typedef struct cusparseDnMatDescr* cusparseDnMatDescr_t;
 
-typedef struct cudaStream_st* cudaStream_t;
+typedef struct CUstream_st* cudaStream_t;
 
 typedef enum cusparseOperation_t {
     CUSPARSE_OPERATION_NON_TRANSPOSE = 0,

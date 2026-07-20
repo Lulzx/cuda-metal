@@ -33,6 +33,7 @@ void print_usage(const char* argv0) {
                  " [--overwrite] [--skip-validate] [--xcrun-validate]"
                  " [--kernel-name name] [--entry name] [--ptx-strict]"
                  " [--cuda-device] [--cuda-arch sm_XX] [--cuda-clang path]"
+                 " [--cuda-inline-threshold value]"
                  " [-I path] [-D name[=value]] [--cuda-include path]"
                  " [--fp64=native|emulate|warn]\n";
 }
@@ -213,6 +214,7 @@ int main(int argc, char** argv) {
     bool cuda_device_frontend = false;
     std::string cuda_arch = "sm_80";
     std::filesystem::path cuda_clang;
+    std::string cuda_inline_threshold;
     std::vector<std::filesystem::path> cuda_include_dirs;
     std::vector<std::string> cuda_defines;
     std::vector<std::filesystem::path> cuda_forced_includes;
@@ -283,6 +285,17 @@ int main(int argc, char** argv) {
                 return 2;
             }
             cuda_clang = argv[++i];
+        } else if (arg == "--cuda-inline-threshold") {
+            if (i + 1 >= argc) {
+                std::cerr << "--cuda-inline-threshold expects a non-negative integer\n";
+                return 2;
+            }
+            cuda_inline_threshold = argv[++i];
+            if (cuda_inline_threshold.empty() ||
+                cuda_inline_threshold.find_first_not_of("0123456789") != std::string::npos) {
+                std::cerr << "--cuda-inline-threshold expects a non-negative integer\n";
+                return 2;
+            }
         } else if (arg == "-I") {
             if (i + 1 >= argc) {
                 std::cerr << "-I expects a path\n";
@@ -374,6 +387,9 @@ int main(int argc, char** argv) {
             " -Xclang -target-feature -Xclang +ptx70"
             " -nocudainc -nocudalib -Wno-unknown-cuda-version -Wno-pass-failed"
             " -D__CUDACC__=1 -D__NVCC__=1";
+        if (!cuda_inline_threshold.empty()) {
+            command += " -fgpu-inline-threshold=" + quote_shell(cuda_inline_threshold);
+        }
         if (std::filesystem::exists(runtime_api_dir) &&
             std::filesystem::is_directory(runtime_api_dir)) {
             command += " -I " + quote_shell(runtime_api_dir.string()) +

@@ -22,31 +22,35 @@ bool rewrite_load_store(const cumetal::ptx::EntryFunction::Instruction& instruct
         return false;
     }
 
-    if (starts_with(instruction.opcode, "ld.shared")) {
+    const bool is_load = starts_with(instruction.opcode, "ld.");
+    const bool is_store = starts_with(instruction.opcode, "st.");
+    const bool is_atomic = starts_with(instruction.opcode, "atom.");
+
+    if (is_load && instruction.opcode.find(".shared") != std::string::npos) {
         out->opcode = "llvm.load";
         out->address_space = 3;
-    } else if (starts_with(instruction.opcode, "ld.global")) {
+    } else if (is_load && instruction.opcode.find(".global") != std::string::npos) {
         out->opcode = "llvm.load";
         out->address_space = 1;
-    } else if (starts_with(instruction.opcode, "ld.local")) {
+    } else if (is_load && instruction.opcode.find(".local") != std::string::npos) {
         out->opcode = "llvm.load";
         out->address_space = 5;
-    } else if (starts_with(instruction.opcode, "st.shared")) {
+    } else if (is_store && instruction.opcode.find(".shared") != std::string::npos) {
         out->opcode = "llvm.store";
         out->address_space = 3;
-    } else if (starts_with(instruction.opcode, "st.global")) {
+    } else if (is_store && instruction.opcode.find(".global") != std::string::npos) {
         out->opcode = "llvm.store";
         out->address_space = 1;
-    } else if (starts_with(instruction.opcode, "st.local")) {
+    } else if (is_store && instruction.opcode.find(".local") != std::string::npos) {
         out->opcode = "llvm.store";
         out->address_space = 5;
-    } else if (starts_with(instruction.opcode, "atom.shared")) {
+    } else if (is_atomic && instruction.opcode.find(".shared") != std::string::npos) {
         out->opcode = "llvm.atomicrmw";
         out->address_space = 3;
-    } else if (starts_with(instruction.opcode, "atom.global")) {
+    } else if (is_atomic && instruction.opcode.find(".global") != std::string::npos) {
         out->opcode = "llvm.atomicrmw";
         out->address_space = 1;
-    } else if (starts_with(instruction.opcode, "ld.const")) {
+    } else if (is_load && instruction.opcode.find(".const") != std::string::npos) {
         // Constant address space (CUDA AS 4 → AIR AS 2).
         // Loads from __constant__ variables; mapped to AIR constant buffer.
         out->opcode = "llvm.load";

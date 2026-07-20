@@ -227,9 +227,12 @@ Implemented:
   - `cumetalc` accepts `.ptx` input via internal PTX->LLVM lowering (`--entry`, `--ptx-strict`)
   - `cumetalc` keeps the initial qualifier-stripping `.cu` prototype and now
     provides an opt-in real CUDA device frontend (`--cuda-device`) using
-    Homebrew LLVM CUDA→PTX, with include/define/forced-include forwarding
+    Homebrew LLVM CUDA→PTX, with include/define/forced-include forwarding and
+    an optional GPU inlining threshold
   - generic PTX LLVM lowering scalarizes `ld/st.v2` and `ld/st.v4` memory
-    operations and lowers CUDA libdevice `__nv_sqrtf`
+    operations and lowers the scalar libdevice calls exercised by the reduced
+    PhysX GRB path (sqrt/rsqrt, popcount, bit reinterpretation, min/max,
+    fast division, and sin/cos)
   - expanded PTX sweep harness (`tests/ptx_sweep`) for strict-mode supported/unsupported opcode checks
   - initial `intrinsic_lower` pass for thread-index/barrier/basic-math mappings
   - initial `printf_lower` pass for PTX `printf`/`vprintf` call extraction and format-table metadata

@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "cuda.h"
+
 #if defined(__clang__) && defined(__CUDA__)
 #ifndef CUDA_VERSION
 #define CUDA_VERSION 12000
@@ -34,6 +36,9 @@
 #endif
 #ifndef __launch_bounds__
 #define __launch_bounds__(...) __attribute__((launch_bounds(__VA_ARGS__)))
+#endif
+#ifndef __builtin_align__
+#define __builtin_align__(n) __attribute__((aligned(n)))
 #endif
 #endif
 
@@ -293,8 +298,8 @@ typedef struct cudaPointerAttributes {
     void* hostPointer;
 } cudaPointerAttributes;
 
-typedef struct cudaStream_st* cudaStream_t;
-typedef struct cudaEvent_st* cudaEvent_t;
+typedef struct CUstream_st* cudaStream_t;
+typedef struct CUevent_st* cudaEvent_t;
 typedef void (*cudaStreamCallback_t)(cudaStream_t stream, cudaError_t status, void* user_data);
 
 #define cudaStreamLegacy ((cudaStream_t)0x1)
@@ -938,6 +943,38 @@ template <typename T>
 static __device__ __forceinline__ T __ldcs(const T* ptr) {
     return *ptr;
 }
+template <typename T>
+static __device__ __forceinline__ T __ldca(const T* ptr) {
+    return *ptr;
+}
+template <typename T>
+static __device__ __forceinline__ T __ldcg(const T* ptr) {
+    return *ptr;
+}
+template <typename T>
+static __device__ __forceinline__ T __ldlu(const T* ptr) {
+    return *ptr;
+}
+template <typename T>
+static __device__ __forceinline__ T __ldcv(const T* ptr) {
+    return *ptr;
+}
+template <typename T>
+static __device__ __forceinline__ void __stwb(T* ptr, T value) {
+    *ptr = value;
+}
+template <typename T>
+static __device__ __forceinline__ void __stcg(T* ptr, T value) {
+    *ptr = value;
+}
+template <typename T>
+static __device__ __forceinline__ void __stcs(T* ptr, T value) {
+    *ptr = value;
+}
+template <typename T>
+static __device__ __forceinline__ void __stwt(T* ptr, T value) {
+    *ptr = value;
+}
 
 static __device__ __forceinline__ unsigned int __cvta_generic_to_shared(const void* generic_ptr) {
     unsigned int shared_ptr;
@@ -951,22 +988,6 @@ static __device__ __forceinline__ unsigned int __cvta_generic_to_shared(const vo
 template <typename T>
 static __device__ __forceinline__ T __ldg(const T* ptr) {
     return *ptr;
-}
-
-// __ldlu/__ldcv: non-coherent/volatile load hints — plain loads on UMA.
-template <typename T>
-static __device__ __forceinline__ T __ldlu(const T* ptr) {
-    return *ptr;
-}
-
-template <typename T>
-static __device__ __forceinline__ T __ldcv(const T* ptr) {
-    return *ptr;
-}
-
-template <typename T>
-static __device__ __forceinline__ void __stcs(T* ptr, T value) {
-    *ptr = value;
 }
 
 // ── Atomic operations ────────────────────────────────────────────────────────
@@ -1144,6 +1165,27 @@ static __device__ __forceinline__ unsigned int __shfl_sync(unsigned int mask, un
     const int out_bits = __cumetal_shfl_sync_idx_i32(mask, __cumetal_shfl_u32_bits_to_i32(val), srcLane,
                                                      __cumetal_shfl_clamp(width, 0x1f));
     return __cumetal_shfl_i32_bits_to_u32(out_bits);
+}
+static __device__ __forceinline__ unsigned long long __shfl_sync(
+    unsigned int mask, unsigned long long val, int srcLane, int width = 32) {
+    const unsigned int lo = static_cast<unsigned int>(val);
+    const unsigned int hi = static_cast<unsigned int>(val >> 32);
+    return static_cast<unsigned long long>(__shfl_sync(mask, lo, srcLane, width)) |
+           (static_cast<unsigned long long>(__shfl_sync(mask, hi, srcLane, width)) << 32);
+}
+static __device__ __forceinline__ long long __shfl_sync(
+    unsigned int mask, long long val, int srcLane, int width = 32) {
+    return static_cast<long long>(
+        __shfl_sync(mask, static_cast<unsigned long long>(val), srcLane, width));
+}
+static __device__ __forceinline__ double __shfl_sync(
+    unsigned int mask, double val, int srcLane, int width = 32) {
+    unsigned long long bits;
+    __builtin_memcpy(&bits, &val, sizeof(bits));
+    bits = __shfl_sync(mask, bits, srcLane, width);
+    double out;
+    __builtin_memcpy(&out, &bits, sizeof(out));
+    return out;
 }
 static __device__ __forceinline__ int __shfl_down_sync(unsigned int mask, int val, unsigned int delta, int width = 32) {
     return __cumetal_shfl_sync_down_i32(mask, val, delta, __cumetal_shfl_clamp(width, 0x1f));

@@ -1,0 +1,34 @@
+diff --git a/physx/include/foundation/PxPreprocessor.h b/physx/include/foundation/PxPreprocessor.h
+index 42f7705e3..ff031295a 100644
+--- a/physx/include/foundation/PxPreprocessor.h
++++ b/physx/include/foundation/PxPreprocessor.h
+@@ -516,9 +516,14 @@ protected:                  \
+ 	Class& operator=(const Class&);
+ 
+ //#define DISABLE_CUDA_PHYSX
++#ifndef PX_CUMETAL
++	#define PX_CUMETAL 0
++#endif
++
+ #ifndef DISABLE_CUDA_PHYSX
+-	//CUDA is currently supported on x86_64 windows and linux, and ARM_64 linux
+-	#define PX_SUPPORT_GPU_PHYSX ((PX_X64 && (PX_WINDOWS_FAMILY || PX_LINUX)) || (PX_A64 && PX_LINUX))
++	// CUDA is supported upstream on x86_64 Windows/Linux and ARM64 Linux.
++	// CuMetal adds the source-recompiled ARM64 Apple target.
++	#define PX_SUPPORT_GPU_PHYSX ((PX_X64 && (PX_WINDOWS_FAMILY || PX_LINUX)) || (PX_A64 && (PX_LINUX || (PX_CUMETAL && PX_APPLE_FAMILY))))
+ #else
+ 	#define PX_SUPPORT_GPU_PHYSX 0
+ #endif
+diff --git a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+index f9bda874a..c33755e91 100644
+--- a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -72,6 +72,8 @@ ADD_CUSTOM_COMMAND(
+ 		-D PX_PHYSX_STATIC_LIB=1
+ 		-D PX_PUBLIC_RELEASE=1
+ 		-D NDEBUG
++		-D PX_CUMETAL=1
++		-D CUMETAL_NO_DEVICE_PRINTF=1
+ 		${PX_CUMETAL_INCLUDE_ARGS}
+ 		"${SPHERE_SOURCE}"
+ 		-o "${SPHERE_METALLIB}"

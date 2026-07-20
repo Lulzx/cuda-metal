@@ -18,6 +18,17 @@ The second patch adds an opt-in `PhysXCumetalGpuKernels` target. It invokes
 `cumetalc --cuda-device` for the explicit SnippetHelloGRB sphere-plane kernel
 manifest without enabling CMake's CUDA language or modifying NVIDIA kernels.
 
+The third patch enables PhysX's existing GPU-facing public declarations for
+the opt-in `PX_CUMETAL` Apple ARM64 build and supplies the CuMetal-only CUDA
+frontend definitions. Other Apple and upstream CUDA configurations are
+unchanged.
+
+The fourth patch expands the bootstrap to the 83 entry points statically
+needed by reduced `SnippetHelloGRB` with PGS and sphere/plane geometry. It
+deliberately excludes articulations, joints, aggregates, freezing, threshold
+reporting, convex/mesh/SDF collision, deformables, particles, and Direct GPU
+API-only entry points.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -40,7 +51,6 @@ machine that has Xcode but has not downloaded the optional Metal Toolchain
 component; experimental containers are inspectable test artifacts and are not
 GPU-executable.
 
-The build script requires macOS on arm64, CMake, Ninja, and `xcrun`. It builds
-the Release configuration, verifies that `SnippetHelloWorld` is a native
-arm64 executable, runs its stock 100 simulation steps, and prints a
-machine-readable `PASS` line.
+The build script requires macOS on arm64, CMake, Ninja, and `xcrun`. It
+compiles all 83 manifest entries, validates and inspects every output, and
+prints a machine-readable `PASS` line.

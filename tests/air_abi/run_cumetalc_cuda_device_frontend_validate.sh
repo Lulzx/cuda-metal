@@ -29,6 +29,18 @@ if "$CUMETALC" \
   exit 1
 fi
 
+if "$CUMETALC" \
+    --cuda-device \
+    --cuda-inline-threshold invalid \
+    --mode experimental \
+    --input "$INPUT_CU" \
+    --output "${OUTPUT_METALLIB}.invalid-threshold" \
+    --entry cuda_device_probe \
+    --overwrite >/dev/null 2>&1; then
+  echo "FAIL: invalid CUDA inline threshold was accepted" >&2
+  exit 1
+fi
+
 "$CUMETALC" \
   --cuda-device \
   --mode experimental \
@@ -36,6 +48,7 @@ fi
   --output "$OUTPUT_METALLIB" \
   --entry cuda_device_probe \
   --ptx-strict \
+  --cuda-inline-threshold 1000000 \
   -I "$INCLUDE_DIR" \
   -D CUMETAL_FRONTEND_TEST_VALUE=2 \
   --overwrite

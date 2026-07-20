@@ -40,20 +40,30 @@ cmake \
     -DCMAKE_BUILD_TYPE=release \
     -DCMAKE_OSX_ARCHITECTURES=arm64
 
-cmake --build "${BUILD_DIR}" --target PhysXCumetalGpuKernels --parallel
+cmake --build "${BUILD_DIR}" --target PhysXCumetalGpuKernels \
+    --parallel "${CUMETAL_PHYSX_BUILD_JOBS:-4}"
 
 KERNEL_DIR="${BUILD_DIR}/sdk_cumetal_gpu_source_bin/kernels"
-METALLIB="${KERNEL_DIR}/sphereNphase_Kernel.metallib"
 MANIFEST="${KERNEL_DIR}/kernels.json"
+EXPECTED_KERNELS=83
 
-"${CUMETAL_ROOT}/build/air_validate" \
-    "${METALLIB}" \
-    --require-function-list \
-    --require-metadata
+KERNEL_COUNT="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["kernels"]))' "${MANIFEST}")"
+if [[ "${KERNEL_COUNT}" != "${EXPECTED_KERNELS}" ]]; then
+    echo "error: expected ${EXPECTED_KERNELS} kernels, found ${KERNEL_COUNT}" >&2
+    exit 1
+fi
 
-INSPECT_JSON="$("${CUMETAL_ROOT}/build/air_inspect" "${METALLIB}" --json)"
-grep -q '"function_count": 1' <<<"${INSPECT_JSON}"
-grep -q '"name": "sphereNphase_Kernel"' <<<"${INSPECT_JSON}"
-grep -q '"name": "sphereNphase_Kernel"' "${MANIFEST}"
+KERNEL_ROWS="$(python3 -c \
+    'import json,sys; [print("{}\t{}".format(k["name"], k["metallib"])) for k in json.load(open(sys.argv[1]))["kernels"]]' \
+    "${MANIFEST}")"
+while IFS=$'\t' read -r KERNEL_NAME METALLIB; do
+    "${CUMETAL_ROOT}/build/air_validate" \
+        "${METALLIB}" \
+        --require-function-list \
+        --require-metadata >/dev/null
+    INSPECT_JSON="$("${CUMETAL_ROOT}/build/air_inspect" "${METALLIB}" --json)"
+    grep -q '"function_count": 1' <<<"${INSPECT_JSON}"
+    grep -q "\"name\": \"${KERNEL_NAME}\"" <<<"${INSPECT_JSON}"
+done <<<"${KERNEL_ROWS}"
 
-echo "PASS: PhysX CuMetal sphere-plane kernel subset compiled (${EMIT_MODE})"
+echo "PASS: ${EXPECTED_KERNELS} PhysX CuMetal sphere-plane PGS kernels compiled (${EMIT_MODE})"

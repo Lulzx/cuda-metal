@@ -1,0 +1,164 @@
+--- a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -59,34 +59,133 @@
+ 	LIST(APPEND PX_CUMETAL_INCLUDE_ARGS -I "${include_dir}")
+ ENDFOREACH()
+ 
+-SET(SPHERE_SOURCE "${PHYSX_SOURCE_DIR}/gpunarrowphase/src/CUDA/cudaSphere.cu")
+-SET(SPHERE_METALLIB "${PX_CUMETAL_KERNEL_OUTPUT_DIR}/sphereNphase_Kernel.metallib")
+-
+-ADD_CUSTOM_COMMAND(
+-	OUTPUT "${SPHERE_METALLIB}"
+-	COMMAND "${CMAKE_COMMAND}" -E make_directory "${PX_CUMETAL_KERNEL_OUTPUT_DIR}"
+-	COMMAND "${CUMETALC_EXECUTABLE}"
+-		--cuda-device
+-		--mode "${PX_CUMETAL_EMIT_MODE}"
+-		--ptx-strict
+-		--entry sphereNphase_Kernel
+-		--overwrite
+-		-D PX_PHYSX_STATIC_LIB=1
+-		-D PX_PUBLIC_RELEASE=1
+-		-D NDEBUG
+-		-D PX_CUMETAL=1
+-		-D CUMETAL_NO_DEVICE_PRINTF=1
+-		${PX_CUMETAL_INCLUDE_ARGS}
+-		"${SPHERE_SOURCE}"
+-		-o "${SPHERE_METALLIB}"
+-	DEPENDS "${SPHERE_SOURCE}" "${CUMETALC_EXECUTABLE}"
+-	COMMENT "Compiling PhysX sphereNphase_Kernel with CuMetal"
+-	COMMAND_EXPAND_LISTS
+-	VERBATIM)
+-
++# source path relative to physx/source | PTX entry point
++SET(PX_CUMETAL_KERNEL_SPECS
++	"gpucommon/src/CUDA/MemCopyBalanced.cu|MemCopyBalanced"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortMultiBlockLaunch"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortMultiCalculateRanksLaunch"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortMultiBlockLaunchWithoutCount"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortMultiCalculateRanksLaunchWithoutCount"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortMultiBlockLaunchWithCount"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortMultiCalculateRanksLaunchWithCount"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortCopyHigh32Bits"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortDoubleCopyHigh32Bits"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortCopy"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortDoubleCopy"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortCopyBits2"
++	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortCopy2"
++	"gpubroadphase/src/CUDA/broadphase.cu|translateAABBsLaunch"
++	"gpubroadphase/src/CUDA/broadphase.cu|markRemovedPairsLaunch"
++	"gpubroadphase/src/CUDA/broadphase.cu|markRemovedPairsProjectionsLaunch"
++	"gpubroadphase/src/CUDA/broadphase.cu|markCreatedPairsLaunch"
++	"gpubroadphase/src/CUDA/broadphase.cu|initializeSapBox1DLaunch"
++	"gpubroadphase/src/CUDA/broadphase.cu|markUpdatedPairsLaunch"
++	"gpubroadphase/src/CUDA/broadphase.cu|markUpdatedPairsLaunch2"
++	"gpubroadphase/src/CUDA/broadphase.cu|computeEndPtsHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|outputEndPtsHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|createRegionsKernel"
++	"gpubroadphase/src/CUDA/broadphase.cu|computeStartRegionsHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|outputStartRegionsHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|computeRegionsHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|outputRegionsHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|writeOutStartAndActiveRegionHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|computeStartAndActiveRegionHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|outputOrderedActiveRegionHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|writeOutOverlapChecksForInsertedBoundsRegionsHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|computeOverlapChecksForRegionsHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|outputOverlapChecksForRegionHistogram"
++	"gpubroadphase/src/CUDA/broadphase.cu|performIncrementalSAP"
++	"gpubroadphase/src/CUDA/broadphase.cu|generateFoundPairsForNewBoundsRegion"
++	"gpubroadphase/src/CUDA/broadphase.cu|clearNewFlagLaunch"
++	"gpubroadphase/src/CUDA/broadphase.cu|computeIncrementalComparisonHistograms_Stage1"
++	"gpubroadphase/src/CUDA/broadphase.cu|computeIncrementalComparisonHistograms_Stage2"
++	"gpubroadphase/src/CUDA/broadphase.cu|initializeRadixRanks"
++	"gpubroadphase/src/CUDA/broadphase.cu|updateHandles"
++	"gpubroadphase/src/CUDA/broadphase.cu|accumulateReportsStage_1"
++	"gpubroadphase/src/CUDA/broadphase.cu|accumulateReportsStage_2"
++	"gpubroadphase/src/CUDA/broadphase.cu|copyReports"
++	"gpubroadphase/src/CUDA/broadphase.cu|bpSignalComplete"
++	"gpusimulationcontroller/src/CUDA/updateTransformAndBoundArray.cu|mergeTransformCacheAndBoundArrayChanges"
++	"gpusimulationcontroller/src/CUDA/updateTransformAndBoundArray.cu|updateTransformCacheAndBoundArrayLaunch"
++	"gpusimulationcontroller/src/CUDA/updateTransformAndBoundArray.cu|updateChangedAABBMgrHandlesLaunch"
++	"gpusimulationcontroller/src/CUDA/updateTransformAndBoundArray.cu|mergeChangedAABBMgrHandlesLaunch"
++	"gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu|updateBodiesLaunch"
++	"gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu|updateShapesLaunch"
++	"gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu|updateBodyExternalVelocitiesLaunch"
++	"gpunarrowphase/src/CUDA/cudaSphere.cu|sphereNphase_Kernel"
++	"gpunarrowphase/src/CUDA/pairManagement.cu|removeContactManagers_Stage1"
++	"gpunarrowphase/src/CUDA/pairManagement.cu|removeContactManagers_Stage2"
++	"gpunarrowphase/src/CUDA/pairManagement.cu|removeContactManagers_Stage3"
++	"gpunarrowphase/src/CUDA/pairManagement.cu|removeContactManagers_Stage4"
++	"gpunarrowphase/src/CUDA/pairManagement.cu|removeContactManagers_Stage5"
++	"gpunarrowphase/src/CUDA/pairManagement.cu|initializeManifolds"
++	"gpunarrowphase/src/CUDA/compressOutputContacts.cu|compressContactStage1"
++	"gpunarrowphase/src/CUDA/compressOutputContacts.cu|compressContactStage2"
++	"gpunarrowphase/src/CUDA/compressOutputContacts.cu|updateFrictionPatches"
++	"gpunarrowphase/src/CUDA/cudaGJKEPA.cu|prepareLostFoundPairs_Stage1"
++	"gpunarrowphase/src/CUDA/cudaGJKEPA.cu|prepareLostFoundPairs_Stage2"
++	"gpunarrowphase/src/CUDA/cudaGJKEPA.cu|finishContactsKernel"
++	"gpusolver/src/CUDA/solverMultiBlock.cu|ZeroBodies"
++	"gpusolver/src/CUDA/solverMultiBlock.cu|markActiveSlabPGS"
++	"gpusolver/src/CUDA/solverMultiBlock.cu|solveBlockPartition"
++	"gpusolver/src/CUDA/solverMultiBlock.cu|writebackBlocks"
++	"gpusolver/src/CUDA/solverMultiBlock.cu|concludeBlocks"
++	"gpusolver/src/CUDA/solverMultiBlock.cu|writeBackBodies"
++	"gpusolver/src/CUDA/solverMultiBlock.cu|computeAverageSolverBodyVelocity"
++	"gpusolver/src/CUDA/solverMultiBlock.cu|propagateSolverBodyVelocity"
++	"gpusolver/src/CUDA/solverMultiBlock.cu|dmaBackChangedElems"
++	"gpusolver/src/CUDA/solverMultiBlock.cu|solveStaticBlock"
++	"gpusolver/src/CUDA/solverMultiBlock.cu|propagateStaticSolverBodyVelocities"
++	"gpusolver/src/CUDA/constraintBlockPrep.cu|contactConstraintBlockPrepareParallelLaunch"
++	"gpusolver/src/CUDA/constraintBlockPrePrep.cu|constraintContactBlockPrePrepLaunch"
++	"gpusolver/src/CUDA/constraintBlockPrePrep.cu|clearFrictionPatchCounts"
++	"gpusolver/src/CUDA/constraintBlockPrePrep.cu|rigidSumInternalContactAndJointBatches1"
++	"gpusolver/src/CUDA/constraintBlockPrePrep.cu|rigidSumInternalContactAndJointBatches2"
++	"gpusolver/src/CUDA/integration.cu|integrateCoreParallelLaunch"
++	"gpusolver/src/CUDA/preIntegration.cu|preIntegrationLaunch"
++	"gpusolver/src/CUDA/preIntegration.cu|initStaticKinematics")
++
++SET(PX_CUMETAL_KERNEL_OUTPUTS)
+ SET(PX_CUMETAL_KERNEL_MANIFEST "${PX_CUMETAL_KERNEL_OUTPUT_DIR}/kernels.json")
+-FILE(GENERATE OUTPUT "${PX_CUMETAL_KERNEL_MANIFEST}" CONTENT
+-"{\n  \"schema\": 1,\n  \"target\": \"SnippetHelloGRB-sphere-plane\",\n  \"kernels\": [\n    {\"name\": \"sphereNphase_Kernel\", \"source\": \"gpunarrowphase/src/CUDA/cudaSphere.cu\", \"metallib\": \"${SPHERE_METALLIB}\"}\n  ]\n}\n")
++FILE(WRITE "${PX_CUMETAL_KERNEL_MANIFEST}"
++	"{\n  \"schema\": 2,\n  \"target\": \"SnippetHelloGRB-sphere-plane-pgs\",\n  \"kernels\": [\n")
++SET(PX_CUMETAL_MANIFEST_SEPARATOR "")
++FOREACH(kernel_spec IN LISTS PX_CUMETAL_KERNEL_SPECS)
++	STRING(REPLACE "|" ";" kernel_fields "${kernel_spec}")
++	LIST(GET kernel_fields 0 kernel_source_rel)
++	LIST(GET kernel_fields 1 kernel_name)
++	SET(kernel_source "${PHYSX_SOURCE_DIR}/${kernel_source_rel}")
++	SET(kernel_output "${PX_CUMETAL_KERNEL_OUTPUT_DIR}/${kernel_name}.metallib")
++	ADD_CUSTOM_COMMAND(
++		OUTPUT "${kernel_output}"
++		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PX_CUMETAL_KERNEL_OUTPUT_DIR}"
++		COMMAND "${CUMETALC_EXECUTABLE}"
++			--cuda-device
++			--cuda-inline-threshold 1000000
++			--mode "${PX_CUMETAL_EMIT_MODE}"
++			--ptx-strict
++			--entry "${kernel_name}"
++			--overwrite
++			-D PX_PHYSX_STATIC_LIB=1
++			-D PX_PUBLIC_RELEASE=1
++			-D PX_CUMETAL=1
++			-D CUMETAL_NO_DEVICE_PRINTF=1
++			-D NDEBUG
++			${PX_CUMETAL_INCLUDE_ARGS}
++			"${kernel_source}"
++			-o "${kernel_output}"
++		DEPENDS "${kernel_source}" "${CUMETALC_EXECUTABLE}"
++		COMMENT "Compiling PhysX ${kernel_name} with CuMetal"
++		COMMAND_EXPAND_LISTS
++		VERBATIM)
++	LIST(APPEND PX_CUMETAL_KERNEL_OUTPUTS "${kernel_output}")
++	FILE(APPEND "${PX_CUMETAL_KERNEL_MANIFEST}"
++		"${PX_CUMETAL_MANIFEST_SEPARATOR}    {\"name\": \"${kernel_name}\", \"source\": \"${kernel_source_rel}\", \"metallib\": \"${kernel_output}\"}")
++	SET(PX_CUMETAL_MANIFEST_SEPARATOR ",\n")
++ENDFOREACH()
++FILE(APPEND "${PX_CUMETAL_KERNEL_MANIFEST}" "\n  ]\n}\n")
+ 
++LIST(LENGTH PX_CUMETAL_KERNEL_SPECS PX_CUMETAL_KERNEL_COUNT)
++MESSAGE(STATUS "Configured ${PX_CUMETAL_KERNEL_COUNT} CuMetal kernels for reduced SnippetHelloGRB")
+ ADD_CUSTOM_TARGET(PhysXCumetalGpuKernels
+-	DEPENDS "${SPHERE_METALLIB}" "${PX_CUMETAL_KERNEL_MANIFEST}")
++	DEPENDS ${PX_CUMETAL_KERNEL_OUTPUTS} "${PX_CUMETAL_KERNEL_MANIFEST}")

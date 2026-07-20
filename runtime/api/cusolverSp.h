@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-typedef struct cudaStream_st* cudaStream_t;
+typedef struct CUstream_st* cudaStream_t;
 typedef struct cusolverSpContext* cusolverSpHandle_t;
 
 // Handle management

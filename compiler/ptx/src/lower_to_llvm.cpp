@@ -2702,6 +2702,13 @@ class GenericLlvmEmitter {
             addr_space = 2;
         } else if (instr.opcode.find(".local") != std::string::npos) {
             addr_space = 0;
+        } else if (root == "ld" || root == "st") {
+            // Clang emits generic ld/st for pointers whose PTX state space is
+            // not encoded in the instruction. CUDA kernel pointer parameters
+            // and pointers loaded from descriptors refer to device/global
+            // memory; shared/local accesses retain explicit state-space
+            // opcodes in generated PTX.
+            addr_space = 1;
         } else {
             return fail(instr, "only global/const/param/shared/local ld/st supported in generic LLVM path");
         }
@@ -2801,13 +2808,19 @@ class GenericLlvmEmitter {
 
     bool emit_call(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
         if (instr.operands.size() < 2) {
-            return fail(instr, "call requires destination tuple and callee");
+            return fail(instr, "call requires callee and argument tuple");
         }
-        const std::string dest_token = instr.operands[0];
-        const std::string callee = trim(instr.operands[1]);
+        const bool has_destination = !trim(instr.operands[0]).empty() &&
+                                     trim(instr.operands[0]).front() == '(';
+        const std::string dest_token = has_destination ? instr.operands[0] : std::string{};
+        const std::size_t callee_index = has_destination ? 1 : 0;
+        const std::size_t args_index = callee_index + 1;
+        const std::string callee = trim(instr.operands[callee_index]);
         const std::vector<std::string> arg_names =
-            (instr.operands.size() >= 3) ? parse_paren_tuple(instr.operands[2]) : std::vector<std::string>{};
-        const std::vector<std::string> dest_names = parse_paren_tuple(dest_token);
+            (instr.operands.size() > args_index) ? parse_paren_tuple(instr.operands[args_index])
+                                                : std::vector<std::string>{};
+        const std::vector<std::string> dest_names =
+            has_destination ? parse_paren_tuple(dest_token) : std::vector<std::string>{};
 
         auto store_ret_bits = [&](const std::string& bits_value, int bits) -> bool {
             if (!dest_names.empty()) {
@@ -2866,6 +2879,16 @@ class GenericLlvmEmitter {
             return store_ret_bits(hi, 32);
         }
 
+        if (callee == "__nv_popc") {
+            if (arg_names.empty()) return fail(instr, "__nv_popc expects 1 arg");
+            auto value = load_call_slot_value(os, arg_names[0], 32);
+            if (!value) return fail(instr, "__nv_popc arg missing");
+            declarations_.insert("declare i32 @llvm.ctpop.i32(i32)");
+            const std::string count = next_tmp("popc");
+            os << "  " << count << " = call i32 @llvm.ctpop.i32(i32 " << *value << ")\n";
+            return store_ret_bits(count, 32);
+        }
+
         if (callee == "__nv_rsqrtf") {
             if (arg_names.empty()) return fail(instr, "__nv_rsqrtf expects 1 arg");
             auto bits = load_call_slot_value(os, arg_names[0], 32);
@@ -2905,6 +2928,16 @@ class GenericLlvmEmitter {
             return store_ret_bits(out, 32);
         }
 
+        if (callee == "__nv_float_as_int" || callee == "__nv_float_as_uint" ||
+            callee == "__nv_int_as_float" || callee == "__nv_uint_as_float") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            auto bits = load_call_slot_value(os, arg_names[0], 32);
+            if (!bits) return fail(instr, callee + " arg missing");
+            // PTX call parameters are untyped bit containers. CUDA's scalar
+            // reinterpretation helpers therefore require no LLVM instruction.
+            return store_ret_bits(*bits, 32);
+        }
+
         if (callee == "__nv_fmaxf") {
             if (arg_names.size() < 2) return fail(instr, "__nv_fmaxf expects 2 args");
             auto a_bits = load_call_slot_value(os, arg_names[0], 32);
@@ -2919,6 +2952,23 @@ class GenericLlvmEmitter {
             const std::string sel = next_tmp("fmaxf_sel");
             os << "  " << sel << " = select i1 " << cmp << ", float " << a << ", float " << b << "\n";
             const std::string bits = next_tmp("fmaxf_i");
+            os << "  " << bits << " = bitcast float " << sel << " to i32\n";
+            return store_ret_bits(bits, 32);
+        }
+        if (callee == "__nv_fminf") {
+            if (arg_names.size() < 2) return fail(instr, "__nv_fminf expects 2 args");
+            auto a_bits = load_call_slot_value(os, arg_names[0], 32);
+            auto b_bits = load_call_slot_value(os, arg_names[1], 32);
+            if (!a_bits || !b_bits) return fail(instr, "__nv_fminf args missing");
+            const std::string a = next_tmp("fminf_a");
+            const std::string b = next_tmp("fminf_b");
+            os << "  " << a << " = bitcast i32 " << *a_bits << " to float\n";
+            os << "  " << b << " = bitcast i32 " << *b_bits << " to float\n";
+            const std::string cmp = next_tmp("fminf_cmp");
+            os << "  " << cmp << " = fcmp olt float " << a << ", " << b << "\n";
+            const std::string sel = next_tmp("fminf_sel");
+            os << "  " << sel << " = select i1 " << cmp << ", float " << a << ", float " << b << "\n";
+            const std::string bits = next_tmp("fminf_i");
             os << "  " << bits << " = bitcast float " << sel << " to i32\n";
             return store_ret_bits(bits, 32);
         }
@@ -2981,6 +3031,28 @@ class GenericLlvmEmitter {
             os << "  " << out << " = call float @air.fast_cos.f32(float " << *x << ")\n";
             return store_ret_f32(out);
         }
+        if (callee == "__nv_fast_sincosf") {
+            if (arg_names.size() < 3) return fail(instr, "__nv_fast_sincosf expects 3 args");
+            auto x = load_call_slot_f32(arg_names[0]);
+            auto sin_ptr_bits = load_call_slot_value(os, arg_names[1], 64);
+            auto cos_ptr_bits = load_call_slot_value(os, arg_names[2], 64);
+            if (!x || !sin_ptr_bits || !cos_ptr_bits) {
+                return fail(instr, "__nv_fast_sincosf args missing");
+            }
+            declarations_.insert("declare float @air.fast_sin.f32(float)");
+            declarations_.insert("declare float @air.fast_cos.f32(float)");
+            const std::string sin_value = next_tmp("sincos_sin");
+            const std::string cos_value = next_tmp("sincos_cos");
+            os << "  " << sin_value << " = call float @air.fast_sin.f32(float " << *x << ")\n";
+            os << "  " << cos_value << " = call float @air.fast_cos.f32(float " << *x << ")\n";
+            const std::string sin_ptr = next_tmp("sincos_sin_ptr");
+            const std::string cos_ptr = next_tmp("sincos_cos_ptr");
+            os << "  " << sin_ptr << " = inttoptr i64 " << *sin_ptr_bits << " to float*\n";
+            os << "  " << cos_ptr << " = inttoptr i64 " << *cos_ptr_bits << " to float*\n";
+            os << "  store float " << sin_value << ", float* " << sin_ptr << ", align 4\n";
+            os << "  store float " << cos_value << ", float* " << cos_ptr << ", align 4\n";
+            return true;
+        }
         if (callee == "__nv_powf") {
             if (arg_names.size() < 2) return fail(instr, "__nv_powf expects 2 args");
             auto x = load_call_slot_f32(arg_names[0]);
@@ -2989,6 +3061,15 @@ class GenericLlvmEmitter {
             declarations_.insert("declare float @air.fast_pow.f32(float, float)");
             const std::string out = next_tmp("powf");
             os << "  " << out << " = call float @air.fast_pow.f32(float " << *x << ", float " << *y << ")\n";
+            return store_ret_f32(out);
+        }
+        if (callee == "__nv_fast_fdividef") {
+            if (arg_names.size() < 2) return fail(instr, "__nv_fast_fdividef expects 2 args");
+            auto numerator = load_call_slot_f32(arg_names[0]);
+            auto denominator = load_call_slot_f32(arg_names[1]);
+            if (!numerator || !denominator) return fail(instr, "__nv_fast_fdividef args missing");
+            const std::string out = next_tmp("fast_fdividef");
+            os << "  " << out << " = fdiv fast float " << *numerator << ", " << *denominator << "\n";
             return store_ret_f32(out);
         }
         if (callee == "__nv_roundf") {

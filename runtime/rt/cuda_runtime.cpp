@@ -26,7 +26,7 @@
 #include <unordered_map>
 #include <vector>
 
-struct cudaStream_st {};
+struct CUstream_st {};
 
 // ── Diagnostic trace (CUMETAL_TRACE=1) ───────────────────────────────────────
 // One-shot, line-buffered log of every CUDA op cumetal actually executes, used
@@ -86,7 +86,7 @@ struct cudaGraphExec_st {
     std::vector<cudaGraphNode_st> nodes;
 };
 
-struct cudaEvent_st {
+struct CUevent_st {
     bool disable_timing = false;
     bool recorded_once = false;
     bool complete = true;
@@ -2762,7 +2762,7 @@ cudaError_t cudaStreamCreateWithFlags(cudaStream_t* stream, unsigned int flags) 
         return fail(status == cudaSuccess ? cudaErrorUnknown : status);
     }
 
-    auto* handle = new (std::nothrow) cudaStream_st{};
+    auto* handle = new (std::nothrow) CUstream_st{};
     if (handle == nullptr) {
         return fail(cudaErrorMemoryAllocation);
     }
@@ -3196,7 +3196,7 @@ cudaError_t cudaEventCreateWithFlags(cudaEvent_t* event, unsigned int flags) {
         return fail(cudaErrorInvalidValue);
     }
 
-    auto* created = new (std::nothrow) cudaEvent_st{};
+    auto* created = new (std::nothrow) CUevent_st{};
     if (created == nullptr) {
         return fail(cudaErrorMemoryAllocation);
     }

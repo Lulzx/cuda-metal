@@ -338,15 +338,25 @@ $L1:
     .reg .b64 %rd<3>;
     .param .b32 call_arg;
     .param .b32 call_ret;
+    .param .b64 sin_ptr_arg;
+    .param .b64 cos_ptr_arg;
     ld.param.u64 %rd1, [vector_memory_param_0];
     ld.param.u64 %rd2, [vector_memory_param_1];
     ld.global.v4.b32 {%r1, %r2, %r3, %r4}, [%rd1];
     st.global.v4.b32 [%rd2], {%r1, %r2, %r3, %r4};
     ld.global.v2.b32 {%r5, %r6}, [%rd1+16];
     st.global.v2.b32 [%rd2+16], {%r5, %r6};
+    ld.b32 %r1, [%rd1];
+    st.b32 [%rd2], %r1;
     st.param.b32 [call_arg], %r1;
     call.uni (call_ret), __nv_sqrtf, (call_arg);
     ld.param.b32 %r1, [call_ret];
+    call.uni (call_ret), __nv_float_as_int, (call_arg);
+    call.uni (call_ret), __nv_popc, (call_arg);
+    call.uni (call_ret), __nv_fast_fdividef, (call_arg, call_arg);
+    st.param.b64 [sin_ptr_arg], %rd1;
+    st.param.b64 [cos_ptr_arg], %rd2;
+    call.uni __nv_fast_sincosf, (call_arg, sin_ptr_arg, cos_ptr_arg);
     ret;
 }
 )PTX";
@@ -364,6 +374,11 @@ $L1:
     }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sqrt.f32"),
                 "__nv_sqrtf lowers to Metal sqrt intrinsic")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sin.f32") &&
+                    contains(vector_memory_lowered.llvm_ir, "@air.fast_cos.f32"),
+                "destination-less __nv_fast_sincosf call lowers to Metal trig intrinsics")) {
         return 1;
     }
 
