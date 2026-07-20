@@ -1,10 +1,23 @@
 # frontend
 
-Phase 3: Clang CUDA frontend integration lives here.
+CUDA source frontend integration lives here.
 
-Current status:
+The canonical source path is:
 
-- `cumetalc` now has an initial `.cu` frontend path that shells out to
-  `xcrun clang++ -S -emit-llvm` with minimal CUDA-qualifier defines.
-- Output LLVM IR is fed into existing AIR emission modes (`experimental`/`xcrun`).
-- Coverage exists in `air_abi_cumetalc_cu_experimental_validate`.
+```text
+stock Clang CUDA device job (-nocudainc -nocudalib)
+→ LLVM/NVVM device IR
+→ CuMetal NVVM importer
+→ verified CuMetal GPU IR
+→ Metal legalization
+→ typed MSL
+→ Apple Metal compiler
+```
+
+`cumetalc --backend=cumetal-ir` uses CuMetal's clean-room runtime headers and
+does not strip CUDA qualifiers. `--emit=llvm`, `cumetal-ir`, `metal-ir`, and
+`msl` expose the intermediate stages. Unknown NVVM intrinsics and unsupported
+LLVM constructs are diagnosed rather than replaced with traps or fallback.
+
+The old qualifier-stripping path remains only under the temporary explicit
+legacy backend during migration.

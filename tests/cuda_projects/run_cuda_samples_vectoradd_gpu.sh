@@ -40,7 +40,7 @@ if ! grep -q 'Test PASSED' "$OUTPUT_FILE"; then
     echo "FAIL: upstream cuda-samples vectorAdd did not verify its result"
     exit 1
 fi
-if ! grep -q 'CUMETAL_PROVENANCE .*source=generic_ptx device=apple_gpu .*launch_success=true' \
+if ! grep -q 'CUMETAL_PROVENANCE .*source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu .*launch_success=true' \
     "$OUTPUT_FILE"; then
     echo "FAIL: upstream CUDA sample has no successful generic-PTX Apple GPU dispatch"
     exit 1

@@ -1,5 +1,6 @@
 #include "cumetal/ptx/lower_to_metal.h"
 
+#include "cumetal/metal/lower_to_msl.h"
 #include "cumetal/passes/phase1_pipeline.h"
 #include "cumetal/ptx/parser.h"
 
@@ -2208,6 +2209,31 @@ std::string emit_metal_source_generic(const std::string& entry_name,
 LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerToMetalOptions& options) {
     LowerToMetalResult result;
 
+    if (options.backend == PtxMetalBackend::kCumetalIr) {
+        cumetal::metal::PtxToMslOptions compile_options;
+        compile_options.strict = true;
+        compile_options.entry_name = options.entry_name;
+        const auto compiled = cumetal::metal::compile_ptx_to_msl(ptx, compile_options);
+        result.warnings = compiled.warnings;
+        if (!compiled.ok) {
+            result.error = compiled.error;
+            return result;
+        }
+        if (compiled.gpu_ir.functions.empty()) {
+            result.error = "CuMetal IR backend produced no kernel functions";
+            return result;
+        }
+        result.ok = true;
+        result.matched = true;
+        result.entry_name = compiled.gpu_ir.functions.front().name;
+        result.lowering_kind = MetalLoweringKind::kGenericCumetalIr;
+        result.metal_source =
+            "// cumetal-provenance: generic_ptx_lowering\n"
+            "// cumetal-lowering: generic_ptx\n" +
+            compiled.source;
+        return result;
+    }
+
     cumetal::passes::Phase1PipelineOptions pipeline_options;
     pipeline_options.strict = options.strict;
     pipeline_options.entry_name = options.entry_name;
@@ -2249,13 +2275,22 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
     result.approximate = approximate;
     result.lowering_kind = lowering_kind;
     const char* lowering_label =
-        lowering_kind == MetalLoweringKind::kGenericPtx
+        (lowering_kind == MetalLoweringKind::kGenericPtx ||
+         lowering_kind == MetalLoweringKind::kGenericCumetalIr)
             ? "generic_ptx"
             : (lowering_kind == MetalLoweringKind::kApproximateStub
                    ? "approximate_stub"
                    : "specialized_msl");
+    const char* provenance_label =
+        (lowering_kind == MetalLoweringKind::kGenericPtx ||
+         lowering_kind == MetalLoweringKind::kGenericCumetalIr)
+            ? "generic_ptx_lowering"
+            : (lowering_kind == MetalLoweringKind::kApproximateStub
+                   ? "unsupported"
+                   : "workload_specialization");
     result.metal_source =
-        std::string("// cumetal-lowering: ") + lowering_label + "\n" + metal_source;
+        std::string("// cumetal-provenance: ") + provenance_label +
+        "\n// cumetal-lowering: " + lowering_label + "\n" + metal_source;
     if (approximate) {
         result.warnings.push_back(
             "kernel '" + pipeline.entry_name +

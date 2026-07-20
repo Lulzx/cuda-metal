@@ -18,6 +18,8 @@ struct RegisteredKernel {
     // Total bytes of static __shared__ memory (non-extern .shared declarations).
     // Used to call setThreadgroupMemoryLength when no dynamic shared memory is specified.
     std::size_t static_shared_bytes = 0;
+    std::string provenance;
+    std::string semantic_quality;
 };
 
 struct LaunchConfiguration {

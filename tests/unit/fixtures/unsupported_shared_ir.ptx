@@ -1,0 +1,10 @@
+.version 7.0
+.target sm_80
+.address_size 64
+
+.visible .entry unsupported()
+{
+    .reg .u32 %r<1>;
+    unsupported.op.u32 %r0, 1;
+    ret;
+}

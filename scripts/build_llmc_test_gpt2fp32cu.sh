@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CUMETAL_BUILD_DIR="${CUMETAL_BUILD_DIR:-${ROOT_DIR}/build}"
 # shellcheck source=scripts/cumetal_cuda_flags.sh
 source "${SCRIPT_DIR}/cumetal_cuda_flags.sh"
 
@@ -44,7 +45,7 @@ if ! grep -q "fabsf(a\\[i\\] - b\\[i\\]) <= ${GRAD_TOL}" "${PATCHED_TMP}"; then
 fi
 mv "${PATCHED_TMP}" "${PATCHED_SRC}"
 
-PATH="${ROOT_DIR}/build/cuda_toolchain:${ROOT_DIR}/scripts/cuda_toolchain:${PATH}" \
+PATH="${CUMETAL_BUILD_DIR}/cuda_toolchain:${ROOT_DIR}/scripts/cuda_toolchain:${PATH}" \
 "${CLANG_BIN}" \
     -x cuda \
     -std=c++17 \
@@ -64,9 +65,9 @@ PATH="${ROOT_DIR}/build/cuda_toolchain:${ROOT_DIR}/scripts/cuda_toolchain:${PATH
 
 xcrun clang++ \
     "${OBJ_FILE}" \
-    -L"${ROOT_DIR}/build" \
+    -L"${CUMETAL_BUILD_DIR}" \
     -lcumetal \
-    -Wl,-rpath,"${ROOT_DIR}/build" \
+    -Wl,-rpath,"${CUMETAL_BUILD_DIR}" \
     -o "${OUT_FILE}"
 
 echo "built ${OUT_FILE}"

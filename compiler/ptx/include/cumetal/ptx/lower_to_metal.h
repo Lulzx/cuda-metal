@@ -6,13 +6,20 @@
 
 namespace cumetal::ptx {
 
+enum class PtxMetalBackend {
+    kLegacy,
+    kCumetalIr,
+};
+
 struct LowerToMetalOptions {
     bool strict = false;
     std::string entry_name;
+    PtxMetalBackend backend = PtxMetalBackend::kLegacy;
 };
 
 enum class MetalLoweringKind {
     kNone,
+    kGenericCumetalIr,
     kGenericPtx,
     kSpecializedMsl,
     kApproximateStub,
