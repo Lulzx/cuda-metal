@@ -10,6 +10,25 @@ set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 
 option(CUMETAL_BUILD_TESTS "Build test targets" ON)
 
+# Clang launches ptxas/fatbinary directly while compiling CUDA source. Native
+# shims avoid macOS provenance policy killing interpreter scripts when they are
+# spawned as compiler subprocesses.
+add_executable(cumetal_ptxas_shim
+    tools/cuda_toolchain_shims/ptxas.cpp
+)
+set_target_properties(cumetal_ptxas_shim PROPERTIES
+    OUTPUT_NAME ptxas
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/cuda_toolchain
+)
+
+add_executable(cumetal_fatbinary_shim
+    tools/cuda_toolchain_shims/fatbinary.cpp
+)
+set_target_properties(cumetal_fatbinary_shim PROPERTIES
+    OUTPUT_NAME fatbinary
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/cuda_toolchain
+)
+
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CUMETAL_ENABLE_BINARY_SHIM_DEFAULT OFF)
 else()
@@ -144,6 +163,7 @@ target_include_directories(cumetal_runtime
         compiler/ptx/include
         runtime/api
         runtime/cache
+        runtime/common
         runtime/error
         runtime/registration
         runtime/rt
@@ -169,6 +189,13 @@ if(APPLE)
     add_custom_command(
         TARGET cumetal_runtime
         POST_BUILD
+        # Files produced inside a quarantined/provenance-marked checkout can
+        # inherit com.apple.provenance. Re-sign after removing it so dyld does
+        # not reject an otherwise valid local development dylib.
+        COMMAND ${CMAKE_COMMAND}
+                -DCUMETAL_BINARY=$<TARGET_FILE:cumetal_runtime>
+                -P
+                ${CMAKE_SOURCE_DIR}/cmake/prepare_macos_binary.cmake
         COMMAND ${CMAKE_COMMAND} -E create_symlink
                 $<TARGET_FILE_NAME:cumetal_runtime>
                 $<TARGET_FILE_DIR:cumetal_runtime>/libcublas.dylib
@@ -361,6 +388,28 @@ target_compile_options(cumetal_bench
         -Wextra
         -Wpedantic
 )
+
+if(APPLE)
+    foreach(cumetal_tool_target IN ITEMS
+            cumetal_ptxas_shim
+            cumetal_fatbinary_shim
+            air_validate
+            cumetal-air-emitter
+            cumetalc
+            cumetal-ptx2llvm
+            air_inspect
+            ptx_diff
+            cumetal_bench)
+        add_custom_command(
+            TARGET ${cumetal_tool_target}
+            POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                    -DCUMETAL_BINARY=$<TARGET_FILE:${cumetal_tool_target}>
+                    -P
+                    ${CMAKE_SOURCE_DIR}/cmake/prepare_macos_binary.cmake
+        )
+    endforeach()
+endif()
 
 if(CUMETAL_BUILD_TESTS)
     enable_testing()

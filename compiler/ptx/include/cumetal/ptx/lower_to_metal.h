@@ -11,9 +11,23 @@ struct LowerToMetalOptions {
     std::string entry_name;
 };
 
+enum class MetalLoweringKind {
+    kNone,
+    kGenericPtx,
+    kSpecializedMsl,
+    kApproximateStub,
+};
+
 struct LowerToMetalResult {
     bool ok = false;
     bool matched = false;
+    // True when the matched lowering is an approximate / passthru stub whose
+    // output is not numerically correct (e.g. GGML rope/dequant/copy stubs that
+    // let a run proceed without computing the real result). Callers must treat
+    // such kernels as unsafe: the runtime skips them by default so the program
+    // fails loudly instead of silently producing wrong answers.
+    bool approximate = false;
+    MetalLoweringKind lowering_kind = MetalLoweringKind::kNone;
     std::string entry_name;
     std::string metal_source;
     // printf metadata: if the kernel uses device printf, the compiler injects a hidden

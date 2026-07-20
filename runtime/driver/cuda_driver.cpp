@@ -3,6 +3,7 @@
 #include "cumetal/air_emitter/emitter.h"
 #include "cumetal/common/metallib.h"
 #include "cumetal/ptx/lower_to_llvm.h"
+#include "cumetal_diag.h"
 #include "cuda_runtime.h"
 #include "module_cache.h"
 
@@ -386,6 +387,18 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path) {
             lower_opts.fp64_mode = cumetal::ptx::Fp64Mode::kWarn;
         }
         // "emulate" is already the default; any other value is ignored
+    }
+    // Emulated FP64 uses Dekker FP32-pair arithmetic (~44-bit mantissa), not full
+    // IEEE-754 double. Warn once when a kernel actually contains double-precision
+    // ops so numerically sensitive code knows the reduced precision is in effect.
+    if (lower_opts.fp64_mode == cumetal::ptx::Fp64Mode::kEmulate &&
+        ptx.find(".f64") != std::string::npos) {
+        cumetal::warn_once(
+            "fp64-emulate",
+            "kernel uses FP64 (double) instructions, emulated with Dekker FP32-pair "
+            "arithmetic (~44-bit mantissa, not full IEEE-754 double); results lose "
+            "precision. Set CUMETAL_FP64_MODE=native to compile true doubles (fails "
+            "at launch on current Apple Silicon)");
     }
     const auto lowered = cumetal::ptx::lower_ptx_to_llvm_ir(ptx, lower_opts);
     if (!lowered.ok || lowered.llvm_ir.empty()) {
@@ -1762,6 +1775,16 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
                                     unsigned int blockDimY, unsigned int blockDimZ,
                                     unsigned int sharedMemBytes, CUstream hStream,
                                     void** kernelParams) {
+    // grid_group::sync() is a no-op on Metal — warn once when a multi-block grid
+    // cooperative launch could rely on grid-wide sync it will not get (spec §8).
+    if ((static_cast<std::uint64_t>(gridDimX) * gridDimY * gridDimZ) > 1) {
+        cumetal::warn_once(
+            "coop-grid-sync",
+            "cuLaunchCooperativeKernel with a multi-block grid: grid-wide "
+            "cooperative_groups sync (this_grid().sync()) is a no-op on Metal and "
+            "cannot synchronize across threadgroups; kernels that depend on it for "
+            "correctness will produce wrong results (spec §8)");
+    }
     return cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
                           sharedMemBytes, hStream, kernelParams, nullptr);
 }

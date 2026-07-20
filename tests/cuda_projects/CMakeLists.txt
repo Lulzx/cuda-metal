@@ -13,8 +13,42 @@ function(cumetal_add_cuda_project_test test_name project_subdir source_cu binary
             ${source_cu}
             ${binary_name}
     )
-    set_tests_properties(${test_name} PROPERTIES SKIP_RETURN_CODE 77)
+    set_tests_properties(
+        ${test_name}
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    )
 endfunction()
+
+add_test(
+    NAME functional_cuda_source_gpu_vector_add
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_cuda_source_gpu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(
+    functional_cuda_source_gpu_vector_add
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
+add_test(
+    NAME conformance_cuda_samples_vectoradd_gpu
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_cuda_samples_vectoradd_gpu.sh
+        ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(
+    conformance_cuda_samples_vectoradd_gpu
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
 
 cumetal_add_cuda_project_test(
     functional_cuda_projects_sgemm_naive
@@ -35,4 +69,22 @@ cumetal_add_cuda_project_test(
 cumetal_add_cuda_project_test(
     functional_cuda_projects_transpose
     transpose transpose_standalone.cu transpose_standalone
+)
+
+add_test(
+    NAME functional_cuda_projects_ggml_output_ops
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ggml_output_ops
+        ggml_output_ops.cu
+        ggml_output_ops
+)
+set_tests_properties(
+    functional_cuda_projects_ggml_output_ops
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
 )

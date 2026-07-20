@@ -16,11 +16,6 @@ if ! command -v ctest >/dev/null 2>&1; then
     exit 77
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "SKIP: python3 not available for ctest JSON parsing"
-    exit 77
-fi
-
 if [[ ! -d "$BUILD_DIR" ]]; then
     echo "FAIL: build directory not found: $BUILD_DIR"
     exit 1
@@ -31,34 +26,13 @@ if ! [[ "$SINGLE_TEST_TIMEOUT" =~ ^[0-9]+$ ]] || [[ "$SINGLE_TEST_TIMEOUT" -eq 0
     exit 1
 fi
 
-JSON_FILE="$(mktemp)"
-trap 'rm -f "$JSON_FILE"' EXIT
-
-ctest --test-dir "$BUILD_DIR" --show-only=json-v1 >"$JSON_FILE"
-
 TEST_NAMES=()
 while IFS= read -r name; do
     if [ -n "$name" ]; then
         TEST_NAMES+=("$name")
     fi
-done < <(
-    python3 - "$JSON_FILE" "$TEST_REGEX" <<'PY'
-import json
-import re
-import sys
-
-path = sys.argv[1]
-pattern = re.compile(sys.argv[2])
-
-with open(path, "r", encoding="utf-8") as f:
-    data = json.load(f)
-
-for test in data.get("tests", []):
-    name = test.get("name", "")
-    if pattern.search(name):
-        print(name)
-PY
-)
+done < <(ctest --test-dir "$BUILD_DIR" -N -R "$TEST_REGEX" |
+    /usr/bin/sed -nE 's/^[[:space:]]*Test +#[0-9]+: (.*)$/\1/p')
 
 if [[ ${#TEST_NAMES[@]} -eq 0 ]]; then
     echo "SKIP: no tests matched regex '${TEST_REGEX}'"
@@ -82,7 +56,7 @@ for test_name in "${TEST_NAMES[@]}"; do
         skipped=$((skipped + 1))
         continue
     fi
-    if grep -Fq "100% tests passed, 0 tests failed out of 1" <<<"$output"; then
+    if grep -Eq "100% tests passed(, 0 tests failed)? out of 1" <<<"$output"; then
         echo "  -> pass"
         passed=$((passed + 1))
     else
@@ -98,13 +72,8 @@ if [[ $executed -eq 0 ]]; then
     exit 77
 fi
 
-pass_rate="$(python3 - "$passed" "$executed" <<'PY'
-import sys
-passed = int(sys.argv[1])
-executed = int(sys.argv[2])
-print(f"{(100.0 * passed / executed):.2f}")
-PY
-)"
+pass_rate="$(awk -v passed="$passed" -v executed="$executed" \
+    'BEGIN { printf "%.2f", 100.0 * passed / executed }')"
 
 echo "Conformance summary:"
 echo "  matched:  ${#TEST_NAMES[@]}"
@@ -115,12 +84,8 @@ echo "  skipped:  ${skipped}"
 echo "  pass_rate(executed): ${pass_rate}%"
 echo "  threshold:           ${MIN_PASS_RATE}%"
 
-if python3 - "$pass_rate" "$MIN_PASS_RATE" <<'PY'
-import sys
-pass_rate = float(sys.argv[1])
-threshold = float(sys.argv[2])
-sys.exit(0 if pass_rate + 1e-9 >= threshold else 1)
-PY
+if awk -v pass_rate="$pass_rate" -v threshold="$MIN_PASS_RATE" \
+    'BEGIN { exit !((pass_rate + 1e-9) >= threshold) }'
 then
     echo "PASS: conformance threshold met"
     exit 0

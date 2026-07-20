@@ -3,6 +3,7 @@
 
 cumetal_cuda_projects_check_prereqs() {
     local root_dir="$1"
+    local cumetal_build_dir="${CUMETAL_BUILD_DIR:-${root_dir}/build}"
 
     if ! command -v xcrun >/dev/null 2>&1; then
         echo "SKIP: xcrun not installed"
@@ -24,9 +25,27 @@ cumetal_cuda_projects_check_prereqs() {
         return 77
     fi
 
-    if [[ ! -f "${root_dir}/build/libcumetal.dylib" ]]; then
-        echo "SKIP: libcumetal not built at ${root_dir}/build"
+    if [[ ! -f "${cumetal_build_dir}/libcumetal.dylib" ]]; then
+        echo "SKIP: libcumetal not built at ${cumetal_build_dir}"
         return 77
+    fi
+
+    # The standalone .cu harnesses emit host code that references the CUDA
+    # runtime registration symbols (__cudaRegisterFatBinary et al.). These are
+    # only present when libcumetal is built with the binary shim enabled
+    # (CUMETAL_ENABLE_BINARY_SHIM=ON, the default for non-Release builds). A
+    # Release build ships the registration stub instead, so linking/loading
+    # would fail with a cryptic dyld error. Detect that and skip cleanly.
+    # Capture into a variable (no pipe): `nm | grep -q` under `set -o pipefail`
+    # can report failure when grep closes the pipe early (SIGPIPE on nm).
+    if command -v nm >/dev/null 2>&1; then
+        local cumetal_syms
+        cumetal_syms="$(nm -gU "${cumetal_build_dir}/libcumetal.dylib" 2>/dev/null || true)"
+        if [[ "${cumetal_syms}" != *cudaRegisterFatBinary* ]]; then
+            echo "SKIP: libcumetal built without the binary shim (CUMETAL_ENABLE_BINARY_SHIM=OFF);"
+            echo "      CUDA registration symbols unavailable — rebuild with -DCUMETAL_ENABLE_BINARY_SHIM=ON"
+            return 77
+        fi
     fi
 
     return 0
@@ -38,12 +57,16 @@ cumetal_cuda_projects_compile_link() {
     local out_dir="$3"
     local src_cu="$4"
     local out_bin="$5"
+    local cumetal_build_dir="${CUMETAL_BUILD_DIR:-${root_dir}/build}"
 
     # shellcheck source=scripts/cumetal_cuda_flags.sh
     source "${root_dir}/scripts/cumetal_cuda_flags.sh"
     cumetal_cuda_device_flags
 
-    export PATH="${root_dir}/scripts/cuda_toolchain:${PATH}"
+    # Prefer native compiler subprocess shims. macOS may SIGKILL interpreter
+    # scripts carrying downloaded-file provenance when Clang execs them
+    # directly, even though `bash script.sh` is allowed.
+    export PATH="${cumetal_build_dir}/cuda_toolchain:${root_dir}/scripts/cuda_toolchain:${PATH}"
 
     echo "Compiling ${src_cu}..."
     # Filter known non-fatal warnings from homebrew clang + ptx feature flags (for sm_80+)
@@ -55,6 +78,6 @@ cumetal_cuda_projects_compile_link() {
         -c "${src_dir}/${src_cu}" -o "${out_dir}/${src_cu%.cu}.o" 2>&1 || true ) \
         | grep -v -E 'ptx[0-9]+ is not a recognized feature|\+ptx[0-9]+|Wimplicit-const-int-float-conversion|warnings generated when compiling for' || true
     xcrun clang++ "${out_dir}/${src_cu%.cu}.o" \
-        -L"${root_dir}/build" -lcumetal -Wl,-rpath,"${root_dir}/build" \
+        -L"${cumetal_build_dir}" -lcumetal -Wl,-rpath,"${cumetal_build_dir}" \
         -o "${out_dir}/${out_bin}"
 }

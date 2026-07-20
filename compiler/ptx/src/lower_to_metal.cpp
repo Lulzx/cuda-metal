@@ -3,6 +3,7 @@
 #include "cumetal/passes/phase1_pipeline.h"
 #include "cumetal/ptx/parser.h"
 
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
@@ -20,6 +21,30 @@ constexpr std::string_view kKernelNameToken = "__KERNEL_NAME__";
 
 bool kernel_name_contains(const std::string& kernel_name, std::string_view needle) {
     return kernel_name.find(needle) != std::string::npos;
+}
+
+bool entry_uses_supported_convert_unary(const std::string& entry_name) {
+    return kernel_name_contains(entry_name, "convert_unaryIfDF16_E") ||
+           kernel_name_contains(entry_name, "convert_unaryIDF16_fE");
+}
+
+// A few direct-MSL templates are passthru / placeholder stubs that let a GGML
+// run proceed without computing the real result (they copy or zero data instead
+// of unpacking quantized blocks, rotating rope embeddings, etc.). They keep the
+// kernel table populated but their numerical output is wrong. Callers use this
+// to flag such kernels as unsafe so the runtime can refuse them by default
+// rather than silently emit garbage. Keep this list in sync with the passthru
+// branches in emit_metal_source_for_entry.
+bool entry_uses_approximate_stub(const std::string& entry_name) {
+    return (kernel_name_contains(entry_name, "convert_unary") &&
+            !entry_uses_supported_convert_unary(entry_name)) ||
+           kernel_name_contains(entry_name, "rope_norm") ||
+           kernel_name_contains(entry_name, "rope_neox") ||
+           kernel_name_contains(entry_name, "dequantize_q5_0") ||
+           kernel_name_contains(entry_name, "dequantize_block_q5") ||
+           kernel_name_contains(entry_name, "k_set_rows") ||
+           kernel_name_contains(entry_name, "cpy_") ||
+           kernel_name_contains(entry_name, "k_cpy");
 }
 
 std::string replace_kernel_name(std::string source, const std::string& entry_name) {
@@ -669,7 +694,10 @@ kernel_template = R"METAL(kernel void __KERNEL_NAME__(
     ) {
         return {};
     } else if (kernel_name_contains(entry_name, "k_bin_bcast") && (kernel_name_contains(entry_name, "op_addff") || kernel_name_contains(entry_name, "op_mulff"))) {
-        // GGML bin_bcast for float add (common in residuals, etc.). Supports basic broadcast + optional extra src1.
+        // GGML bin_bcast for float add/mul (addff is the residual add in transformer blocks,
+        // mulff is elementwise multiply). Same template body; only the operator differs.
+        // NB: the operator MUST be selected from the op tag — a single shared body that
+        // hardcodes `*` silently turns every residual add into a multiply (token salad).
         kernel_template = R"METAL(kernel void __KERNEL_NAME__(
     device const float* src0 [[buffer(0)]],
     device const float* src1 [[buffer(1)]],
@@ -721,11 +749,18 @@ kernel_template = R"METAL(kernel void __KERNEL_NAME__(
         if (extra_src1 != nullptr) {
             v1 = extra_src1[i_src1 + i10 * s10];
         }
-        result = result * v1;
+        result = result __BINOP__ v1;
         dst_row[i0] = result;
     }
 }
 )METAL";
+        // op_addff -> add, op_mulff -> multiply. Anything else falls through to the
+        // generic PTX path (this branch only matches addff/mulff).
+        {
+            const std::string binop = kernel_name_contains(entry_name, "op_addff") ? "+" : "*";
+            const std::size_t bp = kernel_template.find("__BINOP__");
+            if (bp != std::string::npos) kernel_template.replace(bp, 9, binop);
+        }
     } else if (kernel_name_contains(entry_name, "k_bin_bcast") && kernel_name_contains(entry_name, "op_addDF16")) {
         // f16 variant of bin_bcast add
         kernel_template = R"METAL(kernel void __KERNEL_NAME__(
@@ -785,7 +820,14 @@ kernel_template = R"METAL(kernel void __KERNEL_NAME__(
 }
 )METAL";
     } else if (kernel_name_contains(entry_name, "rms_norm_f32")) {
-        // GGML rms_norm_f32 for Llama models (used in Tiny-LLM etc.). Simple implementation with redundant compute per row (fine for small models and test). Uses gid as row.
+        // GGML rms_norm_f32 for Llama/SmolLM2 etc. ggml-cuda launches it as one
+        // threadgroup per row (grid.x = nrows) with block_size cooperating threads
+        // (typically 256) that reduce sum_xx over ncols together. Mapping must use
+        // threadgroup_position_in_grid as the row (bounded by grid = nrows) — NOT the
+        // global thread id: using gid as row runs grid*block_size "rows" and writes
+        // ~20MB past the buffer (rows that don't exist), silently corrupting adjacent
+        // allocations → token salad. mul/add are the 1D [ncols] weight/bias, indexed
+        // by column i (broadcast over rows).
         kernel_template = R"METAL(kernel void __KERNEL_NAME__(
     device const float* x [[buffer(0)]],
     device float* dst [[buffer(1)]],
@@ -810,67 +852,193 @@ kernel_template = R"METAL(kernel void __KERNEL_NAME__(
     constant packed_uint3& add_nrows_packed [[buffer(20)]],
     constant packed_uint3& add_nchannels_packed [[buffer(21)]],
     constant packed_uint3& add_nsamples_packed [[buffer(22)]],
-    uint gid [[thread_position_in_grid]]
+    uint3 local_pos [[thread_position_in_threadgroup]],
+    uint3 group_pos [[threadgroup_position_in_grid]],
+    uint3 groups [[threadgroups_per_grid]],
+    uint3 block_dims [[threads_per_threadgroup]]
 ) {
-    int row = (int)gid;
     if (ncols <= 0) return;
-    const device float* row_x = x + row * stride_row;
-    device float* row_dst = dst + row * stride_row;
-    float sum_xx = 0.0f;
-    for (int i = 0; i < ncols; ++i) {
-        float xi = row_x[i];
-        sum_xx += xi * xi;
+    const uint tid = local_pos.x;
+    const uint block_size = block_dims.x;
+    const uint row = group_pos.x;
+    const uint channel = group_pos.y;
+    const uint sample = group_pos.z;
+    const uint nrows = groups.x;
+    const uint nchannels = groups.y;
+    const device float* row_x =
+        x + (size_t)sample * stride_sample
+          + (size_t)channel * stride_channel
+          + (size_t)row * stride_row;
+    // CUDA writes RMS output densely even when the source is a strided view.
+    device float* row_dst =
+        dst + (((size_t)sample * nchannels + channel) * nrows + row)
+                  * (size_t)ncols;
+    const device float* row_mul = mul;
+    if (row_mul != nullptr) {
+        const uint mul_row =
+            (mul_nrows_packed.z > 0) ? row % mul_nrows_packed.z : 0u;
+        const uint mul_channel =
+            (mul_nchannels_packed.z > 0)
+                ? channel % mul_nchannels_packed.z
+                : 0u;
+        const uint mul_sample =
+            (mul_nsamples_packed.z > 0)
+                ? sample % mul_nsamples_packed.z
+                : 0u;
+        row_mul += (size_t)mul_sample * mul_stride_sample
+                 + (size_t)mul_channel * mul_stride_channel
+                 + (size_t)mul_row * mul_stride_row;
     }
-    float scale = 1.0f / sqrt(sum_xx / (float)ncols + eps);
-    for (int i = 0; i < ncols; ++i) {
+    const device float* row_add = add;
+    if (row_add != nullptr) {
+        const uint add_row =
+            (add_nrows_packed.z > 0) ? row % add_nrows_packed.z : 0u;
+        const uint add_channel =
+            (add_nchannels_packed.z > 0)
+                ? channel % add_nchannels_packed.z
+                : 0u;
+        const uint add_sample =
+            (add_nsamples_packed.z > 0)
+                ? sample % add_nsamples_packed.z
+                : 0u;
+        row_add += (size_t)add_sample * add_stride_sample
+                 + (size_t)add_channel * add_stride_channel
+                 + (size_t)add_row * add_stride_row;
+    }
+    // Each thread accumulates a partial sum of squares over its strided slice.
+    float partial = 0.0f;
+    for (int i = (int)tid; i < ncols; i += (int)block_size) {
+        float xi = row_x[i];
+        partial += xi * xi;
+    }
+    // Reduce within Metal's fixed-width 32-lane SIMD groups, then combine one
+    // subtotal per SIMD group. This mirrors GGML's CUDA reduction and avoids a
+    // large per-thread shared array whose values proved unreliable across
+    // repeated real-model dispatches. The second stage has at most 32 values,
+    // and works for non-power-of-two ncols such as SmolLM2's 576.
+    const uint lane = tid & 31u;
+    const uint simd_group = tid >> 5u;
+    const uint simd_group_count = (block_size + 31u) >> 5u;
+    const float simd_total = simd_sum(partial);
+    threadgroup float shared[32];
+    if (lane == 0u) shared[simd_group] = simd_total;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (uint i = 0; i < simd_group_count; ++i) sum += shared[i];
+        shared[0] = sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float sum_xx = shared[0];
+    const float scale = 1.0f / sqrt(sum_xx / (float)ncols + eps);
+    for (int i = (int)tid; i < ncols; i += (int)block_size) {
         float val = row_x[i] * scale;
-        if (mul != nullptr) val *= mul[i % 1024]; // safe for small
-        if (add != nullptr) val += add[i % 1024];
+        if (row_mul != nullptr) {
+            const uint mul_col =
+                (mul_ncols_packed.z > 0)
+                    ? (uint)i % mul_ncols_packed.z
+                    : 0u;
+            val *= row_mul[mul_col];
+        }
+        if (row_add != nullptr) {
+            const uint add_col =
+                (add_ncols_packed.z > 0)
+                    ? (uint)i % add_ncols_packed.z
+                    : 0u;
+            val += row_add[add_col];
+        }
         row_dst[i] = val;
     }
 }
 )METAL";
     } else if (kernel_name_contains(entry_name, "convert_unary")) {
-        // type conversion kernels used in GGML for f32<->f16 etc during dequant/graph.
+        // GGML strided tensor conversion. The two variants exercised by
+        // llama.cpp's F16 staging path are float -> half and half -> float;
+        // their template types are encoded in the Itanium-mangled entry name.
         kernel_template = R"METAL(kernel void __KERNEL_NAME__(
     device const void* src [[buffer(0)]],
     device void* dst [[buffer(1)]],
-    constant int& ne0 [[buffer(2)]],
-    constant int& ne1 [[buffer(3)]],
-    constant int& ne2 [[buffer(4)]],
-    constant packed_uint3& ne2_packed [[buffer(5)]],
-    constant int64_t& s0 [[buffer(6)]],
-    constant int64_t& s1 [[buffer(7)]],
-    constant int64_t& s2 [[buffer(8)]],
-    uint3 pos [[thread_position_in_grid]]
+    constant long& ne00 [[buffer(2)]],
+    constant long& ne01 [[buffer(3)]],
+    constant long& ne0203 [[buffer(4)]],
+    constant packed_uint3& ne02_fd [[buffer(5)]],
+    constant long& s01 [[buffer(6)]],
+    constant long& s02 [[buffer(7)]],
+    constant long& s03 [[buffer(8)]],
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint3 grid_size [[threadgroups_per_grid]],
+    uint3 block_size [[threads_per_threadgroup]]
 ) {
-    // simple 1D cast, assume f32 to f32 copy; real would use half if name indicates.
-    int idx = pos.x + pos.y * 65536;
-    if (idx >= ne0 * ne1 * ne2) return;
-    const device float* srcf = (const device float*)src;
-    device float* dstf = (device float*)dst;
-    dstf[idx] = srcf[idx];
+    const long i00 = (long)block_size.x * (long)group.x + (long)tid.x;
+    if (i00 >= ne00) return;
+    const long i01 = (long)group.y;
+    const uint divisor = ne02_fd.z;
+    if (divisor == 0) return;
+
+    const device __SRC_TYPE__* typed_src =
+        (const device __SRC_TYPE__*)src;
+    device __DST_TYPE__* typed_dst = (device __DST_TYPE__*)dst;
+    for (long i0203 = (long)group.z; i0203 < ne0203;
+         i0203 += (long)grid_size.z) {
+        const long i02 = i0203 % (long)divisor;
+        const long i03 = i0203 / (long)divisor;
+        const long ix = i03 * s03 + i02 * s02 + i01 * s01 + i00;
+        const long iy = (i0203 * ne01 + i01) * ne00 + i00;
+        typed_dst[iy] = (__DST_TYPE__)typed_src[ix];
+    }
 }
 )METAL";
+        const bool float_to_half =
+            kernel_name_contains(entry_name, "convert_unaryIfDF16_E");
+        const bool half_to_float =
+            kernel_name_contains(entry_name, "convert_unaryIDF16_fE");
+        const std::string src_type = float_to_half ? "float" : "half";
+        const std::string dst_type = float_to_half ? "half" : "float";
+        if (!float_to_half && !half_to_float) {
+            // Unknown template types stay flagged approximate and are refused
+            // by default; the body is never dispatched without explicit opt-in.
+        }
+        for (const auto& [placeholder, replacement] :
+             std::array<std::pair<std::string_view, std::string>, 2>{
+                 std::pair{"__SRC_TYPE__", src_type},
+                 std::pair{"__DST_TYPE__", dst_type}}) {
+            std::size_t pos = 0;
+            while ((pos = kernel_template.find(placeholder, pos)) !=
+                   std::string::npos) {
+                kernel_template.replace(pos, placeholder.size(), replacement);
+                pos += replacement.size();
+            }
+        }
     } else if (kernel_name_contains(entry_name, "dequantize_block_q8_0_f16")) {
-        // q8_0 dequant to f16, used in some quants.
+        // GGML's optimized contiguous Q8_0 -> f16 conversion. Each CUDA
+        // threadgroup owns 2048 output values (64 packed block_q8_0 records);
+        // every record is a half scale followed by 32 signed quant bytes.
         kernel_template = R"METAL(kernel void __KERNEL_NAME__(
     device const void* src [[buffer(0)]],
     device half* dst [[buffer(1)]],
-    constant int& ne0 [[buffer(2)]],
-    constant int& ne1 [[buffer(3)]],
-    constant int& ne2 [[buffer(4)]],
-    constant packed_uint3& ne2_packed [[buffer(5)]],
-    constant int64_t& s0 [[buffer(6)]],
-    constant int64_t& s1 [[buffer(7)]],
-    constant int64_t& s2 [[buffer(8)]],
-    uint3 pos [[thread_position_in_grid]]
+    constant long& k [[buffer(2)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint group [[threadgroup_position_in_grid]],
+    uint block_size [[threads_per_threadgroup]]
 ) {
-    int idx = pos.x + pos.y * 65536;
-    if (idx >= ne0 * ne1 * ne2) return;
-    // stub: treat as f16 copy or zero for test; real dequant would unpack scale+int8.
-    const device half* srcf = (const device half*)src;
-    dst[idx] = srcf[idx];
+    constexpr uint values_per_group = 2048;
+    constexpr uint values_per_block = 32;
+    constexpr uint bytes_per_block = 34;
+    const uint group_base = group * values_per_group;
+    const device uchar* packed = static_cast<const device uchar*>(src);
+
+    for (uint local = tid; local < values_per_group; local += block_size) {
+        const ulong out_index = (ulong)group_base + local;
+        if (out_index >= (ulong)k) break;
+        const ulong quant_block = out_index / values_per_block;
+        const uint quant_lane = (uint)(out_index % values_per_block);
+        const device uchar* record = packed + quant_block * bytes_per_block;
+        const half scale = *reinterpret_cast<const device half*>(record);
+        const char quant = *reinterpret_cast<const device char*>(
+            record + sizeof(half) + quant_lane);
+        dst[out_index] = half(float(scale) * float(quant));
+    }
 }
 )METAL";
     } else if (kernel_name_contains(entry_name, "rope_norm") || kernel_name_contains(entry_name, "rope_neox")) {
@@ -948,6 +1116,36 @@ kernel_template = R"METAL(kernel void __KERNEL_NAME__(
     const device float* s0 = (const device float*)src0;
     device float* d = (device float*)dst;
     if (s0) d[idx] = s0[idx % 1024];
+}
+)METAL";
+    } else if (kernel_name_contains(entry_name, "cpy_") || kernel_name_contains(entry_name, "k_cpy")) {
+        // cpy / copy kernels (scalar contiguous, block, etc.) hit in high-NGL paths for buffer movement.
+        // Passthru stub to prevent "CPY failed" aborts; GGML will launch, data may be approximate.
+        kernel_template = R"METAL(kernel void __KERNEL_NAME__(
+    device const void* src [[buffer(0)]],
+    device void* dst [[buffer(1)]],
+    constant long& ne00 [[buffer(2)]],
+    constant long& ne01 [[buffer(3)]],
+    constant long& ne02 [[buffer(4)]],
+    constant long& ne03 [[buffer(5)]],
+    constant long& ne0 [[buffer(6)]],
+    constant long& ne1 [[buffer(7)]],
+    constant long& ne2 [[buffer(8)]],
+    constant long& ne3 [[buffer(9)]],
+    constant long& ne [[buffer(10)]],
+    constant long& ne10 [[buffer(11)]],
+    constant long& ne11 [[buffer(12)]],
+    constant long& ne12 [[buffer(13)]],
+    constant long& ne13 [[buffer(14)]],
+    constant long& ne14 [[buffer(15)]],
+    constant long& ne15 [[buffer(16)]],
+    uint3 tpos [[thread_position_in_grid]]
+) {
+    int idx = (int)tpos.x;
+    if (idx >= 1024*1024) return;
+    const device char* s = (const device char*)src;
+    device char* d = (device char*)dst;
+    d[idx] = s ? s[idx] : 0;
 }
 )METAL";
     }
@@ -1182,6 +1380,20 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             continue;
         }
 
+        // Clang commonly canonicalizes pointer parameters through
+        // cvta.to.global before doing address arithmetic. Metal device
+        // pointers already have the final address-space semantics, so preserve
+        // the original parameter provenance through this instruction.
+        if (op.find("cvta.to.global") == 0 && ops.size() == 2) {
+            const std::string dest = get_reg(ops[0]);
+            const std::string src = get_reg(ops[1]);
+            if (!dest.empty() && !src.empty() && reg.count(src) &&
+                reg.at(src).kind == RegKind::ParamPtr) {
+                reg[dest] = reg.at(src);
+            }
+            continue;
+        }
+
         if ((op == "mov.u32" || op == "mov.s32") && ops.size() == 2) {
             const std::string dest = get_reg(ops[0]);
             if (!dest.empty()) {
@@ -1277,12 +1489,14 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         }
 
         // mul.lo.u64 rdN, rdGID64, imm  →  byte_offset = gid * imm
-        if ((op == "mul.lo.u64" || op == "mul.wide.u32") && ops.size() == 3) {
+        if ((op == "mul.lo.u64" || op == "mul.wide.u32" || op == "mul.wide.s32") &&
+            ops.size() == 3) {
             const std::string dest = get_reg(ops[0]);
             const std::string src = get_reg(ops[1]);
             const int imm = get_imm(ops[2]);
             if (!dest.empty() && !src.empty() && imm > 0 && reg.count(src) &&
-                reg.at(src).kind == RegKind::ThreadGid64) {
+                (reg.at(src).kind == RegKind::ThreadGid64 ||
+                 reg.at(src).kind == RegKind::ThreadGid)) {
                 reg[dest] = {.kind = RegKind::ByteOffset, .byte_per_elem = imm};
             }
             continue;
@@ -1516,6 +1730,24 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         if (r.size() > 1 && r[0] == '%' && r[1] == 'p') return "bool";
         if (r.size() > 1 && r[0] == '%' && r[1] == 'h') return "ushort";
         return "uint";
+    };
+
+    // Optimized Clang PTX frequently stores floating-point values in .b32
+    // registers named %rN. The instruction suffix, not the register spelling,
+    // is authoritative for the value type.
+    auto instruction_value_type = [&](const std::string& opcode,
+                                      const std::string& dest) -> std::string {
+        if (opcode.find(".f64") != std::string::npos) return "double";
+        if (opcode.find(".f32") != std::string::npos) return "float";
+        if (opcode.find(".s64") != std::string::npos) return "long";
+        if (opcode.find(".u64") != std::string::npos ||
+            opcode.find(".b64") != std::string::npos)
+            return "ulong";
+        if (opcode.find(".s32") != std::string::npos) return "int";
+        if (opcode.find(".u32") != std::string::npos ||
+            opcode.find(".b32") != std::string::npos)
+            return reg_type(dest);
+        return reg_type(dest);
     };
 
     std::unordered_set<std::string> consumed_guards;
@@ -1798,7 +2030,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             if (ops.size() < 3) return false;
             if (!all_sources_defined(ops, 1)) return false;
             const std::string dest = get_reg(ops[0]);
-            metal << "    " << reg_type(dest) << " " << mvar(dest)
+            metal << "    " << instruction_value_type(op, dest) << " " << mvar(dest)
                   << " = " << resolve(ops[1]) << " " << metal_op << " " << resolve(ops[2]) << ";\n";
             defined_regs.insert(dest);
             return true;
@@ -1990,10 +2222,20 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
 
     // First: try the hardcoded name-based lookup for known llm.c kernels.
     std::string metal_source = emit_metal_source_for_entry(pipeline.entry_name);
+    bool approximate = !metal_source.empty() &&
+                       entry_uses_approximate_stub(pipeline.entry_name);
+    MetalLoweringKind lowering_kind = MetalLoweringKind::kNone;
+    if (!metal_source.empty()) {
+        lowering_kind = approximate ? MetalLoweringKind::kApproximateStub
+                                    : MetalLoweringKind::kSpecializedMsl;
+    }
 
     // Second: if no hardcoded match, attempt generic PTX → Metal translation.
     if (metal_source.empty()) {
         metal_source = emit_metal_source_generic(pipeline.entry_name, ptx, &pipeline);
+        if (!metal_source.empty()) {
+            lowering_kind = MetalLoweringKind::kGenericPtx;
+        }
     }
 
     if (metal_source.empty()) {
@@ -2004,7 +2246,21 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
 
     result.ok = true;
     result.matched = true;
-    result.metal_source = metal_source;
+    result.approximate = approximate;
+    result.lowering_kind = lowering_kind;
+    const char* lowering_label =
+        lowering_kind == MetalLoweringKind::kGenericPtx
+            ? "generic_ptx"
+            : (lowering_kind == MetalLoweringKind::kApproximateStub
+                   ? "approximate_stub"
+                   : "specialized_msl");
+    result.metal_source =
+        std::string("// cumetal-lowering: ") + lowering_label + "\n" + metal_source;
+    if (approximate) {
+        result.warnings.push_back(
+            "kernel '" + pipeline.entry_name +
+            "' uses an approximate/passthru lowering; its numerical output is incorrect");
+    }
     // Propagate printf format table for the runtime to use when draining the buffer.
     for (const auto& fmt : pipeline.printf_formats) {
         result.printf_formats.push_back(fmt.token);

@@ -231,6 +231,7 @@ struct BackendState {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
     std::unordered_map<std::string, id<MTLLibrary>> library_cache;
+    std::unordered_map<std::string, std::string> library_lowering_source;
     std::unordered_map<std::string, id<MTLComputePipelineState>> pipeline_cache;
     std::vector<HeapArena> buffer_heaps;
     std::vector<std::weak_ptr<StreamImpl>> streams;
@@ -417,6 +418,15 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
                 }
                 return nil;
             }
+            std::string lowering_source = "unknown";
+            if ([src containsString:@"// cumetal-lowering: generic_ptx"]) {
+                lowering_source = "generic_ptx";
+            } else if ([src containsString:@"// cumetal-lowering: specialized_msl"]) {
+                lowering_source = "specialized_msl";
+            } else if ([src containsString:@"// cumetal-lowering: approximate_stub"]) {
+                lowering_source = "stub";
+            }
+            backend.library_lowering_source[metallib_path] = lowering_source;
             backend.library_cache.emplace(metallib_path, srcLib);
             return srcLib;
         }
@@ -448,6 +458,7 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
         }
 
         backend.library_cache.emplace(metallib_path, library);
+        backend.library_lowering_source[metallib_path] = "metallib";
         return library;
     }
 }
@@ -1202,11 +1213,20 @@ cudaError_t launch_kernel(const std::string& metallib_path,
     BackendState& backend = state();
     id<MTLComputePipelineState> pipeline = nil;
     id<MTLCommandQueue> queue = nil;
+    std::string lowering_source = "unknown";
+    bool compile_cache_hit = false;
     {
         std::lock_guard<std::mutex> lock(backend.mutex);
+        const std::string pipeline_cache_key = metallib_path + "::" + kernel_name;
+        compile_cache_hit =
+            backend.pipeline_cache.find(pipeline_cache_key) != backend.pipeline_cache.end();
         pipeline = load_pipeline_locked(backend, metallib_path, kernel_name, error_message);
         if (pipeline == nil) {
             return cudaErrorInvalidValue;
+        }
+        const auto source_it = backend.library_lowering_source.find(metallib_path);
+        if (source_it != backend.library_lowering_source.end()) {
+            lowering_source = source_it->second;
         }
 
         if (stream_impl != nullptr) {
@@ -1282,6 +1302,53 @@ cudaError_t launch_kernel(const std::string& metallib_path,
 
         [encoder endEncoding];
 
+        const bool trace_async =
+            stream_impl != nullptr && env_truthy(std::getenv("CUMETAL_TRACE_GPU"));
+        if (trace_async) {
+            const std::string trace_kernel = kernel_name;
+            const std::string trace_source = lowering_source;
+            NSString* trace_device_name = [[backend.device name] description];
+            const bool trace_cache_hit = compile_cache_hit;
+            const unsigned int grid_x = config.grid.x;
+            const unsigned int grid_y = config.grid.y;
+            const unsigned int grid_z = config.grid.z;
+            const unsigned int block_x = config.block.x;
+            const unsigned int block_y = config.block.y;
+            const unsigned int block_z = config.block.z;
+            [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+              @autoreleasepool {
+                const cudaError_t completion_status =
+                    check_command_buffer_status(completed, nullptr);
+                const double duration_seconds =
+                    [completed GPUEndTime] - [completed GPUStartTime];
+                const long long duration_ns =
+                    duration_seconds > 0.0
+                        ? static_cast<long long>(duration_seconds * 1000000000.0)
+                        : -1;
+                const char* device_name = [trace_device_name UTF8String];
+                std::fprintf(
+                    stderr,
+                    "CUMETAL_PROVENANCE event=kernel_launch kernel=\"%s\" "
+                    "source=%s device=apple_gpu device_name=\"%s\" "
+                    "compile_cache_hit=%s launch_success=%s duration_ns=%lld "
+                    "grid=(%u,%u,%u) block=(%u,%u,%u) unsupported_reason=\"\"\n",
+                    trace_kernel.c_str(),
+                    trace_source.c_str(),
+                    device_name != nullptr ? device_name : "Apple Metal GPU",
+                    trace_cache_hit ? "true" : "false",
+                    completion_status == cudaSuccess ? "true" : "false",
+                    duration_ns,
+                    grid_x,
+                    grid_y,
+                    grid_z,
+                    block_x,
+                    block_y,
+                    block_z);
+                std::fflush(stderr);
+              }
+            }];
+        }
+
         [command_buffer commit];
 
         if (stream_impl != nullptr) {
@@ -1290,7 +1357,36 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         }
 
         [command_buffer waitUntilCompleted];
-        return check_command_buffer_status(command_buffer, error_message);
+        const cudaError_t completion_status =
+            check_command_buffer_status(command_buffer, error_message);
+        if (env_truthy(std::getenv("CUMETAL_TRACE_GPU"))) {
+            const char* device_name = [[[backend.device name] description] UTF8String];
+            const double duration_seconds =
+                [command_buffer GPUEndTime] - [command_buffer GPUStartTime];
+            const long long duration_ns =
+                duration_seconds > 0.0
+                    ? static_cast<long long>(duration_seconds * 1000000000.0)
+                    : -1;
+            std::fprintf(stderr,
+                         "CUMETAL_PROVENANCE event=kernel_launch kernel=\"%s\" "
+                         "source=%s device=apple_gpu device_name=\"%s\" "
+                         "compile_cache_hit=%s launch_success=%s duration_ns=%lld "
+                         "grid=(%u,%u,%u) block=(%u,%u,%u) unsupported_reason=\"\"\n",
+                         kernel_name.c_str(),
+                         lowering_source.c_str(),
+                         device_name != nullptr ? device_name : "Apple Metal GPU",
+                         compile_cache_hit ? "true" : "false",
+                         completion_status == cudaSuccess ? "true" : "false",
+                         duration_ns,
+                         config.grid.x,
+                         config.grid.y,
+                         config.grid.z,
+                         config.block.x,
+                         config.block.y,
+                         config.block.z);
+            std::fflush(stderr);
+        }
+        return completion_status;
     }
 
     return cudaSuccess;

@@ -15,7 +15,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-CUMETAL_SHELL_RC="$SHELL_RC" "$INSTALL_SCRIPT" "$BUILD_DIR" "$PREFIX"
+CUMETAL_SHELL_RC="$SHELL_RC" bash "$INSTALL_SCRIPT" "$BUILD_DIR" "$PREFIX"
 
 test -x "$PREFIX/bin/air_inspect"
 test -x "$PREFIX/bin/air_validate"
@@ -32,7 +32,7 @@ grep -qF "export PATH=\"$PREFIX/bin:\$PATH\"" "$SHELL_RC"
 grep -qF "export DYLD_FALLBACK_LIBRARY_PATH=\"$PREFIX/lib:\${DYLD_FALLBACK_LIBRARY_PATH:-}\"" \
   "$SHELL_RC"
 
-CUMETAL_SHELL_RC="$SHELL_RC" "$PREFIX/uninstall.sh" "$PREFIX"
+CUMETAL_SHELL_RC="$SHELL_RC" bash "$PREFIX/uninstall.sh" "$PREFIX"
 
 if [[ -e "$PREFIX/bin/air_inspect" || -e "$PREFIX/lib/libcumetal.dylib" ]]; then
   echo "FAIL: expected installed files to be removed" >&2

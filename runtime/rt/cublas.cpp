@@ -35,6 +35,15 @@ bool debug_cublas_enabled() {
     return enabled != 0;
 }
 
+bool cublas_cpu_reference_enabled() {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* v = std::getenv("CUMETAL_CUBLAS_CPU_REFERENCE");
+        enabled = (v != nullptr && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
 cudaDataType_t scale_type_for_compute(cublasComputeType_t compute_type, cudaDataType_t atype) {
     switch (compute_type) {
         case CUBLAS_COMPUTE_64F:
@@ -1509,6 +1518,17 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
     if (m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
     if (a == nullptr || b == nullptr || c == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
 
+    // The conversion below dereferences device allocations from the CPU. Apple
+    // Silicon unified memory makes the address accessible, but it does not make
+    // preceding asynchronous Metal work complete. In particular, llama.cpp
+    // dequantizes weights and converts activations on the handle stream
+    // immediately before GemmEx. Synchronize before reading A/B/C so GEMM cannot
+    // consume stale contents from those producer kernels.
+    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
+    if (sync_status != CUBLAS_STATUS_SUCCESS) {
+        return sync_status;
+    }
+
     // Helper: read one scalar element as float from a typed buffer.
     auto read_f32 = [](const void* ptr, int idx, cudaDataType_t t) -> float {
         switch (t) {
@@ -1588,11 +1608,30 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
 
         const float effective_beta = (!c_already_f32 && beta_f != 0.0f) ? 1.0f : beta_f;
 
-        // Run Metal GPU GEMM (F32 × F32 → F32)
-        const cublasStatus_t st = cublasSgemm(handle, transa, transb, m, n, k,
-                                              &alpha_f, a_f32, lda,
-                                              b_f32, ldb,
-                                              &effective_beta, c_out, ldc);
+        // Diagnostic escape hatch: run the same column-major GEMM through
+        // Accelerate so model-level failures can distinguish malformed inputs
+        // from the default Metal/MPS implementation. This is opt-in only and
+        // never used by the normal GPU path.
+        cublasStatus_t st = CUBLAS_STATUS_SUCCESS;
+        if (cublas_cpu_reference_enabled()) {
+            cblas_sgemm(CblasColMajor,
+                        transa == CUBLAS_OP_N ? CblasNoTrans : CblasTrans,
+                        transb == CUBLAS_OP_N ? CblasNoTrans : CblasTrans,
+                        m, n, k, alpha_f, a_f32, lda, b_f32, ldb,
+                        effective_beta, c_out, ldc);
+            if (debug_cublas_enabled()) {
+                std::fprintf(stderr,
+                             "CUMETAL_DEBUG_CUBLAS: CPU reference GEMM "
+                             "m=%d n=%d k=%d\n",
+                             m, n, k);
+            }
+        } else {
+            // Run Metal GPU GEMM (F32 × F32 → F32)
+            st = cublasSgemm(handle, transa, transb, m, n, k,
+                             &alpha_f, a_f32, lda,
+                             b_f32, ldb,
+                             &effective_beta, c_out, ldc);
+        }
 
         // Downconvert C F32 → target type if necessary
         if (!c_already_f32 && st == CUBLAS_STATUS_SUCCESS) {

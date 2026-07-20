@@ -29,7 +29,8 @@ set_tests_properties(air_abi_metal_load PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
     NAME air_abi_emit_validate_experimental
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_experimental_validation.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_experimental_validation.sh
             $<TARGET_FILE:cumetal-air-emitter>
             $<TARGET_FILE:air_validate>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/vector_add_air.ll
@@ -38,7 +39,8 @@ add_test(
 
 add_test(
     NAME air_abi_validate_reference
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_reference_validation.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_reference_validation.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:air_validate>
             $<TARGET_FILE:air_inspect>
@@ -47,7 +49,8 @@ add_test(
 
 add_test(
     NAME air_abi_emit_validate_xcrun
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_xcrun_emitter_validation.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_xcrun_emitter_validation.sh
             $<TARGET_FILE:cumetal-air-emitter>
             $<TARGET_FILE:air_validate>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/vector_add.metal
@@ -56,7 +59,8 @@ add_test(
 
 add_test(
     NAME air_abi_emit_load_xcrun
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_xcrun_emit_and_load.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_xcrun_emit_and_load.sh
             $<TARGET_FILE:cumetal-air-emitter>
             $<TARGET_FILE:cumetal_metal_load_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/vector_add.metal
@@ -65,7 +69,8 @@ add_test(
 
 add_test(
     NAME air_abi_cumetalc_emit_load_xcrun
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_xcrun_emit_and_load.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_xcrun_emit_and_load.sh
             $<TARGET_FILE:cumetalc>
             $<TARGET_FILE:cumetal_metal_load_test>
             ${CMAKE_CURRENT_SOURCE_DIR}/reference/vector_add.metal
@@ -106,7 +111,8 @@ add_test(
 
 add_test(
     NAME air_abi_validate_negative
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_negative_validation.sh
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_negative_validation.sh
             $<TARGET_FILE:air_validate>
             ${CMAKE_CURRENT_BINARY_DIR}/negative
 )

@@ -1,6 +1,7 @@
 #include "cuda_runtime.h"
 
 #include "allocation_table.h"
+#include "cumetal_diag.h"
 #include "library_conflict.h"
 #include "metal_backend.h"
 #include "registration.h"
@@ -26,6 +27,23 @@
 #include <vector>
 
 struct cudaStream_st {};
+
+// ── Diagnostic trace (CUMETAL_TRACE=1) ───────────────────────────────────────
+// One-shot, line-buffered log of every CUDA op cumetal actually executes, used
+// to root-cause which offloaded op silently corrupts output (e.g. llama.cpp at
+// NGL=0). Disabled by default; no cost when off.
+namespace {
+bool trace_enabled() {
+    static int v = -1;
+    if (v < 0) v = cumetal::diag_env_truthy("CUMETAL_TRACE") ? 1 : 0;
+    return v == 1;
+}
+void trace_op(const char* tag, const char* detail) {
+    if (!trace_enabled()) return;
+    std::fprintf(stderr, "CUMETAL_TRACE %s %s\n", tag, detail ? detail : "");
+    std::fflush(stderr);
+}
+}  // namespace
 
 // ── CUDA Graphs (spec §2.2 — previously deferred, now implemented) ──────────
 // Graph nodes record operations; instantiation creates an executable sequence.
@@ -724,11 +742,21 @@ bool env_truthy(const char* value) {
 }
 
 bool llmc_emulation_enabled() {
-    return !env_truthy(std::getenv("CUMETAL_DISABLE_LLMC_EMULATION"));
+    // CUDA kernels must execute through Metal by default.  The old behavior
+    // silently intercepted known llm.c kernels and ran host loops on UMA,
+    // which made a successful CUDA launch indistinguishable from CPU
+    // emulation.  Keep that implementation only as an explicit diagnostic
+    // escape hatch for comparing results while bringing up a new lowering.
+    return env_truthy(std::getenv("CUMETAL_ENABLE_LLMC_CPU_EMULATION")) &&
+           !env_truthy(std::getenv("CUMETAL_DISABLE_LLMC_EMULATION"));
 }
 
 bool llmc_emulation_skips_kernel(const std::string& kernel_name) {
     return kernel_name_matches_env_list(kernel_name, std::getenv("CUMETAL_LLMC_EMULATION_SKIP"));
+}
+
+bool host_kernel_fallbacks_enabled() {
+    return env_truthy(std::getenv("CUMETAL_ENABLE_HOST_KERNEL_FALLBACKS"));
 }
 
 bool llmc_emulation_trace_enabled() {
@@ -742,6 +770,18 @@ std::atomic<std::uint64_t>& llmc_emulation_count() {
 
 void note_llmc_emulation_hit(const std::string& kernel_name, std::uint32_t arg_count) {
     const std::uint64_t hit = llmc_emulation_count().fetch_add(1, std::memory_order_relaxed) + 1;
+    cumetal::warn_once(
+        "llmc-cpu-emulation",
+        "CUMETAL_ENABLE_LLMC_CPU_EMULATION is running CUDA kernels on the CPU; "
+        "disable it to require Apple GPU execution");
+    if (cumetal::diag_env_truthy("CUMETAL_TRACE_GPU")) {
+        std::fprintf(stderr,
+                     "CUMETAL_PROVENANCE event=kernel_launch kernel=\"%s\" "
+                     "source=cpu_fallback device=cpu compile_cache_hit=false "
+                     "launch_success=true duration_ns=-1 grid=unknown block=unknown "
+                     "unsupported_reason=\"explicit llm.c CPU emulation\"\n",
+                     kernel_name.c_str());
+    }
     if (llmc_emulation_trace_enabled()) {
         std::fprintf(stderr,
                      "INFO: CUMETAL_LLMC_EMULATION kernel=%s arg_count=%u hit=%llu\n",
@@ -1989,6 +2029,11 @@ cudaError_t cudaMalloc(void** dev_ptr, size_t size) {
     }
 
     *dev_ptr = base;
+    if (trace_enabled()) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "malloc size=%zu ptr=%p", size, base);
+        trace_op("MALLOC", buf);
+    }
     return fail(cudaSuccess);
 }
 
@@ -2202,6 +2247,12 @@ cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind 
         std::memcpy(dst, src, count);
     }
 
+    if (trace_enabled()) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "memcpy kind=%d count=%zu dst=%p src=%p",
+                      static_cast<int>(kind), count, dst, src);
+        trace_op("CPY", buf);
+    }
     return fail(cudaSuccess);
 }
 
@@ -2247,6 +2298,12 @@ cudaError_t cudaMemcpyAsync(void* dst,
         std::memcpy(dst, src, count);
     }
 
+    if (trace_enabled()) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "memcpyAsync kind=%d count=%zu dst=%p src=%p",
+                      static_cast<int>(kind), count, dst, src);
+        trace_op("CPYA", buf);
+    }
     return fail(cudaSuccess);
 }
 
@@ -2430,6 +2487,11 @@ cudaError_t cudaMemset(void* dev_ptr, int value, size_t count) {
         std::memset(dev_ptr, value, count);
     }
 
+    if (trace_enabled()) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "memset val=%d count=%zu ptr=%p", value, count, dev_ptr);
+        trace_op("SET", buf);
+    }
     return fail(cudaSuccess);
 }
 
@@ -2463,6 +2525,11 @@ cudaError_t cudaMemsetAsync(void* dev_ptr, int value, size_t count, cudaStream_t
         std::memset(dev_ptr, value, count);
     }
 
+    if (trace_enabled()) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "memsetAsync val=%d count=%zu ptr=%p", value, count, dev_ptr);
+        trace_op("SETA", buf);
+    }
     return fail(cudaSuccess);
 }
 
@@ -3308,6 +3375,15 @@ cudaError_t cudaLaunchKernel(const void* func,
     const bool use_registered_kernel =
         cumetal::registration::lookup_registered_kernel(func, &registered_kernel);
 
+    if (trace_enabled()) {
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), "launch name='%s' grid=(%u,%u,%u) block=(%u,%u,%u)",
+                      use_registered_kernel ? registered_kernel.kernel_name.c_str() : "?",
+                      grid_dim.x, grid_dim.y, grid_dim.z,
+                      block_dim.x, block_dim.y, block_dim.z);
+        trace_op("LAUNCH", buf);
+    }
+
     cumetalKernel_t kernel_copy{};
     const cumetalKernel_t* kernel = nullptr;
     std::uint32_t arg_count = 0;
@@ -3408,7 +3484,27 @@ cudaError_t cudaLaunchKernel(const void* func,
     // ggml CUDA uses this helper kernel only to populate batched cuBLAS pointer arrays.
     // The current generic PTX->Metal path can launch it but does not reliably materialize
     // pointer stores. Perform the pointer math directly on the host for CuMetal.
-    if (use_registered_kernel && kernel_name_contains(registered_kernel.kernel_name, "k_compute_batched_ptrs")) {
+    if (use_registered_kernel && host_kernel_fallbacks_enabled() &&
+        kernel_name_contains(registered_kernel.kernel_name, "k_compute_batched_ptrs")) {
+        cumetal::warn_once(
+            "host-kernel-fallback",
+            "CUMETAL_ENABLE_HOST_KERNEL_FALLBACKS is running CUDA helper kernels on the CPU; "
+            "disable it to require Apple GPU execution");
+        if (cumetal::diag_env_truthy("CUMETAL_TRACE_GPU")) {
+            std::fprintf(stderr,
+                         "CUMETAL_PROVENANCE event=kernel_launch "
+                         "kernel=\"%s\" source=cpu_fallback device=cpu "
+                         "compile_cache_hit=false launch_success=queued duration_ns=-1 "
+                         "grid=(%u,%u,%u) block=(%u,%u,%u) "
+                         "unsupported_reason=\"explicit GGML host helper fallback\"\n",
+                         registered_kernel.kernel_name.c_str(),
+                         grid_dim.x,
+                         grid_dim.y,
+                         grid_dim.z,
+                         block_dim.x,
+                         block_dim.y,
+                         block_dim.z);
+        }
         if (args == nullptr || arg_count < 16) {
             return launch_fail(cudaErrorInvalidValue, "k_compute_batched_ptrs arg count");
         }
@@ -3665,6 +3761,222 @@ cudaError_t cudaLaunchKernel(const void* func,
     const cudaError_t status =
         cumetal::metal_backend::launch_kernel(metallib_path, kernel_name, config, launch_args,
                                               backend_stream, &error);
+
+    // Opt-in model-level oracle for GGML RMS norm. It validates the exact
+    // buffers and packed broadcast metadata bound by llama.cpp, after the Metal
+    // command completes, so synthetic probes cannot hide an ABI mismatch.
+    if (status == cudaSuccess && use_registered_kernel &&
+        cumetal::diag_env_truthy("CUMETAL_VALIDATE_GGML_RMS") &&
+        kernel_name_contains(registered_kernel.kernel_name, "rms_norm_f32")) {
+        std::string sync_error;
+        const cudaError_t sync_status =
+            legacy_stream
+                ? cumetal::metal_backend::synchronize(&sync_error)
+                : cumetal::metal_backend::stream_synchronize(backend_stream,
+                                                              &sync_error);
+        if (sync_status != cudaSuccess) {
+            return launch_fail(sync_status, "GGML RMS validation sync");
+        }
+
+        auto scalar_u64 = [&](std::size_t index) -> std::uint64_t {
+            std::uint64_t value = 0;
+            if (index < launch_args.size() &&
+                launch_args[index].kind ==
+                    cumetal::metal_backend::KernelArg::Kind::kBytes) {
+                const auto& bytes = launch_args[index].bytes;
+                std::memcpy(&value, bytes.data(),
+                            std::min(bytes.size(), sizeof(value)));
+            }
+            return value;
+        };
+        auto packed_divisor = [&](std::size_t index) -> std::uint32_t {
+            std::uint32_t value = 0;
+            if (index < launch_args.size() &&
+                launch_args[index].kind ==
+                    cumetal::metal_backend::KernelArg::Kind::kBytes &&
+                launch_args[index].bytes.size() >= 12) {
+                std::memcpy(&value, launch_args[index].bytes.data() + 8,
+                            sizeof(value));
+            }
+            return value;
+        };
+        auto buffer_f32 = [&](std::size_t index) -> const float* {
+            if (index >= launch_args.size()) return nullptr;
+            const auto& arg = launch_args[index];
+            if (arg.kind !=
+                    cumetal::metal_backend::KernelArg::Kind::kBuffer ||
+                arg.buffer == nullptr) {
+                return nullptr;
+            }
+            return reinterpret_cast<const float*>(
+                static_cast<const char*>(arg.buffer->contents()) + arg.offset);
+        };
+
+        const int ncols = static_cast<int>(scalar_u64(2));
+        const std::int64_t stride_row =
+            static_cast<std::int64_t>(scalar_u64(3));
+        const std::int64_t stride_channel =
+            static_cast<std::int64_t>(scalar_u64(4));
+        const std::int64_t stride_sample =
+            static_cast<std::int64_t>(scalar_u64(5));
+        std::uint32_t eps_bits = static_cast<std::uint32_t>(scalar_u64(6));
+        float eps = 0.0f;
+        std::memcpy(&eps, &eps_bits, sizeof(eps));
+        const float* x = buffer_f32(0);
+        const float* dst = buffer_f32(1);
+        const float* mul = buffer_f32(7);
+        const float* add = buffer_f32(15);
+        const auto& x_arg = launch_args[0];
+        const auto& dst_arg = launch_args[1];
+        const bool same_backing_buffer =
+            x_arg.kind == cumetal::metal_backend::KernelArg::Kind::kBuffer &&
+            dst_arg.kind == cumetal::metal_backend::KernelArg::Kind::kBuffer &&
+            x_arg.buffer != nullptr && x_arg.buffer == dst_arg.buffer;
+        const std::int64_t mul_sr =
+            static_cast<std::int64_t>(scalar_u64(8));
+        const std::int64_t mul_sc =
+            static_cast<std::int64_t>(scalar_u64(9));
+        const std::int64_t mul_ss =
+            static_cast<std::int64_t>(scalar_u64(10));
+        const std::int64_t add_sr =
+            static_cast<std::int64_t>(scalar_u64(16));
+        const std::int64_t add_sc =
+            static_cast<std::int64_t>(scalar_u64(17));
+        const std::int64_t add_ss =
+            static_cast<std::int64_t>(scalar_u64(18));
+        const std::uint32_t mul_nc = packed_divisor(11);
+        const std::uint32_t mul_nr = packed_divisor(12);
+        const std::uint32_t mul_nch = packed_divisor(13);
+        const std::uint32_t mul_ns = packed_divisor(14);
+        const std::uint32_t add_nc = packed_divisor(19);
+        const std::uint32_t add_nr = packed_divisor(20);
+        const std::uint32_t add_nch = packed_divisor(21);
+        const std::uint32_t add_ns = packed_divisor(22);
+
+        float max_abs = 0.0f;
+        std::size_t max_index = 0;
+        float max_got = 0.0f;
+        float max_expected = 0.0f;
+        if (x != nullptr && dst != nullptr && ncols > 0 && x != dst) {
+            for (std::uint32_t sample = 0; sample < grid_dim.z; ++sample) {
+                for (std::uint32_t channel = 0; channel < grid_dim.y;
+                     ++channel) {
+                    for (std::uint32_t row = 0; row < grid_dim.x; ++row) {
+                        const float* row_x =
+                            x + static_cast<std::int64_t>(sample) *
+                                    stride_sample +
+                            static_cast<std::int64_t>(channel) *
+                                    stride_channel +
+                            static_cast<std::int64_t>(row) * stride_row;
+                        double sum = 0.0;
+                        for (int col = 0; col < ncols; ++col) {
+                            sum += static_cast<double>(row_x[col]) * row_x[col];
+                        }
+                        const float scale =
+                            1.0f /
+                            std::sqrt(static_cast<float>(sum / ncols) + eps);
+                        const std::size_t dense_row =
+                            ((static_cast<std::size_t>(sample) * grid_dim.y +
+                              channel) *
+                                 grid_dim.x +
+                             row) *
+                            static_cast<std::size_t>(ncols);
+                        for (int col = 0; col < ncols; ++col) {
+                            float expected = row_x[col] * scale;
+                            if (mul != nullptr) {
+                                const std::size_t mi =
+                                    (mul_ns ? sample % mul_ns : 0) * mul_ss +
+                                    (mul_nch ? channel % mul_nch : 0) * mul_sc +
+                                    (mul_nr ? row % mul_nr : 0) * mul_sr +
+                                    (mul_nc ? static_cast<std::uint32_t>(col) %
+                                                  mul_nc
+                                            : 0);
+                                expected *= mul[mi];
+                            }
+                            if (add != nullptr) {
+                                const std::size_t ai =
+                                    (add_ns ? sample % add_ns : 0) * add_ss +
+                                    (add_nch ? channel % add_nch : 0) * add_sc +
+                                    (add_nr ? row % add_nr : 0) * add_sr +
+                                    (add_nc ? static_cast<std::uint32_t>(col) %
+                                                  add_nc
+                                            : 0);
+                                expected += add[ai];
+                            }
+                            const std::size_t index =
+                                dense_row + static_cast<std::size_t>(col);
+                            const float abs_error =
+                                std::fabs(dst[index] - expected);
+                            if (abs_error > max_abs) {
+                                max_abs = abs_error;
+                                max_index = index;
+                                max_got = dst[index];
+                                max_expected = expected;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::fprintf(stderr,
+                     "CUMETAL_VALIDATE_GGML_RMS kernel=\"%s\" shape=(%d,%u,%u,%u) "
+                     "mul=%s add=%s backing=(%p@%zu,%p@%zu same=%s delta=%lld) "
+                     "strides=(%lld,%lld,%lld) max_abs=%g index=%zu got=%g expected=%g\n",
+                     registered_kernel.kernel_name.c_str(), ncols, grid_dim.x,
+                     grid_dim.y, grid_dim.z, mul ? "yes" : "no",
+                     add ? "yes" : "no", static_cast<void*>(x_arg.buffer.get()),
+                     x_arg.offset, static_cast<void*>(dst_arg.buffer.get()),
+                     dst_arg.offset, same_backing_buffer ? "yes" : "no",
+                     static_cast<long long>(dst_arg.offset) -
+                         static_cast<long long>(x_arg.offset),
+                     static_cast<long long>(stride_row),
+                     static_cast<long long>(stride_channel),
+                     static_cast<long long>(stride_sample), max_abs, max_index,
+                     max_got, max_expected);
+    }
+
+    // Targeted rms_norm probe (CUMETAL_TRACE): dump the bound scalar args and a
+    // few input/output floats to verify arg binding + numerical correctness.
+    static std::atomic<std::uint32_t> rms_probe_count{0};
+    if (trace_enabled() && use_registered_kernel &&
+        kernel_name_contains(registered_kernel.kernel_name, "rms_norm_f32") &&
+        rms_probe_count.fetch_add(1) < 2) {
+        std::fprintf(stderr, "CUMETAL_TRACE RMS argc=%u\n", (unsigned)launch_args.size());
+        for (std::uint32_t i = 0; i < launch_args.size() && i < 23; ++i) {
+            const auto& a = launch_args[i];
+            const char* k = (a.kind == cumetal::metal_backend::KernelArg::Kind::kBuffer) ? "buf" : "byt";
+            if (a.kind == cumetal::metal_backend::KernelArg::Kind::kBytes) {
+                std::uint64_t v = 0;
+                std::memcpy(&v, a.bytes.data(), std::min<std::size_t>(8u, a.bytes.size()));
+                std::fprintf(stderr, "CUMETAL_TRACE RMSARG i=%u %s size=%u off=%zu val=%llu\n",
+                             i, k, (unsigned)a.bytes.size(), (size_t)0, (unsigned long long)v);
+            } else {
+                std::fprintf(stderr, "CUMETAL_TRACE RMSARG i=%u %s off=%zu buf=%p\n",
+                             i, k, (size_t)a.offset, (void*)a.buffer.get());
+            }
+        }
+        auto dump_buf_rows = [&](const char* tag, std::uint32_t idx, long ncols, long stride) {
+            if (idx >= launch_args.size()) return;
+            const auto& a = launch_args[idx];
+            if (a.kind != cumetal::metal_backend::KernelArg::Kind::kBuffer || a.buffer == nullptr) {
+                std::fprintf(stderr, "CUMETAL_TRACE RMSBUF %s idx=%u (null)\n", tag, idx); return;
+            }
+            const float* p = reinterpret_cast<const float*>(
+                static_cast<char*>(a.buffer->contents()) + a.offset);
+            std::fprintf(stderr, "CUMETAL_TRACE RMSBUF %s idx=%u off=%zu r0=%g,%g,%g r1=%g,%g,%g\n",
+                         tag, idx, (size_t)a.offset, p[0], p[1], p[2],
+                         ncols > 0 && stride > 0 ? p[stride] : 0.f, 0.f, 0.f);
+            (void)ncols;
+        };
+        std::uint64_t ncols_raw = 0, stride_raw = 0;
+        if (launch_args.size() > 6 && launch_args[2].kind == cumetal::metal_backend::KernelArg::Kind::kBytes)
+            std::memcpy(&ncols_raw, launch_args[2].bytes.data(), launch_args[2].bytes.size());
+        if (launch_args.size() > 6 && launch_args[3].kind == cumetal::metal_backend::KernelArg::Kind::kBytes)
+            std::memcpy(&stride_raw, launch_args[3].bytes.data(), launch_args[3].bytes.size());
+        dump_buf_rows("x", 0, (long)ncols_raw, (long)stride_raw);
+        dump_buf_rows("dst", 1, (long)ncols_raw, (long)stride_raw);
+        dump_buf_rows("mul", 7, (long)ncols_raw, (long)stride_raw);
+    }
     if (status != cudaSuccess) {
         static int debug_launch = -1;
         if (debug_launch < 0) {
@@ -3695,15 +4007,32 @@ cudaError_t cudaLaunchKernel(const void* func,
                             registered_kernel.printf_formats);
     }
 
-    // Optional debug barrier: force stream completion after every launch.
-    // This is off by default and intended for isolating ordering/synchronization bugs.
+    // Registered fatbinary kernels commonly operate on adjacent suballocations
+    // of one large framework arena. Until cross-command-queue resource fences
+    // provide CUDA-equivalent ordering for those aliases, complete registered
+    // launches before returning. This preserves correctness for the opt-in
+    // binary shim without penalizing the source-first/direct-kernel path.
+    //
+    // CUMETAL_ENABLE_ASYNC_REGISTERED_LAUNCH is an explicit experimental
+    // escape hatch. CUMETAL_SYNC_EACH_LAUNCH remains the broader diagnostic
+    // barrier for direct kernels as well.
     if (status == cudaSuccess) {
         static int sync_each_launch = -1;
+        static int async_registered_launch = -1;
         if (sync_each_launch < 0) {
             const char* v = std::getenv("CUMETAL_SYNC_EACH_LAUNCH");
             sync_each_launch = (v != nullptr && v[0] != '\0' && v[0] != '0') ? 1 : 0;
         }
-        if (sync_each_launch) {
+        if (async_registered_launch < 0) {
+            const char* v =
+                std::getenv("CUMETAL_ENABLE_ASYNC_REGISTERED_LAUNCH");
+            async_registered_launch =
+                (v != nullptr && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+        }
+        const bool synchronize_launch =
+            sync_each_launch ||
+            (use_registered_kernel && !async_registered_launch);
+        if (synchronize_launch) {
             std::string sync_error;
             const cudaError_t sync_status =
                 (backend_stream != nullptr)
@@ -4286,6 +4615,18 @@ cudaError_t cudaLaunchCooperativeKernel(const void* func,
                                          void** args,
                                          size_t sharedMem,
                                          cudaStream_t stream) {
+    // grid_group::sync() is a no-op stub on Metal (no cross-threadgroup barrier).
+    // A cooperative launch that spans more than one threadgroup and relies on
+    // grid-wide sync for correctness will silently misbehave — warn once so this
+    // is not a surprise. Single-block launches are safe (block-scoped CG works).
+    if ((static_cast<std::uint64_t>(gridDim.x) * gridDim.y * gridDim.z) > 1) {
+        cumetal::warn_once(
+            "coop-grid-sync",
+            "cudaLaunchCooperativeKernel with a multi-block grid: grid-wide "
+            "cooperative_groups sync (this_grid().sync()) is a no-op on Metal and "
+            "cannot synchronize across threadgroups; kernels that depend on it for "
+            "correctness will produce wrong results (spec §8)");
+    }
     return cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
 }
 

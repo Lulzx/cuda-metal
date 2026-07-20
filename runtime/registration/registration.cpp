@@ -2,6 +2,7 @@
 
 #include "cumetal/air_emitter/emitter.h"
 #include "cumetal/common/metallib.h"
+#include "cumetal_diag.h"
 #include "cumetal/ptx/lower_to_metal.h"
 #include "cumetal/ptx/lower_to_llvm.h"
 #include "cumetal/ptx/parser.h"
@@ -42,8 +43,11 @@ bool is_debug_registration() {
 // ─── JIT cache ───────────────────────────────────────────────────────────────
 // Compiled metallibs are stored persistently at:
 //   $CUMETAL_CACHE_DIR/registration-jit/<hash>.metallib
-// where hash = FNV-1a-64 over (ptx_source + '\0' + kernel_name).
+// where hash = FNV-1a-64 over
+// (cache_schema + '\0' + ptx_source + '\0' + kernel_name).
 // This avoids recompiling the same kernel across process restarts.
+constexpr std::string_view kRegistrationJitCacheSchema =
+    "cumetal-registration-jit-v4-rms-simd-reduction";
 
 std::uint64_t fnv1a64_registration(const std::uint8_t* bytes, std::size_t size) {
     constexpr std::uint64_t kOffset = 1469598103934665603ull;
@@ -57,9 +61,13 @@ std::uint64_t fnv1a64_registration(const std::uint8_t* bytes, std::size_t size) 
 }
 
 std::string jit_cache_key(const std::string& ptx_source, const std::string& kernel_name) {
-    // Hash ptx_source + NUL + kernel_name so different kernels from the same PTX get different keys.
+    // Include an explicit schema so changes to lowering semantics or emitted
+    // provenance cannot silently reuse stale MSL from an older CuMetal build.
     std::string blob;
-    blob.reserve(ptx_source.size() + 1 + kernel_name.size());
+    blob.reserve(kRegistrationJitCacheSchema.size() + 2 + ptx_source.size() +
+                 kernel_name.size());
+    blob.append(kRegistrationJitCacheSchema);
+    blob.push_back('\0');
     blob.append(ptx_source);
     blob.push_back('\0');
     blob.append(kernel_name);
@@ -654,8 +662,33 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         return false;
     }
 
+    // An approximate/passthru lowering is numerically wrong (see
+    // entry_uses_approximate_stub in lower_to_metal.cpp). Refuse it by default so
+    // the program fails loudly — falling through to the LLVM path and, for these
+    // unsupported GGML kernels, the "missing metallib" abort, exactly like any
+    // other unsupported kernel — instead of silently producing garbage output.
+    // Opt in with CUMETAL_ENABLE_APPROX_KERNELS=1 to run it anyway.
+    bool use_direct_msl = lowered_metal.matched && !lowered_metal.metal_source.empty();
+    if (use_direct_msl && lowered_metal.approximate) {
+        if (cumetal::diag_env_truthy("CUMETAL_ENABLE_APPROX_KERNELS")) {
+            cumetal::warn_once(
+                "approx-use:" + kernel_name,
+                "kernel '" + kernel_name +
+                    "' uses an approximate/passthru lowering (CUMETAL_ENABLE_APPROX_KERNELS=1);"
+                    " its output is numerically incorrect");
+        } else {
+            cumetal::warn_once(
+                "approx-skip:" + kernel_name,
+                "kernel '" + kernel_name +
+                    "' has only an approximate/passthru lowering and was skipped so results"
+                    " are not silently wrong; set CUMETAL_ENABLE_APPROX_KERNELS=1 to run it"
+                    " anyway (output will be incorrect)");
+            use_direct_msl = false;
+        }
+    }
+
     std::filesystem::path staged_input = ll_path;
-    if (lowered_metal.matched && !lowered_metal.metal_source.empty()) {
+    if (use_direct_msl) {
         REG_DEBUG("using direct Metal lowering path for '%s'", kernel_name.c_str());
         const std::vector<std::uint8_t> metal_bytes(lowered_metal.metal_source.begin(),
                                                     lowered_metal.metal_source.end());
