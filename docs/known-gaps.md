@@ -73,12 +73,12 @@ as gaps have been closed.
   completes but the output is not correct, and a warning says so. This trades "it launches but
   lies" for "it fails loudly," which is the safer default for a translation layer.
 - **The covered llama.cpp SmolLM2 smoke path is numerically coherent.** Rechecked
-  2026-07-18 on SmolLM2-135M-Instruct-Q4_K_M, greedy decode of
+  2026-07-20 on SmolLM2-135M-Instruct-Q4_K_M, greedy decode of
   "The capital of France is":
   - Stock CPU llama.cpp (no CuMetal): `Paris.` ✅
   - llama.cpp linked against libcumetal, **NGL=0**: `Paris.` ✅
   - llama.cpp linked against libcumetal, **NGL=1**: `The capital of France is
-    Paris.` ✅ at 5.8 tokens/s generation on Apple M4 Pro. Registered launches
+    Paris.` ✅ at 8.4 tokens/s generation on Apple M4 Pro. Registered launches
     use the correctness-first synchronization policy described above; enabling
     experimental asynchronous registered launches reproduces incoherent output.
   - The conformance harness (`run_llama_cpp_cumetal.sh`) now enforces a **coherence gate**: greedy
@@ -86,6 +86,10 @@ as gaps have been closed.
     NGL>0 run must include completed Apple-GPU provenance, so the test correctly
     FAILS on garbage instead of passing on "some bytes were generated". Set
     `CUMETAL_LLAMA_EXPECT=""` to opt out explicitly.
+  - The harness uses llama.cpp `--simple-io` so token output reaches its capture
+    pipe even when a controlling terminal is present. The gate parses the
+    combined token/provenance capture byte-wise and removes provenance records
+    before coherence matching, including when a record splits token fragments.
   - This is a focused NGL=1 smoke result, not a claim that arbitrary models or
     high layer-offload counts are supported. Broader GGML kernel coverage is
     still required for robust high-NGL inference.

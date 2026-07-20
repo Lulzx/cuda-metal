@@ -188,7 +188,7 @@ bash scripts/build_llama_cpp_cumetal.sh   # clones + builds in ../llama.cpp/
 bash tests/conformance/run_llama_cpp_cumetal.sh
 ```
 
-**Status — verified on 2026-07-18:**
+**Status — verified on 2026-07-20:**
 
 | What | Result |
 | --- | --- |
@@ -201,7 +201,7 @@ Measured on SmolLM2-135M, greedy decode of "The capital of France is":
 - Stock CPU llama.cpp → `Paris.` ✅
 - llama.cpp via libcumetal (NGL=0) → `Paris.` ✅
 - llama.cpp via libcumetal (NGL=1) → `The capital of France is Paris.` ✅
-  (Apple M4 Pro, 5.8 tokens/s generation in the verified run)
+  (Apple M4 Pro, 8.4 tokens/s generation in the latest verified run)
 
 Registered fatbinary launches are conservatively synchronized by default because
 the experimental asynchronous path can violate ordering when GGML uses adjacent
@@ -218,6 +218,11 @@ tokens were generated." The default NGL=1 probe is expected to pass on the
 verified Apple M4 Pro path; unsupported models or larger offload counts fail
 honestly instead of being reported as compatible.
 Point it at another model/answer with `CUMETAL_LLAMA_MODEL` / `CUMETAL_LLAMA_EXPECT`.
+The harness forces llama.cpp's `--simple-io` mode so generated tokens are
+captured instead of being written only to an interactive terminal. Its output
+checker treats the combined token/provenance stream as bytes and reconstructs
+token text split by provenance records; focused regressions cover missing or
+forbidden provenance and incoherent output.
 
 Test suite
 ----------

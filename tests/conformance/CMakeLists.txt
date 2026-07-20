@@ -12,6 +12,12 @@ add_test(
             ^functional_
 )
 
+add_test(
+    NAME conformance_llama_cpp_output_gate
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/check_llama_cpp_output_test.sh
+)
+
 set_tests_properties(conformance_phase4_functional PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 1800

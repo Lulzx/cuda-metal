@@ -134,6 +134,7 @@ set +e
     --seed 1 \
     --no-mmap \
     --log-disable \
+    --simple-io \
     --single-turn \
     < /dev/null \
     2>&1 | tee "${OUTPUT_FILE}"
@@ -155,48 +156,18 @@ fi
 
 echo ""
 
-# ── PASS / FAIL ───────────────────────────────────────────────────────────────
-FAIL_REASON=""
-
-[[ ${EXIT_CODE} -ne 0 ]] && FAIL_REASON="llama-cli exited with code ${EXIT_CODE}"
-
-OUTPUT_LEN="$(wc -c < "${OUTPUT_FILE}")"
-if [[ -z "${FAIL_REASON}" && "${OUTPUT_LEN}" -lt 50 ]]; then
-    FAIL_REASON="output too short (${OUTPUT_LEN} bytes) — no tokens generated"
-fi
-
-if [[ -z "${FAIL_REASON}" ]] && grep -qiE "Segmentation fault|Bus error|Illegal instruction" "${OUTPUT_FILE}" 2>/dev/null; then
-    FAIL_REASON="fatal signal in llama-cli output"
-fi
-
-if [[ -z "${FAIL_REASON}" ]] && grep -qiE "CUDA error|cudaError|ggml_cuda.*failed" "${OUTPUT_FILE}" 2>/dev/null; then
-    FAIL_REASON="CUDA error reported by GGML backend"
-fi
-
-if [[ -z "${FAIL_REASON}" && "${NGL}" -gt 0 ]]; then
-    if ! grep -qE 'CUMETAL_PROVENANCE .*source=(generic_ptx|specialized_msl|metallib) device=apple_gpu .*launch_success=true' \
-        "${OUTPUT_FILE}" 2>/dev/null; then
-        FAIL_REASON="no successful Apple-GPU kernel provenance was recorded"
-    elif grep -qE 'CUMETAL_PROVENANCE .*source=(cpu_fallback|stub)' \
-        "${OUTPUT_FILE}" 2>/dev/null; then
-        FAIL_REASON="CPU fallback or stub provenance was recorded during GPU inference"
-    fi
-fi
-
 # ── Coherence gate: output must be CORRECT, not merely non-empty ───────────────
 # A greedy decode of a factual prompt must contain the expected answer. This is
 # the check that separates a genuinely working translation from one that runs to
 # completion but emits garbage tokens — the failure mode a "some bytes were
 # generated" check silently passes. Set CUMETAL_LLAMA_EXPECT="" to opt out (e.g.
 # for a custom prompt with no fixed answer); opting out is explicit, never silent.
-if [[ -z "${FAIL_REASON}" && -n "${EXPECT}" ]]; then
-    if ! grep -qiF "${EXPECT}" "${OUTPUT_FILE}" 2>/dev/null; then
-        FAIL_REASON="incoherent output — generation did not contain '${EXPECT}'. \
-CuMetal ran llama.cpp to completion but produced text that does not match a \
-correct (stock CPU) run: numerically wrong output, not a crash. See \
-docs/known-gaps.md for status."
-    fi
-fi
+# The checker uses byte-oriented matching because llama.cpp UI output and CuMetal
+# provenance share this capture and can interleave inside a UTF-8 sequence.
+FAIL_REASON="$(
+    "${SCRIPT_DIR}/check_llama_cpp_output.sh" \
+        "${OUTPUT_FILE}" "${EXIT_CODE}" "${NGL}" "${EXPECT}" || true
+)"
 
 if [[ -n "${FAIL_REASON}" ]]; then
     echo "FAIL: ${FAIL_REASON}"

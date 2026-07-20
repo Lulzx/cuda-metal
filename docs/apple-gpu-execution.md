@@ -163,6 +163,18 @@ CUMETAL_LLAMA_NGL=1 \
 bash tests/conformance/run_llama_cpp_cumetal.sh
 ```
 
+The llama.cpp harness forces `--simple-io` so the generated response is written
+to the pipe used by the coherence gate rather than only to an interactive
+terminal. Because CuMetal provenance and llama.cpp token output share the
+capture, the checker parses it as a byte stream and removes provenance records
+before matching the expected response. A focused regression covers invalid
+UTF-8, token fragments split by provenance, missing GPU provenance, forbidden
+fallback/stub provenance, incoherent output, and nonzero llama exit status.
+
+The 2026-07-20 NGL=1 recheck on Apple M4 Pro produced
+`The capital of France is Paris.` at 8.4 tokens/s with completed
+`specialized_msl` Apple-GPU provenance and no fallback or approximate kernels.
+
 Validate that the source-first build does not depend on the binary shim:
 
 ```bash
