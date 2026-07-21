@@ -61,6 +61,9 @@ std::string build_ptx_abi_sidecar(std::string_view ptx_source,
             continue;
         }
         std::string text = "CUMETAL_ABI_V1\nkernel " + entry.name + "\n";
+        text += "shared " +
+                std::to_string(cumetal::ptx::compute_static_shared_bytes(ptx_source,
+                                                                         entry.name)) + "\n";
         for (const auto& param : entry.params) {
             text += param.is_pointer ? "arg buffer 8\n"
                                      : "arg bytes " + std::to_string(ptx_param_size(param)) + "\n";

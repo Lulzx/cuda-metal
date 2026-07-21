@@ -1899,8 +1899,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
 
         // ── shfl.sync: warp shuffle → Metal simd_shuffle* ────────────────────
         // shfl.sync.{idx,down,up,bfly}.b32 d|p, src, lane/delta, clamp, mask
-        // Honor PTX clamp-encoded width to preserve sub-warp shuffle semantics used
-        // by ggml reductions. membermask remains conservatively ignored (full group).
+        // Honor PTX clamp-encoded width and member-mask participation.
         if (op.find("shfl.sync") == 0 && ops.size() >= 3) {
             if (!all_sources_defined(ops, 1)) return {};
             // ops[0] may be "dst|pred_dst"; extract the value register.
@@ -1920,8 +1919,13 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             const std::string local_v = "__cm_shfl_local_" + std::to_string(sid);
             const std::string target_v = "__cm_shfl_target_" + std::to_string(sid);
             const std::string valid_v = "__cm_shfl_valid_" + std::to_string(sid);
+            const std::string member_v = "__cm_shfl_member_" + std::to_string(sid);
+            const std::string defined_v = "__cm_shfl_defined_" + std::to_string(sid);
             const std::string val_v = "__cm_shfl_val_" + std::to_string(sid);
+            const std::string member_mask = ops.size() >= 5 ? resolve(ops[4]) : "0xffffffffu";
             metal << "    uint " << lane_id_v << " = (uint)__laneid & 31u;\n";
+            metal << "    bool " << member_v << " = (((uint)(" << member_mask
+                  << ") >> " << lane_id_v << ") & 1u) != 0u;\n";
             metal << "    uint " << clamp_v << " = (uint)(" << clamp << ");\n";
             metal << "    uint " << width_v << " = 32u - ((" << clamp_v << " >> 8) & 0x1fu);\n";
             metal << "    " << width_v << " = (" << width_v << " == 0u) ? 32u : " << width_v << ";\n";
@@ -1952,10 +1956,11 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             }
             metal << "    " << dtype << " " << val_v
                   << " = (" << dtype << ")simd_shuffle(" << src << ", (ushort)" << target_v << ");\n";
+            metal << "    bool " << defined_v << " = " << valid_v << " && " << member_v << ";\n";
             metal << "    " << dtype << " " << mvar(dest)
-                  << " = " << valid_v << " ? " << val_v << " : (" << dtype << ")(" << src << ");\n";
+                  << " = " << defined_v << " ? " << val_v << " : (" << dtype << ")(" << src << ");\n";
             if (!pred_dest.empty()) {
-                metal << "    bool " << mvar(pred_dest) << " = " << valid_v << ";\n";
+                metal << "    bool " << mvar(pred_dest) << " = " << defined_v << ";\n";
                 defined_regs.insert(pred_dest);
             }
             defined_regs.insert(dest);
@@ -1971,16 +1976,24 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             const std::string dest = get_reg(ops[0]);
             const std::string pred = resolve(ops[1]);
             const std::string dtype = reg_type(dest);
+            const int vid = shfl_tmp_id++;
+            const std::string active_mask = "__cm_vote_active_mask_" + std::to_string(vid);
+            const std::string member_mask = ops.size() >= 3 ? resolve(ops[2]) : "0xffffffffu";
+            const std::string ballot = "((uint)simd_ballot((bool)" + pred + ") & (uint)(" + member_mask + "))";
             if (op.find(".ballot.") != std::string::npos) {
-                metal << "    " << dtype << " " << mvar(dest)
-                      << " = (uint)simd_ballot((bool)" << pred << ");\n";
+                metal << "    " << dtype << " " << mvar(dest) << " = " << ballot << ";\n";
             } else if (op.find(".any.") != std::string::npos) {
-                metal << "    bool " << mvar(dest) << " = simd_any((bool)" << pred << ");\n";
+                metal << "    bool " << mvar(dest) << " = " << ballot << " != 0u;\n";
             } else if (op.find(".all.") != std::string::npos) {
-                metal << "    bool " << mvar(dest) << " = simd_all((bool)" << pred << ");\n";
+                metal << "    uint " << active_mask << " = (uint)simd_ballot(true);\n";
+                metal << "    bool " << mvar(dest) << " = " << ballot
+                      << " == (" << active_mask << " & (uint)(" << member_mask << "));\n";
             } else {
-                // vote.uni / vote.sync.uni — uniformity test, same as all
-                metal << "    bool " << mvar(dest) << " = simd_all((bool)" << pred << ");\n";
+                // Uniform when every named active lane agrees, whether all
+                // predicates are true or all are false.
+                metal << "    uint " << active_mask << " = (uint)simd_ballot(true);\n";
+                metal << "    bool " << mvar(dest) << " = (" << ballot << " == 0u) || ("
+                      << ballot << " == (" << active_mask << " & (uint)(" << member_mask << ")));\n";
             }
             defined_regs.insert(dest);
             continue;

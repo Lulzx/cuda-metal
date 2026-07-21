@@ -152,13 +152,24 @@ void load_function_argument_count(CUfunc_st* function) {
             (abi >> kernel_keyword >> kernel_name) && kernel_keyword == "kernel" &&
             kernel_name == function->kernel_name) {
             std::vector<cumetalKernelArgInfo_t> info;
-            std::string arg_keyword;
-            std::string kind;
-            unsigned long size = 0;
-            while (abi >> arg_keyword >> kind >> size) {
-                if (arg_keyword != "arg" || size == 0 || size > 4096 ||
+            std::string record_keyword;
+            bool valid = true;
+            while (abi >> record_keyword) {
+                if (record_keyword == "shared") {
+                    unsigned long long shared_bytes = 0;
+                    if (!(abi >> shared_bytes) || shared_bytes > 16ull * 1024ull * 1024ull) {
+                        valid = false;
+                        break;
+                    }
+                    continue;
+                }
+                std::string kind;
+                unsigned long size = 0;
+                if (record_keyword != "arg" || !(abi >> kind >> size) ||
+                    size == 0 || size > 4096 ||
                     (kind != "buffer" && kind != "bytes") || info.size() >= 31) {
                     info.clear();
+                    valid = false;
                     break;
                 }
                 info.push_back(cumetalKernelArgInfo_t{
@@ -166,7 +177,7 @@ void load_function_argument_count(CUfunc_st* function) {
                     .size_bytes = static_cast<std::uint32_t>(size),
                 });
             }
-            if (!info.empty() && abi.eof()) {
+            if (valid && !info.empty() && abi.eof()) {
                 function->argument_count = static_cast<std::uint32_t>(info.size());
                 function->has_argument_count = true;
                 function->argument_info = std::move(info);

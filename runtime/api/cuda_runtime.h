@@ -1276,16 +1276,13 @@ static __device__ __forceinline__ unsigned int __shfl_xor_sync(unsigned int mask
 
 // Warp vote intrinsics (spec §5.3).
 static __device__ __forceinline__ int __any_sync(unsigned int mask, int predicate) {
-    (void)mask;
-    return __nvvm_vote_any(predicate);
+    return __nvvm_vote_any_sync(mask, predicate);
 }
 static __device__ __forceinline__ int __all_sync(unsigned int mask, int predicate) {
-    (void)mask;
-    return __nvvm_vote_all(predicate);
+    return __nvvm_vote_all_sync(mask, predicate);
 }
 static __device__ __forceinline__ unsigned int __ballot_sync(unsigned int mask, int predicate) {
-    (void)mask;
-    return __nvvm_vote_ballot(predicate);
+    return __nvvm_vote_ballot_sync(mask, predicate);
 }
 
 static __device__ __forceinline__ unsigned int __activemask(void) {

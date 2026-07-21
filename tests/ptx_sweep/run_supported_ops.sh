@@ -274,7 +274,7 @@ run_case "sweep_mul_lo_u64"     "mul.lo.u64 %rd1, %rd2, %rd3;"
 run_case "sweep_rem_u32"        "rem.u32 %r1, %r2, %r3;"
 run_case "sweep_rem_s64"        "rem.s64 %rd1, %rd2, %rd3;"
 
-# partial-mask warp primitives (mask != 0xFFFFFFFF; conservative lowering — full-group)
+# partial-mask warp primitives (mask != 0xFFFFFFFF; explicit vote/shuffle membership)
 run_case "sweep_shfl_partial_mask"  "shfl.sync.idx.b32 %r1, %r2, %r3, 0x1f, 0x0000ffff;"
 run_case "sweep_vote_partial_mask"  "vote.sync.ballot.b32 %r1, %p1, 0x0000ffff;"
 

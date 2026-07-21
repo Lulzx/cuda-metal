@@ -34,6 +34,7 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx,
 
 // Return the total bytes of static __shared__ memory required by the PTX.
 // This is needed to call setThreadgroupMemoryLength at kernel launch time.
-std::size_t compute_static_shared_bytes(std::string_view ptx);
+std::size_t compute_static_shared_bytes(std::string_view ptx,
+                                        std::string_view entry_name = {});
 
 }  // namespace cumetal::ptx

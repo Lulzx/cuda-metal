@@ -1,0 +1,113 @@
+diff --git a/physx/source/gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu b/physx/source/gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu
+--- a/physx/source/gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu
++++ b/physx/source/gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu
+@@ -84,21 +84,6 @@ extern "C" __global__ void updateBodiesLaunch(const PxgNewBodiesDesc* scDesc)
+ 
+ 	const PxU32 idx = threadIdx.x + blockIdx.x * blockDim.x;
+ 
+-#if PX_CUMETAL
+-	// CuMetal intentionally emulates partial warp masks as full SIMD-group
+-	// operations. Use a body-per-thread copy for this initialization path so
+-	// the 16-lane ballot/shuffle protocol below is not required.
+-	if(idx < totalNbBodies)
+-	{
+-		const PxU32* src = reinterpret_cast<const PxU32*>(gBodySim);
+-		PxU32* dst = reinterpret_cast<PxU32*>(gBodySimPool);
+-		const PxU32 wordsPerBody = sizeof(PxgBodySim) / sizeof(PxU32);
+-		const PxU32 bodyIndex =
+-			src[idx * wordsPerBody + PXG_BODY_SIM_BODYSIM_INDEX_IND * 4 + 3];
+-		for(PxU32 j = 0; j < wordsPerBody; ++j)
+-			dst[bodyIndex * wordsPerBody + j] = src[idx * wordsPerBody + j];
+-	}
+-#else
+ 	//each PxgBodySim has 224 bytes, so we need to use 16 threads to read one body. In fact,
+ 	//we just need to use 14 threads(each thread read one 16 bytes), however, we should use 16 threads because shfl is working in a warp
+ 	//for (PxU32 i = idx / 16; i < totalNbBodies; i += (blockDim.x * gridDim.x) / 16)
+@@ -115,7 +100,6 @@ extern "C" __global__ void updateBodiesLaunch(const PxgNewBodiesDesc* scDesc)
+ 		if (index < PXG_BODY_SIM_UINT4_SIZE)
+ 			gBodySimPool[bodyIndex * PXG_BODY_SIM_UINT4_SIZE + index] = data;
+ 	}
+-#endif
+ }
+ 
+ extern "C" __global__ void updateBodiesLaunchDirectAPI(const PxgNewBodiesDesc* scDesc)
+diff --git a/physx/source/gpusolver/src/CUDA/preIntegration.cuh b/physx/source/gpusolver/src/CUDA/preIntegration.cuh
+--- a/physx/source/gpusolver/src/CUDA/preIntegration.cuh
++++ b/physx/source/gpusolver/src/CUDA/preIntegration.cuh
+@@ -178,76 +178,6 @@ static __device__ void preIntegration(const uint32_t offset, const uint32_t nbSo
+ 	PxU32* PX_RESTRICT solverBodyIndices,
+ 	bool skipGravityApplication = false)
+ {
+-#if PX_CUMETAL
+-	{
+-	// CuMetal currently emulates partial warp masks as a full SIMD group.
+-	// The CUDA path below uses warp-cooperative swizzled loads whose active
+-	// lanes depend on the body count. Use the equivalent body-per-thread
+-	// formulation until masked SIMD operations have exact CUDA semantics.
+-	const uint32_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+-	const uint32_t a = idx + offset;
+-	if(a >= nbSolverBodies)
+-		return;
+-
+-	const PxU32 nodeIndex = islandNodeIndices[a].index();
+-	solverBodyIndices[nodeIndex] = a;
+-	const PxgBodySim& bodySim = bodySimPool[nodeIndex];
+-
+-	float4 linearVelocity = bodySim.linearVelocityXYZ_inverseMassW;
+-	float4 angularVelocity = bodySim.angularVelocityXYZ_maxPenBiasW;
+-	const float4 linearAccel = skipGravityApplication ? make_float4(0.0f) : bodySim.externalLinearAcceleration;
+-	const float4 angularAccel = skipGravityApplication ? make_float4(0.0f) : bodySim.externalAngularAcceleration;
+-	bodyCoreComputeUnconstrainedVelocity(
+-		bodySim.maxLinearVelocitySqX_maxAngularVelocitySqY_linearDampingZ_angularDampingW,
+-		linearVelocity, angularVelocity, bodySim.lockFlags,
+-		bodySim.disableGravity || skipGravityApplication,
+-		bodySim.sleepAngVelAccXYZ_accelScaleW.w, gravity,
+-		linearAccel, angularAccel, dt);
+-
+-	const PxVec3 inverseInertia(
+-		bodySim.inverseInertiaXYZ_contactReportThresholdW.x,
+-		bodySim.inverseInertiaXYZ_contactReportThresholdW.y,
+-		bodySim.inverseInertiaXYZ_contactReportThresholdW.z);
+-	const PxVec3 safeSqrtInvInertia = computeSafeSqrtInertia(inverseInertia);
+-	const PxMat33 rotation(reinterpret_cast<const PxQuat&>(bodySim.body2World.q));
+-	PxMat33 sqrtInvInertia;
+-	transformInertiaTensor(safeSqrtInvInertia, rotation, sqrtInvInertia);
+-
+-	gOutVelocityPool[a] = linearVelocity;
+-	const PxVec3 sqrtInertiaV(
+-		safeSqrtInvInertia.x == 0.f ? 0.f : 1.f / safeSqrtInvInertia.x,
+-		safeSqrtInvInertia.y == 0.f ? 0.f : 1.f / safeSqrtInvInertia.y,
+-		safeSqrtInvInertia.z == 0.f ? 0.f : 1.f / safeSqrtInvInertia.z);
+-	PxMat33 sqrtInertia;
+-	transformInertiaTensor(sqrtInertiaV, rotation, sqrtInertia);
+-	const PxVec3 angularVelocity3(angularVelocity.x, angularVelocity.y, angularVelocity.z);
+-	const PxVec3 angularMomocity = sqrtInertia * angularVelocity3;
+-	gOutVelocityPool[a + nbSolverBodies] =
+-		make_float4(angularMomocity.x, angularMomocity.y, angularMomocity.z, angularVelocity.w);
+-	gTransforms[a] = bodySim.body2World;
+-
+-	PxgSolverBodyData& data = solverBodyDataPool[a];
+-	data.body2World = bodySim.body2World;
+-	data.initialLinVelXYZ_invMassW = linearVelocity;
+-	data.initialAngVelXYZ_penBiasClamp = angularVelocity;
+-	data.offsetSlop = bodySim.offsetSlop;
+-	data.reportThreshold = bodySim.inverseInertiaXYZ_contactReportThresholdW.w;
+-	data.islandNodeIndex = PxNodeIndex(nodeIndex);
+-	data.maxImpulse = bodySim.body2Actor_maxImpulseW.p.w;
+-	PxU32 flags = 0;
+-	if(bodySim.internalFlags & PxsRigidBody::eSPECULATIVE_CCD)
+-		flags |= PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD;
+-	if(bodySim.internalFlags & PxsRigidBody::eENABLE_GYROSCOPIC)
+-		flags |= PxRigidBodyFlag::eENABLE_GYROSCOPIC_FORCES;
+-	data.flags = flags;
+-
+-	solverTxIDataPool[a].sqrtInvInertia = sqrtInvInertia;
+-	solverTxIDataPool[a].deltaBody2World = PxTransform(PxIdentity);
+-	(void)solverBodySleepDataPool;
+-	return;
+-	}
+-#endif
+-
+ 	const uint32_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+ 	const uint32_t a = idx + offset;
+ 

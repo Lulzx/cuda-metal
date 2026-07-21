@@ -3258,20 +3258,49 @@ class GenericLlvmEmitter {
         const std::string& dst = instr.operands[0];
         if (!is_register_name(dst)) return fail(instr, "vote dst must be register");
         const std::string src_bits = emit_load_reg_bits(os, instr.operands[1], 1);
+        declarations_.insert("declare i64 @air.simd_ballot.i64(i1)");
+        const std::string ballot64 = next_tmp("vote_ballot64");
+        os << "  " << ballot64 << " = call i64 @air.simd_ballot.i64(i1 " << src_bits << ")\n";
+        const std::string ballot32 = next_tmp("vote_ballot32");
+        os << "  " << ballot32 << " = trunc i64 " << ballot64 << " to i32\n";
+
+        // The sync forms name the participating lanes explicitly.  AIR's ballot
+        // covers the currently active SIMD lanes, so intersecting it with the
+        // PTX member mask gives CUDA's defined vote set.  Legacy vote forms have
+        // no member-mask operand and therefore use all currently active lanes.
+        std::string member_mask = "-1";
+        if (instr.opcode.find(".sync.") != std::string::npos) {
+            if (instr.operands.size() < 3) return fail(instr, "vote.sync requires member mask");
+            auto parsed_mask = emit_integer_from_any(os, instr.operands[2], 32, false);
+            if (!parsed_mask) return fail(instr, "vote member mask unsupported");
+            member_mask = *parsed_mask;
+        }
+        const std::string masked_ballot = next_tmp("vote_masked");
+        os << "  " << masked_ballot << " = and i32 " << ballot32 << ", " << member_mask << "\n";
         if (is_ballot) {
-            const std::string ballot_res = next_tmp("vote_ballot");
-            os << "  " << ballot_res << " = zext i1 " << src_bits << " to i32\n";
-            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, ballot_res, 32);
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, masked_ballot, 32);
         }
         std::string pred_res;
         if (is_any) {
-            declarations_.insert("declare i1 @air.simdgroup.any.i1(i1)");
             pred_res = next_tmp("vote_any");
-            os << "  " << pred_res << " = call i1 @air.simdgroup.any.i1(i1 " << src_bits << ")\n";
+            os << "  " << pred_res << " = icmp ne i32 " << masked_ballot << ", 0\n";
         } else if (is_all || is_uni) {
-            declarations_.insert("declare i1 @air.simdgroup.all.i1(i1)");
+            const std::string active64 = next_tmp("vote_active64");
+            os << "  " << active64 << " = call i64 @air.simd_ballot.i64(i1 true)\n";
+            const std::string active32 = next_tmp("vote_active32");
+            os << "  " << active32 << " = trunc i64 " << active64 << " to i32\n";
+            const std::string expected = next_tmp("vote_expected");
+            os << "  " << expected << " = and i32 " << active32 << ", " << member_mask << "\n";
             pred_res = next_tmp("vote_all");
-            os << "  " << pred_res << " = call i1 @air.simdgroup.all.i1(i1 " << src_bits << ")\n";
+            if (is_uni) {
+                const std::string none = next_tmp("vote_none");
+                os << "  " << none << " = icmp eq i32 " << masked_ballot << ", 0\n";
+                const std::string all = next_tmp("vote_uniform_all");
+                os << "  " << all << " = icmp eq i32 " << masked_ballot << ", " << expected << "\n";
+                os << "  " << pred_res << " = or i1 " << none << ", " << all << "\n";
+            } else {
+                os << "  " << pred_res << " = icmp eq i32 " << masked_ballot << ", " << expected << "\n";
+            }
         } else {
             return fail(instr, "unrecognized vote form");
         }
@@ -3365,7 +3394,12 @@ class GenericLlvmEmitter {
         if (instr.operands.empty() || !is_register_name(instr.operands[0])) {
             return fail(instr, "activemask requires dst register");
         }
-        return emit_store_reg_bits(os, instr.operands[0], ensure_reg_slot(instr.operands[0]).bits, "-1", 32);
+        declarations_.insert("declare i64 @air.simd_ballot.i64(i1)");
+        const std::string active64 = next_tmp("activemask64");
+        os << "  " << active64 << " = call i64 @air.simd_ballot.i64(i1 true)\n";
+        const std::string active32 = next_tmp("activemask32");
+        os << "  " << active32 << " = trunc i64 " << active64 << " to i32\n";
+        return emit_store_reg_bits(os, instr.operands[0], ensure_reg_slot(instr.operands[0]).bits, active32, 32);
     }
 
     bool emit_bfind(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
@@ -3876,13 +3910,25 @@ class GenericLlvmEmitter {
         if (!src || !sel || !clamp) {
             return fail(instr, "shfl operands unsupported");
         }
-        (void)instr.operands.size();  // membermask currently ignored
+        if (instr.operands.size() < 5) {
+            return fail(instr, "shfl.sync requires member mask");
+        }
+        auto member_mask = emit_integer_from_any(os, instr.operands[4], 32, false);
+        if (!member_mask) {
+            return fail(instr, "shfl member mask unsupported");
+        }
 
         const auto lane_it = builtin_scalar_arg_name_.find("air.thread_index_in_simdgroup");
         if (lane_it == builtin_scalar_arg_name_.end()) {
             return fail(instr, "shfl requires thread_index_in_simdgroup builtin");
         }
         const std::string lane = "%" + lane_it->second;
+        const std::string lane_bit = next_tmp("shfl_lane_bit");
+        os << "  " << lane_bit << " = shl i32 1, " << lane << "\n";
+        const std::string lane_member_bit = next_tmp("shfl_lane_member_bit");
+        os << "  " << lane_member_bit << " = and i32 " << *member_mask << ", " << lane_bit << "\n";
+        const std::string lane_participates = next_tmp("shfl_lane_participates");
+        os << "  " << lane_participates << " = icmp ne i32 " << lane_member_bit << ", 0\n";
 
         // PTX clamp encoding: width = 32 - ((clamp >> 8) & 0x1f); 0 means 32.
         const std::string clamp_shr = next_tmp("shfl_cshr");
@@ -3962,13 +4008,15 @@ class GenericLlvmEmitter {
                << ", i16 " << target16 << ")\n";
         }
 
+        const std::string defined = next_tmp("shfl_defined");
+        os << "  " << defined << " = and i1 " << valid << ", " << lane_participates << "\n";
         const std::string result = next_tmp("shfl_res");
-        os << "  " << result << " = select i1 " << valid << ", i32 " << call << ", i32 " << *src << "\n";
+        os << "  " << result << " = select i1 " << defined << ", i32 " << call << ", i32 " << *src << "\n";
         if (!emit_store_reg_bits(os, dst_token, ensure_reg_slot(dst_token).bits, result, 32)) {
             return false;
         }
         if (!pred_token.empty()) {
-            if (!emit_store_reg_bits(os, pred_token, 1, valid, 1)) {
+            if (!emit_store_reg_bits(os, pred_token, 1, defined, 1)) {
                 return false;
             }
         }
@@ -3976,7 +4024,27 @@ class GenericLlvmEmitter {
     }
 
     bool emit_barrier(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
-        if (starts_with(instr.opcode, "bar.sync") || starts_with(instr.opcode, "bar.warp.sync")) {
+        if (starts_with(instr.opcode, "bar.warp.sync")) {
+            if (instr.operands.empty()) {
+                return fail(instr, "bar.warp.sync requires member mask");
+            }
+            // Validate/load a dynamic member mask even though AIR derives
+            // participation from the currently active SIMD lanes.  Extra
+            // active lanes at the same instruction only strengthen ordering;
+            // divergent execution naturally restricts the barrier to the
+            // active member lanes.
+            auto member_mask = emit_integer_from_any(os, instr.operands[0], 32, false);
+            if (!member_mask) {
+                return fail(instr, "bar.warp.sync member mask unsupported");
+            }
+            declarations_.insert("declare void @air.simdgroup.barrier(i32, i32)");
+            // From Metal 4 AIR for
+            // simdgroup_barrier(mem_flags::mem_threadgroup): flags=2,
+            // thread_scope_simdgroup=4.
+            os << "  call void @air.simdgroup.barrier(i32 2, i32 4)\n";
+            return true;
+        }
+        if (starts_with(instr.opcode, "bar.sync")) {
             declarations_.insert("declare void @air.wg.barrier(i32, i32)");
             // From xcrun AIR LLVM for threadgroup_barrier(mem_flags::mem_threadgroup):
             //   @air.wg.barrier(i32 2, i32 1)
@@ -4700,7 +4768,59 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     return result;
 }
 
-std::size_t compute_static_shared_bytes(std::string_view ptx_text) {
+std::size_t compute_static_shared_bytes(std::string_view ptx_text,
+                                        std::string_view entry_name) {
+    std::string selected_text;
+    if (!entry_name.empty()) {
+        std::size_t search_from = 0;
+        bool found_entry = false;
+        while (true) {
+            const std::size_t entry_pos = ptx_text.find(".entry", search_from);
+            if (entry_pos == std::string_view::npos) {
+                break;
+            }
+            std::size_t name_begin = entry_pos + 6;
+            while (name_begin < ptx_text.size() &&
+                   std::isspace(static_cast<unsigned char>(ptx_text[name_begin])) != 0) {
+                ++name_begin;
+            }
+            std::size_t name_end = name_begin;
+            while (name_end < ptx_text.size() &&
+                   std::isspace(static_cast<unsigned char>(ptx_text[name_end])) == 0 &&
+                   ptx_text[name_end] != '(' && ptx_text[name_end] != '{') {
+                ++name_end;
+            }
+            if (ptx_text.substr(name_begin, name_end - name_begin) != entry_name) {
+                search_from = name_end;
+                continue;
+            }
+
+            const std::size_t body_begin = ptx_text.find('{', name_end);
+            if (body_begin == std::string_view::npos) {
+                return 0;
+            }
+            std::size_t depth = 1;
+            std::size_t body_end = body_begin + 1;
+            for (; body_end < ptx_text.size() && depth != 0; ++body_end) {
+                if (ptx_text[body_end] == '{') {
+                    ++depth;
+                } else if (ptx_text[body_end] == '}') {
+                    --depth;
+                }
+            }
+            if (depth != 0) {
+                return 0;
+            }
+            selected_text.assign(ptx_text.substr(body_begin + 1,
+                                                 body_end - body_begin - 2));
+            found_entry = true;
+            break;
+        }
+        if (!found_entry) {
+            return 0;
+        }
+    }
+
     // Scan .shared declarations (non-extern) and compute total aligned size.
     std::size_t cursor = 0;
     std::unordered_set<std::string> seen;
@@ -4739,6 +4859,13 @@ std::size_t compute_static_shared_bytes(std::string_view ptx_text) {
         if (bracket_open == std::string::npos) continue;
         const std::string symbol = trim(t.substr(sym_begin, bracket_open - sym_begin));
         if (symbol.empty() || seen.count(symbol) != 0) continue;
+        // Clang commonly emits static shared objects at module scope.  For an
+        // entry-specific query, count only declarations referenced by the
+        // selected entry body instead of assigning every module object to
+        // every separately emitted metallib.
+        if (!entry_name.empty() && selected_text.find(symbol) == std::string::npos) {
+            continue;
+        }
         seen.insert(symbol);
 
         const std::size_t bracket_close = t.find(']', bracket_open + 1);

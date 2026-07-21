@@ -70,9 +70,9 @@ Classification meanings:
 
 | Feature requested for audit | PhysX 5.6.1 evidence | CuMetal cross-reference | Classification |
 | --- | --- | --- | --- |
-| `__shfl*` | 638 occurrences in 46 `.cu`/`.cuh` files. Component counts: articulation 10, broadphase 13, common 111, narrowphase 440, simulation controller 25, solver 39. Most pass `FULL_MASK`; active partial/sub-warp masks occur in common reductions/radix/vector helpers, `cudaBox.cu`, `updateBodiesAndShapes.cu`, and PGS/TGS solver code. | Full-mask shuffle lowering exists. `docs/known-gaps.md` says partial masks are conservatively emulated as a full SIMD group and may differ from inactive-lane CUDA semantics. | **Fine** for full masks; **needs workaround** for partial masks. This is a minimal-GRB correctness risk because solver/update helpers use them. |
-| `__ballot*` | 241 occurrences in 46 files. Component counts: articulation 12, broadphase 35, common 16, narrowphase 137, simulation controller 17, solver 24. Most use `FULL_MASK`; active variable-mask ballots occur in reduction/radix helpers, `updateBodiesAndShapes.cu`, and both multiblock solvers. Three legacy `__ballot(` references exist: one active in `cudaGJKEPA.cu`, one commented in `epa.cuh`, and two debug-print arguments in `epa.cuh`. | Full-mask ballot is lowered. Partial masks have the same conservative emulation gap. | **Fine** for full masks; **needs workaround** for active partial masks and the legacy intrinsic spelling if the mesh/GJK path is enabled. |
-| `__syncwarp` | 234 occurrences in 44 `.cu`/`.cuh` files (240 when adjacent GPU `.h` files are included). Most are no-argument/full-warp barriers. Active masked calls occur in `internalConstraints2.cu`, `RadixSort.cuh`, `reduction.cuh`, `cudaBox.cu`, `epa.cuh`, and `updateBodiesAndShapes.cu`. | CuMetal lowers warp barriers to an AIR SIMD-group barrier. Its mask cannot exclude hardware lanes. | **Fine** for full-warp barriers; **needs workaround** for masked barriers. The one-sphere target avoids `cudaBox.cu` and articulation but still uses update/reduction infrastructure. |
+| `__shfl*` | 638 occurrences in 46 `.cu`/`.cuh` files. Component counts: articulation 10, broadphase 13, common 111, narrowphase 440, simulation controller 25, solver 39. Most pass `FULL_MASK`; active partial/sub-warp masks occur in common reductions/radix/vector helpers, `cudaBox.cu`, `updateBodiesAndShapes.cu`, and PGS/TGS solver code. | Member masks predicate caller results; non-member results are undefined by CUDA. The upstream `updateBodiesLaunch` partial-mask path passes repeated reduced-GRB conformance. | **Fine** for the validated rigid-body subset; broader geometry/solver paths remain unverified. |
+| `__ballot*` | 241 occurrences in 46 files. Component counts: articulation 12, broadphase 35, common 16, narrowphase 137, simulation controller 17, solver 24. Most use `FULL_MASK`; active variable-mask ballots occur in reduction/radix helpers, `updateBodiesAndShapes.cu`, and both multiblock solvers. Three legacy `__ballot(` references exist: one active in `cudaGJKEPA.cu`, one commented in `epa.cuh`, and two debug-print arguments in `epa.cuh`. | Partial masks intersect AIR's real active ballot with the CUDA member mask. | **Fine** for the validated rigid-body subset; legacy spelling and unselected paths remain unverified. |
+| `__syncwarp` | 234 occurrences in 44 `.cu`/`.cuh` files (240 when adjacent GPU `.h` files are included). Most are no-argument/full-warp barriers. Active masked calls occur in `internalConstraints2.cu`, `RadixSort.cuh`, `reduction.cuh`, `cudaBox.cu`, `epa.cuh`, and `updateBodiesAndShapes.cu`. | CuMetal lowers warp barriers to AIR SIMD-group scope with threadgroup-memory visibility. Divergent half-warp ordering and PhysX `preIntegration` are GPU-tested. AIR may order additional active lanes because it does not accept the explicit CUDA member mask. | **Fine** for the validated rigid-body subset; irregular masks in unselected paths require further conformance. |
 | `__activemask` | No hits. | CuMetal provides the intrinsic, but it is not required here. | **Fine**. |
 | Cooperative groups | No hits for `cooperative_groups`, `grid_group`, or `this_grid()`. `particleSystemHFMidPhaseCG.cu` uses “CG” in a contact-generation name, not the cooperative-groups API. | CuMetal's `grid_group::sync()` is a no-op, but PhysX does not call it. | **Fine**. |
 | `grid_group::sync` | No hits. | Current no-op behavior is not exercised. | **Fine**. |
@@ -247,15 +247,15 @@ cross-threadgroup synchronization blocker. After installing Apple's Metal
 Toolchain, all 83 selected kernels compile as production metallibs and the
 scene executes on the Apple GPU.
 
-Two compatibility workarounds are required. PhysX stores device pointers
+One address-model compatibility mode is required. PhysX stores device pointers
 inside device-resident descriptor structs, so the runtime must expose
 `MTLBuffer.gpuAddress` values rather than CPU mappings. This is enabled with
 `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`; CUDA memory APIs translate those
-addresses back to shared-memory mappings for host copies. Also,
-`preIntegration` uses body-count-dependent warp-cooperative swizzled loads.
-CuMetal's full-group partial-mask emulation is not exact for this construct,
-so the PhysX patch selects an equivalent body-per-thread implementation under
-`PX_CUMETAL`. Neither issue requires cross-threadgroup synchronization.
+addresses back to shared-memory mappings for host copies. Patch 0008 removes
+the former body-per-thread `preIntegration` and serialized `updateBodiesLaunch`
+workarounds after entry-specific static shared-memory accounting and repeated
+scene conformance passed. No cross-threadgroup synchronization is required by
+this target.
 
 ## Reproduction commands
 

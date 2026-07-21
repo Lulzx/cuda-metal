@@ -17,11 +17,13 @@
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
+#include <fstream>
 #include <limits>
 #include <mutex>
 #include <new>
 #include <string>
 #include <string_view>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -42,6 +44,71 @@ void trace_op(const char* tag, const char* detail) {
     if (!trace_enabled()) return;
     std::fprintf(stderr, "CUMETAL_TRACE %s %s\n", tag, detail ? detail : "");
     std::fflush(stderr);
+}
+
+bool load_inline_static_shared_bytes(const char* metallib_path,
+                                     const char* expected_kernel,
+                                     std::size_t* out_bytes) {
+    if (metallib_path == nullptr || expected_kernel == nullptr || out_bytes == nullptr) {
+        return false;
+    }
+    *out_bytes = 0;
+    std::ifstream abi(std::string(metallib_path) + ".cumetal-abi");
+    if (!abi) {
+        // Prebuilt/legacy metallibs legitimately have no sidecar.
+        return true;
+    }
+
+    std::string line;
+    if (!std::getline(abi, line) || line != "CUMETAL_ABI_V1" ||
+        !std::getline(abi, line)) {
+        return false;
+    }
+    {
+        std::istringstream kernel_line(line);
+        std::string keyword;
+        std::string kernel_name;
+        std::string extra;
+        if (!(kernel_line >> keyword >> kernel_name) || keyword != "kernel" ||
+            kernel_name != expected_kernel || (kernel_line >> extra)) {
+            return false;
+        }
+    }
+
+    bool saw_shared = false;
+    while (std::getline(abi, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        std::istringstream record(line);
+        std::string keyword;
+        if (!(record >> keyword)) {
+            return false;
+        }
+        if (keyword == "shared") {
+            unsigned long long bytes = 0;
+            std::string extra;
+            if (saw_shared || !(record >> bytes) || (record >> extra) ||
+                bytes > 16ull * 1024ull * 1024ull) {
+                return false;
+            }
+            *out_bytes = static_cast<std::size_t>(bytes);
+            saw_shared = true;
+            continue;
+        }
+        if (keyword == "arg") {
+            std::string kind;
+            unsigned long size = 0;
+            std::string extra;
+            if (!(record >> kind >> size) || (record >> extra) ||
+                (kind != "buffer" && kind != "bytes") || size == 0 || size > 4096) {
+                return false;
+            }
+            continue;
+        }
+        return false;
+    }
+    return true;
 }
 }  // namespace
 
@@ -3485,6 +3552,7 @@ cudaError_t cudaLaunchKernel(const void* func,
 
     cumetalKernel_t kernel_copy{};
     const cumetalKernel_t* kernel = nullptr;
+    std::size_t inline_static_shared_bytes = 0;
     std::uint32_t arg_count = 0;
     const cumetalKernelArgInfo_t* arg_info = nullptr;
 
@@ -3540,6 +3608,11 @@ cudaError_t cudaLaunchKernel(const void* func,
         }
         arg_count = kernel->arg_count;
         arg_info = kernel->arg_info;
+        if (!load_inline_static_shared_bytes(kernel->metallib_path,
+                                             kernel->kernel_name,
+                                             &inline_static_shared_bytes)) {
+            return launch_fail(cudaErrorInvalidValue, "inline kernel ABI sidecar invalid");
+        }
     }
 
     std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
@@ -3846,7 +3919,8 @@ cudaError_t cudaLaunchKernel(const void* func,
     // that use static __shared__ arrays without any dynamic shared memory).
     const std::size_t effective_shared_mem =
         (shared_mem > 0) ? shared_mem
-        : (use_registered_kernel ? registered_kernel.static_shared_bytes : 0);
+        : (use_registered_kernel ? registered_kernel.static_shared_bytes
+                                 : inline_static_shared_bytes);
 
     cumetal::metal_backend::LaunchConfig config{
         .grid = grid_dim,

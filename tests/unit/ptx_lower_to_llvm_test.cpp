@@ -382,6 +382,157 @@ $L1:
         return 1;
     }
 
+    const std::string masked_vote_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry masked_vote()
+{
+    .reg .pred %p<5>;
+    .reg .b32 %r<8>;
+    mov.u32 %r1, %laneid;
+    and.b32 %r2, %r1, 1;
+    setp.eq.u32 %p1, %r2, 0;
+    vote.sync.ballot.b32 %r3, %p1, 0x0000ffff;
+    vote.sync.any.pred %p2, %p1, 0x000000ff;
+    vote.sync.all.pred %p3, %p1, 0x00000055;
+    activemask.b32 %r4;
+    shfl.sync.idx.b32 %r5|%p4, %r1, 0, 0x1f, 0x0000ffff;
+    bar.warp.sync 0x0000ffff;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions masked_vote_options;
+    masked_vote_options.entry_name = "masked_vote";
+    masked_vote_options.strict = true;
+    const auto masked_vote_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(masked_vote_ptx, masked_vote_options);
+    if (!expect(masked_vote_lowered.ok, "masked vote/shuffle lowering succeeds")) {
+        return 1;
+    }
+    if (!expect(contains(masked_vote_lowered.llvm_ir,
+                         "declare i64 @air.simd_ballot.i64(i1)"),
+                "vote and activemask use AIR SIMD ballot")) {
+        return 1;
+    }
+    if (!expect(contains(masked_vote_lowered.llvm_ir, "and i32") &&
+                    contains(masked_vote_lowered.llvm_ir, "65535"),
+                "partial vote member mask is retained")) {
+        return 1;
+    }
+    if (!expect(contains(masked_vote_lowered.llvm_ir, "shfl_lane_participates") &&
+                    contains(masked_vote_lowered.llvm_ir, "shfl_defined"),
+                "partial shuffle predicates non-member lanes")) {
+        return 1;
+    }
+    if (!expect(contains(masked_vote_lowered.llvm_ir,
+                         "call void @air.simdgroup.barrier(i32 2, i32 4)"),
+                "bar.warp.sync uses AIR simdgroup barrier scope")) {
+        return 1;
+    }
+    if (!expect(!contains(masked_vote_lowered.llvm_ir,
+                          "call void @air.wg.barrier(i32 2, i32 1)"),
+                "bar.warp.sync does not use a threadgroup barrier")) {
+        return 1;
+    }
+    if (!expect(!contains(masked_vote_lowered.llvm_ir, "zext i1") ||
+                    contains(masked_vote_lowered.llvm_ir, "vote_ballot64"),
+                "ballot is not lowered to only the caller predicate")) {
+        return 1;
+    }
+
+    const std::string multi_entry_shared_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.shared .align 16 .b8 shared_for_second[128];
+.visible .entry no_shared()
+{
+    ret;
+}
+.visible .entry with_shared()
+{
+    .reg .b64 %rd<2>;
+    mov.u64 %rd1, shared_for_second;
+    ret;
+}
+)PTX";
+    if (!expect(cumetal::ptx::compute_static_shared_bytes(multi_entry_shared_ptx,
+                                                          "no_shared") == 0,
+                "entry-specific shared accounting excludes other kernels")) {
+        return 1;
+    }
+    if (!expect(cumetal::ptx::compute_static_shared_bytes(multi_entry_shared_ptx,
+                                                          "with_shared") == 128,
+                "entry-specific shared accounting includes selected kernel")) {
+        return 1;
+    }
+    if (!expect(cumetal::ptx::compute_static_shared_bytes(multi_entry_shared_ptx) == 128,
+                "module-wide shared accounting remains available for registration")) {
+        return 1;
+    }
+
+    const std::string malformed_masked_vote_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_masked_vote()
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<2>;
+    vote.sync.ballot.b32 %r1, %p1;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_masked_vote_options;
+    malformed_masked_vote_options.entry_name = "malformed_masked_vote";
+    malformed_masked_vote_options.strict = true;
+    const auto malformed_masked_vote_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_masked_vote_ptx,
+                                           malformed_masked_vote_options);
+    if (!expect(!malformed_masked_vote_lowered.ok,
+                "strict lowering rejects vote.sync without member mask")) {
+        return 1;
+    }
+
+    const std::string malformed_masked_shuffle_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_masked_shuffle()
+{
+    .reg .b32 %r<3>;
+    shfl.sync.idx.b32 %r1, %r2, 0, 0x1f;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_masked_shuffle_options;
+    malformed_masked_shuffle_options.entry_name = "malformed_masked_shuffle";
+    malformed_masked_shuffle_options.strict = true;
+    const auto malformed_masked_shuffle_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_masked_shuffle_ptx,
+                                           malformed_masked_shuffle_options);
+    if (!expect(!malformed_masked_shuffle_lowered.ok,
+                "strict lowering rejects shfl.sync without member mask")) {
+        return 1;
+    }
+
+    const std::string malformed_warp_barrier_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_warp_barrier()
+{
+    bar.warp.sync;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_warp_barrier_options;
+    malformed_warp_barrier_options.entry_name = "malformed_warp_barrier";
+    malformed_warp_barrier_options.strict = true;
+    const auto malformed_warp_barrier_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_warp_barrier_ptx,
+                                           malformed_warp_barrier_options);
+    if (!expect(!malformed_warp_barrier_lowered.ok,
+                "strict lowering rejects bar.warp.sync without member mask")) {
+        return 1;
+    }
+
     std::printf("PASS: ptx lower-to-llvm unit tests\n");
     return 0;
 }

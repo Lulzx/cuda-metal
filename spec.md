@@ -276,11 +276,15 @@ Apple Silicon SIMD-group width is architecturally fixed at 32 across all M-serie
 | `__all_sync(mask, predicate)` | `llvm.air.simdgroup.all(predicate)` |
 
 **Mask semantics**: All `_sync(mask, ...)` CUDA functions accept a lane participation mask.
-AIR simdgroup operations are implicitly full-group. When `mask != 0xFFFFFFFF`, the lowering
-pass emits a predicated execution wrapper: lanes not in the mask read their own value
-(identity) instead of participating. This is a correctness-critical divergence from NVIDIA
-semantics where masked-out lanes are truly inactive; the CuMetal emulation is conservative
-but safe. Kernels using partial masks should be tested carefully.
+CuMetal intersects AIR's active-lane ballot with that member mask for ballot/any/all and uses
+an AIR ballot of `true` for `activemask`. Shuffle callers outside the member mask receive
+their own value; CUDA specifies their result as undefined. A shuffle from an inactive source
+lane is likewise undefined on both APIs. Masked `__syncwarp` remains conservative because
+AIR does not consume CUDA's explicit member mask, so additional currently active lanes may
+participate and receive stronger ordering than CUDA requires. Divergent lower/upper half-warp
+barriers are GPU-tested, including shared-memory visibility. Broader application paths still
+need independent conformance; PhysX's warp-cooperative `preIntegration` and
+`updateBodiesLaunch` paths pass twenty consecutive 30-step conformance runs.
 
 **Atomics**
 
@@ -392,7 +396,7 @@ Translation imposes overhead. Here is an honest accounting:
 | UMA memcpy (H↔D, D↔D) | **Huge win** | `memcpy` vs. PCIe DMA. `cudaMemcpy` is essentially free. |
 | Metal command buffer submission | 1.2–1.5× overhead vs. hand-Metal | Per-dispatch overhead from encoder create/commit. Amortized for large kernels. |
 | Intrinsic translation overhead | Negligible | 1:1 AIR intrinsic mapping for most operations |
-| Warp primitive emulation (partial masks) | Up to 2× on mask-heavy code | Only when `mask != 0xFFFFFFFF`; rare in practice |
+| Warp primitive handling (partial masks) | Small predicate/ballot overhead | Vote masks are intersected explicitly; barriers use active SIMD-group scope |
 | FP64 emulation (if `--fp64=emulate`) | ~4× vs. native FP32 per op | Only for double-precision code on emulation path |
 
 **Targets:**
@@ -537,8 +541,10 @@ times without race conditions.
    - **Scalar/struct arguments (≤ 4 KB)**: Call `setBytes:length:atIndex:` to pass by value.
    - **Printf buffer**: Bind the printf ring buffer at the last argument index.
    - **Constant buffer**: Bind at reserved index `kConstantBufferIndex`.
-6. Set threadgroup memory: `setThreadgroupMemoryLength:atIndex:` for `__shared__` allocations
-   (static size is from AIR metadata; `sharedMem` parameter provides dynamic shared memory).
+6. Set threadgroup memory: `setThreadgroupMemoryLength:atIndex:` for `__shared__` allocations.
+   Registered PTX records the computed static size; source-first metallibs carry it in the
+   versioned `.cumetal-abi` sidecar. A nonzero `sharedMem` launch parameter supplies the
+   dynamic allocation instead.
 7. `dispatchThreadgroups: MTLSizeMake(gridDim.x, gridDim.y, gridDim.z)`
    `threadsPerThreadgroup: MTLSizeMake(blockDim.x, blockDim.y, blockDim.z)`.
 8. End encoding.

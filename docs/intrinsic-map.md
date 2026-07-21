@@ -35,7 +35,7 @@ Complete CUDA/PTX → AIR intrinsic mapping table for the CuMetal intrinsic lowe
 | PTX Opcode | AIR / LLVM Intrinsic | Notes |
 |------------|---------------------|-------|
 | `bar.sync N` | `air.threadgroup_barrier` | `__syncthreads()` — threadgroup scope |
-| `bar.warp.sync mask` | `air.simdgroup.barrier` | `__syncwarp(mask)` — simdgroup scope; non-0xFFFFFFFF masks conservatively emit full-group barrier |
+| `bar.warp.sync mask` | `air.simdgroup.barrier(i32 2, i32 4)` | `__syncwarp(mask)` — SIMD-group scope and threadgroup-memory visibility; divergent half-warp ordering GPU-tested |
 | `bar.arrive N, count` | `air.threadgroup_barrier` | Cooperative-groups barrier arrive (conservative: full threadgroup barrier) |
 | `bar.red.and.pred d, bar, cnt, pred` | `air.simdgroup.all` | Barrier predicate AND-reduction (conservative simdgroup lowering) |
 | `bar.red.or.pred d, bar, cnt, pred` | `air.simdgroup.any` | Barrier predicate OR-reduction |
@@ -87,19 +87,23 @@ Apple Silicon SIMD-group width is architecturally fixed at 32 (matching CUDA war
 | `shfl.sync.down.b32 dst, src, delta, clamp, mask` | `air.simdgroup.shuffle_down` | `__shfl_down_sync` |
 | `shfl.sync.up.b32 dst, src, delta, clamp, mask` | `air.simdgroup.shuffle_up` | `__shfl_up_sync` |
 | `shfl.sync.bfly.b32 dst, src, lanexor, clamp, mask` | `air.simdgroup.shuffle_xor` | `__shfl_xor_sync` |
-| `vote.sync.ballot.b32 dst, pred, mask` | `air.simdgroup.ballot` | `__ballot_sync` — 32-bit lane mask |
-| `vote.sync.any.pred dst, pred, mask` | `air.simdgroup.any` | `__any_sync` |
-| `vote.sync.all.pred dst, pred, mask` | `air.simdgroup.all` | `__all_sync` |
+| `vote.sync.ballot.b32 dst, pred, mask` | `air.simd_ballot.i64` + truncate/mask | `__ballot_sync` — active predicate bits intersected with member mask |
+| `vote.sync.any.pred dst, pred, mask` | masked `air.simd_ballot.i64` != 0 | `__any_sync` |
+| `vote.sync.all.pred dst, pred, mask` | masked predicate ballot == masked active ballot | `__all_sync` |
 | `vote.ballot.b32 dst, pred` | `air.simdgroup.ballot` | Non-sync form |
 | `vote.any.pred dst, pred` | `air.simdgroup.any` | Non-sync form |
 | `vote.all.pred dst, pred` | `air.simdgroup.all` | Non-sync form |
 | `vote.uni.pred dst, pred` | `air.simdgroup.all` | Uniformity test (conservative: same as all) |
-| `activemask.b32 dst` | `air.activemask` | Returns bitmask of active lanes; conservative constant 0xFFFFFFFF |
+| `activemask.b32 dst` | `air.simd_ballot.i64(true)` + truncate | Returns the real active-lane mask |
 | `fns.b32 dst, mask, base, offset` | `air.fns` | Find Nth set bit in mask |
 | `match.any.sync.b32 dst, src, mask` | `air.match.any.sync` | Warp-wide value match (any lane) |
 | `match.all.sync.b32 dst, pred, src, mask` | `air.match.all.sync` | Warp-wide value match (all lanes) |
 
-**Mask semantics note**: AIR simdgroup operations are implicitly full-group. When `mask != 0xFFFFFFFF`, lanes not in the mask read their own value (identity) rather than being truly inactive. This is a conservative, safe divergence from CUDA semantics. Kernels using partial masks should be tested carefully.
+**Mask semantics note**: vote operations honor the member mask and current AIR active lanes.
+Shuffle callers outside the mask receive identity; CUDA leaves their result undefined. A
+masked warp barrier uses the currently active SIMD group. AIR does not take CUDA's explicit
+member mask, so additional active lanes can receive stronger ordering; divergent lower/upper
+half-warp shared-memory ordering is covered by a production GPU test.
 
 ---
 

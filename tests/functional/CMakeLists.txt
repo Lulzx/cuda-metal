@@ -39,6 +39,10 @@ add_executable(cumetal_runtime_warp_partial_mask_test
     runtime_warp_partial_mask_test.cpp
 )
 
+add_executable(cumetal_runtime_warp_mask_votes_test
+    runtime_warp_mask_votes_test.cpp
+)
+
 add_executable(cumetal_runtime_warp_size_lane_test
     runtime_warp_size_lane_test.cpp
 )
@@ -526,6 +530,11 @@ target_link_libraries(cumetal_runtime_cp_async_emul_test
 )
 
 target_link_libraries(cumetal_runtime_warp_partial_mask_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_warp_mask_votes_test
     PRIVATE
         cumetal_runtime
 )
@@ -1162,6 +1171,13 @@ target_compile_options(cumetal_runtime_cp_async_emul_test
 )
 
 target_compile_options(cumetal_runtime_warp_partial_mask_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_runtime_warp_mask_votes_test
     PRIVATE
         -Wall
         -Wextra
@@ -1920,6 +1936,18 @@ add_test(
 )
 
 set_tests_properties(functional_runtime_warp_partial_mask PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_runtime_warp_mask_votes_cu
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_cuda_device_runtime.sh
+            $<TARGET_FILE:cumetalc>
+            $<TARGET_FILE:cumetal_runtime_warp_mask_votes_test>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/warp_mask_votes.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/warp_mask_votes.from_cu.xcrun.metallib
+)
+
+set_tests_properties(functional_runtime_warp_mask_votes_cu PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
     NAME functional_runtime_warp_size_lane
