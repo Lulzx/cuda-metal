@@ -75,6 +75,23 @@ as gaps have been closed.
 - The older `.cu` mode without `--cuda-device` remains a qualifier-stripping
   host-LLVM prototype suitable only for simple patterns; it is not a general
   CUDA frontend.
+- The verified `--backend=cumetal-ir` path is an initial vertical slice, not yet
+  the default. It supports the vector-add/SAXPY-style arithmetic and indexing
+  subset plus conservative branch shapes. General loop and if/else
+  structurization, aggregate ABI lowering, static/dynamic shared-memory
+  emission, complete device-call builtin threading, atomics, ballot/vote,
+  reductions, and broad math-intrinsic coverage remain incomplete and fail
+  explicitly.
+- Stock Clang CUDA device IR import requires LLVM 18 or newer at build time.
+  Unknown NVVM intrinsics, arbitrary pointer/integer round trips, indirect
+  calls, recursion, unsupported atomics, and irreducible/unsupported CFG shapes
+  are rejected. The new backend never falls back to qualifier stripping,
+  legacy PTX lowering, substitutions, or CPU execution.
+- The CuMetal-native registration ABI and runtime lookup path are implemented
+  and versioned. Automated host-job rewriting, generated launch stubs, and
+  embedding descriptors/metallib bytes into the final host object are not yet
+  wired into `cumetalc`; source applications must not yet assume the new backend
+  produces a complete linked executable.
 - The Clang-based `.cu`/PTX registration path supports many simple kernels and
   samples (vectorAdd etc.) and dispatches them through Metal on the Apple GPU.
   CUDA kernel CPU emulation is disabled by default. The legacy llm.c host
@@ -148,8 +165,9 @@ as gaps have been closed.
   auto-skip (77) when absent. When present they exercise real production kernels.
 
 ## AIR / metallib
-- The emitter + validate + runtime loading work for all supported paths and pass
-  the AIR ABI matrix tests where Xcode toolchains are present.
+- Production compilation uses typed MSL and Apple's `metal`/`metallib` tools.
+  The emitter + validate + runtime loading continue to serve legacy paths and
+  AIR ABI regression tests where Xcode toolchains are present.
 - "Full" metadata RE is effectively complete for the kernels we emit; unknown future
   ABI changes will be caught by the xcode regression harness.
 

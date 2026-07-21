@@ -47,7 +47,20 @@ bool is_debug_registration() {
 // (cache_schema + '\0' + ptx_source + '\0' + kernel_name).
 // This avoids recompiling the same kernel across process restarts.
 constexpr std::string_view kRegistrationJitCacheSchema =
-    "cumetal-registration-jit-v4-rms-simd-reduction";
+    "cumetal-registration-jit-v5-ir-msl-schema-1";
+
+std::string registration_lowering_policy() {
+    const char* backend = std::getenv("CUMETAL_PTX_BACKEND");
+    const char* fp64 = std::getenv("CUMETAL_FP64_MODE");
+    std::string policy = "frontend=ptx;backend=";
+    policy += backend != nullptr && backend[0] != '\0' ? backend : "legacy";
+    policy += ";fp64=";
+    policy += fp64 != nullptr && fp64[0] != '\0' ? fp64 : "emulate";
+    policy += ";approx=";
+    policy += cumetal::diag_env_truthy("CUMETAL_ENABLE_APPROX_KERNELS") ? "enabled" : "disabled";
+    policy += ";ir_schema=1;metal_legalization=1;msl=3.1";
+    return policy;
+}
 
 std::uint64_t fnv1a64_registration(const std::uint8_t* bytes, std::size_t size) {
     constexpr std::uint64_t kOffset = 1469598103934665603ull;
@@ -64,9 +77,12 @@ std::string jit_cache_key(const std::string& ptx_source, const std::string& kern
     // Include an explicit schema so changes to lowering semantics or emitted
     // provenance cannot silently reuse stale MSL from an older CuMetal build.
     std::string blob;
-    blob.reserve(kRegistrationJitCacheSchema.size() + 2 + ptx_source.size() +
-                 kernel_name.size());
+    const std::string policy = registration_lowering_policy();
+    blob.reserve(kRegistrationJitCacheSchema.size() + 3 + policy.size() +
+                 ptx_source.size() + kernel_name.size());
     blob.append(kRegistrationJitCacheSchema);
+    blob.push_back('\0');
+    blob.append(policy);
     blob.push_back('\0');
     blob.append(ptx_source);
     blob.push_back('\0');
@@ -656,6 +672,11 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     std::string io_error;
     cumetal::ptx::LowerToMetalOptions lower_to_metal_options;
     lower_to_metal_options.entry_name = kernel_name;
+    if (const char* backend = std::getenv("CUMETAL_PTX_BACKEND");
+        backend != nullptr && std::string_view(backend) == "cumetal-ir") {
+        lower_to_metal_options.backend =
+            cumetal::ptx::PtxMetalBackend::kCumetalIr;
+    }
     const auto lowered_metal = cumetal::ptx::lower_ptx_to_metal_source(ptx_source, lower_to_metal_options);
     if (!lowered_metal.ok) {
         REG_DEBUG("lower_ptx_to_metal_source failed for kernel '%s'", kernel_name.c_str());

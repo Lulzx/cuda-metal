@@ -43,7 +43,7 @@ if ! grep -q 'PASS: CUDA source vector_add produced correct GPU output' "$OUTPUT
     echo "FAIL: CUDA source program did not verify its result"
     exit 1
 fi
-if ! grep -q 'CUMETAL_PROVENANCE .*kernel="vector_add" .*source=generic_ptx device=apple_gpu .*launch_success=true' "$OUTPUT_FILE"; then
+if ! grep -q 'CUMETAL_PROVENANCE .*kernel="vector_add" .*source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu .*launch_success=true' "$OUTPUT_FILE"; then
     echo "FAIL: CUDA source result has no evidence of a Metal GPU dispatch"
     exit 1
 fi

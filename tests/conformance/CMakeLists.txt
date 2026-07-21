@@ -75,7 +75,7 @@ if((CUMETAL_LLMC_DIR_ENV AND EXISTS "${CUMETAL_LLMC_DIR_ENV}") OR CUMETAL_LLMC_D
         SKIP_RETURN_CODE 77
         TIMEOUT 1800
         ENVIRONMENT
-            "CUMETAL_LLMC_DIR=${CUMETAL_LLMC_DIR_ACTIVE};CUMETAL_LLMC_BUILD_CMD=bash ${CMAKE_SOURCE_DIR}/scripts/build_llmc_test_gpt2fp32cu.sh;CUMETAL_LLMC_TEST_CMD=bash ${CMAKE_SOURCE_DIR}/scripts/run_llmc_test_gpt2fp32cu.sh"
+            "CUMETAL_LLMC_DIR=${CUMETAL_LLMC_DIR_ACTIVE};CUMETAL_LLMC_BUILD_CMD=bash ${CMAKE_SOURCE_DIR}/scripts/build_llmc_test_gpt2fp32cu.sh;CUMETAL_LLMC_TEST_CMD=bash ${CMAKE_SOURCE_DIR}/scripts/run_llmc_test_gpt2fp32cu.sh;CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
     )
 else()
     message(STATUS "Skipping llm.c conformance registration (set CUMETAL_LLMC_DIR to enable)")
@@ -110,7 +110,7 @@ if((CUMETAL_LLAMA_DIR_ENV AND EXISTS "${CUMETAL_LLAMA_DIR_ENV}") OR CUMETAL_LLAM
         SKIP_RETURN_CODE 77
         TIMEOUT 600
         ENVIRONMENT
-            "CUMETAL_LLAMA_DIR=${CUMETAL_LLAMA_DIR_ACTIVE};CUMETAL_LLAMA_BUILD_CMD=${CMAKE_SOURCE_DIR}/scripts/build_llama_cpp_cumetal.sh;CUMETAL_LLAMA_NGL=1"
+            "CUMETAL_LLAMA_DIR=${CUMETAL_LLAMA_DIR_ACTIVE};CUMETAL_LLAMA_BUILD_CMD=${CMAKE_SOURCE_DIR}/scripts/build_llama_cpp_cumetal.sh;CUMETAL_LLAMA_NGL=1;CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
     )
 else()
     message(STATUS "Skipping llama.cpp conformance registration (set CUMETAL_LLAMA_DIR to enable)")

@@ -61,6 +61,14 @@ int main() {
         return 1;
     }
 
+    if (cuGetErrorName(CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED, &name) != CUDA_SUCCESS ||
+        std::strcmp(name, "CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED") != 0 ||
+        cuGetErrorString(CUDA_ERROR_PEER_ACCESS_NOT_ENABLED, &description) != CUDA_SUCCESS ||
+        std::strcmp(description, "CUDA_ERROR_PEER_ACCESS_NOT_ENABLED") != 0) {
+        std::fprintf(stderr, "FAIL: peer-access driver error name/string mismatch\n");
+        return 1;
+    }
+
     std::printf("PASS: driver error APIs behave correctly\n");
     return 0;
 }

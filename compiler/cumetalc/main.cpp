@@ -1,11 +1,15 @@
 #include "cumetal/air_emitter/emitter.h"
 #include "cumetal/common/metallib.h"
+#include "cumetal/ir/ir.h"
+#include "cumetal/ir/nvvm_importer.h"
+#include "cumetal/metal/lower_to_msl.h"
 #include "cumetal/ptx/lower_to_metal.h"
 #include "cumetal/ptx/lower_to_llvm.h"
 #include "cumetal/ptx/parser.h"
 
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
@@ -20,6 +24,19 @@
 #endif
 
 namespace {
+
+enum class BackendKind {
+    kLegacy,
+    kCumetalIr,
+};
+
+enum class EmitStage {
+    kMetallib,
+    kLlvm,
+    kCumetalIr,
+    kMetalIr,
+    kMsl,
+};
 
 struct CommandResult {
     bool started = false;
@@ -82,6 +99,8 @@ void print_usage(const char* argv0) {
                  " [--cuda-device] [--cuda-arch sm_XX] [--cuda-clang path]"
                  " [--cuda-inline-threshold value]"
                  " [-I path] [-D name[=value]] [--cuda-include path]"
+                 " [--backend legacy|cumetal-ir]"
+                 " [--emit llvm|cumetal-ir|metal-ir|msl|metallib]"
                  " [--fp64=native|emulate|warn]\n";
 }
 
@@ -153,7 +172,8 @@ bool xcrun_tool_exists(const std::string& tool_name) {
     return result.output[0] == '0';
 }
 
-std::filesystem::path find_cuda_clang(const std::filesystem::path& requested) {
+std::filesystem::path find_cuda_clang(
+    const std::filesystem::path& requested = std::filesystem::path()) {
     if (!requested.empty()) {
         return requested;
     }
@@ -161,15 +181,93 @@ std::filesystem::path find_cuda_clang(const std::filesystem::path& requested) {
         configured != nullptr && configured[0] != '\0') {
         return configured;
     }
-    for (const std::filesystem::path& candidate : {
-             std::filesystem::path("/opt/homebrew/opt/llvm/bin/clang++"),
-             std::filesystem::path("/usr/local/opt/llvm/bin/clang++"),
-         }) {
-        if (std::filesystem::exists(candidate)) {
-            return candidate;
+    if (const char* configured = std::getenv("CUMETAL_CLANG");
+        configured != nullptr && *configured != '\0' &&
+        std::filesystem::exists(configured)) {
+        return configured;
+    }
+    static constexpr const char* kCandidates[] = {
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "/usr/local/opt/llvm/bin/clang++",
+    };
+    for (const char* candidate : kCandidates) {
+        if (std::filesystem::exists(candidate)) return candidate;
+    }
+    const CommandResult found = run_command_capture("command -v clang++ 2>/dev/null");
+    if (found.started && found.exit_code == 0 && !found.output.empty()) {
+        std::string path = found.output;
+        while (!path.empty() && std::isspace(static_cast<unsigned char>(path.back())) != 0) {
+            path.pop_back();
         }
+        if (!path.empty()) return path;
     }
     return {};
+}
+
+std::filesystem::path find_llvm_opt(const std::filesystem::path& clang) {
+    const std::filesystem::path sibling = clang.parent_path() / "opt";
+    if (std::filesystem::exists(sibling)) return sibling;
+    const CommandResult found = run_command_capture("command -v opt 2>/dev/null");
+    if (found.started && found.exit_code == 0 && !found.output.empty()) {
+        std::string path = found.output;
+        while (!path.empty() &&
+               std::isspace(static_cast<unsigned char>(path.back())) != 0) {
+            path.pop_back();
+        }
+        if (!path.empty()) return path;
+    }
+    return {};
+}
+
+std::string ptx_feature_for_arch(std::string_view arch) {
+    if (arch == "sm_90" || arch == "sm_89" || arch == "sm_86" || arch == "sm_80") {
+        return "+ptx70";
+    }
+    if (arch == "sm_78" || arch == "sm_75") return "+ptx63";
+    if (arch == "sm_72" || arch == "sm_70") return "+ptx60";
+    if (arch == "sm_61") return "+ptx50";
+    return {};
+}
+
+std::string extension_for_stage(EmitStage stage) {
+    switch (stage) {
+        case EmitStage::kLlvm: return ".ll";
+        case EmitStage::kCumetalIr: return ".cmir";
+        case EmitStage::kMetalIr: return ".metalir";
+        case EmitStage::kMsl: return ".metal";
+        case EmitStage::kMetallib: return ".metallib";
+    }
+    return ".metallib";
+}
+
+bool write_text_output(const std::filesystem::path& output, std::string_view text,
+                       bool overwrite, std::string* error) {
+    if (std::filesystem::exists(output) && !overwrite) {
+        if (error != nullptr) {
+            *error = "output already exists (pass --overwrite to replace): " +
+                     output.string();
+        }
+        return false;
+    }
+    const std::vector<std::uint8_t> bytes(text.begin(), text.end());
+    return cumetal::common::write_file_bytes(output, bytes, error);
+}
+
+bool emit_inspection_stage(const cumetal::metal::PtxToMslResult& compiled,
+                           EmitStage stage, const std::filesystem::path& output,
+                           bool overwrite, std::string* error) {
+    std::string text;
+    if (stage == EmitStage::kCumetalIr) {
+        text = cumetal::ir::print(compiled.gpu_ir);
+    } else if (stage == EmitStage::kMetalIr) {
+        text = cumetal::ir::print(compiled.metal_ir);
+    } else if (stage == EmitStage::kMsl) {
+        text = compiled.source;
+    } else {
+        if (error != nullptr) *error = "requested stage is not a textual CuMetal output";
+        return false;
+    }
+    return write_text_output(output, text, overwrite, error);
 }
 
 bool try_emit_vector_add_air_ir_from_cu(const std::filesystem::path& input_cu,
@@ -253,6 +351,8 @@ bool try_emit_vector_add_air_ir_from_cu(const std::filesystem::path& input_cu,
 
 int main(int argc, char** argv) {
     cumetal::air_emitter::EmitOptions options;
+    BackendKind backend = BackendKind::kLegacy;
+    EmitStage emit_stage = EmitStage::kMetallib;
     bool mode_set = false;
     bool positional_input_set = false;
     std::string ptx_entry_name;
@@ -310,6 +410,46 @@ int main(int argc, char** argv) {
                 return 2;
             }
             options.kernel_name = argv[++i];
+        } else if (arg == "--backend" || arg.rfind("--backend=", 0) == 0) {
+            std::string value;
+            if (arg == "--backend") {
+                if (i + 1 >= argc) {
+                    std::cerr << "--backend expects legacy or cumetal-ir\n";
+                    return 2;
+                }
+                value = argv[++i];
+            } else {
+                value = arg.substr(std::string("--backend=").size());
+            }
+            if (value == "legacy") {
+                backend = BackendKind::kLegacy;
+            } else if (value == "cumetal-ir") {
+                backend = BackendKind::kCumetalIr;
+            } else {
+                std::cerr << "invalid --backend: " << value
+                          << " (valid: legacy, cumetal-ir)\n";
+                return 2;
+            }
+        } else if (arg == "--emit" || arg.rfind("--emit=", 0) == 0) {
+            std::string value;
+            if (arg == "--emit") {
+                if (i + 1 >= argc) {
+                    std::cerr << "--emit expects llvm, cumetal-ir, metal-ir, msl, or metallib\n";
+                    return 2;
+                }
+                value = argv[++i];
+            } else {
+                value = arg.substr(std::string("--emit=").size());
+            }
+            if (value == "llvm") emit_stage = EmitStage::kLlvm;
+            else if (value == "cumetal-ir") emit_stage = EmitStage::kCumetalIr;
+            else if (value == "metal-ir") emit_stage = EmitStage::kMetalIr;
+            else if (value == "msl") emit_stage = EmitStage::kMsl;
+            else if (value == "metallib") emit_stage = EmitStage::kMetallib;
+            else {
+                std::cerr << "invalid --emit stage: " << value << "\n";
+                return 2;
+            }
         } else if (arg == "--entry") {
             if (i + 1 >= argc) {
                 std::cerr << "--entry expects a value\n";
@@ -399,7 +539,7 @@ int main(int argc, char** argv) {
     }
     if (options.output.empty()) {
         options.output = options.input;
-        options.output.replace_extension(".metallib");
+        options.output.replace_extension(extension_for_stage(emit_stage));
     }
 
     if (!mode_set) {
@@ -487,56 +627,279 @@ int main(int argc, char** argv) {
         const std::string ptx_source(reinterpret_cast<const char*>(ptx_bytes.data()), ptx_bytes.size());
         abi_sidecar = build_ptx_abi_sidecar(ptx_source, ptx_entry_name);
 
-        cumetal::ptx::LowerToMetalOptions lower_to_metal_options;
-        lower_to_metal_options.strict = ptx_strict;
-        lower_to_metal_options.entry_name = ptx_entry_name;
-        const auto lowered_metal =
-            cumetal::ptx::lower_ptx_to_metal_source(std::string_view(ptx_source), lower_to_metal_options);
-        for (const auto& warning : lowered_metal.warnings) {
-            std::cerr << "ptx warning: " << warning << "\n";
-        }
-        if (!lowered_metal.ok) {
-            std::cerr << "cumetalc failed: PTX->Metal lowering failed: " << lowered_metal.error << "\n";
-            return 1;
-        }
-
-        if (lowered_metal.matched && !lowered_metal.metal_source.empty()) {
-            temp_stage_file = make_temp_path(".metal");
-            const std::vector<std::uint8_t> metal_bytes(lowered_metal.metal_source.begin(),
-                                                        lowered_metal.metal_source.end());
-            if (!cumetal::common::write_file_bytes(temp_stage_file, metal_bytes, &io_error)) {
-                std::cerr << "cumetalc failed: failed to write temporary Metal source: "
-                          << io_error << "\n";
-                return 1;
-            }
-            options.input = temp_stage_file;
-            options.kernel_name = lowered_metal.entry_name;
-            temp_files.push_back(temp_stage_file);
-        } else {
+        if (emit_stage == EmitStage::kLlvm) {
             cumetal::ptx::LowerToLlvmOptions lower_options;
             lower_options.strict = ptx_strict;
             lower_options.entry_name = ptx_entry_name;
             lower_options.fp64_mode = ptx_fp64_mode;
-            const auto lowered = cumetal::ptx::lower_ptx_to_llvm_ir(std::string_view(ptx_source), lower_options);
-            for (const auto& warning : lowered.warnings) {
-                std::cerr << "ptx warning: " << warning << "\n";
-            }
-            if (!lowered.ok) {
-                std::cerr << "cumetalc failed: PTX lowering failed: " << lowered.error << "\n";
+            const auto lowered =
+                cumetal::ptx::lower_ptx_to_llvm_ir(std::string_view(ptx_source), lower_options);
+            if (!lowered.ok ||
+                !write_text_output(options.output, lowered.llvm_ir, options.overwrite, &io_error)) {
+                std::cerr << "cumetalc failed: "
+                          << (!lowered.ok ? lowered.error : io_error) << "\n";
                 return 1;
             }
+            std::cout << "wrote " << options.output << "\n";
+            return 0;
+        }
 
-            temp_stage_file = make_temp_path(".ll");
-            const std::vector<std::uint8_t> ll_bytes(lowered.llvm_ir.begin(), lowered.llvm_ir.end());
-            if (!cumetal::common::write_file_bytes(temp_stage_file, ll_bytes, &io_error)) {
-                std::cerr << "cumetalc failed: failed to write temporary LLVM IR: " << io_error << "\n";
+        if (backend == BackendKind::kCumetalIr) {
+            cumetal::metal::PtxToMslOptions compile_options;
+            compile_options.strict = true;
+            compile_options.entry_name = ptx_entry_name;
+            compile_options.source_name = options.input.string();
+            const auto compiled =
+                cumetal::metal::compile_ptx_to_msl(ptx_source, compile_options);
+            for (const std::string& warning : compiled.warnings) {
+                std::cerr << "ptx warning: " << warning << "\n";
+            }
+            if (!compiled.ok) {
+                std::cerr << "cumetalc failed: " << compiled.error << "\n";
+                return 1;
+            }
+            if (emit_stage != EmitStage::kMetallib) {
+                if (!emit_inspection_stage(compiled, emit_stage, options.output,
+                                           options.overwrite, &io_error)) {
+                    std::cerr << "cumetalc failed: " << io_error << "\n";
+                    return 1;
+                }
+                std::cout << "wrote " << options.output << "\n";
+                return 0;
+            }
+            temp_stage_file = make_temp_path(".metal");
+            if (!write_text_output(temp_stage_file, compiled.source, true, &io_error)) {
+                std::cerr << "cumetalc failed: failed to write temporary MSL: "
+                          << io_error << "\n";
                 return 1;
             }
             options.input = temp_stage_file;
-            options.kernel_name = lowered.entry_name;
+            options.kernel_name = compiled.gpu_ir.functions.front().name;
             temp_files.push_back(temp_stage_file);
+        } else {
+            if (emit_stage == EmitStage::kCumetalIr ||
+                emit_stage == EmitStage::kMetalIr) {
+                std::cerr << "cumetalc failed: --emit="
+                          << (emit_stage == EmitStage::kCumetalIr ? "cumetal-ir" : "metal-ir")
+                          << " requires --backend=cumetal-ir\n";
+                return 1;
+            }
+            cumetal::ptx::LowerToMetalOptions lower_to_metal_options;
+            lower_to_metal_options.strict = ptx_strict;
+            lower_to_metal_options.entry_name = ptx_entry_name;
+            const auto lowered_metal =
+                cumetal::ptx::lower_ptx_to_metal_source(
+                    std::string_view(ptx_source), lower_to_metal_options);
+            for (const auto& warning : lowered_metal.warnings) {
+                std::cerr << "ptx warning: " << warning << "\n";
+            }
+            if (!lowered_metal.ok) {
+                std::cerr << "cumetalc failed: PTX->Metal lowering failed: "
+                          << lowered_metal.error << "\n";
+                return 1;
+            }
+            if (emit_stage == EmitStage::kMsl) {
+                if (!lowered_metal.matched ||
+                    !write_text_output(options.output, lowered_metal.metal_source,
+                                       options.overwrite, &io_error)) {
+                    std::cerr << "cumetalc failed: "
+                              << (!lowered_metal.matched
+                                      ? "legacy backend did not produce MSL"
+                                      : io_error)
+                              << "\n";
+                    return 1;
+                }
+                std::cout << "wrote " << options.output << "\n";
+                return 0;
+            }
+            if (lowered_metal.matched && !lowered_metal.metal_source.empty()) {
+                temp_stage_file = make_temp_path(".metal");
+                if (!write_text_output(temp_stage_file, lowered_metal.metal_source,
+                                       true, &io_error)) {
+                    std::cerr << "cumetalc failed: failed to write temporary Metal source: "
+                              << io_error << "\n";
+                    return 1;
+                }
+                options.input = temp_stage_file;
+                options.kernel_name = lowered_metal.entry_name;
+                temp_files.push_back(temp_stage_file);
+            } else {
+                cumetal::ptx::LowerToLlvmOptions lower_options;
+                lower_options.strict = ptx_strict;
+                lower_options.entry_name = ptx_entry_name;
+                lower_options.fp64_mode = ptx_fp64_mode;
+                const auto lowered =
+                    cumetal::ptx::lower_ptx_to_llvm_ir(
+                        std::string_view(ptx_source), lower_options);
+                if (!lowered.ok) {
+                    std::cerr << "cumetalc failed: PTX lowering failed: "
+                              << lowered.error << "\n";
+                    return 1;
+                }
+                temp_stage_file = make_temp_path(".ll");
+                if (!write_text_output(temp_stage_file, lowered.llvm_ir,
+                                       true, &io_error)) {
+                    std::cerr << "cumetalc failed: failed to write temporary LLVM IR: "
+                              << io_error << "\n";
+                    return 1;
+                }
+                options.input = temp_stage_file;
+                options.kernel_name = lowered.entry_name;
+                temp_files.push_back(temp_stage_file);
+            }
+        }
+    } else if (input_ext == ".ll" || input_ext == ".llvm") {
+        if (backend == BackendKind::kCumetalIr) {
+            std::string io_error;
+            const std::vector<std::uint8_t> bytes =
+                cumetal::common::read_file_bytes(options.input, &io_error);
+            if (bytes.empty()) {
+                std::cerr << "cumetalc failed: " << io_error << "\n";
+                return 1;
+            }
+            const std::string llvm_ir(bytes.begin(), bytes.end());
+            const auto compiled =
+                cumetal::metal::compile_nvvm_to_msl(llvm_ir, options.input.string());
+            if (!compiled.ok) {
+                std::cerr << "cumetalc failed: " << compiled.error << "\n";
+                return 1;
+            }
+            if (emit_stage == EmitStage::kLlvm) {
+                if (!write_text_output(options.output, llvm_ir, options.overwrite, &io_error)) {
+                    std::cerr << "cumetalc failed: " << io_error << "\n";
+                    return 1;
+                }
+                std::cout << "wrote " << options.output << "\n";
+                return 0;
+            }
+            if (emit_stage != EmitStage::kMetallib) {
+                if (!emit_inspection_stage(compiled, emit_stage, options.output,
+                                           options.overwrite, &io_error)) {
+                    std::cerr << "cumetalc failed: " << io_error << "\n";
+                    return 1;
+                }
+                std::cout << "wrote " << options.output << "\n";
+                return 0;
+            }
+            temp_stage_file = make_temp_path(".metal");
+            if (!write_text_output(temp_stage_file, compiled.source, true, &io_error)) {
+                std::cerr << "cumetalc failed: " << io_error << "\n";
+                return 1;
+            }
+            options.input = temp_stage_file;
+            options.kernel_name = compiled.gpu_ir.functions.front().name;
+        } else if (emit_stage != EmitStage::kMetallib) {
+            std::cerr << "cumetalc failed: LLVM inspection stages require "
+                         "--backend=cumetal-ir (or use the input file directly)\n";
+            return 1;
         }
     } else if (input_ext == ".cu") {
+        if (backend == BackendKind::kCumetalIr || emit_stage == EmitStage::kLlvm) {
+            const std::filesystem::path clang = find_cuda_clang();
+            if (clang.empty()) {
+                std::cerr << "cumetalc failed: stock Clang with CUDA support was not found; "
+                             "set CUMETAL_CLANG\n";
+                return 1;
+            }
+            if (!cumetal::ir::llvm_frontend_available()) {
+                std::cerr << "cumetalc failed: CuMetal was built without LLVM IRReader support\n";
+                return 1;
+            }
+            const std::filesystem::path original_input = options.input;
+            const std::filesystem::path raw_device_ll =
+                make_temp_path(".raw-device.ll");
+            const std::filesystem::path device_ll = make_temp_path(".device.ll");
+            const std::filesystem::path runtime_api_dir =
+                std::filesystem::path(CUMETAL_SOURCE_DIR) / "runtime" / "api";
+            const std::string arch = cuda_arch;
+            const std::string ptx_feature = ptx_feature_for_arch(arch);
+            std::string command =
+                quote_shell(clang.string()) +
+                " -x cuda --cuda-device-only -std=c++20 -O0 "
+                "-Xclang -disable-O0-optnone -S -emit-llvm "
+                "-gline-tables-only -nocudainc -nocudalib "
+                "--cuda-gpu-arch=" + quote_shell(arch) + " ";
+            if (!ptx_feature.empty()) {
+                command += "-Xclang -target-feature -Xclang " +
+                           quote_shell(ptx_feature) + " ";
+            }
+            command += "-D__CUDACC__=1 -D__NVCC__=1 -I " +
+                       quote_shell(runtime_api_dir.string()) +
+                       " -include cuda_runtime.h " +
+                       quote_shell(original_input.string()) + " -o " +
+                       quote_shell(raw_device_ll.string()) + " 2>&1";
+            const CommandResult clang_result = run_command_capture(command);
+            if (!clang_result.started || clang_result.exit_code != 0) {
+                if (!clang_result.output.empty()) std::cerr << clang_result.output;
+                std::cerr << "cumetalc failed: Clang CUDA device compilation failed\n";
+                return 1;
+            }
+            const std::filesystem::path llvm_opt = find_llvm_opt(clang);
+            if (llvm_opt.empty()) {
+                std::cerr << "cumetalc failed: LLVM opt is required for the "
+                             "conservative device-IR normalization pipeline\n";
+                return 1;
+            }
+            const std::string opt_command =
+                quote_shell(llvm_opt.string()) +
+                " -S -passes=mem2reg,dce,simplifycfg " +
+                quote_shell(raw_device_ll.string()) + " -o " +
+                quote_shell(device_ll.string()) + " 2>&1";
+            const CommandResult opt_result = run_command_capture(opt_command);
+            if (!opt_result.started || opt_result.exit_code != 0) {
+                if (!opt_result.output.empty()) std::cerr << opt_result.output;
+                std::cerr << "cumetalc failed: conservative LLVM device-IR "
+                             "normalization failed\n";
+                return 1;
+            }
+            std::string io_error;
+            const std::vector<std::uint8_t> llvm_bytes =
+                cumetal::common::read_file_bytes(device_ll, &io_error);
+            if (llvm_bytes.empty()) {
+                std::cerr << "cumetalc failed: " << io_error << "\n";
+                return 1;
+            }
+            const std::string llvm_ir(llvm_bytes.begin(), llvm_bytes.end());
+            if (emit_stage == EmitStage::kLlvm) {
+                if (!write_text_output(options.output, llvm_ir, options.overwrite, &io_error)) {
+                    std::cerr << "cumetalc failed: " << io_error << "\n";
+                    return 1;
+                }
+                std::error_code ec;
+                std::filesystem::remove(raw_device_ll, ec);
+                std::filesystem::remove(device_ll, ec);
+                std::cout << "wrote " << options.output << "\n";
+                return 0;
+            }
+            const auto compiled =
+                cumetal::metal::compile_nvvm_to_msl(llvm_ir, original_input.string());
+            if (!compiled.ok) {
+                std::cerr << "cumetalc failed: " << compiled.error << "\n";
+                return 1;
+            }
+            if (emit_stage != EmitStage::kMetallib) {
+                if (!emit_inspection_stage(compiled, emit_stage, options.output,
+                                           options.overwrite, &io_error)) {
+                    std::cerr << "cumetalc failed: " << io_error << "\n";
+                    return 1;
+                }
+                std::error_code ec;
+                std::filesystem::remove(raw_device_ll, ec);
+                std::filesystem::remove(device_ll, ec);
+                std::cout << "wrote " << options.output << "\n";
+                return 0;
+            }
+            temp_stage_file = make_temp_path(".metal");
+            if (!write_text_output(temp_stage_file, compiled.source, true, &io_error)) {
+                std::cerr << "cumetalc failed: " << io_error << "\n";
+                return 1;
+            }
+            std::error_code ec;
+            std::filesystem::remove(raw_device_ll, ec);
+            std::filesystem::remove(device_ll, ec);
+            options.input = temp_stage_file;
+            options.kernel_name = compiled.gpu_ir.functions.front().name;
+        } else {
         const bool needs_fallback_air_ll =
             options.mode == cumetal::air_emitter::EmitMode::kXcrun && !command_exists("llvm-as");
         if (needs_fallback_air_ll) {
@@ -590,6 +953,7 @@ int main(int argc, char** argv) {
 
         options.input = temp_stage_file;
         temp_files.push_back(temp_stage_file);
+        }
         }
     }
 

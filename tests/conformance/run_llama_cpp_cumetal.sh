@@ -17,6 +17,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+BUILD_DIR="${CUMETAL_BUILD_DIR:-${ROOT_DIR}/build}"
 
 # ── resolve llama-cli binary ──────────────────────────────────────────────────
 LLAMA_DIR="${CUMETAL_LLAMA_DIR:-${ROOT_DIR}/../llama.cpp}"
@@ -47,7 +48,7 @@ echo "llama-cli: ${LLAMA_CLI}"
 # only exist when libcumetal is built with the binary shim (the default for
 # non-Release builds). Without them dyld aborts with a bare "Symbol not found".
 # Detect the missing-shim case up front and skip with a clear message.
-CUMETAL_LIB="${ROOT_DIR}/build/libcumetal.dylib"
+CUMETAL_LIB="${BUILD_DIR}/libcumetal.dylib"
 if [[ -f "${CUMETAL_LIB}" ]] && command -v nm >/dev/null 2>&1; then
     # Capture into a variable (no pipe): `nm | grep -q` under `set -o pipefail`
     # can report failure when grep closes the pipe early (SIGPIPE on nm).
@@ -116,7 +117,7 @@ echo "════════════════════════�
 echo ""
 
 # Set up library path so llama-cli resolves libcumetal instead of real CUDA
-export DYLD_LIBRARY_PATH="${ROOT_DIR}/build${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
+export DYLD_LIBRARY_PATH="${BUILD_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
 export CUMETAL_TRACE_GPU=1
 
 OUTPUT_FILE="$(mktemp)"

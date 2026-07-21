@@ -52,7 +52,7 @@ env \
     DYLD_LIBRARY_PATH="${CUMETAL_ROOT}/build${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}" \
     "${SNIPPET}" >"${RUN_LOG}" 2>&1
 
-grep -q 'source=metallib device=apple_gpu.*launch_success=true' "${RUN_LOG}"
+grep -q 'source=metallib.*device=apple_gpu.*launch_success=true' "${RUN_LOG}"
 grep -q 'kernel="sphereNphase_Kernel".*launch_success=true' "${RUN_LOG}"
 grep -q 'kernel="solveStaticBlock".*launch_success=true' "${RUN_LOG}"
 grep -q 'CuMetal GRB mode: gpu' "${RUN_LOG}"

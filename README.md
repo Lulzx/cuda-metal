@@ -40,8 +40,11 @@ Fish shell is detected automatically; `install.sh` writes `set -gx` syntax to
 Execution model
 ---------------
 
-- **Source recompilation** (primary): compile `.cu` or PTX with `cumetalc`, producing
-  a Metal-backed `.metallib`. Link the resulting object against `libcumetal.dylib`.
+- **Source compiler** (primary): stock Clang emits CUDA device LLVM/NVVM IR,
+  which is imported into verified CuMetal GPU IR, legalized to Metal semantics,
+  printed as typed MSL, and compiled to `.metallib` by Apple's supported tools.
+- **PTX compatibility frontend** (secondary): PTX is parsed into CFG/SSA and
+  converges on the same CuMetal GPU IR and Metal backend.
 - **Binary shim** (optional): set `CUMETAL_ENABLE_BINARY_SHIM=ON` at build time to
   also emit `libcuda.dylib`. Software that was pre-linked against NVIDIA `libcuda.dylib`
   will load CuMetal without recompilation.
@@ -51,14 +54,18 @@ Tools
 
 | Tool | Description |
 |------|-------------|
-| `cumetalc` | Compiler driver: `.cu` / `.ptx` / `.ll` → `.metallib` |
-| `cumetal-air-emitter` | Low-level AIR/metallib container writer |
-| `cumetal-ptx2llvm` | PTX text → LLVM IR (AIR-annotated) |
+| `cumetalc` | Compiler driver: `.cu` / `.ptx` / NVVM `.ll` → CuMetal IR / MSL / `.metallib` |
+| `cumetal-air-emitter` | AIR research, inspection, and regression container writer |
+| `cumetal-ptx2llvm` | Legacy PTX-to-LLVM inspection tool |
 | `air_inspect` | Inspect `.metallib` container (kernels, bitcode offsets, metadata) |
 | `air_validate` | Validate `.metallib` structure and optionally xcrun-validate |
 | `cumetal_bench` | Phase 5 performance benchmark: CuMetal vs native Metal |
 
 `cumetalc` flags of note:
+
+- `--backend=cumetal-ir|legacy` — select the verified shared-IR backend or the
+  temporary compatibility backend; there is no automatic fallback
+- `--emit=llvm|cumetal-ir|metal-ir|msl|metallib` — inspect compiler stages
 - `--fp64=native|emulate|warn` — FP64 mode (default: `emulate`; Apple Silicon GPU
   rejects native FP64 in Metal pipelines at runtime)
 - `--entry <name>` — select a single PTX entry point
@@ -109,12 +116,19 @@ Binary shim JIT cache
 The binary-shim registration path (`__cudaRegisterFatBinary`) compiles PTX kernels
 to `.metallib` at first use and caches the result at
 `$CUMETAL_CACHE_DIR/registration-jit/<hash>.metallib`.
-The cache key is the FNV-1a-64 hash of `ptx_source + kernel_name`.
+The cache schema includes the input/kernel identity, selected frontend/backend,
+FP64 and substitution policy, CuMetal IR/MSL/legalization schema versions, and
+toolchain-dependent compilation inputs. Set `CUMETAL_PTX_BACKEND=cumetal-ir` to
+opt into the shared PTX IR backend for compatibility JIT; it will fail explicitly
+instead of retrying the legacy path.
 Cached files survive process restart and `__cudaUnregisterFatBinary` — the second
 process to use the same kernel skips xcrun entirely.
 
 Enable `CUMETAL_DEBUG_REGISTRATION=1` to trace: fatbinary format detection, JIT
 compile vs cache hit, arg-count inference, and symbol registration events.
+
+Compiler architecture and migration boundaries are documented in
+[docs/compiler-architecture.md](./docs/compiler-architecture.md).
 
 Performance
 -----------

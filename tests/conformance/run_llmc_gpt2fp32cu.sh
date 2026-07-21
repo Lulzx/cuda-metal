@@ -32,7 +32,8 @@ fi
 # when the binary shim is enabled (default off in Release builds). Detect the
 # missing-shim case and skip cleanly instead of failing the build/link opaquely.
 CUMETAL_ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CUMETAL_LIB="${CUMETAL_ROOT_DIR}/build/libcumetal.dylib"
+CUMETAL_BUILD_DIR="${CUMETAL_BUILD_DIR:-${CUMETAL_ROOT_DIR}/build}"
+CUMETAL_LIB="${CUMETAL_BUILD_DIR}/libcumetal.dylib"
 if [[ -f "${CUMETAL_LIB}" ]] && command -v nm >/dev/null 2>&1; then
   # Capture into a variable (no pipe): `nm | grep -q` under `set -o pipefail`
   # can report failure when grep closes the pipe early (SIGPIPE on nm).
@@ -96,7 +97,7 @@ if rg -q "CUMETAL_LLMC_EMULATION" "$OUTPUT_FILE"; then
 fi
 
 if [[ "$REQUIRE_NO_EMULATION" == "1" ]]; then
-  if ! rg -q 'CUMETAL_PROVENANCE .*source=(generic_ptx|specialized_msl|metallib) device=apple_gpu .*launch_success=true' \
+  if ! rg -q 'CUMETAL_PROVENANCE .*source=(generic_ptx|specialized_msl|metallib) provenance=(generic_ptx_lowering|library_substitution|workload_specialization|precompiled_metallib) semantic_quality=(exact|tolerance_bounded|semantic_emulation|performance_degraded) device=apple_gpu .*launch_success=true' \
       "$OUTPUT_FILE"; then
     echo "FAIL: llm.c recorded no successful Apple-GPU kernel launch"
     exit 1

@@ -49,6 +49,8 @@ struct LaunchConfig {
     dim3 grid;
     dim3 block;
     std::size_t shared_memory_bytes = 0;
+    std::string provenance;
+    std::string semantic_quality;
 };
 
 cudaError_t initialize(std::string* error_message);

@@ -44,6 +44,23 @@ bool env_truthy(const char* value) {
     return lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on";
 }
 
+const char* legacy_source_for_provenance(const std::string& provenance) {
+    if (provenance == "generic_nvvm_lowering") return "generic_nvvm";
+    if (provenance == "generic_ptx_lowering") return "generic_ptx";
+    if (provenance == "library_substitution") return "specialized_msl";
+    if (provenance == "workload_specialization") return "specialized_msl";
+    if (provenance == "precompiled_metallib") return "metallib";
+    if (provenance == "cpu_fallback") return "cpu_fallback";
+    if (provenance == "unsupported") return "stub";
+    return "unknown";
+}
+
+const char* semantic_quality_for_provenance(const std::string& provenance) {
+    if (provenance == "cpu_fallback") return "cpu_fallback";
+    if (provenance == "unsupported") return "unsupported";
+    return "exact";
+}
+
 std::size_t parse_size_env(const char* value, std::size_t fallback) {
     if (value == nullptr || value[0] == '\0') {
         return fallback;
@@ -423,12 +440,20 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
                 return nil;
             }
             std::string lowering_source = "unknown";
-            if ([src containsString:@"// cumetal-lowering: generic_ptx"]) {
-                lowering_source = "generic_ptx";
+            if ([src containsString:@"// cumetal-provenance: generic_nvvm_lowering"]) {
+                lowering_source = "generic_nvvm_lowering";
+            } else if ([src containsString:@"// cumetal-provenance: generic_ptx_lowering"]) {
+                lowering_source = "generic_ptx_lowering";
+            } else if ([src containsString:@"// cumetal-provenance: library_substitution"]) {
+                lowering_source = "library_substitution";
+            } else if ([src containsString:@"// cumetal-provenance: workload_specialization"]) {
+                lowering_source = "workload_specialization";
+            } else if ([src containsString:@"// cumetal-lowering: generic_ptx"]) {
+                lowering_source = "generic_ptx_lowering";
             } else if ([src containsString:@"// cumetal-lowering: specialized_msl"]) {
-                lowering_source = "specialized_msl";
+                lowering_source = "workload_specialization";
             } else if ([src containsString:@"// cumetal-lowering: approximate_stub"]) {
-                lowering_source = "stub";
+                lowering_source = "unsupported";
             }
             backend.library_lowering_source[metallib_path] = lowering_source;
             backend.library_cache.emplace(metallib_path, srcLib);
@@ -462,7 +487,7 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
         }
 
         backend.library_cache.emplace(metallib_path, library);
-        backend.library_lowering_source[metallib_path] = "metallib";
+        backend.library_lowering_source[metallib_path] = "precompiled_metallib";
         return library;
     }
 }
@@ -1232,6 +1257,9 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         if (source_it != backend.library_lowering_source.end()) {
             lowering_source = source_it->second;
         }
+        if (!config.provenance.empty()) {
+            lowering_source = config.provenance;
+        }
 
         if (stream_impl != nullptr) {
             queue = stream_impl->queue();
@@ -1311,6 +1339,12 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         if (trace_async) {
             const std::string trace_kernel = kernel_name;
             const std::string trace_source = lowering_source;
+            const std::string trace_legacy_source =
+                legacy_source_for_provenance(lowering_source);
+            const std::string trace_semantic_quality =
+                config.semantic_quality.empty()
+                    ? semantic_quality_for_provenance(lowering_source)
+                    : config.semantic_quality;
             NSString* trace_device_name = [[backend.device name] description];
             const bool trace_cache_hit = compile_cache_hit;
             const unsigned int grid_x = config.grid.x;
@@ -1333,11 +1367,14 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                 std::fprintf(
                     stderr,
                     "CUMETAL_PROVENANCE event=kernel_launch kernel=\"%s\" "
-                    "source=%s device=apple_gpu device_name=\"%s\" "
+                    "source=%s provenance=%s semantic_quality=%s "
+                    "device=apple_gpu device_name=\"%s\" "
                     "compile_cache_hit=%s launch_success=%s duration_ns=%lld "
                     "grid=(%u,%u,%u) block=(%u,%u,%u) unsupported_reason=\"\"\n",
                     trace_kernel.c_str(),
+                    trace_legacy_source.c_str(),
                     trace_source.c_str(),
+                    trace_semantic_quality.c_str(),
                     device_name != nullptr ? device_name : "Apple Metal GPU",
                     trace_cache_hit ? "true" : "false",
                     completion_status == cudaSuccess ? "true" : "false",
@@ -1365,6 +1402,12 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             check_command_buffer_status(command_buffer, error_message);
         if (env_truthy(std::getenv("CUMETAL_TRACE_GPU"))) {
             const char* device_name = [[[backend.device name] description] UTF8String];
+            const char* legacy_source =
+                legacy_source_for_provenance(lowering_source);
+            const std::string semantic_quality =
+                config.semantic_quality.empty()
+                    ? semantic_quality_for_provenance(lowering_source)
+                    : config.semantic_quality;
             const double duration_seconds =
                 [command_buffer GPUEndTime] - [command_buffer GPUStartTime];
             const long long duration_ns =
@@ -1373,11 +1416,14 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                     : -1;
             std::fprintf(stderr,
                          "CUMETAL_PROVENANCE event=kernel_launch kernel=\"%s\" "
-                         "source=%s device=apple_gpu device_name=\"%s\" "
+                         "source=%s provenance=%s semantic_quality=%s "
+                         "device=apple_gpu device_name=\"%s\" "
                          "compile_cache_hit=%s launch_success=%s duration_ns=%lld "
                          "grid=(%u,%u,%u) block=(%u,%u,%u) unsupported_reason=\"\"\n",
                          kernel_name.c_str(),
+                         legacy_source,
                          lowering_source.c_str(),
+                         semantic_quality.c_str(),
                          device_name != nullptr ? device_name : "Apple Metal GPU",
                          compile_cache_hit ? "true" : "false",
                          completion_status == cudaSuccess ? "true" : "false",

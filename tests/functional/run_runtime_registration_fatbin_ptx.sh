@@ -24,7 +24,7 @@ fi
 if [[ $STATUS -ne 0 ]]; then
   exit "$STATUS"
 fi
-if ! grep -q 'CUMETAL_PROVENANCE .*source=generic_ptx device=apple_gpu .*launch_success=true' "$OUTPUT_FILE"; then
+if ! grep -q 'CUMETAL_PROVENANCE .*source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu .*launch_success=true' "$OUTPUT_FILE"; then
   echo "FAIL: correct output was produced without evidence of a Metal GPU dispatch"
   exit 1
 fi
