@@ -17,6 +17,7 @@ int main(int argc, char** argv) {
     CUmodule module = nullptr;
     CUfunction kernel = nullptr;
     CUdeviceptr values = 0;
+    void* host_values = nullptr;
     CUdeviceptr descriptor = 0;
     CUdeviceptr output = 0;
     float input = 7.0f;
@@ -28,15 +29,17 @@ int main(int argc, char** argv) {
         cuCtxCreate(&context, 0, device) != CUDA_SUCCESS ||
         cuModuleLoad(&module, argv[1]) != CUDA_SUCCESS ||
         cuModuleGetFunction(&kernel, module, "nested_device_pointer") != CUDA_SUCCESS ||
-        cuMemAlloc(&values, sizeof(input)) != CUDA_SUCCESS ||
+        cuMemHostAlloc(&host_values, 2 * sizeof(input), CU_MEMHOSTALLOC_DEVICEMAP) != CUDA_SUCCESS ||
+        cuMemHostGetDevicePointer(
+            &values, static_cast<float*>(host_values) + 1, 0) != CUDA_SUCCESS ||
         cuMemAlloc(&descriptor, sizeof(NestedPointerDescriptor)) != CUDA_SUCCESS ||
         cuMemAlloc(&output, sizeof(result)) != CUDA_SUCCESS) {
         return 1;
     }
 
     const NestedPointerDescriptor host_descriptor{values};
-    if (cuMemcpyHtoD(values, &input, sizeof(input)) != CUDA_SUCCESS ||
-        cuMemcpyHtoD(descriptor, &host_descriptor, sizeof(host_descriptor)) != CUDA_SUCCESS) {
+    static_cast<float*>(host_values)[1] = input;
+    if (cuMemcpyHtoD(descriptor, &host_descriptor, sizeof(host_descriptor)) != CUDA_SUCCESS) {
         return 1;
     }
 
@@ -54,7 +57,7 @@ int main(int argc, char** argv) {
 
     cuMemFree(output);
     cuMemFree(descriptor);
-    cuMemFree(values);
+    cuMemFreeHost(host_values);
     cuModuleUnload(module);
     cuCtxDestroy(context);
     return 0;

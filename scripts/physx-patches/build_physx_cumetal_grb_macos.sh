@@ -53,7 +53,13 @@ env \
     "${SNIPPET}" >"${RUN_LOG}" 2>&1
 
 grep -q 'source=metallib device=apple_gpu.*launch_success=true' "${RUN_LOG}"
-grep -q 'CuMetal GRB final velocity: 0 -' "${RUN_LOG}"
+grep -q 'kernel="sphereNphase_Kernel".*launch_success=true' "${RUN_LOG}"
+grep -q 'kernel="solveStaticBlock".*launch_success=true' "${RUN_LOG}"
+grep -q 'CuMetal GRB mode: gpu' "${RUN_LOG}"
 grep -q 'SnippetHelloGRB done.' "${RUN_LOG}"
+if grep -qi 'internal error\|failed to create compute pipeline' "${RUN_LOG}"; then
+    echo "FAIL: PhysX GRB GPU log contains an internal runtime error" >&2
+    exit 1
+fi
 tail -3 "${RUN_LOG}"
 echo "PASS: PhysX SnippetHelloGRB executed GPU dynamics through CuMetal"

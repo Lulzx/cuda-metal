@@ -42,13 +42,13 @@ as gaps have been closed.
 - Binary-shim fatbinary support: CMTL envelopes, raw PTX, basic FatBinary/FatBinary2/3
   PTX wrappers supported. Full NVCC fatbinary variants, complex symbol layouts, or SASS-only
   images not supported (SASS never was; per spec).
-- PhysX 5.6 reduced GRB coverage is currently limited to the 83-kernel
-  sphere/plane PGS manifest. CPU and GPU transforms match through the
-  deterministic 30-step free-fall conformance window. The CPU-broadphase
-  configuration does not yet deliver the later sphere/plane contact through
-  the selected GPU narrowphase path, so the GPU sphere falls through the plane
-  after contact while CPU PhysX resolves it. This is a subset/integration gap,
-  not solver chaos or a cross-threadgroup synchronization issue.
+- PhysX 5.6 reduced GRB coverage is limited to the 83-kernel sphere/plane PGS
+  manifest and a single rigid/static, normal-only resting contact. The CuMetal
+  patch serializes several partial-warp scans and omits friction-patch
+  correlation, joints, articulations, multi-body batching, and user impulse
+  limits. General falling-contact and chaotic long-run solver conformance are
+  not claimed. The 30-step resting-contact gate matches CPU transforms within
+  `1e-3` relative tolerance.
 - PhysX's warp-swizzled `preIntegration` path requires exact partial-mask
   semantics. Patch 0005 selects a body-per-thread equivalent under
   `PX_CUMETAL`; upstream CUDA builds retain the original kernel.

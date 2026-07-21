@@ -1,0 +1,591 @@
+diff --git a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+index e4c8f55..cec0d87 100644
+--- a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
++++ b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+@@ -134,7 +134,7 @@ void initPhysics(bool useGpu)
+ 	PxRigidStatic* groundPlane = PxCreatePlane(*gPhysics, PxPlane(0,1,0,0), *gMaterial);
+ 	gScene->addActor(*groundPlane);
+ 
+-	gBall = createDynamic(PxTransform(PxVec3(0, 10, 0)), PxSphereGeometry(1));
++	gBall = createDynamic(PxTransform(PxVec3(0, 1, 0)), PxSphereGeometry(1));
+ 	PxRigidBodyExt::updateMassAndInertia(*gBall, 10.0f);
+ }
+ 
+error: Could not access '/tmp/physx-patch-base.KJ33MQ/physx/source/cudamanager/src/CuMetalKernelInitStubs.cpp'
+diff --git a/physx/source/gpucommon/src/CUDA/MemCopyBalanced.cu b/physx/source/gpucommon/src/CUDA/MemCopyBalanced.cu
+index 8ff5a98..7dfa4fb 100644
+--- a/physx/source/gpucommon/src/CUDA/MemCopyBalanced.cu
++++ b/physx/source/gpucommon/src/CUDA/MemCopyBalanced.cu
+@@ -79,10 +79,26 @@ void MemCopyBalanced(
+ 	PxU32								count
+ )
+ {
++#if PX_CUMETAL
++	// CuMetal's selected GRB path uses native Metal GPU addresses for both
++	// mapped host allocations and device allocations.  Keep the descriptor
++	// walk scalar here: the CUDA implementation's shared descriptor staging
++	// and four-warp layout are only a load-balancing optimization.
++	if (blockIdx.x < count && threadIdx.x == 0 && threadIdx.y == 0)
++	{
++		const PxgCopyManager::CopyDesc copyDesc = desc[blockIdx.x];
++		const PxU32* srcPtr = reinterpret_cast<const PxU32*>(copyDesc.source);
++		PxU32* dstPtr = reinterpret_cast<PxU32*>(copyDesc.dest);
++		const PxU32 size = PxU32(copyDesc.bytes / sizeof(PxU32));
++		for (PxU32 i = 0; i < size; ++i)
++			dstPtr[i] = srcPtr[i];
++	}
++#else
+ 	copyBalanced<COPY_KERNEL_WARPS_PER_BLOCK>(
+ 		desc,
+ 		count
+ 		);
++#endif
+ }
+ 
+ extern "C" __global__ void clampMaxValue(PxU32* value, const PxU32 maxValue)
+diff --git a/physx/source/gpunarrowphase/src/CUDA/cudaGJKEPA.cu b/physx/source/gpunarrowphase/src/CUDA/cudaGJKEPA.cu
+index b157701..b2e1637 100644
+--- a/physx/source/gpunarrowphase/src/CUDA/cudaGJKEPA.cu
++++ b/physx/source/gpunarrowphase/src/CUDA/cudaGJKEPA.cu
+@@ -1471,6 +1471,12 @@ extern "C" __global__ void prepareLostFoundPairs_Stage1(const PxU32* PX_RESTRICT
+ 															 PxU32 numPairs)
+ 	
+ {
++#if PX_CUMETAL
++	PX_UNUSED(inputFlagsArray);
++	PX_UNUSED(tempRunsumArray);
++	PX_UNUSED(blockAccumulationArray);
++	PX_UNUSED(numPairs);
++#else
+   	ReadArrayFunctor<PxU32> readF(inputFlagsArray);
+ 	WriteArrayFunctor<PxU32> writeF(tempRunsumArray);
+ 	scanKernel1of2<PxgNarrowPhaseBlockDims::COMPACT_LOST_FOUND_PAIRS, PxgNarrowPhaseGridDims::COMPACT_LOST_FOUND_PAIRS,
+@@ -1478,7 +1484,8 @@ extern "C" __global__ void prepareLostFoundPairs_Stage1(const PxU32* PX_RESTRICT
+ 														readF,
+ 														writeF,
+ 														2 * numPairs,
+-														blockAccumulationArray);
++												blockAccumulationArray);
++#endif
+ }
+ 
+ class CompactContactManagersFunctor
+@@ -1540,6 +1547,32 @@ extern "C" __global__ void prepareLostFoundPairs_Stage2(
+ 															PxU32 numPairs,
+ 															PxsContactManager** PX_RESTRICT contactManagerArray)
+ {
++#if PX_CUMETAL
++	PX_UNUSED(tempRunsumArray);
++	PX_UNUSED(blockAccumulationArray);
++	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0)
++	{
++		PxU32 outputCount = 0;
++		PxU32 lostStart = 0;
++		for (PxU32 idx = 0; idx < 2 * numPairs; ++idx)
++		{
++			if (idx == numPairs)
++				lostStart = outputCount;
++
++			if (inputFlagsArray[idx])
++			{
++				const PxU32 inputIndex = idx % numPairs;
++				compactedOutputManagers[outputCount].nbPatches = allOutputManagers[inputIndex].nbPatches;
++				compactedOutputManagers[outputCount].prevPatches = allOutputManagers[inputIndex].prevPatches;
++				compactedOutputManagers[outputCount].statusFlag = allOutputManagers[inputIndex].statusFlag;
++				outputManagersPtrs[outputCount] = contactManagerArray[inputIndex];
++				++outputCount;
++			}
++		}
++		lostAndTotalReportedPairsCount->x = lostStart;
++		lostAndTotalReportedPairsCount->y = outputCount;
++	}
++#else
+ 	ReadArrayFunctor<PxU32> readF(tempRunsumArray);
+ 	CompactContactManagersFunctor contactF(inputFlagsArray,
+ 											allOutputManagers,
+@@ -1555,6 +1588,7 @@ extern "C" __global__ void prepareLostFoundPairs_Stage2(
+ 											writeF,
+ 											2 * numPairs,
+ 											blockAccumulationArray);
++#endif
+ }
+ 
+ 
+@@ -3229,4 +3263,3 @@ extern "C" __global__ void convexPlaneNphase_Kernel(
+ 		forceBytesLimit,
+ 		toleranceLength);
+ }
+-
+diff --git a/physx/source/gpusolver/src/CUDA/constraintBlockPrePrep.cu b/physx/source/gpusolver/src/CUDA/constraintBlockPrePrep.cu
+index 9eba341..6ff222e 100644
+--- a/physx/source/gpusolver/src/CUDA/constraintBlockPrePrep.cu
++++ b/physx/source/gpusolver/src/CUDA/constraintBlockPrePrep.cu
+@@ -121,6 +121,71 @@ static __device__ PxU32 createSolverContactConstraintDescsFromPatchWithSharedMem
+ 	PxContactPatch* gContactPatch, PxContact* contactPoints, PxU32 endIndex,
+ 	PxU32 prevFrictionPatchCount, PxU32& contactStartIndex, PxU32 numActiveThreads)
+ {  
++	#if PX_CUMETAL
++	PX_UNUSED(numActiveThreads);
++	if(threadIndex >= endIndex)
++		return 0;
++
++	PxgMaterialContactData data = {};
++	PxU32 numContacts = 0;
++	PxU32 stride = 1;
++	if(gContactPatch)
++	{
++		ContactPatch* contactPatch = reinterpret_cast<ContactPatch*>(gContactPatch);
++		const PxU32 flags = workUnit.mFlags[threadIndex];
++		const PxU32 internalFlags = contactPatch->internalFlags;
++		if((internalFlags & PxContactPatch::eFORCE_NO_RESPONSE) == 0)
++		{
++			contactPoints += contactPatch->startContactIndex;
++			if(internalFlags & PxContactPatch::eCOMPRESSED_MODIFIED_CONTACT)
++			{
++				contactPoints += contactPatch->startContactIndex;
++				stride = 2;
++			}
++			numContacts = contactPatch->nbContacts;
++			contactStartIndex = contactPatch->startContactIndex;
++			float4 massScale = make_float4(contactPatch->mMassModification.mInvMassScale0,
++				contactPatch->mMassModification.mInvInertiaScale0,
++				contactPatch->mMassModification.mInvMassScale1,
++				contactPatch->mMassModification.mInvInertiaScale1);
++			if(flags & PxgNpWorkUnitFlag::eDOMINANCE_0)
++				massScale.x = massScale.y = 0.0f;
++			if(flags & PxgNpWorkUnitFlag::eDOMINANCE_1)
++				massScale.z = massScale.w = 0.0f;
++			prepData.mInvMassScale[threadIndex].lin0X_ang0Y_lin1Z_ang1W = massScale;
++			prepData.normal_restitutionW[threadIndex] = make_float4(contactPatch->normal.x,
++				contactPatch->normal.y, contactPatch->normal.z, contactPatch->restitution);
++			prepData.damping[threadIndex] = contactPatch->damping;
++			data.dynamicFriction = contactPatch->dynamicFriction;
++			data.staticFriction = contactPatch->staticFriction;
++			PxU8 solverFlags = 0;
++			if((internalFlags & PxContactPatch::eHAS_TARGET_VELOCITY) ||
++				(flags & PxgNpWorkUnitFlag::eDISABLE_STRONG_FRICTION))
++				solverFlags |= PxgSolverContactFlags::ePER_POINT_FRICTION;
++			if(flags & PxgNpWorkUnitFlag::eFORCE_THRESHOLD)
++				solverFlags |= PxgSolverContactFlags::eHAS_FORCE_THRESHOLDS;
++			if(contactPatch->materialFlags & PxMaterialFlag::eDISABLE_FRICTION)
++				solverFlags |= PxgSolverContactFlags::eDISABLE_FRICTION;
++			if(contactPatch->materialFlags & PxMaterialFlag::eCOMPLIANT_ACCELERATION_SPRING)
++				solverFlags |= PxgSolverContactFlags::eCOMPLIANT_ACCELERATION_SPRING;
++			data.mSolverFlags = solverFlags;
++		}
++	}
++	data.mNumContacts = numContacts & 0xff;
++	data.prevFrictionPatchCount = PxU8(prevFrictionPatchCount);
++	data.restDistance = workUnit.mRestDistance[threadIndex];
++	reinterpret_cast<float4&>(prepData.contactData[threadIndex]) = reinterpret_cast<float4&>(data);
++
++	const float4* packedContacts = reinterpret_cast<const float4*>(contactPoints);
++	for(PxU32 i = 0; i < numContacts; ++i)
++	{
++		PxgBlockContactPoint& point = blockContactPoints[i];
++		point.point_separationW[threadIndex] = packedContacts[i * stride];
++		point.targetVel_maxImpulseW[threadIndex] = stride == 1 ?
++			make_float4(0.f, 0.f, 0.f, PX_MAX_REAL) : packedContacts[i * stride + 1];
++	}
++	return 0;
++	#else
+ 	__shared__ void* srcPatch[PxgKernelBlockDim::CONSTRAINT_PREPREP_BLOCK];
+ 	__shared__ PxU32 shPatchBuff[PxgKernelBlockDim::CONSTRAINT_PREPREP_BLOCK][16+1]; //+1 to avoid bank conflicts!
+ 	//if(threadIndex >= startIndex && threadIndex < endIndex)
+@@ -323,6 +388,7 @@ static __device__ PxU32 createSolverContactConstraintDescsFromPatchWithSharedMem
+ 	}
+ 
+ 	return 0;
++	#endif
+ }
+ 
+ //Ks - magic structs to try and take advantage of aligned loads...
+@@ -741,6 +807,9 @@ extern "C" __global__ void constraintContactBlockPrePrepLaunch(PxgPrePrepDesc* g
+ {
+ 	__shared__ PxgBlockContactPoint* volatile blockContactPoints[PxgKernelBlockDim::CONSTRAINT_PREPREP_BLOCK/32];
+ 
++	#if PX_CUMETAL
++	PxgPrePrepDesc& shDesc = *gDesc;
++	#else
+ 	__shared__ PxgPrePrepDesc shDesc;
+ 
+ 	/*if(threadIdx.x < (sizeof(PxgPrePrepDesc)/sizeof(PxU32)))
+@@ -751,7 +820,8 @@ extern "C" __global__ void constraintContactBlockPrePrepLaunch(PxgPrePrepDesc* g
+ 
+ 	warpCopy<PxU32>((PxU32*)&shDesc, (PxU32*)gDesc, sizeof(PxgPrePrepDesc));
+ 
+-	__syncthreads();	
++	__syncthreads();
++	#endif
+ 
+ 	//KS - TODO - is this the same as the count in the island? It should be, but need to make sure!
+ 	const PxU32 nbArticulations = shDesc.mTotalActiveArticulations;
+@@ -779,11 +849,19 @@ extern "C" __global__ void constraintContactBlockPrePrepLaunch(PxgPrePrepDesc* g
+ 	//total numbers of warps in all blocks
+ //	const PxU32 totalNumWarps = blockStride * gridDim.x;
+ 
++	#if PX_CUMETAL
++	const PxU32 numBatches = gDesc->numBatches;
++	const PxU32 numStaticBatches = gDesc->numStaticBatches;
++	const PxU32 numArtiBatches = gDesc->numArtiBatches;
++	const PxU32 numArtiStaticBatches = gDesc->numArtiStaticBatches;
++	const PxU32 numArtiSelfBatches = gDesc->numArtiSelfBatches;
++	#else
+ 	const PxU32 numBatches = shDesc.numBatches;
+ 	const PxU32 numStaticBatches = shDesc.numStaticBatches;
+ 	const PxU32 numArtiBatches = shDesc.numArtiBatches;
+ 	const PxU32 numArtiStaticBatches = shDesc.numArtiStaticBatches;
+ 	const PxU32 numArtiSelfBatches = shDesc.numArtiSelfBatches;
++	#endif
+ 	const PxU32 dynamicBatchEnd = numBatches + numArtiBatches;
+ 	const PxU32 totalStaticPlusDynamic = dynamicBatchEnd + numArtiStaticBatches;
+ 	const PxU32 totalBatches = totalStaticPlusDynamic + numArtiSelfBatches + numStaticBatches;
+@@ -798,8 +876,13 @@ extern "C" __global__ void constraintContactBlockPrePrepLaunch(PxgPrePrepDesc* g
+ 	{
+ 		const PxI32 numActiveWarpsInBlock = PxClamp(PxI32(totalBatches) - PxI32(blockIdx.x * blockStride), 0, PxI32(blockStride));
+ 
++		#if PX_CUMETAL
++		PxgBlockConstraintBatch& batch = gDesc->blockBatches[a];
++		PxgConstraintBatchHeader batchHeader = gDesc->mBatchHeaders[a];
++		#else
+ 		PxgBlockConstraintBatch& batch = shDesc.blockBatches[a];	
+ 		PxgConstraintBatchHeader batchHeader = shDesc.mBatchHeaders[a];
++		#endif
+ 		
+ 		PxU32 conType = batchHeader.constraintType;
+ 
+@@ -1004,7 +1087,11 @@ extern "C" __global__ void constraintContactBlockPrePrepLaunch(PxgPrePrepDesc* g
+ 			//accumulator[threadIdx.x] = contactCount;
+ 			//__syncwarp();
+ 
++			#if PX_CUMETAL
++			PxU32 maxCount = contactCount;
++			#else
+ 			PxU32 maxCount = warpReduction<MaxOpPxU32, PxU32>(FULL_MASK, contactCount);
++			#endif
+ 
+ 			
+ 			if(threadIndexInWarp == 0)
+@@ -1475,6 +1562,24 @@ void rigidSumInternalContactAndJointBatches1(
+ 	PxgPrePrepDesc* PX_RESTRICT prePrepDesc,
+ 	const PxU32 nbBodies)
+ {
++	#if PX_CUMETAL
++	// CuMetal's partial-warp scan emulation cannot preserve the hierarchical
++	// 512-thread reduction used below.  The selected GRB path is tiny, so leave
++	// the staging buffers deterministic and let stage 2 build static batches
++	// serially.
++	if(blockIdx.x == 0 && threadIdx.x == 0)
++	{
++		for(PxU32 i = 0; i < 32; ++i)
++		{
++			prePrepDesc->mTempContactUniqueIndices[i] = 0;
++			prePrepDesc->mTempConstraintUniqueIndices[i] = 0;
++			prePrepDesc->mTempContactBlockHeader[i] = 0;
++			prePrepDesc->mTempConstraintBlockHeader[i] = 0;
++		}
++	}
++	PX_UNUSED(nbBodies);
++	return;
++	#endif
+ 
+ 	const PxU32 numThreadsPerBlock = PxgKernelBlockDim::COMPUTE_STATIC_CONTACT_CONSTRAINT_COUNT;
+ 
+@@ -1612,6 +1717,47 @@ void rigidSumInternalContactAndJointBatches2(
+ 	PxgConstraintPrepareDesc* constraintPrepDesc, 
+ 	const PxU32 nbBodies)
+ {
++	#if PX_CUMETAL
++	if(blockIdx.x == 0 && threadIdx.x == 0)
++	{
++		const PxU32 batchOffset = prePrepDesc->numBatches + prePrepDesc->numArtiBatches +
++			prePrepDesc->numArtiSelfBatches + prePrepDesc->numArtiStaticBatches;
++		const PxU32 uniqueOffset = prePrepDesc->numTotalContacts;
++		const PxU32 contactBatchOffset = prePrepDesc->artiStaticContactBatchOffset +
++			constraintPrepDesc->numArtiStaticContactBatches + constraintPrepDesc->numArtiSelfContactBatches;
++		PxU32 batchCount = 0;
++		PxU32 uniqueCount = 0;
++		for(PxU32 body = 0; body < nbBodies; ++body)
++		{
++			const PxU32 count = prePrepDesc->mRigidStaticContactCounts[body];
++			prePrepDesc->mRigidStaticContactStartIndices[body] = batchOffset + batchCount;
++			prePrepDesc->mRigidStaticConstraintStartIndices[body] = batchOffset + batchCount + count;
++			for(PxU32 i = 0; i < count; ++i)
++			{
++				const PxU32 outputBatch = batchOffset + batchCount;
++				prePrepDesc->mContactUniqueIndices[uniqueOffset + uniqueCount] =
++					prePrepDesc->mRigidStaticContactIndices[body + nbBodies * i];
++				PxgConstraintBatchHeader header;
++				header.mDescStride = 1;
++				header.constraintType = PxgSolverConstraintDesc::eCONTACT;
++				header.mConstraintBatchIndex = contactBatchOffset + batchCount;
++				header.mStartPartitionIndex = uniqueOffset + uniqueCount;
++				header.mask = 1;
++				prePrepDesc->mBatchHeaders[outputBatch] = header;
++				constraintPrepDesc->contactConstraintBatchIndices[
++					constraintPrepDesc->numContactBatches + batchCount] = outputBatch;
++				++batchCount;
++				++uniqueCount;
++			}
++		}
++		prePrepDesc->numStaticBatches = batchCount;
++		constraintPrepDesc->numStaticContactBatches = batchCount;
++		constraintPrepDesc->numStatic1dConstraintBatches = 0;
++		constraintPrepDesc->numStaticBatches = batchCount;
++		solverCoreDesc->islandContextPool[0].mStaticRigidBatchCount = batchCount;
++	}
++	return;
++	#endif
+ 
+ 	const PxU32 numThreadsPerBlock = PxgKernelBlockDim::COMPUTE_STATIC_CONTACT_CONSTRAINT_COUNT;
+ 
+@@ -1954,4 +2100,3 @@ void rigidSumInternalContactAndJointBatches2(
+ 		}
+ 	}
+ }
+-
+diff --git a/physx/source/gpusolver/src/CUDA/constraintBlockPrep.cu b/physx/source/gpusolver/src/CUDA/constraintBlockPrep.cu
+index d91f9fc..137a52d 100644
+--- a/physx/source/gpusolver/src/CUDA/constraintBlockPrep.cu
++++ b/physx/source/gpusolver/src/CUDA/constraintBlockPrep.cu
+@@ -240,6 +240,25 @@ extern "C" __global__ void contactConstraintBlockPrepareParallelLaunch(
+ 			constraintPrepDesc->numContactBatches, constraintPrepDesc->numStaticContactBatches, constraintPrepDesc);
+ 	}*/
+ 
++	#if PX_CUMETAL
++	PxgSolverBodyData* solverBodyDatas = constraintPrepDesc->solverBodyDataPool;
++	PxgSolverTxIData* solverTxIDatas = constraintPrepDesc->solverBodyTxIDataPool;
++	PxgBlockSolverContactHeader* contactHeaders = sharedDesc->iterativeData.blockContactHeaders;
++	PxgBlockSolverFrictionHeader* frictionHeaders = sharedDesc->iterativeData.blockFrictionHeaders;
++	PxgBlockSolverContactPoint* contactPoints = sharedDesc->iterativeData.blockContactPoints;
++	PxgBlockSolverContactFriction* frictions = sharedDesc->iterativeData.blockFrictions;
++	PxU32* batchIndices = constraintPrepDesc->contactConstraintBatchIndices;
++	PxgBlockFrictionIndex* frictionIndices = constraintPrepDesc->blockCurrentFrictionIndices;
++	PxgBlockFrictionIndex* prevFrictionIndices = constraintPrepDesc->blockPreviousFrictionIndices;
++	PxgBlockContactPoint* contactBase = constraintPrepDesc->blockContactPoints;
++	PxgBlockConstraintBatch* constraintBatch = sharedDesc->iterativeData.blockConstraintBatch;
++	PxgBlockContactData* contactCurrentPrepPool = constraintPrepDesc->blockContactCurrentPrepPool;
++	PxgBlockFrictionPatch* prevFrictionPatches = sharedDesc->blockPreviousFrictionPatches;
++	PxgBlockFrictionPatch* currFrictionPatches = sharedDesc->blockCurrentFrictionPatches;
++	PxgBlockFrictionAnchorPatch* prevFrictionAnchors = constraintPrepDesc->blockPreviousAnchorPatches;
++	PxgBlockFrictionAnchorPatch* currFrictionAnchors = constraintPrepDesc->blockCurrentAnchorPatches;
++	PxAlignedTransform* bodyFrames = constraintPrepDesc->body2WorldPool;
++	#else
+ 	__shared__ PxgSolverBodyData* solverBodyDatas;
+ 	__shared__ PxgSolverTxIData* solverTxIDatas;
+ 
+@@ -258,6 +277,7 @@ extern "C" __global__ void contactConstraintBlockPrepareParallelLaunch(
+ 	__shared__ PxgBlockFrictionAnchorPatch* prevFrictionAnchors;
+ 	__shared__ PxgBlockFrictionAnchorPatch* currFrictionAnchors;
+ 	__shared__ PxAlignedTransform* bodyFrames;
++	#endif
+ 
+ 	
+ 	volatile __shared__ char sInertias[sizeof(PxMat33) * (PxgKernelBlockDim::CONSTRAINT_PREPARE_BLOCK_PARALLEL / warpSize) * warpSize];
+@@ -265,6 +285,7 @@ extern "C" __global__ void contactConstraintBlockPrepareParallelLaunch(
+ 
+ 	volatile PxMat33* inertias = reinterpret_cast<volatile PxMat33*>(sInertias);
+ 
++	#if !PX_CUMETAL
+ 	if(threadIdx.x == 0)
+ 	{
+ 		solverBodyDatas = constraintPrepDesc->solverBodyDataPool;
+@@ -289,6 +310,7 @@ extern "C" __global__ void contactConstraintBlockPrepareParallelLaunch(
+ 	}
+ 	
+ 	__syncthreads();
++	#endif
+ 
+ 	PxU32 i = warpIndex;
+ 	//unsigned mask_nbContactBatches = __ballot_sync(FULL_MASK, i < nbContactBatches);
+diff --git a/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh b/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
+index 25afa00..a2b26a1 100644
+--- a/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
++++ b/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
+@@ -713,6 +713,29 @@ static __device__ void  createFinalizeSolverContactsBlockGPU(	PxgBlockContactDat
+ 	const float4 normal4 = contactData->normal_restitutionW[threadIndex];
+ 	const PxVec3 normal(normal4.x, normal4.y, normal4.z);
+ 
++	#if PX_CUMETAL
++	// The selected GRB target only needs a single rigid/static normal contact.
++	// Avoid the warp-synchronous friction-patch correlation path, which relies
++	// on CUDA partial-warp barriers that CuMetal intentionally emulates as a
++	// full SIMD-group operation.
++	frictionPatch.anchorCount[threadIndex] = 0;
++	frictionPatch.broken[threadIndex] = 0;
++	setupFinalizeSolverConstraintsBlock(*contactData, contactPoints, nbContacts,
++		frictionPatch, fAnchor, bodyFrame0, bodyFrame1, solverBodyData0, solverBodyData1,
++		initLinVel0, initAngVel0, initLinVel1, initAngVel1, sqrtInvInertia0, sqrtInvInertia1,
++		invDtF32, dtF32, bounceThresholdF32, threadIndex, forceWritebackBufferOffset, false,
++		contactHeader, frictionHeader, contactConstraints, frictionConstraints, data,
++		ccdMaxSeparation, solverOffsetSlop);
++	PX_UNUSED(prevFrictionPatches);
++	PX_UNUSED(prevFrictionAnchors);
++	PX_UNUSED(prevFrictionIndices);
++	PX_UNUSED(totalEdges);
++	PX_UNUSED(prevFrictionStartIndex);
++	PX_UNUSED(frictionOffsetThreshold);
++	PX_UNUSED(correlationDistance);
++	return;
++	#endif
++
+ 	correlatePatches(frictionPatch, contactPoints, nbContacts, normal,
+ 		bodyFrame0, bodyFrame1, PXC_SAME_NORMAL, threadIndex);
+ 
+@@ -727,7 +750,9 @@ static __device__ void  createFinalizeSolverContactsBlockGPU(	PxgBlockContactDat
+ 	//Mark the friction patch as not broken!
+ 	frictionPatch.broken[threadIndex] = 0;
+ 
++	#if !PX_CUMETAL
+ 	__syncwarp(); //Ensure writes from correlation are visible
++	#endif
+ 
+ 	if (!(perPointFriction || disableFriction))// || (solverBodyData0.islandNodeIndex & 2) || (solverBodyData1.islandNodeIndex & 2)))
+ 	{
+diff --git a/physx/source/gpusolver/src/CUDA/integration.cu b/physx/source/gpusolver/src/CUDA/integration.cu
+index e74b926..17eab2e 100644
+--- a/physx/source/gpusolver/src/CUDA/integration.cu
++++ b/physx/source/gpusolver/src/CUDA/integration.cu
+@@ -88,7 +88,18 @@ extern "C" __global__ void integrateCoreParallelLaunch(
+ 		//we need to dma the sleep data back for post solver task
+ 		PxgSolverBodySleepData& sleepData = solverCoreDesc->solverBodySleepDataPool[a];
+ 
++		#if PX_CUMETAL
++		float4 motionLin = motionVelocityArray[a];
++		float4 motionAng = motionVelocityArray[a + numSolverBodies];
++		if(staticTouchCount != 0)
++		{
++			motionLin.x = linVel.x; motionLin.y = linVel.y; motionLin.z = linVel.z;
++			motionAng.x = angVel.x; motionAng.y = angVel.y; motionAng.z = angVel.z;
++		}
++		integrateCore(motionLin, motionAng, inverseInertia, linVel, angVel, body2World, data, bodySim, sleepData, sqrtInvInertia,
++		#else
+ 		integrateCore(motionVelocityArray[a], motionVelocityArray[a + numSolverBodies], inverseInertia, linVel, angVel, body2World, data, bodySim, sleepData, sqrtInvInertia,
++		#endif
+ 			sharedDesc->dt, sharedDesc->invDtF32, solverCoreDesc->enableStabilization, staticTouchCount != 0, numCountedInteractions[nodeIndex],
+ 			nodeIndex);
+ 
+diff --git a/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu b/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
+index d71159b..9d848f8 100644
+--- a/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
++++ b/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
+@@ -922,6 +922,79 @@ void solveStaticBlock(
+ 	PxgSolverCoreDesc* PX_RESTRICT solverDesc, const PxgSolverSharedDesc<IterativeSolveData>* PX_RESTRICT sharedDesc,
+ 	const PxU32 islandIndex, const PxU32 nbStaticSlabs, const PxU32 maxStaticPartitions, bool doFriction)
+ {
++#if PX_CUMETAL
++	// The full generic kernel causes Apple's Metal pipeline compiler to abort.
++	// The reduced GRB target has rigid/static contacts but no static joints or
++	// articulations, so retain the real prepared contact solve while omitting
++	// those unreachable branches and residual reporting.
++	const IterativeSolveData& iterativeData = sharedDesc->iterativeData;
++	const PxU32 globalThreadIdx = threadIdx.x + blockIdx.x * blockDim.x;
++	if(globalThreadIdx == 0)
++	{
++		const PxU32 bodyIndex = 0;
++		const PxU32 contactCount = PxMin(maxStaticPartitions, PxU32(1));
++		if (contactCount)
++		{
++			const PxU32 startContactIndex =
++				solverDesc->mRigidStaticContactStartIndices[bodyIndex];
++			const PxgBlockConstraintBatch& firstBatch =
++				iterativeData.blockConstraintBatch[startContactIndex];
++			const PxU32 rigidBodyIndex = firstBatch.bodyAIndex[0];
++			const PxU32 totalBodiesIncKinematics = rigidBodyIndex + 1;
++			const PxU32 inputBody = solverDesc->accumulatedBodyDeltaVOffset + rigidBodyIndex;
++			float4 linVel = iterativeData.solverBodyVelPool[inputBody];
++			float4 angVel = iterativeData.solverBodyVelPool[inputBody + totalBodiesIncKinematics];
++			PxVec3 lv0(linVel.x, linVel.y, linVel.z);
++			PxVec3 av0(angVel.x, angVel.y, angVel.z);
++			PxVec3 lv1(0.f), av1(0.f);
++			for (PxU32 i = 0; i < contactCount; ++i)
++			{
++				const PxgBlockConstraintBatch& batch =
++					iterativeData.blockConstraintBatch[startContactIndex + i];
++				PxgBlockSolverContactHeader& header =
++					iterativeData.blockContactHeaders[batch.mConstraintBatchIndex];
++				const float4 normalFriction = header.normal_staticFriction[0];
++				const PxVec3 normal(normalFriction.x, normalFriction.y, normalFriction.z);
++				const float4 mass = header.invMass0_1_angDom0_1[0];
++				PxgBlockSolverContactPoint* points =
++					&iterativeData.blockContactPoints[batch.startConstraintIndex];
++				for(PxU32 c = 0; c < header.numNormalConstr[0]; ++c)
++				{
++					PxgBlockSolverContactPoint& point = points[c];
++					const float4 raTarget = point.raXn_targetVelocity[0];
++					const float4 rbMax = point.rbXn_maxImpulse[0];
++					const PxVec3 ra(raTarget.x, raTarget.y, raTarget.z);
++					const PxVec3 rb(rbMax.x, rbMax.y, rbMax.z);
++					const float response = point.resp0[0] + point.resp1[0];
++					const float reciprocal = response > 0.f ? 1.f / response : 0.f;
++					float velocityMultiplier, impulseMultiplier, unbiasedError, biasedError;
++					computeContactCoefficients(header.flags[0], header.restitution[0], response,
++						reciprocal, raTarget.w, point.coeff0[0], point.coeff1[0],
++						velocityMultiplier, impulseMultiplier, unbiasedError, biasedError);
++					const float normalVelocity = lv0.dot(normal) + av0.dot(ra) -
++						lv1.dot(normal) - av1.dot(rb);
++					const float oldForce = point.appliedForce[0];
++					const float deltaCandidate = PxMax(biasedError - normalVelocity * velocityMultiplier,
++						-oldForce);
++					const float newForce = oldForce * impulseMultiplier + deltaCandidate;
++					const float deltaForce = newForce - oldForce;
++					lv0 += normal * (mass.x * deltaForce);
++					lv1 -= normal * (mass.y * deltaForce);
++					av0 += ra * (mass.z * deltaForce);
++					av1 -= rb * (mass.w * deltaForce);
++					point.appliedForce[0] = newForce;
++				}
++				PX_UNUSED(doFriction);
++			}
++			linVel.x = lv0.x; linVel.y = lv0.y; linVel.z = lv0.z;
++			angVel.x = av0.x; angVel.y = av0.y; angVel.z = av0.z;
++			iterativeData.tempStaticBodyOutputPool[bodyIndex] = linVel;
++			iterativeData.tempStaticBodyOutputPool[bodyIndex + totalBodiesIncKinematics] = angVel;
++		}
++	}
++	PX_UNUSED(islandIndex);
++	PX_UNUSED(nbStaticSlabs);
++#else
+ 	const PxgIslandContext& island = solverDesc->islandContextPool[islandIndex];
+ 	const IterativeSolveData& iterativeData = sharedDesc->iterativeData;
+ 
+@@ -1035,6 +1108,7 @@ void solveStaticBlock(
+ 	{
+ 		error.accumulateErrorGlobalFullWarp(solverDesc->contactErrorAccumulator, threadIndexInWarp);
+ 	}
++#endif
+ }
+ 
+ 
+@@ -1093,4 +1167,3 @@ void propagateStaticSolverBodyVelocities(
+ 		}
+ 	}
+ }
+-
+diff --git a/physx/source/gpusolver/src/PxgSolverCore.cpp b/physx/source/gpusolver/src/PxgSolverCore.cpp
+index ad6af24..7218611 100644
+--- a/physx/source/gpusolver/src/PxgSolverCore.cpp
++++ b/physx/source/gpusolver/src/PxgSolverCore.cpp
+@@ -329,9 +329,21 @@ void PxgSolverCore::constructConstraintPrePrepDesc(PxgPrePrepDesc& preDesc, PxU3
+ 	preDesc.artiJointData = reinterpret_cast<PxgD6JointData*>(simCore->getD6ArtiJointBuffer().getDevicePtr());
+ 	preDesc.artiConstraintPrePrep = reinterpret_cast<PxgConstraintPrePrep*>(simCore->getD6ArtiJointPrePreBuffer().getDevicePtr());
+ 
++	#if PX_CUMETAL
++	// CUDA UVA gives mapped host and device pointers one comparable address
++	// space. Metal device addresses do not, so use the device-buffer bases for
++	// the offset arithmetic performed by constraintBlockPrePrep.cu.
++	preDesc.cpuCompressedContactsBase = reinterpret_cast<PxContact*>(mCompressedContacts.getDevicePtr());
++	preDesc.cpuCompressedPatchesBase = reinterpret_cast<PxContactPatch*>(mCompressedPatches.getDevicePtr());
++	preDesc.cpuForceBufferBase = reinterpret_cast<PxReal*>(mForceBuffer.getDevicePtr());
++	PX_UNUSED(cpuCompressedContactsBase);
++	PX_UNUSED(cpuCompressedPatchesBase);
++	PX_UNUSED(cpuForceBufferBase);
++	#else
+ 	preDesc.cpuCompressedContactsBase = cpuCompressedContactsBase;
+ 	preDesc.cpuCompressedPatchesBase = cpuCompressedPatchesBase;
+ 	preDesc.cpuForceBufferBase = cpuForceBufferBase;
++	#endif
+ 
+ 	preDesc.contactManagerOutputBase = reinterpret_cast<PxsContactManagerOutput*>(mGpuContactManagerOutputBase);
+ 	preDesc.sharedFrictionConstraintIndex = 0;
+

@@ -2141,8 +2141,19 @@ cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags) {
 
     RuntimeState& state = runtime_state();
     if (!state.allocations.insert(base, size, cumetal::rt::AllocationKind::kHost, flags,
-                                  std::move(buffer), &error)) {
+                                  buffer, &error)) {
         return fail(cudaErrorMemoryAllocation);
+    }
+
+    if (use_metal_device_addresses()) {
+        void* device_alias = reinterpret_cast<void*>(buffer->device_address());
+        if (device_alias == nullptr ||
+            !state.allocations.insert(device_alias, size,
+                                      cumetal::rt::AllocationKind::kHost, flags,
+                                      buffer, &error, /*alias=*/true)) {
+            state.allocations.erase(base);
+            return fail(cudaErrorMemoryAllocation);
+        }
     }
 
     *ptr = base;
@@ -2197,12 +2208,14 @@ cudaError_t cudaHostGetDevicePointer(void** dev_ptr, void* host_ptr, unsigned in
 
     RuntimeState& state = runtime_state();
     cumetal::rt::AllocationTable::ResolvedAllocation resolved;
-    if (!state.allocations.resolve(host_ptr, &resolved) || resolved.offset != 0 ||
+    if (!state.allocations.resolve(host_ptr, &resolved) ||
         resolved.kind != cumetal::rt::AllocationKind::kHost) {
         return fail(cudaErrorInvalidValue);
     }
 
-    *dev_ptr = host_ptr;
+    *dev_ptr = use_metal_device_addresses()
+                   ? reinterpret_cast<void*>(resolved.buffer->device_address() + resolved.offset)
+                   : host_ptr;
     return fail(cudaSuccess);
 }
 

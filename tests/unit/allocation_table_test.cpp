@@ -9,10 +9,15 @@ namespace {
 
 class FakeBuffer final : public cumetal::metal_backend::Buffer {
 public:
-    FakeBuffer(void* base, std::size_t size) : base_(base), size_(size) {}
+    FakeBuffer(void* base, std::size_t size, std::uintptr_t device_address = 0)
+        : base_(base), size_(size), device_address_(device_address) {}
 
     void* contents() const override {
         return base_;
+    }
+
+    std::uintptr_t device_address() const override {
+        return device_address_ == 0 ? reinterpret_cast<std::uintptr_t>(base_) : device_address_;
     }
 
     std::size_t length() const override {
@@ -22,6 +27,7 @@ public:
 private:
     void* base_;
     std::size_t size_;
+    std::uintptr_t device_address_;
 };
 
 bool expect(bool condition, const char* message) {
@@ -69,6 +75,27 @@ int main() {
         return 1;
     }
 
+    std::uintptr_t alias_storage[256]{};
+    void* alias = &alias_storage[0];
+    if (!expect(table.insert(alias,
+                             sizeof(memory),
+                             cumetal::rt::AllocationKind::kDevice,
+                             0,
+                             buffer,
+                             &error,
+                             true),
+                "insert device alias")) {
+        return 1;
+    }
+    if (!expect(table.total_allocated_size() == sizeof(memory),
+                "alias does not double-count allocation size")) {
+        return 1;
+    }
+    if (!expect(table.resolve(alias, &resolved) && resolved.offset == 0,
+                "resolve device alias")) {
+        return 1;
+    }
+
     void* offset_ptr = reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(base) + 64);
     if (!expect(table.resolve(offset_ptr, &resolved), "resolve offset pointer")) {
         return 1;
@@ -104,6 +131,9 @@ int main() {
         return 1;
     }
     if (!expect(!table.resolve(base, &resolved), "resolve after erase fails")) {
+        return 1;
+    }
+    if (!expect(!table.resolve(alias, &resolved), "erase primary removes alias")) {
         return 1;
     }
 

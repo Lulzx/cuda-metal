@@ -32,7 +32,8 @@ public:
                 AllocationKind kind,
                 unsigned int host_alloc_flags,
                 std::shared_ptr<metal_backend::Buffer> buffer,
-                std::string* error_message);
+                std::string* error_message,
+                bool alias = false);
     bool erase(void* base);
     bool resolve(const void* ptr, ResolvedAllocation* resolved) const;
     std::size_t total_allocated_size() const;
@@ -44,6 +45,7 @@ private:
         AllocationKind kind = AllocationKind::kDevice;
         unsigned int host_alloc_flags = 0;
         std::shared_ptr<metal_backend::Buffer> buffer;
+        bool alias = false;
     };
 
     std::map<std::uintptr_t, Entry> entries_;

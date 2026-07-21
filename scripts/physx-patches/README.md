@@ -37,6 +37,12 @@ pre-integration path for CuMetal's documented partial-warp-mask limitation.
 The sixth patch adds CPU/GPU mode selection, step count, and per-step
 transform dumps to the reduced snippet for the conformance gate.
 
+The seventh patch brings up the selected sphere/plane contact path. It adds
+CuMetal-safe scalar compaction and static-batch preparation, replaces CUDA-UVA
+pointer subtraction with device-buffer offsets, and uses reduced normal-only
+contact preparation/solve paths. Friction, joints, articulations, and general
+multi-body scenes remain outside this target.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -80,6 +86,7 @@ Run CPU/GPU transform conformance:
 tests/conformance/run_physx_grb.sh
 ```
 
-The default 30-step window precedes first contact and uses `1e-3` relative
-plus `1e-5` absolute tolerance. Longer runs currently diverge at the
-sphere/plane contact as documented in `docs/known-gaps.md`.
+The sphere starts in resting contact with the plane, so the default 30-step
+window exercises narrowphase, constraint preparation, the static contact
+solver, writeback, and integration. It uses `1e-3` relative plus `1e-5`
+absolute tolerance.

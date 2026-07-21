@@ -237,10 +237,10 @@ Implemented:
     `cumetalc` emits exact source-level `.cumetal-abi` argument sidecars,
     Driver contexts are thread-local, and native `MTLBuffer.gpuAddress`
     allocation mode supports nested device pointers in PhysX descriptors
-  - `conformance_physx_grb` compares CPU and GPU transforms for 30 free-fall
-    steps at `1e-3` relative tolerance and requires completed
-    `preIntegrationLaunch` and `integrateCoreParallelLaunch` Apple-GPU
-    provenance
+  - `conformance_physx_grb` compares CPU and GPU transforms for 30 resting
+    contact steps at `1e-3` relative tolerance and requires Apple-GPU
+    provenance through sphere narrowphase, contact pre-prep/prep, static
+    solve, writeback, and integration
   - expanded PTX sweep harness (`tests/ptx_sweep`) for strict-mode supported/unsupported opcode checks
   - initial `intrinsic_lower` pass for thread-index/barrier/basic-math mappings
   - initial `printf_lower` pass for PTX `printf`/`vprintf` call extraction and format-table metadata

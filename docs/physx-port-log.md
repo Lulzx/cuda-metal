@@ -208,10 +208,9 @@ report.
   scene runs 100 steps without a crash, launches solver and integration
   kernels from production metallibs, moves the sphere from `y=10` to
   `y=-3.76124477`, and reports `vy=-16.3499889`.
-- The reduced CPU-broadphase target does not yet generate the plane contact
-  on the GPU path, so the sphere falls through the plane after the early
-  free-fall interval. Phase 4 compares the deterministic pre-contact window
-  and records this longer-run divergence explicitly.
+- Initial runtime bring-up established stable free-fall before contact. The
+  subsequent Phase 4 hardening below replaces that provisional limitation
+  with a selected resting-contact path.
 
 ## 2026-07-20 — Phase 4 conformance gate
 
@@ -220,16 +219,29 @@ report.
   sphere position and quaternion for the initial state and every simulated
   step.
 - Added `tests/conformance/run_physx_grb.sh` and a strict TSV comparator.
-  The default gate runs 30 steps before first contact and uses
-  `1e-3` relative plus `1e-5` absolute tolerance. It also requires successful
-  Apple-GPU provenance for `preIntegrationLaunch` and
-  `integrateCoreParallelLaunch`, preventing a CPU fallback from passing.
-- On Apple M4 Pro the CPU and GPU dumps match exactly for all 30 selected
-  steps: both finish at `p=(0, 8.73287487, 0)` with
-  `v=(0, -4.90500021, 0)`.
-- Long-run behavior is intentionally not claimed conformant yet. By 100 steps
-  CPU PhysX has resolved the sphere/plane collision, while the reduced
-  GPU-via-CuMetal path remains in free fall (`y=-3.76124477`). Iterative
-  solver chaos can amplify small differences after contact in general, but
-  this particular divergence is deterministic and begins at the currently
-  missing contact path, so it is tracked as a kernel-subset integration gap.
+  The hardened default gate runs 30 resting-contact steps and uses `1e-3`
+  relative plus `1e-5` absolute tolerance. It requires Apple-GPU provenance
+  for narrowphase, constraint pre-prep/prep, static solve, writeback, and
+  integration, preventing a CPU fallback or pre-contact-only path from passing.
+- On Apple M4 Pro the hardened resting-contact CPU/GPU dumps remain within
+  about `1.2e-7`; both finish at height `1.0` with zero velocity.
+- Contact hardening fixed interior mapped-pointer aliases, CUDA-UVA offset
+  arithmetic, lost/found compaction, static batch construction, contact
+  pre-prep/prep, a reduced normal solver, and contact-aware integration. The
+  30-step resting scene now differs from CPU by at most about `1.2e-7` in the
+  measured transform. General frictional and multi-body scenes remain outside
+  the selected target and may diverge chaotically over long runs.
+
+## 2026-07-21 — Resting-contact hardening
+
+- Made `cudaHostGetDevicePointer` accept interior pointers and preserve their
+  byte offsets; PhysX uses interior addresses from pinned allocator slabs.
+  Native Metal device-address allocations now register aliases without
+  double-counting allocation bytes, with runtime/driver and nested-pointer
+  regressions.
+- Added patch 0007 for the explicitly reduced target. CUDA partial-warp scan
+  stages are serialized, pointer-heavy descriptors are read from global
+  memory, and CUDA-UVA pointer differences use device-buffer bases.
+- Selected normal-only preparation and solve paths avoid partial-warp friction
+  barriers and the generic solver metallib that Apple's pipeline compiler
+  rejects. NVIDIA CUDA branches are unchanged.

@@ -7,7 +7,8 @@ bool AllocationTable::insert(void* base,
                              AllocationKind kind,
                              unsigned int host_alloc_flags,
                              std::shared_ptr<metal_backend::Buffer> buffer,
-                             std::string* error_message) {
+                             std::string* error_message,
+                             bool alias) {
     if (base == nullptr || size == 0 || buffer == nullptr) {
         if (error_message != nullptr) {
             *error_message = "allocation table insert received invalid arguments";
@@ -48,6 +49,7 @@ bool AllocationTable::insert(void* base,
         .kind = kind,
         .host_alloc_flags = host_alloc_flags,
         .buffer = std::move(buffer),
+        .alias = alias,
     };
     return true;
 }
@@ -59,7 +61,20 @@ bool AllocationTable::erase(void* base) {
 
     const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(base);
     std::unique_lock lock(mutex_);
-    return entries_.erase(address) == 1;
+    const auto found = entries_.find(address);
+    if (found == entries_.end()) {
+        return false;
+    }
+
+    const auto allocation = found->second.buffer;
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (it->second.buffer == allocation) {
+            it = entries_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return true;
 }
 
 bool AllocationTable::resolve(const void* ptr, ResolvedAllocation* resolved) const {
@@ -96,7 +111,9 @@ std::size_t AllocationTable::total_allocated_size() const {
     std::size_t total = 0;
     for (const auto& [address, entry] : entries_) {
         (void)address;
-        total += entry.size;
+        if (!entry.alias) {
+            total += entry.size;
+        }
     }
     return total;
 }

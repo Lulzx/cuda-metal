@@ -52,6 +52,12 @@ patch_marker_is_present() {
                 grep -q 'CuMetal GRB mode:' \
                     "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
+        0007-cumetal-grb-contact.patch)
+            grep -q 'The selected GRB target only needs a single rigid/static normal contact' \
+                "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh" &&
+                grep -q 'CUDA UVA gives mapped host and device pointers' \
+                    "${PHYSX_REPO}/physx/source/gpusolver/src/PxgSolverCore.cpp"
+            ;;
         *)
             return 1
             ;;

@@ -44,9 +44,18 @@ env \
     "${SNIPPET}" --gpu --steps "${STEPS}" --dump "${GPU_DUMP}" >"${GPU_LOG}" 2>&1
 
 grep -q 'kernel="preIntegrationLaunch".*source=metallib device=apple_gpu.*launch_success=true' "${GPU_LOG}"
+grep -q 'kernel="sphereNphase_Kernel".*source=metallib device=apple_gpu.*launch_success=true' "${GPU_LOG}"
+grep -q 'kernel="constraintContactBlockPrePrepLaunch".*source=metallib device=apple_gpu.*launch_success=true' "${GPU_LOG}"
+grep -q 'kernel="contactConstraintBlockPrepareParallelLaunch".*source=metallib device=apple_gpu.*launch_success=true' "${GPU_LOG}"
+grep -q 'kernel="solveStaticBlock".*source=metallib device=apple_gpu.*launch_success=true' "${GPU_LOG}"
+grep -q 'kernel="writebackBlocks".*source=metallib device=apple_gpu.*launch_success=true' "${GPU_LOG}"
 grep -q 'kernel="integrateCoreParallelLaunch".*source=metallib device=apple_gpu.*launch_success=true' "${GPU_LOG}"
 grep -q 'CuMetal GRB mode: cpu' "${CPU_LOG}"
 grep -q 'CuMetal GRB mode: gpu' "${GPU_LOG}"
+if grep -qi 'internal error\|failed to create compute pipeline' "${GPU_LOG}"; then
+    echo "FAIL: PhysX GRB GPU log contains an internal runtime error"
+    exit 1
+fi
 
 python3 "${SCRIPT_DIR}/compare_physx_grb.py" \
     "${CPU_DUMP}" "${GPU_DUMP}" "${STEPS}" "${REL_TOL}" "${ABS_TOL}"

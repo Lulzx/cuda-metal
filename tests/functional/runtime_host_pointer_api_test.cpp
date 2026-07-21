@@ -42,8 +42,9 @@ int main() {
     }
 
     void* host_offset = static_cast<void*>(static_cast<std::uint8_t*>(host_ptr) + 8);
-    if (cudaHostGetDevicePointer(&device_alias, host_offset, 0) != cudaErrorInvalidValue) {
-        std::fprintf(stderr, "FAIL: host-offset pointer should be rejected\n");
+    if (cudaHostGetDevicePointer(&device_alias, host_offset, 0) != cudaSuccess ||
+        device_alias != host_offset) {
+        std::fprintf(stderr, "FAIL: host-offset pointer should preserve its offset\n");
         return 1;
     }
 
