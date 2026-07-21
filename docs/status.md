@@ -246,6 +246,10 @@ Implemented:
     sphere/plane friction solve for 60 steps, matches CPU through sliding and
     no-slip rolling, and verifies a friction-disabled negative control;
     generic friction correlation remains a measured gap
+  - `conformance_physx_grb_multibody` runs two independent dynamic spheres
+    against the plane for 30 steps, isolates each contact pre-prep/prepare
+    batch in one Metal SIMD group, and checks all transforms and velocities
+    against CPU; dynamic/dynamic constraints and general batching remain open
   - expanded PTX sweep harness (`tests/ptx_sweep`) for strict-mode supported/unsupported opcode checks
   - initial `intrinsic_lower` pass for thread-index/barrier/basic-math mappings
   - initial `printf_lower` pass for PTX `printf`/`vprintf` call extraction and format-table metadata

@@ -1,0 +1,316 @@
+diff --git a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+index e4e23e8..f2096ff 100644
+--- a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
++++ b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+@@ -55,6 +55,8 @@ static PxMaterial*				gMaterial			= NULL;
+ static PxPvd*					gPvd				= NULL;
+ static PxCudaContextManager*	gCudaContextManager	= NULL;
+ static PxRigidDynamic*			gBall				= NULL;
++static PxRigidDynamic*			gBalls[16]			= {};
++static PxU32					gBallCount			= 0;
+ static bool						gGpuReady			= false;
+ 
+ enum ContactMode
+@@ -92,7 +94,7 @@ static void createStack(const PxTransform& t, PxU32 size, PxReal halfExtent)
+ 	shape->release();
+ }
+ 
+-void initPhysics(bool useGpu, ContactMode contactMode)
++void initPhysics(bool useGpu, ContactMode contactMode, PxU32 bodyCount)
+ {
+ 	gFoundation = PxCreateFoundation(PX_PHYSICS_VERSION, gAllocator, gErrorCallback);
+ 	gPhysics = PxCreatePhysics(PX_PHYSICS_VERSION, *gFoundation, PxTolerancesScale(), true, NULL);
+@@ -144,8 +146,14 @@ void initPhysics(bool useGpu, ContactMode contactMode)
+ 	gScene->addActor(*groundPlane);
+ 
+ 	const PxVec3 initialVelocity = contactMode == eCONTACT_RESTING ? PxVec3(0) : PxVec3(5.f, 0.f, 0.f);
+-	gBall = createDynamic(PxTransform(PxVec3(0, 1, 0)), PxSphereGeometry(1), initialVelocity);
+-	PxRigidBodyExt::updateMassAndInertia(*gBall, 10.0f);
++	gBallCount = bodyCount;
++	for(PxU32 i = 0; i < bodyCount; ++i)
++	{
++		const PxReal x = (PxReal(i) - PxReal(bodyCount - 1) * 0.5f) * 3.0f;
++		gBalls[i] = createDynamic(PxTransform(PxVec3(x, 1, 0)), PxSphereGeometry(1), initialVelocity);
++		PxRigidBodyExt::updateMassAndInertia(*gBalls[i], 10.0f);
++	}
++	gBall = gBalls[0];
+ }
+ 
+ void stepPhysics(bool /*interactive*/)
+@@ -184,14 +192,24 @@ void keyPress(unsigned char key, const PxTransform& camera)
+ 
+ static void dumpState(FILE* output, PxU32 step)
+ {
+-	const PxTransform pose = gBall->getGlobalPose();
+-	const PxVec3 linearVelocity = gBall->getLinearVelocity();
+-	const PxVec3 angularVelocity = gBall->getAngularVelocity();
+-	fprintf(output, "%u\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\n",
+-		step, double(pose.p.x), double(pose.p.y), double(pose.p.z),
+-		double(pose.q.x), double(pose.q.y), double(pose.q.z), double(pose.q.w),
+-		double(linearVelocity.x), double(linearVelocity.y), double(linearVelocity.z),
+-		double(angularVelocity.x), double(angularVelocity.y), double(angularVelocity.z));
++	for(PxU32 body = 0; body < gBallCount; ++body)
++	{
++		const PxTransform pose = gBalls[body]->getGlobalPose();
++		const PxVec3 linearVelocity = gBalls[body]->getLinearVelocity();
++		const PxVec3 angularVelocity = gBalls[body]->getAngularVelocity();
++		if(gBallCount == 1)
++			fprintf(output, "%u\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\n",
++				step, double(pose.p.x), double(pose.p.y), double(pose.p.z),
++				double(pose.q.x), double(pose.q.y), double(pose.q.z), double(pose.q.w),
++				double(linearVelocity.x), double(linearVelocity.y), double(linearVelocity.z),
++				double(angularVelocity.x), double(angularVelocity.y), double(angularVelocity.z));
++		else
++			fprintf(output, "%u\t%u\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\n",
++				step, body, double(pose.p.x), double(pose.p.y), double(pose.p.z),
++				double(pose.q.x), double(pose.q.y), double(pose.q.z), double(pose.q.w),
++				double(linearVelocity.x), double(linearVelocity.y), double(linearVelocity.z),
++				double(angularVelocity.x), double(angularVelocity.y), double(angularVelocity.z));
++	}
+ }
+ 
+ int snippetMain(int argc, const char*const* argv)
+@@ -202,6 +220,7 @@ int snippetMain(int argc, const char*const* argv)
+ #else
+ 	bool useGpu = true;
+ 	ContactMode contactMode = eCONTACT_RESTING;
++	PxU32 bodyCount = 1;
+ 	PxU32 frameCount = 100;
+ 	const char* dumpPath = NULL;
+ 	for(int i = 1; i < argc; ++i)
+@@ -214,18 +233,27 @@ int snippetMain(int argc, const char*const* argv)
+ 			contactMode = eCONTACT_FRICTION;
+ 		else if(strcmp(argv[i], "--frictionless") == 0)
+ 			contactMode = eCONTACT_FRICTIONLESS;
++		else if(strcmp(argv[i], "--bodies") == 0 && i + 1 < argc)
++		{
++			bodyCount = PxU32(strtoul(argv[++i], NULL, 10));
++			if(bodyCount == 0 || bodyCount > 16)
++			{
++				printf("CuMetal GRB ERROR: --bodies must be between 1 and 16.\n");
++				return 2;
++			}
++		}
+ 		else if(strcmp(argv[i], "--steps") == 0 && i + 1 < argc)
+ 			frameCount = PxU32(strtoul(argv[++i], NULL, 10));
+ 		else if(strcmp(argv[i], "--dump") == 0 && i + 1 < argc)
+ 			dumpPath = argv[++i];
+ 		else
+ 		{
+-			printf("usage: SnippetHelloGRB [--cpu|--gpu] [--friction|--frictionless] [--steps N] [--dump FILE]\n");
++			printf("usage: SnippetHelloGRB [--cpu|--gpu] [--friction|--frictionless] [--bodies N] [--steps N] [--dump FILE]\n");
+ 			return 2;
+ 		}
+ 	}
+ 
+-	initPhysics(useGpu, contactMode);
++	initPhysics(useGpu, contactMode, bodyCount);
+ 	if(!gGpuReady)
+ 	{
+ 		cleanupPhysics(false);
+@@ -244,7 +272,9 @@ int snippetMain(int argc, const char*const* argv)
+ 	}
+ 	if(dump)
+ 	{
+-		fprintf(dump, "step\tpx\tpy\tpz\tqx\tqy\tqz\tqw\tvx\tvy\tvz\twx\twy\twz\n");
++		fprintf(dump, gBallCount == 1 ?
++			"step\tpx\tpy\tpz\tqx\tqy\tqz\tqw\tvx\tvy\tvz\twx\twy\twz\n" :
++			"step\tbody\tpx\tpy\tpz\tqx\tqy\tqz\tqw\tvx\tvy\tvz\twx\twy\twz\n");
+ 		dumpState(dump, 0);
+ 	}
+ 	for(PxU32 i=0; i<frameCount; i++)
+@@ -257,6 +287,7 @@ int snippetMain(int argc, const char*const* argv)
+ 		fclose(dump);
+ 	const PxTransform pose = gBall->getGlobalPose();
+ 	printf("CuMetal GRB mode: %s\n", useGpu ? "gpu" : "cpu");
++	printf("CuMetal GRB bodies: %u\n", gBallCount);
+ 	printf("CuMetal GRB contact mode: %s\n",
+ 		contactMode == eCONTACT_FRICTION ? "friction" :
+ 		(contactMode == eCONTACT_FRICTIONLESS ? "frictionless" : "resting"));
+diff --git a/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu b/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
+index 2c385a4..76b86c2 100644
+--- a/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
++++ b/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
+@@ -58,6 +58,7 @@ PX_CUDA_CALLABLE PX_FORCE_INLINE PxU32 ComputeBodyBatchStartIndex(const PxU32 in
+ 	return index;
+ }
+ 
++
+ extern "C" __global__ void ZeroBodies(const PxgSolverCoreDesc* constraintPrepDesc, const PxgSolverSharedDesc<IterativeSolveData>* sharedDesc)
+ {
+ 	__shared__ float4* bodyVelocities;
+@@ -924,45 +925,54 @@ void solveStaticBlock(
+ {
+ #if PX_CUMETAL
+ 	// The full generic kernel causes Apple's Metal pipeline compiler to abort.
+-	// The reduced GRB target has rigid/static contacts but no static joints or
+-	// articulations, so retain the real prepared contact solve while omitting
+-	// those unreachable branches and residual reporting.
++	// Keep the rigid/static contact path body- and slab-indexed while omitting
++	// static joints, articulations, and residual reporting for now.
++	const PxgIslandContext& island = solverDesc->islandContextPool[islandIndex];
+ 	const IterativeSolveData& iterativeData = sharedDesc->iterativeData;
+ 	const PxU32 globalThreadIdx = threadIdx.x + blockIdx.x * blockDim.x;
+-	if(globalThreadIdx == 0)
++	const PxU32 numDynamicBodies = island.mBodyCount;
++	const PxU32 bodyOffset = island.mBodyStartIndex;
++	const PxU32 totalBodiesIncKinematics = bodyOffset + numDynamicBodies;
++	const PxU32 numDynamicBodiesRounded = (numDynamicBodies + 31) & (~31);
++	const PxU32 nbDynamicBodiesToSolve = numDynamicBodiesRounded * nbStaticSlabs;
++	if(globalThreadIdx < nbDynamicBodiesToSolve)
+ 	{
+-		const PxU32 bodyIndex = 0;
+-		const PxU32 contactCount = PxMin(maxStaticPartitions, PxU32(1));
+-		if (contactCount)
++		const PxU32 bodyIndex = globalThreadIdx % numDynamicBodiesRounded;
++		const PxU32 slabIdx = globalThreadIdx / numDynamicBodiesRounded;
++		if(bodyIndex < numDynamicBodies)
+ 		{
+-			const PxgIslandContext& island = solverDesc->islandContextPool[islandIndex];
+-			const PxU32 startContactIndex =
+-				solverDesc->mRigidStaticContactStartIndices[bodyIndex];
+-			const PxU32 rigidBodyIndex = island.mBodyStartIndex + bodyIndex;
+-			const PxU32 totalBodiesIncKinematics = island.mBodyStartIndex + island.mBodyCount;
+-			const PxU32 inputBody = solverDesc->accumulatedBodyDeltaVOffset + rigidBodyIndex;
+-			float4 linVel = iterativeData.solverBodyVelPool[inputBody];
+-			float4 angVel = iterativeData.solverBodyVelPool[inputBody + totalBodiesIncKinematics];
+-			PxVec3 lv0(linVel.x, linVel.y, linVel.z);
+-			PxVec3 av0(angVel.x, angVel.y, angVel.z);
+-			PxVec3 lv1(0.f), av1(0.f);
+-			for (PxU32 i = 0; i < contactCount; ++i)
++			const PxU32 startIndex = slabIdx * maxStaticPartitions;
++			const PxU32 contactCount = PxMin(maxStaticPartitions,
++				PxMax(startIndex, solverDesc->mRigidStaticContactCounts[bodyIndex]) - startIndex);
++			if(contactCount)
+ 			{
+-				const PxgBlockConstraintBatch& batch =
+-					iterativeData.blockConstraintBatch[startContactIndex + i];
+-				solveContactBlock(batch, lv0, av0, lv1, av1, doFriction, 0,
+-					iterativeData.blockContactHeaders, iterativeData.blockFrictionHeaders,
+-					iterativeData.blockContactPoints, iterativeData.blockFrictions, NULL,
+-					1.f, 1.f);
++				const PxU32 startContactIndex =
++					solverDesc->mRigidStaticContactStartIndices[bodyIndex] + startIndex;
++				const PxU32 inputBody = solverDesc->accumulatedBodyDeltaVOffset + bodyOffset + bodyIndex;
++				float4 linVel = iterativeData.solverBodyVelPool[inputBody];
++				float4 angVel = iterativeData.solverBodyVelPool[inputBody + totalBodiesIncKinematics];
++				PxVec3 lv0(linVel.x, linVel.y, linVel.z);
++				PxVec3 av0(angVel.x, angVel.y, angVel.z);
++				PxVec3 lv1(0.f), av1(0.f);
++				for(PxU32 i = 0; i < contactCount; ++i)
++				{
++					const PxgBlockConstraintBatch& batch =
++						iterativeData.blockConstraintBatch[startContactIndex + i];
++					// The CuMetal pre-prep path emits each rigid/static contact as a
++					// single-entry batch, independent of the solver body's warp lane.
++					solveContactBlock(batch, lv0, av0, lv1, av1, doFriction, 0,
++						iterativeData.blockContactHeaders, iterativeData.blockFrictionHeaders,
++						iterativeData.blockContactPoints, iterativeData.blockFrictions, NULL,
++						1.f, 1.f);
++				}
++				linVel.x = lv0.x; linVel.y = lv0.y; linVel.z = lv0.z;
++				angVel.x = av0.x; angVel.y = av0.y; angVel.z = av0.z;
++				const PxU32 outputBody = slabIdx * totalBodiesIncKinematics * 2;
++				iterativeData.tempStaticBodyOutputPool[bodyIndex + outputBody] = linVel;
++				iterativeData.tempStaticBodyOutputPool[bodyIndex + outputBody + totalBodiesIncKinematics] = angVel;
+ 			}
+-			linVel.x = lv0.x; linVel.y = lv0.y; linVel.z = lv0.z;
+-			angVel.x = av0.x; angVel.y = av0.y; angVel.z = av0.z;
+-			iterativeData.tempStaticBodyOutputPool[bodyIndex] = linVel;
+-			iterativeData.tempStaticBodyOutputPool[bodyIndex + totalBodiesIncKinematics] = angVel;
+ 		}
+ 	}
+-	PX_UNUSED(islandIndex);
+-	PX_UNUSED(nbStaticSlabs);
+ #else
+ 	const PxgIslandContext& island = solverDesc->islandContextPool[islandIndex];
+ 	const IterativeSolveData& iterativeData = sharedDesc->iterativeData;
+diff --git a/physx/source/gpusolver/src/PxgCudaSolverCore.cpp b/physx/source/gpusolver/src/PxgCudaSolverCore.cpp
+index 7bac2ea..7b3b070 100644
+--- a/physx/source/gpusolver/src/PxgCudaSolverCore.cpp
++++ b/physx/source/gpusolver/src/PxgCudaSolverCore.cpp
+@@ -987,13 +987,19 @@ void PxgCudaSolverCore::contactConstraintPrepareParallel(PxU32 nbContactBatches)
+ 		PX_CUDA_KERNEL_PARAM(mSharedDescd)
+ 	};
+ 
++	#if PX_CUMETAL
++	const PxU32 nbWarpsPerBlock = 1;
++	const PxU32 nbThreadsPerBlock = 32;
++	#else
+ 	const PxU32 nbWarpsPerBlock = PxgKernelBlockDim::CONSTRAINT_PREPARE_BLOCK_PARALLEL/32;
++	const PxU32 nbThreadsPerBlock = PxgKernelBlockDim::CONSTRAINT_PREPARE_BLOCK_PARALLEL;
++	#endif
+ 
+ 	const PxU32 nbBlocks = (nbContactBatches + nbWarpsPerBlock-1)/nbWarpsPerBlock;
+ 
+ 	if(nbBlocks > 0)
+ 	{
+-		CUresult result = mCudaContext->launchKernel(kernelFunction, nbBlocks, 1, 1, PxgKernelBlockDim::CONSTRAINT_PREPARE_BLOCK_PARALLEL, 1, 1, 0, mStream, kernelParams, sizeof(kernelParams), 0, PX_FL);
++		CUresult result = mCudaContext->launchKernel(kernelFunction, nbBlocks, 1, 1, nbThreadsPerBlock, 1, 1, 0, mStream, kernelParams, sizeof(kernelParams), 0, PX_FL);
+ 		if(result != CUDA_SUCCESS)
+ 			PxGetFoundation().error(PxErrorCode::eINTERNAL_ERROR, PX_FL, "GPU contactConstraintBlockPrepareParallelLaunch fail to launch kernel!!\n");
+ 	}
+@@ -1284,19 +1290,22 @@ void PxgCudaSolverCore::solveContactMultiBlockParallel(PxgIslandContext* islandC
+ 	const PxReal invDt = 1.f / dt;
+ 
+ #if PX_CUMETAL
+-	// The selected one-body static-contact path writes accumulated delta
+-	// velocities directly. Clear those per-step values before the first solver
+-	// iteration so a prior frame's impulse is not integrated repeatedly.
+-	if(numIslands == 1 && islandContexts[0].mBodyCount == 1)
++	// The CuMetal rigid/static contact path writes accumulated delta velocities
++	// directly. Clear every island body's per-step values before the first solver
++	// iteration so prior-frame impulses are not integrated repeatedly.
++	for(PxU32 islandIndex = 0; islandIndex < numIslands; ++islandIndex)
+ 	{
+-		const PxU32 bodyOffset = islandContexts[0].mBodyStartIndex;
++		const PxU32 bodyOffset = islandContexts[islandIndex].mBodyStartIndex;
++		const PxU32 bodyCount = islandContexts[islandIndex].mBodyCount;
++		if(!bodyCount)
++			continue;
+ 		const PxU32 bodyIndex = mSolverCoreDesc->accumulatedBodyDeltaVOffset + bodyOffset;
+-		const PxU32 angularIndex = bodyIndex + bodyOffset + islandContexts[0].mBodyCount;
++		const PxU32 angularIndex = bodyIndex + bodyOffset + bodyCount;
+ 		const CUdeviceptr velocityBase = CUdeviceptr(mSharedDesc->iterativeData.solverBodyVelPool);
+ 		mCudaContext->memsetD32Async(velocityBase + PxU64(bodyIndex) * sizeof(float4), 0,
+-			sizeof(float4) / sizeof(PxU32), mStream);
++			bodyCount * sizeof(float4) / sizeof(PxU32), mStream);
+ 		mCudaContext->memsetD32Async(velocityBase + PxU64(angularIndex) * sizeof(float4), 0,
+-			sizeof(float4) / sizeof(PxU32), mStream);
++			bodyCount * sizeof(float4) / sizeof(PxU32), mStream);
+ 	}
+ #endif
+ 
+@@ -1394,7 +1403,6 @@ void PxgCudaSolverCore::solveContactMultiBlockParallel(PxgIslandContext* islandC
+ 					CUresult result = mCudaContext->launchKernel(solveRigidStaticconstraintsFunction, nbBlocksRequired, 1, 1, PxgKernelBlockDim::SOLVE_BLOCK_PARTITION, 1, 1, 0, mStream, staticKernelParams, sizeof(staticKernelParams), 0, PX_FL);
+ 					if (result != CUDA_SUCCESS)
+ 						PxGetFoundation().error(PxErrorCode::eINTERNAL_ERROR, PX_FL, "GPU solveStaticBlock fail to launch kernel!!\n");
+-						
+ #if GPU_DEBUG
+ 					result = mCudaContext->streamSynchronize(mStream);
+ 					if (result != CUDA_SUCCESS)
+diff --git a/physx/source/gpusolver/src/PxgSolverCore.cpp b/physx/source/gpusolver/src/PxgSolverCore.cpp
+index 7218611..2a67f60 100644
+--- a/physx/source/gpusolver/src/PxgSolverCore.cpp
++++ b/physx/source/gpusolver/src/PxgSolverCore.cpp
+@@ -589,11 +589,19 @@ void PxgSolverCore::constraintPrePrepParallel(PxU32 nbConstraintBatches, PxU32 n
+ 		PX_CUDA_KERNEL_PARAM(shDescd)
+ 	};
+ 
++	#if PX_CUMETAL
++	// Keep each prepared batch in its own SIMD group. Metal does not provide the
++	// CUDA block-wide warp scheduling assumptions used by this kernel.
++	const PxU32 nbBlocksRequired = nbConstraintBatches;
++	const PxU32 nbThreadsPerBlock = PXG_BATCH_SIZE;
++	#else
+ 	const PxU32 nbBlocksRequired = (nbConstraintBatches*PXG_BATCH_SIZE + PxgKernelBlockDim::CONSTRAINT_PREPREP_BLOCK - 1) / PxgKernelBlockDim::CONSTRAINT_PREPREP_BLOCK;
++	const PxU32 nbThreadsPerBlock = PxgKernelBlockDim::CONSTRAINT_PREPREP_BLOCK;
++	#endif
+ 
+ 	if (nbBlocksRequired > 0)
+ 	{
+-		CUresult launchResult = mCudaContext->launchKernel(kernelFunction, nbBlocksRequired, 1, 1, PxgKernelBlockDim::CONSTRAINT_PREPREP_BLOCK, 1, 1, 0, mStream, kernelParams, sizeof(kernelParams), 0, PX_FL);
++		CUresult launchResult = mCudaContext->launchKernel(kernelFunction, nbBlocksRequired, 1, 1, nbThreadsPerBlock, 1, 1, 0, mStream, kernelParams, sizeof(kernelParams), 0, PX_FL);
+ 		PX_ASSERT(launchResult == CUDA_SUCCESS);
+ 		PX_UNUSED(launchResult);
+ 

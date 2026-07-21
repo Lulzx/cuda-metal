@@ -2,6 +2,21 @@
 
 This log records progress and decisions for the PhysX GPU-on-CuMetal port.
 
+## 2026-07-21 — Selected multibody static-contact batching
+
+- Extended the reduced snippet with `--bodies 1..16` while preserving the
+  original one-body TSV format. The two-body gate uses separated spheres so it
+  isolates rigid/static batching without claiming dynamic/dynamic contacts.
+- Generalized the CuMetal static solver and accumulated-delta reset from one
+  selected body to every body and slab in each island.
+- Found that packing multiple CUDA warps into one Metal threadgroup left the
+  second contact batch incomplete. Patch 0011 launches one 32-lane SIMD group
+  per contact pre-prep and prepare batch, matching PhysX's batch ownership.
+- Two spheres now remain in finite resting contact for 30 steps and match all
+  CPU transforms and velocities with maximum absolute error `1.43e-05`.
+  Invalid body counts `0` and `17` are rejected. Packed general batching and
+  dynamic/dynamic constraints remain explicit gaps.
+
 ## 2026-07-21 — Selected rolling-friction conformance
 
 - Traced the long-horizon kinetic clamp to stale accumulated linear/angular

@@ -48,7 +48,7 @@ as gaps have been closed.
   PTX wrappers supported. Full NVCC fatbinary variants, complex symbol layouts, or SASS-only
   images not supported (SASS never was; per spec).
 - PhysX 5.6 reduced GRB coverage is limited to the 83-kernel sphere/plane PGS
-  manifest and a single rigid/static contact. Patch 0008 removes
+  manifest and selected rigid/static contacts. Patch 0008 removes
   the former body-per-thread `preIntegration` and serialized `updateBodiesLaunch`
   fallbacks; their upstream warp-cooperative paths pass twenty consecutive 30-step
   CPU/GPU resting conformance runs. Patches 0009 and 0010 add a selected
@@ -57,8 +57,12 @@ as gaps have been closed.
   friction-disabled control retains `vx=5` and zero spin. The selected path
   stages one previous patch on the host because generic device-side
   friction-patch correlation is still unsupported.
-  Joints, articulations, multi-body batching, user impulse limits, general
-  falling-contact, and chaotic long-run solver conformance are not claimed.
+  Patch 0011 covers two independent dynamic spheres contacting the same plane
+  by launching each contact pre-prep/prepare batch as its own 32-lane Metal
+  SIMD group and indexing the static solve per island body and slab.
+  Dynamic/dynamic constraints, packed general batching, joints, articulations,
+  user impulse limits, general falling-contact, and chaotic long-run solver
+  conformance are not claimed.
 
 ## .cu / cumetalc frontend limitations
 - `cumetalc --cuda-device` is the real source frontend for project-scale CUDA:

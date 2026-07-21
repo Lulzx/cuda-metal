@@ -62,6 +62,13 @@ the bounded previous friction patch without the unsupported generic device
 pointer traversal, and verifies CPU/GPU rolling agreement at step 60. Generic
 friction correlation and multi-body batching remain out of scope.
 
+The eleventh patch adds selected multibody rigid/static coverage. It schedules
+each contact pre-prep and prepare batch in a dedicated 32-lane Metal SIMD
+group, indexes the reduced static solver and delta reset across island bodies,
+and adds `--bodies 1..16` to the snippet. The conformance claim covers two
+separated dynamic spheres against one plane; dynamic/dynamic constraints and
+packed general batching remain out of scope.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -114,4 +121,10 @@ Run the selected sliding-to-rolling friction gate:
 
 ```bash
 tests/conformance/run_physx_grb_friction.sh
+```
+
+Run the selected two-body rigid/static batching gate:
+
+```bash
+tests/conformance/run_physx_grb_multibody.sh
 ```

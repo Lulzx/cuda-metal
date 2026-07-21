@@ -66,15 +66,25 @@ patch_marker_is_present() {
             { grep -q 'Build its single friction anchor directly' \
                 "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh" ||
                 grep -q "prior frame's impulse is not integrated repeatedly" \
+                    "${PHYSX_REPO}/physx/source/gpusolver/src/PxgCudaSolverCore.cpp" ||
+                grep -q 'prior-frame impulses are not integrated repeatedly' \
                     "${PHYSX_REPO}/physx/source/gpusolver/src/PxgCudaSolverCore.cpp"; } &&
                 grep -q -- '--frictionless' \
                     "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
         0010-cumetal-grb-rolling-friction.patch)
-            grep -q "prior frame's impulse is not integrated repeatedly" \
-                "${PHYSX_REPO}/physx/source/gpusolver/src/PxgCudaSolverCore.cpp" &&
+            { grep -q "prior frame's impulse is not integrated repeatedly" \
+                "${PHYSX_REPO}/physx/source/gpusolver/src/PxgCudaSolverCore.cpp" ||
+                grep -q 'prior-frame impulses are not integrated repeatedly' \
+                    "${PHYSX_REPO}/physx/source/gpusolver/src/PxgCudaSolverCore.cpp"; } &&
                 grep -q "host stages the selected target's prior patch" \
                     "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh"
+            ;;
+        0011-cumetal-grb-multibody-static-batching.patch)
+            grep -q 'Keep each prepared batch in its own SIMD group' \
+                "${PHYSX_REPO}/physx/source/gpusolver/src/PxgSolverCore.cpp" &&
+                grep -q -- '--bodies must be between 1 and 16' \
+                    "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
         *)
             return 1
