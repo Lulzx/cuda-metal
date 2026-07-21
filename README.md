@@ -242,12 +242,14 @@ ctest --test-dir build -R functional_ -V        # functional tests only
 ctest --test-dir build -R unit_ -V              # unit tests only
 ```
 
-PhysX 5.6's reduced `SnippetHelloGRB` now runs a resting sphere/plane contact
-end to end on Apple GPU through CuMetal. The patch/build workflow lives in
-`scripts/physx-patches/`; `conformance_physx_grb` compares 30 CPU/GPU
-transform steps and requires Metal narrowphase, constraint preparation,
-static solve, writeback, and integration provenance. This is a deliberately
-normal-only, one-rigid/one-static target; see `docs/known-gaps.md`.
+PhysX 5.6's reduced `SnippetHelloGRB` now runs resting and kinetic-friction
+sphere/plane contacts end to end on Apple GPU through CuMetal. The patch/build
+workflow lives in `scripts/physx-patches/`; `conformance_physx_grb` compares
+30 resting CPU/GPU transform steps, while `conformance_physx_grb_friction`
+checks the CPU-matching sliding phase and a friction-disabled negative control.
+Both require Metal narrowphase, constraint preparation, static solve,
+writeback, and integration provenance. This remains a deliberately selected
+one-rigid/one-static target; see `docs/known-gaps.md`.
 
 Known limitations
 -----------------
@@ -256,7 +258,9 @@ Known limitations
 - **Multi-GPU**: single GPU on Apple Silicon; peer APIs return appropriate errors
 - **Graphics interop** (OpenGL/Vulkan): non-goal (spec §2.2)
 - **`grid_group::sync()`**: no-op stub; Metal has no cross-threadgroup barrier
-- **Warp partial-mask**: conservative full-group emulation (spec §5.3)
+- **Warp partial-mask**: vote/ballot and shuffle membership are honored; `__syncwarp`
+  uses SIMD-group scope and divergent lower/upper half-warp ordering is GPU-tested
+  (spec §5.3)
 - **FP64**: Apple Silicon GPU has minimal FP64 throughput; `--fp64=emulate` uses
   Dekker double-single decomposition (~44-bit mantissa via FP32 pairs)
 - **CUDA Graphs**: stream capture, instantiate, and replay supported; memcpy/memset/kernel

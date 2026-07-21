@@ -14,9 +14,14 @@ as gaps have been closed.
 - MLIR GPU-dialect kernel fusion / advanced scheduling (optional Phase 5 path not taken).
 
 ## Partial / conservative implementations
-- Warp primitives with partial masks (`mask != 0xFFFFFFFF`): conservative full-SIMD-group
-  emulation (all lanes participate or get identity). Correct but may not match NVIDIA
-  "inactive lane" semantics exactly. Kernels relying on partial masks should be validated.
+- Masked `__syncwarp(mask != 0xFFFFFFFF)` lowers to an AIR SIMD-group barrier with
+  threadgroup-memory visibility. AIR does not consume CUDA's explicit member mask, so
+  additional currently active lanes can receive stronger ordering. Divergent lower/upper
+  half-warp ordering is GPU-tested, including static shared-memory visibility. Partial-mask
+  ballot/any/all intersect the real AIR active-lane ballot with the CUDA member mask,
+  `activemask` returns the real active lanes, and shuffle callers outside the member mask
+  receive identity (their CUDA result is undefined). Broader irregular-mask coverage remains
+  incomplete.
 - Grid-wide cooperative sync (`this_grid().sync()`): a no-op on Metal (no cross-threadgroup
   barrier). A multi-block `cudaLaunchCooperativeKernel` / `cuLaunchCooperativeKernel` now prints
   a one-time `CUMETAL WARNING` so code that depends on grid-wide sync for correctness is not
@@ -43,15 +48,18 @@ as gaps have been closed.
   PTX wrappers supported. Full NVCC fatbinary variants, complex symbol layouts, or SASS-only
   images not supported (SASS never was; per spec).
 - PhysX 5.6 reduced GRB coverage is limited to the 83-kernel sphere/plane PGS
-  manifest and a single rigid/static, normal-only resting contact. The CuMetal
-  patch serializes several partial-warp scans and omits friction-patch
-  correlation, joints, articulations, multi-body batching, and user impulse
-  limits. General falling-contact and chaotic long-run solver conformance are
-  not claimed. The 30-step resting-contact gate matches CPU transforms within
-  `1e-3` relative tolerance.
-- PhysX's warp-swizzled `preIntegration` path requires exact partial-mask
-  semantics. Patch 0005 selects a body-per-thread equivalent under
-  `PX_CUMETAL`; upstream CUDA builds retain the original kernel.
+  manifest and a single rigid/static contact. Patch 0008 removes
+  the former body-per-thread `preIntegration` and serialized `updateBodiesLaunch`
+  fallbacks; their upstream warp-cooperative paths pass twenty consecutive 30-step
+  CPU/GPU resting conformance runs. Patch 0009 adds a selected one-anchor
+  kinetic-friction path: CPU and GPU state agree through the initial 18-step
+  sliding phase, and a 60-step gate verifies material deceleration and spin
+  against a friction-disabled control. Generic friction-patch correlation and
+  persistent/static rolling are not conformant: by step 60 the CPU sphere is
+  rolling at approximately `vx=3.17, wz=-3.17`, while the selected GPU path
+  remains kinetically clamped at approximately `vx=0.095, wz=-9.68`.
+  Joints, articulations, multi-body batching, user impulse limits, general
+  falling-contact, and chaotic long-run solver conformance are not claimed.
 
 ## .cu / cumetalc frontend limitations
 - `cumetalc --cuda-device` is the real source frontend for project-scale CUDA:

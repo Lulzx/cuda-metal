@@ -234,13 +234,18 @@ Implemented:
     PhysX GRB path (sqrt/rsqrt, popcount, bit reinterpretation, min/max,
     fast division, and sin/cos)
   - PhysX 5.6 reduced GRB runtime executes production metallibs on Apple GPU;
-    `cumetalc` emits exact source-level `.cumetal-abi` argument sidecars,
+    `cumetalc` emits exact source-level `.cumetal-abi` argument records plus
+    static shared-memory byte requirements,
     Driver contexts are thread-local, and native `MTLBuffer.gpuAddress`
     allocation mode supports nested device pointers in PhysX descriptors
   - `conformance_physx_grb` compares CPU and GPU transforms for 30 resting
     contact steps at `1e-3` relative tolerance and requires Apple-GPU
     provenance through sphere narrowphase, contact pre-prep/prep, static
     solve, writeback, and integration
+  - `conformance_physx_grb_friction` exercises the selected one-anchor
+    sphere/plane kinetic-friction solve for 60 steps, matches CPU through the
+    initial 18-step sliding phase, and verifies a friction-disabled negative
+    control; persistent/static rolling remains a measured gap
   - expanded PTX sweep harness (`tests/ptx_sweep`) for strict-mode supported/unsupported opcode checks
   - initial `intrinsic_lower` pass for thread-index/barrier/basic-math mappings
   - initial `printf_lower` pass for PTX `printf`/`vprintf` call extraction and format-table metadata
@@ -312,7 +317,8 @@ Implemented:
     - `functional_runtime_struct_arg` (struct by-value argument via CUMETAL_ARG_BYTES)
     - `functional_runtime_barrier_order` (thread 0 writes sentinel; all threads verify post-barrier)
     - `functional_runtime_cp_async_emul` (cp.async emulated as ld+st+threadgroup_barrier)
-    - `functional_runtime_warp_partial_mask` (spec §5.3/§10.3 partial-mask conservative lowering)
+    - `functional_runtime_warp_partial_mask` (reference identity behavior for non-member shuffle lanes)
+    - `functional_runtime_warp_mask_votes_cu` (real CUDA frontend/PTX/AIR execution for partial-mask vote, activemask, shuffle, divergent masked barriers, and automatic static shared memory)
   - intrinsic lowering: `brev.b32/b64` → `llvm.bitreverse.i32/i64` added to pass and parser
   - intrinsic_lower unit tests: Test 6 (abs/shr), Test 7 (brev), Test 8 (f32/f64 math, b64 bitwise)
   - PTX sweep: expanded to 93+ cases covering all kSupportedRoots opcode roots including:
@@ -372,8 +378,8 @@ Device intrinsics added to `cuda_runtime.h`:
 - Fast math: `__sinf`, `__cosf`, `__tanf`, `__expf`, `__exp2f`, `__logf`, `__log2f`, `__log10f`, `__powf`, `__sqrtf`, `__rsqrtf`, `__fdividef`, `__frcp_rn`, `__fsqrt_rn`
 - Lane masks: `__lanemask_eq`, `__lanemask_lt`, `__lanemask_le`, `__lanemask_gt`, `__lanemask_ge`
 - Warp reductions: `__reduce_add_sync`, `__reduce_and_sync`, `__reduce_or_sync`, `__reduce_xor_sync`, `__reduce_min_sync`, `__reduce_max_sync`
-- Warp shuffle: `__shfl_sync`, `__shfl_down_sync`, `__shfl_up_sync`, `__shfl_xor_sync` (int + float overloads; partial masks map to full-group on Apple Silicon)
-- Warp vote: `__any_sync`, `__all_sync`, `__ballot_sync` (mask parameter accepted but Apple Silicon is always full-group)
+- Warp shuffle: `__shfl_sync`, `__shfl_down_sync`, `__shfl_up_sync`, `__shfl_xor_sync` (int + float overloads; partial member masks predicate caller results)
+- Warp vote: `__any_sync`, `__all_sync`, `__ballot_sync` (member mask intersected with the real active-lane ballot)
 - Double atomics: `atomicAdd(double*, double)` via 64-bit CAS loop
 
 `cuda_fp16.h` expanded:
@@ -548,6 +554,8 @@ Known limitations (intentional per spec §2.2 and §8):
 - Multi-GPU peer access: single GPU only on Apple Silicon; peer APIs return appropriate errors.
 - CUDA graphics interop (OpenGL/Vulkan): non-goal per spec §2.2.
 - `cooperative_groups::grid_group::sync()`: no-op stub; Metal has no cross-threadgroup barrier.
-- Warp partial-mask operations: conservative full-group emulation (spec §5.3).
+- Masked `__syncwarp` uses AIR SIMD-group scope with threadgroup-memory visibility;
+  divergent half-warp ordering, partial-mask vote/ballot, activemask, shuffle caller
+  membership, and automatic source-path static shared memory are GPU-tested (spec §5.3).
 - FP64: Apple Silicon GPU has minimal FP64 throughput; `--fp64=emulate` recommended (spec §8.1).
 - Device printf: buffer-based; format strings limited to 256 bytes (spec §5.3).

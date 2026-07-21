@@ -42,9 +42,7 @@ patch_marker_is_present() {
             ;;
         0005-cumetal-runtime-grb.patch)
             grep -q 'CUMETAL_PHYSX_KERNEL_DIR' \
-                "${PHYSX_REPO}/physx/source/cudamanager/src/CudaKernelWrangler.cpp" &&
-                grep -q 'partial warp masks as a full SIMD group' \
-                    "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/preIntegration.cuh"
+                "${PHYSX_REPO}/physx/source/cudamanager/src/CudaKernelWrangler.cpp"
             ;;
         0006-physx-grb-conformance.patch)
             grep -q -- '--dump FILE' \
@@ -53,10 +51,22 @@ patch_marker_is_present() {
                     "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
         0007-cumetal-grb-contact.patch)
-            grep -q 'The selected GRB target only needs a single rigid/static normal contact' \
+            grep -q 'CUDA UVA gives mapped host and device pointers' \
+                "${PHYSX_REPO}/physx/source/gpusolver/src/PxgSolverCore.cpp"
+            ;;
+        0008-cumetal-native-warp-paths.patch)
+            grep -q 'CUMETAL_PHYSX_KERNEL_DIR' \
+                "${PHYSX_REPO}/physx/source/cudamanager/src/CudaKernelWrangler.cpp" &&
+                ! grep -q 'partial warp masks as a full SIMD group' \
+                    "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/preIntegration.cuh" &&
+                ! grep -q 'CuMetal intentionally emulates partial warp masks' \
+                    "${PHYSX_REPO}/physx/source/gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu"
+            ;;
+        0009-cumetal-grb-kinetic-friction.patch)
+            grep -q 'Build its single friction anchor directly' \
                 "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh" &&
-                grep -q 'CUDA UVA gives mapped host and device pointers' \
-                    "${PHYSX_REPO}/physx/source/gpusolver/src/PxgSolverCore.cpp"
+                grep -q -- '--frictionless' \
+                    "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
         *)
             return 1

@@ -1,0 +1,271 @@
+diff --git a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+index cec0d87..e4e23e8 100644
+--- a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
++++ b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+@@ -57,6 +57,13 @@ static PxCudaContextManager*	gCudaContextManager	= NULL;
+ static PxRigidDynamic*			gBall				= NULL;
+ static bool						gGpuReady			= false;
+ 
++enum ContactMode
++{
++	eCONTACT_RESTING,
++	eCONTACT_FRICTION,
++	eCONTACT_FRICTIONLESS
++};
++
+ static PxReal stackZ = 10.0f;
+ 
+ static PxRigidDynamic* createDynamic(const PxTransform& t, const PxGeometry& geometry, const PxVec3& velocity=PxVec3(0))
+@@ -85,7 +92,7 @@ static void createStack(const PxTransform& t, PxU32 size, PxReal halfExtent)
+ 	shape->release();
+ }
+ 
+-void initPhysics(bool useGpu)
++void initPhysics(bool useGpu, ContactMode contactMode)
+ {
+ 	gFoundation = PxCreateFoundation(PX_PHYSICS_VERSION, gAllocator, gErrorCallback);
+ 	gPhysics = PxCreatePhysics(PX_PHYSICS_VERSION, *gFoundation, PxTolerancesScale(), true, NULL);
+@@ -130,11 +137,14 @@ void initPhysics(bool useGpu)
+ 
+ 
+ 	gMaterial = gPhysics->createMaterial(0.5f, 0.5f, 0.6f);
++	if(contactMode == eCONTACT_FRICTIONLESS)
++		gMaterial->setFlag(PxMaterialFlag::eDISABLE_FRICTION, true);
+ 
+ 	PxRigidStatic* groundPlane = PxCreatePlane(*gPhysics, PxPlane(0,1,0,0), *gMaterial);
+ 	gScene->addActor(*groundPlane);
+ 
+-	gBall = createDynamic(PxTransform(PxVec3(0, 1, 0)), PxSphereGeometry(1));
++	const PxVec3 initialVelocity = contactMode == eCONTACT_RESTING ? PxVec3(0) : PxVec3(5.f, 0.f, 0.f);
++	gBall = createDynamic(PxTransform(PxVec3(0, 1, 0)), PxSphereGeometry(1), initialVelocity);
+ 	PxRigidBodyExt::updateMassAndInertia(*gBall, 10.0f);
+ }
+ 
+@@ -172,12 +182,16 @@ void keyPress(unsigned char key, const PxTransform& camera)
+ 	}
+ }
+ 
+-static void dumpTransform(FILE* output, PxU32 step)
++static void dumpState(FILE* output, PxU32 step)
+ {
+ 	const PxTransform pose = gBall->getGlobalPose();
+-	fprintf(output, "%u\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\n",
++	const PxVec3 linearVelocity = gBall->getLinearVelocity();
++	const PxVec3 angularVelocity = gBall->getAngularVelocity();
++	fprintf(output, "%u\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\n",
+ 		step, double(pose.p.x), double(pose.p.y), double(pose.p.z),
+-		double(pose.q.x), double(pose.q.y), double(pose.q.z), double(pose.q.w));
++		double(pose.q.x), double(pose.q.y), double(pose.q.z), double(pose.q.w),
++		double(linearVelocity.x), double(linearVelocity.y), double(linearVelocity.z),
++		double(angularVelocity.x), double(angularVelocity.y), double(angularVelocity.z));
+ }
+ 
+ int snippetMain(int argc, const char*const* argv)
+@@ -187,6 +201,7 @@ int snippetMain(int argc, const char*const* argv)
+ 	renderLoop();
+ #else
+ 	bool useGpu = true;
++	ContactMode contactMode = eCONTACT_RESTING;
+ 	PxU32 frameCount = 100;
+ 	const char* dumpPath = NULL;
+ 	for(int i = 1; i < argc; ++i)
+@@ -195,18 +210,22 @@ int snippetMain(int argc, const char*const* argv)
+ 			useGpu = false;
+ 		else if(strcmp(argv[i], "--gpu") == 0)
+ 			useGpu = true;
++		else if(strcmp(argv[i], "--friction") == 0)
++			contactMode = eCONTACT_FRICTION;
++		else if(strcmp(argv[i], "--frictionless") == 0)
++			contactMode = eCONTACT_FRICTIONLESS;
+ 		else if(strcmp(argv[i], "--steps") == 0 && i + 1 < argc)
+ 			frameCount = PxU32(strtoul(argv[++i], NULL, 10));
+ 		else if(strcmp(argv[i], "--dump") == 0 && i + 1 < argc)
+ 			dumpPath = argv[++i];
+ 		else
+ 		{
+-			printf("usage: SnippetHelloGRB [--cpu|--gpu] [--steps N] [--dump FILE]\n");
++			printf("usage: SnippetHelloGRB [--cpu|--gpu] [--friction|--frictionless] [--steps N] [--dump FILE]\n");
+ 			return 2;
+ 		}
+ 	}
+ 
+-	initPhysics(useGpu);
++	initPhysics(useGpu, contactMode);
+ 	if(!gGpuReady)
+ 	{
+ 		cleanupPhysics(false);
+@@ -225,19 +244,22 @@ int snippetMain(int argc, const char*const* argv)
+ 	}
+ 	if(dump)
+ 	{
+-		fprintf(dump, "step\tpx\tpy\tpz\tqx\tqy\tqz\tqw\n");
+-		dumpTransform(dump, 0);
++		fprintf(dump, "step\tpx\tpy\tpz\tqx\tqy\tqz\tqw\tvx\tvy\tvz\twx\twy\twz\n");
++		dumpState(dump, 0);
+ 	}
+ 	for(PxU32 i=0; i<frameCount; i++)
+ 	{
+ 		stepPhysics(false);
+ 		if(dump)
+-			dumpTransform(dump, i + 1);
++			dumpState(dump, i + 1);
+ 	}
+ 	if(dump)
+ 		fclose(dump);
+ 	const PxTransform pose = gBall->getGlobalPose();
+ 	printf("CuMetal GRB mode: %s\n", useGpu ? "gpu" : "cpu");
++	printf("CuMetal GRB contact mode: %s\n",
++		contactMode == eCONTACT_FRICTION ? "friction" :
++		(contactMode == eCONTACT_FRICTIONLESS ? "frictionless" : "resting"));
+ 	printf("CuMetal GRB final pose: %.9g %.9g %.9g\n", double(pose.p.x), double(pose.p.y), double(pose.p.z));
+ 	const PxVec3 velocity = gBall->getLinearVelocity();
+ 	printf("CuMetal GRB final velocity: %.9g %.9g %.9g\n", double(velocity.x), double(velocity.y), double(velocity.z));
+diff --git a/physx/source/gpusolver/src/CUDA/constraintBlockPrep.cu b/physx/source/gpusolver/src/CUDA/constraintBlockPrep.cu
+index 137a52d..60a4b07 100644
+--- a/physx/source/gpusolver/src/CUDA/constraintBlockPrep.cu
++++ b/physx/source/gpusolver/src/CUDA/constraintBlockPrep.cu
+@@ -444,6 +444,10 @@ extern "C" __global__ void contactConstraintBlockPrepareParallelLaunch(
+ 		//mDescStride might less than 32, we need to guard against it
+ 		if(threadIndexInWarp < descStride)
+ 		{
++			#if PX_CUMETAL
++			invInertia0 = solverTxIDatas[bodyAIndex].sqrtInvInertia;
++			invInertia1 = solverTxIDatas[bodyBIndex].sqrtInvInertia;
++			#endif
+ 			//port contact code
+ 			PxgBlockContactData& contactData = contactCurrentPrepPool[descIndexBatch];
+ 			PxgBlockContactPoint* baseContact = contactBase + batch.blockContactIndex;
+diff --git a/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh b/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
+index a2b26a1..c33c3a1 100644
+--- a/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
++++ b/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
+@@ -713,29 +713,6 @@ static __device__ void  createFinalizeSolverContactsBlockGPU(	PxgBlockContactDat
+ 	const float4 normal4 = contactData->normal_restitutionW[threadIndex];
+ 	const PxVec3 normal(normal4.x, normal4.y, normal4.z);
+ 
+-	#if PX_CUMETAL
+-	// The selected GRB target only needs a single rigid/static normal contact.
+-	// Avoid the warp-synchronous friction-patch correlation path, which relies
+-	// on CUDA partial-warp barriers that CuMetal intentionally emulates as a
+-	// full SIMD-group operation.
+-	frictionPatch.anchorCount[threadIndex] = 0;
+-	frictionPatch.broken[threadIndex] = 0;
+-	setupFinalizeSolverConstraintsBlock(*contactData, contactPoints, nbContacts,
+-		frictionPatch, fAnchor, bodyFrame0, bodyFrame1, solverBodyData0, solverBodyData1,
+-		initLinVel0, initAngVel0, initLinVel1, initAngVel1, sqrtInvInertia0, sqrtInvInertia1,
+-		invDtF32, dtF32, bounceThresholdF32, threadIndex, forceWritebackBufferOffset, false,
+-		contactHeader, frictionHeader, contactConstraints, frictionConstraints, data,
+-		ccdMaxSeparation, solverOffsetSlop);
+-	PX_UNUSED(prevFrictionPatches);
+-	PX_UNUSED(prevFrictionAnchors);
+-	PX_UNUSED(prevFrictionIndices);
+-	PX_UNUSED(totalEdges);
+-	PX_UNUSED(prevFrictionStartIndex);
+-	PX_UNUSED(frictionOffsetThreshold);
+-	PX_UNUSED(correlationDistance);
+-	return;
+-	#endif
+-
+ 	correlatePatches(frictionPatch, contactPoints, nbContacts, normal,
+ 		bodyFrame0, bodyFrame1, PXC_SAME_NORMAL, threadIndex);
+ 
+@@ -750,10 +727,22 @@ static __device__ void  createFinalizeSolverContactsBlockGPU(	PxgBlockContactDat
+ 	//Mark the friction patch as not broken!
+ 	frictionPatch.broken[threadIndex] = 0;
+ 
+-	#if !PX_CUMETAL
+-	__syncwarp(); //Ensure writes from correlation are visible
+-	#endif
+-
++	#if PX_CUMETAL
++	// The selected CuMetal GRB path has one sphere/plane contact per batch.
++	// Build its single friction anchor directly; the generic patch-cache path
++	// substantially expands this kernel and is not needed for this target.
++	if(!disableFriction && nbContacts)
++	{
++		const float4 worldPoint = contactPoints[0].point_separationW[threadIndex];
++		const PxVec3 point(worldPoint.x, worldPoint.y, worldPoint.z);
++		const PxVec3 localPoint0 = bodyFrame0.transformInv(point);
++		const PxVec3 localPoint1 = bodyFrame1.transformInv(point);
++		fAnchor.body0Anchors[0][threadIndex] = make_float4(localPoint0.x, localPoint0.y, localPoint0.z, 0.f);
++		fAnchor.body1Anchors[0][threadIndex] = make_float4(localPoint1.x, localPoint1.y, localPoint1.z, 0.f);
++		frictionPatch.contactID[0][threadIndex] = 0;
++		frictionPatch.anchorCount[threadIndex] = 1;
++	}
++	#else
+ 	if (!(perPointFriction || disableFriction))// || (solverBodyData0.islandNodeIndex & 2) || (solverBodyData1.islandNodeIndex & 2)))
+ 	{
+ 		getFrictionPatches(frictionPatch, fAnchor, prevFrictionIndices, prevFrictionStartIndex, prevFrictionPatches, prevFrictionAnchors, data.prevFrictionPatchCount, bodyFrame0, bodyFrame1, correlationDistance, threadIndex, totalEdges, patchExtents,
+@@ -762,6 +751,7 @@ static __device__ void  createFinalizeSolverContactsBlockGPU(	PxgBlockContactDat
+ 
+ 	if(!disableFriction)
+ 		growPatches(frictionPatch, fAnchor, contactPoints, nbContacts, bodyFrame0, bodyFrame1, frictionOffsetThreshold + data.restDistance, threadIndex, patchExtents);
++	#endif
+ 
+ 	setupFinalizeSolverConstraintsBlock(*contactData, contactPoints, nbContacts, frictionPatch, fAnchor, bodyFrame0, bodyFrame1, solverBodyData0, solverBodyData1, 
+ 		initLinVel0, initAngVel0, initLinVel1, initAngVel1, sqrtInvInertia0, sqrtInvInertia1, invDtF32, dtF32,
+diff --git a/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu b/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
+index 9d848f8..2c385a4 100644
+--- a/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
++++ b/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
+@@ -935,12 +935,11 @@ void solveStaticBlock(
+ 		const PxU32 contactCount = PxMin(maxStaticPartitions, PxU32(1));
+ 		if (contactCount)
+ 		{
++			const PxgIslandContext& island = solverDesc->islandContextPool[islandIndex];
+ 			const PxU32 startContactIndex =
+ 				solverDesc->mRigidStaticContactStartIndices[bodyIndex];
+-			const PxgBlockConstraintBatch& firstBatch =
+-				iterativeData.blockConstraintBatch[startContactIndex];
+-			const PxU32 rigidBodyIndex = firstBatch.bodyAIndex[0];
+-			const PxU32 totalBodiesIncKinematics = rigidBodyIndex + 1;
++			const PxU32 rigidBodyIndex = island.mBodyStartIndex + bodyIndex;
++			const PxU32 totalBodiesIncKinematics = island.mBodyStartIndex + island.mBodyCount;
+ 			const PxU32 inputBody = solverDesc->accumulatedBodyDeltaVOffset + rigidBodyIndex;
+ 			float4 linVel = iterativeData.solverBodyVelPool[inputBody];
+ 			float4 angVel = iterativeData.solverBodyVelPool[inputBody + totalBodiesIncKinematics];
+@@ -951,40 +950,10 @@ void solveStaticBlock(
+ 			{
+ 				const PxgBlockConstraintBatch& batch =
+ 					iterativeData.blockConstraintBatch[startContactIndex + i];
+-				PxgBlockSolverContactHeader& header =
+-					iterativeData.blockContactHeaders[batch.mConstraintBatchIndex];
+-				const float4 normalFriction = header.normal_staticFriction[0];
+-				const PxVec3 normal(normalFriction.x, normalFriction.y, normalFriction.z);
+-				const float4 mass = header.invMass0_1_angDom0_1[0];
+-				PxgBlockSolverContactPoint* points =
+-					&iterativeData.blockContactPoints[batch.startConstraintIndex];
+-				for(PxU32 c = 0; c < header.numNormalConstr[0]; ++c)
+-				{
+-					PxgBlockSolverContactPoint& point = points[c];
+-					const float4 raTarget = point.raXn_targetVelocity[0];
+-					const float4 rbMax = point.rbXn_maxImpulse[0];
+-					const PxVec3 ra(raTarget.x, raTarget.y, raTarget.z);
+-					const PxVec3 rb(rbMax.x, rbMax.y, rbMax.z);
+-					const float response = point.resp0[0] + point.resp1[0];
+-					const float reciprocal = response > 0.f ? 1.f / response : 0.f;
+-					float velocityMultiplier, impulseMultiplier, unbiasedError, biasedError;
+-					computeContactCoefficients(header.flags[0], header.restitution[0], response,
+-						reciprocal, raTarget.w, point.coeff0[0], point.coeff1[0],
+-						velocityMultiplier, impulseMultiplier, unbiasedError, biasedError);
+-					const float normalVelocity = lv0.dot(normal) + av0.dot(ra) -
+-						lv1.dot(normal) - av1.dot(rb);
+-					const float oldForce = point.appliedForce[0];
+-					const float deltaCandidate = PxMax(biasedError - normalVelocity * velocityMultiplier,
+-						-oldForce);
+-					const float newForce = oldForce * impulseMultiplier + deltaCandidate;
+-					const float deltaForce = newForce - oldForce;
+-					lv0 += normal * (mass.x * deltaForce);
+-					lv1 -= normal * (mass.y * deltaForce);
+-					av0 += ra * (mass.z * deltaForce);
+-					av1 -= rb * (mass.w * deltaForce);
+-					point.appliedForce[0] = newForce;
+-				}
+-				PX_UNUSED(doFriction);
++				solveContactBlock(batch, lv0, av0, lv1, av1, doFriction, 0,
++					iterativeData.blockContactHeaders, iterativeData.blockFrictionHeaders,
++					iterativeData.blockContactPoints, iterativeData.blockFrictions, NULL,
++					1.f, 1.f);
+ 			}
+ 			linVel.x = lv0.x; linVel.y = lv0.y; linVel.z = lv0.z;
+ 			angVel.x = av0.x; angVel.y = av0.y; angVel.z = av0.z;

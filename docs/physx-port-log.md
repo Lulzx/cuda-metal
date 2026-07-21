@@ -2,6 +2,58 @@
 
 This log records progress and decisions for the PhysX GPU-on-CuMetal port.
 
+## 2026-07-21 — Selected kinetic-friction bring-up
+
+- Removed the normal-only early return from patch 0007 and routed the selected
+  static contact through PhysX's real `solveContactBlock` friction loop.
+- Added a CuMetal-only one-anchor preparation path for the reduced one-contact
+  sphere/plane batch. Expanding the generic friction-patch cache in this kernel
+  causes an Apple GPU hang, so generic correlation remains excluded.
+- Loaded the selected bodies' inertia tensors directly from solver transform
+  data. The GPU trajectory matches CPU through the initial 18-step kinetic
+  sliding phase and produces the expected tangential deceleration and angular
+  acceleration.
+- Added `--friction` and `--frictionless` scene modes, velocity columns in TSV
+  dumps, and `conformance_physx_grb_friction`. The 60-step negative control
+  retains `vx=5` and zero spin; the friction case reaches approximately
+  `vx=0.095, wz=-9.68`.
+- Persistent/static rolling is still non-conformant because the selected path
+  rebuilds rather than correlates its anchor. CPU reaches approximately
+  `vx=3.17, wz=-3.17` at step 60. This is recorded as an explicit partial
+  capability, not full friction support.
+- Validation after patch 0009: five consecutive friction gates passed; the
+  normal build completed all 193 registered tests (191 pass, 2 expected
+  skips), and the binary-shim-off build completed all 182 registered tests
+  (173 pass, 9 expected source-project skips).
+
+## 2026-07-21 — Native partial-warp paths and static shared memory
+
+- Replaced the PTX path's caller-bit-only `vote.ballot` lowering with AIR
+  `simd_ballot`, including CUDA member-mask intersection for ballot/any/all.
+- `activemask` now reports AIR's real active lanes instead of a constant full mask,
+  and partial-mask shuffle callers outside the member mask receive identity.
+- Lowered `bar.warp.sync` to AIR's SIMD-group barrier with threadgroup-memory
+  visibility, instead of the former threadgroup-wide barrier. Extended the real
+  `.cu` frontend → PTX → AIR → metallib GPU test with divergent lower and upper
+  16-lane shared-memory ordering.
+- Added a versioned `shared <bytes>` ABI-sidecar record so direct source-first
+  launches automatically allocate static `__shared__` storage. Malformed records
+  fail deterministically, and Driver API sidecar parsing remains compatible.
+- Removed the `PX_CUMETAL` body-per-thread `preIntegration` and serialized
+  `updateBodiesLaunch` fallbacks via patch 0008. Initial trials exposed Apple
+  GPU address faults because the first sidecar implementation summed every
+  module-scope `.shared` declaration for every selected entry (for example,
+  assigning 10 KB to `ZeroBodies`). Entry-specific reference filtering now
+  reports `shared 8960` for `preIntegration` and zero for `ZeroBodies` and
+  `updateBodiesLaunch`. With that correction, twenty consecutive 30-step
+  CPU/GPU runs pass on the upstream warp-cooperative paths. The separate
+  selected friction-anchor correlation limitation remains.
+- Validation after the change: the normal configuration passed all 192 registered
+  tests (190 pass, 2 existing skips), including `conformance_physx_grb`; the
+  binary-shim-off configuration passed all 181 registered tests (172 pass,
+  9 expected source-project skips). Focused positive and malformed-input negative
+  lowering tests pass in both configurations.
+
 ## 2026-07-20 — Phase 0 feasibility audit
 
 - Confirmed the working CuMetal repository is `/Users/lulzx/work/cumetal`;
@@ -202,8 +254,9 @@ report.
   kernel now tests a nested pointer plus scalar argument end to end.
 - The audited partial-warp-mask limitation affected `preIntegration`: its
   warp-swizzled body loads depend on a body-count-specific active mask.
-  Patch 0005 uses an equivalent body-per-thread implementation under
-  `PX_CUMETAL`; the upstream CUDA path is unchanged.
+  Patch 0005 originally used an equivalent body-per-thread implementation under
+  `PX_CUMETAL`; patch 0008 removes that workaround after repeated native-path
+  conformance passed.
 - Verified real Apple GPU execution with provenance tracing. The reduced
   scene runs 100 steps without a crash, launches solver and integration
   kernels from production metallibs, moves the sphere from `y=10` to
@@ -229,8 +282,9 @@ report.
   arithmetic, lost/found compaction, static batch construction, contact
   pre-prep/prep, a reduced normal solver, and contact-aware integration. The
   30-step resting scene now differs from CPU by at most about `1.2e-7` in the
-  measured transform. General frictional and multi-body scenes remain outside
-  the selected target and may diverge chaotically over long runs.
+  measured transform. The later patch 0009 gate covers selected kinetic
+  friction, but persistent rolling, general frictional scenes, and multi-body
+  scenes remain outside the conformant target and may diverge over long runs.
 
 ## 2026-07-21 — Resting-contact hardening
 
@@ -242,6 +296,7 @@ report.
 - Added patch 0007 for the explicitly reduced target. CUDA partial-warp scan
   stages are serialized, pointer-heavy descriptors are read from global
   memory, and CUDA-UVA pointer differences use device-buffer bases.
-- Selected normal-only preparation and solve paths avoid partial-warp friction
-  barriers and the generic solver metallib that Apple's pipeline compiler
-  rejects. NVIDIA CUDA branches are unchanged.
+- The original selected normal-only preparation and solve paths avoided
+  partial-warp friction barriers and the generic solver metallib that Apple's
+  pipeline compiler rejects. Patch 0009 supersedes the solver portion with a
+  one-anchor kinetic-friction path. NVIDIA CUDA branches are unchanged.

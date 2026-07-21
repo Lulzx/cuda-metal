@@ -31,8 +31,8 @@ API-only entry points.
 
 The fifth patch builds and links the GPU host runtime against
 `libcumetal.dylib`, loads the source-recompiled per-kernel metallibs through
-`CudaKernelWrangler`, minimizes `SnippetHelloGRB`, and uses a body-per-thread
-pre-integration path for CuMetal's documented partial-warp-mask limitation.
+`CudaKernelWrangler`, minimizes `SnippetHelloGRB`, and introduced the original
+body-per-thread pre-integration compatibility path.
 
 The sixth patch adds CPU/GPU mode selection, step count, and per-step
 transform dumps to the reduced snippet for the conformance gate.
@@ -42,6 +42,19 @@ CuMetal-safe scalar compaction and static-batch preparation, replaces CUDA-UVA
 pointer subtraction with device-buffer offsets, and uses reduced normal-only
 contact preparation/solve paths. Friction, joints, articulations, and general
 multi-body scenes remain outside this target.
+
+The eighth patch removes the serialized `updateBodiesLaunch` and body-per-thread
+pre-integration fallbacks. CuMetal's masked vote, shuffle, SIMD-group barrier,
+and entry-specific static shared-memory paths now execute PhysX's upstream
+warp-cooperative implementations through repeated 30-step conformance runs.
+
+The ninth patch enables the selected sphere/plane kinetic-friction path. It
+builds one friction anchor without expanding the unsupported generic patch
+cache, restores the real contact solver's friction loop, and adds friction and
+friction-disabled snippet modes with linear/angular velocity dumps. The
+60-step gate matches CPU through the initial sliding phase and verifies a
+material GPU friction response against the disabled control. Persistent static
+friction and long-horizon rolling conformance remain out of scope.
 
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
@@ -90,3 +103,9 @@ The sphere starts in resting contact with the plane, so the default 30-step
 window exercises narrowphase, constraint preparation, the static contact
 solver, writeback, and integration. It uses `1e-3` relative plus `1e-5`
 absolute tolerance.
+
+Run the selected kinetic-friction gate:
+
+```bash
+tests/conformance/run_physx_grb_friction.sh
+```
