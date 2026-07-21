@@ -2,6 +2,22 @@
 
 This log records progress and decisions for the PhysX GPU-on-CuMetal port.
 
+## 2026-07-21 — Selected rolling-friction conformance
+
+- Traced the long-horizon kinetic clamp to stale accumulated linear/angular
+  solver deltas in the selected one-body static-contact path. The first frame
+  computed the correct impulse, but that delta was integrated again on every
+  later frame even when the new friction impulse was zero.
+- Patch 0010 clears exactly the selected body's two delta-velocity entries at
+  the start of each solve. It also stages one previous friction patch into the
+  current buffers, avoiding the unsupported generic device-pointer traversal
+  while preserving the selected anchor when it is not broken.
+- At step 60 the CPU reference reaches `vx=3.16690, wz=-3.16684`; Apple GPU
+  reaches `vx=3.16638, wz=-3.16712`. The frictionless control remains at
+  `vx=5, wz=0`, and the rolling residual `abs(vx+wz)` is below `0.001`.
+- This closes sliding-to-rolling conformance only for the selected one-body
+  sphere/plane target. General friction correlation and batching remain open.
+
 ## 2026-07-21 — Selected kinetic-friction bring-up
 
 - Removed the normal-only early return from patch 0007 and routed the selected

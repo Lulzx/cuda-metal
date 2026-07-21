@@ -56,6 +56,12 @@ friction-disabled snippet modes with linear/angular velocity dumps. The
 material GPU friction response against the disabled control. Persistent static
 friction and long-horizon rolling conformance remain out of scope.
 
+The tenth patch closes the selected sphere/plane rolling-friction gap. It
+clears the one-body accumulated solver deltas at each simulation step, stages
+the bounded previous friction patch without the unsupported generic device
+pointer traversal, and verifies CPU/GPU rolling agreement at step 60. Generic
+friction correlation and multi-body batching remain out of scope.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -104,7 +110,7 @@ window exercises narrowphase, constraint preparation, the static contact
 solver, writeback, and integration. It uses `1e-3` relative plus `1e-5`
 absolute tolerance.
 
-Run the selected kinetic-friction gate:
+Run the selected sliding-to-rolling friction gate:
 
 ```bash
 tests/conformance/run_physx_grb_friction.sh

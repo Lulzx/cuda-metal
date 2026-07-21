@@ -1,0 +1,136 @@
+diff --git a/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh b/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
+--- a/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
++++ b/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh
+@@ -236,7 +236,8 @@ static __device__ bool getFrictionPatches(PxgBlockFrictionPatch&  frictionPatch,
+ 						const PxU32 nbContacts)
+ {
+ 	//printf("prevFrictionStartIndex = %i, frictionPatchCount = %i\n", prevFrictionStartIndex, frictionPatchCount);
+-	if(prevFrictionStartIndex == 0xFFFFFFFF || frictionPatchCount == 0 || !prevFrictionIndices)
++	if(totalNbEdges == 0 || prevFrictionStartIndex == 0xFFFFFFFF || frictionPatchCount == 0 ||
++		!prevFrictionIndices || !previousPatches || !previousAnchors)
+ 		return true;
+ 
+ 	//const PxgBlockFrictionIndex* indices = &prevFrictionIndices[prevFrictionStartIndex];
+@@ -712,6 +713,19 @@ static __device__ void  createFinalizeSolverContactsBlockGPU(	PxgBlockContactDat
+ 
+ 	const float4 normal4 = contactData->normal_restitutionW[threadIndex];
+ 	const PxVec3 normal(normal4.x, normal4.y, normal4.z);
++
++	#if PX_CUMETAL
++	// The host stages the selected target's prior patch into the current buffer.
++	// Snapshot it before correlation overwrites the current-frame fields.
++	const PxU8 cachedAnchorCount = frictionPatch.anchorCount[threadIndex];
++	const PxU8 cachedBroken = frictionPatch.broken[threadIndex];
++	const float4 cachedBody0Normal = frictionPatch.body0Normal[threadIndex];
++	const float4 cachedBody1Normal = frictionPatch.body1Normal[threadIndex];
++	const float4 cachedBody0Anchor0 = fAnchor.body0Anchors[0][threadIndex];
++	const float4 cachedBody0Anchor1 = fAnchor.body0Anchors[1][threadIndex];
++	const float4 cachedBody1Anchor0 = fAnchor.body1Anchors[0][threadIndex];
++	const float4 cachedBody1Anchor1 = fAnchor.body1Anchors[1][threadIndex];
++	#endif
+ 
+ 	correlatePatches(frictionPatch, contactPoints, nbContacts, normal,
+ 		bodyFrame0, bodyFrame1, PXC_SAME_NORMAL, threadIndex);
+@@ -722,36 +736,39 @@ static __device__ void  createFinalizeSolverContactsBlockGPU(	PxgBlockContactDat
+ 
+ 	//KS - ensure that the friction patch broken bit is set to 0
+ 	frictionPatch.broken[threadIndex] = 0;
+-	PxReal patchExtents;
++	PxReal patchExtents = 0.0f;
+ 
+ 	//Mark the friction patch as not broken!
+ 	frictionPatch.broken[threadIndex] = 0;
+ 
+ 	#if PX_CUMETAL
+-	// The selected CuMetal GRB path has one sphere/plane contact per batch.
+-	// Build its single friction anchor directly; the generic patch-cache path
+-	// substantially expands this kernel and is not needed for this target.
+-	if(!disableFriction && nbContacts)
++	if(!disableFriction && totalEdges != 0 && !cachedBroken &&
++		cachedAnchorCount != 0 && cachedAnchorCount <= 2 && cachedAnchorCount <= nbContacts)
+ 	{
+-		const float4 worldPoint = contactPoints[0].point_separationW[threadIndex];
+-		const PxVec3 point(worldPoint.x, worldPoint.y, worldPoint.z);
+-		const PxVec3 localPoint0 = bodyFrame0.transformInv(point);
+-		const PxVec3 localPoint1 = bodyFrame1.transformInv(point);
+-		fAnchor.body0Anchors[0][threadIndex] = make_float4(localPoint0.x, localPoint0.y, localPoint0.z, 0.f);
+-		fAnchor.body1Anchors[0][threadIndex] = make_float4(localPoint1.x, localPoint1.y, localPoint1.z, 0.f);
+-		frictionPatch.contactID[0][threadIndex] = 0;
+-		frictionPatch.anchorCount[threadIndex] = 1;
++		frictionPatch.contactID[0][threadIndex] = 0xff;
++		frictionPatch.contactID[1][threadIndex] = 0xff;
++		frictionPatch.anchorCount[threadIndex] = cachedAnchorCount;
++		frictionPatch.body0Normal[threadIndex] = cachedBody0Normal;
++		frictionPatch.body1Normal[threadIndex] = cachedBody1Normal;
++		fAnchor.body0Anchors[0][threadIndex] = cachedBody0Anchor0;
++		fAnchor.body0Anchors[1][threadIndex] = cachedBody0Anchor1;
++		fAnchor.body1Anchors[0][threadIndex] = cachedBody1Anchor0;
++		fAnchor.body1Anchors[1][threadIndex] = cachedBody1Anchor1;
++		const float4 ext = cachedBody0Anchor0 - cachedBody0Anchor1;
++		patchExtents = ext.x*ext.x + ext.y*ext.y + ext.z*ext.z;
+ 	}
+ 	#else
+-	if (!(perPointFriction || disableFriction))// || (solverBodyData0.islandNodeIndex & 2) || (solverBodyData1.islandNodeIndex & 2)))
++	if (!(perPointFriction || disableFriction) && totalEdges != 0 &&
++		prevFrictionStartIndex != 0xFFFFFFFF && data.prevFrictionPatchCount != 0 &&
++		prevFrictionIndices && prevFrictionPatches && prevFrictionAnchors)// || (solverBodyData0.islandNodeIndex & 2) || (solverBodyData1.islandNodeIndex & 2)))
+ 	{
+ 		getFrictionPatches(frictionPatch, fAnchor, prevFrictionIndices, prevFrictionStartIndex, prevFrictionPatches, prevFrictionAnchors, data.prevFrictionPatchCount, bodyFrame0, bodyFrame1, correlationDistance, threadIndex, totalEdges, patchExtents,
+ 			nbContacts);
+ 	}
++	#endif
+ 
+ 	if(!disableFriction)
+ 		growPatches(frictionPatch, fAnchor, contactPoints, nbContacts, bodyFrame0, bodyFrame1, frictionOffsetThreshold + data.restDistance, threadIndex, patchExtents);
+-	#endif
+ 
+ 	setupFinalizeSolverConstraintsBlock(*contactData, contactPoints, nbContacts, frictionPatch, fAnchor, bodyFrame0, bodyFrame1, solverBodyData0, solverBodyData1, 
+ 		initLinVel0, initAngVel0, initLinVel1, initAngVel1, sqrtInvInertia0, sqrtInvInertia1, invDtF32, dtF32,
+diff --git a/physx/source/gpusolver/src/PxgCudaSolverCore.cpp b/physx/source/gpusolver/src/PxgCudaSolverCore.cpp
+--- a/physx/source/gpusolver/src/PxgCudaSolverCore.cpp
++++ b/physx/source/gpusolver/src/PxgCudaSolverCore.cpp
+@@ -964,6 +964,20 @@ void PxgCudaSolverCore::jointConstraintPrepareParallel(PxU32 nbJointBatches)
+ void PxgCudaSolverCore::contactConstraintPrepareParallel(PxU32 nbContactBatches)
+ {
+ 	PX_PROFILE_ZONE("GpuDynamics.contactConstraintPrepareParallel", 0);
++
++#if PX_CUMETAL
++	if(mPrepareDesc->totalPreviousEdges)
++	{
++		mCudaContext->memcpyDtoDAsync(
++			CUdeviceptr(mSharedDesc->blockCurrentFrictionPatches),
++			CUdeviceptr(mSharedDesc->blockPreviousFrictionPatches),
++			sizeof(PxgBlockFrictionPatch), mStream);
++		mCudaContext->memcpyDtoDAsync(
++			CUdeviceptr(mPrepareDesc->blockCurrentAnchorPatches),
++			CUdeviceptr(mPrepareDesc->blockPreviousAnchorPatches),
++			sizeof(PxgBlockFrictionAnchorPatch), mStream);
++	}
++#endif
+ 		
+ 	const CUfunction kernelFunction = mGpuKernelWranglerManager->getKernelWrangler()->getCuFunction(PxgKernelIds::CONTACT_CONSTRAINT_PREPARE_BLOCK_PARALLEL);
+ 
+@@ -1268,6 +1282,23 @@ void PxgCudaSolverCore::solveContactMultiBlockParallel(PxgIslandContext* islandC
+ 
+ 	const PxReal dt = mSharedDesc->dt;
+ 	const PxReal invDt = 1.f / dt;
++
++#if PX_CUMETAL
++	// The selected one-body static-contact path writes accumulated delta
++	// velocities directly. Clear those per-step values before the first solver
++	// iteration so a prior frame's impulse is not integrated repeatedly.
++	if(numIslands == 1 && islandContexts[0].mBodyCount == 1)
++	{
++		const PxU32 bodyOffset = islandContexts[0].mBodyStartIndex;
++		const PxU32 bodyIndex = mSolverCoreDesc->accumulatedBodyDeltaVOffset + bodyOffset;
++		const PxU32 angularIndex = bodyIndex + bodyOffset + islandContexts[0].mBodyCount;
++		const CUdeviceptr velocityBase = CUdeviceptr(mSharedDesc->iterativeData.solverBodyVelPool);
++		mCudaContext->memsetD32Async(velocityBase + PxU64(bodyIndex) * sizeof(float4), 0,
++			sizeof(float4) / sizeof(PxU32), mStream);
++		mCudaContext->memsetD32Async(velocityBase + PxU64(angularIndex) * sizeof(float4), 0,
++			sizeof(float4) / sizeof(PxU32), mStream);
++	}
++#endif
+ 
+ 	//Zero contact error accumulators
+ 	PxReal* zeroA = ((PxReal*)mSolverCoreDescd) + offsetof(PxgSolverCoreDesc, contactErrorAccumulator) / sizeof(PxReal);

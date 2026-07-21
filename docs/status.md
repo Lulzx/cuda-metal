@@ -243,9 +243,9 @@ Implemented:
     provenance through sphere narrowphase, contact pre-prep/prep, static
     solve, writeback, and integration
   - `conformance_physx_grb_friction` exercises the selected one-anchor
-    sphere/plane kinetic-friction solve for 60 steps, matches CPU through the
-    initial 18-step sliding phase, and verifies a friction-disabled negative
-    control; persistent/static rolling remains a measured gap
+    sphere/plane friction solve for 60 steps, matches CPU through sliding and
+    no-slip rolling, and verifies a friction-disabled negative control;
+    generic friction correlation remains a measured gap
   - expanded PTX sweep harness (`tests/ptx_sweep`) for strict-mode supported/unsupported opcode checks
   - initial `intrinsic_lower` pass for thread-index/barrier/basic-math mappings
   - initial `printf_lower` pass for PTX `printf`/`vprintf` call extraction and format-table metadata

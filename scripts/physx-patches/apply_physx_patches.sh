@@ -63,10 +63,18 @@ patch_marker_is_present() {
                     "${PHYSX_REPO}/physx/source/gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu"
             ;;
         0009-cumetal-grb-kinetic-friction.patch)
-            grep -q 'Build its single friction anchor directly' \
-                "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh" &&
+            { grep -q 'Build its single friction anchor directly' \
+                "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh" ||
+                grep -q "prior frame's impulse is not integrated repeatedly" \
+                    "${PHYSX_REPO}/physx/source/gpusolver/src/PxgCudaSolverCore.cpp"; } &&
                 grep -q -- '--frictionless' \
                     "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
+            ;;
+        0010-cumetal-grb-rolling-friction.patch)
+            grep -q "prior frame's impulse is not integrated repeatedly" \
+                "${PHYSX_REPO}/physx/source/gpusolver/src/PxgCudaSolverCore.cpp" &&
+                grep -q "host stages the selected target's prior patch" \
+                    "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/contactConstraintBlockPrep.cuh"
             ;;
         *)
             return 1

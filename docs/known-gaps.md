@@ -51,13 +51,12 @@ as gaps have been closed.
   manifest and a single rigid/static contact. Patch 0008 removes
   the former body-per-thread `preIntegration` and serialized `updateBodiesLaunch`
   fallbacks; their upstream warp-cooperative paths pass twenty consecutive 30-step
-  CPU/GPU resting conformance runs. Patch 0009 adds a selected one-anchor
-  kinetic-friction path: CPU and GPU state agree through the initial 18-step
-  sliding phase, and a 60-step gate verifies material deceleration and spin
-  against a friction-disabled control. Generic friction-patch correlation and
-  persistent/static rolling are not conformant: by step 60 the CPU sphere is
-  rolling at approximately `vx=3.17, wz=-3.17`, while the selected GPU path
-  remains kinetically clamped at approximately `vx=0.095, wz=-9.68`.
+  CPU/GPU resting conformance runs. Patches 0009 and 0010 add a selected
+  one-anchor friction path: CPU and GPU agree through sliding and reach
+  no-slip rolling near `vx=3.17, wz=-3.17` at step 60, while the
+  friction-disabled control retains `vx=5` and zero spin. The selected path
+  stages one previous patch on the host because generic device-side
+  friction-patch correlation is still unsupported.
   Joints, articulations, multi-body batching, user impulse limits, general
   falling-contact, and chaotic long-run solver conformance are not claimed.
 

@@ -77,8 +77,13 @@ def main():
 
         if not (2.0 < cpu_vx < 4.0 and cpu_wz < -2.0):
             return fail(f"CPU friction reference did not reach rolling state: vx={cpu_vx:g} wz={cpu_wz:g}")
-        if not (0.0 <= gpu_vx < 1.0 and gpu_wz < -5.0):
-            return fail(f"GPU kinetic friction response missing: vx={gpu_vx:g} wz={gpu_wz:g}")
+        if abs(gpu_vx - cpu_vx) > 0.01 or abs(gpu_wz - cpu_wz) > 0.01:
+            return fail(
+                f"GPU rolling state mismatch: CPU vx={cpu_vx:g} wz={cpu_wz:g}; "
+                f"GPU vx={gpu_vx:g} wz={gpu_wz:g}"
+            )
+        if abs(gpu_vx + gpu_wz) > 0.01:
+            return fail(f"GPU did not reach no-slip rolling: vx+wz={gpu_vx + gpu_wz:g}")
         if abs(off_vx - 5.0) > 0.02 or abs(value(off_final, "wz")) > 0.02:
             return fail(f"friction-disabled control changed tangential motion: vx={off_vx:g}")
         if off_x - gpu_x < 1.0:
@@ -87,8 +92,8 @@ def main():
         return fail(str(error))
 
     print(
-        "PASS: PhysX sphere/plane kinetic friction matches CPU through "
-        f"step {early_steps}; GPU friction vx={gpu_vx:.6g}, wz={gpu_wz:.6g}, "
+        "PASS: PhysX sphere/plane friction matches CPU sliding and rolling; "
+        f"GPU step {steps} vx={gpu_vx:.6g}, wz={gpu_wz:.6g}, "
         f"disabled vx={off_vx:.6g}"
     )
     return 0

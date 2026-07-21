@@ -260,7 +260,8 @@ PhysX 5.6's reduced `SnippetHelloGRB` now runs resting and kinetic-friction
 sphere/plane contacts end to end on Apple GPU through CuMetal. The patch/build
 workflow lives in `scripts/physx-patches/`; `conformance_physx_grb` compares
 30 resting CPU/GPU transform steps, while `conformance_physx_grb_friction`
-checks the CPU-matching sliding phase and a friction-disabled negative control.
+checks CPU/GPU sliding-to-rolling agreement through 60 steps and a
+friction-disabled negative control.
 Both require Metal narrowphase, constraint preparation, static solve,
 writeback, and integration provenance. This remains a deliberately selected
 one-rigid/one-static target; see `docs/known-gaps.md`.
