@@ -46,6 +46,12 @@ patch_marker_is_present() {
                 grep -q 'partial warp masks as a full SIMD group' \
                     "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/preIntegration.cuh"
             ;;
+        0006-physx-grb-conformance.patch)
+            grep -q -- '--dump FILE' \
+                "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp" &&
+                grep -q 'CuMetal GRB mode:' \
+                    "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
+            ;;
         *)
             return 1
             ;;

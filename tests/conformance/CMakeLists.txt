@@ -3,6 +3,25 @@ if(NOT APPLE)
     return()
 endif()
 
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    find_program(CUMETAL_XCRUN_EXECUTABLE xcrun)
+    if(CUMETAL_XCRUN_EXECUTABLE)
+        add_test(
+            NAME conformance_physx_grb
+            COMMAND bash
+                    ${CMAKE_CURRENT_SOURCE_DIR}/run_physx_grb.sh
+        )
+        set_tests_properties(conformance_physx_grb PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 1800
+        )
+    else()
+        message(STATUS "Skipping PhysX GRB conformance registration (xcrun unavailable)")
+    endif()
+else()
+    message(STATUS "Skipping PhysX GRB conformance registration (Apple Silicon required)")
+endif()
+
 add_test(
     NAME conformance_phase4_functional
     COMMAND bash

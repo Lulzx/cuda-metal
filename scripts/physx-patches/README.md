@@ -34,6 +34,9 @@ The fifth patch builds and links the GPU host runtime against
 `CudaKernelWrangler`, minimizes `SnippetHelloGRB`, and uses a body-per-thread
 pre-integration path for CuMetal's documented partial-warp-mask limitation.
 
+The sixth patch adds CPU/GPU mode selection, step count, and per-step
+transform dumps to the reduced snippet for the conformance gate.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -70,3 +73,13 @@ This enables native Metal GPU virtual addresses for CUDA device allocations,
 which is required for the nested device pointers in PhysX descriptor structs.
 The script verifies successful Apple GPU kernel dispatch and non-zero gravity
 integration before printing `PASS`.
+
+Run CPU/GPU transform conformance:
+
+```bash
+tests/conformance/run_physx_grb.sh
+```
+
+The default 30-step window precedes first contact and uses `1e-3` relative
+plus `1e-5` absolute tolerance. Longer runs currently diverge at the
+sphere/plane contact as documented in `docs/known-gaps.md`.

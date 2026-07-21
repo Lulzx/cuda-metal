@@ -1,0 +1,145 @@
+diff --git a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+index d07e879..e4c8f55 100644
+--- a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
++++ b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+@@ -34,6 +34,9 @@
+ // ****************************************************************************
+ 
+ #include <ctype.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ #include "PxPhysicsAPI.h"
+ #include "cudamanager/PxCudaContextManager.h"
+ #include "../snippetcommon/SnippetPrint.h"
+@@ -82,22 +85,22 @@ static void createStack(const PxTransform& t, PxU32 size, PxReal halfExtent)
+ 	shape->release();
+ }
+ 
+-void initPhysics(bool /*interactive*/)
++void initPhysics(bool useGpu)
+ {
+ 	gFoundation = PxCreateFoundation(PX_PHYSICS_VERSION, gAllocator, gErrorCallback);
+ 	gPhysics = PxCreatePhysics(PX_PHYSICS_VERSION, *gFoundation, PxTolerancesScale(), true, NULL);
+ 	
+-	PxCudaContextManagerDesc cudaContextManagerDesc;
+-	gCudaContextManager = PxCreateCudaContextManager(*gFoundation, cudaContextManagerDesc, PxGetProfilerCallback());	//Create the CUDA context manager, required for GRB to dispatch CUDA kernels.
+-	if(gCudaContextManager)
++	if(useGpu)
+ 	{
+-		if(!gCudaContextManager->contextIsValid())
++		PxCudaContextManagerDesc cudaContextManagerDesc;
++		gCudaContextManager = PxCreateCudaContextManager(*gFoundation, cudaContextManagerDesc, PxGetProfilerCallback());
++		if(gCudaContextManager && !gCudaContextManager->contextIsValid())
+ 			PX_RELEASE(gCudaContextManager);
+-	}
+-	if(!gCudaContextManager)
+-	{
+-		printf("CuMetal GRB ERROR: GPU context initialization failed.\n");
+-		return;
++		if(!gCudaContextManager)
++		{
++			printf("CuMetal GRB ERROR: GPU context initialization failed.\n");
++			return;
++		}
+ 	}
+ 
+ 	PxSceneDesc sceneDesc(gPhysics->getTolerancesScale());
+@@ -106,9 +109,11 @@ void initPhysics(bool /*interactive*/)
+ 	sceneDesc.cpuDispatcher	= gDispatcher;
+ 	sceneDesc.filterShader	= PxDefaultSimulationFilterShader;
+ 
+-	sceneDesc.cudaContextManager = gCudaContextManager;		//Set the CUDA context manager, used by GRB.
+-
+-	sceneDesc.flags |= PxSceneFlag::eENABLE_GPU_DYNAMICS;	//Enable GPU dynamics - without this enabled, simulation (contact gen and solver) will run on the CPU.
++	if(useGpu)
++	{
++		sceneDesc.cudaContextManager = gCudaContextManager;
++		sceneDesc.flags |= PxSceneFlag::eENABLE_GPU_DYNAMICS;
++	}
+ 	sceneDesc.flags |= PxSceneFlag::eENABLE_PCM;			//Enable PCM. PCM NP is supported on GPU. Legacy contact gen will fall back to CPU
+ 	sceneDesc.flags |= PxSceneFlag::eENABLE_STABILIZATION;	//Improve solver stability by enabling post-stabilization.
+ 	sceneDesc.broadPhaseType = PxBroadPhaseType::eABP;
+@@ -118,7 +123,7 @@ void initPhysics(bool /*interactive*/)
+ 	gScene = gPhysics->createScene(sceneDesc);
+ 	if(!gScene)
+ 	{
+-		printf("CuMetal GRB ERROR: GPU scene creation failed.\n");
++		printf("CuMetal GRB ERROR: scene creation failed.\n");
+ 		return;
+ 	}
+ 	gGpuReady = true;
+@@ -167,14 +172,41 @@ void keyPress(unsigned char key, const PxTransform& camera)
+ 	}
+ }
+ 
+-int snippetMain(int, const char*const*)
++static void dumpTransform(FILE* output, PxU32 step)
++{
++	const PxTransform pose = gBall->getGlobalPose();
++	fprintf(output, "%u\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\n",
++		step, double(pose.p.x), double(pose.p.y), double(pose.p.z),
++		double(pose.q.x), double(pose.q.y), double(pose.q.z), double(pose.q.w));
++}
++
++int snippetMain(int argc, const char*const* argv)
+ {
+ #ifdef RENDER_SNIPPET
+ 	extern void renderLoop();
+ 	renderLoop();
+ #else
+-	static const PxU32 frameCount = 100;
+-	initPhysics(false);
++	bool useGpu = true;
++	PxU32 frameCount = 100;
++	const char* dumpPath = NULL;
++	for(int i = 1; i < argc; ++i)
++	{
++		if(strcmp(argv[i], "--cpu") == 0)
++			useGpu = false;
++		else if(strcmp(argv[i], "--gpu") == 0)
++			useGpu = true;
++		else if(strcmp(argv[i], "--steps") == 0 && i + 1 < argc)
++			frameCount = PxU32(strtoul(argv[++i], NULL, 10));
++		else if(strcmp(argv[i], "--dump") == 0 && i + 1 < argc)
++			dumpPath = argv[++i];
++		else
++		{
++			printf("usage: SnippetHelloGRB [--cpu|--gpu] [--steps N] [--dump FILE]\n");
++			return 2;
++		}
++	}
++
++	initPhysics(useGpu);
+ 	if(!gGpuReady)
+ 	{
+ 		cleanupPhysics(false);
+@@ -184,9 +216,28 @@ int snippetMain(int, const char*const*)
+ 		const PxTransform pose = gBall->getGlobalPose();
+ 		printf("CuMetal GRB initial pose: %.9g %.9g %.9g\n", double(pose.p.x), double(pose.p.y), double(pose.p.z));
+ 	}
++	FILE* dump = dumpPath ? fopen(dumpPath, "w") : NULL;
++	if(dumpPath && !dump)
++	{
++		printf("CuMetal GRB ERROR: unable to open transform dump.\n");
++		cleanupPhysics(false);
++		return 1;
++	}
++	if(dump)
++	{
++		fprintf(dump, "step\tpx\tpy\tpz\tqx\tqy\tqz\tqw\n");
++		dumpTransform(dump, 0);
++	}
+ 	for(PxU32 i=0; i<frameCount; i++)
++	{
+ 		stepPhysics(false);
++		if(dump)
++			dumpTransform(dump, i + 1);
++	}
++	if(dump)
++		fclose(dump);
+ 	const PxTransform pose = gBall->getGlobalPose();
++	printf("CuMetal GRB mode: %s\n", useGpu ? "gpu" : "cpu");
+ 	printf("CuMetal GRB final pose: %.9g %.9g %.9g\n", double(pose.p.x), double(pose.p.y), double(pose.p.z));
+ 	const PxVec3 velocity = gBall->getLinearVelocity();
+ 	printf("CuMetal GRB final velocity: %.9g %.9g %.9g\n", double(velocity.x), double(velocity.y), double(velocity.z));

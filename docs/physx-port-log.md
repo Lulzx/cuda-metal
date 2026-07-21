@@ -212,3 +212,24 @@ report.
   on the GPU path, so the sphere falls through the plane after the early
   free-fall interval. Phase 4 compares the deterministic pre-contact window
   and records this longer-run divergence explicitly.
+
+## 2026-07-20 — Phase 4 conformance gate
+
+- Added dual-mode CLI controls to the same reduced `SnippetHelloGRB` binary:
+  `--cpu` or `--gpu`, `--steps N`, and `--dump FILE`. The dump contains the
+  sphere position and quaternion for the initial state and every simulated
+  step.
+- Added `tests/conformance/run_physx_grb.sh` and a strict TSV comparator.
+  The default gate runs 30 steps before first contact and uses
+  `1e-3` relative plus `1e-5` absolute tolerance. It also requires successful
+  Apple-GPU provenance for `preIntegrationLaunch` and
+  `integrateCoreParallelLaunch`, preventing a CPU fallback from passing.
+- On Apple M4 Pro the CPU and GPU dumps match exactly for all 30 selected
+  steps: both finish at `p=(0, 8.73287487, 0)` with
+  `v=(0, -4.90500021, 0)`.
+- Long-run behavior is intentionally not claimed conformant yet. By 100 steps
+  CPU PhysX has resolved the sphere/plane collision, while the reduced
+  GPU-via-CuMetal path remains in free fall (`y=-3.76124477`). Iterative
+  solver chaos can amplify small differences after contact in general, but
+  this particular divergence is deterministic and begins at the currently
+  missing contact path, so it is tracked as a kernel-subset integration gap.

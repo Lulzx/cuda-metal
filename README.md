@@ -242,6 +242,13 @@ ctest --test-dir build -R functional_ -V        # functional tests only
 ctest --test-dir build -R unit_ -V              # unit tests only
 ```
 
+PhysX 5.6's reduced `SnippetHelloGRB` now runs its rigid-body integration
+kernels on Apple GPU through CuMetal. The patch/build workflow lives in
+`scripts/physx-patches/`; `conformance_physx_grb` compares 30 CPU/GPU
+transform steps and verifies production Metal dispatch. The selected subset
+does not yet resolve the later sphere/plane contact; see
+`docs/known-gaps.md`.
+
 Known limitations
 -----------------
 
