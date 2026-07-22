@@ -1,0 +1,90 @@
+diff --git a/physx/source/gpunarrowphase/src/CUDA/convexMesh.cu b/physx/source/gpunarrowphase/src/CUDA/convexMesh.cu
+index 8f3abb2..4c7fda9 100644
+--- a/physx/source/gpunarrowphase/src/CUDA/convexMesh.cu
++++ b/physx/source/gpunarrowphase/src/CUDA/convexMesh.cu
+@@ -439,6 +439,26 @@ __device__ __forceinline__ PxVec3 cumetalClosestPointTriangle(
+ 	return a + ab * (vb * denom) + ac * (vc * denom);
+ }
+ 
++__device__ __forceinline__ bool cumetalPointInTriangle(
++	const PxVec3& p, const PxVec3& a, const PxVec3& b, const PxVec3& c)
++{
++	const PxVec3 ab = b - a;
++	const PxVec3 ac = c - a;
++	const PxVec3 ap = p - a;
++	const PxReal d00 = ab.dot(ab);
++	const PxReal d01 = ab.dot(ac);
++	const PxReal d11 = ac.dot(ac);
++	const PxReal d20 = ap.dot(ab);
++	const PxReal d21 = ap.dot(ac);
++	const PxReal denom = d00 * d11 - d01 * d01;
++	if (denom <= 0.0f)
++		return false;
++	const PxReal v = (d11 * d20 - d01 * d21) / denom;
++	const PxReal w = (d00 * d21 - d01 * d20) / denom;
++	const PxReal tolerance = 1e-5f;
++	return v >= -tolerance && w >= -tolerance && v + w <= 1.0f + tolerance;
++}
++
+ __device__ __forceinline__ PxU32 cumetalSphereTrimeshNarrowphaseCore(
+ 	const PxgContactManagerInput& npWorkItem,
+ 	const PxgShape& sphereShape,
+@@ -472,8 +492,6 @@ __device__ __forceinline__ PxU32 cumetalSphereTrimeshNarrowphaseCore(
+ 	const uint4* adjacencies;
+ 	const PxU32* faceRemap;
+ 	readTriangleMesh(meshData, vertices, triangles, adjacencies, faceRemap);
+-	(void)adjacencies;
+-
+ 	const MeshScaling meshScale(trimeshShape.scale.scale,
+ 		trimeshShape.scale.rotation);
+ 	PxVec3 v0, v1, v2;
+@@ -487,7 +505,29 @@ __device__ __forceinline__ PxU32 cumetalSphereTrimeshNarrowphaseCore(
+ 	const PxReal planeDistance = (sphereCenter - v0).dot(normal);
+ 	const PxVec3 closest = cumetalClosestPointTriangle(sphereCenter, v0, v1, v2);
+ 	const PxVec3 delta = sphereCenter - closest;
+-	const PxReal distanceSquared = delta.magnitudeSquared();
++	PxReal distanceSquared = delta.magnitudeSquared();
++	const PxVec3 projected = sphereCenter - normal * planeDistance;
++	const uint4 adjacent = adjacencies[triangleIdx];
++	const PxU32 adjacentIndices[3] = {adjacent.x, adjacent.y, adjacent.z};
++	for (PxU32 edge = 0; edge < 3; ++edge)
++	{
++		const PxU32 adjacentIndexWithFlags = adjacentIndices[edge];
++		if (adjacentIndexWithFlags == BOUNDARY)
++			continue;
++		const PxU32 adjacentIndex = adjacentIndexWithFlags & ~NONCONVEX_FLAG;
++		PxVec3 av0, av1, av2;
++		getShapeSpaceVerts(av0, av1, av2, meshScale, adjacentIndex,
++			triangles, vertices);
++		PxVec3 adjacentNormal = (av1 - av0).cross(av2 - av0).getNormalized();
++		if (meshScale.flipNormal)
++			adjacentNormal = -adjacentNormal;
++		if (normal.dot(adjacentNormal) > 0.999f &&
++			cumetalPointInTriangle(projected, av0, av1, av2))
++		{
++			distanceSquared = planeDistance * planeDistance;
++			break;
++		}
++	}
+ 	const PxReal inflatedRadius =
+ 		sphereShape.scale.scale.x +
+ 		contactDistance[npWorkItem.transformCacheRef0] +
+diff --git a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+index 81110d2..d5883ba 100644
+--- a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
++++ b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+@@ -232,10 +232,11 @@ void initPhysics(bool useGpu, ContactMode contactMode, BodyLayout bodyLayout,
+ 	gBallCount = bodyCount;
+ 	for(PxU32 i = 0; i < bodyCount; ++i)
+ 	{
+-		const PxReal z = groundGeometry == eGROUND_TRIANGLE_MESH ? -5.0f : 0.0f;
++		const PxReal z = 0.0f;
++		const PxReal xOffset = groundGeometry == eGROUND_TRIANGLE_MESH ? -0.5f : 0.0f;
+ 		const PxVec3 position = bodyLayout == eBODY_STACKED ?
+-			PxVec3(0, 1.0f + 2.0f * PxReal(i), z) :
+-			PxVec3((PxReal(i) - PxReal(bodyCount - 1) * 0.5f) * 3.0f, 1, z);
++			PxVec3(xOffset, 1.0f + 2.0f * PxReal(i), z) :
++			PxVec3((PxReal(i) - PxReal(bodyCount - 1) * 0.5f) * 3.0f + xOffset, 1, z);
+ 		if(bodyGeometry == eGEOMETRY_BOX)
+ 			gBalls[i] = createDynamic(PxTransform(position), PxBoxGeometry(1, 1, 1), initialVelocity);
+ 		else if(bodyGeometry == eGEOMETRY_CONVEX)

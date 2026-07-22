@@ -87,11 +87,13 @@ as gaps have been closed.
   angular velocity at step 5. Arbitrary convex topology/orientation, multiple
   simultaneous convex pairs, heightfields, and SDF collisions remain unsupported
   or unverified. Patch 0017 adds one selected sphere/static-triangle-mesh path:
-  a frictionless unit sphere moving over the interior of one triangle face
-  matches CPU byte-for-byte for 30 steps. It carries a single separation value
+  a frictionless unit sphere moving across two coplanar faces matches CPU
+  byte-for-byte for 30 steps. It carries a single separation value
   through the correlation index as a scoped workaround for an incoherent generic
-  temporary-contact record. Triangle seam transitions, mesh contacts with other
-  shapes, multiple bodies, friction, and general mesh batching remain unsupported.
+  temporary-contact record. Patch 0018 masks PhysX's flagged adjacency indices
+  and preserves plane separation across the selected coplanar seam. Non-coplanar
+  seams, mesh contacts with other shapes, multiple bodies, friction, and general
+  mesh batching remain unsupported.
   The 60-step friction gate is repeatable, but its `3e-3` relative plus `1e-5`
   absolute tolerance is not evidence of general FP determinism. Metal fast-math defaults,
   contraction choices, and long chaotic-scene divergence remain unverified and require a

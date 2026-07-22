@@ -114,6 +114,14 @@ temporary-contact record is not yet coherent across these dispatches. Seam
 transitions, multiple bodies, friction, boxes/convexes against meshes, capsules,
 heightfields, and SDFs remain outside this claim and are rejected by the snippet.
 
+The eighteenth patch extends that selected flat mesh through a coplanar internal
+triangle seam. PhysX stores `NONCONVEX_FLAG` in adjacency indices; the compact
+path now masks that flag, recognizes when the projected sphere center lies on
+the adjacent coplanar face, and carries plane separation during the cached-face
+handoff. The 30-step trajectory starts at `x=-0.5`, crosses the diagonal, and
+remains byte-identical to CPU. Non-coplanar seams and general mesh traversal are
+still unverified.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash

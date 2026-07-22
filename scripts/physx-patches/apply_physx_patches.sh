@@ -120,6 +120,14 @@ patch_marker_is_present() {
                 grep -q 'Carry separation directly' \
                     "${PHYSX_REPO}/physx/source/gpunarrowphase/src/CUDA/convexMesh.cu"
             ;;
+        0018-cumetal-grb-triangle-seam.patch)
+            grep -q 'cumetalPointInTriangle' \
+                "${PHYSX_REPO}/physx/source/gpunarrowphase/src/CUDA/convexMesh.cu" &&
+                grep -q 'adjacentIndexWithFlags & ~NONCONVEX_FLAG' \
+                    "${PHYSX_REPO}/physx/source/gpunarrowphase/src/CUDA/convexMesh.cu" &&
+                grep -q 'xOffset = groundGeometry == eGROUND_TRIANGLE_MESH' \
+                    "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
+            ;;
         *)
             return 1
             ;;

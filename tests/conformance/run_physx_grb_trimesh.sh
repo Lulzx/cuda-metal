@@ -42,6 +42,16 @@ mkdir -p "${RESULT_DIR}"
 "${SNIPPET}" --cpu --sphere --trimesh --frictionless --steps "${STEPS}" \
     --dump "${CPU_DUMP}" >"${CPU_LOG}" 2>&1
 
+python3 - "${CPU_DUMP}" <<'PY'
+import csv
+import sys
+
+with open(sys.argv[1], newline="") as stream:
+    rows = list(csv.DictReader(stream, delimiter="\t"))
+if not rows or float(rows[0]["px"]) >= 0.0 or float(rows[-1]["px"]) <= 0.0:
+    raise SystemExit("FAIL: triangle-mesh conformance trajectory does not cross the internal seam")
+PY
+
 env \
     CUMETAL_USE_METAL_DEVICE_ADDRESSES=1 \
     CUMETAL_PHYSX_KERNEL_DIR="${KERNEL_DIR}" \

@@ -290,13 +290,13 @@ angular-velocity difference at step 5; final states are substantially closer.
 It also rejects a stacked scene with fewer than two bodies.
 `conformance_physx_grb_box` checks a unit box sliding on a plane for 30 steps
 through the convex/plane narrowphase kernel. `conformance_physx_grb_trimesh`
-checks one frictionless sphere moving over the interior of one triangle face
-for 30 byte-identical CPU/GPU steps and rejects box/mesh mode. The gates require Metal
+checks one frictionless sphere crossing a coplanar internal triangle seam for
+30 byte-identical CPU/GPU steps and rejects box/mesh mode. The gates require Metal
 narrowphase, constraint preparation, dynamic and static solve, writeback, and
 integration provenance. These remain deliberately selected shape paths;
 the 93-entry build manifest compiles convex/convex stage 2 through typed CuMetal
 IR, while stage 1 and contact finalization still use the explicit legacy PTX
-backend. Triangle seam transitions and generic cross-dispatch temporary-contact
+backend. Non-coplanar triangle seams and generic cross-dispatch temporary-contact
 records are not yet supported. General convex meshes, arbitrary orientations and
 topology, larger stacks, and general batching therefore remain outside the runtime claim. See
 `docs/known-gaps.md`.
