@@ -1769,6 +1769,50 @@ class GenericLlvmEmitter {
             return true;
         }
 
+        if (!src.empty() && src.front() == '{') {
+            if (!is_register_name(dst)) {
+                return fail(instr, "mov tuple-pack destination must be register");
+            }
+            const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
+            const int packed_bits = ty.bits;
+            const std::vector<std::string> parts = split_comma_list(src);
+            if ((packed_bits != 32 && packed_bits != 64) || parts.size() < 2 ||
+                packed_bits % static_cast<int>(parts.size()) != 0) {
+                return fail(instr, "mov tuple pack requires an evenly sized b32/b64 source tuple");
+            }
+            const int part_bits = packed_bits / static_cast<int>(parts.size());
+            if (part_bits != 8 && part_bits != 16 && part_bits != 32) {
+                return fail(instr, "mov tuple pack element width unsupported");
+            }
+
+            std::string packed;
+            for (std::size_t i = 0; i < parts.size(); ++i) {
+                auto part = emit_integer_from_any(os, parts[i], part_bits, false);
+                if (!part.has_value()) {
+                    return fail(instr, "mov tuple pack source unsupported");
+                }
+                const std::string extended = next_tmp("movpack_ext");
+                os << "  " << extended << " = zext " << llvm_int_type(part_bits) << " "
+                   << *part << " to " << llvm_int_type(packed_bits) << "\n";
+                std::string positioned = extended;
+                const int shift_bits = static_cast<int>(i) * part_bits;
+                if (shift_bits != 0) {
+                    positioned = next_tmp("movpack_sh");
+                    os << "  " << positioned << " = shl " << llvm_int_type(packed_bits)
+                       << " " << extended << ", " << shift_bits << "\n";
+                }
+                if (packed.empty()) {
+                    packed = positioned;
+                } else {
+                    const std::string combined = next_tmp("movpack_or");
+                    os << "  " << combined << " = or " << llvm_int_type(packed_bits)
+                       << " " << packed << ", " << positioned << "\n";
+                    packed = combined;
+                }
+            }
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, packed, packed_bits);
+        }
+
         if (!is_register_name(dst)) {
             return fail(instr, "mov destination must be register");
         }

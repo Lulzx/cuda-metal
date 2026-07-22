@@ -745,6 +745,63 @@ $L1:
         return 1;
     }
 
+    const std::string tuple_pack_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry tuple_pack()
+{
+    .reg .b8 %b<5>;
+    .reg .b16 %rs<4>;
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<2>;
+    mov.b16 %rs1, 1;
+    mov.b16 %rs2, 2;
+    mov.b32 %r1, {%rs1, %rs2};
+    mov.b8 %b1, 1;
+    mov.b8 %b2, 2;
+    mov.b8 %b3, 3;
+    mov.b8 %b4, 4;
+    mov.b32 %r2, {%b1, %b2, %b3, %b4};
+    mov.b64 %rd1, {%r1, %r2};
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions tuple_pack_options;
+    tuple_pack_options.entry_name = "tuple_pack";
+    tuple_pack_options.strict = true;
+    const auto tuple_pack_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(tuple_pack_ptx, tuple_pack_options);
+    if (!expect(tuple_pack_lowered.ok &&
+                    contains(tuple_pack_lowered.llvm_ir, "movpack_sh") &&
+                    contains(tuple_pack_lowered.llvm_ir, "movpack_or"),
+                "mov.b32/mov.b64 pack evenly sized source tuples")) {
+        return 1;
+    }
+
+    const std::string malformed_tuple_pack_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_tuple_pack()
+{
+    .reg .b8 %b<4>;
+    .reg .b32 %r<2>;
+    mov.b32 %r1, {%b1, %b2, %b3};
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_tuple_pack_options;
+    malformed_tuple_pack_options.entry_name = "malformed_tuple_pack";
+    malformed_tuple_pack_options.strict = true;
+    const auto malformed_tuple_pack_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_tuple_pack_ptx,
+                                           malformed_tuple_pack_options);
+    if (!expect(!malformed_tuple_pack_lowered.ok &&
+                    contains(malformed_tuple_pack_lowered.error,
+                             "evenly sized b32/b64 source tuple"),
+                "malformed mov tuple pack is rejected")) {
+        return 1;
+    }
+
     const std::string malformed_masked_vote_ptx = R"PTX(
 .version 8.0
 .target sm_80
