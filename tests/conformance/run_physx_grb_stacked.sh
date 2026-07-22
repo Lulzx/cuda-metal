@@ -8,6 +8,7 @@ BUILD_DIR="${CUMETAL_PHYSX_RUNTIME_BUILD_DIR:-${ROOT_DIR}/build/physx-cumetal-ru
 STEPS="${CUMETAL_PHYSX_CONFORMANCE_STEPS:-30}"
 REL_TOL="${CUMETAL_PHYSX_REL_TOL:-1e-3}"
 FRICTION_REL_TOL="${CUMETAL_PHYSX_STACKED_FRICTION_REL_TOL:-3e-3}"
+BOX_REL_TOL="${CUMETAL_PHYSX_STACKED_BOX_REL_TOL:-2e-2}"
 ABS_TOL="${CUMETAL_PHYSX_ABS_TOL:-1e-5}"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
@@ -33,12 +34,13 @@ mkdir -p "${RESULT_DIR}"
 run_pair() {
     local mode="$1"
     local rel_tol="$2"
-    local cpu_dump="${RESULT_DIR}/cpu-${mode}.tsv"
-    local gpu_dump="${RESULT_DIR}/gpu-${mode}.tsv"
-    local cpu_log="${RESULT_DIR}/cpu-${mode}.log"
-    local gpu_log="${RESULT_DIR}/gpu-${mode}.log"
+    local geometry="${3:-sphere}"
+    local cpu_dump="${RESULT_DIR}/cpu-${geometry}-${mode}.tsv"
+    local gpu_dump="${RESULT_DIR}/gpu-${geometry}-${mode}.tsv"
+    local cpu_log="${RESULT_DIR}/cpu-${geometry}-${mode}.log"
+    local gpu_log="${RESULT_DIR}/gpu-${geometry}-${mode}.log"
 
-    "${SNIPPET}" --cpu --stacked --bodies 2 "--${mode}" --steps "${STEPS}" \
+    "${SNIPPET}" --cpu "--${geometry}" --stacked --bodies 2 "--${mode}" --steps "${STEPS}" \
         --dump "${cpu_dump}" >"${cpu_log}" 2>&1
     env \
         CUMETAL_USE_METAL_DEVICE_ADDRESSES=1 \
@@ -46,11 +48,16 @@ run_pair() {
         CUMETAL_SYNC_EACH_LAUNCH=1 \
         CUMETAL_TRACE_GPU=1 \
         DYLD_LIBRARY_PATH="${ROOT_DIR}/build${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}" \
-        "${SNIPPET}" --gpu --stacked --bodies 2 "--${mode}" --steps "${STEPS}" \
+        "${SNIPPET}" --gpu "--${geometry}" --stacked --bodies 2 "--${mode}" --steps "${STEPS}" \
         --dump "${gpu_dump}" >"${gpu_log}" 2>&1
 
     grep -Fq 'CuMetal GRB body layout: stacked' "${cpu_log}"
     grep -Fq 'CuMetal GRB body layout: stacked' "${gpu_log}"
+    grep -Fq "CuMetal GRB geometry: ${geometry}" "${cpu_log}"
+    grep -Fq "CuMetal GRB geometry: ${geometry}" "${gpu_log}"
+    if [[ "${geometry}" == "box" ]]; then
+        grep -q 'kernel="boxBoxNphase_Kernel".*source=metallib.*device=apple_gpu.*launch_success=true' "${gpu_log}"
+    fi
     grep -q 'kernel="ZeroBodies".*source=metallib.*device=apple_gpu.*launch_success=true' "${gpu_log}"
     grep -q 'kernel="solveBlockPartition".*source=metallib.*device=apple_gpu.*launch_success=true' "${gpu_log}"
     grep -q 'kernel="writeBackBodies".*source=metallib.*device=apple_gpu.*launch_success=true' "${gpu_log}"
@@ -66,10 +73,11 @@ run_pair() {
 
 run_pair friction "${FRICTION_REL_TOL}"
 run_pair frictionless "${REL_TOL}"
+run_pair frictionless "${BOX_REL_TOL}" box
 
 if "${SNIPPET}" --cpu --stacked --bodies 1 --steps 1 >/dev/null 2>&1; then
     echo "FAIL: --stacked accepted fewer than two bodies"
     exit 1
 fi
 
-echo "PASS: PhysX stacked dynamic/dynamic contacts match CPU with and without friction"
+echo "PASS: PhysX stacked sphere and box dynamic/dynamic contacts match CPU"

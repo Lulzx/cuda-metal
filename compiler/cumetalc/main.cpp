@@ -576,7 +576,8 @@ int main(int argc, char** argv) {
             " -nocudainc -nocudalib -Wno-unknown-cuda-version -Wno-pass-failed"
             " -D__CUDACC__=1 -D__NVCC__=1";
         if (!cuda_inline_threshold.empty()) {
-            command += " -fgpu-inline-threshold=" + quote_shell(cuda_inline_threshold);
+            command += " -fgpu-inline-threshold=" + quote_shell(cuda_inline_threshold) +
+                       " -mllvm -inline-all-viable-calls";
         }
         if (std::filesystem::exists(runtime_api_dir) &&
             std::filesystem::is_directory(runtime_api_dir)) {

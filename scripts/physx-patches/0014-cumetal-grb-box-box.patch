@@ -1,0 +1,11 @@
+diff --git a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+--- a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -126,6 +126,7 @@ SET(PX_CUMETAL_KERNEL_SPECS
+ 	"gpunarrowphase/src/CUDA/cudaGJKEPA.cu|prepareLostFoundPairs_Stage2"
+ 	"gpunarrowphase/src/CUDA/cudaGJKEPA.cu|finishContactsKernel"
+ 	"gpunarrowphase/src/CUDA/cudaGJKEPA.cu|convexPlaneNphase_Kernel"
++	"gpunarrowphase/src/CUDA/cudaBox.cu|boxBoxNphase_Kernel"
+ 	"gpusolver/src/CUDA/solverMultiBlock.cu|ZeroBodies"
+ 	"gpusolver/src/CUDA/solverMultiBlock.cu|markActiveSlabPGS"
+ 	"gpusolver/src/CUDA/solverMultiBlock.cu|solveBlockPartition"

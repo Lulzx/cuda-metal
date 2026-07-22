@@ -15,6 +15,40 @@ if [[ -z "${CUMETAL_CUDA_CLANG:-}" \
   exit 77
 fi
 
+if [[ -n "${CUMETAL_CUDA_CLANG:-}" ]]; then
+  REAL_CUDA_CLANG="${CUMETAL_CUDA_CLANG}"
+elif [[ -x /opt/homebrew/opt/llvm/bin/clang++ ]]; then
+  REAL_CUDA_CLANG=/opt/homebrew/opt/llvm/bin/clang++
+else
+  REAL_CUDA_CLANG=/usr/local/opt/llvm/bin/clang++
+fi
+WRAPPER_DIR="$(mktemp -d)"
+trap 'rm -rf "${WRAPPER_DIR}"' EXIT
+cat >"${WRAPPER_DIR}/clang++" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+threshold=false
+force_inline=false
+previous=""
+for argument in "$@"; do
+  if [[ "${argument}" == "-fgpu-inline-threshold=1000000" ]]; then
+    threshold=true
+  fi
+  if [[ "${previous}" == "-mllvm" && "${argument}" == "-inline-all-viable-calls" ]]; then
+    force_inline=true
+  fi
+  previous="${argument}"
+done
+if [[ "${threshold}" != true || "${force_inline}" != true ]]; then
+  echo "FAIL: CUDA frontend omitted forced viable-call inlining" >&2
+  exit 64
+fi
+exec "${CUMETAL_FRONTEND_REAL_CLANG}" "$@"
+EOF
+chmod +x "${WRAPPER_DIR}/clang++"
+export CUMETAL_FRONTEND_REAL_CLANG="${REAL_CUDA_CLANG}"
+export CUMETAL_CUDA_CLANG="${WRAPPER_DIR}/clang++"
+
 if "$CUMETALC" \
     --cuda-device \
     --cuda-arch invalid \

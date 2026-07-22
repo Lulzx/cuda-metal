@@ -85,6 +85,13 @@ scratch no longer starts beyond its allocated Metal threadgroup buffer. The
 and matches CPU transforms. General convex meshes and other convex pair types
 remain outside this claim.
 
+The fourteenth patch adds PhysX's box/box narrowphase entry. CuMetal's CUDA
+frontend forces all viable device calls to inline when the project requests an
+inline threshold, eliminating the remaining `getIncidentPolygon4` PTX call.
+The selected two-unit-box stack stays supported and matches CPU body states
+over 30 frictionless steps. General oriented-box stress cases and larger box
+stacks remain unverified.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -108,7 +115,7 @@ component; experimental containers are inspectable test artifacts and are not
 GPU-executable.
 
 The build script requires macOS on arm64, CMake, Ninja, and `xcrun`. It
-compiles all 84 manifest entries, validates and inspects every output, and
+compiles all 85 manifest entries, validates and inspects every output, and
 prints a machine-readable `PASS` line.
 
 Build and run the reduced GPU rigid-body snippet end to end:
@@ -145,7 +152,8 @@ Run the selected two-body rigid/static batching gate:
 tests/conformance/run_physx_grb_multibody.sh
 ```
 
-Run the selected stacked dynamic/dynamic contact gate:
+Run the selected stacked dynamic/dynamic contact gate (frictional and
+frictionless spheres plus frictionless boxes):
 
 ```bash
 tests/conformance/run_physx_grb_stacked.sh

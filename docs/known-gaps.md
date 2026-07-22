@@ -69,9 +69,11 @@ as gaps have been closed.
   conformance are not claimed. Patch 0013 adds a selected unit box/plane path
   through `convexPlaneNphase_Kernel`; its four contact points and 30-step
   frictionless CPU/GPU transforms agree after fixing entry-specific aligned
-  static shared-memory layout. General convex meshes, convex/convex pairs,
-  triangle meshes, heightfields, and SDF collisions remain unsupported or
-  unverified.
+  static shared-memory layout. Patch 0014 adds `boxBoxNphase_Kernel`; a selected
+  two-unit-box stack matches CPU body states for 30 frictionless steps after
+  forcing viable CUDA device calls to inline. General convex meshes, general
+  convex/convex pairs, triangle meshes, heightfields, and SDF collisions remain
+  unsupported or unverified.
 
 ## .cu / cumetalc frontend limitations
 - `cumetalc --cuda-device` is the real source frontend for project-scale CUDA:
@@ -82,8 +84,11 @@ as gaps have been closed.
   lowering path. CUDA source compilation can therefore succeed while later
   strict PTX lowering still rejects an unimplemented opcode or libdevice call.
   Standalone PTX `.func` bodies are not lowered; projects can request aggressive
-  device inlining with `--cuda-inline-threshold`. The reduced PhysX rigid-body
-  subset uses this to inline `updateCacheAndBound`.
+  device inlining with `--cuda-inline-threshold`, which also forces every viable
+  reachable device call to inline. Recursion, indirect calls, and explicitly
+  non-inlineable helpers remain unsupported. The reduced PhysX rigid-body subset
+  uses this for helpers including `updateCacheAndBound` and
+  `getIncidentPolygon4`.
 - The older `.cu` mode without `--cuda-device` remains a qualifier-stripping
   host-LLVM prototype suitable only for simple patterns; it is not a general
   CUDA frontend.

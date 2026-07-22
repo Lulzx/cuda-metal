@@ -370,3 +370,21 @@ report.
   partial-warp friction barriers and the generic solver metallib that Apple's
   pipeline compiler rejects. Patch 0009 supersedes the solver portion with a
   one-anchor kinetic-friction path. NVIDIA CUDA branches are unchanged.
+
+## 2026-07-22 — Box/box narrowphase
+
+- Added `boxBoxNphase_Kernel` as the 85th selected PhysX kernel. Its first
+  strict-lowering failure was a retained direct call to
+  `getIncidentPolygon4`, not a missing PTX instruction or Metal ABI feature.
+- `cumetalc --cuda-inline-threshold` now combines Clang's GPU cost threshold
+  with LLVM's viable-call inliner. The unchanged PhysX CUDA source compiles to
+  a validated one-entry production metallib, while recursion, indirect calls,
+  and explicitly non-inlineable helpers remain honest unsupported paths.
+- Added a frontend regression that verifies both compiler controls are passed
+  and compiles representative externally visible device helpers through strict
+  PTX lowering.
+- Patch 0014 adds the box/box entry to the revision-pinned manifest. A selected
+  two-unit-box stack runs for 30 frictionless steps on Apple GPU, requires
+  positive `boxBoxNphase_Kernel` provenance, and passes CPU/GPU state comparison
+  with `2e-2` relative plus `1e-5` absolute tolerance. General oriented-box
+  stress cases and larger stacks remain unverified.

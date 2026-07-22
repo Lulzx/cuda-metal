@@ -98,6 +98,10 @@ patch_marker_is_present() {
                 grep -q -- '--sphere|--box' \
                     "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
+        0014-cumetal-grb-box-box.patch)
+            grep -q 'cudaBox.cu|boxBoxNphase_Kernel' \
+                "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
+            ;;
         *)
             return 1
             ;;
