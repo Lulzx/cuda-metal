@@ -350,9 +350,11 @@ $L1:
     st.b32 [%rd2], %r1;
     st.param.b32 [call_arg], %r1;
     call.uni (call_ret), __nv_sqrtf, (call_arg);
+    call.uni (call_ret), __nv_acosf, (call_arg);
     ld.param.b32 %r1, [call_ret];
     call.uni (call_ret), __nv_float_as_int, (call_arg);
     call.uni (call_ret), __nv_popc, (call_arg);
+    call.uni (call_ret), __nv_ffs, (call_arg);
     call.uni (call_ret), __nv_fast_fdividef, (call_arg, call_arg);
     st.param.b64 [sin_ptr_arg], %rd1;
     st.param.b64 [cos_ptr_arg], %rd2;
@@ -374,6 +376,15 @@ $L1:
     }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sqrt.f32"),
                 "__nv_sqrtf lowers to Metal sqrt intrinsic")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_acos.f32"),
+                "__nv_acosf lowers to Metal inverse-cosine intrinsic")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "@llvm.cttz.i32") &&
+                    contains(vector_memory_lowered.llvm_ir, "ffs_zero"),
+                "__nv_ffs lowers to count-trailing-zeros plus one")) {
         return 1;
     }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sin.f32") &&
@@ -467,6 +478,52 @@ $L1:
     }
     if (!expect(cumetal::ptx::compute_static_shared_bytes(multi_entry_shared_ptx) == 128,
                 "module-wide shared accounting remains available for registration")) {
+        return 1;
+    }
+
+    const std::string selected_shared_layout_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.shared .align 16 .b8 unrelated_shared[64];
+.shared .align 4 .b8 selected_first[12];
+.shared .align 16 .b8 selected_second[32];
+.visible .entry other_shared()
+{
+    .reg .b64 %rd<2>;
+    mov.u64 %rd1, unrelated_shared;
+    ret;
+}
+.visible .entry selected_shared()
+{
+    .reg .b64 %rd<3>;
+    mov.u64 %rd1, selected_first;
+    mov.u64 %rd2, selected_second;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions selected_shared_options;
+    selected_shared_options.entry_name = "selected_shared";
+    selected_shared_options.strict = true;
+    const auto selected_shared_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(selected_shared_layout_ptx,
+                                           selected_shared_options);
+    if (!selected_shared_lowered.ok) {
+        std::fprintf(stderr, "selected shared lowering error: %s\n",
+                     selected_shared_lowered.error.c_str());
+    }
+    if (!expect(selected_shared_lowered.ok,
+                "multiple selected static shared symbols lower")) {
+        return 1;
+    }
+    if (!expect(cumetal::ptx::compute_static_shared_bytes(selected_shared_layout_ptx,
+                                                          "selected_shared") == 48,
+                "selected static shared allocation includes alignment padding")) {
+        return 1;
+    }
+    if (!expect(contains(selected_shared_lowered.llvm_ir, "tg_sym_off") &&
+                    contains(selected_shared_lowered.llvm_ir, ", 16\n") &&
+                    !contains(selected_shared_lowered.llvm_ir, ", 80\n"),
+                "selected shared symbols start at zero and ignore other entries")) {
         return 1;
     }
 

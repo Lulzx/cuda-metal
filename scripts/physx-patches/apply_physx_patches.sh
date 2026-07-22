@@ -92,6 +92,12 @@ patch_marker_is_present() {
                 grep -q -- '--stacked requires at least two bodies' \
                     "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
+        0013-cumetal-grb-box-plane.patch)
+            grep -q 'convexPlaneNphase_Kernel' \
+                "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt" &&
+                grep -q -- '--sphere|--box' \
+                    "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
+            ;;
         *)
             return 1
             ;;

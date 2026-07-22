@@ -47,7 +47,7 @@ as gaps have been closed.
 - Binary-shim fatbinary support: CMTL envelopes, raw PTX, basic FatBinary/FatBinary2/3
   PTX wrappers supported. Full NVCC fatbinary variants, complex symbol layouts, or SASS-only
   images not supported (SASS never was; per spec).
-- PhysX 5.6 reduced GRB coverage is limited to the 83-kernel sphere/plane PGS
+- PhysX 5.6 reduced GRB coverage is limited to the 84-kernel selected-shape PGS
   manifest and selected rigid/static contacts. Patch 0008 removes
   the former body-per-thread `preIntegration` and serialized `updateBodiesLaunch`
   fallbacks; their upstream warp-cooperative paths pass twenty consecutive 30-step
@@ -66,7 +66,12 @@ as gaps have been closed.
   frictional and frictionless steps. Larger stacks, multiple simultaneous
   dynamic contacts per body, packed general batching, joints, articulations,
   user impulse limits, general falling-contact, and chaotic long-run solver
-  conformance are not claimed.
+  conformance are not claimed. Patch 0013 adds a selected unit box/plane path
+  through `convexPlaneNphase_Kernel`; its four contact points and 30-step
+  frictionless CPU/GPU transforms agree after fixing entry-specific aligned
+  static shared-memory layout. General convex meshes, convex/convex pairs,
+  triangle meshes, heightfields, and SDF collisions remain unsupported or
+  unverified.
 
 ## .cu / cumetalc frontend limitations
 - `cumetalc --cuda-device` is the real source frontend for project-scale CUDA:

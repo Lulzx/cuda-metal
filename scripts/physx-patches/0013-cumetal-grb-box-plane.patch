@@ -1,0 +1,94 @@
+diff --git a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+--- a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
++++ b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+@@ -72,6 +72,12 @@ enum BodyLayout
+ 	eBODY_STACKED
+ };
+ 
++enum BodyGeometry
++{
++	eGEOMETRY_SPHERE,
++	eGEOMETRY_BOX
++};
++
+ static PxReal stackZ = 10.0f;
+ 
+ static PxRigidDynamic* createDynamic(const PxTransform& t, const PxGeometry& geometry, const PxVec3& velocity=PxVec3(0))
+@@ -100,7 +106,8 @@ static void createStack(const PxTransform& t, PxU32 size, PxReal halfExtent)
+ 	shape->release();
+ }
+ 
+-void initPhysics(bool useGpu, ContactMode contactMode, BodyLayout bodyLayout, PxU32 bodyCount)
++void initPhysics(bool useGpu, ContactMode contactMode, BodyLayout bodyLayout,
++	BodyGeometry bodyGeometry, PxU32 bodyCount)
+ {
+ 	gFoundation = PxCreateFoundation(PX_PHYSICS_VERSION, gAllocator, gErrorCallback);
+ 	gPhysics = PxCreatePhysics(PX_PHYSICS_VERSION, *gFoundation, PxTolerancesScale(), true, NULL);
+@@ -158,7 +165,10 @@ void initPhysics(bool useGpu, ContactMode contactMode, BodyLayout bodyLayout, Px
+ 		const PxVec3 position = bodyLayout == eBODY_STACKED ?
+ 			PxVec3(0, 1.0f + 2.0f * PxReal(i), 0) :
+ 			PxVec3((PxReal(i) - PxReal(bodyCount - 1) * 0.5f) * 3.0f, 1, 0);
+-		gBalls[i] = createDynamic(PxTransform(position), PxSphereGeometry(1), initialVelocity);
++		if(bodyGeometry == eGEOMETRY_BOX)
++			gBalls[i] = createDynamic(PxTransform(position), PxBoxGeometry(1, 1, 1), initialVelocity);
++		else
++			gBalls[i] = createDynamic(PxTransform(position), PxSphereGeometry(1), initialVelocity);
+ 		PxRigidBodyExt::updateMassAndInertia(*gBalls[i], 10.0f);
+ 	}
+ 	gBall = gBalls[0];
+@@ -229,6 +239,7 @@ int snippetMain(int argc, const char*const* argv)
+ 	bool useGpu = true;
+ 	ContactMode contactMode = eCONTACT_RESTING;
+ 	BodyLayout bodyLayout = eBODY_SEPARATED;
++	BodyGeometry bodyGeometry = eGEOMETRY_SPHERE;
+ 	PxU32 bodyCount = 1;
+ 	PxU32 frameCount = 100;
+ 	const char* dumpPath = NULL;
+@@ -244,6 +255,10 @@ int snippetMain(int argc, const char*const* argv)
+ 			contactMode = eCONTACT_FRICTIONLESS;
+ 		else if(strcmp(argv[i], "--stacked") == 0)
+ 			bodyLayout = eBODY_STACKED;
++		else if(strcmp(argv[i], "--box") == 0)
++			bodyGeometry = eGEOMETRY_BOX;
++		else if(strcmp(argv[i], "--sphere") == 0)
++			bodyGeometry = eGEOMETRY_SPHERE;
+ 		else if(strcmp(argv[i], "--bodies") == 0 && i + 1 < argc)
+ 		{
+ 			bodyCount = PxU32(strtoul(argv[++i], NULL, 10));
+@@ -259,7 +274,7 @@ int snippetMain(int argc, const char*const* argv)
+ 			dumpPath = argv[++i];
+ 		else
+ 		{
+-			printf("usage: SnippetHelloGRB [--cpu|--gpu] [--friction|--frictionless] [--stacked] [--bodies N] [--steps N] [--dump FILE]\n");
++			printf("usage: SnippetHelloGRB [--cpu|--gpu] [--friction|--frictionless] [--sphere|--box] [--stacked] [--bodies N] [--steps N] [--dump FILE]\n");
+ 			return 2;
+ 		}
+ 	}
+@@ -269,7 +284,7 @@ int snippetMain(int argc, const char*const* argv)
+ 		return 2;
+ 	}
+ 
+-	initPhysics(useGpu, contactMode, bodyLayout, bodyCount);
++	initPhysics(useGpu, contactMode, bodyLayout, bodyGeometry, bodyCount);
+ 	if(!gGpuReady)
+ 	{
+ 		cleanupPhysics(false);
+@@ -305,6 +320,7 @@ int snippetMain(int argc, const char*const* argv)
+ 	printf("CuMetal GRB mode: %s\n", useGpu ? "gpu" : "cpu");
+ 	printf("CuMetal GRB bodies: %u\n", gBallCount);
+ 	printf("CuMetal GRB body layout: %s\n", bodyLayout == eBODY_STACKED ? "stacked" : "separated");
++	printf("CuMetal GRB geometry: %s\n", bodyGeometry == eGEOMETRY_BOX ? "box" : "sphere");
+ 	printf("CuMetal GRB contact mode: %s\n",
+ 		contactMode == eCONTACT_FRICTION ? "friction" :
+ 		(contactMode == eCONTACT_FRICTIONLESS ? "frictionless" : "resting"));
+diff --git a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+--- a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -125,6 +125,7 @@ SET(PX_CUMETAL_KERNEL_SPECS
+ 	"gpunarrowphase/src/CUDA/cudaGJKEPA.cu|prepareLostFoundPairs_Stage1"
+ 	"gpunarrowphase/src/CUDA/cudaGJKEPA.cu|prepareLostFoundPairs_Stage2"
+ 	"gpunarrowphase/src/CUDA/cudaGJKEPA.cu|finishContactsKernel"
++	"gpunarrowphase/src/CUDA/cudaGJKEPA.cu|convexPlaneNphase_Kernel"
+ 	"gpusolver/src/CUDA/solverMultiBlock.cu|ZeroBodies"
+ 	"gpusolver/src/CUDA/solverMultiBlock.cu|markActiveSlabPGS"
+ 	"gpusolver/src/CUDA/solverMultiBlock.cu|solveBlockPartition"

@@ -77,6 +77,14 @@ adds a two-sphere `--stacked` layout. CPU and GPU agree for 30 frictional and
 frictionless steps; larger stacks, joints, articulations, and packed general
 batching remain out of scope.
 
+The thirteenth patch adds the convex/plane narrowphase entry and a selectable
+unit box to the reduced snippet. CuMetal's compiler now lays out only the
+selected entry's aligned static shared objects, so the convex kernel's contact
+scratch no longer starts beyond its allocated Metal threadgroup buffer. The
+30-step frictionless box/plane gate preserves four distinct corner contacts
+and matches CPU transforms. General convex meshes and other convex pair types
+remain outside this claim.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -100,7 +108,7 @@ component; experimental containers are inspectable test artifacts and are not
 GPU-executable.
 
 The build script requires macOS on arm64, CMake, Ninja, and `xcrun`. It
-compiles all 83 manifest entries, validates and inspects every output, and
+compiles all 84 manifest entries, validates and inspects every output, and
 prints a machine-readable `PASS` line.
 
 Build and run the reduced GPU rigid-body snippet end to end:
@@ -141,4 +149,10 @@ Run the selected stacked dynamic/dynamic contact gate:
 
 ```bash
 tests/conformance/run_physx_grb_stacked.sh
+```
+
+Run the selected four-point box/plane contact gate:
+
+```bash
+tests/conformance/run_physx_grb_box.sh
 ```

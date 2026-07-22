@@ -2,6 +2,24 @@
 
 This log records progress and decisions for the PhysX GPU-on-CuMetal port.
 
+## 2026-07-22 — Selected four-point box/plane contacts
+
+- Added `convexPlaneNphase_Kernel` as the 84th reduced manifest entry and
+  extended `SnippetHelloGRB` with explicit `--sphere` / `--box` geometry.
+- Narrowphase found four contacts and allocated the right solver stream size,
+  but all four points collapsed to the plane origin. The PTX module contained
+  static shared objects for several kernels: CuMetal reserved only the selected
+  entry's bytes yet assigned its scratch offset after objects owned by other
+  entries, placing `sContacts` beyond the Metal threadgroup allocation.
+- The compiler now filters static shared symbols by selected entry before
+  assigning aligned offsets. A CUDA-source regression uses two independent
+  shared arrays and a warp-cooperative packed `float4` stream write.
+- The production 30-step frictionless unit-box gate preserves four distinct
+  corner points and matches CPU transforms at `1e-3` relative plus `1e-5`
+  absolute tolerance. The full shim-on suite passes 203/203 tests (two expected
+  skips); shim-off passes 191/191 (eleven expected skips). General convex
+  meshes and other convex pair types remain open.
+
 ## 2026-07-22 — Selected stacked dynamic/dynamic contact batching
 
 - Added a deterministic `--stacked --bodies 2` scene in which the lower sphere

@@ -363,6 +363,12 @@ dropped (matching CUDA's behavior).
 | 4 | Constant | 2 | See §5.4.1 |
 | 5 | Local (thread-private) | 0 (stack) | Lowered to stack allocations |
 
+Static `.shared` objects emitted at PTX module scope are laid out per selected
+kernel entry, in declaration order with their requested alignment. Objects
+owned only by other entries do not consume offsets in the selected entry's
+threadgroup buffer; the computed layout and `setThreadgroupMemoryLength` size
+must therefore describe the same object set.
+
 #### 5.4.1 Constant Memory
 
 CUDA `__constant__` variables occupy a 64 KB per-module constant cache on NVIDIA hardware.

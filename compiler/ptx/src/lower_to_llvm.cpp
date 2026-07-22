@@ -596,7 +596,46 @@ std::vector<ParsedConstB8Array> parse_ptx_const_b8_arrays(std::string_view ptx_t
 // Parse .shared declarations (non-extern) from PTX to build a symbol→byte-offset map.
 // Each static __shared__ variable gets a contiguous region in the threadgroup buffer.
 // .extern .shared symbols (unknown size) are skipped; they remain at offset 0.
-std::unordered_map<std::string, SharedSymbolInfo> parse_ptx_shared_symbols(std::string_view ptx_text) {
+std::unordered_map<std::string, SharedSymbolInfo> parse_ptx_shared_symbols(
+    std::string_view ptx_text,
+    std::string_view entry_name) {
+    std::string selected_entry_body;
+    if (!entry_name.empty()) {
+        std::size_t search_from = 0;
+        while (true) {
+            const std::size_t entry_pos = ptx_text.find(".entry", search_from);
+            if (entry_pos == std::string_view::npos) break;
+            std::size_t name_begin = entry_pos + 6;
+            while (name_begin < ptx_text.size() &&
+                   std::isspace(static_cast<unsigned char>(ptx_text[name_begin])) != 0) {
+                ++name_begin;
+            }
+            std::size_t name_end = name_begin;
+            while (name_end < ptx_text.size() &&
+                   std::isspace(static_cast<unsigned char>(ptx_text[name_end])) == 0 &&
+                   ptx_text[name_end] != '(' && ptx_text[name_end] != '{') {
+                ++name_end;
+            }
+            if (ptx_text.substr(name_begin, name_end - name_begin) != entry_name) {
+                search_from = name_end;
+                continue;
+            }
+            const std::size_t body_begin = ptx_text.find('{', name_end);
+            if (body_begin == std::string_view::npos) break;
+            std::size_t depth = 1;
+            std::size_t body_end = body_begin + 1;
+            for (; body_end < ptx_text.size() && depth != 0; ++body_end) {
+                if (ptx_text[body_end] == '{') ++depth;
+                else if (ptx_text[body_end] == '}') --depth;
+            }
+            if (depth == 0) {
+                selected_entry_body.assign(
+                    ptx_text.substr(body_begin + 1, body_end - body_begin - 2));
+            }
+            break;
+        }
+    }
+
     struct Entry { std::size_t size_bytes; std::size_t align_bytes; };
     std::vector<std::pair<std::string, Entry>> ordered;
     std::unordered_set<std::string> seen;
@@ -640,6 +679,14 @@ std::unordered_map<std::string, SharedSymbolInfo> parse_ptx_shared_symbols(std::
         if (bracket_open == std::string::npos) continue;
         const std::string symbol = trim(t.substr(sym_begin, bracket_open - sym_begin));
         if (symbol.empty() || seen.count(symbol) != 0) continue;
+        // Static shared objects are module-scoped in Clang PTX even when they
+        // belong to different kernels. Layout only the objects used by the
+        // selected entry, matching compute_static_shared_bytes(). Otherwise a
+        // selected kernel's first object can be placed beyond the threadgroup
+        // allocation reserved for that kernel.
+        if (!entry_name.empty() && selected_entry_body.find(symbol) == std::string::npos) {
+            continue;
+        }
         seen.insert(symbol);
 
         // Element count inside brackets.
@@ -655,9 +702,6 @@ std::unordered_map<std::string, SharedSymbolInfo> parse_ptx_shared_symbols(std::
         if (size_bytes == 0) continue;
         ordered.push_back({symbol, Entry{size_bytes, align_bytes}});
     }
-
-    // If only one symbol, it stays at offset 0 — no remapping needed.
-    if (ordered.size() <= 1) return {};
 
     // Assign contiguous byte offsets, respecting alignment.
     std::unordered_map<std::string, SharedSymbolInfo> out;
@@ -1323,6 +1367,10 @@ class GenericLlvmEmitter {
                 if (op.find("%ntid.") != std::string::npos) needs_tpg = true;
                 if (op.find("%nctaid.") != std::string::npos) needs_gpg = true;
                 if (op.find("%laneid") != std::string::npos) needs_lane = true;
+                if (shared_symbols_ != nullptr &&
+                    shared_symbols_->find(trim(op)) != shared_symbols_->end()) {
+                    needs_threadgroup_buffer = true;
+                }
             }
             if (instr.opcode.find(".shared") != std::string::npos ||
                 starts_with(instr.opcode, "bar.sync") ||
@@ -2889,6 +2937,24 @@ class GenericLlvmEmitter {
             return store_ret_bits(count, 32);
         }
 
+        if (callee == "__nv_ffs") {
+            if (arg_names.empty()) return fail(instr, "__nv_ffs expects 1 arg");
+            auto value = load_call_slot_value(os, arg_names[0], 32);
+            if (!value) return fail(instr, "__nv_ffs arg missing");
+            declarations_.insert("declare i32 @llvm.cttz.i32(i32, i1 immarg)");
+            const std::string trailing = next_tmp("ffs_cttz");
+            os << "  " << trailing << " = call i32 @llvm.cttz.i32(i32 " << *value
+               << ", i1 false)\n";
+            const std::string one_based = next_tmp("ffs_one_based");
+            os << "  " << one_based << " = add i32 " << trailing << ", 1\n";
+            const std::string is_zero = next_tmp("ffs_zero");
+            os << "  " << is_zero << " = icmp eq i32 " << *value << ", 0\n";
+            const std::string result = next_tmp("ffs");
+            os << "  " << result << " = select i1 " << is_zero << ", i32 0, i32 "
+               << one_based << "\n";
+            return store_ret_bits(result, 32);
+        }
+
         if (callee == "__nv_rsqrtf") {
             if (arg_names.empty()) return fail(instr, "__nv_rsqrtf expects 1 arg");
             auto bits = load_call_slot_value(os, arg_names[0], 32);
@@ -3029,6 +3095,15 @@ class GenericLlvmEmitter {
             declarations_.insert("declare float @air.fast_cos.f32(float)");
             const std::string out = next_tmp("cosf");
             os << "  " << out << " = call float @air.fast_cos.f32(float " << *x << ")\n";
+            return store_ret_f32(out);
+        }
+        if (callee == "__nv_acosf") {
+            if (arg_names.empty()) return fail(instr, "__nv_acosf expects 1 arg");
+            auto x = load_call_slot_f32(arg_names[0]);
+            if (!x) return fail(instr, "__nv_acosf arg missing");
+            declarations_.insert("declare float @air.fast_acos.f32(float)");
+            const std::string out = next_tmp("acosf");
+            os << "  " << out << " = call float @air.fast_acos.f32(float " << *x << ")\n";
             return store_ret_f32(out);
         }
         if (callee == "__nv_fast_sincosf") {
@@ -4547,7 +4622,7 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         const_global_defs.push_back(def.str());
     }
 
-    const auto shared_symbols = parse_ptx_shared_symbols(ptx);
+    const auto shared_symbols = parse_ptx_shared_symbols(ptx, pipeline.entry_name);
 
     GenericLlvmBodyResult generic_body;
     bool use_generic_body = false;

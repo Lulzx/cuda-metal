@@ -12,7 +12,10 @@
 namespace {
 
 constexpr std::uint32_t kThreads = 32;
-constexpr std::uint32_t kWordsPerThread = 6;
+constexpr std::uint32_t kWordsPerThread = 7;
+constexpr std::uint32_t kCounterWord = kThreads * kWordsPerThread;
+constexpr std::uint32_t kContactStreamWord = kCounterWord + 1u;
+constexpr std::uint32_t kContactCount = 4;
 
 }  // namespace
 
@@ -32,7 +35,8 @@ int main(int argc, char** argv) {
     }
 
     std::uint32_t* device_output = nullptr;
-    constexpr std::size_t kBytes = kThreads * kWordsPerThread * sizeof(std::uint32_t);
+    constexpr std::size_t kWordCount = kContactStreamWord + kContactCount * 4u;
+    constexpr std::size_t kBytes = kWordCount * sizeof(std::uint32_t);
     if (cudaMalloc(reinterpret_cast<void**>(&device_output), kBytes) != cudaSuccess ||
         cudaMemset(device_output, 0, kBytes) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: output allocation\n");
@@ -54,7 +58,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::vector<std::uint32_t> output(kThreads * kWordsPerThread);
+    std::vector<std::uint32_t> output(kWordCount);
     if (cudaMemcpy(output.data(), device_output, kBytes, cudaMemcpyDeviceToHost) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: output copy\n");
         return 1;
@@ -70,6 +74,8 @@ int main(int argc, char** argv) {
             lower ? 0u : 16u,
             lower ? (100u + ((lane + 1u) & 15u))
                   : (200u + 16u + ((lane - 15u) & 15u)),
+            lower ? (1000u + ((lane + 1u) & 15u))
+                  : (2000u + 16u + ((lane - 15u) & 15u)),
         };
         for (std::uint32_t word = 0; word < kWordsPerThread; ++word) {
             const std::uint32_t actual = output[lane * kWordsPerThread + word];
@@ -80,6 +86,31 @@ int main(int argc, char** argv) {
                              word,
                              actual,
                              expected[word]);
+                return 1;
+            }
+        }
+    }
+
+    if (output[kCounterWord] != kContactCount * 16u) {
+        std::fprintf(stderr,
+                     "FAIL: cooperative stream allocated %u bytes, expected %u\n",
+                     output[kCounterWord],
+                     kContactCount * 16u);
+        return 1;
+    }
+    const float* contacts = reinterpret_cast<const float*>(output.data() + kContactStreamWord);
+    for (std::uint32_t lane = 0; lane < kContactCount; ++lane) {
+        const std::array<float, 4> expected{
+            100.0f + lane, 200.0f + lane, 300.0f + lane, -0.25f * lane};
+        for (std::uint32_t component = 0; component < 4u; ++component) {
+            const float actual = contacts[lane * 4u + component];
+            if (actual != expected[component]) {
+                std::fprintf(stderr,
+                             "FAIL: contact %u component %u = %g, expected %g\n",
+                             lane,
+                             component,
+                             static_cast<double>(actual),
+                             static_cast<double>(expected[component]));
                 return 1;
             }
         }
@@ -124,6 +155,6 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "FAIL: cudaFree\n");
         return 1;
     }
-    std::printf("PASS: source partial-mask vote, activemask, shuffle, masked barrier, and static shared allocation\n");
+    std::printf("PASS: source warp votes, masked barriers, and cooperative packed stream writes\n");
     return 0;
 }

@@ -266,7 +266,8 @@ ctest --test-dir build -R unit_ -V              # unit tests only
 ```
 
 PhysX 5.6's reduced `SnippetHelloGRB` now runs resting and kinetic-friction
-sphere/plane contacts end to end on Apple GPU through CuMetal. The patch/build
+sphere/plane contacts plus frictionless four-point box/plane contacts end to
+end on Apple GPU through CuMetal. The patch/build
 workflow lives in `scripts/physx-patches/`; `conformance_physx_grb` compares
 30 resting CPU/GPU transform steps, `conformance_physx_grb_friction` checks
 CPU/GPU sliding-to-rolling agreement through 60 steps and a friction-disabled
@@ -274,11 +275,13 @@ negative control, and `conformance_physx_grb_multibody` checks two independent
 dynamic spheres across separately scheduled static-contact batches.
 `conformance_physx_grb_stacked` adds two vertically stacked dynamic spheres,
 checks frictional and frictionless CPU/GPU state agreement for 30 steps, and
-rejects a stacked scene with fewer than two bodies. The gates require Metal
+rejects a stacked scene with fewer than two bodies. `conformance_physx_grb_box`
+checks a unit box sliding on a plane for 30 steps through the convex/plane
+narrowphase kernel. The gates require Metal
 narrowphase, constraint preparation, dynamic and static solve, writeback, and
-integration provenance. This remains a deliberately selected sphere target;
-larger stacks and general batching remain outside the claim. See
-`docs/known-gaps.md`.
+integration provenance. These remain deliberately selected shape paths;
+general convex meshes, larger stacks, and general batching remain outside the
+claim. See `docs/known-gaps.md`.
 
 Known limitations
 -----------------
