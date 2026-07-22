@@ -460,6 +460,17 @@ std::optional<std::int64_t> parse_signed_immediate(std::string token) {
     if (token.empty()) {
         return std::nullopt;
     }
+    // Clang PTX retains C/C++ integer literal suffixes on some immediates
+    // (for example prmt selectors such as 0x3340U). They do not change the
+    // encoded integer value at this lowering boundary.
+    while (!token.empty() &&
+           (token.back() == 'u' || token.back() == 'U' ||
+            token.back() == 'l' || token.back() == 'L')) {
+        token.pop_back();
+    }
+    if (token.empty()) {
+        return std::nullopt;
+    }
     try {
         std::size_t idx = 0;
         long long value = 0;
@@ -593,9 +604,10 @@ std::vector<ParsedConstB8Array> parse_ptx_const_b8_arrays(std::string_view ptx_t
     return out;
 }
 
-// Parse .shared declarations (non-extern) from PTX to build a symbol→byte-offset map.
+// Parse .shared declarations from PTX to build a symbol→byte-offset map.
 // Each static __shared__ variable gets a contiguous region in the threadgroup buffer.
-// .extern .shared symbols (unknown size) are skipped; they remain at offset 0.
+// Explicitly retain .extern .shared symbols with size zero at offset zero so address
+// resolution can distinguish dynamic shared memory from unrelated module symbols.
 std::unordered_map<std::string, SharedSymbolInfo> parse_ptx_shared_symbols(
     std::string_view ptx_text,
     std::string_view entry_name) {
@@ -638,24 +650,35 @@ std::unordered_map<std::string, SharedSymbolInfo> parse_ptx_shared_symbols(
 
     struct Entry { std::size_t size_bytes; std::size_t align_bytes; };
     std::vector<std::pair<std::string, Entry>> ordered;
+    std::vector<std::string> extern_symbols;
     std::unordered_set<std::string> seen;
     std::istringstream lines{std::string(ptx_text)};
     std::string line;
     while (std::getline(lines, line)) {
         const std::string t = trim(line);
         if (t.find(".shared") == std::string::npos) continue;
-        // Skip extern declarations — pointer arithmetic by user handles sub-regions.
-        if (t.find(".extern") != std::string::npos) continue;
+        const bool is_extern = t.find(".extern") != std::string::npos;
 
-        // Determine element byte-size from type token (.b8=1, .b16=2, .b32=4, .b64=8).
-        std::size_t b_pos = std::string::npos;
+        // Determine element byte-size from the PTX declaration type. Clang
+        // commonly emits byte arrays as .b8 but preserves scalar source types
+        // such as .u32 for function-local __shared__ objects.
+        std::size_t type_pos = std::string::npos;
+        std::size_t type_len = 0;
         int elem_bytes = 1;
         for (const auto& p : std::vector<std::pair<std::string, int>>{
-                {".b64", 8}, {".b32", 4}, {".b16", 2}, {".b8", 1}}) {
+                {".b64", 8}, {".u64", 8}, {".s64", 8}, {".f64", 8},
+                {".b32", 4}, {".u32", 4}, {".s32", 4}, {".f32", 4},
+                {".b16", 2}, {".u16", 2}, {".s16", 2}, {".f16", 2},
+                {".b8", 1}, {".u8", 1}, {".s8", 1}, {".pred", 1}}) {
             const auto pos = t.find(p.first);
-            if (pos != std::string::npos) { b_pos = pos; elem_bytes = p.second; break; }
+            if (pos != std::string::npos) {
+                type_pos = pos;
+                type_len = p.first.size();
+                elem_bytes = p.second;
+                break;
+            }
         }
-        if (b_pos == std::string::npos) continue;
+        if (type_pos == std::string::npos) continue;
 
         // Parse .align N
         std::size_t align_bytes = static_cast<std::size_t>(elem_bytes);
@@ -670,14 +693,16 @@ std::unordered_map<std::string, SharedSymbolInfo> parse_ptx_shared_symbols(
             }
         }
 
-        // Symbol name: from end of ".bN" token to '['.
-        // ".b8" = 3 chars, ".b16/.b32/.b64" = 4 chars.
-        const std::size_t type_len = (elem_bytes == 1) ? 3u : 4u;
-        std::size_t sym_begin = b_pos + type_len;
+        // Symbol name: from the end of the type token to '[' for arrays or ';'
+        // for scalar shared objects.
+        std::size_t sym_begin = type_pos + type_len;
         while (sym_begin < t.size() && std::isspace(static_cast<unsigned char>(t[sym_begin])) != 0) ++sym_begin;
         const std::size_t bracket_open = t.find('[', sym_begin);
-        if (bracket_open == std::string::npos) continue;
-        const std::string symbol = trim(t.substr(sym_begin, bracket_open - sym_begin));
+        const std::size_t symbol_end = bracket_open != std::string::npos
+                                           ? bracket_open
+                                           : t.find(';', sym_begin);
+        if (symbol_end == std::string::npos) continue;
+        const std::string symbol = trim(t.substr(sym_begin, symbol_end - sym_begin));
         if (symbol.empty() || seen.count(symbol) != 0) continue;
         // Static shared objects are module-scoped in Clang PTX even when they
         // belong to different kernels. Layout only the objects used by the
@@ -689,10 +714,20 @@ std::unordered_map<std::string, SharedSymbolInfo> parse_ptx_shared_symbols(
         }
         seen.insert(symbol);
 
+        // All extern shared declarations alias the launch-provided dynamic
+        // threadgroup allocation. Pointer arithmetic in the kernel selects
+        // sub-regions, so their symbolic base is exactly byte offset zero.
+        if (is_extern) {
+            extern_symbols.push_back(symbol);
+            continue;
+        }
+
         // Element count inside brackets.
-        const std::size_t bracket_close = t.find(']', bracket_open + 1);
-        std::size_t elem_count = 0;
-        if (bracket_close != std::string::npos) {
+        std::size_t elem_count = bracket_open == std::string::npos ? 1 : 0;
+        const std::size_t bracket_close = bracket_open == std::string::npos
+                                              ? std::string::npos
+                                              : t.find(']', bracket_open + 1);
+        if (bracket_open != std::string::npos && bracket_close != std::string::npos) {
             const std::string cnt = trim(t.substr(bracket_open + 1, bracket_close - bracket_open - 1));
             if (!cnt.empty()) {
                 try { elem_count = static_cast<std::size_t>(std::stoull(cnt)); } catch (...) {}
@@ -710,6 +745,9 @@ std::unordered_map<std::string, SharedSymbolInfo> parse_ptx_shared_symbols(
         if (e.align_bytes > 1) cursor = (cursor + e.align_bytes - 1) & ~(e.align_bytes - 1);
         out.emplace(sym, SharedSymbolInfo{.offset_bytes = cursor, .size_bytes = e.size_bytes});
         cursor += e.size_bytes;
+    }
+    for (const std::string& sym : extern_symbols) {
+        out.emplace(sym, SharedSymbolInfo{.offset_bytes = 0, .size_bytes = 0});
     }
     return out;
 }
@@ -1504,19 +1542,20 @@ class GenericLlvmEmitter {
         if (starts_with(symbol, "__local_depot")) {
             return std::nullopt;
         }
-        if (!has_threadgroup_buffer_param_) {
+        if (!has_threadgroup_buffer_param_ || shared_symbols_ == nullptr) {
+            return std::nullopt;
+        }
+        const auto it = shared_symbols_->find(symbol);
+        if (it == shared_symbols_->end()) {
             return std::nullopt;
         }
         const std::string tmp = next_tmp("tg_p2i");
         os << "  " << tmp << " = ptrtoint i8 addrspace(3)* %" << threadgroup_buffer_arg_name_ << " to i64\n";
         // Apply per-symbol byte offset for multiple static __shared__ arrays.
-        if (shared_symbols_ != nullptr) {
-            const auto it = shared_symbols_->find(symbol);
-            if (it != shared_symbols_->end() && it->second.offset_bytes > 0) {
-                const std::string off = next_tmp("tg_sym_off");
-                os << "  " << off << " = add i64 " << tmp << ", " << it->second.offset_bytes << "\n";
-                return off;
-            }
+        if (it->second.offset_bytes > 0) {
+            const std::string off = next_tmp("tg_sym_off");
+            os << "  " << off << " = add i64 " << tmp << ", " << it->second.offset_bytes << "\n";
+            return off;
         }
         return tmp;
     }
@@ -2776,7 +2815,9 @@ class GenericLlvmEmitter {
             if (const auto tg = resolve_threadgroup_symbol_address(os, mem.base)) {
                 base_i64 = *tg;
             } else {
-                return fail(instr, "ld/st.shared: cannot resolve shared symbol address");
+                return fail(instr,
+                            "ld/st.shared: cannot resolve shared symbol address '" +
+                                mem.base + "'");
             }
         } else {
             return fail(instr, "memory base must be register or param/local/const symbol");

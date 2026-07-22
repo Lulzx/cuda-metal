@@ -586,6 +586,165 @@ $L1:
         return 1;
     }
 
+    const std::string mixed_shared_const_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.const .align 8 .b8 constant_table[16] = {1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0};
+.shared .align 16 .b8 shared_scratch[16];
+.visible .entry mixed_shared_const()
+{
+    .reg .b64 %rd<3>;
+    .reg .b32 %r<2>;
+    mov.u64 %rd1, shared_scratch;
+    mov.u64 %rd2, constant_table;
+    ld.const.u32 %r1, [%rd2];
+    st.shared.u32 [%rd1], %r1;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions mixed_shared_const_options;
+    mixed_shared_const_options.entry_name = "mixed_shared_const";
+    mixed_shared_const_options.strict = true;
+    const auto mixed_shared_const_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(mixed_shared_const_ptx,
+                                           mixed_shared_const_options);
+    if (!mixed_shared_const_lowered.ok) {
+        std::fprintf(stderr, "mixed shared/const lowering error: %s\n",
+                     mixed_shared_const_lowered.error.c_str());
+    }
+    if (!expect(mixed_shared_const_lowered.ok,
+                "mixed static shared and constant symbols lower")) {
+        return 1;
+    }
+    if (!expect(contains(mixed_shared_const_lowered.llvm_ir,
+                         "getelementptr inbounds [16 x i8], [16 x i8] addrspace(2)* @\"constant_table\"") &&
+                    contains(mixed_shared_const_lowered.llvm_ir,
+                             "ptrtoint i8 addrspace(3)* %__air_tg0 to i64"),
+                "constant and shared symbols keep distinct address-space bases")) {
+        return 1;
+    }
+
+    const std::string extern_shared_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.extern .shared .align 16 .b8 dynamic_smem[];
+.visible .entry use_extern_shared()
+{
+    .reg .b64 %rd<2>;
+    mov.u64 %rd1, dynamic_smem;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions extern_shared_options;
+    extern_shared_options.entry_name = "use_extern_shared";
+    extern_shared_options.strict = true;
+    const auto extern_shared_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(extern_shared_ptx,
+                                           extern_shared_options);
+    if (!expect(extern_shared_lowered.ok &&
+                    contains(extern_shared_lowered.llvm_ir,
+                             "ptrtoint i8 addrspace(3)* %__air_tg0 to i64"),
+                "declared extern shared symbol resolves to dynamic threadgroup memory")) {
+        return 1;
+    }
+
+    const std::string scalar_shared_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.shared .align 4 .u32 scalar_shared;
+.visible .entry use_scalar_shared()
+{
+    .reg .b32 %r<2>;
+    mov.u32 %r1, 7;
+    st.shared.u32 [scalar_shared], %r1;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions scalar_shared_options;
+    scalar_shared_options.entry_name = "use_scalar_shared";
+    scalar_shared_options.strict = true;
+    const auto scalar_shared_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(scalar_shared_ptx,
+                                           scalar_shared_options);
+    if (!expect(scalar_shared_lowered.ok &&
+                    contains(scalar_shared_lowered.llvm_ir,
+                             "ptrtoint i8 addrspace(3)* %__air_tg0 to i64"),
+                "declared scalar shared symbol resolves to threadgroup memory")) {
+        return 1;
+    }
+
+    const std::string undeclared_symbol_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.shared .align 16 .b8 declared_shared[16];
+.visible .entry reject_undeclared_symbol()
+{
+    .reg .b64 %rd<3>;
+    mov.u64 %rd1, declared_shared;
+    mov.u64 %rd2, undeclared_symbol;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions undeclared_symbol_options;
+    undeclared_symbol_options.entry_name = "reject_undeclared_symbol";
+    undeclared_symbol_options.strict = true;
+    const auto undeclared_symbol_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(undeclared_symbol_ptx,
+                                           undeclared_symbol_options);
+    if (!expect(!undeclared_symbol_lowered.ok &&
+                    contains(undeclared_symbol_lowered.error,
+                             "mov source unsupported"),
+                "strict lowering rejects undeclared symbols instead of aliasing shared memory")) {
+        return 1;
+    }
+
+    const std::string suffixed_immediate_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry suffixed_immediate()
+{
+    .reg .b32 %r<4>;
+    mov.u32 %r1, 287454020U;
+    prmt.b32 %r2, %r1, 0, 0x3340U;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions suffixed_immediate_options;
+    suffixed_immediate_options.entry_name = "suffixed_immediate";
+    suffixed_immediate_options.strict = true;
+    const auto suffixed_immediate_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(suffixed_immediate_ptx,
+                                           suffixed_immediate_options);
+    if (!expect(suffixed_immediate_lowered.ok &&
+                    contains(suffixed_immediate_lowered.llvm_ir, "prmt_src"),
+                "Clang-style unsigned PTX immediates lower")) {
+        return 1;
+    }
+
+    const std::string malformed_suffixed_immediate_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_suffixed_immediate()
+{
+    .reg .b32 %r<3>;
+    prmt.b32 %r1, 0, 0, 0x33G0U;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_suffixed_immediate_options;
+    malformed_suffixed_immediate_options.entry_name =
+        "malformed_suffixed_immediate";
+    malformed_suffixed_immediate_options.strict = true;
+    const auto malformed_suffixed_immediate_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_suffixed_immediate_ptx,
+                                           malformed_suffixed_immediate_options);
+    if (!expect(!malformed_suffixed_immediate_lowered.ok &&
+                    contains(malformed_suffixed_immediate_lowered.error,
+                             "prmt sources unsupported"),
+                "malformed suffixed PTX immediate is rejected")) {
+        return 1;
+    }
+
     const std::string malformed_masked_vote_ptx = R"PTX(
 .version 8.0
 .target sm_80
