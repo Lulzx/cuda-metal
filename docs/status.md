@@ -47,6 +47,15 @@ Phase 5 items implemented:
 
 Post-Phase 5 work completed:
 
+- **Linear binary-shim PTX ABI indexing**: fatbinary registration now scans only
+  `.entry` signatures to build kernel launch metadata instead of fully parsing
+  every PTX module with `std::regex`. The scanner handles comments, strings,
+  pointer qualifiers, scalar widths, aggregate byte arrays, and NVCC's
+  unqualified 64-bit pointer convention. A 5,000-entry unit corpus scans in
+  22 ms on Apple M4 Pro. The llama.cpp NGL=1 one-token workload improved from
+  290.24 s to 8.20 s wall-clock (35.4×); the 16-token correctness/provenance
+  gate completes in 9 s. Full parsing is retained for actual kernel lowering.
+
 - **MTLHeap auto-threshold**: MTLHeap sub-allocation now auto-enabled for allocations ≥ 4 MiB
   (configurable via `CUMETAL_MTLHEAP_THRESHOLD_BYTES`). Three modes:
   - `CUMETAL_MTLHEAP_ALLOC` unset → auto (heap for size ≥ threshold, default 4 MiB)
@@ -249,7 +258,12 @@ Implemented:
   - `conformance_physx_grb_multibody` runs two independent dynamic spheres
     against the plane for 30 steps, isolates each contact pre-prep/prepare
     batch in one Metal SIMD group, and checks all transforms and velocities
-    against CPU; dynamic/dynamic constraints and general batching remain open
+    against CPU
+  - `conformance_physx_grb_stacked` runs one selected sphere/sphere dynamic
+    contact above the plane for 30 frictional and frictionless steps, requires
+    dynamic solve, slab reset, motion-writeback, and integration provenance,
+    and rejects a one-body stacked scene; larger stacks and general batching
+    remain open
   - expanded PTX sweep harness (`tests/ptx_sweep`) for strict-mode supported/unsupported opcode checks
   - initial `intrinsic_lower` pass for thread-index/barrier/basic-math mappings
   - initial `printf_lower` pass for PTX `printf`/`vprintf` call extraction and format-table metadata

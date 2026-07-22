@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace cumetal::registration {
@@ -28,6 +29,12 @@ struct LaunchConfiguration {
     std::size_t shared_mem = 0;
     cudaStream_t stream = nullptr;
 };
+
+// Build the CUDA launch-argument ABI index from PTX entry signatures. This is
+// intentionally a lightweight registration-time scan; full PTX parsing remains
+// part of kernel lowering.
+std::unordered_map<std::string, std::vector<cumetalKernelArgInfo_t>>
+build_arg_info_index_from_ptx(const std::string& ptx_source);
 
 bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out);
 bool lookup_registered_symbol(const void* host_symbol,

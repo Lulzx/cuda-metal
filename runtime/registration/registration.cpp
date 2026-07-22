@@ -8,6 +8,7 @@
 #include "cumetal/ptx/parser.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -508,42 +509,110 @@ std::uint32_t scalar_size_bytes_for_ptx_type(std::string_view ptx_type) {
     return 4u;
 }
 
-std::vector<cumetalKernelArgInfo_t> infer_arg_info_from_ptx_entry(const std::string& ptx_source,
-                                                                  const std::string& kernel_name) {
-    if (ptx_source.empty() || kernel_name.empty()) {
-        return {};
-    }
+bool is_ptx_token_boundary(char c) {
+    const unsigned char value = static_cast<unsigned char>(c);
+    return std::isspace(value) || c == ',' || c == '(' || c == ')' || c == '{' || c == '}' ||
+           c == ';';
+}
 
-    cumetal::ptx::ParseOptions parse_options;
-    parse_options.strict = false;
-    const auto parsed = cumetal::ptx::parse_ptx(ptx_source, parse_options);
-    if (!parsed.ok) {
-        return {};
-    }
-
-    for (const auto& entry : parsed.module.entries) {
-        if (entry.name != kernel_name) {
+void skip_ptx_trivia(std::string_view source, std::size_t* cursor) {
+    while (*cursor < source.size()) {
+        const unsigned char c = static_cast<unsigned char>(source[*cursor]);
+        if (std::isspace(c)) {
+            ++*cursor;
             continue;
         }
-
-        std::vector<cumetalKernelArgInfo_t> arg_info;
-        arg_info.reserve(entry.params.size());
-        for (const auto& param : entry.params) {
-            cumetalKernelArgInfo_t info{};
-            if (param.is_pointer) {
-                info.kind = CUMETAL_ARG_BUFFER;
-                info.size_bytes = static_cast<std::uint32_t>(sizeof(void*));
-            } else {
-                info.kind = CUMETAL_ARG_BYTES;
-                const std::uint32_t arr_bytes = parse_param_array_bytes(param.name);
-                info.size_bytes = (arr_bytes > 0) ? arr_bytes : scalar_size_bytes_for_ptx_type(param.type);
+        if (source[*cursor] == '/' && *cursor + 1 < source.size()) {
+            if (source[*cursor + 1] == '/') {
+                *cursor += 2;
+                while (*cursor < source.size() && source[*cursor] != '\n') ++*cursor;
+                continue;
             }
-            arg_info.push_back(info);
+            if (source[*cursor + 1] == '*') {
+                *cursor += 2;
+                while (*cursor + 1 < source.size() &&
+                       !(source[*cursor] == '*' && source[*cursor + 1] == '/')) {
+                    ++*cursor;
+                }
+                if (*cursor + 1 < source.size()) *cursor += 2;
+                continue;
+            }
         }
-        return arg_info;
+        break;
     }
+}
 
-    return {};
+void skip_ptx_string(std::string_view source, std::size_t* cursor) {
+    if (*cursor >= source.size() || source[*cursor] != '"') return;
+    ++*cursor;
+    while (*cursor < source.size()) {
+        if (source[*cursor] == '\\' && *cursor + 1 < source.size()) {
+            *cursor += 2;
+        } else if (source[(*cursor)++] == '"') {
+            return;
+        }
+    }
+}
+
+std::string_view next_ptx_token(std::string_view source, std::size_t* cursor) {
+    skip_ptx_trivia(source, cursor);
+    const std::size_t begin = *cursor;
+    while (*cursor < source.size() && !is_ptx_token_boundary(source[*cursor])) {
+        if (source[*cursor] == '/' && *cursor + 1 < source.size() &&
+            (source[*cursor + 1] == '/' || source[*cursor + 1] == '*')) {
+            break;
+        }
+        ++*cursor;
+    }
+    return source.substr(begin, *cursor - begin);
+}
+
+std::vector<cumetalKernelArgInfo_t> scan_ptx_entry_params(std::string_view params) {
+    std::vector<cumetalKernelArgInfo_t> result;
+    std::size_t segment_begin = 0;
+    while (segment_begin < params.size()) {
+        std::size_t segment_end = segment_begin;
+        while (segment_end < params.size() && params[segment_end] != ',') ++segment_end;
+        const std::string_view segment = params.substr(segment_begin, segment_end - segment_begin);
+        bool is_param = false;
+        bool has_pointer_qualifier = false;
+        std::string_view type;
+        std::size_t cursor = 0;
+        while (cursor < segment.size()) {
+            const std::string_view token = next_ptx_token(segment, &cursor);
+            if (token.empty()) {
+                if (cursor < segment.size()) ++cursor;
+                continue;
+            }
+            if (token == ".param") is_param = true;
+            if (token == ".ptr") has_pointer_qualifier = true;
+            // Match the parser's tolerant type rule: the first dotted token
+            // other than a declaration qualifier is the parameter type.
+            if (type.empty() && token.size() > 1 && token.front() == '.' &&
+                token != ".param" && token != ".ptr" && token != ".align") {
+                type = token;
+            }
+        }
+        if (is_param && !type.empty()) {
+            // NVCC commonly emits kernel pointers as unqualified .u64/.s64/.b64
+            // parameters. The full PTX parser refines ambiguous 64-bit values from
+            // body data flow, but deliberately defaults them to pointers when it
+            // cannot prove scalar use. Keep that compatibility rule here. At launch,
+            // allocation lookup safely reclassifies an over-inferred small scalar.
+            const bool is_unannotated_pointer_width =
+                type == ".u64" || type == ".s64" || type == ".b64";
+            const bool is_pointer = has_pointer_qualifier || is_unannotated_pointer_width;
+            cumetalKernelArgInfo_t info{};
+            info.kind = is_pointer ? CUMETAL_ARG_BUFFER : CUMETAL_ARG_BYTES;
+            const std::uint32_t array_bytes = parse_param_array_bytes(segment);
+            info.size_bytes = is_pointer
+                ? static_cast<std::uint32_t>(sizeof(void*))
+                : (array_bytes > 0 ? array_bytes : scalar_size_bytes_for_ptx_type(type));
+            result.push_back(info);
+        }
+        segment_begin = segment_end + (segment_end < params.size() ? 1u : 0u);
+    }
+    return result;
 }
 
 std::unordered_map<std::string, std::vector<cumetalKernelArgInfo_t>>
@@ -553,30 +622,56 @@ build_arg_info_index_from_ptx(const std::string& ptx_source) {
         return out;
     }
 
-    cumetal::ptx::ParseOptions parse_options;
-    parse_options.strict = false;
-    const auto parsed = cumetal::ptx::parse_ptx(ptx_source, parse_options);
-    if (!parsed.ok) {
-        return out;
-    }
-
-    out.reserve(parsed.module.entries.size());
-    for (const auto& entry : parsed.module.entries) {
-        std::vector<cumetalKernelArgInfo_t> arg_info;
-        arg_info.reserve(entry.params.size());
-        for (const auto& param : entry.params) {
-            cumetalKernelArgInfo_t info{};
-            if (param.is_pointer) {
-                info.kind = CUMETAL_ARG_BUFFER;
-                info.size_bytes = static_cast<std::uint32_t>(sizeof(void*));
-            } else {
-                info.kind = CUMETAL_ARG_BYTES;
-                const std::uint32_t arr_bytes = parse_param_array_bytes(param.name);
-                info.size_bytes = (arr_bytes > 0) ? arr_bytes : scalar_size_bytes_for_ptx_type(param.type);
-            }
-            arg_info.push_back(info);
+    const std::string_view source(ptx_source);
+    std::size_t cursor = 0;
+    while (cursor < source.size()) {
+        skip_ptx_trivia(source, &cursor);
+        if (cursor >= source.size()) break;
+        if (source[cursor] == '"') {
+            skip_ptx_string(source, &cursor);
+            continue;
         }
-        out.emplace(entry.name, std::move(arg_info));
+        constexpr std::string_view kEntry = ".entry";
+        const bool boundary_before = cursor == 0 || is_ptx_token_boundary(source[cursor - 1]);
+        const bool matches = boundary_before && source.substr(cursor, kEntry.size()) == kEntry;
+        const std::size_t after_entry = cursor + kEntry.size();
+        const bool boundary_after = after_entry >= source.size() ||
+                                    is_ptx_token_boundary(source[after_entry]);
+        if (!matches || !boundary_after) {
+            ++cursor;
+            continue;
+        }
+
+        cursor = after_entry;
+        const std::string_view name = next_ptx_token(source, &cursor);
+        if (name.empty()) continue;
+        skip_ptx_trivia(source, &cursor);
+        while (cursor < source.size() && source[cursor] != '(' && source[cursor] != '{') {
+            if (source[cursor] == '"') skip_ptx_string(source, &cursor);
+            else ++cursor;
+            skip_ptx_trivia(source, &cursor);
+        }
+        if (cursor >= source.size() || source[cursor] != '(') continue;
+        const std::size_t params_begin = ++cursor;
+        std::size_t depth = 1;
+        while (cursor < source.size() && depth > 0) {
+            if (source[cursor] == '"') {
+                skip_ptx_string(source, &cursor);
+                continue;
+            }
+            if (source[cursor] == '/' && cursor + 1 < source.size() &&
+                (source[cursor + 1] == '/' || source[cursor + 1] == '*')) {
+                skip_ptx_trivia(source, &cursor);
+                continue;
+            }
+            if (source[cursor] == '(') ++depth;
+            if (source[cursor] == ')') --depth;
+            ++cursor;
+        }
+        if (depth != 0) break;
+        const std::size_t params_end = cursor - 1;
+        out.emplace(std::string(name),
+                    scan_ptx_entry_params(source.substr(params_begin, params_end - params_begin)));
     }
 
     return out;

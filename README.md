@@ -205,7 +205,7 @@ bash scripts/build_llama_cpp_cumetal.sh   # clones + builds in ../llama.cpp/
 bash tests/conformance/run_llama_cpp_cumetal.sh
 ```
 
-**Status — verified on 2026-07-20:**
+**Status — verified on 2026-07-22:**
 
 | What | Result |
 | --- | --- |
@@ -218,7 +218,15 @@ Measured on SmolLM2-135M, greedy decode of "The capital of France is":
 - Stock CPU llama.cpp → `Paris.` ✅
 - llama.cpp via libcumetal (NGL=0) → `Paris.` ✅
 - llama.cpp via libcumetal (NGL=1) → `The capital of France is Paris.` ✅
-  (Apple M4 Pro, 8.4 tokens/s generation in the latest verified run)
+  (Apple M4 Pro, 8.1 tokens/s generation in the latest verified run)
+
+Binary-shim startup now scans PTX entry signatures with a linear ABI pass
+instead of invoking the full regex-based PTX parser for every registered
+fatbinary module. On the same Apple M4 Pro, the one-layer, one-token smoke
+workload fell from 290.24 s to 8.20 s wall-clock (35.4× faster); the full
+16-token coherence gate completed in 9 s. Full PTX parsing still occurs when a
+kernel actually needs lowering, so this removes redundant eager compiler work
+without bypassing translation validation.
 
 Registered fatbinary launches are conservatively synchronized by default because
 the experimental asynchronous path can violate ordering when GGML uses adjacent
@@ -263,10 +271,13 @@ workflow lives in `scripts/physx-patches/`; `conformance_physx_grb` compares
 CPU/GPU sliding-to-rolling agreement through 60 steps and a friction-disabled
 negative control, and `conformance_physx_grb_multibody` checks two independent
 dynamic spheres across separately scheduled static-contact batches.
-Both require Metal narrowphase, constraint preparation, static solve,
-writeback, and integration provenance. This remains a deliberately selected
-sphere/plane target; dynamic/dynamic constraints and general batching remain
-outside the claim. See `docs/known-gaps.md`.
+`conformance_physx_grb_stacked` adds two vertically stacked dynamic spheres,
+checks frictional and frictionless CPU/GPU state agreement for 30 steps, and
+rejects a stacked scene with fewer than two bodies. The gates require Metal
+narrowphase, constraint preparation, dynamic and static solve, writeback, and
+integration provenance. This remains a deliberately selected sphere target;
+larger stacks and general batching remain outside the claim. See
+`docs/known-gaps.md`.
 
 Known limitations
 -----------------

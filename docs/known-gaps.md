@@ -60,7 +60,11 @@ as gaps have been closed.
   Patch 0011 covers two independent dynamic spheres contacting the same plane
   by launching each contact pre-prep/prepare batch as its own 32-lane Metal
   SIMD group and indexing the static solve per island body and slab.
-  Dynamic/dynamic constraints, packed general batching, joints, articulations,
+  Patch 0012 covers one selected dynamic/dynamic contact in a two-sphere stack.
+  It directly resets and writes back Metal solver buffers without shared
+  device-pointer staging, aggregates body slabs, and matches CPU for 30
+  frictional and frictionless steps. Larger stacks, multiple simultaneous
+  dynamic contacts per body, packed general batching, joints, articulations,
   user impulse limits, general falling-contact, and chaotic long-run solver
   conformance are not claimed.
 
@@ -124,14 +128,20 @@ as gaps have been closed.
   completes but the output is not correct, and a warning says so. This trades "it launches but
   lies" for "it fails loudly," which is the safer default for a translation layer.
 - **The covered llama.cpp SmolLM2 smoke path is numerically coherent.** Rechecked
-  2026-07-20 on SmolLM2-135M-Instruct-Q4_K_M, greedy decode of
+  2026-07-22 on SmolLM2-135M-Instruct-Q4_K_M, greedy decode of
   "The capital of France is":
   - Stock CPU llama.cpp (no CuMetal): `Paris.` ✅
   - llama.cpp linked against libcumetal, **NGL=0**: `Paris.` ✅
   - llama.cpp linked against libcumetal, **NGL=1**: `The capital of France is
-    Paris.` ✅ at 8.4 tokens/s generation on Apple M4 Pro. Registered launches
+    Paris.` ✅ at 8.1 tokens/s generation on Apple M4 Pro. Registered launches
     use the correctness-first synchronization policy described above; enabling
     experimental asynchronous registered launches reproduces incoherent output.
+  - Registration uses a linear PTX entry-signature ABI scan rather than eagerly
+    running the full parser for every fatbinary module. This reduced the covered
+    one-layer, one-token run from 290.24 s to 8.20 s (35.4×) on Apple M4 Pro;
+    actual kernel lowering retains the full parser. Unannotated 64-bit PTX
+    parameters remain conservatively pointer-classified, with the existing
+    allocation-aware launch fallback for small scalar values.
   - The conformance harness (`run_llama_cpp_cumetal.sh`) now enforces a **coherence gate**: greedy
     decode must contain the expected answer (`CUMETAL_LLAMA_EXPECT`, default `Paris`) and an
     NGL>0 run must include completed Apple-GPU provenance, so the test correctly
