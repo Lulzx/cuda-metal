@@ -178,11 +178,12 @@ struct MslReturn {
 };
 
 struct MslBreak {};
+struct MslContinue {};
 
 struct MslStatement {
     std::variant<MslVariableDeclaration, MslAssignment, MslExpressionStatement,
                  MslIf, MslWhile, MslThreadgroupByteArray, MslSwitch, MslReturn,
-                 MslBreak>
+                 MslBreak, MslContinue>
         value;
     ir::SourceLocation location;
 
@@ -198,6 +199,7 @@ struct MslStatement {
     static MslStmt switch_statement(MslExpr selector, std::vector<MslSwitchCase> cases);
     static MslStmt return_statement(std::optional<MslExpr> value = std::nullopt);
     static MslStmt break_statement();
+    static MslStmt continue_statement();
 };
 
 struct MslAttribute {

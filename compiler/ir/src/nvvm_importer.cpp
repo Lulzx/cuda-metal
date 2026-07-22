@@ -75,6 +75,21 @@ Type import_type(llvm::Type* type, bool kernel_pointer = false) {
     return Type::void_type();
 }
 
+bool contains_fp64(llvm::Type* type) {
+    if (type->isDoubleTy()) return true;
+    if (const auto* vector = llvm::dyn_cast<llvm::VectorType>(type)) {
+        return contains_fp64(vector->getElementType());
+    }
+    if (const auto* array = llvm::dyn_cast<llvm::ArrayType>(type)) {
+        return contains_fp64(array->getElementType());
+    }
+    if (const auto* structure = llvm::dyn_cast<llvm::StructType>(type)) {
+        return std::any_of(structure->element_begin(), structure->element_end(),
+                           [](llvm::Type* element) { return contains_fp64(element); });
+    }
+    return false;
+}
+
 std::uint32_t type_size(const Type& type) {
     if (type.is_pointer()) return 8;
     if (type.kind == TypeKind::kInteger || type.kind == TypeKind::kFloat) {
@@ -140,11 +155,53 @@ SourceLocation import_location(const llvm::Instruction& instruction,
 }
 
 std::string constant_spelling(const llvm::Constant& constant) {
+    if (const auto* floating = llvm::dyn_cast<llvm::ConstantFP>(&constant)) {
+        llvm::SmallVector<char, 32> text;
+        floating->getValueAPF().toString(text);
+        std::string spelling(text.begin(), text.end());
+        if (spelling.find_first_of(".eE") == std::string::npos &&
+            spelling != "NaN" && spelling != "+Inf" && spelling != "-Inf") {
+            spelling += ".0";
+        }
+        return spelling;
+    }
     std::string spelling;
     llvm::raw_string_ostream stream(spelling);
     constant.printAsOperand(stream, false);
     stream.flush();
     return spelling;
+}
+
+struct DemotedFloatMultiply {
+    const llvm::FPExtInst* extension = nullptr;
+    const llvm::BinaryOperator* multiply = nullptr;
+    const llvm::ConstantFP* constant = nullptr;
+};
+
+std::optional<DemotedFloatMultiply> match_demotable_float_multiply(
+    const llvm::Instruction& instruction) {
+    const auto* truncation = llvm::dyn_cast<llvm::FPTruncInst>(&instruction);
+    if (truncation == nullptr || !truncation->getType()->isFloatTy()) {
+        return std::nullopt;
+    }
+    const auto* multiply = llvm::dyn_cast<llvm::BinaryOperator>(
+        truncation->getOperand(0));
+    if (multiply == nullptr || multiply->getOpcode() != llvm::Instruction::FMul ||
+        !multiply->getType()->isDoubleTy() || !multiply->hasOneUse()) {
+        return std::nullopt;
+    }
+    const llvm::FPExtInst* extension = nullptr;
+    const llvm::ConstantFP* constant = nullptr;
+    for (unsigned i = 0; i < 2; ++i) {
+        extension = llvm::dyn_cast<llvm::FPExtInst>(multiply->getOperand(i));
+        constant = llvm::dyn_cast<llvm::ConstantFP>(multiply->getOperand(1 - i));
+        if (extension != nullptr && constant != nullptr &&
+            extension->getOperand(0)->getType()->isFloatTy() &&
+            extension->hasOneUse()) {
+            return DemotedFloatMultiply{extension, multiply, constant};
+        }
+    }
+    return std::nullopt;
 }
 
 bool write_constant_bytes(const llvm::Constant& constant, std::uint64_t offset,
@@ -300,6 +357,7 @@ struct FunctionState {
     std::unordered_map<const llvm::BasicBlock*, BlockId> blocks;
     std::unordered_map<ValueId, Type> value_types;
     std::unordered_map<ValueId, AddressSpace> integer_pointer_address_spaces;
+    std::unordered_map<ValueId, ValueId> integer_pointer_sources;
     std::unordered_map<const llvm::Value*, std::vector<std::optional<Operand>>>
         aggregate_components;
 };
@@ -470,6 +528,13 @@ struct Importer {
             const Type type = import_type(phi->getType());
             const ValueId materialized = builder.next_value();
             state->value_types[materialized] = type;
+            if (phi->getType()->isPointerTy() &&
+                phi->getType()->getPointerAddressSpace() == 0) {
+                state->output.generic_pointer_values.insert(materialized);
+                if (llvm::isa<llvm::ConstantPointerNull>(constant)) {
+                    state->output.generic_null_pointer_values.insert(materialized);
+                }
+            }
             Operation convert;
             convert.opcode = OpCode::kConvert;
             convert.results = {materialized};
@@ -682,10 +747,127 @@ struct Importer {
         return true;
     }
 
+    bool import_memset(const llvm::MemSetInst& set, FunctionState* state,
+                       BasicBlock* output_block) {
+        const auto* length = llvm::dyn_cast<llvm::ConstantInt>(set.getLength());
+        if (length == nullptr) {
+            return fail(&set, "dynamic-length LLVM memset is unsupported");
+        }
+        if (set.isVolatile()) {
+            return fail(&set, "volatile LLVM memset is unsupported");
+        }
+        const auto* byte = llvm::dyn_cast<llvm::ConstantInt>(set.getValue());
+        if (byte == nullptr) {
+            return fail(&set, "dynamic-byte LLVM memset is unsupported");
+        }
+
+        const std::uint64_t byte_count = length->getZExtValue();
+        const std::uint64_t destination_alignment = set.getDestAlign().value().value();
+        const std::uint64_t byte_value = byte->getZExtValue() & 0xffu;
+        const SourceLocation location = import_location(set, fallback_source);
+        const Operand destination = import_operand(*set.getDest(), *state);
+
+        auto offset_pointer = [&](std::uint64_t offset) {
+            if (offset == 0) return destination;
+            const ValueId value = builder.next_value();
+            state->value_types[value] = destination.type;
+            Operation pointer_offset;
+            pointer_offset.opcode = OpCode::kPointerOffset;
+            pointer_offset.results = {value};
+            pointer_offset.result_types = {destination.type};
+            pointer_offset.operands = {
+                destination,
+                Operand::immediate(std::to_string(offset), Type::integer(64)),
+            };
+            pointer_offset.attributes["offset_unit"] = "bytes";
+            pointer_offset.location = location;
+            output_block->operations.push_back(std::move(pointer_offset));
+            return Operand::value_ref(value, destination.type);
+        };
+
+        for (std::uint64_t offset = 0; offset < byte_count;) {
+            const bool word_aligned = destination_alignment >= 4 && offset % 4 == 0 &&
+                                      byte_count - offset >= 4;
+            const std::uint64_t width = word_aligned ? 4 : 1;
+            const std::uint64_t stored =
+                word_aligned ? byte_value * 0x01010101ull : byte_value;
+            const Type value_type =
+                Type::integer(static_cast<std::uint32_t>(width * 8));
+            Operation store;
+            store.opcode = OpCode::kStore;
+            store.operands = {
+                offset_pointer(offset),
+                Operand::immediate(std::to_string(stored), value_type),
+            };
+            store.attributes["alignment"] = std::to_string(width);
+            store.location = location;
+            output_block->operations.push_back(std::move(store));
+            offset += width;
+        }
+        return true;
+    }
+
     bool import_instruction(const llvm::Instruction& instruction,
                             const llvm::BasicBlock& source_block,
                             FunctionState* state, BasicBlock* output_block) {
         if (llvm::isa<llvm::PHINode>(instruction)) return true;
+        if (const auto demoted = match_demotable_float_multiply(instruction)) {
+            llvm::APFloat constant = demoted->constant->getValueAPF();
+            bool loses_info = false;
+            constant.convert(llvm::APFloat::IEEEsingle(),
+                             llvm::APFloat::rmNearestTiesToEven, &loses_info);
+            const llvm::Constant* float_constant =
+                llvm::ConstantFP::get(input->getContext(), constant);
+            Operation multiply;
+            multiply.opcode = OpCode::kMul;
+            multiply.results = {state->values.at(&instruction)};
+            multiply.result_types = {Type::floating(32)};
+            multiply.operands = {
+                import_operand(*demoted->extension->getOperand(0), *state),
+                Operand::immediate(constant_spelling(*float_constant),
+                                   Type::floating(32)),
+            };
+            multiply.location = import_location(instruction, fallback_source);
+            output_block->operations.push_back(std::move(multiply));
+            result.module.semantic_quality = SemanticQuality::kPerformanceDegraded;
+            const std::string caveat =
+                "Metal lacks FP64; demoted isolated float-to-double multiply-to-float chains";
+            if (std::find(result.module.semantic_caveats.begin(),
+                          result.module.semantic_caveats.end(), caveat) ==
+                result.module.semantic_caveats.end()) {
+                result.module.semantic_caveats.push_back(caveat);
+            }
+            return true;
+        }
+        if (const auto* extension = llvm::dyn_cast<llvm::FPExtInst>(&instruction);
+            extension != nullptr && extension->hasOneUse()) {
+            const auto* multiply = llvm::dyn_cast<llvm::Instruction>(*extension->user_begin());
+            if (multiply != nullptr && multiply->hasOneUse()) {
+                const auto* truncation =
+                    llvm::dyn_cast<llvm::Instruction>(*multiply->user_begin());
+                if (truncation != nullptr &&
+                    match_demotable_float_multiply(*truncation).has_value()) {
+                    return true;
+                }
+            }
+        }
+        if (const auto* multiply = llvm::dyn_cast<llvm::BinaryOperator>(&instruction);
+            multiply != nullptr && multiply->hasOneUse()) {
+            const auto* truncation =
+                llvm::dyn_cast<llvm::Instruction>(*multiply->user_begin());
+            if (truncation != nullptr &&
+                match_demotable_float_multiply(*truncation).has_value()) {
+                return true;
+            }
+        }
+        if (contains_fp64(instruction.getType()) ||
+            std::any_of(instruction.op_begin(), instruction.op_end(),
+                        [](const llvm::Use& operand) {
+                            return contains_fp64(operand->getType());
+                        })) {
+            return fail(&instruction,
+                        "Metal does not support FP64 outside the isolated float multiply demotion");
+        }
         Operation operation;
         operation.location = import_location(instruction, fallback_source);
         if (!instruction.getType()->isVoidTy()) {
@@ -715,6 +897,20 @@ struct Importer {
             if (pointer_address_space) {
                 state->integer_pointer_address_spaces[operation.results.front()] =
                     *pointer_address_space;
+            }
+            std::optional<ValueId> pointer_source;
+            for (const Operand& operand : operation.operands) {
+                if (operand.kind != OperandKind::kValue) continue;
+                const auto source = state->integer_pointer_sources.find(operand.value);
+                if (source == state->integer_pointer_sources.end()) continue;
+                if (pointer_source.has_value() && *pointer_source != source->second) {
+                    return fail(&instruction,
+                                "integer arithmetic mixes distinct pointer identities");
+                }
+                pointer_source = source->second;
+            }
+            if (pointer_source.has_value()) {
+                state->integer_pointer_sources[operation.results.front()] = *pointer_source;
             }
             if (binary->getOpcode() == llvm::Instruction::SDiv ||
                 binary->getOpcode() == llvm::Instruction::SRem ||
@@ -810,6 +1006,10 @@ struct Importer {
                 operation.attributes["pointer_integer"] = "true";
                 state->integer_pointer_address_spaces[operation.results.front()] =
                     operation.operands.front().type.address_space;
+                if (operation.operands.front().kind == OperandKind::kValue) {
+                    state->integer_pointer_sources[operation.results.front()] =
+                        operation.operands.front().value;
+                }
                 state->output.pointer_provenance[operation.results.front()] = {
                     .base_kind = PointerBaseKind::kIntegerRoundTrip,
                     .base_name = value_name(operation.operands.front().value),
@@ -821,12 +1021,23 @@ struct Importer {
                 operation.opcode = OpCode::kConvert;
                 operation.attributes["pointer_integer"] = "true";
                 AddressSpace address_space = AddressSpace::kDevice;
+                bool has_pointer_source = false;
                 if (operation.operands.front().kind == OperandKind::kValue) {
                     const auto provenance = state->integer_pointer_address_spaces.find(
                         operation.operands.front().value);
                     if (provenance != state->integer_pointer_address_spaces.end()) {
                         address_space = provenance->second;
                     }
+                    const auto source = state->integer_pointer_sources.find(
+                        operation.operands.front().value);
+                    if (source != state->integer_pointer_sources.end()) {
+                        has_pointer_source = true;
+                        operation.attributes["pointer_source_value"] =
+                            std::to_string(source->second);
+                    }
+                }
+                if (!has_pointer_source) {
+                    operation.attributes["pointer_integer_concrete"] = "true";
                 }
                 const Type pointer_type = Type::pointer(Type::integer(8), address_space);
                 operation.result_types.front() = pointer_type;
@@ -916,10 +1127,45 @@ struct Importer {
                 state->value_types[operation.results.front()] = operation.operands.front().type;
             }
             operation.attributes["offset_unit"] = "bytes";
-            const auto source = state->output.pointer_provenance.find(
-                operation.operands.front().value);
-            if (source != state->output.pointer_provenance.end()) {
-                state->output.pointer_provenance[operation.results.front()] = source->second;
+            std::optional<PointerProvenance> source_provenance;
+            if (operation.operands.front().kind == OperandKind::kValue) {
+                const auto source = state->output.pointer_provenance.find(
+                    operation.operands.front().value);
+                if (source != state->output.pointer_provenance.end()) {
+                    source_provenance = source->second;
+                }
+            } else if (operation.operands.front().kind == OperandKind::kSymbol &&
+                       operation.operands.front().type.is_pointer()) {
+                source_provenance = PointerProvenance{
+                    .base_kind = operation.operands.front().type.address_space ==
+                                         AddressSpace::kThreadgroup
+                                     ? PointerBaseKind::kDynamicThreadgroupMemory
+                                     : PointerBaseKind::kAllocation,
+                    .base_name = operation.operands.front().text,
+                    .known_byte_offset = 0,
+                };
+            }
+            if (source_provenance.has_value()) {
+                PointerProvenance provenance = std::move(*source_provenance);
+                if (provenance.memory_layout.empty()) {
+                    llvm::raw_string_ostream layout(provenance.memory_layout);
+                    gep->getSourceElementType()->print(layout);
+                    layout.flush();
+                    provenance.known_layout_offset = 0;
+                }
+                if (provenance.known_layout_offset.has_value()) {
+                    provenance.known_layout_offset =
+                        *provenance.known_layout_offset +
+                        constant_offset.getSExtValue();
+                }
+                if (!has_dynamic_offset && provenance.known_byte_offset.has_value()) {
+                    provenance.known_byte_offset =
+                        *provenance.known_byte_offset + constant_offset.getSExtValue();
+                } else {
+                    provenance.known_byte_offset = std::nullopt;
+                }
+                state->output.pointer_provenance[operation.results.front()] =
+                    std::move(provenance);
             }
         } else if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction)) {
             operation.opcode = OpCode::kLoad;
@@ -930,6 +1176,8 @@ struct Importer {
             operation.operands.push_back(import_operand(*store->getPointerOperand(), *state));
             operation.operands.push_back(import_operand(*store->getValueOperand(), *state));
             operation.attributes["alignment"] = std::to_string(store->getAlign().value());
+        } else if (const auto* set = llvm::dyn_cast<llvm::MemSetInst>(&instruction)) {
+            return import_memset(*set, state, output_block);
         } else if (const auto* copy = llvm::dyn_cast<llvm::MemCpyInst>(&instruction)) {
             return import_memcpy(*copy, state, output_block);
         } else if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
@@ -950,6 +1198,15 @@ struct Importer {
                 llvm::AtomicRMWInst::getOperationName(atomic->getOperation()).str();
             operation.memory_scope = MemoryScope::kDevice;
             operation.memory_ordering = import_ordering(atomic->getOrdering());
+            // LLVM's NVPTX frontend spells legacy CUDA atomic intrinsics as
+            // seq_cst atomicrmw even though CUDA specifies these operations as
+            // atomic but relaxed (they are not memory fences). Preserve CUDA's
+            // source semantics and map the operation to Metal's relaxed order.
+            if (operation.memory_ordering == MemoryOrdering::kSequentiallyConsistent &&
+                input->getTargetTriple().isNVPTX()) {
+                operation.memory_ordering = MemoryOrdering::kRelaxed;
+                operation.attributes["cuda_legacy_atomic"] = "true";
+            }
         } else if (const auto* fence = llvm::dyn_cast<llvm::FenceInst>(&instruction)) {
             operation.opcode = OpCode::kFence;
             operation.memory_scope = MemoryScope::kDevice;
@@ -1009,6 +1266,14 @@ struct Importer {
     }
 
     bool import_function(const llvm::Function& function) {
+        if (contains_fp64(function.getReturnType()) ||
+            std::any_of(function.arg_begin(), function.arg_end(),
+                        [](const llvm::Argument& argument) {
+                            return contains_fp64(argument.getType());
+                        })) {
+            return fail(nullptr, "Metal does not support FP64 function signatures in '" +
+                                     function.getName().str() + "'");
+        }
         FunctionState state;
         if (!allocate_function(function, &state)) return false;
         std::size_t block_index = 0;

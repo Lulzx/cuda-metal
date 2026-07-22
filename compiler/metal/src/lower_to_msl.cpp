@@ -150,8 +150,34 @@ public:
         const std::size_t node = parents_.size();
         parents_.push_back(node);
         ranks_.push_back(0);
-        spaces_.push_back(std::nullopt);
+        spaces_.push_back(0);
+        polymorphic_.push_back(false);
         return node;
+    }
+
+    void flow(std::size_t source, std::size_t target) {
+        flows_.push_back({source, target});
+    }
+
+    bool solve() {
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (const auto& [source, target] : flows_) {
+                const std::uint8_t incoming = spaces_[source];
+                if (incoming == 0) continue;
+                const std::uint8_t combined = spaces_[target] | incoming;
+                if (!polymorphic_[target] && spaces_[target] != 0 &&
+                    combined != spaces_[target]) {
+                    return false;
+                }
+                if (combined != spaces_[target]) {
+                    spaces_[target] = combined;
+                    changed = true;
+                }
+            }
+        }
+        return true;
     }
 
     std::size_t find(std::size_t node) {
@@ -163,38 +189,62 @@ public:
         left = find(left);
         right = find(right);
         if (left == right) return true;
-        if (spaces_[left].has_value() && spaces_[right].has_value() &&
-            spaces_[left] != spaces_[right]) {
+        if (spaces_[left] != 0 && spaces_[right] != 0 &&
+            spaces_[left] != spaces_[right] &&
+            !polymorphic_[left] && !polymorphic_[right]) {
             return false;
         }
         if (ranks_[left] < ranks_[right]) std::swap(left, right);
         parents_[right] = left;
         if (ranks_[left] == ranks_[right]) ++ranks_[left];
-        if (!spaces_[left].has_value()) spaces_[left] = spaces_[right];
+        spaces_[left] |= spaces_[right];
+        polymorphic_[left] = polymorphic_[left] || polymorphic_[right];
         return true;
     }
 
     bool seed(std::size_t node, ir::AddressSpace space) {
         node = find(node);
         if (space == ir::AddressSpace::kNone) return true;
-        if (spaces_[node].has_value() && spaces_[node] != space) return false;
-        spaces_[node] = space;
+        const std::uint8_t bit =
+            static_cast<std::uint8_t>(1u << static_cast<unsigned>(space));
+        if (spaces_[node] != 0 && (spaces_[node] & bit) == 0 &&
+            !polymorphic_[node]) {
+            return false;
+        }
+        spaces_[node] |= bit;
         return true;
     }
 
-    std::optional<ir::AddressSpace> space(std::size_t node) {
+    void mark_polymorphic(std::size_t node) {
+        polymorphic_[find(node)] = true;
+    }
+
+    std::uint8_t mask(std::size_t node) {
         return spaces_[find(node)];
+    }
+
+    std::optional<ir::AddressSpace> space(std::size_t node) {
+        const std::uint8_t value = mask(node);
+        if (value == 0 || (value & (value - 1)) != 0) return std::nullopt;
+        for (unsigned bit = 1; bit <= static_cast<unsigned>(ir::AddressSpace::kPrivate);
+             ++bit) {
+            if (value == (1u << bit)) return static_cast<ir::AddressSpace>(bit);
+        }
+        return std::nullopt;
     }
 
 private:
     std::vector<std::size_t> parents_;
     std::vector<std::uint8_t> ranks_;
-    std::vector<std::optional<ir::AddressSpace>> spaces_;
+    std::vector<std::uint8_t> spaces_;
+    std::vector<bool> polymorphic_;
+    std::vector<std::pair<std::size_t, std::size_t>> flows_;
 };
 
 AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
     AddressSpaceConstraints constraints;
     std::unordered_map<ir::ValueId, std::size_t> value_nodes;
+    std::unordered_map<ir::ValueId, ir::AddressSpace> concrete_value_spaces;
     std::vector<std::optional<std::size_t>> return_nodes(module->functions.size());
     std::unordered_map<std::string, std::size_t> function_indices;
 
@@ -204,9 +254,13 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
     for (std::size_t function_index = 0; function_index < module->functions.size();
          ++function_index) {
         ir::Function& function = module->functions[function_index];
+        function.mixed_pointer_address_spaces.clear();
         function_indices[function.name] = function_index;
         if (function.return_type.is_pointer()) {
             return_nodes[function_index] = constraints.add_node();
+            if (function.generic_pointer_return) {
+                constraints.mark_polymorphic(*return_nodes[function_index]);
+            }
             if (!function.generic_pointer_return &&
                 !constraints.seed(*return_nodes[function_index],
                                   function.return_type.address_space)) {
@@ -217,22 +271,34 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
         for (const ir::FunctionArgument& argument : function.arguments) {
             if (!argument.type.is_pointer()) continue;
             add_value(argument.value);
+            if (function.generic_pointer_values.contains(argument.value)) {
+                constraints.mark_polymorphic(value_nodes.at(argument.value));
+            }
             if (!function.generic_pointer_values.contains(argument.value) &&
                 !constraints.seed(value_nodes.at(argument.value),
                                   argument.type.address_space)) {
                 return {false, "conflicting concrete argument address spaces in '" +
                                    function.name + "'"};
             }
+            if (!function.generic_pointer_values.contains(argument.value)) {
+                concrete_value_spaces[argument.value] = argument.type.address_space;
+            }
         }
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::BlockArgument& argument : block.arguments) {
                 if (!argument.type.is_pointer()) continue;
                 add_value(argument.value);
+                if (function.generic_pointer_values.contains(argument.value)) {
+                    constraints.mark_polymorphic(value_nodes.at(argument.value));
+                }
                 if (!function.generic_pointer_values.contains(argument.value) &&
                     !constraints.seed(value_nodes.at(argument.value),
                                       argument.type.address_space)) {
                     return {false, "conflicting block-argument address spaces in '" +
                                        function.name + "'"};
+                }
+                if (!function.generic_pointer_values.contains(argument.value)) {
+                    concrete_value_spaces[argument.value] = argument.type.address_space;
                 }
             }
             for (const ir::Operation& operation : block.operations) {
@@ -242,11 +308,14 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                         continue;
                     }
                     add_value(operation.results[i]);
+                    if (function.generic_pointer_values.contains(operation.results[i])) {
+                        constraints.mark_polymorphic(value_nodes.at(operation.results[i]));
+                    }
                     const bool concrete =
                         !function.generic_pointer_values.contains(operation.results[i]) ||
                         operation.opcode == ir::OpCode::kAlloca ||
-                        (operation.attributes.contains("pointer_integer") &&
-                         operation.attributes.at("pointer_integer") == "true");
+                        (operation.attributes.contains("pointer_integer_concrete") &&
+                         operation.attributes.at("pointer_integer_concrete") == "true");
                     const ir::AddressSpace seed =
                         operation.opcode == ir::OpCode::kAlloca
                             ? ir::AddressSpace::kPrivate
@@ -256,6 +325,7 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                         return {false, "conflicting result address spaces in '" +
                                            function.name + "'"};
                     }
+                    if (concrete) concrete_value_spaces[operation.results[i]] = seed;
                 }
             }
         }
@@ -264,13 +334,61 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
     auto constrain_operand = [&](std::size_t node, const ir::Operand& operand) {
         if (operand.kind == ir::OperandKind::kValue &&
             value_nodes.contains(operand.value)) {
-            return constraints.unite(node, value_nodes.at(operand.value));
+            constraints.flow(value_nodes.at(operand.value), node);
+            return true;
         }
         if (operand.kind == ir::OperandKind::kSymbol && operand.type.is_pointer()) {
             return constraints.seed(node, operand.type.address_space);
         }
         return true;
     };
+
+    // Preserve singleton provenance through address-preserving pointer operations.
+    // Equality constraints alone deliberately merge at a generic PHI; without this
+    // directional fact the merge would incorrectly turn its concrete sources into
+    // mixed pointers as well.
+    bool propagated_concrete_space = true;
+    while (propagated_concrete_space) {
+        propagated_concrete_space = false;
+        for (ir::Function& function : module->functions) {
+            for (const ir::BasicBlock& block : function.blocks) {
+                for (const ir::Operation& operation : block.operations) {
+                    if (operation.results.empty() || operation.result_types.empty() ||
+                        !operation.result_types.front().is_pointer() ||
+                        concrete_value_spaces.contains(operation.results.front()) ||
+                        (operation.opcode != ir::OpCode::kPointerOffset &&
+                         operation.opcode != ir::OpCode::kConvert &&
+                         operation.opcode != ir::OpCode::kAddressSpaceCast) ||
+                        operation.operands.empty()) {
+                        continue;
+                    }
+                    std::optional<ir::AddressSpace> source_space;
+                    const ir::Operand& source = operation.operands.front();
+                    if (source.kind == ir::OperandKind::kSymbol &&
+                        source.type.is_pointer() &&
+                        source.type.address_space != ir::AddressSpace::kNone) {
+                        source_space = source.type.address_space;
+                    } else if (source.kind == ir::OperandKind::kValue) {
+                        const auto concrete = concrete_value_spaces.find(source.value);
+                        if (concrete != concrete_value_spaces.end()) {
+                            source_space = concrete->second;
+                        }
+                    }
+                    if (!source_space.has_value()) continue;
+                    concrete_value_spaces[operation.results.front()] = *source_space;
+                    if (!constraints.seed(value_nodes.at(operation.results.front()),
+                                          *source_space)) {
+                        return AddressSpaceResolution{
+                            false,
+                            "address-preserving pointer operation changes concrete address space in '" +
+                                function.name + "'",
+                        };
+                    }
+                    propagated_concrete_space = true;
+                }
+            }
+        }
+    }
 
     for (std::size_t function_index = 0; function_index < module->functions.size();
          ++function_index) {
@@ -289,6 +407,16 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                         !constrain_operand(result_node, operation.operands.front())) {
                         return {false, "generic pointer changes address space in '" +
                                            function.name + "'"};
+                    }
+                    if (operation.attributes.contains("pointer_source_value")) {
+                        const ir::ValueId source = static_cast<ir::ValueId>(
+                            std::stoul(operation.attributes.at("pointer_source_value")));
+                        if (!value_nodes.contains(source)) {
+                            return {false,
+                                    "pointer integer round-trip changes address space in '" +
+                                        function.name + "'"};
+                        }
+                        constraints.flow(value_nodes.at(source), result_node);
                     }
                     if (operation.opcode == ir::OpCode::kSelect) {
                         for (std::size_t i = 1; i < operation.operands.size(); ++i) {
@@ -321,12 +449,9 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                         }
                         if (!operation.results.empty() &&
                             value_nodes.contains(operation.results.front()) &&
-                            return_nodes[callee_index->second].has_value() &&
-                            !constraints.unite(
-                                value_nodes.at(operation.results.front()),
-                                *return_nodes[callee_index->second])) {
-                            return {false, "device helper return requires address-space specialization: " +
-                                               callee.name};
+                            return_nodes[callee_index->second].has_value()) {
+                            constraints.flow(*return_nodes[callee_index->second],
+                                             value_nodes.at(operation.results.front()));
                         }
                     }
                 }
@@ -350,40 +475,113 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                         !value_nodes.contains(successor.arguments[i])) {
                         continue;
                     }
-                    if (!constraints.unite(
-                            value_nodes.at(target->arguments[i].value),
-                            value_nodes.at(successor.arguments[i]))) {
-                        const auto target_space = constraints.space(
-                            value_nodes.at(target->arguments[i].value));
-                        const auto incoming_space = constraints.space(
-                            value_nodes.at(successor.arguments[i]));
-                        return {false,
-                                "PHI merges incompatible pointer address spaces in '" +
-                                    function.name + "' at block '" + target->name +
-                                    "' (argument " +
-                                    std::to_string(target->arguments[i].value) + " is " +
-                                    (target_space.has_value()
-                                         ? std::string(ir::address_space_name(*target_space))
-                                         : "unresolved") +
-                                    ", incoming " +
-                                    std::to_string(successor.arguments[i]) + " is " +
-                                    (incoming_space.has_value()
-                                         ? std::string(ir::address_space_name(*incoming_space))
-                                         : "unresolved") +
-                                    ")"};
+                    if (function.generic_null_pointer_values.contains(
+                            successor.arguments[i])) {
+                        constraints.flow(value_nodes.at(target->arguments[i].value),
+                                         value_nodes.at(successor.arguments[i]));
+                    } else {
+                        constraints.flow(value_nodes.at(successor.arguments[i]),
+                                         value_nodes.at(target->arguments[i].value));
                     }
                 }
             }
         }
     }
 
-    auto resolve_type = [&](ir::ValueId value, ir::Type* type,
+    // CUDA permits generic pointers to be stored in ordinary structs. Connect
+    // pointer loads and stores through an exact base+constant-offset memory slot.
+    // The base uses the already unified interprocedural pointer component, so a
+    // field initialized in a constructor is visible to a method called later on
+    // the same object without relying on source-level type names.
+    std::unordered_map<std::string, std::size_t> pointer_memory_slots;
+    for (ir::Function& function : module->functions) {
+        auto slot_for = [&](const ir::Operand& address) -> std::optional<std::size_t> {
+            if (address.kind != ir::OperandKind::kValue ||
+                !value_nodes.contains(address.value)) {
+                return std::nullopt;
+            }
+            const auto provenance = function.pointer_provenance.find(address.value);
+            if (provenance == function.pointer_provenance.end() ||
+                provenance->second.base_kind == ir::PointerBaseKind::kUnknown ||
+                (!provenance->second.known_layout_offset.has_value() &&
+                 !provenance->second.known_byte_offset.has_value())) {
+                return std::nullopt;
+            }
+            const std::int64_t slot_offset =
+                provenance->second.known_layout_offset.has_value()
+                    ? *provenance->second.known_layout_offset
+                    : *provenance->second.known_byte_offset;
+            const std::string key =
+                (provenance->second.memory_layout.empty()
+                     ? "root:" + std::to_string(
+                                     constraints.find(value_nodes.at(address.value)))
+                     : "layout:" + provenance->second.memory_layout) +
+                ":" + std::to_string(slot_offset);
+            const auto existing = pointer_memory_slots.find(key);
+            if (existing != pointer_memory_slots.end()) return existing->second;
+            const std::size_t node = constraints.add_node();
+            constraints.mark_polymorphic(node);
+            pointer_memory_slots.emplace(key, node);
+            return node;
+        };
+        for (const ir::BasicBlock& block : function.blocks) {
+            for (const ir::Operation& operation : block.operations) {
+                if (operation.opcode == ir::OpCode::kStore &&
+                    operation.operands.size() >= 2 &&
+                    operation.operands[1].type.is_pointer()) {
+                    const auto slot = slot_for(operation.operands[0]);
+                    if (slot.has_value() &&
+                        !constrain_operand(*slot, operation.operands[1])) {
+                        return {false, "pointer field stores incompatible concrete address spaces in '" +
+                                           function.name + "'"};
+                    }
+                } else if (operation.opcode == ir::OpCode::kLoad &&
+                           !operation.results.empty() &&
+                           !operation.result_types.empty() &&
+                           operation.result_types.front().is_pointer() &&
+                           !operation.operands.empty()) {
+                    const auto slot = slot_for(operation.operands[0]);
+                    if (slot.has_value()) {
+                        constraints.flow(*slot,
+                                         value_nodes.at(operation.results.front()));
+                    }
+                }
+            }
+        }
+    }
+
+    if (!constraints.solve()) {
+        return {false,
+                "directional pointer flow reaches a conflicting concrete address space"};
+    }
+
+    auto resolve_type = [&](ir::Function* function, ir::ValueId value, ir::Type* type,
                             std::string_view context) -> std::optional<std::string> {
         if (!type->is_pointer() || !value_nodes.contains(value)) return std::nullopt;
+        if (const auto concrete = concrete_value_spaces.find(value);
+            concrete != concrete_value_spaces.end()) {
+            type->address_space = concrete->second;
+            return std::nullopt;
+        }
+        const std::uint8_t mask = constraints.mask(value_nodes.at(value));
         const auto space = constraints.space(value_nodes.at(value));
         if (!space.has_value()) {
+            if (mask != 0 && (mask & (mask - 1)) != 0) {
+                type->address_space = ir::AddressSpace::kNone;
+                function->mixed_pointer_address_spaces[value] = mask;
+                return std::nullopt;
+            }
+            std::string detail;
+            if (const auto provenance = function->pointer_provenance.find(value);
+                provenance != function->pointer_provenance.end()) {
+                detail = " (layout='" + provenance->second.memory_layout + "', offset=" +
+                         (provenance->second.known_byte_offset.has_value()
+                              ? std::to_string(*provenance->second.known_byte_offset)
+                              : std::string("unknown")) +
+                         ")";
+            }
             return "unresolved generic pointer address space for " +
-                   std::string(context) + " value " + std::to_string(value);
+                   std::string(context) + " value " + std::to_string(value) + detail;
         }
         type->address_space = *space;
         return std::nullopt;
@@ -401,14 +599,14 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
             function.return_type.address_space = *space;
         }
         for (ir::FunctionArgument& argument : function.arguments) {
-            if (const auto error = resolve_type(argument.value, &argument.type,
+            if (const auto error = resolve_type(&function, argument.value, &argument.type,
                                                 function.name + " argument")) {
                 return {false, *error};
             }
         }
         for (ir::BasicBlock& block : function.blocks) {
             for (ir::BlockArgument& argument : block.arguments) {
-                if (const auto error = resolve_type(argument.value, &argument.type,
+                if (const auto error = resolve_type(&function, argument.value, &argument.type,
                                                     function.name + " block argument")) {
                     return {false, *error};
                 }
@@ -417,7 +615,7 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                 for (std::size_t i = 0; i < operation.results.size(); ++i) {
                     if (i < operation.result_types.size()) {
                         if (const auto error = resolve_type(
-                                operation.results[i], &operation.result_types[i],
+                                &function, operation.results[i], &operation.result_types[i],
                                 function.name + " result")) {
                             return {false, *error};
                         }
@@ -426,8 +624,20 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                 for (ir::Operand& operand : operation.operands) {
                     if (operand.kind == ir::OperandKind::kValue &&
                         value_nodes.contains(operand.value) && operand.type.is_pointer()) {
+                        if (const auto concrete = concrete_value_spaces.find(operand.value);
+                            concrete != concrete_value_spaces.end()) {
+                            operand.type.address_space = concrete->second;
+                            continue;
+                        }
                         const auto space = constraints.space(value_nodes.at(operand.value));
                         if (!space.has_value()) {
+                            const std::uint8_t mask =
+                                constraints.mask(value_nodes.at(operand.value));
+                            if (mask != 0 && (mask & (mask - 1)) != 0) {
+                                operand.type.address_space = ir::AddressSpace::kNone;
+                                function.mixed_pointer_address_spaces[operand.value] = mask;
+                                continue;
+                            }
                             return {false, "unresolved pointer operand address space in '" +
                                                function.name + "'"};
                         }
@@ -477,6 +687,7 @@ struct BuiltinUsage {
 using BuiltinUsageMap = std::unordered_map<std::string, BuiltinUsage>;
 using SharedUsageMap =
     std::unordered_map<std::string, std::vector<std::string>>;
+using BarrierUsageMap = std::unordered_map<std::string, bool>;
 
 std::string shared_parameter_name(std::string_view global) {
     return "cm_shared_" + sanitize_identifier(global);
@@ -542,6 +753,7 @@ BuiltinUsageMap analyze_builtin_usage(const ir::Module& module) {
                                                operation.opcode == ir::OpCode::kMetalThreadgroupsPerGrid;
                 direct.lane_id = direct.lane_id ||
                                  operation.opcode == ir::OpCode::kMetalLaneId ||
+                                 operation.opcode == ir::OpCode::kMetalShuffle ||
                                  operation.opcode == ir::OpCode::kMetalBallot ||
                                  operation.opcode == ir::OpCode::kMetalVote;
             }
@@ -620,6 +832,40 @@ SharedUsageMap analyze_shared_usage(const ir::Module& module) {
     return usage;
 }
 
+BarrierUsageMap analyze_barrier_usage(const ir::Module& module) {
+    BarrierUsageMap usage;
+    for (const ir::Function& function : module.functions) {
+        bool direct = false;
+        for (const ir::BasicBlock& block : function.blocks) {
+            for (const ir::Operation& operation : block.operations) {
+                direct = direct || operation.opcode == ir::OpCode::kMetalBarrier;
+            }
+        }
+        usage[function.name] = direct;
+    }
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const ir::Function& function : module.functions) {
+            if (usage[function.name]) continue;
+            for (const ir::BasicBlock& block : function.blocks) {
+                for (const ir::Operation& operation : block.operations) {
+                    if (operation.opcode != ir::OpCode::kCall) continue;
+                    const auto callee = operation.attributes.find("callee");
+                    if (callee != operation.attributes.end() &&
+                        usage.contains(callee->second) && usage.at(callee->second)) {
+                        usage[function.name] = true;
+                        changed = true;
+                        break;
+                    }
+                }
+                if (usage[function.name]) break;
+            }
+        }
+    }
+    return usage;
+}
+
 struct AstLowerer {
     const ir::Module& module;
     const ir::Function& function;
@@ -628,26 +874,42 @@ struct AstLowerer {
     LowerToMslResult result;
     MslFunction output;
     std::unordered_map<ir::ValueId, MslExpr> values;
+    std::unordered_map<ir::ValueId, MslExpr> mixed_pointer_tags;
+    std::unordered_set<ir::ValueId> declared_block_arguments;
     std::unordered_map<ir::BlockId, std::size_t> block_indices;
+    std::vector<std::vector<std::size_t>> predecessors;
+    std::vector<std::vector<bool>> dominators;
+    std::vector<std::vector<bool>> postdominators;
     std::unordered_set<ir::BlockId> emitted;
+    std::unordered_set<ir::BlockId> region_stack;
+    struct LoopEscapeContext {
+        std::size_t enclosing_header_index;
+        MslExpr continue_enclosing;
+    };
+    std::vector<LoopEscapeContext> loop_escape_stack;
     bool needs_thread_position = false;
     bool needs_threadgroup_position = false;
     bool needs_threads_per_threadgroup = false;
     bool needs_threadgroups_per_grid = false;
     bool needs_lane_id = false;
     bool cfg_dispatcher_mode = false;
+    bool predeclared_ssa_storage = false;
     bool force_cfg_dispatcher = false;
     std::size_t edge_temporary_index = 0;
+    std::size_t loop_escape_index = 0;
+    std::optional<ir::AddressSpace> pointer_specialization;
 
     AstLowerer(const ir::Module& input_module, const ir::Function& input_function,
                const BuiltinUsageMap& input_builtin_usage,
                const SharedUsageMap& input_shared_usage,
-               bool force_dispatcher = false)
+               bool force_dispatcher = false,
+               std::optional<ir::AddressSpace> specialization = std::nullopt)
         : module(input_module),
           function(input_function),
           builtin_usage(input_builtin_usage),
           shared_usage(input_shared_usage),
-          force_cfg_dispatcher(force_dispatcher) {
+          force_cfg_dispatcher(force_dispatcher),
+          pointer_specialization(specialization) {
         const BuiltinUsage& required = builtin_usage.at(function.name);
         needs_thread_position = required.thread_position;
         needs_threadgroup_position = required.threadgroup_position;
@@ -664,11 +926,48 @@ struct AstLowerer {
         return false;
     }
 
+    bool is_mixed_pointer(ir::ValueId value) const {
+        return function.mixed_pointer_address_spaces.contains(value);
+    }
+
+    MslType lower_value_type(ir::ValueId value, const ir::Type& type) const {
+        if (!type.is_pointer() || !is_mixed_pointer(value)) return lower_type(type);
+        if (pointer_specialization.has_value()) {
+            ir::Type specialized = type;
+            specialized.address_space = *pointer_specialization;
+            return lower_type(specialized);
+        }
+        return MslType::uint(64);
+    }
+
+    MslType lower_result_type(const ir::Operation& operation,
+                              std::size_t index = 0) const {
+        if (index >= operation.results.size() || index >= operation.result_types.size()) {
+            return MslType::void_type();
+        }
+        return lower_value_type(operation.results[index], operation.result_types[index]);
+    }
+
+    std::string specialized_callee(std::string_view callee,
+                                   ir::AddressSpace space) const {
+        std::string suffix;
+        switch (space) {
+            case ir::AddressSpace::kDevice: suffix = "__cm_device"; break;
+            case ir::AddressSpace::kConstant: suffix = "__cm_constant"; break;
+            case ir::AddressSpace::kThreadgroup: suffix = "__cm_threadgroup"; break;
+            case ir::AddressSpace::kPrivate: suffix = "__cm_thread"; break;
+            case ir::AddressSpace::kNone: suffix = "__cm_generic"; break;
+        }
+        return std::string(callee) + suffix;
+    }
+
     MslExpr expression_for(const ir::Operand& operand) {
         if (operand.kind == ir::OperandKind::kValue) {
             const auto value = values.find(operand.value);
             if (value != values.end()) return value->second;
-            return MslExpression::identifier(value_name(operand.value), lower_type(operand.type));
+            return MslExpression::identifier(
+                value_name(operand.value),
+                lower_value_type(operand.value, operand.type));
         }
         if (operand.kind == ir::OperandKind::kSymbol) {
             if (operand.type.is_pointer() &&
@@ -684,9 +983,9 @@ struct AstLowerer {
 
     MslStmt declare_result(const ir::Operation& operation, MslExpr initializer) {
         const ir::ValueId value = operation.results.front();
-        const MslType type = lower_type(operation.result_types.front());
+        const MslType type = lower_result_type(operation);
         values[value] = MslExpression::identifier(value_name(value), type);
-        if (cfg_dispatcher_mode) {
+        if (cfg_dispatcher_mode || predeclared_ssa_storage) {
             return MslStatement::assignment(values.at(value), std::move(initializer));
         }
         return MslStatement::variable(type, value_name(value), std::move(initializer), true);
@@ -752,7 +1051,7 @@ struct AstLowerer {
             }
             MslExpr left = expression_for(operation.operands[0]);
             MslExpr right = expression_for(operation.operands[1]);
-            MslType expression_type = lower_type(operation.result_types.front());
+            MslType expression_type = lower_result_type(operation);
             if (operation.attributes.contains("signed") &&
                 operation.attributes.at("signed") == "true" &&
                 operation.operands[0].type.kind == ir::TypeKind::kInteger) {
@@ -762,14 +1061,37 @@ struct AstLowerer {
                 right = MslExpression::cast(signed_type, right);
                 expression_type = signed_type;
             }
-            MslExpr expression = MslExpression::binary(
-                binary, left, right, expression_type);
+            MslExpr expression;
+            if (operation.opcode == ir::OpCode::kPointerOffset &&
+                operation.attributes.contains("offset_unit") &&
+                operation.attributes.at("offset_unit") == "bytes" &&
+                !is_mixed_pointer(operation.results.front())) {
+                // CuMetal pointer offsets are byte offsets even when the source
+                // pointer originated from an aggregate alloca. Cast before the
+                // addition so C++/MSL cannot scale the offset by the aggregate's
+                // sizeof (for example, `&vec3_storage + 4`).
+                const MslAddressSpace address_space =
+                    expression_type.kind == MslTypeKind::kPointer
+                        ? expression_type.address_space
+                        : left->type.address_space;
+                const MslType byte_pointer = MslType::pointer(
+                    MslType::uint(8), address_space);
+                const MslExpr byte_base = MslExpression::cast(
+                    byte_pointer, left, true);
+                const MslExpr byte_offset = MslExpression::binary(
+                    binary, byte_base, right, byte_pointer);
+                expression = MslExpression::cast(
+                    expression_type, byte_offset, true);
+            } else {
+                expression = MslExpression::binary(
+                    binary, left, right, expression_type);
+            }
             if (operation.attributes.contains("combined") &&
                 operation.attributes.at("combined") == "mul_add" &&
                 operation.operands.size() >= 3) {
                 expression = MslExpression::binary(
                     "+", expression, expression_for(operation.operands[2]),
-                    lower_type(operation.result_types.front()));
+                    lower_result_type(operation));
             }
             return declare_result(operation, expression);
         }
@@ -782,7 +1104,7 @@ struct AstLowerer {
             return declare_result(
                 operation,
                 MslExpression::call("fma", std::move(arguments),
-                                    lower_type(operation.result_types.front())));
+                                    lower_result_type(operation)));
         }
 
         if (operation.opcode == ir::OpCode::kAggregateExtract) {
@@ -794,7 +1116,7 @@ struct AstLowerer {
                 operation,
                 MslExpression::subscript(expression_for(operation.operands[0]),
                                          expression_for(operation.operands[1]),
-                                         lower_type(operation.result_types.front())));
+                                         lower_result_type(operation)));
         }
 
         if (operation.opcode == ir::OpCode::kAggregateConstruct) {
@@ -811,7 +1133,7 @@ struct AstLowerer {
             return declare_result(
                 operation,
                 MslExpression::call(constructor->second, std::move(elements),
-                                    lower_type(operation.result_types.front())));
+                                    lower_result_type(operation)));
         }
 
         if (operation.opcode == ir::OpCode::kCall) {
@@ -833,14 +1155,14 @@ struct AstLowerer {
                     MslExpression::call("abs", {signed_input}, signed_type);
                 return declare_result(
                     operation,
-                    MslExpression::cast(lower_type(operation.result_types.front()), absolute));
+                    MslExpression::cast(lower_result_type(operation), absolute));
             }
             if (callee->second == "__cumetal_ffs") {
                 if (operation.results.empty() || operation.operands.size() != 1) {
                     fail(&operation, "malformed CUDA ffs builtin");
                     return std::nullopt;
                 }
-                const MslType result_type = lower_type(operation.result_types.front());
+                const MslType result_type = lower_result_type(operation);
                 const MslExpr input = expression_for(operation.operands.front());
                 const MslExpr zero = MslExpression::literal("0", input->type);
                 const MslExpr is_zero =
@@ -867,6 +1189,10 @@ struct AstLowerer {
                 const std::size_t count =
                     std::min(arguments.size(), callee_function->arguments.size());
                 for (std::size_t i = 0; i < count; ++i) {
+                    if (callee_function->mixed_pointer_address_spaces.contains(
+                            callee_function->arguments[i].value)) {
+                        continue;
+                    }
                     const MslType expected =
                         lower_type(callee_function->arguments[i].type);
                     if (arguments[i]->type.kind == MslTypeKind::kPointer &&
@@ -912,7 +1238,115 @@ struct AstLowerer {
             }
             const MslType return_type = operation.result_types.empty()
                                             ? MslType::void_type()
-                                            : lower_type(operation.result_types.front());
+                                            : lower_result_type(operation);
+            const bool polymorphic_callee =
+                callee_function != module.functions.end() &&
+                !callee_function->mixed_pointer_address_spaces.empty();
+            std::optional<std::size_t> mixed_argument;
+            if (!pointer_specialization.has_value()) {
+                for (std::size_t i = 0; i < operation.operands.size(); ++i) {
+                    if (operation.operands[i].kind == ir::OperandKind::kValue &&
+                        is_mixed_pointer(operation.operands[i].value)) {
+                        mixed_argument = i;
+                        break;
+                    }
+                }
+            }
+            if (polymorphic_callee && mixed_argument.has_value()) {
+                if (operation.results.empty()) {
+                    fail(&operation,
+                         "void calls through mixed CUDA pointers require statement dispatch");
+                    return std::nullopt;
+                }
+                auto specialized_arguments = [&](ir::AddressSpace space) {
+                    std::vector<MslExpr> result = arguments;
+                    const std::size_t count = std::min(
+                        operation.operands.size(), callee_function->arguments.size());
+                    for (std::size_t i = 0; i < count; ++i) {
+                        if (operation.operands[i].kind != ir::OperandKind::kValue ||
+                            !is_mixed_pointer(operation.operands[i].value)) {
+                            continue;
+                        }
+                        ir::Type pointer_type = callee_function->arguments[i].type;
+                        pointer_type.address_space = space;
+                        result[i] = MslExpression::cast(
+                            lower_type(pointer_type), arguments[i], true);
+                    }
+                    return result;
+                };
+                const MslExpr device_call = MslExpression::call(
+                    specialized_callee(callee->second, ir::AddressSpace::kDevice),
+                    specialized_arguments(ir::AddressSpace::kDevice), return_type);
+                const MslExpr threadgroup_call = MslExpression::call(
+                    specialized_callee(callee->second, ir::AddressSpace::kThreadgroup),
+                    specialized_arguments(ir::AddressSpace::kThreadgroup), return_type);
+                const ir::ValueId mixed_value =
+                    operation.operands[*mixed_argument].value;
+                const MslExpr is_device = MslExpression::binary(
+                    "==", mixed_pointer_tags.at(mixed_value),
+                    MslExpression::literal(
+                        std::to_string(static_cast<unsigned>(ir::AddressSpace::kDevice)) +
+                            "u",
+                        MslType::uint()),
+                    MslType::boolean());
+                return declare_result(
+                    operation,
+                    MslExpression::conditional(is_device, device_call,
+                                               threadgroup_call, return_type));
+            }
+            if (polymorphic_callee) {
+                std::optional<ir::AddressSpace> concrete_specialization;
+                const std::size_t count = std::min(
+                    operation.operands.size(), callee_function->arguments.size());
+                for (std::size_t i = 0; i < count; ++i) {
+                    if (!callee_function->mixed_pointer_address_spaces.contains(
+                            callee_function->arguments[i].value) ||
+                        arguments[i]->type.kind != MslTypeKind::kPointer) {
+                        continue;
+                    }
+                    ir::AddressSpace space = ir::AddressSpace::kNone;
+                    if (arguments[i]->type.address_space == MslAddressSpace::kDevice) {
+                        space = ir::AddressSpace::kDevice;
+                    } else if (arguments[i]->type.address_space ==
+                               MslAddressSpace::kConstant) {
+                        space = ir::AddressSpace::kConstant;
+                    } else if (arguments[i]->type.address_space ==
+                               MslAddressSpace::kThreadgroup) {
+                        space = ir::AddressSpace::kThreadgroup;
+                    } else if (arguments[i]->type.address_space ==
+                               MslAddressSpace::kThread) {
+                        space = ir::AddressSpace::kPrivate;
+                    }
+                    if (space == ir::AddressSpace::kNone) continue;
+                    if (concrete_specialization.has_value() &&
+                        *concrete_specialization != space) {
+                        fail(&operation,
+                             "polymorphic helper call has multiple concrete address spaces");
+                        return std::nullopt;
+                    }
+                    concrete_specialization = space;
+                }
+                if (concrete_specialization.has_value()) {
+                    for (std::size_t i = 0; i < count; ++i) {
+                        if (!callee_function->mixed_pointer_address_spaces.contains(
+                                callee_function->arguments[i].value)) {
+                            continue;
+                        }
+                        ir::Type expected_type = callee_function->arguments[i].type;
+                        expected_type.address_space = *concrete_specialization;
+                        arguments[i] = MslExpression::cast(
+                            lower_type(expected_type), arguments[i], true);
+                    }
+                    MslExpr call = MslExpression::call(
+                        specialized_callee(callee->second,
+                                           *concrete_specialization),
+                        std::move(arguments), return_type);
+                    if (operation.results.empty()) {
+                        return MslStatement::expression(std::move(call));
+                    }
+                    return declare_result(operation, std::move(call));
+                }
+            }
             MslExpr call = MslExpression::call(callee->second, std::move(arguments), return_type);
             if (operation.results.empty()) return MslStatement::expression(std::move(call));
             return declare_result(operation, std::move(call));
@@ -922,7 +1356,7 @@ struct AstLowerer {
             return declare_result(
                 operation,
                 MslExpression::unary("-", expression_for(operation.operands.front()),
-                                     lower_type(operation.result_types.front())));
+                                     lower_result_type(operation)));
         }
 
         if (operation.opcode == ir::OpCode::kCompare) {
@@ -949,7 +1383,7 @@ struct AstLowerer {
                     expression_for(operation.operands[0]),
                     expression_for(operation.operands[1]),
                     expression_for(operation.operands[2]),
-                    lower_type(operation.result_types.front())));
+                    lower_result_type(operation)));
         }
 
         if (operation.opcode == ir::OpCode::kConvert ||
@@ -961,6 +1395,13 @@ struct AstLowerer {
             const bool reinterpret =
                 operation.opcode == ir::OpCode::kAddressSpaceCast &&
                 operation.operands.front().type.is_pointer();
+            if (operation.operands.front().kind == ir::OperandKind::kImmediate &&
+                operation.operands.front().text == "null" &&
+                operation.result_types.front().is_pointer()) {
+                return declare_result(
+                    operation,
+                    MslExpression::literal("nullptr", lower_result_type(operation)));
+            }
             if (operation.operands.front().type == operation.result_types.front()) {
                 return declare_result(operation,
                                       expression_for(operation.operands.front()));
@@ -969,19 +1410,19 @@ struct AstLowerer {
                 operation.attributes.at("bitcast") == "true") {
                 return declare_result(
                     operation,
-                    MslExpression::bitcast(lower_type(operation.result_types.front()),
+                    MslExpression::bitcast(lower_result_type(operation),
                                            expression_for(operation.operands.front())));
             }
             if (operation.attributes.contains("pointer_integer") &&
                 operation.attributes.at("pointer_integer") == "true") {
                 return declare_result(
                     operation,
-                    MslExpression::cast(lower_type(operation.result_types.front()),
+                    MslExpression::cast(lower_result_type(operation),
                                         expression_for(operation.operands.front()), true));
             }
             return declare_result(
                 operation,
-                MslExpression::cast(lower_type(operation.result_types.front()),
+                MslExpression::cast(lower_result_type(operation),
                                     expression_for(operation.operands.front()), reinterpret));
         }
 
@@ -999,8 +1440,10 @@ struct AstLowerer {
             const MslExpr storage =
                 MslExpression::identifier(storage_name, storage_type);
             values[result_value] = MslExpression::unary(
-                "&", storage, lower_type(operation.result_types.front()));
-            if (cfg_dispatcher_mode) return std::nullopt;
+                "&", storage, lower_result_type(operation));
+            if (cfg_dispatcher_mode || predeclared_ssa_storage) {
+                return std::nullopt;
+            }
             return MslStatement::variable(storage_type, storage_name, std::nullopt, false);
         }
 
@@ -1009,15 +1452,15 @@ struct AstLowerer {
                 fail(&operation, "malformed load");
                 return std::nullopt;
             }
-            const MslType value_type = lower_type(operation.result_types.front());
-            const ir::AddressSpace address_space =
-                operation.operands.front().type.is_pointer()
-                    ? operation.operands.front().type.address_space
-                    : ir::AddressSpace::kDevice;
-            const MslType pointer_type =
-                MslType::pointer(value_type, lower_address_space(address_space));
+            const MslType value_type = lower_result_type(operation);
+            const MslExpr source_pointer = expression_for(operation.operands.front());
+            const MslAddressSpace address_space =
+                source_pointer->type.kind == MslTypeKind::kPointer
+                    ? source_pointer->type.address_space
+                    : lower_address_space(operation.operands.front().type.address_space);
+            const MslType pointer_type = MslType::pointer(value_type, address_space);
             const MslExpr pointer =
-                MslExpression::cast(pointer_type, expression_for(operation.operands.front()), true);
+                MslExpression::cast(pointer_type, source_pointer, true);
             return declare_result(
                 operation,
                 MslExpression::unary("*", pointer, value_type));
@@ -1029,14 +1472,15 @@ struct AstLowerer {
                 return std::nullopt;
             }
             const MslExpr stored_value = expression_for(operation.operands[1]);
-            const ir::AddressSpace address_space =
-                operation.operands.front().type.is_pointer()
-                    ? operation.operands.front().type.address_space
-                    : ir::AddressSpace::kDevice;
+            const MslExpr destination_pointer = expression_for(operation.operands.front());
+            const MslAddressSpace address_space =
+                destination_pointer->type.kind == MslTypeKind::kPointer
+                    ? destination_pointer->type.address_space
+                    : lower_address_space(operation.operands.front().type.address_space);
             const MslType pointer_type =
-                MslType::pointer(stored_value->type, lower_address_space(address_space));
+                MslType::pointer(stored_value->type, address_space);
             const MslExpr pointer =
-                MslExpression::cast(pointer_type, expression_for(operation.operands[0]), true);
+                MslExpression::cast(pointer_type, destination_pointer, true);
             return MslStatement::assignment(
                 MslExpression::unary("*", pointer, stored_value->type), stored_value);
         }
@@ -1069,19 +1513,81 @@ struct AstLowerer {
                 fail(&operation, "malformed SIMD shuffle");
                 return std::nullopt;
             }
-            std::string intrinsic = "simd_shuffle";
+            const std::string intrinsic = "simd_shuffle";
+            MslExpr shuffle_index = expression_for(operation.operands[1]);
             if (operation.attributes.contains("kind")) {
                 const std::string& kind = operation.attributes.at("kind");
-                if (kind == "down") intrinsic = "simd_shuffle_down";
-                else if (kind == "up") intrinsic = "simd_shuffle_up";
+                if ((kind == "index" || kind == "down" || kind == "up") &&
+                    operation.operands.size() < 3) {
+                    fail(&operation, "PTX SIMD shuffle is missing its clamp/control operand");
+                    return std::nullopt;
+                }
+                if (kind == "index" || kind == "down" || kind == "up") {
+                    needs_lane_id = true;
+                    const MslType uint_type = MslType::uint();
+                    const MslExpr lane = MslExpression::identifier(
+                        "cm_lane_id", uint_type);
+                    const MslExpr source_or_delta = MslExpression::binary(
+                        "&",
+                        MslExpression::cast(
+                            uint_type, expression_for(operation.operands[1])),
+                        MslExpression::literal("31u", uint_type), uint_type);
+                    const MslExpr control = MslExpression::cast(
+                        uint_type, expression_for(operation.operands[2]));
+                    const MslExpr five_bits = MslExpression::literal(
+                        "31u", uint_type);
+                    const MslExpr segment_mask = MslExpression::binary(
+                        "&",
+                        MslExpression::binary(
+                            ">>", control,
+                            MslExpression::literal("8u", uint_type), uint_type),
+                        five_bits, uint_type);
+                    const MslExpr minimum_lane = MslExpression::binary(
+                        "&", lane, segment_mask, uint_type);
+                    const MslExpr maximum_lane = MslExpression::binary(
+                        "|", minimum_lane,
+                        MslExpression::binary("&", control, five_bits, uint_type),
+                        uint_type);
+                    MslExpr requested_lane;
+                    MslExpr valid_lane;
+                    if (kind == "index") {
+                        requested_lane = MslExpression::binary(
+                            "|",
+                            MslExpression::binary(
+                                "&", source_or_delta,
+                                MslExpression::unary("~", segment_mask, uint_type),
+                                uint_type),
+                            minimum_lane, uint_type);
+                        valid_lane = MslExpression::binary(
+                            "<=", requested_lane, maximum_lane,
+                            MslType::boolean());
+                    } else if (kind == "down") {
+                        requested_lane = MslExpression::binary(
+                            "+", lane, source_or_delta, uint_type);
+                        valid_lane = MslExpression::binary(
+                            "<=", requested_lane, maximum_lane,
+                            MslType::boolean());
+                    } else {
+                        requested_lane = MslExpression::binary(
+                            "-", lane, source_or_delta, uint_type);
+                        valid_lane = MslExpression::binary(
+                            ">=", lane,
+                            MslExpression::binary(
+                                "+", minimum_lane, source_or_delta, uint_type),
+                            MslType::boolean());
+                    }
+                    shuffle_index = MslExpression::conditional(
+                        std::move(valid_lane),
+                        requested_lane, lane, uint_type);
+                }
             }
             return declare_result(
                 operation,
                 MslExpression::call(
                     intrinsic,
                     {expression_for(operation.operands[0]),
-                     expression_for(operation.operands[1])},
-                    lower_type(operation.result_types.front())));
+                     std::move(shuffle_index)},
+                    lower_result_type(operation)));
         }
 
         if (operation.opcode == ir::OpCode::kMetalBallot) {
@@ -1150,11 +1656,65 @@ struct AstLowerer {
                 all ? "simd_all" : "simd_any", {predicate}, MslType::boolean());
             return declare_result(
                 operation,
-                MslExpression::cast(lower_type(operation.result_types.front()), voted));
+                MslExpression::cast(lower_result_type(operation), voted));
         }
 
-        if (operation.opcode == ir::OpCode::kMetalReduction ||
-            operation.opcode == ir::OpCode::kMetalAtomic) {
+        if (operation.opcode == ir::OpCode::kMetalAtomic) {
+            if (operation.results.size() != 1 || operation.result_types.size() != 1 ||
+                operation.operands.size() != 2 ||
+                operation.result_types.front().kind != ir::TypeKind::kInteger ||
+                operation.result_types.front().bit_width != 32) {
+                fail(&operation,
+                     "Metal atomic lowering currently requires one 32-bit integer result");
+                return std::nullopt;
+            }
+            const auto atomic_op = operation.attributes.find("atomic_op");
+            const std::string callee =
+                atomic_op != operation.attributes.end() && atomic_op->second == "add"
+                    ? "atomic_fetch_add_explicit"
+                    : atomic_op != operation.attributes.end() && atomic_op->second == "or"
+                          ? "atomic_fetch_or_explicit"
+                          : std::string{};
+            if (callee.empty()) {
+                fail(&operation, "unsupported Metal atomic operation '" +
+                                     (atomic_op == operation.attributes.end()
+                                          ? std::string("<missing>")
+                                          : atomic_op->second) +
+                                     "'");
+                return std::nullopt;
+            }
+            if (operation.memory_ordering != ir::MemoryOrdering::kRelaxed) {
+                fail(&operation,
+                     "Metal atomic lowering currently requires relaxed CUDA ordering");
+                return std::nullopt;
+            }
+            const MslExpr raw_pointer = expression_for(operation.operands.front());
+            const MslAddressSpace address_space =
+                raw_pointer->type.kind == MslTypeKind::kPointer
+                    ? raw_pointer->type.address_space
+                    : lower_address_space(operation.operands.front().type.address_space);
+            const MslType atomic_uint = {
+                .kind = MslTypeKind::kStruct,
+                .struct_name = "atomic_uint",
+            };
+            const MslType atomic_pointer =
+                MslType::pointer(atomic_uint, address_space);
+            const MslExpr pointer =
+                MslExpression::cast(atomic_pointer, raw_pointer, true);
+            const MslExpr ordering = MslExpression::identifier(
+                "memory_order_relaxed", MslType{
+                                            .kind = MslTypeKind::kStruct,
+                                            .struct_name = "memory_order",
+                                        });
+            return declare_result(
+                operation,
+                MslExpression::call(callee,
+                                    {pointer, expression_for(operation.operands[1]),
+                                     ordering},
+                                    lower_result_type(operation)));
+        }
+
+        if (operation.opcode == ir::OpCode::kMetalReduction) {
             fail(&operation, "Metal semantic operation '" +
                                  std::string(ir::opcode_name(operation.opcode)) +
                                  "' is represented but not yet MSL-emittable");
@@ -1181,6 +1741,51 @@ struct AstLowerer {
         return MslStatement::return_statement(expression_for(operation.operands.front()));
     }
 
+    MslExpr pointer_tag_for(const MslExpr& pointer) const {
+        unsigned tag = 0;
+        if (pointer->type.kind == MslTypeKind::kPointer) {
+            if (pointer->type.address_space == MslAddressSpace::kDevice) {
+                tag = static_cast<unsigned>(ir::AddressSpace::kDevice);
+            } else if (pointer->type.address_space == MslAddressSpace::kThreadgroup) {
+                tag = static_cast<unsigned>(ir::AddressSpace::kThreadgroup);
+            } else if (pointer->type.address_space == MslAddressSpace::kThread) {
+                tag = static_cast<unsigned>(ir::AddressSpace::kPrivate);
+            } else if (pointer->type.address_space == MslAddressSpace::kConstant) {
+                tag = static_cast<unsigned>(ir::AddressSpace::kConstant);
+            }
+        }
+        return MslExpression::literal(std::to_string(tag) + "u", MslType::uint());
+    }
+
+    std::pair<MslExpr, MslExpr> mixed_pointer_parts(ir::ValueId source,
+                                                    const ir::Type& target_type) {
+        if (is_mixed_pointer(source) && !pointer_specialization.has_value()) {
+            return {expression_for(ir::Operand::value_ref(source, target_type)),
+                    mixed_pointer_tags.at(source)};
+        }
+        const MslExpr pointer = expression_for(ir::Operand::value_ref(source, target_type));
+        return {MslExpression::cast(MslType::uint(64), pointer, true),
+                pointer_tag_for(pointer)};
+    }
+
+    void declare_block_argument(const ir::BlockArgument& argument,
+                                std::vector<MslStmt>* statements) {
+        if (!declared_block_arguments.insert(argument.value).second) return;
+        const MslType type = lower_value_type(argument.value, argument.type);
+        const std::string name = value_name(argument.value);
+        values[argument.value] = MslExpression::identifier(name, type);
+        statements->push_back(
+            MslStatement::variable(type, name, std::nullopt, false));
+        if (is_mixed_pointer(argument.value) &&
+            !pointer_specialization.has_value()) {
+            const std::string tag_name = name + "_space";
+            mixed_pointer_tags[argument.value] =
+                MslExpression::identifier(tag_name, MslType::uint());
+            statements->push_back(MslStatement::variable(
+                MslType::uint(), tag_name, std::nullopt, false));
+        }
+    }
+
     bool bind_block_arguments(const ir::BasicBlock& block,
                               const ir::Successor* incoming) {
         if (incoming == nullptr) return true;
@@ -1189,54 +1794,54 @@ struct AstLowerer {
                                      block.name + "'");
         }
         std::vector<MslExpr> incoming_values;
+        std::vector<std::optional<MslExpr>> incoming_tags;
         incoming_values.reserve(incoming->arguments.size());
+        incoming_tags.reserve(incoming->arguments.size());
         for (std::size_t i = 0; i < incoming->arguments.size(); ++i) {
-            incoming_values.push_back(expression_for(ir::Operand::value_ref(
-                incoming->arguments[i], block.arguments[i].type)));
+            if (is_mixed_pointer(block.arguments[i].value) &&
+                !pointer_specialization.has_value()) {
+                auto [address, tag] = mixed_pointer_parts(
+                    incoming->arguments[i], block.arguments[i].type);
+                incoming_values.push_back(std::move(address));
+                incoming_tags.push_back(std::move(tag));
+            } else {
+                incoming_values.push_back(expression_for(ir::Operand::value_ref(
+                    incoming->arguments[i], block.arguments[i].type)));
+                incoming_tags.push_back(std::nullopt);
+            }
         }
         for (std::size_t i = 0; i < block.arguments.size(); ++i) {
             values[block.arguments[i].value] = std::move(incoming_values[i]);
+            if (incoming_tags[i].has_value()) {
+                mixed_pointer_tags[block.arguments[i].value] =
+                    std::move(*incoming_tags[i]);
+            }
         }
         return true;
     }
 
     std::optional<std::size_t> find_nearest_common_successor(std::size_t first,
                                                               std::size_t second) const {
-        auto distances = [&](std::size_t start) {
-            std::unordered_map<std::size_t, std::size_t> result;
-            std::queue<std::size_t> pending;
-            result[start] = 0;
-            pending.push(start);
-            while (!pending.empty()) {
-                const std::size_t index = pending.front();
-                pending.pop();
-                const ir::Operation& terminator = function.blocks[index].operations.back();
-                for (const ir::Successor& successor : terminator.successors) {
-                    const std::size_t target = block_indices.at(successor.block);
-                    if (result.emplace(target, result.at(index) + 1).second) {
-                        pending.push(target);
-                    }
-                }
-            }
-            return result;
-        };
-        const auto first_distances = distances(first);
-        const auto second_distances = distances(second);
-        std::optional<std::size_t> best;
-        std::size_t best_max = std::numeric_limits<std::size_t>::max();
-        std::size_t best_sum = std::numeric_limits<std::size_t>::max();
-        for (const auto& [candidate, first_distance] : first_distances) {
-            const auto other = second_distances.find(candidate);
-            if (other == second_distances.end()) continue;
-            const std::size_t maximum = std::max(first_distance, other->second);
-            const std::size_t sum = first_distance + other->second;
-            if (maximum < best_max || (maximum == best_max && sum < best_sum)) {
-                best = candidate;
-                best_max = maximum;
-                best_sum = sum;
+        if (first >= postdominators.size() || second >= postdominators.size()) {
+            return std::nullopt;
+        }
+        std::vector<std::size_t> common;
+        for (std::size_t candidate = 0; candidate < function.blocks.size();
+             ++candidate) {
+            if (postdominators[first][candidate] &&
+                postdominators[second][candidate]) {
+                common.push_back(candidate);
             }
         }
-        return best;
+        for (const std::size_t candidate : common) {
+            const bool postdominates_another_common = std::any_of(
+                common.begin(), common.end(), [&](std::size_t other) {
+                    return other != candidate &&
+                           postdominators[other][candidate];
+                });
+            if (!postdominates_another_common) return candidate;
+        }
+        return std::nullopt;
     }
 
     bool assign_join_arguments(const ir::BasicBlock& join,
@@ -1247,6 +1852,16 @@ struct AstLowerer {
                                      join.name + "'");
         }
         for (std::size_t i = 0; i < join.arguments.size(); ++i) {
+            if (is_mixed_pointer(join.arguments[i].value) &&
+                !pointer_specialization.has_value()) {
+                auto [address, tag] = mixed_pointer_parts(
+                    successor.arguments[i], join.arguments[i].type);
+                statements->push_back(MslStatement::assignment(
+                    values.at(join.arguments[i].value), std::move(address)));
+                statements->push_back(MslStatement::assignment(
+                    mixed_pointer_tags.at(join.arguments[i].value), std::move(tag)));
+                continue;
+            }
             statements->push_back(MslStatement::assignment(
                 values.at(join.arguments[i].value),
                 expression_for(ir::Operand::value_ref(successor.arguments[i],
@@ -1273,6 +1888,114 @@ struct AstLowerer {
         return false;
     }
 
+    void analyze_cfg() {
+        const std::size_t count = function.blocks.size();
+        predecessors.assign(count, {});
+        for (std::size_t source = 0; source < count; ++source) {
+            const ir::Operation& terminator =
+                function.blocks[source].operations.back();
+            for (const ir::Successor& successor : terminator.successors) {
+                predecessors[block_indices.at(successor.block)].push_back(source);
+            }
+        }
+
+        dominators.assign(count, std::vector<bool>(count, true));
+        if (count == 0) return;
+        std::fill(dominators[0].begin(), dominators[0].end(), false);
+        dominators[0][0] = true;
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (std::size_t block = 1; block < count; ++block) {
+                std::vector<bool> next(count, true);
+                if (predecessors[block].empty()) {
+                    std::fill(next.begin(), next.end(), false);
+                } else {
+                    for (const std::size_t predecessor : predecessors[block]) {
+                        for (std::size_t candidate = 0; candidate < count;
+                             ++candidate) {
+                            next[candidate] =
+                                next[candidate] && dominators[predecessor][candidate];
+                        }
+                    }
+                }
+                next[block] = true;
+                if (next != dominators[block]) {
+                    dominators[block] = std::move(next);
+                    changed = true;
+                }
+            }
+        }
+
+        postdominators.assign(count, std::vector<bool>(count, true));
+        for (std::size_t block = 0; block < count; ++block) {
+            if (!function.blocks[block].operations.back().successors.empty()) continue;
+            std::fill(postdominators[block].begin(),
+                      postdominators[block].end(), false);
+            postdominators[block][block] = true;
+        }
+        changed = true;
+        while (changed) {
+            changed = false;
+            for (std::size_t block = 0; block < count; ++block) {
+                const ir::Operation& terminator =
+                    function.blocks[block].operations.back();
+                if (terminator.successors.empty()) continue;
+                std::vector<bool> next(count, true);
+                for (const ir::Successor& successor : terminator.successors) {
+                    const std::size_t target = block_indices.at(successor.block);
+                    for (std::size_t candidate = 0; candidate < count;
+                         ++candidate) {
+                        next[candidate] =
+                            next[candidate] && postdominators[target][candidate];
+                    }
+                }
+                next[block] = true;
+                if (next != postdominators[block]) {
+                    postdominators[block] = std::move(next);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    bool dominates(std::size_t dominator, std::size_t block) const {
+        return block < dominators.size() && dominator < dominators[block].size() &&
+               dominators[block][dominator];
+    }
+
+    std::unordered_set<std::size_t> natural_loop_nodes(
+        std::size_t header_index) const {
+        std::unordered_set<std::size_t> nodes = {header_index};
+        std::vector<std::size_t> pending;
+        for (std::size_t source = 0; source < function.blocks.size(); ++source) {
+            const ir::Operation& terminator =
+                function.blocks[source].operations.back();
+            for (const ir::Successor& successor : terminator.successors) {
+                if (block_indices.at(successor.block) == header_index &&
+                    source != header_index && dominates(header_index, source) &&
+                    nodes.insert(source).second) {
+                    pending.push_back(source);
+                }
+            }
+        }
+        while (!pending.empty()) {
+            const std::size_t block = pending.back();
+            pending.pop_back();
+            for (const std::size_t predecessor : predecessors[block]) {
+                if (predecessor != header_index &&
+                    !dominates(header_index, predecessor)) {
+                    continue;
+                }
+                if (nodes.insert(predecessor).second &&
+                    predecessor != header_index) {
+                    pending.push_back(predecessor);
+                }
+            }
+        }
+        return nodes;
+    }
+
     std::optional<std::pair<std::size_t, std::size_t>> loop_body_and_exit(
         std::size_t header_index) const {
         const ir::Operation& terminator =
@@ -1283,10 +2006,57 @@ struct AstLowerer {
         }
         const std::size_t first = block_indices.at(terminator.successors[0].block);
         const std::size_t second = block_indices.at(terminator.successors[1].block);
-        const bool first_backedge = can_reach(first, header_index);
-        const bool second_backedge = can_reach(second, header_index);
-        if (first_backedge == second_backedge) return std::nullopt;
-        return first_backedge ? std::pair{first, second} : std::pair{second, first};
+        const std::unordered_set<std::size_t> loop =
+            natural_loop_nodes(header_index);
+        if (loop.size() == 1) return std::nullopt;
+        const bool first_in_loop = loop.contains(first);
+        const bool second_in_loop = loop.contains(second);
+        if (first_in_loop == second_in_loop) return std::nullopt;
+        return first_in_loop ? std::pair{first, second}
+                             : std::pair{second, first};
+    }
+
+    std::optional<std::size_t> natural_loop_exit_index(
+        std::size_t header_index) const {
+        if (const auto canonical = loop_body_and_exit(header_index)) {
+            return canonical->second;
+        }
+        const std::unordered_set<std::size_t> loop =
+            natural_loop_nodes(header_index);
+        if (loop.size() <= 1) return std::nullopt;
+        std::vector<std::size_t> exits;
+        for (const std::size_t source : loop) {
+            const ir::Operation& terminator =
+                function.blocks[source].operations.back();
+            for (const ir::Successor& successor : terminator.successors) {
+                const std::size_t target = block_indices.at(successor.block);
+                if (loop.contains(target)) continue;
+                if (std::find(exits.begin(), exits.end(), target) == exits.end()) {
+                    exits.push_back(target);
+                }
+            }
+        }
+        if (exits.empty()) return std::nullopt;
+        if (exits.size() == 1) return exits.front();
+        std::vector<std::size_t> common;
+        for (std::size_t candidate = 0; candidate < function.blocks.size();
+             ++candidate) {
+            if (loop.contains(candidate)) continue;
+            const bool postdominates_all = std::all_of(
+                exits.begin(), exits.end(), [&](std::size_t exit) {
+                    return postdominators[exit][candidate];
+                });
+            if (postdominates_all) common.push_back(candidate);
+        }
+        for (const std::size_t candidate : common) {
+            const bool postdominates_another_common = std::any_of(
+                common.begin(), common.end(), [&](std::size_t other) {
+                    return other != candidate &&
+                           postdominators[other][candidate];
+                });
+            if (!postdominates_another_common) return candidate;
+        }
+        return std::nullopt;
     }
 
     bool assign_loop_arguments(const ir::BasicBlock& header,
@@ -1297,9 +2067,28 @@ struct AstLowerer {
                                      header.name + "'");
         }
         std::vector<MslExpr> temporaries;
+        std::vector<std::optional<MslExpr>> tag_temporaries;
         temporaries.reserve(header.arguments.size());
+        tag_temporaries.reserve(header.arguments.size());
         for (std::size_t i = 0; i < header.arguments.size(); ++i) {
-            const MslType type = lower_type(header.arguments[i].type);
+            if (is_mixed_pointer(header.arguments[i].value) &&
+                !pointer_specialization.has_value()) {
+                auto [address, tag] = mixed_pointer_parts(
+                    backedge.arguments[i], header.arguments[i].type);
+                const std::string name = value_name(header.arguments[i].value) + "_next";
+                const std::string tag_name = name + "_space";
+                statements->push_back(MslStatement::variable(
+                    MslType::uint(64), name, std::move(address), true));
+                statements->push_back(MslStatement::variable(
+                    MslType::uint(), tag_name, std::move(tag), true));
+                temporaries.push_back(
+                    MslExpression::identifier(name, MslType::uint(64)));
+                tag_temporaries.push_back(
+                    MslExpression::identifier(tag_name, MslType::uint()));
+                continue;
+            }
+            const MslType type = lower_value_type(header.arguments[i].value,
+                                                  header.arguments[i].type);
             const std::string name = value_name(header.arguments[i].value) + "_next";
             statements->push_back(MslStatement::variable(
                 type, name,
@@ -1307,26 +2096,73 @@ struct AstLowerer {
                                                        header.arguments[i].type)),
                 true));
             temporaries.push_back(MslExpression::identifier(name, type));
+            tag_temporaries.push_back(std::nullopt);
         }
         for (std::size_t i = 0; i < header.arguments.size(); ++i) {
             statements->push_back(MslStatement::assignment(
                 values.at(header.arguments[i].value), temporaries[i]));
+            if (tag_temporaries[i].has_value()) {
+                statements->push_back(MslStatement::assignment(
+                    mixed_pointer_tags.at(header.arguments[i].value),
+                    *tag_temporaries[i]));
+            }
         }
         return true;
     }
 
-    bool emit_loop_region(std::size_t block_index, std::size_t header_index,
-                          const ir::Successor* incoming,
+    bool emit_loop_region(
+        std::size_t block_index, std::size_t stop_index,
+        std::optional<std::size_t> active_loop_header_index,
+        const ir::Successor* incoming,
                           std::vector<MslStmt>* statements) {
-        const ir::BasicBlock& header = function.blocks[header_index];
-        if (block_index == header_index) {
-            return incoming != nullptr &&
-                   assign_loop_arguments(header, *incoming, statements);
+        if (!loop_escape_stack.empty() &&
+            block_index == loop_escape_stack.back().enclosing_header_index) {
+            if (incoming == nullptr) {
+                return fail(nullptr,
+                            "nested loop reaches its enclosing header without an edge");
+            }
+            if (!assign_loop_arguments(function.blocks[block_index], *incoming,
+                                       statements)) {
+                return false;
+            }
+            statements->push_back(MslStatement::assignment(
+                loop_escape_stack.back().continue_enclosing,
+                MslExpression::literal("true", MslType::boolean())));
+            statements->push_back(MslStatement::break_statement());
+            return true;
+        }
+        if (active_loop_header_index.has_value() &&
+            block_index == *active_loop_header_index) {
+            if (incoming == nullptr) {
+                return fail(nullptr, "loop region reaches header '" +
+                                         function.blocks[block_index].name +
+                                         "' without a backedge");
+            }
+            return assign_loop_arguments(function.blocks[block_index], *incoming,
+                                         statements);
+        }
+        if (block_index == stop_index) {
+            if (incoming == nullptr) return true;
+            return assign_loop_arguments(function.blocks[block_index], *incoming,
+                                         statements);
+        }
+        if (natural_loop_exit_index(block_index).has_value()) {
+            return emit_natural_loop(block_index, incoming, statements,
+                                     active_loop_header_index, stop_index);
         }
         const ir::BasicBlock& block = function.blocks[block_index];
-        if (!emitted.insert(block.id).second) {
-            return fail(nullptr, "loop body revisits block '" + block.name + "'");
+        if (!region_stack.insert(block.id).second) {
+            const std::string owner = active_loop_header_index.has_value()
+                                          ? function.blocks[*active_loop_header_index].name
+                                          : function.blocks[stop_index].name;
+            return fail(nullptr, "structured region for '" + owner +
+                                     "' revisits block '" + block.name + "'");
         }
+        struct RegionStackGuard {
+            std::unordered_set<ir::BlockId>* stack;
+            ir::BlockId block;
+            ~RegionStackGuard() { stack->erase(block); }
+        } guard{&region_stack, block.id};
         if (!bind_block_arguments(block, incoming) ||
             !emit_operations(block, statements)) {
             return false;
@@ -1341,8 +2177,9 @@ struct AstLowerer {
                 return fail(&terminator, "malformed loop-body branch");
             }
             const ir::Successor& successor = terminator.successors.front();
-            return emit_loop_region(block_indices.at(successor.block), header_index,
-                                    &successor, statements);
+            return emit_loop_region(block_indices.at(successor.block), stop_index,
+                                    active_loop_header_index, &successor,
+                                    statements);
         }
         if (terminator.opcode != ir::OpCode::kCondBranch ||
             terminator.successors.size() != 2 || terminator.operands.empty()) {
@@ -1372,74 +2209,205 @@ struct AstLowerer {
             statements->push_back(MslStatement::if_statement(
                 condition, {lower_return(function.blocks[return_index].operations.front())}));
             const std::size_t successor_index = first_returns ? 1 : 0;
-            return emit_loop_region(continuation_index, header_index,
-                                    &terminator.successors[successor_index], statements);
+            return emit_loop_region(
+                continuation_index, stop_index, active_loop_header_index,
+                &terminator.successors[successor_index], statements);
+        }
+
+        const auto enclosing_loop_exit =
+            active_loop_header_index.has_value()
+                ? natural_loop_exit_index(*active_loop_header_index)
+                : std::nullopt;
+        const std::unordered_set<std::size_t> loop_nodes =
+            enclosing_loop_exit.has_value()
+                ? natural_loop_nodes(*active_loop_header_index)
+                : std::unordered_set<std::size_t>{};
+        const bool first_in_loop =
+            enclosing_loop_exit.has_value() && loop_nodes.contains(first);
+        const bool second_in_loop =
+            enclosing_loop_exit.has_value() && loop_nodes.contains(second);
+        if (enclosing_loop_exit.has_value() && first_in_loop != second_in_loop) {
+            const std::size_t exit_successor_index = first_in_loop ? 1 : 0;
+            const std::size_t continuation_successor_index = 1 - exit_successor_index;
+            const std::size_t exit_index =
+                block_indices.at(terminator.successors[exit_successor_index].block);
+            std::vector<MslStmt> exit_statements;
+            if (exit_index == *enclosing_loop_exit) {
+                const ir::BasicBlock& exit_block = function.blocks[exit_index];
+                if (!assign_join_arguments(
+                        exit_block, terminator.successors[exit_successor_index],
+                        &exit_statements)) {
+                    return false;
+                }
+            } else {
+                if (loop_nodes.contains(exit_index)) {
+                    return fail(&terminator,
+                                "natural loop secondary exit does not reconverge");
+                }
+                if (!emit_loop_region(
+                        exit_index, *enclosing_loop_exit,
+                        active_loop_header_index,
+                        &terminator.successors[exit_successor_index],
+                        &exit_statements)) {
+                    return false;
+                }
+            }
+            exit_statements.push_back(MslStatement::break_statement());
+            MslExpr exit_condition = expression_for(terminator.operands.front());
+            if (exit_successor_index == 1) {
+                exit_condition = MslExpression::unary(
+                    "!", exit_condition, MslType::boolean());
+            }
+            statements->push_back(MslStatement::if_statement(
+                std::move(exit_condition), std::move(exit_statements)));
+            const ir::Successor& continuation =
+                terminator.successors[continuation_successor_index];
+            return emit_loop_region(block_indices.at(continuation.block),
+                                    stop_index, active_loop_header_index,
+                                    &continuation, statements);
         }
 
         const auto join = find_nearest_common_successor(first, second);
         if (!join || *join == block_index) {
             return fail(&terminator, "nested loop conditional has no reconvergence");
         }
-        if (*join != header_index) {
+        if (*join != stop_index) {
             const ir::BasicBlock& join_block = function.blocks[*join];
             for (const ir::BlockArgument& argument : join_block.arguments) {
-                const MslType type = lower_type(argument.type);
-                const std::string name = value_name(argument.value);
-                values[argument.value] = MslExpression::identifier(name, type);
-                statements->push_back(
-                    MslStatement::variable(type, name, std::nullopt, false));
+                declare_block_argument(argument, statements);
             }
         }
         std::vector<MslStmt> first_statements;
         std::vector<MslStmt> second_statements;
-        if (!emit_loop_region(first, *join, &terminator.successors[0],
+        if (!emit_loop_region(first, *join, active_loop_header_index,
+                              &terminator.successors[0],
                               &first_statements) ||
-            !emit_loop_region(second, *join, &terminator.successors[1],
+            !emit_loop_region(second, *join, active_loop_header_index,
+                              &terminator.successors[1],
                               &second_statements)) {
             return false;
         }
         statements->push_back(MslStatement::if_statement(
             expression_for(terminator.operands.front()),
             std::move(first_statements), std::move(second_statements)));
-        if (*join == header_index) return true;
-        return emit_loop_region(*join, header_index, nullptr, statements);
+        if (*join == stop_index) return true;
+        return emit_loop_region(*join, stop_index, active_loop_header_index,
+                                nullptr, statements);
     }
 
-    bool emit_natural_loop(std::size_t header_index, const ir::Successor* incoming,
-                           std::vector<MslStmt>* statements) {
+    bool emit_natural_loop(
+        std::size_t header_index, const ir::Successor* incoming,
+        std::vector<MslStmt>* statements,
+        std::optional<std::size_t> enclosing_header_index = std::nullopt,
+        std::optional<std::size_t> continuation_stop_index = std::nullopt) {
         const ir::BasicBlock& header = function.blocks[header_index];
         const auto body_and_exit = loop_body_and_exit(header_index);
-        if (!body_and_exit || incoming == nullptr ||
+        const auto loop_exit = natural_loop_exit_index(header_index);
+        if (!loop_exit || incoming == nullptr ||
             incoming->arguments.size() != header.arguments.size()) {
             return fail(nullptr, "malformed natural loop header '" + header.name + "'");
         }
 
-        std::vector<MslExpr> initial_values;
-        for (std::size_t i = 0; i < header.arguments.size(); ++i) {
-            initial_values.push_back(expression_for(ir::Operand::value_ref(
-                incoming->arguments[i], header.arguments[i].type)));
-        }
-        for (std::size_t i = 0; i < header.arguments.size(); ++i) {
-            const MslType type = lower_type(header.arguments[i].type);
-            const std::string name = value_name(header.arguments[i].value);
-            values[header.arguments[i].value] = MslExpression::identifier(name, type);
-            statements->push_back(
-                MslStatement::variable(type, name, initial_values[i], false));
+        if (!assign_loop_arguments(header, *incoming, statements)) return false;
+
+        const std::size_t exit_index = *loop_exit;
+        const ir::BasicBlock& exit_block = function.blocks[exit_index];
+        const bool exits_to_enclosing_header =
+            enclosing_header_index.has_value() &&
+            exit_index == *enclosing_header_index;
+        const bool exits_enclosing_loop =
+            enclosing_header_index.has_value() &&
+            natural_loop_exit_index(*enclosing_header_index) == loop_exit;
+        if (!exits_to_enclosing_header && !exits_enclosing_loop) {
+            for (const ir::BlockArgument& argument : exit_block.arguments) {
+                declare_block_argument(argument, statements);
+            }
         }
 
-        const std::size_t body_index = body_and_exit->first;
-        const std::size_t exit_index = body_and_exit->second;
-        const ir::BasicBlock& exit_block = function.blocks[exit_index];
-        for (const ir::BlockArgument& argument : exit_block.arguments) {
-            const MslType type = lower_type(argument.type);
-            const std::string name = value_name(argument.value);
-            values[argument.value] = MslExpression::identifier(name, type);
-            statements->push_back(MslStatement::variable(type, name, std::nullopt, false));
+        std::optional<MslExpr> continue_enclosing;
+        if (exits_enclosing_loop) {
+            const std::string name =
+                "cm_continue_enclosing_" + std::to_string(loop_escape_index++);
+            statements->push_back(MslStatement::variable(
+                MslType::boolean(), name,
+                MslExpression::literal("false", MslType::boolean()), false));
+            continue_enclosing =
+                MslExpression::identifier(name, MslType::boolean());
+            loop_escape_stack.push_back(
+                {*enclosing_header_index, *continue_enclosing});
         }
+        struct LoopEscapeGuard {
+            std::vector<LoopEscapeContext>* stack;
+            bool active;
+            ~LoopEscapeGuard() {
+                if (active) stack->pop_back();
+            }
+        } escape_guard{&loop_escape_stack, exits_enclosing_loop};
 
         std::vector<MslStmt> loop_statements;
         if (!emit_operations(header, &loop_statements)) return false;
         const ir::Operation& terminator = header.operations.back();
+        if (!body_and_exit) {
+            if (terminator.opcode != ir::OpCode::kCondBranch ||
+                terminator.successors.size() != 2 || terminator.operands.empty()) {
+                return fail(&terminator,
+                            "general natural loop requires a conditional header");
+            }
+            const std::size_t first =
+                block_indices.at(terminator.successors[0].block);
+            const std::size_t second =
+                block_indices.at(terminator.successors[1].block);
+            const std::unordered_set<std::size_t> loop_nodes =
+                natural_loop_nodes(header_index);
+            if (!loop_nodes.contains(first) || !loop_nodes.contains(second)) {
+                return fail(&terminator,
+                            "general natural loop header has an unrecognized exit");
+            }
+            const auto join = find_nearest_common_successor(first, second);
+            if (!join || !loop_nodes.contains(*join)) {
+                return fail(&terminator,
+                            "general natural loop header paths do not reconverge in-loop");
+            }
+            const ir::BasicBlock& join_block = function.blocks[*join];
+            for (const ir::BlockArgument& argument : join_block.arguments) {
+                declare_block_argument(argument, &loop_statements);
+            }
+            std::vector<MslStmt> first_statements;
+            std::vector<MslStmt> second_statements;
+            if (!emit_loop_region(first, *join, header_index,
+                                  &terminator.successors[0],
+                                  &first_statements) ||
+                !emit_loop_region(second, *join, header_index,
+                                  &terminator.successors[1],
+                                  &second_statements)) {
+                return false;
+            }
+            loop_statements.push_back(MslStatement::if_statement(
+                expression_for(terminator.operands.front()),
+                std::move(first_statements), std::move(second_statements)));
+            if (!emit_loop_region(*join, header_index, header_index, nullptr,
+                                  &loop_statements)) {
+                return false;
+            }
+            statements->push_back(MslStatement::while_statement(
+                MslExpression::literal("true", MslType::boolean()),
+                std::move(loop_statements)));
+            if (exits_enclosing_loop) {
+                statements->push_back(MslStatement::if_statement(
+                    *continue_enclosing,
+                    {MslStatement::continue_statement()}));
+                statements->push_back(MslStatement::break_statement());
+                return true;
+            }
+            if (exits_to_enclosing_header) return true;
+            if (continuation_stop_index.has_value()) {
+                return emit_loop_region(exit_index, *continuation_stop_index,
+                                        enclosing_header_index, nullptr,
+                                        statements);
+            }
+            return emit_from(exit_index, statements);
+        }
+        const std::size_t body_index = body_and_exit->first;
         const std::size_t body_successor_index =
             block_indices.at(terminator.successors[0].block) == body_index ? 0 : 1;
         const std::size_t exit_successor_index = 1 - body_successor_index;
@@ -1451,15 +2419,22 @@ struct AstLowerer {
         MslExpr exit_condition =
             MslExpression::unary("!", continue_condition, MslType::boolean());
         std::vector<MslStmt> exit_statements;
-        if (!assign_join_arguments(exit_block,
-                                   terminator.successors[exit_successor_index],
-                                   &exit_statements)) {
+        const bool assigned_exit = exits_to_enclosing_header
+                                       ? assign_loop_arguments(
+                                             exit_block,
+                                             terminator.successors[exit_successor_index],
+                                             &exit_statements)
+                                       : assign_join_arguments(
+                                             exit_block,
+                                             terminator.successors[exit_successor_index],
+                                             &exit_statements);
+        if (!assigned_exit) {
             return false;
         }
         exit_statements.push_back(MslStatement::break_statement());
         loop_statements.push_back(MslStatement::if_statement(
             exit_condition, std::move(exit_statements)));
-        if (!emit_loop_region(body_index, header_index,
+        if (!emit_loop_region(body_index, header_index, header_index,
                               &terminator.successors[body_successor_index],
                               &loop_statements)) {
             return false;
@@ -1467,6 +2442,17 @@ struct AstLowerer {
         statements->push_back(MslStatement::while_statement(
             MslExpression::literal("true", MslType::boolean()),
             std::move(loop_statements)));
+        if (exits_enclosing_loop) {
+            statements->push_back(MslStatement::if_statement(
+                *continue_enclosing, {MslStatement::continue_statement()}));
+            statements->push_back(MslStatement::break_statement());
+            return true;
+        }
+        if (exits_to_enclosing_header) return true;
+        if (continuation_stop_index.has_value()) {
+            return emit_loop_region(exit_index, *continuation_stop_index,
+                                    enclosing_header_index, nullptr, statements);
+        }
         return emit_from(exit_index, statements);
     }
 
@@ -1475,8 +2461,8 @@ struct AstLowerer {
             const ir::Operation& terminator = function.blocks[source].operations.back();
             for (const ir::Successor& successor : terminator.successors) {
                 const std::size_t target = block_indices.at(successor.block);
-                if (target <= source && can_reach(target, source) &&
-                    !loop_body_and_exit(target).has_value()) {
+                if (target != source && dominates(target, source) &&
+                    !natural_loop_exit_index(target).has_value()) {
                     return true;
                 }
             }
@@ -1494,22 +2480,49 @@ struct AstLowerer {
                                      target.name + "'");
         }
         std::vector<MslExpr> temporaries;
+        std::vector<std::optional<MslExpr>> tag_temporaries;
         temporaries.reserve(target.arguments.size());
+        tag_temporaries.reserve(target.arguments.size());
         for (std::size_t i = 0; i < target.arguments.size(); ++i) {
-            const MslType type = lower_type(target.arguments[i].type);
+            const bool mixed = is_mixed_pointer(target.arguments[i].value) &&
+                               !pointer_specialization.has_value();
+            const MslType type = lower_value_type(target.arguments[i].value,
+                                                  target.arguments[i].type);
             const std::string temporary =
                 "cm_edge_" + std::to_string(edge_temporary_index++) + "_" +
                 std::to_string(i);
+            MslExpr incoming;
+            std::optional<MslExpr> incoming_tag;
+            if (mixed) {
+                auto parts = mixed_pointer_parts(successor.arguments[i],
+                                                 target.arguments[i].type);
+                incoming = std::move(parts.first);
+                incoming_tag = std::move(parts.second);
+            } else {
+                incoming = expression_for(ir::Operand::value_ref(
+                    successor.arguments[i], target.arguments[i].type));
+            }
             statements->push_back(MslStatement::variable(
-                type, temporary,
-                expression_for(ir::Operand::value_ref(successor.arguments[i],
-                                                       target.arguments[i].type)),
-                true));
+                type, temporary, std::move(incoming), true));
             temporaries.push_back(MslExpression::identifier(temporary, type));
+            if (incoming_tag.has_value()) {
+                const std::string tag_temporary = temporary + "_space";
+                statements->push_back(MslStatement::variable(
+                    MslType::uint(), tag_temporary, std::move(*incoming_tag), true));
+                tag_temporaries.push_back(MslExpression::identifier(
+                    tag_temporary, MslType::uint()));
+            } else {
+                tag_temporaries.push_back(std::nullopt);
+            }
         }
         for (std::size_t i = 0; i < target.arguments.size(); ++i) {
             statements->push_back(MslStatement::assignment(
                 values.at(target.arguments[i].value), temporaries[i]));
+            if (tag_temporaries[i].has_value()) {
+                statements->push_back(MslStatement::assignment(
+                    mixed_pointer_tags.at(target.arguments[i].value),
+                    *tag_temporaries[i]));
+            }
         }
         statements->push_back(MslStatement::assignment(
             state, MslExpression::literal(std::to_string(target_index) + "u",
@@ -1521,10 +2534,7 @@ struct AstLowerer {
         cfg_dispatcher_mode = true;
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::BlockArgument& argument : block.arguments) {
-                const MslType type = lower_type(argument.type);
-                const std::string name = value_name(argument.value);
-                values[argument.value] = MslExpression::identifier(name, type);
-                statements->push_back(MslStatement::variable(type, name));
+                declare_block_argument(argument, statements);
             }
             for (const ir::Operation& operation : block.operations) {
                 if (operation.opcode == ir::OpCode::kParameter ||
@@ -1545,12 +2555,12 @@ struct AstLowerer {
                         MslStatement::variable(storage_type, storage_name));
                     values[value] = MslExpression::unary(
                         "&", MslExpression::identifier(storage_name, storage_type),
-                        lower_type(operation.result_types.front()));
+                        lower_result_type(operation));
                     continue;
                 }
                 for (std::size_t i = 0; i < operation.results.size(); ++i) {
                     const ir::ValueId value = operation.results[i];
-                    const MslType type = lower_type(operation.result_types[i]);
+                    const MslType type = lower_result_type(operation, i);
                     const std::string name = value_name(value);
                     values[value] = MslExpression::identifier(name, type);
                     statements->push_back(MslStatement::variable(type, name));
@@ -1623,7 +2633,7 @@ struct AstLowerer {
         if (!emitted.insert(block.id).second) {
             return fail(nullptr, "loop structurization is not implemented for block '" + block.name + "'");
         }
-        if (loop_body_and_exit(block_index)) {
+        if (natural_loop_exit_index(block_index)) {
             return emit_natural_loop(block_index, incoming, statements);
         }
         if (!bind_block_arguments(block, incoming)) return false;
@@ -1680,18 +2690,15 @@ struct AstLowerer {
                 }
                 ir::BasicBlock const& join_block = function.blocks[*join];
                 for (const ir::BlockArgument& argument : join_block.arguments) {
-                    const MslType type = lower_type(argument.type);
-                    const MslExpr identifier =
-                        MslExpression::identifier(value_name(argument.value), type);
-                    values[argument.value] = identifier;
-                    statements->push_back(MslStatement::variable(
-                        type, value_name(argument.value), std::nullopt, false));
+                    declare_block_argument(argument, statements);
                 }
                 std::vector<MslStmt> first_statements;
                 std::vector<MslStmt> second_statements;
-                if (!emit_loop_region(first, *join, &terminator.successors[0],
+                if (!emit_loop_region(first, *join, std::nullopt,
+                                      &terminator.successors[0],
                                       &first_statements) ||
-                    !emit_loop_region(second, *join, &terminator.successors[1],
+                    !emit_loop_region(second, *join, std::nullopt,
+                                      &terminator.successors[1],
                                       &second_statements)) {
                     return false;
                 }
@@ -1736,7 +2743,9 @@ struct AstLowerer {
     }
 
     LowerToMslResult run() {
-        output.name = function.name;
+        output.name = pointer_specialization.has_value()
+                          ? specialized_callee(function.name, *pointer_specialization)
+                          : function.name;
         output.return_type = lower_type(function.return_type);
         output.is_kernel = function.is_kernel;
         for (std::size_t i = 0; i < function.arguments.size(); ++i) {
@@ -1744,9 +2753,9 @@ struct AstLowerer {
             MslType type;
             std::vector<MslAttribute> attributes;
             if (!function.is_kernel) {
-                type = lower_type(argument.type);
+                type = lower_value_type(argument.value, argument.type);
             } else if (argument.type.is_pointer()) {
-                type = lower_type(argument.type);
+                type = lower_value_type(argument.value, argument.type);
             } else {
                 type = MslType::reference(lower_type(argument.type), MslAddressSpace::kConstant);
             }
@@ -1768,9 +2777,17 @@ struct AstLowerer {
             block_indices[function.blocks[i].id] = i;
             for (const ir::BlockArgument& argument : function.blocks[i].arguments) {
                 values[argument.value] =
-                    MslExpression::identifier(value_name(argument.value), lower_type(argument.type));
+                    MslExpression::identifier(value_name(argument.value),
+                                              lower_value_type(argument.value,
+                                                               argument.type));
+                if (is_mixed_pointer(argument.value) &&
+                    !pointer_specialization.has_value()) {
+                    mixed_pointer_tags[argument.value] = MslExpression::identifier(
+                        value_name(argument.value) + "_space", MslType::uint());
+                }
             }
         }
+        analyze_cfg();
 
         const auto required_shared = shared_usage.find(function.name);
         if (required_shared != shared_usage.end()) {
@@ -1799,6 +2816,46 @@ struct AstLowerer {
                                                  MslAddressSpace::kThreadgroup),
                         .name = name,
                     });
+                }
+            }
+        }
+
+        for (const ir::BasicBlock& block : function.blocks) {
+            for (const ir::BlockArgument& argument : block.arguments) {
+                declare_block_argument(argument, &output.statements);
+            }
+        }
+        predeclared_ssa_storage = true;
+        for (const ir::BasicBlock& block : function.blocks) {
+            for (const ir::Operation& operation : block.operations) {
+                if (operation.opcode == ir::OpCode::kParameter) continue;
+                if (operation.opcode == ir::OpCode::kAlloca) {
+                    if (operation.results.size() != 1 ||
+                        operation.result_types.size() != 1 ||
+                        !operation.result_types.front().is_pointer() ||
+                        operation.result_types.front().pointee() == nullptr) {
+                        return LowerToMslResult{
+                            .error = "malformed thread-local allocation",
+                        };
+                    }
+                    const ir::ValueId value = operation.results.front();
+                    const MslType storage_type =
+                        lower_type(*operation.result_types.front().pointee());
+                    const std::string storage_name = value_name(value) + "_storage";
+                    output.statements.push_back(MslStatement::variable(
+                        storage_type, storage_name, std::nullopt, false));
+                    values[value] = MslExpression::unary(
+                        "&", MslExpression::identifier(storage_name, storage_type),
+                        lower_result_type(operation));
+                    continue;
+                }
+                for (std::size_t i = 0; i < operation.results.size(); ++i) {
+                    const ir::ValueId value = operation.results[i];
+                    const MslType type = lower_result_type(operation, i);
+                    const std::string name = value_name(value);
+                    values[value] = MslExpression::identifier(name, type);
+                    output.statements.push_back(MslStatement::variable(
+                        type, name, std::nullopt, false));
                 }
             }
         }
@@ -2042,6 +3099,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     }
     const BuiltinUsageMap builtin_usage = analyze_builtin_usage(metal_module);
     const SharedUsageMap shared_usage = analyze_shared_usage(metal_module);
+    const BarrierUsageMap barrier_usage = analyze_barrier_usage(metal_module);
     for (const ir::Function& function : metal_module.functions) {
         const StructurizeResult structurized = check_structurizable(function);
         if (!structurized.ok) {
@@ -2049,30 +3107,70 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                            structurized.error;
             return result;
         }
-        AstLowerer lowerer(metal_module, function, builtin_usage, shared_usage);
-        LowerToMslResult function_result = lowerer.run();
-        const bool structurization_failure =
-            !function_result.ok &&
-            (function_result.error.find("revisits block") != std::string::npos ||
-             function_result.error.find("no forward reconvergence") !=
-                 std::string::npos ||
-             function_result.error.find("nested loop conditional") !=
-                 std::string::npos ||
-             function_result.error.find("loop structurization") !=
-                 std::string::npos);
-        if (structurization_failure) {
-            AstLowerer dispatcher_lowerer(metal_module, function, builtin_usage,
-                                          shared_usage, true);
-            function_result = dispatcher_lowerer.run();
+        std::vector<std::optional<ir::AddressSpace>> specializations = {std::nullopt};
+        std::uint8_t argument_space_mask = 0;
+        if (!function.is_kernel) {
+            for (const ir::FunctionArgument& argument : function.arguments) {
+                const auto mixed =
+                    function.mixed_pointer_address_spaces.find(argument.value);
+                if (mixed != function.mixed_pointer_address_spaces.end()) {
+                    argument_space_mask |= mixed->second;
+                }
+            }
         }
-        if (!function_result.ok) {
-            function_result.error =
-                "cannot lower function '" + function.name + "': " + function_result.error;
-            return function_result;
+        if (argument_space_mask != 0) {
+            specializations.clear();
+            for (unsigned bit = 1;
+                 bit <= static_cast<unsigned>(ir::AddressSpace::kPrivate); ++bit) {
+                if ((argument_space_mask & (1u << bit)) != 0) {
+                    specializations.push_back(static_cast<ir::AddressSpace>(bit));
+                }
+            }
         }
-        result.ast.functions.insert(result.ast.functions.end(),
-                                    function_result.ast.functions.begin(),
-                                    function_result.ast.functions.end());
+        for (const std::optional<ir::AddressSpace> specialization : specializations) {
+            AstLowerer lowerer(metal_module, function, builtin_usage, shared_usage,
+                               false, specialization);
+            LowerToMslResult function_result = lowerer.run();
+            const bool structurization_failure =
+                !function_result.ok &&
+                (function_result.error.find("revisits block") != std::string::npos ||
+                 function_result.error.find("no forward reconvergence") !=
+                     std::string::npos ||
+                 function_result.error.find("nested loop conditional") !=
+                     std::string::npos ||
+                 function_result.error.find("loop structurization") !=
+                     std::string::npos);
+            if (structurization_failure) {
+                const std::string structurization_error = function_result.error;
+                if (barrier_usage.at(function.name)) {
+                    function_result.error =
+                        "cannot lower function '" + function.name +
+                        "': structured CFG lowering failed for a barrier-containing "
+                        "call graph: " + structurization_error;
+                    return function_result;
+                }
+                AstLowerer dispatcher_lowerer(metal_module, function, builtin_usage,
+                                              shared_usage, true, specialization);
+                function_result = dispatcher_lowerer.run();
+                if (!function_result.ok) {
+                    function_result.error =
+                        "structured CFG lowering failed: " + structurization_error +
+                        "; CFG dispatcher fallback failed" +
+                        (function_result.error.empty()
+                             ? std::string{}
+                             : ": " + function_result.error);
+                }
+            }
+            if (!function_result.ok) {
+                function_result.error =
+                    "cannot lower function '" + function.name + "': " +
+                    function_result.error;
+                return function_result;
+            }
+            result.ast.functions.insert(result.ast.functions.end(),
+                                        function_result.ast.functions.begin(),
+                                        function_result.ast.functions.end());
+        }
     }
     const MslPrintResult printed = print_msl(result.ast);
     if (!printed.ok) {

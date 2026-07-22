@@ -182,6 +182,73 @@ exit:
 }
 )llvm";
 
+constexpr const char* kNvvmNestedMultiExitLoop = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+declare void @llvm.nvvm.bar.warp.sync(i32)
+
+define ptx_kernel void @nested_multi_exit_loop(ptr %out, i32 %count) {
+entry:
+  br label %outer.header
+outer.header:
+  %outer = phi i32 [ 0, %entry ], [ %outer.next, %inner.escape ]
+  %outer.active = icmp ult i32 %outer, %count
+  br i1 %outer.active, label %inner.preheader, label %exit
+inner.preheader:
+  br label %inner.header
+inner.header:
+  %inner = phi i32 [ 0, %inner.preheader ], [ %inner.next, %inner.latch ]
+  call void @llvm.nvvm.bar.warp.sync(i32 -1)
+  %odd = and i32 %inner, 1
+  %choose = icmp ne i32 %odd, 0
+  br i1 %choose, label %left, label %right
+left:
+  br label %decision
+right:
+  br label %decision
+decision:
+  %escape = icmp eq i32 %inner, 3
+  br i1 %escape, label %inner.escape, label %inner.latch
+inner.latch:
+  %inner.next = add i32 %inner, 1
+  %repeat = icmp ult i32 %inner.next, 5
+  br i1 %repeat, label %inner.header, label %exit
+inner.escape:
+  %outer.next = add i32 %outer, 1
+  %continue.outer = icmp ult i32 %outer.next, %count
+  br i1 %continue.outer, label %outer.header, label %exit
+exit:
+  store i32 %outer, ptr %out, align 4
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmIrreducibleBarrier = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+declare void @llvm.nvvm.bar.warp.sync(i32)
+
+define internal void @barrier_helper() {
+entry:
+  call void @llvm.nvvm.bar.warp.sync(i32 -1)
+  ret void
+}
+
+define ptx_kernel void @irreducible_barrier(ptr %out, i1 %first, i1 %next) {
+entry:
+  br i1 %first, label %left, label %right
+left:
+  br label %cycle
+right:
+  br label %cycle
+cycle:
+  call void @barrier_helper()
+  br i1 %next, label %left, label %right
+}
+)llvm";
+
 constexpr const char* kNvvmGenericDevicePointer = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -215,6 +282,38 @@ entry:
 define ptx_kernel void @static_threadgroup_global(i32 %value) {
 entry:
   call void @shared_helper(i32 %value)
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmMixedDeviceThreadgroupPhi = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+@mixed_shared = internal addrspace(3) global [16 x i8] undef, align 4
+
+define i32 @read_generic_word(ptr %input) {
+entry:
+  %value = load i32, ptr %input, align 4
+  ret i32 %value
+}
+
+define ptx_kernel void @mixed_device_threadgroup_phi(ptr %device_input, ptr %output,
+                                                      i1 %use_device) {
+entry:
+  br i1 %use_device, label %from_device, label %from_threadgroup
+
+from_device:
+  br label %join
+
+from_threadgroup:
+  %shared = getelementptr [16 x i8], ptr addrspacecast (ptr addrspace(3) @mixed_shared to ptr), i64 0, i64 0
+  br label %join
+
+join:
+  %input = phi ptr [ %device_input, %from_device ], [ %shared, %from_threadgroup ]
+  %value = call i32 @read_generic_word(ptr %input)
+  store i32 %value, ptr %output, align 4
   ret void
 }
 )llvm";
@@ -318,6 +417,19 @@ entry:
 declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg)
 )llvm";
 
+constexpr const char* kNvvmMemset = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @memset_kernel(ptr %destination) {
+entry:
+  call void @llvm.memset.p0.i64(ptr align 4 %destination, i8 90, i64 12, i1 false)
+  ret void
+}
+
+declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)
+)llvm";
+
 constexpr const char* kNvvmValueReturningHelper = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -337,6 +449,34 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmIsolatedFp64Multiply = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @isolated_fp64_multiply(ptr %out, float %value) {
+entry:
+  %wide = fpext float %value to double
+  %scaled = fmul double %wide, 1.000000e-02
+  %result = fptrunc double %scaled to float
+  store float %result, ptr %out, align 4
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmUnsupportedFp64 = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @unsupported_fp64(ptr %out, float %value) {
+entry:
+  %wide = fpext float %value to double
+  %sum = fadd double %wide, 1.000000e+00
+  %result = fptrunc double %sum to float
+  store float %result, ptr %out, align 4
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmDynamicMemcpy = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -348,6 +488,42 @@ entry:
 }
 
 declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg)
+)llvm";
+
+constexpr const char* kNvvmDynamicMemset = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @dynamic_memset(ptr %destination, i64 %size) {
+entry:
+  call void @llvm.memset.p0.i64(ptr align 1 %destination, i8 0, i64 %size, i1 false)
+  ret void
+}
+
+declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)
+)llvm";
+
+constexpr const char* kNvvmCudaLegacyAtomic = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @cuda_legacy_atomic(ptr %counter, ptr %old_value, i32 %increment) {
+entry:
+  %old = atomicrmw add ptr %counter, i32 %increment seq_cst, align 4
+  store i32 %old, ptr %old_value, align 4
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmUnsupportedAtomic = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @unsupported_atomic(ptr %counter) {
+entry:
+  %old = atomicrmw xor ptr %counter, i32 1 monotonic, align 4
+  ret void
+}
 )llvm";
 
 constexpr const char* kNvvmPointerAlignment = R"llvm(
@@ -556,9 +732,9 @@ int main() {
     ok &= expect(result.source.find("int(") != std::string::npos &&
                      result.source.find(" < int(") != std::string::npos,
                  "signed LLVM comparisons preserve signed semantics in MSL");
-    ok &= expect(result.source.find("device uchar* const") != std::string::npos &&
+    ok &= expect(result.source.find("device uchar*") != std::string::npos &&
                      result.source.find("const device uchar*") == std::string::npos,
-                 "SSA pointer bindings are const without making device pointees read-only");
+                 "hoisted SSA pointer storage does not make device pointees read-only");
 
     const metal::NvvmToMslResult selected =
         metal::compile_nvvm_to_msl(kNvvmSelectedCall, "selected.ll", "selected");
@@ -628,11 +804,39 @@ int main() {
                                    "noncanonical-loop.ll",
                                    "noncanonical_loop");
     ok &= expect(noncanonical_loop.ok &&
-                     noncanonical_loop.source.find("switch (cm_block_state)") !=
+                     noncanonical_loop.source.find("switch (cm_block_state)") ==
                          std::string::npos &&
                      noncanonical_loop.source.find("while (true)") !=
                          std::string::npos,
-                 "noncanonical nested loop exits lower through the typed CFG dispatcher");
+                 "noncanonical loop exits lower as structured control flow");
+
+    const metal::NvvmToMslResult nested_multi_exit_loop =
+        metal::compile_nvvm_to_msl(kNvvmNestedMultiExitLoop,
+                                   "nested-multi-exit-loop.ll",
+                                   "nested_multi_exit_loop");
+    ok &= expect(nested_multi_exit_loop.ok,
+                 "nested multi-exit loop lowers: " +
+                     nested_multi_exit_loop.error);
+    if (nested_multi_exit_loop.ok) {
+        ok &= expect(
+            nested_multi_exit_loop.source.find("switch (cm_block_state)") ==
+                    std::string::npos &&
+                nested_multi_exit_loop.source.find("simdgroup_barrier") !=
+                    std::string::npos,
+            "nested multi-exit loops preserve barriers without per-lane dispatch");
+        ok &= expect(nested_multi_exit_loop.source.find("continue;") !=
+                         std::string::npos,
+                     "non-local nested-loop exits continue the enclosing loop");
+    }
+
+    const metal::NvvmToMslResult irreducible_barrier =
+        metal::compile_nvvm_to_msl(kNvvmIrreducibleBarrier,
+                                   "irreducible-barrier.ll",
+                                   "irreducible_barrier");
+    ok &= expect(!irreducible_barrier.ok &&
+                     irreducible_barrier.error.find("barrier-containing call graph") !=
+                         std::string::npos,
+                 "irreducible barrier CFGs fail instead of using a per-lane dispatcher");
 
     const metal::NvvmToMslResult generic_device_pointer =
         metal::compile_nvvm_to_msl(kNvvmGenericDevicePointer,
@@ -663,6 +867,29 @@ int main() {
                          std::string::npos,
                  "static CUDA shared globals become kernel-local arrays threaded through helpers");
 
+    const metal::NvvmToMslResult mixed_device_threadgroup_phi =
+        metal::compile_nvvm_to_msl(kNvvmMixedDeviceThreadgroupPhi,
+                                   "mixed-device-threadgroup-phi.ll",
+                                   "mixed_device_threadgroup_phi");
+    if (!mixed_device_threadgroup_phi.ok) {
+        std::cerr << "mixed pointer lowering: "
+                  << mixed_device_threadgroup_phi.error << "\n";
+    }
+    ok &= expect(mixed_device_threadgroup_phi.ok &&
+                     mixed_device_threadgroup_phi.source.find(
+                         "read_generic_word__cm_device") != std::string::npos &&
+                     mixed_device_threadgroup_phi.source.find(
+                         "read_generic_word__cm_threadgroup") != std::string::npos &&
+                     mixed_device_threadgroup_phi.source.find("ulong v7") !=
+                         std::string::npos &&
+                     mixed_device_threadgroup_phi.source.find("v7_space == 1u") !=
+                         std::string::npos &&
+                     mixed_device_threadgroup_phi.source.find(
+                         "reinterpret_cast<device uchar*>(v7)") != std::string::npos &&
+                     mixed_device_threadgroup_phi.source.find(
+                         "reinterpret_cast<threadgroup uchar*>(v7)") != std::string::npos,
+                 "mixed CUDA generic-pointer PHIs dispatch concrete device and threadgroup helper specializations");
+
     const metal::NvvmToMslResult malformed_phi =
         metal::compile_nvvm_to_msl(kNvvmMalformedPhi, "malformed-phi.ll",
                                    "malformed_phi");
@@ -691,9 +918,13 @@ int main() {
                      inline_shuffle.source.find("thread_index_in_simdgroup") !=
                          std::string::npos &&
                      inline_shuffle.source.find("simd_shuffle(") != std::string::npos &&
-                     inline_shuffle.source.find("simd_shuffle_down(") != std::string::npos &&
-                     inline_shuffle.source.find("simd_shuffle_up(") != std::string::npos,
-                 "CUDA shuffle inline assembly lowers to direction-correct Metal SIMD intrinsics");
+                     inline_shuffle.source.find(" <= ") != std::string::npos &&
+                     inline_shuffle.source.find(" + ") != std::string::npos &&
+                     inline_shuffle.source.find(" - ") != std::string::npos &&
+                     inline_shuffle.source.find(" >= ") != std::string::npos &&
+                     inline_shuffle.source.find("simd_shuffle_down(") == std::string::npos &&
+                     inline_shuffle.source.find("simd_shuffle_up(") == std::string::npos,
+                 "CUDA shuffle inline assembly preserves PTX clamp and self-lane fallback semantics");
 
     const metal::NvvmToMslResult bitcast =
         metal::compile_nvvm_to_msl(kNvvmBitcast, "bitcast.ll", "bitcast_kernel");
@@ -706,6 +937,14 @@ int main() {
                      memcpy.source.find("reinterpret_cast<device uint*>") != std::string::npos,
                  "constant-length aligned LLVM memcpy expands into typed Metal loads and stores");
 
+    const metal::NvvmToMslResult memset = metal::compile_nvvm_to_msl(
+        kNvvmMemset, "memset.ll", "memset_kernel");
+    ok &= expect(memset.ok &&
+                     memset.source.find("1515870810") != std::string::npos &&
+                     memset.source.find("reinterpret_cast<device uint*>") !=
+                         std::string::npos,
+                 "constant-length aligned LLVM memset expands into repeated typed Metal stores");
+
     const metal::NvvmToMslResult value_returning_helper = metal::compile_nvvm_to_msl(
         kNvvmValueReturningHelper, "scale_add.ll", "scale_add_kernel");
     ok &= expect(value_returning_helper.ok &&
@@ -715,11 +954,65 @@ int main() {
                      value_returning_helper.source.find("= scale_add(") != std::string::npos,
                  "value-returning device helpers preserve their return operand in MSL");
 
+    const metal::NvvmToMslResult isolated_fp64_multiply =
+        metal::compile_nvvm_to_msl(kNvvmIsolatedFp64Multiply,
+                                   "isolated-fp64-multiply.ll",
+                                   "isolated_fp64_multiply");
+    ok &= expect(isolated_fp64_multiply.ok &&
+                     isolated_fp64_multiply.source.find("double v") ==
+                         std::string::npos &&
+                     isolated_fp64_multiply.source.find(
+                         "cumetal-semantic-quality: performance_degraded") !=
+                         std::string::npos &&
+                     isolated_fp64_multiply.source.find("0x") ==
+                         std::string::npos &&
+                     isolated_fp64_multiply.source.find(" * ") !=
+                         std::string::npos,
+                 "isolated float-to-double multiply chains demote explicitly for Metal");
+
+    const metal::NvvmToMslResult unsupported_fp64 =
+        metal::compile_nvvm_to_msl(kNvvmUnsupportedFp64,
+                                   "unsupported-fp64.ll", "unsupported_fp64");
+    ok &= expect(!unsupported_fp64.ok &&
+                     unsupported_fp64.error.find("Metal does not support FP64") !=
+                         std::string::npos,
+                 "general FP64 arithmetic remains an explicit diagnostic");
+
     const metal::NvvmToMslResult dynamic_memcpy = metal::compile_nvvm_to_msl(
         kNvvmDynamicMemcpy, "dynamic-memcpy.ll", "dynamic_memcpy");
     ok &= expect(!dynamic_memcpy.ok &&
                      dynamic_memcpy.error.find("dynamic-length LLVM memcpy") != std::string::npos,
                  "dynamic-length LLVM memcpy remains an explicit diagnostic");
+
+    const metal::NvvmToMslResult dynamic_memset = metal::compile_nvvm_to_msl(
+        kNvvmDynamicMemset, "dynamic-memset.ll", "dynamic_memset");
+    ok &= expect(!dynamic_memset.ok &&
+                     dynamic_memset.error.find("dynamic-length LLVM memset") !=
+                         std::string::npos,
+                 "dynamic-length LLVM memset remains an explicit diagnostic");
+
+    const metal::NvvmToMslResult cuda_legacy_atomic =
+        metal::compile_nvvm_to_msl(kNvvmCudaLegacyAtomic,
+                                   "cuda-legacy-atomic.ll",
+                                   "cuda_legacy_atomic");
+    ok &= expect(cuda_legacy_atomic.ok &&
+                     cuda_legacy_atomic.source.find(
+                         "atomic_fetch_add_explicit") != std::string::npos &&
+                     cuda_legacy_atomic.source.find("memory_order_relaxed") !=
+                         std::string::npos &&
+                     cuda_legacy_atomic.source.find("device atomic_uint*") !=
+                         std::string::npos,
+                 "legacy CUDA seq_cst atomicrmw spelling lowers with CUDA-relaxed Metal semantics");
+
+    const metal::NvvmToMslResult unsupported_atomic =
+        metal::compile_nvvm_to_msl(kNvvmUnsupportedAtomic,
+                                   "unsupported-atomic.ll",
+                                   "unsupported_atomic");
+    ok &= expect(!unsupported_atomic.ok &&
+                     unsupported_atomic.error.find(
+                         "unsupported Metal atomic operation 'xor'") !=
+                         std::string::npos,
+                 "unsupported atomic operations fail with an explicit Metal diagnostic");
 
     const metal::NvvmToMslResult pointer_alignment = metal::compile_nvvm_to_msl(
         kNvvmPointerAlignment, "pointer-alignment.ll", "align_pointer");
@@ -758,9 +1051,12 @@ int main() {
     ok &= expect(thread_alloca.ok &&
                      thread_alloca.source.find("struct Pair") != std::string::npos &&
                      thread_alloca.source.find("Pair v") != std::string::npos &&
+                     thread_alloca.source.find(
+                         "reinterpret_cast<thread uchar*>(&") != std::string::npos &&
+                     thread_alloca.source.find("_storage + 4") == std::string::npos &&
                      thread_alloca.source.find("reinterpret_cast<thread float*>") !=
                          std::string::npos,
-                 "LLVM allocas lower to addressable thread-local Metal storage");
+                 "LLVM aggregate allocas apply byte offsets after byte-pointer casts");
 
     const metal::NvvmToMslResult natural_loop = metal::compile_nvvm_to_msl(
         kNvvmNaturalLoop, "natural-loop.ll", "natural_loop");

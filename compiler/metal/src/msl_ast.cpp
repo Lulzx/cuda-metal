@@ -300,6 +300,9 @@ private:
                 } else if constexpr (std::is_same_v<Node, MslBreak>) {
                     indent(depth);
                     out_ << "break;\n";
+                } else if constexpr (std::is_same_v<Node, MslContinue>) {
+                    indent(depth);
+                    out_ << "continue;\n";
                 }
             },
             statement->value);
@@ -392,6 +395,13 @@ std::string MslType::str() const {
         case MslTypeKind::kPointer:
         case MslTypeKind::kReference: {
             const std::string address_space = address_space_spelling(this->address_space);
+            if (element != nullptr &&
+                (element->kind == MslTypeKind::kPointer ||
+                 element->kind == MslTypeKind::kReference)) {
+                return element->str() +
+                       (address_space.empty() ? std::string{} : " " + address_space) +
+                       (kind == MslTypeKind::kPointer ? "*" : "&");
+            }
             return (address_space.empty() ? std::string{} : address_space + " ") +
                    (element == nullptr ? std::string("void") : element->str()) +
                    (kind == MslTypeKind::kPointer ? "*" : "&");
@@ -562,6 +572,10 @@ MslStmt MslStatement::return_statement(std::optional<MslExpr> value) {
 
 MslStmt MslStatement::break_statement() {
     return std::make_shared<MslStatement>(MslStatement{.value = MslBreak{}});
+}
+
+MslStmt MslStatement::continue_statement() {
+    return std::make_shared<MslStatement>(MslStatement{.value = MslContinue{}});
 }
 
 std::string sanitize_identifier(std::string_view name) {

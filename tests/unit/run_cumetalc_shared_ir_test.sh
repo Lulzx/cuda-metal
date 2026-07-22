@@ -6,6 +6,7 @@ ptx=$2
 cu=$3
 unsupported=$4
 switch_source=$5
+float_abs_source=$6
 
 workdir=$(mktemp -d "${TMPDIR:-/tmp}/cumetalc-shared-ir.XXXXXX")
 trap 'rm -rf "$workdir"' EXIT
@@ -33,6 +34,11 @@ if grep -q ' switch ' "$workdir/switch.ll"; then
     exit 1
 fi
 grep -q 'br i1' "$workdir/switch.ll"
+
+"$cumetalc" "$float_abs_source" --backend=cumetal-ir --emit=msl \
+    --overwrite -o "$workdir/float_abs.metal"
+grep -q 'kernel void cuda_float_abs' "$workdir/float_abs.metal"
+test "$(grep -o 'fabs(' "$workdir/float_abs.metal" | wc -l | tr -d ' ')" -ge 2
 
 if "$cumetalc" "$unsupported" --backend=cumetal-ir --emit=msl \
     --overwrite -o "$workdir/unsupported.metal" \

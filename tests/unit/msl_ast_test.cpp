@@ -34,6 +34,9 @@ int main() {
     };
     function.statements.push_back(
         MslStatement::variable(MslType::uint(), "result", expression, true));
+    function.statements.push_back(MslStatement::while_statement(
+        MslExpression::literal("false", MslType::boolean()),
+        {MslStatement::continue_statement()}));
     function.statements.push_back(MslStatement::return_statement());
     MslModule module;
     module.comments.push_back("cumetal-provenance: generic_ptx_lowering");
@@ -47,12 +50,20 @@ int main() {
                  "printer sanitizes function identifiers");
     ok &= expect(printed.source.find("cm_thread") != std::string::npos,
                  "printer protects MSL reserved identifiers");
+    ok &= expect(printed.source.find("continue;") != std::string::npos,
+                 "printer emits structured loop continuation");
     ok &= expect(printed.source.find("// cumetal-provenance: generic_ptx_lowering") !=
                      std::string::npos,
                  "printer emits controlled provenance metadata");
     ok &= expect(MslType::pointer(MslType::uint(8), MslAddressSpace::kDevice) ==
                      MslType::pointer(MslType::uint(8), MslAddressSpace::kDevice),
                  "MSL types compare structurally");
+    ok &= expect(
+        MslType::pointer(
+            MslType::pointer(MslType::uint(8), MslAddressSpace::kDevice),
+            MslAddressSpace::kThreadgroup)
+                .str() == "device uchar* threadgroup*",
+        "nested MSL pointers place each address-space qualifier on its own pointer level");
 
     if (!ok) return 1;
     std::cout << "MSL AST tests passed\n";

@@ -981,6 +981,18 @@ static __device__ __forceinline__ float fabs(float x) {
     return __builtin_fabsf(x);
 }
 
+// CUDA's C++ math overlay overloads unqualified abs for floating-point
+// operands. Clang's standalone CUDA overlay only provides abs(int), which
+// otherwise silently converts convergence deltas to integers before taking
+// their magnitude.
+static __device__ __forceinline__ float abs(float x) {
+    return __builtin_fabsf(x);
+}
+
+static __device__ __forceinline__ double abs(double x) {
+    return __builtin_fabs(x);
+}
+
 static __host__ __forceinline__ int max(int a, int b) {
     return a > b ? a : b;
 }

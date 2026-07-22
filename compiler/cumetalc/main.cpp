@@ -760,7 +760,8 @@ int main(int argc, char** argv) {
             }
             const std::string llvm_ir(bytes.begin(), bytes.end());
             const auto compiled =
-                cumetal::metal::compile_nvvm_to_msl(llvm_ir, options.input.string());
+                cumetal::metal::compile_nvvm_to_msl(llvm_ir, options.input.string(),
+                                                    ptx_entry_name);
             if (!compiled.ok) {
                 std::cerr << "cumetalc failed: " << compiled.error << "\n";
                 return 1;

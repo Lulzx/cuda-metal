@@ -136,7 +136,11 @@ enum class PointerBaseKind : std::uint8_t {
 struct PointerProvenance {
     PointerBaseKind base_kind = PointerBaseKind::kUnknown;
     std::string base_name;
+    std::string memory_layout;
     std::optional<std::int64_t> known_byte_offset;
+    // Constant offset within memory_layout. Unlike known_byte_offset this remains
+    // useful when a dynamic array index chooses which object instance is used.
+    std::optional<std::int64_t> known_layout_offset;
     std::uint32_t alignment = 1;
     bool no_alias = false;
     bool escaped = false;
@@ -280,6 +284,12 @@ struct Function {
     std::optional<KernelAbi> kernel_abi;
     std::unordered_map<ValueId, PointerProvenance> pointer_provenance;
     std::unordered_set<ValueId> generic_pointer_values;
+    std::unordered_set<ValueId> generic_null_pointer_values;
+    // Concrete address-space alternatives retained for CUDA generic pointers that
+    // cannot be monomorphized to one Metal pointer type. The bit position is the
+    // AddressSpace enum value. Metal legalization must dispatch every use through
+    // concrete specializations; it must never print these as unqualified pointers.
+    std::unordered_map<ValueId, std::uint8_t> mixed_pointer_address_spaces;
     bool generic_pointer_return = false;
 
     [[nodiscard]] const BasicBlock* find_block(BlockId id) const;
