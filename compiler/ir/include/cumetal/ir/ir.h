@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace cumetal::ir {
@@ -56,6 +57,7 @@ struct Type {
     std::uint32_t lanes = 1;
     AddressSpace address_space = AddressSpace::kNone;
     std::vector<Type> elements;
+    std::string name;
 
     static Type void_type();
     static Type predicate();
@@ -63,7 +65,7 @@ struct Type {
     static Type floating(std::uint32_t bits);
     static Type vector(Type element, std::uint32_t lanes);
     static Type pointer(Type pointee, AddressSpace address_space);
-    static Type aggregate(std::vector<Type> elements);
+    static Type aggregate(std::vector<Type> elements, std::string name = {});
 
     [[nodiscard]] bool is_scalar() const;
     [[nodiscard]] bool is_pointer() const;
@@ -172,6 +174,8 @@ enum class OpCode : std::uint16_t {
     kShiftRight,
     kCompare,
     kSelect,
+    kAggregateConstruct,
+    kAggregateExtract,
     kConvert,
     kAddressSpaceCast,
     kAlloca,
@@ -275,9 +279,17 @@ struct Function {
     std::vector<BasicBlock> blocks;
     std::optional<KernelAbi> kernel_abi;
     std::unordered_map<ValueId, PointerProvenance> pointer_provenance;
+    std::unordered_set<ValueId> generic_pointer_values;
+    bool generic_pointer_return = false;
 
     [[nodiscard]] const BasicBlock* find_block(BlockId id) const;
     [[nodiscard]] BasicBlock* find_block(BlockId id);
+};
+
+struct GlobalConstant {
+    std::string name;
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t alignment = 1;
 };
 
 struct Module {
@@ -285,6 +297,7 @@ struct Module {
     IrStage stage = IrStage::kGpuSemantic;
     SemanticQuality semantic_quality = SemanticQuality::kExact;
     std::vector<std::string> semantic_caveats;
+    std::vector<GlobalConstant> global_constants;
     std::vector<Function> functions;
     std::unordered_map<std::string, std::string> attributes;
 };

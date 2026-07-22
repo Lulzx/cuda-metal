@@ -84,6 +84,7 @@ struct MslCast {
     MslType target;
     MslExpr operand;
     bool reinterpret = false;
+    bool bitcast = false;
 };
 
 struct MslSubscript {
@@ -102,10 +103,14 @@ struct MslConditional {
     MslExpr false_value;
 };
 
+struct MslVoteMask {
+    MslExpr vote;
+};
+
 struct MslExpression {
     MslType type;
     std::variant<MslIdentifier, MslLiteral, MslUnary, MslBinary, MslCall,
-                 MslCast, MslSubscript, MslMember, MslConditional>
+                 MslCast, MslSubscript, MslMember, MslConditional, MslVoteMask>
         value;
     ir::SourceLocation location;
 
@@ -115,10 +120,12 @@ struct MslExpression {
     static MslExpr binary(std::string operation, MslExpr left, MslExpr right, MslType type);
     static MslExpr call(std::string callee, std::vector<MslExpr> arguments, MslType type);
     static MslExpr cast(MslType target, MslExpr operand, bool reinterpret = false);
+    static MslExpr bitcast(MslType target, MslExpr operand);
     static MslExpr subscript(MslExpr base, MslExpr index, MslType type);
     static MslExpr member(MslExpr base, std::string member, MslType type);
     static MslExpr conditional(MslExpr condition, MslExpr true_value,
                                MslExpr false_value, MslType type);
+    static MslExpr vote_mask(MslExpr vote);
 };
 
 struct MslStatement;
@@ -151,13 +158,25 @@ struct MslWhile {
     std::vector<MslStmt> statements;
 };
 
+struct MslSwitchCase {
+    MslExpr value;
+    std::vector<MslStmt> statements;
+};
+
+struct MslSwitch {
+    MslExpr selector;
+    std::vector<MslSwitchCase> cases;
+};
+
 struct MslReturn {
     std::optional<MslExpr> value;
 };
 
+struct MslBreak {};
+
 struct MslStatement {
     std::variant<MslVariableDeclaration, MslAssignment, MslExpressionStatement,
-                 MslIf, MslWhile, MslReturn>
+                 MslIf, MslWhile, MslSwitch, MslReturn, MslBreak>
         value;
     ir::SourceLocation location;
 
@@ -169,7 +188,9 @@ struct MslStatement {
     static MslStmt if_statement(MslExpr condition, std::vector<MslStmt> then_statements,
                                 std::vector<MslStmt> else_statements = {});
     static MslStmt while_statement(MslExpr condition, std::vector<MslStmt> statements);
+    static MslStmt switch_statement(MslExpr selector, std::vector<MslSwitchCase> cases);
     static MslStmt return_statement(std::optional<MslExpr> value = std::nullopt);
+    static MslStmt break_statement();
 };
 
 struct MslAttribute {
@@ -201,12 +222,18 @@ struct MslStruct {
     std::vector<MslStructField> fields;
 };
 
+struct MslGlobalByteArray {
+    std::string name;
+    std::vector<std::uint8_t> bytes;
+};
+
 struct MslModule {
     std::uint32_t language_major = 3;
     std::uint32_t language_minor = 1;
     std::vector<std::string> comments;
     std::vector<std::string> includes = {"metal_stdlib"};
     std::vector<MslStruct> structs;
+    std::vector<MslGlobalByteArray> global_byte_arrays;
     std::vector<MslFunction> functions;
 };
 

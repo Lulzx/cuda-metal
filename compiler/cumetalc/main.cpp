@@ -796,7 +796,7 @@ int main(int argc, char** argv) {
         }
     } else if (input_ext == ".cu") {
         if (backend == BackendKind::kCumetalIr || emit_stage == EmitStage::kLlvm) {
-            const std::filesystem::path clang = find_cuda_clang();
+            const std::filesystem::path clang = find_cuda_clang(cuda_clang);
             if (clang.empty()) {
                 std::cerr << "cumetalc failed: stock Clang with CUDA support was not found; "
                              "set CUMETAL_CLANG\n";
@@ -826,8 +826,17 @@ int main(int argc, char** argv) {
             }
             command += "-D__CUDACC__=1 -D__NVCC__=1 -I " +
                        quote_shell(runtime_api_dir.string()) +
-                       " -include cuda_runtime.h " +
-                       quote_shell(original_input.string()) + " -o " +
+                       " -include cuda_runtime.h ";
+            for (const auto& include_dir : cuda_include_dirs) {
+                command += "-I " + quote_shell(include_dir.string()) + " ";
+            }
+            for (const auto& define : cuda_defines) {
+                command += "-D " + quote_shell(define) + " ";
+            }
+            for (const auto& forced_include : cuda_forced_includes) {
+                command += "-include " + quote_shell(forced_include.string()) + " ";
+            }
+            command += quote_shell(original_input.string()) + " -o " +
                        quote_shell(raw_device_ll.string()) + " 2>&1";
             const CommandResult clang_result = run_command_capture(command);
             if (!clang_result.started || clang_result.exit_code != 0) {
@@ -843,7 +852,7 @@ int main(int argc, char** argv) {
             }
             const std::string opt_command =
                 quote_shell(llvm_opt.string()) +
-                " -S -passes=mem2reg,dce,simplifycfg " +
+                " -S -passes=sroa,mem2reg,dce,simplifycfg,lower-switch " +
                 quote_shell(raw_device_ll.string()) + " -o " +
                 quote_shell(device_ll.string()) + " 2>&1";
             const CommandResult opt_result = run_command_capture(opt_command);
@@ -872,8 +881,8 @@ int main(int argc, char** argv) {
                 std::cout << "wrote " << options.output << "\n";
                 return 0;
             }
-            const auto compiled =
-                cumetal::metal::compile_nvvm_to_msl(llvm_ir, original_input.string());
+            const auto compiled = cumetal::metal::compile_nvvm_to_msl(
+                llvm_ir, original_input.string(), ptx_entry_name);
             if (!compiled.ok) {
                 std::cerr << "cumetalc failed: " << compiled.error << "\n";
                 return 1;

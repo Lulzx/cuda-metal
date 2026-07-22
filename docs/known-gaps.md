@@ -74,12 +74,16 @@ as gaps have been closed.
   forcing viable CUDA device calls to inline. General convex meshes, general
   convex/convex pairs, triangle meshes, heightfields, and SDF collisions remain
   unsupported or unverified.
-  The two upstream GJK/EPA convex/convex kernels now compile to production
-  metallibs after adding CUDA float math overloads and libdevice integer
-  `abs`/`clz` lowering. The first stage executes on Apple GPU, but Metal's
-  pipeline compiler currently aborts while specializing the 624 KB forced-inline
-  second stage (`XPC_ERROR_CONNECTION_INTERRUPTED`), so convex/convex runtime
-  support is not yet claimed.
+  The first upstream GJK/EPA convex/convex stage executes on Apple GPU. The
+  canonical non-inline CUDA/NVVM path now imports the second stage and its
+  reachable device-call closure, lowers its noncanonical CFG through typed MSL,
+  and preserves its constant lookup tables. Legalization then rejects a real
+  CUDA-generic PHI that selects either threadgroup scratch or device memory:
+  Metal requires one static address space, so address-space monomorphization
+  plus mixed-PHI dispatch is still required. Static threadgroup globals and one
+  FP64 calculation remain subsequent MSL blockers. The older 624 KB
+  forced-inline form can still abort Apple's pipeline compiler. Convex/convex
+  runtime support is therefore not yet claimed.
 
 ## .cu / cumetalc frontend limitations
 - `cumetalc --cuda-device` is the real source frontend for project-scale CUDA:
@@ -98,13 +102,15 @@ as gaps have been closed.
 - The older `.cu` mode without `--cuda-device` remains a qualifier-stripping
   host-LLVM prototype suitable only for simple patterns; it is not a general
   CUDA frontend.
-- The verified `--backend=cumetal-ir` path is an initial vertical slice, not yet
-  the default. It supports the vector-add/SAXPY-style arithmetic and indexing
-  subset plus conservative branch shapes. General loop and if/else
-  structurization, aggregate ABI lowering, static/dynamic shared-memory
-  emission, complete device-call builtin threading, atomics, ballot/vote,
-  reductions, and broad math-intrinsic coverage remain incomplete and fail
-  explicitly.
+- The verified `--backend=cumetal-ir` path is not yet the default. It now
+  supports selected-entry device-call closures, structured and dispatcher-based
+  CFG lowering, loop-carried PHIs, CUDA vector and named aggregate values,
+  thread-local allocas, constant global tables, warp shuffle/vote operations,
+  transitive Metal builtin threading, and the CUDA math/bit intrinsics exercised
+  by the current PhysX convex path. Mixed CUDA-generic pointers whose runtime
+  value can name different Metal address spaces, static/dynamic shared-memory
+  emission, atomics, reductions, full FP64 handling, and the remaining
+  intrinsic surface still fail explicitly.
 - Stock Clang CUDA device IR import requires LLVM 18 or newer at build time.
   Unknown NVVM intrinsics, arbitrary pointer/integer round trips, indirect
   calls, recursion, unsupported atomics, and irreducible/unsupported CFG shapes

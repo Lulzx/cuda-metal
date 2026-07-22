@@ -5,6 +5,7 @@ cumetalc=$1
 ptx=$2
 cu=$3
 unsupported=$4
+switch_source=$5
 
 workdir=$(mktemp -d "${TMPDIR:-/tmp}/cumetalc-shared-ir.XXXXXX")
 trap 'rm -rf "$workdir"' EXIT
@@ -24,6 +25,14 @@ grep -q 'kernel void vector_add' "$workdir/vector.metal"
     --overwrite -o "$workdir/source.metal"
 grep -q 'cumetal-provenance: generic_nvvm_lowering' "$workdir/source.metal"
 grep -q 'kernel void vector_add' "$workdir/source.metal"
+
+"$cumetalc" "$switch_source" --backend=cumetal-ir --emit=llvm \
+    --overwrite -o "$workdir/switch.ll"
+if grep -q ' switch ' "$workdir/switch.ll"; then
+    echo "LLVM switch survived canonical CUDA normalization" >&2
+    exit 1
+fi
+grep -q 'br i1' "$workdir/switch.ll"
 
 if "$cumetalc" "$unsupported" --backend=cumetal-ir --emit=msl \
     --overwrite -o "$workdir/unsupported.metal" \

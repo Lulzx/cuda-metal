@@ -11,6 +11,10 @@ namespace cumetal::ir {
 
 struct NvvmImportOptions {
     std::string source_name;
+    // When set, import only this kernel and the transitive closure of direct
+    // device functions it calls. This keeps source-AOT artifacts scoped to the
+    // selected entry without requiring whole-kernel inlining.
+    std::string entry_name;
 };
 
 struct NvvmImportResult {

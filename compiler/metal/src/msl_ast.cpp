@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iomanip>
 #include <sstream>
 #include <unordered_set>
 
@@ -72,6 +73,26 @@ public:
             out_ << "struct " << name << " {\n";
             for (const MslStructField& field : structure.fields) {
                 out_ << "    " << field.type.str() << " " << sanitize_identifier(field.name) << ";\n";
+            }
+            out_ << "};\n\n";
+        }
+
+        for (const MslGlobalByteArray& global : module.global_byte_arrays) {
+            const std::string name = sanitize_identifier(global.name);
+            if (!names.insert(name).second) {
+                errors_.push_back("duplicate MSL declaration: " + name);
+                continue;
+            }
+            if (global.bytes.empty()) {
+                errors_.push_back("global byte array cannot be empty: " + name);
+                continue;
+            }
+            out_ << "constant uchar " << name << "[" << global.bytes.size()
+                 << "] = {";
+            for (std::size_t i = 0; i < global.bytes.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                out_ << "0x" << std::hex << std::setw(2) << std::setfill('0')
+                     << static_cast<unsigned>(global.bytes[i]) << std::dec;
             }
             out_ << "};\n\n";
         }
@@ -157,7 +178,11 @@ private:
                     }
                     out_ << ")";
                 } else if constexpr (std::is_same_v<Node, MslCast>) {
-                    if (node.reinterpret) {
+                    if (node.bitcast) {
+                        out_ << "as_type<" << node.target.str() << ">(";
+                        print_expression(node.operand);
+                        out_ << ")";
+                    } else if (node.reinterpret) {
                         out_ << "reinterpret_cast<" << node.target.str() << ">(";
                         print_expression(node.operand);
                         out_ << ")";
@@ -180,6 +205,10 @@ private:
                     print_expression(node.true_value, current_precedence);
                     out_ << " : ";
                     print_expression(node.false_value, current_precedence);
+                } else if constexpr (std::is_same_v<Node, MslVoteMask>) {
+                    out_ << "uint(simd_vote::vote_t(";
+                    print_expression(node.vote);
+                    out_ << "))";
                 }
             },
             expression->value);
@@ -197,8 +226,9 @@ private:
                 using Node = std::decay_t<decltype(node)>;
                 if constexpr (std::is_same_v<Node, MslVariableDeclaration>) {
                     indent(depth);
-                    if (node.is_const) out_ << "const ";
-                    out_ << node.type.str() << " " << sanitize_identifier(node.name);
+                    out_ << node.type.str();
+                    if (node.is_const) out_ << " const";
+                    out_ << " " << sanitize_identifier(node.name);
                     if (node.initializer.has_value()) {
                         out_ << " = ";
                         print_expression(*node.initializer);
@@ -237,6 +267,24 @@ private:
                     for (const MslStmt& child : node.statements) print_statement(child, depth + 1);
                     indent(depth);
                     out_ << "}\n";
+                } else if constexpr (std::is_same_v<Node, MslSwitch>) {
+                    indent(depth);
+                    out_ << "switch (";
+                    print_expression(node.selector);
+                    out_ << ") {\n";
+                    for (const MslSwitchCase& switch_case : node.cases) {
+                        indent(depth + 1);
+                        out_ << "case ";
+                        print_expression(switch_case.value);
+                        out_ << ": {\n";
+                        for (const MslStmt& child : switch_case.statements) {
+                            print_statement(child, depth + 2);
+                        }
+                        indent(depth + 1);
+                        out_ << "}\n";
+                    }
+                    indent(depth);
+                    out_ << "}\n";
                 } else if constexpr (std::is_same_v<Node, MslReturn>) {
                     indent(depth);
                     out_ << "return";
@@ -245,6 +293,9 @@ private:
                         print_expression(*node.value);
                     }
                     out_ << ";\n";
+                } else if constexpr (std::is_same_v<Node, MslBreak>) {
+                    indent(depth);
+                    out_ << "break;\n";
                 }
             },
             statement->value);
@@ -393,6 +444,18 @@ MslExpr MslExpression::cast(MslType target, MslExpr operand, bool reinterpret) {
     });
 }
 
+MslExpr MslExpression::bitcast(MslType target, MslExpr operand) {
+    const MslType result_type = target;
+    return std::make_shared<MslExpression>(MslExpression{
+        .type = result_type,
+        .value = MslCast{
+            .target = std::move(target),
+            .operand = std::move(operand),
+            .bitcast = true,
+        },
+    });
+}
+
 MslExpr MslExpression::subscript(MslExpr base, MslExpr index, MslType type) {
     return std::make_shared<MslExpression>(MslExpression{
         .type = std::move(type),
@@ -416,6 +479,13 @@ MslExpr MslExpression::conditional(MslExpr condition, MslExpr true_value,
             .true_value = std::move(true_value),
             .false_value = std::move(false_value),
         },
+    });
+}
+
+MslExpr MslExpression::vote_mask(MslExpr vote) {
+    return std::make_shared<MslExpression>(MslExpression{
+        .type = MslType::uint(),
+        .value = MslVoteMask{.vote = std::move(vote)},
     });
 }
 
@@ -461,9 +531,23 @@ MslStmt MslStatement::while_statement(MslExpr condition, std::vector<MslStmt> st
     });
 }
 
+MslStmt MslStatement::switch_statement(MslExpr selector,
+                                        std::vector<MslSwitchCase> cases) {
+    return std::make_shared<MslStatement>(MslStatement{
+        .value = MslSwitch{
+            .selector = std::move(selector),
+            .cases = std::move(cases),
+        },
+    });
+}
+
 MslStmt MslStatement::return_statement(std::optional<MslExpr> value) {
     return std::make_shared<MslStatement>(
         MslStatement{.value = MslReturn{.value = std::move(value)}});
+}
+
+MslStmt MslStatement::break_statement() {
+    return std::make_shared<MslStatement>(MslStatement{.value = MslBreak{}});
 }
 
 std::string sanitize_identifier(std::string_view name) {

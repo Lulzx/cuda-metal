@@ -385,6 +385,7 @@ add_test(
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx
             ${CMAKE_SOURCE_DIR}/tests/cuda_projects/vector_add/vector_add.cu
             ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/unsupported_shared_ir.ptx
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/switch_normalization.cu
 )
 
 add_test(

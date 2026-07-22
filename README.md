@@ -68,7 +68,8 @@ Tools
 - `--emit=llvm|cumetal-ir|metal-ir|msl|metallib` — inspect compiler stages
 - `--fp64=native|emulate|warn` — FP64 mode (default: `emulate`; Apple Silicon GPU
   rejects native FP64 in Metal pipelines at runtime)
-- `--entry <name>` — select a single PTX entry point
+- `--entry <name>` — select a single PTX or CUDA/NVVM kernel and its reachable
+  device-call closure
 - `--ptx-strict` — treat unsupported PTX opcodes as errors
 - `--cuda-device` — compile `.cu` with a CUDA-capable Clang to PTX before
   CuMetal lowering; accepts `-I`, `-D`, `--cuda-include`, `--cuda-arch`, and

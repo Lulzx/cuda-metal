@@ -53,6 +53,7 @@ using NvvmToMslResult = PtxToMslResult;
 [[nodiscard]] PtxToMslResult compile_ptx_to_msl(
     std::string_view ptx, const PtxToMslOptions& options = {});
 [[nodiscard]] NvvmToMslResult compile_nvvm_to_msl(
-    std::string_view llvm_ir, std::string_view source_name = {});
+    std::string_view llvm_ir, std::string_view source_name = {},
+    std::string_view entry_name = {});
 
 }  // namespace cumetal::metal

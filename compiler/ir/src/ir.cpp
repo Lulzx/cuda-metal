@@ -80,8 +80,12 @@ Type Type::pointer(Type pointee_type, AddressSpace pointer_address_space) {
     };
 }
 
-Type Type::aggregate(std::vector<Type> aggregate_elements) {
-    return {.kind = TypeKind::kAggregate, .elements = std::move(aggregate_elements)};
+Type Type::aggregate(std::vector<Type> aggregate_elements, std::string aggregate_name) {
+    return {
+        .kind = TypeKind::kAggregate,
+        .elements = std::move(aggregate_elements),
+        .name = std::move(aggregate_name),
+    };
 }
 
 bool Type::is_scalar() const {
@@ -254,6 +258,8 @@ std::string_view opcode_name(OpCode opcode) {
         case OpCode::kShiftRight: return "shr";
         case OpCode::kCompare: return "compare";
         case OpCode::kSelect: return "select";
+        case OpCode::kAggregateConstruct: return "aggregate_construct";
+        case OpCode::kAggregateExtract: return "aggregate_extract";
         case OpCode::kConvert: return "convert";
         case OpCode::kAddressSpaceCast: return "addrspace_cast";
         case OpCode::kAlloca: return "alloca";
