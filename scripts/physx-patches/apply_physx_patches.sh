@@ -102,6 +102,10 @@ patch_marker_is_present() {
             grep -q 'cudaBox.cu|boxBoxNphase_Kernel' \
                 "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
             ;;
+        0015-cumetal-structured-convex-kernels.patch)
+            grep -q 'cudaGJKEPA.cu|convexConvexNphase_stage2Kernel' \
+                "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
+            ;;
         *)
             return 1
             ;;

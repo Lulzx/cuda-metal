@@ -92,6 +92,12 @@ The selected two-unit-box stack stays supported and matches CPU body states
 over 30 frictionless steps. General oriented-box stress cases and larger box
 stacks remain unverified.
 
+The fifteenth patch adds the upstream two-stage convex/convex GJK/EPA entries
+to the reproducible kernel manifest. Both canonical non-inline NVVM entries
+compile to validated metallibs through the typed CuMetal IR backend. This is a
+compiler and kernel-build claim only: no committed general convex-mesh scene
+gate exists yet, so general convex/convex runtime support remains unclaimed.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -115,7 +121,7 @@ component; experimental containers are inspectable test artifacts and are not
 GPU-executable.
 
 The build script requires macOS on arm64, CMake, Ninja, and `xcrun`. It
-compiles all 85 manifest entries, validates and inspects every output, and
+compiles all 87 manifest entries, validates and inspects every output, and
 prints a machine-readable `PASS` line.
 
 Build and run the reduced GPU rigid-body snippet end to end:

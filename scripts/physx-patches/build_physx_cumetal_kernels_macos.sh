@@ -45,7 +45,7 @@ cmake --build "${BUILD_DIR}" --target PhysXCumetalGpuKernels \
 
 KERNEL_DIR="${BUILD_DIR}/sdk_cumetal_gpu_source_bin/kernels"
 MANIFEST="${KERNEL_DIR}/kernels.json"
-EXPECTED_KERNELS=83
+EXPECTED_KERNELS=87
 
 KERNEL_COUNT="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["kernels"]))' "${MANIFEST}")"
 if [[ "${KERNEL_COUNT}" != "${EXPECTED_KERNELS}" ]]; then
@@ -66,4 +66,4 @@ while IFS=$'\t' read -r KERNEL_NAME METALLIB; do
     grep -q "\"name\": \"${KERNEL_NAME}\"" <<<"${INSPECT_JSON}"
 done <<<"${KERNEL_ROWS}"
 
-echo "PASS: ${EXPECTED_KERNELS} PhysX CuMetal sphere-plane PGS kernels compiled (${EMIT_MODE})"
+echo "PASS: ${EXPECTED_KERNELS} PhysX CuMetal selected rigid PGS kernels compiled (${EMIT_MODE})"

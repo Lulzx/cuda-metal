@@ -267,6 +267,10 @@ Implemented:
     static shared-memory byte requirements,
     Driver contexts are thread-local, and native `MTLBuffer.gpuAddress`
     allocation mode supports nested device pointers in PhysX descriptors
+  - the 87-entry selected rigid PGS manifest also compiles both upstream
+    convex/convex GJK/EPA stages from canonical non-inline NVVM through typed
+    CuMetal IR; general convex-mesh runtime support remains gated on a committed
+    end-to-end CPU/GPU scene rather than compilation alone
   - `conformance_physx_grb` compares CPU and GPU transforms for 30 resting
     contact steps at `1e-3` relative tolerance and requires Apple-GPU
     provenance through sphere narrowphase, contact pre-prep/prep, static

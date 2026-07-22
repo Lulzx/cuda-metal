@@ -288,7 +288,10 @@ unit box sliding on a plane for 30 steps through the convex/plane narrowphase
 kernel. The gates require Metal
 narrowphase, constraint preparation, dynamic and static solve, writeback, and
 integration provenance. These remain deliberately selected shape paths;
-general convex meshes, larger stacks, and general batching remain outside the
+the 87-entry build manifest now also compiles and validates the upstream
+two-stage convex/convex GJK/EPA kernels through typed CuMetal IR, but no
+committed general convex-mesh scene gate exists yet. General convex meshes,
+larger stacks, and general batching therefore remain outside the runtime
 claim. See `docs/known-gaps.md`.
 
 Known limitations

@@ -54,7 +54,7 @@ as gaps have been closed.
 - Binary-shim fatbinary support: CMTL envelopes, raw PTX, basic FatBinary/FatBinary2/3
   PTX wrappers supported. Full NVCC fatbinary variants, complex symbol layouts, or SASS-only
   images not supported (SASS never was; per spec).
-- PhysX 5.6 reduced GRB coverage is limited to the 84-kernel selected-shape PGS
+- PhysX 5.6 reduced GRB coverage is limited to the 87-kernel selected-shape PGS
   manifest and selected rigid/static contacts. Patch 0008 removes
   the former body-per-thread `preIntegration` and serialized `updateBodiesLaunch`
   fallbacks; their upstream warp-cooperative paths pass twenty consecutive 30-step
@@ -85,17 +85,15 @@ as gaps have been closed.
   absolute tolerance is not evidence of general FP determinism. Metal fast-math defaults,
   contraction choices, and long chaotic-scene divergence remain unverified and require a
   dedicated strict-math/contraction matrix plus long-horizon conformance.
-  The first upstream GJK/EPA convex/convex stage executes on Apple GPU. The
-  canonical non-inline CUDA/NVVM path now imports the second stage and its
-  reachable device-call closure, lowers its noncanonical CFG through typed MSL,
-  and preserves its constant lookup tables. Legalization then rejects a real
-  CUDA-generic PHI that selects either threadgroup scratch or device memory:
-  Metal requires one static address space, so address-space monomorphization
-  plus mixed-PHI dispatch is still required. Static threadgroup globals are now
-  represented as kernel-local arrays and threaded through reachable helpers;
-  one FP64 calculation remains a subsequent MSL blocker. The older 624 KB
-  forced-inline form can still abort Apple's pipeline compiler. Convex/convex
-  runtime support is therefore not yet claimed.
+  Both upstream GJK/EPA convex/convex stages now compile from canonical
+  non-inline CUDA/NVVM to validated metallibs. The typed backend structures the
+  nested natural loops, preserves values across loop exits, specializes helper
+  calls selected by mixed CUDA address-space PHIs, threads static shared globals
+  through reachable helpers, emits value-returning device calls, and performs
+  byte offsets through byte pointers rather than scaled aggregate pointers. A
+  direct selected-contact probe produces a finite three-point manifold, but no
+  committed end-to-end general convex-mesh CPU/GPU gate exists yet. General
+  convex/convex runtime support is therefore still not claimed.
 
 ## .cu / cumetalc frontend limitations
 - `cumetalc --cuda-device` is the real source frontend for project-scale CUDA:
@@ -115,14 +113,16 @@ as gaps have been closed.
   host-LLVM prototype suitable only for simple patterns; it is not a general
   CUDA frontend.
 - The verified `--backend=cumetal-ir` path is not yet the default. It now
-  supports selected-entry device-call closures, structured and dispatcher-based
-  CFG lowering, loop-carried PHIs, CUDA vector and named aggregate values,
+  supports selected-entry device-call closures, structured natural-loop CFG
+  lowering with multiple exits and nested `continue`, dispatcher fallback for
+  barrier-free residual CFGs, loop-carried PHIs, CUDA vector and named aggregate values,
   thread-local allocas, constant global tables, warp shuffle/vote operations,
   transitive Metal builtin threading, and the CUDA math/bit intrinsics exercised
-  by the current PhysX convex path. Mixed CUDA-generic pointers whose runtime
-  value can name different Metal address spaces, dynamic shared-memory emission,
-  atomics, reductions, full FP64 handling, and the remaining intrinsic surface
-  still fail explicitly. Static CUDA shared globals with compile-time sizes are
+  by the current PhysX convex path. Mixed CUDA-generic pointers can dispatch
+  supported loads, stores, offsets, and void helper calls across their concrete
+  Metal address spaces; unsupported mixed-pointer operations, dynamic shared-memory
+  emission, atomics, reductions, full FP64 handling, and the remaining intrinsic
+  surface still fail explicitly. Static CUDA shared globals with compile-time sizes are
   emitted as kernel-local threadgroup storage and threaded through device calls.
 - Stock Clang CUDA device IR import requires LLVM 18 or newer at build time.
   Unknown NVVM intrinsics, arbitrary pointer/integer round trips, indirect
