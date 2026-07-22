@@ -134,6 +134,12 @@ patch_marker_is_present() {
                 ! grep -q 'contactMode != eCONTACT_FRICTIONLESS' \
                     "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
+        0020-cumetal-kernel-init-stubs.patch)
+            test -f \
+                "${PHYSX_REPO}/physx/source/cudamanager/src/CuMetalKernelInitStubs.cpp" &&
+                grep -q 'PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels5)' \
+                    "${PHYSX_REPO}/physx/source/cudamanager/src/CuMetalKernelInitStubs.cpp"
+            ;;
         *)
             return 1
             ;;

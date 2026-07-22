@@ -129,6 +129,11 @@ the established `3e-3` 60-step envelope, while a friction-disabled GPU control
 retains `vx=5` and zero spin. Other shapes, multiple bodies, and generic mesh
 friction correlation remain unsupported.
 
+The twentieth patch makes the host runtime patch series self-contained by
+adding the `CuMetalKernelInitStubs.cpp` file already referenced by patch 0005.
+These empty link anchors replace the init symbols normally emitted by nvcc;
+CuMetal loads the source-recompiled kernels by name at runtime.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash

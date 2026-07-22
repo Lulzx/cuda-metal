@@ -330,6 +330,7 @@ Documentation
 - Build and validation workflows: [docs/build.md](./docs/build.md)
 - Test and conformance workflows: [docs/testing.md](./docs/testing.md)
 - Known feature gaps: [docs/known-gaps.md](./docs/known-gaps.md)
+- PhysX pause/resume handoff: [docs/physx-handoff.md](./docs/physx-handoff.md)
 - AIR/metallib ABI notes: [docs/air-abi.md](./docs/air-abi.md)
 - Design specification: [spec.md](./spec.md)
 

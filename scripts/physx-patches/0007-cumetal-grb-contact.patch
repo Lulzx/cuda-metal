@@ -11,7 +11,6 @@ index e4c8f55..cec0d87 100644
  	PxRigidBodyExt::updateMassAndInertia(*gBall, 10.0f);
  }
  
-error: Could not access '/tmp/physx-patch-base.KJ33MQ/physx/source/cudamanager/src/CuMetalKernelInitStubs.cpp'
 diff --git a/physx/source/gpucommon/src/CUDA/MemCopyBalanced.cu b/physx/source/gpucommon/src/CUDA/MemCopyBalanced.cu
 index 8ff5a98..7dfa4fb 100644
 --- a/physx/source/gpucommon/src/CUDA/MemCopyBalanced.cu
@@ -588,4 +587,3 @@ index ad6af24..7218611 100644
  
  	preDesc.contactManagerOutputBase = reinterpret_cast<PxsContactManagerOutput*>(mGpuContactManagerOutputBase);
  	preDesc.sharedFrictionConstraintIndex = 0;
-

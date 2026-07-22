@@ -1,0 +1,76 @@
+diff --git a/physx/source/cudamanager/src/CuMetalKernelInitStubs.cpp b/physx/source/cudamanager/src/CuMetalKernelInitStubs.cpp
+new file mode 100644
+index 0000000..c9d0045
+--- /dev/null
++++ b/physx/source/cudamanager/src/CuMetalKernelInitStubs.cpp
+@@ -0,0 +1,70 @@
++// CuMetal loads source-recompiled PhysX kernels by name at runtime. The empty
++// init functions emitted by nvcc exist only to force CUDA object files into a
++// static link, so they have no work to perform on this path.
++#if PX_CUMETAL
++
++#define PX_CUMETAL_KERNEL_INIT(name) extern "C" void name() {}
++
++PX_CUMETAL_KERNEL_INIT(initAlgorithmsKernels0)
++PX_CUMETAL_KERNEL_INIT(initAnisotropyKernels0)
++PX_CUMETAL_KERNEL_INIT(initArticulationKernels1)
++PX_CUMETAL_KERNEL_INIT(initArticulationKernels2)
++PX_CUMETAL_KERNEL_INIT(initArticulationKernels3)
++PX_CUMETAL_KERNEL_INIT(initArticulationKernels4)
++PX_CUMETAL_KERNEL_INIT(initBroadphaseKernels0)
++PX_CUMETAL_KERNEL_INIT(initBroadphaseKernels1)
++PX_CUMETAL_KERNEL_INIT(initCommonKernels0)
++PX_CUMETAL_KERNEL_INIT(initCommonKernels1)
++PX_CUMETAL_KERNEL_INIT(initCommonKernels2)
++PX_CUMETAL_KERNEL_INIT(initDiffuseParticlesKernels0)
++PX_CUMETAL_KERNEL_INIT(initFEMClothKernels0)
++PX_CUMETAL_KERNEL_INIT(initFEMClothKernels1)
++PX_CUMETAL_KERNEL_INIT(initFEMClothKernels2)
++PX_CUMETAL_KERNEL_INIT(initIsosurfaceExtractionKernels0)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels0)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels1)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels2)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels3)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels4)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels5)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels6)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels7)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels8)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels9)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels10)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels11)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels12)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels13)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels14)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels15)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels16)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels17)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels18)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels19)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels20)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels21)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels22)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels23)
++PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels24)
++PX_CUMETAL_KERNEL_INIT(initParticleSystemKernels0)
++PX_CUMETAL_KERNEL_INIT(initSdfConstructionKernels0)
++PX_CUMETAL_KERNEL_INIT(initSimulationControllerKernels0)
++PX_CUMETAL_KERNEL_INIT(initSimulationControllerKernels1)
++PX_CUMETAL_KERNEL_INIT(initSimulationControllerKernels2)
++PX_CUMETAL_KERNEL_INIT(initSoftBodyKernels0)
++PX_CUMETAL_KERNEL_INIT(initSoftBodyKernels1)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels0)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels1)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels2)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels3)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels4)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels5)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels6)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels7)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels9)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels10)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels11)
++PX_CUMETAL_KERNEL_INIT(initSolverKernels13)
++PX_CUMETAL_KERNEL_INIT(initSparseGridStandaloneKernels0)
++
++#endif
