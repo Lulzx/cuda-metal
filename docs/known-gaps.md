@@ -54,7 +54,7 @@ as gaps have been closed.
 - Binary-shim fatbinary support: CMTL envelopes, raw PTX, basic FatBinary/FatBinary2/3
   PTX wrappers supported. Full NVCC fatbinary variants, complex symbol layouts, or SASS-only
   images not supported (SASS never was; per spec).
-- PhysX 5.6 reduced GRB coverage is limited to the 87-kernel selected-shape PGS
+- PhysX 5.6 reduced GRB coverage is limited to the 93-kernel selected-shape PGS
   manifest and selected rigid/static contacts. Patch 0008 removes
   the former body-per-thread `preIntegration` and serialized `updateBodiesLaunch`
   fallbacks; their upstream warp-cooperative paths pass twenty consecutive 30-step
@@ -85,8 +85,13 @@ as gaps have been closed.
   solve, writeback, and integration to dispatch as production Metal kernels;
   CPU/GPU states stay within 1% component-wise, with the largest transient in
   angular velocity at step 5. Arbitrary convex topology/orientation, multiple
-  simultaneous convex pairs, triangle meshes, heightfields, and SDF collisions
-  remain unsupported or unverified.
+  simultaneous convex pairs, heightfields, and SDF collisions remain unsupported
+  or unverified. Patch 0017 adds one selected sphere/static-triangle-mesh path:
+  a frictionless unit sphere moving over the interior of one triangle face
+  matches CPU byte-for-byte for 30 steps. It carries a single separation value
+  through the correlation index as a scoped workaround for an incoherent generic
+  temporary-contact record. Triangle seam transitions, mesh contacts with other
+  shapes, multiple bodies, friction, and general mesh batching remain unsupported.
   The 60-step friction gate is repeatable, but its `3e-3` relative plus `1e-5`
   absolute tolerance is not evidence of general FP determinism. Metal fast-math defaults,
   contraction choices, and long chaotic-scene divergence remain unverified and require a

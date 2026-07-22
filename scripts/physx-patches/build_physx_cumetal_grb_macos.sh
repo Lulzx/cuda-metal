@@ -14,7 +14,18 @@ fi
 command -v cmake >/dev/null
 command -v ninja >/dev/null
 command -v xcrun >/dev/null
-xcrun -f metal >/dev/null
+if ! xcrun metal --version >/dev/null 2>&1; then
+    command -v xcodebuild >/dev/null
+    command -v python3 >/dev/null
+    metal_toolchain="$(xcodebuild -showComponent MetalToolchain -json 2>/dev/null | \
+        python3 -c 'import json, sys; data = json.load(sys.stdin); print(data.get("toolchainIdentifier", "") if data.get("status") == "installed" else "")')"
+    if [[ -z "${metal_toolchain}" ]]; then
+        echo "error: install Xcode's optional Metal Toolchain component" >&2
+        exit 1
+    fi
+    export TOOLCHAINS="${metal_toolchain}"
+fi
+xcrun metal --version >/dev/null
 
 "${SCRIPT_DIR}/apply_physx_patches.sh" "${PHYSX_REPO}"
 cmake --build "${CUMETAL_ROOT}/build" --target cumetal_runtime cumetalc --parallel

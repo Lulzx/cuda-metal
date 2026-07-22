@@ -112,6 +112,14 @@ patch_marker_is_present() {
                 grep -q 'kernel_name STREQUAL "convexConvexNphase_stage2Kernel"' \
                     "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
             ;;
+        0017-cumetal-grb-triangle-mesh.patch)
+            grep -q 'sphereTrimeshNarrowphase' \
+                "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt" &&
+                grep -q -- '--trimesh' \
+                    "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp" &&
+                grep -q 'Carry separation directly' \
+                    "${PHYSX_REPO}/physx/source/gpunarrowphase/src/CUDA/convexMesh.cu"
+            ;;
         *)
             return 1
             ;;

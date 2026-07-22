@@ -273,8 +273,9 @@ ctest --test-dir build -R unit_ -V              # unit tests only
 ```
 
 PhysX 5.6's reduced `SnippetHelloGRB` now runs resting and kinetic-friction
-sphere/plane contacts plus frictionless four-point box/plane and box/box
-contacts end to end on Apple GPU through CuMetal. The patch/build
+sphere/plane contacts plus frictionless four-point box/plane, box/box, and a
+selected sphere/static-triangle-mesh contact end to end on Apple GPU through
+CuMetal. The patch/build
 workflow lives in `scripts/physx-patches/`; `conformance_physx_grb` compares
 30 resting CPU/GPU transform steps, `conformance_physx_grb_friction` checks
 CPU/GPU sliding-to-rolling agreement through 60 steps and a friction-disabled
@@ -288,13 +289,16 @@ separate 1% component-wise envelope because its largest CPU/GPU transient is an
 angular-velocity difference at step 5; final states are substantially closer.
 It also rejects a stacked scene with fewer than two bodies.
 `conformance_physx_grb_box` checks a unit box sliding on a plane for 30 steps
-through the convex/plane narrowphase kernel. The gates require Metal
+through the convex/plane narrowphase kernel. `conformance_physx_grb_trimesh`
+checks one frictionless sphere moving over the interior of one triangle face
+for 30 byte-identical CPU/GPU steps and rejects box/mesh mode. The gates require Metal
 narrowphase, constraint preparation, dynamic and static solve, writeback, and
 integration provenance. These remain deliberately selected shape paths;
-the 87-entry build manifest compiles convex/convex stage 2 through typed CuMetal
+the 93-entry build manifest compiles convex/convex stage 2 through typed CuMetal
 IR, while stage 1 and contact finalization still use the explicit legacy PTX
-backend. General convex meshes, arbitrary orientations and topology, larger
-stacks, and general batching therefore remain outside the runtime claim. See
+backend. Triangle seam transitions and generic cross-dispatch temporary-contact
+records are not yet supported. General convex meshes, arbitrary orientations and
+topology, larger stacks, and general batching therefore remain outside the runtime claim. See
 `docs/known-gaps.md`.
 
 Known limitations

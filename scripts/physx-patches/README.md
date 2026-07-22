@@ -105,6 +105,15 @@ finalization, dynamic and static preparation/solve, writeback, and integration.
 CPU/GPU states stay within a documented 1% component-wise envelope; this is a
 selected topology and pair, not a general convex-mesh compatibility claim.
 
+The seventeenth patch adds six sphere/triangle-mesh midphase, narrowphase,
+sorting, correlation, and finish entries. Its compact CuMetal path verifies one
+frictionless unit sphere moving over the interior of one face in a two-triangle
+static ground mesh for 30 steps, with byte-identical CPU/GPU states. The path
+carries its one contact separation in the correlation index because the generic
+temporary-contact record is not yet coherent across these dispatches. Seam
+transitions, multiple bodies, friction, boxes/convexes against meshes, capsules,
+heightfields, and SDFs remain outside this claim and are rejected by the snippet.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -127,8 +136,9 @@ machine that has Xcode but has not downloaded the optional Metal Toolchain
 component; experimental containers are inspectable test artifacts and are not
 GPU-executable.
 
-The build script requires macOS on arm64, CMake, Ninja, and `xcrun`. It
-compiles all 87 manifest entries, validates and inspects every output, and
+The build script requires macOS on arm64, CMake, Ninja, `xcrun`, and Xcode's
+optional Metal Toolchain component (which it discovers automatically). It
+compiles all 93 manifest entries, validates and inspects every output, and
 prints a machine-readable `PASS` line.
 
 Build and run the reduced GPU rigid-body snippet end to end:
@@ -176,4 +186,11 @@ Run the selected four-point box/plane contact gate:
 
 ```bash
 tests/conformance/run_physx_grb_box.sh
+```
+
+Run the selected sphere/static-triangle-mesh gate and unsupported-shape
+negative control:
+
+```bash
+tests/conformance/run_physx_grb_trimesh.sh
 ```
