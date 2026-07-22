@@ -105,6 +105,8 @@ extern "C" __global__ void cuda_device_probe(
     const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
     float4 value = input[index];
     value.x += cumetal_frontend_test_bias();
+    value.w = sqrt(value.w * value.w + 1.0f);
+    value.z = fabs(value.z);
     value = cumetal_frontend_inline_probe(value, threadIdx.x & 31u);
     const float zero = value.w - value.w;
     const float one = zero + 1.0f;

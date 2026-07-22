@@ -969,6 +969,18 @@ static __device__ __forceinline__ int isinf(T x) {
     return __builtin_isinf_sign(x) != 0;
 }
 
+// NVIDIA's CUDA math overlay provides C++ float overloads in addition to the
+// C `*f` spellings. Clang's standalone CUDA overlay only declares
+// `double sqrt(double)`, so unqualified `sqrt(float)` would otherwise promote
+// to FP64 and emit an unnecessary __nv_sqrt libdevice call.
+static __device__ __forceinline__ float sqrt(float x) {
+    return __builtin_sqrtf(x);
+}
+
+static __device__ __forceinline__ float fabs(float x) {
+    return __builtin_fabsf(x);
+}
+
 static __host__ __forceinline__ int max(int a, int b) {
     return a > b ? a : b;
 }

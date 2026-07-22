@@ -2909,6 +2909,39 @@ class GenericLlvmEmitter {
             return store_ret_bits("0", 32);
         }
 
+        if (callee == "__nv_abs") {
+            if (arg_names.empty()) return fail(instr, "__nv_abs expects 1 arg");
+            auto value = load_call_slot_value(os, arg_names[0], 32);
+            if (!value) return fail(instr, "__nv_abs arg missing");
+            const std::string is_negative = next_tmp("abs_negative");
+            os << "  " << is_negative << " = icmp slt i32 " << *value << ", 0\n";
+            const std::string negated = next_tmp("abs_negated");
+            // Deliberately omit nsw: CUDA's integer abs preserves INT_MIN's
+            // two's-complement bit pattern rather than introducing LLVM poison.
+            os << "  " << negated << " = sub i32 0, " << *value << "\n";
+            const std::string result = next_tmp("abs");
+            os << "  " << result << " = select i1 " << is_negative << ", i32 "
+               << negated << ", i32 " << *value << "\n";
+            return store_ret_bits(result, 32);
+        }
+
+        if (callee == "__nv_clz" || callee == "__nv_clzll") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            const int input_bits = callee == "__nv_clzll" ? 64 : 32;
+            auto value = load_call_slot_value(os, arg_names[0], input_bits);
+            if (!value) return fail(instr, callee + " arg missing");
+            const std::string type = llvm_int_type(input_bits);
+            declarations_.insert("declare " + type + " @llvm.ctlz." + type +
+                                 "(" + type + ", i1)");
+            const std::string count = next_tmp("clz");
+            os << "  " << count << " = call " << type << " @llvm.ctlz." << type
+               << "(" << type << " " << *value << ", i1 false)\n";
+            if (input_bits == 32) return store_ret_bits(count, 32);
+            const std::string narrowed = next_tmp("clz_i32");
+            os << "  " << narrowed << " = trunc i64 " << count << " to i32\n";
+            return store_ret_bits(narrowed, 32);
+        }
+
         if (callee == "__nv_umulhi") {
             if (arg_names.size() < 2) return fail(instr, "__nv_umulhi expects 2 args");
             auto a = load_call_slot_value(os, arg_names[0], 32);

@@ -338,6 +338,7 @@ $L1:
     .reg .b64 %rd<3>;
     .param .b32 call_arg;
     .param .b32 call_ret;
+    .param .b64 call_arg64;
     .param .b64 sin_ptr_arg;
     .param .b64 cos_ptr_arg;
     ld.param.u64 %rd1, [vector_memory_param_0];
@@ -353,6 +354,10 @@ $L1:
     call.uni (call_ret), __nv_acosf, (call_arg);
     ld.param.b32 %r1, [call_ret];
     call.uni (call_ret), __nv_float_as_int, (call_arg);
+    call.uni (call_ret), __nv_abs, (call_arg);
+    call.uni (call_ret), __nv_clz, (call_arg);
+    st.param.b64 [call_arg64], %rd1;
+    call.uni (call_ret), __nv_clzll, (call_arg64);
     call.uni (call_ret), __nv_popc, (call_arg);
     call.uni (call_ret), __nv_ffs, (call_arg);
     call.uni (call_ret), __nv_fast_fdividef, (call_arg, call_arg);
@@ -382,6 +387,18 @@ $L1:
                 "__nv_acosf lowers to Metal inverse-cosine intrinsic")) {
         return 1;
     }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "abs_negative") &&
+                    contains(vector_memory_lowered.llvm_ir, "abs_negated") &&
+                    !contains(vector_memory_lowered.llvm_ir, "sub nsw i32"),
+                "__nv_abs lowers with wrapping INT_MIN semantics")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "@llvm.ctlz.i32") &&
+                    contains(vector_memory_lowered.llvm_ir, "@llvm.ctlz.i64") &&
+                    contains(vector_memory_lowered.llvm_ir, "clz_i32"),
+                "__nv_clz and __nv_clzll lower with defined zero semantics")) {
+        return 1;
+    }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@llvm.cttz.i32") &&
                     contains(vector_memory_lowered.llvm_ir, "ffs_zero"),
                 "__nv_ffs lowers to count-trailing-zeros plus one")) {
@@ -390,6 +407,48 @@ $L1:
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sin.f32") &&
                     contains(vector_memory_lowered.llvm_ir, "@air.fast_cos.f32"),
                 "destination-less __nv_fast_sincosf call lowers to Metal trig intrinsics")) {
+        return 1;
+    }
+
+    const std::string malformed_abs_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_abs()
+{
+    .param .b32 call_ret;
+    call.uni (call_ret), __nv_abs, ();
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_abs_options;
+    malformed_abs_options.entry_name = "malformed_abs";
+    malformed_abs_options.strict = true;
+    const auto malformed_abs_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_abs_ptx, malformed_abs_options);
+    if (!expect(!malformed_abs_lowered.ok &&
+                    contains(malformed_abs_lowered.error, "__nv_abs expects 1 arg"),
+                "strict lowering rejects malformed __nv_abs calls")) {
+        return 1;
+    }
+
+    const std::string malformed_clz_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_clz()
+{
+    .param .b32 call_ret;
+    call.uni (call_ret), __nv_clz, ();
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_clz_options;
+    malformed_clz_options.entry_name = "malformed_clz";
+    malformed_clz_options.strict = true;
+    const auto malformed_clz_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_clz_ptx, malformed_clz_options);
+    if (!expect(!malformed_clz_lowered.ok &&
+                    contains(malformed_clz_lowered.error, "__nv_clz expects 1 arg"),
+                "strict lowering rejects malformed __nv_clz calls")) {
         return 1;
     }
 

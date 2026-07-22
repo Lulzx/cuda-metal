@@ -388,3 +388,21 @@ report.
   positive `boxBoxNphase_Kernel` provenance, and passes CPU/GPU state comparison
   with `2e-2` relative plus `1e-5` absolute tolerance. General oriented-box
   stress cases and larger stacks remain unverified.
+
+### Convex/convex compiler audit
+
+- The unchanged `convexConvexNphase_stage1Kernel` compiled and executed on
+  Apple GPU. Stage 2 exposed CUDA-source compatibility gaps rather than new PTX
+  instructions: Clang's standalone overlay lacked NVIDIA's float overloads for
+  unqualified `sqrt`/`fabs`, and emitted libdevice calls for integer `abs` and
+  `clz`/`clzll`.
+- CuMetal now supplies the float overloads and lowers those integer calls with
+  defined zero and two's-complement edge behavior. Focused tests cover the
+  successful paths and reject malformed missing-argument calls.
+- The complete stage-2 kernel now produces a validated 624 KB production
+  metallib. A cooked triangular-prism stack reaches both upstream GJK/EPA
+  dispatches, but Apple's runtime pipeline compiler aborts on stage 2 with
+  `XPC_ERROR_CONNECTION_INTERRUPTED`; `-O3` did not reduce the artifact or
+  change the failure. Runtime convex/convex support therefore remains open,
+  with standalone PTX device-function lowering identified as the next route to
+  avoid the monolithic forced-inline kernel.
