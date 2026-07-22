@@ -86,6 +86,12 @@ patch_marker_is_present() {
                 grep -q -- '--bodies must be between 1 and 16' \
                     "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
+        0012-cumetal-grb-dynamic-contact-batching.patch)
+            grep -q 'Avoid staging device pointers and island metadata' \
+                "${PHYSX_REPO}/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu" &&
+                grep -q -- '--stacked requires at least two bodies' \
+                    "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
+            ;;
         *)
             return 1
             ;;

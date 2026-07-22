@@ -69,6 +69,14 @@ and adds `--bodies 1..16` to the snippet. The conformance claim covers two
 separated dynamic spheres against one plane; dynamic/dynamic constraints and
 packed general batching remain out of scope.
 
+The twelfth patch adds selected dynamic/dynamic contact batching. It replaces
+shared device-pointer staging in the zero and motion-writeback kernels with
+direct Metal-safe indexing, runs the prepared rigid-contact block solver, and
+serially aggregates and propagates each body's slab contributions. The snippet
+adds a two-sphere `--stacked` layout. CPU and GPU agree for 30 frictional and
+frictionless steps; larger stacks, joints, articulations, and packed general
+batching remain out of scope.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -127,4 +135,10 @@ Run the selected two-body rigid/static batching gate:
 
 ```bash
 tests/conformance/run_physx_grb_multibody.sh
+```
+
+Run the selected stacked dynamic/dynamic contact gate:
+
+```bash
+tests/conformance/run_physx_grb_stacked.sh
 ```

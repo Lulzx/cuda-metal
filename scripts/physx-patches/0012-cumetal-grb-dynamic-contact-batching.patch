@@ -1,0 +1,352 @@
+diff --git a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+index f2096ff..be65922 100644
+--- a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
++++ b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+@@ -66,6 +66,12 @@ enum ContactMode
+ 	eCONTACT_FRICTIONLESS
+ };
+ 
++enum BodyLayout
++{
++	eBODY_SEPARATED,
++	eBODY_STACKED
++};
++
+ static PxReal stackZ = 10.0f;
+ 
+ static PxRigidDynamic* createDynamic(const PxTransform& t, const PxGeometry& geometry, const PxVec3& velocity=PxVec3(0))
+@@ -94,7 +100,7 @@ static void createStack(const PxTransform& t, PxU32 size, PxReal halfExtent)
+ 	shape->release();
+ }
+ 
+-void initPhysics(bool useGpu, ContactMode contactMode, PxU32 bodyCount)
++void initPhysics(bool useGpu, ContactMode contactMode, BodyLayout bodyLayout, PxU32 bodyCount)
+ {
+ 	gFoundation = PxCreateFoundation(PX_PHYSICS_VERSION, gAllocator, gErrorCallback);
+ 	gPhysics = PxCreatePhysics(PX_PHYSICS_VERSION, *gFoundation, PxTolerancesScale(), true, NULL);
+@@ -149,8 +155,10 @@ void initPhysics(bool useGpu, ContactMode contactMode, PxU32 bodyCount)
+ 	gBallCount = bodyCount;
+ 	for(PxU32 i = 0; i < bodyCount; ++i)
+ 	{
+-		const PxReal x = (PxReal(i) - PxReal(bodyCount - 1) * 0.5f) * 3.0f;
+-		gBalls[i] = createDynamic(PxTransform(PxVec3(x, 1, 0)), PxSphereGeometry(1), initialVelocity);
++		const PxVec3 position = bodyLayout == eBODY_STACKED ?
++			PxVec3(0, 1.0f + 2.0f * PxReal(i), 0) :
++			PxVec3((PxReal(i) - PxReal(bodyCount - 1) * 0.5f) * 3.0f, 1, 0);
++		gBalls[i] = createDynamic(PxTransform(position), PxSphereGeometry(1), initialVelocity);
+ 		PxRigidBodyExt::updateMassAndInertia(*gBalls[i], 10.0f);
+ 	}
+ 	gBall = gBalls[0];
+@@ -220,6 +228,7 @@ int snippetMain(int argc, const char*const* argv)
+ #else
+ 	bool useGpu = true;
+ 	ContactMode contactMode = eCONTACT_RESTING;
++	BodyLayout bodyLayout = eBODY_SEPARATED;
+ 	PxU32 bodyCount = 1;
+ 	PxU32 frameCount = 100;
+ 	const char* dumpPath = NULL;
+@@ -233,6 +242,8 @@ int snippetMain(int argc, const char*const* argv)
+ 			contactMode = eCONTACT_FRICTION;
+ 		else if(strcmp(argv[i], "--frictionless") == 0)
+ 			contactMode = eCONTACT_FRICTIONLESS;
++		else if(strcmp(argv[i], "--stacked") == 0)
++			bodyLayout = eBODY_STACKED;
+ 		else if(strcmp(argv[i], "--bodies") == 0 && i + 1 < argc)
+ 		{
+ 			bodyCount = PxU32(strtoul(argv[++i], NULL, 10));
+@@ -248,12 +259,17 @@ int snippetMain(int argc, const char*const* argv)
+ 			dumpPath = argv[++i];
+ 		else
+ 		{
+-			printf("usage: SnippetHelloGRB [--cpu|--gpu] [--friction|--frictionless] [--bodies N] [--steps N] [--dump FILE]\n");
++			printf("usage: SnippetHelloGRB [--cpu|--gpu] [--friction|--frictionless] [--stacked] [--bodies N] [--steps N] [--dump FILE]\n");
+ 			return 2;
+ 		}
+ 	}
++	if(bodyLayout == eBODY_STACKED && bodyCount < 2)
++	{
++		printf("CuMetal GRB ERROR: --stacked requires at least two bodies.\n");
++		return 2;
++	}
+ 
+-	initPhysics(useGpu, contactMode, bodyCount);
++	initPhysics(useGpu, contactMode, bodyLayout, bodyCount);
+ 	if(!gGpuReady)
+ 	{
+ 		cleanupPhysics(false);
+@@ -288,6 +304,7 @@ int snippetMain(int argc, const char*const* argv)
+ 	const PxTransform pose = gBall->getGlobalPose();
+ 	printf("CuMetal GRB mode: %s\n", useGpu ? "gpu" : "cpu");
+ 	printf("CuMetal GRB bodies: %u\n", gBallCount);
++	printf("CuMetal GRB body layout: %s\n", bodyLayout == eBODY_STACKED ? "stacked" : "separated");
+ 	printf("CuMetal GRB contact mode: %s\n",
+ 		contactMode == eCONTACT_FRICTION ? "friction" :
+ 		(contactMode == eCONTACT_FRICTIONLESS ? "frictionless" : "resting"));
+diff --git a/physx/source/gpusolver/src/CUDA/integration.cu b/physx/source/gpusolver/src/CUDA/integration.cu
+index 17eab2e..e74b926 100644
+--- a/physx/source/gpusolver/src/CUDA/integration.cu
++++ b/physx/source/gpusolver/src/CUDA/integration.cu
+@@ -88,18 +88,7 @@ extern "C" __global__ void integrateCoreParallelLaunch(
+ 		//we need to dma the sleep data back for post solver task
+ 		PxgSolverBodySleepData& sleepData = solverCoreDesc->solverBodySleepDataPool[a];
+ 
+-		#if PX_CUMETAL
+-		float4 motionLin = motionVelocityArray[a];
+-		float4 motionAng = motionVelocityArray[a + numSolverBodies];
+-		if(staticTouchCount != 0)
+-		{
+-			motionLin.x = linVel.x; motionLin.y = linVel.y; motionLin.z = linVel.z;
+-			motionAng.x = angVel.x; motionAng.y = angVel.y; motionAng.z = angVel.z;
+-		}
+-		integrateCore(motionLin, motionAng, inverseInertia, linVel, angVel, body2World, data, bodySim, sleepData, sqrtInvInertia,
+-		#else
+ 		integrateCore(motionVelocityArray[a], motionVelocityArray[a + numSolverBodies], inverseInertia, linVel, angVel, body2World, data, bodySim, sleepData, sqrtInvInertia,
+-		#endif
+ 			sharedDesc->dt, sharedDesc->invDtF32, solverCoreDesc->enableStabilization, staticTouchCount != 0, numCountedInteractions[nodeIndex],
+ 			nodeIndex);
+ 
+diff --git a/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu b/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
+index 76b86c2..263ad39 100644
+--- a/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
++++ b/physx/source/gpusolver/src/CUDA/solverMultiBlock.cu
+@@ -61,6 +61,24 @@ PX_CUDA_CALLABLE PX_FORCE_INLINE PxU32 ComputeBodyBatchStartIndex(const PxU32 in
+ 
+ extern "C" __global__ void ZeroBodies(const PxgSolverCoreDesc* constraintPrepDesc, const PxgSolverSharedDesc<IterativeSolveData>* sharedDesc)
+ {
++#if PX_CUMETAL
++	float4* bodyVelocities = sharedDesc->iterativeData.solverBodyVelPool;
++	float4* motionVelocities = constraintPrepDesc->motionVelocityArray;
++	const PxU32 totalNumBodies = constraintPrepDesc->numSolverBodies * 2;
++	const PxU32 totalNumBodiesConstraints =
++		(constraintPrepDesc->numBatches + constraintPrepDesc->numArticBatches) * 32 * 4;
++	const PxU32 offset = constraintPrepDesc->accumulatedBodyDeltaVOffset;
++	const PxU32 threadIndex = threadIdx.x + blockIdx.x * blockDim.x;
++	const PxU32 blockStride = blockDim.x * gridDim.x;
++	const float4 zero = make_float4(0.f);
++	for(PxU32 a = threadIndex; a < totalNumBodies; a += blockStride)
++	{
++		motionVelocities[a] = zero;
++		bodyVelocities[offset + a] = zero;
++	}
++	for(PxU32 a = threadIndex; a < totalNumBodiesConstraints; a += blockStride)
++		bodyVelocities[a] = zero;
++#else
+ 	__shared__ float4* bodyVelocities;
+ 	__shared__ float4* motionVelocities;
+ 	__shared__ uint totalNumBodies;
+@@ -99,6 +117,7 @@ extern "C" __global__ void ZeroBodies(const PxgSolverCoreDesc* constraintPrepDes
+ 	{
+ 		bodyVelocities[a]					= zero;
+ 	}
++#endif
+ }
+ 
+ __device__ __inline__ float4 loadFloat4(const float4* PX_RESTRICT address)
+@@ -374,7 +393,62 @@ extern "C" __global__
+ void solveBlockPartition(
+ 	PxgSolverCoreDesc* PX_RESTRICT solverDesc, const PxgSolverSharedDesc<IterativeSolveData>* PX_RESTRICT sharedDesc,
+ 	const PxU32 islandIndex, const PxU32 partitionIndex, bool doFriction)
+-{	
++{
++#if PX_CUMETAL
++	// The generic kernel's block-wide IterativeSolveData staging and its
++	// articulation/joint/residual branches cause Apple's Metal pipeline compiler
++	// to terminate. Rigid contact batches already own disjoint velocity slabs, so
++	// solve them directly from the global descriptor while retaining PhysX's
++	// prepared block-contact formulation and remap layout.
++	const PxgIslandContext& island = solverDesc->islandContextPool[islandIndex];
++	const PxU32 startPartitionIndex = island.mStartPartitionIndex;
++	const PxU32 startIndex = partitionIndex == 0 ? island.mBatchStartIndex :
++		solverDesc->constraintsPerPartition[partitionIndex + startPartitionIndex - 1];
++	const PxU32 endIndex = solverDesc->constraintsPerPartition[partitionIndex + startPartitionIndex];
++	const PxU32 globalThreadIdx = threadIdx.x + blockIdx.x * blockDim.x;
++	const PxU32 warpIndex = globalThreadIdx / 32;
++	const PxU32 threadIndexInWarp = threadIdx.x & 31;
++	const PxU32 batchIndex = startIndex + warpIndex;
++	if(batchIndex < endIndex)
++	{
++		const IterativeSolveData& iterativeData = sharedDesc->iterativeData;
++		const PxgBlockConstraintBatch& batch = iterativeData.blockConstraintBatch[batchIndex];
++		if(threadIndexInWarp < batch.mDescStride &&
++			batch.constraintType == PxgSolverConstraintDesc::eCONTACT)
++		{
++			PxReal curRef0 = 1.f;
++			PxReal curRef1 = 1.f;
++			const PxU32 bodyOffset = island.mBodyStartIndex;
++			const PxU32 numTotalBodies = bodyOffset + island.mBodyCount + island.mArticulationCount;
++			const PxU32 bodyA = batch.bodyAIndex[threadIndexInWarp];
++			const PxU32 bodyB = batch.bodyBIndex[threadIndexInWarp];
++			if(bodyA >= bodyOffset)
++				curRef0 = PxReal(countActiveSlabs(bodyA, solverDesc->numSlabs, numTotalBodies,
++					iterativeData.solverEncodedReferenceCount));
++			if(bodyB >= bodyOffset)
++				curRef1 = PxReal(countActiveSlabs(bodyB, solverDesc->numSlabs, numTotalBodies,
++					iterativeData.solverEncodedReferenceCount));
++			const PxU32 readIndex = batchIndex * 128 + threadIndexInWarp;
++			const float4 linVel0 = Pxldcg(iterativeData.solverBodyVelPool[readIndex]);
++			const float4 angVel0 = Pxldcg(iterativeData.solverBodyVelPool[readIndex + 32]);
++			const float4 linVel1 = Pxldcg(iterativeData.solverBodyVelPool[readIndex + 64]);
++			const float4 angVel1 = Pxldcg(iterativeData.solverBodyVelPool[readIndex + 96]);
++			PxVec3 lv0(linVel0.x, linVel0.y, linVel0.z);
++			PxVec3 av0(angVel0.x, angVel0.y, angVel0.z);
++			PxVec3 lv1(linVel1.x, linVel1.y, linVel1.z);
++			PxVec3 av1(angVel1.x, angVel1.y, angVel1.z);
++			solveContactBlock(batch, lv0, av0, lv1, av1, doFriction, threadIndexInWarp,
++				iterativeData.blockContactHeaders, iterativeData.blockFrictionHeaders,
++				iterativeData.blockContactPoints, iterativeData.blockFrictions, NULL, curRef0, curRef1);
++			const PxU32 indexA = ComputeBodyBatchStartIndex(batch.remappedBodyAIndex[threadIndexInWarp]);
++			const PxU32 indexB = ComputeBodyBatchStartIndex(batch.remappedBodyBIndex[threadIndexInWarp]);
++			Pxstcg(&iterativeData.solverBodyVelPool[indexA], make_float4(lv0.x, lv0.y, lv0.z, 0.f));
++			Pxstcg(&iterativeData.solverBodyVelPool[indexA + 32], make_float4(av0.x, av0.y, av0.z, 0.f));
++			Pxstcg(&iterativeData.solverBodyVelPool[indexB], make_float4(lv1.x, lv1.y, lv1.z, 0.f));
++			Pxstcg(&iterativeData.solverBodyVelPool[indexB + 32], make_float4(av1.x, av1.y, av1.z, 0.f));
++		}
++	}
++#else
+ 	const PxgIslandContext& island = solverDesc->islandContextPool[islandIndex];
+ 
+ 	const PxU32 startPartitionIndex = island.mStartPartitionIndex;
+@@ -526,6 +600,7 @@ void solveBlockPartition(
+ 	{
+ 		error.accumulateErrorGlobalFullWarp(solverDesc->contactErrorAccumulator, threadIndexInWarp);
+ 	}
++#endif
+ }
+ 
+ extern "C" __global__ void writebackBlocks(
+@@ -684,7 +759,25 @@ extern "C" __global__ void concludeBlocks(
+ extern "C" __global__ void writeBackBodies(
+ 	const PxgSolverCoreDesc* constraintPrepDesc,
+ 	const PxgSolverSharedDesc<IterativeSolveData>* sharedDesc, const PxU32 islandIndex)
+-{	
++{
++#if PX_CUMETAL
++	// Avoid staging device pointers and island metadata through threadgroup
++	// memory. Metal does not preserve CUDA's shared pointer semantics here,
++	// which left motionVelocityArray stale for dynamic/dynamic contacts.
++	const PxgIslandContext& island = constraintPrepDesc->islandContextPool[islandIndex];
++	const PxU32 localBodyIndex = threadIdx.x + blockIdx.x * blockDim.x;
++	if(localBodyIndex < island.mBodyCount)
++	{
++		const PxU32 bodyIndex = island.mBodyStartIndex + localBodyIndex;
++		const PxU32 totalBodyCount = constraintPrepDesc->numSolverBodies;
++		const PxU32 outputOffsetIndex = sharedDesc->deltaOutOffset;
++		float4* bodyVelocities = sharedDesc->iterativeData.solverBodyVelPool;
++		float4* motionVelocities = constraintPrepDesc->motionVelocityArray;
++		motionVelocities[bodyIndex] = bodyVelocities[bodyIndex + outputOffsetIndex];
++		motionVelocities[bodyIndex + totalBodyCount] =
++			bodyVelocities[bodyIndex + outputOffsetIndex + totalBodyCount];
++	}
++#else
+ 	__shared__ float4* bodyVelocities;
+ 	__shared__ float4* motionVelocities;
+ 	__shared__ PxU32 bodyStartIndex;
+@@ -716,12 +809,61 @@ extern "C" __global__ void writeBackBodies(
+ 		motionVelocities[a]						= bodyVelocities[a + outputOffsetIndex];		//Linear velocity
+ 		motionVelocities[a+totalBodyCount]		= bodyVelocities[a + outputOffsetIndex + totalBodyCount];	//Angular velocity stored after all linear velocities
+ 	}
++#endif
+ }
+ 
+ extern "C" __global__ void computeAverageSolverBodyVelocity(
+ 	const PxgSolverCoreDesc* const PX_RESTRICT solverDesc,
+ 	const PxgSolverSharedDesc<IterativeSolveData>* PX_RESTRICT sharedDesc)
+ {
++#if PX_CUMETAL
++	// Aggregate a body's slab contributions serially on one thread. This is the
++	// same sum/reference-count formulation as the CUDA sub-warp reduction below,
++	// without relying on multiple logical sub-warps sharing a Metal SIMD group.
++	const PxU32 bodyId = threadIdx.x + threadIdx.y * blockDim.x +
++		blockIdx.x * blockDim.x * blockDim.y;
++	const PxU32 totalBodyCount = solverDesc->islandContextPool->mBodyCount;
++	if(bodyId < totalBodyCount)
++	{
++		float4* bodyVelocities = sharedDesc->iterativeData.solverBodyVelPool;
++		const PxU32 bodyOffset = solverDesc->islandContextPool->mBodyStartIndex;
++		const PxU32 numSlabs = solverDesc->numSlabs;
++		const PxU32 deltaVOffset = solverDesc->accumulatedBodyDeltaVOffset;
++		const PxU32 averageOutputOffsets =
++			(solverDesc->numBatches + solverDesc->numArticBatches) * PXG_BATCH_SIZE * 4;
++		const PxU32 outputBody = deltaVOffset + bodyId + bodyOffset;
++		const float4 lastLinearVel = bodyVelocities[outputBody];
++		const float4 lastAngularVel = bodyVelocities[outputBody + totalBodyCount + bodyOffset];
++		float4 linDelta = make_float4(0.f);
++		float4 angDelta = make_float4(0.f);
++		bool hasRef = false;
++		for(PxU32 slab = 0; slab < numSlabs; ++slab)
++		{
++			const PxU32 bodyIndex = bodyId * numSlabs + slab;
++			const PxgSolverReferences reference = solverDesc->solverBodyReferences[bodyIndex];
++			if(reference.mRemappedBodyIndex != 0xFFFFFFFF)
++			{
++				const PxU32 velIndex = averageOutputOffsets + ComputeAverageBodyBatchStartIndex(bodyIndex);
++				linDelta += bodyVelocities[velIndex] - lastLinearVel;
++				angDelta += bodyVelocities[velIndex + 32] - lastAngularVel;
++				hasRef = true;
++			}
++		}
++		if(hasRef)
++		{
++			const PxU32 numTotalBodies = bodyOffset + totalBodyCount +
++				solverDesc->islandContextPool->mArticulationCount;
++			const PxU32 referenceCount = countActiveSlabs(bodyOffset + bodyId, numSlabs,
++				numTotalBodies, sharedDesc->iterativeData.solverEncodedReferenceCount);
++			const PxReal recipRefs = 1.f / PxReal(referenceCount);
++			bodyVelocities[outputBody] = lastLinearVel + linDelta * recipRefs;
++			bodyVelocities[outputBody + totalBodyCount + bodyOffset] =
++				lastAngularVel + angDelta * recipRefs;
++			resetSlabCount(bodyOffset + bodyId, numSlabs, numTotalBodies,
++				sharedDesc->iterativeData.solverEncodedReferenceCount);
++		}
++	}
++#else
+ 	//we need to fill in the writeIndex for the solver body data
+ 	const PxgSolverReferences* const PX_RESTRICT solverReferences = solverDesc->solverBodyReferences;
+ 	float4* bodyVelocities = sharedDesc->iterativeData.solverBodyVelPool;
+@@ -834,12 +976,37 @@ extern "C" __global__ void computeAverageSolverBodyVelocity(
+ 			}
+ 		}
+ 	}
++#endif
+ }
+ 
+ extern "C" __global__ void propagateSolverBodyVelocity(
+ 	const PxgSolverCoreDesc* solverDesc,
+ 	const PxgSolverSharedDesc<IterativeSolveData>* sharedDesc)
+ {
++#if PX_CUMETAL
++	const PxU32 bodyId = threadIdx.x + blockIdx.x * blockDim.x;
++	const PxU32 totalBodyCount = solverDesc->islandContextPool->mBodyCount;
++	if(bodyId < totalBodyCount)
++	{
++		float4* bodyVelocities = sharedDesc->iterativeData.solverBodyVelPool;
++		const PxU32 bodyOffset = solverDesc->islandContextPool->mBodyStartIndex;
++		const PxU32 outputBody = solverDesc->accumulatedBodyDeltaVOffset + bodyId + bodyOffset;
++		float4 linVel = bodyVelocities[outputBody];
++		const float4 angVel = bodyVelocities[outputBody + totalBodyCount + bodyOffset];
++		linVel.w = 0.f;
++		for(PxU32 slab = 0; slab < solverDesc->numSlabs; ++slab)
++		{
++			const PxU32 bodyIndex = bodyId * solverDesc->numSlabs + slab;
++			const PxU32 remappedBodyIndex = solverDesc->solverBodyReferences[bodyIndex].mRemappedBodyIndex;
++			if(remappedBodyIndex != 0xFFFFFFFF)
++			{
++				const PxU32 velIndex = ComputeBodyBatchStartIndex(remappedBodyIndex);
++				bodyVelocities[velIndex] = linVel;
++				bodyVelocities[velIndex + 32] = angVel;
++			}
++		}
++	}
++#else
+ 	//we need to fill in the writeIndex for the solver body data
+ 	PxgSolverReferences* solverReferences = solverDesc->solverBodyReferences;
+ 	float4* bodyVelocities = sharedDesc->iterativeData.solverBodyVelPool;
+@@ -887,6 +1054,7 @@ extern "C" __global__ void propagateSolverBodyVelocity(
+ 			}
+ 		}
+ 	}
++#endif
+ }
+ 
+ extern "C" __global__ void dmaBackChangedElems(const PxgSolverCoreDesc* solverDesc, Dy::ThresholdStreamElement* hostChangedElems)
+

@@ -2,6 +2,27 @@
 
 This log records progress and decisions for the PhysX GPU-on-CuMetal port.
 
+## 2026-07-22 — Selected stacked dynamic/dynamic contact batching
+
+- Added a deterministic `--stacked --bodies 2` scene in which the lower sphere
+  contacts the plane and the upper sphere contacts the lower dynamic body.
+- The upstream `solveBlockPartition` Metal pipeline aborted while compiling its
+  block-wide descriptor staging and articulation/joint branches. Patch 0012
+  keeps the prepared rigid-contact formulation but indexes its global velocity
+  slabs directly; unsupported branches remain explicit.
+- Found that `ZeroBodies` and `writeBackBodies` staged device pointers through
+  CUDA shared memory. On Metal, the stale slab velocities falsely warm-started
+  later frames and motion writeback was unreliable. Direct body/slab indexing
+  restores per-frame reset and position-iteration motion velocities.
+- Removed the prior CuMetal integration override that substituted final
+  velocity for every body in an island containing any static contact. That
+  island-wide test incorrectly affected the upper dynamic-only sphere.
+- The 30-step frictionless CPU/GPU maximum absolute difference is `5.46e-06`.
+  The frictional run is deterministic and remains within `3e-3` relative plus
+  `1e-5` absolute tolerance; the invalid one-body stacked form is rejected.
+  Larger stacks, multiple simultaneous dynamic contacts per body, and packed
+  general batching remain open.
+
 ## 2026-07-21 — Selected multibody static-contact batching
 
 - Extended the reduced snippet with `--bodies 1..16` while preserving the
