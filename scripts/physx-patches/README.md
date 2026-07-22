@@ -93,10 +93,17 @@ over 30 frictionless steps. General oriented-box stress cases and larger box
 stacks remain unverified.
 
 The fifteenth patch adds the upstream two-stage convex/convex GJK/EPA entries
-to the reproducible kernel manifest. Both canonical non-inline NVVM entries
-compile to validated metallibs through the typed CuMetal IR backend. This is a
-compiler and kernel-build claim only: no committed general convex-mesh scene
-gate exists yet, so general convex/convex runtime support remains unclaimed.
+to the reproducible kernel manifest. Stage 2 compiles from canonical non-inline
+NVVM through the typed CuMetal IR backend. Stage 1 remains on the explicit
+legacy PTX backend because typed generic-pointer legalization rejects conflicting
+address-space flow.
+
+The sixteenth patch adds a cooked six-vertex convex prism to the reduced
+snippet and selects typed CuMetal IR only for convex/convex stage 2. The
+30-step two-prism frictionless stack exercises both GJK/EPA stages, contact
+finalization, dynamic and static preparation/solve, writeback, and integration.
+CPU/GPU states stay within a documented 1% component-wise envelope; this is a
+selected topology and pair, not a general convex-mesh compatibility claim.
 
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
@@ -159,7 +166,7 @@ tests/conformance/run_physx_grb_multibody.sh
 ```
 
 Run the selected stacked dynamic/dynamic contact gate (frictional and
-frictionless spheres plus frictionless boxes):
+frictionless spheres plus frictionless boxes and convex prisms):
 
 ```bash
 tests/conformance/run_physx_grb_stacked.sh

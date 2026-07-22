@@ -9,6 +9,7 @@ STEPS="${CUMETAL_PHYSX_CONFORMANCE_STEPS:-30}"
 REL_TOL="${CUMETAL_PHYSX_REL_TOL:-1e-3}"
 FRICTION_REL_TOL="${CUMETAL_PHYSX_STACKED_FRICTION_REL_TOL:-3e-3}"
 BOX_REL_TOL="${CUMETAL_PHYSX_STACKED_BOX_REL_TOL:-2e-2}"
+CONVEX_REL_TOL="${CUMETAL_PHYSX_STACKED_CONVEX_REL_TOL:-1e-2}"
 ABS_TOL="${CUMETAL_PHYSX_ABS_TOL:-1e-5}"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
@@ -57,6 +58,11 @@ run_pair() {
     grep -Fq "CuMetal GRB geometry: ${geometry}" "${gpu_log}"
     if [[ "${geometry}" == "box" ]]; then
         grep -q 'kernel="boxBoxNphase_Kernel".*source=metallib.*device=apple_gpu.*launch_success=true' "${gpu_log}"
+    elif [[ "${geometry}" == "convex" ]]; then
+        grep -q 'kernel="convexConvexNphase_stage1Kernel".*source=metallib.*device=apple_gpu.*launch_success=true' "${gpu_log}"
+        grep -q 'kernel="convexConvexNphase_stage2Kernel".*source=metallib.*device=apple_gpu.*launch_success=true' "${gpu_log}"
+        grep -q 'kernel="finishContactsKernel".*source=metallib.*device=apple_gpu.*launch_success=true' "${gpu_log}"
+        grep -q 'kernel="convexPlaneNphase_Kernel".*source=metallib.*device=apple_gpu.*launch_success=true' "${gpu_log}"
     fi
     grep -q 'kernel="ZeroBodies".*source=metallib.*device=apple_gpu.*launch_success=true' "${gpu_log}"
     grep -q 'kernel="solveBlockPartition".*source=metallib.*device=apple_gpu.*launch_success=true' "${gpu_log}"
@@ -74,10 +80,11 @@ run_pair() {
 run_pair friction "${FRICTION_REL_TOL}"
 run_pair frictionless "${REL_TOL}"
 run_pair frictionless "${BOX_REL_TOL}" box
+run_pair frictionless "${CONVEX_REL_TOL}" convex
 
 if "${SNIPPET}" --cpu --stacked --bodies 1 --steps 1 >/dev/null 2>&1; then
     echo "FAIL: --stacked accepted fewer than two bodies"
     exit 1
 fi
 
-echo "PASS: PhysX stacked sphere and box dynamic/dynamic contacts match CPU"
+echo "PASS: PhysX stacked sphere, box, and convex dynamic/dynamic contacts match CPU"

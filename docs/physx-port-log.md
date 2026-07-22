@@ -416,10 +416,14 @@ report.
 - CuMetal now supplies the float overloads and lowers those integer calls with
   defined zero and two's-complement edge behavior. Focused tests cover the
   successful paths and reject malformed missing-argument calls.
-- The complete stage-2 kernel now produces a validated 624 KB production
-  metallib. A cooked triangular-prism stack reaches both upstream GJK/EPA
-  dispatches, but Apple's runtime pipeline compiler aborts on stage 2 with
-  `XPC_ERROR_CONNECTION_INTERRUPTED`; `-O3` did not reduce the artifact or
-  change the failure. Runtime convex/convex support therefore remains open,
-  with standalone PTX device-function lowering identified as the next route to
-  avoid the monolithic forced-inline kernel.
+- The original monolithic stage-2 artifact reached Apple's runtime pipeline
+  compiler limit. The selected six-vertex prism path now compiles stage 2
+  through the typed CuMetal IR backend while retaining stage 1 and contact
+  finishing on the migration backend.
+- Fixing PTX symbol ownership was also required: constant lookup tables had
+  been incorrectly rebound to threadgroup storage whenever a kernel declared
+  shared memory. The corrected lowering preserves constant and shared address
+  spaces, and the selected prism now produces three dynamic contacts and passes
+  the 30-step stacked CPU/GPU conformance gate at 1% relative tolerance.
+- This is selected convex/convex coverage, not general convex-mesh support;
+  broader hull shapes, batching, and stress cases remain open.

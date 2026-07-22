@@ -106,6 +106,12 @@ patch_marker_is_present() {
             grep -q 'cudaGJKEPA.cu|convexConvexNphase_stage2Kernel' \
                 "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
             ;;
+        0016-cumetal-grb-convex-convex.patch)
+            grep -q -- '--sphere|--box|--convex' \
+                "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp" &&
+                grep -q 'kernel_name STREQUAL "convexConvexNphase_stage2Kernel"' \
+                    "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
+            ;;
         *)
             return 1
             ;;

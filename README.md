@@ -282,17 +282,20 @@ negative control, and `conformance_physx_grb_multibody` checks two independent
 dynamic spheres across separately scheduled static-contact batches.
 `conformance_physx_grb_stacked` adds two vertically stacked dynamic spheres,
 checks frictional and frictionless CPU/GPU state agreement for 30 steps, adds
-a frictionless two-box stack through the box/box narrowphase kernel, and rejects
-a stacked scene with fewer than two bodies. `conformance_physx_grb_box` checks a
-unit box sliding on a plane for 30 steps through the convex/plane narrowphase
-kernel. The gates require Metal
+a frictionless two-box stack through the box/box narrowphase kernel, and adds a
+frictionless two-prism convex-mesh stack through GJK/EPA. The convex gate uses a
+separate 1% component-wise envelope because its largest CPU/GPU transient is an
+angular-velocity difference at step 5; final states are substantially closer.
+It also rejects a stacked scene with fewer than two bodies.
+`conformance_physx_grb_box` checks a unit box sliding on a plane for 30 steps
+through the convex/plane narrowphase kernel. The gates require Metal
 narrowphase, constraint preparation, dynamic and static solve, writeback, and
 integration provenance. These remain deliberately selected shape paths;
-the 87-entry build manifest now also compiles and validates the upstream
-two-stage convex/convex GJK/EPA kernels through typed CuMetal IR, but no
-committed general convex-mesh scene gate exists yet. General convex meshes,
-larger stacks, and general batching therefore remain outside the runtime
-claim. See `docs/known-gaps.md`.
+the 87-entry build manifest compiles convex/convex stage 2 through typed CuMetal
+IR, while stage 1 and contact finalization still use the explicit legacy PTX
+backend. General convex meshes, arbitrary orientations and topology, larger
+stacks, and general batching therefore remain outside the runtime claim. See
+`docs/known-gaps.md`.
 
 Known limitations
 -----------------

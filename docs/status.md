@@ -267,10 +267,10 @@ Implemented:
     static shared-memory byte requirements,
     Driver contexts are thread-local, and native `MTLBuffer.gpuAddress`
     allocation mode supports nested device pointers in PhysX descriptors
-  - the 87-entry selected rigid PGS manifest also compiles both upstream
-    convex/convex GJK/EPA stages from canonical non-inline NVVM through typed
-    CuMetal IR; general convex-mesh runtime support remains gated on a committed
-    end-to-end CPU/GPU scene rather than compilation alone
+  - the 87-entry selected rigid PGS manifest compiles convex/convex GJK/EPA
+    stage 2 from canonical non-inline NVVM through typed CuMetal IR; stage 1
+    remains on the explicit legacy PTX backend because typed generic-pointer
+    legalization rejects conflicting address-space flow
   - `conformance_physx_grb` compares CPU and GPU transforms for 30 resting
     contact steps at `1e-3` relative tolerance and requires Apple-GPU
     provenance through sphere narrowphase, contact pre-prep/prep, static
@@ -286,8 +286,10 @@ Implemented:
   - `conformance_physx_grb_stacked` runs one selected sphere/sphere dynamic
     contact above the plane for 30 frictional and frictionless steps, requires
     dynamic solve, slab reset, motion-writeback, and integration provenance,
-    and rejects a one-body stacked scene; larger stacks and general batching
-    remain open
+    adds selected box/box and six-vertex convex/convex frictionless stacks, and
+    rejects a one-body stacked scene; the convex gate uses a documented 1%
+    component-wise envelope, while larger stacks, general convex topology, and
+    general batching remain open
   - expanded PTX sweep harness (`tests/ptx_sweep`) for strict-mode supported/unsupported opcode checks
   - initial `intrinsic_lower` pass for thread-index/barrier/basic-math mappings
   - initial `printf_lower` pass for PTX `printf`/`vprintf` call extraction and format-table metadata

@@ -78,21 +78,31 @@ as gaps have been closed.
   frictionless CPU/GPU transforms agree after fixing entry-specific aligned
   static shared-memory layout. Patch 0014 adds `boxBoxNphase_Kernel`; a selected
   two-unit-box stack matches CPU body states for 30 frictionless steps after
-  forcing viable CUDA device calls to inline. General convex meshes, general
-  convex/convex pairs, triangle meshes, heightfields, and SDF collisions remain
-  unsupported or unverified.
+  forcing viable CUDA device calls to inline. Patch 0016 adds one cooked
+  six-vertex prism topology and verifies one selected dynamic convex/convex pair
+  above the convex/plane contact over 30 frictionless steps. The gate requires
+  both GJK/EPA stages, contact finalization, dynamic/static preparation and
+  solve, writeback, and integration to dispatch as production Metal kernels;
+  CPU/GPU states stay within 1% component-wise, with the largest transient in
+  angular velocity at step 5. Arbitrary convex topology/orientation, multiple
+  simultaneous convex pairs, triangle meshes, heightfields, and SDF collisions
+  remain unsupported or unverified.
   The 60-step friction gate is repeatable, but its `3e-3` relative plus `1e-5`
   absolute tolerance is not evidence of general FP determinism. Metal fast-math defaults,
   contraction choices, and long chaotic-scene divergence remain unverified and require a
   dedicated strict-math/contraction matrix plus long-horizon conformance.
-  Both upstream GJK/EPA convex/convex stages now compile from canonical
-  non-inline CUDA/NVVM to validated metallibs. The typed backend structures the
+  Convex/convex stage 2 compiles from canonical non-inline CUDA/NVVM to a
+  validated metallib through typed CuMetal IR. Stage 1 still uses the explicit
+  legacy CUDA-to-PTX backend because typed generic-pointer legalization reports
+  a conflicting concrete address space. The typed backend structures the
   nested natural loops, preserves values across loop exits, specializes helper
   calls selected by mixed CUDA address-space PHIs, threads static shared globals
   through reachable helpers, emits value-returning device calls, and performs
   byte offsets through byte pointers rather than scaled aggregate pointers. A
-  direct selected-contact probe produces a finite three-point manifold, but no
-  committed end-to-end general convex-mesh CPU/GPU gate exists yet. General
+  selected six-vertex prism scene produces a finite three-point manifold and
+  passes the committed 30-step two-body gate. Contact finalization currently
+  uses legacy PTX lowering; its mixed static-shared/constant-symbol address bug
+  is covered by positive and undeclared-symbol negative tests. General
   convex/convex runtime support is therefore still not claimed.
 
 ## .cu / cumetalc frontend limitations
