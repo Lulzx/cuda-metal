@@ -25,7 +25,14 @@ as gaps have been closed.
 - Grid-wide cooperative sync (`this_grid().sync()`): a no-op on Metal (no cross-threadgroup
   barrier). A multi-block `cudaLaunchCooperativeKernel` / `cuLaunchCooperativeKernel` now prints
   a one-time `CUMETAL WARNING` so code that depends on grid-wide sync for correctness is not
-  silently wrong. Single-block launches are safe (block-scoped CG works).
+  silently wrong. Single-block launches are safe (block-scoped CG works). The tractable general
+  implementation is typed-IR kernel fission: split at each grid-sync point, materialize values
+  live across the split in device storage, and submit the phases as ordered Metal dispatches.
+  Persistent-threadgroup barriers are not a correctness strategy because Metal does not
+  guarantee that every threadgroup in a grid is resident concurrently. PhysX 5.6.1 does not use
+  cooperative groups or cooperative launch; its iterative TGS solver already expresses phase
+  boundaries as separate host-side kernel launches, so this gap is not on the current PhysX
+  rigid-solver critical path.
 - FP64: `--fp64=emulate` (Dekker single-double via FP32 pairs, ~44-bit mantissa) is only
   activated for name-matched kernels (`*fp64*{mul,fma,add}*` etc.). Arbitrary `.f64` PTX
   streams fall back to native (which is rejected at Metal pipeline create time on current
@@ -74,6 +81,10 @@ as gaps have been closed.
   forcing viable CUDA device calls to inline. General convex meshes, general
   convex/convex pairs, triangle meshes, heightfields, and SDF collisions remain
   unsupported or unverified.
+  The 60-step friction gate is repeatable, but its `3e-3` relative plus `1e-5`
+  absolute tolerance is not evidence of general FP determinism. Metal fast-math defaults,
+  contraction choices, and long chaotic-scene divergence remain unverified and require a
+  dedicated strict-math/contraction matrix plus long-horizon conformance.
   The first upstream GJK/EPA convex/convex stage executes on Apple GPU. The
   canonical non-inline CUDA/NVVM path now imports the second stage and its
   reachable device-call closure, lowers its noncanonical CFG through typed MSL,

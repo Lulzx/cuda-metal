@@ -2,6 +2,23 @@
 
 This log records progress and decisions for the PhysX GPU-on-CuMetal port.
 
+## 2026-07-22 — Scaling synchronization and determinism audit
+
+- Rechecked all PhysX 5.6.1 GPU sources for `cooperative_groups`, `grid_group`,
+  `this_grid()`, and Runtime/Driver cooperative launch calls; there are no hits.
+  The TGS solver's iterative phases are explicit host-side loops that submit
+  partition solve, average-velocity, static propagation, articulation, conclude,
+  and writeback kernels in stream order. CuMetal's unsupported grid-wide barrier
+  is therefore a general CUDA gap, not the current PhysX scaling boundary.
+- The correctness architecture for a future general grid barrier is typed-IR
+  kernel fission with device-backed live-state carry and ordered dispatches.
+  Persistent-threadgroup barriers are excluded because Metal scheduling does not
+  guarantee simultaneous residency of every threadgroup.
+- The existing friction result is deterministic across repeated 60-step runs,
+  but its `3e-3` relative plus `1e-5` absolute gate does not establish general
+  floating-point determinism. Strict/relaxed Metal math modes, FMA contraction,
+  and long chaotic-scene divergence remain explicit conformance work.
+
 ## 2026-07-22 — Selected four-point box/plane contacts
 
 - Added `convexPlaneNphase_Kernel` as the 84th reduced manifest entry and

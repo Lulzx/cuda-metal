@@ -297,7 +297,9 @@ Known limitations
 - **Dynamic parallelism**: compile-time error (spec §2.2)
 - **Multi-GPU**: single GPU on Apple Silicon; peer APIs return appropriate errors
 - **Graphics interop** (OpenGL/Vulkan): non-goal (spec §2.2)
-- **`grid_group::sync()`**: no-op stub; Metal has no cross-threadgroup barrier
+- **`grid_group::sync()`**: no-op stub; Metal has no cross-threadgroup barrier. A
+  general implementation requires typed-IR kernel fission into ordered dispatches;
+  PhysX 5.6.1 does not call this API and already launches its TGS phases separately
 - **Warp partial-mask**: vote/ballot and shuffle membership are honored; `__syncwarp`
   uses SIMD-group scope and divergent lower/upper half-warp ordering is GPU-tested
   (spec §5.3)
