@@ -58,6 +58,13 @@ Post-Phase 5 work completed:
   reduced it from 290.24 s. The 16-token correctness/provenance gate now
   completes in 2 s. Full parsing is retained for actual kernel lowering.
 
+- **Native FP16 `cublasGemmEx` library lowering**: all-FP16 GEMM with FP16
+  compute now binds the tracked CUDA allocations directly as `MPSMatrix`
+  operands instead of allocating and filling FP32 copies on the CPU. On the
+  SmolLM2 NGL=1 gate this moves the 49,152×576 output projection to Apple GPU:
+  the five-run warm median is 0.57 s for one token and 0.61 s for the 16-token
+  coherence gate; generation rose from 8.1 to 279.2 tokens/s median (five runs).
+
 - **MTLHeap auto-threshold**: MTLHeap sub-allocation now auto-enabled for allocations ≥ 4 MiB
   (configurable via `CUMETAL_MTLHEAP_THRESHOLD_BYTES`). Three modes:
   - `CUMETAL_MTLHEAP_ALLOC` unset → auto (heap for size ≥ threshold, default 4 MiB)
@@ -80,10 +87,11 @@ Post-Phase 5 work completed (continued, part 2):
 - **cuBLAS extended APIs** (`runtime/rt/cublas.cpp`, `runtime/api/cublas_v2.h`):
   Added `cudaDataType_t`, `cublasDiagType_t`, `cublasSideMode_t`, `cublasGemmAlgo_t` enums.
   New functions:
-  - `cublasGemmEx` — extended GEMM: routes CUDA_R_32F → cublasSgemm, CUDA_R_64F → cublasDgemm,
-    FP16/mixed types via scalar upconvert loop.
+  - `cublasGemmEx` — extended GEMM: routes CUDA_R_32F → cublasSgemm,
+    CUDA_R_64F → cublasDgemm, all-FP16/FP16-compute directly to MPS, and other
+    mixed types through the FP32 conversion path.
   - `cublasGemmStridedBatchedEx` — batched strided GemmEx; routes fp32/fp64 to typed variants.
-  - `cublasHgemm` — half-precision GEMM via upconvert to float through GemmEx.
+  - `cublasHgemm` — half-precision GEMM through the native FP16 GemmEx path.
   - `cublasSgemmBatched` / `cublasDgemmBatched` — array-of-pointers batched GEMM.
   - `cublasStrsm` / `cublasDtrsm` — triangular solve (BLAS3); supports LEFT/RIGHT side,
     UPPER/LOWER fill, N/T/C transpose, UNIT/NON_UNIT diagonal, alpha scaling.

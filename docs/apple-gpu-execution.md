@@ -103,14 +103,22 @@ approximate registered kernels unless `CUMETAL_ENABLE_APPROX_KERNELS=1` is set.
 
 ## cuBLAS and Metal backend changes
 
-Mixed-precision `cublasGemmEx` now honors the selected CUDA stream and waits for
-the Metal/MPS result before host-side conversion or reuse. Tests cover the exact
-SmolLM2 output-head dimensions:
+All-FP16 `cublasGemmEx` with FP16 compute now lowers directly to an
+`MPSMatrixMultiplication` over the tracked Metal buffers. Other mixed-type
+combinations retain the FP32 conversion path. The implementation waits for
+producer work before the library substitution and for the Metal/MPS result
+before host-side conversion or reuse. Tests cover the exact SmolLM2 output-head
+dimensions:
 
 - Q8_0 dequantization of 28,311,552 weights;
 - f32-to-f16 conversion of a 576-element activation;
 - a `49152 x 1 x 576` mixed GEMM;
 - f16-to-f32 conversion of 49,152 logits.
+
+This removes the previous per-token CPU expansion of 28,311,552 FP16 weights.
+On Apple M4 Pro, five warm NGL=1 runs measured a 0.57 s median for the one-token
+gate and 0.61 s for the full 16-token coherence gate; generation improved from
+8.1 to 279.2 tokens/s median.
 
 `CUMETAL_CUBLAS_CPU_REFERENCE=1` is an opt-in diagnostic oracle used to separate
 GEMM errors from surrounding kernel/scheduling errors. It is not enabled by

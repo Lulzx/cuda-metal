@@ -1040,6 +1040,145 @@ cudaError_t gemm_f32(bool transa,
     }
 }
 
+cudaError_t gemm_f16(bool transa,
+                     bool transb,
+                     int m,
+                     int n,
+                     int k,
+                     float alpha,
+                     const std::shared_ptr<Buffer>& a_buffer,
+                     std::size_t a_offset_bytes,
+                     int lda,
+                     const std::shared_ptr<Buffer>& b_buffer,
+                     std::size_t b_offset_bytes,
+                     int ldb,
+                     float beta,
+                     const std::shared_ptr<Buffer>& c_buffer,
+                     std::size_t c_offset_bytes,
+                     int ldc,
+                     const std::shared_ptr<Stream>& stream,
+                     std::string* error_message) {
+    if (m < 0 || n < 0 || k < 0 || lda <= 0 || ldb <= 0 || ldc <= 0 ||
+        a_buffer == nullptr || b_buffer == nullptr || c_buffer == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "gemm_f16 invalid argument";
+        }
+        return cudaErrorInvalidValue;
+    }
+    if (m == 0 || n == 0 || k == 0) {
+        return cudaSuccess;
+    }
+    if (!ensure_initialized(error_message)) {
+        return cudaErrorInitializationError;
+    }
+
+    auto* a_impl = dynamic_cast<BufferImpl*>(a_buffer.get());
+    auto* b_impl = dynamic_cast<BufferImpl*>(b_buffer.get());
+    auto* c_impl = dynamic_cast<BufferImpl*>(c_buffer.get());
+    if (a_impl == nullptr || b_impl == nullptr || c_impl == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "gemm_f16 unexpected buffer type";
+        }
+        return cudaErrorInvalidValue;
+    }
+
+    constexpr std::size_t element_bytes = sizeof(std::uint16_t);
+    const std::size_t a_cols = static_cast<std::size_t>(transa ? m : k);
+    const std::size_t b_cols = static_cast<std::size_t>(transb ? k : n);
+    const std::size_t c_cols = static_cast<std::size_t>(n);
+    const std::size_t a_span = static_cast<std::size_t>(lda) * a_cols * element_bytes;
+    const std::size_t b_span = static_cast<std::size_t>(ldb) * b_cols * element_bytes;
+    const std::size_t c_span = static_cast<std::size_t>(ldc) * c_cols * element_bytes;
+    if (!checked_matrix_span_bytes(a_offset_bytes, a_span, a_impl->length(), "A", error_message) ||
+        !checked_matrix_span_bytes(b_offset_bytes, b_span, b_impl->length(), "B", error_message) ||
+        !checked_matrix_span_bytes(c_offset_bytes, c_span, c_impl->length(), "C", error_message)) {
+        return cudaErrorInvalidValue;
+    }
+
+    std::shared_ptr<StreamImpl> stream_impl;
+    id<MTLCommandQueue> queue = nil;
+    const cudaError_t queue_status =
+        resolve_queue_for_stream(stream, &stream_impl, &queue, error_message);
+    if (queue_status != cudaSuccess) {
+        return queue_status;
+    }
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+        if (command_buffer == nil) {
+            if (error_message != nullptr) {
+                *error_message = "gemm_f16 failed to create command buffer";
+            }
+            return cudaErrorUnknown;
+        }
+
+        const NSUInteger left_rows = static_cast<NSUInteger>(b_cols);
+        const NSUInteger left_cols = static_cast<NSUInteger>(transb ? n : k);
+        const NSUInteger right_rows = static_cast<NSUInteger>(a_cols);
+        const NSUInteger right_cols = static_cast<NSUInteger>(transa ? k : m);
+        const NSUInteger result_rows = static_cast<NSUInteger>(n);
+        const NSUInteger result_cols = static_cast<NSUInteger>(m);
+        const NSUInteger interior_cols = static_cast<NSUInteger>(k);
+
+        MPSMatrixDescriptor* left_desc =
+            [MPSMatrixDescriptor matrixDescriptorWithRows:left_rows
+                                                  columns:left_cols
+                                                 rowBytes:static_cast<NSUInteger>(ldb) * element_bytes
+                                                 dataType:MPSDataTypeFloat16];
+        MPSMatrixDescriptor* right_desc =
+            [MPSMatrixDescriptor matrixDescriptorWithRows:right_rows
+                                                  columns:right_cols
+                                                 rowBytes:static_cast<NSUInteger>(lda) * element_bytes
+                                                 dataType:MPSDataTypeFloat16];
+        MPSMatrixDescriptor* result_desc =
+            [MPSMatrixDescriptor matrixDescriptorWithRows:result_rows
+                                                  columns:result_cols
+                                                 rowBytes:static_cast<NSUInteger>(ldc) * element_bytes
+                                                 dataType:MPSDataTypeFloat16];
+
+        MPSMatrix* left = [[MPSMatrix alloc]
+            initWithBuffer:b_impl->handle()
+                     offset:static_cast<NSUInteger>(b_offset_bytes)
+                 descriptor:left_desc];
+        MPSMatrix* right = [[MPSMatrix alloc]
+            initWithBuffer:a_impl->handle()
+                     offset:static_cast<NSUInteger>(a_offset_bytes)
+                 descriptor:right_desc];
+        MPSMatrix* result = [[MPSMatrix alloc]
+            initWithBuffer:c_impl->handle()
+                     offset:static_cast<NSUInteger>(c_offset_bytes)
+                 descriptor:result_desc];
+
+        MPSMatrixMultiplication* op = [[MPSMatrixMultiplication alloc]
+            initWithDevice:state().device
+             transposeLeft:(transb ? YES : NO)
+            transposeRight:(transa ? YES : NO)
+               resultRows:result_rows
+            resultColumns:result_cols
+          interiorColumns:interior_cols
+                     alpha:static_cast<double>(alpha)
+                      beta:static_cast<double>(beta)];
+        if (op == nil) {
+            if (error_message != nullptr) {
+                *error_message = "gemm_f16 failed to create MPSMatrixMultiplication";
+            }
+            return cudaErrorUnknown;
+        }
+
+        [op encodeToCommandBuffer:command_buffer
+                       leftMatrix:left
+                      rightMatrix:right
+                     resultMatrix:result];
+        [command_buffer commit];
+        if (stream_impl != nullptr) {
+            stream_impl->add_pending(command_buffer);
+            return cudaSuccess;
+        }
+        [command_buffer waitUntilCompleted];
+        return check_command_buffer_status(command_buffer, error_message);
+    }
+}
+
 cudaError_t gemm_strided_batched_f32(bool transa,
                                      bool transb,
                                      int m,

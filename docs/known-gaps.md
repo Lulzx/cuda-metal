@@ -138,13 +138,16 @@ as gaps have been closed.
   - Stock CPU llama.cpp (no CuMetal): `Paris.` ✅
   - llama.cpp linked against libcumetal, **NGL=0**: `Paris.` ✅
   - llama.cpp linked against libcumetal, **NGL=1**: `The capital of France is
-    Paris.` ✅ at 8.1 tokens/s generation on Apple M4 Pro. Registered launches
+    Paris.` ✅ at 279.2 tokens/s median generation across five warm runs on
+    Apple M4 Pro (223.2–307.7 tokens/s observed). Registered launches
     use the correctness-first synchronization policy described above; enabling
     experimental asynchronous registered launches reproduces incoherent output.
   - Registration builds the linear PTX entry-signature ABI index lazily, only
     when a kernel from that fatbinary module is launched. This avoids parsing
     thousands of unused GGML kernels and reduced the covered one-layer,
-    one-token run from 8.20 s to 1.00 s (8.2×) on Apple M4 Pro; the earlier
+    one-token run from 8.20 s to 1.00 s on Apple M4 Pro; native FP16
+    `cublasGemmEx` lowering further reduces the five-run warm median to 0.57 s
+    and the 16-token gate to 0.61 s. The earlier
     linear-scanner change had already reduced it from 290.24 s. Actual kernel
     lowering retains the full parser. Unannotated 64-bit PTX parameters remain
     conservatively pointer-classified, with the existing allocation-aware

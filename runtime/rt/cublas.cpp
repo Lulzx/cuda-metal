@@ -1554,6 +1554,44 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
     const float alpha_f = read_f32(alpha, 0, alpha_type);
     const float beta_f  = read_f32(beta,  0, beta_type);
 
+    // Native FP16 library lowering. GGML's llama output projection uses
+    // half A^T x half B -> half C; expanding its 49k x 576 weights to FP32 on
+    // the CPU for every token dominates the one-layer workload. MPS accepts
+    // FP16 matrices directly and accumulates the multiplication on Apple GPU.
+    if (atype == CUDA_R_16F && btype == CUDA_R_16F && ctype == CUDA_R_16F &&
+        compute_type == CUBLAS_COMPUTE_16F) {
+        const int a_rows = (transa == CUBLAS_OP_N) ? m : k;
+        const int b_rows = (transb == CUBLAS_OP_N) ? k : n;
+        if (lda < std::max(a_rows, 1) || ldb < std::max(b_rows, 1) ||
+            ldc < std::max(m, 1)) {
+            return CUBLAS_STATUS_INVALID_VALUE;
+        }
+
+        cumetal::rt::AllocationTable::ResolvedAllocation a_resolved;
+        cumetal::rt::AllocationTable::ResolvedAllocation b_resolved;
+        cumetal::rt::AllocationTable::ResolvedAllocation c_resolved;
+        if (!cumetal::rt::resolve_allocation_for_pointer(a, &a_resolved) ||
+            !cumetal::rt::resolve_allocation_for_pointer(b, &b_resolved) ||
+            !cumetal::rt::resolve_allocation_for_pointer(c, &c_resolved)) {
+            return CUBLAS_STATUS_INVALID_VALUE;
+        }
+
+        std::string error;
+        const cudaError_t gemm_status = cumetal::metal_backend::gemm_f16(
+            transa != CUBLAS_OP_N, transb != CUBLAS_OP_N, m, n, k,
+            alpha_f, a_resolved.buffer, a_resolved.offset, lda,
+            b_resolved.buffer, b_resolved.offset, ldb,
+            beta_f, c_resolved.buffer, c_resolved.offset, ldc,
+            nullptr, &error);
+        if (gemm_status != cudaSuccess && debug_cublas_enabled()) {
+            std::fprintf(stderr,
+                         "CUMETAL_DEBUG_CUBLAS: native FP16 GemmEx failed "
+                         "m=%d n=%d k=%d msg=%s\n",
+                         m, n, k, error.c_str());
+        }
+        return map_cuda_status_to_cublas(gemm_status);
+    }
+
     // GPU-accelerated path: upconvert FP16/BF16 → FP32 on CPU (fast on Apple
     // Silicon UMA shared memory), run Metal GPU GEMM (cublasSgemm), then
     // downconvert FP32 → FP16/BF16 if the output type requires it.

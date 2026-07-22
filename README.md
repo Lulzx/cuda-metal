@@ -218,16 +218,21 @@ Measured on SmolLM2-135M, greedy decode of "The capital of France is":
 - Stock CPU llama.cpp → `Paris.` ✅
 - llama.cpp via libcumetal (NGL=0) → `Paris.` ✅
 - llama.cpp via libcumetal (NGL=1) → `The capital of France is Paris.` ✅
-  (Apple M4 Pro, 8.1 tokens/s generation in the latest verified run)
+  (Apple M4 Pro, 279.2 tokens/s median generation across five warm runs;
+  observed range 223.2–307.7 tokens/s)
 
 Binary-shim startup records kernels cheaply and builds a module's linear PTX
 entry-signature ABI index only when one of its kernels is actually launched.
 This avoids scanning thousands of GGML kernels that llama.cpp registers but does
 not use in the one-layer test. On the same Apple M4 Pro, the one-layer,
-one-token workload fell from 8.20 s to 1.00 s wall-clock (8.2× faster), and the
-full 16-token coherence gate fell from 9 s to 2 s. Combined with the earlier
-linear scanner work, the one-token path is down from 290.24 s to 1.00 s. Full
-PTX parsing still occurs when a kernel actually needs lowering.
+one-token workload first fell from 8.20 s to 1.00 s wall-clock. Native FP16
+`cublasGemmEx` lowering through Metal Performance Shaders then reduced the
+five-run warm median to 0.57 s and the full 16-token coherence gate from 2 s to
+0.61 s. Generation improved from 8.1 to a 279.2 tokens/s median because the
+49,152×576 output projection no longer expands its FP16 weights to FP32 on the
+CPU for every token. Combined with the earlier linear scanner work, the
+one-token path is down from 290.24 s to 0.57 s. Full PTX parsing still occurs
+when a kernel actually needs lowering.
 
 Registered fatbinary launches are conservatively synchronized by default because
 the experimental asynchronous path can violate ordering when GGML uses adjacent

@@ -162,7 +162,7 @@ int main() {
         for (int i = 0; i < 4; ++i) {
             h_a[i] = static_cast<__half>(fa[i]);
             h_b[i] = static_cast<__half>(fb[i]);
-            h_c[i] = static_cast<__half>(0.f);
+            h_c[i] = static_cast<__half>(1.f);
         }
 
         void *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
@@ -174,7 +174,7 @@ int main() {
         std::memcpy(d_c, h_c, 4 * sizeof(__half));
 
         const __half alpha = static_cast<__half>(1.f);
-        const __half beta  = static_cast<__half>(0.f);
+        const __half beta  = static_cast<__half>(0.5f);
         const cublasStatus_t st = cublasHgemm(
             handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K,
             &alpha,
@@ -186,11 +186,11 @@ int main() {
 
         const __half* res = static_cast<const __half*>(d_c);
         // Allow a bit more tolerance for fp16.
-        if (!expect(near_f(static_cast<float>(res[0]), 1.f, 1e-2f) &&
-                    near_f(static_cast<float>(res[1]), 3.f, 1e-2f) &&
-                    near_f(static_cast<float>(res[2]), 2.f, 1e-2f) &&
-                    near_f(static_cast<float>(res[3]), 4.f, 1e-2f),
-                    "Hgemm result")) return 1;
+        if (!expect(near_f(static_cast<float>(res[0]), 1.5f, 1e-2f) &&
+                    near_f(static_cast<float>(res[1]), 3.5f, 1e-2f) &&
+                    near_f(static_cast<float>(res[2]), 2.5f, 1e-2f) &&
+                    near_f(static_cast<float>(res[3]), 4.5f, 1e-2f),
+                    "Hgemm alpha/beta result")) return 1;
 
         cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
     }
