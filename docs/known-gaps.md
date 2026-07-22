@@ -74,6 +74,12 @@ as gaps have been closed.
   forcing viable CUDA device calls to inline. General convex meshes, general
   convex/convex pairs, triangle meshes, heightfields, and SDF collisions remain
   unsupported or unverified.
+  The two upstream GJK/EPA convex/convex kernels now compile to production
+  metallibs after adding CUDA float math overloads and libdevice integer
+  `abs`/`clz` lowering. The first stage executes on Apple GPU, but Metal's
+  pipeline compiler currently aborts while specializing the 624 KB forced-inline
+  second stage (`XPC_ERROR_CONNECTION_INTERRUPTED`), so convex/convex runtime
+  support is not yet claimed.
 
 ## .cu / cumetalc frontend limitations
 - `cumetalc --cuda-device` is the real source frontend for project-scale CUDA:
@@ -147,12 +153,13 @@ as gaps have been closed.
     Apple M4 Pro (223.2–307.7 tokens/s observed). Registered launches
     use the correctness-first synchronization policy described above; enabling
     experimental asynchronous registered launches reproduces incoherent output.
-  - Registration builds the linear PTX entry-signature ABI index lazily, only
-    when a kernel from that fatbinary module is launched. This avoids parsing
-    thousands of unused GGML kernels and reduced the covered one-layer,
+  - Registration resolves only the launched PTX entry signature, avoiding ABI
+    metadata allocation for thousands of unused GGML kernels. This reduced the covered one-layer,
     one-token run from 8.20 s to 1.00 s on Apple M4 Pro; native FP16
-    `cublasGemmEx` lowering further reduces the five-run warm median to 0.57 s
-    and the 16-token gate to 0.61 s. The earlier
+    `cublasGemmEx` lowering further reduced the five-run warm median to 0.57 s
+    and the 16-token gate to 0.61 s. Memoized streaming cache keys and targeted
+    ABI resolution subsequently reduced the controlled 16-token warm median
+    from 0.60 s to 0.575 s (about 4.2% versus `a41b4e5`). The earlier
     linear-scanner change had already reduced it from 290.24 s. Actual kernel
     lowering retains the full parser. Unannotated 64-bit PTX parameters remain
     conservatively pointer-classified, with the existing allocation-aware

@@ -22,6 +22,9 @@ int main() {
 .address_size 64
 // .entry comment_only(.param .u64 wrong)
 .file 1 ".entry string_only(.param .u64 wrong)"
+/*
+.entry block_comment_only(.param .u64 wrong)
+*/
 .visible .entry pointer_scalar(
     .param .u64 .ptr .global .align 16 pointer_scalar_param_0,
     .param .u32 pointer_scalar_param_1,
@@ -64,6 +67,24 @@ int main() {
         return 1;
     }
 
+    std::vector<cumetalKernelArgInfo_t> selected;
+    if (!cumetal::registration::find_arg_info_for_ptx_entry(
+            fixture, "legacy_unqualified", &selected) ||
+        selected.size() != 3 ||
+        !check_arg(selected, 0, CUMETAL_ARG_BUFFER, sizeof(void*)) ||
+        !check_arg(selected, 1, CUMETAL_ARG_BYTES, 8) ||
+        cumetal::registration::find_arg_info_for_ptx_entry(
+            fixture, "comment_only", &selected) ||
+        cumetal::registration::find_arg_info_for_ptx_entry(
+            fixture, "string_only", &selected) ||
+        cumetal::registration::find_arg_info_for_ptx_entry(
+            fixture, "block_comment_only", &selected) ||
+        cumetal::registration::find_arg_info_for_ptx_entry(
+            fixture, "missing", &selected)) {
+        std::fprintf(stderr, "FAIL: targeted PTX entry ABI scan mismatch\n");
+        return 1;
+    }
+
     std::string large;
     constexpr int kEntries = 5000;
     large.reserve(static_cast<std::size_t>(kEntries) * 160);
@@ -87,8 +108,21 @@ int main() {
         return 1;
     }
 
-    std::printf("PASS: scanned %d PTX entry ABIs in %lld ms\n",
+    const auto targeted_start = std::chrono::steady_clock::now();
+    if (!cumetal::registration::find_arg_info_for_ptx_entry(
+            large, "kernel_4999", &selected) ||
+        selected.size() != 2 ||
+        !check_arg(selected, 0, CUMETAL_ARG_BUFFER, sizeof(void*)) ||
+        !check_arg(selected, 1, CUMETAL_ARG_BYTES, 4)) {
+        std::fprintf(stderr, "FAIL: targeted large PTX ABI scan mismatch\n");
+        return 1;
+    }
+    const auto targeted_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - targeted_start);
+
+    std::printf("PASS: scanned %d PTX entry ABIs in %lld ms; targeted last entry in %lld ms\n",
                 kEntries,
-                static_cast<long long>(elapsed.count()));
+                static_cast<long long>(elapsed.count()),
+                static_cast<long long>(targeted_elapsed.count()));
     return 0;
 }

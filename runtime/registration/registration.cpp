@@ -19,6 +19,7 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -63,10 +64,12 @@ std::string registration_lowering_policy() {
     return policy;
 }
 
-std::uint64_t fnv1a64_registration(const std::uint8_t* bytes, std::size_t size) {
-    constexpr std::uint64_t kOffset = 1469598103934665603ull;
+constexpr std::uint64_t kFnv1a64Offset = 1469598103934665603ull;
+
+std::uint64_t fnv1a64_registration_update(std::uint64_t hash,
+                                          const std::uint8_t* bytes,
+                                          std::size_t size) {
     constexpr std::uint64_t kPrime  = 1099511628211ull;
-    std::uint64_t hash = kOffset;
     for (std::size_t i = 0; i < size; ++i) {
         hash ^= static_cast<std::uint64_t>(bytes[i]);
         hash *= kPrime;
@@ -74,24 +77,33 @@ std::uint64_t fnv1a64_registration(const std::uint8_t* bytes, std::size_t size) 
     return hash;
 }
 
-std::string jit_cache_key(const std::string& ptx_source, const std::string& kernel_name) {
-    // Include an explicit schema so changes to lowering semantics or emitted
-    // provenance cannot silently reuse stale MSL from an older CuMetal build.
-    std::string blob;
+std::uint64_t jit_cache_prefix_hash(const std::string& ptx_source) {
+    // Hash incrementally instead of materializing another full-sized PTX blob.
+    // GGML modules can exceed 10 MiB, and several kernels from the same module
+    // are resolved during one-layer llama.cpp inference.
     const std::string policy = registration_lowering_policy();
-    blob.reserve(kRegistrationJitCacheSchema.size() + 3 + policy.size() +
-                 ptx_source.size() + kernel_name.size());
-    blob.append(kRegistrationJitCacheSchema);
-    blob.push_back('\0');
-    blob.append(policy);
-    blob.push_back('\0');
-    blob.append(ptx_source);
-    blob.push_back('\0');
-    blob.append(kernel_name);
-    const std::uint64_t h = fnv1a64_registration(
-        reinterpret_cast<const std::uint8_t*>(blob.data()), blob.size());
+    std::uint64_t hash = kFnv1a64Offset;
+    const auto append = [&hash](std::string_view bytes) {
+        hash = fnv1a64_registration_update(
+            hash, reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
+    };
+    append(kRegistrationJitCacheSchema);
+    append(std::string_view("\0", 1));
+    append(policy);
+    append(std::string_view("\0", 1));
+    append(ptx_source);
+    return hash;
+}
+
+std::string jit_cache_key(std::uint64_t prefix_hash, const std::string& kernel_name) {
+    std::uint64_t hash = fnv1a64_registration_update(
+        prefix_hash, reinterpret_cast<const std::uint8_t*>("\0"), 1);
+    hash = fnv1a64_registration_update(
+        hash,
+        reinterpret_cast<const std::uint8_t*>(kernel_name.data()),
+        kernel_name.size());
     std::ostringstream oss;
-    oss << std::hex << std::setfill('0') << std::setw(16) << h;
+    oss << std::hex << std::setfill('0') << std::setw(16) << hash;
     return oss.str();
 }
 
@@ -144,7 +156,7 @@ std::filesystem::path jit_cache_root() {
 
 // Returns the persistent cache path for a (ptx_source, kernel_name) pair.
 // Returns an empty path if the cache directory cannot be created.
-std::filesystem::path jit_cache_path_for(const std::string& ptx_source,
+std::filesystem::path jit_cache_path_for(std::uint64_t prefix_hash,
                                           const std::string& kernel_name) {
     const std::filesystem::path root = jit_cache_root();
     std::error_code ec;
@@ -152,7 +164,7 @@ std::filesystem::path jit_cache_path_for(const std::string& ptx_source,
     if (ec) {
         return {};
     }
-    return root / (jit_cache_key(ptx_source, kernel_name) + ".metallib");
+    return root / (jit_cache_key(prefix_hash, kernel_name) + ".metallib");
 }
 
 }  // namespace
@@ -200,9 +212,8 @@ struct ParsedFatbinImage {
 
 struct RegistrationModule {
     std::string metallib_path;
-    std::string ptx_source;
-    bool kernel_arg_info_index_built = false;
-    std::unordered_map<std::string, std::vector<cumetalKernelArgInfo_t>> kernel_arg_info_index;
+    std::shared_ptr<const std::string> ptx_source;
+    std::optional<std::uint64_t> jit_cache_prefix_hash;
     std::unordered_map<std::string, std::string> emitted_kernel_metallibs;
     std::unordered_map<std::string, std::vector<std::string>> emitted_kernel_printf_formats;
     std::unordered_map<std::string, std::size_t> emitted_kernel_static_shared_bytes;
@@ -555,6 +566,34 @@ void skip_ptx_string(std::string_view source, std::size_t* cursor) {
     }
 }
 
+bool ptx_offset_is_code(std::string_view source, std::size_t target) {
+    std::size_t cursor = 0;
+    while (cursor < target && cursor < source.size()) {
+        if (source[cursor] == '"') {
+            skip_ptx_string(source, &cursor);
+            continue;
+        }
+        if (source[cursor] == '/' && cursor + 1 < source.size()) {
+            if (source[cursor + 1] == '/') {
+                cursor += 2;
+                while (cursor < source.size() && source[cursor] != '\n') ++cursor;
+                continue;
+            }
+            if (source[cursor + 1] == '*') {
+                cursor += 2;
+                while (cursor + 1 < source.size() &&
+                       !(source[cursor] == '*' && source[cursor + 1] == '/')) {
+                    ++cursor;
+                }
+                cursor = std::min(cursor + 2, source.size());
+                continue;
+            }
+        }
+        ++cursor;
+    }
+    return cursor == target;
+}
+
 std::string_view next_ptx_token(std::string_view source, std::size_t* cursor) {
     skip_ptx_trivia(source, cursor);
     const std::size_t begin = *cursor;
@@ -678,10 +717,86 @@ build_arg_info_index_from_ptx(const std::string& ptx_source) {
     return out;
 }
 
+bool find_arg_info_for_ptx_entry(const std::string& ptx_source,
+                                 std::string_view entry_name,
+                                 std::vector<cumetalKernelArgInfo_t>* out) {
+    if (ptx_source.empty() || entry_name.empty() || out == nullptr) {
+        return false;
+    }
+
+    const std::string_view source(ptx_source);
+    constexpr std::string_view kEntry = ".entry";
+    std::size_t cursor = 0;
+    while ((cursor = source.find(entry_name, cursor)) != std::string_view::npos) {
+        const std::size_t name_end = cursor + entry_name.size();
+        const bool boundary_before = cursor == 0 || is_ptx_token_boundary(source[cursor - 1]);
+        const bool boundary_after = name_end >= source.size() ||
+                                    is_ptx_token_boundary(source[name_end]);
+        if (!boundary_before || !boundary_after || !ptx_offset_is_code(source, cursor)) {
+            cursor = name_end;
+            continue;
+        }
+
+        const std::size_t entry_pos = source.rfind(kEntry, cursor);
+        if (entry_pos == std::string_view::npos ||
+            !ptx_offset_is_code(source, entry_pos)) {
+            cursor = name_end;
+            continue;
+        }
+
+        std::size_t declaration_cursor = entry_pos + kEntry.size();
+        const std::string_view name = next_ptx_token(source, &declaration_cursor);
+        if (name != entry_name) {
+            cursor = name_end;
+            continue;
+        }
+        skip_ptx_trivia(source, &declaration_cursor);
+        while (declaration_cursor < source.size() &&
+               source[declaration_cursor] != '(' && source[declaration_cursor] != '{') {
+            if (source[declaration_cursor] == '"') {
+                skip_ptx_string(source, &declaration_cursor);
+            } else {
+                ++declaration_cursor;
+            }
+            skip_ptx_trivia(source, &declaration_cursor);
+        }
+        if (declaration_cursor >= source.size() || source[declaration_cursor] != '(') {
+            return false;
+        }
+
+        const std::size_t params_begin = ++declaration_cursor;
+        std::size_t depth = 1;
+        while (declaration_cursor < source.size() && depth > 0) {
+            if (source[declaration_cursor] == '"') {
+                skip_ptx_string(source, &declaration_cursor);
+                continue;
+            }
+            if (source[declaration_cursor] == '/' && declaration_cursor + 1 < source.size() &&
+                (source[declaration_cursor + 1] == '/' ||
+                 source[declaration_cursor + 1] == '*')) {
+                skip_ptx_trivia(source, &declaration_cursor);
+                continue;
+            }
+            if (source[declaration_cursor] == '(') ++depth;
+            if (source[declaration_cursor] == ')') --depth;
+            ++declaration_cursor;
+        }
+        if (depth != 0) {
+            return false;
+        }
+        const std::size_t params_end = declaration_cursor - 1;
+        *out = scan_ptx_entry_params(
+            source.substr(params_begin, params_end - params_begin));
+        return true;
+    }
+    return false;
+}
+
 // out_is_persistent: set to true if the output lives in the persistent JIT cache
 // (and therefore must NOT be deleted on __cudaUnregisterFatBinary).
 bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
                                      const std::string& kernel_name,
+                                     std::uint64_t cache_prefix_hash,
                                      std::string* out_path,
                                      std::vector<std::string>* out_printf_formats = nullptr,
                                      bool* out_is_persistent = nullptr) {
@@ -697,7 +812,8 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     // If a metallib for this exact (ptx_source, kernel_name) pair was compiled
     // in a prior run it lives at jit_cache_path_for(...).  Reuse it and skip
     // the expensive xcrun compile step.
-    const std::filesystem::path cached_metallib = jit_cache_path_for(ptx_source, kernel_name);
+    const std::filesystem::path cached_metallib =
+        jit_cache_path_for(cache_prefix_hash, kernel_name);
     if (!cached_metallib.empty()) {
         std::error_code ec;
         bool hit = false;
@@ -916,7 +1032,8 @@ std::string resolve_metallib_path_for_kernel(void* module_handle,
         return fallback_metallib_path_from_env();
     }
 
-    std::string ptx_source;
+    std::shared_ptr<const std::string> ptx_source;
+    std::uint64_t cache_prefix_hash = kFnv1a64Offset;
     {
         RegistrationState& s = state();
         std::lock_guard<std::mutex> lock(s.mutex);
@@ -925,7 +1042,7 @@ std::string resolve_metallib_path_for_kernel(void* module_handle,
             return fallback_metallib_path_from_env();
         }
 
-        const RegistrationModule& module = *found->second;
+        RegistrationModule& module = *found->second;
         if (!module.metallib_path.empty()) {
             REG_DEBUG("resolve_metallib '%s': prebuilt metallib '%s'",
                       kernel_name.c_str(), module.metallib_path.c_str());
@@ -952,22 +1069,30 @@ std::string resolve_metallib_path_for_kernel(void* module_handle,
         }
 
         ptx_source = module.ptx_source;
+        if (ptx_source != nullptr) {
+            if (!module.jit_cache_prefix_hash.has_value()) {
+                module.jit_cache_prefix_hash = ::jit_cache_prefix_hash(*ptx_source);
+            }
+            cache_prefix_hash = *module.jit_cache_prefix_hash;
+        }
     }
 
-    if (ptx_source.empty()) {
+    if (ptx_source == nullptr || ptx_source->empty()) {
         REG_DEBUG("resolve_metallib '%s': no PTX, using env fallback", kernel_name.c_str());
         return fallback_metallib_path_from_env();
     }
 
     // Compute static shared memory size from the PTX source before JIT compilation.
-    const std::size_t static_shared = cumetal::ptx::compute_static_shared_bytes(ptx_source);
+    const std::size_t static_shared =
+        cumetal::ptx::compute_static_shared_bytes(*ptx_source, kernel_name);
 
     REG_DEBUG("resolve_metallib '%s': JIT compiling... (static_shared=%zu)",
               kernel_name.c_str(), static_shared);
     std::string emitted_path;
     std::vector<std::string> local_printf_formats;
     bool is_persistent = false;
-    if (!emit_ptx_entry_to_temp_metallib(ptx_source, kernel_name, &emitted_path,
+    if (!emit_ptx_entry_to_temp_metallib(*ptx_source, kernel_name, cache_prefix_hash,
+                                         &emitted_path,
                                          &local_printf_formats, &is_persistent)) {
         REG_DEBUG("resolve_metallib '%s': JIT compile failed, using env fallback",
                   kernel_name.c_str());
@@ -1056,24 +1181,17 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
         }
 
         // Fatbins register every compiled CUDA kernel at process startup, while
-        // an application normally launches only a small subset. Building the
-        // full PTX ABI index from __cudaRegisterFunction made llama.cpp scan all
-        // GGML translation units before loading a model. Resolve the index only
-        // for a module that reaches an actual launch.
+        // an application normally launches only a small subset. Resolve only
+        // the requested entry rather than allocating an ABI index for thousands
+        // of unused GGML kernels in the same module.
         if (!found->second.arg_info_resolved) {
             const auto module_it = s.modules.find(found->second.module_handle);
-            if (module_it != s.modules.end() && module_it->second != nullptr) {
+            if (module_it != s.modules.end() && module_it->second != nullptr &&
+                module_it->second->ptx_source != nullptr) {
                 RegistrationModule& module = *module_it->second;
-                if (!module.kernel_arg_info_index_built && !module.ptx_source.empty()) {
-                    module.kernel_arg_info_index =
-                        build_arg_info_index_from_ptx(module.ptx_source);
-                    module.kernel_arg_info_index_built = true;
-                }
-                const auto arg_it =
-                    module.kernel_arg_info_index.find(found->second.kernel_name);
-                if (arg_it != module.kernel_arg_info_index.end()) {
-                    found->second.arg_info = arg_it->second;
-                }
+                (void)find_arg_info_for_ptx_entry(*module.ptx_source,
+                                                  found->second.kernel_name,
+                                                  &found->second.arg_info);
             }
             found->second.arg_info_resolved = true;
         }
@@ -1170,14 +1288,15 @@ void** __cudaRegisterFatBinary(const void* fat_cubin) {
     const cumetal::registration::ParsedFatbinImage parsed =
         cumetal::registration::parse_fatbin_image(fat_cubin);
     module->metallib_path = parsed.metallib_path;
-    module->ptx_source = parsed.ptx_source;
+    module->ptx_source =
+        std::make_shared<const std::string>(std::move(parsed.ptx_source));
 
-    if (module->metallib_path.empty() && module->ptx_source.empty()) {
+    if (module->metallib_path.empty() && module->ptx_source->empty()) {
         module->metallib_path = cumetal::registration::fallback_metallib_path_from_env();
     }
 
     REG_DEBUG("__cudaRegisterFatBinary: metallib='%s' ptx_size=%zu",
-              module->metallib_path.c_str(), module->ptx_source.size());
+              module->metallib_path.c_str(), module->ptx_source->size());
 
     void* handle = module.get();
 

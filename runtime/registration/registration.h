@@ -36,6 +36,12 @@ struct LaunchConfiguration {
 std::unordered_map<std::string, std::vector<cumetalKernelArgInfo_t>>
 build_arg_info_index_from_ptx(const std::string& ptx_source);
 
+// Resolve one launch ABI without allocating metadata for every other entry in
+// a large fatbinary module. Returns false when the entry is absent or malformed.
+bool find_arg_info_for_ptx_entry(const std::string& ptx_source,
+                                 std::string_view entry_name,
+                                 std::vector<cumetalKernelArgInfo_t>* out);
+
 bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out);
 bool lookup_registered_symbol(const void* host_symbol,
                               const void** out_device_symbol,

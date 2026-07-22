@@ -47,16 +47,26 @@ Phase 5 items implemented:
 
 Post-Phase 5 work completed:
 
-- **Lazy linear binary-shim PTX ABI indexing**: fatbinary registration records
-  kernel identities without scanning every module. The first actual launch from
-  a module builds its linear `.entry` signature index; modules containing only
-  unused GGML kernels are never parsed. The scanner handles comments, strings,
-  pointer qualifiers, scalar widths, aggregate byte arrays, and NVCC's
-  unqualified 64-bit pointer convention. A 5,000-entry unit corpus scans in
-  22 ms on Apple M4 Pro. The llama.cpp NGL=1 one-token workload improved from
-  8.20 s to 1.00 s wall-clock (8.2×), after the prior linear-scanner change had
-  reduced it from 290.24 s. The 16-token correctness/provenance gate now
-  completes in 2 s. Full parsing is retained for actual kernel lowering.
+- **Demand-driven binary-shim PTX ABI resolution**: fatbinary registration
+  records kernel identities without scanning every module. The first actual
+  launch resolves only its requested `.entry` signature; modules and entries
+  that never launch are never parsed or inserted into a full ABI map. The
+  scanner handles comments, strings, pointer qualifiers, scalar widths,
+  aggregate byte arrays, and NVCC's unqualified 64-bit pointer convention. On
+  Apple M4 Pro, a comment-safe 5,000-entry worst-case lookup takes 4 ms versus
+  17 ms to build
+  the complete index. The earlier lazy full-index implementation had already
+  improved the llama.cpp NGL=1 one-token workload from 8.20 s to 1.00 s after
+  the original linear scanner reduced it from 290.24 s. Full parsing remains
+  part of actual kernel lowering.
+
+- **Streaming, memoized registration JIT cache keys**: immutable module PTX is
+  shared across kernel resolutions, and the persistent-cache FNV prefix is
+  streamed and memoized once per module instead of copying and hashing
+  multi-megabyte PTX once per launched kernel. Cache keys remain byte-for-byte
+  compatible. Twelve controlled interleaved A/B runs of the SmolLM2 NGL=1
+  16-token coherence gate improved from a 0.60 s warm median at `a41b4e5` to
+  0.575 s (about 4.2%), with correct `Paris` output in every measured run.
 
 - **Native FP16 `cublasGemmEx` library lowering**: all-FP16 GEMM with FP16
   compute now binds the tracked CUDA allocations directly as `MPSMatrix`
