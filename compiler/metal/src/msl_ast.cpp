@@ -267,6 +267,10 @@ private:
                     for (const MslStmt& child : node.statements) print_statement(child, depth + 1);
                     indent(depth);
                     out_ << "}\n";
+                } else if constexpr (std::is_same_v<Node, MslThreadgroupByteArray>) {
+                    indent(depth);
+                    out_ << "threadgroup uchar " << sanitize_identifier(node.name)
+                         << "[" << node.byte_size << "];\n";
                 } else if constexpr (std::is_same_v<Node, MslSwitch>) {
                     indent(depth);
                     out_ << "switch (";
@@ -527,6 +531,16 @@ MslStmt MslStatement::while_statement(MslExpr condition, std::vector<MslStmt> st
         .value = MslWhile{
             .condition = std::move(condition),
             .statements = std::move(statements),
+        },
+    });
+}
+
+MslStmt MslStatement::threadgroup_byte_array(std::string name,
+                                             std::uint64_t byte_size) {
+    return std::make_shared<MslStatement>(MslStatement{
+        .value = MslThreadgroupByteArray{
+            .name = std::move(name),
+            .byte_size = byte_size,
         },
     });
 }

@@ -80,8 +80,9 @@ as gaps have been closed.
   and preserves its constant lookup tables. Legalization then rejects a real
   CUDA-generic PHI that selects either threadgroup scratch or device memory:
   Metal requires one static address space, so address-space monomorphization
-  plus mixed-PHI dispatch is still required. Static threadgroup globals and one
-  FP64 calculation remain subsequent MSL blockers. The older 624 KB
+  plus mixed-PHI dispatch is still required. Static threadgroup globals are now
+  represented as kernel-local arrays and threaded through reachable helpers;
+  one FP64 calculation remains a subsequent MSL blocker. The older 624 KB
   forced-inline form can still abort Apple's pipeline compiler. Convex/convex
   runtime support is therefore not yet claimed.
 
@@ -108,9 +109,10 @@ as gaps have been closed.
   thread-local allocas, constant global tables, warp shuffle/vote operations,
   transitive Metal builtin threading, and the CUDA math/bit intrinsics exercised
   by the current PhysX convex path. Mixed CUDA-generic pointers whose runtime
-  value can name different Metal address spaces, static/dynamic shared-memory
-  emission, atomics, reductions, full FP64 handling, and the remaining
-  intrinsic surface still fail explicitly.
+  value can name different Metal address spaces, dynamic shared-memory emission,
+  atomics, reductions, full FP64 handling, and the remaining intrinsic surface
+  still fail explicitly. Static CUDA shared globals with compile-time sizes are
+  emitted as kernel-local threadgroup storage and threaded through device calls.
 - Stock Clang CUDA device IR import requires LLVM 18 or newer at build time.
   Unknown NVVM intrinsics, arbitrary pointer/integer round trips, indirect
   calls, recursion, unsupported atomics, and irreducible/unsupported CFG shapes

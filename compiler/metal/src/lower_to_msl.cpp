@@ -475,6 +475,12 @@ struct BuiltinUsage {
 };
 
 using BuiltinUsageMap = std::unordered_map<std::string, BuiltinUsage>;
+using SharedUsageMap =
+    std::unordered_map<std::string, std::vector<std::string>>;
+
+std::string shared_parameter_name(std::string_view global) {
+    return "cm_shared_" + sanitize_identifier(global);
+}
 
 void collect_msl_struct(const ir::Type& type, std::unordered_set<std::string>* seen,
                         std::vector<MslStruct>* structs) {
@@ -566,10 +572,59 @@ BuiltinUsageMap analyze_builtin_usage(const ir::Module& module) {
     return usage;
 }
 
+SharedUsageMap analyze_shared_usage(const ir::Module& module) {
+    SharedUsageMap usage;
+    for (const ir::Function& function : module.functions) {
+        std::unordered_set<std::string> direct;
+        for (const ir::BasicBlock& block : function.blocks) {
+            for (const ir::Operation& operation : block.operations) {
+                for (const ir::Operand& operand : operation.operands) {
+                    if (operand.kind == ir::OperandKind::kSymbol &&
+                        operand.type.is_pointer() &&
+                        operand.type.address_space == ir::AddressSpace::kThreadgroup) {
+                        direct.insert(operand.text);
+                    }
+                }
+            }
+        }
+        usage[function.name] = {direct.begin(), direct.end()};
+        std::sort(usage[function.name].begin(), usage[function.name].end());
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const ir::Function& function : module.functions) {
+            std::unordered_set<std::string> merged(
+                usage[function.name].begin(), usage[function.name].end());
+            for (const ir::BasicBlock& block : function.blocks) {
+                for (const ir::Operation& operation : block.operations) {
+                    if (operation.opcode != ir::OpCode::kCall) continue;
+                    const auto callee = operation.attributes.find("callee");
+                    if (callee == operation.attributes.end() ||
+                        !usage.contains(callee->second)) {
+                        continue;
+                    }
+                    merged.insert(usage[callee->second].begin(),
+                                  usage[callee->second].end());
+                }
+            }
+            std::vector<std::string> next(merged.begin(), merged.end());
+            std::sort(next.begin(), next.end());
+            if (next != usage[function.name]) {
+                usage[function.name] = std::move(next);
+                changed = true;
+            }
+        }
+    }
+    return usage;
+}
+
 struct AstLowerer {
     const ir::Module& module;
     const ir::Function& function;
     const BuiltinUsageMap& builtin_usage;
+    const SharedUsageMap& shared_usage;
     LowerToMslResult result;
     MslFunction output;
     std::unordered_map<ir::ValueId, MslExpr> values;
@@ -586,10 +641,12 @@ struct AstLowerer {
 
     AstLowerer(const ir::Module& input_module, const ir::Function& input_function,
                const BuiltinUsageMap& input_builtin_usage,
+               const SharedUsageMap& input_shared_usage,
                bool force_dispatcher = false)
         : module(input_module),
           function(input_function),
           builtin_usage(input_builtin_usage),
+          shared_usage(input_shared_usage),
           force_cfg_dispatcher(force_dispatcher) {
         const BuiltinUsage& required = builtin_usage.at(function.name);
         needs_thread_position = required.thread_position;
@@ -614,6 +671,11 @@ struct AstLowerer {
             return MslExpression::identifier(value_name(operand.value), lower_type(operand.type));
         }
         if (operand.kind == ir::OperandKind::kSymbol) {
+            if (operand.type.is_pointer() &&
+                operand.type.address_space == ir::AddressSpace::kThreadgroup) {
+                return MslExpression::identifier(shared_parameter_name(operand.text),
+                                                 lower_type(operand.type));
+            }
             return MslExpression::identifier(operand.text, lower_type(operand.type));
         }
         return MslExpression::literal(operand.text == "null" ? "nullptr" : operand.text,
@@ -813,6 +875,15 @@ struct AstLowerer {
                         arguments[i] =
                             MslExpression::cast(expected, arguments[i], true);
                     }
+                }
+            }
+            const auto callee_shared = shared_usage.find(callee->second);
+            if (callee_shared != shared_usage.end()) {
+                for (const std::string& global : callee_shared->second) {
+                    arguments.push_back(MslExpression::identifier(
+                        shared_parameter_name(global),
+                        MslType::pointer(MslType::uint(8),
+                                         MslAddressSpace::kThreadgroup)));
                 }
             }
             const auto callee_usage = builtin_usage.find(callee->second);
@@ -1701,6 +1772,37 @@ struct AstLowerer {
             }
         }
 
+        const auto required_shared = shared_usage.find(function.name);
+        if (required_shared != shared_usage.end()) {
+            for (const std::string& global : required_shared->second) {
+                const std::string name = shared_parameter_name(global);
+                if (function.is_kernel) {
+                    const auto declaration = std::find_if(
+                        module.global_threadgroups.begin(),
+                        module.global_threadgroups.end(),
+                        [&](const ir::GlobalThreadgroup& candidate) {
+                            return candidate.name == global;
+                        });
+                    if (declaration == module.global_threadgroups.end() ||
+                        declaration->byte_size == 0) {
+                        return LowerToMslResult{
+                            .error = "missing static threadgroup declaration for '" +
+                                     global + "'",
+                        };
+                    }
+                    output.statements.push_back(
+                        MslStatement::threadgroup_byte_array(name,
+                                                             declaration->byte_size));
+                } else {
+                    output.parameters.push_back({
+                        .type = MslType::pointer(MslType::uint(8),
+                                                 MslAddressSpace::kThreadgroup),
+                        .name = name,
+                    });
+                }
+            }
+        }
+
         if (force_cfg_dispatcher || requires_cfg_dispatcher()) {
             if (!emit_cfg_dispatcher(&output.statements)) return result;
         } else if (!emit_from(0, &output.statements)) {
@@ -1939,6 +2041,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         });
     }
     const BuiltinUsageMap builtin_usage = analyze_builtin_usage(metal_module);
+    const SharedUsageMap shared_usage = analyze_shared_usage(metal_module);
     for (const ir::Function& function : metal_module.functions) {
         const StructurizeResult structurized = check_structurizable(function);
         if (!structurized.ok) {
@@ -1946,7 +2049,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                            structurized.error;
             return result;
         }
-        AstLowerer lowerer(metal_module, function, builtin_usage);
+        AstLowerer lowerer(metal_module, function, builtin_usage, shared_usage);
         LowerToMslResult function_result = lowerer.run();
         const bool structurization_failure =
             !function_result.ok &&
@@ -1958,7 +2061,8 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
              function_result.error.find("loop structurization") !=
                  std::string::npos);
         if (structurization_failure) {
-            AstLowerer dispatcher_lowerer(metal_module, function, builtin_usage, true);
+            AstLowerer dispatcher_lowerer(metal_module, function, builtin_usage,
+                                          shared_usage, true);
             function_result = dispatcher_lowerer.run();
         }
         if (!function_result.ok) {

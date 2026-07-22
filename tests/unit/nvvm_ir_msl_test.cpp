@@ -199,6 +199,26 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmStaticThreadgroupGlobal = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+@shared_bytes = internal addrspace(3) global [32 x i8] undef, align 16
+
+define void @shared_helper(i32 %value) {
+entry:
+  %slot = getelementptr [32 x i8], ptr addrspacecast (ptr addrspace(3) @shared_bytes to ptr), i64 0, i64 4
+  store i32 %value, ptr %slot, align 4
+  ret void
+}
+
+define ptx_kernel void @static_threadgroup_global(i32 %value) {
+entry:
+  call void @shared_helper(i32 %value)
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmMalformedPhi = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -626,6 +646,22 @@ int main() {
                          "reinterpret_cast<thread uchar*>(arg0)") ==
                          std::string::npos,
                  "generic helper pointers inherit concrete device address spaces from callers");
+
+    const metal::NvvmToMslResult static_threadgroup_global =
+        metal::compile_nvvm_to_msl(kNvvmStaticThreadgroupGlobal,
+                                   "static-threadgroup-global.ll",
+                                   "static_threadgroup_global");
+    ok &= expect(static_threadgroup_global.ok &&
+                     static_threadgroup_global.source.find(
+                         "threadgroup uchar cm_shared_shared_bytes[32]") !=
+                         std::string::npos &&
+                     static_threadgroup_global.source.find(
+                         "threadgroup uchar* cm_shared_shared_bytes") !=
+                         std::string::npos &&
+                     static_threadgroup_global.source.find(
+                         "shared_helper(value, cm_shared_shared_bytes)") !=
+                         std::string::npos,
+                 "static CUDA shared globals become kernel-local arrays threaded through helpers");
 
     const metal::NvvmToMslResult malformed_phi =
         metal::compile_nvvm_to_msl(kNvvmMalformedPhi, "malformed-phi.ll",

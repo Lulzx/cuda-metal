@@ -1034,6 +1034,19 @@ struct Importer {
         result.module.attributes["target_triple"] = module->getTargetTriple().str();
 
         for (const llvm::GlobalVariable& global : module->globals()) {
+            if (global.getAddressSpace() == 3 && global.hasInitializer() &&
+                !global.getName().starts_with("llvm.")) {
+                result.module.global_threadgroups.push_back({
+                    .name = global.getName().str(),
+                    .byte_size = module->getDataLayout().getTypeAllocSize(
+                        global.getValueType()),
+                    .alignment = static_cast<std::uint32_t>(
+                        global.getAlign().has_value()
+                            ? global.getAlign()->value()
+                            : 1),
+                });
+                continue;
+            }
             if (!global.isConstant() || !global.hasInitializer() ||
                 global.getAddressSpace() != 4 ||
                 global.getName().starts_with("llvm.")) {
