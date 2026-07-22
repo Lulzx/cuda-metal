@@ -41,9 +41,11 @@ add_executable(cumetal_native_registration_test
     native_registration_test.cpp
 )
 
-add_executable(cumetal_registration_arg_index_test
-    registration_arg_index_test.cpp
-)
+if(CUMETAL_ENABLE_BINARY_SHIM)
+    add_executable(cumetal_registration_arg_index_test
+        registration_arg_index_test.cpp
+    )
+endif()
 
 add_executable(cumetal_intrinsic_lower_test
     intrinsic_lower_test.cpp
@@ -141,15 +143,17 @@ target_link_libraries(cumetal_native_registration_test
         cumetal_runtime
 )
 
-target_link_libraries(cumetal_registration_arg_index_test
-    PRIVATE
-        cumetal_runtime
-)
+if(CUMETAL_ENABLE_BINARY_SHIM)
+    target_link_libraries(cumetal_registration_arg_index_test
+        PRIVATE
+            cumetal_runtime
+    )
 
-target_include_directories(cumetal_registration_arg_index_test
-    PRIVATE
-        ${CMAKE_SOURCE_DIR}/runtime/registration
-)
+    target_include_directories(cumetal_registration_arg_index_test
+        PRIVATE
+            ${CMAKE_SOURCE_DIR}/runtime/registration
+    )
+endif()
 
 target_link_libraries(cumetal_intrinsic_lower_test
     PRIVATE
@@ -241,7 +245,9 @@ target_compile_options(cumetal_msl_ast_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_ptx_ir_msl_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_nvvm_ir_msl_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_native_registration_test PRIVATE -Wall -Wextra -Wpedantic)
-target_compile_options(cumetal_registration_arg_index_test PRIVATE -Wall -Wextra -Wpedantic)
+if(CUMETAL_ENABLE_BINARY_SHIM)
+    target_compile_options(cumetal_registration_arg_index_test PRIVATE -Wall -Wextra -Wpedantic)
+endif()
 
 target_compile_options(cumetal_intrinsic_lower_test
     PRIVATE
@@ -368,7 +374,9 @@ add_test(NAME unit_msl_ast COMMAND cumetal_msl_ast_test)
 add_test(NAME unit_ptx_ir_msl COMMAND cumetal_ptx_ir_msl_test)
 add_test(NAME unit_nvvm_ir_msl COMMAND cumetal_nvvm_ir_msl_test)
 add_test(NAME unit_native_registration COMMAND cumetal_native_registration_test)
-add_test(NAME unit_registration_arg_index COMMAND cumetal_registration_arg_index_test)
+if(CUMETAL_ENABLE_BINARY_SHIM)
+    add_test(NAME unit_registration_arg_index COMMAND cumetal_registration_arg_index_test)
+endif()
 add_test(
     NAME unit_cumetalc_shared_ir
     COMMAND bash

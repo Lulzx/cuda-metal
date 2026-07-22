@@ -41,6 +41,13 @@ if ! echo "$first_run_stderr" | grep -q "jit cache miss"; then
     exit 1
 fi
 
+if ! echo "$first_run_stderr" | grep -q "args=lazy"; then
+    echo "FAIL: fatbin registration eagerly built the PTX argument index"
+    echo "stderr was:"
+    echo "$first_run_stderr"
+    exit 1
+fi
+
 # The direct PTX-to-MSL path caches source for newLibraryWithSource; the LLVM
 # path caches an AOT metallib. Either is a valid persistent JIT artifact.
 cache_file=$(find "$JIT_CACHE_DIR/registration-jit" \

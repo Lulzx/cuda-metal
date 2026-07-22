@@ -220,13 +220,14 @@ Measured on SmolLM2-135M, greedy decode of "The capital of France is":
 - llama.cpp via libcumetal (NGL=1) → `The capital of France is Paris.` ✅
   (Apple M4 Pro, 8.1 tokens/s generation in the latest verified run)
 
-Binary-shim startup now scans PTX entry signatures with a linear ABI pass
-instead of invoking the full regex-based PTX parser for every registered
-fatbinary module. On the same Apple M4 Pro, the one-layer, one-token smoke
-workload fell from 290.24 s to 8.20 s wall-clock (35.4× faster); the full
-16-token coherence gate completed in 9 s. Full PTX parsing still occurs when a
-kernel actually needs lowering, so this removes redundant eager compiler work
-without bypassing translation validation.
+Binary-shim startup records kernels cheaply and builds a module's linear PTX
+entry-signature ABI index only when one of its kernels is actually launched.
+This avoids scanning thousands of GGML kernels that llama.cpp registers but does
+not use in the one-layer test. On the same Apple M4 Pro, the one-layer,
+one-token workload fell from 8.20 s to 1.00 s wall-clock (8.2× faster), and the
+full 16-token coherence gate fell from 9 s to 2 s. Combined with the earlier
+linear scanner work, the one-token path is down from 290.24 s to 1.00 s. Full
+PTX parsing still occurs when a kernel actually needs lowering.
 
 Registered fatbinary launches are conservatively synchronized by default because
 the experimental asynchronous path can violate ordering when GGML uses adjacent

@@ -214,6 +214,7 @@ struct RegistrationRecord {
     std::string metallib_path;
     std::string kernel_name;
     std::vector<cumetalKernelArgInfo_t> arg_info;
+    bool arg_info_resolved = false;
     std::vector<std::string> printf_formats;
     std::size_t static_shared_bytes = 0;
 };
@@ -1053,6 +1054,29 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
         if (found == s.kernels.end()) {
             return false;
         }
+
+        // Fatbins register every compiled CUDA kernel at process startup, while
+        // an application normally launches only a small subset. Building the
+        // full PTX ABI index from __cudaRegisterFunction made llama.cpp scan all
+        // GGML translation units before loading a model. Resolve the index only
+        // for a module that reaches an actual launch.
+        if (!found->second.arg_info_resolved) {
+            const auto module_it = s.modules.find(found->second.module_handle);
+            if (module_it != s.modules.end() && module_it->second != nullptr) {
+                RegistrationModule& module = *module_it->second;
+                if (!module.kernel_arg_info_index_built && !module.ptx_source.empty()) {
+                    module.kernel_arg_info_index =
+                        build_arg_info_index_from_ptx(module.ptx_source);
+                    module.kernel_arg_info_index_built = true;
+                }
+                const auto arg_it =
+                    module.kernel_arg_info_index.find(found->second.kernel_name);
+                if (arg_it != module.kernel_arg_info_index.end()) {
+                    found->second.arg_info = arg_it->second;
+                }
+            }
+            found->second.arg_info_resolved = true;
+        }
         record = found->second;
     }
 
@@ -1260,27 +1284,8 @@ void __cudaRegisterFunction(void** fat_cubin_handle,
         metallib_path = cumetal::registration::fallback_metallib_path_from_env();
     }
 
-    std::vector<cumetalKernelArgInfo_t> inferred_arg_info;
-    {
-        cumetal::registration::RegistrationState& s = cumetal::registration::state();
-        std::lock_guard<std::mutex> lock(s.mutex);
-        const auto module_it = s.modules.find(handle);
-        if (module_it != s.modules.end() && module_it->second != nullptr) {
-            auto& module = *module_it->second;
-            if (!module.kernel_arg_info_index_built && !module.ptx_source.empty()) {
-                module.kernel_arg_info_index =
-                    cumetal::registration::build_arg_info_index_from_ptx(module.ptx_source);
-                module.kernel_arg_info_index_built = true;
-            }
-            const auto arg_it = module.kernel_arg_info_index.find(chosen_name);
-            if (arg_it != module.kernel_arg_info_index.end()) {
-                inferred_arg_info = arg_it->second;
-            }
-        }
-    }
-
-    REG_DEBUG("__cudaRegisterFunction: kernel='%s' metallib='%s' args=%zu (lazy=%d)",
-              chosen_name, metallib_path.c_str(), inferred_arg_info.size(),
+    REG_DEBUG("__cudaRegisterFunction: kernel='%s' metallib='%s' args=lazy (lazy=%d)",
+              chosen_name, metallib_path.c_str(),
               lazy_metallib_resolution ? 1 : 0);
 
     cumetal::registration::RegistrationState& s = cumetal::registration::state();
@@ -1289,7 +1294,8 @@ void __cudaRegisterFunction(void** fat_cubin_handle,
         .module_handle = handle,
         .metallib_path = std::move(metallib_path),
         .kernel_name = chosen_name,
-        .arg_info = std::move(inferred_arg_info),
+        .arg_info = {},
+        .arg_info_resolved = false,
         .printf_formats = std::move(printf_formats),
     };
     REG_DEBUG("__cudaRegisterFunction: registered host_fn=%p", host_function);

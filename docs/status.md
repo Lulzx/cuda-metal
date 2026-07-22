@@ -47,14 +47,16 @@ Phase 5 items implemented:
 
 Post-Phase 5 work completed:
 
-- **Linear binary-shim PTX ABI indexing**: fatbinary registration now scans only
-  `.entry` signatures to build kernel launch metadata instead of fully parsing
-  every PTX module with `std::regex`. The scanner handles comments, strings,
+- **Lazy linear binary-shim PTX ABI indexing**: fatbinary registration records
+  kernel identities without scanning every module. The first actual launch from
+  a module builds its linear `.entry` signature index; modules containing only
+  unused GGML kernels are never parsed. The scanner handles comments, strings,
   pointer qualifiers, scalar widths, aggregate byte arrays, and NVCC's
   unqualified 64-bit pointer convention. A 5,000-entry unit corpus scans in
   22 ms on Apple M4 Pro. The llama.cpp NGL=1 one-token workload improved from
-  290.24 s to 8.20 s wall-clock (35.4×); the 16-token correctness/provenance
-  gate completes in 9 s. Full parsing is retained for actual kernel lowering.
+  8.20 s to 1.00 s wall-clock (8.2×), after the prior linear-scanner change had
+  reduced it from 290.24 s. The 16-token correctness/provenance gate now
+  completes in 2 s. Full parsing is retained for actual kernel lowering.
 
 - **MTLHeap auto-threshold**: MTLHeap sub-allocation now auto-enabled for allocations ≥ 4 MiB
   (configurable via `CUMETAL_MTLHEAP_THRESHOLD_BYTES`). Three modes:

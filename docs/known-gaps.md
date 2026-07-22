@@ -136,12 +136,14 @@ as gaps have been closed.
     Paris.` ✅ at 8.1 tokens/s generation on Apple M4 Pro. Registered launches
     use the correctness-first synchronization policy described above; enabling
     experimental asynchronous registered launches reproduces incoherent output.
-  - Registration uses a linear PTX entry-signature ABI scan rather than eagerly
-    running the full parser for every fatbinary module. This reduced the covered
-    one-layer, one-token run from 290.24 s to 8.20 s (35.4×) on Apple M4 Pro;
-    actual kernel lowering retains the full parser. Unannotated 64-bit PTX
-    parameters remain conservatively pointer-classified, with the existing
-    allocation-aware launch fallback for small scalar values.
+  - Registration builds the linear PTX entry-signature ABI index lazily, only
+    when a kernel from that fatbinary module is launched. This avoids parsing
+    thousands of unused GGML kernels and reduced the covered one-layer,
+    one-token run from 8.20 s to 1.00 s (8.2×) on Apple M4 Pro; the earlier
+    linear-scanner change had already reduced it from 290.24 s. Actual kernel
+    lowering retains the full parser. Unannotated 64-bit PTX parameters remain
+    conservatively pointer-classified, with the existing allocation-aware
+    launch fallback for small scalar values.
   - The conformance harness (`run_llama_cpp_cumetal.sh`) now enforces a **coherence gate**: greedy
     decode must contain the expected answer (`CUMETAL_LLAMA_EXPECT`, default `Paris`) and an
     NGL>0 run must include completed Apple-GPU provenance, so the test correctly
