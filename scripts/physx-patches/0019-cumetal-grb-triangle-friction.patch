@@ -1,0 +1,17 @@
+diff --git a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+index d5883ba..165eadf 100644
+--- a/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
++++ b/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp
+@@ -365,10 +365,9 @@ int snippetMain(int argc, const char*const* argv)
+ 		return 2;
+ 	}
+ 	if(useGpu && groundGeometry == eGROUND_TRIANGLE_MESH &&
+-		(bodyGeometry != eGEOMETRY_SPHERE || contactMode != eCONTACT_FRICTIONLESS ||
+-		 bodyLayout != eBODY_SEPARATED || bodyCount != 1))
++		(bodyGeometry != eGEOMETRY_SPHERE || bodyLayout != eBODY_SEPARATED || bodyCount != 1))
+ 	{
+-		printf("CuMetal GRB ERROR: GPU triangle-mesh mode currently supports one separated frictionless sphere only.\n");
++		printf("CuMetal GRB ERROR: GPU triangle-mesh mode currently supports one separated sphere only.\n");
+ 		return 2;
+ 	}
+ 

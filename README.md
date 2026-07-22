@@ -291,7 +291,9 @@ It also rejects a stacked scene with fewer than two bodies.
 `conformance_physx_grb_box` checks a unit box sliding on a plane for 30 steps
 through the convex/plane narrowphase kernel. `conformance_physx_grb_trimesh`
 checks one frictionless sphere crossing a coplanar internal triangle seam for
-30 byte-identical CPU/GPU steps and rejects box/mesh mode. The gates require Metal
+30 byte-identical CPU/GPU steps, verifies CPU/GPU sliding-to-rolling friction
+through 60 steps against a friction-disabled control, and rejects box/mesh mode.
+The gates require Metal
 narrowphase, constraint preparation, dynamic and static solve, writeback, and
 integration provenance. These remain deliberately selected shape paths;
 the 93-entry build manifest compiles convex/convex stage 2 through typed CuMetal

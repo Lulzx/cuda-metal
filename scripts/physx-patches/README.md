@@ -122,6 +122,13 @@ handoff. The 30-step trajectory starts at `x=-0.5`, crosses the diagonal, and
 remains byte-identical to CPU. Non-coplanar seams and general mesh traversal are
 still unverified.
 
+The nineteenth patch removes the frictionless-only guard for the selected
+one-sphere mesh path. The existing one-anchor friction preparation and static
+solver reach no-slip rolling after crossing the seam: CPU/GPU state stays within
+the established `3e-3` 60-step envelope, while a friction-disabled GPU control
+retains `vx=5` and zero spin. Other shapes, multiple bodies, and generic mesh
+friction correlation remain unsupported.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash

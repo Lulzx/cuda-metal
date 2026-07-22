@@ -91,8 +91,10 @@ as gaps have been closed.
   byte-for-byte for 30 steps. It carries a single separation value
   through the correlation index as a scoped workaround for an incoherent generic
   temporary-contact record. Patch 0018 masks PhysX's flagged adjacency indices
-  and preserves plane separation across the selected coplanar seam. Non-coplanar
-  seams, mesh contacts with other shapes, multiple bodies, friction, and general
+  and preserves plane separation across the selected coplanar seam. Patch 0019
+  runs the existing one-anchor friction path over that seam and stays within the
+  established 60-step `3e-3` CPU/GPU envelope. Non-coplanar seams, mesh contacts
+  with other shapes, multiple bodies, generic friction correlation, and general
   mesh batching remain unsupported.
   The 60-step friction gate is repeatable, but its `3e-3` relative plus `1e-5`
   absolute tolerance is not evidence of general FP determinism. Metal fast-math defaults,

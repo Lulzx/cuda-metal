@@ -128,6 +128,12 @@ patch_marker_is_present() {
                 grep -q 'xOffset = groundGeometry == eGROUND_TRIANGLE_MESH' \
                     "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
             ;;
+        0019-cumetal-grb-triangle-friction.patch)
+            grep -q 'GPU triangle-mesh mode currently supports one separated sphere only' \
+                "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp" &&
+                ! grep -q 'contactMode != eCONTACT_FRICTIONLESS' \
+                    "${PHYSX_REPO}/physx/snippets/snippethellogrb/SnippetHelloGRB.cpp"
+            ;;
         *)
             return 1
             ;;
