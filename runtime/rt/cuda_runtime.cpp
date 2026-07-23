@@ -850,10 +850,6 @@ bool llmc_emulation_skips_kernel(const std::string& kernel_name) {
     return kernel_name_matches_env_list(kernel_name, std::getenv("CUMETAL_LLMC_EMULATION_SKIP"));
 }
 
-bool host_kernel_fallbacks_enabled() {
-    return env_truthy(std::getenv("CUMETAL_ENABLE_HOST_KERNEL_FALLBACKS"));
-}
-
 bool llmc_emulation_trace_enabled() {
     return env_truthy(std::getenv("CUMETAL_TRACE_LLMC_EMULATION"));
 }
@@ -2121,14 +2117,27 @@ cudaError_t cudaMalloc(void** dev_ptr, size_t size) {
     if (host_base == nullptr || (use_metal_device_addresses() && device_address == 0)) {
         return fail(cudaErrorMemoryAllocation);
     }
-    void* base = use_metal_device_addresses()
-                     ? reinterpret_cast<void*>(device_address)
-                     : host_base;
+    void* device_base = reinterpret_cast<void*>(device_address);
+    void* base = use_metal_device_addresses() ? device_base : host_base;
 
     RuntimeState& state = runtime_state();
     if (!state.allocations.insert(base, size, cumetal::rt::AllocationKind::kDevice,
                                   /*host_alloc_flags=*/0,
-                                  std::move(buffer), &error)) {
+                                  buffer, &error)) {
+        return fail(cudaErrorMemoryAllocation);
+    }
+
+    // Metal kernels store MTLBuffer GPU virtual addresses when they write
+    // pointers into device-resident tables.  CUDA's host-facing pointer can be
+    // either that address or the shared-memory CPU mapping, depending on the
+    // compatibility mode.  Track both identities so a pointer produced on
+    // either side resolves to the same allocation and byte offset.
+    void* alias = (base == host_base) ? device_base : host_base;
+    if (alias != nullptr && alias != base &&
+        !state.allocations.insert(alias, size, cumetal::rt::AllocationKind::kDevice,
+                                  /*host_alloc_flags=*/0,
+                                  buffer, &error, /*alias=*/true)) {
+        state.allocations.erase(base);
         return fail(cudaErrorMemoryAllocation);
     }
 
@@ -2214,10 +2223,9 @@ cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags) {
         return fail(cudaErrorMemoryAllocation);
     }
 
-    if (use_metal_device_addresses()) {
-        void* device_alias = reinterpret_cast<void*>(buffer->device_address());
-        if (device_alias == nullptr ||
-            !state.allocations.insert(device_alias, size,
+    void* device_alias = reinterpret_cast<void*>(buffer->device_address());
+    if (device_alias != nullptr && device_alias != base) {
+        if (!state.allocations.insert(device_alias, size,
                                       cumetal::rt::AllocationKind::kHost, flags,
                                       buffer, &error, /*alias=*/true)) {
             state.allocations.erase(base);
@@ -3657,23 +3665,20 @@ cudaError_t cudaLaunchKernel(const void* func,
 
     RuntimeState& state = runtime_state();
 
-    // ggml CUDA uses this helper kernel only to populate batched cuBLAS pointer arrays.
-    // The current generic PTX->Metal path can launch it but does not reliably materialize
-    // pointer stores. Perform the pointer math directly on the host for CuMetal.
-    if (use_registered_kernel && host_kernel_fallbacks_enabled() &&
+    // ggml CUDA uses this ABI helper only to populate batched cuBLAS pointer arrays.
+    // Generic PTX lowering cannot yet reliably materialize its pointer stores, so construct
+    // the exact table here.  Table entries must use Metal GPU virtual addresses: cuBLAS later
+    // resolves those identities back to their shared MTLBuffer allocations.
+    if (use_registered_kernel &&
         kernel_name_contains(registered_kernel.kernel_name, "k_compute_batched_ptrs")) {
-        cumetal::warn_once(
-            "host-kernel-fallback",
-            "CUMETAL_ENABLE_HOST_KERNEL_FALLBACKS is running CUDA helper kernels on the CPU; "
-            "disable it to require Apple GPU execution");
         if (cumetal::diag_env_truthy("CUMETAL_TRACE_GPU")) {
             std::fprintf(stderr,
                          "CUMETAL_PROVENANCE event=kernel_launch "
-                         "kernel=\"%s\" source=cpu_fallback provenance=cpu_fallback "
-                         "semantic_quality=cpu_fallback device=cpu "
-                         "compile_cache_hit=false launch_success=queued duration_ns=-1 "
+                         "kernel=\"%s\" source=runtime_helper provenance=runtime_helper "
+                         "semantic_quality=exact device=cpu "
+                         "compile_cache_hit=false launch_success=true duration_ns=-1 "
                          "grid=(%u,%u,%u) block=(%u,%u,%u) "
-                         "unsupported_reason=\"explicit GGML host helper fallback\"\n",
+                         "unsupported_reason=\"exact GPU pointer-table construction\"\n",
                          registered_kernel.kernel_name.c_str(),
                          grid_dim.x,
                          grid_dim.y,
@@ -3756,35 +3761,93 @@ cudaError_t cudaLaunchKernel(const void* func,
             return launch_fail(cudaErrorInvalidDevicePointer, "k_compute_batched_ptrs resolve");
         }
 
-        auto* src0_base = static_cast<const char*>(src0_resolved.buffer->contents()) + src0_resolved.offset;
-        auto* src1_base = static_cast<const char*>(src1_resolved.buffer->contents()) + src1_resolved.offset;
-        auto* dst_base = static_cast<char*>(dst_resolved.buffer->contents()) + dst_resolved.offset;
-        auto* ptrs_src_base =
-            reinterpret_cast<const void**>(static_cast<char*>(ptrs_src_resolved.buffer->contents()) +
-                                           ptrs_src_resolved.offset);
-        auto* ptrs_dst_base =
-            reinterpret_cast<void**>(static_cast<char*>(ptrs_dst_resolved.buffer->contents()) +
-                                     ptrs_dst_resolved.offset);
-
+        if (ne12 != 0 && ne13 > std::numeric_limits<std::int64_t>::max() / ne12) {
+            return launch_fail(cudaErrorInvalidValue, "k_compute_batched_ptrs dimension overflow");
+        }
         if (ne23 != ne12 * ne13) {
             return launch_fail(cudaErrorInvalidValue, "k_compute_batched_ptrs ne23 mismatch");
         }
+        const auto table_count = static_cast<std::size_t>(ne23);
+        if (table_count > std::numeric_limits<std::size_t>::max() / (2 * sizeof(void*)) ||
+            ptrs_src_resolved.remaining_size < table_count * 2 * sizeof(void*) ||
+            ptrs_dst_resolved.remaining_size < table_count * sizeof(void*)) {
+            return launch_fail(cudaErrorInvalidValue, "k_compute_batched_ptrs table bounds");
+        }
+
+        auto device_base = [](const cumetal::rt::AllocationTable::ResolvedAllocation& allocation)
+            -> std::uintptr_t {
+            if (!allocation.buffer) {
+                return 0;
+            }
+            std::uintptr_t base = allocation.buffer->device_address();
+            if (base == 0 && allocation.buffer->contents() != nullptr) {
+                base = reinterpret_cast<std::uintptr_t>(allocation.buffer->contents());
+            }
+            if (base == 0 || base > std::numeric_limits<std::uintptr_t>::max() - allocation.offset) {
+                return 0;
+            }
+            return base + allocation.offset;
+        };
+        const std::uintptr_t src0_base = device_base(src0_resolved);
+        const std::uintptr_t src1_base = device_base(src1_resolved);
+        const std::uintptr_t dst_base = device_base(dst_resolved);
+        auto* ptrs_src_base = static_cast<char*>(ptrs_src_resolved.buffer->contents());
+        auto* ptrs_dst_base = static_cast<char*>(ptrs_dst_resolved.buffer->contents());
+        if (src0_base == 0 || src1_base == 0 || dst_base == 0 || ptrs_src_base == nullptr ||
+            ptrs_dst_base == nullptr) {
+            return launch_fail(cudaErrorInvalidDevicePointer, "k_compute_batched_ptrs address");
+        }
+        ptrs_src_base += ptrs_src_resolved.offset;
+        ptrs_dst_base += ptrs_dst_resolved.offset;
+
+        auto checked_offset = [](std::int64_t i2,
+                                 std::size_t stride2,
+                                 std::int64_t i3,
+                                 std::size_t stride3,
+                                 std::size_t remaining,
+                                 std::size_t* out) -> bool {
+            const auto u2 = static_cast<std::size_t>(i2);
+            const auto u3 = static_cast<std::size_t>(i3);
+            if ((stride2 != 0 && u2 > std::numeric_limits<std::size_t>::max() / stride2) ||
+                (stride3 != 0 && u3 > std::numeric_limits<std::size_t>::max() / stride3)) {
+                return false;
+            }
+            const std::size_t offset2 = u2 * stride2;
+            const std::size_t offset3 = u3 * stride3;
+            if (offset2 > std::numeric_limits<std::size_t>::max() - offset3) {
+                return false;
+            }
+            *out = offset2 + offset3;
+            return *out < remaining;
+        };
+        auto store_pointer = [](char* table, std::size_t index, std::uintptr_t value) {
+            std::memcpy(table + index * sizeof(void*), &value, sizeof(void*));
+        };
 
         for (std::int64_t i13 = 0; i13 < ne13; ++i13) {
             for (std::int64_t i12 = 0; i12 < ne12; ++i12) {
                 const std::int64_t i03 = i13 / r3;
                 const std::int64_t i02 = i12 / r2;
-                const std::int64_t index = i12 + i13 * ne12;
-                ptrs_src_base[0 * ne23 + index] = src0_base + i02 * static_cast<std::int64_t>(nb02) +
-                                                  i03 * static_cast<std::int64_t>(nb03);
-                ptrs_src_base[1 * ne23 + index] = src1_base + i12 * static_cast<std::int64_t>(nb12) +
-                                                  i13 * static_cast<std::int64_t>(nb13);
-                ptrs_dst_base[0 * ne23 + index] = dst_base + i12 * static_cast<std::int64_t>(nbd2) +
-                                                  i13 * static_cast<std::int64_t>(nbd3);
+                const std::size_t index = static_cast<std::size_t>(i12 + i13 * ne12);
+                std::size_t src0_offset = 0, src1_offset = 0, dst_offset = 0;
+                if (!checked_offset(i02, nb02, i03, nb03, src0_resolved.remaining_size,
+                                    &src0_offset) ||
+                    !checked_offset(i12, nb12, i13, nb13, src1_resolved.remaining_size,
+                                    &src1_offset) ||
+                    !checked_offset(i12, nbd2, i13, nbd3, dst_resolved.remaining_size,
+                                    &dst_offset) ||
+                    src0_base > std::numeric_limits<std::uintptr_t>::max() - src0_offset ||
+                    src1_base > std::numeric_limits<std::uintptr_t>::max() - src1_offset ||
+                    dst_base > std::numeric_limits<std::uintptr_t>::max() - dst_offset) {
+                    return launch_fail(cudaErrorInvalidValue, "k_compute_batched_ptrs tensor bounds");
+                }
+                store_pointer(ptrs_src_base, index, src0_base + src0_offset);
+                store_pointer(ptrs_src_base, table_count + index, src1_base + src1_offset);
+                store_pointer(ptrs_dst_base, index, dst_base + dst_offset);
             }
         }
 
-        return launch_fail(cudaSuccess, "k_compute_batched_ptrs host-emulated");
+        return launch_fail(cudaSuccess, "k_compute_batched_ptrs runtime helper");
     }
 
     // Printf ring buffer size: 1 MB default, overridable via CUMETAL_PRINTF_BUFFER_SIZE (bytes).
@@ -4192,31 +4255,27 @@ cudaError_t cudaLaunchKernel(const void* func,
                             registered_kernel.printf_formats);
     }
 
-    // Registered fatbinary kernels commonly operate on adjacent suballocations
-    // of one large framework arena. Until cross-command-queue resource fences
-    // provide CUDA-equivalent ordering for those aliases, complete registered
-    // launches before returning. This preserves correctness for the opt-in
-    // binary shim without penalizing the source-first/direct-kernel path.
-    //
-    // CUMETAL_ENABLE_ASYNC_REGISTERED_LAUNCH is an explicit experimental
-    // escape hatch. CUMETAL_SYNC_EACH_LAUNCH remains the broader diagnostic
-    // barrier for direct kernels as well.
+    // Metal-backend commands now encode per-buffer MTLSharedEvent dependencies,
+    // including when several CUDA pointers alias suballocations of one buffer.
+    // Registered launches can therefore remain asynchronous without losing
+    // ordering against MPS/cuBLAS work on another command queue. Keep explicit
+    // synchronization switches for diagnosis and performance comparisons.
     if (status == cudaSuccess) {
         static int sync_each_launch = -1;
-        static int async_registered_launch = -1;
+        static int sync_registered_launch = -1;
         if (sync_each_launch < 0) {
             const char* v = std::getenv("CUMETAL_SYNC_EACH_LAUNCH");
             sync_each_launch = (v != nullptr && v[0] != '\0' && v[0] != '0') ? 1 : 0;
         }
-        if (async_registered_launch < 0) {
+        if (sync_registered_launch < 0) {
             const char* v =
-                std::getenv("CUMETAL_ENABLE_ASYNC_REGISTERED_LAUNCH");
-            async_registered_launch =
+                std::getenv("CUMETAL_SYNC_REGISTERED_LAUNCH");
+            sync_registered_launch =
                 (v != nullptr && v[0] != '\0' && v[0] != '0') ? 1 : 0;
         }
         const bool synchronize_launch =
             sync_each_launch ||
-            (use_registered_kernel && !async_registered_launch);
+            (use_registered_kernel && sync_registered_launch);
         if (synchronize_launch) {
             std::string sync_error;
             const cudaError_t sync_status =

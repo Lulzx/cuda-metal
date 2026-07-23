@@ -1,0 +1,67 @@
+{
+  "projects": [
+    {
+      "name": "vector_add",
+      "subdir": "vector_add",
+      "source": "vector_add.cu",
+      "binary": "vector_add",
+      "harness": "standard"
+    },
+    {
+      "name": "sgemm_naive",
+      "subdir": "sgemm",
+      "source": "sgemm_naive.cu",
+      "binary": "sgemm_naive",
+      "harness": "standard"
+    },
+    {
+      "name": "sgemm_shmem",
+      "subdir": "sgemm",
+      "source": "sgemm_shmem.cu",
+      "binary": "sgemm_shmem",
+      "harness": "standard"
+    },
+    {
+      "name": "sgemm_2d",
+      "subdir": "sgemm",
+      "source": "sgemm_2d.cu",
+      "binary": "sgemm_2d",
+      "harness": "standard"
+    },
+    {
+      "name": "reduction",
+      "subdir": "reduction",
+      "source": "reduction_standalone.cu",
+      "binary": "reduction_standalone",
+      "harness": "standard"
+    },
+    {
+      "name": "transpose",
+      "subdir": "transpose",
+      "source": "transpose_standalone.cu",
+      "binary": "transpose_standalone",
+      "harness": "standard"
+    },
+    {
+      "name": "softmax",
+      "subdir": "softmax",
+      "source": "softmax.cu",
+      "binary": "softmax",
+      "harness": "standard"
+    },
+    {
+      "name": "flash_attention_minimal",
+      "subdir": "flash_attn",
+      "source": "flash_standalone.cu",
+      "binary": "flash",
+      "harness": "standard"
+    },
+    {
+      "name": "ggml_output_ops",
+      "subdir": "ggml_output_ops",
+      "source": "ggml_output_ops.cu",
+      "binary": "ggml_output_ops",
+      "harness": "strict"
+    }
+  ]
+}

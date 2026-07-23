@@ -43,12 +43,12 @@ as gaps have been closed.
 - Null stream (legacy default): observable serialization correct via command-buffer ordering
   on default queue. The full spec §6.3.1 cross-stream "user streams wait for null" via
   MTLSharedEvent is not implemented; current approach suffices for single-context use.
-- Registered fatbinary launches are synchronized before returning by default. This
-  correctness-first policy avoids stale reads when frameworks use multiple CUDA
-  streams over adjacent suballocations of one large Metal buffer. Direct/source-first
-  launches remain asynchronous. `CUMETAL_ENABLE_ASYNC_REGISTERED_LAUNCH=1` restores
-  the experimental asynchronous registration path, which is known to corrupt
-  llama.cpp inference until cross-command-queue resource fencing is complete.
+- Registered fatbinary launches are asynchronous by default. Per-stream
+  `MTLSharedEvent` values now fence accesses to the same tracked Metal buffer
+  across command queues, including MPS/cuBLAS commands, and duplicate waits for
+  several aliases are coalesced. `CUMETAL_SYNC_REGISTERED_LAUNCH=1` restores the
+  former host drain for diagnostics. This is conservative buffer-level hazard
+  ordering; it does not yet infer disjoint byte ranges within one arena.
 - Device printf: fully works for PTX registration + direct paths (256-byte format limit,
   ring buffer, post-launch drain). Reordering vs. CUDA possible (as on real CUDA too).
 - Binary-shim fatbinary support: CMTL envelopes, raw PTX, basic FatBinary/FatBinary2/3
@@ -136,8 +136,9 @@ as gaps have been closed.
   lowering with multiple exits and nested `continue`, dispatcher fallback for
   barrier-free residual CFGs, loop-carried PHIs, CUDA vector and named aggregate values,
   thread-local allocas, constant global tables, warp shuffle/vote operations,
-  transitive Metal builtin threading, and the CUDA math/bit intrinsics exercised
-  by the current PhysX convex path. Mixed CUDA-generic pointers can dispatch
+  transitive Metal builtin threading, and common CUDA/libdevice math and bit
+  intrinsics (including exp/log/trigonometric/rounding/pow operations). Mixed
+  CUDA-generic pointers can dispatch
   supported loads, stores, offsets, and void helper calls across their concrete
   Metal address spaces; unsupported mixed-pointer operations, dynamic shared-memory
   emission, atomics, reductions, full FP64 handling, and the remaining intrinsic
@@ -148,6 +149,9 @@ as gaps have been closed.
   calls, recursion, unsupported atomics, and irreducible/unsupported CFG shapes
   are rejected. The new backend never falls back to qualifier stripping,
   legacy PTX lowering, substitutions, or CPU execution.
+- The old source-pattern-specific vector-add AIR template has been removed.
+  Direct AIR generation remains limited to explicit research/inspection tools;
+  it is not a hidden production fallback.
 - The CuMetal-native registration ABI and runtime lookup path are implemented
   and versioned. Automated host-job rewriting, generated launch stubs, and
   embedding descriptors/metallib bytes into the final host object are not yet
@@ -157,8 +161,10 @@ as gaps have been closed.
   samples (vectorAdd etc.) and dispatches them through Metal on the Apple GPU.
   CUDA kernel CPU emulation is disabled by default. The legacy llm.c host
   implementation is diagnostic-only and requires
-  `CUMETAL_ENABLE_LLMC_CPU_EMULATION=1`; GGML's host helper fallback similarly
-  requires `CUMETAL_ENABLE_HOST_KERNEL_FALLBACKS=1`. Both modes emit a warning.
+  `CUMETAL_ENABLE_LLMC_CPU_EMULATION=1`. GGML's `k_compute_batched_ptrs` is an
+  exact runtime ABI helper rather than a kernel fallback: it synchronizes its
+  input stream and writes native Metal GPU addresses into the cuBLAS tables.
+  CPU kernel emulation continues to emit a warning.
   `CUMETAL_TRACE_GPU=1` provides positive dispatch evidence.
 - Complex CUDA C++ sources exercise mixed coverage. The strict llm.c GPT-2 FP32
   conformance workload passes numerical parity on Apple M4 Pro with CPU emulation
@@ -167,13 +173,16 @@ as gaps have been closed.
 - The binary-shim / PTX reg + lower path (plus special llm.c cases) gets further than pure
   generic emitter. Direct MSL name-matched cases (compiler/ptx/src/lower_to_metal.cpp) now cover
   common GGML kernels used by small models: k_bin_bcast (op_addff/op_mulff + f16 variants),
-  rms_norm_f32 (with stride/mul/add support), and Q8_0-to-f16 dequantization.
+  rms_norm_f32 (with stride/mul/add support), Q8_0/Q6_K-to-f16 dequantization,
+  typed float/half conversion, forward RoPE, gated SiLU, and typed float/half
+  strided scalar copies.
   A fast negative filter skips heavy lowering for the bulk of GGML's 1000s of mul_mat_q* / flash
   / other dequants / cpy etc (they hit "registered kernel missing" and GGML typically falls back
   or aborts depending on NGL and op).
 - **Approximate/passthru stubs are refused by default (no silent wrong answers).** A handful of
-  templates (`convert_unary`, `rope_norm`/`rope_neox`, `dequantize_q5_0`/`_block_q5`,
-  `k_set_rows`, `cpy_`/`k_cpy`) exist only as passthru placeholders — they copy or zero data
+  templates (unsupported `convert_unary` and `rope_norm` variants, `rope_neox`,
+  `dequantize_q5_0`/`_block_q5`, `k_set_rows`, and unsupported `cpy_`/`k_cpy`
+  variants) exist only as passthru placeholders — they copy or zero data
   instead of computing the real quantized/rotary/copy result. Their output is numerically wrong,
   so the runtime **skips them by default** (the kernel falls through to the same clean "registered
   kernel missing metallib" abort as any unsupported op) and prints a one-time
@@ -181,16 +190,14 @@ as gaps have been closed.
   Set `CUMETAL_ENABLE_APPROX_KERNELS=1` to run them anyway for experimentation — the run then
   completes but the output is not correct, and a warning says so. This trades "it launches but
   lies" for "it fails loudly," which is the safer default for a translation layer.
-- **The covered llama.cpp SmolLM2 smoke path is numerically coherent.** Rechecked
-  2026-07-22 on SmolLM2-135M-Instruct-Q4_K_M, greedy decode of
+- **The covered llama.cpp SmolLM2 path is numerically coherent.** Rechecked
+  2026-07-23 on SmolLM2-135M-Instruct-Q4_K_M, greedy decode of
   "The capital of France is":
   - Stock CPU llama.cpp (no CuMetal): `Paris.` ✅
   - llama.cpp linked against libcumetal, **NGL=0**: `Paris.` ✅
   - llama.cpp linked against libcumetal, **NGL=1**: `The capital of France is
     Paris.` ✅ at 279.2 tokens/s median generation across five warm runs on
-    Apple M4 Pro (223.2–307.7 tokens/s observed). Registered launches
-    use the correctness-first synchronization policy described above; enabling
-    experimental asynchronous registered launches reproduces incoherent output.
+    Apple M4 Pro (223.2–307.7 tokens/s observed).
   - Registration resolves only the launched PTX entry signature, avoiding ABI
     metadata allocation for thousands of unused GGML kernels. This reduced the covered one-layer,
     one-token run from 8.20 s to 1.00 s on Apple M4 Pro; native FP16
@@ -211,11 +218,28 @@ as gaps have been closed.
     pipe even when a controlling terminal is present. The gate parses the
     combined token/provenance capture byte-wise and removes provenance records
     before coherence matching, including when a record splits token fragments.
-  - This is a focused NGL=1 smoke result, not a claim that arbitrary models or
-    high layer-offload counts are supported. Broader GGML kernel coverage is
-    still required for robust high-NGL inference.
+  - This remains a focused SmolLM2 result, not a claim that arbitrary models are
+    supported. Broader GGML kernel coverage is still required. Device-resident
+    batched-GEMM pointer tables now preserve
+    Metal GPU-address identity, and FP16-input/FP32-output `cublasGemmEx` now
+    runs directly through MPS. CuMetal's llama.cpp build also disables
+    `GGML_CUDA_FA`, making the backend select ordinary attention instead of
+    fused kernels that CuMetal cannot lower. The former NGL=4 incoherence was
+    isolated to GGML's strided `cpy_scalar<half, half>` value-cache
+    materialization: the old LLVM path handled the first logical row but not the
+    later strided rows. Exact MSL float/half scalar-copy variants preserve all
+    four source and destination byte strides. The 2026-07-23 automated sweep
+    passes every NGL from 1 through 99; values above the model's layer count are
+    repeated full-offload saturation checks.
 
 ## Tooling / build notes
+- CMake discovers the standalone Apple Metal toolchain for the entire CTest
+  graph and preserves explicitly selected `TOOLCHAINS` values. Discovery is
+  verified before it is cached, so installing the component after an earlier
+  configure is recoverable.
+- `tests/cuda_projects/sweep_cuda_projects.py` provides a manifest-complete
+  strict sweep with classified TSV/JSON output. The 2026-07-23 local baseline
+  is eight passes and one numerical failure (`sgemm_2d`).
 - `air_emitter` "experimental" mode produces test containers, not production metallib ABI (for validation/air_abi only; runtime execution requires real metallib from xcrun or prebuilt).
 - AIR metadata validation relies on MetalLibraryArchive + xcrun where available; the
   bridge is optional at build time.

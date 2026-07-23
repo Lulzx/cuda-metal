@@ -109,6 +109,40 @@ cublasStatus_t synchronize_handle_stream(cublasHandle_t handle) {
     return CUBLAS_STATUS_SUCCESS;
 }
 
+bool read_pointer_table(const void* table,
+                        int count,
+                        std::vector<void*>* pointers) {
+    if (count < 0 || pointers == nullptr || (count > 0 && table == nullptr)) {
+        return false;
+    }
+    pointers->clear();
+    pointers->reserve(static_cast<std::size_t>(count));
+    if (count == 0) {
+        return true;
+    }
+
+    const std::size_t table_bytes = static_cast<std::size_t>(count) * sizeof(void*);
+    const unsigned char* table_contents = static_cast<const unsigned char*>(table);
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (cumetal::rt::resolve_allocation_for_pointer(table, &resolved)) {
+        if (resolved.buffer == nullptr || resolved.buffer->contents() == nullptr ||
+            resolved.remaining_size < table_bytes) {
+            return false;
+        }
+        table_contents = static_cast<const unsigned char*>(resolved.buffer->contents()) +
+                         resolved.offset;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        void* pointer = nullptr;
+        std::memcpy(&pointer,
+                    table_contents + static_cast<std::size_t>(i) * sizeof(void*),
+                    sizeof(pointer));
+        pointers->push_back(pointer);
+    }
+    return true;
+}
+
 // Helper: read element of symmetric n×n matrix (column-major, upper or lower stored).
 template<typename T>
 static inline T symm_elem(const T* a, int lda, int i, int j, bool upper) {
@@ -1554,12 +1588,73 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
     const float alpha_f = read_f32(alpha, 0, alpha_type);
     const float beta_f  = read_f32(beta,  0, beta_type);
 
+    // llama.cpp commonly multiplies FP16 operands with FP32 accumulation and
+    // output.  MPS accepts independently typed input/result matrices, so bind
+    // the tracked allocations directly instead of allocating and filling two
+    // temporary FP32 matrices on the CPU.
+    if (atype == CUDA_R_16F && btype == CUDA_R_16F && ctype == CUDA_R_32F &&
+        (compute_type == CUBLAS_COMPUTE_32F ||
+         compute_type == CUBLAS_COMPUTE_32F_FAST_TF32) &&
+        !cublas_cpu_reference_enabled()) {
+        if (debug_cublas_enabled()) {
+            std::fprintf(stderr,
+                         "CUMETAL_DEBUG_CUBLAS: native FP16/FP32 GemmEx "
+                         "transa=%d transb=%d m=%d n=%d k=%d "
+                         "lda=%d ldb=%d ldc=%d alpha=%g beta=%g\n",
+                         static_cast<int>(transa), static_cast<int>(transb),
+                         m, n, k, lda, ldb, ldc,
+                         static_cast<double>(alpha_f),
+                         static_cast<double>(beta_f));
+        }
+        const int a_rows = (transa == CUBLAS_OP_N) ? m : k;
+        const int b_rows = (transb == CUBLAS_OP_N) ? k : n;
+        if (lda < std::max(a_rows, 1) || ldb < std::max(b_rows, 1) ||
+            ldc < std::max(m, 1)) {
+            return CUBLAS_STATUS_INVALID_VALUE;
+        }
+
+        cumetal::rt::AllocationTable::ResolvedAllocation a_resolved;
+        cumetal::rt::AllocationTable::ResolvedAllocation b_resolved;
+        cumetal::rt::AllocationTable::ResolvedAllocation c_resolved;
+        if (!cumetal::rt::resolve_allocation_for_pointer(a, &a_resolved) ||
+            !cumetal::rt::resolve_allocation_for_pointer(b, &b_resolved) ||
+            !cumetal::rt::resolve_allocation_for_pointer(c, &c_resolved)) {
+            return CUBLAS_STATUS_INVALID_VALUE;
+        }
+
+        std::string error;
+        const cudaError_t gemm_status = cumetal::metal_backend::gemm_f16_f32(
+            transa != CUBLAS_OP_N, transb != CUBLAS_OP_N, m, n, k,
+            alpha_f, a_resolved.buffer, a_resolved.offset, lda,
+            b_resolved.buffer, b_resolved.offset, ldb,
+            beta_f, c_resolved.buffer, c_resolved.offset, ldc,
+            nullptr, &error);
+        if (gemm_status != cudaSuccess && debug_cublas_enabled()) {
+            std::fprintf(stderr,
+                         "CUMETAL_DEBUG_CUBLAS: native FP16/FP32 GemmEx failed "
+                         "m=%d n=%d k=%d msg=%s\n",
+                         m, n, k, error.c_str());
+        }
+        return map_cuda_status_to_cublas(gemm_status);
+    }
+
     // Native FP16 library lowering. GGML's llama output projection uses
     // half A^T x half B -> half C; expanding its 49k x 576 weights to FP32 on
     // the CPU for every token dominates the one-layer workload. MPS accepts
     // FP16 matrices directly and accumulates the multiplication on Apple GPU.
     if (atype == CUDA_R_16F && btype == CUDA_R_16F && ctype == CUDA_R_16F &&
-        compute_type == CUBLAS_COMPUTE_16F) {
+        compute_type == CUBLAS_COMPUTE_16F &&
+        !cublas_cpu_reference_enabled()) {
+        if (debug_cublas_enabled()) {
+            std::fprintf(stderr,
+                         "CUMETAL_DEBUG_CUBLAS: native FP16 GemmEx "
+                         "transa=%d transb=%d m=%d n=%d k=%d "
+                         "lda=%d ldb=%d ldc=%d alpha=%g beta=%g\n",
+                         static_cast<int>(transa), static_cast<int>(transb),
+                         m, n, k, lda, ldb, ldc,
+                         static_cast<double>(alpha_f),
+                         static_cast<double>(beta_f));
+        }
         const int a_rows = (transa == CUBLAS_OP_N) ? m : k;
         const int b_rows = (transb == CUBLAS_OP_N) ? k : n;
         if (lda < std::max(a_rows, 1) || ldb < std::max(b_rows, 1) ||
@@ -1597,6 +1692,22 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
     // downconvert FP32 → FP16/BF16 if the output type requires it.
     // This is substantially faster than the naive O(M·N·K) CPU loop.
     {
+        // Pointer tables produced on the GPU contain Metal virtual addresses,
+        // not necessarily the CPU mapping returned by cudaMalloc. Resolve both
+        // identities through the allocation table before CPU conversion.
+        const auto cpu_mapping = [](const void* ptr) -> const void* {
+            cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+            if (!cumetal::rt::resolve_allocation_for_pointer(ptr, &resolved) ||
+                resolved.buffer == nullptr || resolved.buffer->contents() == nullptr) {
+                return ptr;
+            }
+            return static_cast<const unsigned char*>(resolved.buffer->contents()) +
+                   resolved.offset;
+        };
+        const void* a_cpu = cpu_mapping(a);
+        const void* b_cpu = cpu_mapping(b);
+        void* c_cpu = const_cast<void*>(cpu_mapping(c));
+
         // A memory footprint: lda × (transa==N ? k : m) elements
         // B memory footprint: ldb × (transb==N ? n : k) elements
         // C memory footprint: ldc × n elements
@@ -1628,19 +1739,19 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
 
         // Upconvert A → F32 (CPU-side, Apple Silicon UMA shared memory)
         for (std::size_t i = 0; i < a_elems; ++i) {
-            a_f32[i] = read_f32(a, static_cast<int>(i), atype);
+            a_f32[i] = read_f32(a_cpu, static_cast<int>(i), atype);
         }
         // Upconvert B → F32
         for (std::size_t i = 0; i < b_elems; ++i) {
-            b_f32[i] = read_f32(b, static_cast<int>(i), btype);
+            b_f32[i] = read_f32(b_cpu, static_cast<int>(i), btype);
         }
 
-        float* c_out = c_already_f32 ? static_cast<float*>(c) : c_f32;
+        float* c_out = c_already_f32 ? static_cast<float*>(c_cpu) : c_f32;
 
         // If C is not F32 and beta != 0, seed c_out with beta*C (converted)
         if (!c_already_f32 && beta_f != 0.0f) {
             for (std::size_t i = 0; i < c_elems; ++i) {
-                c_out[i] = beta_f * read_f32(c, static_cast<int>(i), ctype);
+                c_out[i] = beta_f * read_f32(c_cpu, static_cast<int>(i), ctype);
             }
         }
 
@@ -1674,7 +1785,7 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         // Downconvert C F32 → target type if necessary
         if (!c_already_f32 && st == CUBLAS_STATUS_SUCCESS) {
             for (std::size_t i = 0; i < c_elems; ++i) {
-                write_f32(c, static_cast<int>(i), c_out[i], ctype);
+                write_f32(c_cpu, static_cast<int>(i), c_out[i], ctype);
             }
         }
 
@@ -1797,6 +1908,7 @@ cublasStatus_t cublasSgemmBatched(cublasHandle_t handle,
     if (m < 0 || n < 0 || k < 0 || batch_count < 0)
         return CUBLAS_STATUS_INVALID_VALUE;
     if (alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (batch_count == 0 || m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
     if (a_array == nullptr || b_array == nullptr || c_array == nullptr)
         return CUBLAS_STATUS_INVALID_VALUE;
 
@@ -1805,11 +1917,21 @@ cublasStatus_t cublasSgemmBatched(cublasHandle_t handle,
         return sync_status;
     }
 
+    std::vector<void*> a_pointers;
+    std::vector<void*> b_pointers;
+    std::vector<void*> c_pointers;
+    if (!read_pointer_table(a_array, batch_count, &a_pointers) ||
+        !read_pointer_table(b_array, batch_count, &b_pointers) ||
+        !read_pointer_table(c_array, batch_count, &c_pointers)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+
     for (int bi = 0; bi < batch_count; ++bi) {
         const cublasStatus_t s =
             cublasSgemm(handle, transa, transb, m, n, k,
-                        alpha, a_array[bi], lda, b_array[bi], ldb,
-                        beta, c_array[bi], ldc);
+                        alpha, static_cast<const float*>(a_pointers[bi]), lda,
+                        static_cast<const float*>(b_pointers[bi]), ldb,
+                        beta, static_cast<float*>(c_pointers[bi]), ldc);
         if (s != CUBLAS_STATUS_SUCCESS) return s;
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -1831,6 +1953,7 @@ cublasStatus_t cublasDgemmBatched(cublasHandle_t handle,
     if (m < 0 || n < 0 || k < 0 || batch_count < 0)
         return CUBLAS_STATUS_INVALID_VALUE;
     if (alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (batch_count == 0 || m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
     if (a_array == nullptr || b_array == nullptr || c_array == nullptr)
         return CUBLAS_STATUS_INVALID_VALUE;
 
@@ -1839,11 +1962,21 @@ cublasStatus_t cublasDgemmBatched(cublasHandle_t handle,
         return sync_status;
     }
 
+    std::vector<void*> a_pointers;
+    std::vector<void*> b_pointers;
+    std::vector<void*> c_pointers;
+    if (!read_pointer_table(a_array, batch_count, &a_pointers) ||
+        !read_pointer_table(b_array, batch_count, &b_pointers) ||
+        !read_pointer_table(c_array, batch_count, &c_pointers)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+
     for (int bi = 0; bi < batch_count; ++bi) {
         const cublasStatus_t s =
             cublasDgemm(handle, transa, transb, m, n, k,
-                        alpha, a_array[bi], lda, b_array[bi], ldb,
-                        beta, c_array[bi], ldc);
+                        alpha, static_cast<const double*>(a_pointers[bi]), lda,
+                        static_cast<const double*>(b_pointers[bi]), ldb,
+                        beta, static_cast<double*>(c_pointers[bi]), ldc);
         if (s != CUBLAS_STATUS_SUCCESS) return s;
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -1871,6 +2004,9 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t handle,
     if (alpha == nullptr || beta == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
+    if (batch_count == 0 || m == 0 || n == 0) {
+        return CUBLAS_STATUS_SUCCESS;
+    }
     if ((batch_count > 0) && (a_array == nullptr || b_array == nullptr || c_array == nullptr)) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -1880,20 +2016,28 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t handle,
         return sync_status;
     }
 
+    std::vector<void*> a_pointers;
+    std::vector<void*> b_pointers;
+    std::vector<void*> c_pointers;
+    if (!read_pointer_table(a_array, batch_count, &a_pointers) ||
+        !read_pointer_table(b_array, batch_count, &b_pointers) ||
+        !read_pointer_table(c_array, batch_count, &c_pointers)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
     for (int bi = 0; bi < batch_count; ++bi) {
         const cublasStatus_t s =
             cublasGemmEx(handle, transa, transb, m, n, k,
                          alpha,
-                         a_array[bi], atype, lda,
-                         b_array[bi], btype, ldb,
+                         a_pointers[bi], atype, lda,
+                         b_pointers[bi], btype, ldb,
                          beta,
-                         c_array[bi], ctype, ldc,
+                         c_pointers[bi], ctype, ldc,
                          compute_type, algo);
         if (s != CUBLAS_STATUS_SUCCESS) {
             if (debug_cublas_enabled()) {
-                const void* a_ptr = a_array[bi];
-                const void* b_ptr = b_array[bi];
-                const void* c_ptr = c_array[bi];
+                const void* a_ptr = a_pointers[bi];
+                const void* b_ptr = b_pointers[bi];
+                const void* c_ptr = c_pointers[bi];
                 std::fprintf(stderr,
                              "CUMETAL_DEBUG_CUBLAS: cublasGemmBatchedEx failed batch=%d status=%d m=%d n=%d k=%d lda=%d ldb=%d ldc=%d atype=%d btype=%d ctype=%d compute=%d a=%p b=%p c=%p dev(a,b,c)=(%d,%d,%d)\n",
                              bi, static_cast<int>(s), m, n, k, lda, ldb, ldc,

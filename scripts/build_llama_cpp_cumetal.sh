@@ -10,6 +10,10 @@
 #   CUMETAL_LLAMA_TAG    git tag/branch to pin (default: latest main)
 #   CUMETAL_CLANG        clang++ binary to use (default: auto-detect)
 #   CUMETAL_CUDA_ARCH    CUDA arch string (default: sm_80)
+#
+# CuMetal does not currently lower llama.cpp's fused FlashAttention kernels.
+# The build therefore disables GGML_CUDA_FA so llama.cpp's normal backend
+# capability probe selects its supported non-fused attention graph.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -278,6 +282,7 @@ cmake -S "${LLAMA_DIR}" -B "${LLAMA_BUILD}" \
     -DLLAMA_BUILD_EXAMPLES=ON \
     -DGGML_CUDA_GRAPHS=OFF \
     -DGGML_CUDA_NO_VMM=ON \
+    -DGGML_CUDA_FA=OFF \
     -DGGML_CUDA_FORCE_CUBLAS=ON \
     -DBUILD_SHARED_LIBS=OFF \
     2>&1

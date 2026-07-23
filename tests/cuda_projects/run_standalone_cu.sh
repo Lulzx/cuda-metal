@@ -28,11 +28,18 @@ RUN_OUTPUT="$("${OUT_DIR}/${OUT_BIN}" 2>&1 || true)"
 echo "$RUN_OUTPUT"
 
 if echo "$RUN_OUTPUT" | grep -q "CUMETAL: registered kernel missing metallib"; then
-    echo "SKIP: lowering not supported for this kernel (generic PTX emitter or direct path incomplete for tiled/shared/complex kernels; see docs/known-gaps.md). Harness compile succeeded."
+    echo "UNSUPPORTED: registered kernel lowering is unavailable; harness compile succeeded."
+    if [[ "${CUMETAL_CUDA_PROJECT_STRICT_CLASSIFICATION:-0}" == "1" ]]; then
+        exit 1
+    fi
+    echo "SKIP: lowering not supported for this kernel (generic PTX emitter or direct path incomplete for tiled/shared/complex kernels; see docs/known-gaps.md)."
     exit 77
 fi
 if echo "$RUN_OUTPUT" | grep -q "FAIL:"; then
-    # Other failure in limited lowering env -> skip to keep ctest green while reducing skip-only on harness
+    if [[ "${CUMETAL_CUDA_PROJECT_STRICT_CLASSIFICATION:-0}" == "1" ]]; then
+        exit 1
+    fi
+    # Other failure in limited lowering env -> skip in ordinary CTest mode.
     echo "SKIP: execution failed (likely due to incomplete PTX->Metal coverage for this project)."
     exit 77
 fi

@@ -51,6 +51,10 @@ add_executable(cumetal_runtime_stream_vector_add_test
     runtime_stream_vector_add_test.cpp
 )
 
+add_executable(cumetal_metal_backend_cross_queue_fence_test
+    metal_backend_cross_queue_fence_test.cpp
+)
+
 add_executable(cumetal_runtime_null_stream_sync_test
     runtime_null_stream_sync_test.cpp
 )
@@ -145,6 +149,10 @@ add_executable(cumetal_cublas_api_test
 
 add_executable(cumetal_cublas_extended_api_test
     cublas_extended_api_test.cpp
+)
+
+add_executable(cumetal_cublas_device_pointer_table_test
+    cublas_device_pointer_table_test.cpp
 )
 
 add_executable(cumetal_misc_extended_api_test
@@ -549,6 +557,17 @@ target_link_libraries(cumetal_runtime_stream_vector_add_test
         cumetal_runtime
 )
 
+target_link_libraries(cumetal_metal_backend_cross_queue_fence_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_include_directories(cumetal_metal_backend_cross_queue_fence_test
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/runtime/metal_backend
+        ${CMAKE_SOURCE_DIR}/runtime/api
+)
+
 target_link_libraries(cumetal_runtime_null_stream_sync_test
     PRIVATE
         cumetal_runtime
@@ -665,6 +684,11 @@ target_link_libraries(cumetal_cublas_api_test
 )
 
 target_link_libraries(cumetal_cublas_extended_api_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cublas_device_pointer_table_test
     PRIVATE
         cumetal_runtime
 )
@@ -1198,6 +1222,13 @@ target_compile_options(cumetal_runtime_stream_vector_add_test
         -Wpedantic
 )
 
+target_compile_options(cumetal_metal_backend_cross_queue_fence_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
 target_compile_options(cumetal_runtime_null_stream_sync_test
     PRIVATE
         -Wall
@@ -1360,6 +1391,13 @@ target_compile_options(cumetal_cublas_api_test
 )
 
 target_compile_options(cumetal_cublas_extended_api_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_cublas_device_pointer_table_test
     PRIVATE
         -Wall
         -Wextra
@@ -1972,6 +2010,17 @@ add_test(
 set_tests_properties(functional_runtime_stream_vector_add PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
+    NAME functional_metal_backend_cross_queue_fence
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+            ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
+            $<TARGET_FILE:cumetal_metal_backend_cross_queue_fence_test>
+            ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
+)
+
+set_tests_properties(functional_metal_backend_cross_queue_fence PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
     NAME functional_runtime_null_stream_sync
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
@@ -2132,6 +2181,14 @@ add_test(
 add_test(
     NAME functional_cublas_extended_api
     COMMAND cumetal_cublas_extended_api_test
+)
+
+add_test(
+    NAME functional_cublas_device_pointer_table
+    COMMAND cumetal_cublas_device_pointer_table_test
+)
+set_tests_properties(functional_cublas_device_pointer_table PROPERTIES
+    ENVIRONMENT "CUMETAL_USE_METAL_DEVICE_ADDRESSES=1"
 )
 
 add_test(

@@ -329,6 +329,81 @@ int main() {
         cudaFree(d_c);
     }
 
+    // ── llama.cpp attention projection: padded A^T, FP16 inputs, FP32 C ────
+    {
+        constexpr int M = 256;
+        constexpr int N = 35;
+        constexpr int K = 64;
+        constexpr int lda = 192;
+        constexpr int ldb = K;
+        constexpr int ldc = M;
+        std::vector<__half> h_a(static_cast<std::size_t>(lda) * M,
+                                static_cast<__half>(-7.0f));
+        std::vector<__half> h_b(static_cast<std::size_t>(ldb) * N);
+        std::vector<float> h_c(static_cast<std::size_t>(ldc) * N, -1.0f);
+        std::vector<float> expected(h_c.size(), 0.0f);
+        for (int col = 0; col < M; ++col) {
+            for (int row = 0; row < K; ++row) {
+                h_a[row + static_cast<std::size_t>(col) * lda] =
+                    static_cast<__half>(
+                        0.015625f * static_cast<float>((row + 3 * col) % 17 - 8));
+            }
+        }
+        for (int col = 0; col < N; ++col) {
+            for (int row = 0; row < K; ++row) {
+                h_b[row + static_cast<std::size_t>(col) * ldb] =
+                    static_cast<__half>(
+                        0.03125f * static_cast<float>((5 * row + col) % 13 - 6));
+            }
+        }
+        for (int col = 0; col < N; ++col) {
+            for (int row = 0; row < M; ++row) {
+                float sum = 0.0f;
+                for (int inner = 0; inner < K; ++inner) {
+                    sum += static_cast<float>(
+                               h_a[inner + static_cast<std::size_t>(row) * lda]) *
+                           static_cast<float>(
+                               h_b[inner + static_cast<std::size_t>(col) * ldb]);
+                }
+                expected[row + static_cast<std::size_t>(col) * ldc] = sum;
+            }
+        }
+
+        __half *d_a = nullptr, *d_b = nullptr;
+        float* d_c = nullptr;
+        cudaMalloc(reinterpret_cast<void**>(&d_a), h_a.size() * sizeof(__half));
+        cudaMalloc(reinterpret_cast<void**>(&d_b), h_b.size() * sizeof(__half));
+        cudaMalloc(reinterpret_cast<void**>(&d_c), h_c.size() * sizeof(float));
+        cudaMemcpy(d_a, h_a.data(), h_a.size() * sizeof(__half),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(d_b, h_b.data(), h_b.size() * sizeof(__half),
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(d_c, h_c.data(), h_c.size() * sizeof(float),
+                   cudaMemcpyHostToDevice);
+
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+        const cublasStatus_t st = cublasGemmEx(
+            handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K,
+            &alpha, d_a, CUDA_R_16F, lda,
+                    d_b, CUDA_R_16F, ldb,
+            &beta,  d_c, CUDA_R_32F, ldc,
+            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        if (!expect(st == CUBLAS_STATUS_SUCCESS,
+                    "llama padded mixed GemmEx status"))
+            return 1;
+        cudaMemcpy(h_c.data(), d_c, h_c.size() * sizeof(float),
+                   cudaMemcpyDeviceToHost);
+        for (std::size_t i = 0; i < h_c.size(); ++i) {
+            if (!expect(near_f(h_c[i], expected[i], 2e-3f),
+                        "llama padded mixed GemmEx result"))
+                return 1;
+        }
+        cudaFree(d_a);
+        cudaFree(d_b);
+        cudaFree(d_c);
+    }
+
     // ── Mixed GemmEx observes asynchronous producers on its handle stream ───
     {
         const int M = 2, N = 2, K = 2;

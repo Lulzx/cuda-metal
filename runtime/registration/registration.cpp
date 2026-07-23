@@ -49,7 +49,7 @@ bool is_debug_registration() {
 // (cache_schema + '\0' + ptx_source + '\0' + kernel_name).
 // This avoids recompiling the same kernel across process restarts.
 constexpr std::string_view kRegistrationJitCacheSchema =
-    "cumetal-registration-jit-v5-ir-msl-schema-1";
+    "cumetal-registration-jit-v9-strided-cpy-msl-schema-1";
 
 std::string registration_lowering_policy() {
     const char* backend = std::getenv("CUMETAL_PTX_BACKEND");

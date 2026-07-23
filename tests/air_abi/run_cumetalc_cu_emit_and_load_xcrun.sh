@@ -27,6 +27,8 @@ if ! xcrun --find metallib >/dev/null 2>&1; then
 fi
 
 "$CUMETALC" \
+  --backend=cumetal-ir \
+  --entry vector_add \
   --mode xcrun \
   --input "$INPUT_CU" \
   --output "$OUTPUT_METALLIB" \

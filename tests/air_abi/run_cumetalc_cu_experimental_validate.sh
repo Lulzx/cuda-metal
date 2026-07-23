@@ -18,6 +18,8 @@ if ! xcrun --find clang++ >/dev/null 2>&1; then
 fi
 
 "$CUMETALC" \
+  --backend=cumetal-ir \
+  --entry vector_add \
   --mode experimental \
   --input "$INPUT_CU" \
   --output "$OUTPUT_METALLIB" \

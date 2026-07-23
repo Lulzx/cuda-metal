@@ -476,6 +476,30 @@ add_test(
 )
 
 add_test(
+    NAME unit_llama_build_contract
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/check_llama_build_contract_test.sh
+            ${CMAKE_SOURCE_DIR}/scripts/build_llama_cpp_cumetal.sh
+)
+
+find_program(CUMETAL_PYTHON3_EXECUTABLE python3)
+if(CUMETAL_PYTHON3_EXECUTABLE)
+add_test(
+    NAME unit_llama_ngl_sweep_classifier
+        COMMAND ${CUMETAL_PYTHON3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/conformance/sweep_llama_cpp_ngl.py
+                --self-test
+    )
+add_test(
+    NAME unit_cuda_project_sweep_classifier
+    COMMAND
+        ${CUMETAL_PYTHON3_EXECUTABLE}
+        ${CMAKE_SOURCE_DIR}/tests/cuda_projects/sweep_cuda_projects.py
+        --self-test
+)
+endif()
+
+add_test(
     NAME unit_runtime_library_aliases
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_library_aliases_test.sh

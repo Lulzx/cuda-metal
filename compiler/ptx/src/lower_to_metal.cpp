@@ -29,6 +29,21 @@ bool entry_uses_supported_convert_unary(const std::string& entry_name) {
            kernel_name_contains(entry_name, "convert_unaryIDF16_fE");
 }
 
+bool entry_uses_supported_rope_norm(const std::string& entry_name) {
+    return kernel_name_contains(entry_name, "rope_normILb1ELb0EffEv") ||
+           kernel_name_contains(entry_name, "rope_normILb1ELb0EfDF16_Ev");
+}
+
+bool entry_uses_supported_cpy_scalar(const std::string& entry_name) {
+    if (!kernel_name_contains(entry_name, "_ZL10cpy_scalarI")) {
+        return false;
+    }
+    return kernel_name_contains(entry_name, "cpy_1_scalarIffE") ||
+           kernel_name_contains(entry_name, "cpy_1_scalarIfDF16_E") ||
+           kernel_name_contains(entry_name, "cpy_1_scalarIDF16_fE") ||
+           kernel_name_contains(entry_name, "cpy_1_scalarIDF16_DF16_E");
+}
+
 // A few direct-MSL templates are passthru / placeholder stubs that let a GGML
 // run proceed without computing the real result (they copy or zero data instead
 // of unpacking quantized blocks, rotating rope embeddings, etc.). They keep the
@@ -39,12 +54,14 @@ bool entry_uses_supported_convert_unary(const std::string& entry_name) {
 bool entry_uses_approximate_stub(const std::string& entry_name) {
     return (kernel_name_contains(entry_name, "convert_unary") &&
             !entry_uses_supported_convert_unary(entry_name)) ||
-           kernel_name_contains(entry_name, "rope_norm") ||
+           (kernel_name_contains(entry_name, "rope_norm") &&
+            !entry_uses_supported_rope_norm(entry_name)) ||
            kernel_name_contains(entry_name, "rope_neox") ||
            kernel_name_contains(entry_name, "dequantize_q5_0") ||
            kernel_name_contains(entry_name, "dequantize_block_q5") ||
            kernel_name_contains(entry_name, "k_set_rows") ||
-           kernel_name_contains(entry_name, "cpy_") ||
+           (kernel_name_contains(entry_name, "cpy_") &&
+            !entry_uses_supported_cpy_scalar(entry_name)) ||
            kernel_name_contains(entry_name, "k_cpy");
 }
 
@@ -679,13 +696,41 @@ kernel_template = R"METAL(kernel void __KERNEL_NAME__(
     }
 }
 )METAL";
+    } else if (kernel_name_contains(entry_name, "unary_gated_op_kernel") &&
+               kernel_name_contains(entry_name, "op_silu") &&
+               kernel_name_contains(entry_name, "EEfEv")) {
+        // GGML float gated-SiLU: dst = silu(x) * gate. The two inputs can be
+        // separate tensors or differently strided halves of one tensor.
+        kernel_template = R"METAL(kernel void __KERNEL_NAME__(
+    device const float* x [[buffer(0)]],
+    device const float* gate [[buffer(1)]],
+    device float* dst [[buffer(2)]],
+    constant long& k [[buffer(3)]],
+    constant long& n [[buffer(4)]],
+    constant long& o0 [[buffer(5)]],
+    constant long& o1 [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const long i = (long)gid;
+    if (i >= k || n <= 0) return;
+    const long row = i / n;
+    const long lane = i - row * n;
+    const long j0 = row * o0 + lane;
+    const long j1 = (o0 == o1) ? j0 : row * o1 + lane;
+    const float value = x[j0];
+    dst[i] = (value / (1.0f + exp(-value))) * gate[j1];
+}
+)METAL";
     } else if (
         // Fast negative for common complex GGML kernels (quant matmuls, most dequants, silu, flash, etc).
         // Avoids full PTX->LLVM->AIR emission attempts during registration of GGML's 1000s of templated
         // kernels from its fatbin PTX. These will hit the "registered kernel missing" path (GGML typically
         // falls back to CPU for that op/tensor) while still allowing covered ops (rms_norm_f32, k_bin_bcast
         // add/mul, convert, q8_0/q5_0 dequant, rope_*) to use the fast direct .metal + newLibraryWithSource GPU path.
-        (kernel_name_contains(entry_name, "dequantize_block_q") && !kernel_name_contains(entry_name, "q8_0_f16") && !kernel_name_contains(entry_name, "q5_0")) ||
+        (kernel_name_contains(entry_name, "dequantize_block_q") &&
+         !kernel_name_contains(entry_name, "q8_0_f16") &&
+         !kernel_name_contains(entry_name, "q5_0") &&
+         !kernel_name_contains(entry_name, "q6_K")) ||
         kernel_name_contains(entry_name, "mul_mat_q") ||
         kernel_name_contains(entry_name, "mul_mat_vec_q") ||
         kernel_name_contains(entry_name, "dequantize_block_iq") ||
@@ -1042,6 +1087,130 @@ kernel_template = R"METAL(kernel void __KERNEL_NAME__(
     }
 }
 )METAL";
+    } else if (kernel_name_contains(entry_name, "dequantize_block_q6_K")) {
+        // Exact GGML Q6_K -> f16 conversion. A block packs 256 values into
+        // 128 lower-nibble bytes, 64 upper-two-bit bytes, 16 signed scales,
+        // and one trailing half super-scale (210 bytes total). llama.cpp
+        // dispatches one 64-thread group per packed block.
+        kernel_template = R"METAL(kernel void __KERNEL_NAME__(
+    device const void* src [[buffer(0)]],
+    device half* dst [[buffer(1)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint group [[threadgroup_position_in_grid]]
+) {
+    constexpr ulong values_per_block = 256;
+    constexpr ulong bytes_per_block = 210;
+    constexpr ulong qh_offset = 128;
+    constexpr ulong scales_offset = 192;
+    constexpr ulong delta_offset = 208;
+    if (tid >= 64u) return;
+
+    const device uchar* record =
+        static_cast<const device uchar*>(src) + (ulong)group * bytes_per_block;
+    const uint ip = tid >> 5u;
+    const uint il = tid & 31u;
+    const uint scale_index = 8u * ip + (il >> 4u);
+    const ulong ql_index = 64u * ip + il;
+    const uchar qh = record[qh_offset + 32u * ip + il];
+    const float delta = float(*reinterpret_cast<const device half*>(
+        record + delta_offset));
+    const ulong out = (ulong)group * values_per_block + 128u * ip + il;
+
+    const uchar ql0 = record[ql_index];
+    const uchar ql32 = record[ql_index + 32u];
+    const int q0 = int((ql0 & 0x0fu) | (((qh >> 0u) & 0x03u) << 4u)) - 32;
+    const int q1 = int((ql32 & 0x0fu) | (((qh >> 2u) & 0x03u) << 4u)) - 32;
+    const int q2 = int((ql0 >> 4u) | (((qh >> 4u) & 0x03u) << 4u)) - 32;
+    const int q3 = int((ql32 >> 4u) | (((qh >> 6u) & 0x03u) << 4u)) - 32;
+    const device char* scales =
+        reinterpret_cast<const device char*>(record + scales_offset);
+
+    dst[out + 0u] = half(delta * float(scales[scale_index + 0u]) * float(q0));
+    dst[out + 32u] = half(delta * float(scales[scale_index + 2u]) * float(q1));
+    dst[out + 64u] = half(delta * float(scales[scale_index + 4u]) * float(q2));
+    dst[out + 96u] = half(delta * float(scales[scale_index + 6u]) * float(q3));
+}
+)METAL";
+    } else if (entry_uses_supported_rope_norm(entry_name)) {
+        // Exact forward, no-frequency-factor GGML RoPE variants used by
+        // SmolLM2. Input is float; output is either float or half.
+        kernel_template = R"METAL(kernel void __KERNEL_NAME__(
+    device const float* src [[buffer(0)]],
+    device __DST_TYPE__* dst [[buffer(1)]],
+    constant int& ne00 [[buffer(2)]],
+    constant int& ne01 [[buffer(3)]],
+    constant int& ne02 [[buffer(4)]],
+    constant int& s01 [[buffer(5)]],
+    constant int& s02 [[buffer(6)]],
+    constant int& s03 [[buffer(7)]],
+    constant int& s1 [[buffer(8)]],
+    constant int& s2 [[buffer(9)]],
+    constant int& s3 [[buffer(10)]],
+    constant int& n_dims [[buffer(11)]],
+    device const int* pos [[buffer(12)]],
+    constant float& freq_scale [[buffer(13)]],
+    constant float& ext_factor [[buffer(14)]],
+    constant float& attn_factor [[buffer(15)]],
+    constant packed_float2& corr_dims [[buffer(16)]],
+    constant float& theta_scale [[buffer(17)]],
+    device const float* freq_factors [[buffer(18)]],
+    device const long* row_indices [[buffer(19)]],
+    constant int& set_rows_stride [[buffer(20)]],
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint3 group_size [[threads_per_threadgroup]]
+) {
+    (void)freq_factors;
+    const int i0 = 2 * (int(group_size.y) * int(group.y) + int(tid.y));
+    if (i0 >= ne00) return;
+    const int row_dst = int(group_size.x) * int(group.x) + int(tid.x);
+    const int rows12 = ne01 * ne02;
+    const uint i3 = uint(row_dst / rows12);
+    const uint rem3 = uint(row_dst - int(i3) * rows12);
+    const uint i2 = rem3 / uint(ne01);
+    const uint i1 = rem3 - i2 * uint(ne01);
+    int idst = i0 + int(i1) * s1 + int(i2) * s2 + int(i3) * s3;
+    const int ix = i0 + int(i1) * s01 + int(i2) * s02 + int(i3) * s03;
+    if (set_rows_stride != 0) {
+        idst = int(i1) * s1 + i0 +
+               int(row_indices[i2]) * set_rows_stride;
+    }
+    const float x0 = src[ix];
+    const float x1 = src[ix + 1];
+    if (i0 >= n_dims) {
+        dst[idst] = __DST_TYPE__(x0);
+        dst[idst + 1] = __DST_TYPE__(x1);
+        return;
+    }
+
+    const float theta_extrap =
+        float(pos[i2]) * pow(theta_scale, float(i0) * 0.5f);
+    const float theta_interp = freq_scale * theta_extrap;
+    float theta = theta_interp;
+    float mscale = attn_factor;
+    if (ext_factor != 0.0f) {
+        const float y =
+            (float(i0 / 2) - corr_dims.x) /
+            max(0.001f, corr_dims.y - corr_dims.x);
+        const float ramp = 1.0f - clamp(y, 0.0f, 1.0f);
+        const float mix = ramp * ext_factor;
+        theta = theta_interp * (1.0f - mix) + theta_extrap * mix;
+        mscale *= 1.0f + 0.1f * log(1.0f / freq_scale);
+    }
+    const float cosine = cos(theta) * mscale;
+    const float sine = sin(theta) * mscale;
+    dst[idst] = __DST_TYPE__(x0 * cosine - x1 * sine);
+    dst[idst + 1] = __DST_TYPE__(x0 * sine + x1 * cosine);
+}
+)METAL";
+        const std::string dst_type =
+            kernel_name_contains(entry_name, "fDF16_Ev") ? "half" : "float";
+        constexpr std::string_view token = "__DST_TYPE__";
+        std::size_t pos = 0;
+        while ((pos = kernel_template.find(token, pos)) != std::string::npos) {
+            kernel_template.replace(pos, token.size(), dst_type);
+            pos += dst_type.size();
+        }
     } else if (kernel_name_contains(entry_name, "rope_norm") || kernel_name_contains(entry_name, "rope_neox")) {
         // GGML rope variants hit during model decode with NGL>0. Provide a passthru to prevent
         // "ROPE failed" abort on missing kernel when offloading layers. (A full impl would apply
@@ -1119,6 +1288,82 @@ kernel_template = R"METAL(kernel void __KERNEL_NAME__(
     if (s0) d[idx] = s0[idx % 1024];
 }
 )METAL";
+    } else if (entry_uses_supported_cpy_scalar(entry_name)) {
+        // Exact GGML scalar copy for strided 4-D tensors. Offloaded attention
+        // uses this to materialize the transposed value-cache view before its
+        // matrix multiply. All strides are byte strides, matching cpy.cu.
+        kernel_template = R"METAL(kernel void __KERNEL_NAME__(
+    device const char* src [[buffer(0)]],
+    device char* dst [[buffer(1)]],
+    constant long& ne [[buffer(2)]],
+    constant long& ne00 [[buffer(3)]],
+    constant long& ne01 [[buffer(4)]],
+    constant long& ne02 [[buffer(5)]],
+    constant long& nb00 [[buffer(6)]],
+    constant long& nb01 [[buffer(7)]],
+    constant long& nb02 [[buffer(8)]],
+    constant long& nb03 [[buffer(9)]],
+    constant long& ne10 [[buffer(10)]],
+    constant long& ne11 [[buffer(11)]],
+    constant long& ne12 [[buffer(12)]],
+    constant long& nb10 [[buffer(13)]],
+    constant long& nb11 [[buffer(14)]],
+    constant long& nb12 [[buffer(15)]],
+    constant long& nb13 [[buffer(16)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const long i = (long)gid;
+    if (i >= ne || ne00 <= 0 || ne01 <= 0 || ne02 <= 0 ||
+        ne10 <= 0 || ne11 <= 0 || ne12 <= 0) {
+        return;
+    }
+
+    const long ne00_ne01 = ne00 * ne01;
+    const long ne10_ne11 = ne10 * ne11;
+    const long i03 = i / (ne00_ne01 * ne02);
+    const long rem03 = i - i03 * ne00_ne01 * ne02;
+    const long i02 = rem03 / ne00_ne01;
+    const long rem02 = rem03 - i02 * ne00_ne01;
+    const long i01 = rem02 / ne00;
+    const long i00 = rem02 - i01 * ne00;
+    const long src_offset =
+        i00 * nb00 + i01 * nb01 + i02 * nb02 + i03 * nb03;
+
+    const long i13 = i / (ne10_ne11 * ne12);
+    const long rem13 = i - i13 * ne10_ne11 * ne12;
+    const long i12 = rem13 / ne10_ne11;
+    const long rem12 = rem13 - i12 * ne10_ne11;
+    const long i11 = rem12 / ne10;
+    const long i10 = rem12 - i11 * ne10;
+    const long dst_offset =
+        i10 * nb10 + i11 * nb11 + i12 * nb12 + i13 * nb13;
+
+    *reinterpret_cast<device __DST_TYPE__*>(dst + dst_offset) =
+        (__DST_TYPE__)*reinterpret_cast<const device __SRC_TYPE__*>(
+            src + src_offset);
+}
+)METAL";
+        std::string src_type = "half";
+        std::string dst_type = "half";
+        if (kernel_name_contains(entry_name, "cpy_1_scalarIffE")) {
+            src_type = "float";
+            dst_type = "float";
+        } else if (kernel_name_contains(entry_name, "cpy_1_scalarIfDF16_E")) {
+            src_type = "float";
+        } else if (kernel_name_contains(entry_name, "cpy_1_scalarIDF16_fE")) {
+            dst_type = "float";
+        }
+        for (const auto& [placeholder, replacement] :
+             std::array<std::pair<std::string_view, std::string>, 2>{
+                 std::pair{"__SRC_TYPE__", src_type},
+                 std::pair{"__DST_TYPE__", dst_type}}) {
+            std::size_t pos = 0;
+            while ((pos = kernel_template.find(placeholder, pos)) !=
+                   std::string::npos) {
+                kernel_template.replace(pos, placeholder.size(), replacement);
+                pos += replacement.size();
+            }
+        }
     } else if (kernel_name_contains(entry_name, "cpy_") || kernel_name_contains(entry_name, "k_cpy")) {
         // cpy / copy kernels (scalar contiguous, block, etc.) hit in high-NGL paths for buffer movement.
         // Passthru stub to prevent "CPY failed" aborts; GGML will launch, data may be approximate.

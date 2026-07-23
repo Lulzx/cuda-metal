@@ -24,6 +24,21 @@ extern "C" __global__ void k_bin_bcast_op_addff_probe(
 extern "C" __global__ void dequantize_block_q8_0_f16_probe(
     const void*, __half*, int64_t) {}
 
+extern "C" __global__ void dequantize_block_q6_KIDF16_E_probe(
+    const void*, __half*) {}
+
+extern "C" __global__ void unary_gated_op_kernel_op_silu_EEfEv_probe(
+    const float*, const float*, float*, int64_t, int64_t, int64_t, int64_t) {}
+
+struct RopeCorrDims {
+    float v[2];
+};
+
+extern "C" __global__ void rope_normILb1ELb0EfDF16_Ev_probe(
+    const float*, __half*, int, int, int, int, int, int, int, int, int, int,
+    const int32_t*, float, float, float, RopeCorrDims, float, const float*,
+    const int64_t*, int) {}
+
 extern "C" __global__ void convert_unaryIfDF16_E_probe(
     const void*, __half*, int64_t, int64_t, int64_t, uint3, int64_t,
     int64_t, int64_t) {}
@@ -317,8 +332,15 @@ struct BlockQ8 {
     __half scale;
     int8_t quant[32];
 };
+struct BlockQ6K {
+    uint8_t ql[128];
+    uint8_t qh[64];
+    int8_t scales[16];
+    __half delta;
+};
 #pragma pack(pop)
 static_assert(sizeof(BlockQ8) == 34, "Q8_0 block layout");
+static_assert(sizeof(BlockQ6K) == 210, "Q6_K block layout");
 
 bool test_q8_dequant() {
     constexpr int blocks = 64;
@@ -348,6 +370,199 @@ bool test_q8_dequant() {
         if (!near(static_cast<float>(output[i]), expected)) {
             std::fprintf(stderr, "FAIL: q8 i=%d got=%f expected=%f\n", i,
                          static_cast<float>(output[i]), expected);
+            return false;
+        }
+    }
+    cudaFree(d_packed);
+    cudaFree(d_output);
+    return true;
+}
+
+bool test_gated_silu() {
+    constexpr int64_t n = 5;
+    constexpr int64_t rows = 3;
+    constexpr int64_t k = n * rows;
+    constexpr int64_t o0 = 8;
+    constexpr int64_t o1 = 9;
+    std::vector<float> x(o0 * rows, -99.0f);
+    std::vector<float> gate(o1 * rows, -77.0f);
+    std::vector<float> output(k, 0.0f);
+    for (int64_t row = 0; row < rows; ++row) {
+        for (int64_t col = 0; col < n; ++col) {
+            x[row * o0 + col] =
+                0.25f * static_cast<float>(col - 2 + row);
+            gate[row * o1 + col] =
+                0.125f * static_cast<float>(1 + col + 2 * row);
+        }
+    }
+
+    float *d_x = nullptr, *d_gate = nullptr, *d_output = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&d_x), x.size() * sizeof(float));
+    cudaMalloc(reinterpret_cast<void**>(&d_gate), gate.size() * sizeof(float));
+    cudaMalloc(reinterpret_cast<void**>(&d_output), output.size() * sizeof(float));
+    cudaMemcpy(d_x, x.data(), x.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_gate, gate.data(), gate.size() * sizeof(float),
+               cudaMemcpyHostToDevice);
+    unary_gated_op_kernel_op_silu_EEfEv_probe<<<1, 256>>>(
+        d_x, d_gate, d_output, k, n, o0, o1);
+    if (!check_cuda("unary_gated_op_kernel_op_silu_EEfEv_probe")) return false;
+    cudaMemcpy(output.data(), d_output, output.size() * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    for (int64_t i = 0; i < k; ++i) {
+        const int64_t row = i / n;
+        const int64_t col = i % n;
+        const float value = x[row * o0 + col];
+        const float expected =
+            value / (1.0f + std::exp(-value)) * gate[row * o1 + col];
+        if (!near(output[i], expected, 1.0e-5f)) {
+            std::fprintf(stderr,
+                         "FAIL: gated silu i=%lld got=%f expected=%f\n",
+                         static_cast<long long>(i), output[i], expected);
+            return false;
+        }
+    }
+    cudaFree(d_x);
+    cudaFree(d_gate);
+    cudaFree(d_output);
+    return true;
+}
+
+bool test_rope_norm_f32_f16() {
+    constexpr int ne00 = 6;
+    constexpr int ne01 = 2;
+    constexpr int ne02 = 2;
+    constexpr int s01 = 8;
+    constexpr int s02 = 20;
+    constexpr int s03 = 40;
+    constexpr int s1 = ne00;
+    constexpr int s2 = ne00 * ne01;
+    constexpr int s3 = ne00 * ne01 * ne02;
+    constexpr int rows = ne01 * ne02;
+    std::vector<float> input(s03, -99.0f);
+    std::vector<__half> output(rows * ne00);
+    const int32_t positions[ne02] = {1, 3};
+    for (int i2 = 0; i2 < ne02; ++i2) {
+        for (int i1 = 0; i1 < ne01; ++i1) {
+            for (int i0 = 0; i0 < ne00; ++i0) {
+                input[i2 * s02 + i1 * s01 + i0] =
+                    0.125f * static_cast<float>(1 + i0 + 7 * i1 + 13 * i2);
+            }
+        }
+    }
+    float* d_input = nullptr;
+    __half* d_output = nullptr;
+    int32_t* d_pos = nullptr;
+    float* d_freq = nullptr;
+    int64_t* d_rows = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&d_input), input.size() * sizeof(float));
+    cudaMalloc(reinterpret_cast<void**>(&d_output), output.size() * sizeof(__half));
+    cudaMalloc(reinterpret_cast<void**>(&d_pos), sizeof(positions));
+    cudaMalloc(reinterpret_cast<void**>(&d_freq), sizeof(float));
+    cudaMalloc(reinterpret_cast<void**>(&d_rows), ne02 * sizeof(int64_t));
+    cudaMemcpy(d_input, input.data(), input.size() * sizeof(float),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_pos, positions, sizeof(positions), cudaMemcpyHostToDevice);
+    const RopeCorrDims corr{{0.0f, 1.0f}};
+    constexpr float freq_scale = 1.0f;
+    constexpr float ext_factor = 0.0f;
+    constexpr float attn_factor = 1.0f;
+    constexpr float theta_scale = 0.25f;
+    rope_normILb1ELb0EfDF16_Ev_probe<<<dim3(rows, 1, 1), dim3(1, 256, 1)>>>(
+        d_input, d_output, ne00, ne01, ne02, s01, s02, s03, s1, s2, s3,
+        ne00, d_pos, freq_scale, ext_factor, attn_factor, corr, theta_scale,
+        d_freq, d_rows, 0);
+    if (!check_cuda("rope_normILb1ELb0EfDF16_Ev_probe")) return false;
+    cudaMemcpy(output.data(), d_output, output.size() * sizeof(__half),
+               cudaMemcpyDeviceToHost);
+    for (int i2 = 0; i2 < ne02; ++i2) {
+        for (int i1 = 0; i1 < ne01; ++i1) {
+            for (int i0 = 0; i0 < ne00; i0 += 2) {
+                const float x0 = input[i2 * s02 + i1 * s01 + i0];
+                const float x1 = input[i2 * s02 + i1 * s01 + i0 + 1];
+                const float theta =
+                    static_cast<float>(positions[i2]) *
+                    std::pow(theta_scale, 0.5f * static_cast<float>(i0));
+                const float expected0 =
+                    x0 * std::cos(theta) - x1 * std::sin(theta);
+                const float expected1 =
+                    x0 * std::sin(theta) + x1 * std::cos(theta);
+                const int out = (i2 * ne01 + i1) * ne00 + i0;
+                if (!near(static_cast<float>(output[out]), expected0) ||
+                    !near(static_cast<float>(output[out + 1]), expected1)) {
+                    std::fprintf(stderr,
+                                 "FAIL: rope i=%d got=(%f,%f) expected=(%f,%f)\n",
+                                 out, static_cast<float>(output[out]),
+                                 static_cast<float>(output[out + 1]),
+                                 expected0, expected1);
+                    return false;
+                }
+            }
+        }
+    }
+    cudaFree(d_input);
+    cudaFree(d_output);
+    cudaFree(d_pos);
+    cudaFree(d_freq);
+    cudaFree(d_rows);
+    return true;
+}
+
+bool test_q6_k_dequant() {
+    constexpr int blocks = 3;
+    constexpr int values_per_block = 256;
+    std::vector<BlockQ6K> packed(blocks);
+    std::vector<__half> output(blocks * values_per_block);
+    std::vector<float> expected(output.size(), 0.0f);
+    for (int block = 0; block < blocks; ++block) {
+        BlockQ6K& value = packed[block];
+        value.delta = static_cast<__half>(0.03125f * (block + 1));
+        for (int i = 0; i < 128; ++i) {
+            value.ql[i] = static_cast<uint8_t>((13 * i + 17 * block) & 0xff);
+        }
+        for (int i = 0; i < 64; ++i) {
+            value.qh[i] = static_cast<uint8_t>((29 * i + 7 * block) & 0xff);
+        }
+        for (int i = 0; i < 16; ++i) {
+            value.scales[i] = static_cast<int8_t>((5 * i + 3 * block) % 17 - 8);
+        }
+        const float delta = static_cast<float>(value.delta);
+        for (int tid = 0; tid < 64; ++tid) {
+            const int ip = tid / 32;
+            const int il = tid % 32;
+            const int is = 8 * ip + il / 16;
+            const int ql_index = 64 * ip + il;
+            const uint8_t qh = value.qh[32 * ip + il];
+            const uint8_t ql0 = value.ql[ql_index];
+            const uint8_t ql32 = value.ql[ql_index + 32];
+            const int quant[4] = {
+                static_cast<int>((ql0 & 0x0f) | (((qh >> 0) & 3) << 4)) - 32,
+                static_cast<int>((ql32 & 0x0f) | (((qh >> 2) & 3) << 4)) - 32,
+                static_cast<int>((ql0 >> 4) | (((qh >> 4) & 3) << 4)) - 32,
+                static_cast<int>((ql32 >> 4) | (((qh >> 6) & 3) << 4)) - 32,
+            };
+            const int out = block * values_per_block + 128 * ip + il;
+            for (int segment = 0; segment < 4; ++segment) {
+                expected[out + 32 * segment] =
+                    delta * value.scales[is + 2 * segment] * quant[segment];
+            }
+        }
+    }
+
+    BlockQ6K* d_packed = nullptr;
+    __half* d_output = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&d_packed), packed.size() * sizeof(BlockQ6K));
+    cudaMalloc(reinterpret_cast<void**>(&d_output), output.size() * sizeof(__half));
+    cudaMemcpy(d_packed, packed.data(), packed.size() * sizeof(BlockQ6K),
+               cudaMemcpyHostToDevice);
+    dequantize_block_q6_KIDF16_E_probe<<<blocks, 64>>>(d_packed, d_output);
+    if (!check_cuda("dequantize_block_q6_KIDF16_E_probe")) return false;
+    cudaMemcpy(output.data(), d_output, output.size() * sizeof(__half),
+               cudaMemcpyDeviceToHost);
+    for (std::size_t i = 0; i < output.size(); ++i) {
+        const float rounded = static_cast<float>(static_cast<__half>(expected[i]));
+        if (!near(static_cast<float>(output[i]), rounded, 1.0e-6f)) {
+            std::fprintf(stderr, "FAIL: q6_K i=%zu got=%f expected=%f\n", i,
+                         static_cast<float>(output[i]), rounded);
             return false;
         }
     }
@@ -582,7 +797,8 @@ bool test_integrated_output_head() {
 int main() {
     if (!test_rms_norm() || !test_rms_norm_3d() ||
         !test_rms_norm_ping_pong() || !test_bin_bcast() ||
-        !test_q8_dequant() ||
+        !test_q8_dequant() || !test_gated_silu() ||
+        !test_rope_norm_f32_f16() || !test_q6_k_dequant() ||
         !test_convert() || !test_integrated_output_head()) {
         return 1;
     }

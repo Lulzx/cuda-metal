@@ -24,6 +24,8 @@ CU_COPY="$TMP_DIR/vector_add.cu"
 cp "$INPUT_CU" "$CU_COPY"
 
 "$CUMETALC" \
+  --backend=cumetal-ir \
+  --entry vector_add \
   --mode experimental \
   "$CU_COPY" \
   --overwrite

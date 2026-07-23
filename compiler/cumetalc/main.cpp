@@ -270,83 +270,6 @@ bool emit_inspection_stage(const cumetal::metal::PtxToMslResult& compiled,
     return write_text_output(output, text, overwrite, error);
 }
 
-bool try_emit_vector_add_air_ir_from_cu(const std::filesystem::path& input_cu,
-                                        const std::filesystem::path& output_ll,
-                                        std::string* error) {
-    std::string io_error;
-    const std::vector<std::uint8_t> source_bytes = cumetal::common::read_file_bytes(input_cu, &io_error);
-    if (source_bytes.empty()) {
-        if (error != nullptr) {
-            *error = io_error.empty() ? "failed to read .cu source" : io_error;
-        }
-        return false;
-    }
-
-    std::string source(source_bytes.begin(), source_bytes.end());
-    std::string normalized;
-    normalized.reserve(source.size());
-    for (char c : source) {
-        if (!std::isspace(static_cast<unsigned char>(c))) {
-            normalized.push_back(c);
-        }
-    }
-
-    if (normalized.find("vector_add(") == std::string::npos ||
-        normalized.find("c[id]=a[id]+b[id];") == std::string::npos) {
-        if (error != nullptr) {
-            *error = "unsupported .cu pattern for no-llvm-as fallback";
-        }
-        return false;
-    }
-
-    static constexpr char kVectorAddAirTemplate[] =
-        "target triple = \"air64_v28-apple-macosx26.0.0\"\n"
-        "\n"
-        "define void @vector_add(float addrspace(1)* %a, float addrspace(1)* %b, "
-        "float addrspace(1)* %c, i32 %id) #0 {\n"
-        "entry:\n"
-        "  %pa = getelementptr float, float addrspace(1)* %a, i32 %id\n"
-        "  %pb = getelementptr float, float addrspace(1)* %b, i32 %id\n"
-        "  %pc = getelementptr float, float addrspace(1)* %c, i32 %id\n"
-        "  %va = load float, float addrspace(1)* %pa, align 4\n"
-        "  %vb = load float, float addrspace(1)* %pb, align 4\n"
-        "  %sum = fadd float %va, %vb\n"
-        "  store float %sum, float addrspace(1)* %pc, align 4\n"
-        "  ret void\n"
-        "}\n"
-        "\n"
-        "attributes #0 = { \"air.kernel\" \"air.version\"=\"2.8\" }\n"
-        "\n"
-        "!air.kernel = !{!0}\n"
-        "!0 = !{void (float addrspace(1)*, float addrspace(1)*, float addrspace(1)*, i32)* @vector_add, !1, !2}\n"
-        "!1 = !{}\n"
-        "!2 = !{!3, !4, !5, !6}\n"
-        "!3 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"a\"}\n"
-        "!4 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"b\"}\n"
-        "!5 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 2, i32 1, !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"c\"}\n"
-        "!6 = !{i32 3, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"id\"}\n"
-        "!air.compile_options = !{!7, !8, !9}\n"
-        "!7 = !{!\"air.compile.denorms_disable\"}\n"
-        "!8 = !{!\"air.compile.fast_math_enable\"}\n"
-        "!9 = !{!\"air.compile.framebuffer_fetch_enable\"}\n"
-        "!air.version = !{!10}\n"
-        "!air.language_version = !{!11}\n"
-        "!10 = !{i32 2, i32 8, i32 0}\n"
-        "!11 = !{!\"Metal\", i32 4, i32 0, i32 0}\n";
-
-    const std::vector<std::uint8_t> out_bytes(
-        reinterpret_cast<const std::uint8_t*>(kVectorAddAirTemplate),
-        reinterpret_cast<const std::uint8_t*>(kVectorAddAirTemplate) +
-            std::char_traits<char>::length(kVectorAddAirTemplate));
-    if (!cumetal::common::write_file_bytes(output_ll, out_bytes, &io_error)) {
-        if (error != nullptr) {
-            *error = io_error.empty() ? "failed to write fallback AIR LLVM IR" : io_error;
-        }
-        return false;
-    }
-    return true;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -911,25 +834,6 @@ int main(int argc, char** argv) {
             options.input = temp_stage_file;
             options.kernel_name = compiled.gpu_ir.functions.front().name;
         } else {
-        const bool needs_fallback_air_ll =
-            options.mode == cumetal::air_emitter::EmitMode::kXcrun && !command_exists("llvm-as");
-        if (needs_fallback_air_ll) {
-            temp_stage_file = make_temp_path(".ll");
-            std::string fallback_error;
-            if (try_emit_vector_add_air_ir_from_cu(options.input, temp_stage_file, &fallback_error)) {
-                options.input = temp_stage_file;
-                options.kernel_name = "vector_add";
-                temp_files.push_back(temp_stage_file);
-            } else {
-                std::cerr << "cumetalc warning: " << fallback_error
-                          << "; attempting generic .cu frontend lowering\n";
-                temp_stage_file.clear();
-            }
-        }
-
-        if (!temp_stage_file.empty()) {
-            // Fallback AIR-ready LLVM IR path selected.
-        } else {
         if (!command_exists("xcrun")) {
             std::cerr << "cumetalc failed: xcrun is required for .cu frontend compilation\n";
             return 1;
@@ -964,7 +868,6 @@ int main(int argc, char** argv) {
 
         options.input = temp_stage_file;
         temp_files.push_back(temp_stage_file);
-        }
         }
     }
 

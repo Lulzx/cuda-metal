@@ -573,6 +573,20 @@ declare float @__nv_fmaxf(float, float)
 declare float @__nv_sqrtf(float)
 declare float @__nv_fabsf(float)
 declare float @__nv_acosf(float)
+declare float @__nv_rsqrtf(float)
+declare float @__nv_expf(float)
+declare float @__nv_fast_expf(float)
+declare float @__nv_exp2f(float)
+declare float @__nv_logf(float)
+declare float @__nv_log2f(float)
+declare float @__nv_sinf(float)
+declare float @__nv_cosf(float)
+declare float @__nv_tanhf(float)
+declare float @__nv_floorf(float)
+declare float @__nv_ceilf(float)
+declare float @__nv_truncf(float)
+declare float @__nv_roundf(float)
+declare float @__nv_powf(float, float)
 declare i32 @__nv_popc(i32)
 declare i32 @__nv_clz(i32)
 declare i32 @__nv_ffs(i32)
@@ -587,7 +601,21 @@ entry:
   %magnitude = call float @__nv_fabsf(float %root)
   %intrinsic_magnitude = call float @llvm.fabs.f32(float %magnitude)
   %angle = call float @__nv_acosf(float %intrinsic_magnitude)
-  %negative = fneg float %angle
+  %inverse_root = call float @__nv_rsqrtf(float %maximum)
+  %exponential = call float @__nv_expf(float %angle)
+  %fast_exponential = call float @__nv_fast_expf(float %exponential)
+  %binary_exponential = call float @__nv_exp2f(float %fast_exponential)
+  %logarithm = call float @__nv_logf(float %binary_exponential)
+  %binary_logarithm = call float @__nv_log2f(float %binary_exponential)
+  %sine = call float @__nv_sinf(float %binary_logarithm)
+  %cosine = call float @__nv_cosf(float %sine)
+  %hyperbolic = call float @__nv_tanhf(float %cosine)
+  %floored = call float @__nv_floorf(float %hyperbolic)
+  %ceiled = call float @__nv_ceilf(float %floored)
+  %truncated = call float @__nv_truncf(float %ceiled)
+  %rounded = call float @__nv_roundf(float %truncated)
+  %powered = call float @__nv_powf(float %rounded, float %inverse_root)
+  %negative = fneg float %powered
   %population = call i32 @__nv_popc(i32 %bits)
   %leading = call i32 @__nv_clz(i32 %bits)
   %first = call i32 @__nv_ffs(i32 %bits)
@@ -1035,6 +1063,12 @@ int main() {
     const metal::NvvmToMslResult cuda_math =
         metal::compile_nvvm_to_msl(kNvvmCudaMathBuiltins, "cuda-math.ll", "cuda_math");
     ok &= expect(cuda_math.ok && cuda_math.source.find("fmin(") != std::string::npos &&
+                     cuda_math.source.find("rsqrt(") != std::string::npos &&
+                     cuda_math.source.find("exp2(") != std::string::npos &&
+                     cuda_math.source.find("log2(") != std::string::npos &&
+                     cuda_math.source.find("tanh(") != std::string::npos &&
+                     cuda_math.source.find("round(") != std::string::npos &&
+                     cuda_math.source.find("pow(") != std::string::npos &&
                      cuda_math.source.find("popcount(") != std::string::npos &&
                      cuda_math.source.find("ctz(") != std::string::npos &&
                      cuda_math.source.find(" ? ") != std::string::npos,

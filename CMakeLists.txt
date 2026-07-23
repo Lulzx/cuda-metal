@@ -481,6 +481,12 @@ endif()
 
 if(CUMETAL_BUILD_TESTS)
     enable_testing()
+    include(cmake/CuMetalToolchain.cmake)
+    cumetal_discover_metal_toolchain(CUMETAL_TEST_METAL_TOOLCHAIN)
+    if(CUMETAL_TEST_METAL_TOOLCHAIN)
+        message(STATUS
+            "CTest Metal toolchain: ${CUMETAL_TEST_METAL_TOOLCHAIN}")
+    endif()
     add_subdirectory(tests/air_abi)
     add_subdirectory(tests/conformance)
     add_subdirectory(tests/functional)
@@ -502,6 +508,17 @@ if(CUMETAL_BUILD_TESTS)
         )
         set_tests_properties(bench_phase5_all_kernels PROPERTIES SKIP_RETURN_CODE 77)
     endif()
+
+    cumetal_apply_metal_toolchain_to_tests(
+        "${CUMETAL_TEST_METAL_TOOLCHAIN}"
+        "${CMAKE_SOURCE_DIR}"
+        "${CMAKE_SOURCE_DIR}/tests/air_abi"
+        "${CMAKE_SOURCE_DIR}/tests/conformance"
+        "${CMAKE_SOURCE_DIR}/tests/functional"
+        "${CMAKE_SOURCE_DIR}/tests/cuda_projects"
+        "${CMAKE_SOURCE_DIR}/tests/ptx_sweep"
+        "${CMAKE_SOURCE_DIR}/tests/unit"
+    )
 endif()
 
 install(TARGETS

@@ -133,6 +133,9 @@ Phase 4 conformance gate over functional tests:
 ctest --test-dir build -R conformance_phase4_functional --output-on-failure
 ctest --test-dir build -R conformance_llmc_gpt2fp32cu --output-on-failure
 ctest --test-dir build -R functional_cuda_projects_ --output-on-failure
+
+# Manifest-complete strict sweep with classified TSV/JSON output:
+python3 tests/cuda_projects/sweep_cuda_projects.py
 ```
 
 Notes:
@@ -144,6 +147,11 @@ Notes:
   `tests/cuda_projects/` (SGEMM naive/shmem/2d, reduction, transpose). It requires
   Clang, `xcrun`, and the matching `libcumetal` build. Unsupported lowering is
   reported as an exit-77 skip.
+- The standalone sweep uses strict classification instead of CTest skip
+  semantics and distinguishes prerequisite skips, compile/link failures,
+  unsupported kernels, numerical failures, crashes, timeouts, and other runtime
+  errors. Its manifest check fails if a new standalone `.cu` fixture is not
+  enrolled.
 - `conformance_llmc_gpt2fp32cu` is registered only when llm.c is configured (set `CUMETAL_LLMC_DIR`
   before CMake configure, or place checkout at `../llm.c` relative to this repo root).
 - `conformance_llmc_gpt2fp32cu` skips when `gpt2_124M.bin` is missing from the llm.c checkout

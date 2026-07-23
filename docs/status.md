@@ -47,6 +47,28 @@ Phase 5 items implemented:
 
 Post-Phase 5 work completed:
 
+- **CTest-wide Metal toolchain discovery**: configure now discovers Apple's
+  separately installed Metal toolchain with
+  `xcodebuild -showComponent MetalToolchain -json`, verifies its identifier
+  through `xcrun -f metal`, and injects `TOOLCHAINS` into every registered
+  test without overwriting existing test environments. Explicit cache and
+  process-environment selections still win.
+
+- **Classified standalone CUDA coverage sweep**:
+  `tests/cuda_projects/sweep_cuda_projects.py` validates that every standalone
+  `.cu` fixture is represented in a manifest, runs it with strict result
+  semantics, and emits per-project logs plus TSV/JSON summaries. The current
+  nine-project baseline is eight passes and one numerical failure
+  (`sgemm_2d`); unsupported lowering, compiler/link failures, crashes, and
+  timeouts are distinguished rather than collapsed into skips.
+
+- **Typed NVVM/MSL migration**: the importer now covers common single-precision
+  libdevice declarations including reciprocal square root, exponential,
+  logarithmic, trigonometric, hyperbolic, rounding, and power functions. The
+  hidden source-pattern-specific vector-add AIR template has been removed;
+  direct AIR remains research tooling, while the explicit legacy backend
+  remains available until the specification's parity gate is met.
+
 - **Demand-driven binary-shim PTX ABI resolution**: fatbinary registration
   records kernel identities without scanning every module. The first actual
   launch resolves only its requested `.entry` signature; modules and entries
@@ -75,6 +97,44 @@ Post-Phase 5 work completed:
   the five-run warm median is 0.57 s for one token and 0.61 s for the 16-token
   coherence gate; generation rose from 8.1 to 279.2 tokens/s median (five runs).
 
+- **GPU-address batched GEMM and mixed FP16/FP32 lowering**: device allocations
+  now retain both their shared-memory CPU identity and native `MTLBuffer`
+  virtual address in the allocation table. `cublasSgemmBatched`,
+  `cublasDgemmBatched`, and `cublasGemmBatchedEx` decode device-resident pointer
+  arrays through that table, including pointer values written by Metal kernels.
+  FP16 A/B with FP32 compute and C now binds directly to mixed-type `MPSMatrix`
+  descriptors instead of allocating CPU-filled FP32 operand copies. Truncated
+  device tables fail with `CUBLAS_STATUS_INVALID_VALUE`. Test:
+  `functional_cublas_device_pointer_table` (runs with native Metal addresses).
+
+- **Truthful llama.cpp FlashAttention capability**: the CuMetal llama.cpp build
+  sets `GGML_CUDA_FA=OFF`. llama.cpp's native CUDA backend probe consequently
+  reports fused FlashAttention unsupported and its scheduler selects the
+  ordinary attention graph rather than launching kernels CuMetal deliberately
+  rejects. Test: `unit_llama_build_contract`.
+
+- **Reproducible llama.cpp high-offload sweep**: the exact
+  `k_compute_batched_ptrs` runtime helper now writes Metal GPU virtual addresses
+  by default, clearing the former NGL=2 cuBLAS invalid-value failure. The
+  `sweep_llama_cpp_ngl.py` runner classifies and logs NGL=1..99 probes. The
+  former NGL=4 incoherence was isolated with llama.cpp's per-node evaluation
+  callback to GGML's strided `cpy_scalar<half, half>` materialization of a
+  transposed value-cache view. Exact typed MSL scalar-copy variants now preserve
+  all four source and destination byte strides. The 2026-07-23 SmolLM2 sweep
+  passes every NGL from 1 through 99; values above its layer count repeat the
+  saturated full-offload configuration. Tests: `unit_ptx_lower_to_metal` and
+  `unit_llama_ngl_sweep_classifier`.
+
+- **Cross-command-queue resource fencing**: each Metal stream owns a public
+  `MTLSharedEvent`, and kernel plus MPS command buffers publish one coalesced
+  access value while waiting for prior accesses to their tracked buffers. This
+  keeps registered launches asynchronous without stale alias reads. Five
+  interleaved warm NGL=3 runs measured a 1.000 s asynchronous median versus
+  1.024 s with `CUMETAL_SYNC_REGISTERED_LAUNCH=1` (0.98×) on Apple M4 Pro.
+  Tests: `functional_metal_backend_cross_queue_fence` and
+  `conformance_llama_cpp`; benchmark:
+  `scripts/benchmark_llama_registered_launches.py`.
+
 - **MTLHeap auto-threshold**: MTLHeap sub-allocation now auto-enabled for allocations ≥ 4 MiB
   (configurable via `CUMETAL_MTLHEAP_THRESHOLD_BYTES`). Three modes:
   - `CUMETAL_MTLHEAP_ALLOC` unset → auto (heap for size ≥ threshold, default 4 MiB)
@@ -98,17 +158,21 @@ Post-Phase 5 work completed (continued, part 2):
   Added `cudaDataType_t`, `cublasDiagType_t`, `cublasSideMode_t`, `cublasGemmAlgo_t` enums.
   New functions:
   - `cublasGemmEx` — extended GEMM: routes CUDA_R_32F → cublasSgemm,
-    CUDA_R_64F → cublasDgemm, all-FP16/FP16-compute directly to MPS, and other
-    mixed types through the FP32 conversion path.
+    CUDA_R_64F → cublasDgemm, all-FP16/FP16-compute and
+    FP16-input/FP32-output directly to MPS, and other mixed types through the
+    FP32 conversion path.
   - `cublasGemmStridedBatchedEx` — batched strided GemmEx; routes fp32/fp64 to typed variants.
   - `cublasHgemm` — half-precision GEMM through the native FP16 GemmEx path.
-  - `cublasSgemmBatched` / `cublasDgemmBatched` — array-of-pointers batched GEMM.
+  - `cublasSgemmBatched` / `cublasDgemmBatched` / `cublasGemmBatchedEx` —
+    array-of-pointers batched GEMM with device-resident GPU-address table
+    translation.
   - `cublasStrsm` / `cublasDtrsm` — triangular solve (BLAS3); supports LEFT/RIGHT side,
     UPPER/LOWER fill, N/T/C transpose, UNIT/NON_UNIT diagonal, alpha scaling.
   - `cublasSetVector` / `cublasGetVector` / `cublasSetMatrix` / `cublasGetMatrix` —
     strided host↔device copy helpers (no-op overhead on Apple Silicon UMA).
   - Async variants (`*Async`) alias to their synchronous counterparts (stream ignored; UMA).
-  Test: `functional_cublas_extended_api`.
+  Tests: `functional_cublas_extended_api`,
+  `functional_cublas_device_pointer_table`.
 
 
 - **Miscellaneous extended APIs** (`runtime/api/`, `runtime/rt/`, `runtime/driver/`):

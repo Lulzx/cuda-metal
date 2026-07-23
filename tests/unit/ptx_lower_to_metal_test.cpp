@@ -446,6 +446,80 @@ DONE:
                 "RMS stores one subtotal per SIMD group"))
         return 1;
 
+    // ── Regression: GGML float gated-SiLU is lowered exactly ───────────────
+    const std::string silu_name =
+        "_ZL21unary_gated_op_kernelIXadL_ZL7op_silufEEfEvPKT0_S2_PS0_xxxx";
+    const std::string silu_ptx = std::string(R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry )PTX") + silu_name + R"PTX((
+    .param .u64 x,
+    .param .u64 gate,
+    .param .u64 dst,
+    .param .u64 k,
+    .param .u64 n,
+    .param .u64 o0,
+    .param .u64 o1
+) {
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions opts_silu;
+    opts_silu.entry_name = silu_name;
+    const auto r_silu =
+        cumetal::ptx::lower_ptx_to_metal_source(silu_ptx, opts_silu);
+    if (!expect(r_silu.ok && r_silu.matched, "gated-SiLU lowering matched"))
+        return 1;
+    if (!expect(!r_silu.approximate, "gated-SiLU lowering is exact"))
+        return 1;
+    if (!expect(contains(r_silu.metal_source, "row * o0 + lane"),
+                "gated-SiLU honors the source row stride"))
+        return 1;
+    if (!expect(contains(r_silu.metal_source, "exp(-value)"),
+                "gated-SiLU applies the sigmoid"))
+        return 1;
+    if (!expect(contains(r_silu.metal_source, "gate[j1]"),
+                "gated-SiLU multiplies by the gate"))
+        return 1;
+
+    // ── Regression: observed SmolLM2 forward RoPE is exact ─────────────────
+    const std::string rope_exact_name =
+        "_ZL9rope_normILb1ELb0EfDF16_EvPKT1_PT2_iiiiiiiiiiPKifff"
+        "14rope_corr_dimsfPKfPKxi";
+    const std::string rope_exact_ptx = std::string(R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry )PTX") + rope_exact_name + R"PTX((
+    .param .u64 src,
+    .param .u64 dst
+) {
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions opts_rope_exact;
+    opts_rope_exact.entry_name = rope_exact_name;
+    const auto r_rope_exact =
+        cumetal::ptx::lower_ptx_to_metal_source(rope_exact_ptx,
+                                                opts_rope_exact);
+    if (!expect(r_rope_exact.ok && r_rope_exact.matched,
+                "observed forward RoPE lowering matched"))
+        return 1;
+    if (!expect(!r_rope_exact.approximate,
+                "observed forward RoPE lowering is exact"))
+        return 1;
+    if (!expect(contains(r_rope_exact.metal_source, "pow(theta_scale"),
+                "RoPE applies dimension-dependent frequency"))
+        return 1;
+    if (!expect(contains(r_rope_exact.metal_source,
+                         "x0 * cosine - x1 * sine"),
+                "RoPE rotates each adjacent pair"))
+        return 1;
+    if (!expect(contains(r_rope_exact.metal_source, "device half* dst"),
+                "RoPE selects the half-output ABI"))
+        return 1;
+
     // ── Regression: GGML Q8_0 conversion is a real dequantizer ──────────────
     const std::string q8_ptx = R"PTX(
 .version 8.0
@@ -469,6 +543,44 @@ DONE:
         return 1;
     if (!expect(contains(r_q8.metal_source, "float(scale) * float(quant)"),
                 "Q8_0 dequantizer applies the block scale"))
+        return 1;
+
+    // ── Regression: GGML Q6_K packed layout is dequantized exactly ────────
+    const std::string q6_name =
+        "_ZL21dequantize_block_q6_KIDF16_EvPKvPT_";
+    const std::string q6_ptx = std::string(R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry )PTX") + q6_name + R"PTX((
+    .param .u64 src,
+    .param .u64 dst
+) {
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions opts_q6;
+    opts_q6.entry_name = q6_name;
+    const auto r_q6 = cumetal::ptx::lower_ptx_to_metal_source(q6_ptx, opts_q6);
+    if (!(r_q6.ok && r_q6.matched)) {
+        std::fprintf(stderr,
+                     "Q6_K diagnostic: ok=%d matched=%d entry='%s' error='%s'\n",
+                     r_q6.ok ? 1 : 0, r_q6.matched ? 1 : 0,
+                     r_q6.entry_name.c_str(), r_q6.error.c_str());
+        if (!expect(false, "Q6_K f16 dequantizer matched")) return 1;
+    }
+    if (!expect(!r_q6.approximate, "Q6_K f16 dequantizer is exact")) return 1;
+    if (!expect(contains(r_q6.metal_source, "bytes_per_block = 210"),
+                "Q6_K dequantizer uses the packed 210-byte block layout"))
+        return 1;
+    if (!expect(contains(r_q6.metal_source, "scales_offset = 192"),
+                "Q6_K dequantizer reads signed per-group scales"))
+        return 1;
+    if (!expect(contains(r_q6.metal_source, "delta_offset = 208"),
+                "Q6_K dequantizer reads the trailing half super-scale"))
+        return 1;
+    if (!expect(contains(r_q6.metal_source, "float(q3)"),
+                "Q6_K dequantizer reconstructs all four 6-bit values per lane"))
         return 1;
 
     // ── Regression: GGML strided f32/f16 conversion keeps its ABI ──────────
@@ -538,6 +650,61 @@ DONE:
     if (!expect(contains(r_f16_f32.metal_source,
                          "device float* typed_dst"),
                 "half-to-float convert writes float"))
+        return 1;
+
+    // GGML materializes transposed attention-cache views with the general
+    // strided scalar-copy kernel. This must preserve all four byte strides;
+    // treating it as a flat memcpy corrupts every row after the first.
+    const std::string cpy_f16_f16_name =
+        "_ZL10cpy_scalarIXadL_ZL12cpy_1_scalarIDF16_DF16_EvPKcPcEEEvS2_S3_"
+        "xxxxxxxxxxxxxxx";
+    const std::string cpy_f16_f16_ptx = std::string(R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry )PTX") + cpy_f16_f16_name + R"PTX((
+    .param .u64 src,
+    .param .u64 dst,
+    .param .u64 ne,
+    .param .u64 ne00,
+    .param .u64 ne01,
+    .param .u64 ne02,
+    .param .u64 nb00,
+    .param .u64 nb01,
+    .param .u64 nb02,
+    .param .u64 nb03,
+    .param .u64 ne10,
+    .param .u64 ne11,
+    .param .u64 ne12,
+    .param .u64 nb10,
+    .param .u64 nb11,
+    .param .u64 nb12,
+    .param .u64 nb13
+) {
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions opts_cpy_f16_f16;
+    opts_cpy_f16_f16.entry_name = cpy_f16_f16_name;
+    const auto r_cpy_f16_f16 = cumetal::ptx::lower_ptx_to_metal_source(
+        cpy_f16_f16_ptx, opts_cpy_f16_f16);
+    if (!expect(r_cpy_f16_f16.ok && r_cpy_f16_f16.matched,
+                "GGML half scalar copy matched"))
+        return 1;
+    if (!expect(!r_cpy_f16_f16.approximate,
+                "GGML half scalar copy is exact"))
+        return 1;
+    if (!expect(contains(r_cpy_f16_f16.metal_source,
+                         "i00 * nb00 + i01 * nb01 + i02 * nb02 + i03 * nb03"),
+                "scalar copy preserves source byte strides"))
+        return 1;
+    if (!expect(contains(r_cpy_f16_f16.metal_source,
+                         "i10 * nb10 + i11 * nb11 + i12 * nb12 + i13 * nb13"),
+                "scalar copy preserves destination byte strides"))
+        return 1;
+    if (!expect(contains(r_cpy_f16_f16.metal_source,
+                         "reinterpret_cast<device half*>"),
+                "half scalar copy uses the encoded template type"))
         return 1;
 
     if (!expect(r_math.lowering_kind == cumetal::ptx::MetalLoweringKind::kGenericPtx,

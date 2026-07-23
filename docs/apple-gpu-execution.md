@@ -33,9 +33,10 @@ GGML kernels.
 ### CPU execution is opt-in
 
 The legacy llm.c CPU implementation is disabled unless
-`CUMETAL_ENABLE_LLMC_CPU_EMULATION=1` is set. GGML host kernel helpers are
-disabled unless `CUMETAL_ENABLE_HOST_KERNEL_FALLBACKS=1` is set. Both diagnostic
-modes emit a warning when enabled.
+`CUMETAL_ENABLE_LLMC_CPU_EMULATION=1` is set and emits a warning when enabled.
+GGML's `k_compute_batched_ptrs` path is not CPU kernel emulation: it is an exact
+runtime ABI helper that synchronizes its input stream and constructs native
+Metal-address tables for batched cuBLAS calls.
 
 The strict conformance scripts reject provenance from `cpu_fallback` and `stub`
 sources, so a CPU result cannot be mistaken for a GPU pass.
@@ -48,15 +49,17 @@ registration path produced timing-dependent stale reads: isolated RMS,
 conversion, dequantization, and GEMM probes were exact, while the live model
 alternated between exact and badly corrupted RMS results.
 
-Synchronizing every registered launch removed the corruption and produced the
-same greedy answer as the stock CPU build. CuMetal therefore synchronizes
-fatbinary-registered launches before returning by default. Direct/source-first
-kernels retain asynchronous stream behavior.
+CuMetal now keeps those launches asynchronous while preserving visibility with
+public Metal synchronization APIs. Each stream owns an `MTLSharedEvent`; every
+command records one signal value, and commands touching a buffer wait on its
+previous queue access. Identical dependencies across several arguments are
+coalesced. Because aliases resolve to the same tracked `Buffer`, adjacent CUDA
+suballocations receive the same dependency chain, including transitions between
+typed kernels and MPS/cuBLAS commands.
 
-`CUMETAL_ENABLE_ASYNC_REGISTERED_LAUNCH=1` opts into the incomplete asynchronous
-registration path for development. It is not a correctness mode. The long-term
-fix is CUDA-equivalent cross-command-queue resource fencing for aliased Metal
-buffers.
+`CUMETAL_SYNC_REGISTERED_LAUNCH=1` restores the former host-side wait for
+diagnosis and A/B performance comparisons. The focused cross-queue regression
+is `functional_metal_backend_cross_queue_fence`.
 
 `CUMETAL_SYNC_EACH_LAUNCH=1` remains a broader diagnostic switch that also
 synchronizes direct launches.
@@ -199,12 +202,13 @@ binary-shim-only cases reported explicit skips instead of false passes.
 
 ## Remaining limitations
 
-- The verified llama.cpp result uses NGL=1. Broad high-NGL support needs more
-  dequantization, matrix, attention, RoPE, and copy kernels.
-- Registered launches are synchronous until explicit Metal cross-queue fencing
-  is implemented, which reduces throughput.
-- Fatbinary registration still takes several minutes for llama.cpp because the
-  process scans and prepares a very large kernel set.
+- The verified SmolLM2 result passes NGL=1 through NGL=99, including saturated
+  full offload. This does not imply that arbitrary models or all GGML kernels
+  are supported.
+- Registered launches use shared-event resource fencing across Metal command
+  queues; `CUMETAL_SYNC_REGISTERED_LAUNCH=1` remains available for diagnostics.
+- Fatbinary registration indexes entry signatures lazily; a kernel still pays
+  its PTX lowering and Metal compilation cost on first use.
 - Approximate template bodies still exist for development but are refused by
   default.
 - The generic PTX lowering surface remains a documented subset; successful

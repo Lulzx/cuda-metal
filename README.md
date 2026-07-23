@@ -76,6 +76,10 @@ Tools
   `--cuda-inline-threshold` (which forces every viable reachable device call
   to inline)
 
+CMake also auto-discovers Apple's separately installed Metal toolchain and
+applies its verified `TOOLCHAINS` identifier across the full CTest graph.
+Explicit cache or environment selections take precedence.
+
 Library shims
 -------------
 
@@ -205,15 +209,18 @@ bash scripts/build_llama_cpp_cumetal.sh   # clones + builds in ../llama.cpp/
 
 ```bash
 bash tests/conformance/run_llama_cpp_cumetal.sh
+
+# Find the first incorrect high-offload boundary (defaults to NGL=1..99).
+python3 tests/conformance/sweep_llama_cpp_ngl.py
 ```
 
-**Status — verified on 2026-07-22:**
+**Status — verified on 2026-07-23:**
 
 | What | Result |
 | --- | --- |
 | Build llama.cpp's GGML CUDA backend unmodified against libcumetal | ✅ works |
 | Load model, init CUDA device, register fatbins/kernels, run end-to-end | ✅ works |
-| SmolLM2-135M greedy output with one GPU-offloaded layer | ✅ coherent |
+| SmolLM2-135M greedy output with NGL=1 through NGL=99 | ✅ coherent |
 
 Measured on SmolLM2-135M, greedy decode of "The capital of France is":
 
@@ -222,6 +229,8 @@ Measured on SmolLM2-135M, greedy decode of "The capital of France is":
 - llama.cpp via libcumetal (NGL=1) → `The capital of France is Paris.` ✅
   (Apple M4 Pro, 279.2 tokens/s median generation across five warm runs;
   observed range 223.2–307.7 tokens/s)
+- llama.cpp via libcumetal (NGL=4 and saturated full offload through NGL=99)
+  → contains `Paris` ✅
 
 Binary-shim startup records kernels cheaply and builds a module's linear PTX
 entry-signature ABI index only when one of its kernels is actually launched.
@@ -236,20 +245,48 @@ CPU for every token. Combined with the earlier linear scanner work, the
 one-token path is down from 290.24 s to 0.57 s. Full PTX parsing still occurs
 when a kernel actually needs lowering.
 
-Registered fatbinary launches are conservatively synchronized by default because
-the experimental asynchronous path can violate ordering when GGML uses adjacent
-suballocations of a shared Metal arena. Direct/source-first launches remain
-asynchronous. `CUMETAL_ENABLE_ASYNC_REGISTERED_LAUNCH=1` opts into the incomplete
-asynchronous path for development. This result is a focused NGL=1 smoke test;
-arbitrary models and high offload counts still require broader GGML kernel coverage.
+Batched cuBLAS pointer arrays now resolve both shared-memory CPU pointers and
+native Metal GPU virtual addresses to the same tracked allocation. Mixed
+FP16-input/FP32-output `cublasGemmEx` and `cublasGemmBatchedEx` bind their
+original buffers directly to mixed-type MPS matrices, avoiding CPU-side FP32
+operand expansion. A focused functional test covers native-address device
+tables, mixed batched GEMM, and truncated-table rejection.
+
+The CuMetal llama.cpp build disables `GGML_CUDA_FA`: fused CUDA
+FlashAttention kernels are not yet supported, so advertising them caused the
+backend scheduler to choose a graph CuMetal could not execute. llama.cpp now
+sees FlashAttention as unsupported and automatically uses its ordinary
+attention fallback.
+
+Registered fatbinary launches are asynchronous by default. The Metal backend
+tracks the last queue access to each underlying buffer and encodes coalesced
+`MTLSharedEvent` wait/signal dependencies, so CUDA pointer aliases and MPS/cuBLAS
+commands remain ordered across command queues without draining them on the host.
+`CUMETAL_SYNC_REGISTERED_LAUNCH=1` restores the old per-launch host wait for A/B
+diagnosis. Five interleaved warm `NGL=3` runs measured a 1.000 s fenced-async
+median versus 1.024 s host-synchronized (0.98×) on Apple M4 Pro; reproduce with
+`python3 scripts/benchmark_llama_registered_launches.py`. This is a focused
+NGL=3 result; arbitrary models still require broader GGML kernel coverage.
+The automated sweep stops at the first failure, writes per-NGL logs plus a TSV
+summary under `build/llama-ngl-sweep/`, and classifies coherence failures,
+unsupported kernels, cuBLAS errors, crashes, and timeouts. On the 2026-07-23
+SmolLM2 sweep, every value from NGL=1 through NGL=99 passes the coherence and
+Apple-GPU provenance gates. The former NGL=4 failure was the general GGML
+`cpy_scalar<half, half>` operation used to materialize a transposed value-cache
+view: its LLVM-lowered path copied the first logical row but mishandled later
+strided rows. CuMetal now emits an exact typed MSL implementation for the
+float/half scalar-copy variants, preserving all four source and destination byte
+strides. A node-by-node CPU/GPU evaluation trace and the end-to-end sweep verify
+the correction. NGL values above the model's layer count are saturation checks,
+not additional offloaded layers.
 
 The conformance test enforces a **coherence gate**: a greedy decode must contain the
 expected answer (`CUMETAL_LLAMA_EXPECT`, default `Paris`). With `NGL>0` it also
 requires a successful Apple-GPU provenance record and rejects CPU fallbacks and
 stubs, so it FAILS on garbage or non-GPU execution rather than passing on "some
 tokens were generated." The default NGL=1 probe is expected to pass on the
-verified Apple M4 Pro path; unsupported models or larger offload counts fail
-honestly instead of being reported as compatible.
+verified Apple M4 Pro path; unsupported models fail honestly instead of being
+reported as compatible.
 Point it at another model/answer with `CUMETAL_LLAMA_MODEL` / `CUMETAL_LLAMA_EXPECT`.
 The harness forces llama.cpp's `--simple-io` mode so generated tokens are
 captured instead of being written only to an interactive terminal. Its output
