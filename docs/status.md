@@ -63,6 +63,16 @@ Post-Phase 5 work completed:
   skips. The CTest harness (`run_standalone_cu.sh`) likewise reports a kernel
   that runs but computes wrong results as a failure, never as a skip — only
   genuinely unavailable lowering (`registered kernel missing metallib`) skips.
+  `cumetal_cuda_projects_compile_link` propagates the compiler's exit status and
+  removes any previous object and binary first, so a failed compile cannot link a
+  stale object from an earlier build and report a pass.
+
+- **`functional_runtime_ptx_lowering_regression` executes again**: it previously
+  passed `--mode experimental` unconditionally, always produced an unloadable
+  container, and always skipped its own execution check on every machine. It now
+  packages validated metallibs with `--mode xcrun`, skips only when `xcrun
+  metal`/`metallib` are genuinely absent, and verifies negate, reduce_sum, and
+  clamp_relu numerically on the GPU.
 
 - **Typed NVVM/MSL migration**: the importer now covers common single-precision
   libdevice declarations including reciprocal square root, exponential,

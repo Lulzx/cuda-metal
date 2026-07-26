@@ -68,16 +68,39 @@ cumetal_cuda_projects_compile_link() {
     # directly, even though `bash script.sh` is allowed.
     export PATH="${cumetal_build_dir}/cuda_toolchain:${root_dir}/scripts/cuda_toolchain:${PATH}"
 
+    local obj_file="${out_dir}/${src_cu%.cu}.o"
+    local compile_log="${out_dir}/${src_cu%.cu}.compile.log"
+
     echo "Compiling ${src_cu}..."
-    # Filter known non-fatal warnings from homebrew clang + ptx feature flags (for sm_80+)
-    # and source RAND_MAX implicit conversions (pre-existing in project .cu samples).
-    ( "${CLANG_BIN}" -x cuda -std=c++17 -O2 -DNDEBUG \
+    # The compiler's exit status must be propagated, and any object file from an
+    # earlier build removed first. Discarding the status let a failed compile link
+    # a stale object instead, so the harness reported PASS while verifying code
+    # that no longer existed.
+    #
+    # Known non-fatal warnings from homebrew clang + ptx feature flags (for sm_80+)
+    # and RAND_MAX implicit conversions (pre-existing in project .cu samples) are
+    # filtered out of the printed log only — never out of the exit status.
+    rm -f "${obj_file}" "${out_dir}/${out_bin}"
+    local compile_status=0
+    "${CLANG_BIN}" -x cuda -std=c++17 -O2 -DNDEBUG \
         -D__CUDACC__=1 -D__NVCC__=1 -Wno-pass-failed \
         "${CUMETAL_CUDA_DEVICE_FLAGS[@]}" -nocudainc -nocudalib \
         -I"${root_dir}/runtime/api" -include cuda_runtime.h \
-        -c "${src_dir}/${src_cu}" -o "${out_dir}/${src_cu%.cu}.o" 2>&1 || true ) \
-        | grep -v -E 'ptx[0-9]+ is not a recognized feature|\+ptx[0-9]+|Wimplicit-const-int-float-conversion|warnings generated when compiling for' || true
-    xcrun clang++ "${out_dir}/${src_cu%.cu}.o" \
+        -c "${src_dir}/${src_cu}" -o "${obj_file}" \
+        >"${compile_log}" 2>&1 || compile_status=$?
+    grep -v -E 'ptx[0-9]+ is not a recognized feature|\+ptx[0-9]+|Wimplicit-const-int-float-conversion|warnings generated when compiling for' \
+        "${compile_log}" || true
+
+    if [[ ${compile_status} -ne 0 ]]; then
+        echo "FAIL: compiling ${src_cu} failed (clang exit ${compile_status})"
+        return 1
+    fi
+    if [[ ! -f "${obj_file}" ]]; then
+        echo "FAIL: compiling ${src_cu} produced no object file"
+        return 1
+    fi
+
+    xcrun clang++ "${obj_file}" \
         -L"${cumetal_build_dir}" -lcumetal -Wl,-rpath,"${cumetal_build_dir}" \
         -o "${out_dir}/${out_bin}"
 }

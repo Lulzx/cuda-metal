@@ -10,9 +10,20 @@ if ! command -v xcrun >/dev/null 2>&1; then
   exit 77
 fi
 
-# PTX lowering regression uses cumetalc (which has internal fallback to emitter when
-# xcrun metal/metallib unavailable) + runtime execution. Relax compiler checks.
-# if ! xcrun --find metal ...  (intentionally omitted)
+# This test packages real metallibs and executes them, so the Metal compiler is a
+# genuine prerequisite. It used to pass --mode experimental unconditionally, which
+# always produced an unloadable container and therefore always skipped the whole
+# execution check — on every machine, toolchain or not. Skip only when the tools
+# really are missing.
+if ! xcrun --find metal >/dev/null 2>&1; then
+  echo "SKIP: xcrun metal not available"
+  exit 77
+fi
+
+if ! xcrun --find metallib >/dev/null 2>&1; then
+  echo "SKIP: xcrun metallib not available"
+  exit 77
+fi
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -26,8 +37,28 @@ cat > "${WORK_DIR}/negate.ptx" <<'PTX'
     .param .u64 param_in,
     .param .u64 param_out
 ) {
-    .reg .f32 %f<2>;
+    .reg .u64 %rd<6>;
+    .reg .f32 %f<3>;
+    .reg .u32 %r<5>;
+
+    ld.param.u64 %rd0, [param_in];
+    ld.param.u64 %rd1, [param_out];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r4, %r1, %r2, %r3;
+
+    cvt.u64.u32 %rd2, %r4;
+    shl.b64     %rd2, %rd2, 2;
+
+    add.u64     %rd3, %rd0, %rd2;
+    ld.global.f32 %f0, [%rd3];
+
     neg.f32 %f1, %f0;
+
+    add.u64     %rd4, %rd1, %rd2;
+    st.global.f32 [%rd4], %f1;
     ret;
 }
 PTX
@@ -116,24 +147,17 @@ DONE:
 }
 PTX
 
-# Use experimental mode so packaging does not require xcrun metallib (falls back to
-# cumetal-air-emitter experimental container, which is accepted by the runtime loader
-# for these regression tests).
-"${CUMETALC_BIN}" --mode experimental --input "${WORK_DIR}/negate.ptx" \
-  --output "${WORK_DIR}/negate.metallib" --overwrite --skip-validate >/dev/null
-"${CUMETALC_BIN}" --mode experimental --input "${WORK_DIR}/reduce_sum.ptx" \
-  --output "${WORK_DIR}/reduce_sum.metallib" --overwrite --skip-validate >/dev/null
-"${CUMETALC_BIN}" --mode experimental --input "${WORK_DIR}/clamp_relu.ptx" \
-  --output "${WORK_DIR}/clamp_relu.metallib" --overwrite --skip-validate >/dev/null
-
-# In limited envs (no xcrun metal/metallib), cumetalc produces experimental container.
-# The lowering itself succeeded (no error from cumetalc); skip the host-side execution
-# verification which requires a full ABI metallib. In full-toolchain envs this runs.
-if grep -q 'cumetal-experimental' "${WORK_DIR}/negate.metallib" 2>/dev/null || \
-   [ "$(stat -f%z "${WORK_DIR}/negate.metallib" 2>/dev/null || echo 0)" -lt 2000 ]; then
-  echo "SKIP: experimental container produced (ptx lowering succeeded); full exec verification requires xcrun metallib"
-  exit 77
-fi
+# Package real, validated metallibs. Lowering that merely "succeeds" without
+# producing something executable proves nothing: the point of this regression is
+# that the lowered kernels compute the right values on the GPU.
+for kernel in negate reduce_sum clamp_relu; do
+  "${CUMETALC_BIN}" --mode xcrun --input "${WORK_DIR}/${kernel}.ptx" \
+    --output "${WORK_DIR}/${kernel}.metallib" --overwrite >/dev/null
+  if [[ ! -s "${WORK_DIR}/${kernel}.metallib" ]]; then
+    echo "FAIL: cumetalc produced no metallib for ${kernel}"
+    exit 1
+  fi
+done
 
 cat > "${WORK_DIR}/ptx_lowering_regression.cpp" <<'CPP'
 #include "cuda_runtime.h"
@@ -211,16 +235,13 @@ int run_reduce_sum(const char* metallib_path) {
 
     void* d_input = nullptr;
     void* d_output = nullptr;
-    void* d_count = nullptr;
     if (cudaMalloc(&d_input, sizeof(float) * kN) != cudaSuccess ||
-        cudaMalloc(&d_output, sizeof(float)) != cudaSuccess ||
-        cudaMalloc(&d_count, sizeof(int)) != cudaSuccess) {
+        cudaMalloc(&d_output, sizeof(float)) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: reduce cudaMalloc failed\n");
         return 1;
     }
 
-    if (cudaMemcpy(d_input, input.data(), sizeof(float) * kN, cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(d_count, &count, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) {
+    if (cudaMemcpy(d_input, input.data(), sizeof(float) * kN, cudaMemcpyHostToDevice) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: reduce cudaMemcpy HtoD failed\n");
         return 1;
     }
@@ -229,10 +250,13 @@ int run_reduce_sum(const char* metallib_path) {
         return 1;
     }
 
+    // param_n is a `.param .u32` scalar in the PTX, so it must be bound by value.
+    // Binding a device buffer here would feed the pointer's low bits in as the
+    // element count.
     static const cumetalKernelArgInfo_t kArgInfo[] = {
         {CUMETAL_ARG_BUFFER, 0},
         {CUMETAL_ARG_BUFFER, 0},
-        {CUMETAL_ARG_BUFFER, 0},
+        {CUMETAL_ARG_BYTES, sizeof(int)},
     };
     const cumetalKernel_t kernel{
         .metallib_path = metallib_path,
@@ -243,8 +267,7 @@ int run_reduce_sum(const char* metallib_path) {
 
     void* in_arg = d_input;
     void* out_arg = d_output;
-    void* count_arg = d_count;
-    void* args[] = {&in_arg, &out_arg, &count_arg};
+    void* args[] = {&in_arg, &out_arg, const_cast<int*>(&count)};
     if (cudaLaunchKernel(&kernel, dim3((kN + 255) / 256), dim3(256), args, 0, nullptr) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: reduce cudaLaunchKernel failed\n");
         return 1;
