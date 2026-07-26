@@ -65,10 +65,12 @@ v1 toolchain-completeness work (2026-07-26):
   inflating the native baseline rather than a real speedup. The results table now also prints a
   `spread` column so a reader can see how jittery a given run was.
 
-- **The llm.c parity gate is intermittently non-deterministic** — roughly 2-4 failures in 15,
-  pre-existing (4/15 at `fbaece1` vs 2/15 on current `main`), not root-caused. See
-  [known-gaps.md](known-gaps.md). Documentation that described llm.c as numerically correct has
-  been corrected to "passes most runs".
+- **The llm.c parity intermittency is root-caused and fixed** (0/75 after, 2/25 before). Two
+  defects: a JIT cache key that did not identify the compiler build that produced each entry, so
+  lowering changes silently reused stale kernels and a cache could hold kernels from several
+  compiler versions at once; and a missing device-memory barrier in the specialized
+  `fused_classifier_kernel3` template, where thread 0 read a logit while other threads overwrote
+  it with gradients. See [known-gaps.md](known-gaps.md).
 
 - **Name-match audit complete** ([name-match-audit-2026-07-26.md](name-match-audit-2026-07-26.md)).
   Every site where CuMetal decided behavior from a name it does not own was reviewed. Four body

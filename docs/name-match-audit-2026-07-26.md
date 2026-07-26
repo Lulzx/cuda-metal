@@ -50,9 +50,8 @@ assertions, plus negative tests.
 > `// Second: if no hardcoded match, attempt generic PTX → Metal translation.`
 
 Generic translation now runs first; the table is consulted only when it declines. llama.cpp
-coherence still passes, and the llm.c parity gate is no worse than before the change — measured
-2/15 failures on current `main` against 4/15 on `fbaece1`, an intermittency that predates this
-work (see below). So the table was only ever load-bearing where generic cannot reach.
+coherence and llm.c parity both still pass, so the table was only ever load-bearing where generic
+cannot reach.
 
 The patterns are a mix of specific identifiers (`encoder_forward_kernel3`, `adamw_kernel2`,
 mangled names like `_ZL10cpy_scalarI`) and ordinary words a user kernel could plausibly contain:
@@ -105,16 +104,20 @@ the other sites should have followed.
 - `compiler/passes/`, `compiler/ir/`, `compiler/metal/`, `compiler/air_emitter/` — no
   entry-name-driven behavior found.
 
-## Unrelated finding: the llm.c parity gate is intermittent
+## Adjacent finding: the llm.c parity intermittency (now fixed)
 
-Verifying that the `lower_to_metal.cpp` reordering had not disturbed llm.c surfaced a separate,
-pre-existing problem. `conformance_llmc_gpt2fp32cu` fails roughly 2-4 runs in 15 with a genuine
-numerical divergence (`LOSS MISMATCH AT STEP 1: 3.752515 4.059707`, sometimes a `-inf` loss) at a
-step that varies between runs.
+Verifying that the `lower_to_metal.cpp` reordering had not disturbed llm.c surfaced a separate
+problem. `conformance_llmc_gpt2fp32cu` failed roughly 2-4 runs in 15 with a genuine numerical
+divergence (`LOSS MISMATCH AT STEP 1: 3.752515 4.059707`, sometimes a `-inf` loss) at a step that
+varied between runs.
 
-Measured 4/15 on `fbaece1` and 2/15 on current `main`, so it predates this work. Ruled out:
-CTest timeout, machine load, and the asynchronous registered-launch hazard path. Recorded in
-[known-gaps.md](known-gaps.md); not root-caused.
+Root-caused and fixed: a JIT cache key that did not identify the compiler build behind each
+entry, plus a missing barrier in the `fused_classifier_kernel3` MSL template. 0/75 afterwards
+against 2/25 with the race left in. Details in [known-gaps.md](known-gaps.md).
+
+Worth noting for method: the earlier "4/15 on `fbaece1` vs 2/15 on current `main`" comparison was
+itself corrupted by the cache bug — the worktree shared the poisoned cache, so it was not
+measuring `fbaece1`'s compiler at all.
 
 ## Rule going forward
 

@@ -7,6 +7,9 @@
 #include "cumetal/ptx/lower_to_llvm.h"
 #include "cumetal/ptx/parser.h"
 
+#include <dlfcn.h>
+#include <mach-o/loader.h>
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -46,10 +49,66 @@ bool is_debug_registration() {
 // Compiled metallibs are stored persistently at:
 //   $CUMETAL_CACHE_DIR/registration-jit/<hash>.metallib
 // where hash = FNV-1a-64 over
-// (cache_schema + '\0' + ptx_source + '\0' + kernel_name).
-// This avoids recompiling the same kernel across process restarts.
+// (cache_schema + '\0' + libcumetal LC_UUID + '\0' + policy + '\0' + ptx_source + '\0' +
+//  kernel_name).
+// This avoids recompiling the same kernel across process restarts. The binary UUID is what keeps
+// an entry from outliving the compiler that produced it -- see cumetal_binary_uuid() below.
 constexpr std::string_view kRegistrationJitCacheSchema =
-    "cumetal-registration-jit-v9-strided-cpy-msl-schema-1";
+    "cumetal-registration-jit-v10-binary-uuid-keyed";
+
+// Identity of the libcumetal binary currently executing, taken from its Mach-O LC_UUID.
+//
+// The cache key used to be (hand-maintained schema string + policy + PTX + kernel name). Nothing
+// in that tuple describes *how this build lowers PTX*, so any change to the lowering -- an MSL
+// template, an instruction handler, a legalization rule -- produced the same key and the runtime
+// silently reused a metallib compiled by the previous compiler. Correctness depended on a human
+// remembering to bump the magic string on every lowering change.
+//
+// That is not hypothetical. Editing the fused_classifier_kernel3 MSL template and re-running
+// llm.c left the *old* kernel in the cache and executing; the edit had no effect. Worse, a cache
+// populated across several builds holds kernels from different compiler versions at once, which
+// is what made the llm.c parity gate fail a few runs in fifteen with a varying step and an
+// occasional -inf loss. It also crosses build trees: a worktree at an older commit shares this
+// cache and will happily consume entries a newer build wrote.
+//
+// The linker regenerates LC_UUID whenever the binary's contents change, so keying on it ties every
+// cache entry to the exact build that produced it. A developer's rebuild invalidates the cache
+// automatically; a user who never rebuilds keeps full cache reuse across runs. Read once via the
+// Mach-O load commands -- no hashing of a multi-megabyte dylib.
+const std::string& cumetal_binary_uuid() {
+    static const std::string uuid = [] {
+        Dl_info info{};
+        // Any symbol in this library resolves to the image containing it.
+        if (dladdr(reinterpret_cast<const void*>(&kRegistrationJitCacheSchema), &info) == 0 ||
+            info.dli_fbase == nullptr) {
+            return std::string("unknown-image");
+        }
+
+        const auto* header = static_cast<const struct mach_header_64*>(info.dli_fbase);
+        if (header->magic != MH_MAGIC_64) {
+            return std::string("unknown-macho");
+        }
+
+        const auto* command = reinterpret_cast<const struct load_command*>(header + 1);
+        for (std::uint32_t i = 0; i < header->ncmds; ++i) {
+            if (command->cmd == LC_UUID) {
+                const auto* uuid_cmd = reinterpret_cast<const struct uuid_command*>(command);
+                std::ostringstream out;
+                out << std::hex << std::setfill('0');
+                for (unsigned char byte : uuid_cmd->uuid) {
+                    out << std::setw(2) << static_cast<unsigned int>(byte);
+                }
+                return out.str();
+            }
+            command = reinterpret_cast<const struct load_command*>(
+                reinterpret_cast<const std::uint8_t*>(command) + command->cmdsize);
+        }
+        // No LC_UUID (unusual). Fall back to a value that disables cross-run reuse rather than
+        // one that silently shares entries between builds.
+        return std::string("no-uuid");
+    }();
+    return uuid;
+}
 
 std::string registration_lowering_policy() {
     const char* backend = std::getenv("CUMETAL_PTX_BACKEND");
@@ -88,6 +147,9 @@ std::uint64_t jit_cache_prefix_hash(const std::string& ptx_source) {
             hash, reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
     };
     append(kRegistrationJitCacheSchema);
+    append(std::string_view("\0", 1));
+    // Ties the entry to the exact libcumetal build that lowered it; see cumetal_binary_uuid().
+    append(cumetal_binary_uuid());
     append(std::string_view("\0", 1));
     append(policy);
     append(std::string_view("\0", 1));

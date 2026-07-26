@@ -227,10 +227,10 @@ On the tested Apple M4 Pro, the strict gate passes for the llm.c GPT-2 FP32
 workload with CPU emulation disabled. Its kernels use CuMetal's
 `specialized_msl` path; this is not evidence that arbitrary PTX is supported.
 
-**This gate is intermittent.** Run in a loop it fails roughly 2-4 times in 15 with a real
-numerical divergence (occasionally a `-inf` loss), at a step that varies between runs. The
-defect is pre-existing and unresolved — see [docs/known-gaps.md](./docs/known-gaps.md). Treat
-llm.c parity as "passes most runs", not as a deterministic result.
+This gate was intermittent until 2026-07-26 (2-4 failures in 15, with an occasional `-inf`
+loss). Two defects caused it — a JIT cache key that did not identify the compiler that produced
+each entry, and a missing barrier in the `fused_classifier_kernel3` template. Both are fixed;
+measured 0/75 afterwards. See [docs/known-gaps.md](./docs/known-gaps.md).
 The legacy llm.c CPU implementation is available only when explicitly requested
 with `CUMETAL_ENABLE_LLMC_CPU_EMULATION=1`.
 Set `CUMETAL_TRACE_GPU=1` to print a machine-readable `CUMETAL_PROVENANCE`

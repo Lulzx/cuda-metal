@@ -56,6 +56,17 @@ programs.
 
 ### Fixed
 
+- **The JIT cache key now identifies the compiler build that produced each entry.** It was
+  (hand-maintained schema string + policy + PTX + kernel name), which describes nothing about how
+  a given build lowers PTX — so changing an MSL template, an instruction handler, or a
+  legalization rule produced the same key and the runtime silently reused a metallib compiled by
+  the previous build. A cache populated across several builds held kernels from different
+  compiler versions at once, and it crossed build trees. The key now includes the libcumetal
+  Mach-O `LC_UUID`, which the linker regenerates whenever the binary changes.
+- **Fixed a race in the specialized `fused_classifier_kernel3` MSL template.** Thread 0 read
+  `row_logits[target]` to compute the loss while every thread overwrote `row_logits[]` with
+  gradients immediately below, without a barrier. Together with the cache defect above this made
+  the llm.c parity gate fail 2-4 runs in 15; measured 0/75 after both fixes.
 - **Removed four name-matched body templates that silently miscompiled real kernels.**
   `lower_to_llvm.cpp` replaced a kernel's actual PTX body with a canned implementation whenever
   the entry name contained `vector_add`, `matrix_mul`, `neg`, or `reduce_sum` and the parameters

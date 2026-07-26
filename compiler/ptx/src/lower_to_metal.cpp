@@ -648,6 +648,18 @@ kernel_template = R"METAL(kernel void __KERNEL_NAME__(
         losses[idx] = -log(max(prob, 1.0e-20f));
     }
 
+    // Thread 0 reads row_logits[target] just above; every thread overwrites row_logits[] with
+    // gradients just below. Without this barrier the thread that owns index `target` can store
+    // its gradient before thread 0 has read the logit, so the loss is computed from a gradient
+    // instead of a logit -- intermittently, depending on scheduling.
+    //
+    // Upstream llm.c has the same shape and gets away with it because every thread participates
+    // in a block-wide cooperative reduction immediately before, which keeps the warps in step.
+    // This port instead has thread 0 perform the whole max/sum scan alone and then do more work
+    // after the barrier while the other threads are already storing, which widens the window
+    // enormously. It showed up as the llm.c parity gate failing a few runs in fifteen.
+    threadgroup_barrier(mem_flags::mem_device);
+
     const float dloss = dlosses != nullptr ? dlosses[idx] : (1.0f / static_cast<float>(n));
     const int stride = static_cast<int>(threads_per_group.x);
     for (int i = static_cast<int>(tid); i < V; i += stride) {

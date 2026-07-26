@@ -238,22 +238,30 @@ as gaps have been closed.
   conformance workload reaches numerical parity on Apple M4 Pro with CPU emulation
   disabled, using specialized MSL replacements. llama.cpp's much broader GGML
   CUDA kernel set remains incomplete.
-- **The llm.c parity gate is intermittently non-deterministic (measured 2026-07-26).** Running
-  `conformance_llmc_gpt2fp32cu` in a loop on an otherwise quiet Apple M4 Pro fails roughly
-  2-4 times in 15 with a genuine numerical divergence, e.g.
-  `LOSS MISMATCH AT STEP 1: 3.752515 4.059707`, and sometimes a `-inf` loss. The failing step
-  varies between runs; most runs pass. This is **not** measurement noise or FP reassociation —
-  the divergence is percent-scale or worse, and `-inf` indicates a blown-up or uninitialized
-  value rather than reordered accumulation.
-  It is **pre-existing**, not a regression: measured at 4/15 on `fbaece1` (before the
-  2026-07-26 toolchain work) versus 2/15 on current `main`, so the same defect predates the
-  name-match audit and the lowering-order changes.
-  Ruled out so far: CTest timeout (1800 s limit against an 8 s runtime); machine load (reproduces
-  on an idle machine); and the asynchronous registered-launch hazard path
-  (`CUMETAL_SYNC_REGISTERED_LAUNCH=1`, which forces a full host drain, still fails 3/15).
-  Remaining suspects are a race or stale/uninitialized buffer inside the specialized MSL kernels
-  or their cuBLAS/MPS interaction. **Until this is root-caused, "llm.c is numerically correct
-  under CuMetal" should be read as "passes most runs", not "passes deterministically."**
+- **The llm.c parity intermittency is fixed (2026-07-26).** `conformance_llmc_gpt2fp32cu` used to
+  fail 2-4 runs in 15 with a real numerical divergence (`LOSS MISMATCH AT STEP 1: 3.752515
+  4.059707`, sometimes a `-inf` loss) at a step that varied between runs. Two independent defects,
+  both fixed; measured 0/75 afterwards against 2/25 with the race left in.
+
+  1. **The JIT cache key did not describe the compiler that produced the entry.** The key was
+     (hand-maintained schema string + policy + PTX + kernel name), so any change to lowering — an
+     MSL template, an instruction handler, a legalization rule — produced the *same* key and the
+     runtime silently reused a metallib compiled by the previous build. Correctness depended on a
+     human remembering to bump a magic string. Demonstrated directly: editing the
+     `fused_classifier_kernel3` template and re-running llm.c left the old kernel executing, and a
+     cache populated across several builds holds kernels from different compiler versions at once.
+     It also crosses build trees — a worktree at an older commit shares the cache and will consume
+     entries a newer build wrote. The key now includes the libcumetal Mach-O `LC_UUID`, which the
+     linker regenerates whenever the binary changes, so an entry cannot outlive its compiler. A
+     rebuild invalidates automatically; a user who never rebuilds keeps full reuse.
+  2. **A race in the specialized `fused_classifier_kernel3` MSL template.** Thread 0 read
+     `row_logits[target]` to compute the loss while every thread overwrote `row_logits[]` with
+     gradients immediately below, with no barrier between. Whichever thread owned index `target`
+     could store first, so the loss was computed from a gradient instead of a logit. Upstream
+     llm.c has the same shape but keeps its warps in step through a block-wide cooperative
+     reduction; this port has thread 0 do the whole max/sum scan alone and more work after the
+     barrier, widening the window enormously. Fixed with a device-memory threadgroup barrier.
+
 - The binary-shim / PTX reg + lower path (plus special llm.c cases) gets further than pure
   generic emitter. Direct MSL name-matched cases (compiler/ptx/src/lower_to_metal.cpp) now cover
   common GGML kernels used by small models: k_bin_bcast (op_addff/op_mulff + f16 variants),
