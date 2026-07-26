@@ -2573,6 +2573,33 @@ class GenericLlvmEmitter {
         dst_value.type = cvt.dst;
         dst_value.bits = cvt.dst.bits;
 
+        // PTX integer-rounding modes (the ones ending in `i`) round a float to
+        // an integral value. Ignoring them made `cvt.rni.f32.f32` -- what clang
+        // emits for rintf -- a plain register copy, so rint/floor/ceil silently
+        // returned their argument unrounded. Apply the rounding to the source
+        // before any width conversion; for a float->int destination the later
+        // fptosi/fptoui truncation is then already correct.
+        if (cvt.src.kind == PtxTypeSpec::Kind::kFloat && !src_value.ir.empty()) {
+            const std::string fty_src = (cvt.src.bits == 16)   ? "half"
+                                        : (cvt.src.bits == 32) ? "float"
+                                                               : "double";
+            const char* round_fn = nullptr;
+            if (instr.opcode.find(".rni.") != std::string::npos) round_fn = "llvm.rint";
+            else if (instr.opcode.find(".rmi.") != std::string::npos) round_fn = "llvm.floor";
+            else if (instr.opcode.find(".rpi.") != std::string::npos) round_fn = "llvm.ceil";
+            else if (instr.opcode.find(".rzi.") != std::string::npos) round_fn = "llvm.trunc";
+            if (round_fn != nullptr) {
+                const std::string suffix =
+                    (cvt.src.bits == 16) ? ".f16" : (cvt.src.bits == 32 ? ".f32" : ".f64");
+                declarations_.insert("declare " + fty_src + " @" + round_fn + suffix + "(" +
+                                     fty_src + ")");
+                const std::string r = next_tmp("cvtrnd");
+                os << "  " << r << " = call " << fty_src << " @" << round_fn << suffix << "("
+                   << fty_src << " " << src_value.ir << ")\n";
+                src_value.ir = r;
+            }
+        }
+
         if (cvt.dst.kind == PtxTypeSpec::Kind::kFloat) {
             const std::string fty =
                 (cvt.dst.bits == 16) ? "half" : (cvt.dst.bits == 32 ? "float" : (cvt.dst.bits == 64 ? "double" : ""));
@@ -3198,20 +3225,6 @@ class GenericLlvmEmitter {
             return store_ret_bits(rbits, 32);
         }
 
-        if (callee == "__nv_sqrtf") {
-            if (arg_names.empty()) return fail(instr, "__nv_sqrtf expects 1 arg");
-            auto bits = load_call_slot_value(os, arg_names[0], 32);
-            if (!bits) return fail(instr, "__nv_sqrtf arg missing");
-            const std::string f = next_tmp("sqrtf_bc");
-            os << "  " << f << " = bitcast i32 " << *bits << " to float\n";
-            declarations_.insert("declare float @air.fast_sqrt.f32(float)");
-            const std::string result = next_tmp("sqrtf");
-            os << "  " << result << " = call float @air.fast_sqrt.f32(float " << f << ")\n";
-            const std::string result_bits = next_tmp("sqrtf_i");
-            os << "  " << result_bits << " = bitcast float " << result << " to i32\n";
-            return store_ret_bits(result_bits, 32);
-        }
-
         if (callee == "__nv_fabsf") {
             if (arg_names.empty()) return fail(instr, "__nv_fabsf expects 1 arg");
             auto bits = load_call_slot_value(os, arg_names[0], 32);
@@ -3288,51 +3301,6 @@ class GenericLlvmEmitter {
             os << "  " << sel << " = select i1 " << cmp << ", i32 " << *a << ", i32 " << *b << "\n";
             return store_ret_bits(sel, 32);
         }
-        if (callee == "__nv_expf" || callee == "__nv_fast_expf") {
-            if (arg_names.empty()) return fail(instr, "__nv_expf expects 1 arg");
-            auto x = load_call_slot_f32(arg_names[0]);
-            if (!x) return fail(instr, "__nv_expf arg missing");
-            declarations_.insert("declare float @air.fast_exp.f32(float)");
-            const std::string out = next_tmp("expf");
-            os << "  " << out << " = call float @air.fast_exp.f32(float " << *x << ")\n";
-            return store_ret_f32(out);
-        }
-        if (callee == "__nv_logf") {
-            if (arg_names.empty()) return fail(instr, "__nv_logf expects 1 arg");
-            auto x = load_call_slot_f32(arg_names[0]);
-            if (!x) return fail(instr, "__nv_logf arg missing");
-            declarations_.insert("declare float @air.fast_log.f32(float)");
-            const std::string out = next_tmp("logf");
-            os << "  " << out << " = call float @air.fast_log.f32(float " << *x << ")\n";
-            return store_ret_f32(out);
-        }
-        if (callee == "__nv_sinf") {
-            if (arg_names.empty()) return fail(instr, "__nv_sinf expects 1 arg");
-            auto x = load_call_slot_f32(arg_names[0]);
-            if (!x) return fail(instr, "__nv_sinf arg missing");
-            declarations_.insert("declare float @air.fast_sin.f32(float)");
-            const std::string out = next_tmp("sinf");
-            os << "  " << out << " = call float @air.fast_sin.f32(float " << *x << ")\n";
-            return store_ret_f32(out);
-        }
-        if (callee == "__nv_cosf") {
-            if (arg_names.empty()) return fail(instr, "__nv_cosf expects 1 arg");
-            auto x = load_call_slot_f32(arg_names[0]);
-            if (!x) return fail(instr, "__nv_cosf arg missing");
-            declarations_.insert("declare float @air.fast_cos.f32(float)");
-            const std::string out = next_tmp("cosf");
-            os << "  " << out << " = call float @air.fast_cos.f32(float " << *x << ")\n";
-            return store_ret_f32(out);
-        }
-        if (callee == "__nv_acosf") {
-            if (arg_names.empty()) return fail(instr, "__nv_acosf expects 1 arg");
-            auto x = load_call_slot_f32(arg_names[0]);
-            if (!x) return fail(instr, "__nv_acosf arg missing");
-            declarations_.insert("declare float @air.fast_acos.f32(float)");
-            const std::string out = next_tmp("acosf");
-            os << "  " << out << " = call float @air.fast_acos.f32(float " << *x << ")\n";
-            return store_ret_f32(out);
-        }
         if (callee == "__nv_fast_sincosf") {
             if (arg_names.size() < 3) return fail(instr, "__nv_fast_sincosf expects 3 args");
             auto x = load_call_slot_f32(arg_names[0]);
@@ -3355,16 +3323,6 @@ class GenericLlvmEmitter {
             os << "  store float " << cos_value << ", float* " << cos_ptr << ", align 4\n";
             return true;
         }
-        if (callee == "__nv_powf") {
-            if (arg_names.size() < 2) return fail(instr, "__nv_powf expects 2 args");
-            auto x = load_call_slot_f32(arg_names[0]);
-            auto y = load_call_slot_f32(arg_names[1]);
-            if (!x || !y) return fail(instr, "__nv_powf args missing");
-            declarations_.insert("declare float @air.fast_pow.f32(float, float)");
-            const std::string out = next_tmp("powf");
-            os << "  " << out << " = call float @air.fast_pow.f32(float " << *x << ", float " << *y << ")\n";
-            return store_ret_f32(out);
-        }
         if (callee == "__nv_fast_fdividef") {
             if (arg_names.size() < 2) return fail(instr, "__nv_fast_fdividef expects 2 args");
             auto numerator = load_call_slot_f32(arg_names[0]);
@@ -3374,13 +3332,254 @@ class GenericLlvmEmitter {
             os << "  " << out << " = fdiv fast float " << *numerator << ", " << *denominator << "\n";
             return store_ret_f32(out);
         }
-        if (callee == "__nv_roundf") {
-            if (arg_names.empty()) return fail(instr, "__nv_roundf expects 1 arg");
+        // ---- libdevice float surface ---------------------------------------
+        //
+        // Every libdevice function used to need its own hand-written block, so
+        // anything not explicitly listed aborted the entire kernel -- one
+        // missing entry (__nv_tanf) was enough to make a whole ray tracer
+        // unlowerable. The mapping is declarative instead, and every entry is
+        // probed against the host libm by tests/cuda_projects/libdevice so a
+        // wrong symbol is caught by measurement rather than assumed correct.
+        struct FloatBuiltin {
+            const char* nv;
+            const char* sym;
+            int arity;
+        };
+        static const FloatBuiltin kFloatBuiltins[] = {
+            {"__nv_sqrtf", "air.fast_sqrt.f32", 1},
+            {"__nv_expf", "air.fast_exp.f32", 1},
+            {"__nv_fast_expf", "air.fast_exp.f32", 1},
+            {"__nv_exp2f", "air.fast_exp2.f32", 1},
+            {"__nv_exp10f", "air.fast_exp10.f32", 1},
+            {"__nv_logf", "air.fast_log.f32", 1},
+            {"__nv_log2f", "air.fast_log2.f32", 1},
+            {"__nv_log10f", "air.fast_log10.f32", 1},
+            {"__nv_sinf", "air.fast_sin.f32", 1},
+            {"__nv_cosf", "air.fast_cos.f32", 1},
+            {"__nv_tanf", "air.fast_tan.f32", 1},
+            {"__nv_asinf", "air.fast_asin.f32", 1},
+            {"__nv_acosf", "air.fast_acos.f32", 1},
+            {"__nv_atanf", "air.fast_atan.f32", 1},
+            {"__nv_sinhf", "air.fast_sinh.f32", 1},
+            {"__nv_coshf", "air.fast_cosh.f32", 1},
+            {"__nv_tanhf", "air.fast_tanh.f32", 1},
+            {"__nv_asinhf", "air.fast_asinh.f32", 1},
+            {"__nv_acoshf", "air.fast_acosh.f32", 1},
+            {"__nv_atanhf", "air.fast_atanh.f32", 1},
+            {"__nv_floorf", "llvm.floor.f32", 1},
+            {"__nv_ceilf", "llvm.ceil.f32", 1},
+            {"__nv_truncf", "llvm.trunc.f32", 1},
+            {"__nv_roundf", "llvm.round.f32", 1},
+            {"__nv_rintf", "llvm.rint.f32", 1},
+            {"__nv_nearbyintf", "llvm.nearbyint.f32", 1},
+            {"__nv_powf", "air.fast_pow.f32", 2},
+            {"__nv_atan2f", "air.fast_atan2.f32", 2},
+            {"__nv_fmodf", "air.fmod.f32", 2},
+            {"__nv_copysignf", "llvm.copysign.f32", 2},
+            {"__nv_fmaf", "llvm.fma.f32", 3},
+        };
+        for (const FloatBuiltin& fb : kFloatBuiltins) {
+            if (callee != fb.nv) continue;
+            if (static_cast<int>(arg_names.size()) < fb.arity) {
+                return fail(instr, callee + " expects " + std::to_string(fb.arity) + " arg(s)");
+            }
+            std::vector<std::string> values;
+            for (int i = 0; i < fb.arity; ++i) {
+                auto v = load_call_slot_f32(arg_names[static_cast<std::size_t>(i)]);
+                if (!v) return fail(instr, callee + " arg missing");
+                values.push_back(*v);
+            }
+            std::string decl = "declare float @" + std::string(fb.sym) + "(float";
+            for (int i = 1; i < fb.arity; ++i) decl += ", float";
+            decl += ")";
+            declarations_.insert(decl);
+            const std::string out = next_tmp("nvmath");
+            os << "  " << out << " = call float @" << fb.sym << "(";
+            for (int i = 0; i < fb.arity; ++i) {
+                if (i != 0) os << ", ";
+                os << "float " << values[static_cast<std::size_t>(i)];
+            }
+            os << ")\n";
+            return store_ret_f32(out);
+        }
+
+        // Functions with no direct Metal builtin, expressed exactly in terms of
+        // ones that do. Kept separate from the table so the substitution is
+        // visible rather than hidden behind a symbol name.
+        if (callee == "__nv_expm1f" || callee == "__nv_log1pf") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
             auto x = load_call_slot_f32(arg_names[0]);
-            if (!x) return fail(instr, "__nv_roundf arg missing");
-            declarations_.insert("declare float @llvm.round.f32(float)");
-            const std::string out = next_tmp("roundf");
-            os << "  " << out << " = call float @llvm.round.f32(float " << *x << ")\n";
+            if (!x) return fail(instr, callee + " arg missing");
+            const bool is_expm1 = (callee == "__nv_expm1f");
+            declarations_.insert(is_expm1 ? "declare float @air.fast_exp.f32(float)"
+                                          : "declare float @air.fast_log.f32(float)");
+            const std::string adj = next_tmp(is_expm1 ? "expm1_e" : "log1p_a");
+            if (is_expm1) {
+                os << "  " << adj << " = call float @air.fast_exp.f32(float " << *x << ")\n";
+                const std::string out = next_tmp("expm1");
+                os << "  " << out << " = fsub float " << adj << ", 1.000000e+00\n";
+                return store_ret_f32(out);
+            }
+            os << "  " << adj << " = fadd float " << *x << ", 1.000000e+00\n";
+            const std::string out = next_tmp("log1p");
+            os << "  " << out << " = call float @air.fast_log.f32(float " << adj << ")\n";
+            return store_ret_f32(out);
+        }
+        if (callee == "__nv_fdimf") {
+            // fdim(x,y) = (x > y) ? x - y : +0
+            if (arg_names.size() < 2) return fail(instr, "__nv_fdimf expects 2 args");
+            auto x = load_call_slot_f32(arg_names[0]);
+            auto y = load_call_slot_f32(arg_names[1]);
+            if (!x || !y) return fail(instr, "__nv_fdimf args missing");
+            const std::string cmp = next_tmp("fdim_cmp");
+            os << "  " << cmp << " = fcmp ogt float " << *x << ", " << *y << "\n";
+            const std::string diff = next_tmp("fdim_sub");
+            os << "  " << diff << " = fsub float " << *x << ", " << *y << "\n";
+            const std::string out = next_tmp("fdim");
+            os << "  " << out << " = select i1 " << cmp << ", float " << diff
+               << ", float 0.000000e+00\n";
+            return store_ret_f32(out);
+        }
+        if (callee == "__nv_hypotf") {
+            // Metal has no hypot builtin. sqrt(x*x + y*y) matches it except for
+            // intermediate overflow when |x| or |y| exceeds ~1e19, where the
+            // true hypot is still finite; that is the documented limit here.
+            if (arg_names.size() < 2) return fail(instr, "__nv_hypotf expects 2 args");
+            auto x = load_call_slot_f32(arg_names[0]);
+            auto y = load_call_slot_f32(arg_names[1]);
+            if (!x || !y) return fail(instr, "__nv_hypotf args missing");
+            declarations_.insert("declare float @air.fast_sqrt.f32(float)");
+            const std::string xx = next_tmp("hypot_xx");
+            const std::string yy = next_tmp("hypot_yy");
+            const std::string sum = next_tmp("hypot_sum");
+            const std::string out = next_tmp("hypot");
+            os << "  " << xx << " = fmul float " << *x << ", " << *x << "\n";
+            os << "  " << yy << " = fmul float " << *y << ", " << *y << "\n";
+            os << "  " << sum << " = fadd float " << xx << ", " << yy << "\n";
+            os << "  " << out << " = call float @air.fast_sqrt.f32(float " << sum << ")\n";
+            return store_ret_f32(out);
+        }
+        if (callee == "__nv_cbrtf") {
+            // pow() is undefined for a negative base, so fold the sign out and
+            // put it back: cbrt(x) = copysign(pow(|x|, 1/3), x).
+            if (arg_names.empty()) return fail(instr, "__nv_cbrtf expects 1 arg");
+            auto x = load_call_slot_f32(arg_names[0]);
+            if (!x) return fail(instr, "__nv_cbrtf arg missing");
+            declarations_.insert("declare float @air.fast_pow.f32(float, float)");
+            declarations_.insert("declare float @llvm.fabs.f32(float)");
+            declarations_.insert("declare float @llvm.copysign.f32(float, float)");
+            const std::string ax = next_tmp("cbrt_abs");
+            const std::string root = next_tmp("cbrt_pow");
+            const std::string out = next_tmp("cbrt");
+            os << "  " << ax << " = call float @llvm.fabs.f32(float " << *x << ")\n";
+            os << "  " << root << " = call float @air.fast_pow.f32(float " << ax
+               << ", float 0x3FD5555560000000)\n";
+            os << "  " << out << " = call float @llvm.copysign.f32(float " << root
+               << ", float " << *x << ")\n";
+            return store_ret_f32(out);
+        }
+        if (callee == "__nv_remainderf") {
+            // IEEE remainder: x - y * rint(x/y), with rint's round-half-to-even
+            // being exactly what distinguishes it from fmod's truncation.
+            if (arg_names.size() < 2) return fail(instr, "__nv_remainderf expects 2 args");
+            auto x = load_call_slot_f32(arg_names[0]);
+            auto y = load_call_slot_f32(arg_names[1]);
+            if (!x || !y) return fail(instr, "__nv_remainderf args missing");
+            declarations_.insert("declare float @llvm.rint.f32(float)");
+            const std::string q = next_tmp("rem_q");
+            const std::string n = next_tmp("rem_n");
+            const std::string prod = next_tmp("rem_p");
+            const std::string out = next_tmp("rem");
+            os << "  " << q << " = fdiv float " << *x << ", " << *y << "\n";
+            os << "  " << n << " = call float @llvm.rint.f32(float " << q << ")\n";
+            os << "  " << prod << " = fmul float " << n << ", " << *y << "\n";
+            os << "  " << out << " = fsub float " << *x << ", " << prod << "\n";
+            return store_ret_f32(out);
+        }
+        if (callee == "__nv_erff" || callee == "__nv_erfcf") {
+            // Metal has no erf/erfc. Abramowitz & Stegun 7.1.26 gives
+            //   erfc(|x|) ~ P(t) * exp(-x^2),  t = 1/(1 + 0.3275911|x|)
+            // with |absolute error| <= 1.5e-7.
+            //
+            // erfc is computed from that product directly rather than as
+            // 1 - erf(x): the subtraction cancels catastrophically for large x
+            // (erfc(5) is ~1.5e-12, so 1 - erf would return a flat 0), and a
+            // silently-zero tail is exactly the kind of wrong answer that must
+            // not ship. erf keeps the 1 - P*exp form, which is accurate for
+            // small x and saturates correctly to +-1 for large x.
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            auto x = load_call_slot_f32(arg_names[0]);
+            if (!x) return fail(instr, callee + " arg missing");
+            declarations_.insert("declare float @llvm.fabs.f32(float)");
+            declarations_.insert("declare float @llvm.copysign.f32(float, float)");
+            declarations_.insert("declare float @air.fast_exp.f32(float)");
+
+            const std::string ax = next_tmp("erf_ax");
+            os << "  " << ax << " = call float @llvm.fabs.f32(float " << *x << ")\n";
+            const std::string td = next_tmp("erf_td");
+            const std::string td1 = next_tmp("erf_td1");
+            os << "  " << td << " = fmul float " << ax << ", 0x3FD4F740A0000000\n";
+            os << "  " << td1 << " = fadd float " << td << ", 1.000000e+00\n";
+            const std::string t = next_tmp("erf_t");
+            os << "  " << t << " = fdiv float 1.000000e+00, " << td1 << "\n";
+            // Horner: ((((a5 t + a4) t + a3) t + a2) t + a1) t
+            static const char* kA[5] = {
+                "0x3FF0FB8440000000",   // a5 =  1.061405429
+                "0xBFF7401C60000000",   // a4 = -1.453152027
+                "0x3FF6BE1C60000000",   // a3 =  1.421413741
+                "0xBFD23531C0000000",   // a2 = -0.284496736
+                "0x3FD04F20C0000000",   // a1 =  0.254829592
+            };
+            std::string acc = kA[0];
+            for (int i = 1; i < 5; ++i) {
+                const std::string m = next_tmp("erf_m");
+                const std::string a = next_tmp("erf_a");
+                os << "  " << m << " = fmul float " << acc << ", " << t << "\n";
+                os << "  " << a << " = fadd float " << m << ", " << kA[i] << "\n";
+                acc = a;
+            }
+            const std::string poly = next_tmp("erf_poly");
+            os << "  " << poly << " = fmul float " << acc << ", " << t << "\n";
+            const std::string x2 = next_tmp("erf_x2");
+            const std::string nx2 = next_tmp("erf_nx2");
+            os << "  " << x2 << " = fmul float " << ax << ", " << ax << "\n";
+            os << "  " << nx2 << " = fsub float -0.000000e+00, " << x2 << "\n";
+            const std::string ex = next_tmp("erf_exp");
+            os << "  " << ex << " = call float @air.fast_exp.f32(float " << nx2 << ")\n";
+            const std::string tail = next_tmp("erf_tail");  // == erfc(|x|)
+            os << "  " << tail << " = fmul float " << poly << ", " << ex << "\n";
+
+            if (callee == "__nv_erff") {
+                const std::string mag = next_tmp("erf_mag");
+                os << "  " << mag << " = fsub float 1.000000e+00, " << tail << "\n";
+                const std::string out = next_tmp("erf");
+                os << "  " << out << " = call float @llvm.copysign.f32(float " << mag
+                   << ", float " << *x << ")\n";
+                return store_ret_f32(out);
+            }
+            // erfc(x) = tail for x >= 0, and 2 - tail for x < 0.
+            const std::string neg = next_tmp("erfc_neg");
+            os << "  " << neg << " = fcmp olt float " << *x << ", 0.000000e+00\n";
+            const std::string refl = next_tmp("erfc_refl");
+            os << "  " << refl << " = fsub float 2.000000e+00, " << tail << "\n";
+            const std::string out = next_tmp("erfc");
+            os << "  " << out << " = select i1 " << neg << ", float " << refl << ", float "
+               << tail << "\n";
+            return store_ret_f32(out);
+        }
+        if (callee == "__nv_saturatef") {
+            if (arg_names.empty()) return fail(instr, "__nv_saturatef expects 1 arg");
+            auto x = load_call_slot_f32(arg_names[0]);
+            if (!x) return fail(instr, "__nv_saturatef arg missing");
+            const std::string lo = next_tmp("sat_lo");
+            os << "  " << lo << " = fcmp ogt float " << *x << ", 0.000000e+00\n";
+            const std::string c0 = next_tmp("sat_c0");
+            os << "  " << c0 << " = select i1 " << lo << ", float " << *x << ", float 0.000000e+00\n";
+            const std::string hi = next_tmp("sat_hi");
+            os << "  " << hi << " = fcmp olt float " << c0 << ", 1.000000e+00\n";
+            const std::string out = next_tmp("sat");
+            os << "  " << out << " = select i1 " << hi << ", float " << c0
+               << ", float 1.000000e+00\n";
             return store_ret_f32(out);
         }
 

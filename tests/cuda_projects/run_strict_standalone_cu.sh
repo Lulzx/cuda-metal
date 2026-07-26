@@ -6,6 +6,9 @@ BUILD_DIR="${2:?}"
 PROJECT_SUBDIR="${3:?}"
 SRC_CU="${4:?}"
 OUT_BIN="${5:?}"
+# Line the harness must print to be considered passing. Defaults to the GGML
+# output-head probe's banner so existing callers are unaffected.
+EXPECT_PATTERN="${6:-PASS: GGML output-head kernels match CPU references on Apple GPU}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/cuda_projects/_common.sh
@@ -26,9 +29,14 @@ RUN_OUTPUT="$(CUMETAL_TRACE_GPU=1 "${OUT_DIR}/${OUT_BIN}" 2>&1)" || {
     exit 1
 }
 echo "${RUN_OUTPUT}"
-grep -q "PASS: GGML output-head kernels match CPU references on Apple GPU" \
-    <<<"${RUN_OUTPUT}"
-grep -q 'device=apple_gpu' <<<"${RUN_OUTPUT}"
+if ! grep -q "${EXPECT_PATTERN}" <<<"${RUN_OUTPUT}"; then
+    echo "FAIL: expected output line not found: ${EXPECT_PATTERN}"
+    exit 1
+fi
+if ! grep -q 'device=apple_gpu' <<<"${RUN_OUTPUT}"; then
+    echo "FAIL: no kernel launch was traced on the Apple GPU"
+    exit 1
+fi
 if grep -q 'source=approximate_stub' <<<"${RUN_OUTPUT}"; then
     echo "FAIL: strict numerical probe used an approximate stub"
     exit 1

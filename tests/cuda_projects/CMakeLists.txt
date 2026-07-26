@@ -71,6 +71,50 @@ cumetal_add_cuda_project_test(
     transpose transpose_standalone.cu transpose_standalone
 )
 
+# Measures every mapped libdevice math function against the host libm. Strict:
+# a mis-mapped builtin computes the wrong function silently, and a newly
+# unsupported one means a lowering regression.
+add_test(
+    NAME functional_cuda_projects_libdevice_math
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        libdevice
+        libdevice_math.cu
+        libdevice_math
+        "PASS: libdevice float surface probe"
+)
+set_tests_properties(
+    functional_cuda_projects_libdevice_math
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
+# Ray Tracing in One Weekend. Strict runner on purpose: this kernel is known to
+# lower, so a future "registered kernel missing metallib" is a regression, not a
+# coverage gap, and must not be downgraded to a skip.
+add_test(
+    NAME functional_cuda_projects_raytracer
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        raytracer
+        rtiow.cu
+        rtiow
+        "OK: GPU render matches CPU reference."
+)
+set_tests_properties(
+    functional_cuda_projects_raytracer
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
 add_test(
     NAME functional_cuda_projects_ggml_output_ops
     COMMAND bash

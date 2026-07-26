@@ -2314,8 +2314,88 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             if (!all_sources_defined(ops, 1)) return {};
             const std::string dest = get_reg(ops[0]);
             const std::string src = resolve(ops[1]);
-            const std::string dtype = reg_type(dest);
-            metal << "    " << dtype << " " << mvar(dest) << " = (" << dtype << ")" << src << ";\n";
+
+            // PTX spells this `cvt.<rnd>.<dtype>.<stype>`, and BOTH parts carry
+            // meaning that a plain C cast throws away:
+            //
+            //   * the destination type. Typing the result from the register
+            //     name is unsound -- optimized NVPTX keeps floats in .b32 %rN
+            //     registers, so `cvt.rni.f32.f32 %r7, %r6` was emitting
+            //     `uint vr7 = (uint)vr6`, silently truncating a float and
+            //     clamping negatives to zero.
+            //   * the rounding mode. The integer-rounding modes (those ending
+            //     in `i`) round a float to an integral *float* value; a cast
+            //     always truncates toward zero, so rint/floor/ceil all
+            //     degraded to trunc and produced wrong numbers, not errors.
+            std::vector<std::string> type_toks;
+            std::string rnd;
+            {
+                std::size_t pos = 0;
+                while (pos < op.size()) {
+                    const std::size_t dot = op.find('.', pos);
+                    const std::string tok =
+                        op.substr(pos, dot == std::string::npos ? std::string::npos : dot - pos);
+                    if (!tok.empty() && tok != "cvt") {
+                        const char c0 = tok[0];
+                        const bool is_type =
+                            (tok == "pred") ||
+                            ((c0 == 'f' || c0 == 's' || c0 == 'u' || c0 == 'b') && tok.size() > 1 &&
+                             std::isdigit(static_cast<unsigned char>(tok[1])));
+                        if (is_type) {
+                            type_toks.push_back(tok);
+                        } else if (tok == "sat") {
+                            rnd = rnd.empty() ? "sat" : rnd;
+                        } else if (tok.size() >= 2 && c0 == 'r') {
+                            rnd = tok;
+                        }
+                    }
+                    if (dot == std::string::npos) break;
+                    pos = dot + 1;
+                }
+            }
+
+            auto metal_type_for = [&](const std::string& tok) -> std::string {
+                if (tok == "f64") return "double";
+                if (tok == "f32") return "float";
+                if (tok == "f16") return "half";
+                if (tok == "s64") return "long";
+                if (tok == "u64" || tok == "b64") return "ulong";
+                if (tok == "s32") return "int";
+                if (tok == "u32" || tok == "b32") return "uint";
+                if (tok == "s16") return "short";
+                if (tok == "u16" || tok == "b16") return "ushort";
+                if (tok == "s8") return "char";
+                if (tok == "u8" || tok == "b8") return "uchar";
+                if (tok == "pred") return "bool";
+                return "";
+            };
+
+            std::string dtype;
+            bool src_is_float = false;
+            if (type_toks.size() >= 2) {
+                const std::string& dtok = type_toks[type_toks.size() - 2];
+                const std::string& stok = type_toks[type_toks.size() - 1];
+                // A .b32/.b64 destination is genuinely untyped; only there does
+                // the register spelling remain the best available signal.
+                dtype = (dtok[0] == 'b') ? reg_type(dest) : metal_type_for(dtok);
+                src_is_float = (stok[0] == 'f');
+            }
+            if (dtype.empty()) dtype = reg_type(dest);
+
+            std::string expr = src;
+            if (src_is_float && !rnd.empty() && rnd.back() == 'i') {
+                if (rnd == "rni") expr = "rint(" + src + ")";
+                else if (rnd == "rmi") expr = "floor(" + src + ")";
+                else if (rnd == "rpi") expr = "ceil(" + src + ")";
+                else if (rnd == "rzi") expr = "trunc(" + src + ")";
+                else return {};  // unknown integer rounding mode: refuse, never guess
+            }
+            if (op.find(".sat") != std::string::npos && !dtype.empty() &&
+                (dtype == "float" || dtype == "double" || dtype == "half")) {
+                expr = "clamp(" + expr + ", (" + dtype + ")0, (" + dtype + ")1)";
+            }
+
+            metal << "    " << dtype << " " << mvar(dest) << " = (" << dtype << ")" << expr << ";\n";
             defined_regs.insert(dest);
             continue;
         }
