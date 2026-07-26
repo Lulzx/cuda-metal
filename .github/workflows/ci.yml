@@ -95,6 +95,39 @@ jobs:
           path: build/Testing/Temporary/
           retention-days: 14
 
+  # spec.md §10.5 wants AIR ABI regression across Xcode versions, and §13 rates a silent ABI
+  # change between Xcode releases as the project's highest risk. A single dev machine has one
+  # Xcode installed; runner images are how this project actually gets more than one. Each image
+  # ships a different Xcode, so the same invariants run against different Metal compilers and the
+  # provenance banner in the logs says which.
+  air-abi-toolchains:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [macos-14, macos-15]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 45
+    name: air-abi (${{ matrix.image }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun metal --version || echo "metal compiler unavailable"
+
+      - name: Install build dependencies
+        run: brew install cmake ninja
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: AIR ABI regression
+        run: bash scripts/ci_report.sh build --tests-regex '^air_abi'
+
   # Installs to a prefix and builds a CUDA program with the installed cumetalc, which is the only
   # way to catch install-layout breakage (missing headers, missing ptxas/fatbinary shims). The
   # build tree finds those by accident; an install does not.

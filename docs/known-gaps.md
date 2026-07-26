@@ -166,6 +166,28 @@ as gaps have been closed.
 - The old source-pattern-specific vector-add AIR template has been removed.
   Direct AIR generation remains limited to explicit research/inspection tools;
   it is not a hidden production fallback.
+- **Four further name-matched body templates were found and removed on 2026-07-26.** The claim
+  immediately above was true of the AIR emitter but false of `lower_to_llvm.cpp`, which still
+  carried `vector_add`, `matrix_mul`, `negate`, and `reduce_sum` templates. Each replaced a
+  kernel's *actual* PTX body with a canned implementation whenever the entry name contained a
+  matching substring and the parameters had roughly the right shape, and each was consulted
+  **before** generic lowering was attempted, which also bypassed `--ptx-strict`.
+  A kernel named `neg_but_actually_triples` whose PTX computed `x*3` was emitted as `fneg`.
+  `neg.s32` came out as a float sign-bit flip: `-(7)` returned `0x80000007` instead of
+  `0xFFFFFFF9`. The name match additionally mutated the ABI — retyping parameters and appending a
+  thread-position builtin — which then caused generic lowering to fail, which selected the
+  template that produced the wrong body. Removing all four required no compensating work: the
+  generic path lowers every affected case, and the full suite stays green.
+  The unit and AIR ABI fixtures that "covered" these paths were themselves artifacts — each had a
+  stub body (`mov.u32 %r0, %tid.x; ret;`) while asserting a fully computed body, so they were
+  verifying the template rather than the compiler and could never have caught the miscompile.
+  They are now real kernels with assertions on real lowering, plus explicit negative tests that a
+  matching entry name does not substitute semantics.
+  Found by `ptx_sweep_numeric` on its first run.
+- **A kernel that cannot be lowered is now refused instead of emitted empty.** Non-strict
+  lowering previously fell through to a bare `ret void` body, producing a kernel that loaded,
+  launched, and wrote nothing — the caller read back whatever was already in the output buffer
+  with no diagnostic. Both strict and tolerant modes now return an error.
 - **`cumetalc foo.cu -o foo` produces a complete linked executable** (spec §11 Phase 2/3 exit
   criterion), covered by `functional_cumetalc_link_executable`. An unmodified CUDA source file
   using `<<<>>>` compiles and runs with no host/device split and no metallib path at runtime.
@@ -288,6 +310,20 @@ as gaps have been closed.
   in runtime/metal_backend.
 - Full AIR ABI reverse-engineering continues to be refined as Xcode releases change
   undocumented fields (regression tests in `tests/air_abi/` + `air_validate` catch breaks).
+- **AIR ABI cross-version coverage is narrower than spec §10.5 asks for.** The spec wants
+  regression across Xcode 15.0 / 15.4 / 16.0 / 16.2+; in practice a developer machine has one
+  Xcode, and CI covers whatever Xcodes the `macos-14` and `macos-15` runner images ship. Every
+  AIR ABI test now prints a `CUMETAL_AIR_ABI_PROVENANCE` line naming the macOS build, Xcode
+  version and build, selected `TOOLCHAINS`, chip, and metal compiler version, so a result is
+  attributable to a toolchain instead of floating free.
+  `air_abi_xcode_matrix_regression` previously defaulted both of its Xcode slots to
+  `xcode-select -p` when the override variables were unset, compiled the same source twice with
+  the same compiler, and reported "Xcode matrix ABI regression checks succeeded" — claiming
+  cross-version coverage it never had. It now identifies toolchains by metal compiler version
+  (not directory path), deduplicates them, and says plainly when only one is present.
+  `CUMETAL_REQUIRE_XCODE_MATRIX=1` turns a single-toolchain environment into a failure for
+  machines that do have two Xcodes installed. Genuinely exercising the specific versions in the
+  spec table still requires installing them side by side.
 
 ## External dependency for full stress conformance
 - `conformance_llmc_gpt2fp32cu` and llama.cpp tests require external source checkouts

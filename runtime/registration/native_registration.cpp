@@ -149,6 +149,17 @@ void clear() {
 
 extern "C" {
 
+// Reports the version of the loaded libcumetal, which is not necessarily the version of the
+// headers the caller compiled against. Compare against the CUMETAL_VERSION macro to detect a
+// mismatched dylib -- the usual symptom of a stale copy earlier in DYLD_LIBRARY_PATH.
+int cumetalGetVersion(void) {
+    return CUMETAL_VERSION;
+}
+
+const char* cumetalGetVersionString(void) {
+    return CUMETAL_VERSION_STRING;
+}
+
 CuMetalModuleHandle cumetalRegisterModule(
     const CuMetalModuleDescriptor* descriptor) {
     std::string error;

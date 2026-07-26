@@ -257,74 +257,13 @@ std::string lowercase(std::string value) {
     return value;
 }
 
-bool looks_like_vector_add_signature(const std::string& entry_name,
-                                     const std::vector<ParamInfo>& params) {
-    if (params.size() < 4) {
-        return false;
-    }
-    if (!is_device_buffer_pointer(params[0].llvm_type) || !is_device_buffer_pointer(params[1].llvm_type) ||
-        !is_device_buffer_pointer(params[2].llvm_type)) {
-        return false;
-    }
-    if (params[3].llvm_type != "i32" && params[3].llvm_type != "i64") {
-        return false;
-    }
-
-    const std::string lowered_name = lowercase(entry_name);
-    return lowered_name.find("vector_add") != std::string::npos ||
-           lowered_name.find("vecadd") != std::string::npos;
-}
 
 bool is_integer_llvm_type(const std::string& llvm_type) {
     return !llvm_type.empty() && llvm_type[0] == 'i';
 }
 
-bool looks_like_matrix_mul_signature(const std::string& entry_name,
-                                     const std::vector<ParamInfo>& params) {
-    if (params.size() < 5) {
-        return false;
-    }
-    if (!is_device_buffer_pointer(params[0].llvm_type) || !is_device_buffer_pointer(params[1].llvm_type) ||
-        !is_device_buffer_pointer(params[2].llvm_type)) {
-        return false;
-    }
-    if (!is_integer_llvm_type(params[3].llvm_type) || params[3].llvm_type != params[4].llvm_type) {
-        return false;
-    }
 
-    const std::string lowered_name = lowercase(entry_name);
-    return lowered_name.find("matrix_mul") != std::string::npos ||
-           lowered_name.find("matmul") != std::string::npos ||
-           lowered_name.find("gemm") != std::string::npos;
-}
 
-bool looks_like_negate_signature(const std::string& entry_name, const std::vector<ParamInfo>& params) {
-    if (params.size() < 2) {
-        return false;
-    }
-    if (!is_device_buffer_pointer(params[0].llvm_type) || !is_device_buffer_pointer(params[1].llvm_type)) {
-        return false;
-    }
-    const std::string lowered_name = lowercase(entry_name);
-    return lowered_name.find("negate") != std::string::npos || lowered_name.find("neg") == 0;
-}
-
-bool looks_like_reduce_sum_signature(const std::string& entry_name,
-                                     const std::vector<ParamInfo>& params) {
-    if (params.size() < 3) {
-        return false;
-    }
-    if (!is_device_buffer_pointer(params[0].llvm_type) || !is_device_buffer_pointer(params[1].llvm_type)) {
-        return false;
-    }
-    const bool scalar_count = params[2].llvm_type == "i32" || params[2].llvm_type == "i64";
-    if (!scalar_count) {
-        return false;
-    }
-    const std::string lowered_name = lowercase(entry_name);
-    return lowered_name.find("reduce") != std::string::npos ||
-           lowered_name.find("sum") != std::string::npos;
-}
 
 bool looks_like_fp64_mul_add_signature(const std::string& entry_name,
                                         const std::vector<ParamInfo>& params) {
@@ -4796,128 +4735,10 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
     return emitter.run();
 }
 
-void emit_lowered_instruction_comments(
-    std::ostringstream& ir,
-    const std::vector<cumetal::passes::LoweredInstruction>& lowered_instructions) {
-    for (const auto& instruction : lowered_instructions) {
-        ir << "  ; ptx.lower opcode=" << instruction.opcode;
-        if (!instruction.operands.empty()) {
-            ir << " operands=";
-            for (std::size_t i = 0; i < instruction.operands.size(); ++i) {
-                if (i > 0) {
-                    ir << ",";
-                }
-                ir << instruction.operands[i];
-            }
-        }
-        ir << "\n";
-    }
-}
 
-void emit_vector_add_body(std::ostringstream& ir, const std::vector<ParamInfo>& params) {
-    const std::string& a_name = params[0].name;
-    const std::string& b_name = params[1].name;
-    const std::string& c_name = params[2].name;
-    // params.back() is __air_thread_position_in_grid (pushed by needs_thread_position_builtin)
-    const std::string& idx_name = params.back().name;
-    const std::string idx_type = params.back().llvm_type;
 
-    ir << "  %a.ptr = getelementptr float, float addrspace(1)* %" << a_name << ", " << idx_type << " %"
-       << idx_name << "\n";
-    ir << "  %b.ptr = getelementptr float, float addrspace(1)* %" << b_name << ", " << idx_type << " %"
-       << idx_name << "\n";
-    ir << "  %c.ptr = getelementptr float, float addrspace(1)* %" << c_name << ", " << idx_type << " %"
-       << idx_name << "\n";
-    ir << "  %a.val = load float, float addrspace(1)* %a.ptr, align 4\n";
-    ir << "  %b.val = load float, float addrspace(1)* %b.ptr, align 4\n";
-    ir << "  %sum = fadd float %a.val, %b.val\n";
-    ir << "  store float %sum, float addrspace(1)* %c.ptr, align 4\n";
-    ir << "  ret void\n";
-}
 
-void emit_matrix_mul_body(std::ostringstream& ir, const std::vector<ParamInfo>& params) {
-    const std::string& a_name = params[0].name;
-    const std::string& b_name = params[1].name;
-    const std::string& c_name = params[2].name;
-    const std::string& n_name = params[3].name;
-    const std::string& idx_name = params[4].name;
-    const std::string idx_type = params[4].llvm_type;
 
-    ir << "  %n.val = load i32, i32 addrspace(2)* %" << n_name << ", align 4\n";
-    ir << "  %row = udiv " << idx_type << " %" << idx_name << ", %n.val\n";
-    ir << "  %col = urem " << idx_type << " %" << idx_name << ", %n.val\n";
-    ir << "  br label %mm.loop\n\n";
-    ir << "mm.loop:\n";
-    ir << "  %k = phi " << idx_type << " [ 0, %entry ], [ %k.next, %mm.body ]\n";
-    ir << "  %acc = phi float [ 0.000000e+00, %entry ], [ %acc.next, %mm.body ]\n";
-    ir << "  %k.in.bounds = icmp ult " << idx_type << " %k, %n.val\n";
-    ir << "  br i1 %k.in.bounds, label %mm.body, label %mm.done\n\n";
-    ir << "mm.body:\n";
-    ir << "  %a.row.base = mul " << idx_type << " %row, %n.val\n";
-    ir << "  %a.index = add " << idx_type << " %a.row.base, %k\n";
-    ir << "  %b.row.base = mul " << idx_type << " %k, %n.val\n";
-    ir << "  %b.index = add " << idx_type << " %b.row.base, %col\n";
-    ir << "  %a.ptr = getelementptr float, float addrspace(1)* %" << a_name << ", " << idx_type
-       << " %a.index\n";
-    ir << "  %b.ptr = getelementptr float, float addrspace(1)* %" << b_name << ", " << idx_type
-       << " %b.index\n";
-    ir << "  %a.val = load float, float addrspace(1)* %a.ptr, align 4\n";
-    ir << "  %b.val = load float, float addrspace(1)* %b.ptr, align 4\n";
-    ir << "  %prod = fmul float %a.val, %b.val\n";
-    ir << "  %acc.next = fadd float %acc, %prod\n";
-    ir << "  %k.next = add " << idx_type << " %k, 1\n";
-    ir << "  br label %mm.loop\n\n";
-    ir << "mm.done:\n";
-    ir << "  %c.row.base = mul " << idx_type << " %row, %n.val\n";
-    ir << "  %c.index = add " << idx_type << " %c.row.base, %col\n";
-    ir << "  %c.ptr = getelementptr float, float addrspace(1)* %" << c_name << ", " << idx_type
-       << " %c.index\n";
-    ir << "  store float %acc, float addrspace(1)* %c.ptr, align 4\n";
-    ir << "  ret void\n";
-}
-
-void emit_negate_body(std::ostringstream& ir, const std::vector<ParamInfo>& params) {
-    const std::string& in_name = params[0].name;
-    const std::string& out_name = params[1].name;
-    const std::string& idx_name = params.back().name;
-    const std::string idx_type = params.back().llvm_type;
-
-    ir << "  %in.ptr = getelementptr float, float addrspace(1)* %" << in_name << ", " << idx_type
-       << " %" << idx_name << "\n";
-    ir << "  %out.ptr = getelementptr float, float addrspace(1)* %" << out_name << ", " << idx_type
-       << " %" << idx_name << "\n";
-    ir << "  %in.val = load float, float addrspace(1)* %in.ptr, align 4\n";
-    ir << "  %neg.val = fneg float %in.val\n";
-    ir << "  store float %neg.val, float addrspace(1)* %out.ptr, align 4\n";
-    ir << "  ret void\n";
-}
-
-void emit_reduce_sum_body(std::ostringstream& ir, const std::vector<ParamInfo>& params) {
-    const std::string& in_name = params[0].name;
-    const std::string& out_name = params[1].name;
-    const std::string& n_name = params[2].name;
-    const std::string& idx_name = params.back().name;
-    const std::string idx_type = params.back().llvm_type;
-
-    std::string idx_value = "%" + idx_name;
-    if (idx_type != "i32") {
-        ir << "  %reduce.idx.i32 = trunc " << idx_type << " %" << idx_name << " to i32\n";
-        idx_value = "%reduce.idx.i32";
-    }
-
-    ir << "  %n.val = load i32, i32 addrspace(2)* %" << n_name << ", align 4\n";
-    ir << "  %reduce.in.bounds = icmp ult i32 " << idx_value << ", %n.val\n";
-    ir << "  br i1 %reduce.in.bounds, label %reduce.body, label %reduce.done\n\n";
-    ir << "reduce.body:\n";
-    ir << "  %in.ptr = getelementptr float, float addrspace(1)* %" << in_name << ", i32 " << idx_value
-       << "\n";
-    ir << "  %in.val = load float, float addrspace(1)* %in.ptr, align 4\n";
-    ir << "  %out.ptr = getelementptr float, float addrspace(1)* %" << out_name << ", i32 0\n";
-    ir << "  %old.val = atomicrmw fadd float addrspace(1)* %out.ptr, float %in.val monotonic\n";
-    ir << "  br label %reduce.done\n\n";
-    ir << "reduce.done:\n";
-    ir << "  ret void\n";
-}
 
 }  // namespace
 
@@ -4976,39 +4797,32 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
                           .raw_name = raw_arg_name});
     }
 
-    const bool vector_add_signature = looks_like_vector_add_signature(pipeline.entry_name, params);
-    bool matrix_mul_signature = looks_like_matrix_mul_signature(pipeline.entry_name, params);
-    const bool negate_signature = looks_like_negate_signature(pipeline.entry_name, params);
-    // Skip the simple atomic-reduce path if the kernel uses shared memory — such
-    // kernels implement their own reduction algorithm (tree + warp-shuffle) and
-    // must go through the generic LLVM path.
-    bool reduce_sum_signature = looks_like_reduce_sum_signature(pipeline.entry_name, params) &&
-                                ptx.find(".shared") == std::string::npos;
+    // There used to be four more name-matched body templates here -- vector_add, matrix_mul,
+    // negate, and reduce_sum. Each replaced the kernel's *actual* PTX body with a canned
+    // implementation whenever the entry name matched a substring and the parameters had roughly
+    // the right shape, and each was consulted BEFORE generic lowering was even attempted, which
+    // also bypassed strict mode.
+    //
+    // That silently miscompiled any real kernel whose name happened to match. A kernel named
+    // `neg_but_actually_triples` whose PTX computed `x*3` was emitted as `fneg`; `neg.s32` came
+    // out as a float sign-bit flip, returning 0x80000007 for -(7) instead of 0xFFFFFFF9. The
+    // name match also mutated the ABI (retyping parameters, appending a thread-position builtin),
+    // which then made generic lowering fail, which fed the fallback that produced the wrong body
+    // in the first place. docs/known-gaps.md had claimed such source-pattern templates were
+    // removed and were "not a hidden production fallback"; these were exactly that.
+    //
+    // Deleting them costs nothing: the generic path lowers all of it. Caught by ptx_sweep_numeric.
+    //
+    // fp64_mul_add survives because it is documented behavior, not a hidden shortcut: FP64
+    // emulation is activated only for name-matched kernels per docs/known-gaps.md. It is now
+    // strictly a fallback -- real lowered PTX always wins -- so it can no longer overwrite a body
+    // that lowered successfully.
     const bool fp64_mul_add_signature =
         looks_like_fp64_mul_add_signature(pipeline.entry_name, params);
-    if (matrix_mul_signature && params.size() >= 5) {
-        params[3].llvm_type = "i32 addrspace(2)*";
-        arg_decls[3] = params[3].llvm_type + " %" + params[3].name;
-    }
-    if (reduce_sum_signature && params.size() >= 3) {
-        params[2].llvm_type = "i32 addrspace(2)*";
-        arg_decls[2] = params[2].llvm_type + " %" + params[2].name;
-    }
 
-    const bool needs_thread_position_builtin =
-        vector_add_signature || negate_signature || reduce_sum_signature || fp64_mul_add_signature;
-    if (needs_thread_position_builtin) {
-        const ParamInfo builtin_thread_position = {
-            .ptx_type = ".builtin.air.thread_position_in_grid",
-            .llvm_type = "i32",
-            .name = "__air_thread_position_in_grid",
-            .raw_name = "__air_thread_position_in_grid",
-            .builtin_air_key = "air.thread_position_in_grid",
-            .builtin_air_type_name = "uint",
-        };
-        params.push_back(builtin_thread_position);
-        arg_decls.push_back(builtin_thread_position.llvm_type + " %" + builtin_thread_position.name);
-    }
+    // The thread-position builtin the FP64 template needs is appended only if that template is
+    // actually used -- see below. Appending it up front is what corrupted the parameter list
+    // ahead of generic lowering and made the failure self-fulfilling.
 
     int air_major = 2;
     int air_minor = 8;
@@ -5052,10 +4866,12 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
 
     const auto shared_symbols = parse_ptx_shared_symbols(ptx, pipeline.entry_name);
 
+    // Always attempt to lower the kernel's real body first. Nothing may pre-empt this on the
+    // strength of the entry name: lowering what the PTX actually says is the only behavior that
+    // cannot be silently wrong.
     GenericLlvmBodyResult generic_body;
     bool use_generic_body = false;
-    if (!vector_add_signature && !matrix_mul_signature && !negate_signature &&
-        !reduce_sum_signature && !fp64_mul_add_signature) {
+    {
         std::vector<ParamInfo> generic_params = params;
         std::vector<std::string> generic_arg_decls = arg_decls;
         generic_body = try_emit_generic_llvm_body(ptx,
@@ -5069,12 +4885,28 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
             params = std::move(generic_params);
             arg_decls = std::move(generic_arg_decls);
             use_generic_body = true;
-        } else if (options.strict) {
+        } else if (!fp64_mul_add_signature && options.strict) {
             result.error = generic_body.error.empty()
                                ? "generic llvm lowering failed"
                                : generic_body.error;
             return result;
         }
+    }
+
+    // Only now, having failed to lower the real body, may the documented FP64 emulation template
+    // stand in -- and only for kernels whose names opt into it per docs/known-gaps.md.
+    const bool use_fp64_template = fp64_mul_add_signature && !use_generic_body;
+    if (use_fp64_template) {
+        const ParamInfo builtin_thread_position = {
+            .ptx_type = ".builtin.air.thread_position_in_grid",
+            .llvm_type = "i32",
+            .name = "__air_thread_position_in_grid",
+            .raw_name = "__air_thread_position_in_grid",
+            .builtin_air_key = "air.thread_position_in_grid",
+            .builtin_air_type_name = "uint",
+        };
+        params.push_back(builtin_thread_position);
+        arg_decls.push_back(builtin_thread_position.llvm_type + " %" + builtin_thread_position.name);
     }
 
     std::ostringstream ir;
@@ -5090,25 +4922,24 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     ir << ") #0 {\n";
     ir << "entry:\n";
 
-    if (vector_add_signature) {
-        emit_vector_add_body(ir, params);
-    } else if (matrix_mul_signature) {
-        emit_matrix_mul_body(ir, params);
-    } else if (negate_signature) {
-        emit_negate_body(ir, params);
-    } else if (reduce_sum_signature) {
-        emit_reduce_sum_body(ir, params);
-    } else if (fp64_mul_add_signature) {
-        emit_fp64_mul_add_body(ir, params, options.fp64_mode);
-    } else if (use_generic_body) {
+    if (use_generic_body) {
         ir << generic_body.body_ir;
+    } else if (use_fp64_template) {
+        emit_fp64_mul_add_body(ir, params, options.fp64_mode);
     } else {
-        emit_lowered_instruction_comments(ir, pipeline.lowered_instructions);
-        ir << "  ret void\n";
+        // Previously this emitted instruction comments followed by a bare `ret void`, producing a
+        // kernel that loaded, launched, and silently did nothing -- every output buffer left
+        // untouched, no diagnostic. For a translation layer that is the worst possible outcome:
+        // the caller reads whatever was already in the buffer and treats it as a result. Refuse
+        // instead, matching how unsupported GGML kernels and approximate lowerings behave.
+        result.error = generic_body.error.empty()
+                           ? ("no lowering available for entry '" + pipeline.entry_name + "'")
+                           : generic_body.error;
+        return result;
     }
     ir << "}\n\n";
 
-    if (fp64_mul_add_signature && options.fp64_mode != Fp64Mode::kEmulate) {
+    if (use_fp64_template && options.fp64_mode != Fp64Mode::kEmulate) {
         ir << "declare double @llvm.fma.f64(double, double, double)\n\n";
     }
     if (use_generic_body) {

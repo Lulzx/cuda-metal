@@ -95,12 +95,21 @@ recompilation, not binary translation.
 
 ## Contributor License Agreement
 
-All contributors must sign a CLA confirming:
+The full text is in [docs/cla.md](cla.md), and [CONTRIBUTING.md](../CONTRIBUTING.md) explains
+the workflow. Contributors sign it by adding `Signed-off-by` to each commit (`git commit -s`),
+which certifies the Developer Certificate of Origin 1.1 plus CuMetal's clean-room clauses:
 
 1. The contributed code is a clean-room implementation — no NVIDIA proprietary source
    material was referenced or copied.
 2. No prior exposure to NVIDIA proprietary source code for the implemented API surface.
-3. The contribution is original work or is properly attributed open-source code.
+3. Nothing derived from NVIDIA SASS disassembly or decompilation.
+4. Any AIR/`metallib` ABI knowledge came from publicly distributed Apple toolchain *output*,
+   not from Apple source code or from decompiling an Apple binary.
+5. The contribution is original work or is properly attributed, license-compatible open-source
+   code.
+6. The contributor has the legal right to make the certification.
+
+There is no copyright assignment: contributors retain ownership and license under Apache 2.0.
 
 ---
 

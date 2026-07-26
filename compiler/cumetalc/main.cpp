@@ -23,6 +23,10 @@
 #define CUMETAL_SOURCE_DIR ""
 #endif
 
+#ifndef CUMETAL_VERSION_STRING
+#define CUMETAL_VERSION_STRING "unknown"
+#endif
+
 namespace {
 
 enum class BackendKind {
@@ -698,6 +702,9 @@ int main(int argc, char** argv) {
             link_requested_explicitly = true;
         } else if (arg == "--save-temps") {
             keep_intermediates = true;
+        } else if (arg == "--version" || arg == "-v") {
+            std::cout << "cumetalc " << CUMETAL_VERSION_STRING << "\n";
+            return 0;
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;

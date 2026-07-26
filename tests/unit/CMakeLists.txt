@@ -554,3 +554,14 @@ add_test(
             ${CMAKE_CURRENT_SOURCE_DIR}/cusolver_link_test.sh
             $<TARGET_FILE_DIR:cumetal_runtime>
 )
+
+# The release version is duplicated between CMakeLists.txt and cumetal_native.h so the header
+# stays standalone-usable; this pins them together so they cannot drift silently.
+add_test(
+    NAME unit_version_matches
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_version_matches_test.sh
+            ${PROJECT_VERSION}
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_SOURCE_DIR}/runtime/api/cumetal_native.h
+)

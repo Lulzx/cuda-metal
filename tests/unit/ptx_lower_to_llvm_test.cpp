@@ -20,19 +20,43 @@ bool contains(const std::string& haystack, const std::string& needle) {
 }  // namespace
 
 int main() {
+    // Every fixture in this file used to be a stub -- `mov.u32 %r0, %tid.x; ret;` -- while the
+    // assertions below checked for a fully computed body. They passed because lower_to_llvm.cpp
+    // carried name-matched templates that substituted a canned implementation for any kernel
+    // called vector_add / matrix_mul / negate / reduce_sum with roughly the right parameters,
+    // discarding the real PTX. The tests were verifying those templates, so they could not have
+    // caught the templates miscompiling real kernels -- which they did; see ptx_sweep_numeric.
+    //
+    // The templates are gone. These fixtures are now real kernels, and the assertions check what
+    // the compiler actually emitted for them.
     const std::string ptx = R"PTX(
 .version 8.0
 .target sm_90
+.address_size 64
 .visible .entry vector_add(
     .param .u64 vector_add_param_0,
     .param .u64 vector_add_param_1,
-    .param .u64 vector_add_param_2,
-    .param .u32 vector_add_param_3
+    .param .u64 vector_add_param_2
 )
 {
-    mov.u32 %r0, %tid.x;
-    add.s32 %r1, %r0, %r0;
-    ld.shared.u32 %r2, [%rd1];
+    .reg .b64 %rd<8>;
+    .reg .b32 %r<4>;
+    .reg .f32 %f<4>;
+    ld.param.u64 %rd1, [vector_add_param_0];
+    ld.param.u64 %rd2, [vector_add_param_1];
+    ld.param.u64 %rd3, [vector_add_param_2];
+    cvta.to.global.u64 %rd4, %rd1;
+    cvta.to.global.u64 %rd5, %rd2;
+    cvta.to.global.u64 %rd6, %rd3;
+    mov.u32 %r1, %tid.x;
+    mul.wide.u32 %rd7, %r1, 4;
+    add.s64 %rd4, %rd4, %rd7;
+    add.s64 %rd5, %rd5, %rd7;
+    add.s64 %rd6, %rd6, %rd7;
+    ld.global.f32 %f1, [%rd4];
+    ld.global.f32 %f2, [%rd5];
+    add.f32 %f3, %f1, %f2;
+    st.global.f32 [%rd6], %f3;
     ret;
 }
 )PTX";
@@ -57,15 +81,17 @@ int main() {
                 "u64 param mapped")) {
         return 1;
     }
-    if (!expect(contains(lowered.llvm_ir, "i32 %vector_add_param_3"), "u32 param mapped")) {
+    // Assert on the operations the PTX actually asked for, not on template-generated SSA names.
+    if (!expect(contains(lowered.llvm_ir, "fadd float"),
+                "vector-add floating add emitted from the real add.f32")) {
         return 1;
     }
-    if (!expect(contains(lowered.llvm_ir, "%sum = fadd float %a.val, %b.val"),
-                "vector-add floating add body emitted")) {
+    if (!expect(contains(lowered.llvm_ir, "load float"),
+                "vector-add loads its operands from device memory")) {
         return 1;
     }
-    if (!expect(contains(lowered.llvm_ir, "store float %sum, float addrspace(1)* %c.ptr"),
-                "vector-add store emitted")) {
+    if (!expect(contains(lowered.llvm_ir, "store float"),
+                "vector-add stores its result to device memory")) {
         return 1;
     }
     if (!expect(contains(lowered.llvm_ir, "\"air.kernel\""), "air.kernel attribute emitted")) {
@@ -82,100 +108,66 @@ int main() {
         return 1;
     }
 
-    const std::string matrix_ptx = R"PTX(
+    // A kernel named `negate` whose body multiplies instead. Under the old name-matched templates
+    // this lowered to `fneg` regardless -- the entry name decided the semantics and the PTX was
+    // discarded. Guarding against that specifically, because the name still matches.
+    const std::string misleading_name_ptx = R"PTX(
 .version 8.0
 .target sm_90
-.visible .entry matrix_mul(
-    .param .u64 matrix_mul_param_0,
-    .param .u64 matrix_mul_param_1,
-    .param .u64 matrix_mul_param_2,
-    .param .u32 matrix_mul_param_3,
-    .param .u32 matrix_mul_param_4
-)
-{
-    mov.u32 %r0, %tid.x;
-    ret;
-}
-)PTX";
-
-    cumetal::ptx::LowerToLlvmOptions matrix_options;
-    matrix_options.entry_name = "matrix_mul";
-    matrix_options.module_id = "unit.ptx.matrix_mul";
-    const auto matrix_lowered = cumetal::ptx::lower_ptx_to_llvm_ir(matrix_ptx, matrix_options);
-    if (!expect(matrix_lowered.ok, "matrix multiply lowering succeeds")) {
-        return 1;
-    }
-    if (!expect(contains(matrix_lowered.llvm_ir,
-                         "define void @matrix_mul(float addrspace(1)* %matrix_mul_param_0"),
-                "matrix multiply kernel definition emitted")) {
-        return 1;
-    }
-    if (!expect(contains(matrix_lowered.llvm_ir,
-                         "%row = udiv i32 %matrix_mul_param_4, %n.val"),
-                "matrix row index derivation emitted")) {
-        return 1;
-    }
-    if (!expect(contains(matrix_lowered.llvm_ir, "%prod = fmul float %a.val, %b.val"),
-                "matrix multiply fmul emitted")) {
-        return 1;
-    }
-    if (!expect(contains(matrix_lowered.llvm_ir, "%acc.next = fadd float %acc, %prod"),
-                "matrix multiply accumulation emitted")) {
-        return 1;
-    }
-    if (!expect(contains(matrix_lowered.llvm_ir, "store float %acc, float addrspace(1)* %c.ptr"),
-                "matrix multiply store emitted")) {
-        return 1;
-    }
-    if (!expect(matrix_lowered.warnings.empty(), "no warnings for matrix multiply lowering path")) {
-        return 1;
-    }
-
-    const std::string negate_ptx = R"PTX(
-.version 8.0
-.target sm_90
+.address_size 64
 .visible .entry negate(
     .param .u64 negate_param_0,
     .param .u64 negate_param_1
 )
 {
-    mov.u32 %r0, %tid.x;
-    neg.f32 %f1, %f0;
+    .reg .b64 %rd<8>;
+    .reg .f32 %f<4>;
+    ld.param.u64 %rd1, [negate_param_0];
+    ld.param.u64 %rd2, [negate_param_1];
+    cvta.to.global.u64 %rd3, %rd1;
+    cvta.to.global.u64 %rd4, %rd2;
+    ld.global.f32 %f1, [%rd3];
+    mul.f32 %f2, %f1, %f1;
+    st.global.f32 [%rd4], %f2;
     ret;
 }
 )PTX";
 
-    cumetal::ptx::LowerToLlvmOptions negate_options;
-    negate_options.entry_name = "negate";
-    const auto negate_lowered = cumetal::ptx::lower_ptx_to_llvm_ir(negate_ptx, negate_options);
-    if (!expect(negate_lowered.ok, "negate lowering succeeds")) {
+    cumetal::ptx::LowerToLlvmOptions misleading_options;
+    misleading_options.entry_name = "negate";
+    const auto misleading_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(misleading_name_ptx, misleading_options);
+    if (!expect(misleading_lowered.ok, "kernel named negate lowers")) {
         return 1;
     }
-    if (!expect(contains(negate_lowered.llvm_ir,
-                         "define void @negate(float addrspace(1)* %negate_param_0"),
-                "negate kernel definition emitted")) {
+    if (!expect(contains(misleading_lowered.llvm_ir, "fmul float"),
+                "kernel named negate emits the multiply its PTX actually specifies")) {
         return 1;
     }
-    if (!expect(contains(negate_lowered.llvm_ir, "i32 %__air_thread_position_in_grid"),
-                "negate includes implicit thread position argument")) {
-        return 1;
-    }
-    if (!expect(contains(negate_lowered.llvm_ir, "%neg.val = fneg float %in.val"),
-                "negate emits fneg body")) {
+    if (!expect(!contains(misleading_lowered.llvm_ir, "fneg"),
+                "entry name must not substitute a negate body for unrelated PTX")) {
         return 1;
     }
 
+    // Same guard for the reduce_sum template: a matching name plus an atomic body must lower the
+    // real atomic, not a canned reduction.
     const std::string reduce_ptx = R"PTX(
 .version 8.0
 .target sm_90
+.address_size 64
 .visible .entry reduce_sum(
     .param .u64 reduce_param_0,
-    .param .u64 reduce_param_1,
-    .param .u32 reduce_param_2
+    .param .u64 reduce_param_1
 )
 {
-    mov.u32 %r0, %tid.x;
-    atom.global.add.f32 %f1, [%rd1], %f0;
+    .reg .b64 %rd<8>;
+    .reg .f32 %f<4>;
+    ld.param.u64 %rd1, [reduce_param_0];
+    ld.param.u64 %rd2, [reduce_param_1];
+    cvta.to.global.u64 %rd3, %rd1;
+    cvta.to.global.u64 %rd4, %rd2;
+    ld.global.f32 %f1, [%rd3];
+    atom.global.add.f32 %f2, [%rd4], %f1;
     ret;
 }
 )PTX";
@@ -186,13 +178,8 @@ int main() {
     if (!expect(reduce_lowered.ok, "reduce_sum lowering succeeds")) {
         return 1;
     }
-    if (!expect(contains(reduce_lowered.llvm_ir, "i32 addrspace(2)* %reduce_param_2"),
-                "reduce_sum scalar count lowered as constant buffer pointer")) {
-        return 1;
-    }
-    if (!expect(contains(reduce_lowered.llvm_ir,
-                         "atomicrmw fadd float addrspace(1)* %out.ptr, float %in.val monotonic"),
-                "reduce_sum emits atomic add")) {
+    if (!expect(contains(reduce_lowered.llvm_ir, "atomicrmw fadd"),
+                "reduce_sum emits the atomic add its PTX specifies")) {
         return 1;
     }
     if (!expect(reduce_lowered.warnings.empty(), "reduce_sum path should not emit warnings")) {
@@ -214,11 +201,16 @@ int main() {
 }
 )PTX";
 
+    // Tolerant (non-strict) mode used to "accept" an unsupported opcode by emitting the kernel
+    // signature with a bare `ret void` body. That kernel loaded and launched successfully and
+    // wrote nothing, so the caller read back whatever was already in the output buffer and had no
+    // way to tell. For a translation layer that is worse than failing: it is an unsupported
+    // opcode reported as a successful run. Both modes now refuse.
     const auto tolerant = cumetal::ptx::lower_ptx_to_llvm_ir(unsupported_ptx, options);
-    if (!expect(tolerant.ok, "tolerant lowering accepts unsupported opcode")) {
+    if (!expect(!tolerant.ok, "tolerant lowering refuses an unsupported opcode")) {
         return 1;
     }
-    if (!expect(!tolerant.warnings.empty(), "warnings propagated for unsupported opcode")) {
+    if (!expect(!tolerant.error.empty(), "refusal carries a diagnostic")) {
         return 1;
     }
 

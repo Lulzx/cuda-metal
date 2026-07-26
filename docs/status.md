@@ -49,6 +49,22 @@ v1 toolchain-completeness work (2026-07-26):
 - **Backend default is input-dependent and measured** rather than a single global setting; see
   the table in [known-gaps.md](known-gaps.md).
 
+- **`ptx_sweep_numeric` executes each PTX opcode and checks the value** (spec §10.2). The
+  pre-existing sweeps lower a kernel per opcode and grep the IR for `define void @name`, which
+  proves a function was emitted and nothing about what it computes. The new harness runs each
+  opcode on the GPU and compares bit-for-bit against a hand-derived ISA oracle. On its first run
+  it found `neg.s32` returning a float sign-bit flip, which traced back to four name-matched
+  body templates in `lower_to_llvm.cpp` that discarded real PTX bodies — see
+  [known-gaps.md](known-gaps.md). Those are removed, and unlowerable kernels are now refused
+  rather than emitted as an empty `ret void`.
+
+- **AIR ABI results are attributable to a toolchain** (spec §10.5). Every AIR ABI test prints
+  macOS build, Xcode version and build, selected `TOOLCHAINS`, chip, and metal compiler version.
+  `air_abi_xcode_matrix_regression` previously defaulted both Xcode slots to the same developer
+  directory and reported cross-version coverage it never had; it now identifies toolchains by
+  compiler version, deduplicates, and says plainly when only one is present. CI runs the AIR ABI
+  suite across `macos-14` and `macos-15`.
+
 - **Four test harnesses stopped reporting on stale artifacts.**
   `run_samples_vector_add.sh`, `run_cumetalc_cu_runtime_vector_add.sh`,
   `run_runtime_vector_add.sh`, and `run_runtime_axpy.sh` each checked for a pre-existing

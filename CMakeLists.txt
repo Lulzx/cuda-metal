@@ -415,6 +415,7 @@ target_compile_options(cumetalc
 target_compile_definitions(cumetalc
     PRIVATE
         CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        CUMETAL_VERSION_STRING="${PROJECT_VERSION}"
 )
 
 add_executable(cumetal-ptx2llvm

@@ -8,6 +8,11 @@ REFERENCE_METALLIB="$4"
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 MLA_CMD="swift run --package-path $ROOT_DIR/tools/metal_library_archive_bridge cumetal-mla-validate"
 
+# A green AIR ABI result is only interpretable alongside the toolchain that produced it.
+# shellcheck source=tests/air_abi/_toolchain_provenance.sh
+source "$(dirname "$0")/_toolchain_provenance.sh"
+cumetal_print_toolchain_provenance "air_abi_validate_reference"
+
 if ! command -v xcrun >/dev/null 2>&1; then
   echo "SKIP: xcrun not installed"
   exit 77

@@ -1,3 +1,12 @@
+// Naive square matrix multiply, one output element per thread:
+//   C[row*N + col] = sum over k of A[row*N + k] * B[k*N + col]
+//
+// This fixture used to be a stub -- `mov.u32 %r0, %tid.x; ret;` -- while the harness asserted
+// that the lowered IR contained `fmul float` and `fadd float`. Those instructions came from a
+// name-matched `matrix_mul` template in lower_to_llvm.cpp that replaced the body of any
+// similarly-named kernel with a canned matmul. The template is gone (it silently miscompiled
+// real kernels), so the fixture now has to actually multiply matrices for the assertion to mean
+// anything.
 .version 8.0
 .target sm_90
 .address_size 64
@@ -6,10 +15,58 @@
     .param .u64 matrix_mul_param_0,
     .param .u64 matrix_mul_param_1,
     .param .u64 matrix_mul_param_2,
-    .param .u32 matrix_mul_param_3,
-    .param .u32 matrix_mul_param_4
+    .param .u32 matrix_mul_param_3
 )
 {
-    mov.u32 %r0, %tid.x;
+    .reg .pred  %p<4>;
+    .reg .b32   %r<16>;
+    .reg .b64   %rd<24>;
+    .reg .f32   %f<12>;
+
+    ld.param.u64 %rd1, [matrix_mul_param_0];
+    ld.param.u64 %rd2, [matrix_mul_param_1];
+    ld.param.u64 %rd3, [matrix_mul_param_2];
+    ld.param.u32 %r1, [matrix_mul_param_3];
+
+    cvta.to.global.u64 %rd4, %rd1;
+    cvta.to.global.u64 %rd5, %rd2;
+    cvta.to.global.u64 %rd6, %rd3;
+
+    // idx = tid.x; row = idx / N; col = idx % N
+    mov.u32 %r2, %tid.x;
+    div.u32 %r3, %r2, %r1;
+    rem.u32 %r4, %r2, %r1;
+
+    mov.f32 %f1, 0f00000000;
+    mov.u32 %r5, 0;
+
+LOOP:
+    setp.ge.u32 %p1, %r5, %r1;
+    @%p1 bra DONE;
+
+    // A[row*N + k]
+    mul.lo.u32 %r6, %r3, %r1;
+    add.u32 %r7, %r6, %r5;
+    mul.wide.u32 %rd7, %r7, 4;
+    add.s64 %rd8, %rd4, %rd7;
+    ld.global.f32 %f2, [%rd8];
+
+    // B[k*N + col]
+    mul.lo.u32 %r8, %r5, %r1;
+    add.u32 %r9, %r8, %r4;
+    mul.wide.u32 %rd9, %r9, 4;
+    add.s64 %rd10, %rd5, %rd9;
+    ld.global.f32 %f3, [%rd10];
+
+    mul.f32 %f4, %f2, %f3;
+    add.f32 %f1, %f1, %f4;
+
+    add.u32 %r5, %r5, 1;
+    bra LOOP;
+
+DONE:
+    mul.wide.u32 %rd11, %r2, 4;
+    add.s64 %rd12, %rd6, %rd11;
+    st.global.f32 [%rd12], %f1;
     ret;
 }
