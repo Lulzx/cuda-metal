@@ -126,8 +126,11 @@ Phase 5 items implemented:
   - Prints a tabular comparison: kernel | elements | native_gpu_ms | native_wall_ms |
     cumetal_wall_ms | ratio | PASS/FAIL.
   - `--max-ratio <x>` enforces the spec §5.7 / §10.6 gate (Phase 5 target: ≤ 2.0×).
-  - Measured ratios on Apple Silicon (fastest of 20 iterations): vector_add ~1.0-1.1×,
-    saxpy ~0.9-1.3×, reduce_f32 ~1.0-1.1×. These supersede an earlier mean-based set
+  - Clean-rebuild Apple M4 Pro measurement on 2026-07-27 (fastest of 20 iterations):
+    vector_add 1.063×, saxpy 1.036×, reduce_f32 1.008×. The benchmark metallib was
+    regenerated after rebuilding `libcumetal`; older cross-rebuild measurements are
+    not comparable because the former registration-JIT cache key could reuse kernels
+    from a previous compiler build. These also supersede an earlier mean-based set
     (0.74×/0.98×/1.00×) that was outlier-dominated.
 - `scripts/generate_bench_metallib.sh` — compiles `bench_kernels.metal` to
   `bench_kernels.metallib` via `xcrun metal` + `xcrun metallib`; exits 77 if

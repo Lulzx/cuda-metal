@@ -119,6 +119,9 @@ echo ""
 # Set up library path so llama-cli resolves libcumetal instead of real CUDA
 export DYLD_LIBRARY_PATH="${BUILD_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
 export CUMETAL_TRACE_GPU=1
+# llama.cpp currently needs exact, provenance-labelled GGML workload
+# specializations for kernels outside generic PTX coverage.
+export CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=1
 
 OUTPUT_FILE="$(mktemp)"
 trap 'rm -f "${OUTPUT_FILE}"' EXIT

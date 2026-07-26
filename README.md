@@ -178,11 +178,15 @@ Typical results on Apple Silicon:
 
 | Kernel | Elements | Ratio (CuMetal/Metal) |
 |--------|----------|-----------------------|
-| vector_add | 262144 | ~1.0-1.1× |
-| saxpy | 262144 | ~0.9-1.3× |
-| reduce_f32 | 262144 | ~1.0-1.1× |
+| vector_add | 262144 | 1.063× |
+| saxpy | 262144 | 1.036× |
+| reduce_f32 | 262144 | 1.008× |
 
 All measured ratios are well within the 2× spec gate (§5.7).
+These values were re-measured on Apple M4 Pro on 2026-07-27 from a rebuilt
+`libcumetal` and freshly generated benchmark metallib, after the registration-JIT
+cache key began identifying the compiler build. Measurements from older rebuilds
+should not be compared because they may have executed a previously cached kernel.
 
 The gate reports the **fastest** of 20 iterations, not the mean. These kernels run in ~0.2 ms, so
 a single iteration is dominated by dispatch jitter — the per-iteration spread reaches ~50% even
@@ -225,7 +229,10 @@ The conformance gate requires `OK (LOGITS)`, `LOSS OK`, `TENSOR OK`,
 `overall okay: 1`, plus at least one successful Apple-GPU provenance record.
 On the tested Apple M4 Pro, the strict gate passes for the llm.c GPT-2 FP32
 workload with CPU emulation disabled. Its kernels use CuMetal's
-`specialized_msl` path; this is not evidence that arbitrary PTX is supported.
+`specialized_msl` path, explicitly enabled by the conformance launcher with
+`CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=1`; this is not evidence that arbitrary PTX is
+supported. Workload specializations are disabled by default so a generic-lowering miss cannot
+select semantics from a colliding entry name.
 
 This gate was intermittent until 2026-07-26 (2-4 failures in 15, with an occasional `-inf`
 loss). Two defects caused it — a JIT cache key that did not identify the compiler that produced

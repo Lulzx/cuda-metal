@@ -62,6 +62,22 @@
       "source": "ggml_output_ops.cu",
       "binary": "ggml_output_ops",
       "harness": "strict"
+    },
+    {
+      "name": "libdevice_math",
+      "subdir": "libdevice",
+      "source": "libdevice_math.cu",
+      "binary": "libdevice_math",
+      "harness": "strict",
+      "expect_pattern": "PASS: libdevice float surface probe"
+    },
+    {
+      "name": "raytracer",
+      "subdir": "raytracer",
+      "source": "rtiow.cu",
+      "binary": "rtiow",
+      "harness": "strict",
+      "expect_pattern": "OK: GPU render matches CPU reference."
     }
   ]
 }

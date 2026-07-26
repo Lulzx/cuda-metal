@@ -2659,9 +2659,11 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
         lowering_kind = MetalLoweringKind::kGenericPtx;
     }
 
-    // Second: fall back to the hardcoded name-based lookup for known llm.c and GGML kernels that
-    // the generic translator cannot yet handle.
-    if (metal_source.empty()) {
+    // Second: callers that explicitly opt into workload compatibility may use
+    // the hardcoded lookup for known llm.c and GGML kernels that the generic
+    // translator cannot yet handle. It is disabled by default: an entry name is
+    // not sufficient evidence that an arbitrary kernel implements that workload.
+    if (metal_source.empty() && options.allow_workload_specializations) {
         metal_source = emit_metal_source_for_entry(pipeline.entry_name);
         if (!metal_source.empty()) {
             approximate = entry_uses_approximate_stub(pipeline.entry_name);
@@ -2671,6 +2673,12 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
     }
 
     if (metal_source.empty()) {
+        if (!options.allow_workload_specializations &&
+            !emit_metal_source_for_entry(pipeline.entry_name).empty()) {
+            result.warnings.push_back(
+                "kernel '" + pipeline.entry_name +
+                "' has a workload specialization, but name-selected bodies are disabled");
+        }
         result.ok = true;
         result.matched = false;
         return result;

@@ -14,4 +14,7 @@ fi
 export DYLD_LIBRARY_PATH="${CUMETAL_BUILD_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
 export CUMETAL_DISABLE_LLMC_EMULATION="${CUMETAL_DISABLE_LLMC_EMULATION:-1}"
 export CUMETAL_ENABLE_LLMC_CPU_EMULATION=0
+# This verified compatibility workload still uses exact specialized MSL for
+# kernels outside generic PTX coverage; opt in explicitly.
+export CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=1
 exec "./${BIN_NAME}"

@@ -43,6 +43,14 @@ programs.
 
 ### Changed
 
+- **Name-selected llm.c/GGML workload bodies are opt-in.** Generic PTX lowering still runs first;
+  if it declines, the specialized table is consulted only with
+  `CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=1`. The strict llm.c, llama.cpp, and GGML conformance
+  launchers opt in explicitly; arbitrary CUDA projects cannot acquire a body from a colliding
+  entry name.
+- **The manifest-complete CUDA-project sweep uses a fresh JIT cache per fixture** and now enrolls
+  the libdevice and ray-tracer strict projects. This prevents a prior compiler build from
+  concealing a lowering regression and raises the clean local sweep from 9 to 11 projects.
 - **`CUMETAL_ENABLE_BINARY_SHIM` now controls only the `libcuda.dylib` alias.** It previously
   also gated the host registration ABI (`__cudaRegister*`), which Clang emits when compiling
   *your own* `.cu` source. Because the flag defaults off in Release, the source-recompilation
@@ -79,7 +87,8 @@ programs.
   `lower_to_metal.cpp` consulted its hardcoded llm.c/GGML name table *before* attempting generic
   PTX→MSL translation, so a kernel whose name merely contained e.g. `gelu_forward_kernel` had its
   real body replaced by a canned one. Same defect as the LLVM-path templates; generic translation
-  now wins wherever it succeeds, and the table only covers what it cannot lower.
+  now wins wherever it succeeds, and the table only covers what it cannot lower. The table is
+  additionally disabled unless the caller explicitly opts into workload compatibility.
 - **`cumetal_bench` gates on the fastest iteration instead of the mean.** These kernels run in
   ~0.2 ms and are dispatch-jitter dominated (per-iteration spread reaches ~50% when lightly
   loaded), so the
@@ -123,8 +132,9 @@ programs.
 Verified on Apple M4 Pro, macOS 26.6, Xcode 26.6:
 
 - 213 tests pass in Debug with the binary shim on; 210 in Release with it off. No skips, no
-  failures. The performance gate holds: vector_add ~1.0-1.1×, saxpy ~0.9-1.3×, reduce_f32
-  ~1.0-1.1× against hand-written Metal, well inside the 2× ceiling.
+  failures. A clean-rebuild Apple M4 Pro re-measurement on 2026-07-27 reports vector_add
+  1.063×, saxpy 1.036×, and reduce_f32 1.008× against hand-written Metal, well inside
+  the 2× ceiling.
 - **llm.c** GPT-2 FP32 training reaches numerical parity with the PyTorch reference.
 - **llama.cpp** greedy-decodes coherently on SmolLM2-135M-Instruct-Q4_K_M at ~279 tok/s with
   full offload. This is one model on a covered kernel subset, not general GGML support.
@@ -140,4 +150,3 @@ unsupported by design. Grid-wide cooperative sync is a no-op. FP64 runs emulated
 precision. Broad GGML kernel coverage, general PhysX shapes, and arbitrary CUDA C++ are not
 claimed. See [docs/known-gaps.md](docs/known-gaps.md) for the full list — it is long, specific,
 and worth reading before adopting.
-

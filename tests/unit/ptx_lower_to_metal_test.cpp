@@ -327,6 +327,7 @@ DONE:
 )PTX";
     cumetal::ptx::LowerToMetalOptions opts_rope;
     opts_rope.entry_name = "rope_norm_f32";
+    opts_rope.allow_workload_specializations = true;
     const auto r_rope = cumetal::ptx::lower_ptx_to_metal_source(rope_ptx, opts_rope);
     if (!expect(r_rope.ok, "rope stub lowering ok")) return 1;
     if (!expect(r_rope.matched, "rope stub matched by direct-MSL emitter")) return 1;
@@ -352,12 +353,27 @@ DONE:
 )PTX";
     cumetal::ptx::LowerToMetalOptions opts_enc;
     opts_enc.entry_name = "encoder_forward_kernel3";
+    opts_enc.allow_workload_specializations = true;
     const auto r_enc = cumetal::ptx::lower_ptx_to_metal_source(encoder_ptx, opts_enc);
     if (!expect(r_enc.ok, "encoder kernel lowering ok")) return 1;
     if (!expect(r_enc.matched, "encoder kernel matched by direct-MSL emitter")) return 1;
     if (!expect(!r_enc.approximate, "real encoder kernel not flagged approximate")) return 1;
     if (!expect(r_enc.lowering_kind == cumetal::ptx::MetalLoweringKind::kSpecializedMsl,
                 "encoder provenance is specialized_msl"))
+        return 1;
+
+    // A recognized name is not authority to replace the kernel body. When
+    // generic lowering declines, workload substitution must remain disabled
+    // unless the caller opted in explicitly above.
+    cumetal::ptx::LowerToMetalOptions opts_enc_default;
+    opts_enc_default.entry_name = "encoder_forward_kernel3";
+    const auto r_enc_default =
+        cumetal::ptx::lower_ptx_to_metal_source(encoder_ptx, opts_enc_default);
+    if (!expect(r_enc_default.ok && !r_enc_default.matched,
+                "name-matched workload body is disabled by default"))
+        return 1;
+    if (!expect(r_enc_default.lowering_kind == cumetal::ptx::MetalLoweringKind::kNone,
+                "disabled workload substitution reports no lowering"))
         return 1;
 
     // ── Regression: k_bin_bcast op_addff must ADD, op_mulff must MUL ──────────
@@ -381,6 +397,7 @@ DONE:
 
     cumetal::ptx::LowerToMetalOptions opts_add;
     opts_add.entry_name = "k_bin_bcast_op_addff";
+    opts_add.allow_workload_specializations = true;
     const auto r_add = cumetal::ptx::lower_ptx_to_metal_source(bcast_ptx("op_addff"), opts_add);
     if (!expect(r_add.ok, "op_addff lowering ok")) return 1;
     if (!expect(r_add.matched, "op_addff matched by direct-MSL emitter")) return 1;
@@ -391,6 +408,7 @@ DONE:
 
     cumetal::ptx::LowerToMetalOptions opts_mul;
     opts_mul.entry_name = "k_bin_bcast_op_mulff";
+    opts_mul.allow_workload_specializations = true;
     const auto r_mul = cumetal::ptx::lower_ptx_to_metal_source(bcast_ptx("op_mulff"), opts_mul);
     if (!expect(r_mul.ok, "op_mulff lowering ok")) return 1;
     if (!expect(r_mul.matched, "op_mulff matched by direct-MSL emitter")) return 1;
@@ -413,6 +431,7 @@ DONE:
 )PTX";
     cumetal::ptx::LowerToMetalOptions opts_rms;
     opts_rms.entry_name = "rms_norm_f32";
+    opts_rms.allow_workload_specializations = true;
     const auto r_rms =
         cumetal::ptx::lower_ptx_to_metal_source(rms_ptx, opts_rms);
     if (!expect(r_rms.ok && r_rms.matched, "GGML RMS norm matched")) return 1;
@@ -467,6 +486,7 @@ DONE:
 )PTX";
     cumetal::ptx::LowerToMetalOptions opts_silu;
     opts_silu.entry_name = silu_name;
+    opts_silu.allow_workload_specializations = true;
     const auto r_silu =
         cumetal::ptx::lower_ptx_to_metal_source(silu_ptx, opts_silu);
     if (!expect(r_silu.ok && r_silu.matched, "gated-SiLU lowering matched"))
@@ -500,6 +520,7 @@ DONE:
 )PTX";
     cumetal::ptx::LowerToMetalOptions opts_rope_exact;
     opts_rope_exact.entry_name = rope_exact_name;
+    opts_rope_exact.allow_workload_specializations = true;
     const auto r_rope_exact =
         cumetal::ptx::lower_ptx_to_metal_source(rope_exact_ptx,
                                                 opts_rope_exact);
@@ -535,6 +556,7 @@ DONE:
 )PTX";
     cumetal::ptx::LowerToMetalOptions opts_q8;
     opts_q8.entry_name = "dequantize_block_q8_0_f16";
+    opts_q8.allow_workload_specializations = true;
     const auto r_q8 = cumetal::ptx::lower_ptx_to_metal_source(q8_ptx, opts_q8);
     if (!expect(r_q8.ok && r_q8.matched, "Q8_0 f16 dequantizer matched")) return 1;
     if (!expect(!r_q8.approximate, "Q8_0 f16 dequantizer is not a passthru stub")) return 1;
@@ -561,6 +583,7 @@ DONE:
 )PTX";
     cumetal::ptx::LowerToMetalOptions opts_q6;
     opts_q6.entry_name = q6_name;
+    opts_q6.allow_workload_specializations = true;
     const auto r_q6 = cumetal::ptx::lower_ptx_to_metal_source(q6_ptx, opts_q6);
     if (!(r_q6.ok && r_q6.matched)) {
         std::fprintf(stderr,
@@ -608,6 +631,7 @@ DONE:
         "_ZL13convert_unaryIfDF16_EvPKvPT0_xxx5uint3xxx";
     cumetal::ptx::LowerToMetalOptions opts_f32_f16;
     opts_f32_f16.entry_name = f32_f16_name;
+    opts_f32_f16.allow_workload_specializations = true;
     const auto r_f32_f16 =
         cumetal::ptx::lower_ptx_to_metal_source(convert_ptx(f32_f16_name),
                                                  opts_f32_f16);
@@ -634,6 +658,7 @@ DONE:
         "_ZL13convert_unaryIDF16_fEvPKvPT0_xxx5uint3xxx";
     cumetal::ptx::LowerToMetalOptions opts_f16_f32;
     opts_f16_f32.entry_name = f16_f32_name;
+    opts_f16_f32.allow_workload_specializations = true;
     const auto r_f16_f32 =
         cumetal::ptx::lower_ptx_to_metal_source(convert_ptx(f16_f32_name),
                                                  opts_f16_f32);
@@ -686,6 +711,7 @@ DONE:
 )PTX";
     cumetal::ptx::LowerToMetalOptions opts_cpy_f16_f16;
     opts_cpy_f16_f16.entry_name = cpy_f16_f16_name;
+    opts_cpy_f16_f16.allow_workload_specializations = true;
     const auto r_cpy_f16_f16 = cumetal::ptx::lower_ptx_to_metal_source(
         cpy_f16_f16_ptx, opts_cpy_f16_f16);
     if (!expect(r_cpy_f16_f16.ok && r_cpy_f16_f16.matched,

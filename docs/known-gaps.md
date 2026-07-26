@@ -200,11 +200,13 @@ as gaps have been closed.
   translation — but the failure mode was the same, and it would also have bitten on version
   skew: if llm.c or GGML changed what a kernel of a given name computes, CuMetal would have gone
   on silently computing the old definition.
-  **Residual risk:** where generic translation genuinely cannot lower a kernel, a name collision
-  still selects the specialized body. That is the case these tables exist for, and it is
-  reported as `specialized_msl` / `workload_specialization` in `CUMETAL_TRACE_GPU=1` provenance,
-  but a user kernel named exactly like an llm.c one and outside generic coverage would still be
-  substituted. Ordering is pinned by `unit_ptx_lower_to_metal`.
+  **Name collisions no longer select a body by default.** Where generic translation cannot lower
+  a kernel, the table is consulted only when the caller explicitly enables
+  `CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=1`. The llm.c and llama.cpp conformance launchers opt
+  in because their currently verified paths depend on exact specialized kernels; ordinary CUDA
+  projects do not. Selected bodies remain reported as `specialized_msl` /
+  `workload_specialization` in `CUMETAL_TRACE_GPU=1` provenance. Ordering and the default-off
+  policy are pinned by `unit_ptx_lower_to_metal`.
 - **A kernel that cannot be lowered is now refused instead of emitted empty.** Non-strict
   lowering previously fell through to a bare `ret void` body, producing a kernel that loaded,
   launched, and wrote nothing — the caller read back whatever was already in the output buffer
@@ -330,9 +332,10 @@ as gaps have been closed.
   verified before it is cached, so installing the component after an earlier
   configure is recoverable.
 - `tests/cuda_projects/sweep_cuda_projects.py` provides a manifest-complete
-  strict sweep with classified TSV/JSON output. The 2026-07-26 local baseline
-  is nine passes; the earlier `sgemm_2d` numerical failure was a PTX `.local`
-  stack-depot sizing bug, now fixed.
+  strict sweep with classified TSV/JSON output and a fresh JIT cache per fixture.
+  The 2026-07-27 local baseline is eleven passes, including the strict libdevice
+  and ray-tracer projects; the earlier `sgemm_2d` numerical failure was a PTX
+  `.local` stack-depot sizing bug, now fixed.
 - Direct PTX→MSL pointer-base resolution was flow-insensitive until 2026-07-26:
   `lower_to_metal` kept one register→base map per entry, so a register reassigned
   from one pointer base to another resolved every use to the last assignment and

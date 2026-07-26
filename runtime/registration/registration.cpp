@@ -119,6 +119,10 @@ std::string registration_lowering_policy() {
     policy += fp64 != nullptr && fp64[0] != '\0' ? fp64 : "emulate";
     policy += ";approx=";
     policy += cumetal::diag_env_truthy("CUMETAL_ENABLE_APPROX_KERNELS") ? "enabled" : "disabled";
+    policy += ";workload_specializations=";
+    policy += cumetal::diag_env_truthy("CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS")
+                  ? "enabled"
+                  : "disabled";
     policy += ";ir_schema=1;metal_legalization=1;msl=3.1";
     return policy;
 }
@@ -946,6 +950,8 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     std::string io_error;
     cumetal::ptx::LowerToMetalOptions lower_to_metal_options;
     lower_to_metal_options.entry_name = kernel_name;
+    lower_to_metal_options.allow_workload_specializations =
+        cumetal::diag_env_truthy("CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS");
     if (const char* backend = std::getenv("CUMETAL_PTX_BACKEND");
         backend != nullptr && std::string_view(backend) == "cumetal-ir") {
         lower_to_metal_options.backend =

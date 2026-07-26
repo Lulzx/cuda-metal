@@ -13,6 +13,9 @@ enum class PtxMetalBackend {
 
 struct LowerToMetalOptions {
     bool strict = false;
+    // Compatibility bodies keyed by workload entry names are not generic
+    // translation and must never be selected without explicit caller consent.
+    bool allow_workload_specializations = false;
     std::string entry_name;
     PtxMetalBackend backend = PtxMetalBackend::kLegacy;
 };

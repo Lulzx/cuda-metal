@@ -11,6 +11,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -122,6 +123,8 @@ def load_manifest(path: Path, fixtures_root: Path) -> list[dict[str, str]]:
         if not isinstance(raw, dict) or not required.issubset(raw):
             raise ValueError(f"manifest project {index} is missing required fields")
         project = {key: str(raw[key]) for key in required}
+        if "expect_pattern" in raw:
+            project["expect_pattern"] = str(raw["expect_pattern"])
         if project["name"] in names:
             raise ValueError(f"duplicate project name: {project['name']}")
         if project["harness"] not in ("standard", "strict"):
@@ -196,6 +199,9 @@ def main() -> int:
         projects = [project for project in projects if project["name"] in selected]
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    cache_root = Path(
+        tempfile.mkdtemp(prefix="jit-cache-", dir=output_dir)
+    ).resolve()
     rows: list[dict[str, Any]] = []
     env = os.environ.copy()
     env.setdefault("CUMETAL_BUILD_DIR", str(root / "build"))
@@ -215,9 +221,21 @@ def main() -> int:
             project["source"],
             project["binary"],
         ]
+        if project["harness"] == "strict" and project.get("expect_pattern"):
+            command.append(project["expect_pattern"])
+        # A sweep is a correctness measurement of the compiler under test, not
+        # of an arbitrary metallib left by an earlier build. Give each fixture a
+        # fresh cache so neither cross-build nor cross-project reuse can conceal
+        # a lowering regression.
+        project_cache = cache_root / project["name"]
+        project_cache.mkdir()
+        project_env = env.copy()
+        project_env["CUMETAL_CACHE_DIR"] = str(project_cache)
+        if project["name"] == "ggml_output_ops":
+            project_env["CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS"] = "1"
         started = time.monotonic()
         returncode, output, timed_out = run_command(
-            command, root, env, args.timeout
+            command, root, project_env, args.timeout
         )
         elapsed = time.monotonic() - started
         classification = classify(returncode, output, timed_out)

@@ -42,7 +42,7 @@ The unit and AIR ABI fixtures that "covered" these were artifacts of them: each 
 not the compiler, and could never have caught the miscompile. Now real kernels with real
 assertions, plus negative tests.
 
-### 2. `lower_to_metal.cpp` — MSL specialization table — **DEMOTED TO FALLBACK**
+### 2. `lower_to_metal.cpp` — MSL specialization table — **GENERIC-FIRST, OPT-IN**
 
 67 substring matches covering llm.c and GGML kernels. The code said what it did:
 
@@ -58,9 +58,12 @@ mangled names like `_ZL10cpy_scalarI`) and ordinary words a user kernel could pl
 `silu`, `cpy_`, `q5_0`, `flash_attn`, `rms_norm_f32`, `rope_norm`. Seven of the riskiest are
 swept by `unit_ptx_lower_to_metal`, each paired with PTX that doubles its input.
 
-**Residual risk:** where generic translation genuinely cannot lower a kernel, a name collision
-still selects the specialized body. Narrower than before but real, and reported as
-`specialized_msl` / `workload_specialization` in `CUMETAL_TRACE_GPU=1` provenance.
+As of 2026-07-27, the fallback is also disabled by default. A caller must explicitly set
+`CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=1`; otherwise a generic-lowering miss remains
+unsupported and a colliding name cannot select a body. The llm.c and llama.cpp conformance
+launchers opt in because their verified compatibility paths still need these exact kernels.
+When enabled, selection is reported as `specialized_msl` / `workload_specialization` in
+`CUMETAL_TRACE_GPU=1` provenance.
 
 The "fast negative filter" inside this table (`mul_mat_q`, `flash_attn`, `silu`, …) returns *no
 specialization* rather than blocking translation, so it never suppressed generic lowering.
