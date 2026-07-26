@@ -167,7 +167,7 @@ struct BenchResult {
     double gpu_avg_ms  = -1.0;  // fastest GPU time per iteration (from MTLCommandBuffer)
     // Interquartile range of the wall samples over their median, reported in the results table
     // as "spread". Diagnostic only -- it tells a reader how jittery the run was. It is not part
-    // of the gate: idle runs already spread 50-190%, so it cannot detect contention.
+    // of the gate: even lightly loaded runs spread up to ~50%, so it cannot detect contention.
     double wall_rel_iqr = -1.0;
     bool   valid       = false;
 };
@@ -175,9 +175,9 @@ struct BenchResult {
 // The gate uses the MINIMUM per-iteration time, not the mean or the median.
 //
 // These kernels run in ~0.2 ms, so a single iteration's wall time is dominated by dispatch and
-// scheduling jitter. Measured on an idle machine, the per-iteration interquartile spread is
-// already 50-190% of the median -- the samples are inherently noisy even with nothing else
-// running, so no measure of central tendency is stable here:
+// scheduling jitter. On a lightly loaded machine the per-iteration interquartile spread runs from
+// a few percent up to ~50% of the median (vector_add is the worst), and climbs sharply under
+// contention. The samples are noisy enough that no measure of central tendency is stable:
 //
 //   mean    one stall dominates the average. Flaked the 2x gate under load, and inflated the
 //           native baseline enough to report CuMetal as 26% FASTER than hand-written Metal for
@@ -186,9 +186,9 @@ struct BenchResult {
 //           shifts the CuMetal path further because CuMetal does more host work per dispatch.
 //           Under 8-way CPU saturation the saxpy ratio reached 2.73x against the 2.0x gate.
 //   min     the fastest observed iteration is the one that got a clean slot, so it estimates the
-//           uncontended cost. Measured across repeated runs: 1.02-1.27x idle, 0.83-1.33x under
-//           8-way saturation. Both comfortably inside the 2x ceiling, and the gate stops
-//           reporting on machine load instead of on CuMetal.
+//           uncontended cost. Measured across repeated runs: ~0.9-1.3x lightly loaded, 0.83-1.33x
+//           under 8-way saturation -- i.e. essentially unchanged by load, and comfortably inside
+//           the 2x ceiling. The gate stops reporting on machine load instead of on CuMetal.
 //
 // This is the standard microbenchmark choice for latency under interference, and it does not
 // weaken the gate: a genuine regression makes even the best iteration slow.

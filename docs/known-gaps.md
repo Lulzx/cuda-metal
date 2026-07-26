@@ -184,6 +184,9 @@ as gaps have been closed.
   They are now real kernels with assertions on real lowering, plus explicit negative tests that a
   matching entry name does not substitute semantics.
   Found by `ptx_sweep_numeric` on its first run.
+- A full audit of every name-driven decision in the compiler and runtime is recorded in
+  [name-match-audit-2026-07-26.md](name-match-audit-2026-07-26.md), including one further site
+  removed from the runtime launch path and the categories that were cleared.
 - **The MSL name-matched specialization table no longer pre-empts real translation
   (2026-07-26).** `lower_to_metal.cpp` consulted its hardcoded llm.c/GGML entry-name table
   *before* attempting generic PTX→MSL translation — the comments said so outright — so a kernel
@@ -232,9 +235,25 @@ as gaps have been closed.
   CPU kernel emulation continues to emit a warning.
   `CUMETAL_TRACE_GPU=1` provides positive dispatch evidence.
 - Complex CUDA C++ sources exercise mixed coverage. The strict llm.c GPT-2 FP32
-  conformance workload passes numerical parity on Apple M4 Pro with CPU emulation
+  conformance workload reaches numerical parity on Apple M4 Pro with CPU emulation
   disabled, using specialized MSL replacements. llama.cpp's much broader GGML
   CUDA kernel set remains incomplete.
+- **The llm.c parity gate is intermittently non-deterministic (measured 2026-07-26).** Running
+  `conformance_llmc_gpt2fp32cu` in a loop on an otherwise quiet Apple M4 Pro fails roughly
+  2-4 times in 15 with a genuine numerical divergence, e.g.
+  `LOSS MISMATCH AT STEP 1: 3.752515 4.059707`, and sometimes a `-inf` loss. The failing step
+  varies between runs; most runs pass. This is **not** measurement noise or FP reassociation —
+  the divergence is percent-scale or worse, and `-inf` indicates a blown-up or uninitialized
+  value rather than reordered accumulation.
+  It is **pre-existing**, not a regression: measured at 4/15 on `fbaece1` (before the
+  2026-07-26 toolchain work) versus 2/15 on current `main`, so the same defect predates the
+  name-match audit and the lowering-order changes.
+  Ruled out so far: CTest timeout (1800 s limit against an 8 s runtime); machine load (reproduces
+  on an idle machine); and the asynchronous registered-launch hazard path
+  (`CUMETAL_SYNC_REGISTERED_LAUNCH=1`, which forces a full host drain, still fails 3/15).
+  Remaining suspects are a race or stale/uninitialized buffer inside the specialized MSL kernels
+  or their cuBLAS/MPS interaction. **Until this is root-caused, "llm.c is numerically correct
+  under CuMetal" should be read as "passes most runs", not "passes deterministically."**
 - The binary-shim / PTX reg + lower path (plus special llm.c cases) gets further than pure
   generic emitter. Direct MSL name-matched cases (compiler/ptx/src/lower_to_metal.cpp) now cover
   common GGML kernels used by small models: k_bin_bcast (op_addff/op_mulff + f16 variants),

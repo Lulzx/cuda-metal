@@ -70,7 +70,8 @@ programs.
   real body replaced by a canned one. Same defect as the LLVM-path templates; generic translation
   now wins wherever it succeeds, and the table only covers what it cannot lower.
 - **`cumetal_bench` gates on the fastest iteration instead of the mean.** These kernels run in
-  ~0.2 ms and are dispatch-jitter dominated (50-190% per-iteration spread even when idle), so the
+  ~0.2 ms and are dispatch-jitter dominated (per-iteration spread reaches ~50% when lightly
+  loaded), so the
   mean flaked the 2× ceiling under load and the median still reached 2.73× under CPU saturation.
   The fastest iteration estimates the uncontended cost and holds under 8-way saturation. This
   also retired a fictitious published figure — CuMetal was never 26% faster than hand-written

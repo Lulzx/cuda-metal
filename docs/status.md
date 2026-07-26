@@ -54,7 +54,8 @@ v1 toolchain-completeness work (2026-07-26):
 - **The performance gate no longer flakes under load.** `cumetal_bench` averaged its iterations,
   and a mean is dominated by its worst sample, so a single scheduler stall failed the 2× ceiling
   on a busy machine. These kernels run in ~0.2 ms and are dispatch-jitter dominated — the
-  per-iteration spread is 50-190% even when idle — so no measure of central tendency is stable:
+  per-iteration spread runs from a few percent to ~50% on a lightly loaded machine and climbs
+  sharply under contention — so no measure of central tendency is stable:
   the median still reached 2.73× for saxpy under 8-way CPU saturation, because contention shifts
   the whole distribution and shifts CuMetal's path further (it does more host work per dispatch).
   The gate now reports the **fastest** iteration, the standard microbenchmark estimator for
@@ -63,6 +64,18 @@ v1 toolchain-completeness work (2026-07-26):
   `vector_add` at 0.74×, i.e. CuMetal 26% *faster* than hand-written Metal, which was outliers
   inflating the native baseline rather than a real speedup. The results table now also prints a
   `spread` column so a reader can see how jittery a given run was.
+
+- **The llm.c parity gate is intermittently non-deterministic** — roughly 2-4 failures in 15,
+  pre-existing (4/15 at `fbaece1` vs 2/15 on current `main`), not root-caused. See
+  [known-gaps.md](known-gaps.md). Documentation that described llm.c as numerically correct has
+  been corrected to "passes most runs".
+
+- **Name-match audit complete** ([name-match-audit-2026-07-26.md](name-match-audit-2026-07-26.md)).
+  Every site where CuMetal decided behavior from a name it does not own was reviewed. Four body
+  templates removed from the LLVM path, the 67-pattern MSL specialization table demoted to a
+  fallback behind real translation, and a name-keyed argument-count override removed from the
+  runtime launch path (instrumentation showed it was never reached). Intrinsic matching, cache
+  identity lookups, and metallib byte signatures were cleared as legitimate.
 
 - **Backend default is input-dependent and measured** rather than a single global setting; see
   the table in [known-gaps.md](known-gaps.md).

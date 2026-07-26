@@ -92,6 +92,13 @@ through because a test asserted the wrong thing. Accordingly:
 - **Prove GPU execution when you claim it.** Correct output alone does not distinguish a GPU
   dispatch from a host fallback. Assert on `CUMETAL_TRACE_GPU=1` provenance
   (`device=apple_gpu`, `launch_success=true`).
+- **Never let a name decide what code means.** An entry or kernel name may be used to look
+  something up, or to read a reserved intrinsic (`llvm.nvvm.*`, `__nv_*`), but it must not select
+  semantics: it is a label the user chose and does not constrain what their code does. Three
+  separate sites once substituted a canned body when a kernel name matched a substring, two of
+  them silently miscompiling real kernels. If a name-keyed fallback is genuinely unavoidable, it
+  must run only after real translation has declined, be reported in provenance, and be documented
+  as a limitation. See [docs/name-match-audit-2026-07-26.md](docs/name-match-audit-2026-07-26.md).
 - **One kernel per function under test** where practical, so a single unsupported call cannot
   mask everything else. `functional_cuda_projects_libdevice_math` is the pattern to copy.
 

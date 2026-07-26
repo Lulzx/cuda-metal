@@ -823,6 +823,73 @@ DONE:
                 "colliding-name kernel emits no GELU tanh term"))
         return 1;
 
+    // Same guard, swept across the entry names most likely to collide with a user's own kernel.
+    //
+    // The specialization table matches by substring, and an audit of all 67 of its patterns found
+    // several that are ordinary words rather than project-specific identifiers: "silu", "cpy_",
+    // "q5_0", "flash_attn", "rms_norm_f32", "rope_norm". A kernel merely *containing* one of those
+    // is not unusual. Each name below is paired with PTX that doubles its input, so if the table
+    // ever regains priority over real translation the lowering kind flips and this fails.
+    static const char* const kCollidingNames[] = {
+        "my_silu_kernel",       // "silu"
+        "my_cpy_helper",        // "cpy_"
+        "q5_0_probe",           // "q5_0"
+        "flash_attn_probe",     // "flash_attn"
+        "rms_norm_f32_probe",   // "rms_norm_f32"
+        "rope_norm_probe",      // "rope_norm"
+        "adamw_kernel2_probe",  // "adamw_kernel2"
+    };
+
+    for (const char* name : kCollidingNames) {
+        std::string ptx =
+            ".version 8.0\n.target sm_80\n.address_size 64\n.visible .entry ";
+        ptx += name;
+        ptx +=
+            "(\n"
+            "  .param .u64 param_in,\n"
+            "  .param .u64 param_out\n"
+            ")\n"
+            "{\n"
+            "  .reg .b64 %rd<12>;\n"
+            "  .reg .b32 %r<8>;\n"
+            "  .reg .f32 %f<8>;\n"
+            "  ld.param.u64 %rd0, [param_in];\n"
+            "  ld.param.u64 %rd1, [param_out];\n"
+            "  cvta.to.global.u64 %rd2, %rd0;\n"
+            "  cvta.to.global.u64 %rd3, %rd1;\n"
+            "  mov.u32 %r1, %tid.x;\n"
+            "  mov.u32 %r2, %ctaid.x;\n"
+            "  mov.u32 %r3, %ntid.x;\n"
+            "  mad.lo.s32 %r4, %r2, %r3, %r1;\n"
+            "  mul.wide.u32 %rd4, %r4, 4;\n"
+            "  add.s64 %rd5, %rd2, %rd4;\n"
+            "  add.s64 %rd6, %rd3, %rd4;\n"
+            "  ld.global.f32 %f1, [%rd5];\n"
+            "  add.f32 %f2, %f1, %f1;\n"
+            "  st.global.f32 [%rd6], %f2;\n"
+            "  ret;\n"
+            "}\n";
+
+        cumetal::ptx::LowerToMetalOptions sweep_options;
+        sweep_options.entry_name = name;
+        const auto swept = cumetal::ptx::lower_ptx_to_metal_source(ptx, sweep_options);
+
+        std::string label = std::string("colliding name '") + name +
+                            "' uses generic translation, not the specialization table";
+        if (!expect(swept.ok && swept.matched &&
+                        swept.lowering_kind == cumetal::ptx::MetalLoweringKind::kGenericPtx,
+                    label.c_str())) {
+            return 1;
+        }
+        // An approximate stub silently returns wrong data, so it must never be selected for a
+        // kernel whose real body translated cleanly.
+        std::string approx_label =
+            std::string("colliding name '") + name + "' is not flagged approximate";
+        if (!expect(!swept.approximate, approx_label.c_str())) {
+            return 1;
+        }
+    }
+
     std::printf("PASS: ptx lower-to-metal unit tests\n");
     return 0;
 }

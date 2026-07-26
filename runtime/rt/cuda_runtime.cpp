@@ -883,62 +883,6 @@ void note_llmc_emulation_hit(const std::string& kernel_name, std::uint32_t arg_c
     }
 }
 
-std::uint32_t llmc_expected_arg_count(const std::string& kernel_name) {
-    if (kernel_name_contains(kernel_name, "encoder_forward_kernel3")) {
-        return 7;
-    }
-    if (kernel_name_contains(kernel_name, "encoder_backward_kernel")) {
-        return 7;
-    }
-    if (kernel_name_contains(kernel_name, "layernorm_forward_kernel3")) {
-        return 8;
-    }
-    if (kernel_name_contains(kernel_name, "unpermute_kernel_backward")) {
-        return 6;
-    }
-    if (kernel_name_contains(kernel_name, "unpermute_kernel")) {
-        return 6;
-    }
-    if (kernel_name_contains(kernel_name, "permute_kernel_backward") &&
-        !kernel_name_contains(kernel_name, "unpermute_kernel_backward")) {
-        return 8;
-    }
-    if (kernel_name_contains(kernel_name, "permute_kernel") &&
-        !kernel_name_contains(kernel_name, "unpermute_kernel")) {
-        return 8;
-    }
-    if (kernel_name_contains(kernel_name, "softmax_forward_kernel5")) {
-        return 5;
-    }
-    if (kernel_name_contains(kernel_name, "residual_forward_kernel")) {
-        return 4;
-    }
-    if (kernel_name_contains(kernel_name, "gelu_forward_kernel")) {
-        return 3;
-    }
-    if (kernel_name_contains(kernel_name, "gelu_backward_kernel")) {
-        return 4;
-    }
-    if (kernel_name_contains(kernel_name, "matmul_backward_bias_kernel4")) {
-        return 5;
-    }
-    if (kernel_name_contains(kernel_name, "layernorm_backward_kernel2")) {
-        return 11;
-    }
-    if (kernel_name_contains(kernel_name, "softmax_autoregressive_backward_kernel")) {
-        return 7;
-    }
-    if (kernel_name_contains(kernel_name, "adamw_kernel2")) {
-        return 12;
-    }
-    if (kernel_name_contains(kernel_name, "fused_classifier_kernel3")) {
-        return 9;
-    }
-    if (kernel_name_contains(kernel_name, "matmul_forward_kernel4")) {
-        return 6;
-    }
-    return 0;
-}
 
 cudaError_t synchronize_for_emulated_kernel(
     bool legacy_stream,
@@ -3593,21 +3537,36 @@ cudaError_t cudaLaunchKernel(const void* func,
             arg_count = clipped;
             arg_info = registered_kernel.arg_info.data();
         } else {
-            const std::uint32_t known_arg_count = llmc_expected_arg_count(registered_kernel.kernel_name);
-            if (known_arg_count > 0) {
-                arg_count = known_arg_count;
-            } else {
-                std::size_t inferred_count = 0;
-                for (; inferred_count < 31; ++inferred_count) {
-                    if (args[inferred_count] == nullptr) {
-                        break;
-                    }
+            // No PTX ABI info for this kernel, so the argument count has to be inferred from the
+            // caller's null-terminated argv.
+            //
+            // This used to consult a hardcoded table of llm.c kernel names first and, on a match,
+            // force that kernel's argument count. That is name-driven behavior on the real GPU
+            // launch path: any kernel whose name merely *contained* e.g.
+            // "layernorm_forward_kernel3" would have had 8 arguments forced regardless of its
+            // actual signature, binding the wrong number of buffers. Same defect class as the
+            // lowering templates in docs/known-gaps.md, and unlike the llm.c CPU emulation below
+            // it was not gated behind an opt-in flag.
+            //
+            // Instrumenting this branch showed it is never reached anywhere in the test suite --
+            // including the llm.c and llama.cpp conformance gates -- because ABI resolution now
+            // populates arg_info. So the table protected nothing and only carried collision risk.
+            // Inference from the actual arguments is at least driven by the call, not the name.
+            cumetal::warn_once(
+                "launch-arg-count-inferred",
+                "a registered kernel had no PTX argument ABI; inferring the argument count from "
+                "the caller's null-terminated argv. If this kernel misbehaves, the inference is "
+                "the first thing to suspect");
+            std::size_t inferred_count = 0;
+            for (; inferred_count < 31; ++inferred_count) {
+                if (args[inferred_count] == nullptr) {
+                    break;
                 }
-                if (inferred_count == 31) {
-                    return launch_fail(cudaErrorInvalidValue, "arg-count inference hit sentinel limit");
-                }
-                arg_count = static_cast<std::uint32_t>(inferred_count);
             }
+            if (inferred_count == 31) {
+                return launch_fail(cudaErrorInvalidValue, "arg-count inference hit sentinel limit");
+            }
+            arg_count = static_cast<std::uint32_t>(inferred_count);
         }
     } else {
         std::memcpy(&kernel_copy, func, sizeof(kernel_copy));

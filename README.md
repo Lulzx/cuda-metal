@@ -185,8 +185,8 @@ Typical results on Apple Silicon:
 All measured ratios are well within the 2× spec gate (§5.7).
 
 The gate reports the **fastest** of 20 iterations, not the mean. These kernels run in ~0.2 ms, so
-a single iteration is dominated by dispatch jitter — even on an idle machine the per-iteration
-spread is 50-190%. Averaging made the gate flake under load and, worse, put a fictitious result in
+a single iteration is dominated by dispatch jitter — the per-iteration spread reaches ~50% even
+on a lightly loaded machine. Averaging made the gate flake under load and, worse, put a fictitious result in
 this table: the old mean-based figures claimed `vector_add` at 0.74×, i.e. CuMetal 26% *faster*
 than hand-written Metal, which was outliers inflating the native baseline rather than a real
 speedup. The fastest iteration is the one that got a clean scheduling slot, so it estimates the
@@ -226,6 +226,11 @@ The conformance gate requires `OK (LOGITS)`, `LOSS OK`, `TENSOR OK`,
 On the tested Apple M4 Pro, the strict gate passes for the llm.c GPT-2 FP32
 workload with CPU emulation disabled. Its kernels use CuMetal's
 `specialized_msl` path; this is not evidence that arbitrary PTX is supported.
+
+**This gate is intermittent.** Run in a loop it fails roughly 2-4 times in 15 with a real
+numerical divergence (occasionally a `-inf` loss), at a step that varies between runs. The
+defect is pre-existing and unresolved — see [docs/known-gaps.md](./docs/known-gaps.md). Treat
+llm.c parity as "passes most runs", not as a deterministic result.
 The legacy llm.c CPU implementation is available only when explicitly requested
 with `CUMETAL_ENABLE_LLMC_CPU_EMULATION=1`.
 Set `CUMETAL_TRACE_GPU=1` to print a machine-readable `CUMETAL_PROVENANCE`
