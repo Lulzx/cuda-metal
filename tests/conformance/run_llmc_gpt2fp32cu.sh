@@ -39,9 +39,9 @@ if [[ -f "${CUMETAL_LIB}" ]] && command -v nm >/dev/null 2>&1; then
   # can report failure when grep closes the pipe early (SIGPIPE on nm).
   CUMETAL_SYMS="$(nm -gU "${CUMETAL_LIB}" 2>/dev/null || true)"
   if [[ "${CUMETAL_SYMS}" != *cudaRegisterFatBinary* ]]; then
-    echo "SKIP: libcumetal built without the binary shim (CUMETAL_ENABLE_BINARY_SHIM=OFF);"
-    echo "      rebuild with -DCUMETAL_ENABLE_BINARY_SHIM=ON to run this conformance test"
-    exit 77
+    echo "FAIL: libcumetal exports no CUDA registration symbols."
+    echo "      This conformance test needs CUMETAL_ENABLE_CUDA_REGISTRATION=ON (the default)."
+    exit 1
   fi
 fi
 

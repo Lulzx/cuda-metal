@@ -31,20 +31,21 @@ cumetal_cuda_projects_check_prereqs() {
     fi
 
     # The standalone .cu harnesses emit host code that references the CUDA
-    # runtime registration symbols (__cudaRegisterFatBinary et al.). These are
-    # only present when libcumetal is built with the binary shim enabled
-    # (CUMETAL_ENABLE_BINARY_SHIM=ON, the default for non-Release builds). A
-    # Release build ships the registration stub instead, so linking/loading
-    # would fail with a cryptic dyld error. Detect that and skip cleanly.
+    # runtime registration symbols (__cudaRegisterFatBinary et al.). Those are
+    # part of the source-recompilation path and are built unconditionally
+    # (CUMETAL_ENABLE_CUDA_REGISTRATION defaults ON in every build type), so
+    # their absence is a build defect rather than an expected configuration.
+    # Fail instead of skipping: this check previously keyed off the binary shim
+    # and silently skipped the entire source path in Release builds.
     # Capture into a variable (no pipe): `nm | grep -q` under `set -o pipefail`
     # can report failure when grep closes the pipe early (SIGPIPE on nm).
     if command -v nm >/dev/null 2>&1; then
         local cumetal_syms
         cumetal_syms="$(nm -gU "${cumetal_build_dir}/libcumetal.dylib" 2>/dev/null || true)"
         if [[ "${cumetal_syms}" != *cudaRegisterFatBinary* ]]; then
-            echo "SKIP: libcumetal built without the binary shim (CUMETAL_ENABLE_BINARY_SHIM=OFF);"
-            echo "      CUDA registration symbols unavailable — rebuild with -DCUMETAL_ENABLE_BINARY_SHIM=ON"
-            return 77
+            echo "FAIL: libcumetal exports no CUDA registration symbols."
+            echo "      The source path requires CUMETAL_ENABLE_CUDA_REGISTRATION=ON (the default)."
+            return 1
         fi
     fi
 

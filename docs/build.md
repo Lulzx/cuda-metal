@@ -7,9 +7,32 @@ Build
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 cmake --install build --prefix /tmp/cumetal-install
-# optional: enable binary-shim registration exports + install libcuda.dylib alias
+# optional: also install the libcuda.dylib drop-in alias (see docs/legal-notice.md)
 cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCUMETAL_ENABLE_BINARY_SHIM=ON
 ```
+
+Two independent switches
+------------------------
+
+| Option | Default | Controls |
+|--------|---------|----------|
+| `CUMETAL_ENABLE_CUDA_REGISTRATION` | `ON` everywhere | The host CUDA registration ABI (`__cudaRegister*`) that Clang emits when compiling *your own* `.cu`. The source path needs it; it is not a binary shim. |
+| `CUMETAL_ENABLE_BINARY_SHIM` | `ON` except Release | The `libcuda.dylib` alias only — the drop-in for binaries pre-linked against NVIDIA's libcuda. |
+
+These used to be a single flag, so a Release build silently replaced the registration ABI with a
+stub and the source-recompilation path stopped being tested in the shipping configuration.
+Enabling the binary shim without the registration ABI is a configure-time error.
+
+Compile a CUDA program
+----------------------
+
+```bash
+./build/cumetalc samples/vectorAdd/vectorAdd.cu -o /tmp/vectorAdd
+CUMETAL_TRACE_GPU=1 /tmp/vectorAdd
+```
+
+An installed `cumetalc` finds its headers, `libcumetal.dylib`, and the `ptxas`/`fatbinary` shims
+relative to its own path. Set `CUMETAL_ROOT` to point it at a prefix explicitly.
 
 Generate and validate a reference metallib (requires full Xcode)
 -----------------------------------------------------------------

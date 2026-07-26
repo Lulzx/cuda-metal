@@ -21,9 +21,18 @@ a replacement `libcuda.dylib` that intercepts fatbinary registration).
 | Drop-in `libcuda.dylib` for closed-source PTX-shipping binaries | **High** — may violate NVIDIA EULA | Opt-in only; use at own risk |
 | Drop-in for closed-source SASS-only binaries | Not supported | SASS is not translatable |
 
-CuMetal's binary shim (`libcuda.dylib`) is provided as an opt-in convenience and is
-**disabled by default** (`CUMETAL_ENABLE_BINARY_SHIM=OFF` in release builds). Its use
-is at the user's own discretion and risk.
+CuMetal's binary shim is the **`libcuda.dylib` alias**, and only that alias. It is provided as an
+opt-in convenience and is **disabled by default** (`CUMETAL_ENABLE_BINARY_SHIM=OFF` in release
+builds). Its use is at the user's own discretion and risk.
+
+The host **registration ABI** (`__cudaRegisterFatBinary`, `__cudaRegisterFunction`,
+`__cudaPopCallConfiguration`) is a separate thing and is built unconditionally
+(`CUMETAL_ENABLE_CUDA_REGISTRATION=ON`). Clang emits calls to those symbols when it compiles
+*your own* `.cu` source, so they are part of the source-recompilation path — the row marked
+"None" in the table above — and carry none of the binary shim's exposure. No NVIDIA binary is
+involved: you compiled your code with a different compiler, and these are that compiler's host
+calling convention. The two switches were previously one, which meant a release build silently
+disabled the source path along with the alias.
 
 ---
 

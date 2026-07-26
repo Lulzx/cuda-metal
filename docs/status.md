@@ -23,6 +23,42 @@ implemented for the covered kernels.
 Intentional non-goals per §2.2 (CUDA Graphs, dynamic parallelism, texture objects,
 multi-GPU, graphics interop) remain deferred to v2.
 
+v1 toolchain-completeness work (2026-07-26):
+
+- **`cumetalc foo.cu -o foo` builds a runnable executable**, closing the spec §11 Phase 2/3 exit
+  criterion. Previously `cumetalc` could only emit a `.metallib`, so every program had to be
+  hand-split into a `.cu` plus a host `.cpp` that named kernels through `cumetalKernel_t` and
+  took a metallib path as `argv[1]`. Gated by `functional_cumetalc_link_executable`, which
+  requires both a numerical PASS and `device=apple_gpu` provenance. Verified from an install
+  prefix as well as the build tree.
+
+- **The CUDA registration ABI is decoupled from the binary shim.**
+  `CUMETAL_ENABLE_CUDA_REGISTRATION` (always ON) builds `__cudaRegister*`; the renamed-in-scope
+  `CUMETAL_ENABLE_BINARY_SHIM` now controls only the `libcuda.dylib` alias. These were one
+  switch, so `CMAKE_BUILD_TYPE=Release` stubbed out the registration ABI and the entire
+  source-recompilation path went unexercised in the configuration users install — the tests that
+  covered it did not fail, they silently vanished from the suite.
+
+- **CI exists** (`.github/workflows/ci.yml`, spec §10.7): Apple Silicon runner, a matrix of
+  Release/shim-off and Debug/shim-on, plus a job that installs to a prefix and compiles a CUDA
+  program with the installed `cumetalc`. `scripts/ci_report.sh` reports passed/skipped/failed
+  separately and names every skipped test, per this document's own warning that a registration
+  count is not a pass count. The performance gate is excluded from CI per §10.7 (and because
+  wall-clock ratios flake on a loaded runner).
+
+- **Backend default is input-dependent and measured** rather than a single global setting; see
+  the table in [known-gaps.md](known-gaps.md).
+
+- **Four test harnesses stopped reporting on stale artifacts.**
+  `run_samples_vector_add.sh`, `run_cumetalc_cu_runtime_vector_add.sh`,
+  `run_runtime_vector_add.sh`, and `run_runtime_axpy.sh` each checked for a pre-existing
+  binary/metallib *before* checking whether the toolchain was available, so once any build
+  produced one they stopped rebuilding and would have stayed green through a total compiler
+  regression. They now rebuild whenever the toolchain is present and fall back to a stale
+  artifact only when it is genuinely absent, with a warning. Same class as the
+  `cumetal_cuda_projects_compile_link` stale-object bug in
+  [correctness-audit-2026-07-26.md](correctness-audit-2026-07-26.md).
+
 Phase 5 items implemented:
 
 - `metal_backend::launch_kernel_timed()` — synchronous kernel launch that captures

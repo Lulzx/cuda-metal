@@ -9,13 +9,11 @@ RUNTIME_LIB_DIR="$5"
 OUTPUT_METALLIB="$6"
 OUTPUT_BINARY="$7"
 
-# Short-circuit if pre-built sample binary + metallib already present in build tree.
-# Allows execution in envs missing metal/metallib (clang++ is present, but cumetalc
-# can fallback internally; prebuilts come from prior full builds).
-if [[ -x "$OUTPUT_BINARY" && -s "$OUTPUT_METALLIB" ]]; then
-  echo "Using pre-existing sample binary + metallib: $OUTPUT_BINARY $OUTPUT_METALLIB"
-  exec "$OUTPUT_BINARY" "$OUTPUT_METALLIB"
-fi
+# Always rebuild from source. This used to short-circuit on a pre-existing binary + metallib in
+# the build tree, which meant the test verified whatever a previous build had left behind: it
+# stayed green across source edits, and would have stayed green if the sample were deleted. Same
+# stale-artifact green-wash that cumetal_cuda_projects_compile_link was fixed for.
+rm -f "$OUTPUT_BINARY" "$OUTPUT_METALLIB"
 
 if ! command -v xcrun >/dev/null 2>&1; then
   echo "SKIP: xcrun not installed"

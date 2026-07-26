@@ -92,6 +92,12 @@ std::string build_ptx_abi_sidecar(std::string_view ptx_source,
 
 void print_usage(const char* argv0) {
     std::cerr << "Usage: " << argv0
+              << " <file.cu> -o <executable>            # compile and link a CUDA program\n"
+                 "       "
+              << argv0
+              << " <file.cu> -o <file.metallib>         # compile device code only\n\n"
+                 "Full options: "
+              << argv0
               << " [--input] <file.{metal,cu,ptx,ll,air,bc}> [--output|-o <file.metallib>]"
                  " [--mode xcrun|experimental] [--fallback-experimental]"
                  " [--overwrite] [--skip-validate] [--xcrun-validate]"
@@ -100,7 +106,8 @@ void print_usage(const char* argv0) {
                  " [--cuda-inline-threshold value]"
                  " [-I path] [-D name[=value]] [--cuda-include path]"
                  " [--backend legacy|cumetal-ir]"
-                 " [--emit llvm|cumetal-ir|metal-ir|msl|metallib]"
+                 " [--emit llvm|cumetal-ir|metal-ir|msl|metallib|exe]"
+                 " [--link|--no-link] [--save-temps]"
                  " [--fp64=native|emulate|warn]\n";
 }
 
@@ -170,6 +177,109 @@ bool xcrun_tool_exists(const std::string& tool_name) {
         return false;
     }
     return result.output[0] == '0';
+}
+
+// Where cumetalc finds the pieces it needs to build a complete executable. The driver has to
+// work both from the build tree and from `cmake --install` output, so nothing here may assume
+// CUMETAL_SOURCE_DIR exists on disk.
+struct ResourceLayout {
+    std::filesystem::path include_dir;    // holds cuda_runtime.h
+    std::filesystem::path lib_dir;        // holds libcumetal.dylib
+    std::filesystem::path toolchain_dir;  // holds the ptxas/fatbinary shims
+    bool ok = false;
+};
+
+// Absolute path of this cumetalc binary, used to locate sibling resources in an installed tree.
+std::filesystem::path executable_path(const char* argv0) {
+    std::error_code ec;
+    if (argv0 != nullptr && argv0[0] != '\0') {
+        std::filesystem::path candidate(argv0);
+        if (candidate.has_parent_path()) {
+            auto absolute = std::filesystem::weakly_canonical(candidate, ec);
+            if (!ec && std::filesystem::exists(absolute)) return absolute;
+        }
+        const CommandResult found =
+            run_command_capture("command -v " + quote_shell(argv0) + " 2>/dev/null");
+        if (found.started && found.exit_code == 0 && !found.output.empty()) {
+            std::string path = found.output;
+            while (!path.empty() &&
+                   std::isspace(static_cast<unsigned char>(path.back())) != 0) {
+                path.pop_back();
+            }
+            if (!path.empty()) {
+                auto absolute = std::filesystem::weakly_canonical(path, ec);
+                if (!ec) return absolute;
+            }
+        }
+    }
+    return {};
+}
+
+bool layout_from_root(const std::filesystem::path& include_dir,
+                      const std::filesystem::path& lib_dir,
+                      const std::filesystem::path& toolchain_dir,
+                      ResourceLayout* out) {
+    if (!std::filesystem::exists(include_dir / "cuda_runtime.h")) return false;
+    if (!std::filesystem::exists(lib_dir / "libcumetal.dylib")) return false;
+    out->include_dir = include_dir;
+    out->lib_dir = lib_dir;
+    out->toolchain_dir = toolchain_dir;
+    out->ok = true;
+    return true;
+}
+
+ResourceLayout resolve_resources(const char* argv0) {
+    ResourceLayout layout;
+
+    // 1. Explicit override wins, so a relocated or unusual install is always recoverable.
+    if (const char* root = std::getenv("CUMETAL_ROOT"); root != nullptr && root[0] != '\0') {
+        const std::filesystem::path prefix(root);
+        if (layout_from_root(prefix / "include",
+                             prefix / "lib",
+                             prefix / "libexec" / "cumetal" / "cuda_toolchain",
+                             &layout)) {
+            return layout;
+        }
+    }
+
+    const std::filesystem::path self = executable_path(argv0);
+    if (!self.empty()) {
+        const std::filesystem::path bin_dir = self.parent_path();
+
+        // 2. Installed layout: <prefix>/bin/cumetalc alongside <prefix>/{include,lib,libexec}.
+        const std::filesystem::path prefix = bin_dir.parent_path();
+        if (layout_from_root(prefix / "include",
+                             prefix / "lib",
+                             prefix / "libexec" / "cumetal" / "cuda_toolchain",
+                             &layout)) {
+            return layout;
+        }
+
+        // 3. Build tree: cumetalc sits next to libcumetal.dylib and cuda_toolchain/, with the
+        //    headers still back in the source directory.
+        const std::filesystem::path source_api =
+            std::filesystem::path(CUMETAL_SOURCE_DIR) / "runtime" / "api";
+        if (layout_from_root(source_api, bin_dir, bin_dir / "cuda_toolchain", &layout)) {
+            return layout;
+        }
+    }
+
+    return layout;
+}
+
+// Homebrew LLVM defaults to PTX 4.2, which rejects newer -march values outright. Mirrors
+// cumetal_cuda_ptx_feature_flags() in scripts/cumetal_cuda_flags.sh; keep the two in step.
+std::string ptx_feature_flags_for_arch(const std::string& arch) {
+    const auto feature = [](const char* name) {
+        return std::string(" -Xclang -target-feature -Xclang +") + name;
+    };
+    if (arch == "sm_80" || arch == "sm_86" || arch == "sm_89" || arch.rfind("sm_90", 0) == 0) {
+        return feature("ptx70");
+    }
+    if (arch == "sm_75" || arch == "sm_78") return feature("ptx63");
+    if (arch == "sm_70" || arch == "sm_72") return feature("ptx60");
+    if (arch == "sm_61") return feature("ptx50");
+    return {};
 }
 
 std::filesystem::path find_cuda_clang(
@@ -270,12 +380,143 @@ bool emit_inspection_stage(const cumetal::metal::PtxToMslResult& compiled,
     return write_text_output(output, text, overwrite, error);
 }
 
+struct ExecutableDriverOptions {
+    std::filesystem::path input;
+    std::filesystem::path output;
+    std::filesystem::path cuda_clang;
+    std::string cuda_arch = "sm_80";
+    std::string cuda_inline_threshold;
+    std::vector<std::filesystem::path> include_dirs;
+    std::vector<std::string> defines;
+    std::vector<std::filesystem::path> forced_includes;
+    bool keep_intermediates = false;
+};
+
+// Compile a complete CUDA translation unit -- host code and `<<<>>>` launches included -- into a
+// runnable executable linked against libcumetal. This is spec.md's Phase 2/3 exit criterion.
+//
+// Clang does the whole job: it compiles the host side to the standard CUDA registration ABI
+// (__cudaRegisterFatBinary / __cudaPushCallConfiguration / cudaLaunchKernel), and drives the
+// device side through the in-tree ptxas and fatbinary shims, which pass PTX through into a
+// fatbinary envelope rather than assembling SASS. libcumetal's registration path then JITs that
+// PTX to a metallib on first launch. So the executable carries its own device code and needs no
+// metallib path at runtime -- which is exactly what the old two-file sample flow could not do.
+int run_executable_driver(const ExecutableDriverOptions& options, const char* argv0) {
+    const std::filesystem::path compiler = find_cuda_clang(options.cuda_clang);
+    if (compiler.empty() || !std::filesystem::exists(compiler)) {
+        std::cerr << "cumetalc failed: CUDA-capable clang++ not found; install Homebrew LLVM or "
+                     "pass --cuda-clang/CUMETAL_CUDA_CLANG\n";
+        return 1;
+    }
+    if (options.cuda_arch.size() < 4 || options.cuda_arch.substr(0, 3) != "sm_") {
+        std::cerr << "cumetalc failed: --cuda-arch must use sm_XX form\n";
+        return 2;
+    }
+
+    const ResourceLayout layout = resolve_resources(argv0);
+    if (!layout.ok) {
+        std::cerr << "cumetalc failed: could not locate the CuMetal headers and libcumetal.dylib "
+                     "needed to link an executable.\n"
+                     "  Set CUMETAL_ROOT to the install prefix, or run cumetalc from the build "
+                     "directory.\n";
+        return 1;
+    }
+    if (!std::filesystem::exists(layout.toolchain_dir / "fatbinary") ||
+        !std::filesystem::exists(layout.toolchain_dir / "ptxas")) {
+        std::cerr << "cumetalc failed: the ptxas/fatbinary shims are missing from "
+                  << layout.toolchain_dir << ".\n"
+                     "  Clang needs them on PATH to emit device code for a linked executable.\n";
+        return 1;
+    }
+
+    const std::filesystem::path object_file = make_temp_path(".o");
+
+    // Clang execs the shims as subprocesses, so they must be found via PATH. Prepend rather than
+    // replace so a user-provided toolchain earlier in PATH still loses to ours deliberately.
+    const char* existing_path = std::getenv("PATH");
+    const std::string path_prefix =
+        "PATH=" + quote_shell(layout.toolchain_dir.string()) + ":" +
+        (existing_path != nullptr ? std::string(existing_path) : std::string("/usr/bin:/bin")) +
+        " ";
+
+    std::string compile = path_prefix + quote_shell(compiler.string()) +
+                          " -x cuda -std=c++17 -O2"
+                          " --cuda-gpu-arch=" +
+                          quote_shell(options.cuda_arch) +
+                          ptx_feature_flags_for_arch(options.cuda_arch) +
+                          " -nocudainc -nocudalib -Wno-unknown-cuda-version -Wno-pass-failed"
+                          " -D__CUDACC__=1 -D__NVCC__=1"
+                          " -I " +
+                          quote_shell(layout.include_dir.string()) + " -include " +
+                          quote_shell("cuda_runtime.h");
+    if (!options.cuda_inline_threshold.empty()) {
+        compile += " -fgpu-inline-threshold=" + quote_shell(options.cuda_inline_threshold) +
+                   " -mllvm -inline-all-viable-calls";
+    }
+    for (const auto& dir : options.include_dirs) {
+        compile += " -I " + quote_shell(dir.string());
+    }
+    for (const auto& define : options.defines) {
+        compile += " -D " + quote_shell(define);
+    }
+    for (const auto& forced : options.forced_includes) {
+        compile += " -include " + quote_shell(forced.string());
+    }
+    compile += " -c " + quote_shell(options.input.string()) + " -o " +
+               quote_shell(object_file.string()) + " 2>&1";
+
+    const CommandResult compile_result = run_command_capture(compile);
+    if (!compile_result.output.empty()) {
+        std::cerr << compile_result.output;
+        if (compile_result.output.back() != '\n') std::cerr << '\n';
+    }
+    if (!compile_result.started || compile_result.exit_code != 0 ||
+        !std::filesystem::exists(object_file)) {
+        std::error_code ec;
+        std::filesystem::remove(object_file, ec);
+        std::cerr << "cumetalc failed: CUDA compilation of " << options.input << " failed\n";
+        return 1;
+    }
+
+    // Link with an rpath so the produced binary runs without the caller exporting
+    // DYLD_LIBRARY_PATH first.
+    const std::string link = quote_shell(compiler.string()) + " " +
+                             quote_shell(object_file.string()) + " -L " +
+                             quote_shell(layout.lib_dir.string()) + " -lcumetal -Wl,-rpath," +
+                             quote_shell(layout.lib_dir.string()) + " -o " +
+                             quote_shell(options.output.string()) + " 2>&1";
+
+    const CommandResult link_result = run_command_capture(link);
+    if (!link_result.output.empty()) {
+        std::cerr << link_result.output;
+        if (link_result.output.back() != '\n') std::cerr << '\n';
+    }
+
+    if (!options.keep_intermediates) {
+        std::error_code ec;
+        std::filesystem::remove(object_file, ec);
+    } else {
+        std::cerr << "cumetalc: kept intermediate object " << object_file << "\n";
+    }
+
+    if (!link_result.started || link_result.exit_code != 0 ||
+        !std::filesystem::exists(options.output)) {
+        std::cerr << "cumetalc failed: linking " << options.output << " failed\n";
+        return 1;
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     cumetal::air_emitter::EmitOptions options;
     BackendKind backend = BackendKind::kLegacy;
+    bool backend_set_explicitly = false;
     EmitStage emit_stage = EmitStage::kMetallib;
+    bool link_executable = false;
+    bool link_requested_explicitly = false;
+    bool keep_intermediates = false;
     bool mode_set = false;
     bool positional_input_set = false;
     std::string ptx_entry_name;
@@ -346,8 +587,10 @@ int main(int argc, char** argv) {
             }
             if (value == "legacy") {
                 backend = BackendKind::kLegacy;
+                backend_set_explicitly = true;
             } else if (value == "cumetal-ir") {
                 backend = BackendKind::kCumetalIr;
+                backend_set_explicitly = true;
             } else {
                 std::cerr << "invalid --backend: " << value
                           << " (valid: legacy, cumetal-ir)\n";
@@ -357,14 +600,20 @@ int main(int argc, char** argv) {
             std::string value;
             if (arg == "--emit") {
                 if (i + 1 >= argc) {
-                    std::cerr << "--emit expects llvm, cumetal-ir, metal-ir, msl, or metallib\n";
+                    std::cerr
+                        << "--emit expects llvm, cumetal-ir, metal-ir, msl, metallib, or exe\n";
                     return 2;
                 }
                 value = argv[++i];
             } else {
                 value = arg.substr(std::string("--emit=").size());
             }
-            if (value == "llvm") emit_stage = EmitStage::kLlvm;
+            if (value == "exe") {
+                emit_stage = EmitStage::kMetallib;
+                link_executable = true;
+                link_requested_explicitly = true;
+            }
+            else if (value == "llvm") emit_stage = EmitStage::kLlvm;
             else if (value == "cumetal-ir") emit_stage = EmitStage::kCumetalIr;
             else if (value == "metal-ir") emit_stage = EmitStage::kMetalIr;
             else if (value == "msl") emit_stage = EmitStage::kMsl;
@@ -441,6 +690,14 @@ int main(int argc, char** argv) {
                           << " (valid: native, emulate, warn)\n";
                 return 2;
             }
+        } else if (arg == "--link") {
+            link_executable = true;
+            link_requested_explicitly = true;
+        } else if (arg == "--no-link") {
+            link_executable = false;
+            link_requested_explicitly = true;
+        } else if (arg == "--save-temps") {
+            keep_intermediates = true;
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
@@ -460,6 +717,54 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 2;
     }
+
+    // Pick the backend that actually works for this input rather than one global default. The two
+    // are complementary, not ranked, and the split follows the frontend feeding them. Measured
+    // over the 19-file in-tree .cu corpus (tests/ + samples/, see docs/compiler-architecture.md):
+    //
+    //   direct .cu           legacy 0/19   cumetal-ir 10/19
+    //   --cuda-device (PTX)  legacy 17/19  cumetal-ir  6/19
+    //
+    // Legacy's direct-.cu mode is the qualifier-stripping prototype documented in
+    // docs/known-gaps.md and lowers nothing in this corpus, so typed CuMetal IR is strictly
+    // better there. Through the PTX frontend the ordering reverses and defaulting to typed IR
+    // would regress the path llm.c, llama.cpp, and PhysX all depend on. --backend overrides.
+    if (!backend_set_explicitly && lower_ext(options.input) == ".cu" && !cuda_device_frontend) {
+        backend = BackendKind::kCumetalIr;
+    }
+
+    // `cumetalc foo.cu -o foo` builds an executable. Infer that from the shape of the request --
+    // a .cu input, the default (metallib) emit stage, and an -o that does not name a .metallib --
+    // so the nvcc-style invocation works without a special flag. --link/--no-link override.
+    if (!link_requested_explicitly && lower_ext(options.input) == ".cu" &&
+        emit_stage == EmitStage::kMetallib && !options.output.empty() &&
+        lower_ext(options.output) != ".metallib") {
+        link_executable = true;
+    }
+
+    if (link_executable) {
+        if (lower_ext(options.input) != ".cu") {
+            std::cerr << "cumetalc failed: --link requires a .cu input (got " << options.input
+                      << ")\n";
+            return 2;
+        }
+        if (options.output.empty()) {
+            options.output = options.input;
+            options.output.replace_extension();
+        }
+        ExecutableDriverOptions driver;
+        driver.input = options.input;
+        driver.output = options.output;
+        driver.cuda_clang = cuda_clang;
+        driver.cuda_arch = cuda_arch;
+        driver.cuda_inline_threshold = cuda_inline_threshold;
+        driver.include_dirs = cuda_include_dirs;
+        driver.defines = cuda_defines;
+        driver.forced_includes = cuda_forced_includes;
+        driver.keep_intermediates = keep_intermediates;
+        return run_executable_driver(driver, argv[0]);
+    }
+
     if (options.output.empty()) {
         options.output = options.input;
         options.output.replace_extension(extension_for_stage(emit_stage));

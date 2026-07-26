@@ -131,8 +131,22 @@ as gaps have been closed.
 - The older `.cu` mode without `--cuda-device` remains a qualifier-stripping
   host-LLVM prototype suitable only for simple patterns; it is not a general
   CUDA frontend.
-- The verified `--backend=cumetal-ir` path is not yet the default. It now
-  supports selected-entry device-call closures, structured natural-loop CFG
+- The backend default now follows the input rather than being one global setting, because the
+  two backends are complementary rather than ranked. Measured over the 19-file in-tree `.cu`
+  corpus (`tests/` + `samples/`):
+
+  | frontend | `--backend=legacy` | `--backend=cumetal-ir` |
+  |----------|-------------------|------------------------|
+  | direct `.cu` | 0/19 | **10/19** |
+  | `--cuda-device` (PTX) | **17/19** | 6/19 |
+
+  So a direct `.cu` input defaults to `cumetal-ir` (legacy's direct-`.cu` mode is the
+  qualifier-stripping prototype below and lowers nothing in this corpus), while `--cuda-device`
+  and PTX inputs default to `legacy` — defaulting those to typed IR would regress the path
+  llm.c, llama.cpp, and PhysX depend on. `--backend` overrides either way. Reproduce the table by
+  running both backends over `find tests samples -name '*.cu'`.
+
+  The typed `cumetal-ir` path supports selected-entry device-call closures, structured natural-loop CFG
   lowering with multiple exits and nested `continue`, dispatcher fallback for
   barrier-free residual CFGs, loop-carried PHIs, CUDA vector and named aggregate values,
   thread-local allocas, constant global tables, warp shuffle/vote operations,
@@ -152,11 +166,22 @@ as gaps have been closed.
 - The old source-pattern-specific vector-add AIR template has been removed.
   Direct AIR generation remains limited to explicit research/inspection tools;
   it is not a hidden production fallback.
-- The CuMetal-native registration ABI and runtime lookup path are implemented
-  and versioned. Automated host-job rewriting, generated launch stubs, and
-  embedding descriptors/metallib bytes into the final host object are not yet
-  wired into `cumetalc`; source applications must not yet assume the new backend
-  produces a complete linked executable.
+- **`cumetalc foo.cu -o foo` produces a complete linked executable** (spec §11 Phase 2/3 exit
+  criterion), covered by `functional_cumetalc_link_executable`. An unmodified CUDA source file
+  using `<<<>>>` compiles and runs with no host/device split and no metallib path at runtime.
+  The driver runs Clang over the whole translation unit: the host side compiles to the standard
+  CUDA registration ABI, the device side goes through the in-tree `ptxas`/`fatbinary` shims that
+  carry PTX into a fatbinary envelope, and `libcumetal` lowers that PTX to a metallib on first
+  launch. It resolves headers, `libcumetal.dylib`, and the shims relative to its own location, so
+  it works from both the build tree and an install prefix (`CUMETAL_ROOT` overrides).
+  Note what this does *not* change: device-code coverage is still exactly the PTX lowering
+  surface documented below. A program whose kernels fall outside it will link and then abort at
+  launch with the usual "registered kernel missing metallib" — the driver makes the toolchain
+  complete, not the lowering.
+- The CuMetal-native registration ABI and runtime lookup path are implemented and versioned.
+  Automated host-job rewriting and generated launch stubs for the *native* (`cumetalKernel_t`)
+  ABI are still not wired into `cumetalc`; that path remains the explicit two-file flow shown in
+  `samples/nativeLaunch`.
 - The Clang-based `.cu`/PTX registration path supports many simple kernels and
   samples (vectorAdd etc.) and dispatches them through Metal on the Apple GPU.
   CUDA kernel CPU emulation is disabled by default. The legacy llm.c host

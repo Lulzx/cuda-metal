@@ -117,6 +117,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("PASS: samples/vectorAdd produced correct output for %zu elements\n", kElementCount);
+    std::printf("PASS: samples/nativeLaunch produced correct output for %zu elements\n", kElementCount);
     return 0;
 }

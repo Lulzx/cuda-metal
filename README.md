@@ -37,6 +37,32 @@ bash install/uninstall.sh  # removes installed files
 Fish shell is detected automatically; `install.sh` writes `set -gx` syntax to
 `~/.config/fish/config.fish`. Override with `CUMETAL_SHELL_RC`.
 
+Compile and run a CUDA program
+------------------------------
+
+`vectorAdd.cu` below is ordinary CUDA — host code, a `__global__` kernel, and a `<<<>>>`
+launch in one file, with no CuMetal-specific API:
+
+```bash
+cumetalc samples/vectorAdd/vectorAdd.cu -o vectorAdd
+./vectorAdd
+# PASS: samples/vectorAdd produced correct output for 16384 elements
+```
+
+The executable carries its own device code, so it needs no `.metallib` path and no
+`DYLD_LIBRARY_PATH`. To confirm the kernel really ran on the GPU rather than any host path:
+
+```bash
+CUMETAL_TRACE_GPU=1 ./vectorAdd
+# CUMETAL_PROVENANCE event=kernel_launch ... device=apple_gpu device_name="Apple M4 Pro" ...
+```
+
+`cumetalc` emits a `.metallib` instead when `-o` names one, or with `--no-link`.
+
+**Coverage caveat:** this makes the *toolchain* complete, not the lowering. Device-code support
+is still the documented PTX subset — a kernel outside it links and then aborts at launch with
+`registered kernel missing metallib`. See [docs/known-gaps.md](./docs/known-gaps.md).
+
 Execution model
 ---------------
 
@@ -47,14 +73,16 @@ Execution model
   converges on the same CuMetal GPU IR and Metal backend.
 - **Binary shim** (optional): set `CUMETAL_ENABLE_BINARY_SHIM=ON` at build time to
   also emit `libcuda.dylib`. Software that was pre-linked against NVIDIA `libcuda.dylib`
-  will load CuMetal without recompilation.
+  will load CuMetal without recompilation. This alias is the only thing that flag controls;
+  the host registration ABI used by your own recompiled source is always built
+  (`CUMETAL_ENABLE_CUDA_REGISTRATION=ON`). See [docs/legal-notice.md](./docs/legal-notice.md).
 
 Tools
 -----
 
 | Tool | Description |
 |------|-------------|
-| `cumetalc` | Compiler driver: `.cu` / `.ptx` / NVVM `.ll` → CuMetal IR / MSL / `.metallib` |
+| `cumetalc` | Compiler driver: `.cu` / `.ptx` / NVVM `.ll` → executable / CuMetal IR / MSL / `.metallib` |
 | `cumetal-air-emitter` | AIR research, inspection, and regression container writer |
 | `cumetal-ptx2llvm` | Legacy PTX-to-LLVM inspection tool |
 | `air_inspect` | Inspect `.metallib` container (kernels, bitcode offsets, metadata) |
@@ -63,9 +91,14 @@ Tools
 
 `cumetalc` flags of note:
 
+- `--link` / `--no-link` — force or suppress building an executable. Inferred by default: a
+  `.cu` input with an `-o` that does not name a `.metallib` links an executable
 - `--backend=cumetal-ir|legacy` — select the verified shared-IR backend or the
-  temporary compatibility backend; there is no automatic fallback
-- `--emit=llvm|cumetal-ir|metal-ir|msl|metallib` — inspect compiler stages
+  temporary compatibility backend; there is no automatic fallback. The default follows the
+  input — `cumetal-ir` for a direct `.cu`, `legacy` for `--cuda-device`/PTX — because the two
+  cover different ground; see the measured table in [docs/known-gaps.md](./docs/known-gaps.md)
+- `--emit=llvm|cumetal-ir|metal-ir|msl|metallib|exe` — inspect compiler stages
+- `--save-temps` — keep the intermediate object file from a link
 - `--fp64=native|emulate|warn` — FP64 mode (default: `emulate`; Apple Silicon GPU
   rejects native FP64 in Metal pipelines at runtime)
 - `--entry <name>` — select a single PTX or CUDA/NVVM kernel and its reachable

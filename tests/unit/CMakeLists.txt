@@ -41,7 +41,7 @@ add_executable(cumetal_native_registration_test
     native_registration_test.cpp
 )
 
-if(CUMETAL_ENABLE_BINARY_SHIM)
+if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     add_executable(cumetal_registration_arg_index_test
         registration_arg_index_test.cpp
     )
@@ -143,7 +143,7 @@ target_link_libraries(cumetal_native_registration_test
         cumetal_runtime
 )
 
-if(CUMETAL_ENABLE_BINARY_SHIM)
+if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     target_link_libraries(cumetal_registration_arg_index_test
         PRIVATE
             cumetal_runtime
@@ -245,7 +245,7 @@ target_compile_options(cumetal_msl_ast_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_ptx_ir_msl_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_nvvm_ir_msl_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_native_registration_test PRIVATE -Wall -Wextra -Wpedantic)
-if(CUMETAL_ENABLE_BINARY_SHIM)
+if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     target_compile_options(cumetal_registration_arg_index_test PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
@@ -374,7 +374,7 @@ add_test(NAME unit_msl_ast COMMAND cumetal_msl_ast_test)
 add_test(NAME unit_ptx_ir_msl COMMAND cumetal_ptx_ir_msl_test)
 add_test(NAME unit_nvvm_ir_msl COMMAND cumetal_nvvm_ir_msl_test)
 add_test(NAME unit_native_registration COMMAND cumetal_native_registration_test)
-if(CUMETAL_ENABLE_BINARY_SHIM)
+if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     add_test(NAME unit_registration_arg_index COMMAND cumetal_registration_arg_index_test)
 endif()
 add_test(

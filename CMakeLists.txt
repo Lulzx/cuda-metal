@@ -29,6 +29,25 @@ set_target_properties(cumetal_fatbinary_shim PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/cuda_toolchain
 )
 
+# Two independent switches that used to be one. Keep them separate:
+#
+#   CUMETAL_ENABLE_CUDA_REGISTRATION -- the host-side CUDA registration ABI
+#       (__cudaRegisterFatBinary / __cudaRegisterFunction / __cudaPopCallConfiguration).
+#       Clang emits calls to these when it compiles *the user's own* .cu source, so the
+#       source-recompilation path in docs/legal-notice.md depends on them. This is not a
+#       binary shim and carries none of its legal exposure, so it is always on by default.
+#
+#   CUMETAL_ENABLE_BINARY_SHIM -- the libcuda.dylib alias only. That alias is what lets a
+#       pre-built binary linked against NVIDIA's libcuda load CuMetal instead, which is the
+#       EULA-sensitive drop-in case. It stays off by default in Release builds.
+#
+# Conflating them meant a Release build silently stubbed out the registration ABI and the
+# entire source path went untested in the configuration users actually ship.
+option(CUMETAL_ENABLE_CUDA_REGISTRATION
+    "Build the host CUDA registration ABI used by clang-compiled .cu source (__cudaRegister*)"
+    ON
+)
+
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CUMETAL_ENABLE_BINARY_SHIM_DEFAULT OFF)
 else()
@@ -38,6 +57,12 @@ option(CUMETAL_ENABLE_BINARY_SHIM
     "Enable CUDA binary-shim library alias (build/install libcuda.dylib -> libcumetal.dylib)"
     ${CUMETAL_ENABLE_BINARY_SHIM_DEFAULT}
 )
+
+if(CUMETAL_ENABLE_BINARY_SHIM AND NOT CUMETAL_ENABLE_CUDA_REGISTRATION)
+    message(FATAL_ERROR
+        "CUMETAL_ENABLE_BINARY_SHIM=ON requires CUMETAL_ENABLE_CUDA_REGISTRATION=ON: "
+        "the libcuda.dylib alias is useless without the registration ABI behind it.")
+endif()
 
 add_library(cumetal_common STATIC
     compiler/common/src/metallib.cpp
@@ -186,7 +211,7 @@ target_compile_options(cumetal_ptx_codegen
         -Wpedantic
 )
 
-if(CUMETAL_ENABLE_BINARY_SHIM)
+if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     set(CUMETAL_REGISTRATION_SOURCE runtime/registration/registration.cpp)
 else()
     set(CUMETAL_REGISTRATION_SOURCE runtime/registration/registration_stub.cpp)
@@ -533,6 +558,15 @@ install(TARGETS
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin
+)
+
+# `cumetalc foo.cu -o foo` execs these from PATH while clang compiles device code, so an
+# installed cumetalc is useless without them. They live in libexec (not bin) because they
+# shadow real NVIDIA tool names and must never land on a user's PATH by accident.
+install(TARGETS
+    cumetal_ptxas_shim
+    cumetal_fatbinary_shim
+    RUNTIME DESTINATION libexec/cumetal/cuda_toolchain
 )
 
 if(APPLE)

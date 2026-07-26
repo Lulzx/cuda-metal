@@ -97,7 +97,7 @@ ctest --test-dir build -R functional_runtime_matrix_mul_tiled --output-on-failur
 ctest --test-dir build -R functional_runtime_dynamic_shared --output-on-failure
 ctest --test-dir build -R functional_runtime_registration_printf --output-on-failure
 ctest --test-dir build -R functional_driver_extended_api --output-on-failure
-# binary-shim-only tests (`CUMETAL_ENABLE_BINARY_SHIM=ON`):
+# CUDA registration-path tests (always built; CUMETAL_ENABLE_CUDA_REGISTRATION=ON):
 ctest --test-dir build -R functional_runtime_registration_path --output-on-failure
 ctest --test-dir build -R functional_runtime_call_config_registration --output-on-failure
 ctest --test-dir build -R functional_runtime_registration_fatbin_ptx --output-on-failure
@@ -122,7 +122,7 @@ ctest --test-dir build -R unit_cumetal_bench_help --output-on-failure
 ctest --test-dir build -R unit_cumetal_bench_invalid_arg --output-on-failure
 ctest --test-dir build -R unit_cumetal_bench_ratio_gate --output-on-failure
 ctest --test-dir build -R unit_runtime_library_aliases --output-on-failure
-# binary-shim-only unit tests (`CUMETAL_ENABLE_BINARY_SHIM=ON`):
+# libcuda.dylib alias tests (`CUMETAL_ENABLE_BINARY_SHIM=ON` only):
 ctest --test-dir build -R unit_binary_shim_symbol_exports --output-on-failure
 ctest --test-dir build -R unit_binary_shim_library_alias --output-on-failure
 ctest --test-dir build -R unit_binary_shim_link_alias --output-on-failure

@@ -5,11 +5,15 @@ TEST_BINARY="$1"
 INPUT_METAL="$2"
 OUTPUT_METALLIB="$3"
 
-# Support pre-existing metallib in the build dir (common after initial full-toolchain build).
-# Allows running the kernel execution part of the test even without xcrun metal/metallib.
-if [[ -s "$OUTPUT_METALLIB" ]]; then
-  echo "Using pre-existing metallib (skipping compile): $OUTPUT_METALLIB"
+# Reuse a previously compiled metallib only when the Metal toolchain is genuinely missing.
+# The artifact check used to come first, so once one build produced a metallib, later edits to
+# the reference .metal were never compiled again and the test reported on stale output.
+if ! (command -v xcrun >/dev/null 2>&1 && xcrun --find metal >/dev/null 2>&1 &&
+      xcrun --find metallib >/dev/null 2>&1) && [[ -s "$OUTPUT_METALLIB" ]]; then
+  echo "WARNING: Metal toolchain unavailable; using a previously compiled metallib."
+  echo "         $INPUT_METAL was not rebuilt: $OUTPUT_METALLIB"
 else
+  rm -f "$OUTPUT_METALLIB"
   if ! command -v xcrun >/dev/null 2>&1; then
     echo "SKIP: xcrun not installed"
     exit 77

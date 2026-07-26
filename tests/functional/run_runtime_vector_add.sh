@@ -5,13 +5,19 @@ GENERATE_SCRIPT="$1"
 TEST_BINARY="$2"
 REFERENCE_METALLIB="$3"
 
-# If a pre-built or previously generated metallib already exists, use it directly.
-# This allows functional tests to run in environments without the full Xcode
-# metal/metallib toolchain (e.g. only runtime Metal.framework available).
-if [[ -s "$REFERENCE_METALLIB" ]]; then
-  echo "Using pre-existing metallib (no xcrun needed): $REFERENCE_METALLIB"
-  exec "$TEST_BINARY" "$REFERENCE_METALLIB"
+# Reuse a previously generated metallib only when the Metal toolchain is genuinely missing (e.g.
+# only the runtime Metal.framework is present). Checking for the artifact first, as this script
+# used to, meant edits to the reference kernel were silently ignored on every developer machine.
+if ! (command -v xcrun >/dev/null 2>&1 && xcrun --find metal >/dev/null 2>&1 &&
+      xcrun --find metallib >/dev/null 2>&1); then
+  if [[ -s "$REFERENCE_METALLIB" ]]; then
+    echo "WARNING: Metal toolchain unavailable; using a previously generated metallib."
+    echo "         The reference kernel was not rebuilt: $REFERENCE_METALLIB"
+    exec "$TEST_BINARY" "$REFERENCE_METALLIB"
+  fi
 fi
+
+rm -f "$REFERENCE_METALLIB"
 
 if ! command -v xcrun >/dev/null 2>&1; then
   echo "SKIP: xcrun not installed"

@@ -375,7 +375,7 @@ add_executable(cumetal_runtime_cooperative_launch_test
     runtime_cooperative_launch_test.cpp
 )
 
-if(CUMETAL_ENABLE_BINARY_SHIM)
+if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     add_executable(cumetal_runtime_registration_path_test
         runtime_registration_path_test.cpp
     )
@@ -968,7 +968,7 @@ target_link_libraries(cumetal_runtime_cooperative_launch_test
         cumetal_runtime
 )
 
-if(CUMETAL_ENABLE_BINARY_SHIM)
+if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     target_link_libraries(cumetal_runtime_registration_path_test
         PRIVATE
             cumetal_runtime
@@ -1782,7 +1782,7 @@ target_compile_options(cumetal_runtime_cooperative_launch_test
         -Wpedantic
 )
 
-if(CUMETAL_ENABLE_BINARY_SHIM)
+if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     target_compile_options(cumetal_runtime_registration_path_test
         PRIVATE
             -Wall
@@ -1877,8 +1877,8 @@ add_test(
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_samples_vector_add.sh
             $<TARGET_FILE:cumetalc>
-            ${CMAKE_SOURCE_DIR}/samples/vectorAdd/vectorAdd.cu
-            ${CMAKE_SOURCE_DIR}/samples/vectorAdd/vectorAdd.cpp
+            ${CMAKE_SOURCE_DIR}/samples/nativeLaunch/nativeLaunch.cu
+            ${CMAKE_SOURCE_DIR}/samples/nativeLaunch/nativeLaunch.cpp
             ${CMAKE_SOURCE_DIR}/runtime/api
             $<TARGET_FILE_DIR:cumetal_runtime>
             ${CMAKE_CURRENT_BINARY_DIR}/sample_vector_add.from_cu.xcrun.metallib
@@ -2629,7 +2629,7 @@ add_test(
 
 set_tests_properties(functional_runtime_cooperative_launch PROPERTIES SKIP_RETURN_CODE 77)
 
-if(CUMETAL_ENABLE_BINARY_SHIM)
+if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     add_test(
         NAME functional_runtime_registration_path
         COMMAND bash
@@ -2824,3 +2824,17 @@ add_test(
     NAME functional_cusolver_sparse
     COMMAND cumetal_cusolver_sparse_test
 )
+
+# spec.md Phase 2/3 exit criterion: `cumetalc foo.cu -o foo` produces a runnable executable.
+# Gated on the registration ABI because the linked binary registers its own fatbinary at startup.
+if(CUMETAL_ENABLE_CUDA_REGISTRATION)
+    add_test(
+        NAME functional_cumetalc_link_executable
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_SOURCE_DIR}/samples/vectorAdd/vectorAdd.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_link_executable
+    )
+    set_tests_properties(functional_cumetalc_link_executable PROPERTIES SKIP_RETURN_CODE 77)
+endif()
