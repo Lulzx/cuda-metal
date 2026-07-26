@@ -251,9 +251,11 @@ Post-Phase 5 work completed:
 
 - **Binary shim JIT cache**: Registration-path PTX→metallib compilations are now cached
   persistently at `$CUMETAL_CACHE_DIR/registration-jit/<hash>.metallib` (default:
-  `$HOME/Library/Caches/io.cumetal/registration-jit/`), keyed by FNV-1a-64 hash of
-  `ptx_source + kernel_name`. Persistent cache files survive `__cudaUnregisterFatBinary`
-  and process restart — second registration of the same kernel skips xcrun.
+  `$HOME/Library/Caches/io.cumetal/registration-jit/`); the supported direct-source
+  fallback stores `<hash>.metal` instead. The FNV-1a-64 key includes the libcumetal
+  Mach-O `LC_UUID`, lowering policy, PTX source, and kernel name. Persistent cache
+  files survive `__cudaUnregisterFatBinary` and process restart — the same build's
+  second registration skips compilation, while a distinct build UUID uses a separate entry.
   Test: `functional_runtime_registration_jit_cache`.
 - **`CUMETAL_DEBUG_REGISTRATION=1`** — opt-in stderr trace for binary shim diagnostics:
   logs fatbinary format detection, JIT compile path (Metal vs LLVM IR lowering),

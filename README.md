@@ -154,14 +154,17 @@ Binary shim JIT cache
 
 The binary-shim registration path (`__cudaRegisterFatBinary`) compiles PTX kernels
 to `.metallib` at first use and caches the result at
-`$CUMETAL_CACHE_DIR/registration-jit/<hash>.metallib`.
+`$CUMETAL_CACHE_DIR/registration-jit/<hash>.metallib`. When the supported
+direct-source fallback is selected, the cache stores the lowered Metal source
+at the corresponding `<hash>.metal` path instead.
 The cache schema includes the input/kernel identity, selected frontend/backend,
 FP64 and substitution policy, CuMetal IR/MSL/legalization schema versions, and
-toolchain-dependent compilation inputs. Set `CUMETAL_PTX_BACKEND=cumetal-ir` to
-opt into the shared PTX IR backend for compatibility JIT; it will fail explicitly
-instead of retrying the legacy path.
-Cached files survive process restart and `__cudaUnregisterFatBinary` — the second
-process to use the same kernel skips xcrun entirely.
+toolchain-dependent compilation inputs, plus the `libcumetal` Mach-O `LC_UUID`.
+Set `CUMETAL_PTX_BACKEND=cumetal-ir` to opt into the shared PTX IR backend for
+compatibility JIT; it will fail explicitly instead of retrying the legacy path.
+Cached files survive process restart and `__cudaUnregisterFatBinary`; another
+process using the same kernel and `libcumetal` build skips compilation, while a
+different build UUID creates a separate entry.
 
 Enable `CUMETAL_DEBUG_REGISTRATION=1` to trace: fatbinary format detection, JIT
 compile vs cache hit, arg-count inference, and symbol registration events.

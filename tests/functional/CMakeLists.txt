@@ -2668,6 +2668,7 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 ${CMAKE_CURRENT_SOURCE_DIR}/run_registration_jit_cache_test.sh
                 $<TARGET_FILE:cumetal_runtime_registration_fatbin_ptx_test>
                 ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx
+                $<TARGET_FILE:cumetal_runtime>
     )
 
     set_tests_properties(functional_runtime_registration_jit_cache PROPERTIES SKIP_RETURN_CODE 77)
