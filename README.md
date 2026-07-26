@@ -1,434 +1,329 @@
-CuMetal
-=======
+# CuMetal
 
-CuMetal is an experimental CUDA compiler and runtime for Apple Silicon GPUs.
-It translates CUDA source code (`.cu`) and PTX assembly to Metal Shading Language,
-and provides a CUDA-compatible runtime API backed by Metal and Apple frameworks.
+CUDA programs assume an NVIDIA machine. CuMetal makes a useful subset of them
+run on Apple Silicon.
 
-Requirements
-------------
+It is a compiler, a runtime, and a set of compatibility libraries. CUDA source
+or PTX goes in. Metal runs on the GPU. There is no NVIDIA hardware in the loop.
 
-- macOS 14+ (Sonoma)
-- Apple M-series GPU
-- Xcode command-line tools (`xcrun metal`, `xcrun metallib`)
+This is experimental software. The covered paths execute real kernels and check
+real answers. Unsupported paths are expected to fail explicitly. That is a
+better failure mode than silently computing nonsense.
 
-Quick start
------------
+## Start here
+
+You need:
+
+- macOS 14 or newer
+- an Apple M-series GPU
+- CMake and the Xcode command-line tools
+- Apple's Metal toolchain (`xcrun metal` and `xcrun metallib`)
+
+Build it:
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(sysctl -n hw.ncpu)
-ctest --test-dir build --output-on-failure
+cmake --build build -j"$(sysctl -n hw.ncpu)"
+bash scripts/ci_report.sh build --exclude-regex '^bench_'
 ```
 
-Install to a prefix:
+Compile ordinary CUDA:
 
 ```bash
-cmake --install build --prefix /usr/local
+./build/cumetalc samples/vectorAdd/vectorAdd.cu -o /tmp/vectorAdd
+CUMETAL_TRACE_GPU=1 /tmp/vectorAdd
 ```
 
-Or use the provided scripts:
+The program should print a numerical `PASS`. The trace should contain a
+`CUMETAL_PROVENANCE` record with `device=apple_gpu` and
+`launch_success=true`. A correct number without GPU provenance is not proof of
+GPU execution.
+
+Install it:
 
 ```bash
-bash install/install.sh    # installs to /usr/local, sets DYLD_LIBRARY_PATH
-bash install/uninstall.sh  # removes installed files
+cmake --install build --prefix /opt/cumetal
 ```
 
-Fish shell is detected automatically; `install.sh` writes `set -gx` syntax to
-`~/.config/fish/config.fish`. Override with `CUMETAL_SHELL_RC`.
-
-Compile and run a CUDA program
-------------------------------
-
-`vectorAdd.cu` below is ordinary CUDA — host code, a `__global__` kernel, and a `<<<>>>`
-launch in one file, with no CuMetal-specific API:
+The installer scripts use the same prefix by default:
 
 ```bash
-cumetalc samples/vectorAdd/vectorAdd.cu -o vectorAdd
-./vectorAdd
-# PASS: samples/vectorAdd produced correct output for 16384 elements
+bash install/install.sh
+bash install/uninstall.sh
 ```
 
-The executable carries its own device code, so it needs no `.metallib` path and no
-`DYLD_LIBRARY_PATH`. To confirm the kernel really ran on the GPU rather than any host path:
+`install.sh` also adds the prefix to your shell environment.
+
+## The model
+
+CuMetal is source-first.
+
+```text
+CUDA C++ ---> Clang / NVVM ---> typed CuMetal IR --+
+                                                    |
+PTX --------> legacy or typed lowering -------------+--> MSL
+                                                          |
+                                                          v
+                                                Apple Metal toolchain
+                                                          |
+                                                          v
+                                                     .metallib
+                                                          |
+                                                          v
+                                              libcumetal -> Metal GPU
+```
+
+There are three entry paths:
+
+1. **Source recompilation.** `cumetalc` compiles a `.cu` file into a runnable
+   executable or a `.metallib`. This is the primary path.
+2. **PTX compatibility.** CuMetal parses PTX, builds CFG/SSA, and lowers it
+   toward the same Metal backend. This path currently covers more project-scale
+   CUDA than the typed source path.
+3. **Binary compatibility.** An opt-in `libcuda.dylib` alias accepts programs
+   already linked against the CUDA Driver API and handles supported fatbinary
+   registration. It is useful, narrower than CUDA, and not the architecture.
+
+The SIMD width is 32. This is fixed. CUDA warp semantics are lowered onto
+Metal SIMD-group operations; CuMetal does not pretend the machine has a
+different warp size because that would make every hard problem harder.
+
+Metal calls stay behind the Objective-C++ boundary in
+`runtime/metal_backend/`. CUDA-facing headers are clean-room. No private Apple
+API is used.
+
+## Compiler reality
+
+`cumetalc` can emit every useful stage:
 
 ```bash
-CUMETAL_TRACE_GPU=1 ./vectorAdd
-# CUMETAL_PROVENANCE event=kernel_launch ... device=apple_gpu device_name="Apple M4 Pro" ...
+cumetalc kernel.cu --emit=cumetal-ir -o kernel.cumetal
+cumetalc kernel.cu --emit=msl        -o kernel.metal
+cumetalc kernel.cu --emit=metallib   -o kernel.metallib
+cumetalc kernel.cu --emit=exe        -o kernel
 ```
 
-`cumetalc` emits a `.metallib` instead when `-o` names one, or with `--no-link`.
+Important switches:
 
-**Coverage caveat:** this makes the *toolchain* complete, not the lowering. Device-code support
-is still the documented PTX subset — a kernel outside it links and then aborts at launch with
-`registered kernel missing metallib`. See [docs/known-gaps.md](./docs/known-gaps.md).
-
-Execution model
----------------
-
-- **Source compiler** (primary): stock Clang emits CUDA device LLVM/NVVM IR,
-  which is imported into verified CuMetal GPU IR, legalized to Metal semantics,
-  printed as typed MSL, and compiled to `.metallib` by Apple's supported tools.
-- **PTX compatibility frontend** (secondary): PTX is parsed into CFG/SSA and
-  converges on the same CuMetal GPU IR and Metal backend.
-- **Binary shim** (optional): set `CUMETAL_ENABLE_BINARY_SHIM=ON` at build time to
-  also emit `libcuda.dylib`. Software that was pre-linked against NVIDIA `libcuda.dylib`
-  will load CuMetal without recompilation. This alias is the only thing that flag controls;
-  the host registration ABI used by your own recompiled source is always built
-  (`CUMETAL_ENABLE_CUDA_REGISTRATION=ON`). See [docs/legal-notice.md](./docs/legal-notice.md).
-
-Tools
------
-
-| Tool | Description |
-|------|-------------|
-| `cumetalc` | Compiler driver: `.cu` / `.ptx` / NVVM `.ll` → executable / CuMetal IR / MSL / `.metallib` |
-| `cumetal-air-emitter` | AIR research, inspection, and regression container writer |
-| `cumetal-ptx2llvm` | Legacy PTX-to-LLVM inspection tool |
-| `air_inspect` | Inspect `.metallib` container (kernels, bitcode offsets, metadata) |
-| `air_validate` | Validate `.metallib` structure and optionally xcrun-validate |
-| `cumetal_bench` | Phase 5 performance benchmark: CuMetal vs native Metal |
-
-`cumetalc` flags of note:
-
-- `--link` / `--no-link` — force or suppress building an executable. Inferred by default: a
-  `.cu` input with an `-o` that does not name a `.metallib` links an executable
-- `--backend=cumetal-ir|legacy` — select the verified shared-IR backend or the
-  temporary compatibility backend; there is no automatic fallback. The default follows the
-  input — `cumetal-ir` for a direct `.cu`, `legacy` for `--cuda-device`/PTX — because the two
-  cover different ground; see the measured table in [docs/known-gaps.md](./docs/known-gaps.md)
-- `--emit=llvm|cumetal-ir|metal-ir|msl|metallib|exe` — inspect compiler stages
-- `--save-temps` — keep the intermediate object file from a link
-- `--fp64=native|emulate|warn` — FP64 mode (default: `emulate`; Apple Silicon GPU
-  rejects native FP64 in Metal pipelines at runtime)
-- `--entry <name>` — select a single PTX or CUDA/NVVM kernel and its reachable
-  device-call closure
-- `--ptx-strict` — treat unsupported PTX opcodes as errors
-- `--cuda-device` — compile `.cu` with a CUDA-capable Clang to PTX before
-  CuMetal lowering; accepts `-I`, `-D`, `--cuda-include`, `--cuda-arch`, and
-  `--cuda-inline-threshold` (which forces every viable reachable device call
-  to inline)
-
-CMake also auto-discovers Apple's separately installed Metal toolchain and
-applies its verified `TOOLCHAINS` identifier across the full CTest graph.
-Explicit cache or environment selections take precedence.
-
-Library shims
--------------
-
-`libcumetal.dylib` exports:
-
-- Full CUDA Runtime API (see below)
-- CUDA Driver API (`cuInit`, `cuLaunchKernel`, modules, streams, events, …)
-- cuRAND (host-side random number generation via MT19937/XORWOW)
-- cuBLAS v2 (GEMM, GEMV, BLAS 1 — backed by MetalPerformanceShaders and Accelerate)
-- cuFFT (1D/2D/3D, any-N batched, backed by Apple Accelerate vDSP)
-- cuSPARSE (CSR/COO SpMV, SpMM, legacy `cusparseScsrmv`/`cusparseDcsrmv` — CPU-backed on UMA)
-- cuSOLVER Dense (LU, QR, Cholesky, SVD, eigenvalue — backed by Apple Accelerate LAPACK)
-- CUDA Graphs (stream capture, instantiate, launch — sequential replay)
-- cublasLt (lightweight BLAS matmul with epilogues: bias, relu, gelu)
-- cuDNN (convolution fwd/bwd via im2col+GEMM, pooling, activations fwd/bwd, dropout, softmax, batch norm, Nd tensor, tensor ops)
-- NVML (device info, memory queries, driver version — Apple Silicon adapted)
-- NCCL (single-rank collectives: allreduce, broadcast, reduce, allgather — identity ops on single GPU)
-- thrust (device_vector, sort, reduce, scan, transform, fill, sequence, counting_iterator — CPU-backed on UMA)
-- Async memory pool API (cudaMallocAsync/cudaFreeAsync — UMA synchronous aliases)
-- Texture/Surface objects (array allocation, memcpy, object lifecycle)
-
-Build/install also provides dylib aliases so software linked against CUDA library
-names can find the shims: `libcublas.dylib`, `libcublasLt.dylib`, `libcudnn.dylib`,
-`libcurand.dylib`, `libcufft.dylib`, `libcusparse.dylib`, `libcusolver.dylib`,
-`libnvidia-ml.dylib`, `libnccl.dylib`.
-With `CUMETAL_ENABLE_BINARY_SHIM=ON`, `libcuda.dylib` is also provided.
-
-
-MTLHeap auto-threshold
-----------------------
-
-`cudaMalloc` automatically uses `MTLHeap` sub-allocation for allocations at or above
-the threshold (default 4 MiB). This improves throughput for large allocations by
-reducing Metal command encoder overhead. Set `CUMETAL_MTLHEAP_ALLOC=1` to force heap
-for all allocations; `CUMETAL_MTLHEAP_ALLOC=0` to disable entirely.
-
-Binary shim JIT cache
----------------------
-
-The binary-shim registration path (`__cudaRegisterFatBinary`) compiles PTX kernels
-to `.metallib` at first use and caches the result at
-`$CUMETAL_CACHE_DIR/registration-jit/<hash>.metallib`. When the supported
-direct-source fallback is selected, the cache stores the lowered Metal source
-at the corresponding `<hash>.metal` path instead.
-The cache schema includes the input/kernel identity, selected frontend/backend,
-FP64 and substitution policy, CuMetal IR/MSL/legalization schema versions, and
-toolchain-dependent compilation inputs, plus the `libcumetal` Mach-O `LC_UUID`.
-Set `CUMETAL_PTX_BACKEND=cumetal-ir` to opt into the shared PTX IR backend for
-compatibility JIT; it will fail explicitly instead of retrying the legacy path.
-Cached files survive process restart and `__cudaUnregisterFatBinary`; another
-process using the same kernel and `libcumetal` build skips compilation, while a
-different build UUID creates a separate entry.
-
-Enable `CUMETAL_DEBUG_REGISTRATION=1` to trace: fatbinary format detection, JIT
-compile vs cache hit, arg-count inference, and symbol registration events.
-
-Compiler architecture and migration boundaries are documented in
-[docs/compiler-architecture.md](./docs/compiler-architecture.md).
-
-Performance
------------
-
-Phase 5 benchmark (`cumetal_bench --all-kernels --max-ratio 2.0`) measures
-CuMetal wall-clock time against native Metal MSL for three kernels.
-Typical results on Apple Silicon:
-
-| Kernel | Elements | Ratio (CuMetal/Metal) |
-|--------|----------|-----------------------|
-| vector_add | 262144 | 1.063× |
-| saxpy | 262144 | 1.036× |
-| reduce_f32 | 262144 | 1.008× |
-
-All measured ratios are well within the 2× spec gate (§5.7).
-These values were re-measured on Apple M4 Pro on 2026-07-27 from a rebuilt
-`libcumetal` and freshly generated benchmark metallib, after the registration-JIT
-cache key began identifying the compiler build. Measurements from older rebuilds
-should not be compared because they may have executed a previously cached kernel.
-
-The gate reports the **fastest** of 20 iterations, not the mean. These kernels run in ~0.2 ms, so
-a single iteration is dominated by dispatch jitter — the per-iteration spread reaches ~50% even
-on a lightly loaded machine. Averaging made the gate flake under load and, worse, put a fictitious result in
-this table: the old mean-based figures claimed `vector_add` at 0.74×, i.e. CuMetal 26% *faster*
-than hand-written Metal, which was outliers inflating the native baseline rather than a real
-speedup. The fastest iteration is the one that got a clean scheduling slot, so it estimates the
-uncontended cost; the gate now holds under 8-way CPU saturation.
-
-Conformance
------------
-
-For the complete implementation record, GPU proof criteria, diagnostic switches,
-and verified results, see
-[docs/apple-gpu-execution.md](docs/apple-gpu-execution.md).
-
-### Upstream CUDA source on Apple GPU
-
-The upstream NVIDIA `cuda-samples` vectorAdd source can be compiled without
-source modifications and executed through CuMetal:
-
-```bash
-CUMETAL_CUDA_SAMPLES_DIR=/path/to/cuda-samples \
-  bash tests/cuda_projects/run_cuda_samples_vectoradd_gpu.sh "$PWD"
-```
-
-The gate requires the sample's numerical `Test PASSED` result and a provenance
-record with `source=generic_ptx`, `device=apple_gpu`, and
-`launch_success=true`; it rejects CPU fallbacks and stubs. This proves the
-documented simple-kernel subset, not general CUDA or llama.cpp compatibility.
-
-The llm.c GPT-2 FP32 training binary can be built and executed via CuMetal:
-
-```bash
-bash scripts/build_llmc_test_gpt2fp32cu.sh
-bash scripts/run_llmc_test_gpt2fp32cu.sh
-```
-
-The conformance gate requires `OK (LOGITS)`, `LOSS OK`, `TENSOR OK`,
-`overall okay: 1`, plus at least one successful Apple-GPU provenance record.
-On the tested Apple M4 Pro, the strict gate passes for the llm.c GPT-2 FP32
-workload with CPU emulation disabled. Its kernels use CuMetal's
-`specialized_msl` path, explicitly enabled by the conformance launcher with
-`CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=1`; this is not evidence that arbitrary PTX is
-supported. Workload specializations are disabled by default so a generic-lowering miss cannot
-select semantics from a colliding entry name.
-
-This gate was intermittent until 2026-07-26 (2-4 failures in 15, with an occasional `-inf`
-loss). Two defects caused it — a JIT cache key that did not identify the compiler that produced
-each entry, and a missing barrier in the `fused_classifier_kernel3` template. Both are fixed;
-measured 0/75 afterwards. See [docs/known-gaps.md](./docs/known-gaps.md).
-The legacy llm.c CPU implementation is available only when explicitly requested
-with `CUMETAL_ENABLE_LLMC_CPU_EMULATION=1`.
-Set `CUMETAL_TRACE_GPU=1` to print a machine-readable `CUMETAL_PROVENANCE`
-record for each Metal compute command, including whether it came from generic
-PTX or a specialized MSL replacement, the execution device, launch status,
-dimensions, and GPU duration when available.
-
-### llama.cpp Conformance Test
-
-[llama.cpp](https://github.com/ggml-org/llama.cpp) (95k+ stars, used by Ollama,
-LM Studio, and every major local-LLM stack) is the most demanding real-world
-CUDA workload available. Its GGML CUDA backend is built **unmodified** against
-libcumetal as the CUDA provider — zero source changes required.
-
-**Build llama.cpp with CuMetal as the CUDA provider:**
-
-```bash
-bash scripts/build_llama_cpp_cumetal.sh   # clones + builds in ../llama.cpp/
-```
-
-**Run the conformance test** (auto-downloads SmolLM2-135M-Instruct Q4_K_M ~105 MB):
-
-```bash
-bash tests/conformance/run_llama_cpp_cumetal.sh
-
-# Find the first incorrect high-offload boundary (defaults to NGL=1..99).
-python3 tests/conformance/sweep_llama_cpp_ngl.py
-```
-
-**Status — verified on 2026-07-23:**
-
-| What | Result |
+| Switch | Meaning |
 | --- | --- |
-| Build llama.cpp's GGML CUDA backend unmodified against libcumetal | ✅ works |
-| Load model, init CUDA device, register fatbins/kernels, run end-to-end | ✅ works |
-| SmolLM2-135M greedy output with NGL=1 through NGL=99 | ✅ coherent |
+| `--backend=cumetal-ir\|legacy` | Select the typed shared-IR backend or the compatibility backend. There is no silent fallback. |
+| `--cuda-device` | Ask a CUDA-capable Clang to produce PTX before CuMetal lowering. |
+| `--entry NAME` | Compile one kernel and its reachable device-call closure. |
+| `--ptx-strict` | Reject unsupported PTX instead of tolerating it. |
+| `--fp64=native\|emulate\|warn` | Choose the FP64 policy. Default: `emulate`. |
+| `--save-temps` | Keep link intermediates. |
 
-Measured on SmolLM2-135M, greedy decode of "The capital of France is":
+The default backend follows the input because measured coverage says it should:
 
-- Stock CPU llama.cpp → `Paris.` ✅
-- llama.cpp via libcumetal (NGL=0) → `Paris.` ✅
-- llama.cpp via libcumetal (NGL=1) → `The capital of France is Paris.` ✅
-  (Apple M4 Pro, 279.2 tokens/s median generation across five warm runs;
-  observed range 223.2–307.7 tokens/s)
-- llama.cpp via libcumetal (NGL=4 and saturated full offload through NGL=99)
-  → contains `Paris` ✅
+| Input corpus | `legacy` | `cumetal-ir` |
+| --- | ---: | ---: |
+| direct `.cu` | 0/19 | **10/19** |
+| `.cu --cuda-device` / PTX | **17/19** | 6/19 |
 
-Binary-shim startup records kernels cheaply and builds a module's linear PTX
-entry-signature ABI index only when one of its kernels is actually launched.
-This avoids scanning thousands of GGML kernels that llama.cpp registers but does
-not use in the one-layer test. On the same Apple M4 Pro, the one-layer,
-one-token workload first fell from 8.20 s to 1.00 s wall-clock. Native FP16
-`cublasGemmEx` lowering through Metal Performance Shaders then reduced the
-five-run warm median to 0.57 s and the full 16-token coherence gate from 2 s to
-0.61 s. Generation improved from 8.1 to a 279.2 tokens/s median because the
-49,152×576 output projection no longer expands its FP16 weights to FP32 on the
-CPU for every token. Combined with the earlier linear scanner work, the
-one-token path is down from 290.24 s to 0.57 s. Full PTX parsing still occurs
-when a kernel actually needs lowering.
+Direct `.cu` therefore defaults to `cumetal-ir`; PTX and `--cuda-device`
+default to `legacy`. This is engineering, not ideology. When the measurements
+change, the default should change.
 
-Batched cuBLAS pointer arrays now resolve both shared-memory CPU pointers and
-native Metal GPU virtual addresses to the same tracked allocation. Mixed
-FP16-input/FP32-output `cublasGemmEx` and `cublasGemmBatchedEx` bind their
-original buffers directly to mixed-type MPS matrices, avoiding CPU-side FP32
-operand expansion. A focused functional test covers native-address device
-tables, mixed batched GEMM, and truncated-table rejection.
+The complete compiler boundary is in
+[docs/compiler-architecture.md](docs/compiler-architecture.md). Unsupported
+instructions, calls, pointer conversions, CFGs, and ABI forms are tracked in
+[docs/known-gaps.md](docs/known-gaps.md).
 
-The CuMetal llama.cpp build disables `GGML_CUDA_FA`: fused CUDA
-FlashAttention kernels are not yet supported, so advertising them caused the
-backend scheduler to choose a graph CuMetal could not execute. llama.cpp now
-sees FlashAttention as unsupported and automatically uses its ordinary
-attention fallback.
+## Runtime and libraries
 
-Registered fatbinary launches are asynchronous by default. The Metal backend
-tracks the last queue access to each underlying buffer and encodes coalesced
-`MTLSharedEvent` wait/signal dependencies, so CUDA pointer aliases and MPS/cuBLAS
-commands remain ordered across command queues without draining them on the host.
-`CUMETAL_SYNC_REGISTERED_LAUNCH=1` restores the old per-launch host wait for A/B
-diagnosis. Five interleaved warm `NGL=3` runs measured a 1.000 s fenced-async
-median versus 1.024 s host-synchronized (0.98×) on Apple M4 Pro; reproduce with
-`python3 scripts/benchmark_llama_registered_launches.py`. This is a focused
-NGL=3 result; arbitrary models still require broader GGML kernel coverage.
-The automated sweep stops at the first failure, writes per-NGL logs plus a TSV
-summary under `build/llama-ngl-sweep/`, and classifies coherence failures,
-unsupported kernels, cuBLAS errors, crashes, and timeouts. On the 2026-07-23
-SmolLM2 sweep, every value from NGL=1 through NGL=99 passes the coherence and
-Apple-GPU provenance gates. The former NGL=4 failure was the general GGML
-`cpy_scalar<half, half>` operation used to materialize a transposed value-cache
-view: its LLVM-lowered path copied the first logical row but mishandled later
-strided rows. CuMetal now emits an exact typed MSL implementation for the
-float/half scalar-copy variants, preserving all four source and destination byte
-strides. A node-by-node CPU/GPU evaluation trace and the end-to-end sweep verify
-the correction. NGL values above the model's layer count are saturation checks,
-not additional offloaded layers.
+`libcumetal.dylib` implements the CUDA Runtime and Driver API over Metal. It
+tracks allocations, resolves CUDA pointers to Metal buffers, preserves the
+per-thread error model, and maps streams and events onto command queues and
+shared-event ordering.
 
-The conformance test enforces a **coherence gate**: a greedy decode must contain the
-expected answer (`CUMETAL_LLAMA_EXPECT`, default `Paris`). With `NGL>0` it also
-requires a successful Apple-GPU provenance record and rejects CPU fallbacks and
-stubs, so it FAILS on garbage or non-GPU execution rather than passing on "some
-tokens were generated." The default NGL=1 probe is expected to pass on the
-verified Apple M4 Pro path; unsupported models fail honestly instead of being
-reported as compatible.
-Point it at another model/answer with `CUMETAL_LLAMA_MODEL` / `CUMETAL_LLAMA_EXPECT`.
-The harness forces llama.cpp's `--simple-io` mode so generated tokens are
-captured instead of being written only to an interactive terminal. Its output
-checker treats the combined token/provenance stream as bytes and reconstructs
-token text split by provenance records; focused regressions cover missing or
-forbidden provenance and incoherent output.
+The same library also exports compatibility surfaces for:
 
-Test suite
-----------
+- cuBLAS and cublasLt
+- cuRAND
+- cuFFT
+- cuSPARSE
+- cuSOLVER Dense
+- cuDNN
+- CUDA Graphs
+- NVML
+- NCCL single-rank operations
+- a small CPU-backed Thrust surface over unified memory
+- async allocation, texture, and surface object lifecycle APIs
 
-CTest registers unit, functional, conformance, and benchmark tests. Results must
-be reported as separate pass/skip/fail counts because external-project and
-toolchain-dependent tests legitimately skip; registration is not a passing
-compatibility claim. The `bench_phase5_all_kernels` gate runs only when its
-required Metal toolchain is available.
+These names do not imply full NVIDIA parity. Some operations use
+MetalPerformanceShaders, some use Accelerate, some exploit unified memory, and
+some are deliberately partial. Read [docs/status.md](docs/status.md) before
+building on one.
+
+Large `cudaMalloc` allocations use `MTLHeap` suballocation at 4 MiB and above.
+Override this for diagnosis:
 
 ```bash
-ctest --test-dir build --output-on-failure      # run all tests
-ctest --test-dir build -R functional_ -V        # functional tests only
-ctest --test-dir build -R unit_ -V              # unit tests only
+CUMETAL_MTLHEAP_ALLOC=1 ./program   # always
+CUMETAL_MTLHEAP_ALLOC=0 ./program   # never
 ```
 
-PhysX 5.6's reduced `SnippetHelloGRB` now runs resting and kinetic-friction
-sphere/plane contacts plus frictionless four-point box/plane, box/box, and a
-selected sphere/static-triangle-mesh contact end to end on Apple GPU through
-CuMetal. The patch/build
-workflow lives in `scripts/physx-patches/`; `conformance_physx_grb` compares
-30 resting CPU/GPU transform steps, `conformance_physx_grb_friction` checks
-CPU/GPU sliding-to-rolling agreement through 60 steps and a friction-disabled
-negative control, and `conformance_physx_grb_multibody` checks two independent
-dynamic spheres across separately scheduled static-contact batches.
-`conformance_physx_grb_stacked` adds two vertically stacked dynamic spheres,
-checks frictional and frictionless CPU/GPU state agreement for 30 steps, adds
-a frictionless two-box stack through the box/box narrowphase kernel, and adds a
-frictionless two-prism convex-mesh stack through GJK/EPA. The convex gate uses a
-separate 1% component-wise envelope because its largest CPU/GPU transient is an
-angular-velocity difference at step 5; final states are substantially closer.
-It also rejects a stacked scene with fewer than two bodies.
-`conformance_physx_grb_box` checks a unit box sliding on a plane for 30 steps
-through the convex/plane narrowphase kernel. `conformance_physx_grb_trimesh`
-checks one frictionless sphere crossing a coplanar internal triangle seam for
-30 byte-identical CPU/GPU steps, verifies CPU/GPU sliding-to-rolling friction
-through 60 steps against a friction-disabled control, and rejects box/mesh mode.
-The gates require Metal
-narrowphase, constraint preparation, dynamic and static solve, writeback, and
-integration provenance. These remain deliberately selected shape paths;
-the 93-entry build manifest compiles convex/convex stage 2 through typed CuMetal
-IR, while stage 1 and contact finalization still use the explicit legacy PTX
-backend. Non-coplanar triangle seams and generic cross-dispatch temporary-contact
-records are not yet supported. General convex meshes, arbitrary orientations and
-topology, larger stacks, and general batching therefore remain outside the runtime claim. See
-`docs/known-gaps.md`.
+## Binary shim
 
-Known limitations
------------------
+By default, Release builds keep source registration enabled and the
+`libcuda.dylib` alias disabled. Enable the alias explicitly:
 
-- **Dynamic parallelism**: compile-time error (spec §2.2)
-- **Multi-GPU**: single GPU on Apple Silicon; peer APIs return appropriate errors
-- **Graphics interop** (OpenGL/Vulkan): non-goal (spec §2.2)
-- **`grid_group::sync()`**: no-op stub; Metal has no cross-threadgroup barrier. A
-  general implementation requires typed-IR kernel fission into ordered dispatches;
-  PhysX 5.6.1 does not call this API and already launches its TGS phases separately
-- **Warp partial-mask**: vote/ballot and shuffle membership are honored; `__syncwarp`
-  uses SIMD-group scope and divergent lower/upper half-warp ordering is GPU-tested
-  (spec §5.3)
-- **FP64**: Apple Silicon GPU has minimal FP64 throughput; `--fp64=emulate` uses
-  Dekker double-single decomposition (~44-bit mantissa via FP32 pairs)
-- **CUDA Graphs**: stream capture, instantiate, and replay supported; memcpy/memset/kernel
-  operations intercepted during capture; node addition APIs available
-- **Texture/surface objects**: lifecycle and array memcpy supported; GPU-side texture
-  sampling requires Metal shader integration (not yet wired)
-- **Device printf**: buffer-based; format strings limited to 256 bytes
+```bash
+cmake -B build-shim \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCUMETAL_ENABLE_BINARY_SHIM=ON
+cmake --build build-shim
+```
 
-Documentation
--------------
+`CUMETAL_ENABLE_CUDA_REGISTRATION=ON` is the host registration ABI emitted by
+Clang for recompiled `.cu` programs. It is part of the source path.
+`CUMETAL_ENABLE_BINARY_SHIM=ON` only adds the drop-in `libcuda.dylib` name.
+Do not confuse them.
 
-- Implementation status and API coverage: [docs/status.md](./docs/status.md)
-- Build and validation workflows: [docs/build.md](./docs/build.md)
-- Test and conformance workflows: [docs/testing.md](./docs/testing.md)
-- Known feature gaps: [docs/known-gaps.md](./docs/known-gaps.md)
-- Silent-wrong-answer audit (2026-07-26): [docs/correctness-audit-2026-07-26.md](./docs/correctness-audit-2026-07-26.md)
-- PhysX pause/resume handoff: [docs/physx-handoff.md](./docs/physx-handoff.md)
-- AIR/metallib ABI notes: [docs/air-abi.md](./docs/air-abi.md)
-- Design specification: [spec.md](./spec.md)
+The shim recognizes CMTL envelopes, raw PTX, and basic
+FatBinary/FatBinary2/FatBinary3 PTX wrappers. It does not execute SASS and does
+not understand every NVCC fatbinary variant.
 
-License
--------
+Registered PTX is compiled on first use and cached under:
 
-[Apache 2.0](./LICENSE)
+```text
+$CUMETAL_CACHE_DIR/registration-jit/
+```
+
+The key includes the input, kernel, lowering policy, schema versions,
+toolchain-dependent inputs, and the `libcumetal` Mach-O UUID. Set
+`CUMETAL_DEBUG_REGISTRATION=1` to see format detection, compilation, cache hits,
+ABI inference, and registration.
+
+The legal boundary is documented in
+[docs/legal-notice.md](docs/legal-notice.md).
+
+## What has actually been demonstrated
+
+### Small kernels
+
+Vector add, SAXPY, reduction, matrix operations, atomics, shared memory, warp
+operations, streams, events, and selected CUDA library calls have numerical GPU
+tests. The suite includes negative cases because accepting a program is not the
+same as implementing it correctly.
+
+### Performance
+
+The Phase 5 gate compares CuMetal with hand-written Metal for three
+memory-bound kernels. On an Apple M4 Pro, rebuilt and measured on 2026-07-27:
+
+| Kernel | Elements | CuMetal / native Metal |
+| --- | ---: | ---: |
+| vector add | 262,144 | 1.063× |
+| SAXPY | 262,144 | 1.036× |
+| FP32 reduction | 262,144 | 1.008× |
+
+The gate uses the fastest of 20 synchronized wall-clock iterations. These
+kernels take roughly 0.2 ms, so averages mostly measure scheduler interference.
+The target is at most 2× native Metal, not a suspicious claim that translated
+code beats the baseline.
+
+Reproduce it:
+
+```bash
+ctest --test-dir build -R bench_phase5_all_kernels --output-on-failure
+```
+
+### Real programs
+
+- Upstream `cuda-samples` vector add builds without source changes and passes a
+  numerical plus Apple-GPU provenance gate.
+- llm.c GPT-2 FP32 passes logits, loss, tensor, and GPU-provenance checks on the
+  tested path. It uses explicit workload specializations and is not proof of
+  arbitrary PTX support.
+- llama.cpp's unmodified GGML CUDA backend builds against CuMetal. SmolLM2-135M
+  greedy decoding was coherent from one-layer offload through saturation on the
+  verified Apple M4 Pro setup. FlashAttention is advertised as unsupported, so
+  llama.cpp selects its ordinary attention path.
+- A reduced PhysX 5.6 GRB path runs selected sphere, box, convex, and triangle
+  mesh contacts on the GPU. It is a selected-shape conformance target, not
+  general PhysX GPU support.
+
+Exact commands, models, tolerances, provenance requirements, results, and
+scope boundaries live in
+[docs/apple-gpu-execution.md](docs/apple-gpu-execution.md),
+[docs/testing.md](docs/testing.md), and
+[docs/known-gaps.md](docs/known-gaps.md). Compatibility claims without those
+conditions are meaningless.
+
+## Known hard limits
+
+- No dynamic parallelism.
+- No multi-GPU or peer-to-peer execution.
+- No OpenGL, Vulkan, or DirectX interop.
+- No SASS execution.
+- `grid_group::sync()` is not a general cross-threadgroup barrier.
+- FP64 emulation is partial and provides about a 44-bit mantissa, not IEEE
+  binary64.
+- Texture and surface object lifecycle exists; general device-side sampling
+  does not.
+- Device `printf` uses a bounded buffer and limits format strings to 256 bytes.
+- CUDA, cuDNN, PhysX, llama.cpp, and PTX coverage is incomplete.
+
+This list is intentionally short. The authoritative list is
+[docs/known-gaps.md](docs/known-gaps.md).
+
+## Test without lying to yourself
+
+Run both the normal source-first build and the binary-shim build:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+bash scripts/ci_report.sh build --exclude-regex '^bench_'
+
+cmake -B build-shim \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCUMETAL_ENABLE_BINARY_SHIM=ON
+cmake --build build-shim
+bash scripts/ci_report.sh build-shim --exclude-regex '^bench_'
+```
+
+For focused work:
+
+```bash
+ctest --test-dir build -R unit_ --output-on-failure
+ctest --test-dir build -R functional_ --output-on-failure
+ctest --test-dir build -R conformance_ --output-on-failure
+```
+
+Report passes, skips, and failures separately. A registered test is not a
+passing test. A skip is not evidence of compatibility. A correct answer without
+GPU provenance may be a CPU fallback. The test policy exists because all three
+mistakes have happened before.
+
+## Tools
+
+| Tool | Job |
+| --- | --- |
+| `cumetalc` | Compile `.cu`, PTX, or NVVM IR to inspectable stages, `.metallib`, or an executable |
+| `air_inspect` | Inspect kernels, bitcode offsets, and metadata in a `.metallib` |
+| `air_validate` | Validate `.metallib` structure and optionally check it with `xcrun` |
+| `cumetal-air-emitter` | AIR research and regression container generation |
+| `cumetal-ptx2llvm` | Legacy PTX-to-LLVM inspection |
+| `ptx_diff` | Compare PTX-related outputs |
+| `cumetal_bench` | Compare covered CuMetal kernels with native Metal |
+
+## Documentation
+
+- [Design specification](spec.md) — canonical architecture and semantics
+- [Current status](docs/status.md) — what is implemented
+- [Known gaps](docs/known-gaps.md) — what is partial, wrong, or absent
+- [Build guide](docs/build.md) — toolchains and validation
+- [Testing guide](docs/testing.md) — gates and conformance workflows
+- [Compiler architecture](docs/compiler-architecture.md) — lowering paths and migration boundaries
+- [Apple-GPU execution record](docs/apple-gpu-execution.md) — evidence and provenance
+- [AIR ABI notes](docs/air-abi.md) — metallib research and limitations
+- [Correctness audit](docs/correctness-audit-2026-07-26.md) — failures found by testing the tests
+
+If the README and the spec disagree, the spec wins.
+
+## License
+
+[Apache 2.0](LICENSE)
