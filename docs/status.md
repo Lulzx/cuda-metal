@@ -39,12 +39,30 @@ v1 toolchain-completeness work (2026-07-26):
   source-recompilation path went unexercised in the configuration users install — the tests that
   covered it did not fail, they silently vanished from the suite.
 
-- **CI exists** (`.github/workflows/ci.yml`, spec §10.7): Apple Silicon runner, a matrix of
-  Release/shim-off and Debug/shim-on, plus a job that installs to a prefix and compiles a CUDA
-  program with the installed `cumetalc`. `scripts/ci_report.sh` reports passed/skipped/failed
-  separately and names every skipped test, per this document's own warning that a registration
-  count is not a pass count. The performance gate is excluded from CI per §10.7 (and because
-  wall-clock ratios flake on a loaded runner).
+- **`scripts/ci_report.sh` reports passed/skipped/failed separately** and names every skipped
+  test, per this document's own warning that a registration count is not a pass count. Run it in
+  place of bare `ctest`:
+
+  ```bash
+  bash scripts/ci_report.sh build --exclude-regex '^bench_'
+  ```
+
+  There is deliberately no CI (spec §10.7 is unimplemented). Both configurations —
+  Release/shim-off, which is what users install, and Debug/shim-on — must be run locally before
+  a change lands.
+
+- **The performance gate no longer flakes under load.** `cumetal_bench` averaged its iterations,
+  and a mean is dominated by its worst sample, so a single scheduler stall failed the 2× ceiling
+  on a busy machine. These kernels run in ~0.2 ms and are dispatch-jitter dominated — the
+  per-iteration spread is 50-190% even when idle — so no measure of central tendency is stable:
+  the median still reached 2.73× for saxpy under 8-way CPU saturation, because contention shifts
+  the whole distribution and shifts CuMetal's path further (it does more host work per dispatch).
+  The gate now reports the **fastest** iteration, the standard microbenchmark estimator for
+  latency under interference. Verified 13/13 passes across idle and 8-way-saturated runs.
+  The same change corrected a misleading published result: the mean-based numbers reported
+  `vector_add` at 0.74×, i.e. CuMetal 26% *faster* than hand-written Metal, which was outliers
+  inflating the native baseline rather than a real speedup. The results table now also prints a
+  `spread` column so a reader can see how jittery a given run was.
 
 - **Backend default is input-dependent and measured** rather than a single global setting; see
   the table in [known-gaps.md](known-gaps.md).
@@ -62,8 +80,9 @@ v1 toolchain-completeness work (2026-07-26):
   macOS build, Xcode version and build, selected `TOOLCHAINS`, chip, and metal compiler version.
   `air_abi_xcode_matrix_regression` previously defaulted both Xcode slots to the same developer
   directory and reported cross-version coverage it never had; it now identifies toolchains by
-  compiler version, deduplicates, and says plainly when only one is present. CI runs the AIR ABI
-  suite across `macos-14` and `macos-15`.
+  compiler version, deduplicates, and says plainly when only one is present. Genuine
+  cross-version coverage still requires two Xcodes installed side by side and
+  `CUMETAL_XCODE15_DEVELOPER_DIR` / `CUMETAL_XCODE16_DEVELOPER_DIR` pointed at them.
 
 - **Four test harnesses stopped reporting on stale artifacts.**
   `run_samples_vector_add.sh`, `run_cumetalc_cu_runtime_vector_add.sh`,
@@ -92,7 +111,9 @@ Phase 5 items implemented:
   - Prints a tabular comparison: kernel | elements | native_gpu_ms | native_wall_ms |
     cumetal_wall_ms | ratio | PASS/FAIL.
   - `--max-ratio <x>` enforces the spec §5.7 / §10.6 gate (Phase 5 target: ≤ 2.0×).
-  - Measured ratios on Apple Silicon: vector_add 0.74×, saxpy 0.98×, reduce_f32 1.00×.
+  - Measured ratios on Apple Silicon (fastest of 20 iterations): vector_add ~1.0-1.1×,
+    saxpy ~0.9-1.3×, reduce_f32 ~1.0-1.1×. These supersede an earlier mean-based set
+    (0.74×/0.98×/1.00×) that was outlier-dominated.
 - `scripts/generate_bench_metallib.sh` — compiles `bench_kernels.metal` to
   `bench_kernels.metallib` via `xcrun metal` + `xcrun metallib`; exits 77 if
   toolchain is unavailable (CTest skip).

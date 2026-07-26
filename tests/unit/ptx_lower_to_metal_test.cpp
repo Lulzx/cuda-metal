@@ -768,6 +768,61 @@ DONE:
                 "reused-base load is not retargeted to the store's base"))
         return 1;
 
+    // Real PTX must beat the name-matched specialization table.
+    //
+    // lower_ptx_to_metal_source used to consult the hardcoded llm.c/GGML name table *before*
+    // attempting generic translation, so any kernel whose name merely contained one of those
+    // substrings had its real body replaced by a canned implementation. This kernel is named
+    // `gelu_forward_kernel_mine` -- it matches the `gelu_forward_kernel` entry -- but it doubles
+    // its input rather than computing GELU. Generic translation can lower it, so generic must
+    // win. The equivalent defect on the LLVM path silently miscompiled real kernels; see
+    // docs/known-gaps.md.
+    const std::string colliding_name_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry gelu_forward_kernel_mine(
+  .param .u64 param_in,
+  .param .u64 param_out
+)
+{
+  .reg .b64 %rd<12>;
+  .reg .b32 %r<8>;
+  .reg .f32 %f<8>;
+  ld.param.u64 %rd0, [param_in];
+  ld.param.u64 %rd1, [param_out];
+  cvta.to.global.u64 %rd2, %rd0;
+  cvta.to.global.u64 %rd3, %rd1;
+  mov.u32 %r1, %tid.x;
+  mov.u32 %r2, %ctaid.x;
+  mov.u32 %r3, %ntid.x;
+  mad.lo.s32 %r4, %r2, %r3, %r1;
+  mul.wide.u32 %rd4, %r4, 4;
+  add.s64 %rd5, %rd2, %rd4;
+  add.s64 %rd6, %rd3, %rd4;
+  ld.global.f32 %f1, [%rd5];
+  add.f32 %f2, %f1, %f1;
+  st.global.f32 [%rd6], %f2;
+  ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions colliding_options;
+    colliding_options.entry_name = "gelu_forward_kernel_mine";
+    const auto colliding =
+        cumetal::ptx::lower_ptx_to_metal_source(colliding_name_ptx, colliding_options);
+    if (!expect(colliding.ok && colliding.matched, "colliding-name kernel lowers"))
+        return 1;
+    if (!expect(colliding.lowering_kind == cumetal::ptx::MetalLoweringKind::kGenericPtx,
+                "colliding-name kernel uses generic translation, not the specialization table"))
+        return 1;
+    // GELU's tanh approximation constant. Its presence would mean the template supplied the body.
+    if (!expect(!contains(colliding.metal_source, "0.7978845608"),
+                "entry name must not substitute a GELU body for unrelated PTX"))
+        return 1;
+    if (!expect(!contains(colliding.metal_source, "tanh"),
+                "colliding-name kernel emits no GELU tanh term"))
+        return 1;
+
     std::printf("PASS: ptx lower-to-metal unit tests\n");
     return 0;
 }

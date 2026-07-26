@@ -65,7 +65,8 @@ kind of change belongs.
 Before opening a pull request:
 
 - Both configurations build and pass: Release with `CUMETAL_ENABLE_BINARY_SHIM=OFF` (what users
-  install) and Debug with it `ON`. CI runs both.
+  install) and Debug with it `ON`. There is no CI, so running both locally is the only thing
+  that catches a configuration-specific break.
 - New behavior has a test that **fails without your change**. Verify this by reverting your
   change and watching it fail, not by assuming.
 - `git status` is clean — no build artifacts, no generated binaries.

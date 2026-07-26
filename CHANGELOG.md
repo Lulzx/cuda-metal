@@ -6,13 +6,13 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
-## [1.0.0] — 2026-07-26
+Nothing is released yet. `project(cumetal VERSION 1.0.0)` names the version under development,
+not a shipped one; there is no `v1.0.0` tag. The entries below accumulate toward a first release.
 
-First release. CuMetal compiles CUDA source to Metal and runs it on Apple Silicon GPUs, with a
-CUDA-compatible runtime backed by Metal and Apple's acceleration frameworks.
-
-Read [What works](#what-works-in-100) below before depending on this. CuMetal supports a
-documented subset of CUDA, not arbitrary CUDA programs.
+CuMetal compiles CUDA source to Metal and runs it on Apple Silicon GPUs, with a CUDA-compatible
+runtime backed by Metal and Apple's acceleration frameworks. Read [What works](#what-works)
+below before depending on it: CuMetal supports a documented subset of CUDA, not arbitrary CUDA
+programs.
 
 ### Added
 
@@ -26,10 +26,8 @@ documented subset of CUDA, not arbitrary CUDA programs.
 - **`cumetalc --version`**, plus `cumetalGetVersion()` / `cumetalGetVersionString()` in the
   runtime and `CUMETAL_VERSION*` macros in `cumetal_native.h`, so a version mismatch between
   headers and a loaded dylib is detectable.
-- **Continuous integration** (`.github/workflows/ci.yml`): Apple Silicon runner, matrix over
-  Release/shim-off and Debug/shim-on, plus a job that installs to a prefix and compiles a CUDA
-  program with the installed `cumetalc`. `scripts/ci_report.sh` reports passed/skipped/failed
-  separately and names every skipped test.
+- **`scripts/ci_report.sh`** reports passed/skipped/failed separately and names every skipped
+  test, so a run cannot read as full coverage when part of the suite never executed.
 - **`CUMETAL_ENABLE_CUDA_REGISTRATION`** build option (default `ON` in every build type),
   controlling the host CUDA registration ABI independently of the binary shim.
 - **`samples/nativeLaunch`** documents the native `cumetalKernel_t` launch API, which
@@ -40,8 +38,8 @@ documented subset of CUDA, not arbitrary CUDA programs.
   bit-for-bit against a hand-derived ISA oracle, classifying SUPPORTED / WRONG / UNSUPPORTED.
   Covers integer and float arithmetic, shifts, bit ops, and every `cvt` rounding mode.
 - **AIR ABI toolchain provenance** (spec §10.5): every AIR ABI test prints the macOS build, Xcode
-  version, selected `TOOLCHAINS`, chip, and metal compiler version, and CI runs the suite across
-  `macos-14` and `macos-15` for genuine multi-toolchain coverage.
+  version, selected `TOOLCHAINS`, chip, and metal compiler version, so a result is attributable
+  to the toolchain that produced it.
 
 ### Changed
 
@@ -66,6 +64,17 @@ documented subset of CUDA, not arbitrary CUDA programs.
   `fneg`; `neg.s32` returned a float sign-bit flip. The unit and AIR ABI fixtures covering these
   paths had stub bodies but asserted computed ones, so they verified the templates rather than
   the compiler. Found by the new numerical PTX sweep on its first run.
+- **The name-matched MSL specialization table no longer pre-empts real translation.**
+  `lower_to_metal.cpp` consulted its hardcoded llm.c/GGML name table *before* attempting generic
+  PTX→MSL translation, so a kernel whose name merely contained e.g. `gelu_forward_kernel` had its
+  real body replaced by a canned one. Same defect as the LLVM-path templates; generic translation
+  now wins wherever it succeeds, and the table only covers what it cannot lower.
+- **`cumetal_bench` gates on the fastest iteration instead of the mean.** These kernels run in
+  ~0.2 ms and are dispatch-jitter dominated (50-190% per-iteration spread even when idle), so the
+  mean flaked the 2× ceiling under load and the median still reached 2.73× under CPU saturation.
+  The fastest iteration estimates the uncontended cost and holds under 8-way saturation. This
+  also retired a fictitious published figure — CuMetal was never 26% faster than hand-written
+  Metal at `vector_add`; that was outliers inflating the native baseline.
 - **Unlowerable kernels are refused rather than emitted empty.** Tolerant mode previously fell
   through to a bare `ret void`, producing a kernel that launched and wrote nothing while the
   caller read back stale buffer contents with no diagnostic.
@@ -97,13 +106,13 @@ documented subset of CUDA, not arbitrary CUDA programs.
 - One-time `CUMETAL WARNING` diagnostics for grid-wide cooperative launch (a no-op on Metal) and
   FP64 Dekker emulation (~44-bit mantissa).
 
-### What works in 1.0.0
+### What works
 
-Verified on Apple M4 Pro, macOS 15, Xcode 16:
+Verified on Apple M4 Pro, macOS 26.6, Xcode 26.6:
 
-- 211 tests pass in Debug with the binary shim on; 208 in Release with it off. No skips, no
-  failures. The performance gate holds: vector_add 0.74×, saxpy 0.98×, reduce_f32 1.00× against
-  hand-written Metal.
+- 213 tests pass in Debug with the binary shim on; 210 in Release with it off. No skips, no
+  failures. The performance gate holds: vector_add ~1.0-1.1×, saxpy ~0.9-1.3×, reduce_f32
+  ~1.0-1.1× against hand-written Metal, well inside the 2× ceiling.
 - **llm.c** GPT-2 FP32 training reaches numerical parity with the PyTorch reference.
 - **llama.cpp** greedy-decodes coherently on SmolLM2-135M-Instruct-Q4_K_M at ~279 tok/s with
   full offload. This is one model on a covered kernel subset, not general GGML support.
@@ -120,5 +129,3 @@ precision. Broad GGML kernel coverage, general PhysX shapes, and arbitrary CUDA 
 claimed. See [docs/known-gaps.md](docs/known-gaps.md) for the full list — it is long, specific,
 and worth reading before adopting.
 
-[Unreleased]: https://github.com/lulzx/cumetal/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/lulzx/cumetal/releases/tag/v1.0.0

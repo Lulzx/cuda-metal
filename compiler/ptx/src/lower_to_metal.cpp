@@ -2624,21 +2624,37 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
     result.entry_name = pipeline.entry_name;
     result.warnings = pipeline.warnings;
 
-    // First: try the hardcoded name-based lookup for known llm.c kernels.
-    std::string metal_source = emit_metal_source_for_entry(pipeline.entry_name);
-    bool approximate = !metal_source.empty() &&
-                       entry_uses_approximate_stub(pipeline.entry_name);
+    // First: translate the kernel's actual PTX. This ordering matters and used to be reversed --
+    // the name-matched table below was consulted first, so a kernel whose name merely *contained*
+    // one of these substrings had its real body discarded in favor of a canned implementation,
+    // even when the generic translator could have lowered it correctly.
+    //
+    // That is the same defect removed from lower_to_llvm.cpp (see docs/known-gaps.md): there,
+    // name-matched templates for vector_add / matrix_mul / negate / reduce_sum silently
+    // miscompiled real kernels, and `neg.s32` came out as a float sign-bit flip. The MSL side is
+    // less exposed because its names are long and specific (`encoder_forward_kernel3`,
+    // `adamw_kernel2`) rather than generic words, and because the result is at least labelled
+    // `specialized_msl` in provenance instead of claiming to be a real translation. But the
+    // failure mode is identical, and it also bites on version skew: if llm.c or GGML changes what
+    // a kernel of that name computes, CuMetal would keep silently computing the old definition.
+    //
+    // Generic first means the substitution now only applies where real translation is genuinely
+    // unavailable, which is the case these tables were written for.
+    std::string metal_source = emit_metal_source_generic(pipeline.entry_name, ptx, &pipeline);
+    bool approximate = false;
     MetalLoweringKind lowering_kind = MetalLoweringKind::kNone;
     if (!metal_source.empty()) {
-        lowering_kind = approximate ? MetalLoweringKind::kApproximateStub
-                                    : MetalLoweringKind::kSpecializedMsl;
+        lowering_kind = MetalLoweringKind::kGenericPtx;
     }
 
-    // Second: if no hardcoded match, attempt generic PTX → Metal translation.
+    // Second: fall back to the hardcoded name-based lookup for known llm.c and GGML kernels that
+    // the generic translator cannot yet handle.
     if (metal_source.empty()) {
-        metal_source = emit_metal_source_generic(pipeline.entry_name, ptx, &pipeline);
+        metal_source = emit_metal_source_for_entry(pipeline.entry_name);
         if (!metal_source.empty()) {
-            lowering_kind = MetalLoweringKind::kGenericPtx;
+            approximate = entry_uses_approximate_stub(pipeline.entry_name);
+            lowering_kind = approximate ? MetalLoweringKind::kApproximateStub
+                                        : MetalLoweringKind::kSpecializedMsl;
         }
     }
 

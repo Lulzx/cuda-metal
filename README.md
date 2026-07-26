@@ -178,11 +178,19 @@ Typical results on Apple Silicon:
 
 | Kernel | Elements | Ratio (CuMetal/Metal) |
 |--------|----------|-----------------------|
-| vector_add | 1M | ~0.74× |
-| saxpy | 1M | ~0.98× |
-| reduce_f32 | 1M | ~1.00× |
+| vector_add | 262144 | ~1.0-1.1× |
+| saxpy | 262144 | ~0.9-1.3× |
+| reduce_f32 | 262144 | ~1.0-1.1× |
 
 All measured ratios are well within the 2× spec gate (§5.7).
+
+The gate reports the **fastest** of 20 iterations, not the mean. These kernels run in ~0.2 ms, so
+a single iteration is dominated by dispatch jitter — even on an idle machine the per-iteration
+spread is 50-190%. Averaging made the gate flake under load and, worse, put a fictitious result in
+this table: the old mean-based figures claimed `vector_add` at 0.74×, i.e. CuMetal 26% *faster*
+than hand-written Metal, which was outliers inflating the native baseline rather than a real
+speedup. The fastest iteration is the one that got a clean scheduling slot, so it estimates the
+uncontended cost; the gate now holds under 8-way CPU saturation.
 
 Conformance
 -----------

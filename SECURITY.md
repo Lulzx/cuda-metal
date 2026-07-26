@@ -2,13 +2,9 @@
 
 ## Supported versions
 
-| Version | Supported |
-|---------|-----------|
-| 1.0.x   | Yes       |
-| < 1.0   | No        |
-
-CuMetal follows the latest release. Fixes land on `main` and ship in the next release; there are
-no long-term support branches.
+CuMetal has not had a tagged release yet. `main` is the only supported version: fixes land there
+and there are no maintenance branches. If you are running CuMetal, you are running a development
+snapshot — report the commit hash.
 
 ## Reporting a vulnerability
 

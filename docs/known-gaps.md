@@ -184,6 +184,24 @@ as gaps have been closed.
   They are now real kernels with assertions on real lowering, plus explicit negative tests that a
   matching entry name does not substitute semantics.
   Found by `ptx_sweep_numeric` on its first run.
+- **The MSL name-matched specialization table no longer pre-empts real translation
+  (2026-07-26).** `lower_to_metal.cpp` consulted its hardcoded llm.c/GGML entry-name table
+  *before* attempting generic PTX→MSL translation — the comments said so outright — so a kernel
+  whose name merely *contained* one of those substrings had its real body replaced by a canned
+  implementation even when generic translation could handle it. A kernel named
+  `gelu_forward_kernel_mine` that doubled its input was emitted as GELU. Generic translation is
+  now attempted first and the table is consulted only when it declines.
+  This surface is less exposed than the LLVM-path templates were — the names are long and
+  specific (`encoder_forward_kernel3`, `adamw_kernel2`) rather than generic words, and the
+  result is at least labelled `specialized_msl` in provenance rather than claiming to be a real
+  translation — but the failure mode was the same, and it would also have bitten on version
+  skew: if llm.c or GGML changed what a kernel of a given name computes, CuMetal would have gone
+  on silently computing the old definition.
+  **Residual risk:** where generic translation genuinely cannot lower a kernel, a name collision
+  still selects the specialized body. That is the case these tables exist for, and it is
+  reported as `specialized_msl` / `workload_specialization` in `CUMETAL_TRACE_GPU=1` provenance,
+  but a user kernel named exactly like an llm.c one and outside generic coverage would still be
+  substituted. Ordering is pinned by `unit_ptx_lower_to_metal`.
 - **A kernel that cannot be lowered is now refused instead of emitted empty.** Non-strict
   lowering previously fell through to a bare `ret void` body, producing a kernel that loaded,
   launched, and wrote nothing — the caller read back whatever was already in the output buffer
@@ -312,7 +330,7 @@ as gaps have been closed.
   undocumented fields (regression tests in `tests/air_abi/` + `air_validate` catch breaks).
 - **AIR ABI cross-version coverage is narrower than spec §10.5 asks for.** The spec wants
   regression across Xcode 15.0 / 15.4 / 16.0 / 16.2+; in practice a developer machine has one
-  Xcode, and CI covers whatever Xcodes the `macos-14` and `macos-15` runner images ship. Every
+  Xcode, and there is no CI to spread the matrix across machines. Every
   AIR ABI test now prints a `CUMETAL_AIR_ABI_PROVENANCE` line naming the macOS build, Xcode
   version and build, selected `TOOLCHAINS`, chip, and metal compiler version, so a result is
   attributable to a toolchain instead of floating free.
