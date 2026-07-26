@@ -241,16 +241,13 @@ as gaps have been closed.
   strict sweep with classified TSV/JSON output. The 2026-07-26 local baseline
   is nine passes; the earlier `sgemm_2d` numerical failure was a PTX `.local`
   stack-depot sizing bug, now fixed.
-- **Open — direct PTX→MSL pointer bases are flow-insensitive.** The generic
-  `lower_to_metal` path keeps one register→base map for the whole entry, so a
-  register reassigned from one pointer base to another resolves every use to the
-  last assignment. It emits wrong code rather than declining to match. Reproducer:
-  a kernel that does `add.u64 %rd3, %rd0, %rd2; ld.global.f32 %f0, [%rd3];` then
-  reuses `%rd3` for `add.u64 %rd3, %rd1, %rd2; st.global.f32 [%rd3], %f1;` lowers
-  to `param_out[gid] = -param_out[gid]`, dropping `param_in` entirely. Using a
-  distinct destination register lowers correctly. Register reuse across differing
-  bases is ordinary in nvcc output, so this is a live correctness risk for the
-  direct-MSL path; a fix needs per-definition (SSA-style) base tracking.
+- Direct PTX→MSL pointer-base resolution was flow-insensitive until 2026-07-26:
+  `lower_to_metal` kept one register→base map per entry, so a register reassigned
+  from one pointer base to another resolved every use to the last assignment and
+  emitted wrong code instead of declining to match. Address classification is now
+  snapshotted at each global load/store/atomic while the forward pass is at that
+  instruction. Covered by `unit_ptx_lower_to_metal` and end-to-end by
+  `functional_runtime_ptx_lowering_regression`.
 - `air_emitter` "experimental" mode produces test containers, not production metallib ABI (for validation/air_abi only; runtime execution requires real metallib from xcrun or prebuilt).
 - AIR metadata validation relies on MetalLibraryArchive + xcrun where available; the
   bridge is optional at build time.

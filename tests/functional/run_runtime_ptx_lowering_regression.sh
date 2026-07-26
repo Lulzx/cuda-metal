@@ -37,7 +37,7 @@ cat > "${WORK_DIR}/negate.ptx" <<'PTX'
     .param .u64 param_in,
     .param .u64 param_out
 ) {
-    .reg .u64 %rd<6>;
+    .reg .u64 %rd<4>;
     .reg .f32 %f<3>;
     .reg .u32 %r<5>;
 
@@ -52,13 +52,16 @@ cat > "${WORK_DIR}/negate.ptx" <<'PTX'
     cvt.u64.u32 %rd2, %r4;
     shl.b64     %rd2, %rd2, 2;
 
+    // %rd3 deliberately addresses param_in here and param_out below. Reusing one
+    // register across two pointer bases is ordinary in nvcc output, and resolving
+    // it from a single per-entry map used to retarget this load to param_out.
     add.u64     %rd3, %rd0, %rd2;
     ld.global.f32 %f0, [%rd3];
 
     neg.f32 %f1, %f0;
 
-    add.u64     %rd4, %rd1, %rd2;
-    st.global.f32 [%rd4], %f1;
+    add.u64     %rd3, %rd1, %rd2;
+    st.global.f32 [%rd3], %f1;
     ret;
 }
 PTX

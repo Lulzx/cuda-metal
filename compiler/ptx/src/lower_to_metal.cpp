@@ -1556,6 +1556,23 @@ std::string emit_metal_source_generic(const std::string& entry_name,
     };
     std::unordered_map<std::string, RegInfo> reg;
 
+    // Classification of the address register at each global memory instruction,
+    // keyed by instruction index.
+    //
+    // `reg` is a single map per entry, so a register reassigned to a second
+    // pointer base overwrites the first. Consumers that ran after classification
+    // and looked the register up in `reg` therefore saw the *last* base for every
+    // use, silently retargeting earlier accesses: reusing one register for a load
+    // from param_in and a store to param_out lowered to
+    // `param_out[gid] = -param_out[gid]`, dropping param_in entirely. Register
+    // reuse across differing bases is ordinary in nvcc output, so snapshot the
+    // classification at each use while the forward pass is still at that point.
+    std::unordered_map<std::size_t, RegInfo> addr_at_instr;
+    auto addr_info = [&addr_at_instr](std::size_t index) -> const RegInfo* {
+        const auto it = addr_at_instr.find(index);
+        return it == addr_at_instr.end() ? nullptr : &it->second;
+    };
+
     // Extract the first %register from an operand string (handles "[%rd0]", "[%rd0+4]").
     auto get_reg = [](const std::string& op) -> std::string {
         const std::size_t pct = op.find('%');
@@ -1591,11 +1608,28 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         param_is_ptr[p.name] = p.is_pointer;
     }
 
-    for (const auto& instr : entry->instructions) {
+    for (std::size_t instr_index = 0; instr_index < entry->instructions.size(); ++instr_index) {
+        const auto& instr = entry->instructions[instr_index];
         const auto& op = instr.opcode;
         const auto& ops = instr.operands;
         if (ops.empty()) {
             continue;
+        }
+
+        // Record what the address register resolves to *here*, before any later
+        // instruction can reassign it. Global memory instructions do not define a
+        // classified register, so this does not interfere with classification.
+        if (op.find("ld.global") == 0 || op.find("st.global") == 0 ||
+            op.find("atom.global") == 0) {
+            const bool is_store = (op.find("st.global") == 0);
+            const std::size_t addr_index = is_store ? 0u : 1u;
+            if (ops.size() > addr_index) {
+                const std::string mreg = get_reg(ops[addr_index]);
+                const auto it = reg.find(mreg);
+                if (it != reg.end()) {
+                    addr_at_instr[instr_index] = it->second;
+                }
+            }
         }
 
         if (op.size() >= 8 && op.substr(0, 8) == "ld.param" && ops.size() >= 2) {
@@ -1778,7 +1812,8 @@ std::string emit_metal_source_generic(const std::string& entry_name,
     // ── Validate: every global load/store must have a resolved address ─────────
 
     bool has_global = false;
-    for (const auto& instr : entry->instructions) {
+    for (std::size_t instr_index = 0; instr_index < entry->instructions.size(); ++instr_index) {
+        const auto& instr = entry->instructions[instr_index];
         if (instr.opcode.find("ld.global") == 0 || instr.opcode.find("st.global") == 0) {
             has_global = true;
             const bool is_load = (instr.opcode[0] == 'l');
@@ -1791,10 +1826,10 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             if (mreg.empty()) {
                 return {};
             }
-            const auto it = reg.find(mreg);
-            if (it == reg.end() ||
-                (it->second.kind != RegKind::DerivedPtr &&
-                 it->second.kind != RegKind::ParamPtr)) {
+            const RegInfo* info = addr_info(instr_index);
+            if (info == nullptr ||
+                (info->kind != RegKind::DerivedPtr &&
+                 info->kind != RegKind::ParamPtr)) {
                 return {};
             }
         }
@@ -1814,7 +1849,8 @@ std::string emit_metal_source_generic(const std::string& entry_name,
     // ── Determine element type for each pointer param ─────────────────────────
 
     std::unordered_map<std::string, std::string> param_etype;
-    for (const auto& instr : entry->instructions) {
+    for (std::size_t instr_index = 0; instr_index < entry->instructions.size(); ++instr_index) {
+        const auto& instr = entry->instructions[instr_index];
         const auto& op = instr.opcode;
         if (op.find("ld.global") != 0 && op.find("st.global") != 0) {
             continue;
@@ -1824,13 +1860,13 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         if (mreg.empty()) {
             continue;
         }
-        const auto it = reg.find(mreg);
-        if (it == reg.end()) {
+        const RegInfo* info = addr_info(instr_index);
+        if (info == nullptr) {
             continue;
         }
-        const std::string& pname = (it->second.kind == RegKind::DerivedPtr)
-                                       ? it->second.base_param
-                                       : it->second.param_name;
+        const std::string& pname = (info->kind == RegKind::DerivedPtr)
+                                       ? info->base_param
+                                       : info->param_name;
         std::string etype;
         if (op.find(".f32") != std::string::npos) {
             etype = "float";
@@ -2028,7 +2064,8 @@ std::string emit_metal_source_generic(const std::string& entry_name,
     };
 
     int shfl_tmp_id = 0;
-    for (const auto& instr : entry->instructions) {
+    for (std::size_t instr_index = 0; instr_index < entry->instructions.size(); ++instr_index) {
+        const auto& instr = entry->instructions[instr_index];
         const auto& op = instr.opcode;
         const auto& ops = instr.operands;
 
@@ -2067,12 +2104,11 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         // ── Global memory load ───────────────────────────────────────────────
         if (op.find("ld.global") == 0 && ops.size() >= 2) {
             const std::string dest = get_reg(ops[0]);
-            const std::string mreg = get_reg(ops[1]);
-            const auto it = reg.find(mreg);
-            if (it == reg.end()) return {};
-            const std::string& pname = (it->second.kind == RegKind::DerivedPtr)
-                                           ? it->second.base_param
-                                           : it->second.param_name;
+            const RegInfo* info = addr_info(instr_index);
+            if (info == nullptr) return {};
+            const std::string& pname = (info->kind == RegKind::DerivedPtr)
+                                           ? info->base_param
+                                           : info->param_name;
             const std::string etype =
                 param_etype.count(pname) ? param_etype.at(pname) : "float";
             metal << "    " << etype << " " << mvar(dest) << " = " << pname << "[gid];\n";
@@ -2082,12 +2118,11 @@ std::string emit_metal_source_generic(const std::string& entry_name,
 
         // ── Global memory store ──────────────────────────────────────────────
         if (op.find("st.global") == 0 && ops.size() >= 2) {
-            const std::string mreg = get_reg(ops[0]);
-            const auto it = reg.find(mreg);
-            if (it == reg.end()) return {};
-            const std::string& pname = (it->second.kind == RegKind::DerivedPtr)
-                                           ? it->second.base_param
-                                           : it->second.param_name;
+            const RegInfo* info = addr_info(instr_index);
+            if (info == nullptr) return {};
+            const std::string& pname = (info->kind == RegKind::DerivedPtr)
+                                           ? info->base_param
+                                           : info->param_name;
             metal << "    " << pname << "[gid] = " << resolve(ops[1]) << ";\n";
             continue;
         }
@@ -2403,12 +2438,11 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         if (op.find("atom.global.add.f32") == 0 && ops.size() >= 3) {
             if (!all_sources_defined(ops, 2)) return {};
             const std::string dest = get_reg(ops[0]);
-            const std::string mreg = get_reg(ops[1]);
-            const auto it = reg.find(mreg);
-            if (it == reg.end()) return {};
-            const bool is_derived = (it->second.kind == RegKind::DerivedPtr);
-            const std::string& pname = is_derived ? it->second.base_param
-                                                   : it->second.param_name;
+            const RegInfo* info = addr_info(instr_index);
+            if (info == nullptr) return {};
+            const bool is_derived = (info->kind == RegKind::DerivedPtr);
+            const std::string& pname = is_derived ? info->base_param
+                                                   : info->param_name;
             const std::string atm = "atm_" + mvar(dest);
             // DerivedPtr: each thread has its own slot (param[gid]).
             // Raw ParamPtr: global accumulation to a fixed base address (param[0]).

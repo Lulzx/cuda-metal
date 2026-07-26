@@ -711,6 +711,63 @@ DONE:
                 "ordinary math kernel provenance is generic_ptx"))
         return 1;
 
+    // A PTX register may be reassigned to a different pointer base within one
+    // entry — ordinary in nvcc output. Address classification must be resolved at
+    // each use, not from one map per entry, or every access retargets to the last
+    // base assigned anywhere in the kernel. Here %rd3 addresses param_in for the
+    // load and param_out for the store; collapsing them yields
+    // `param_out[gid] = -param_out[gid]`, silently dropping param_in.
+    const std::string reused_base_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+
+.visible .entry negate_reused_base(
+    .param .u64 param_in,
+    .param .u64 param_out
+) {
+    .reg .u64 %rd<4>;
+    .reg .f32 %f<3>;
+    .reg .u32 %r<5>;
+
+    ld.param.u64 %rd0, [param_in];
+    ld.param.u64 %rd1, [param_out];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r4, %r1, %r2, %r3;
+
+    cvt.u64.u32 %rd2, %r4;
+    shl.b64     %rd2, %rd2, 2;
+
+    add.u64     %rd3, %rd0, %rd2;
+    ld.global.f32 %f0, [%rd3];
+
+    neg.f32 %f1, %f0;
+
+    add.u64     %rd3, %rd1, %rd2;
+    st.global.f32 [%rd3], %f1;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions opts_reused_base;
+    opts_reused_base.entry_name = "negate_reused_base";
+    const auto r_reused_base =
+        cumetal::ptx::lower_ptx_to_metal_source(reused_base_ptx, opts_reused_base);
+    if (!expect(r_reused_base.ok && r_reused_base.matched,
+                "register reused across pointer bases still matches"))
+        return 1;
+    if (!expect(contains(r_reused_base.metal_source, "= param_in[gid]"),
+                "reused-base load reads the input parameter"))
+        return 1;
+    if (!expect(contains(r_reused_base.metal_source, "param_out[gid] ="),
+                "reused-base store writes the output parameter"))
+        return 1;
+    if (!expect(!contains(r_reused_base.metal_source, "= param_out[gid]"),
+                "reused-base load is not retargeted to the store's base"))
+        return 1;
+
     std::printf("PASS: ptx lower-to-metal unit tests\n");
     return 0;
 }
