@@ -238,8 +238,9 @@ as gaps have been closed.
   verified before it is cached, so installing the component after an earlier
   configure is recoverable.
 - `tests/cuda_projects/sweep_cuda_projects.py` provides a manifest-complete
-  strict sweep with classified TSV/JSON output. The 2026-07-23 local baseline
-  is eight passes and one numerical failure (`sgemm_2d`).
+  strict sweep with classified TSV/JSON output. The 2026-07-26 local baseline
+  is nine passes; the earlier `sgemm_2d` numerical failure was a PTX `.local`
+  stack-depot sizing bug, now fixed.
 - `air_emitter` "experimental" mode produces test containers, not production metallib ABI (for validation/air_abi only; runtime execution requires real metallib from xcrun or prebuilt).
 - AIR metadata validation relies on MetalLibraryArchive + xcrun where available; the
   bridge is optional at build time.

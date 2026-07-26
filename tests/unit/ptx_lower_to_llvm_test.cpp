@@ -865,6 +865,78 @@ $L1:
         return 1;
     }
 
+    // A `.local` stack depot must be allocated at its declared size. Guessing a
+    // fixed size silently truncates the frame: out-of-range slots read as zero
+    // instead of faulting, so a register-tiled kernel quietly computes zeros.
+    const std::string local_depot_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry local_depot_frame(
+    .param .u64 local_depot_frame_param_0
+)
+{
+    .local .align 4 .b8 __local_depot0[288];
+    .reg .b64 %SP;
+    .reg .b64 %SPL;
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<4>;
+
+    mov.b64 %SPL, __local_depot0;
+    ld.param.b64 %rd1, [local_depot_frame_param_0];
+    add.u64 %rd2, %SPL, 256;
+    mov.b32 %r1, 0;
+    st.local.b32 [%rd2], %r1;
+    ld.local.b32 %r1, [%rd2];
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions local_depot_options;
+    local_depot_options.entry_name = "local_depot_frame";
+    local_depot_options.strict = true;
+    const auto local_depot_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(local_depot_ptx, local_depot_options);
+    if (!expect(local_depot_lowered.ok, "local depot kernel lowers")) {
+        std::fprintf(stderr, "  error: %s\n", local_depot_lowered.error.c_str());
+        return 1;
+    }
+    if (!expect(contains(local_depot_lowered.llvm_ir, "alloca [288 x i8]"),
+                "local depot alloca uses the declared frame size")) {
+        return 1;
+    }
+    if (!expect(!contains(local_depot_lowered.llvm_ir, "alloca [256 x i8]"),
+                "local depot alloca is not a fixed-size guess")) {
+        return 1;
+    }
+
+    // Without a parseable depot declaration the frame size is unknown; refuse to
+    // lower rather than emit an under-sized frame that reads zeros.
+    const std::string undeclared_depot_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry undeclared_depot()
+{
+    .reg .b64 %SP;
+    .reg .b64 %SPL;
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<3>;
+
+    mov.b64 %SPL, __local_depot0;
+    add.u64 %rd2, %SPL, 16;
+    mov.b32 %r1, 0;
+    st.local.b32 [%rd2], %r1;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions undeclared_depot_options;
+    undeclared_depot_options.entry_name = "undeclared_depot";
+    undeclared_depot_options.strict = true;
+    const auto undeclared_depot_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(undeclared_depot_ptx, undeclared_depot_options);
+    if (!expect(!undeclared_depot_lowered.ok,
+                "strict lowering refuses a local depot with no declared size")) {
+        return 1;
+    }
+
     std::printf("PASS: ptx lower-to-llvm unit tests\n");
     return 0;
 }

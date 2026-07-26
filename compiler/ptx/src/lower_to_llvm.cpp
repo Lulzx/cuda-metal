@@ -604,6 +604,136 @@ std::vector<ParsedConstB8Array> parse_ptx_const_b8_arrays(std::string_view ptx_t
     return out;
 }
 
+// Extract the body text (between the outermost braces) of the named .entry.
+// Returns an empty string when the entry name is empty, the entry is absent, or
+// its braces are unbalanced.
+std::string extract_entry_body(std::string_view ptx_text, std::string_view entry_name) {
+    if (entry_name.empty()) {
+        return {};
+    }
+    std::size_t search_from = 0;
+    while (true) {
+        const std::size_t entry_pos = ptx_text.find(".entry", search_from);
+        if (entry_pos == std::string_view::npos) break;
+        std::size_t name_begin = entry_pos + 6;
+        while (name_begin < ptx_text.size() &&
+               std::isspace(static_cast<unsigned char>(ptx_text[name_begin])) != 0) {
+            ++name_begin;
+        }
+        std::size_t name_end = name_begin;
+        while (name_end < ptx_text.size() &&
+               std::isspace(static_cast<unsigned char>(ptx_text[name_end])) == 0 &&
+               ptx_text[name_end] != '(' && ptx_text[name_end] != '{') {
+            ++name_end;
+        }
+        if (ptx_text.substr(name_begin, name_end - name_begin) != entry_name) {
+            search_from = name_end;
+            continue;
+        }
+        const std::size_t body_begin = ptx_text.find('{', name_end);
+        if (body_begin == std::string_view::npos) break;
+        std::size_t depth = 1;
+        std::size_t body_end = body_begin + 1;
+        for (; body_end < ptx_text.size() && depth != 0; ++body_end) {
+            if (ptx_text[body_end] == '{') ++depth;
+            else if (ptx_text[body_end] == '}') --depth;
+        }
+        if (depth == 0) {
+            return std::string(ptx_text.substr(body_begin + 1, body_end - body_begin - 2));
+        }
+        break;
+    }
+    return {};
+}
+
+struct LocalDepotInfo {
+    std::size_t size_bytes = 0;
+    std::size_t align_bytes = 16;
+};
+
+// Parse `.local` stack-depot declarations from the selected entry's body.
+//
+// Clang emits one depot per kernel (e.g. `.local .align 4 .b8 __local_depot0[288];`)
+// holding every address-taken local object, addressed through %SPL. The depot size
+// must come from the declaration: allocating a fixed guess silently truncates the
+// frame, and every slot past the end reads as zero rather than faulting. That turns
+// a register-tiled kernel into one that quietly computes zeros.
+std::unordered_map<std::string, LocalDepotInfo> parse_ptx_local_depots(
+    std::string_view ptx_text,
+    std::string_view entry_name) {
+    std::unordered_map<std::string, LocalDepotInfo> out;
+    const std::string body = extract_entry_body(ptx_text, entry_name);
+    if (body.empty()) {
+        return out;
+    }
+
+    std::istringstream lines{body};
+    std::string line;
+    while (std::getline(lines, line)) {
+        std::string t = trim(line);
+        if (const std::size_t comment = t.find("//"); comment != std::string::npos) {
+            t = trim(t.substr(0, comment));
+        }
+        // Only declarations start with `.local`; `ld.local`/`st.local` do not.
+        if (!starts_with(t, ".local")) continue;
+
+        std::size_t type_pos = std::string::npos;
+        std::size_t type_len = 0;
+        std::size_t elem_bytes = 1;
+        for (const auto& p : std::vector<std::pair<std::string, std::size_t>>{
+                {".b64", 8}, {".u64", 8}, {".s64", 8}, {".f64", 8},
+                {".b32", 4}, {".u32", 4}, {".s32", 4}, {".f32", 4},
+                {".b16", 2}, {".u16", 2}, {".s16", 2}, {".f16", 2},
+                {".b8", 1}, {".u8", 1}, {".s8", 1}}) {
+            const auto pos = t.find(p.first);
+            if (pos != std::string::npos) {
+                type_pos = pos;
+                type_len = p.first.size();
+                elem_bytes = p.second;
+                break;
+            }
+        }
+        if (type_pos == std::string::npos) continue;
+
+        std::size_t align_bytes = 16;
+        if (const std::size_t ap = t.find(".align"); ap != std::string::npos) {
+            std::size_t pos = ap + 6;
+            while (pos < t.size() && std::isspace(static_cast<unsigned char>(t[pos])) != 0) ++pos;
+            std::size_t end = pos;
+            while (end < t.size() && std::isdigit(static_cast<unsigned char>(t[end])) != 0) ++end;
+            if (end > pos) {
+                try { align_bytes = static_cast<std::size_t>(std::max(1, std::stoi(t.substr(pos, end - pos)))); }
+                catch (...) {}
+            }
+        }
+
+        std::size_t sym_begin = type_pos + type_len;
+        while (sym_begin < t.size() && std::isspace(static_cast<unsigned char>(t[sym_begin])) != 0) ++sym_begin;
+        const std::size_t bracket_open = t.find('[', sym_begin);
+        const std::size_t symbol_end = bracket_open != std::string::npos
+                                           ? bracket_open
+                                           : t.find(';', sym_begin);
+        if (symbol_end == std::string::npos) continue;
+        const std::string symbol = trim(t.substr(sym_begin, symbol_end - sym_begin));
+        if (symbol.empty()) continue;
+
+        std::size_t elem_count = bracket_open == std::string::npos ? 1 : 0;
+        const std::size_t bracket_close = bracket_open == std::string::npos
+                                              ? std::string::npos
+                                              : t.find(']', bracket_open + 1);
+        if (bracket_open != std::string::npos && bracket_close != std::string::npos) {
+            const std::string cnt = trim(t.substr(bracket_open + 1, bracket_close - bracket_open - 1));
+            if (!cnt.empty()) {
+                try { elem_count = static_cast<std::size_t>(std::stoull(cnt)); } catch (...) {}
+            }
+        }
+        const std::size_t size_bytes = elem_count * elem_bytes;
+        if (size_bytes == 0) continue;
+        out[symbol] = LocalDepotInfo{.size_bytes = size_bytes, .align_bytes = align_bytes};
+    }
+    return out;
+}
+
 // Parse .shared declarations from PTX to build a symbol→byte-offset map.
 // Each static __shared__ variable gets a contiguous region in the threadgroup buffer.
 // Explicitly retain .extern .shared symbols with size zero at offset zero so address
@@ -611,42 +741,7 @@ std::vector<ParsedConstB8Array> parse_ptx_const_b8_arrays(std::string_view ptx_t
 std::unordered_map<std::string, SharedSymbolInfo> parse_ptx_shared_symbols(
     std::string_view ptx_text,
     std::string_view entry_name) {
-    std::string selected_entry_body;
-    if (!entry_name.empty()) {
-        std::size_t search_from = 0;
-        while (true) {
-            const std::size_t entry_pos = ptx_text.find(".entry", search_from);
-            if (entry_pos == std::string_view::npos) break;
-            std::size_t name_begin = entry_pos + 6;
-            while (name_begin < ptx_text.size() &&
-                   std::isspace(static_cast<unsigned char>(ptx_text[name_begin])) != 0) {
-                ++name_begin;
-            }
-            std::size_t name_end = name_begin;
-            while (name_end < ptx_text.size() &&
-                   std::isspace(static_cast<unsigned char>(ptx_text[name_end])) == 0 &&
-                   ptx_text[name_end] != '(' && ptx_text[name_end] != '{') {
-                ++name_end;
-            }
-            if (ptx_text.substr(name_begin, name_end - name_begin) != entry_name) {
-                search_from = name_end;
-                continue;
-            }
-            const std::size_t body_begin = ptx_text.find('{', name_end);
-            if (body_begin == std::string_view::npos) break;
-            std::size_t depth = 1;
-            std::size_t body_end = body_begin + 1;
-            for (; body_end < ptx_text.size() && depth != 0; ++body_end) {
-                if (ptx_text[body_end] == '{') ++depth;
-                else if (ptx_text[body_end] == '}') --depth;
-            }
-            if (depth == 0) {
-                selected_entry_body.assign(
-                    ptx_text.substr(body_begin + 1, body_end - body_begin - 2));
-            }
-            break;
-        }
-    }
+    const std::string selected_entry_body = extract_entry_body(ptx_text, entry_name);
 
     struct Entry { std::size_t size_bytes; std::size_t align_bytes; };
     std::vector<std::pair<std::string, Entry>> ordered;
@@ -964,9 +1059,10 @@ class GenericLlvmEmitter {
                       std::vector<std::string>* arg_decls,
                       const std::unordered_map<std::string, ConstSymbolInfo>* const_symbols,
                       const std::unordered_map<std::string, SharedSymbolInfo>* shared_symbols,
+                      const std::unordered_map<std::string, LocalDepotInfo>* local_depots,
                       cumetal::ptx::Fp64Mode fp64_mode = cumetal::ptx::Fp64Mode::kNative)
         : entry_(entry), params_(params), arg_decls_(arg_decls), const_symbols_(const_symbols),
-          shared_symbols_(shared_symbols), fp64_mode_(fp64_mode) {
+          shared_symbols_(shared_symbols), local_depots_(local_depots), fp64_mode_(fp64_mode) {
         if (params_ != nullptr) {
             for (std::size_t i = 0; i < params_->size(); ++i) {
                 param_by_raw_[(*params_)[i].raw_name] = static_cast<int>(i);
@@ -1045,8 +1141,8 @@ class GenericLlvmEmitter {
     struct LocalSymbolInfo {
         std::string alloca_name;
         std::string base_ptr_name;
-        int size_bytes = 256;
-        int align_bytes = 16;
+        std::size_t size_bytes = 0;
+        std::size_t align_bytes = 16;
     };
 
     const cumetal::ptx::EntryFunction& entry_;
@@ -1054,6 +1150,7 @@ class GenericLlvmEmitter {
     std::vector<std::string>* arg_decls_ = nullptr;
     const std::unordered_map<std::string, ConstSymbolInfo>* const_symbols_ = nullptr;
     const std::unordered_map<std::string, SharedSymbolInfo>* shared_symbols_ = nullptr;
+    const std::unordered_map<std::string, LocalDepotInfo>* local_depots_ = nullptr;
     cumetal::ptx::Fp64Mode fp64_mode_ = cumetal::ptx::Fp64Mode::kNative;
 
     std::unordered_map<std::string, int> param_by_raw_;
@@ -1567,7 +1664,19 @@ class GenericLlvmEmitter {
         }
         auto it = local_symbols_.find(symbol);
         if (it == local_symbols_.end()) {
+            // The declared depot size is the only correct frame size. Refuse to
+            // lower rather than guess: an undersized frame does not fault, it
+            // silently reads zeros (see parse_ptx_local_depots).
+            if (local_depots_ == nullptr) {
+                return std::nullopt;
+            }
+            const auto dit = local_depots_->find(symbol);
+            if (dit == local_depots_->end() || dit->second.size_bytes == 0) {
+                return std::nullopt;
+            }
             LocalSymbolInfo info;
+            info.size_bytes = dit->second.size_bytes;
+            info.align_bytes = dit->second.align_bytes;
             const std::string sanitized = sanitize_llvm_identifier(symbol, "local_depot");
             info.alloca_name = "%cm_local_" + sanitized + "_" + std::to_string(slot_id_++);
             info.base_ptr_name = "%cm_local_base_" + sanitized + "_" + std::to_string(slot_id_++);
@@ -4482,7 +4591,9 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
         return out;
     }
 
-    GenericLlvmEmitter emitter(*entry, params, arg_decls, const_symbols, shared_symbols, fp64_mode);
+    const auto local_depots = parse_ptx_local_depots(ptx_source, entry_name);
+    GenericLlvmEmitter emitter(*entry, params, arg_decls, const_symbols, shared_symbols,
+                               &local_depots, fp64_mode);
     return emitter.run();
 }
 

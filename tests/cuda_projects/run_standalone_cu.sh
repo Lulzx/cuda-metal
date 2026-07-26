@@ -36,12 +36,13 @@ if echo "$RUN_OUTPUT" | grep -q "CUMETAL: registered kernel missing metallib"; t
     exit 77
 fi
 if echo "$RUN_OUTPUT" | grep -q "FAIL:"; then
-    if [[ "${CUMETAL_CUDA_PROJECT_STRICT_CLASSIFICATION:-0}" == "1" ]]; then
-        exit 1
-    fi
-    # Other failure in limited lowering env -> skip in ordinary CTest mode.
-    echo "SKIP: execution failed (likely due to incomplete PTX->Metal coverage for this project)."
-    exit 77
+    # The kernel launched and ran to completion but produced wrong results.
+    # That is a numerical failure, not a coverage gap: unsupported lowering
+    # reports "registered kernel missing metallib" and is skipped above. Never
+    # downgrade a wrong answer to a skip -- doing so reads as coverage the
+    # project does not have.
+    echo "FAIL: cuda_projects/${PROJECT_SUBDIR}/${OUT_BIN} produced incorrect results."
+    exit 1
 fi
 
 echo "PASS: cuda_projects/${PROJECT_SUBDIR}/${OUT_BIN}"

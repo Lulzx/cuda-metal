@@ -58,9 +58,11 @@ Post-Phase 5 work completed:
   `tests/cuda_projects/sweep_cuda_projects.py` validates that every standalone
   `.cu` fixture is represented in a manifest, runs it with strict result
   semantics, and emits per-project logs plus TSV/JSON summaries. The current
-  nine-project baseline is eight passes and one numerical failure
-  (`sgemm_2d`); unsupported lowering, compiler/link failures, crashes, and
-  timeouts are distinguished rather than collapsed into skips.
+  nine-project baseline is nine passes; unsupported lowering, compiler/link
+  failures, crashes, and timeouts are distinguished rather than collapsed into
+  skips. The CTest harness (`run_standalone_cu.sh`) likewise reports a kernel
+  that runs but computes wrong results as a failure, never as a skip — only
+  genuinely unavailable lowering (`registered kernel missing metallib`) skips.
 
 - **Typed NVVM/MSL migration**: the importer now covers common single-precision
   libdevice declarations including reciprocal square root, exponential,
