@@ -7,6 +7,10 @@ The July 2026 Apple-GPU execution work, including the exact llama.cpp result,
 runtime policy, provenance contract, toolchain shims, and completion validation,
 is recorded in [apple-gpu-execution.md](apple-gpu-execution.md).
 
+The 2026-07-26 silent-wrong-answer audit — two compiler miscompiles, two
+harnesses that reported failures as skips, and the suite-wide skip review — is
+recorded in [correctness-audit-2026-07-26.md](correctness-audit-2026-07-26.md).
+
 Do not interpret the number of CTest registrations as a pass count. The suite
 contains environment-dependent skips and external-project conformance gates;
 each run must report passed, skipped, and failed totals separately with the

@@ -5,6 +5,14 @@ The GPU-only proof strategy and July 2026 validation record are documented in
 result is not a GPU pass unless the test also observes completed Apple-GPU
 provenance and rejects CPU fallback/stub sources.
 
+A skip is not a pass either. Harnesses must not downgrade a wrong answer to a
+skip, and a skip must be a precondition checked *before* the work runs, never a
+verdict reached after it. Read the pass count together with the skip count, and
+inspect any long-lived skip with `ctest -V` before trusting it —
+[correctness-audit-2026-07-26.md](correctness-audit-2026-07-26.md) records two
+cases where a skip concealed a real failure and one where a test had never
+executed on any machine.
+
 Runtime execution tests
 -----------------------
 
