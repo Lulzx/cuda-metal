@@ -1,0 +1,57 @@
+.version 8.0
+.target sm_80
+.address_size 64
+
+// The bodies are intentionally minimal: these are the concrete GGML ABI
+// signatures whose workload-specialized Metal lowering is under test.
+.visible .entry _ZL9rope_neoxILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxi(
+    .param .u64 src,
+    .param .u64 dst,
+    .param .u32 ne00,
+    .param .u32 ne01,
+    .param .u32 ne02,
+    .param .u32 s01,
+    .param .u32 s02,
+    .param .u32 s03,
+    .param .u32 s1,
+    .param .u32 s2,
+    .param .u32 s3,
+    .param .u32 n_dims,
+    .param .u64 pos,
+    .param .f32 freq_scale,
+    .param .f32 ext_factor,
+    .param .f32 attn_factor,
+    .param .align 4 .b8 corr_dims[8],
+    .param .f32 theta_scale,
+    .param .u64 freq_factors,
+    .param .u64 row_indices,
+    .param .u32 set_rows_stride
+) {
+    ret;
+}
+
+.visible .entry _ZL9rope_neoxILb1ELb0EfDF16_EvPKT1_PT2_iiiiiiiiiiPKifff14rope_corr_dimsfPKfPKxi(
+    .param .u64 src,
+    .param .u64 dst,
+    .param .u32 ne00,
+    .param .u32 ne01,
+    .param .u32 ne02,
+    .param .u32 s01,
+    .param .u32 s02,
+    .param .u32 s03,
+    .param .u32 s1,
+    .param .u32 s2,
+    .param .u32 s3,
+    .param .u32 n_dims,
+    .param .u64 pos,
+    .param .f32 freq_scale,
+    .param .f32 ext_factor,
+    .param .f32 attn_factor,
+    .param .align 4 .b8 corr_dims[8],
+    .param .f32 theta_scale,
+    .param .u64 freq_factors,
+    .param .u64 row_indices,
+    .param .u32 set_rows_stride
+) {
+    ret;
+}

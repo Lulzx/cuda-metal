@@ -40,9 +40,15 @@ as gaps have been closed.
   driver-JIT kernel actually contains `.f64` ops under the emulate default, the runtime prints a
   one-time `CUMETAL WARNING` noting the reduced (~44-bit) precision; `CUMETAL_FP64_MODE=native`
   compiles true doubles (which fail at launch on current hardware, useful only for testing).
-- Null stream (legacy default): observable serialization correct via command-buffer ordering
-  on default queue. The full spec §6.3.1 cross-stream "user streams wait for null" via
-  MTLSharedEvent is not implemented; current approach suffices for single-context use.
+- **Legacy default-stream ordering is complete.** Every blocking user stream publishes a
+  monotonically increasing `MTLSharedEvent` value and waits on the latest legacy-default value;
+  each legacy-default submission waits on the latest value from every blocking stream. The
+  resource-hazard and legacy-order reservations share one atomic submission transaction, so
+  concurrent host submissions cannot create cross-queue dependency cycles. Stream creation flags
+  are retained and reported by `cudaStreamGetFlags` / `cuStreamGetFlags`; streams created with
+  `cudaStreamNonBlocking` / `CU_STREAM_NON_BLOCKING` and per-thread default streams are correctly
+  excluded from legacy implicit synchronization. Runtime and Driver API tests cover both ordering
+  directions with disjoint buffers and both non-blocking negative directions.
 - Registered fatbinary launches are asynchronous by default. Per-stream
   `MTLSharedEvent` values now fence accesses to the same tracked Metal buffer
   across command queues, including MPS/cuBLAS commands, and duplicate waits for
@@ -52,8 +58,12 @@ as gaps have been closed.
 - Device printf: fully works for PTX registration + direct paths (256-byte format limit,
   ring buffer, post-launch drain). Reordering vs. CUDA possible (as on real CUDA too).
 - Binary-shim fatbinary support: CMTL envelopes, raw PTX, basic FatBinary/FatBinary2/3
-  PTX wrappers supported. Full NVCC fatbinary variants, complex symbol layouts, or SASS-only
-  images not supported (SASS never was; per spec).
+  PTX wrappers, and little-endian ELF64 objects with named `.nv_fatbin` or raw-PTX sections
+  are supported by both registration and `cuModuleLoadData`. ELF extraction follows validated
+  section-table ranges under the 64 MiB image cap; the former registration-only blind 1 MiB
+  memory scan has been removed. ELF32, big-endian ELF, extended section indexes, compressed
+  fatbin payloads, complex symbol layouts, and SASS-only images remain unsupported (SASS never
+  was supported; per spec).
 - PhysX 5.6 reduced GRB coverage is limited to the 93-kernel selected-shape PGS
   manifest and selected rigid/static contacts. Patch 0008 removes
   the former body-per-thread `preIntegration` and serialized `updateBodiesLaunch`
@@ -97,9 +107,14 @@ as gaps have been closed.
   with other shapes, multiple bodies, generic friction correlation, and general
   mesh batching remain unsupported.
   The 60-step friction gate is repeatable, but its `3e-3` relative plus `1e-5`
-  absolute tolerance is not evidence of general FP determinism. Metal fast-math defaults,
-  contraction choices, and long chaotic-scene divergence remain unverified and require a
-  dedicated strict-math/contraction matrix plus long-horizon conformance.
+  absolute tolerance is not evidence of general FP determinism. Runtime-compiled MSL now has
+  an explicit `CUMETAL_MSL_MATH_MODE=fast|safe` policy: `fast` preserves the historical
+  default, while `safe` selects `MTLMathModeSafe` on macOS 15+ and disables fast math through
+  the legacy compile option on macOS 14. The normalized mode is isolated in the registration
+  JIT cache and reported as `math_mode=` in GPU provenance. This does not retroactively change
+  precompiled metallibs. Explicit FMA-contraction coverage and long chaotic-scene divergence
+  remain unverified and still require a dedicated contraction matrix plus long-horizon
+  conformance.
   Convex/convex stage 2 compiles from canonical non-inline CUDA/NVVM to a
   validated metallib through typed CuMetal IR. Stage 1 still uses the explicit
   legacy CUDA-to-PTX backend because typed generic-pointer legalization reports
@@ -274,7 +289,7 @@ as gaps have been closed.
   / other dequants / cpy etc (they hit "registered kernel missing" and GGML typically falls back
   or aborts depending on NGL and op).
 - **Approximate/passthru stubs are refused by default (no silent wrong answers).** A handful of
-  templates (unsupported `convert_unary` and `rope_norm` variants, `rope_neox`,
+  templates (unsupported `convert_unary`, `rope_norm`, and `rope_neox` variants,
   `dequantize_q5_0`/`_block_q5`, `k_set_rows`, and unsupported `cpy_`/`k_cpy`
   variants) exist only as passthru placeholders — they copy or zero data
   instead of computing the real quantized/rotary/copy result. Their output is numerically wrong,
@@ -353,7 +368,10 @@ as gaps have been closed.
 - The external llm.c stress gate now passes through specialized Metal kernels.
   llama.cpp builds, links, initializes, and executes a covered subset, but other
   GGML kernels (mul_mat variants, dequants, flash attention, conversions, and
-  rotary operations) still hit lowering gaps or are refused placeholder paths.
+  rotary operations) still hit lowering gaps or are refused placeholder paths. Exact forward,
+  no-frequency-factor GPT-NeoX RoPE is covered for the concrete float-to-float and float-to-half
+  GGML ABIs; backward, frequency-factor, and half-input `rope_neox` variants remain refused
+  rather than using the passthrough.
   See the bin_bcast special case in compiler/ptx/src/lower_to_metal.cpp and Metal source path
   in runtime/metal_backend.
 - Full AIR ABI reverse-engineering continues to be refined as Xcode releases change

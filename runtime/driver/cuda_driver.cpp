@@ -5,6 +5,7 @@
 #include "cumetal/ptx/lower_to_llvm.h"
 #include "cumetal_diag.h"
 #include "cuda_runtime.h"
+#include "fatbin_elf.h"
 #include "module_cache.h"
 
 #include <chrono>
@@ -435,6 +436,11 @@ bool parse_fatbin_wrapper_ptx(const void* image, std::string* out_ptx) {
         if (parse_fatbin_blob_ptx(data, out_ptx)) {
             return true;
         }
+        if (cumetal::fatbin::extract_elf64_ptx(
+                data, kMaxImageBytes, out_ptx) ==
+            cumetal::fatbin::ElfPtxStatus::kFound) {
+            return true;
+        }
     }
     return false;
 }
@@ -450,7 +456,12 @@ bool parse_ptx_image(const void* image, std::string* out_ptx) {
     if (parse_fatbin_blob_ptx(image, out_ptx)) {
         return true;
     }
-    return parse_fatbin_wrapper_ptx(image, out_ptx);
+    if (parse_fatbin_wrapper_ptx(image, out_ptx)) {
+        return true;
+    }
+    return cumetal::fatbin::extract_elf64_ptx(
+               image, kMaxImageBytes, out_ptx) ==
+           cumetal::fatbin::ElfPtxStatus::kFound;
 }
 
 bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path) {
@@ -1083,12 +1094,15 @@ CUresult cuStreamGetPriority(CUstream /*hStream*/, int* priority) {
 }
 
 CUresult cuStreamGetFlags(CUstream hStream, unsigned int* flags) {
-    if (flags == nullptr) return CUDA_ERROR_INVALID_VALUE;
-    // hStream==null is legacy stream (default), non-null was created with CU_STREAM_DEFAULT (0)
-    // or CU_STREAM_NON_BLOCKING (1).  We don't store flags per stream; return 0.
-    (void)hStream;
-    *flags = 0;
-    return CUDA_SUCCESS;
+    if (flags == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    return map_cuda_error(
+        cudaStreamGetFlags(reinterpret_cast<cudaStream_t>(hStream), flags));
 }
 
 CUresult cuStreamAddCallback(CUstream hStream,

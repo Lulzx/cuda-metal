@@ -1,4 +1,5 @@
 #include "metal_backend.h"
+#include "metal_math_mode.h"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -123,8 +124,14 @@ private:
 
 class StreamImpl final : public Stream {
 public:
-    StreamImpl(id<MTLCommandQueue> queue, id<MTLSharedEvent> access_event)
-        : queue_(queue), access_event_(access_event) {}
+    StreamImpl(id<MTLCommandQueue> queue,
+               id<MTLSharedEvent> access_event,
+               bool participates_in_legacy_sync,
+               bool legacy_default)
+        : queue_(queue),
+          access_event_(access_event),
+          participates_in_legacy_sync_(participates_in_legacy_sync),
+          legacy_default_(legacy_default) {}
 
     id<MTLCommandQueue> queue() const {
         return queue_;
@@ -136,6 +143,26 @@ public:
 
     std::uint64_t reserve_access_value() {
         return next_access_value_++;
+    }
+
+    bool participates_in_legacy_sync() const {
+        return participates_in_legacy_sync_;
+    }
+
+    bool is_legacy_default() const {
+        return legacy_default_;
+    }
+
+    std::uint64_t latest_submission_value() const {
+        return latest_submission_value_;
+    }
+
+    void set_latest_submission_value(std::uint64_t value) {
+        latest_submission_value_ = value;
+    }
+
+    std::mutex& submission_mutex() {
+        return submission_mutex_;
     }
 
     std::uint64_t add_pending(id<MTLCommandBuffer> command_buffer) {
@@ -255,7 +282,11 @@ private:
 
     id<MTLCommandQueue> queue_;
     id<MTLSharedEvent> access_event_;
+    bool participates_in_legacy_sync_ = false;
+    bool legacy_default_ = false;
     std::uint64_t next_access_value_ = 1;
+    std::uint64_t latest_submission_value_ = 0;
+    std::mutex submission_mutex_;
     mutable std::mutex mutex_;
     std::uint64_t next_ticket_ = 1;
     std::uint64_t completed_ticket_ = 0;
@@ -269,10 +300,10 @@ struct BackendState {
     };
 
     std::mutex mutex;
-    // Reservations across several buffers must be atomic. Otherwise two host
-    // threads could reserve A→B and B→A in opposite orders and create a GPU
-    // dependency cycle.
-    std::mutex resource_fence_mutex;
+    // Resource and legacy-default-stream reservations are one submission
+    // transaction. Keeping them under one lock prevents cross-queue wait cycles
+    // when host threads submit concurrently.
+    std::mutex submission_fence_mutex;
     bool initialized = false;
     HeapMode heap_mode = HeapMode::kAuto;
     std::size_t heap_auto_threshold = kDefaultHeapAutoThresholdBytes;
@@ -280,9 +311,10 @@ struct BackendState {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
     id<MTLSharedEvent> default_access_event = nil;
-    std::uint64_t next_default_access_value = 1;
+    std::shared_ptr<StreamImpl> default_stream;
     std::unordered_map<std::string, id<MTLLibrary>> library_cache;
     std::unordered_map<std::string, std::string> library_lowering_source;
+    std::unordered_map<std::string, std::string> library_math_mode;
     std::unordered_map<std::string, id<MTLComputePipelineState>> pipeline_cache;
     std::vector<HeapArena> buffer_heaps;
     std::vector<std::weak_ptr<StreamImpl>> streams;
@@ -294,8 +326,9 @@ struct ResourceFenceReservation {
 };
 
 BackendState& state();
+std::vector<std::shared_ptr<StreamImpl>> collect_live_streams_locked(BackendState& backend);
 
-std::vector<ResourceFenceReservation> encode_resource_waits(
+std::vector<ResourceFenceReservation> encode_submission_waits(
     id<MTLCommandBuffer> command_buffer,
     const std::shared_ptr<StreamImpl>& stream_impl,
     std::vector<BufferImpl*> buffers) {
@@ -305,33 +338,62 @@ std::vector<ResourceFenceReservation> encode_resource_waits(
 
     std::vector<ResourceFenceReservation> reservations;
     BackendState& backend = state();
-    std::lock_guard<std::mutex> lock(backend.resource_fence_mutex);
-    id<MTLSharedEvent> signal_event = stream_impl != nullptr
-                                          ? stream_impl->access_event()
-                                          : backend.default_access_event;
-    const std::uint64_t signal_value = stream_impl != nullptr
-                                           ? stream_impl->reserve_access_value()
-                                           : backend.next_default_access_value++;
+    std::scoped_lock lock(backend.mutex, backend.submission_fence_mutex);
+    const std::shared_ptr<StreamImpl> submission_stream =
+        stream_impl != nullptr ? stream_impl : backend.default_stream;
+    if (submission_stream == nullptr) {
+        return reservations;
+    }
+
+    id<MTLSharedEvent> signal_event = submission_stream->access_event();
+    const std::uint64_t signal_value = submission_stream->reserve_access_value();
     std::vector<ResourceFenceReservation> waits;
+    auto add_wait = [&](id<MTLSharedEvent> event, std::uint64_t value) {
+        if (event == nil || value == 0 ||
+            (event == signal_event && value >= signal_value)) {
+            return;
+        }
+        const bool duplicate = std::any_of(
+            waits.begin(), waits.end(), [&](const ResourceFenceReservation& wait) {
+                return wait.event == event && wait.signal_value == value;
+            });
+        if (!duplicate) {
+            waits.push_back({.event = event, .signal_value = value});
+        }
+    };
+
+    // Make stream order explicit at the GPU timeline level. Metal command
+    // queues preserve commit order, but command buffers may overlap; CUDA
+    // stream semantics require each submission to observe all prior work in
+    // that same stream even when its resources are disjoint.
+    add_wait(submission_stream->access_event(),
+             submission_stream->latest_submission_value());
+
+    if (submission_stream->is_legacy_default()) {
+        const auto live_streams = collect_live_streams_locked(backend);
+        for (const auto& user_stream : live_streams) {
+            if (!user_stream->participates_in_legacy_sync()) {
+                continue;
+            }
+            add_wait(user_stream->access_event(),
+                     user_stream->latest_submission_value());
+        }
+    } else if (submission_stream->participates_in_legacy_sync() &&
+               backend.default_stream != nullptr) {
+        add_wait(backend.default_stream->access_event(),
+                 backend.default_stream->latest_submission_value());
+    }
+
     for (BufferImpl* buffer : buffers) {
         const auto [wait_event, wait_value] = buffer->last_access();
-        if (wait_event != nil && wait_value != 0) {
-            const bool duplicate = std::any_of(
-                waits.begin(), waits.end(), [&](const ResourceFenceReservation& wait) {
-                    return wait.event == wait_event && wait.signal_value == wait_value;
-                });
-            if (!duplicate) {
-                waits.push_back({.event = wait_event, .signal_value = wait_value});
-            }
-        }
+        add_wait(wait_event, wait_value);
         buffer->set_last_access(signal_event, signal_value);
     }
+    submission_stream->set_latest_submission_value(signal_value);
     for (const ResourceFenceReservation& wait : waits) {
         [command_buffer encodeWaitForEvent:wait.event value:wait.signal_value];
     }
-    if (!buffers.empty()) {
-        reservations.push_back({.event = signal_event, .signal_value = signal_value});
-    }
+    reservations.push_back({.event = signal_event, .signal_value = signal_value});
     return reservations;
 }
 
@@ -378,6 +440,8 @@ bool ensure_initialized(std::string* error_message) {
             }
             return false;
         }
+        backend.default_stream = std::make_shared<StreamImpl>(
+            backend.queue, backend.default_access_event, true, true);
 
         {
             const char* heap_env = std::getenv("CUMETAL_MTLHEAP_ALLOC");
@@ -517,6 +581,20 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
                 return nil;
             }
             MTLCompileOptions* compileOpts = [[MTLCompileOptions alloc] init];
+            const cumetal::MetalMathMode math_mode =
+                cumetal::current_metal_math_mode();
+            if (@available(macOS 15.0, *)) {
+                compileOpts.mathMode =
+                    math_mode == cumetal::MetalMathMode::kSafe
+                        ? MTLMathModeSafe
+                        : MTLMathModeFast;
+            } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                compileOpts.fastMathEnabled =
+                    math_mode == cumetal::MetalMathMode::kFast;
+#pragma clang diagnostic pop
+            }
             NSError* libErr = nil;
             id<MTLLibrary> srcLib = [backend.device newLibraryWithSource:src options:compileOpts error:&libErr];
             if (srcLib == nil) {
@@ -548,6 +626,8 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
                 lowering_source = "unsupported";
             }
             backend.library_lowering_source[metallib_path] = lowering_source;
+            backend.library_math_mode[metallib_path] =
+                cumetal::metal_math_mode_name(math_mode);
             backend.library_cache.emplace(metallib_path, srcLib);
             return srcLib;
         }
@@ -580,6 +660,7 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
 
         backend.library_cache.emplace(metallib_path, library);
         backend.library_lowering_source[metallib_path] = "precompiled_metallib";
+        backend.library_math_mode[metallib_path] = "precompiled";
         return library;
     }
 }
@@ -784,7 +865,10 @@ cudaError_t resolve_queue_for_stream(const std::shared_ptr<Stream>& stream,
     BackendState& backend = state();
     {
         std::lock_guard<std::mutex> lock(backend.mutex);
-        *out_queue = (stream_impl != nullptr) ? stream_impl->queue() : backend.queue;
+        if (stream_impl == nullptr) {
+            stream_impl = backend.default_stream;
+        }
+        *out_queue = stream_impl != nullptr ? stream_impl->queue() : backend.queue;
     }
 
     if (out_stream_impl != nullptr) {
@@ -890,7 +974,9 @@ cudaError_t allocate_buffer(std::size_t size,
     return cudaSuccess;
 }
 
-cudaError_t create_stream(std::shared_ptr<Stream>* out_stream, std::string* error_message) {
+cudaError_t create_stream(std::shared_ptr<Stream>* out_stream,
+                          std::string* error_message,
+                          bool participates_in_legacy_sync) {
     if (out_stream == nullptr) {
         if (error_message != nullptr) {
             *error_message = "create_stream invalid argument";
@@ -921,10 +1007,20 @@ cudaError_t create_stream(std::shared_ptr<Stream>* out_stream, std::string* erro
     }
 
     std::shared_ptr<StreamImpl> stream =
-        std::make_shared<StreamImpl>(queue, access_event);
+        std::make_shared<StreamImpl>(
+            queue, access_event, participates_in_legacy_sync, false);
     backend.streams.push_back(stream);
     *out_stream = stream;
     return cudaSuccess;
+}
+
+std::shared_ptr<Stream> legacy_default_stream() {
+    if (!ensure_initialized(nullptr)) {
+        return nullptr;
+    }
+    BackendState& backend = state();
+    std::lock_guard<std::mutex> lock(backend.mutex);
+    return backend.default_stream;
 }
 
 cudaError_t destroy_stream(const std::shared_ptr<Stream>& stream, std::string* error_message) {
@@ -1019,6 +1115,7 @@ cudaError_t gemm_f32(bool transa,
                      int ldc,
                      const std::shared_ptr<Stream>& stream,
                      std::string* error_message) {
+    const bool synchronous_default = stream == nullptr;
     if (m < 0 || n < 0 || k < 0 || lda <= 0 || ldb <= 0 || ldc <= 0 || a_buffer == nullptr ||
         b_buffer == nullptr || c_buffer == nullptr) {
         if (error_message != nullptr) {
@@ -1064,6 +1161,7 @@ cudaError_t gemm_f32(bool transa,
     if (queue_status != cudaSuccess) {
         return queue_status;
     }
+    std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
 
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
@@ -1128,12 +1226,12 @@ cudaError_t gemm_f32(bool transa,
         }
 
         const auto fences =
-            encode_resource_waits(command_buffer, stream_impl, {a_impl, b_impl, c_impl});
+            encode_submission_waits(command_buffer, stream_impl, {a_impl, b_impl, c_impl});
         [op encodeToCommandBuffer:command_buffer leftMatrix:left rightMatrix:right resultMatrix:result];
         encode_resource_signals(command_buffer, fences);
         [command_buffer commit];
 
-        if (stream_impl != nullptr) {
+        if (!synchronous_default) {
             stream_impl->add_pending(command_buffer);
             return cudaSuccess;
         }
@@ -1161,6 +1259,7 @@ cudaError_t gemm_f16(bool transa,
                      int ldc,
                      const std::shared_ptr<Stream>& stream,
                      std::string* error_message) {
+    const bool synchronous_default = stream == nullptr;
     if (m < 0 || n < 0 || k < 0 || lda <= 0 || ldb <= 0 || ldc <= 0 ||
         a_buffer == nullptr || b_buffer == nullptr || c_buffer == nullptr) {
         if (error_message != nullptr) {
@@ -1205,6 +1304,7 @@ cudaError_t gemm_f16(bool transa,
     if (queue_status != cudaSuccess) {
         return queue_status;
     }
+    std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
 
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
@@ -1269,14 +1369,14 @@ cudaError_t gemm_f16(bool transa,
         }
 
         const auto fences =
-            encode_resource_waits(command_buffer, stream_impl, {a_impl, b_impl, c_impl});
+            encode_submission_waits(command_buffer, stream_impl, {a_impl, b_impl, c_impl});
         [op encodeToCommandBuffer:command_buffer
                        leftMatrix:left
                       rightMatrix:right
                      resultMatrix:result];
         encode_resource_signals(command_buffer, fences);
         [command_buffer commit];
-        if (stream_impl != nullptr) {
+        if (!synchronous_default) {
             stream_impl->add_pending(command_buffer);
             return cudaSuccess;
         }
@@ -1303,6 +1403,7 @@ cudaError_t gemm_f16_f32(bool transa,
                          int ldc,
                          const std::shared_ptr<Stream>& stream,
                          std::string* error_message) {
+    const bool synchronous_default = stream == nullptr;
     if (m < 0 || n < 0 || k < 0 || lda <= 0 || ldb <= 0 || ldc <= 0 ||
         a_buffer == nullptr || b_buffer == nullptr || c_buffer == nullptr) {
         if (error_message != nullptr) {
@@ -1346,6 +1447,7 @@ cudaError_t gemm_f16_f32(bool transa,
     if (queue_status != cudaSuccess) {
         return queue_status;
     }
+    std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
 
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
@@ -1405,14 +1507,14 @@ cudaError_t gemm_f16_f32(bool transa,
         }
 
         const auto fences =
-            encode_resource_waits(command_buffer, stream_impl, {a_impl, b_impl, c_impl});
+            encode_submission_waits(command_buffer, stream_impl, {a_impl, b_impl, c_impl});
         [op encodeToCommandBuffer:command_buffer
                        leftMatrix:left
                       rightMatrix:right
                      resultMatrix:result];
         encode_resource_signals(command_buffer, fences);
         [command_buffer commit];
-        if (stream_impl != nullptr) {
+        if (!synchronous_default) {
             stream_impl->add_pending(command_buffer);
             return cudaSuccess;
         }
@@ -1443,6 +1545,7 @@ cudaError_t gemm_strided_batched_f32(bool transa,
                                      int batch_count,
                                      const std::shared_ptr<Stream>& stream,
                                      std::string* error_message) {
+    const bool synchronous_default = stream == nullptr;
     if (batch_count < 0) {
         if (error_message != nullptr) {
             *error_message = "gemm_strided_batched_f32 invalid batch_count";
@@ -1499,6 +1602,7 @@ cudaError_t gemm_strided_batched_f32(bool transa,
     if (queue_status != cudaSuccess) {
         return queue_status;
     }
+    std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
 
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
@@ -1550,7 +1654,7 @@ cudaError_t gemm_strided_batched_f32(bool transa,
         }
 
         const auto fences =
-            encode_resource_waits(command_buffer, stream_impl, {a_impl, b_impl, c_impl});
+            encode_submission_waits(command_buffer, stream_impl, {a_impl, b_impl, c_impl});
         for (int batch = 0; batch < batch_count; ++batch) {
             const std::size_t bindex = static_cast<std::size_t>(batch);
             MPSMatrix* left =
@@ -1570,7 +1674,7 @@ cudaError_t gemm_strided_batched_f32(bool transa,
 
         encode_resource_signals(command_buffer, fences);
         [command_buffer commit];
-        if (stream_impl != nullptr) {
+        if (!synchronous_default) {
             stream_impl->add_pending(command_buffer);
             return cudaSuccess;
         }
@@ -1627,6 +1731,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
     id<MTLComputePipelineState> pipeline = nil;
     id<MTLCommandQueue> queue = nil;
     std::string lowering_source = "unknown";
+    std::string math_mode = "precompiled";
     bool compile_cache_hit = false;
     {
         std::lock_guard<std::mutex> lock(backend.mutex);
@@ -1641,16 +1746,21 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         if (source_it != backend.library_lowering_source.end()) {
             lowering_source = source_it->second;
         }
+        const auto math_mode_it =
+            backend.library_math_mode.find(metallib_path);
+        if (math_mode_it != backend.library_math_mode.end()) {
+            math_mode = math_mode_it->second;
+        }
         if (!config.provenance.empty()) {
             lowering_source = config.provenance;
         }
 
-        if (stream_impl != nullptr) {
-            queue = stream_impl->queue();
-        } else {
-            queue = backend.queue;
+        if (stream_impl == nullptr) {
+            stream_impl = backend.default_stream;
         }
+        queue = stream_impl != nullptr ? stream_impl->queue() : backend.queue;
     }
+    std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
 
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
@@ -1688,7 +1798,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             fence_buffers.push_back(buffer_impl);
         }
         const auto fences =
-            encode_resource_waits(command_buffer, stream_impl, std::move(fence_buffers));
+            encode_submission_waits(command_buffer, stream_impl, std::move(fence_buffers));
 
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
         if (encoder == nil) {
@@ -1759,6 +1869,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                 config.semantic_quality.empty()
                     ? semantic_quality_for_provenance(lowering_source)
                     : config.semantic_quality;
+            const std::string trace_math_mode = math_mode;
             NSString* trace_device_name = [[backend.device name] description];
             const bool trace_cache_hit = compile_cache_hit;
             const unsigned int grid_x = config.grid.x;
@@ -1783,13 +1894,14 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                     "CUMETAL_PROVENANCE event=kernel_launch kernel=\"%s\" "
                     "source=%s provenance=%s semantic_quality=%s "
                     "device=apple_gpu device_name=\"%s\" "
-                    "compile_cache_hit=%s launch_success=%s duration_ns=%lld "
+                    "math_mode=%s compile_cache_hit=%s launch_success=%s duration_ns=%lld "
                     "grid=(%u,%u,%u) block=(%u,%u,%u) unsupported_reason=\"\"\n",
                     trace_kernel.c_str(),
                     trace_legacy_source.c_str(),
                     trace_source.c_str(),
                     trace_semantic_quality.c_str(),
                     device_name != nullptr ? device_name : "Apple Metal GPU",
+                    trace_math_mode.c_str(),
                     trace_cache_hit ? "true" : "false",
                     completion_status == cudaSuccess ? "true" : "false",
                     duration_ns,
@@ -1832,13 +1944,14 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                          "CUMETAL_PROVENANCE event=kernel_launch kernel=\"%s\" "
                          "source=%s provenance=%s semantic_quality=%s "
                          "device=apple_gpu device_name=\"%s\" "
-                         "compile_cache_hit=%s launch_success=%s duration_ns=%lld "
+                         "math_mode=%s compile_cache_hit=%s launch_success=%s duration_ns=%lld "
                          "grid=(%u,%u,%u) block=(%u,%u,%u) unsupported_reason=\"\"\n",
                          kernel_name.c_str(),
                          legacy_source,
                          lowering_source.c_str(),
                          semantic_quality.c_str(),
                          device_name != nullptr ? device_name : "Apple Metal GPU",
+                         math_mode.c_str(),
                          compile_cache_hit ? "true" : "false",
                          completion_status == cudaSuccess ? "true" : "false",
                          duration_ns,
@@ -1899,6 +2012,9 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
         }
         queue = backend.queue;
     }
+    const std::shared_ptr<StreamImpl> default_stream =
+        std::dynamic_pointer_cast<StreamImpl>(legacy_default_stream());
+    std::unique_lock<std::mutex> submission_lock(default_stream->submission_mutex());
 
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
@@ -1935,7 +2051,7 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
             }
             fence_buffers.push_back(buffer_impl);
         }
-        const auto fences = encode_resource_waits(
+        const auto fences = encode_submission_waits(
             command_buffer, std::shared_ptr<StreamImpl>{}, std::move(fence_buffers));
 
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
@@ -2015,6 +2131,9 @@ cudaError_t synchronize(std::string* error_message) {
     {
         std::lock_guard<std::mutex> lock(backend.mutex);
         streams = collect_live_streams_locked(backend);
+        if (backend.default_stream != nullptr) {
+            streams.push_back(backend.default_stream);
+        }
     }
 
     for (const std::shared_ptr<StreamImpl>& stream : streams) {

@@ -541,6 +541,76 @@ DONE:
                 "RoPE selects the half-output ABI"))
         return 1;
 
+    // ── Regression: exact forward GPT-NeoX RoPE ABI matching ──────────────
+    const std::string rope_neox_f32_name =
+        "_ZL9rope_neoxILb1ELb0EffEvPKT1_PT2_iiiiiiiiiiPKifff"
+        "14rope_corr_dimsfPKfPKxi";
+    const std::string rope_neox_f16_name =
+        "_ZL9rope_neoxILb1ELb0EfDF16_EvPKT1_PT2_iiiiiiiiiiPKifff"
+        "14rope_corr_dimsfPKfPKxi";
+    const auto lower_named_rope_neox = [](const std::string& name) {
+        const std::string ptx = std::string(R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry )PTX") + name + R"PTX((
+    .param .u64 src,
+    .param .u64 dst
+) {
+    ret;
+}
+)PTX";
+        cumetal::ptx::LowerToMetalOptions options;
+        options.entry_name = name;
+        options.allow_workload_specializations = true;
+        return cumetal::ptx::lower_ptx_to_metal_source(ptx, options);
+    };
+    const auto r_rope_neox_f32 = lower_named_rope_neox(rope_neox_f32_name);
+    if (!expect(r_rope_neox_f32.ok && r_rope_neox_f32.matched,
+                "forward no-FF float GPT-NeoX RoPE matched"))
+        return 1;
+    if (!expect(!r_rope_neox_f32.approximate,
+                "forward no-FF float GPT-NeoX RoPE is exact"))
+        return 1;
+    if (!expect(contains(r_rope_neox_f32.metal_source,
+                         "src[ix + n_dims / 2]"),
+                "GPT-NeoX RoPE pairs lower and upper dimension halves"))
+        return 1;
+    if (!expect(contains(r_rope_neox_f32.metal_source, "device float* dst"),
+                "GPT-NeoX RoPE selects float output"))
+        return 1;
+
+    const auto r_rope_neox_f16 = lower_named_rope_neox(rope_neox_f16_name);
+    if (!expect(r_rope_neox_f16.ok && r_rope_neox_f16.matched,
+                "forward no-FF half-output GPT-NeoX RoPE matched"))
+        return 1;
+    if (!expect(!r_rope_neox_f16.approximate,
+                "forward no-FF half-output GPT-NeoX RoPE is exact"))
+        return 1;
+    if (!expect(contains(r_rope_neox_f16.metal_source, "device half* dst"),
+                "GPT-NeoX RoPE selects half output"))
+        return 1;
+
+    const std::array<std::string, 3> unsupported_rope_neox_names = {
+        "_ZL9rope_neoxILb0ELb0EffEvPKT1_PT2_iiiiiiiiiiPKifff"
+        "14rope_corr_dimsfPKfPKxi",
+        "_ZL9rope_neoxILb1ELb1EffEvPKT1_PT2_iiiiiiiiiiPKifff"
+        "14rope_corr_dimsfPKfPKxi",
+        "_ZL9rope_neoxILb1ELb0EDF16_DF16_EvPKT1_PT2_iiiiiiiiiiPKifff"
+        "14rope_corr_dimsfPKfPKxi",
+    };
+    for (const std::string& unsupported_name : unsupported_rope_neox_names) {
+        const auto unsupported = lower_named_rope_neox(unsupported_name);
+        if (!expect(unsupported.ok && unsupported.matched,
+                    "unsupported GPT-NeoX RoPE remains classified"))
+            return 1;
+        if (!expect(unsupported.approximate &&
+                        unsupported.lowering_kind ==
+                            cumetal::ptx::MetalLoweringKind::kApproximateStub,
+                    "backward/frequency-factor/half-input GPT-NeoX RoPE remains refused"))
+            return 1;
+    }
+
     // ── Regression: GGML Q8_0 conversion is a real dequantizer ──────────────
     const std::string q8_ptx = R"PTX(
 .version 8.0

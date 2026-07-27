@@ -11,6 +11,7 @@ namespace {
 
 constexpr std::size_t kElementCount = 1u << 18;
 constexpr std::size_t kThreadsPerBlock = 256;
+constexpr unsigned int kSpinIterations = 100000000u;
 
 bool nearly_equal(float a, float b) {
     return std::fabs(a - b) < 1e-5f;
@@ -126,17 +127,121 @@ int main(int argc, char** argv) {
         }
     }
 
+    void* spin_output_a = nullptr;
+    void* spin_output_b = nullptr;
+    void* marker_output_a = nullptr;
+    void* marker_output_b = nullptr;
+    if (cudaMalloc(&spin_output_a, sizeof(unsigned int)) != cudaSuccess ||
+        cudaMalloc(&spin_output_b, sizeof(unsigned int)) != cudaSuccess ||
+        cudaMalloc(&marker_output_a, sizeof(unsigned int)) != cudaSuccess ||
+        cudaMalloc(&marker_output_b, sizeof(unsigned int)) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: ordering-probe cudaMalloc failed\n");
+        return 1;
+    }
+
+    static const cumetalKernelArgInfo_t kProbeArgInfo[] = {
+        {CUMETAL_ARG_BUFFER, 0},
+        {CUMETAL_ARG_BYTES, sizeof(unsigned int)},
+    };
+    const cumetalKernel_t spin_kernel{
+        .metallib_path = metallib_path.c_str(),
+        .kernel_name = "spin_store",
+        .arg_count = 2,
+        .arg_info = kProbeArgInfo,
+    };
+    const cumetalKernel_t marker_kernel{
+        .metallib_path = metallib_path.c_str(),
+        .kernel_name = "marker_store",
+        .arg_count = 2,
+        .arg_info = kProbeArgInfo,
+    };
+    auto launch_spin = [&](void* output, cudaStream_t target) {
+        void* output_arg = output;
+        unsigned int iterations = kSpinIterations;
+        void* launch_args[] = {&output_arg, &iterations};
+        return cudaLaunchKernel(
+            &spin_kernel, dim3(1, 1, 1), dim3(1, 1, 1), launch_args, 0, target);
+    };
+    auto launch_marker = [&](void* output, unsigned int value, cudaStream_t target) {
+        void* output_arg = output;
+        void* launch_args[] = {&output_arg, &value};
+        return cudaLaunchKernel(
+            &marker_kernel, dim3(1, 1, 1), dim3(1, 1, 1), launch_args, 0, target);
+    };
+
+    // Blocking stream -> legacy stream, with no shared buffers between the commands.
+    if (launch_spin(spin_output_a, stream) != cudaSuccess ||
+        launch_marker(marker_output_a, 0xA1u, nullptr) != cudaSuccess ||
+        cudaStreamSynchronize(nullptr) != cudaSuccess ||
+        cudaStreamQuery(stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: legacy stream did not wait for prior blocking-stream work\n");
+        return 1;
+    }
+
+    // Legacy stream -> blocking stream, again using disjoint buffers.
+    if (launch_spin(spin_output_b, nullptr) != cudaSuccess ||
+        launch_marker(marker_output_b, 0xB2u, stream) != cudaSuccess ||
+        cudaStreamSynchronize(stream) != cudaSuccess ||
+        cudaStreamQuery(nullptr) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: blocking stream did not wait for prior legacy-stream work\n");
+        return 1;
+    }
+
+    cudaStream_t nonblocking_stream = nullptr;
+    if (cudaStreamCreateWithFlags(&nonblocking_stream, cudaStreamNonBlocking) != cudaSuccess ||
+        nonblocking_stream == nullptr) {
+        std::fprintf(stderr, "FAIL: cudaStreamCreateWithFlags(nonblocking) failed\n");
+        return 1;
+    }
+
+    // A legacy command must not wait for unrelated non-blocking-stream work.
+    if (launch_spin(spin_output_a, nonblocking_stream) != cudaSuccess ||
+        launch_marker(marker_output_a, 0xC3u, nullptr) != cudaSuccess ||
+        cudaStreamSynchronize(nullptr) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: nonblocking -> legacy probe launch failed\n");
+        return 1;
+    }
+    if (cudaStreamQuery(nonblocking_stream) != cudaErrorNotReady) {
+        std::fprintf(stderr, "FAIL: legacy stream incorrectly waited for nonblocking stream\n");
+        return 1;
+    }
+    if (cudaStreamSynchronize(nonblocking_stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: nonblocking stream cleanup sync failed\n");
+        return 1;
+    }
+
+    // Hold the legacy command behind unrelated blocking-stream work. A
+    // non-blocking marker submitted afterwards must bypass both commands.
+    if (launch_spin(spin_output_b, stream) != cudaSuccess ||
+        launch_marker(marker_output_b, 0xD4u, nullptr) != cudaSuccess ||
+        launch_marker(marker_output_a, 0xE5u, nonblocking_stream) != cudaSuccess ||
+        cudaStreamSynchronize(nonblocking_stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: legacy -> nonblocking probe launch failed\n");
+        return 1;
+    }
+    if (cudaStreamQuery(nullptr) != cudaErrorNotReady) {
+        std::fprintf(stderr, "FAIL: nonblocking stream incorrectly waited for legacy stream\n");
+        return 1;
+    }
+    if (cudaStreamSynchronize(nullptr) != cudaSuccess ||
+        cudaStreamDestroy(nonblocking_stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: ordering-probe cleanup failed\n");
+        return 1;
+    }
+
     if (cudaStreamDestroy(stream) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaStreamDestroy failed\n");
         return 1;
     }
 
     if (cudaFree(dev_a) != cudaSuccess || cudaFree(dev_b) != cudaSuccess ||
-        cudaFree(dev_tmp) != cudaSuccess || cudaFree(dev_out) != cudaSuccess) {
+        cudaFree(dev_tmp) != cudaSuccess || cudaFree(dev_out) != cudaSuccess ||
+        cudaFree(spin_output_a) != cudaSuccess || cudaFree(spin_output_b) != cudaSuccess ||
+        cudaFree(marker_output_a) != cudaSuccess || cudaFree(marker_output_b) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaFree failed\n");
         return 1;
     }
 
-    std::printf("PASS: runtime null stream waits for prior non-default stream work\n");
+    std::printf("PASS: runtime legacy stream orders blocking streams and excludes nonblocking streams\n");
     return 0;
 }

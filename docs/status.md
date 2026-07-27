@@ -142,6 +142,32 @@ Phase 5 items implemented:
 
 Post-Phase 5 work completed:
 
+- **Selectable runtime MSL math policy**: `CUMETAL_MSL_MATH_MODE=fast|safe` controls
+  runtime Metal source compilation, defaulting to the historical fast mode. Safe mode uses
+  `MTLMathModeSafe` on macOS 15+ with a macOS 14-compatible fallback. The normalized policy is
+  part of registration JIT cache identity and appears in `CUMETAL_TRACE_GPU=1` provenance;
+  invalid values warn once and use fast mode. An Apple-GPU functional test verifies numerical
+  correctness, distinct cache artifacts, and provenance for both modes.
+
+- **Bounded ELF64 fatbinary parsing**: CUDA registration and `cuModuleLoadData` now share
+  section-table-driven extraction for little-endian ELF64 `.nv_fatbin` and raw-PTX sections.
+  Header, table, name, payload, and nested fatbin ranges are checked against the 64 MiB image
+  ceiling; malformed and unsupported ELF images are refused. Functional tests launch the same
+  PTX through both APIs and both section encodings, with malformed-image negative coverage.
+
+- **Exact GPT-NeoX rotary embedding for covered GGML ABIs**: the concrete forward,
+  no-frequency-factor `rope_neox` float-to-float and float-to-half variants now rotate paired
+  lower/upper dimension halves with the full YaRN interpolation and fused set-rows indexing
+  contract. Other `rope_neox` template variants remain classified approximate and refused.
+  Unit tests pin the positive and negative mangled-name boundary, and a registration-path
+  Apple-GPU test compares both output types against a CPU numerical oracle.
+
+- **Correct legacy default-stream semantics**: runtime and Driver API stream flags are persisted
+  and queryable, while Metal command submissions implement bidirectional implicit ordering between
+  the legacy default stream and blocking user streams through `MTLSharedEvent` epochs. Non-blocking
+  and per-thread streams remain independent. Positive and negative tests use disjoint allocations
+  so conservative buffer-hazard fencing cannot mask a missing stream-order dependency.
+
 - **CTest-wide Metal toolchain discovery**: configure now discovers Apple's
   separately installed Metal toolchain with
   `xcodebuild -showComponent MetalToolchain -json`, verifies its identifier

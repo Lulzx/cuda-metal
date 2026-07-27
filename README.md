@@ -39,6 +39,11 @@ The program should print a numerical `PASS`. The trace should contain a
 `launch_success=true`. A correct number without GPU provenance is not proof of
 GPU execution.
 
+Runtime-compiled MSL preserves Metal's fast-math default. Set
+`CUMETAL_MSL_MATH_MODE=safe` to request safe Metal math for JIT-compiled source;
+GPU provenance reports the selected `math_mode`. Precompiled metallibs retain
+the policy used when they were built.
+
 Install it:
 
 ```bash

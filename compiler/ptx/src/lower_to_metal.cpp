@@ -34,6 +34,11 @@ bool entry_uses_supported_rope_norm(const std::string& entry_name) {
            kernel_name_contains(entry_name, "rope_normILb1ELb0EfDF16_Ev");
 }
 
+bool entry_uses_supported_rope_neox(const std::string& entry_name) {
+    return kernel_name_contains(entry_name, "rope_neoxILb1ELb0EffEv") ||
+           kernel_name_contains(entry_name, "rope_neoxILb1ELb0EfDF16_Ev");
+}
+
 bool entry_uses_supported_cpy_scalar(const std::string& entry_name) {
     if (!kernel_name_contains(entry_name, "_ZL10cpy_scalarI")) {
         return false;
@@ -56,7 +61,8 @@ bool entry_uses_approximate_stub(const std::string& entry_name) {
             !entry_uses_supported_convert_unary(entry_name)) ||
            (kernel_name_contains(entry_name, "rope_norm") &&
             !entry_uses_supported_rope_norm(entry_name)) ||
-           kernel_name_contains(entry_name, "rope_neox") ||
+           (kernel_name_contains(entry_name, "rope_neox") &&
+            !entry_uses_supported_rope_neox(entry_name)) ||
            kernel_name_contains(entry_name, "dequantize_q5_0") ||
            kernel_name_contains(entry_name, "dequantize_block_q5") ||
            kernel_name_contains(entry_name, "k_set_rows") ||
@@ -1223,7 +1229,88 @@ kernel_template = R"METAL(kernel void __KERNEL_NAME__(
             kernel_template.replace(pos, token.size(), dst_type);
             pos += dst_type.size();
         }
-    } else if (kernel_name_contains(entry_name, "rope_norm") || kernel_name_contains(entry_name, "rope_neox")) {
+    } else if (entry_uses_supported_rope_neox(entry_name)) {
+        // Exact forward, no-frequency-factor GPT-NeoX RoPE variants. Unlike
+        // rope_norm, GPT-NeoX pairs the lower and upper halves of n_dims.
+        kernel_template = R"METAL(kernel void __KERNEL_NAME__(
+    device const float* src [[buffer(0)]],
+    device __DST_TYPE__* dst [[buffer(1)]],
+    constant int& ne00 [[buffer(2)]],
+    constant int& ne01 [[buffer(3)]],
+    constant int& ne02 [[buffer(4)]],
+    constant int& s01 [[buffer(5)]],
+    constant int& s02 [[buffer(6)]],
+    constant int& s03 [[buffer(7)]],
+    constant int& s1 [[buffer(8)]],
+    constant int& s2 [[buffer(9)]],
+    constant int& s3 [[buffer(10)]],
+    constant int& n_dims [[buffer(11)]],
+    device const int* pos [[buffer(12)]],
+    constant float& freq_scale [[buffer(13)]],
+    constant float& ext_factor [[buffer(14)]],
+    constant float& attn_factor [[buffer(15)]],
+    constant packed_float2& corr_dims [[buffer(16)]],
+    constant float& theta_scale [[buffer(17)]],
+    device const float* freq_factors [[buffer(18)]],
+    device const long* row_indices [[buffer(19)]],
+    constant int& set_rows_stride [[buffer(20)]],
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint3 group_size [[threads_per_threadgroup]]
+) {
+    (void)freq_factors;
+    const int i0 = 2 * (int(group_size.y) * int(group.y) + int(tid.y));
+    if (i0 >= ne00) return;
+    const int row_dst = int(group_size.x) * int(group.x) + int(tid.x);
+    const int rows12 = ne01 * ne02;
+    const uint i3 = uint(row_dst / rows12);
+    const uint rem3 = uint(row_dst - int(i3) * rows12);
+    const uint i2 = rem3 / uint(ne01);
+    const uint i1 = rem3 - i2 * uint(ne01);
+    int idst = i0 / 2 + int(i1) * s1 + int(i2) * s2 + int(i3) * s3;
+    const int ix = i0 / 2 + int(i1) * s01 + int(i2) * s02 + int(i3) * s03;
+    if (set_rows_stride != 0) {
+        idst = int(i1) * s1 + i0 / 2 +
+               int(row_indices[i2]) * set_rows_stride;
+    }
+    if (i0 >= n_dims) {
+        dst[idst + i0 / 2] = __DST_TYPE__(src[ix + i0 / 2]);
+        dst[idst + i0 / 2 + 1] = __DST_TYPE__(src[ix + i0 / 2 + 1]);
+        return;
+    }
+
+    const float theta_extrap =
+        float(pos[i2]) * pow(theta_scale, float(i0) * 0.5f);
+    const float theta_interp = freq_scale * theta_extrap;
+    float theta = theta_interp;
+    float mscale = attn_factor;
+    if (ext_factor != 0.0f) {
+        const float y =
+            (float(i0 / 2) - corr_dims.x) /
+            max(0.001f, corr_dims.y - corr_dims.x);
+        const float ramp = 1.0f - clamp(y, 0.0f, 1.0f);
+        const float mix = ramp * ext_factor;
+        theta = theta_interp * (1.0f - mix) + theta_extrap * mix;
+        mscale *= 1.0f + 0.1f * log(1.0f / freq_scale);
+    }
+    const float cosine = cos(theta) * mscale;
+    const float sine = sin(theta) * mscale;
+    const float x0 = src[ix];
+    const float x1 = src[ix + n_dims / 2];
+    dst[idst] = __DST_TYPE__(x0 * cosine - x1 * sine);
+    dst[idst + n_dims / 2] = __DST_TYPE__(x0 * sine + x1 * cosine);
+}
+)METAL";
+        const std::string dst_type =
+            kernel_name_contains(entry_name, "fDF16_Ev") ? "half" : "float";
+        constexpr std::string_view token = "__DST_TYPE__";
+        std::size_t pos = 0;
+        while ((pos = kernel_template.find(token, pos)) != std::string::npos) {
+            kernel_template.replace(pos, token.size(), dst_type);
+            pos += dst_type.size();
+        }
+    } else if (kernel_name_contains(entry_name, "rope_norm") ||
+               kernel_name_contains(entry_name, "rope_neox")) {
         // GGML rope variants hit during model decode with NGL>0. Provide a passthru to prevent
         // "ROPE failed" abort on missing kernel when offloading layers. (A full impl would apply
         // rotary position embeddings using pos, freqs etc; passthru allows run to complete and

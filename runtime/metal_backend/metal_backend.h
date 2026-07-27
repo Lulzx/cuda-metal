@@ -58,7 +58,10 @@ cudaError_t query_device_properties(DeviceProperties* out_properties, std::strin
 cudaError_t allocate_buffer(std::size_t size,
                             std::shared_ptr<Buffer>* out_buffer,
                             std::string* error_message);
-cudaError_t create_stream(std::shared_ptr<Stream>* out_stream, std::string* error_message);
+cudaError_t create_stream(std::shared_ptr<Stream>* out_stream,
+                          std::string* error_message,
+                          bool participates_in_legacy_sync = true);
+std::shared_ptr<Stream> legacy_default_stream();
 cudaError_t destroy_stream(const std::shared_ptr<Stream>& stream, std::string* error_message);
 cudaError_t stream_synchronize(const std::shared_ptr<Stream>& stream, std::string* error_message);
 cudaError_t stream_tail_ticket(const std::shared_ptr<Stream>& stream,

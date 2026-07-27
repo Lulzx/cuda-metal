@@ -177,7 +177,11 @@ struct RuntimeState {
     unsigned int device_flags = cudaDeviceScheduleAuto;
     cumetal::rt::AllocationTable allocations;
     std::mutex stream_mutex;
-    std::unordered_map<cudaStream_t, std::shared_ptr<cumetal::metal_backend::Stream>> streams;
+    struct StreamRecord {
+        std::shared_ptr<cumetal::metal_backend::Stream> backend;
+        unsigned int flags = cudaStreamDefault;
+    };
+    std::unordered_map<cudaStream_t, StreamRecord> streams;
 };
 
 RuntimeState& runtime_state() {
@@ -388,7 +392,7 @@ bool resolve_stream_handle(cudaStream_t stream,
         return false;
     }
 
-    *out_stream = found->second;
+    *out_stream = found->second.backend;
     return true;
 }
 
@@ -398,6 +402,24 @@ bool is_legacy_stream_handle(cudaStream_t stream) {
 
 bool is_per_thread_stream_handle(cudaStream_t stream) {
     return stream == cudaStreamPerThread;
+}
+
+bool resolve_stream_flags(cudaStream_t stream, unsigned int* out_flags) {
+    if (out_flags == nullptr) {
+        return false;
+    }
+    if (is_legacy_stream_handle(stream) || is_per_thread_stream_handle(stream)) {
+        *out_flags = cudaStreamDefault;
+        return true;
+    }
+    RuntimeState& state = runtime_state();
+    std::lock_guard<std::mutex> lock(state.stream_mutex);
+    const auto found = state.streams.find(stream);
+    if (found == state.streams.end()) {
+        return false;
+    }
+    *out_flags = found->second.flags;
+    return true;
 }
 
 cudaError_t ensure_per_thread_stream(std::shared_ptr<cumetal::metal_backend::Stream>* out_stream) {
@@ -411,7 +433,8 @@ cudaError_t ensure_per_thread_stream(std::shared_ptr<cumetal::metal_backend::Str
 
     std::string error;
     std::shared_ptr<cumetal::metal_backend::Stream> created;
-    const cudaError_t status = cumetal::metal_backend::create_stream(&created, &error);
+    const cudaError_t status =
+        cumetal::metal_backend::create_stream(&created, &error, false);
     if (status != cudaSuccess || created == nullptr) {
         return status == cudaSuccess ? cudaErrorUnknown : status;
     }
@@ -432,6 +455,10 @@ cudaError_t resolve_runtime_stream(cudaStream_t stream,
     }
 
     if (is_legacy_stream_handle(stream)) {
+        *out_stream = cumetal::metal_backend::legacy_default_stream();
+        if (*out_stream == nullptr) {
+            return cudaErrorInitializationError;
+        }
         if (is_legacy_stream != nullptr) {
             *is_legacy_stream = true;
         }
@@ -461,7 +488,7 @@ bool erase_stream_handle(cudaStream_t stream,
         return false;
     }
 
-    *out_stream = std::move(found->second);
+    *out_stream = std::move(found->second.backend);
     state.streams.erase(found);
     return true;
 }
@@ -698,11 +725,6 @@ cudaError_t synchronize_stream_for_host_op(cudaStream_t stream,
         return resolve_status;
     }
 
-    if (legacy_stream) {
-        std::string error;
-        return cumetal::metal_backend::synchronize(&error);
-    }
-
     std::string error;
     const cudaError_t status = cumetal::metal_backend::stream_synchronize(backend_stream, &error);
     if (status != cudaSuccess) {
@@ -887,7 +909,8 @@ void note_llmc_emulation_hit(const std::string& kernel_name, std::uint32_t arg_c
 cudaError_t synchronize_for_emulated_kernel(
     bool legacy_stream,
     const std::shared_ptr<cumetal::metal_backend::Stream>& backend_stream) {
-    if (legacy_stream || backend_stream == nullptr) {
+    (void)legacy_stream;
+    if (backend_stream == nullptr) {
         return cudaSuccess;
     }
 
@@ -2819,8 +2842,8 @@ cudaError_t cudaDeviceReset(void) {
     {
         std::lock_guard<std::mutex> lock(state.stream_mutex);
         streams.reserve(state.streams.size());
-        for (auto& [handle, backend_stream] : state.streams) {
-            streams.emplace_back(handle, std::move(backend_stream));
+        for (auto& [handle, record] : state.streams) {
+            streams.emplace_back(handle, std::move(record.backend));
         }
         state.streams.clear();
     }
@@ -2878,7 +2901,8 @@ cudaError_t cudaStreamCreateWithFlags(cudaStream_t* stream, unsigned int flags) 
 
     std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
     std::string error;
-    const cudaError_t status = cumetal::metal_backend::create_stream(&backend_stream, &error);
+    const cudaError_t status = cumetal::metal_backend::create_stream(
+        &backend_stream, &error, flags == cudaStreamDefault);
     if (status != cudaSuccess || backend_stream == nullptr) {
         return fail(status == cudaSuccess ? cudaErrorUnknown : status);
     }
@@ -2891,10 +2915,25 @@ cudaError_t cudaStreamCreateWithFlags(cudaStream_t* stream, unsigned int flags) 
     RuntimeState& state = runtime_state();
     {
         std::lock_guard<std::mutex> lock(state.stream_mutex);
-        state.streams.emplace(handle, std::move(backend_stream));
+        state.streams.emplace(
+            handle, RuntimeState::StreamRecord{std::move(backend_stream), flags});
     }
 
     *stream = handle;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaStreamGetFlags(cudaStream_t stream, unsigned int* flags) {
+    if (flags == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+    if (!resolve_stream_flags(stream, flags)) {
+        return fail(cudaErrorInvalidValue);
+    }
     return fail(cudaSuccess);
 }
 
@@ -2920,10 +2959,6 @@ cudaError_t cudaStreamDestroy(cudaStream_t stream) {
 }
 
 cudaError_t cudaStreamSynchronize(cudaStream_t stream) {
-    if (is_legacy_stream_handle(stream)) {
-        return cudaDeviceSynchronize();
-    }
-
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {
         return fail(init_status);
@@ -2944,43 +2979,6 @@ cudaError_t cudaStreamQuery(cudaStream_t stream) {
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {
         return fail(init_status);
-    }
-
-    if (is_legacy_stream_handle(stream)) {
-        std::vector<std::shared_ptr<cumetal::metal_backend::Stream>> streams;
-        {
-            RuntimeState& state = runtime_state();
-            std::lock_guard<std::mutex> lock(state.stream_mutex);
-            streams.reserve(state.streams.size());
-            for (const auto& it : state.streams) {
-                streams.push_back(it.second);
-            }
-        }
-        if (tls_per_thread_stream != nullptr) {
-            streams.push_back(tls_per_thread_stream);
-        }
-
-        for (const auto& backend_stream : streams) {
-            std::uint64_t tail_ticket = 0;
-            bool complete = true;
-            std::string error;
-            const cudaError_t tail_status =
-                cumetal::metal_backend::stream_tail_ticket(backend_stream, &tail_ticket, &error);
-            if (tail_status != cudaSuccess) {
-                return fail(tail_status);
-            }
-            const cudaError_t query_status =
-                cumetal::metal_backend::stream_query_ticket(backend_stream, tail_ticket,
-                                                            &complete, &error);
-            if (query_status != cudaSuccess) {
-                return fail(query_status);
-            }
-            if (!complete) {
-                return fail(cudaErrorNotReady);
-            }
-        }
-
-        return fail(cudaSuccess);
     }
 
     std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
@@ -3261,24 +3259,19 @@ cudaError_t cudaStreamAddCallback(cudaStream_t stream,
     }
 
     std::uint64_t tail_ticket = 0;
-    if (!legacy_stream) {
-        std::string error;
-        const cudaError_t ticket_status =
-            cumetal::metal_backend::stream_tail_ticket(backend_stream, &tail_ticket, &error);
-        if (ticket_status != cudaSuccess) {
-            return fail(ticket_status);
-        }
+    std::string ticket_error;
+    const cudaError_t ticket_status =
+        cumetal::metal_backend::stream_tail_ticket(
+            backend_stream, &tail_ticket, &ticket_error);
+    if (ticket_status != cudaSuccess) {
+        return fail(ticket_status);
     }
 
     std::thread([stream, callback, user_data, backend_stream, tail_ticket, legacy_stream]() mutable {
         std::string error;
-        cudaError_t callback_status = cudaSuccess;
-        if (legacy_stream) {
-            callback_status = cumetal::metal_backend::synchronize(&error);
-        } else {
-            callback_status =
-                cumetal::metal_backend::stream_wait_ticket(backend_stream, tail_ticket, &error);
-        }
+        (void)legacy_stream;
+        const cudaError_t callback_status =
+            cumetal::metal_backend::stream_wait_ticket(backend_stream, tail_ticket, &error);
         callback(stream, callback_status, user_data);
     }).detach();
 
@@ -3360,27 +3353,20 @@ cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
 
     std::uint64_t tail_ticket = 0;
     bool complete = true;
-    if (!legacy_stream) {
-        std::string error;
-        const cudaError_t tail_status =
-            cumetal::metal_backend::stream_tail_ticket(backend_stream, &tail_ticket, &error);
-        if (tail_status != cudaSuccess) {
-            return fail(tail_status);
-        }
+    (void)legacy_stream;
+    std::string error;
+    const cudaError_t tail_status =
+        cumetal::metal_backend::stream_tail_ticket(backend_stream, &tail_ticket, &error);
+    if (tail_status != cudaSuccess) {
+        return fail(tail_status);
+    }
 
-        if (tail_ticket > 0) {
-            const cudaError_t query_status =
-                cumetal::metal_backend::stream_query_ticket(backend_stream, tail_ticket,
-                                                            &complete, &error);
-            if (query_status != cudaSuccess) {
-                return fail(query_status);
-            }
-        }
-    } else {
-        std::string error;
-        const cudaError_t sync_status = cumetal::metal_backend::synchronize(&error);
-        if (sync_status != cudaSuccess) {
-            return fail(sync_status);
+    if (tail_ticket > 0) {
+        const cudaError_t query_status =
+            cumetal::metal_backend::stream_query_ticket(backend_stream, tail_ticket,
+                                                        &complete, &error);
+        if (query_status != cudaSuccess) {
+            return fail(query_status);
         }
     }
 
@@ -3593,14 +3579,6 @@ cudaError_t cudaLaunchKernel(const void* func,
     if (resolve_status != cudaSuccess) {
         return launch_fail(resolve_status, "resolve_runtime_stream");
     }
-    if (legacy_stream) {
-        std::string error;
-        const cudaError_t sync_status = cumetal::metal_backend::synchronize(&error);
-        if (sync_status != cudaSuccess) {
-            return launch_fail(sync_status, "legacy-stream pre-sync");
-        }
-    }
-
     if (use_registered_kernel && llmc_emulation_enabled() &&
         !llmc_emulation_skips_kernel(registered_kernel.kernel_name)) {
         bool emulated = false;
@@ -3977,10 +3955,7 @@ cudaError_t cudaLaunchKernel(const void* func,
         kernel_name_contains(registered_kernel.kernel_name, "rms_norm_f32")) {
         std::string sync_error;
         const cudaError_t sync_status =
-            legacy_stream
-                ? cumetal::metal_backend::synchronize(&sync_error)
-                : cumetal::metal_backend::stream_synchronize(backend_stream,
-                                                              &sync_error);
+            cumetal::metal_backend::stream_synchronize(backend_stream, &sync_error);
         if (sync_status != cudaSuccess) {
             return launch_fail(sync_status, "GGML RMS validation sync");
         }

@@ -371,6 +371,10 @@ add_executable(cumetal_runtime_fp64_ops_test
     runtime_fp64_ops_test.cpp
 )
 
+add_executable(cumetal_runtime_rope_neox_test
+    runtime_rope_neox_test.cpp
+)
+
 add_executable(cumetal_runtime_cooperative_launch_test
     runtime_cooperative_launch_test.cpp
 )
@@ -959,6 +963,11 @@ target_link_libraries(cumetal_runtime_grid_3d_test
 )
 
 target_link_libraries(cumetal_runtime_fp64_ops_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_rope_neox_test
     PRIVATE
         cumetal_runtime
 )
@@ -1775,6 +1784,13 @@ target_compile_options(cumetal_runtime_fp64_ops_test
         -Wpedantic
 )
 
+target_compile_options(cumetal_runtime_rope_neox_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
 target_compile_options(cumetal_runtime_cooperative_launch_test
     PRIVATE
         -Wall
@@ -2023,10 +2039,10 @@ set_tests_properties(functional_metal_backend_cross_queue_fence PROPERTIES SKIP_
 add_test(
     NAME functional_runtime_null_stream_sync
     COMMAND bash
-            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
-            ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_runtime_null_stream_sync_test>
-            ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
+            ${CMAKE_CURRENT_SOURCE_DIR}/reference/stream_order.metal
+            ${CMAKE_CURRENT_BINARY_DIR}/stream_order.metallib
 )
 
 set_tests_properties(functional_runtime_null_stream_sync PROPERTIES SKIP_RETURN_CODE 77)
@@ -2255,10 +2271,10 @@ set_tests_properties(functional_driver_vector_add PROPERTIES SKIP_RETURN_CODE 77
 add_test(
     NAME functional_driver_null_stream_sync
     COMMAND bash
-            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
-            ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh
             $<TARGET_FILE:cumetal_driver_null_stream_sync_test>
-            ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
+            ${CMAKE_CURRENT_SOURCE_DIR}/reference/stream_order.metal
+            ${CMAKE_CURRENT_BINARY_DIR}/stream_order.metallib
 )
 
 set_tests_properties(functional_driver_null_stream_sync PROPERTIES SKIP_RETURN_CODE 77)
@@ -2608,6 +2624,19 @@ add_test(
 set_tests_properties(functional_runtime_fp64_ops PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
+    NAME functional_runtime_rope_neox
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_driver_module_load_data_ptx.sh
+            $<TARGET_FILE:cumetal_runtime_rope_neox_test>
+            ${CMAKE_CURRENT_SOURCE_DIR}/reference/rope_neox.ptx
+)
+
+set_tests_properties(functional_runtime_rope_neox PROPERTIES
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=1"
+)
+
+add_test(
     NAME functional_runtime_ptx_lowering_regression
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_ptx_lowering_regression.sh
@@ -2672,6 +2701,16 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
 
     set_tests_properties(functional_runtime_registration_jit_cache PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_runtime_msl_math_mode
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_msl_math_mode_test.sh
+                $<TARGET_FILE:cumetal_runtime_registration_fatbin_ptx_test>
+                ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx
+    )
+
+    set_tests_properties(functional_runtime_msl_math_mode PROPERTIES SKIP_RETURN_CODE 77)
 
     add_test(
         NAME functional_runtime_legacy_launch_registration

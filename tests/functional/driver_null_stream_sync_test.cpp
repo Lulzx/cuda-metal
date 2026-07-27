@@ -11,6 +11,7 @@ namespace {
 
 constexpr std::size_t kElementCount = 1u << 18;
 constexpr std::size_t kThreadsPerBlock = 256;
+constexpr unsigned int kSpinIterations = 100000000u;
 
 bool nearly_equal(float a, float b) {
     return std::fabs(a - b) < 1e-5f;
@@ -58,6 +59,13 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "FAIL: cuModuleGetFunction failed\n");
         return 1;
     }
+    CUfunction spin_store = nullptr;
+    CUfunction marker_store = nullptr;
+    if (cuModuleGetFunction(&spin_store, module, "spin_store") != CUDA_SUCCESS ||
+        cuModuleGetFunction(&marker_store, module, "marker_store") != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuModuleGetFunction ordering probes failed\n");
+        return 1;
+    }
 
     std::vector<float> host_a(kElementCount);
     std::vector<float> host_b(kElementCount);
@@ -85,7 +93,7 @@ int main(int argc, char** argv) {
     }
 
     CUstream stream = nullptr;
-    if (cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS || stream == nullptr) {
+    if (cuStreamCreate(&stream, CU_STREAM_DEFAULT) != CUDA_SUCCESS || stream == nullptr) {
         std::fprintf(stderr, "FAIL: cuStreamCreate failed\n");
         return 1;
     }
@@ -155,12 +163,89 @@ int main(int argc, char** argv) {
         }
     }
 
+    CUdeviceptr spin_output_a = 0;
+    CUdeviceptr spin_output_b = 0;
+    CUdeviceptr marker_output_a = 0;
+    CUdeviceptr marker_output_b = 0;
+    if (cuMemAlloc(&spin_output_a, sizeof(unsigned int)) != CUDA_SUCCESS ||
+        cuMemAlloc(&spin_output_b, sizeof(unsigned int)) != CUDA_SUCCESS ||
+        cuMemAlloc(&marker_output_a, sizeof(unsigned int)) != CUDA_SUCCESS ||
+        cuMemAlloc(&marker_output_b, sizeof(unsigned int)) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: ordering-probe cuMemAlloc failed\n");
+        return 1;
+    }
+    auto launch_spin = [&](CUdeviceptr output, CUstream target) {
+        unsigned int iterations = kSpinIterations;
+        void* params[] = {&output, &iterations, nullptr};
+        return cuLaunchKernel(
+            spin_store, 1, 1, 1, 1, 1, 1, 0, target, params, nullptr);
+    };
+    auto launch_marker = [&](CUdeviceptr output, unsigned int value, CUstream target) {
+        void* params[] = {&output, &value, nullptr};
+        return cuLaunchKernel(
+            marker_store, 1, 1, 1, 1, 1, 1, 0, target, params, nullptr);
+    };
+
+    if (launch_spin(spin_output_a, stream) != CUDA_SUCCESS ||
+        launch_marker(marker_output_a, 0xA1u, nullptr) != CUDA_SUCCESS ||
+        cuStreamSynchronize(nullptr) != CUDA_SUCCESS ||
+        cuStreamQuery(stream) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: legacy stream did not wait for prior blocking-stream work\n");
+        return 1;
+    }
+    if (launch_spin(spin_output_b, nullptr) != CUDA_SUCCESS ||
+        launch_marker(marker_output_b, 0xB2u, stream) != CUDA_SUCCESS ||
+        cuStreamSynchronize(stream) != CUDA_SUCCESS ||
+        cuStreamQuery(nullptr) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: blocking stream did not wait for prior legacy-stream work\n");
+        return 1;
+    }
+
+    CUstream nonblocking_stream = nullptr;
+    if (cuStreamCreate(&nonblocking_stream, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS ||
+        nonblocking_stream == nullptr) {
+        std::fprintf(stderr, "FAIL: cuStreamCreate(nonblocking) failed\n");
+        return 1;
+    }
+    if (launch_spin(spin_output_a, nonblocking_stream) != CUDA_SUCCESS ||
+        launch_marker(marker_output_a, 0xC3u, nullptr) != CUDA_SUCCESS ||
+        cuStreamSynchronize(nullptr) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: nonblocking -> legacy probe launch failed\n");
+        return 1;
+    }
+    if (cuStreamQuery(nonblocking_stream) != CUDA_ERROR_NOT_READY) {
+        std::fprintf(stderr, "FAIL: legacy stream incorrectly waited for nonblocking stream\n");
+        return 1;
+    }
+    if (cuStreamSynchronize(nonblocking_stream) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: nonblocking stream cleanup sync failed\n");
+        return 1;
+    }
+    if (launch_spin(spin_output_b, stream) != CUDA_SUCCESS ||
+        launch_marker(marker_output_b, 0xD4u, nullptr) != CUDA_SUCCESS ||
+        launch_marker(marker_output_a, 0xE5u, nonblocking_stream) != CUDA_SUCCESS ||
+        cuStreamSynchronize(nonblocking_stream) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: legacy -> nonblocking probe launch failed\n");
+        return 1;
+    }
+    if (cuStreamQuery(nullptr) != CUDA_ERROR_NOT_READY) {
+        std::fprintf(stderr, "FAIL: nonblocking stream incorrectly waited for legacy stream\n");
+        return 1;
+    }
+    if (cuStreamSynchronize(nullptr) != CUDA_SUCCESS ||
+        cuStreamDestroy(nonblocking_stream) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: ordering-probe stream cleanup failed\n");
+        return 1;
+    }
+
     if (cuStreamDestroy(stream) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: cuStreamDestroy failed\n");
         return 1;
     }
     if (cuMemFree(dev_a) != CUDA_SUCCESS || cuMemFree(dev_b) != CUDA_SUCCESS ||
-        cuMemFree(dev_tmp) != CUDA_SUCCESS || cuMemFree(dev_out) != CUDA_SUCCESS) {
+        cuMemFree(dev_tmp) != CUDA_SUCCESS || cuMemFree(dev_out) != CUDA_SUCCESS ||
+        cuMemFree(spin_output_a) != CUDA_SUCCESS || cuMemFree(spin_output_b) != CUDA_SUCCESS ||
+        cuMemFree(marker_output_a) != CUDA_SUCCESS || cuMemFree(marker_output_b) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: cuMemFree failed\n");
         return 1;
     }
@@ -173,6 +258,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("PASS: driver null stream waits for prior non-default stream work\n");
+    std::printf("PASS: driver legacy stream orders blocking streams and excludes nonblocking streams\n");
     return 0;
 }

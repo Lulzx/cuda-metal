@@ -26,6 +26,12 @@ int main() {
         std::fprintf(stderr, "FAIL: cuStreamCreate(default) failed\n");
         return 1;
     }
+    unsigned int observed_flags = ~0u;
+    if (cuStreamGetFlags(stream, &observed_flags) != CUDA_SUCCESS ||
+        observed_flags != CU_STREAM_DEFAULT) {
+        std::fprintf(stderr, "FAIL: default stream flags were not preserved\n");
+        return 1;
+    }
     if (cuStreamDestroy(stream) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: cuStreamDestroy(default stream) failed\n");
         return 1;
@@ -34,6 +40,12 @@ int main() {
     stream = nullptr;
     if (cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS || stream == nullptr) {
         std::fprintf(stderr, "FAIL: cuStreamCreate(nonblocking) failed\n");
+        return 1;
+    }
+    observed_flags = ~0u;
+    if (cuStreamGetFlags(stream, &observed_flags) != CUDA_SUCCESS ||
+        observed_flags != CU_STREAM_NON_BLOCKING) {
+        std::fprintf(stderr, "FAIL: nonblocking stream flags were not preserved\n");
         return 1;
     }
     if (cuStreamDestroy(stream) != CUDA_SUCCESS) {

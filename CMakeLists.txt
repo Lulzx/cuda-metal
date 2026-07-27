@@ -219,6 +219,8 @@ endif()
 
 add_library(cumetal_runtime SHARED
     runtime/cache/module_cache.cpp
+    runtime/common/fatbin_elf.cpp
+    runtime/common/metal_math_mode.cpp
     runtime/driver/cuda_driver.cpp
     runtime/error/library_conflict.cpp
     runtime/registration/native_registration.cpp

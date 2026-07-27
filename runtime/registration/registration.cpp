@@ -6,6 +6,8 @@
 #include "cumetal/ptx/lower_to_metal.h"
 #include "cumetal/ptx/lower_to_llvm.h"
 #include "cumetal/ptx/parser.h"
+#include "fatbin_elf.h"
+#include "metal_math_mode.h"
 
 #include <dlfcn.h>
 #include <mach-o/loader.h>
@@ -123,6 +125,9 @@ std::string registration_lowering_policy() {
     policy += cumetal::diag_env_truthy("CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS")
                   ? "enabled"
                   : "disabled";
+    policy += ";msl_math=";
+    policy += cumetal::metal_math_mode_name(
+        cumetal::current_metal_math_mode());
     policy += ";ir_schema=1;metal_legalization=1;msl=3.1";
     return policy;
 }
@@ -274,6 +279,7 @@ struct FatbinBlobHeader {
 struct ParsedFatbinImage {
     std::string metallib_path;
     std::string ptx_source;
+    bool allow_environment_fallback = true;
 };
 
 struct RegistrationModule {
@@ -439,48 +445,14 @@ bool parse_fatbin_blob_ptx(const void* fat_cubin, std::string* out_ptx) {
     return extract_ptx_from_blob(blob + header_size, fat_size, out_ptx);
 }
 
-// ELF-embedded fatbinary: NVCC places PTX inside ELF objects within .nv_fatbin sections.
-// The ELF magic is 0x7f 'E' 'L' 'F'. We scan the entire image for embedded fatbin blobs
-// or raw PTX strings that live after the ELF headers.
-bool parse_elf_embedded_ptx(const void* fat_cubin, std::size_t scan_limit, std::string* out_ptx) {
-    if (fat_cubin == nullptr || out_ptx == nullptr || scan_limit < 16) {
-        return false;
-    }
-    const auto* raw = static_cast<const std::uint8_t*>(fat_cubin);
-
-    // Check for ELF magic (0x7f 'E' 'L' 'F')
-    if (raw[0] != 0x7f || raw[1] != 'E' || raw[2] != 'L' || raw[3] != 'F') {
-        return false;
-    }
-
-    REG_DEBUG("parse_elf_embedded_ptx: ELF magic detected, scanning %zu bytes", scan_limit);
-
-    // Scan the ELF for embedded fatbin blobs or PTX markers
-    for (std::size_t i = 4; i + 8 < scan_limit; ++i) {
-        // Look for fatbin blob magic within the ELF
-        std::uint32_t word = 0;
-        std::memcpy(&word, raw + i, sizeof(word));
-        if (word == kFatbinBlobMagic) {
-            if (parse_fatbin_blob_ptx(raw + i, out_ptx)) {
-                REG_DEBUG("parse_elf_embedded_ptx: found fatbin blob at offset %zu", i);
-                return true;
-            }
-        }
-        // Look for raw PTX (.version marker) within ELF
-        if (raw[i] == '.' && i + 8 < scan_limit &&
-            std::memcmp(raw + i, ".version", 8) == 0) {
-            if (extract_ptx_from_blob(raw + i, scan_limit - i, out_ptx)) {
-                REG_DEBUG("parse_elf_embedded_ptx: found PTX at offset %zu", i);
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool parse_fatbin_wrapper_ptx(const void* fat_cubin, std::string* out_ptx) {
+bool parse_fatbin_wrapper_ptx(const void* fat_cubin,
+                              std::string* out_ptx,
+                              bool* recognized_invalid) {
     if (fat_cubin == nullptr || out_ptx == nullptr) {
         return false;
+    }
+    if (recognized_invalid != nullptr) {
+        *recognized_invalid = false;
     }
 
     // Some fatbin wrappers prepend private fields before the canonical wrapper.
@@ -507,6 +479,17 @@ bool parse_fatbin_wrapper_ptx(const void* fat_cubin, std::string* out_ptx) {
         if (parse_fatbin_blob_ptx(data, out_ptx)) {
             return true;
         }
+        const cumetal::fatbin::ElfPtxStatus elf_status =
+            cumetal::fatbin::extract_elf64_ptx(
+                data, kMaxFatbinImageBytes, out_ptx);
+        if (elf_status == cumetal::fatbin::ElfPtxStatus::kFound) {
+            return true;
+        }
+        if (elf_status != cumetal::fatbin::ElfPtxStatus::kNotElf &&
+            recognized_invalid != nullptr) {
+            *recognized_invalid = true;
+            return false;
+        }
     }
     return false;
 }
@@ -528,9 +511,16 @@ ParsedFatbinImage parse_fatbin_image(const void* fat_cubin) {
         return parsed;
     }
 
-    if (parse_fatbin_wrapper_ptx(fat_cubin, &parsed.ptx_source)) {
+    bool wrapper_recognized_invalid = false;
+    if (parse_fatbin_wrapper_ptx(
+            fat_cubin, &parsed.ptx_source, &wrapper_recognized_invalid)) {
         REG_DEBUG("parse_fatbin_image: fatbin wrapper format, ptx_size=%zu",
                   parsed.ptx_source.size());
+        return parsed;
+    }
+    if (wrapper_recognized_invalid) {
+        parsed.allow_environment_fallback = false;
+        REG_DEBUG("%s", "parse_fatbin_image: malformed/unsupported ELF in fatbin wrapper");
         return parsed;
     }
     if (parse_fatbin_blob_ptx(fat_cubin, &parsed.ptx_source)) {
@@ -543,10 +533,19 @@ ParsedFatbinImage parse_fatbin_image(const void* fat_cubin) {
                   parsed.ptx_source.size());
         return parsed;
     }
-    // NVCC-generated ELF fatbinaries may embed PTX inside an ELF container.
-    if (parse_elf_embedded_ptx(fat_cubin, 1024 * 1024, &parsed.ptx_source)) {
+    // NVCC-generated ELF objects carry PTX in named sections. Parse only the
+    // ELF64 section-table ranges instead of scanning an arbitrary memory window.
+    const cumetal::fatbin::ElfPtxStatus elf_status =
+        cumetal::fatbin::extract_elf64_ptx(
+            fat_cubin, kMaxFatbinImageBytes, &parsed.ptx_source);
+    if (elf_status == cumetal::fatbin::ElfPtxStatus::kFound) {
         REG_DEBUG("parse_fatbin_image: ELF-embedded PTX, ptx_size=%zu",
                   parsed.ptx_source.size());
+        return parsed;
+    }
+    if (elf_status != cumetal::fatbin::ElfPtxStatus::kNotElf) {
+        parsed.allow_environment_fallback = false;
+        REG_DEBUG("%s", "parse_fatbin_image: malformed/unsupported ELF refused");
         return parsed;
     }
 
@@ -1359,7 +1358,8 @@ void** __cudaRegisterFatBinary(const void* fat_cubin) {
     module->ptx_source =
         std::make_shared<const std::string>(std::move(parsed.ptx_source));
 
-    if (module->metallib_path.empty() && module->ptx_source->empty()) {
+    if (parsed.allow_environment_fallback && module->metallib_path.empty() &&
+        module->ptx_source->empty()) {
         module->metallib_path = cumetal::registration::fallback_metallib_path_from_env();
     }
 

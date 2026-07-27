@@ -1,4 +1,5 @@
 #include "cuda.h"
+#include "elf_fatbin_fixture.h"
 
 #include <cmath>
 #include <cstddef>
@@ -195,6 +196,12 @@ int main(int argc, char** argv) {
     header.fat_size = ptx_file_bytes.size();
     std::memcpy(fatbin_blob.data(), &header, sizeof(header));
     std::memcpy(fatbin_blob.data() + sizeof(header), ptx_file_bytes.data(), ptx_file_bytes.size());
+    const std::vector<std::uint8_t> elf_fatbin =
+        cumetal::test::make_elf64_image(".nv_fatbin", fatbin_blob);
+    const std::vector<std::uint8_t> raw_ptx_payload(
+        ptx_file_bytes.begin(), ptx_file_bytes.end());
+    const std::vector<std::uint8_t> elf_raw_ptx =
+        cumetal::test::make_elf64_image(".ptx", raw_ptx_payload);
 
     FatbinBlobHeader padded_header{};
     padded_header.header_size = 64;
@@ -251,6 +258,32 @@ int main(int argc, char** argv) {
 
     if (cuModuleUnload(module) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: cuModuleUnload after fatbin blob load failed\n");
+        return 1;
+    }
+
+    if (cuModuleLoadData(&module, elf_fatbin.data()) != CUDA_SUCCESS ||
+        module == nullptr) {
+        std::fprintf(stderr, "FAIL: cuModuleLoadData(ELF .nv_fatbin) failed\n");
+        return 1;
+    }
+    if (!run_vector_add(module)) {
+        return 1;
+    }
+    if (cuModuleUnload(module) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuModuleUnload after ELF .nv_fatbin load failed\n");
+        return 1;
+    }
+
+    if (cuModuleLoadData(&module, elf_raw_ptx.data()) != CUDA_SUCCESS ||
+        module == nullptr) {
+        std::fprintf(stderr, "FAIL: cuModuleLoadData(ELF raw PTX section) failed\n");
+        return 1;
+    }
+    if (!run_vector_add(module)) {
+        return 1;
+    }
+    if (cuModuleUnload(module) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuModuleUnload after ELF raw PTX load failed\n");
         return 1;
     }
 
@@ -317,11 +350,40 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    std::vector<std::uint8_t> malformed_elf = elf_fatbin;
+    cumetal::test::write_value<std::uint64_t>(
+        &malformed_elf, 40, 64ull * 1024ull * 1024ull - 32ull);
+    module = nullptr;
+    if (cuModuleLoadData(&module, malformed_elf.data()) !=
+        CUDA_ERROR_INVALID_IMAGE) {
+        std::fprintf(stderr, "FAIL: out-of-range ELF section table should be rejected\n");
+        return 1;
+    }
+
+    std::vector<std::uint8_t> unsupported_elf = elf_fatbin;
+    unsupported_elf[4] = 1;  // ELFCLASS32
+    module = nullptr;
+    if (cuModuleLoadData(&module, unsupported_elf.data()) !=
+        CUDA_ERROR_INVALID_IMAGE) {
+        std::fprintf(stderr, "FAIL: unsupported ELF class should be rejected\n");
+        return 1;
+    }
+
+    std::vector<std::uint8_t> malformed_nested_fatbin = elf_fatbin;
+    cumetal::test::write_value<std::uint64_t>(
+        &malformed_nested_fatbin, 64 + 8, ~std::uint64_t{0});
+    module = nullptr;
+    if (cuModuleLoadData(&module, malformed_nested_fatbin.data()) !=
+        CUDA_ERROR_INVALID_IMAGE) {
+        std::fprintf(stderr, "FAIL: out-of-range nested fatbin should be rejected\n");
+        return 1;
+    }
+
     if (cuCtxDestroy(context) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: cuCtxDestroy failed\n");
         return 1;
     }
 
-    std::printf("PASS: cuModuleLoadData supports PTX text and fatbin PTX variants (wrapper/blob/direct)\n");
+    std::printf("PASS: cuModuleLoadData supports PTX text, fatbin, and bounded ELF64 variants\n");
     return 0;
 }
