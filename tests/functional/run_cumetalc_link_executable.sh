@@ -42,12 +42,14 @@ mkdir -p "${PATH_WITH_SPACES}"
 PATH="${PATH_WITH_SPACES}:${PATH}" \
   "${CUMETALC}" "${SOURCE_CU}" -o "${OUT_BIN}" >"${BUILD_LOG}" 2>&1 || BUILD_STATUS=$?
 
-# Homebrew LLVM emits a benign "'+ptxNN' is not a recognized feature" line on toolchains new
-# enough not to need the flag. Filter it from the printed log only, never from the exit status.
-grep -v -E "is not a recognized feature for this target" "${BUILD_LOG}" || true
+cat "${BUILD_LOG}"
 
 if [[ ${BUILD_STATUS} -ne 0 ]]; then
     echo "FAIL: cumetalc exited ${BUILD_STATUS} building an executable from ${SOURCE_CU}"
+    exit 1
+fi
+if grep -q -E "ptx[0-9]+.*is not a recognized feature for this target" "${BUILD_LOG}"; then
+    echo "FAIL: the CUDA PTX feature leaked into the Apple host compilation"
     exit 1
 fi
 if [[ ! -x "${OUT_BIN}" ]]; then

@@ -13,22 +13,23 @@ cumetal_cuda_arch() {
     fi
 }
 
-# Extra -Xclang target-feature flags so Homebrew LLVM (PTX 4.2 default) can target
-# newer SM versions. Without these, --cuda-gpu-arch=sm_80 fails at compile time.
+# CUDA device features so Homebrew LLVM (PTX 4.2 default) can target newer SM
+# versions. --cuda-feature keeps the PTX setting out of the Apple host compile.
+# Without these, --cuda-gpu-arch=sm_80 fails at compile time.
 cumetal_cuda_ptx_feature_flags() {
     local arch="$1"
     case "${arch}" in
         sm_90*|sm_89|sm_86|sm_80)
-            echo -Xclang -target-feature -Xclang +ptx70
+            echo --cuda-feature=+ptx70
             ;;
         sm_78|sm_75)
-            echo -Xclang -target-feature -Xclang +ptx63
+            echo --cuda-feature=+ptx63
             ;;
         sm_72|sm_70)
-            echo -Xclang -target-feature -Xclang +ptx60
+            echo --cuda-feature=+ptx60
             ;;
         sm_61)
-            echo -Xclang -target-feature -Xclang +ptx50
+            echo --cuda-feature=+ptx50
             ;;
         sm_*) ;;
     esac
