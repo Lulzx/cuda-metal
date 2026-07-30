@@ -6,12 +6,6 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
-### Fixed
-
-- **`cumetalc` no longer prints spurious `+ptxNN` target-feature warnings.** PTX version features
-  are now scoped to Clang's CUDA device compilation instead of leaking into the Apple arm64 host
-  compilation.
-
 ## [0.1.1] - 2026-07-30
 
 ### Changed
