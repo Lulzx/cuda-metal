@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(cumetal VERSION 1.0.0 LANGUAGES C CXX OBJCXX)
+project(cumetal VERSION 0.1.3 LANGUAGES C CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -420,6 +420,23 @@ target_compile_definitions(cumetalc
         CUMETAL_VERSION_STRING="${PROJECT_VERSION}"
 )
 
+add_executable(cumetal
+    tools/cumetal/main.cpp
+)
+
+target_compile_options(cumetal
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_definitions(cumetal
+    PRIVATE
+        CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        CUMETAL_VERSION_STRING="${PROJECT_VERSION}"
+)
+
 add_executable(cumetal-ptx2llvm
     compiler/ptx/src/main.cpp
 )
@@ -554,6 +571,7 @@ install(TARGETS
     air_inspect
     air_validate
     cumetal-air-emitter
+    cumetal
     cumetalc
     cumetal-ptx2llvm
     ptx_diff

@@ -2877,4 +2877,20 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_link_executable
     )
     set_tests_properties(functional_cumetalc_link_executable PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_installed_cumetalc_link_executable
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_installed_cumetalc_link_executable.sh
+                ${CMAKE_SOURCE_DIR}/install/install.sh
+                ${CMAKE_BINARY_DIR}
+                ${CMAKE_SOURCE_DIR}/samples/vectorAdd/vectorAdd.cu
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+    )
+    set_tests_properties(
+        functional_installed_cumetalc_link_executable
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            RESOURCE_LOCK cumetal_install_manifest
+    )
 endif()

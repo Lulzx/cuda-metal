@@ -226,6 +226,11 @@ as gaps have been closed.
   lowering previously fell through to a bare `ret void` body, producing a kernel that loaded,
   launched, and wrote nothing — the caller read back whatever was already in the output buffer
   with no diagnostic. Both strict and tolerant modes now return an error.
+- **`cumetal run` is an environment-scoped launcher, not a universal binary translator.** It
+  prepends the selected installation's library directory only for the child process. Programs
+  built by `cumetalc` already run directly and do not need it. Prebuilt applications require
+  `CUMETAL_ENABLE_BINARY_SHIM=ON`, a load command that dyld can resolve through the shim, and
+  embedded supported PTX. Absolute NVIDIA library paths and SASS-only binaries are not repaired.
 - **`cumetalc foo.cu -o foo` produces a complete linked executable** (spec §11 Phase 2/3 exit
   criterion), covered by `functional_cumetalc_link_executable`. An unmodified CUDA source file
   using `<<<>>>` compiles and runs with no host/device split and no metallib path at runtime.

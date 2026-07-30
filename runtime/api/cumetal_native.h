@@ -15,10 +15,10 @@ extern "C" {
  * These must stay in step with project(cumetal VERSION ...) in CMakeLists.txt. They are
  * duplicated rather than generated so this header stays usable standalone; unit_version_matches
  * fails the build's test suite if the two ever drift. */
-#define CUMETAL_VERSION_MAJOR 1
-#define CUMETAL_VERSION_MINOR 0
-#define CUMETAL_VERSION_PATCH 0
-#define CUMETAL_VERSION_STRING "1.0.0"
+#define CUMETAL_VERSION_MAJOR 0
+#define CUMETAL_VERSION_MINOR 1
+#define CUMETAL_VERSION_PATCH 3
+#define CUMETAL_VERSION_STRING "0.1.3"
 
 /* Encoded as major*10000 + minor*100 + patch, so versions compare with < and >. */
 #define CUMETAL_VERSION \

@@ -10,7 +10,31 @@ This is experimental software. The covered paths execute real kernels and check
 real answers. Unsupported paths are expected to fail explicitly. That is a
 better failure mode than silently computing nonsense.
 
-## Start here
+## Install
+
+CuMetal requires macOS 14 or newer on Apple Silicon. Install the source-first
+compiler and runtime from the official CuMetal tap:
+
+```bash
+brew install lulzx/tap/cumetal
+cumetalc vectorAdd.cu -o vectorAdd
+./vectorAdd
+```
+
+Verify the complete local toolchain with:
+
+```bash
+cumetal doctor
+```
+
+Homebrew installs CMake and LLVM as dependencies. Apple's Metal compiler still
+comes from Xcode; if `xcrun --find metal` fails, install Xcode and its Metal
+Toolchain component.
+
+The formula deliberately installs the source-first compiler/runtime without
+the optional `libcuda.dylib` binary shim.
+
+## Build from source
 
 You need:
 
@@ -44,20 +68,42 @@ Runtime-compiled MSL preserves Metal's fast-math default. Set
 GPU provenance reports the selected `math_mode`. Precompiled metallibs retain
 the policy used when they were built.
 
-Install it:
+Install it without changing shell startup files:
 
 ```bash
-cmake --install build --prefix /opt/cumetal
+bash install/install.sh build /opt/cumetal
+/opt/cumetal/bin/cumetal doctor
 ```
 
-The installer scripts use the same prefix by default:
+To also add CuMetal to your shell's `PATH`, opt in explicitly:
 
 ```bash
-bash install/install.sh
-bash install/uninstall.sh
+bash install/install.sh build /opt/cumetal --shell-config
 ```
 
-`install.sh` also adds the prefix to your shell environment.
+Remove the installation with `/opt/cumetal/uninstall.sh`. The uninstaller uses
+the recorded CMake install manifest, so every installed header, tool, shim, and
+library is covered.
+
+## Run
+
+Source-built programs need no launcher:
+
+```bash
+cumetalc samples/vectorAdd/vectorAdd.cu -o vectorAdd
+./vectorAdd
+```
+
+`cumetal run` is a convenience for launching a process with this installation's
+runtime library path scoped to that child:
+
+```bash
+cumetal run ./cuda-application
+```
+
+It does not make unsupported binaries portable. Prebuilt CUDA applications
+still require a compatible PTX payload and an installation configured with
+`CUMETAL_ENABLE_BINARY_SHIM=ON`; SASS-only applications remain unsupported.
 
 ## The model
 
@@ -313,6 +359,7 @@ local test selections and runner contract remain documented in
 | Tool | Job |
 | --- | --- |
 | `cumetalc` | Compile `.cu`, PTX, or NVVM IR to inspectable stages, `.metallib`, or an executable |
+| `cumetal` | Check an installation with `doctor` or launch a child process with `run` |
 | `air_inspect` | Inspect kernels, bitcode offsets, and metadata in a `.metallib` |
 | `air_validate` | Validate `.metallib` structure and optionally check it with `xcrun` |
 | `cumetal-air-emitter` | AIR research and regression container generation |

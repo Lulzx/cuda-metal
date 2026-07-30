@@ -474,6 +474,10 @@ add_test(
             ${CMAKE_SOURCE_DIR}/install/uninstall.sh
             ${CMAKE_BINARY_DIR}
 )
+set_tests_properties(
+    unit_install_uninstall_scripts
+    PROPERTIES RESOURCE_LOCK cumetal_install_manifest
+)
 
 add_test(
     NAME unit_llama_build_contract
@@ -567,6 +571,14 @@ add_test(
 )
 
 add_test(
+    NAME unit_cumetal_cli
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetal_cli_test.sh
+            $<TARGET_FILE:cumetal>
+            $<TARGET_FILE_DIR:cumetal_runtime>
+)
+
+add_test(
     NAME unit_ci_report
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_ci_report_test.sh
@@ -577,6 +589,10 @@ add_test(
 # Keep GPU execution out of this label so a hosted runner cannot turn a
 # missing Metal device into a green-but-skipped hardware claim.
 get_property(CUMETAL_UNIT_TESTS DIRECTORY PROPERTY TESTS)
-list(REMOVE_ITEM CUMETAL_UNIT_TESTS unit_cumetal_bench_ratio_gate)
+list(REMOVE_ITEM
+    CUMETAL_UNIT_TESTS
+    unit_cumetal_bench_ratio_gate
+    unit_metallib_parser
+)
 set_tests_properties(${CUMETAL_UNIT_TESTS} PROPERTIES LABELS "hosted;unit")
 set_tests_properties(unit_cumetal_bench_ratio_gate PROPERTIES LABELS "gpu")

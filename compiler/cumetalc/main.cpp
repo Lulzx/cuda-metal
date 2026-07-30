@@ -271,11 +271,13 @@ ResourceLayout resolve_resources(const char* argv0) {
     return layout;
 }
 
-// Homebrew LLVM defaults to PTX 4.2, which rejects newer -march values outright. Mirrors
-// cumetal_cuda_ptx_feature_flags() in scripts/cumetal_cuda_flags.sh; keep the two in step.
+// Homebrew LLVM defaults to PTX 4.2, which rejects newer -march values outright. Use Clang's
+// CUDA-specific option so the PTX feature reaches only the device compilation; forwarding a raw
+// -target-feature also sends it to the Apple arm64 host compilation and produces noisy warnings.
+// Mirrors cumetal_cuda_ptx_feature_flags() in scripts/cumetal_cuda_flags.sh; keep the two in step.
 std::string ptx_feature_flags_for_arch(const std::string& arch) {
     const auto feature = [](const char* name) {
-        return std::string(" -Xclang -target-feature -Xclang +") + name;
+        return std::string(" --cuda-feature=+") + name;
     };
     if (arch == "sm_80" || arch == "sm_86" || arch == "sm_89" || arch.rfind("sm_90", 0) == 0) {
         return feature("ptx70");
@@ -468,10 +470,10 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     // Clang execs the shims as subprocesses, so they must be found via PATH. Prepend rather than
     // replace so a user-provided toolchain earlier in PATH still loses to ours deliberately.
     const char* existing_path = std::getenv("PATH");
-    const std::string child_path =
+    const std::string combined_path =
         layout.toolchain_dir.string() + ":" +
         (existing_path != nullptr ? std::string(existing_path) : std::string("/usr/bin:/bin"));
-    const std::string path_prefix = "PATH=" + quote_shell(child_path) + " ";
+    const std::string path_prefix = "PATH=" + quote_shell(combined_path) + " ";
 
     std::string compile = path_prefix + quote_shell(compiler.string()) +
                           " -x cuda -std=c++17 -O2"

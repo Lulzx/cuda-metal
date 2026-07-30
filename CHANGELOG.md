@@ -6,8 +6,33 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
-Nothing is released yet. `project(cumetal VERSION 1.0.0)` names the version under development,
-not a shipped one; there is no `v1.0.0` tag. The entries below accumulate toward a first release.
+## [0.1.3] - 2026-07-30
+
+### Removed
+
+- **The installed `vectorAdd.cu` copy and its `cumetal doctor` suggestion have been removed.**
+  Doctor now reports installation health only and ends at `No issues found!`.
+
+## [0.1.2] - 2026-07-30
+
+### Fixed
+
+- **`cumetalc` no longer prints spurious `+ptxNN` target-feature warnings.** PTX version features
+  are now scoped to Clang's CUDA device compilation instead of leaking into the Apple arm64 host
+  compilation.
+
+## [0.1.1] - 2026-07-30
+
+### Changed
+
+- **`cumetal doctor` now has a Flutter-style, color-aware summary.** Required components use
+  green checks, failures use red crosses, the optional binary shim is clearly informational,
+  redirected output stays free of ANSI escapes, and `NO_COLOR` is respected.
+- **The doctor example is now real.** `vectorAdd.cu` is installed under CuMetal's shared examples
+  directory, and doctor prints a copy-paste compile command using its resolved absolute path.
+  The installed-prefix gate compiles that exact installed file.
+
+## [0.1.0] - 2026-07-30
 
 CuMetal compiles CUDA source to Metal and runs it on Apple Silicon GPUs, with a CUDA-compatible
 runtime backed by Metal and Apple's acceleration frameworks. Read [What works](#what-works)
@@ -16,6 +41,14 @@ programs.
 
 ### Added
 
+- **Homebrew tap packaging and an installed `cumetal` front door.** The
+  `Lulzx/homebrew-tap` formula builds the source-first Release configuration with Homebrew LLVM
+  and verifies it by compiling and running a CUDA kernel. `cumetal doctor` checks the complete
+  local toolchain; `cumetal run` scopes runtime lookup to one child process without requiring
+  global `DYLD_*` exports.
+- **An installed-prefix end-to-end gate.** A fresh manifest-backed install must locate all of its
+  headers, libraries, and Clang shims, pass `cumetal doctor`, compile the unmodified `vectorAdd`
+  source, and execute it on the Apple GPU without caller environment setup.
 - **`cumetalc foo.cu -o foo` builds a runnable executable.** An ordinary CUDA file — host code,
   `__global__` kernels, `<<<>>>` launches — compiles and runs with no host/device split and no
   `.metallib` path at runtime. Clang compiles the whole translation unit; device code travels as
@@ -43,6 +76,9 @@ programs.
 
 ### Changed
 
+- **The installer no longer edits shell startup files by default.** `--shell-config` is an
+  explicit opt-in, and even that only adds the installation's `bin` directory to `PATH`. Installs
+  now retain CMake's exact manifest so uninstall covers every tool, header, library, and shim.
 - **Name-selected llm.c/GGML workload bodies are opt-in.** Generic PTX lowering still runs first;
   if it declines, the specialized table is consulted only with
   `CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=1`. The strict llm.c, llama.cpp, and GGML conformance
@@ -64,6 +100,9 @@ programs.
 
 ### Fixed
 
+- **`cumetalc` now quotes the complete temporary `PATH` assignment.** A normal desktop `PATH`
+  containing a directory with spaces previously prevented Clang from starting, breaking the
+  supposedly simple compile command before source compilation began.
 - **The JIT cache key now identifies the compiler build that produced each entry.** It was
   (hand-maintained schema string + policy + PTX + kernel name), which describes nothing about how
   a given build lowers PTX — so changing an MSL template, an instruction handler, or a
