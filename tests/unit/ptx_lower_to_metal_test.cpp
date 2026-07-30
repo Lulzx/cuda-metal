@@ -986,6 +986,108 @@ DONE:
         }
     }
 
+    // Clang emits ordinary C `int*` loads/stores as untyped `.b32` memory
+    // operations. The typed arithmetic consuming/producing those registers is
+    // the pointee-type evidence. Defaulting `.b32` to float caused issue #5:
+    // a correctly dispatched 2-block integer vector add returned all zeros.
+    const std::string int_b32_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry add_int_b32(
+    .param .u64 .ptr .align 1 a,
+    .param .u64 .ptr .align 1 b,
+    .param .u64 .ptr .align 1 c,
+    .param .u32 n
+) {
+    .reg .pred %p<2>;
+    .reg .b32 %r<9>;
+    .reg .b64 %rd<11>;
+    ld.param.b64 %rd4, [a];
+    ld.param.b64 %rd5, [c];
+    cvta.to.global.u64 %rd6, %rd5;
+    ld.param.b64 %rd7, [b];
+    cvta.to.global.u64 %rd8, %rd7;
+    cvta.to.global.u64 %rd9, %rd4;
+    ld.param.b32 %r1, [n];
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.s32 %r5, %r2, %r3, %r4;
+    setp.ge.s32 %p1, %r5, %r1;
+    @%p1 bra DONE;
+    mul.wide.s32 %rd10, %r5, 4;
+    add.s64 %rd1, %rd6, %rd10;
+    add.s64 %rd2, %rd8, %rd10;
+    add.s64 %rd3, %rd9, %rd10;
+    ld.global.b32 %r6, [%rd3];
+    ld.global.b32 %r7, [%rd2];
+    add.s32 %r8, %r7, %r6;
+    st.global.b32 [%rd1], %r8;
+DONE:
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions int_b32_options;
+    int_b32_options.entry_name = "add_int_b32";
+    const auto int_b32 =
+        cumetal::ptx::lower_ptx_to_metal_source(int_b32_ptx, int_b32_options);
+    if (!expect(int_b32.ok && int_b32.matched,
+                "integer .b32 vector add lowers through the generic emitter"))
+        return 1;
+    if (!expect(contains(int_b32.metal_source, "device int* a") &&
+                    contains(int_b32.metal_source, "device int* b") &&
+                    contains(int_b32.metal_source, "device int* c"),
+                "typed s32 dataflow maps .b32 pointer parameters to int"))
+        return 1;
+    if (!expect(contains(int_b32.metal_source, "int vr6 = a[gid]") &&
+                    contains(int_b32.metal_source, "int vr7 = b[gid]") &&
+                    contains(int_b32.metal_source, "int vr8 = vr7 + vr6"),
+                "integer .b32 loads and arithmetic remain integer"))
+        return 1;
+
+    // Negative guard: `.b32` itself must not be treated as integer. Optimized
+    // PTX also carries floats in `%r` bit registers, and typed f32 consumers
+    // must keep those pointer parameters floating-point.
+    std::string float_b32_ptx = int_b32_ptx;
+    const auto replace_all = [](std::string* text,
+                                const std::string& from,
+                                const std::string& to) {
+        std::size_t pos = 0;
+        while ((pos = text->find(from, pos)) != std::string::npos) {
+            text->replace(pos, from.size(), to);
+            pos += to.size();
+        }
+    };
+    replace_all(&float_b32_ptx, "add_int_b32", "add_float_b32");
+    replace_all(&float_b32_ptx, "add.s32 %r8", "add.f32 %r8");
+    cumetal::ptx::LowerToMetalOptions float_b32_options;
+    float_b32_options.entry_name = "add_float_b32";
+    const auto float_b32 =
+        cumetal::ptx::lower_ptx_to_metal_source(float_b32_ptx, float_b32_options);
+    if (!expect(float_b32.ok && float_b32.matched,
+                "floating-point .b32 vector add lowers through the generic emitter"))
+        return 1;
+    if (!expect(contains(float_b32.metal_source, "device float* a") &&
+                    contains(float_b32.metal_source, "device float* b") &&
+                    contains(float_b32.metal_source, "device float* c"),
+                "typed f32 dataflow maps .b32 pointer parameters to float"))
+        return 1;
+
+    // With no typed consumer or producer, `.b32` is genuinely ambiguous.
+    // Refuse generic MSL synthesis instead of silently guessing a pointee type.
+    std::string ambiguous_b32_ptx = int_b32_ptx;
+    replace_all(&ambiguous_b32_ptx, "add_int_b32", "copy_ambiguous_b32");
+    replace_all(&ambiguous_b32_ptx, "ld.global.b32 %r7, [%rd2];\n    add.s32 %r8, %r7, %r6;",
+                "mov.b32 %r8, %r6;");
+    cumetal::ptx::LowerToMetalOptions ambiguous_b32_options;
+    ambiguous_b32_options.entry_name = "copy_ambiguous_b32";
+    const auto ambiguous_b32 = cumetal::ptx::lower_ptx_to_metal_source(
+        ambiguous_b32_ptx, ambiguous_b32_options);
+    if (!expect(ambiguous_b32.ok && !ambiguous_b32.matched,
+                "untyped .b32 memory dataflow falls back instead of guessing"))
+        return 1;
+
     std::printf("PASS: ptx lower-to-metal unit tests\n");
     return 0;
 }

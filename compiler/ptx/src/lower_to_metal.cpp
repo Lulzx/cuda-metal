@@ -1946,6 +1946,119 @@ std::string emit_metal_source_generic(const std::string& entry_name,
     }
 
     // ── Determine element type for each pointer param ─────────────────────────
+    //
+    // Optimized Clang PTX commonly uses bit types for ordinary C/C++ values:
+    //
+    //   ld.global.b32 %r6, [%rd3];
+    //   ld.global.b32 %r7, [%rd2];
+    //   add.s32       %r8, %r7, %r6;
+    //   st.global.b32 [%rd1], %r8;
+    //
+    // The `.b32` memory opcode does not say whether the pointee is float or int.
+    // Defaulting it to float silently reinterprets `int*` buffers and turns small
+    // integers into denormal floats. Infer the semantic register type from typed
+    // consumers/producers instead. Keep `.b32` genuinely ambiguous when no typed
+    // dataflow evidence exists; the generic emitter must not guess.
+    std::unordered_map<std::string, std::string> reg_value_type;
+    std::unordered_set<std::string> ambiguous_reg_value_type;
+
+    auto record_reg_value_type = [&](const std::string& operand,
+                                     const std::string& type) {
+        const std::string r = get_reg(operand);
+        if (r.empty() || type.empty() || ambiguous_reg_value_type.count(r)) {
+            return;
+        }
+        const auto it = reg_value_type.find(r);
+        if (it == reg_value_type.end()) {
+            reg_value_type[r] = type;
+        } else if (it->second != type) {
+            reg_value_type.erase(it);
+            ambiguous_reg_value_type.insert(r);
+        }
+    };
+
+    auto metal_value_type = [](std::string_view token) -> std::string {
+        if (token == "f64") return "double";
+        if (token == "f32") return "float";
+        if (token == "s64") return "long";
+        if (token == "u64") return "ulong";
+        if (token == "s32") return "int";
+        if (token == "u32") return "uint";
+        if (token == "s16") return "short";
+        if (token == "u16") return "ushort";
+        if (token == "s8") return "char";
+        if (token == "u8") return "uchar";
+        return {};
+    };
+
+    auto opcode_type_tokens = [](const std::string& opcode) {
+        std::vector<std::string> tokens;
+        std::size_t pos = 0;
+        while (pos < opcode.size()) {
+            const std::size_t dot = opcode.find('.', pos);
+            const std::string token =
+                opcode.substr(pos, dot == std::string::npos ? std::string::npos : dot - pos);
+            if (!token.empty()) {
+                const char first = token.front();
+                if ((first == 'f' || first == 's' || first == 'u' || first == 'b') &&
+                    token.size() > 1 &&
+                    std::isdigit(static_cast<unsigned char>(token[1]))) {
+                    tokens.push_back(token);
+                }
+            }
+            if (dot == std::string::npos) break;
+            pos = dot + 1;
+        }
+        return tokens;
+    };
+
+    for (const auto& instr : entry->instructions) {
+        const auto& op = instr.opcode;
+        const auto& ops = instr.operands;
+        if (ops.empty()) continue;
+
+        const std::vector<std::string> type_tokens = opcode_type_tokens(op);
+        if (op.find("cvt") == 0 && type_tokens.size() >= 2 && ops.size() >= 2) {
+            record_reg_value_type(ops[0],
+                                  metal_value_type(type_tokens[type_tokens.size() - 2]));
+            record_reg_value_type(ops[1],
+                                  metal_value_type(type_tokens[type_tokens.size() - 1]));
+            continue;
+        }
+
+        if (type_tokens.empty()) continue;
+        const std::string type = metal_value_type(type_tokens.back());
+        if (type.empty()) continue;  // .b32/.b64 carry no semantic type evidence.
+
+        std::size_t first_value = 0;
+        if (op.find("setp") == 0 || op.find("st.") == 0 ||
+            op.find("atom.") == 0) {
+            first_value = 1;
+        }
+        for (std::size_t i = first_value; i < ops.size(); ++i) {
+            record_reg_value_type(ops[i], type);
+        }
+    }
+
+    // Propagate semantic type through untyped bit moves. Two passes cover the
+    // short move chains emitted by Clang without pretending to solve arbitrary
+    // PTX dataflow here.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const auto& instr : entry->instructions) {
+            if (instr.opcode.find("mov.b32") != 0 || instr.operands.size() != 2) {
+                continue;
+            }
+            const std::string dest = get_reg(instr.operands[0]);
+            const std::string src = get_reg(instr.operands[1]);
+            if (dest.empty() || src.empty()) continue;
+            if (reg_value_type.count(src)) {
+                record_reg_value_type(dest, reg_value_type.at(src));
+            }
+            if (reg_value_type.count(dest)) {
+                record_reg_value_type(src, reg_value_type.at(dest));
+            }
+        }
+    }
 
     std::unordered_map<std::string, std::string> param_etype;
     for (std::size_t instr_index = 0; instr_index < entry->instructions.size(); ++instr_index) {
@@ -1977,6 +2090,14 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             etype = "int";
         } else if (op.find(".u64") != std::string::npos) {
             etype = "ulong";
+        } else if (op.find(".b32") != std::string::npos) {
+            const std::string value_reg =
+                get_reg(is_load ? instr.operands[0] : instr.operands[1]);
+            const auto value_type = reg_value_type.find(value_reg);
+            if (value_type == reg_value_type.end()) {
+                return {};
+            }
+            etype = value_type->second;
         } else {
             etype = "float";
         }
