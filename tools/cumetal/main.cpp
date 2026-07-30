@@ -70,13 +70,15 @@ struct Layout {
   std::filesystem::path bin_dir;
   std::filesystem::path include_dir;
   std::filesystem::path lib_dir;
+  std::filesystem::path vector_add_example;
 };
 
 Layout resolve_layout(const char *argv0) {
   if (const char *root = std::getenv("CUMETAL_ROOT");
       root != nullptr && root[0] != '\0') {
     const std::filesystem::path prefix(root);
-    return {prefix, prefix / "bin", prefix / "include", prefix / "lib"};
+    return {prefix, prefix / "bin", prefix / "include", prefix / "lib",
+            prefix / "share" / "cumetal" / "examples" / "vectorAdd.cu"};
   }
 
   const std::filesystem::path self = executable_path(argv0);
@@ -84,12 +86,15 @@ Layout resolve_layout(const char *argv0) {
   const std::filesystem::path prefix = bin_dir.parent_path();
   if (std::filesystem::exists(prefix / "include" / "cuda_runtime.h") &&
       std::filesystem::exists(prefix / "lib" / "libcumetal.dylib")) {
-    return {prefix, bin_dir, prefix / "include", prefix / "lib"};
+    return {prefix, bin_dir, prefix / "include", prefix / "lib",
+            prefix / "share" / "cumetal" / "examples" / "vectorAdd.cu"};
   }
 
   return {prefix, bin_dir,
           std::filesystem::path(CUMETAL_SOURCE_DIR) / "runtime" / "api",
-          bin_dir};
+          bin_dir,
+          std::filesystem::path(CUMETAL_SOURCE_DIR) / "samples" / "vectorAdd" /
+              "vectorAdd.cu"};
 }
 
 void print_usage(const char *argv0) {
@@ -106,23 +111,96 @@ void print_usage(const char *argv0) {
             << "  cumetalc program.cu -o program\n";
 }
 
-bool report_check(bool ok, std::string_view label, std::string_view detail) {
-  std::cout << (ok ? "[ok]    " : "[error] ") << label;
-  if (!detail.empty())
-    std::cout << ": " << detail;
-  std::cout << '\n';
-  return ok;
+bool color_enabled() {
+  if (std::getenv("NO_COLOR") != nullptr)
+    return false;
+  if (const char *forced = std::getenv("CLICOLOR_FORCE");
+      forced != nullptr && forced[0] != '\0' &&
+      std::string_view(forced) != "0") {
+    return true;
+  }
+  if (const char *term = std::getenv("TERM");
+      term != nullptr && std::string_view(term) == "dumb") {
+    return false;
+  }
+  return isatty(STDOUT_FILENO) != 0;
+}
+
+class DoctorConsole {
+public:
+  DoctorConsole() : color_(color_enabled()) {}
+
+  void heading() const {
+    std::cout << style("\033[1;36m", "CuMetal doctor") << "\n\n";
+  }
+
+  bool check(bool ok, std::string_view label,
+             const std::vector<std::string> &details = {}) const {
+    const char *color = ok ? "\033[32m" : "\033[31m";
+    const std::string marker = ok ? "[✓]" : "[✗]";
+    std::cout << style(color, marker) << " " << style("\033[1m", label) << '\n';
+    for (const std::string &detail : details)
+      std::cout << "    " << style("\033[2m", "•") << " " << detail << '\n';
+    return ok;
+  }
+
+  void info(std::string_view label,
+            const std::vector<std::string> &details = {}) const {
+    std::cout << style("\033[36m", "[•]") << " " << style("\033[1m", label)
+              << '\n';
+    for (const std::string &detail : details)
+      std::cout << "    " << style("\033[2m", "•") << " " << detail << '\n';
+  }
+
+  void success(std::string_view message) const {
+    std::cout << style("\033[1;32m", message) << '\n';
+  }
+
+  void failure(std::string_view message) const {
+    std::cerr << (color_ ? "\033[1;31m" : "") << message
+              << (color_ ? "\033[0m" : "") << '\n';
+  }
+
+  void command(std::string_view command) const {
+    std::cout << "  " << style("\033[36m", command) << '\n';
+  }
+
+private:
+  std::string style(const char *code, std::string_view text) const {
+    if (!color_)
+      return std::string(text);
+    return std::string(code) + std::string(text) + "\033[0m";
+  }
+
+  bool color_;
+};
+
+std::string shell_quote(std::string_view value) {
+  std::string quoted = "'";
+  for (const char ch : value) {
+    if (ch == '\'')
+      quoted += "'\\''";
+    else
+      quoted += ch;
+  }
+  quoted += "'";
+  return quoted;
 }
 
 int doctor(const char *argv0) {
   const Layout layout = resolve_layout(argv0);
+  const DoctorConsole console;
   bool ready = true;
 
+  console.heading();
+  std::cout
+      << "Doctor summary (all required components are checked below):\n\n";
+
   const CommandResult arch = run_capture("/usr/bin/uname -m 2>/dev/null");
-  ready &= report_check(
+  ready &= console.check(
       arch.exit_code == 0 && arch.output == "arm64", "Apple Silicon",
-      arch.output.empty() ? "architecture could not be determined"
-                          : arch.output);
+      {arch.output.empty() ? "Architecture could not be determined"
+                           : "Architecture: " + arch.output});
 
   const CommandResult macos =
       run_capture("/usr/bin/sw_vers -productVersion 2>/dev/null");
@@ -135,19 +213,24 @@ int doctor(const char *argv0) {
         major.find_first_not_of("0123456789") == std::string::npos &&
         std::stoi(major) >= 14;
   }
-  ready &= report_check(supported_macos, "macOS 14+", macos.output);
+  ready &= console.check(supported_macos, "macOS",
+                         {macos.output.empty()
+                              ? "Version could not be determined"
+                              : "Version " + macos.output + " (14+ required)"});
 
   const bool compiler = std::filesystem::exists(layout.bin_dir / "cumetalc");
-  ready &= report_check(compiler, "CuMetal compiler",
-                        (layout.bin_dir / "cumetalc").string());
-
   const bool headers =
       std::filesystem::exists(layout.include_dir / "cuda_runtime.h");
-  ready &= report_check(headers, "CUDA headers", layout.include_dir.string());
-
   const bool runtime =
       std::filesystem::exists(layout.lib_dir / "libcumetal.dylib");
-  ready &= report_check(runtime, "CuMetal runtime", layout.lib_dir.string());
+  const bool example = std::filesystem::exists(layout.vector_add_example);
+  ready &=
+      console.check(compiler && headers && runtime && example,
+                    std::string("CuMetal ") + CUMETAL_VERSION_STRING,
+                    {"Compiler: " + (layout.bin_dir / "cumetalc").string(),
+                     "Headers: " + layout.include_dir.string(),
+                     "Runtime: " + layout.lib_dir.string(),
+                     "Bundled example: " + layout.vector_add_example.string()});
 
   std::filesystem::path clang;
   if (const char *configured = std::getenv("CUMETAL_CUDA_CLANG");
@@ -170,37 +253,41 @@ int doctor(const char *argv0) {
         clang = found.output;
     }
   }
-  ready &= report_check(
+  ready &= console.check(
       !clang.empty() && std::filesystem::exists(clang), "CUDA-capable Clang",
-      clang.empty() ? "install with `brew install llvm`" : clang.string());
+      {clang.empty() ? "Not found; install with `brew install llvm`"
+                     : clang.string()});
 
   const CommandResult metal = run_capture("xcrun --find metal 2>/dev/null");
-  ready &= report_check(
-      metal.exit_code == 0 && !metal.output.empty(), "Metal compiler",
-      metal.output.empty() ? "install Xcode's Metal toolchain" : metal.output);
-
   const CommandResult metallib =
       run_capture("xcrun --find metallib 2>/dev/null");
-  ready &= report_check(
-      metallib.exit_code == 0 && !metallib.output.empty(), "Metal library tool",
-      metallib.output.empty() ? "install Xcode's Metal toolchain"
-                              : metallib.output);
+  const bool metal_ready = metal.exit_code == 0 && !metal.output.empty() &&
+                           metallib.exit_code == 0 && !metallib.output.empty();
+  ready &= console.check(
+      metal_ready, "Metal toolchain",
+      {metal.output.empty() ? "metal: not found" : "metal: " + metal.output,
+       metallib.output.empty() ? "metallib: not found"
+                               : "metallib: " + metallib.output});
 
   const bool binary_shim =
       std::filesystem::exists(layout.lib_dir / "libcuda.dylib");
-  std::cout << "[info]  Binary compatibility shim: "
-            << (binary_shim
-                    ? "installed"
-                    : "not installed (source compilation is unaffected)")
-            << '\n';
+  console.info("Binary compatibility shim",
+               {binary_shim
+                    ? "Installed"
+                    : "Not installed (optional; source compilation is ready)"});
 
   if (ready) {
-    std::cout << "\nCuMetal is ready. Try:\n"
-              << "  cumetalc vectorAdd.cu -o vectorAdd\n"
-              << "  ./vectorAdd\n";
+    std::cout << '\n';
+    console.success("No issues found!");
+    std::cout << "\nTry the bundled vectorAdd example:\n";
+    console.command("cumetalc " +
+                    shell_quote(layout.vector_add_example.string()) +
+                    " -o /tmp/vectorAdd");
+    console.command("/tmp/vectorAdd");
     return 0;
   }
-  std::cerr << "\nCuMetal is not ready; fix the [error] checks above.\n";
+  std::cerr << '\n';
+  console.failure("CuMetal is not ready; fix the [✗] checks above.");
   return 1;
 }
 

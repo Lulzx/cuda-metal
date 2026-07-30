@@ -6,6 +6,15 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **`cumetal doctor` now has a Flutter-style, color-aware summary.** Required components use
+  green checks, failures use red crosses, the optional binary shim is clearly informational,
+  redirected output stays free of ANSI escapes, and `NO_COLOR` is respected.
+- **The doctor example is now real.** `vectorAdd.cu` is installed under CuMetal's shared examples
+  directory, and doctor prints a copy-paste compile command using its resolved absolute path.
+  The installed-prefix gate compiles that exact installed file.
+
 ## [0.1.0] - 2026-07-30
 
 CuMetal compiles CUDA source to Metal and runs it on Apple Silicon GPUs, with a CUDA-compatible

@@ -30,6 +30,7 @@ test -x "$PREFIX/bin/cumetalc"
 test -f "$PREFIX/lib/libcumetal.dylib"
 test -f "$PREFIX/include/cuda.h"
 test -f "$PREFIX/include/cuda_runtime.h"
+test -f "$PREFIX/share/cumetal/examples/vectorAdd.cu"
 test -x "$PREFIX/uninstall.sh"
 test -f "$PREFIX/share/cumetal/install_manifest.txt"
 

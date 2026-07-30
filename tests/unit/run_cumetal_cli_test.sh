@@ -3,11 +3,28 @@ set -euo pipefail
 
 CUMETAL="${1:?usage: run_cumetal_cli_test.sh <cumetal> <runtime-directory>}"
 RUNTIME_DIR="${2:?}"
+EXAMPLE="${3:?}"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 "$CUMETAL" version | grep -q '^cumetal '
 "$CUMETAL" --help | grep -q 'cumetalc program.cu -o program'
+
+DOCTOR_OUTPUT="$(NO_COLOR=1 "$CUMETAL" doctor)"
+grep -qF '[✓] Apple Silicon' <<<"$DOCTOR_OUTPUT"
+grep -qF '[✓] CuMetal ' <<<"$DOCTOR_OUTPUT"
+grep -qF '[•] Binary compatibility shim' <<<"$DOCTOR_OUTPUT"
+grep -qF "cumetalc '$EXAMPLE' -o /tmp/vectorAdd" <<<"$DOCTOR_OUTPUT"
+if [[ "$DOCTOR_OUTPUT" == *$'\033['* ]]; then
+  echo "FAIL: NO_COLOR doctor output contained ANSI escapes" >&2
+  exit 1
+fi
+
+COLOR_OUTPUT="$(env -u NO_COLOR CLICOLOR_FORCE=1 "$CUMETAL" doctor)"
+if [[ "$COLOR_OUTPUT" != *$'\033[32m[✓]'* ]]; then
+  echo "FAIL: forced-color doctor output did not color its success markers" >&2
+  exit 1
+fi
 
 # macOS strips DYLD_* when launching a platform-protected system binary. Build
 # an ordinary user executable so the test observes the environment that a CUDA
@@ -54,4 +71,4 @@ if [[ "$EXEC_STATUS" -ne 127 ]]; then
   exit 1
 fi
 
-echo "PASS: cumetal CLI reports its version and launches with the installed runtime"
+echo "PASS: cumetal CLI has polished doctor output and launches with the installed runtime"
