@@ -3,7 +3,6 @@ set -euo pipefail
 
 CUMETAL="${1:?usage: run_cumetal_cli_test.sh <cumetal> <runtime-directory>}"
 RUNTIME_DIR="${2:?}"
-EXAMPLE="${3:?}"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -14,7 +13,11 @@ DOCTOR_OUTPUT="$(NO_COLOR=1 "$CUMETAL" doctor)"
 grep -qF '[✓] Apple Silicon' <<<"$DOCTOR_OUTPUT"
 grep -qF '[✓] CuMetal ' <<<"$DOCTOR_OUTPUT"
 grep -qF '[•] Binary compatibility shim' <<<"$DOCTOR_OUTPUT"
-grep -qF "cumetalc '$EXAMPLE' -o /tmp/vectorAdd" <<<"$DOCTOR_OUTPUT"
+grep -qF 'No issues found!' <<<"$DOCTOR_OUTPUT"
+if [[ "$DOCTOR_OUTPUT" == *"vectorAdd"* || "$DOCTOR_OUTPUT" == *"Try the bundled"* ]]; then
+  echo "FAIL: doctor output still advertises the removed bundled example" >&2
+  exit 1
+fi
 if [[ "$DOCTOR_OUTPUT" == *$'\033['* ]]; then
   echo "FAIL: NO_COLOR doctor output contained ANSI escapes" >&2
   exit 1

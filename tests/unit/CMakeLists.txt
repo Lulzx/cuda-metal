@@ -576,5 +576,4 @@ add_test(
             ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetal_cli_test.sh
             $<TARGET_FILE:cumetal>
             $<TARGET_FILE_DIR:cumetal_runtime>
-            ${CMAKE_SOURCE_DIR}/samples/vectorAdd/vectorAdd.cu
 )

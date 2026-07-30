@@ -760,8 +760,3 @@ install(FILES
     runtime/api/cub/device/device_merge_sort.h
     DESTINATION include/cub/device
 )
-
-install(FILES
-    samples/vectorAdd/vectorAdd.cu
-    DESTINATION share/cumetal/examples
-)
