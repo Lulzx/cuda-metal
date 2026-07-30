@@ -722,6 +722,21 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmInlineActiveMask = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define void @inline_active_mask(ptr %out) {
+entry:
+  %active = call i32 asm "mov.u32 $0, %activemask;", "=r"()
+  store i32 %active, ptr %out, align 4
+  ret void
+}
+
+!nvvm.annotations = !{!0}
+!0 = !{ptr @inline_active_mask, !"kernel", i32 1}
+)llvm";
+
 }  // namespace
 
 int main() {
@@ -1110,6 +1125,14 @@ int main() {
                      warp_votes.source.find("thread_index_in_simdgroup") !=
                          std::string::npos,
                  "masked CUDA warp votes lower to Metal SIMD vote semantics");
+
+    const metal::NvvmToMslResult inline_active_mask =
+        metal::compile_nvvm_to_msl(
+            kNvvmInlineActiveMask, "inline-active-mask.ll", "inline_active_mask");
+    ok &= expect(inline_active_mask.ok &&
+                     inline_active_mask.source.find("simd_active_threads_mask()") !=
+                         std::string::npos,
+                 "Clang-compatible inline activemask lowers to the Metal active-lane mask");
 
     if (!ok) return 1;
     std::cout << "NVVM -> CuMetal IR -> typed MSL tests passed\n";

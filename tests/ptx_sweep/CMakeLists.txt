@@ -40,3 +40,10 @@ add_test(
 )
 
 set_tests_properties(ptx_sweep_numeric PROPERTIES SKIP_RETURN_CODE 77)
+
+set_tests_properties(
+    ptx_sweep_supported_ops
+    ptx_sweep_unsupported_ops
+    PROPERTIES LABELS "hosted;ptx-lowering"
+)
+set_tests_properties(ptx_sweep_numeric PROPERTIES LABELS "gpu")

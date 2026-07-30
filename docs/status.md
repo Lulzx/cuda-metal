@@ -47,9 +47,20 @@ v1 toolchain-completeness work (2026-07-26):
   bash scripts/ci_report.sh build --exclude-regex '^bench_'
   ```
 
-  There is deliberately no CI (spec §10.7 is unimplemented). Both configurations —
-  Release/shim-off, which is what users install, and Debug/shim-on — must be run locally before
-  a change lands.
+  Layered GitHub Actions definitions exist for both configurations —
+  Release/shim-off, which is what users install, and Debug/shim-on — but are
+  temporarily disabled as `.github/workflows/*.yml.disabled`. When enabled,
+  the hosted lane runs only tests explicitly labelled `hosted`, requires a
+  non-empty selection, and verifies the installed prefix and shim layout.
+
+  Spec §10.7's Apple-GPU correctness layer is defined separately for a
+  self-hosted runner labelled `ci-m1`. When the workflow is re-enabled, it runs
+  on pushes to `main` after the `CUMETAL_GPU_CI_ENABLED=true` repository
+  variable is set and can be commissioned with a manual dispatch. A focused
+  GPU/provenance set uses
+  `--require-no-skips` before the full suite, so a missing device or Metal
+  toolchain cannot appear as a green hardware result. Pull requests do not run
+  untrusted code on the self-hosted machine.
 
 - **The performance gate no longer flakes under load.** `cumetal_bench` averaged its iterations,
   and a mean is dominated by its worst sample, so a single scheduler stall failed the 2× ceiling

@@ -39,8 +39,27 @@ for argument in "$@"; do
   fi
   previous="${argument}"
 done
-if [[ "${threshold}" != true || "${force_inline}" != true ]]; then
-  echo "FAIL: CUDA frontend omitted forced viable-call inlining" >&2
+
+if [[ "$*" == *"-cc1"* && "$*" == *"--help-hidden"* ]]; then
+  exec "${CUMETAL_FRONTEND_REAL_CLANG}" "$@"
+fi
+
+supports_force_inline=false
+if "${CUMETAL_FRONTEND_REAL_CLANG}" -cc1 -mllvm --help-hidden 2>/dev/null |
+    grep -- '-inline-all-viable-calls' >/dev/null; then
+  supports_force_inline=true
+fi
+
+if [[ "${threshold}" != true ]]; then
+  echo "FAIL: CUDA frontend omitted the GPU inline threshold" >&2
+  exit 64
+fi
+if [[ "${supports_force_inline}" == true && "${force_inline}" != true ]]; then
+  echo "FAIL: CUDA frontend omitted supported viable-call inlining" >&2
+  exit 64
+fi
+if [[ "${supports_force_inline}" != true && "${force_inline}" == true ]]; then
+  echo "FAIL: CUDA frontend passed unsupported viable-call inlining" >&2
   exit 64
 fi
 exec "${CUMETAL_FRONTEND_REAL_CLANG}" "$@"

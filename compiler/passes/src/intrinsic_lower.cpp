@@ -470,6 +470,17 @@ IntrinsicLowerResult lower_intrinsics(const cumetal::ptx::EntryFunction& entry,
             continue;
         }
 
+        // Tolerant module parsing is required so --entry can ignore
+        // unsupported neighboring kernels. Re-apply strictness to the selected
+        // entry here; otherwise a shared-root opcode such as
+        // cp.async.bulk.tensor could be mistaken for supported cp.async.
+        if (!instruction.supported) {
+            result.warnings.push_back(
+                "intrinsic_lower: no mapping for opcode '" + instruction.opcode + "'");
+            result.instructions.push_back(std::move(lowered));
+            continue;
+        }
+
         bool translated = false;
         translated = translated || map_special_register_mov(instruction, &lowered);
         translated = translated || map_barrier(instruction, &lowered);

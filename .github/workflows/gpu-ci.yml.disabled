@@ -1,0 +1,97 @@
+name: Apple GPU CI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-gpu-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gpu-correctness:
+    # Pushes run only after the repository variable is enabled. A manual
+    # dispatch always attempts the job, which is useful while commissioning a
+    # runner. Pull requests never execute untrusted code on the self-hosted Mac.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      vars.CUMETAL_GPU_CI_ENABLED == 'true'
+    name: ${{ matrix.name }}
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - ci-m1
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - name: release-shim-off
+            build_type: Release
+            binary_shim: "OFF"
+          - name: debug-shim-on
+            build_type: Debug
+            binary_shim: "ON"
+
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+      CUMETAL_CACHE_DIR: >-
+        ${{ runner.temp }}/cumetal-cache-${{ matrix.name }}-${{ github.run_id }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Verify Apple GPU prerequisites
+        shell: bash
+        run: |
+          test "$(uname -m)" = "arm64"
+          xcrun --find metal
+          xcrun --find metallib
+          cmake --version
+
+          if llvm_root="$(brew --prefix llvm@18 2>/dev/null)"; then
+            :
+          else
+            llvm_root="$(brew --prefix llvm)"
+          fi
+          echo "${llvm_root}/bin" >> "${GITHUB_PATH}"
+          echo "CMAKE_PREFIX_PATH=${llvm_root}" >> "${GITHUB_ENV}"
+          echo "CUMETAL_CUDA_CLANG=${llvm_root}/bin/clang++" >> "${GITHUB_ENV}"
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build-gpu \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCUMETAL_BUILD_TESTS=ON \
+            -DCUMETAL_ENABLE_CUDA_REGISTRATION=ON \
+            -DCUMETAL_ENABLE_BINARY_SHIM=${{ matrix.binary_shim }}
+
+      - name: Build
+        run: cmake --build build-gpu
+
+      - name: Require positive GPU proof
+        shell: bash
+        run: |
+          bash scripts/ci_report.sh build-gpu \
+            --require-tests \
+            --require-no-skips \
+            --tests-regex \
+            '^(air_abi_emit_load_xcrun|functional_runtime_vector_add|functional_runtime_stream_vector_add|functional_runtime_atomic|functional_runtime_warp_partial_mask|functional_cumetalc_link_executable|ptx_sweep_numeric)$' \
+            --parallel 1
+
+      - name: Run full correctness suite
+        shell: bash
+        run: |
+          bash scripts/ci_report.sh build-gpu \
+            --require-tests \
+            --exclude-regex '(^bench_|unit_cumetal_bench_ratio_gate$)' \
+            --parallel 1

@@ -8,6 +8,8 @@
 
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/MapVector.h>
+#include <llvm/ADT/StringRef.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DebugInfoMetadata.h>
@@ -22,6 +24,7 @@
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/TargetParser/Triple.h>
 
 #include <algorithm>
 #include <map>
@@ -351,6 +354,32 @@ MemoryOrdering import_ordering(llvm::AtomicOrdering ordering) {
     return MemoryOrdering::kNone;
 }
 
+bool is_nvvm_kernel(const llvm::Function& function) {
+    if (function.getCallingConv() == llvm::CallingConv::PTX_Kernel) {
+        return true;
+    }
+    const llvm::Module* module = function.getParent();
+    const llvm::NamedMDNode* annotations =
+        module != nullptr ? module->getNamedMetadata("nvvm.annotations") : nullptr;
+    if (annotations == nullptr) return false;
+
+    for (const llvm::MDNode* annotation : annotations->operands()) {
+        if (annotation == nullptr || annotation->getNumOperands() < 2) continue;
+        const auto* annotated_value =
+            llvm::dyn_cast_or_null<llvm::ValueAsMetadata>(
+                annotation->getOperand(0).get());
+        const auto* property =
+            llvm::dyn_cast_or_null<llvm::MDString>(
+                annotation->getOperand(1).get());
+        if (annotated_value != nullptr &&
+            annotated_value->getValue() == &function &&
+            property != nullptr && property->getString() == "kernel") {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct FunctionState {
     Function output;
     std::unordered_map<const llvm::Value*, ValueId> values;
@@ -404,8 +433,7 @@ struct Importer {
 
     bool allocate_function(const llvm::Function& function, FunctionState* state) {
         state->output.name = function.getName().str();
-        state->output.is_kernel =
-            function.getCallingConv() == llvm::CallingConv::PTX_Kernel;
+        state->output.is_kernel = is_nvvm_kernel(function);
         state->output.return_type = import_type(function.getReturnType());
         state->output.generic_pointer_return =
             function.getReturnType()->isPointerTy() &&
@@ -562,8 +590,11 @@ struct Importer {
             if (assembly == nullptr) {
                 return fail(&call, "malformed LLVM inline assembly call");
             }
-            const std::string text = assembly->getAsmString().str();
-            if (text.find("mov.u32 $0, %laneid") != std::string::npos) {
+            const std::string text = llvm::StringRef(assembly->getAsmString()).str();
+            if (text.find("mov.u32 $0, %activemask") != std::string::npos) {
+                operation->opcode = OpCode::kBallot;
+                operation->attributes["kind"] = "active_mask";
+            } else if (text.find("mov.u32 $0, %laneid") != std::string::npos) {
                 operation->opcode = OpCode::kLaneId;
             } else if (text.find("shfl.sync.idx.b32") != std::string::npos) {
                 operation->opcode = OpCode::kShuffle;
@@ -1074,7 +1105,11 @@ struct Importer {
             }
         } else if (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&instruction)) {
             constexpr unsigned kPointerBits = 64;
+#if LLVM_VERSION_MAJOR >= 20
             llvm::SmallMapVector<llvm::Value*, llvm::APInt, 4> variable_offsets;
+#else
+            llvm::MapVector<llvm::Value*, llvm::APInt> variable_offsets;
+#endif
             llvm::APInt constant_offset(kPointerBits, 0, true);
             if (!gep->collectOffset(input->getDataLayout(), kPointerBits,
                                     variable_offsets, constant_offset)) {
@@ -1221,7 +1256,7 @@ struct Importer {
             // atomic but relaxed (they are not memory fences). Preserve CUDA's
             // source semantics and map the operation to Metal's relaxed order.
             if (operation.memory_ordering == MemoryOrdering::kSequentiallyConsistent &&
-                input->getTargetTriple().isNVPTX()) {
+                llvm::Triple(input->getTargetTriple()).isNVPTX()) {
                 operation.memory_ordering = MemoryOrdering::kRelaxed;
                 operation.attributes["cuda_legacy_atomic"] = "true";
             }
@@ -1314,7 +1349,8 @@ struct Importer {
         result.module.stage = IrStage::kGpuSemantic;
         result.module.attributes["frontend"] = "nvvm";
         result.module.attributes["ir_schema"] = "1";
-        result.module.attributes["target_triple"] = module->getTargetTriple().str();
+        result.module.attributes["target_triple"] =
+            llvm::Triple(module->getTargetTriple()).str();
 
         for (const llvm::GlobalVariable& global : module->globals()) {
             if (global.getAddressSpace() == 3 && global.hasInitializer() &&
@@ -1363,7 +1399,7 @@ struct Importer {
                 result.error = "NVVM kernel not found: " + options.entry_name;
                 return std::move(result);
             }
-            if (root->getCallingConv() != llvm::CallingConv::PTX_Kernel) {
+            if (!is_nvvm_kernel(*root)) {
                 result.error = "selected NVVM entry is not a kernel: " + options.entry_name;
                 return std::move(result);
             }

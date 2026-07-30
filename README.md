@@ -349,6 +349,11 @@ passing test. A skip is not evidence of compatibility. A correct answer without
 GPU provenance may be a CPU fallback. The test policy exists because all three
 mistakes have happened before.
 
+The hosted and Apple-GPU CI definitions are temporarily disabled and retained
+as `.github/workflows/*.yml.disabled` for later re-enablement. The equivalent
+local test selections and runner contract remain documented in
+[docs/testing.md](docs/testing.md).
+
 ## Tools
 
 | Tool | Job |
