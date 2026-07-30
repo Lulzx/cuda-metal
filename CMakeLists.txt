@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(cumetal VERSION 0.1.0 LANGUAGES C CXX OBJCXX)
+project(cumetal VERSION 0.1.1 LANGUAGES C CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -759,4 +759,9 @@ install(FILES
     runtime/api/cub/device/device_partition.h
     runtime/api/cub/device/device_merge_sort.h
     DESTINATION include/cub/device
+)
+
+install(FILES
+    samples/vectorAdd/vectorAdd.cu
+    DESTINATION share/cumetal/examples
 )
