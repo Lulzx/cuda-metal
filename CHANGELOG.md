@@ -6,6 +6,13 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-30
+
+### Removed
+
+- **The installed `vectorAdd.cu` copy and its `cumetal doctor` suggestion have been removed.**
+  Doctor now reports installation health only and ends at `No issues found!`.
+
 ## [0.1.2] - 2026-07-30
 
 ### Fixed

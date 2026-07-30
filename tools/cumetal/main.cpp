@@ -70,15 +70,13 @@ struct Layout {
   std::filesystem::path bin_dir;
   std::filesystem::path include_dir;
   std::filesystem::path lib_dir;
-  std::filesystem::path vector_add_example;
 };
 
 Layout resolve_layout(const char *argv0) {
   if (const char *root = std::getenv("CUMETAL_ROOT");
       root != nullptr && root[0] != '\0') {
     const std::filesystem::path prefix(root);
-    return {prefix, prefix / "bin", prefix / "include", prefix / "lib",
-            prefix / "share" / "cumetal" / "examples" / "vectorAdd.cu"};
+    return {prefix, prefix / "bin", prefix / "include", prefix / "lib"};
   }
 
   const std::filesystem::path self = executable_path(argv0);
@@ -86,15 +84,12 @@ Layout resolve_layout(const char *argv0) {
   const std::filesystem::path prefix = bin_dir.parent_path();
   if (std::filesystem::exists(prefix / "include" / "cuda_runtime.h") &&
       std::filesystem::exists(prefix / "lib" / "libcumetal.dylib")) {
-    return {prefix, bin_dir, prefix / "include", prefix / "lib",
-            prefix / "share" / "cumetal" / "examples" / "vectorAdd.cu"};
+    return {prefix, bin_dir, prefix / "include", prefix / "lib"};
   }
 
   return {prefix, bin_dir,
           std::filesystem::path(CUMETAL_SOURCE_DIR) / "runtime" / "api",
-          bin_dir,
-          std::filesystem::path(CUMETAL_SOURCE_DIR) / "samples" / "vectorAdd" /
-              "vectorAdd.cu"};
+          bin_dir};
 }
 
 void print_usage(const char *argv0) {
@@ -161,10 +156,6 @@ public:
               << (color_ ? "\033[0m" : "") << '\n';
   }
 
-  void command(std::string_view command) const {
-    std::cout << "  " << style("\033[36m", command) << '\n';
-  }
-
 private:
   std::string style(const char *code, std::string_view text) const {
     if (!color_)
@@ -174,18 +165,6 @@ private:
 
   bool color_;
 };
-
-std::string shell_quote(std::string_view value) {
-  std::string quoted = "'";
-  for (const char ch : value) {
-    if (ch == '\'')
-      quoted += "'\\''";
-    else
-      quoted += ch;
-  }
-  quoted += "'";
-  return quoted;
-}
 
 int doctor(const char *argv0) {
   const Layout layout = resolve_layout(argv0);
@@ -223,14 +202,12 @@ int doctor(const char *argv0) {
       std::filesystem::exists(layout.include_dir / "cuda_runtime.h");
   const bool runtime =
       std::filesystem::exists(layout.lib_dir / "libcumetal.dylib");
-  const bool example = std::filesystem::exists(layout.vector_add_example);
-  ready &=
-      console.check(compiler && headers && runtime && example,
-                    std::string("CuMetal ") + CUMETAL_VERSION_STRING,
-                    {"Compiler: " + (layout.bin_dir / "cumetalc").string(),
-                     "Headers: " + layout.include_dir.string(),
-                     "Runtime: " + layout.lib_dir.string(),
-                     "Bundled example: " + layout.vector_add_example.string()});
+  ready &= console.check(
+      compiler && headers && runtime,
+      std::string("CuMetal ") + CUMETAL_VERSION_STRING,
+      {"Compiler: " + (layout.bin_dir / "cumetalc").string(),
+       "Headers: " + layout.include_dir.string(),
+       "Runtime: " + layout.lib_dir.string()});
 
   std::filesystem::path clang;
   if (const char *configured = std::getenv("CUMETAL_CUDA_CLANG");
@@ -279,11 +256,6 @@ int doctor(const char *argv0) {
   if (ready) {
     std::cout << '\n';
     console.success("No issues found!");
-    std::cout << "\nTry the bundled vectorAdd example:\n";
-    console.command("cumetalc " +
-                    shell_quote(layout.vector_add_example.string()) +
-                    " -o /tmp/vectorAdd");
-    console.command("/tmp/vectorAdd");
     return 0;
   }
   std::cerr << '\n';
