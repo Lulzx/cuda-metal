@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <string_view>
 
 namespace cumetal::fatbin {
@@ -22,6 +21,7 @@ struct FatbinBlobHeader {
 
 struct SectionView {
     std::uint32_t name_offset = 0;
+    std::uint32_t link = 0;
     std::uint64_t offset = 0;
     std::uint64_t size = 0;
 };
@@ -41,21 +41,19 @@ bool checked_range(std::uint64_t offset,
 
 bool checked_table_range(std::uint64_t offset,
                          std::uint16_t entry_size,
-                         std::uint16_t entry_count,
+                         std::uint64_t entry_count,
                          std::size_t limit) {
-    if (entry_count == 0 ||
-        entry_size > std::numeric_limits<std::size_t>::max() / entry_count) {
+    if (entry_count == 0 || entry_size == 0 || offset > limit) {
         return false;
     }
-    return checked_range(offset,
-                         static_cast<std::uint64_t>(entry_size) * entry_count,
-                         limit);
+    return entry_count <=
+           (limit - static_cast<std::size_t>(offset)) / entry_size;
 }
 
 SectionView read_section(const std::uint8_t* bytes,
                          std::uint64_t section_table_offset,
                          std::uint16_t section_entry_size,
-                         std::uint16_t index) {
+                         std::uint64_t index) {
     const std::size_t base =
         static_cast<std::size_t>(section_table_offset) +
         static_cast<std::size_t>(section_entry_size) * index;
@@ -63,6 +61,7 @@ SectionView read_section(const std::uint8_t* bytes,
     section.name_offset = read_value<std::uint32_t>(bytes, base);
     section.offset = read_value<std::uint64_t>(bytes, base + 24);
     section.size = read_value<std::uint64_t>(bytes, base + 32);
+    section.link = read_value<std::uint32_t>(bytes, base + 40);
     return section;
 }
 
@@ -161,15 +160,32 @@ ElfPtxStatus extract_elf64_ptx(const void* image,
         read_value<std::uint16_t>(bytes, 52);
     const std::uint16_t section_entry_size =
         read_value<std::uint16_t>(bytes, 58);
-    const std::uint16_t section_count =
+    const std::uint16_t encoded_section_count =
         read_value<std::uint16_t>(bytes, 60);
-    const std::uint16_t string_table_index =
+    const std::uint16_t encoded_string_table_index =
         read_value<std::uint16_t>(bytes, 62);
 
     if (elf_header_size < kElf64HeaderSize ||
         section_table_offset < elf_header_size ||
         section_entry_size < kElf64SectionHeaderSize ||
-        section_count == 0 || string_table_index == 0xffff ||
+        !checked_range(section_table_offset, section_entry_size,
+                       max_image_bytes)) {
+        return ElfPtxStatus::kMalformed;
+    }
+
+    // ELF64 uses section header 0 to carry values that do not fit in the ELF
+    // header: sh_size is the real section count when e_shnum is zero, and
+    // sh_link is the real string-table index when e_shstrndx is SHN_XINDEX.
+    const SectionView section_zero =
+        read_section(bytes, section_table_offset, section_entry_size, 0);
+    const std::uint64_t section_count =
+        encoded_section_count == 0 ? section_zero.size
+                                   : encoded_section_count;
+    const std::uint64_t string_table_index =
+        encoded_string_table_index == 0xffff ? section_zero.link
+                                             : encoded_string_table_index;
+
+    if (string_table_index == 0 ||
         string_table_index >= section_count ||
         !checked_table_range(section_table_offset, section_entry_size,
                              section_count, max_image_bytes)) {
@@ -187,7 +203,7 @@ ElfPtxStatus extract_elf64_ptx(const void* image,
         reinterpret_cast<const char*>(bytes + string_table.offset);
     const std::size_t names_size = static_cast<std::size_t>(string_table.size);
 
-    for (std::uint16_t index = 0; index < section_count; ++index) {
+    for (std::uint64_t index = 0; index < section_count; ++index) {
         const SectionView section =
             read_section(bytes, section_table_offset, section_entry_size, index);
         if (section.name_offset >= names_size ||

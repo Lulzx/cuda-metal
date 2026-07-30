@@ -24,7 +24,8 @@ inline void write_value(std::vector<std::uint8_t>* bytes,
 // named payload section.
 inline std::vector<std::uint8_t> make_elf64_image(
     std::string_view section_name,
-    const std::vector<std::uint8_t>& payload) {
+    const std::vector<std::uint8_t>& payload,
+    bool use_extended_section_indexes = false) {
     constexpr std::size_t kHeaderSize = 64;
     constexpr std::size_t kSectionHeaderSize = 64;
     const std::string names =
@@ -52,8 +53,16 @@ inline std::vector<std::uint8_t> make_elf64_image(
     write_value<std::uint64_t>(&image, 40, section_table_offset);
     write_value<std::uint16_t>(&image, 52, kHeaderSize);
     write_value<std::uint16_t>(&image, 58, kSectionHeaderSize);
-    write_value<std::uint16_t>(&image, 60, 3);
-    write_value<std::uint16_t>(&image, 62, 1);
+    write_value<std::uint16_t>(
+        &image, 60, use_extended_section_indexes ? 0 : 3);
+    write_value<std::uint16_t>(
+        &image, 62, use_extended_section_indexes ? 0xffff : 1);
+
+    if (use_extended_section_indexes) {
+        // ELF64 extended indexes are stored in section header 0.
+        write_value<std::uint64_t>(&image, section_table_offset + 32, 3);
+        write_value<std::uint32_t>(&image, section_table_offset + 40, 1);
+    }
 
     std::memcpy(image.data() + payload_offset, payload.data(), payload.size());
     std::memcpy(image.data() + names_offset, names.data(), names.size());

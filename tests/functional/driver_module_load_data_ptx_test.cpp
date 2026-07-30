@@ -198,6 +198,8 @@ int main(int argc, char** argv) {
     std::memcpy(fatbin_blob.data() + sizeof(header), ptx_file_bytes.data(), ptx_file_bytes.size());
     const std::vector<std::uint8_t> elf_fatbin =
         cumetal::test::make_elf64_image(".nv_fatbin", fatbin_blob);
+    const std::vector<std::uint8_t> elf_extended_indexes =
+        cumetal::test::make_elf64_image(".nv_fatbin", fatbin_blob, true);
     const std::vector<std::uint8_t> raw_ptx_payload(
         ptx_file_bytes.begin(), ptx_file_bytes.end());
     const std::vector<std::uint8_t> elf_raw_ptx =
@@ -271,6 +273,24 @@ int main(int argc, char** argv) {
     }
     if (cuModuleUnload(module) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: cuModuleUnload after ELF .nv_fatbin load failed\n");
+        return 1;
+    }
+
+    if (cuModuleLoadData(&module, elf_extended_indexes.data()) !=
+            CUDA_SUCCESS ||
+        module == nullptr) {
+        std::fprintf(
+            stderr,
+            "FAIL: cuModuleLoadData(ELF extended indexes) failed\n");
+        return 1;
+    }
+    if (!run_vector_add(module)) {
+        return 1;
+    }
+    if (cuModuleUnload(module) != CUDA_SUCCESS) {
+        std::fprintf(
+            stderr,
+            "FAIL: cuModuleUnload after ELF extended-index load failed\n");
         return 1;
     }
 
@@ -379,11 +399,44 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const std::size_t extended_section_table_offset =
+        elf_extended_indexes.size() - 3 * 64;
+    std::vector<std::uint8_t> malformed_extended_count =
+        elf_extended_indexes;
+    cumetal::test::write_value<std::uint64_t>(
+        &malformed_extended_count,
+        extended_section_table_offset + 32,
+        64ull * 1024ull * 1024ull);
+    module = nullptr;
+    if (cuModuleLoadData(&module, malformed_extended_count.data()) !=
+        CUDA_ERROR_INVALID_IMAGE) {
+        std::fprintf(
+            stderr,
+            "FAIL: out-of-range extended section count should be rejected\n");
+        return 1;
+    }
+
+    std::vector<std::uint8_t> malformed_extended_string_index =
+        elf_extended_indexes;
+    cumetal::test::write_value<std::uint32_t>(
+        &malformed_extended_string_index,
+        extended_section_table_offset + 40,
+        3);
+    module = nullptr;
+    if (cuModuleLoadData(&module,
+                         malformed_extended_string_index.data()) !=
+        CUDA_ERROR_INVALID_IMAGE) {
+        std::fprintf(
+            stderr,
+            "FAIL: out-of-range extended string-table index should be rejected\n");
+        return 1;
+    }
+
     if (cuCtxDestroy(context) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: cuCtxDestroy failed\n");
         return 1;
     }
 
-    std::printf("PASS: cuModuleLoadData supports PTX text, fatbin, and bounded ELF64 variants\n");
+    std::printf("PASS: cuModuleLoadData supports PTX text, fatbin, and bounded ELF64 extended-index variants\n");
     return 0;
 }

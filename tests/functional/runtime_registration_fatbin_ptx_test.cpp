@@ -93,6 +93,8 @@ int main(int argc, char** argv) {
     std::memcpy(fatbin_blob.data() + sizeof(header), ptx_file_bytes.data(), ptx_file_bytes.size());
     const std::vector<std::uint8_t> elf_fatbin =
         cumetal::test::make_elf64_image(".nv_fatbin", fatbin_blob);
+    const std::vector<std::uint8_t> elf_extended_indexes =
+        cumetal::test::make_elf64_image(".nv_fatbin", fatbin_blob, true);
     const std::vector<std::uint8_t> raw_ptx_payload(
         ptx_file_bytes.begin(), ptx_file_bytes.end());
     const std::vector<std::uint8_t> elf_raw_ptx =
@@ -423,6 +425,37 @@ int main(int argc, char** argv) {
     }
     __cudaUnregisterFatBinary(fatbin_handle);
 
+    fatbin_handle = __cudaRegisterFatBinary(elf_extended_indexes.data());
+    if (fatbin_handle == nullptr) {
+        std::fprintf(
+            stderr,
+            "FAIL: __cudaRegisterFatBinary (ELF extended indexes) returned null\n");
+        return 1;
+    }
+    __cudaRegisterFunction(fatbin_handle,
+                           reinterpret_cast<const void*>(&vector_add_host_stub),
+                           device_function,
+                           nullptr,
+                           0,
+                           nullptr,
+                           nullptr,
+                           nullptr,
+                           nullptr,
+                           nullptr);
+    if (cudaLaunchKernel(reinterpret_cast<const void*>(&vector_add_host_stub),
+                         grid_dim,
+                         block_dim,
+                         args,
+                         0,
+                         nullptr) != cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess) {
+        std::fprintf(
+            stderr,
+            "FAIL: launch through ELF extended-index registration failed\n");
+        return 1;
+    }
+    __cudaUnregisterFatBinary(fatbin_handle);
+
     std::vector<std::uint8_t> malformed_elf = elf_fatbin;
     cumetal::test::write_value<std::uint16_t>(&malformed_elf, 62, 7);
     fatbin_handle = __cudaRegisterFatBinary(malformed_elf.data());
@@ -448,6 +481,45 @@ int main(int argc, char** argv) {
                          nullptr) != cudaErrorInvalidValue) {
         std::fprintf(stderr,
                      "FAIL: malformed ELF registration should not produce a launchable kernel\n");
+        return 1;
+    }
+    __cudaUnregisterFatBinary(fatbin_handle);
+
+    std::vector<std::uint8_t> malformed_extended_count =
+        elf_extended_indexes;
+    const std::size_t extended_section_table_offset =
+        malformed_extended_count.size() - 3 * 64;
+    cumetal::test::write_value<std::uint64_t>(
+        &malformed_extended_count,
+        extended_section_table_offset + 32,
+        64ull * 1024ull * 1024ull);
+    fatbin_handle =
+        __cudaRegisterFatBinary(malformed_extended_count.data());
+    if (fatbin_handle == nullptr) {
+        std::fprintf(
+            stderr,
+            "FAIL: malformed extended-count ELF registration returned null\n");
+        return 1;
+    }
+    __cudaRegisterFunction(fatbin_handle,
+                           reinterpret_cast<const void*>(&vector_add_host_stub),
+                           device_function,
+                           nullptr,
+                           0,
+                           nullptr,
+                           nullptr,
+                           nullptr,
+                           nullptr,
+                           nullptr);
+    if (cudaLaunchKernel(reinterpret_cast<const void*>(&vector_add_host_stub),
+                         grid_dim,
+                         block_dim,
+                         args,
+                         0,
+                         nullptr) != cudaErrorInvalidValue) {
+        std::fprintf(
+            stderr,
+            "FAIL: out-of-range extended section count should not launch\n");
         return 1;
     }
     __cudaUnregisterFatBinary(fatbin_handle);
@@ -510,6 +582,6 @@ int main(int argc, char** argv) {
     }
 
     std::printf(
-        "PASS: runtime registration supports fatbin, bounded ELF64, and FatBinary3 PTX paths\n");
+        "PASS: runtime registration supports fatbin, bounded ELF64 extended indexes, and FatBinary3 PTX paths\n");
     return 0;
 }
