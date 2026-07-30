@@ -17,8 +17,8 @@ extern "C" {
  * fails the build's test suite if the two ever drift. */
 #define CUMETAL_VERSION_MAJOR 0
 #define CUMETAL_VERSION_MINOR 1
-#define CUMETAL_VERSION_PATCH 0
-#define CUMETAL_VERSION_STRING "0.1.0"
+#define CUMETAL_VERSION_PATCH 1
+#define CUMETAL_VERSION_STRING "0.1.1"
 
 /* Encoded as major*10000 + minor*100 + patch, so versions compare with < and >. */
 #define CUMETAL_VERSION \

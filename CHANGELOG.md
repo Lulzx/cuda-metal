@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-30
+
 ### Changed
 
 - **`cumetal doctor` now has a Flutter-style, color-aware summary.** Required components use
