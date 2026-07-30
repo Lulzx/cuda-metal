@@ -271,11 +271,13 @@ ResourceLayout resolve_resources(const char* argv0) {
     return layout;
 }
 
-// Homebrew LLVM defaults to PTX 4.2, which rejects newer -march values outright. Mirrors
-// cumetal_cuda_ptx_feature_flags() in scripts/cumetal_cuda_flags.sh; keep the two in step.
+// Homebrew LLVM defaults to PTX 4.2, which rejects newer -march values outright. Use Clang's
+// CUDA-specific option so the PTX feature reaches only the device compilation; forwarding a raw
+// -target-feature also sends it to the Apple arm64 host compilation and produces noisy warnings.
+// Mirrors cumetal_cuda_ptx_feature_flags() in scripts/cumetal_cuda_flags.sh; keep the two in step.
 std::string ptx_feature_flags_for_arch(const std::string& arch) {
     const auto feature = [](const char* name) {
-        return std::string(" -Xclang -target-feature -Xclang +") + name;
+        return std::string(" --cuda-feature=+") + name;
     };
     if (arch == "sm_80" || arch == "sm_86" || arch == "sm_89" || arch.rfind("sm_90", 0) == 0) {
         return feature("ptx70");
