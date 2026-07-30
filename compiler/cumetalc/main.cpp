@@ -318,6 +318,26 @@ std::filesystem::path find_cuda_clang(
     return {};
 }
 
+bool clang_supports_inline_all_viable_calls(const std::filesystem::path& clang) {
+    const CommandResult help = run_command_capture(
+        quote_shell(clang.string()) + " -cc1 -mllvm --help-hidden 2>&1");
+    return help.started &&
+           help.output.find("-inline-all-viable-calls") != std::string::npos;
+}
+
+std::string cuda_inline_flags(const std::filesystem::path& clang,
+                              const std::string& threshold) {
+    if (threshold.empty()) return {};
+    std::string flags = " -fgpu-inline-threshold=" + quote_shell(threshold);
+    // LLVM 22 added the stronger all-viable-calls switch. Older supported
+    // Clang versions reject it during option parsing, so retain their GPU
+    // inlining threshold without passing an unknown backend option.
+    if (clang_supports_inline_all_viable_calls(clang)) {
+        flags += " -mllvm -inline-all-viable-calls";
+    }
+    return flags;
+}
+
 std::filesystem::path find_llvm_opt(const std::filesystem::path& clang) {
     const std::filesystem::path sibling = clang.parent_path() / "opt";
     if (std::filesystem::exists(sibling)) return sibling;
@@ -331,6 +351,16 @@ std::filesystem::path find_llvm_opt(const std::filesystem::path& clang) {
         if (!path.empty()) return path;
     }
     return {};
+}
+
+std::string llvm_lower_switch_pass(const std::filesystem::path& llvm_opt) {
+    const CommandResult passes =
+        run_command_capture(quote_shell(llvm_opt.string()) + " --print-passes 2>&1");
+    if (passes.started && passes.output.find("lower-switch") != std::string::npos) {
+        return "lower-switch";
+    }
+    // LLVM 18 used the unhyphenated new-pass-manager spelling.
+    return "lowerswitch";
 }
 
 std::string ptx_feature_for_arch(std::string_view arch) {
@@ -438,10 +468,10 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     // Clang execs the shims as subprocesses, so they must be found via PATH. Prepend rather than
     // replace so a user-provided toolchain earlier in PATH still loses to ours deliberately.
     const char* existing_path = std::getenv("PATH");
-    const std::string path_prefix =
-        "PATH=" + quote_shell(layout.toolchain_dir.string()) + ":" +
-        (existing_path != nullptr ? std::string(existing_path) : std::string("/usr/bin:/bin")) +
-        " ";
+    const std::string child_path =
+        layout.toolchain_dir.string() + ":" +
+        (existing_path != nullptr ? std::string(existing_path) : std::string("/usr/bin:/bin"));
+    const std::string path_prefix = "PATH=" + quote_shell(child_path) + " ";
 
     std::string compile = path_prefix + quote_shell(compiler.string()) +
                           " -x cuda -std=c++17 -O2"
@@ -453,10 +483,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
                           " -I " +
                           quote_shell(layout.include_dir.string()) + " -include " +
                           quote_shell("cuda_runtime.h");
-    if (!options.cuda_inline_threshold.empty()) {
-        compile += " -fgpu-inline-threshold=" + quote_shell(options.cuda_inline_threshold) +
-                   " -mllvm -inline-all-viable-calls";
-    }
+    compile += cuda_inline_flags(compiler, options.cuda_inline_threshold);
     for (const auto& dir : options.include_dirs) {
         compile += " -I " + quote_shell(dir.string());
     }
@@ -810,10 +837,7 @@ int main(int argc, char** argv) {
             " -Xclang -target-feature -Xclang +ptx70"
             " -nocudainc -nocudalib -Wno-unknown-cuda-version -Wno-pass-failed"
             " -D__CUDACC__=1 -D__NVCC__=1";
-        if (!cuda_inline_threshold.empty()) {
-            command += " -fgpu-inline-threshold=" + quote_shell(cuda_inline_threshold) +
-                       " -mllvm -inline-all-viable-calls";
-        }
+        command += cuda_inline_flags(compiler, cuda_inline_threshold);
         if (std::filesystem::exists(runtime_api_dir) &&
             std::filesystem::is_directory(runtime_api_dir)) {
             command += " -I " + quote_shell(runtime_api_dir.string()) +
@@ -1088,7 +1112,8 @@ int main(int argc, char** argv) {
             }
             const std::string opt_command =
                 quote_shell(llvm_opt.string()) +
-                " -S -passes=sroa,mem2reg,dce,simplifycfg,lower-switch " +
+                " -S -passes=sroa,mem2reg,dce,simplifycfg," +
+                llvm_lower_switch_pass(llvm_opt) + " " +
                 quote_shell(raw_device_ll.string()) + " -o " +
                 quote_shell(device_ll.string()) + " 2>&1";
             const CommandResult opt_result = run_command_capture(opt_command);

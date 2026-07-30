@@ -1,0 +1,83 @@
+name: Hosted CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hosted-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: release-shim-off
+            build_type: Release
+            binary_shim: "OFF"
+          - name: debug-shim-on
+            build_type: Debug
+            binary_shim: "ON"
+
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "3"
+      CTEST_PARALLEL_LEVEL: "3"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Select LLVM 18 toolchain
+        shell: bash
+        run: |
+          llvm_root="$(brew --prefix llvm@18)"
+          echo "${llvm_root}/bin" >> "${GITHUB_PATH}"
+          echo "CMAKE_PREFIX_PATH=${llvm_root}" >> "${GITHUB_ENV}"
+          echo "CUMETAL_CUDA_CLANG=${llvm_root}/bin/clang++" >> "${GITHUB_ENV}"
+          "${llvm_root}/bin/clang++" --version
+          cmake --version
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCUMETAL_BUILD_TESTS=ON \
+            -DCUMETAL_ENABLE_CUDA_REGISTRATION=ON \
+            -DCUMETAL_ENABLE_BINARY_SHIM=${{ matrix.binary_shim }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run hosted compiler and host tests
+        shell: bash
+        run: |
+          bash scripts/ci_report.sh build \
+            --require-tests \
+            --label-regex '^hosted$'
+
+      - name: Verify install layout
+        shell: bash
+        env:
+          INSTALL_PREFIX: ${{ runner.temp }}/cumetal-${{ matrix.name }}
+          EXPECT_BINARY_SHIM: ${{ matrix.binary_shim }}
+        run: |
+          cmake --install build --prefix "${INSTALL_PREFIX}"
+          "${INSTALL_PREFIX}/bin/cumetalc" --version
+          test -x "${INSTALL_PREFIX}/libexec/cumetal/cuda_toolchain/ptxas"
+          test -x "${INSTALL_PREFIX}/libexec/cumetal/cuda_toolchain/fatbinary"
+          test -L "${INSTALL_PREFIX}/lib/libcublas.dylib"
+          if [[ "${EXPECT_BINARY_SHIM}" == "ON" ]]; then
+            test -L "${INSTALL_PREFIX}/lib/libcuda.dylib"
+          else
+            test ! -e "${INSTALL_PREFIX}/lib/libcuda.dylib"
+          fi

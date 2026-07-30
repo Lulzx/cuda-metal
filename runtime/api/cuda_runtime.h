@@ -1311,7 +1311,9 @@ static __device__ __forceinline__ unsigned int __ballot_sync(unsigned int mask, 
 }
 
 static __device__ __forceinline__ unsigned int __activemask(void) {
-    return __nvvm_activemask();
+    unsigned int active;
+    asm("mov.u32 %0, %%activemask;" : "=r"(active));
+    return active;
 }
 
 // Lane mask special registers: bitmasks of lanes with index R relative to current lane.

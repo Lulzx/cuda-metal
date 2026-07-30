@@ -138,10 +138,10 @@ as gaps have been closed.
   lowering path. CUDA source compilation can therefore succeed while later
   strict PTX lowering still rejects an unimplemented opcode or libdevice call.
   Standalone PTX `.func` bodies are not lowered; projects can request aggressive
-  device inlining with `--cuda-inline-threshold`, which also forces every viable
-  reachable device call to inline. Recursion, indirect calls, and explicitly
-  non-inlineable helpers remain unsupported. The reduced PhysX rigid-body subset
-  uses this for helpers including `updateCacheAndBound` and
+  device inlining with `--cuda-inline-threshold`, which on LLVM 22+ also forces
+  every viable reachable device call to inline. Recursion, indirect calls, and
+  explicitly non-inlineable helpers remain unsupported. The reduced PhysX
+  rigid-body subset uses this for helpers including `updateCacheAndBound` and
   `getIncidentPolygon4`.
 - The older `.cu` mode without `--cuda-device` remains a qualifier-stripping
   host-LLVM prototype suitable only for simple patterns; it is not a general

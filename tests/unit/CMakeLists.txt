@@ -565,3 +565,18 @@ add_test(
             $<TARGET_FILE:cumetalc>
             ${CMAKE_SOURCE_DIR}/runtime/api/cumetal_native.h
 )
+
+add_test(
+    NAME unit_ci_report
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_ci_report_test.sh
+            ${CMAKE_SOURCE_DIR}/scripts/ci_report.sh
+)
+
+# Hosted CI deliberately selects tests by capability rather than by name.
+# Keep GPU execution out of this label so a hosted runner cannot turn a
+# missing Metal device into a green-but-skipped hardware claim.
+get_property(CUMETAL_UNIT_TESTS DIRECTORY PROPERTY TESTS)
+list(REMOVE_ITEM CUMETAL_UNIT_TESTS unit_cumetal_bench_ratio_gate)
+set_tests_properties(${CUMETAL_UNIT_TESTS} PROPERTIES LABELS "hosted;unit")
+set_tests_properties(unit_cumetal_bench_ratio_gate PROPERTIES LABELS "gpu")

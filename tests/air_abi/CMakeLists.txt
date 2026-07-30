@@ -275,3 +275,21 @@ set_tests_properties(
     PROPERTIES
         SKIP_RETURN_CODE 77
 )
+
+# These checks exercise container parsing, negative paths, PTX/CUDA import,
+# typed lowering, and experimental metallib emission without loading a library
+# on a Metal device. They are the AIR/compiler slice safe for hosted CI.
+set_tests_properties(
+    air_abi_emit_validate_experimental
+    air_abi_validate_negative
+    air_abi_ptx_to_experimental_validate
+    air_abi_matrix_ptx_to_experimental_validate
+    air_abi_cumetalc_ptx_experimental_validate
+    air_abi_cumetalc_matrix_ptx_experimental_validate
+    air_abi_cumetalc_cu_experimental_validate
+    air_abi_cumetalc_cuda_device_frontend_validate
+    air_abi_cumetalc_cu_default_output_validate
+    air_abi_cumetalc_ptx_default_output_validate
+    air_abi_ptx2llvm_positional_default_output
+    PROPERTIES LABELS "hosted;air-compiler"
+)

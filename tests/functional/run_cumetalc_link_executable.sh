@@ -34,7 +34,10 @@ rm -f "${OUT_BIN}"
 echo "Building ${SOURCE_CU} -> ${OUT_BIN}"
 BUILD_LOG="${WORK_DIR}/link_executable.build.log"
 BUILD_STATUS=0
-"${CUMETALC}" "${SOURCE_CU}" -o "${OUT_BIN}" >"${BUILD_LOG}" 2>&1 || BUILD_STATUS=$?
+# Keep a space-bearing PATH entry in this regression gate. The driver prepends its
+# CUDA shims to PATH when invoking Clang and must preserve the caller's value.
+PATH="${WORK_DIR}/path with spaces:${PATH}" \
+    "${CUMETALC}" "${SOURCE_CU}" -o "${OUT_BIN}" >"${BUILD_LOG}" 2>&1 || BUILD_STATUS=$?
 
 # Homebrew LLVM emits a benign "'+ptxNN' is not a recognized feature" line on toolchains new
 # enough not to need the flag. Filter it from the printed log only, never from the exit status.
