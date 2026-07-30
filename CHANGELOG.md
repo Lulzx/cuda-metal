@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-30
+
 ### Fixed
 
 - **`cumetalc` no longer prints spurious `+ptxNN` target-feature warnings.** PTX version features
