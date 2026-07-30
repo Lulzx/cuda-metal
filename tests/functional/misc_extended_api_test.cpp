@@ -53,6 +53,8 @@ static void test_curand_generate_poisson() {
 
     CHECK(curandGeneratePoisson(gen, d_out, kN, 4.0) == CURAND_STATUS_SUCCESS,
           "curandGeneratePoisson lambda=4");
+    CHECK(cudaDeviceSynchronize() == cudaSuccess,
+          "curandGeneratePoisson completes before host inspection");
 
     // Verify output looks like Poisson (mean ~4, all non-negative)
     double sum = 0.0;
@@ -164,6 +166,8 @@ static void test_cuda_malloc3d_memcpy3d() {
     // Async variant (should behave identically on UMA).
     std::memset(dp2.ptr, 0x00, dp2.pitch * ext.height * ext.depth);
     CHECK(cudaMemcpy3DAsync(&p, nullptr) == cudaSuccess, "cudaMemcpy3DAsync");
+    CHECK(cudaDeviceSynchronize() == cudaSuccess,
+          "cudaMemcpy3DAsync completes before host inspection");
     ok = true;
     for (size_t b = 0; b < ext.width; ++b) {
         if (dst[b] != 0xAB) { ok = false; break; }

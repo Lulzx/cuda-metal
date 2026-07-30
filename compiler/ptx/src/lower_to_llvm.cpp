@@ -250,91 +250,6 @@ int byte_size_for_param_metadata(const ParamInfo& param) {
     return byte_size_for_llvm_type(param.llvm_type);
 }
 
-std::string lowercase(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    return value;
-}
-
-
-bool is_integer_llvm_type(const std::string& llvm_type) {
-    return !llvm_type.empty() && llvm_type[0] == 'i';
-}
-
-
-
-
-bool looks_like_fp64_mul_add_signature(const std::string& entry_name,
-                                        const std::vector<ParamInfo>& params) {
-    if (params.size() < 2) {
-        return false;
-    }
-    if (!is_device_buffer_pointer(params[0].llvm_type) ||
-        !is_device_buffer_pointer(params[1].llvm_type)) {
-        return false;
-    }
-    const std::string lowered_name = lowercase(entry_name);
-    // Match kernels named like "fp64_mul_add" or "fp64_fma" — FP64 arithmetic tests
-    return lowered_name.find("fp64") != std::string::npos &&
-           (lowered_name.find("mul") != std::string::npos ||
-            lowered_name.find("fma") != std::string::npos ||
-            lowered_name.find("add") != std::string::npos);
-}
-
-// Emit the body for a fp64_mul_add kernel.
-//
-// kNative: use @llvm.fma.f64 (IEEE 754 double; fails at runtime on Apple
-//          Silicon because the GPU rejects double-precision ALU operations).
-// kEmulate: decompose to FP32 using Dekker double-single arithmetic.
-//   For fma(a, 2.0, 1.0) where a is a float:
-//     • Multiplying a float by 2.0 is exact (exponent increment).
-//     • Adding 1.0 uses Knuth's TwoSum to preserve all 24 bits of mantissa.
-//   Result is identical to the FP64 computation for any float input because
-//   the intermediate products are exactly representable in FP32.  For inputs
-//   that would require > 24 bits the Dekker pair captures the residual in the
-//   low word, giving ~44 bits of effective mantissa before the final rounding.
-void emit_fp64_mul_add_body(std::ostringstream& ir,
-                            const std::vector<ParamInfo>& params,
-                            Fp64Mode fp64_mode) {
-    // params[0]: float* input, params[1]: float* output
-    // params.back(): __air_thread_position_in_grid (i32)
-    const std::string& in_name  = params[0].name;
-    const std::string& out_name = params[1].name;
-    const std::string& idx_name = params.back().name;
-
-    ir << "  %in.ptr = getelementptr float, float addrspace(1)* %" << in_name
-       << ", i32 %" << idx_name << "\n";
-    ir << "  %out.ptr = getelementptr float, float addrspace(1)* %" << out_name
-       << ", i32 %" << idx_name << "\n";
-    ir << "  %f.val = load float, float addrspace(1)* %in.ptr, align 4\n";
-
-    if (fp64_mode == Fp64Mode::kEmulate) {
-        // Dekker double-single emulation: fma(val, 2.0, 1.0) in FP32.
-        // Step 1: val * 2.0 — exact for any float (just exponent + 1).
-        ir << "  %f.mul = fmul float %f.val, 2.000000e+00\n";
-        // Step 2: Knuth TwoSum for (f.mul + 1.0).
-        //   s   = f.mul + 1.0
-        //   b'  = s - f.mul     (recovered addend)
-        //   err = 1.0 - b'      (rounding residual)
-        //   result = s (err is below FP32 precision for this specific sum,
-        //               so high word s gives the correctly-rounded float result)
-        ir << "  %f.sum = fadd float %f.mul, 1.000000e+00\n";
-        ir << "  %f.b_prime = fsub float %f.sum, %f.mul\n";
-        ir << "  %f.err = fsub float 1.000000e+00, %f.b_prime\n";
-        ir << "  %f.result = fadd float %f.sum, %f.err\n";
-    } else {
-        // Native (kNative / kWarn): use LLVM double FMA intrinsic.
-        ir << "  %d.val = fpext float %f.val to double\n";
-        ir << "  %d.result = call double @llvm.fma.f64(double %d.val, "
-              "double 2.000000e+00, double 1.000000e+00)\n";
-        ir << "  %f.result = fptrunc double %d.result to float\n";
-    }
-
-    ir << "  store float %f.result, float addrspace(1)* %out.ptr, align 4\n";
-    ir << "  ret void\n";
-}
-
 struct GenericLlvmBodyResult {
     bool ok = false;
     std::string body_ir;
@@ -1069,6 +984,11 @@ class GenericLlvmEmitter {
         int bits = 0;
     };
 
+    struct Fp64Pair {
+        std::string hi;
+        std::string lo;
+    };
+
     enum class PointerAs {
         kUnknown = 0,
         kGlobal = 1,
@@ -1327,6 +1247,163 @@ class GenericLlvmEmitter {
             }
         }
         return std::nullopt;
+    }
+
+    std::string emit_float_constant(std::ostringstream& os, float value,
+                                    std::string_view label) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        const std::string raw = next_tmp(std::string(label) + "_bits");
+        os << "  " << raw << " = or i32 0, " << static_cast<std::int32_t>(bits) << "\n";
+        const std::string result = next_tmp(std::string(label));
+        os << "  " << result << " = bitcast i32 " << raw << " to float\n";
+        return result;
+    }
+
+    std::optional<Fp64Pair> decode_fp64_pair(std::ostringstream& os,
+                                             const std::string& operand) {
+        if (is_register_name(operand)) {
+            if (ensure_reg_slot(operand).bits != 64) return std::nullopt;
+            const std::string packed = emit_load_reg_bits(os, operand, 64);
+            const std::string hi_bits = next_tmp("fp64_hi_bits");
+            const std::string shifted = next_tmp("fp64_lo_shift");
+            const std::string lo_bits = next_tmp("fp64_lo_bits");
+            os << "  " << hi_bits << " = trunc i64 " << packed << " to i32\n";
+            os << "  " << shifted << " = lshr i64 " << packed << ", 32\n";
+            os << "  " << lo_bits << " = trunc i64 " << shifted << " to i32\n";
+            const std::string hi = next_tmp("fp64_hi");
+            const std::string lo = next_tmp("fp64_lo");
+            os << "  " << hi << " = bitcast i32 " << hi_bits << " to float\n";
+            os << "  " << lo << " = bitcast i32 " << lo_bits << " to float\n";
+            return Fp64Pair{hi, lo};
+        }
+
+        double value = 0.0;
+        bool parsed = false;
+        if (operand.size() == 18 && operand[0] == '0' && operand[1] == 'd') {
+            try {
+                const std::uint64_t bits = std::stoull(operand.substr(2), nullptr, 16);
+                std::memcpy(&value, &bits, sizeof(value));
+                parsed = true;
+            } catch (...) {
+            }
+        } else {
+            char* end = nullptr;
+            value = std::strtod(operand.c_str(), &end);
+            parsed = end != operand.c_str() && *end == '\0';
+        }
+        if (!parsed) return std::nullopt;
+        const float hi_value = static_cast<float>(value);
+        const float lo_value =
+            static_cast<float>(value - static_cast<double>(hi_value));
+        return Fp64Pair{
+            emit_float_constant(os, hi_value, "fp64_imm_hi"),
+            emit_float_constant(os, lo_value, "fp64_imm_lo")};
+    }
+
+    bool store_fp64_pair(std::ostringstream& os, const std::string& dst,
+                         const Fp64Pair& value) {
+        const std::string hi_bits = next_tmp("fp64_pack_hi");
+        const std::string lo_bits = next_tmp("fp64_pack_lo");
+        os << "  " << hi_bits << " = bitcast float " << value.hi << " to i32\n";
+        os << "  " << lo_bits << " = bitcast float " << value.lo << " to i32\n";
+        const std::string hi64 = next_tmp("fp64_pack_hi64");
+        const std::string lo64 = next_tmp("fp64_pack_lo64");
+        const std::string shifted = next_tmp("fp64_pack_shift");
+        const std::string packed = next_tmp("fp64_pack");
+        os << "  " << hi64 << " = zext i32 " << hi_bits << " to i64\n";
+        os << "  " << lo64 << " = zext i32 " << lo_bits << " to i64\n";
+        os << "  " << shifted << " = shl i64 " << lo64 << ", 32\n";
+        os << "  " << packed << " = or i64 " << hi64 << ", " << shifted << "\n";
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, packed, 64);
+    }
+
+    Fp64Pair emit_fp64_pair_add(std::ostringstream& os,
+                                const Fp64Pair& a,
+                                const Fp64Pair& b,
+                                bool subtract = false) {
+        std::string b_hi = b.hi;
+        std::string b_lo = b.lo;
+        if (subtract) {
+            b_hi = next_tmp("fp64_sub_hi");
+            b_lo = next_tmp("fp64_sub_lo");
+            os << "  " << b_hi << " = fneg float " << b.hi << "\n";
+            os << "  " << b_lo << " = fneg float " << b.lo << "\n";
+        }
+        const std::string sum = next_tmp("fp64_sum");
+        const std::string b_virtual = next_tmp("fp64_bvirtual");
+        const std::string a_round = next_tmp("fp64_around");
+        const std::string a_error = next_tmp("fp64_aerror");
+        const std::string b_round = next_tmp("fp64_bround");
+        const std::string err0 = next_tmp("fp64_err0");
+        const std::string err1 = next_tmp("fp64_err1");
+        const std::string err2 = next_tmp("fp64_err2");
+        os << "  " << sum << " = fadd float " << a.hi << ", " << b_hi << "\n";
+        os << "  " << b_virtual << " = fsub float " << sum << ", " << a.hi << "\n";
+        os << "  " << a_round << " = fsub float " << sum << ", " << b_virtual << "\n";
+        os << "  " << a_error << " = fsub float " << a.hi << ", " << a_round << "\n";
+        os << "  " << b_round << " = fsub float " << b_hi << ", " << b_virtual << "\n";
+        os << "  " << err0 << " = fadd float " << a_error << ", " << b_round << "\n";
+        os << "  " << err1 << " = fadd float " << err0 << ", " << a.lo << "\n";
+        os << "  " << err2 << " = fadd float " << err1 << ", " << b_lo << "\n";
+        const std::string hi = next_tmp("fp64_add_hi");
+        const std::string delta = next_tmp("fp64_add_delta");
+        const std::string lo = next_tmp("fp64_add_lo");
+        os << "  " << hi << " = fadd float " << sum << ", " << err2 << "\n";
+        os << "  " << delta << " = fsub float " << hi << ", " << sum << "\n";
+        os << "  " << lo << " = fsub float " << err2 << ", " << delta << "\n";
+        return {hi, lo};
+    }
+
+    Fp64Pair emit_fp64_pair_div(std::ostringstream& os,
+                                const Fp64Pair& a,
+                                const Fp64Pair& b) {
+        const std::string quotient = next_tmp("fp64_quotient");
+        os << "  " << quotient << " = fdiv float " << a.hi << ", " << b.hi << "\n";
+        const std::string zero = emit_float_constant(os, 0.0f, "fp64_zero");
+        const Fp64Pair q{quotient, zero};
+        const Fp64Pair product = emit_fp64_pair_mul(os, q, b);
+        const Fp64Pair residual = emit_fp64_pair_add(os, a, product, true);
+        const std::string residual_sum = next_tmp("fp64_div_residual");
+        os << "  " << residual_sum << " = fadd float "
+           << residual.hi << ", " << residual.lo << "\n";
+        const std::string correction = next_tmp("fp64_div_correction");
+        os << "  " << correction << " = fdiv float "
+           << residual_sum << ", " << b.hi << "\n";
+        const Fp64Pair correction_pair{correction, zero};
+        return emit_fp64_pair_add(os, q, correction_pair);
+    }
+
+    Fp64Pair emit_fp64_pair_mul(std::ostringstream& os,
+                                const Fp64Pair& a,
+                                const Fp64Pair& b) {
+        declarations_.insert("declare float @llvm.fma.f32(float, float, float)");
+        const std::string product = next_tmp("fp64_product");
+        const std::string neg_product = next_tmp("fp64_neg_product");
+        const std::string exact_error = next_tmp("fp64_product_error");
+        const std::string cross0 = next_tmp("fp64_cross0");
+        const std::string cross1 = next_tmp("fp64_cross1");
+        const std::string cross2 = next_tmp("fp64_cross2");
+        const std::string error0 = next_tmp("fp64_mul_error0");
+        const std::string error1 = next_tmp("fp64_mul_error1");
+        os << "  " << product << " = fmul float " << a.hi << ", " << b.hi << "\n";
+        os << "  " << neg_product << " = fneg float " << product << "\n";
+        os << "  " << exact_error << " = call float @llvm.fma.f32(float "
+           << a.hi << ", float " << b.hi << ", float " << neg_product << ")\n";
+        os << "  " << cross0 << " = fmul float " << a.hi << ", " << b.lo << "\n";
+        os << "  " << cross1 << " = fmul float " << a.lo << ", " << b.hi << "\n";
+        os << "  " << cross2 << " = fmul float " << a.lo << ", " << b.lo << "\n";
+        os << "  " << error0 << " = fadd float " << exact_error << ", " << cross0 << "\n";
+        os << "  " << error1 << " = fadd float " << error0 << ", " << cross1 << "\n";
+        const std::string error2 = next_tmp("fp64_mul_error2");
+        os << "  " << error2 << " = fadd float " << error1 << ", " << cross2 << "\n";
+        const std::string hi = next_tmp("fp64_mul_hi");
+        const std::string delta = next_tmp("fp64_mul_delta");
+        const std::string lo = next_tmp("fp64_mul_lo");
+        os << "  " << hi << " = fadd float " << product << ", " << error2 << "\n";
+        os << "  " << delta << " = fsub float " << hi << ", " << product << "\n";
+        os << "  " << lo << " = fsub float " << error2 << ", " << delta << "\n";
+        return {hi, lo};
     }
 
     std::optional<std::string> encode_value_to_reg_bits(std::ostringstream& os,
@@ -1867,6 +1944,11 @@ class GenericLlvmEmitter {
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         int dst_bits = ensure_reg_slot(dst).bits;
         if (ty.kind == PtxTypeSpec::Kind::kFloat && (ty.bits == 32 || ty.bits == 64)) {
+            if (ty.bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                auto pair = decode_fp64_pair(os, src);
+                if (!pair) return fail(instr, "mov.f64 emulation source unsupported");
+                return store_fp64_pair(os, dst, *pair);
+            }
             if (auto fv = decode_float_operand(os, src, ty.bits)) {
                 if (auto bits = encode_value_to_reg_bits(os, *fv, dst_bits)) {
                     return emit_store_reg_bits(os, dst, dst_bits, *bits, dst_bits);
@@ -1944,121 +2026,6 @@ class GenericLlvmEmitter {
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, out, bits);
     }
 
-    // Dekker double-single FP64 emulation: decompose a 64-bit float op into FP32 pairs.
-    // Each double is represented as (hi, lo) where hi+lo approximates the double value.
-    // This gives ~44 bits of effective mantissa.
-    bool emit_fp64_emulated_binary(std::ostringstream& os,
-                                    const std::string& dst,
-                                    const Value& a, const Value& b,
-                                    const std::string& llvm_op) {
-        // Truncate double operands to float (hi word of Dekker pair)
-        const std::string a_hi = next_tmp("dek_ahi");
-        const std::string b_hi = next_tmp("dek_bhi");
-        os << "  " << a_hi << " = fptrunc double " << a.ir << " to float\n";
-        os << "  " << b_hi << " = fptrunc double " << b.ir << " to float\n";
-
-        // Compute error terms (lo words): a_lo = a - fpext(a_hi)
-        const std::string a_hi_ext = next_tmp("dek_ahiext");
-        const std::string b_hi_ext = next_tmp("dek_bhiext");
-        const std::string a_lo_d = next_tmp("dek_alo");
-        const std::string b_lo_d = next_tmp("dek_blo");
-        os << "  " << a_hi_ext << " = fpext float " << a_hi << " to double\n";
-        os << "  " << b_hi_ext << " = fpext float " << b_hi << " to double\n";
-        os << "  " << a_lo_d << " = fsub double " << a.ir << ", " << a_hi_ext << "\n";
-        os << "  " << b_lo_d << " = fsub double " << b.ir << ", " << b_hi_ext << "\n";
-        const std::string a_lo = next_tmp("dek_alo32");
-        const std::string b_lo = next_tmp("dek_blo32");
-        os << "  " << a_lo << " = fptrunc double " << a_lo_d << " to float\n";
-        os << "  " << b_lo << " = fptrunc double " << b_lo_d << " to float\n";
-
-        std::string result_hi, result_lo;
-
-        if (llvm_op == "fadd" || llvm_op == "fsub") {
-            // (a_hi + a_lo) +/- (b_hi + b_lo) = (a_hi +/- b_hi) + (a_lo +/- b_lo)
-            // Use TwoSum for the hi parts to get exact error
-            const std::string s = next_tmp("dek_s");
-            os << "  " << s << " = " << llvm_op << " float " << a_hi << ", " << b_hi << "\n";
-            const std::string v1 = next_tmp("dek_v");
-            os << "  " << v1 << " = fsub float " << s << ", " << a_hi << "\n";
-            const std::string err_b = next_tmp("dek_errb");
-            os << "  " << err_b << " = fsub float " << b_hi << ", " << v1 << "\n";
-            const std::string err_a = next_tmp("dek_erra");
-            os << "  " << err_a << " = fsub float " << a_hi << ", " << s << "\n";
-            const std::string err_a2 = next_tmp("dek_erra2");
-            os << "  " << err_a2 << " = fadd float " << err_a << ", " << v1 << "\n";
-            const std::string round_err = next_tmp("dek_rerr");
-            os << "  " << round_err << " = fadd float " << err_a2 << ", " << err_b << "\n";
-            // lo = round_err + a_lo +/- b_lo
-            const std::string lo1 = next_tmp("dek_lo1");
-            os << "  " << lo1 << " = fadd float " << round_err << ", " << a_lo << "\n";
-            const std::string lo2 = next_tmp("dek_lo2");
-            os << "  " << lo2 << " = " << llvm_op << " float " << lo1 << ", " << b_lo << "\n";
-            result_hi = s;
-            result_lo = lo2;
-        } else if (llvm_op == "fmul") {
-            // (a_hi + a_lo) * (b_hi + b_lo) ≈ a_hi*b_hi + (a_hi*b_lo + a_lo*b_hi)
-            const std::string p = next_tmp("dek_p");
-            os << "  " << p << " = fmul float " << a_hi << ", " << b_hi << "\n";
-            // Cross terms
-            const std::string c1 = next_tmp("dek_c1");
-            os << "  " << c1 << " = fmul float " << a_hi << ", " << b_lo << "\n";
-            const std::string c2 = next_tmp("dek_c2");
-            os << "  " << c2 << " = fmul float " << a_lo << ", " << b_hi << "\n";
-            const std::string lo1 = next_tmp("dek_lo1");
-            os << "  " << lo1 << " = fadd float " << c1 << ", " << c2 << "\n";
-            result_hi = p;
-            result_lo = lo1;
-        } else if (llvm_op == "fdiv") {
-            // a / b ≈ (a_hi / b_hi) with Newton correction
-            const std::string q = next_tmp("dek_q");
-            os << "  " << q << " = fdiv float " << a_hi << ", " << b_hi << "\n";
-            // Residual: r = a_hi - q * b_hi
-            const std::string qb = next_tmp("dek_qb");
-            os << "  " << qb << " = fmul float " << q << ", " << b_hi << "\n";
-            const std::string r = next_tmp("dek_r");
-            os << "  " << r << " = fsub float " << a_hi << ", " << qb << "\n";
-            // Correction: (r + a_lo - q * b_lo) / b_hi
-            const std::string r2 = next_tmp("dek_r2");
-            os << "  " << r2 << " = fadd float " << r << ", " << a_lo << "\n";
-            const std::string qbl = next_tmp("dek_qbl");
-            os << "  " << qbl << " = fmul float " << q << ", " << b_lo << "\n";
-            const std::string r3 = next_tmp("dek_r3");
-            os << "  " << r3 << " = fsub float " << r2 << ", " << qbl << "\n";
-            const std::string corr = next_tmp("dek_corr");
-            os << "  " << corr << " = fdiv float " << r3 << ", " << b_hi << "\n";
-            result_hi = q;
-            result_lo = corr;
-        } else {
-            // Unsupported op — fall back to FP32 approximation
-            const std::string out = next_tmp("fbin");
-            os << "  " << out << " = " << llvm_op << " float " << a_hi << ", " << b_hi << "\n";
-            result_hi = out;
-            result_lo = "";
-        }
-
-        // Reconstruct: result = hi + lo, then extend back to double
-        std::string final_f32;
-        if (!result_lo.empty()) {
-            final_f32 = next_tmp("dek_sum");
-            os << "  " << final_f32 << " = fadd float " << result_hi << ", " << result_lo << "\n";
-        } else {
-            final_f32 = result_hi;
-        }
-        const std::string result_d = next_tmp("dek_result");
-        os << "  " << result_d << " = fpext float " << final_f32 << " to double\n";
-
-        Value v;
-        v.ir = result_d;
-        v.type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = 64, .is_signed = false};
-        v.bits = 64;
-        auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
-        if (!bitsv.has_value()) {
-            error_ = "fp64 emulate result encode failed";
-            return false;
-        }
-        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
-    }
-
     bool emit_binary_float_op(std::ostringstream& os,
                               const cumetal::ptx::EntryFunction::Instruction& instr,
                               const std::string& llvm_op) {
@@ -2073,12 +2040,16 @@ class GenericLlvmEmitter {
 
         // FP64 emulation: decompose to FP32 Dekker pairs when --fp64=emulate
         if (ty.bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
-            auto a = decode_float_operand(os, instr.operands[1], ty.bits);
-            auto b = decode_float_operand(os, instr.operands[2], ty.bits);
-            if (!a.has_value() || !b.has_value()) {
-                return fail(instr, "float op source unsupported");
-            }
-            return emit_fp64_emulated_binary(os, dst, *a, *b, llvm_op);
+            auto a = decode_fp64_pair(os, instr.operands[1]);
+            auto b = decode_fp64_pair(os, instr.operands[2]);
+            if (!a || !b) return fail(instr, "fp64 emulation source unsupported");
+            Fp64Pair result;
+            if (llvm_op == "fadd") result = emit_fp64_pair_add(os, *a, *b);
+            else if (llvm_op == "fsub") result = emit_fp64_pair_add(os, *a, *b, true);
+            else if (llvm_op == "fmul") result = emit_fp64_pair_mul(os, *a, *b);
+            else if (llvm_op == "fdiv") result = emit_fp64_pair_div(os, *a, *b);
+            else return fail(instr, "unsupported fp64 emulation binary operation");
+            return store_fp64_pair(os, dst, result);
         }
 
         auto a = decode_float_operand(os, instr.operands[1], ty.bits);
@@ -2208,76 +2179,6 @@ class GenericLlvmEmitter {
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, hi, bits);
     }
 
-    // Dekker FMA emulation: fma(a, b, c) ≈ dekker_mul(a, b) + c using double-single pairs
-    bool emit_fp64_emulated_fma(std::ostringstream& os,
-                                 const std::string& dst,
-                                 const Value& a, const Value& b, const Value& c) {
-        // Decompose a, b, c to (hi, lo) FP32 pairs
-        const std::string a_hi = next_tmp("fma_ahi"), b_hi = next_tmp("fma_bhi"), c_hi = next_tmp("fma_chi");
-        os << "  " << a_hi << " = fptrunc double " << a.ir << " to float\n";
-        os << "  " << b_hi << " = fptrunc double " << b.ir << " to float\n";
-        os << "  " << c_hi << " = fptrunc double " << c.ir << " to float\n";
-
-        const std::string a_hi_ext = next_tmp("fma_ahiext"), b_hi_ext = next_tmp("fma_bhiext"), c_hi_ext = next_tmp("fma_chiext");
-        os << "  " << a_hi_ext << " = fpext float " << a_hi << " to double\n";
-        os << "  " << b_hi_ext << " = fpext float " << b_hi << " to double\n";
-        os << "  " << c_hi_ext << " = fpext float " << c_hi << " to double\n";
-
-        const std::string a_lo_d = next_tmp("fma_alo"), b_lo_d = next_tmp("fma_blo"), c_lo_d = next_tmp("fma_clo");
-        os << "  " << a_lo_d << " = fsub double " << a.ir << ", " << a_hi_ext << "\n";
-        os << "  " << b_lo_d << " = fsub double " << b.ir << ", " << b_hi_ext << "\n";
-        os << "  " << c_lo_d << " = fsub double " << c.ir << ", " << c_hi_ext << "\n";
-
-        const std::string a_lo = next_tmp("fma_alo32"), b_lo = next_tmp("fma_blo32"), c_lo = next_tmp("fma_clo32");
-        os << "  " << a_lo << " = fptrunc double " << a_lo_d << " to float\n";
-        os << "  " << b_lo << " = fptrunc double " << b_lo_d << " to float\n";
-        os << "  " << c_lo << " = fptrunc double " << c_lo_d << " to float\n";
-
-        // Dekker multiply: p = a_hi * b_hi, cross = a_hi*b_lo + a_lo*b_hi
-        const std::string p = next_tmp("fma_p");
-        os << "  " << p << " = fmul float " << a_hi << ", " << b_hi << "\n";
-        const std::string cr1 = next_tmp("fma_cr1"), cr2 = next_tmp("fma_cr2"), cross = next_tmp("fma_cross");
-        os << "  " << cr1 << " = fmul float " << a_hi << ", " << b_lo << "\n";
-        os << "  " << cr2 << " = fmul float " << a_lo << ", " << b_hi << "\n";
-        os << "  " << cross << " = fadd float " << cr1 << ", " << cr2 << "\n";
-
-        // TwoSum: s = p + c_hi, with error tracking
-        const std::string s = next_tmp("fma_s");
-        os << "  " << s << " = fadd float " << p << ", " << c_hi << "\n";
-        const std::string v1 = next_tmp("fma_v");
-        os << "  " << v1 << " = fsub float " << s << ", " << p << "\n";
-        const std::string err_c = next_tmp("fma_errc");
-        os << "  " << err_c << " = fsub float " << c_hi << ", " << v1 << "\n";
-        const std::string err_p = next_tmp("fma_errp");
-        os << "  " << err_p << " = fsub float " << p << ", " << s << "\n";
-        const std::string err_p2 = next_tmp("fma_errp2");
-        os << "  " << err_p2 << " = fadd float " << err_p << ", " << v1 << "\n";
-        const std::string round_err = next_tmp("fma_rerr");
-        os << "  " << round_err << " = fadd float " << err_p2 << ", " << err_c << "\n";
-
-        // lo = round_err + cross + c_lo
-        const std::string lo1 = next_tmp("fma_lo1"), lo2 = next_tmp("fma_lo2");
-        os << "  " << lo1 << " = fadd float " << round_err << ", " << cross << "\n";
-        os << "  " << lo2 << " = fadd float " << lo1 << ", " << c_lo << "\n";
-
-        // Reconstruct
-        const std::string final_f32 = next_tmp("fma_sum");
-        os << "  " << final_f32 << " = fadd float " << s << ", " << lo2 << "\n";
-        const std::string result_d = next_tmp("fma_result");
-        os << "  " << result_d << " = fpext float " << final_f32 << " to double\n";
-
-        Value v;
-        v.ir = result_d;
-        v.type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = 64, .is_signed = false};
-        v.bits = 64;
-        auto bitsv = encode_value_to_reg_bits(os, v, ensure_reg_slot(dst).bits);
-        if (!bitsv.has_value()) {
-            error_ = "fp64 emulate fma result encode failed";
-            return false;
-        }
-        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv, ensure_reg_slot(dst).bits);
-    }
-
     bool emit_mad_or_fma(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
         if (instr.operands.size() < 4 || !is_register_name(instr.operands[0])) {
             return fail(instr, "mad/fma requires dst, a, b, c");
@@ -2286,15 +2187,18 @@ class GenericLlvmEmitter {
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         if (opcode_uses_float_math(instr.opcode)) {
             const int bits = (ty.bits == 64) ? 64 : 32;
+            if (bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                auto a = decode_fp64_pair(os, instr.operands[1]);
+                auto b = decode_fp64_pair(os, instr.operands[2]);
+                auto c = decode_fp64_pair(os, instr.operands[3]);
+                if (!a || !b || !c) return fail(instr, "fp64 fma emulation source unsupported");
+                const Fp64Pair product = emit_fp64_pair_mul(os, *a, *b);
+                return store_fp64_pair(os, dst, emit_fp64_pair_add(os, product, *c));
+            }
             auto a = decode_float_operand(os, instr.operands[1], bits);
             auto b = decode_float_operand(os, instr.operands[2], bits);
             auto c = decode_float_operand(os, instr.operands[3], bits);
             if (!a || !b || !c) return fail(instr, "mad/fma float source unsupported");
-
-            // FP64 emulation: decompose fma to Dekker double-single pairs
-            if (bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
-                return emit_fp64_emulated_fma(os, dst, *a, *b, *c);
-            }
 
             const std::string mul = next_tmp("fmul");
             const std::string add = next_tmp("fadd");
@@ -2328,6 +2232,30 @@ class GenericLlvmEmitter {
 
         if (opcode_uses_float_math(instr.opcode)) {
             const int bits = (ty.bits > 0) ? ty.bits : 32;
+            if (bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                auto a = decode_fp64_pair(os, instr.operands[1]);
+                auto b = decode_fp64_pair(os, instr.operands[2]);
+                if (!a || !b) return fail(instr, "fp64 min/max emulation source unsupported");
+                const std::string hi_cmp = next_tmp("fp64_minmax_hi");
+                const std::string hi_eq = next_tmp("fp64_minmax_hieq");
+                const std::string lo_cmp = next_tmp("fp64_minmax_lo");
+                const std::string tie_cmp = next_tmp("fp64_minmax_tie");
+                const std::string choose_a = next_tmp("fp64_minmax_choose");
+                os << "  " << hi_cmp << " = fcmp " << (is_min ? "olt" : "ogt")
+                   << " float " << a->hi << ", " << b->hi << "\n";
+                os << "  " << hi_eq << " = fcmp oeq float " << a->hi << ", " << b->hi << "\n";
+                os << "  " << lo_cmp << " = fcmp " << (is_min ? "olt" : "ogt")
+                   << " float " << a->lo << ", " << b->lo << "\n";
+                os << "  " << tie_cmp << " = and i1 " << hi_eq << ", " << lo_cmp << "\n";
+                os << "  " << choose_a << " = or i1 " << hi_cmp << ", " << tie_cmp << "\n";
+                const std::string hi = next_tmp("fp64_minmax_sel_hi");
+                const std::string lo = next_tmp("fp64_minmax_sel_lo");
+                os << "  " << hi << " = select i1 " << choose_a << ", float "
+                   << a->hi << ", float " << b->hi << "\n";
+                os << "  " << lo << " = select i1 " << choose_a << ", float "
+                   << a->lo << ", float " << b->lo << "\n";
+                return store_fp64_pair(os, dst, Fp64Pair{hi, lo});
+            }
             auto a = decode_float_operand(os, instr.operands[1], bits);
             auto b = decode_float_operand(os, instr.operands[2], bits);
             if (!a || !b) return fail(instr, "min/max float source unsupported");
@@ -2367,6 +2295,15 @@ class GenericLlvmEmitter {
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         if (opcode_uses_float_math(instr.opcode)) {
             const int bits = (ty.bits > 0) ? ty.bits : 32;
+            if (bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                auto pair = decode_fp64_pair(os, instr.operands[1]);
+                if (!pair) return fail(instr, "fp64 neg emulation source unsupported");
+                const std::string hi = next_tmp("fp64_neg_hi");
+                const std::string lo = next_tmp("fp64_neg_lo");
+                os << "  " << hi << " = fneg float " << pair->hi << "\n";
+                os << "  " << lo << " = fneg float " << pair->lo << "\n";
+                return store_fp64_pair(os, dst, Fp64Pair{hi, lo});
+            }
             auto a = decode_float_operand(os, instr.operands[1], bits);
             if (!a) return fail(instr, "neg float source unsupported");
             const std::string out = next_tmp("fneg");
@@ -2459,6 +2396,45 @@ class GenericLlvmEmitter {
             return fail(instr, "unable to parse cvt types");
         }
         const std::string& src = instr.operands[1];
+
+        const bool converts_fp64 =
+            (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64) ||
+            (cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64);
+        if (fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate && converts_fp64) {
+            if (instr.opcode.find(".rni.") != std::string::npos ||
+                instr.opcode.find(".rmi.") != std::string::npos ||
+                instr.opcode.find(".rpi.") != std::string::npos ||
+                instr.opcode.find(".rzi.") != std::string::npos) {
+                return fail(instr, "rounded fp64 conversion is not supported by FP32-pair emulation");
+            }
+            if (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64 &&
+                cvt.dst.kind == PtxTypeSpec::Kind::kFloat) {
+                auto pair = decode_fp64_pair(os, src);
+                if (!pair) return fail(instr, "fp64 conversion source unsupported");
+                if (cvt.dst.bits == 64) return store_fp64_pair(os, dst, *pair);
+                if (cvt.dst.bits != 32) {
+                    return fail(instr, "FP32-pair emulation currently converts fp64 only to fp32");
+                }
+                const std::string rounded = next_tmp("fp64_to_f32");
+                os << "  " << rounded << " = fadd float " << pair->hi << ", " << pair->lo << "\n";
+                Value result{.ir = rounded,
+                             .type = {.kind = PtxTypeSpec::Kind::kFloat, .bits = 32},
+                             .bits = 32};
+                auto bits = encode_value_to_reg_bits(os, result, ensure_reg_slot(dst).bits);
+                if (!bits) return fail(instr, "fp64-to-f32 conversion encode failed");
+                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bits,
+                                           ensure_reg_slot(dst).bits);
+            }
+            if (cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64 &&
+                cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 32) {
+                auto value = decode_float_operand(os, src, 32);
+                if (!value) return fail(instr, "f32-to-fp64 conversion source unsupported");
+                const std::string zero = emit_float_constant(os, 0.0f, "fp64_cvt_zero");
+                return store_fp64_pair(os, dst, Fp64Pair{value->ir, zero});
+            }
+            return fail(instr,
+                        "this fp64 conversion is not supported by FP32-pair emulation");
+        }
 
         Value src_value;
         if (cvt.src.kind == PtxTypeSpec::Kind::kFloat) {
@@ -2619,6 +2595,44 @@ class GenericLlvmEmitter {
 
         std::string pred_value;
         if (ty.kind == PtxTypeSpec::Kind::kFloat) {
+            if (ty.bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                auto a = decode_fp64_pair(os, instr.operands[1]);
+                auto b = decode_fp64_pair(os, instr.operands[2]);
+                if (!a || !b) return fail(instr, "fp64 setp emulation source unsupported");
+                const std::string hi_eq = next_tmp("fp64_cmp_hieq");
+                const std::string lo_eq = next_tmp("fp64_cmp_loeq");
+                const std::string equal = next_tmp("fp64_cmp_eq");
+                os << "  " << hi_eq << " = fcmp oeq float " << a->hi << ", " << b->hi << "\n";
+                os << "  " << lo_eq << " = fcmp oeq float " << a->lo << ", " << b->lo << "\n";
+                os << "  " << equal << " = and i1 " << hi_eq << ", " << lo_eq << "\n";
+                if (cmp == "eq") {
+                    pred_value = equal;
+                } else if (cmp == "ne") {
+                    const std::string out = next_tmp("fp64_cmp_ne");
+                    os << "  " << out << " = xor i1 " << equal << ", true\n";
+                    pred_value = out;
+                } else {
+                    const bool greater = cmp == "gt" || cmp == "ge";
+                    const std::string hi_order = next_tmp("fp64_cmp_hiorder");
+                    const std::string lo_order = next_tmp("fp64_cmp_loorder");
+                    const std::string tie_order = next_tmp("fp64_cmp_tie");
+                    const std::string strict = next_tmp("fp64_cmp_strict");
+                    os << "  " << hi_order << " = fcmp " << (greater ? "ogt" : "olt")
+                       << " float " << a->hi << ", " << b->hi << "\n";
+                    os << "  " << lo_order << " = fcmp " << (greater ? "ogt" : "olt")
+                       << " float " << a->lo << ", " << b->lo << "\n";
+                    os << "  " << tie_order << " = and i1 " << hi_eq << ", " << lo_order << "\n";
+                    os << "  " << strict << " = or i1 " << hi_order << ", " << tie_order << "\n";
+                    if (cmp == "le" || cmp == "ge") {
+                        const std::string inclusive = next_tmp("fp64_cmp_inclusive");
+                        os << "  " << inclusive << " = or i1 " << strict << ", " << equal << "\n";
+                        pred_value = inclusive;
+                    } else {
+                        pred_value = strict;
+                    }
+                }
+                return emit_store_reg_bits(os, dst, 1, pred_value, 1);
+            }
             auto a = decode_float_operand(os, instr.operands[1], ty.bits);
             auto b = decode_float_operand(os, instr.operands[2], ty.bits);
             if (!a || !b) return fail(instr, "setp float source unsupported");
@@ -2725,6 +2739,12 @@ class GenericLlvmEmitter {
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         if (ty.kind == PtxTypeSpec::Kind::kInvalid) {
             return fail(instr, "unable to parse memory element type");
+        }
+        if (ty.kind == PtxTypeSpec::Kind::kFloat && ty.bits == 64 &&
+            fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+            return fail(instr,
+                        "fp64 memory load/store is not supported by FP32-pair emulation; "
+                        "convert at an fp32 boundary");
         }
 
         auto emit_ptr_from_i64 = [&](const std::string& addr_i64, int as, int elem_bits, bool float_elem) -> std::string {
@@ -3065,8 +3085,9 @@ class GenericLlvmEmitter {
         };
 
         if (callee == "vprintf") {
-            // vprintf is not executable in the Metal LLVM path; emit a no-op return 0.
-            return store_ret_bits("0", 32);
+            return fail(instr,
+                        "vprintf is unsupported by the LLVM PTX backend; use the "
+                        "direct Metal lowering, which implements the printf ring buffer");
         }
 
         if (callee == "__nv_abs") {
@@ -3755,8 +3776,48 @@ class GenericLlvmEmitter {
 
     bool emit_cp_async(std::ostringstream& os,
                        const cumetal::ptx::EntryFunction::Instruction& instr) {
-        if (instr.opcode.find("wait") != std::string::npos) {
-            os << "  fence seq_cst\n";
+        if (instr.opcode.find(".bulk") != std::string::npos ||
+            instr.opcode.find(".tensor") != std::string::npos) {
+            return fail(instr, "TMA/bulk cp.async is unsupported");
+        }
+        if (instr.opcode.find("commit_group") != std::string::npos ||
+            instr.opcode.find("wait_group") != std::string::npos ||
+            instr.opcode.find("wait_all") != std::string::npos) {
+            declarations_.insert("declare void @air.wg.barrier(i32, i32)");
+            os << "  call void @air.wg.barrier(i32 2, i32 1)\n";
+            return true;
+        }
+        if (instr.operands.size() != 3) {
+            return fail(instr,
+                        "cp.async requires dst, src, and a fixed copy size; "
+                        "source-size/zero-fill forms are unsupported");
+        }
+        const ParsedMemOperand dst = parse_memory_operand(instr.operands[0]);
+        const ParsedMemOperand src = parse_memory_operand(instr.operands[1]);
+        const auto bytes = parse_signed_immediate(instr.operands[2]);
+        if (!dst.ok || !src.ok || !is_register_name(dst.base) ||
+            !is_register_name(src.base) || !bytes ||
+            (*bytes != 4 && *bytes != 8 && *bytes != 16)) {
+            return fail(instr, "cp.async supports fixed 4, 8, or 16-byte register-addressed copies");
+        }
+        const std::string dst_base = emit_load_reg_bits(os, dst.base, 64);
+        const std::string src_base = emit_load_reg_bits(os, src.base, 64);
+        const std::string dst_addr = pointer_add_bytes(os, dst_base, dst.offset);
+        const std::string src_addr = pointer_add_bytes(os, src_base, src.offset);
+        for (std::int64_t offset = 0; offset < *bytes; offset += 4) {
+            const std::string src_word_addr = pointer_add_bytes(os, src_addr, offset);
+            const std::string dst_word_addr = pointer_add_bytes(os, dst_addr, offset);
+            const std::string src_ptr = next_tmp("cp_src_ptr");
+            const std::string dst_ptr = next_tmp("cp_dst_ptr");
+            os << "  " << src_ptr << " = inttoptr i64 " << src_word_addr
+               << " to i32 addrspace(1)*\n";
+            os << "  " << dst_ptr << " = inttoptr i64 " << dst_word_addr
+               << " to i32 addrspace(3)*\n";
+            const std::string word = next_tmp("cp_word");
+            os << "  " << word << " = load i32, i32 addrspace(1)* " << src_ptr
+               << ", align 4\n";
+            os << "  store i32 " << word << ", i32 addrspace(3)* " << dst_ptr
+               << ", align 4\n";
         }
         return true;
     }
@@ -4630,28 +4691,18 @@ class GenericLlvmEmitter {
         if (root == "prmt") return emit_prmt(os, instr);
         if (root == "bfi") return emit_bfi(os, instr);
         if (root == "isspacep") return emit_isspacep(os, instr);
-        if (root == "nanosleep" || root == "trap" || root == "prefetch" || root == "prefetchu") {
+        if (root == "trap") {
+            declarations_.insert("declare void @llvm.trap()");
+            os << "  call void @llvm.trap()\n";
+            return true;
+        }
+        if (root == "nanosleep" || root == "prefetch" || root == "prefetchu") {
             return true;
         }
         if (root == "redux") {
-            // redux.sync.op.type dst, src, mask → warp-wide reduction; conservative: copy src to dst
-            if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
-                return fail(instr, "redux requires dst and src");
-            }
-            const std::string& dst = instr.operands[0];
-            const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
-            const int bits = (ty.bits > 0) ? ty.bits : ensure_reg_slot(dst).bits;
-            const int slot_bits = ensure_reg_slot(dst).bits;
-            if (ty.kind == PtxTypeSpec::Kind::kFloat) {
-                auto fv = decode_float_operand(os, instr.operands[1], bits);
-                if (!fv) return fail(instr, "redux float source unsupported");
-                auto bitsv = encode_value_to_reg_bits(os, *fv, slot_bits);
-                if (!bitsv) return fail(instr, "redux float encode failed");
-                return emit_store_reg_bits(os, dst, slot_bits, *bitsv, slot_bits);
-            }
-            auto iv = emit_integer_from_any(os, instr.operands[1], bits, ty.is_signed);
-            if (!iv) return fail(instr, "redux int source unsupported");
-            return emit_store_reg_bits(os, dst, slot_bits, *iv, bits);
+            return fail(instr,
+                        "redux.sync is not implemented by the LLVM PTX backend; "
+                        "refusing the former per-lane identity placeholder");
         }
         if (root == "sqrt") return emit_sqrt(os, instr);
         if (root == "rsqrt") return emit_rsqrt(os, instr);
@@ -4813,17 +4864,6 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     //
     // Deleting them costs nothing: the generic path lowers all of it. Caught by ptx_sweep_numeric.
     //
-    // fp64_mul_add survives because it is documented behavior, not a hidden shortcut: FP64
-    // emulation is activated only for name-matched kernels per docs/known-gaps.md. It is now
-    // strictly a fallback -- real lowered PTX always wins -- so it can no longer overwrite a body
-    // that lowered successfully.
-    const bool fp64_mul_add_signature =
-        looks_like_fp64_mul_add_signature(pipeline.entry_name, params);
-
-    // The thread-position builtin the FP64 template needs is appended only if that template is
-    // actually used -- see below. Appending it up front is what corrupted the parameter list
-    // ahead of generic lowering and made the failure self-fulfilling.
-
     int air_major = 2;
     int air_minor = 8;
     if (const auto it = fields.find("air.version"); it != fields.end()) {
@@ -4885,28 +4925,12 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
             params = std::move(generic_params);
             arg_decls = std::move(generic_arg_decls);
             use_generic_body = true;
-        } else if (!fp64_mul_add_signature && options.strict) {
+        } else if (options.strict) {
             result.error = generic_body.error.empty()
                                ? "generic llvm lowering failed"
                                : generic_body.error;
             return result;
         }
-    }
-
-    // Only now, having failed to lower the real body, may the documented FP64 emulation template
-    // stand in -- and only for kernels whose names opt into it per docs/known-gaps.md.
-    const bool use_fp64_template = fp64_mul_add_signature && !use_generic_body;
-    if (use_fp64_template) {
-        const ParamInfo builtin_thread_position = {
-            .ptx_type = ".builtin.air.thread_position_in_grid",
-            .llvm_type = "i32",
-            .name = "__air_thread_position_in_grid",
-            .raw_name = "__air_thread_position_in_grid",
-            .builtin_air_key = "air.thread_position_in_grid",
-            .builtin_air_type_name = "uint",
-        };
-        params.push_back(builtin_thread_position);
-        arg_decls.push_back(builtin_thread_position.llvm_type + " %" + builtin_thread_position.name);
     }
 
     std::ostringstream ir;
@@ -4924,8 +4948,6 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
 
     if (use_generic_body) {
         ir << generic_body.body_ir;
-    } else if (use_fp64_template) {
-        emit_fp64_mul_add_body(ir, params, options.fp64_mode);
     } else {
         // Previously this emitted instruction comments followed by a bare `ret void`, producing a
         // kernel that loaded, launched, and silently did nothing -- every output buffer left
@@ -4939,9 +4961,6 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     }
     ir << "}\n\n";
 
-    if (use_fp64_template && options.fp64_mode != Fp64Mode::kEmulate) {
-        ir << "declare double @llvm.fma.f64(double, double, double)\n\n";
-    }
     if (use_generic_body) {
         for (const std::string& decl : generic_body.declarations) {
             ir << decl << "\n";
@@ -5077,11 +5096,9 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         result.warnings.push_back(generic_body.error);
     }
 
-    // --fp64=emulate: Dekker's algorithm FP32-pair decomposition is active in the
-    // generic LLVM emitter. Named fp64_mul_add signatures use dedicated Dekker code.
-    // Generic .f64 arithmetic (fadd, fsub, fmul, fdiv) is decomposed to ~44-bit
-    // effective mantissa via FP32 pairs. Other .f64 ops (sqrt, fma intrinsic) fall
-    // through to native double IR and may fail on Apple Silicon GPU.
+    // --fp64=emulate: generic register arithmetic uses an FP32 pair and never
+    // emits native double ALU operations. Unsupported FP64 memory/conversion
+    // forms fail lowering explicitly.
 
     // --fp64=warn: scan PTX source for any .f64 instructions and emit per-line warnings.
     if (options.fp64_mode == Fp64Mode::kWarn) {

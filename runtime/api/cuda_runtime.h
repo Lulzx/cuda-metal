@@ -104,6 +104,7 @@ typedef enum cudaError {
     cudaErrorPeerAccessNotEnabled = 51,
     cudaErrorDevicesUnavailable = 46,
     cudaErrorIllegalAddress = 700,
+    cudaErrorNotSupported = 801,
     cudaErrorUnknown = 999,
 } cudaError_t;
 
@@ -800,7 +801,8 @@ cudaError_t cudaDestroySurfaceObject(cudaSurfaceObject_t surfObject);
 cudaChannelFormatDesc cudaCreateChannelDesc(int x, int y, int z, int w,
                                              cudaChannelFormatKind f);
 
-// Async memory pool API — on Apple Silicon UMA these alias synchronous allocation.
+// Async memory pool API — allocation is host-side on UMA, while frees and
+// lifetime transitions remain ordered by the selected CUDA stream.
 typedef struct cudaMemPool_st* cudaMemPool_t;
 
 typedef enum cudaMemPoolAttr {

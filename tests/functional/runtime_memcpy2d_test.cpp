@@ -1,7 +1,9 @@
 #include "cuda_runtime.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 // Test cudaMemcpy2D, cudaMemset2D, and cudaMemcpy2DAsync with a pitched 2D matrix.
 // Uses a 4x8 matrix with row pitch > row width (extra padding per row).
@@ -117,6 +119,66 @@ int main() {
             }
         }
     }
+
+    // A host operation queued ahead of the async copy must hold it back, while
+    // the API call itself must return without synchronizing the stream.
+    struct Gate {
+        std::atomic<bool> entered{false};
+        std::atomic<bool> release{false};
+    } gate;
+    auto block_stream = [](void* opaque) {
+        auto* g = static_cast<Gate*>(opaque);
+        g->entered.store(true, std::memory_order_release);
+        while (!g->release.load(std::memory_order_acquire))
+            std::this_thread::yield();
+    };
+    cudaStream_t ordered_stream = nullptr;
+    if (cudaStreamCreate(&ordered_stream) != cudaSuccess ||
+        cudaLaunchHostFunc(ordered_stream, block_stream, &gate) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: failed to create async-ordering gate\n");
+        return 1;
+    }
+    std::memset(host_dst, 0, sizeof(host_dst));
+    err = cudaMemcpy2DAsync(host_dst, kDPitch, host_src, kSPitch,
+                            kWidth, kRows, cudaMemcpyHostToHost, ordered_stream);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: ordered cudaMemcpy2DAsync returned %d\n", err);
+        return 1;
+    }
+    if (host_dst[0][0] != 0.0f) {
+        std::fprintf(stderr, "FAIL: cudaMemcpy2DAsync ignored prior stream work\n");
+        return 1;
+    }
+    gate.release.store(true, std::memory_order_release);
+    if (cudaStreamSynchronize(ordered_stream) != cudaSuccess ||
+        host_dst[0][0] != host_src[0][0]) {
+        std::fprintf(stderr, "FAIL: cudaMemcpy2DAsync did not complete in stream order\n");
+        return 1;
+    }
+
+    gate.entered.store(false, std::memory_order_release);
+    gate.release.store(false, std::memory_order_release);
+    if (cudaLaunchHostFunc(ordered_stream, block_stream, &gate) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: failed to create memset ordering gate\n");
+        return 1;
+    }
+    std::memset(host_dst, 0, sizeof(host_dst));
+    if (cudaMemset2DAsync(host_dst, kDPitch, 0x5a, kWidth, kRows,
+                          ordered_stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: ordered cudaMemset2DAsync failed\n");
+        return 1;
+    }
+    if (reinterpret_cast<unsigned char*>(host_dst)[0] != 0) {
+        std::fprintf(stderr, "FAIL: cudaMemset2DAsync ignored prior stream work\n");
+        return 1;
+    }
+    gate.release.store(true, std::memory_order_release);
+    if (cudaStreamSynchronize(ordered_stream) != cudaSuccess ||
+        reinterpret_cast<unsigned char*>(host_dst)[0] != 0x5a) {
+        std::fprintf(stderr, "FAIL: cudaMemset2DAsync did not complete in stream order\n");
+        return 1;
+    }
+    cudaStreamDestroy(ordered_stream);
 
     std::printf("PASS: cudaMemcpy2D, cudaMemset2D, cudaMemcpy2DAsync all correct\n");
     return 0;

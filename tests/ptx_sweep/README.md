@@ -33,6 +33,6 @@ PTX bodies; see `docs/known-gaps.md`.
   - arithmetic: `add`, `sub`, `mul`, `mad`
   - special-register moves: `%tid.*`, `%ctaid.*`, `%ntid.*`, `%nctaid.*`
   - memory/addrspace: `ld/st` in shared/global/local + `cvta.to.*`
-  - control/other: `bar.sync`, `setp`, `bra`, `call` (`vprintf`)
+  - control/other: `bar.sync`, `setp`, `bra`
 - `run_unsupported_ops.sh`: verifies strict mode rejects unsupported instruction roots
   (`foo`, `trap`, `tex`, `suld`).

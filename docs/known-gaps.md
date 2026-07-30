@@ -22,10 +22,11 @@ as gaps have been closed.
   `activemask` returns the real active lanes, and shuffle callers outside the member mask
   receive identity (their CUDA result is undefined). Broader irregular-mask coverage remains
   incomplete.
-- Grid-wide cooperative sync (`this_grid().sync()`): a no-op on Metal (no cross-threadgroup
-  barrier). A multi-block `cudaLaunchCooperativeKernel` / `cuLaunchCooperativeKernel` now prints
-  a one-time `CUMETAL WARNING` so code that depends on grid-wide sync for correctness is not
-  silently wrong. Single-block launches are safe (block-scoped CG works). The tractable general
+- Grid-wide cooperative sync (`this_grid().sync()`): Metal has no cross-threadgroup
+  barrier. Multi-block `cudaLaunchCooperativeKernel` / `cuLaunchCooperativeKernel` calls are
+  rejected with `cudaErrorNotSupported` / `CUDA_ERROR_NOT_SUPPORTED`; they are never forwarded
+  as known-wrong ordinary launches. Single-block launches are safe because the header's
+  `grid_group::sync()` reduces to a threadgroup barrier. The tractable general
   implementation is typed-IR kernel fission: split at each grid-sync point, materialize values
   live across the split in device storage, and submit the phases as ordered Metal dispatches.
   Persistent-threadgroup barriers are not a correctness strategy because Metal does not
@@ -33,11 +34,13 @@ as gaps have been closed.
   cooperative groups or cooperative launch; its iterative TGS solver already expresses phase
   boundaries as separate host-side kernel launches, so this gap is not on the current PhysX
   rigid-solver critical path.
-- FP64: `--fp64=emulate` (Dekker single-double via FP32 pairs, ~44-bit mantissa) is only
-  activated for name-matched kernels (`*fp64*{mul,fma,add}*` etc.). Arbitrary `.f64` PTX
-  streams fall back to native (which is rejected at Metal pipeline create time on current
-  Apple Silicon; runtime forces emulate default). General lowering pass deferred. When a
-  driver-JIT kernel actually contains `.f64` ops under the emulate default, the runtime prints a
+- FP64: `--fp64=emulate` applies to `.f64` instructions in every kernel; entry names have no
+  semantic effect. Register `mov`, add/subtract/multiply/divide/FMA, negation, min/max,
+  comparisons, and FP32↔emulated-FP64 conversion use packed FP32 pairs (~44-bit mantissa)
+  without emitting native `double` ALU instructions. IEEE-binary64 memory loads/stores,
+  integer conversions, and rounded FP64 conversions are not yet represented by this packed
+  register ABI and fail lowering explicitly instead of falling through to native double.
+  When a driver-JIT kernel contains `.f64` ops under the emulate default, the runtime prints a
   one-time `CUMETAL WARNING` noting the reduced (~44-bit) precision; `CUMETAL_FP64_MODE=native`
   compiles true doubles (which fail at launch on current hardware, useful only for testing).
 - **Legacy default-stream ordering is complete.** Every blocking user stream publishes a
@@ -55,8 +58,18 @@ as gaps have been closed.
   several aliases are coalesced. `CUMETAL_SYNC_REGISTERED_LAUNCH=1` restores the
   former host drain for diagnostics. This is conservative buffer-level hazard
   ordering; it does not yet infer disjoint byte ranges within one arena.
-- Device printf: fully works for PTX registration + direct paths (256-byte format limit,
-  ring buffer, post-launch drain). Reordering vs. CUDA possible (as on real CUDA too).
+- Device printf: compiler-recognized printf calls use a 256-byte-format bounded ring buffer and
+  post-launch drain. A raw PTX `call ... vprintf` reaching the generic LLVM backend is rejected
+  with an actionable diagnostic; it is never lowered to a silent zero-return no-op.
+- Raw PTX `redux.sync.*` reaches a semantic AIR mapping in the phase IR, but the generic LLVM
+  emitter does not yet have a validated AIR reduction ABI. It now fails explicitly instead of
+  returning the caller lane's input as if a warp reduction had occurred. CUDA header
+  `__reduce_*_sync` helpers continue to use the tested shuffle implementation.
+- cuDNN multi-head attention has one numerically implemented CPU/UMA subset: FP32,
+  projection-free, dropout-free, canonical time/batch/beam/vector sequence descriptors with
+  equal Q/K/V feature size and fixed sequence lengths. Projection weights, dropout, attention
+  windows, variable sequence lengths, and incremental decoding return
+  `CUDNN_STATUS_NOT_SUPPORTED` instead of copying Q to O.
 - Binary-shim fatbinary support: CMTL envelopes, raw PTX, basic FatBinary/FatBinary2/3
   PTX wrappers, and little-endian ELF32/ELF64 objects with named `.nv_fatbin` or raw-PTX sections
   are supported by both registration and `cuModuleLoadData`. ELF extraction follows validated
@@ -288,17 +301,15 @@ as gaps have been closed.
   A fast negative filter skips heavy lowering for the bulk of GGML's 1000s of mul_mat_q* / flash
   / other dequants / cpy etc (they hit "registered kernel missing" and GGML typically falls back
   or aborts depending on NGL and op).
-- **Approximate/passthru stubs are refused by default (no silent wrong answers).** A handful of
+- **Approximate/passthru stubs are unconditionally refused (no silent wrong answers).** A handful of
   templates (unsupported `convert_unary`, `rope_norm`, and `rope_neox` variants,
   `dequantize_q5_0`/`_block_q5`, `k_set_rows`, and unsupported `cpy_`/`k_cpy`
   variants) exist only as passthru placeholders — they copy or zero data
   instead of computing the real quantized/rotary/copy result. Their output is numerically wrong,
-  so the runtime **skips them by default** (the kernel falls through to the same clean "registered
+  so lowering **always skips them** (the kernel falls through to the same clean "registered
   kernel missing metallib" abort as any unsupported op) and prints a one-time
   `CUMETAL WARNING: kernel '…' has only an approximate/passthru lowering and was skipped …`.
-  Set `CUMETAL_ENABLE_APPROX_KERNELS=1` to run them anyway for experimentation — the run then
-  completes but the output is not correct, and a warning says so. This trades "it launches but
-  lies" for "it fails loudly," which is the safer default for a translation layer.
+  `CUMETAL_ENABLE_APPROX_KERNELS` no longer overrides this safety rule.
 - **The covered llama.cpp SmolLM2 path is numerically coherent.** Rechecked
   2026-07-23 on SmolLM2-135M-Instruct-Q4_K_M, greedy decode of
   "The capital of France is":

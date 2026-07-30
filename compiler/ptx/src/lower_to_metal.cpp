@@ -2872,11 +2872,16 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
     // translator cannot yet handle. It is disabled by default: an entry name is
     // not sufficient evidence that an arbitrary kernel implements that workload.
     if (metal_source.empty() && options.allow_workload_specializations) {
-        metal_source = emit_metal_source_for_entry(pipeline.entry_name);
-        if (!metal_source.empty()) {
-            approximate = entry_uses_approximate_stub(pipeline.entry_name);
-            lowering_kind = approximate ? MetalLoweringKind::kApproximateStub
-                                        : MetalLoweringKind::kSpecializedMsl;
+        std::string specialization =
+            emit_metal_source_for_entry(pipeline.entry_name);
+        if (!specialization.empty() &&
+            entry_uses_approximate_stub(pipeline.entry_name)) {
+            result.warnings.push_back(
+                "kernel '" + pipeline.entry_name +
+                "' has only a known-incorrect passthrough template; CuMetal refuses it");
+        } else if (!specialization.empty()) {
+            metal_source = std::move(specialization);
+            lowering_kind = MetalLoweringKind::kSpecializedMsl;
         }
     }
 

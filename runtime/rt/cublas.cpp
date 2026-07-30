@@ -255,12 +255,8 @@ cublasStatus_t cublasSaxpy(cublasHandle_t handle,
         return CUBLAS_STATUS_INVALID_VALUE;
     }
 
-    {
-        const cudaError_t st = cudaDeviceSynchronize();
-        if (st != cudaSuccess) {
-            return map_cuda_status_to_cublas(st);
-        }
-    }
+    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
+    if (sync_status != CUBLAS_STATUS_SUCCESS) return sync_status;
 
     const float alpha_value = *alpha;
     for (int i = 0; i < n; ++i) {
@@ -286,12 +282,8 @@ cublasStatus_t cublasSscal(cublasHandle_t handle, int n, const float* alpha, flo
         return CUBLAS_STATUS_INVALID_VALUE;
     }
 
-    {
-        const cudaError_t st = cudaDeviceSynchronize();
-        if (st != cudaSuccess) {
-            return map_cuda_status_to_cublas(st);
-        }
-    }
+    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
+    if (sync_status != CUBLAS_STATUS_SUCCESS) return sync_status;
 
     const float alpha_value = *alpha;
     for (int i = 0; i < n; ++i) {
@@ -322,12 +314,8 @@ cublasStatus_t cublasScopy(cublasHandle_t handle,
         return CUBLAS_STATUS_INVALID_VALUE;
     }
 
-    {
-        const cudaError_t st = cudaDeviceSynchronize();
-        if (st != cudaSuccess) {
-            return map_cuda_status_to_cublas(st);
-        }
-    }
+    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
+    if (sync_status != CUBLAS_STATUS_SUCCESS) return sync_status;
 
     for (int i = 0; i < n; ++i) {
         y[i * incy] = x[i * incx];
@@ -2261,29 +2249,50 @@ cublasStatus_t cublasGetMatrix(int rows, int cols, int elem_size,
 cublasStatus_t cublasSetVectorAsync(int n, int elem_size,
                                     const void* x, int incx,
                                     void* y, int incy,
-                                    cudaStream_t /* stream */) {
-    return cublasSetVector(n, elem_size, x, incx, y, incy);
+                                    cudaStream_t stream) {
+    if (n < 0 || elem_size <= 0 || incx <= 0 || incy <= 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (!x || !y) return CUBLAS_STATUS_INVALID_VALUE;
+    const size_t es = static_cast<size_t>(elem_size);
+    return cudaMemcpy2DAsync(y, static_cast<size_t>(incy) * es,
+                             x, static_cast<size_t>(incx) * es,
+                             es, static_cast<size_t>(n),
+                             cudaMemcpyDefault, stream) == cudaSuccess
+               ? CUBLAS_STATUS_SUCCESS
+               : CUBLAS_STATUS_EXECUTION_FAILED;
 }
 
 cublasStatus_t cublasGetVectorAsync(int n, int elem_size,
                                     const void* x, int incx,
                                     void* y, int incy,
-                                    cudaStream_t /* stream */) {
-    return cublasSetVector(n, elem_size, x, incx, y, incy);
+                                    cudaStream_t stream) {
+    return cublasSetVectorAsync(n, elem_size, x, incx, y, incy, stream);
 }
 
 cublasStatus_t cublasSetMatrixAsync(int rows, int cols, int elem_size,
                                     const void* a, int lda,
                                     void* b, int ldb,
-                                    cudaStream_t /* stream */) {
-    return cublasSetMatrix(rows, cols, elem_size, a, lda, b, ldb);
+                                    cudaStream_t stream) {
+    if (rows < 0 || cols < 0 || elem_size <= 0 || lda < rows || ldb < rows)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (rows == 0 || cols == 0) return CUBLAS_STATUS_SUCCESS;
+    if (!a || !b) return CUBLAS_STATUS_INVALID_VALUE;
+    const size_t es = static_cast<size_t>(elem_size);
+    return cudaMemcpy2DAsync(b, static_cast<size_t>(ldb) * es,
+                             a, static_cast<size_t>(lda) * es,
+                             static_cast<size_t>(rows) * es,
+                             static_cast<size_t>(cols),
+                             cudaMemcpyDefault, stream) == cudaSuccess
+               ? CUBLAS_STATUS_SUCCESS
+               : CUBLAS_STATUS_EXECUTION_FAILED;
 }
 
 cublasStatus_t cublasGetMatrixAsync(int rows, int cols, int elem_size,
                                     const void* a, int lda,
                                     void* b, int ldb,
-                                    cudaStream_t /* stream */) {
-    return cublasSetMatrix(rows, cols, elem_size, a, lda, b, ldb);
+                                    cudaStream_t stream) {
+    return cublasSetMatrixAsync(rows, cols, elem_size, a, lda, b, ldb, stream);
 }
 
 const char* cublasGetStatusName(cublasStatus_t status) {

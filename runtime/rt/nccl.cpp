@@ -1,7 +1,6 @@
 #include "nccl.h"
 
 #include <cstdlib>
-#include <cstring>
 #include <new>
 
 // NCCL shim for single-GPU Apple Silicon.
@@ -29,6 +28,15 @@ size_t nccl_dtype_size(ncclDataType_t dt) {
         case ncclFloat64: return 8;
         default: return 4;
     }
+}
+
+ncclResult_t enqueue_identity_copy(const void* sendbuff, void* recvbuff,
+                                   size_t bytes, cudaStream_t stream) {
+    if (bytes == 0 || sendbuff == recvbuff) return ncclSuccess;
+    if (sendbuff == nullptr || recvbuff == nullptr) return ncclInvalidArgument;
+    return cudaMemcpyAsync(recvbuff, sendbuff, bytes, cudaMemcpyDefault, stream) == cudaSuccess
+               ? ncclSuccess
+               : ncclUnhandledCudaError;
 }
 
 } // namespace
@@ -114,47 +122,39 @@ ncclResult_t ncclCommUserRank(const ncclComm_t comm, int* rank) {
 
 ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
                             ncclDataType_t datatype, ncclRedOp_t /*op*/,
-                            ncclComm_t /*comm*/, cudaStream_t /*stream*/) {
+                            ncclComm_t /*comm*/, cudaStream_t stream) {
     if (!sendbuff || !recvbuff) return ncclInvalidArgument;
-    if (sendbuff != recvbuff)
-        std::memcpy(recvbuff, sendbuff, count * nccl_dtype_size(datatype));
-    return ncclSuccess;
+    return enqueue_identity_copy(sendbuff, recvbuff, count * nccl_dtype_size(datatype), stream);
 }
 
 ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count,
                             ncclDataType_t datatype, int /*root*/,
-                            ncclComm_t /*comm*/, cudaStream_t /*stream*/) {
+                            ncclComm_t /*comm*/, cudaStream_t stream) {
     if (!sendbuff || !recvbuff) return ncclInvalidArgument;
-    if (sendbuff != recvbuff)
-        std::memcpy(recvbuff, sendbuff, count * nccl_dtype_size(datatype));
-    return ncclSuccess;
+    return enqueue_identity_copy(sendbuff, recvbuff, count * nccl_dtype_size(datatype), stream);
 }
 
 ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count,
                          ncclDataType_t datatype, ncclRedOp_t /*op*/, int /*root*/,
-                         ncclComm_t /*comm*/, cudaStream_t /*stream*/) {
+                         ncclComm_t /*comm*/, cudaStream_t stream) {
     if (!sendbuff || !recvbuff) return ncclInvalidArgument;
-    if (sendbuff != recvbuff)
-        std::memcpy(recvbuff, sendbuff, count * nccl_dtype_size(datatype));
-    return ncclSuccess;
+    return enqueue_identity_copy(sendbuff, recvbuff, count * nccl_dtype_size(datatype), stream);
 }
 
 ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcount,
                             ncclDataType_t datatype,
-                            ncclComm_t /*comm*/, cudaStream_t /*stream*/) {
+                            ncclComm_t /*comm*/, cudaStream_t stream) {
     if (!sendbuff || !recvbuff) return ncclInvalidArgument;
-    if (sendbuff != recvbuff)
-        std::memcpy(recvbuff, sendbuff, sendcount * nccl_dtype_size(datatype));
-    return ncclSuccess;
+    return enqueue_identity_copy(sendbuff, recvbuff,
+                                 sendcount * nccl_dtype_size(datatype), stream);
 }
 
 ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, size_t recvcount,
                                 ncclDataType_t datatype, ncclRedOp_t /*op*/,
-                                ncclComm_t /*comm*/, cudaStream_t /*stream*/) {
+                                ncclComm_t /*comm*/, cudaStream_t stream) {
     if (!sendbuff || !recvbuff) return ncclInvalidArgument;
-    if (sendbuff != recvbuff)
-        std::memcpy(recvbuff, sendbuff, recvcount * nccl_dtype_size(datatype));
-    return ncclSuccess;
+    return enqueue_identity_copy(sendbuff, recvbuff,
+                                 recvcount * nccl_dtype_size(datatype), stream);
 }
 
 ncclResult_t ncclSend(const void* /*sendbuff*/, size_t /*count*/, ncclDataType_t /*datatype*/,

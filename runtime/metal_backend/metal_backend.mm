@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -165,6 +166,24 @@ public:
         return submission_mutex_;
     }
 
+    void add_pending_host_operation() {
+        std::lock_guard<std::mutex> lock(host_operation_mutex_);
+        ++pending_host_operations_;
+    }
+
+    void complete_pending_host_operation() {
+        {
+            std::lock_guard<std::mutex> lock(host_operation_mutex_);
+            if (pending_host_operations_ > 0) --pending_host_operations_;
+        }
+        host_operation_cv_.notify_all();
+    }
+
+    void wait_host_operations() {
+        std::unique_lock<std::mutex> lock(host_operation_mutex_);
+        host_operation_cv_.wait(lock, [&] { return pending_host_operations_ == 0; });
+    }
+
     std::uint64_t add_pending(id<MTLCommandBuffer> command_buffer) {
         std::lock_guard<std::mutex> lock(mutex_);
         const std::uint64_t ticket = next_ticket_++;
@@ -291,6 +310,9 @@ private:
     std::uint64_t next_ticket_ = 1;
     std::uint64_t completed_ticket_ = 0;
     std::vector<PendingBuffer> pending_buffers_;
+    std::mutex host_operation_mutex_;
+    std::condition_variable host_operation_cv_;
+    std::size_t pending_host_operations_ = 0;
 };
 
 struct BackendState {
@@ -933,6 +955,35 @@ cudaError_t query_device_properties(DeviceProperties* out_properties, std::strin
     return cudaSuccess;
 }
 
+cudaError_t query_kernel_properties(const std::string& metallib_path,
+                                    const std::string& kernel_name,
+                                    KernelProperties* out_properties,
+                                    std::string* error_message) {
+    if (out_properties == nullptr || metallib_path.empty() || kernel_name.empty()) {
+        if (error_message != nullptr) {
+            *error_message = "query_kernel_properties invalid argument";
+        }
+        return cudaErrorInvalidValue;
+    }
+    if (!ensure_initialized(error_message)) {
+        return cudaErrorInitializationError;
+    }
+    BackendState& backend = state();
+    std::lock_guard<std::mutex> lock(backend.mutex);
+    id<MTLComputePipelineState> pipeline =
+        load_pipeline_locked(backend, metallib_path, kernel_name, error_message);
+    if (pipeline == nil) {
+        return cudaErrorInvalidValue;
+    }
+    out_properties->max_threads_per_threadgroup =
+        static_cast<int>(pipeline.maxTotalThreadsPerThreadgroup);
+    out_properties->thread_execution_width =
+        static_cast<int>(pipeline.threadExecutionWidth);
+    out_properties->static_threadgroup_memory_bytes =
+        static_cast<std::size_t>(pipeline.staticThreadgroupMemoryLength);
+    return cudaSuccess;
+}
+
 cudaError_t allocate_buffer(std::size_t size,
                             std::shared_ptr<Buffer>* out_buffer,
                             std::string* error_message) {
@@ -1043,6 +1094,7 @@ cudaError_t stream_synchronize(const std::shared_ptr<Stream>& stream, std::strin
         return cudaErrorInvalidValue;
     }
 
+    stream_impl->wait_host_operations();
     return stream_impl->wait_ticket(stream_impl->tail_ticket(), error_message);
 }
 
@@ -1095,6 +1147,90 @@ cudaError_t stream_wait_ticket(const std::shared_ptr<Stream>& stream,
     }
 
     return stream_impl->wait_ticket(ticket, error_message);
+}
+
+cudaError_t enqueue_host_function(const std::shared_ptr<Stream>& stream,
+                                  std::function<void()> function,
+                                  std::string* error_message) {
+    if (!function) {
+        if (error_message != nullptr) {
+            *error_message = "enqueue_host_function missing function";
+        }
+        return cudaErrorInvalidValue;
+    }
+    if (!ensure_initialized(error_message)) {
+        return cudaErrorInitializationError;
+    }
+
+    std::shared_ptr<StreamImpl> stream_impl =
+        std::dynamic_pointer_cast<StreamImpl>(stream);
+    if (stream_impl == nullptr) {
+        stream_impl = std::dynamic_pointer_cast<StreamImpl>(legacy_default_stream());
+    }
+    if (stream_impl == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "enqueue_host_function received unknown stream type";
+        }
+        return cudaErrorInvalidValue;
+    }
+
+    std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
+    id<MTLCommandQueue> queue = stream_impl->queue();
+    @autoreleasepool {
+        // The marker inherits all prior same-stream and legacy-default waits.
+        id<MTLCommandBuffer> marker = [queue commandBuffer];
+        if (marker == nil) {
+            if (error_message != nullptr) {
+                *error_message = "enqueue_host_function failed to create marker";
+            }
+            return cudaErrorUnknown;
+        }
+        const auto marker_fences = encode_submission_waits(marker, stream_impl, {});
+        encode_resource_signals(marker, marker_fences);
+        stream_impl->add_pending(marker);
+        [marker commit];
+
+        // Reserve a CPU-signalled event value. A completion command buffer
+        // waits on it, making the host function a real stream operation:
+        // later submissions and stream synchronization cannot overtake it.
+        id<MTLSharedEvent> event = stream_impl->access_event();
+        std::uint64_t host_done_value = 0;
+        {
+            BackendState& backend = state();
+            std::scoped_lock lock(backend.mutex, backend.submission_fence_mutex);
+            host_done_value = stream_impl->reserve_access_value();
+            stream_impl->set_latest_submission_value(host_done_value);
+        }
+
+        id<MTLCommandBuffer> completion = [queue commandBuffer];
+        if (completion == nil) {
+            // Release any future same-stream wait even on allocation failure.
+            event.signaledValue = host_done_value;
+            if (error_message != nullptr) {
+                *error_message = "enqueue_host_function failed to create completion";
+            }
+            return cudaErrorUnknown;
+        }
+        const auto completion_fences =
+            encode_submission_waits(completion, stream_impl, {});
+        encode_resource_signals(completion, completion_fences);
+        stream_impl->add_pending(completion);
+        [completion commit];
+
+        stream_impl->add_pending_host_operation();
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            [marker waitUntilCompleted];
+            try {
+                function();
+            } catch (...) {
+                // CUDA host functions have no exception channel. Preserve
+                // stream progress even if foreign C++ code throws.
+            }
+            event.signaledValue = host_done_value;
+            stream_impl->complete_pending_host_operation();
+        });
+    }
+    return cudaSuccess;
 }
 
 cudaError_t gemm_f32(bool transa,

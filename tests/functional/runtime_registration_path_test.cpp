@@ -126,6 +126,25 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    int active_blocks = 0;
+    int min_grid = 0;
+    int suggested_block = 0;
+    cudaFuncAttributes attributes{};
+    const void* registered_function =
+        reinterpret_cast<const void*>(&vector_add_host_stub);
+    if (cudaFuncGetAttributes(&attributes, registered_function) != cudaSuccess ||
+        attributes.maxThreadsPerBlock <= 0 ||
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &active_blocks, registered_function, kThreadsPerBlock, 0) != cudaSuccess ||
+        active_blocks <= 0 ||
+        cudaOccupancyMaxPotentialBlockSize(
+            &min_grid, &suggested_block, registered_function, 0, 0) != cudaSuccess ||
+        min_grid <= 0 || suggested_block <= 0 ||
+        suggested_block > attributes.maxThreadsPerBlock) {
+        std::fprintf(stderr, "FAIL: registered kernel Metal properties/occupancy failed\n");
+        return 1;
+    }
+
     if (cudaMemcpy(host_c.data(), dev_c, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaMemcpy device->host failed\n");
         return 1;

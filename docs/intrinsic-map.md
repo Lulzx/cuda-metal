@@ -77,6 +77,10 @@ Complete CUDA/PTX → AIR intrinsic mapping table for the CuMetal intrinsic lowe
 | `redux.sync.max.s32 dst, src, mask` | `air.simdgroup.reduce_max` | Warp-wide max (integer) |
 | `redux.sync.max.f32 dst, src, mask` | `air.simdgroup.reduce_max.f32` | Warp-wide max (float) |
 
+The `redux.sync` rows describe phase-IR classification. The generic LLVM PTX
+emitter currently rejects them until CuMetal has a validated AIR reduction ABI;
+it does not substitute the source lane as a fake reduction result.
+
 ## Warp / SIMD-group Primitives
 
 Apple Silicon SIMD-group width is architecturally fixed at 32 (matching CUDA warp size).

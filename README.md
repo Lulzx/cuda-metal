@@ -263,9 +263,10 @@ conditions are meaningless.
 - No multi-GPU or peer-to-peer execution.
 - No OpenGL, Vulkan, or DirectX interop.
 - No SASS execution.
-- `grid_group::sync()` is not a general cross-threadgroup barrier.
-- FP64 emulation is partial and provides about a 44-bit mantissa, not IEEE
-  binary64.
+- Multi-block cooperative launch/grid sync is rejected; single-block
+  cooperative launch is supported.
+- FP64 register emulation provides about a 44-bit mantissa, not IEEE binary64;
+  unsupported binary64 memory/conversion boundaries fail compilation.
 - Texture and surface object lifecycle exists; general device-side sampling
   does not.
 - Device `printf` uses a bounded buffer and limits format strings to 256 bytes.

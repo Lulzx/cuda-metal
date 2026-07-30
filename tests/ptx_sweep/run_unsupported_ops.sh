@@ -32,6 +32,8 @@ EOF
 }
 
 run_case_expect_fail "unsupported_foo" "foo.bar %r1, %r2;"
+run_case_expect_fail "unsupported_vprintf" \
+    "call.uni (%r0), vprintf, (\"tid=%u\", %r1);"
 
 # Hopper cluster ops (spec §5.1.1: per-instruction compile-time error)
 run_case_expect_fail "unsupported_cluster_sync"   "cluster.sync.aligned;"
@@ -41,6 +43,8 @@ run_case_expect_fail "unsupported_mbarrier_arrive" "mbarrier.arrive.b64 %rd1, [%
 # TMA (Tensor Memory Accelerator) ops (spec §5.1.1: per-instruction compile-time error)
 run_case_expect_fail "unsupported_tma_bulk_1d" \
     "cp.async.bulk.tensor.1d.global.shared::cluster.bulk_group [%rd1], [%rd2, {%r1}];"
+run_case_expect_fail "unsupported_redux" \
+    "redux.sync.add.s32 %r1, %r2, 0xffffffff;"
 
 # FP8 / Transformer Engine (spec §5.1.1: per-instruction compile-time error)
 run_case_expect_fail "unsupported_fp8_cvt" "cvt.rn.f8x2.e4m3x2.rn.satfinite.f32 %r1, %f1, %f2;"

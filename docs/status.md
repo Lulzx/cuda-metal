@@ -308,7 +308,8 @@ Post-Phase 5 work completed (continued, part 2):
     UPPER/LOWER fill, N/T/C transpose, UNIT/NON_UNIT diagonal, alpha scaling.
   - `cublasSetVector` / `cublasGetVector` / `cublasSetMatrix` / `cublasGetMatrix` —
     strided host↔device copy helpers (no-op overhead on Apple Silicon UMA).
-  - Async variants (`*Async`) alias to their synchronous counterparts (stream ignored; UMA).
+  - Async vector/matrix transfer variants enqueue their strided copies on the supplied CUDA
+    stream; they no longer ignore it or execute inline.
   Tests: `functional_cublas_extended_api`,
   `functional_cublas_device_pointer_table`.
 
@@ -330,11 +331,12 @@ Post-Phase 5 work completed (continued, part 2):
     - `cudaMalloc3D(pitchedDevPtr, extent)` — allocates pitch×height×depth bytes,
       pitch aligned to 512 bytes.
     - `cudaMemcpy3D(parms)` / `cudaMemcpy3DAsync(parms, stream)` — 3D pitched copy
-      (plane-by-row stride walk; stream ignored on UMA).
+      (plane-by-row stride walk; the async form is stream ordered).
   - **Driver API 3D copy** (`cuda.h`/`cuda_driver.cpp`): Added `CUmemorytype` enum,
     `CUarray` opaque typedef, `CUDA_MEMCPY3D` struct, and:
     - `cuMemcpy3D(pCopy)` / `cuMemcpy3DAsync(pCopy, hStream)` — 3D strided copy
-      resolving host/device ptrs from `CUmemorytype` (UMA: both are host-accessible).
+      resolving host/device ptrs from `CUmemorytype`; the async form is enqueued in the stream
+      timeline.
   Test: `functional_misc_extended_api` (6 sub-tests covering all new APIs).
 
 - **Extended APIs batch 2** (`runtime/api/`, `runtime/rt/`, `runtime/driver/`):
@@ -350,7 +352,8 @@ Post-Phase 5 work completed (continued, part 2):
     - `cublasSsyr2k`/`cublasDsyr2k` — symmetric rank-2k update:
       `C = alpha * (op(A)*op(B)^T + op(B)*op(A)^T) + beta * C`.
   - **Driver API**:
-    - `cuFuncSetAttribute` — no-op (Metal manages occupancy automatically).
+    - `cuFuncSetAttribute` — validates function handles; unsupported mutable Metal pipeline
+      attributes return an explicit error.
     - `cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags` — delegates to base function,
       flags ignored.
     - `cuCtxPushCurrent`/`cuCtxPopCurrent` — thin wrappers around `cuCtxSetCurrent`/`GetCurrent`.
@@ -361,8 +364,11 @@ Post-Phase 5 work completed (continued, part 2):
       `__device__` globals in CuMetal).
   - **Runtime peer copy**: `cudaMemcpyPeer`/`cudaMemcpyPeerAsync` — UMA single GPU;
     forward to `cudaMemcpy`/`cudaMemcpyAsync` with `cudaMemcpyDefault`.
-  - `cudaLaunchHostFunc(stream, fn, userData)` — synchronizes stream then calls `fn(userData)`.
-  - `cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags` — delegates to base function.
+  - `cudaLaunchHostFunc(stream, fn, userData)` — enqueues a CPU callback between shared-event
+    markers so later stream work cannot overtake it and synchronization waits for it.
+  - Runtime/Driver occupancy queries validate real kernel handles and derive limits from the
+    corresponding Metal compute pipeline's maximum threads, execution width, and static
+    threadgroup memory.
   Test: `functional_extended_api_v2` (18 sub-tests covering all new APIs).
 
 - **Extended APIs batch 3** (`runtime/api/`, `runtime/rt/`):
@@ -388,12 +394,12 @@ Post-Phase 5 work completed (continued, part 2):
   Test: `functional_extended_api_v3` (14 sub-tests covering all new APIs).
 
 - **Extended APIs batch 4** (`runtime/api/`, `runtime/rt/`, `runtime/driver/`):
-  - **Runtime 3D memset**: `cudaMemset2DAsync` — async variant of 2D memset (stream ignored on UMA);
+  - **Runtime 3D memset**: `cudaMemset2DAsync` — stream-ordered 2D memset;
     `cudaMemset3D`/`cudaMemset3DAsync` — fill 3D pitched volume plane-by-row using
     `pitchedDevPtr.pitch × pitchedDevPtr.ysize` as the plane stride.
   - **Driver 2D memset**: `cuMemsetD2D8`/`cuMemsetD2D16`/`cuMemsetD2D32` — strided per-row fill
-    (8-bit uses `memset`; 16/32-bit use typed element loops); `*Async` variants alias synchronous
-    versions (stream ignored; UMA).
+    (8-bit uses `memset`; 16/32-bit use typed element loops); `*Async` variants enqueue the
+    typed fill in the selected stream.
   - **Driver allocation query**: `cuMemGetAddressRange(pbase, psize, dptr)` — queries CuMetal's
     allocation table via `cumetalRuntimeGetAllocationInfo` to return base address and allocation
     size for any pointer within a `cudaMalloc`-ed block.
@@ -451,8 +457,9 @@ Implemented:
     `membar.cta` → `air.mem.barrier.threadgroup` (__threadfence/__threadfence_block)
   - async copy lowering: `cp.async.*` → `air.cp_async` (serialized ld+st);
     `cp.async.commit_group/wait_group/wait_all` → `air.threadgroup_barrier`
-  - warp reduction lowering: `redux.sync.{add,and,or,xor,min,max}` →
-    `air.simdgroup.reduce_{add,and,or,xor,min,max}[.f32]` (__redux_sync emulation)
+  - phase-IR warp reduction classification maps `redux.sync.{add,and,or,xor,min,max}` to
+    `air.simdgroup.reduce_*`; the generic LLVM emitter refuses these until the AIR ABI is
+    validated rather than emitting the former per-lane identity placeholder.
   - parser: targeted error diagnostics for Hopper cluster ops (`cluster.*`, `mbarrier.*`),
     TMA (`cp.async.bulk.tensor.*`), and FP8 (`cvt.rn.f8*`) with specific messages
   - `cumetalc` accepts `.ptx` input via internal PTX->LLVM lowering (`--entry`, `--ptx-strict`)
@@ -541,14 +548,15 @@ Implemented:
     compatibility
   - PTX sweep extended with 30+ new test cases: `shfl.sync.{idx,down,up,bfly}`,
     `vote.sync.{ballot,any,all}`, `bar.warp.sync`, `membar.{gl,cta,sys}`,
-    `cp.async.{ca,commit_group,wait_all}`, `redux.sync.{add,and,or,xor,min,max}`,
+    `cp.async.{ca,commit_group,wait_all}`,
     and math intrinsics `sqrt`, `rsqrt`, `ex2`, `lg2`, `sin`, `cos`, `fma`, `abs`, `min`, `max`
   - Unsupported-op sweep extended with targeted diagnostic cases for Hopper cluster ops
     (`cluster.sync.aligned`, `mbarrier.init`, `mbarrier.arrive`), TMA
     (`cp.async.bulk.tensor.1d.*`), and FP8 (`cvt.rn.f8x2.*`)
   - `--fp64=native|emulate|warn` flag added to `cumetalc` (spec §8.1); `warn` mode emits
     per-instruction warnings for `.f64` opcodes; `emulate` implements Dekker FP32-pair
-    decomposition for recognized fp64 kernels; runtime defaults to `kEmulate` because
+    decomposition for generic FP64 register arithmetic, independent of entry name; unsupported
+    binary64 memory/conversion boundaries fail lowering. Runtime defaults to `kEmulate` because
     Apple Silicon GPU rejects `fmul double` in Metal pipelines at runtime (set
     `CUMETAL_FP64_MODE=native` to force native mode for compilation-path testing)
   - functional tests added:
@@ -586,6 +594,8 @@ Supported runtime API subset:
 - `cudaGetDeviceCount`, `cudaGetDevice`, `cudaSetDevice`, `cudaGetDeviceProperties`, `cudaDeviceGetAttribute`
 - `cudaSetDeviceFlags`, `cudaGetDeviceFlags`
 - `cudaMalloc`, `cudaMallocManaged`, `cudaMallocHost`, `cudaFree`
+- `cudaMallocAsync`, `cudaMallocFromPoolAsync`, `cudaFreeAsync` (free lifetime is deferred in
+  stream order; allocation does not drain the stream)
 - `cudaHostAlloc`, `cudaFreeHost`, `cudaHostGetDevicePointer`, `cudaHostGetFlags`
 - `cudaMemGetInfo`
 - `cudaMemcpy`, `cudaMemcpyAsync`
@@ -607,7 +617,8 @@ Supported runtime API subset:
 - `cudaPointerGetAttributes`, `cudaChooseDevice`
 - `cudaStreamCreateWithPriority` (priority ignored; creates regular stream)
 - `cudaDeviceSetLimit` (no-op), `cudaDeviceGetLimit` (returns sensible defaults)
-- `cudaLaunchCooperativeKernel` (forwards to `cudaLaunchKernel`; threadgroup CG works)
+- `cudaLaunchCooperativeKernel` (single threadgroup supported; multi-block launch returns
+  `cudaErrorNotSupported`)
 - `cudaDeviceSetCacheConfig`, `cudaDeviceGetCacheConfig` (no-op stubs; all memory is UMA)
 - `cudaDeviceSetSharedMemConfig`, `cudaDeviceGetSharedMemConfig` (no-op stubs)
 - `cudaGetSymbolAddress`, `cudaGetSymbolSize`
@@ -757,6 +768,8 @@ Supported library shim subset:
   - `curandGenerateUniform`, `curandGenerateUniformDouble`
   - `curandGenerateNormal`, `curandGenerateNormalDouble`
   - `curandGenerateLogNormal`, `curandGenerateLogNormalDouble`
+  - generation is enqueued on the bound stream; state-changing setters and destruction wait
+    for prior generator work so callbacks cannot race generator lifetime/state.
 - cuFFT (`cufft.h`)
   - `cufftCreate`, `cufftDestroy`, `cufftSetStream`, `cufftGetSize`, `cufftGetVersion`
   - `cufftPlan1d`, `cufftPlan2d`, `cufftPlan3d`, `cufftPlanMany`
@@ -799,9 +812,11 @@ Known limitations (intentional per spec §2.2 and §8):
 - Texture/surface objects: deferred to v2 per spec §2.2 and §8.
 - Multi-GPU peer access: single GPU only on Apple Silicon; peer APIs return appropriate errors.
 - CUDA graphics interop (OpenGL/Vulkan): non-goal per spec §2.2.
-- `cooperative_groups::grid_group::sync()`: no-op stub; Metal has no cross-threadgroup barrier.
+- Multi-block cooperative launch is rejected with not-supported because Metal has no
+  cross-threadgroup barrier; single-block cooperative sync uses a threadgroup barrier.
 - Masked `__syncwarp` uses AIR SIMD-group scope with threadgroup-memory visibility;
   divergent half-warp ordering, partial-mask vote/ballot, activemask, shuffle caller
   membership, and automatic source-path static shared memory are GPU-tested (spec §5.3).
-- FP64: Apple Silicon GPU has minimal FP64 throughput; `--fp64=emulate` recommended (spec §8.1).
+- FP64: generic FP32-pair register emulation is available at ~44-bit mantissa; unsupported
+  binary64 memory/conversion forms fail compilation (spec §8.1).
 - Device printf: buffer-based; format strings limited to 256 bytes (spec §5.3).

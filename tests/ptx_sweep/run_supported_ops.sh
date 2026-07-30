@@ -71,7 +71,6 @@ run_case "sweep_cvta_local" "cvta.to.local.u64 %rd2, %rd1;"
 run_case "sweep_bar_sync" "bar.sync 0;"
 run_case "sweep_setp_eq_s32" "setp.eq.s32 %p1, %r1, %r2;"
 run_case "sweep_bra_label" $'bra L_done;\nL_done:'
-run_case "sweep_call_vprintf" "call.uni (%r0), vprintf, (\"tid=%u\", %r1);"
 run_case "sweep_atom_global_add_f32" "atom.global.add.f32 %f1, [%rd1], %f2;"
 
 # Warp / SIMD-group primitives
@@ -92,22 +91,11 @@ run_case "sweep_membar_gl"   "membar.gl;"
 run_case "sweep_membar_cta"  "membar.cta;"
 run_case "sweep_membar_sys"  "membar.sys;"
 
-# Async copy
+# Async copy is serialized to an exact shared-memory copy plus wait barrier.
 run_case "sweep_cp_async_ca"          "cp.async.ca.shared.global [%rd1], [%rd2], 16;"
 run_case "sweep_cp_async_commit"      "cp.async.commit_group;"
 run_case "sweep_cp_async_wait_all"    "cp.async.wait_all;"
 run_case "sweep_cp_async_wait_group0" "cp.async.wait_group 0;"
-
-# Warp reductions
-run_case "sweep_redux_sync_add_s32" "redux.sync.add.s32 %r1, %r2, 0xffffffff;"
-run_case "sweep_redux_sync_add_f32" "redux.sync.add.f32 %f1, %f2, 0xffffffff;"
-run_case "sweep_redux_sync_and_b32" "redux.sync.and.b32 %r1, %r2, 0xffffffff;"
-run_case "sweep_redux_sync_or_b32"  "redux.sync.or.b32 %r1, %r2, 0xffffffff;"
-run_case "sweep_redux_sync_xor_b32" "redux.sync.xor.b32 %r1, %r2, 0xffffffff;"
-run_case "sweep_redux_sync_min_s32" "redux.sync.min.s32 %r1, %r2, 0xffffffff;"
-run_case "sweep_redux_sync_max_s32" "redux.sync.max.s32 %r1, %r2, 0xffffffff;"
-run_case "sweep_redux_sync_min_f32" "redux.sync.min.f32 %f1, %f2, 0xffffffff;"
-run_case "sweep_redux_sync_max_f32" "redux.sync.max.f32 %f1, %f2, 0xffffffff;"
 
 # Math intrinsics (extended)
 run_case "sweep_sqrt_rn_f32"    "sqrt.rn.f32 %f1, %f2;"
