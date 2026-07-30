@@ -7,8 +7,33 @@ Build
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 cmake --install build --prefix /tmp/cumetal-install
+/tmp/cumetal-install/bin/cumetal doctor
 # optional: also install the libcuda.dylib drop-in alias (see docs/legal-notice.md)
 cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCUMETAL_ENABLE_BINARY_SHIM=ON
+```
+
+For a manifest-backed install with a matching uninstaller:
+
+```bash
+bash install/install.sh build /opt/cumetal
+# Optional and explicit; the default does not edit shell startup files.
+bash install/install.sh build /opt/cumetal --shell-config
+```
+
+The installer does not export global `DYLD_*` variables. Linked output from
+`cumetalc` has an rpath to its installed runtime, and `cumetal run` scopes
+runtime lookup changes to the process it launches.
+
+Homebrew packaging
+------------------
+
+The formula is maintained in
+[`Lulzx/homebrew-tap`](https://github.com/Lulzx/homebrew-tap). It builds a
+Release configuration, depends on Homebrew LLVM, keeps the binary shim off, and
+runs a compile-and-execute GPU smoke test in `brew test cumetal`:
+
+```bash
+brew install lulzx/tap/cumetal
 ```
 
 Two independent switches
@@ -33,6 +58,9 @@ CUMETAL_TRACE_GPU=1 /tmp/vectorAdd
 
 An installed `cumetalc` finds its headers, `libcumetal.dylib`, and the `ptxas`/`fatbinary` shims
 relative to its own path. Set `CUMETAL_ROOT` to point it at a prefix explicitly.
+
+Use `cumetal doctor` to check Apple Silicon, macOS, LLVM, Metal tools, headers,
+and runtime discovery in one pass.
 
 Generate and validate a reference metallib (requires full Xcode)
 -----------------------------------------------------------------

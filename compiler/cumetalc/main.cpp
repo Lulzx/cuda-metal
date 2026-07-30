@@ -438,10 +438,10 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     // Clang execs the shims as subprocesses, so they must be found via PATH. Prepend rather than
     // replace so a user-provided toolchain earlier in PATH still loses to ours deliberately.
     const char* existing_path = std::getenv("PATH");
-    const std::string path_prefix =
-        "PATH=" + quote_shell(layout.toolchain_dir.string()) + ":" +
-        (existing_path != nullptr ? std::string(existing_path) : std::string("/usr/bin:/bin")) +
-        " ";
+    const std::string combined_path =
+        layout.toolchain_dir.string() + ":" +
+        (existing_path != nullptr ? std::string(existing_path) : std::string("/usr/bin:/bin"));
+    const std::string path_prefix = "PATH=" + quote_shell(combined_path) + " ";
 
     std::string compile = path_prefix + quote_shell(compiler.string()) +
                           " -x cuda -std=c++17 -O2"

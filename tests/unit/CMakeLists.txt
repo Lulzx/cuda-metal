@@ -474,6 +474,10 @@ add_test(
             ${CMAKE_SOURCE_DIR}/install/uninstall.sh
             ${CMAKE_BINARY_DIR}
 )
+set_tests_properties(
+    unit_install_uninstall_scripts
+    PROPERTIES RESOURCE_LOCK cumetal_install_manifest
+)
 
 add_test(
     NAME unit_llama_build_contract
@@ -564,4 +568,12 @@ add_test(
             ${PROJECT_VERSION}
             $<TARGET_FILE:cumetalc>
             ${CMAKE_SOURCE_DIR}/runtime/api/cumetal_native.h
+)
+
+add_test(
+    NAME unit_cumetal_cli
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetal_cli_test.sh
+            $<TARGET_FILE:cumetal>
+            $<TARGET_FILE_DIR:cumetal_runtime>
 )
