@@ -436,7 +436,7 @@ bool parse_fatbin_wrapper_ptx(const void* image, std::string* out_ptx) {
         if (parse_fatbin_blob_ptx(data, out_ptx)) {
             return true;
         }
-        if (cumetal::fatbin::extract_elf64_ptx(
+        if (cumetal::fatbin::extract_elf_ptx(
                 data, kMaxImageBytes, out_ptx) ==
             cumetal::fatbin::ElfPtxStatus::kFound) {
             return true;
@@ -459,7 +459,7 @@ bool parse_ptx_image(const void* image, std::string* out_ptx) {
     if (parse_fatbin_wrapper_ptx(image, out_ptx)) {
         return true;
     }
-    return cumetal::fatbin::extract_elf64_ptx(
+    return cumetal::fatbin::extract_elf_ptx(
                image, kMaxImageBytes, out_ptx) ==
            cumetal::fatbin::ElfPtxStatus::kFound;
 }

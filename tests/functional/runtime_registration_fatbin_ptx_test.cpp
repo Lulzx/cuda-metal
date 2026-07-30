@@ -93,12 +93,18 @@ int main(int argc, char** argv) {
     std::memcpy(fatbin_blob.data() + sizeof(header), ptx_file_bytes.data(), ptx_file_bytes.size());
     const std::vector<std::uint8_t> elf_fatbin =
         cumetal::test::make_elf64_image(".nv_fatbin", fatbin_blob);
+    const std::vector<std::uint8_t> elf32_fatbin =
+        cumetal::test::make_elf32_image(".nv_fatbin", fatbin_blob);
+    const std::vector<std::uint8_t> elf32_extended_indexes =
+        cumetal::test::make_elf32_image(".nv_fatbin", fatbin_blob, true);
     const std::vector<std::uint8_t> elf_extended_indexes =
         cumetal::test::make_elf64_image(".nv_fatbin", fatbin_blob, true);
     const std::vector<std::uint8_t> raw_ptx_payload(
         ptx_file_bytes.begin(), ptx_file_bytes.end());
     const std::vector<std::uint8_t> elf_raw_ptx =
         cumetal::test::make_elf64_image(".ptx", raw_ptx_payload);
+    const std::vector<std::uint8_t> elf32_raw_ptx =
+        cumetal::test::make_elf32_image(".ptx", raw_ptx_payload);
 
     FatbinBlobHeader padded_header{};
     padded_header.header_size = 64;
@@ -398,6 +404,37 @@ int main(int argc, char** argv) {
     }
     __cudaUnregisterFatBinary(fatbin_handle);
 
+    for (const auto* elf32 :
+         {&elf32_fatbin, &elf32_extended_indexes, &elf32_raw_ptx}) {
+        fatbin_handle = __cudaRegisterFatBinary(elf32->data());
+        if (fatbin_handle == nullptr) {
+            std::fprintf(stderr,
+                         "FAIL: __cudaRegisterFatBinary (ELF32) returned null\n");
+            return 1;
+        }
+        __cudaRegisterFunction(fatbin_handle,
+                               reinterpret_cast<const void*>(&vector_add_host_stub),
+                               device_function,
+                               nullptr,
+                               0,
+                               nullptr,
+                               nullptr,
+                               nullptr,
+                               nullptr,
+                               nullptr);
+        if (cudaLaunchKernel(reinterpret_cast<const void*>(&vector_add_host_stub),
+                             grid_dim,
+                             block_dim,
+                             args,
+                             0,
+                             nullptr) != cudaSuccess ||
+            cudaDeviceSynchronize() != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: launch through ELF32 registration failed\n");
+            return 1;
+        }
+        __cudaUnregisterFatBinary(fatbin_handle);
+    }
+
     fatbin_handle = __cudaRegisterFatBinary(elf_raw_ptx.data());
     if (fatbin_handle == nullptr) {
         std::fprintf(stderr, "FAIL: __cudaRegisterFatBinary (ELF raw PTX) returned null\n");
@@ -582,6 +619,6 @@ int main(int argc, char** argv) {
     }
 
     std::printf(
-        "PASS: runtime registration supports fatbin, bounded ELF64 extended indexes, and FatBinary3 PTX paths\n");
+        "PASS: runtime registration supports fatbin, bounded ELF32/ELF64 extended indexes, and FatBinary3 PTX paths\n");
     return 0;
 }

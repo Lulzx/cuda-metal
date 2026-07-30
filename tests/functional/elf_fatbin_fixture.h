@@ -82,4 +82,70 @@ inline std::vector<std::uint8_t> make_elf64_image(
     return image;
 }
 
+// Minimal little-endian ELF32 counterpart used to verify that the shared
+// parser does not assume host pointer width or ELF64 section offsets.
+inline std::vector<std::uint8_t> make_elf32_image(
+    std::string_view section_name,
+    const std::vector<std::uint8_t>& payload,
+    bool use_extended_section_indexes = false) {
+    constexpr std::size_t kHeaderSize = 52;
+    constexpr std::size_t kSectionHeaderSize = 40;
+    const std::string names =
+        std::string("\0.shstrtab\0", 11) + std::string(section_name) + '\0';
+    constexpr std::uint32_t kStringTableNameOffset = 1;
+    constexpr std::uint32_t kPayloadNameOffset = 11;
+
+    const std::size_t payload_offset = kHeaderSize;
+    const std::size_t names_offset =
+        align_up(payload_offset + payload.size(), 4);
+    const std::size_t section_table_offset =
+        align_up(names_offset + names.size(), 4);
+    std::vector<std::uint8_t> image(
+        section_table_offset + 3 * kSectionHeaderSize, 0);
+
+    image[0] = 0x7f;
+    image[1] = 'E';
+    image[2] = 'L';
+    image[3] = 'F';
+    image[4] = 1;  // ELFCLASS32
+    image[5] = 1;  // ELFDATA2LSB
+    image[6] = 1;  // EV_CURRENT
+    write_value<std::uint16_t>(&image, 16, 1);  // ET_REL
+    write_value<std::uint32_t>(&image, 20, 1);
+    write_value<std::uint32_t>(
+        &image, 32, static_cast<std::uint32_t>(section_table_offset));
+    write_value<std::uint16_t>(&image, 40, kHeaderSize);
+    write_value<std::uint16_t>(&image, 46, kSectionHeaderSize);
+    write_value<std::uint16_t>(
+        &image, 48, use_extended_section_indexes ? 0 : 3);
+    write_value<std::uint16_t>(
+        &image, 50, use_extended_section_indexes ? 0xffff : 1);
+
+    if (use_extended_section_indexes) {
+        write_value<std::uint32_t>(&image, section_table_offset + 20, 3);
+        write_value<std::uint32_t>(&image, section_table_offset + 24, 1);
+    }
+
+    std::memcpy(image.data() + payload_offset, payload.data(), payload.size());
+    std::memcpy(image.data() + names_offset, names.data(), names.size());
+
+    const std::size_t strings = section_table_offset + kSectionHeaderSize;
+    write_value<std::uint32_t>(&image, strings, kStringTableNameOffset);
+    write_value<std::uint32_t>(&image, strings + 4, 3);  // SHT_STRTAB
+    write_value<std::uint32_t>(
+        &image, strings + 16, static_cast<std::uint32_t>(names_offset));
+    write_value<std::uint32_t>(
+        &image, strings + 20, static_cast<std::uint32_t>(names.size()));
+
+    const std::size_t data = section_table_offset + 2 * kSectionHeaderSize;
+    write_value<std::uint32_t>(&image, data, kPayloadNameOffset);
+    write_value<std::uint32_t>(&image, data + 4, 1);  // SHT_PROGBITS
+    write_value<std::uint32_t>(
+        &image, data + 16, static_cast<std::uint32_t>(payload_offset));
+    write_value<std::uint32_t>(
+        &image, data + 20, static_cast<std::uint32_t>(payload.size()));
+    write_value<std::uint32_t>(&image, data + 32, 1);
+    return image;
+}
+
 }  // namespace cumetal::test

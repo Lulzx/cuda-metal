@@ -7,6 +7,8 @@
 namespace cumetal::fatbin {
 namespace {
 
+constexpr std::size_t kElf32HeaderSize = 52;
+constexpr std::size_t kElf32SectionHeaderSize = 40;
 constexpr std::size_t kElf64HeaderSize = 64;
 constexpr std::size_t kElf64SectionHeaderSize = 64;
 constexpr std::uint32_t kFatbinBlobMagic = 0xBA55ED50u;
@@ -24,6 +26,20 @@ struct SectionView {
     std::uint32_t link = 0;
     std::uint64_t offset = 0;
     std::uint64_t size = 0;
+};
+
+struct ElfLayout {
+    std::size_t header_size = 0;
+    std::size_t section_header_size = 0;
+    std::size_t section_table_offset_field = 0;
+    std::size_t header_size_field = 0;
+    std::size_t section_entry_size_field = 0;
+    std::size_t section_count_field = 0;
+    std::size_t string_table_index_field = 0;
+    std::size_t section_offset_field = 0;
+    std::size_t section_size_field = 0;
+    std::size_t section_link_field = 0;
+    bool fields_are_64_bit = false;
 };
 
 template <typename T>
@@ -53,15 +69,25 @@ bool checked_table_range(std::uint64_t offset,
 SectionView read_section(const std::uint8_t* bytes,
                          std::uint64_t section_table_offset,
                          std::uint16_t section_entry_size,
-                         std::uint64_t index) {
+                         std::uint64_t index,
+                         const ElfLayout& layout) {
     const std::size_t base =
         static_cast<std::size_t>(section_table_offset) +
         static_cast<std::size_t>(section_entry_size) * index;
     SectionView section;
     section.name_offset = read_value<std::uint32_t>(bytes, base);
-    section.offset = read_value<std::uint64_t>(bytes, base + 24);
-    section.size = read_value<std::uint64_t>(bytes, base + 32);
-    section.link = read_value<std::uint32_t>(bytes, base + 40);
+    section.offset = layout.fields_are_64_bit
+                         ? read_value<std::uint64_t>(
+                               bytes, base + layout.section_offset_field)
+                         : read_value<std::uint32_t>(
+                               bytes, base + layout.section_offset_field);
+    section.size = layout.fields_are_64_bit
+                       ? read_value<std::uint64_t>(
+                             bytes, base + layout.section_size_field)
+                       : read_value<std::uint32_t>(
+                             bytes, base + layout.section_size_field);
+    section.link = read_value<std::uint32_t>(
+        bytes, base + layout.section_link_field);
     return section;
 }
 
@@ -137,11 +163,10 @@ ElfPtxStatus extract_from_section(const std::uint8_t* bytes,
 
 }  // namespace
 
-ElfPtxStatus extract_elf64_ptx(const void* image,
-                               std::size_t max_image_bytes,
-                               std::string* out_ptx) {
-    if (image == nullptr || out_ptx == nullptr ||
-        max_image_bytes < kElf64HeaderSize) {
+ElfPtxStatus extract_elf_ptx(const void* image,
+                             std::size_t max_image_bytes,
+                             std::string* out_ptx) {
+    if (image == nullptr || out_ptx == nullptr || max_image_bytes < 4) {
         return ElfPtxStatus::kNotElf;
     }
     const auto* bytes = static_cast<const std::uint8_t*>(image);
@@ -149,35 +174,78 @@ ElfPtxStatus extract_elf64_ptx(const void* image,
         bytes[3] != 'F') {
         return ElfPtxStatus::kNotElf;
     }
-    // ELFCLASS64, ELFDATA2LSB, and EV_CURRENT.
-    if (bytes[4] != 2 || bytes[5] != 1 || bytes[6] != 1) {
+    if (max_image_bytes < 7) {
+        return ElfPtxStatus::kMalformed;
+    }
+    // ELFDATA2LSB and EV_CURRENT.
+    if (bytes[5] != 1 || bytes[6] != 1) {
         return ElfPtxStatus::kUnsupported;
     }
 
-    const std::uint64_t section_table_offset =
-        read_value<std::uint64_t>(bytes, 40);
-    const std::uint16_t elf_header_size =
-        read_value<std::uint16_t>(bytes, 52);
-    const std::uint16_t section_entry_size =
-        read_value<std::uint16_t>(bytes, 58);
-    const std::uint16_t encoded_section_count =
-        read_value<std::uint16_t>(bytes, 60);
-    const std::uint16_t encoded_string_table_index =
-        read_value<std::uint16_t>(bytes, 62);
+    ElfLayout layout;
+    if (bytes[4] == 1) {
+        layout = {
+            .header_size = kElf32HeaderSize,
+            .section_header_size = kElf32SectionHeaderSize,
+            .section_table_offset_field = 32,
+            .header_size_field = 40,
+            .section_entry_size_field = 46,
+            .section_count_field = 48,
+            .string_table_index_field = 50,
+            .section_offset_field = 16,
+            .section_size_field = 20,
+            .section_link_field = 24,
+            .fields_are_64_bit = false,
+        };
+    } else if (bytes[4] == 2) {
+        layout = {
+            .header_size = kElf64HeaderSize,
+            .section_header_size = kElf64SectionHeaderSize,
+            .section_table_offset_field = 40,
+            .header_size_field = 52,
+            .section_entry_size_field = 58,
+            .section_count_field = 60,
+            .string_table_index_field = 62,
+            .section_offset_field = 24,
+            .section_size_field = 32,
+            .section_link_field = 40,
+            .fields_are_64_bit = true,
+        };
+    } else {
+        return ElfPtxStatus::kUnsupported;
+    }
+    if (max_image_bytes < layout.header_size) {
+        return ElfPtxStatus::kMalformed;
+    }
 
-    if (elf_header_size < kElf64HeaderSize ||
+    const std::uint64_t section_table_offset =
+        layout.fields_are_64_bit
+            ? read_value<std::uint64_t>(
+                  bytes, layout.section_table_offset_field)
+            : read_value<std::uint32_t>(
+                  bytes, layout.section_table_offset_field);
+    const std::uint16_t elf_header_size =
+        read_value<std::uint16_t>(bytes, layout.header_size_field);
+    const std::uint16_t section_entry_size =
+        read_value<std::uint16_t>(bytes, layout.section_entry_size_field);
+    const std::uint16_t encoded_section_count =
+        read_value<std::uint16_t>(bytes, layout.section_count_field);
+    const std::uint16_t encoded_string_table_index =
+        read_value<std::uint16_t>(bytes, layout.string_table_index_field);
+
+    if (elf_header_size < layout.header_size ||
         section_table_offset < elf_header_size ||
-        section_entry_size < kElf64SectionHeaderSize ||
+        section_entry_size < layout.section_header_size ||
         !checked_range(section_table_offset, section_entry_size,
                        max_image_bytes)) {
         return ElfPtxStatus::kMalformed;
     }
 
-    // ELF64 uses section header 0 to carry values that do not fit in the ELF
+    // ELF uses section header 0 to carry values that do not fit in the ELF
     // header: sh_size is the real section count when e_shnum is zero, and
     // sh_link is the real string-table index when e_shstrndx is SHN_XINDEX.
     const SectionView section_zero =
-        read_section(bytes, section_table_offset, section_entry_size, 0);
+        read_section(bytes, section_table_offset, section_entry_size, 0, layout);
     const std::uint64_t section_count =
         encoded_section_count == 0 ? section_zero.size
                                    : encoded_section_count;
@@ -194,7 +262,7 @@ ElfPtxStatus extract_elf64_ptx(const void* image,
 
     const SectionView string_table =
         read_section(bytes, section_table_offset, section_entry_size,
-                     string_table_index);
+                     string_table_index, layout);
     if (!checked_range(string_table.offset, string_table.size,
                        max_image_bytes)) {
         return ElfPtxStatus::kMalformed;
@@ -205,7 +273,8 @@ ElfPtxStatus extract_elf64_ptx(const void* image,
 
     for (std::uint64_t index = 0; index < section_count; ++index) {
         const SectionView section =
-            read_section(bytes, section_table_offset, section_entry_size, index);
+            read_section(bytes, section_table_offset, section_entry_size, index,
+                         layout);
         if (section.name_offset >= names_size ||
             !checked_range(section.offset, section.size, max_image_bytes)) {
             return ElfPtxStatus::kMalformed;

@@ -58,11 +58,11 @@ as gaps have been closed.
 - Device printf: fully works for PTX registration + direct paths (256-byte format limit,
   ring buffer, post-launch drain). Reordering vs. CUDA possible (as on real CUDA too).
 - Binary-shim fatbinary support: CMTL envelopes, raw PTX, basic FatBinary/FatBinary2/3
-  PTX wrappers, and little-endian ELF64 objects with named `.nv_fatbin` or raw-PTX sections
+  PTX wrappers, and little-endian ELF32/ELF64 objects with named `.nv_fatbin` or raw-PTX sections
   are supported by both registration and `cuModuleLoadData`. ELF extraction follows validated
-  section-table ranges under the 64 MiB image cap, including ELF64 extended section counts and
-  string-table indexes carried by section header 0; the former registration-only blind 1 MiB
-  memory scan has been removed. ELF32, big-endian ELF, compressed fatbin payloads, complex
+  section-table ranges under the 64 MiB image cap, including extended section counts and
+  string-table indexes carried by section header 0 for both classes; the former registration-only
+  blind 1 MiB memory scan has been removed. Big-endian ELF, compressed fatbin payloads, complex
   symbol layouts, and SASS-only images remain unsupported (SASS never was supported; per spec).
 - PhysX 5.6 reduced GRB coverage is limited to the 93-kernel selected-shape PGS
   manifest and selected rigid/static contacts. Patch 0008 removes

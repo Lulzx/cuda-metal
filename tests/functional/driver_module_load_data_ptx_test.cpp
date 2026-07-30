@@ -198,12 +198,18 @@ int main(int argc, char** argv) {
     std::memcpy(fatbin_blob.data() + sizeof(header), ptx_file_bytes.data(), ptx_file_bytes.size());
     const std::vector<std::uint8_t> elf_fatbin =
         cumetal::test::make_elf64_image(".nv_fatbin", fatbin_blob);
+    const std::vector<std::uint8_t> elf32_fatbin =
+        cumetal::test::make_elf32_image(".nv_fatbin", fatbin_blob);
+    const std::vector<std::uint8_t> elf32_extended_indexes =
+        cumetal::test::make_elf32_image(".nv_fatbin", fatbin_blob, true);
     const std::vector<std::uint8_t> elf_extended_indexes =
         cumetal::test::make_elf64_image(".nv_fatbin", fatbin_blob, true);
     const std::vector<std::uint8_t> raw_ptx_payload(
         ptx_file_bytes.begin(), ptx_file_bytes.end());
     const std::vector<std::uint8_t> elf_raw_ptx =
         cumetal::test::make_elf64_image(".ptx", raw_ptx_payload);
+    const std::vector<std::uint8_t> elf32_raw_ptx =
+        cumetal::test::make_elf32_image(".ptx", raw_ptx_payload);
 
     FatbinBlobHeader padded_header{};
     padded_header.header_size = 64;
@@ -274,6 +280,22 @@ int main(int argc, char** argv) {
     if (cuModuleUnload(module) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: cuModuleUnload after ELF .nv_fatbin load failed\n");
         return 1;
+    }
+
+    for (const auto* elf32 :
+         {&elf32_fatbin, &elf32_extended_indexes, &elf32_raw_ptx}) {
+        if (cuModuleLoadData(&module, elf32->data()) != CUDA_SUCCESS ||
+            module == nullptr) {
+            std::fprintf(stderr, "FAIL: cuModuleLoadData(ELF32) failed\n");
+            return 1;
+        }
+        if (!run_vector_add(module)) {
+            return 1;
+        }
+        if (cuModuleUnload(module) != CUDA_SUCCESS) {
+            std::fprintf(stderr, "FAIL: cuModuleUnload after ELF32 load failed\n");
+            return 1;
+        }
     }
 
     if (cuModuleLoadData(&module, elf_extended_indexes.data()) !=
@@ -381,11 +403,11 @@ int main(int argc, char** argv) {
     }
 
     std::vector<std::uint8_t> unsupported_elf = elf_fatbin;
-    unsupported_elf[4] = 1;  // ELFCLASS32
+    unsupported_elf[5] = 2;  // ELFDATA2MSB
     module = nullptr;
     if (cuModuleLoadData(&module, unsupported_elf.data()) !=
         CUDA_ERROR_INVALID_IMAGE) {
-        std::fprintf(stderr, "FAIL: unsupported ELF class should be rejected\n");
+        std::fprintf(stderr, "FAIL: unsupported ELF byte order should be rejected\n");
         return 1;
     }
 
@@ -432,11 +454,29 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const std::size_t elf32_extended_section_table_offset =
+        elf32_extended_indexes.size() - 3 * 40;
+    std::vector<std::uint8_t> malformed_elf32_extended_count =
+        elf32_extended_indexes;
+    cumetal::test::write_value<std::uint32_t>(
+        &malformed_elf32_extended_count,
+        elf32_extended_section_table_offset + 20,
+        64u * 1024u * 1024u);
+    module = nullptr;
+    if (cuModuleLoadData(&module,
+                         malformed_elf32_extended_count.data()) !=
+        CUDA_ERROR_INVALID_IMAGE) {
+        std::fprintf(
+            stderr,
+            "FAIL: out-of-range ELF32 extended section count should be rejected\n");
+        return 1;
+    }
+
     if (cuCtxDestroy(context) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: cuCtxDestroy failed\n");
         return 1;
     }
 
-    std::printf("PASS: cuModuleLoadData supports PTX text, fatbin, and bounded ELF64 extended-index variants\n");
+    std::printf("PASS: cuModuleLoadData supports PTX text, fatbin, and bounded ELF32/ELF64 extended-index variants\n");
     return 0;
 }

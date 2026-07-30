@@ -480,7 +480,7 @@ bool parse_fatbin_wrapper_ptx(const void* fat_cubin,
             return true;
         }
         const cumetal::fatbin::ElfPtxStatus elf_status =
-            cumetal::fatbin::extract_elf64_ptx(
+            cumetal::fatbin::extract_elf_ptx(
                 data, kMaxFatbinImageBytes, out_ptx);
         if (elf_status == cumetal::fatbin::ElfPtxStatus::kFound) {
             return true;
@@ -534,9 +534,9 @@ ParsedFatbinImage parse_fatbin_image(const void* fat_cubin) {
         return parsed;
     }
     // NVCC-generated ELF objects carry PTX in named sections. Parse only the
-    // ELF64 section-table ranges instead of scanning an arbitrary memory window.
+    // ELF section-table ranges instead of scanning an arbitrary memory window.
     const cumetal::fatbin::ElfPtxStatus elf_status =
-        cumetal::fatbin::extract_elf64_ptx(
+        cumetal::fatbin::extract_elf_ptx(
             fat_cubin, kMaxFatbinImageBytes, &parsed.ptx_source);
     if (elf_status == cumetal::fatbin::ElfPtxStatus::kFound) {
         REG_DEBUG("parse_fatbin_image: ELF-embedded PTX, ptx_size=%zu",

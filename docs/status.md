@@ -149,13 +149,14 @@ Post-Phase 5 work completed:
   invalid values warn once and use fast mode. An Apple-GPU functional test verifies numerical
   correctness, distinct cache artifacts, and provenance for both modes.
 
-- **Bounded ELF64 fatbinary parsing**: CUDA registration and `cuModuleLoadData` now share
-  section-table-driven extraction for little-endian ELF64 `.nv_fatbin` and raw-PTX sections.
+- **Bounded ELF32/ELF64 fatbinary parsing**: CUDA registration and `cuModuleLoadData` now share
+  section-table-driven extraction for little-endian ELF32 and ELF64 `.nv_fatbin` and raw-PTX
+  sections.
   Standard and extended section counts/string-table indexes are resolved from the ELF header or
   section header 0 as required. Header, table, name, payload, and nested fatbin ranges are checked
   against the 64 MiB image ceiling; malformed and unsupported ELF images are refused. Functional
-  tests launch the same PTX through registration and `cuModuleLoadData`, including extended-index
-  images, with malformed-image negative coverage.
+  tests launch the same PTX through registration and `cuModuleLoadData` for both ELF classes,
+  including extended-index images, with malformed-image negative coverage.
 
 - **Exact GPT-NeoX rotary embedding for covered GGML ABIs**: the concrete forward,
   no-frequency-factor `rope_neox` float-to-float and float-to-half variants now rotate paired
