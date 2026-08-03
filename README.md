@@ -27,7 +27,19 @@ cmake --build build -j"$(sysctl -n hw.ncpu)"
 bash scripts/ci_report.sh build --exclude-regex '^bench_'
 ```
 
-Compile ordinary CUDA:
+### Apollo demo (the front door)
+
+One command that climbs from vector-add through reduction, SGEMM, and a path
+tracer, refusing any stage that lacks `device=apple_gpu` provenance:
+
+```bash
+bash demos/apollo/run.sh
+```
+
+Optional: `bash demos/apollo/run.sh --full` adds the llm.c GPT-2 FP32 gate.
+Details, scope limits, and artifacts: [demos/apollo/README.md](demos/apollo/README.md).
+
+### Single sample
 
 ```bash
 ./build/cumetalc samples/vectorAdd/vectorAdd.cu -o /tmp/vectorAdd

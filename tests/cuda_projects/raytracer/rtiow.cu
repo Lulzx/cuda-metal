@@ -363,5 +363,36 @@ int main(int argc, char **argv) {
     }
 
     printf("OK: GPU render matches CPU reference.\n");
+
+    // Optional PPM dump for demos (CUMETAL_WRITE_PPM=/path/out.ppm).
+    // Writes the GPU image so a stranger can open proof without reading logs.
+    if (const char *ppm_path = std::getenv("CUMETAL_WRITE_PPM")) {
+        if (ppm_path[0] != '\0') {
+            FILE *f = std::fopen(ppm_path, "wb");
+            if (!f) {
+                printf("WARN: could not open CUMETAL_WRITE_PPM path: %s\n", ppm_path);
+            } else {
+                std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+                for (int py = h - 1; py >= 0; --py) {
+                    for (int px = 0; px < w; ++px) {
+                        int i = (py * w + px) * 3;
+                        auto tonemap = [](float v) -> unsigned char {
+                            v = fminf(fmaxf(v, 0.0f), 1.0f);
+                            v = sqrtf(v); // gamma 2.0 for display
+                            return static_cast<unsigned char>(255.99f * v);
+                        };
+                        unsigned char rgb[3] = {
+                            tonemap(gpu[i + 0]),
+                            tonemap(gpu[i + 1]),
+                            tonemap(gpu[i + 2]),
+                        };
+                        std::fwrite(rgb, 1, 3, f);
+                    }
+                }
+                std::fclose(f);
+                printf("wrote GPU image: %s\n", ppm_path);
+            }
+        }
+    }
     return 0;
 }
