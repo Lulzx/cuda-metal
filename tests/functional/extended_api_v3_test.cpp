@@ -37,6 +37,8 @@ static void test_curand_exponential() {
     cudaMalloc(reinterpret_cast<void**>(&buf), 64 * sizeof(float));
     CHECK(curandGenerateExponential(gen, buf, 64) == CURAND_STATUS_SUCCESS,
           "curandGenerateExponential succeeds");
+    CHECK(cudaDeviceSynchronize() == cudaSuccess,
+          "curandGenerateExponential completes before host inspection");
     // All values must be > 0
     for (int i = 0; i < 64; ++i) {
         CHECK(buf[i] > 0.0f, "curandGenerateExponential value > 0");
@@ -47,6 +49,8 @@ static void test_curand_exponential() {
     cudaMalloc(reinterpret_cast<void**>(&bufd), 32 * sizeof(double));
     CHECK(curandGenerateExponentialDouble(gen, bufd, 32) == CURAND_STATUS_SUCCESS,
           "curandGenerateExponentialDouble succeeds");
+    CHECK(cudaDeviceSynchronize() == cudaSuccess,
+          "curandGenerateExponentialDouble completes before host inspection");
     for (int i = 0; i < 32; ++i) {
         CHECK(bufd[i] > 0.0, "curandGenerateExponentialDouble value > 0");
     }

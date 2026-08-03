@@ -27,6 +27,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct CUstream_st {};
@@ -176,6 +177,8 @@ struct RuntimeState {
     int current_device = 0;
     unsigned int device_flags = cudaDeviceScheduleAuto;
     cumetal::rt::AllocationTable allocations;
+    std::mutex pending_free_mutex;
+    std::unordered_set<void*> pending_async_frees;
     std::mutex stream_mutex;
     struct StreamRecord {
         std::shared_ptr<cumetal::metal_backend::Stream> backend;
@@ -584,6 +587,23 @@ void* host_accessible_pointer(void* ptr, std::size_t count) {
         host_accessible_pointer(static_cast<const void*>(ptr), count));
 }
 
+cudaError_t query_runtime_kernel_properties(
+    const void* function,
+    cumetal::metal_backend::KernelProperties* properties) {
+    if (function == nullptr || properties == nullptr)
+        return cudaErrorInvalidValue;
+    cumetal::registration::RegisteredKernel kernel;
+    if (!cumetal::native_registration::lookup_kernel(function, &kernel) &&
+        !cumetal::registration::lookup_registered_kernel(function, &kernel)) {
+        return cudaErrorInvalidValue;
+    }
+    if (kernel.metallib_path.empty() || kernel.kernel_name.empty())
+        return cudaErrorInvalidValue;
+    std::string error;
+    return cumetal::metal_backend::query_kernel_properties(
+        kernel.metallib_path, kernel.kernel_name, properties, &error);
+}
+
 cudaError_t resolve_memcpy_kind(void* dst, const void* src, cudaMemcpyKind kind, cudaMemcpyKind* resolved_kind) {
     if (resolved_kind == nullptr) {
         return cudaErrorInvalidValue;
@@ -735,6 +755,18 @@ cudaError_t synchronize_stream_for_host_op(cudaStream_t stream,
         *out_stream = std::move(backend_stream);
     }
     return cudaSuccess;
+}
+
+cudaError_t enqueue_stream_host_op(cudaStream_t stream, std::function<void()> operation) {
+    std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
+    const cudaError_t resolve_status =
+        resolve_runtime_stream(stream, &backend_stream, nullptr);
+    if (resolve_status != cudaSuccess) {
+        return resolve_status;
+    }
+    std::string error;
+    return cumetal::metal_backend::enqueue_host_function(
+        backend_stream, std::move(operation), &error);
 }
 
 cudaError_t update_event_completion(cudaEvent_t event, bool wait_for_completion) {
@@ -1695,6 +1727,10 @@ bool resolve_allocation_for_pointer(const void* ptr, AllocationTable::ResolvedAl
     return state.allocations.resolve(ptr, out);
 }
 
+cudaError_t enqueue_host_operation(cudaStream_t stream, std::function<void()> operation) {
+    return enqueue_stream_host_op(stream, std::move(operation));
+}
+
 }  // namespace cumetal::rt
 
 extern "C" {
@@ -2386,19 +2422,16 @@ cudaError_t cudaMemcpyAsync(void* dst,
     }
     (void)resolved_kind;
 
-    const cudaError_t sync_status = synchronize_stream_for_host_op(stream, nullptr);
-    if (sync_status != cudaSuccess) {
-        return fail(sync_status);
+    void* host_dst = host_accessible_pointer(dst, count);
+    const void* host_src = host_accessible_pointer(src, count);
+    if ((host_dst == nullptr || host_src == nullptr) && count > 0) {
+        return fail(cudaErrorInvalidValue);
     }
-
-    if (count > 0) {
-        void* host_dst = host_accessible_pointer(dst, count);
-        const void* host_src = host_accessible_pointer(src, count);
-        if (host_dst == nullptr || host_src == nullptr) {
-            return fail(cudaErrorInvalidValue);
-        }
-        std::memcpy(host_dst, host_src, count);
-    }
+    const cudaError_t enqueue_status = enqueue_stream_host_op(
+        stream, [host_dst, host_src, count]() {
+            if (count > 0) std::memcpy(host_dst, host_src, count);
+        });
+    if (enqueue_status != cudaSuccess) return fail(enqueue_status);
 
     if (trace_enabled()) {
         char buf[128];
@@ -2517,16 +2550,12 @@ cudaError_t cudaMemcpyToSymbolAsync(const void* symbol,
         return fail(symbol_status);
     }
 
-    const cudaError_t sync_status = synchronize_stream_for_host_op(stream, nullptr);
-    if (sync_status != cudaSuccess) {
-        return fail(sync_status);
-    }
-
-    if (count > 0) {
-        std::memcpy(const_cast<unsigned char*>(symbol_ptr), src, count);
-    }
-
-    return fail(cudaSuccess);
+    const cudaError_t enqueue_status = enqueue_stream_host_op(
+        stream, [symbol_ptr, src, count]() {
+            if (count > 0)
+                std::memcpy(const_cast<unsigned char*>(symbol_ptr), src, count);
+        });
+    return fail(enqueue_status);
 }
 
 cudaError_t cudaMemcpyFromSymbolAsync(void* dst,
@@ -2557,16 +2586,11 @@ cudaError_t cudaMemcpyFromSymbolAsync(void* dst,
         return fail(symbol_status);
     }
 
-    const cudaError_t sync_status = synchronize_stream_for_host_op(stream, nullptr);
-    if (sync_status != cudaSuccess) {
-        return fail(sync_status);
-    }
-
-    if (count > 0) {
-        std::memcpy(dst, symbol_ptr, count);
-    }
-
-    return fail(cudaSuccess);
+    const cudaError_t enqueue_status = enqueue_stream_host_op(
+        stream, [dst, symbol_ptr, count]() {
+            if (count > 0) std::memcpy(dst, symbol_ptr, count);
+        });
+    return fail(enqueue_status);
 }
 
 cudaError_t cudaMemset(void* dev_ptr, int value, size_t count) {
@@ -2622,18 +2646,15 @@ cudaError_t cudaMemsetAsync(void* dev_ptr, int value, size_t count, cudaStream_t
         return fail(cudaSuccess);
     }
 
-    const cudaError_t sync_status = synchronize_stream_for_host_op(stream, nullptr);
-    if (sync_status != cudaSuccess) {
-        return fail(sync_status);
+    void* host_ptr = host_accessible_pointer(dev_ptr, count);
+    if (host_ptr == nullptr && count > 0) {
+        return fail(cudaErrorInvalidValue);
     }
-
-    if (count > 0) {
-        void* host_ptr = host_accessible_pointer(dev_ptr, count);
-        if (host_ptr == nullptr) {
-            return fail(cudaErrorInvalidValue);
-        }
-        std::memset(host_ptr, value, count);
-    }
+    const cudaError_t enqueue_status = enqueue_stream_host_op(
+        stream, [host_ptr, value, count]() {
+            if (count > 0) std::memset(host_ptr, value, count);
+        });
+    if (enqueue_status != cudaSuccess) return fail(enqueue_status);
 
     if (trace_enabled()) {
         char buf[128];
@@ -2677,12 +2698,17 @@ cudaError_t cudaMemcpy2DAsync(void* dst, size_t dpitch,
                                const void* src, size_t spitch,
                                size_t width, size_t height,
                                cudaMemcpyKind kind, cudaStream_t stream) {
-    const cudaError_t sync_status = synchronize_stream_for_host_op(stream, nullptr);
-    if (sync_status != cudaSuccess) {
-        return fail(sync_status);
-    }
-
-    return cudaMemcpy2D(dst, dpitch, src, spitch, width, height, kind);
+    (void)kind;
+    auto* d = static_cast<uint8_t*>(host_accessible_pointer(
+        dst, height == 0 ? 0 : (height - 1) * dpitch + width));
+    const auto* s = static_cast<const uint8_t*>(host_accessible_pointer(
+        src, height == 0 ? 0 : (height - 1) * spitch + width));
+    if ((d == nullptr || s == nullptr) && width > 0 && height > 0)
+        return fail(cudaErrorInvalidValue);
+    return fail(enqueue_stream_host_op(stream, [=]() {
+        for (size_t row = 0; row < height; ++row)
+            if (width > 0) std::memcpy(d + row * dpitch, s + row * spitch, width);
+    }));
 }
 
 cudaError_t cudaMemset2D(void* dev_ptr, size_t pitch,
@@ -2710,11 +2736,17 @@ cudaError_t cudaMemset2D(void* dev_ptr, size_t pitch,
     return fail(cudaSuccess);
 }
 
-// cudaMemset2DAsync — UMA: stream ignored; same as synchronous variant.
 cudaError_t cudaMemset2DAsync(void* dev_ptr, size_t pitch,
                                int value, size_t width, size_t height,
-                               cudaStream_t /*stream*/) {
-    return cudaMemset2D(dev_ptr, pitch, value, width, height);
+                               cudaStream_t stream) {
+    auto* d = static_cast<uint8_t*>(host_accessible_pointer(
+        dev_ptr, height == 0 ? 0 : (height - 1) * pitch + width));
+    if (d == nullptr && width > 0 && height > 0)
+        return fail(cudaErrorInvalidValue);
+    return fail(enqueue_stream_host_op(stream, [=]() {
+        for (size_t row = 0; row < height; ++row)
+            if (width > 0) std::memset(d + row * pitch, value, width);
+    }));
 }
 
 // cudaMemset3D — fills a 3D pitched allocation plane-by-row.
@@ -2747,10 +2779,24 @@ cudaError_t cudaMemset3D(cudaPitchedPtr pitchedDevPtr, int value, cudaExtent ext
     return fail(cudaSuccess);
 }
 
-// cudaMemset3DAsync — UMA: stream ignored; same as synchronous variant.
 cudaError_t cudaMemset3DAsync(cudaPitchedPtr pitchedDevPtr, int value, cudaExtent extent,
-                               cudaStream_t /*stream*/) {
-    return cudaMemset3D(pitchedDevPtr, value, extent);
+                               cudaStream_t stream) {
+    const size_t plane_size = pitchedDevPtr.pitch * pitchedDevPtr.ysize;
+    const size_t span = extent.depth == 0 || extent.height == 0
+                            ? 0
+                            : (extent.depth - 1) * plane_size +
+                                  (extent.height - 1) * pitchedDevPtr.pitch + extent.width;
+    auto* base = static_cast<uint8_t*>(
+        host_accessible_pointer(pitchedDevPtr.ptr, span));
+    if (base == nullptr && extent.width > 0 && extent.height > 0 && extent.depth > 0)
+        return fail(cudaErrorInvalidValue);
+    return fail(enqueue_stream_host_op(stream, [=]() {
+        for (size_t z = 0; z < extent.depth; ++z)
+            for (size_t y = 0; y < extent.height; ++y)
+                if (extent.width > 0)
+                    std::memset(base + z * plane_size + y * pitchedDevPtr.pitch,
+                                value, extent.width);
+    }));
 }
 
 cudaError_t cudaMemcpy3D(const cudaMemcpy3DParms* p) {
@@ -2805,8 +2851,45 @@ cudaError_t cudaMemcpy3D(const cudaMemcpy3DParms* p) {
 }
 
 cudaError_t cudaMemcpy3DAsync(const cudaMemcpy3DParms* p, cudaStream_t stream) {
-    (void)stream;
-    return cudaMemcpy3D(p);
+    if (p == nullptr || p->srcArray != nullptr || p->dstArray != nullptr)
+        return fail(cudaErrorInvalidValue);
+    const cudaMemcpy3DParms params = *p;
+    const size_t src_pitch = params.srcPtr.pitch ? params.srcPtr.pitch : params.extent.width;
+    const size_t dst_pitch = params.dstPtr.pitch ? params.dstPtr.pitch : params.extent.width;
+    const size_t src_height = params.srcPtr.ysize ? params.srcPtr.ysize : params.extent.height;
+    const size_t dst_height = params.dstPtr.ysize ? params.dstPtr.ysize : params.extent.height;
+    const size_t src_span = params.extent.depth == 0 || params.extent.height == 0
+                                ? 0
+                                : (params.srcPos.z + params.extent.depth - 1) *
+                                          src_pitch * src_height +
+                                      (params.srcPos.y + params.extent.height - 1) * src_pitch +
+                                      params.srcPos.x + params.extent.width;
+    const size_t dst_span = params.extent.depth == 0 || params.extent.height == 0
+                                ? 0
+                                : (params.dstPos.z + params.extent.depth - 1) *
+                                          dst_pitch * dst_height +
+                                      (params.dstPos.y + params.extent.height - 1) * dst_pitch +
+                                      params.dstPos.x + params.extent.width;
+    const char* src_base = static_cast<const char*>(
+        host_accessible_pointer(params.srcPtr.ptr, src_span));
+    char* dst_base = static_cast<char*>(
+        host_accessible_pointer(params.dstPtr.ptr, dst_span));
+    if ((src_base == nullptr || dst_base == nullptr) &&
+        params.extent.width > 0 && params.extent.height > 0 && params.extent.depth > 0)
+        return fail(cudaErrorInvalidValue);
+    return fail(enqueue_stream_host_op(stream, [=]() {
+        for (size_t z = 0; z < params.extent.depth; ++z) {
+            const size_t src_z = (params.srcPos.z + z) * src_pitch * src_height;
+            const size_t dst_z = (params.dstPos.z + z) * dst_pitch * dst_height;
+            for (size_t y = 0; y < params.extent.height; ++y) {
+                std::memcpy(dst_base + dst_z + (params.dstPos.y + y) * dst_pitch +
+                                params.dstPos.x,
+                            src_base + src_z + (params.srcPos.y + y) * src_pitch +
+                                params.srcPos.x,
+                            params.extent.width);
+            }
+        }
+    }));
 }
 
 cudaError_t cudaMemcpy3DPeerAsync(const cudaMemcpy3DPeerParms* p, cudaStream_t stream) {
@@ -4370,6 +4453,8 @@ const char* cudaGetErrorName(cudaError_t error) {
             return "cudaErrorPeerAccessNotEnabled";
         case cudaErrorIllegalAddress:
             return "cudaErrorIllegalAddress";
+        case cudaErrorNotSupported:
+            return "cudaErrorNotSupported";
         case cudaErrorUnknown:
             return "cudaErrorUnknown";
     }
@@ -4400,6 +4485,8 @@ const char* cudaGetErrorString(cudaError_t error) {
             return "cudaErrorPeerAccessNotEnabled";
         case cudaErrorIllegalAddress:
             return "cudaErrorIllegalAddress";
+        case cudaErrorNotSupported:
+            return "operation not supported";
         case cudaErrorUnknown:
             return "cudaErrorUnknown";
     }
@@ -4422,28 +4509,44 @@ cudaError_t cudaProfilerStop(void) {
     return fail(cudaSuccess);
 }
 
-// Occupancy API — returns conservative estimates (spec §8).
-// Metal exposes no equivalent to SM occupancy; we return sensible defaults
-// that allow block-size auto-tuning code to proceed without crashing.
+// Occupancy API — kernel-specific Metal-backed estimate.
 cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int* numBlocks,
-                                                          const void* /*func*/,
-                                                          int /*blockSize*/,
-                                                          size_t /*dynamicSMemSize*/) {
-    if (numBlocks == nullptr) {
+                                                          const void* func,
+                                                          int blockSize,
+                                                          size_t dynamicSMemSize) {
+    if (numBlocks == nullptr || blockSize <= 0) {
         return fail(cudaErrorInvalidValue);
     }
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {
         return fail(init_status);
     }
-    *numBlocks = 2;  // conservative estimate
+    cumetal::metal_backend::KernelProperties kernel{};
+    const cudaError_t query = query_runtime_kernel_properties(func, &kernel);
+    if (query != cudaSuccess) return fail(query);
+    if (blockSize > kernel.max_threads_per_threadgroup)
+        return fail(cudaErrorInvalidValue);
+    cudaDeviceProp device{};
+    if (cudaGetDeviceProperties(&device, 0) != cudaSuccess)
+        return fail(cudaErrorInvalidValue);
+    const size_t total_shared =
+        kernel.static_threadgroup_memory_bytes + dynamicSMemSize;
+    if (total_shared > static_cast<size_t>(device.sharedMemPerBlock))
+        return fail(cudaErrorInvalidValue);
+    const int thread_bound =
+        std::max(1, kernel.max_threads_per_threadgroup / blockSize);
+    const int memory_bound =
+        total_shared == 0
+            ? thread_bound
+            : std::max(1, static_cast<int>(device.sharedMemPerBlock / total_shared));
+    *numBlocks = std::min(thread_bound, memory_bound);
     return fail(cudaSuccess);
 }
 
 cudaError_t cudaOccupancyMaxPotentialBlockSize(int* minGridSize,
                                                int* blockSize,
-                                               const void* /*func*/,
-                                               size_t /*dynamicSMemSize*/,
+                                               const void* func,
+                                               size_t dynamicSMemSize,
                                                int blockSizeLimit) {
     if (minGridSize == nullptr || blockSize == nullptr) {
         return fail(cudaErrorInvalidValue);
@@ -4452,22 +4555,29 @@ cudaError_t cudaOccupancyMaxPotentialBlockSize(int* minGridSize,
     if (init_status != cudaSuccess) {
         return fail(init_status);
     }
-    // Default to 256 threads/block unless the caller constrains it.
-    const int chosen_block = (blockSizeLimit > 0 && blockSizeLimit < 256) ? blockSizeLimit : 256;
+    cumetal::metal_backend::KernelProperties kernel{};
+    const cudaError_t query = query_runtime_kernel_properties(func, &kernel);
+    if (query != cudaSuccess) return fail(query);
+    int chosen_block = kernel.max_threads_per_threadgroup;
+    if (blockSizeLimit > 0)
+        chosen_block = std::min(chosen_block, blockSizeLimit);
+    const int width = std::max(1, kernel.thread_execution_width);
+    chosen_block = std::max(width, (chosen_block / width) * width);
+    int active_blocks = 0;
+    const cudaError_t occupancy = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &active_blocks, func, chosen_block, dynamicSMemSize);
+    if (occupancy != cudaSuccess) return fail(occupancy);
     *blockSize = chosen_block;
-    // minGridSize = multiProcessorCount * 2 blocks/SM, rounded to grid coverage.
     cudaDeviceProp prop{};
     if (cudaGetDeviceProperties(&prop, 0) == cudaSuccess && prop.multiProcessorCount > 0) {
-        *minGridSize = prop.multiProcessorCount * 2;
+        *minGridSize = prop.multiProcessorCount * active_blocks;
     } else {
         *minGridSize = 16;  // safe fallback
     }
     return fail(cudaSuccess);
 }
 
-// Function attribute query — returns zeroed/default attributes (spec §8).
-// Metal pipelines expose no per-function register or shared-memory counts.
-cudaError_t cudaFuncGetAttributes(cudaFuncAttributes* attr, const void* /*func*/) {
+cudaError_t cudaFuncGetAttributes(cudaFuncAttributes* attr, const void* func) {
     if (attr == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
@@ -4475,10 +4585,25 @@ cudaError_t cudaFuncGetAttributes(cudaFuncAttributes* attr, const void* /*func*/
     if (init_status != cudaSuccess) {
         return fail(init_status);
     }
+    cumetal::metal_backend::KernelProperties kernel{};
+    const cudaError_t query = query_runtime_kernel_properties(func, &kernel);
+    if (query != cudaSuccess) return fail(query);
+    cudaDeviceProp device{};
+    if (cudaGetDeviceProperties(&device, 0) != cudaSuccess)
+        return fail(cudaErrorInvalidValue);
     *attr = {};
-    attr->maxThreadsPerBlock = 1024;
-    attr->ptxVersion = 80;   // report Ampere-equivalent PTX ISA
-    attr->binaryVersion = 80;
+    attr->maxThreadsPerBlock = kernel.max_threads_per_threadgroup;
+    attr->sharedSizeBytes = kernel.static_threadgroup_memory_bytes;
+    attr->maxDynamicSharedSizeBytes =
+        kernel.static_threadgroup_memory_bytes >=
+                static_cast<size_t>(device.sharedMemPerBlock)
+            ? 0
+            : static_cast<int>(
+                  static_cast<size_t>(device.sharedMemPerBlock) -
+                  kernel.static_threadgroup_memory_bytes);
+    // Metal pipelines have no NVIDIA PTX or SASS target version.
+    attr->ptxVersion = 0;
+    attr->binaryVersion = 0;
     return fail(cudaSuccess);
 }
 
@@ -4587,9 +4712,9 @@ cudaError_t cudaMemRangeGetAttribute(void* data,
 }
 
 // ── Async memory pool API ────────────────────────────────────────────────────
-// On Apple Silicon UMA, async allocation is equivalent to synchronous allocation.
-// Memory pools are no-op wrappers; cudaMallocAsync/cudaFreeAsync delegate to
-// cudaMalloc/cudaFree after stream synchronization.
+// Allocation itself is host-side on UMA, but its lifetime still follows the
+// selected stream: allocation returns immediately and free is deferred until
+// prior work in that stream completes.
 
 struct cudaMemPool_st {
     int device = 0;
@@ -4598,13 +4723,35 @@ struct cudaMemPool_st {
 static cudaMemPool_st g_default_mempool;
 
 cudaError_t cudaMallocAsync(void** dev_ptr, size_t size, cudaStream_t stream) {
-    if (stream) cudaStreamSynchronize(stream);
+    const cudaError_t stream_status = enqueue_stream_host_op(stream, []() {});
+    if (stream_status != cudaSuccess) return fail(stream_status);
     return cudaMalloc(dev_ptr, size);
 }
 
 cudaError_t cudaFreeAsync(void* dev_ptr, cudaStream_t stream) {
-    if (stream) cudaStreamSynchronize(stream);
-    return cudaFree(dev_ptr);
+    if (dev_ptr == nullptr) return fail(cudaSuccess);
+    RuntimeState& state = runtime_state();
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!state.allocations.resolve(dev_ptr, &resolved) || resolved.offset != 0) {
+        return fail(cudaErrorInvalidDevicePointer);
+    }
+    {
+        std::lock_guard<std::mutex> lock(state.pending_free_mutex);
+        if (!state.pending_async_frees.insert(dev_ptr).second) {
+            return fail(cudaErrorInvalidDevicePointer);
+        }
+    }
+    const cudaError_t status = enqueue_stream_host_op(stream, [dev_ptr]() {
+        RuntimeState& callback_state = runtime_state();
+        (void)callback_state.allocations.erase(dev_ptr);
+        std::lock_guard<std::mutex> lock(callback_state.pending_free_mutex);
+        callback_state.pending_async_frees.erase(dev_ptr);
+    });
+    if (status != cudaSuccess) {
+        std::lock_guard<std::mutex> lock(state.pending_free_mutex);
+        state.pending_async_frees.erase(dev_ptr);
+    }
+    return fail(status);
 }
 
 cudaError_t cudaMemPoolCreate(cudaMemPool_t* pool, const cudaMemPoolProps* /*poolProps*/) {
@@ -4769,17 +4916,25 @@ cudaError_t cudaMemcpyPeerAsync(void* dst, int /*dstDevice*/,
     return cudaMemcpyAsync(dst, src, count, cudaMemcpyDefault, stream);
 }
 
-// cudaLaunchHostFunc — synchronizes the stream then invokes fn(userData) on the host.
+// cudaLaunchHostFunc — enqueue a CPU function in the stream timeline. Later
+// stream work and stream synchronization wait for the function to return.
 cudaError_t cudaLaunchHostFunc(cudaStream_t stream, cudaHostFn_t fn, void* userData) {
     if (fn == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    const cudaError_t sync_err = cudaStreamSynchronize(stream);
-    if (sync_err != cudaSuccess) {
-        return fail(sync_err);
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
     }
-    fn(userData);
-    return fail(cudaSuccess);
+    std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
+    const cudaError_t resolve_status =
+        resolve_runtime_stream(stream, &backend_stream, nullptr);
+    if (resolve_status != cudaSuccess) {
+        return fail(resolve_status);
+    }
+    std::string error;
+    return fail(cumetal::metal_backend::enqueue_host_function(
+        backend_stream, [fn, userData]() { fn(userData); }, &error));
 }
 
 // cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags — flags ignored on Metal.
@@ -4792,26 +4947,16 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int* numBlock
                                                          dynamicSMemSize);
 }
 
-// Cooperative kernel launch — grid-wide CG is not supported on Metal (no cross-
-// threadgroup barrier), but threadgroup-scoped CG works.  Forward to cudaLaunchKernel
-// so programs that only use thread_block CG continue to function (spec §8).
+// Single-threadgroup cooperative launches are safe. Multi-threadgroup launches
+// are refused until grid-barrier kernel fission is implemented.
 cudaError_t cudaLaunchCooperativeKernel(const void* func,
                                          dim3 gridDim,
                                          dim3 blockDim,
                                          void** args,
                                          size_t sharedMem,
                                          cudaStream_t stream) {
-    // grid_group::sync() is a no-op stub on Metal (no cross-threadgroup barrier).
-    // A cooperative launch that spans more than one threadgroup and relies on
-    // grid-wide sync for correctness will silently misbehave — warn once so this
-    // is not a surprise. Single-block launches are safe (block-scoped CG works).
     if ((static_cast<std::uint64_t>(gridDim.x) * gridDim.y * gridDim.z) > 1) {
-        cumetal::warn_once(
-            "coop-grid-sync",
-            "cudaLaunchCooperativeKernel with a multi-block grid: grid-wide "
-            "cooperative_groups sync (this_grid().sync()) is a no-op on Metal and "
-            "cannot synchronize across threadgroups; kernels that depend on it for "
-            "correctness will produce wrong results (spec §8)");
+        return fail(cudaErrorNotSupported);
     }
     return cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
 }

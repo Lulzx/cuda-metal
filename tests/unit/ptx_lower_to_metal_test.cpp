@@ -309,10 +309,7 @@ DONE:
                 "math_kernel global store to param_1"))
         return 1;
 
-    // ── Test: passthru stub is flagged approximate ──────────────────────────
-    // GGML rope is lowered to a passthru copy (no real rotary embedding), so its
-    // output is numerically wrong. It must be matched AND flagged approximate so
-    // the runtime can refuse it by default instead of silently emitting garbage.
+    // ── Test: known-wrong passthru bodies are unconditionally refused ────────
     const std::string rope_ptx = R"PTX(
 .version 8.0
 .target sm_90
@@ -329,11 +326,13 @@ DONE:
     opts_rope.entry_name = "rope_norm_f32";
     opts_rope.allow_workload_specializations = true;
     const auto r_rope = cumetal::ptx::lower_ptx_to_metal_source(rope_ptx, opts_rope);
-    if (!expect(r_rope.ok, "rope stub lowering ok")) return 1;
-    if (!expect(r_rope.matched, "rope stub matched by direct-MSL emitter")) return 1;
-    if (!expect(r_rope.approximate, "rope passthru stub flagged approximate")) return 1;
-    if (!expect(r_rope.lowering_kind == cumetal::ptx::MetalLoweringKind::kApproximateStub,
-                "rope provenance is approximate_stub"))
+    if (!expect(r_rope.ok, "unsupported rope lowering is classified")) return 1;
+    if (!expect(!r_rope.matched,
+                "known-wrong rope passthru cannot be selected even with specializations"))
+        return 1;
+    if (!expect(!r_rope.warnings.empty() &&
+                    contains(r_rope.warnings.front(), "known-incorrect"),
+                "rope refusal explains that the old template was incorrect"))
         return 1;
 
     // ── Test: a genuine kernel is NOT flagged approximate ────────────────────
@@ -601,13 +600,11 @@ DONE:
     };
     for (const std::string& unsupported_name : unsupported_rope_neox_names) {
         const auto unsupported = lower_named_rope_neox(unsupported_name);
-        if (!expect(unsupported.ok && unsupported.matched,
-                    "unsupported GPT-NeoX RoPE remains classified"))
+        if (!expect(unsupported.ok && !unsupported.matched,
+                    "unsupported GPT-NeoX RoPE is refused"))
             return 1;
-        if (!expect(unsupported.approximate &&
-                        unsupported.lowering_kind ==
-                            cumetal::ptx::MetalLoweringKind::kApproximateStub,
-                    "backward/frequency-factor/half-input GPT-NeoX RoPE remains refused"))
+        if (!expect(!unsupported.warnings.empty(),
+                    "unsupported GPT-NeoX RoPE carries a refusal diagnostic"))
             return 1;
     }
 

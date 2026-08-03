@@ -93,9 +93,9 @@ __device__ __forceinline__ thread_block_tile<TileSize> tiled_partition(const thr
 }
 
 // grid_group — grid-wide collective group.
-// Metal has no cross-threadgroup barrier, so grid_group is a stub.
-// sync() is a no-op. Programs that require grid-level synchronization must use
-// cudaLaunchCooperativeKernel + a global atomic barrier pattern instead (spec §8).
+// Metal has no cross-threadgroup barrier. CuMetal therefore accepts only a
+// single-threadgroup cooperative grid and rejects multi-block cooperative
+// launch at the Runtime/Driver API boundary.
 struct grid_group {
     __device__ __forceinline__ unsigned int size() const {
         return gridDim.x * gridDim.y * gridDim.z * blockDim.x * blockDim.y * blockDim.z;
@@ -110,10 +110,9 @@ struct grid_group {
         return blockRank * blockSize + threadInBlock;
     }
 
-    // Grid-wide sync is not supported on Metal — no cross-threadgroup barrier.
-    // This is a no-op stub; programs must not rely on it for correctness (spec §8).
+    // A threadgroup barrier is grid-wide for the only admitted grid shape.
     __device__ __forceinline__ void sync() const {
-        __syncthreads(); // Only synchronizes within the threadgroup (not grid-wide).
+        __syncthreads();
     }
 };
 

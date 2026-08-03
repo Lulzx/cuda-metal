@@ -8,9 +8,11 @@
 #include "cublas_v2.h"
 #include "cuda_fp16.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -31,6 +33,17 @@ bool near_d(double a, double b, double tol = 1e-10) {
     return std::fabs(a - b) <= tol * (1.0 + std::fabs(b));
 }
 
+struct Gate {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+};
+
+void wait_gate(void* raw) {
+    auto* gate = static_cast<Gate*>(raw);
+    gate->entered.store(true, std::memory_order_release);
+    while (!gate->release.load(std::memory_order_acquire)) std::this_thread::yield();
+}
+
 }  // namespace
 
 int main() {
@@ -41,6 +54,33 @@ int main() {
 
     cublasHandle_t handle = nullptr;
     if (!expect(cublasCreate(&handle) == CUBLAS_STATUS_SUCCESS, "cublasCreate")) return 1;
+
+    // Async transfer helpers must join the supplied stream instead of copying
+    // immediately and ignoring it.
+    {
+        cudaStream_t stream = nullptr;
+        float* destination = nullptr;
+        float source[4] = {3.f, 5.f, 7.f, 11.f};
+        if (!expect(cudaStreamCreate(&stream) == cudaSuccess &&
+                    cudaMalloc(reinterpret_cast<void**>(&destination), sizeof(source)) == cudaSuccess &&
+                    cudaMemset(destination, 0, sizeof(source)) == cudaSuccess,
+                    "async transfer setup")) return 1;
+        Gate gate;
+        if (!expect(cudaLaunchHostFunc(stream, wait_gate, &gate) == cudaSuccess,
+                    "async transfer gate")) return 1;
+        while (!gate.entered.load(std::memory_order_acquire)) std::this_thread::yield();
+        if (!expect(cublasSetVectorAsync(4, sizeof(float), source, 1, destination, 1, stream) ==
+                        CUBLAS_STATUS_SUCCESS,
+                    "SetVectorAsync enqueue")) return 1;
+        if (!expect(destination[0] == 0.f,
+                    "SetVectorAsync does not overtake earlier stream work")) return 1;
+        gate.release.store(true, std::memory_order_release);
+        if (!expect(cudaStreamSynchronize(stream) == cudaSuccess &&
+                    destination[0] == 3.f && destination[3] == 11.f,
+                    "SetVectorAsync completes in stream order")) return 1;
+        cudaFree(destination);
+        cudaStreamDestroy(stream);
+    }
 
     // ── cublasSetVector / cublasGetVector ────────────────────────────────────
     {

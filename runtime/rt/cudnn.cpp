@@ -1,4 +1,5 @@
 #include "cudnn.h"
+#include "runtime_internal.h"
 
 #include <Accelerate/Accelerate.h>
 
@@ -2230,6 +2231,9 @@ struct cudnnAttnStruct {
     int nHeads = 1;
     double smScaler = 1.0;
     cudnnDataType_t dataType = CUDNN_DATA_FLOAT;
+    cudnnDataType_t computePrec = CUDNN_DATA_FLOAT;
+    cudnnDropoutDescriptor_t attnDropoutDesc = nullptr;
+    cudnnDropoutDescriptor_t postDropoutDesc = nullptr;
     int qSize = 0, kSize = 0, vSize = 0;
     int qProjSize = 0, kProjSize = 0, vProjSize = 0, oProjSize = 0;
     int qoMaxSeqLength = 0, kvMaxSeqLength = 0;
@@ -2240,6 +2244,8 @@ struct cudnnSeqDataStruct {
     cudnnDataType_t dataType = CUDNN_DATA_FLOAT;
     int nbDims = 0;
     int dims[CUDNN_SEQDATA_DIM_COUNT] = {};
+    cudnnSeqDataAxis_t axes[CUDNN_SEQDATA_DIM_COUNT] = {};
+    std::vector<int> seqLengths;
 };
 
 cudnnStatus_t cudnnCreateAttnDescriptor(cudnnAttnDescriptor_t* attnDesc) {
@@ -2255,18 +2261,26 @@ cudnnStatus_t cudnnDestroyAttnDescriptor(cudnnAttnDescriptor_t attnDesc) {
 
 cudnnStatus_t cudnnSetAttnDescriptor(cudnnAttnDescriptor_t attnDesc,
                                       unsigned attnMode, int nHeads, double smScaler,
-                                      cudnnDataType_t dataType, cudnnDataType_t,
+                                      cudnnDataType_t dataType, cudnnDataType_t computePrec,
                                       cudnnMathType_t,
-                                      cudnnDropoutDescriptor_t, cudnnDropoutDescriptor_t,
+                                      cudnnDropoutDescriptor_t attnDropoutDesc,
+                                      cudnnDropoutDescriptor_t postDropoutDesc,
                                       int qSize, int kSize, int vSize,
                                       int qProjSize, int kProjSize, int vProjSize, int oProjSize,
                                       int qoMaxSeqLength, int kvMaxSeqLength,
                                       int maxBatchSize, int maxBeamSize) {
-    if (!attnDesc) return CUDNN_STATUS_BAD_PARAM;
+    if (!attnDesc || nHeads <= 0 || qSize <= 0 || kSize <= 0 || vSize <= 0 ||
+        qoMaxSeqLength <= 0 || kvMaxSeqLength <= 0 ||
+        maxBatchSize <= 0 || maxBeamSize <= 0) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     attnDesc->attnMode = attnMode;
     attnDesc->nHeads = nHeads;
     attnDesc->smScaler = smScaler;
     attnDesc->dataType = dataType;
+    attnDesc->computePrec = computePrec;
+    attnDesc->attnDropoutDesc = attnDropoutDesc;
+    attnDesc->postDropoutDesc = postDropoutDesc;
     attnDesc->qSize = qSize; attnDesc->kSize = kSize; attnDesc->vSize = vSize;
     attnDesc->qProjSize = qProjSize; attnDesc->kProjSize = kProjSize;
     attnDesc->vProjSize = vProjSize; attnDesc->oProjSize = oProjSize;
@@ -2282,15 +2296,15 @@ cudnnStatus_t cudnnGetMultiHeadAttnBuffers(cudnnHandle_t,
                                             size_t* reserveSpaceSizeInBytes) {
     if (!attnDesc) return CUDNN_STATUS_BAD_PARAM;
     const int h = attnDesc->nHeads;
-    const int qp = attnDesc->qProjSize > 0 ? attnDesc->qProjSize : attnDesc->qSize;
-    const int kp = attnDesc->kProjSize > 0 ? attnDesc->kProjSize : attnDesc->kSize;
-    const int vp = attnDesc->vProjSize > 0 ? attnDesc->vProjSize : attnDesc->vSize;
-    const int op = attnDesc->oProjSize > 0 ? attnDesc->oProjSize : h * vp;
+    const int qp = attnDesc->qProjSize;
+    const int kp = attnDesc->kProjSize;
+    const int vp = attnDesc->vProjSize;
+    const int op = attnDesc->oProjSize;
     // Weight sizes: Wq(qSize*qp*h) + Wk(kSize*kp*h) + Wv(vSize*vp*h) + Wo(h*vp*op)
     size_t ws = (size_t)(attnDesc->qSize * qp * h +
                          attnDesc->kSize * kp * h +
                          attnDesc->vSize * vp * h +
-                         h * vp * op) * sizeof(float);
+                         h * vp * op) * dtype_size(attnDesc->dataType);
     if (weightSizeInBytes) *weightSizeInBytes = ws;
     if (workSpaceSizeInBytes) *workSpaceSizeInBytes = 0;
     if (reserveSpaceSizeInBytes) *reserveSpaceSizeInBytes = 0;
@@ -2332,42 +2346,157 @@ cudnnStatus_t cudnnDestroySeqDataDescriptor(cudnnSeqDataDescriptor_t seqDataDesc
 
 cudnnStatus_t cudnnSetSeqDataDescriptor(cudnnSeqDataDescriptor_t seqDataDesc,
                                          cudnnDataType_t dataType, int nbDims,
-                                         const int dimA[], const cudnnSeqDataAxis_t[],
-                                         size_t, const int[], void*) {
-    if (!seqDataDesc) return CUDNN_STATUS_BAD_PARAM;
+                                         const int dimA[], const cudnnSeqDataAxis_t axes[],
+                                         size_t seqLengthArraySize,
+                                         const int seqLengthArray[], void*) {
+    if (!seqDataDesc || nbDims != CUDNN_SEQDATA_DIM_COUNT || !dimA || !axes ||
+        (seqLengthArraySize > 0 && !seqLengthArray)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     seqDataDesc->dataType = dataType;
     seqDataDesc->nbDims = nbDims;
-    for (int i = 0; i < nbDims && i < CUDNN_SEQDATA_DIM_COUNT; ++i)
+    bool seen[CUDNN_SEQDATA_DIM_COUNT] = {};
+    for (int i = 0; i < nbDims; ++i) {
+        if (dimA[i] <= 0 || axes[i] < CUDNN_SEQDATA_TIME_DIM ||
+            axes[i] > CUDNN_SEQDATA_VECT_DIM || seen[axes[i]]) {
+            return CUDNN_STATUS_BAD_PARAM;
+        }
+        seen[axes[i]] = true;
         seqDataDesc->dims[i] = dimA[i];
+        seqDataDesc->axes[i] = axes[i];
+    }
+    seqDataDesc->seqLengths.clear();
+    if (seqLengthArraySize > 0) {
+        seqDataDesc->seqLengths.assign(seqLengthArray,
+                                       seqLengthArray + seqLengthArraySize);
+    }
     return CUDNN_STATUS_SUCCESS;
 }
 
 cudnnStatus_t cudnnMultiHeadAttnForward(cudnnHandle_t handle,
                                          const cudnnAttnDescriptor_t attnDesc,
-                                         int, const int[], const int[],
-                                         const int[], const int[],
-                                         const cudnnSeqDataDescriptor_t,
+                                         int currIdx, const int loWinIdx[], const int hiWinIdx[],
+                                         const int devSeqLengthsQO[],
+                                         const int devSeqLengthsKV[],
+                                         const cudnnSeqDataDescriptor_t qDesc,
                                          const void* queries, const void*,
-                                         const cudnnSeqDataDescriptor_t,
+                                         const cudnnSeqDataDescriptor_t kDesc,
                                          const void* keys,
-                                         const cudnnSeqDataDescriptor_t,
+                                         const cudnnSeqDataDescriptor_t vDesc,
                                          const void* values,
-                                         const cudnnSeqDataDescriptor_t,
+                                         const cudnnSeqDataDescriptor_t oDesc,
                                          void* output,
-                                         size_t, const void* weights,
+                                         size_t weightSizeInBytes, const void* weights,
                                          size_t, void*,
                                          size_t, void*) {
-    if (!handle || !attnDesc || !queries || !keys || !values || !output || !weights)
+    if (!handle || !attnDesc || !qDesc || !kDesc || !vDesc || !oDesc ||
+        !queries || !keys || !values || !output) {
         return CUDNN_STATUS_BAD_PARAM;
-    // Simplified CPU multi-head attention: Q*K^T * V (no projections for now)
-    // This is a functional stub that produces valid output for testing
-    // Full implementation would apply Wq/Wk/Wv projections, scaled dot-product, softmax
-    const int nHeads = attnDesc->nHeads;
-    const int qSize = attnDesc->qSize;
-    (void)nHeads; (void)qSize;
-    // For now, copy queries to output as identity (functional stub)
-    // Real projects should implement scaled dot-product attention
-    return CUDNN_STATUS_SUCCESS;
+    }
+
+    // Bounded, exact compatibility path: contiguous canonical
+    // [time,batch,beam,vector] FP32 tensors without learned projections,
+    // dropout, residual addition, variable sequence lengths, or attention
+    // windows. Unsupported configurations are rejected instead of returning
+    // success without producing output.
+    auto canonical = [](const cudnnSeqDataDescriptor_t desc) {
+        if (!desc || desc->nbDims != CUDNN_SEQDATA_DIM_COUNT) return false;
+        for (int i = 0; i < CUDNN_SEQDATA_DIM_COUNT; ++i) {
+            if (desc->axes[i] != static_cast<cudnnSeqDataAxis_t>(i)) return false;
+        }
+        return true;
+    };
+    if (attnDesc->dataType != CUDNN_DATA_FLOAT ||
+        attnDesc->computePrec != CUDNN_DATA_FLOAT ||
+        qDesc->dataType != CUDNN_DATA_FLOAT ||
+        kDesc->dataType != CUDNN_DATA_FLOAT ||
+        vDesc->dataType != CUDNN_DATA_FLOAT ||
+        oDesc->dataType != CUDNN_DATA_FLOAT ||
+        !canonical(qDesc) || !canonical(kDesc) ||
+        !canonical(vDesc) || !canonical(oDesc) ||
+        attnDesc->qProjSize != 0 || attnDesc->kProjSize != 0 ||
+        attnDesc->vProjSize != 0 || attnDesc->oProjSize != 0 ||
+        attnDesc->attnDropoutDesc != nullptr ||
+        attnDesc->postDropoutDesc != nullptr ||
+        attnDesc->attnMode != 0 || currIdx >= 0 ||
+        loWinIdx != nullptr || hiWinIdx != nullptr ||
+        devSeqLengthsQO != nullptr || devSeqLengthsKV != nullptr ||
+        weightSizeInBytes != 0 || weights != nullptr) {
+        return CUDNN_STATUS_NOT_SUPPORTED;
+    }
+
+    const int tq = qDesc->dims[CUDNN_SEQDATA_TIME_DIM];
+    const int tk = kDesc->dims[CUDNN_SEQDATA_TIME_DIM];
+    const int tv = vDesc->dims[CUDNN_SEQDATA_TIME_DIM];
+    const int batch = qDesc->dims[CUDNN_SEQDATA_BATCH_DIM];
+    const int beam = qDesc->dims[CUDNN_SEQDATA_BEAM_DIM];
+    const int qv = qDesc->dims[CUDNN_SEQDATA_VECT_DIM];
+    const int kv = kDesc->dims[CUDNN_SEQDATA_VECT_DIM];
+    const int vv = vDesc->dims[CUDNN_SEQDATA_VECT_DIM];
+    const int ov = oDesc->dims[CUDNN_SEQDATA_VECT_DIM];
+    const int heads = attnDesc->nHeads;
+
+    if (tk != tv || qv != attnDesc->qSize || kv != attnDesc->kSize ||
+        vv != attnDesc->vSize || qv != kv || qv != vv || ov != vv ||
+        qv % heads != 0 ||
+        kDesc->dims[CUDNN_SEQDATA_BATCH_DIM] != batch ||
+        vDesc->dims[CUDNN_SEQDATA_BATCH_DIM] != batch ||
+        oDesc->dims[CUDNN_SEQDATA_BATCH_DIM] != batch ||
+        kDesc->dims[CUDNN_SEQDATA_BEAM_DIM] != beam ||
+        vDesc->dims[CUDNN_SEQDATA_BEAM_DIM] != beam ||
+        oDesc->dims[CUDNN_SEQDATA_BEAM_DIM] != beam ||
+        oDesc->dims[CUDNN_SEQDATA_TIME_DIM] != tq) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+
+    const float* q = static_cast<const float*>(queries);
+    const float* k = static_cast<const float*>(keys);
+    const float* v = static_cast<const float*>(values);
+    float* out = static_cast<float*>(output);
+    const int width = qv / heads;
+    const float scale = static_cast<float>(attnDesc->smScaler);
+    const cudaError_t enqueue_status = cumetal::rt::enqueue_host_operation(
+        handle->stream, [=]() {
+            std::vector<float> scores(static_cast<size_t>(tk));
+            auto offset = [batch, beam](int t, int b, int r, int c, int vec) {
+                return (((static_cast<size_t>(t) * batch + b) * beam + r) * vec + c);
+            };
+            for (int t = 0; t < tq; ++t) {
+                for (int b = 0; b < batch; ++b) {
+                    for (int r = 0; r < beam; ++r) {
+                        for (int h = 0; h < heads; ++h) {
+                            float max_score = -INFINITY;
+                            for (int s = 0; s < tk; ++s) {
+                                float dot = 0.0f;
+                                for (int c = 0; c < width; ++c) {
+                                    const int hc = h * width + c;
+                                    dot += q[offset(t, b, r, hc, qv)] *
+                                           k[offset(s, b, r, hc, kv)];
+                                }
+                                scores[static_cast<size_t>(s)] = scale * dot;
+                                max_score = std::max(max_score, scores[static_cast<size_t>(s)]);
+                            }
+                            float denominator = 0.0f;
+                            for (float& score : scores) {
+                                score = std::exp(score - max_score);
+                                denominator += score;
+                            }
+                            for (int c = 0; c < width; ++c) {
+                                float sum = 0.0f;
+                                const int hc = h * width + c;
+                                for (int s = 0; s < tk; ++s) {
+                                    sum += (scores[static_cast<size_t>(s)] / denominator) *
+                                           v[offset(s, b, r, hc, vv)];
+                                }
+                                out[offset(t, b, r, hc, ov)] = sum;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    return enqueue_status == cudaSuccess ? CUDNN_STATUS_SUCCESS
+                                         : CUDNN_STATUS_EXECUTION_FAILED;
 }
 
 } // extern "C"

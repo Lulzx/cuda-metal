@@ -2,7 +2,7 @@
 
 #include <cstdio>
 
-// Tests spec §8 "Occupancy API" and related function/pointer attribute stubs.
+// Tests rejection behavior for occupancy/function attributes and pointer attributes.
 
 int main() {
     if (cudaInit(0) != cudaSuccess) {
@@ -10,66 +10,25 @@ int main() {
         return 1;
     }
 
-    // --- cudaOccupancyMaxActiveBlocksPerMultiprocessor ---
     int numBlocks = -1;
     const void* dummy_func = reinterpret_cast<const void*>(0x1);
     if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, dummy_func, 256, 0) !=
-        cudaSuccess) {
-        std::fprintf(stderr, "FAIL: cudaOccupancyMaxActiveBlocksPerMultiprocessor failed\n");
-        return 1;
-    }
-    if (numBlocks <= 0) {
-        std::fprintf(stderr,
-                     "FAIL: cudaOccupancyMaxActiveBlocksPerMultiprocessor returned %d (expected > 0)\n",
-                     numBlocks);
+        cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: occupancy accepted an invalid function\n");
         return 1;
     }
 
-    // --- cudaOccupancyMaxPotentialBlockSize ---
     int minGridSize = -1;
     int blockSize = -1;
     if (cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, dummy_func, 0, 0) !=
-        cudaSuccess) {
-        std::fprintf(stderr, "FAIL: cudaOccupancyMaxPotentialBlockSize failed\n");
-        return 1;
-    }
-    if (blockSize <= 0 || blockSize > 1024) {
-        std::fprintf(stderr,
-                     "FAIL: cudaOccupancyMaxPotentialBlockSize blockSize=%d (expected 1..1024)\n",
-                     blockSize);
-        return 1;
-    }
-    if (minGridSize <= 0) {
-        std::fprintf(stderr,
-                     "FAIL: cudaOccupancyMaxPotentialBlockSize minGridSize=%d (expected > 0)\n",
-                     minGridSize);
-        return 1;
-    }
-    // blockSizeLimit clamps: when limit=64, blockSize should be ≤64
-    int limitedBlock = -1;
-    int limitedGrid = -1;
-    if (cudaOccupancyMaxPotentialBlockSize(&limitedGrid, &limitedBlock, dummy_func, 0, 64) !=
-        cudaSuccess) {
-        std::fprintf(stderr, "FAIL: cudaOccupancyMaxPotentialBlockSize with limit failed\n");
-        return 1;
-    }
-    if (limitedBlock > 64) {
-        std::fprintf(stderr,
-                     "FAIL: blockSizeLimit=64 but blockSize=%d\n",
-                     limitedBlock);
+        cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: potential occupancy accepted an invalid function\n");
         return 1;
     }
 
-    // --- cudaFuncGetAttributes ---
     cudaFuncAttributes attr{};
-    if (cudaFuncGetAttributes(&attr, dummy_func) != cudaSuccess) {
-        std::fprintf(stderr, "FAIL: cudaFuncGetAttributes failed\n");
-        return 1;
-    }
-    if (attr.maxThreadsPerBlock <= 0) {
-        std::fprintf(stderr,
-                     "FAIL: maxThreadsPerBlock=%d (expected > 0)\n",
-                     attr.maxThreadsPerBlock);
+    if (cudaFuncGetAttributes(&attr, dummy_func) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: function attributes accepted an invalid function\n");
         return 1;
     }
 

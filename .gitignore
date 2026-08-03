@@ -15,3 +15,5 @@ tests/cuda_projects/**/build/reduction_*
 tests/cuda_projects/**/build/transpose_*
 tests/cuda_projects/**/build/softmax
 tests/cuda_projects/**/build/flash_*
+# Apollo demo artifacts
+demos/apollo/out/

@@ -16,6 +16,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <thread>
 
 static int g_failures = 0;
 
@@ -341,13 +345,43 @@ static void test_cuda_memcpy_peer_async() {
 // ── runtime: cudaLaunchHostFunc ───────────────────────────────────────────────
 
 static void test_cuda_launch_host_func() {
-    int flag = 0;
-    auto fn = [](void* ud) { *static_cast<int*>(ud) = 42; };
+    struct State {
+        std::atomic<bool> entered{false};
+        std::atomic<bool> release{false};
+        std::atomic<int> order{0};
+    } state;
+    auto blocking_fn = [](void* ud) {
+        auto* s = static_cast<State*>(ud);
+        s->entered.store(true, std::memory_order_release);
+        while (!s->release.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        s->order.store(1, std::memory_order_release);
+    };
+    auto trailing_fn = [](void* ud) {
+        auto* s = static_cast<State*>(ud);
+        if (s->order.load(std::memory_order_acquire) == 1)
+            s->order.store(2, std::memory_order_release);
+    };
     cudaStream_t stream = nullptr;
     cudaStreamCreate(&stream);
-    CHECK(cudaLaunchHostFunc(stream, fn, &flag) == cudaSuccess,
-          "cudaLaunchHostFunc succeeds");
-    CHECK(flag == 42, "cudaLaunchHostFunc callback executed");
+    auto launch = std::async(std::launch::async, [&]() {
+        return cudaLaunchHostFunc(stream, blocking_fn, &state);
+    });
+    CHECK(launch.wait_for(std::chrono::seconds(1)) == std::future_status::ready,
+          "cudaLaunchHostFunc returns without running callback inline");
+    CHECK(launch.get() == cudaSuccess, "cudaLaunchHostFunc succeeds");
+    CHECK(cudaLaunchHostFunc(stream, trailing_fn, &state) == cudaSuccess,
+          "second cudaLaunchHostFunc succeeds");
+    for (int i = 0; i < 1000 && !state.entered.load(std::memory_order_acquire); ++i)
+        std::this_thread::yield();
+    CHECK(state.order.load(std::memory_order_acquire) == 0,
+          "later stream callback cannot overtake blocked host function");
+    state.release.store(true, std::memory_order_release);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess,
+          "stream synchronization waits for host functions");
+    CHECK(state.order.load(std::memory_order_acquire) == 2,
+          "host functions execute in stream order");
     cudaStreamDestroy(stream);
 }
 

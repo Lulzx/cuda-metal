@@ -3,8 +3,26 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <thread>
 #include <vector>
+
+namespace {
+struct HostGate {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+};
+
+void wait_on_gate(void* data) {
+    auto* gate = static_cast<HostGate*>(data);
+    gate->entered.store(true, std::memory_order_release);
+    while (!gate->release.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+}
+}  // namespace
 
 int main() {
     constexpr std::size_t kCount = 4096;
@@ -46,6 +64,40 @@ int main() {
     if (curandGetStream(generator, &queried_stream) != CURAND_STATUS_SUCCESS ||
         queried_stream != stream) {
         std::fprintf(stderr, "FAIL: curandGetStream mismatch\n");
+        return 1;
+    }
+
+    float* ordered_output = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&ordered_output), sizeof(float)) != cudaSuccess ||
+        cudaMemset(ordered_output, 0, sizeof(float)) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cuRAND ordering buffer setup failed\n");
+        return 1;
+    }
+    HostGate gate;
+    if (cudaLaunchHostFunc(stream, wait_on_gate, &gate) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cuRAND ordering gate enqueue failed\n");
+        return 1;
+    }
+    while (!gate.entered.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    const auto generate_start = std::chrono::steady_clock::now();
+    if (curandGenerateUniform(generator, ordered_output, 1) != CURAND_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: queued cuRAND generation failed\n");
+        return 1;
+    }
+    const auto generate_elapsed = std::chrono::steady_clock::now() - generate_start;
+    if (generate_elapsed > std::chrono::milliseconds(100) || ordered_output[0] != 0.0f) {
+        std::fprintf(stderr, "FAIL: cuRAND generation blocked or overtook its stream\n");
+        return 1;
+    }
+    gate.release.store(true, std::memory_order_release);
+    if (cudaStreamSynchronize(stream) != cudaSuccess || ordered_output[0] == 0.0f) {
+        std::fprintf(stderr, "FAIL: queued cuRAND generation did not complete after stream sync\n");
+        return 1;
+    }
+    if (cudaFree(ordered_output) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cuRAND ordering buffer cleanup failed\n");
         return 1;
     }
     if (curandSetGeneratorOffset(nullptr, 0) != CURAND_STATUS_NOT_INITIALIZED) {

@@ -101,8 +101,9 @@ width, `simd_sum` subtotals, and a small threadgroup reduction. The previous
 global-thread mapping wrote beyond the destination arena.
 
 Registration cache keys include a schema/version tag, so behavior-changing
-lowering updates invalidate stale generated Metal sources. The runtime refuses
-approximate registered kernels unless `CUMETAL_ENABLE_APPROX_KERNELS=1` is set.
+lowering updates invalidate stale generated Metal sources. Approximate
+registered kernels are unconditionally refused; no environment switch can
+enable known-wrong output.
 
 ## cuBLAS and Metal backend changes
 

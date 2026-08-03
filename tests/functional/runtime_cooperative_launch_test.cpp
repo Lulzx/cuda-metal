@@ -6,13 +6,12 @@
 #include <string>
 #include <vector>
 
-// Verifies cudaLaunchCooperativeKernel forwards correctly to cudaLaunchKernel
-// (spec §8: "cudaLaunchCooperativeKernel forwards to cudaLaunchKernel;
-// threadgroup CG works, grid-wide CG unsupported").
+// Verifies single-threadgroup cooperative launches work and unsafe
+// multi-threadgroup launches are refused.
 
 namespace {
 
-constexpr std::size_t kElementCount = 1024;
+constexpr std::size_t kElementCount = 256;
 constexpr std::size_t kThreadsPerBlock = 256;
 
 }  // namespace
@@ -72,7 +71,13 @@ int main(int argc, char** argv) {
     const dim3 block(kThreadsPerBlock, 1, 1);
     const dim3 grid((kElementCount + kThreadsPerBlock - 1) / kThreadsPerBlock, 1, 1);
 
-    // Use cudaLaunchCooperativeKernel instead of cudaLaunchKernel.
+    if (cudaLaunchCooperativeKernel(
+            &kernel, dim3(2, 1, 1), block, args, 0, nullptr) !=
+        cudaErrorNotSupported) {
+        std::fprintf(stderr, "FAIL: unsafe multi-block cooperative launch was accepted\n");
+        return 1;
+    }
+
     cudaError_t err = cudaLaunchCooperativeKernel(&kernel, grid, block, args, 0, nullptr);
     if (err != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaLaunchCooperativeKernel returned %s\n",
@@ -99,6 +104,6 @@ int main(int argc, char** argv) {
     cudaFree(dev_b);
     cudaFree(dev_c);
 
-    std::printf("PASS: cudaLaunchCooperativeKernel correctly forwards to cudaLaunchKernel\n");
+    std::printf("PASS: cooperative launch accepts one block and rejects unsafe grids\n");
     return 0;
 }

@@ -544,7 +544,7 @@ cublasStatus_t cublasGetMatrix(int rows, int cols, int elem_size,
                                const void* a, int lda,
                                void* b, int ldb);
 
-// Async variants (identical to sync on Apple Silicon UMA).
+// Async variants enqueue the transfer in the supplied CUDA stream.
 cublasStatus_t cublasSetVectorAsync(int n, int elem_size,
                                     const void* x, int incx,
                                     void* y, int incy,

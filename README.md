@@ -51,7 +51,19 @@ cmake --build build -j"$(sysctl -n hw.ncpu)"
 bash scripts/ci_report.sh build --exclude-regex '^bench_'
 ```
 
-Compile ordinary CUDA:
+### Apollo demo (the front door)
+
+One command that climbs from vector-add through reduction, SGEMM, and a path
+tracer, refusing any stage that lacks `device=apple_gpu` provenance:
+
+```bash
+bash demos/apollo/run.sh
+```
+
+Optional: `bash demos/apollo/run.sh --full` adds the llm.c GPT-2 FP32 gate.
+Details, scope limits, and artifacts: [demos/apollo/README.md](demos/apollo/README.md).
+
+### Single sample
 
 ```bash
 ./build/cumetalc samples/vectorAdd/vectorAdd.cu -o /tmp/vectorAdd
@@ -309,9 +321,10 @@ conditions are meaningless.
 - No multi-GPU or peer-to-peer execution.
 - No OpenGL, Vulkan, or DirectX interop.
 - No SASS execution.
-- `grid_group::sync()` is not a general cross-threadgroup barrier.
-- FP64 emulation is partial and provides about a 44-bit mantissa, not IEEE
-  binary64.
+- Multi-block cooperative launch/grid sync is rejected; single-block
+  cooperative launch is supported.
+- FP64 register emulation provides about a 44-bit mantissa, not IEEE binary64;
+  unsupported binary64 memory/conversion boundaries fail compilation.
 - Texture and surface object lifecycle exists; general device-side sampling
   does not.
 - Device `printf` uses a bounded buffer and limits format strings to 256 bytes.

@@ -56,6 +56,7 @@ static bool test_allreduce_identity() {
         std::fprintf(stderr, "FAIL: ncclAllReduce returned %d\n", r);
         return false;
     }
+    if (cudaDeviceSynchronize() != cudaSuccess) return false;
 
     for (int i = 0; i < 4; ++i) {
         if (recv[i] != send[i]) {
@@ -77,6 +78,7 @@ static bool test_broadcast_identity() {
     float data[4] = {10.0f, 20.0f, 30.0f, 40.0f};
     float out[4] = {};
     ncclBroadcast(data, out, 4, ncclFloat32, 0, comm, nullptr);
+    if (cudaDeviceSynchronize() != cudaSuccess) return false;
 
     for (int i = 0; i < 4; ++i) {
         if (out[i] != data[i]) {

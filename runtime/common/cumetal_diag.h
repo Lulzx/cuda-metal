@@ -3,10 +3,9 @@
 // cumetal_diag.h — lightweight runtime diagnostics helpers.
 //
 // CuMetal translates a large CUDA surface onto Metal, and a handful of paths are
-// intentionally lossy (FP64 Dekker emulation), no-ops (grid-wide cooperative
-// sync), or outright approximate (passthru GGML stubs). Silent incorrectness on
-// those paths is the project's biggest risk, so they must announce themselves at
-// runtime rather than only in the spec. These helpers provide a uniform,
+// intentionally limited (for example FP64 Dekker emulation). Silent
+// incorrectness is the project's biggest risk, so limitations must be surfaced
+// at runtime rather than only in the spec. These helpers provide a uniform,
 // thread-safe, print-once warning channel plus a truthy-env check.
 //
 #include <cstdio>

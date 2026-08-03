@@ -222,6 +222,30 @@ int main() {
         return 1;
     }
 
+    const std::string llvm_printf_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry llvm_printf()
+{
+    .reg .b32 %r<2>;
+    mov.u32 %r1, 7;
+    call.uni (%r0), vprintf, ("value=%d", %r1);
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions printf_options;
+    printf_options.entry_name = "llvm_printf";
+    const auto llvm_printf =
+        cumetal::ptx::lower_ptx_to_llvm_ir(llvm_printf_ptx, printf_options);
+    if (!expect(!llvm_printf.ok,
+                "LLVM PTX backend refuses vprintf instead of deleting output")) {
+        return 1;
+    }
+    if (!expect(contains(llvm_printf.error, "vprintf is unsupported"),
+                "LLVM vprintf refusal carries an actionable diagnostic")) {
+        return 1;
+    }
+
     // Test: .u64 parameter used in arithmetic is inferred as non-pointer scalar,
     // lowered to i64 in LLVM IR rather than float addrspace(1)*.
     // This exercises the ld.param erase-bug fix end-to-end: without the fix,
@@ -926,6 +950,99 @@ $L1:
         cumetal::ptx::lower_ptx_to_llvm_ir(undeclared_depot_ptx, undeclared_depot_options);
     if (!expect(!undeclared_depot_lowered.ok,
                 "strict lowering refuses a local depot with no declared size")) {
+        return 1;
+    }
+
+    // FP64 emulation is selected by instruction type, not by a magic kernel
+    // name. Its register representation is two packed FP32 values, so the AIR
+    // module must contain no native double ALU operations.
+    const std::string generic_fp64_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry arbitrary_precision_work()
+{
+    .reg .f32 %f<3>;
+    .reg .f64 %fd<8>;
+    mov.f32 %f1, 1.25;
+    cvt.rn.f64.f32 %fd1, %f1;
+    mov.f64 %fd2, 0d4000000000000000;
+    add.f64 %fd3, %fd1, %fd2;
+    mul.f64 %fd4, %fd3, %fd2;
+    div.f64 %fd5, %fd4, %fd2;
+    fma.rn.f64 %fd6, %fd5, %fd2, %fd1;
+    neg.f64 %fd7, %fd6;
+    cvt.rn.f32.f64 %f2, %fd7;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions generic_fp64_options;
+    generic_fp64_options.entry_name = "arbitrary_precision_work";
+    generic_fp64_options.strict = true;
+    generic_fp64_options.fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
+    const auto generic_fp64_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(generic_fp64_ptx, generic_fp64_options);
+    if (!expect(generic_fp64_lowered.ok,
+                "generic non-name-matched fp64 register arithmetic lowers")) {
+        std::fprintf(stderr, "  error: %s\n", generic_fp64_lowered.error.c_str());
+        return 1;
+    }
+    if (!expect(!contains(generic_fp64_lowered.llvm_ir, "double"),
+                "fp64 emulation emits no native double operations")) {
+        return 1;
+    }
+    if (!expect(contains(generic_fp64_lowered.llvm_ir, "fp64_pack"),
+                "fp64 emulation stores packed FP32 pairs")) {
+        return 1;
+    }
+
+    const std::string integer_width_conversion_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry integer_width_conversion()
+{
+    .reg .u32 %r1;
+    .reg .u64 %rd1;
+    mov.u32 %r1, 7;
+    cvt.u64.u32 %rd1, %r1;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions integer_width_conversion_options;
+    integer_width_conversion_options.entry_name = "integer_width_conversion";
+    integer_width_conversion_options.strict = true;
+    integer_width_conversion_options.fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
+    const auto integer_width_conversion_lowered = cumetal::ptx::lower_ptx_to_llvm_ir(
+        integer_width_conversion_ptx, integer_width_conversion_options);
+    if (!expect(integer_width_conversion_lowered.ok,
+                "FP64 emulation does not intercept 64-bit integer conversions")) {
+        std::fprintf(stderr, "  error: %s\n", integer_width_conversion_lowered.error.c_str());
+        return 1;
+    }
+
+    const std::string fp64_memory_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry unsupported_fp64_memory(.param .u64 p)
+{
+    .reg .b64 %rd1;
+    .reg .f64 %fd1;
+    ld.param.u64 %rd1, [p];
+    ld.global.f64 %fd1, [%rd1];
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions fp64_memory_options;
+    fp64_memory_options.entry_name = "unsupported_fp64_memory";
+    fp64_memory_options.strict = true;
+    fp64_memory_options.fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
+    const auto fp64_memory_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(fp64_memory_ptx, fp64_memory_options);
+    if (!expect(!fp64_memory_lowered.ok,
+                "unsupported fp64 memory representation is rejected explicitly")) {
+        return 1;
+    }
+    if (!expect(contains(fp64_memory_lowered.error, "fp64 memory load/store"),
+                "fp64 memory rejection identifies the unsupported boundary")) {
         return 1;
     }
 

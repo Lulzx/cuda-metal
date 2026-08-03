@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
 
     // A legacy command must not wait for unrelated non-blocking-stream work.
     if (launch_spin(spin_output_a, nonblocking_stream) != cudaSuccess ||
-        launch_marker(marker_output_a, 0xC3u, nullptr) != cudaSuccess ||
+        launch_marker(marker_output_b, 0xC3u, nullptr) != cudaSuccess ||
         cudaStreamSynchronize(nullptr) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: nonblocking -> legacy probe launch failed\n");
         return 1;

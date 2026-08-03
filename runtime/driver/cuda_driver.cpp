@@ -6,8 +6,10 @@
 #include "cumetal_diag.h"
 #include "cuda_runtime.h"
 #include "fatbin_elf.h"
+#include "metal_backend.h"
 #include "module_cache.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
@@ -15,6 +17,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <string>
@@ -111,6 +114,8 @@ CUresult map_cuda_error(cudaError_t error) {
             return CUDA_ERROR_ILLEGAL_ADDRESS;
         case cudaErrorDevicesUnavailable:
             return CUDA_ERROR_DEVICES_UNAVAILABLE;
+        case cudaErrorNotSupported:
+            return CUDA_ERROR_NOT_SUPPORTED;
         case cudaErrorPeerAccessAlreadyEnabled:
             return CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED;
         case cudaErrorPeerAccessNotEnabled:
@@ -140,6 +145,27 @@ CUresult require_initialized_context() {
 
 bool is_valid_function_locked(const DriverState& state, CUfunction function) {
     return function != nullptr && state.functions.find(function) != state.functions.end();
+}
+
+CUresult query_function_properties(
+    CUfunction function,
+    cumetal::metal_backend::KernelProperties* properties) {
+    if (properties == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    std::string metallib_path;
+    std::string kernel_name;
+    {
+        DriverState& state = driver_state();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!state.initialized) return CUDA_ERROR_NOT_INITIALIZED;
+        if (!has_current_context_locked(state)) return CUDA_ERROR_INVALID_CONTEXT;
+        if (!is_valid_function_locked(state, function) || function->module == nullptr)
+            return CUDA_ERROR_INVALID_VALUE;
+        metallib_path = function->module->metallib_path;
+        kernel_name = function->kernel_name;
+    }
+    std::string error;
+    return map_cuda_error(cumetal::metal_backend::query_kernel_properties(
+        metallib_path, kernel_name, properties, &error));
 }
 
 void load_function_argument_count(CUfunc_st* function) {
@@ -500,6 +526,11 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path) {
     }
     const auto lowered = cumetal::ptx::lower_ptx_to_llvm_ir(ptx, lower_opts);
     if (!lowered.ok || lowered.llvm_ir.empty()) {
+        if (cumetal::diag_env_truthy("CUMETAL_DEBUG_ERRORS")) {
+            std::fprintf(stderr,
+                         "CUMETAL_DEBUG_ERRORS: PTX lowering failed: %s\n",
+                         lowered.error.empty() ? "empty LLVM IR" : lowered.error.c_str());
+        }
         return false;
     }
 
@@ -512,6 +543,11 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path) {
     std::string io_error;
     const std::vector<std::uint8_t> ll_bytes(lowered.llvm_ir.begin(), lowered.llvm_ir.end());
     if (!cumetal::common::write_file_bytes(ll_path, ll_bytes, &io_error)) {
+        if (cumetal::diag_env_truthy("CUMETAL_DEBUG_ERRORS")) {
+            std::fprintf(stderr,
+                         "CUMETAL_DEBUG_ERRORS: failed to stage PTX LLVM IR: %s\n",
+                         io_error.c_str());
+        }
         return false;
     }
 
@@ -528,6 +564,11 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path) {
     std::error_code ec;
     std::filesystem::remove(ll_path, ec);
     if (!emitted.ok || emitted.output.empty()) {
+        if (cumetal::diag_env_truthy("CUMETAL_DEBUG_ERRORS")) {
+            std::fprintf(stderr,
+                         "CUMETAL_DEBUG_ERRORS: PTX metallib emission failed: %s\n",
+                         emitted.error.empty() ? "empty output path" : emitted.error.c_str());
+        }
         std::filesystem::remove(metallib_path, ec);
         return false;
     }
@@ -1806,8 +1847,33 @@ CUresult cuMemcpy3D(const CUDA_MEMCPY3D* pCopy) {
     return CUDA_SUCCESS;
 }
 
-CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D* pCopy, CUstream /*hStream*/) {
-    return cuMemcpy3D(pCopy);
+CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D* pCopy, CUstream hStream) {
+    if (pCopy == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    if (pCopy->WidthInBytes == 0 || pCopy->Height == 0 || pCopy->Depth == 0) {
+        return CUDA_SUCCESS;
+    }
+    if ((pCopy->srcMemoryType == CU_MEMORYTYPE_HOST && pCopy->srcHost == nullptr) ||
+        (pCopy->srcMemoryType == CU_MEMORYTYPE_DEVICE && pCopy->srcDevice == 0) ||
+        (pCopy->dstMemoryType == CU_MEMORYTYPE_HOST && pCopy->dstHost == nullptr) ||
+        (pCopy->dstMemoryType == CU_MEMORYTYPE_DEVICE && pCopy->dstDevice == 0)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    struct Payload {
+        CUDA_MEMCPY3D copy;
+    };
+    auto* payload = new (std::nothrow) Payload{*pCopy};
+    if (payload == nullptr) return CUDA_ERROR_OUT_OF_MEMORY;
+    const cudaError_t status = cudaLaunchHostFunc(
+        reinterpret_cast<cudaStream_t>(hStream),
+        +[](void* raw) {
+            std::unique_ptr<Payload> owned(static_cast<Payload*>(raw));
+            (void)cuMemcpy3D(&owned->copy);
+        },
+        payload);
+    if (status != cudaSuccess) delete payload;
+    return map_cuda_error(status);
 }
 
 CUresult cuMemGetInfo(size_t* freeBytes, size_t* totalBytes) {
@@ -1929,22 +1995,16 @@ CUresult cuCtxGetStreamPriorityRange(int* leastPriority, int* greatestPriority) 
     return CUDA_SUCCESS;
 }
 
-// Cooperative kernel launch — forwards to cuLaunchKernel (threadgroup CG works; spec §8).
+// Single-threadgroup cooperative launches are safe. Multi-threadgroup launches
+// are refused until grid-barrier kernel fission is implemented.
 CUresult cuLaunchCooperativeKernel(CUfunction f,
                                     unsigned int gridDimX, unsigned int gridDimY,
                                     unsigned int gridDimZ, unsigned int blockDimX,
                                     unsigned int blockDimY, unsigned int blockDimZ,
                                     unsigned int sharedMemBytes, CUstream hStream,
                                     void** kernelParams) {
-    // grid_group::sync() is a no-op on Metal — warn once when a multi-block grid
-    // cooperative launch could rely on grid-wide sync it will not get (spec §8).
     if ((static_cast<std::uint64_t>(gridDimX) * gridDimY * gridDimZ) > 1) {
-        cumetal::warn_once(
-            "coop-grid-sync",
-            "cuLaunchCooperativeKernel with a multi-block grid: grid-wide "
-            "cooperative_groups sync (this_grid().sync()) is a no-op on Metal and "
-            "cannot synchronize across threadgroups; kernels that depend on it for "
-            "correctness will produce wrong results (spec §8)");
+        return CUDA_ERROR_NOT_SUPPORTED;
     }
     return cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
                           sharedMemBytes, hStream, kernelParams, nullptr);
@@ -2038,18 +2098,75 @@ CUresult cuMemsetD2D32(CUdeviceptr dstDevice, size_t dstPitch,
     return CUDA_SUCCESS;
 }
 
-// Async variants — UMA: stream ignored; same as synchronous.
+// Async variants enqueue their host-coherent fill in the CUDA stream timeline.
 CUresult cuMemsetD2D8Async(CUdeviceptr d, size_t p, unsigned char uc,
-                            size_t W, size_t H, CUstream /*s*/) {
-    return cuMemsetD2D8(d, p, uc, W, H);
+                            size_t W, size_t H, CUstream s) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
+        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(d)),
+        H == 0 ? 0 : (H - 1) * p + W));
+    if (base == nullptr && W > 0 && H > 0) return CUDA_ERROR_INVALID_VALUE;
+    struct Payload { unsigned char* base; size_t pitch, width, height; unsigned char value; };
+    auto* payload = new (std::nothrow) Payload{base, p, W, H, uc};
+    if (!payload) return CUDA_ERROR_OUT_OF_MEMORY;
+    const cudaError_t status = cudaLaunchHostFunc(
+        reinterpret_cast<cudaStream_t>(s),
+        [](void* opaque) {
+            std::unique_ptr<Payload> data(static_cast<Payload*>(opaque));
+            for (size_t row = 0; row < data->height; ++row)
+                std::memset(data->base + row * data->pitch, data->value, data->width);
+        }, payload);
+    if (status != cudaSuccess) delete payload;
+    return map_cuda_error(status);
 }
 CUresult cuMemsetD2D16Async(CUdeviceptr d, size_t p, unsigned short us,
-                             size_t W, size_t H, CUstream /*s*/) {
-    return cuMemsetD2D16(d, p, us, W, H);
+                             size_t W, size_t H, CUstream s) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
+        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(d)),
+        H == 0 ? 0 : (H - 1) * p + W * sizeof(unsigned short)));
+    if (base == nullptr && W > 0 && H > 0) return CUDA_ERROR_INVALID_VALUE;
+    struct Payload { unsigned char* base; size_t pitch, width, height; unsigned short value; };
+    auto* payload = new (std::nothrow) Payload{base, p, W, H, us};
+    if (!payload) return CUDA_ERROR_OUT_OF_MEMORY;
+    const cudaError_t status = cudaLaunchHostFunc(
+        reinterpret_cast<cudaStream_t>(s),
+        [](void* opaque) {
+            std::unique_ptr<Payload> data(static_cast<Payload*>(opaque));
+            for (size_t row = 0; row < data->height; ++row) {
+                auto* values = reinterpret_cast<unsigned short*>(
+                    data->base + row * data->pitch);
+                std::fill_n(values, data->width, data->value);
+            }
+        }, payload);
+    if (status != cudaSuccess) delete payload;
+    return map_cuda_error(status);
 }
 CUresult cuMemsetD2D32Async(CUdeviceptr d, size_t p, unsigned int ui,
-                             size_t W, size_t H, CUstream /*s*/) {
-    return cuMemsetD2D32(d, p, ui, W, H);
+                             size_t W, size_t H, CUstream s) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
+        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(d)),
+        H == 0 ? 0 : (H - 1) * p + W * sizeof(unsigned int)));
+    if (base == nullptr && W > 0 && H > 0) return CUDA_ERROR_INVALID_VALUE;
+    struct Payload { unsigned char* base; size_t pitch, width, height; unsigned int value; };
+    auto* payload = new (std::nothrow) Payload{base, p, W, H, ui};
+    if (!payload) return CUDA_ERROR_OUT_OF_MEMORY;
+    const cudaError_t status = cudaLaunchHostFunc(
+        reinterpret_cast<cudaStream_t>(s),
+        [](void* opaque) {
+            std::unique_ptr<Payload> data(static_cast<Payload*>(opaque));
+            for (size_t row = 0; row < data->height; ++row) {
+                auto* values = reinterpret_cast<unsigned int*>(
+                    data->base + row * data->pitch);
+                std::fill_n(values, data->width, data->value);
+            }
+        }, payload);
+    if (status != cudaSuccess) delete payload;
+    return map_cuda_error(status);
 }
 
 // cuMemGetAddressRange — returns the base address and size of the allocation
@@ -2158,63 +2275,97 @@ CUresult cuMemAllocPitch(CUdeviceptr* dptr, size_t* pPitch, size_t WidthInBytes,
     return cuMemAlloc(dptr, *pPitch * Height);
 }
 
-// Occupancy API — conservative estimates (spec §8, driver-API counterparts).
+// Occupancy API — kernel-specific Metal-backed estimates. Metal does not expose
+// CUDA SM register occupancy, but pipeline thread and threadgroup-memory limits
+// provide a meaningful safe bound.
 CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int* numBlocks,
-                                                     CUfunction /*func*/,
-                                                     int /*blockSize*/,
-                                                     size_t /*dynamicSMemSize*/) {
-    if (numBlocks == nullptr) {
+                                                     CUfunction func,
+                                                     int blockSize,
+                                                     size_t dynamicSMemSize) {
+    if (numBlocks == nullptr || blockSize <= 0) {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) {
-        return ready;
-    }
-    *numBlocks = 2;
+    cumetal::metal_backend::KernelProperties kernel{};
+    const CUresult query = query_function_properties(func, &kernel);
+    if (query != CUDA_SUCCESS) return query;
+    if (blockSize > kernel.max_threads_per_threadgroup)
+        return CUDA_ERROR_INVALID_VALUE;
+    cudaDeviceProp device{};
+    if (cudaGetDeviceProperties(&device, 0) != cudaSuccess)
+        return CUDA_ERROR_INVALID_VALUE;
+    const int thread_bound =
+        std::max(1, kernel.max_threads_per_threadgroup / blockSize);
+    int memory_bound = thread_bound;
+    const size_t total_shared =
+        kernel.static_threadgroup_memory_bytes + dynamicSMemSize;
+    if (total_shared > static_cast<size_t>(device.sharedMemPerBlock))
+        return CUDA_ERROR_INVALID_VALUE;
+    if (total_shared > 0)
+        memory_bound = std::max(
+            1, static_cast<int>(device.sharedMemPerBlock / total_shared));
+    *numBlocks = std::min(thread_bound, memory_bound);
     return CUDA_SUCCESS;
 }
 
 CUresult cuOccupancyMaxPotentialBlockSize(int* minGridSize,
                                           int* blockSize,
-                                          CUfunction /*func*/,
-                                          size_t /*dynamicSMemSize*/,
+                                          CUfunction func,
+                                          size_t dynamicSMemSize,
                                           int blockSizeLimit) {
     if (minGridSize == nullptr || blockSize == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) {
-        return ready;
-    }
-    const int chosen = (blockSizeLimit > 0 && blockSizeLimit < 256) ? blockSizeLimit : 256;
+    cumetal::metal_backend::KernelProperties kernel{};
+    const CUresult query = query_function_properties(func, &kernel);
+    if (query != CUDA_SUCCESS) return query;
+    int chosen = kernel.max_threads_per_threadgroup;
+    if (blockSizeLimit > 0) chosen = std::min(chosen, blockSizeLimit);
+    const int width = std::max(1, kernel.thread_execution_width);
+    chosen = std::max(width, (chosen / width) * width);
+    int active_blocks = 0;
+    const CUresult occupancy = cuOccupancyMaxActiveBlocksPerMultiprocessor(
+        &active_blocks, func, chosen, dynamicSMemSize);
+    if (occupancy != CUDA_SUCCESS) return occupancy;
     *blockSize = chosen;
     cudaDeviceProp prop{};
     if (cudaGetDeviceProperties(&prop, 0) == cudaSuccess && prop.multiProcessorCount > 0) {
-        *minGridSize = prop.multiProcessorCount * 2;
+        *minGridSize = prop.multiProcessorCount * active_blocks;
     } else {
         *minGridSize = 16;
     }
     return CUDA_SUCCESS;
 }
 
-// Function attribute query — returns zeroed/default values (spec §8).
-CUresult cuFuncGetAttribute(int* pi, CUfunc_attribute attrib, CUfunction /*hfunc*/) {
+CUresult cuFuncGetAttribute(int* pi, CUfunc_attribute attrib, CUfunction hfunc) {
     if (pi == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) {
-        return ready;
-    }
+    cumetal::metal_backend::KernelProperties kernel{};
+    const CUresult query = query_function_properties(hfunc, &kernel);
+    if (query != CUDA_SUCCESS) return query;
     switch (attrib) {
         case CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK:
-            *pi = 1024;
+            *pi = kernel.max_threads_per_threadgroup;
             break;
+        case CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES:
+            *pi = static_cast<int>(kernel.static_threadgroup_memory_bytes);
+            break;
+        case CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES: {
+            cudaDeviceProp device{};
+            if (cudaGetDeviceProperties(&device, 0) != cudaSuccess)
+                return CUDA_ERROR_INVALID_VALUE;
+            *pi = kernel.static_threadgroup_memory_bytes >=
+                          static_cast<size_t>(device.sharedMemPerBlock)
+                      ? 0
+                      : static_cast<int>(
+                            static_cast<size_t>(device.sharedMemPerBlock) -
+                            kernel.static_threadgroup_memory_bytes);
+            break;
+        }
         case CU_FUNC_ATTRIBUTE_PTX_VERSION:
-            *pi = 80;
-            break;
         case CU_FUNC_ATTRIBUTE_BINARY_VERSION:
-            *pi = 80;
+            // A Metal pipeline has no NVIDIA PTX or SASS target version.
+            *pi = 0;
             break;
         default:
             *pi = 0;

@@ -66,49 +66,28 @@ int main() {
         return 1;
     }
 
-    // --- cuOccupancyMaxActiveBlocksPerMultiprocessor ---
-    // Need a valid function — use a dummy CUfunction pointer
-    // (The stub returns 2 regardless of function)
+    // Invalid function handles must be rejected instead of receiving invented
+    // occupancy and attribute values.
     CUfunction dummy_func = reinterpret_cast<CUfunction>(0x1);
     int numBlocks = -1;
-    if (cuOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, dummy_func, 256, 0) !=
-        CUDA_SUCCESS) {
-        std::fprintf(stderr, "FAIL: cuOccupancyMaxActiveBlocksPerMultiprocessor failed\n");
-        return 1;
-    }
-    if (numBlocks <= 0) {
-        std::fprintf(stderr,
-                     "FAIL: cuOccupancyMaxActiveBlocksPerMultiprocessor returned %d (expected > 0)\n",
-                     numBlocks);
+    if (cuOccupancyMaxActiveBlocksPerMultiprocessor(
+            &numBlocks, dummy_func, 256, 0) != CUDA_ERROR_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: occupancy accepted an invalid function\n");
         return 1;
     }
 
-    // --- cuOccupancyMaxPotentialBlockSize ---
     int minGridSize = -1;
     int blockSize = -1;
-    if (cuOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, dummy_func, 0, 0) !=
-        CUDA_SUCCESS) {
-        std::fprintf(stderr, "FAIL: cuOccupancyMaxPotentialBlockSize failed\n");
-        return 1;
-    }
-    if (blockSize <= 0 || blockSize > 1024) {
-        std::fprintf(stderr,
-                     "FAIL: cuOccupancyMaxPotentialBlockSize blockSize=%d (expected 1..1024)\n",
-                     blockSize);
+    if (cuOccupancyMaxPotentialBlockSize(
+            &minGridSize, &blockSize, dummy_func, 0, 0) != CUDA_ERROR_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: potential occupancy accepted an invalid function\n");
         return 1;
     }
 
-    // --- cuFuncGetAttribute ---
     int attr_val = -1;
-    if (cuFuncGetAttribute(&attr_val, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, dummy_func) !=
-        CUDA_SUCCESS) {
-        std::fprintf(stderr, "FAIL: cuFuncGetAttribute(MAX_THREADS_PER_BLOCK) failed\n");
-        return 1;
-    }
-    if (attr_val <= 0) {
-        std::fprintf(stderr,
-                     "FAIL: cuFuncGetAttribute MAX_THREADS_PER_BLOCK=%d (expected > 0)\n",
-                     attr_val);
+    if (cuFuncGetAttribute(&attr_val, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                           dummy_func) != CUDA_ERROR_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: function attributes accepted an invalid function\n");
         return 1;
     }
 

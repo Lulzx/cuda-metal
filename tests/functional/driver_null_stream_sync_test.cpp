@@ -208,7 +208,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (launch_spin(spin_output_a, nonblocking_stream) != CUDA_SUCCESS ||
-        launch_marker(marker_output_a, 0xC3u, nullptr) != CUDA_SUCCESS ||
+        launch_marker(marker_output_b, 0xC3u, nullptr) != CUDA_SUCCESS ||
         cuStreamSynchronize(nullptr) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: nonblocking -> legacy probe launch failed\n");
         return 1;

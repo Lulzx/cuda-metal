@@ -119,8 +119,6 @@ std::string registration_lowering_policy() {
     policy += backend != nullptr && backend[0] != '\0' ? backend : "legacy";
     policy += ";fp64=";
     policy += fp64 != nullptr && fp64[0] != '\0' ? fp64 : "emulate";
-    policy += ";approx=";
-    policy += cumetal::diag_env_truthy("CUMETAL_ENABLE_APPROX_KERNELS") ? "enabled" : "disabled";
     policy += ";workload_specializations=";
     policy += cumetal::diag_env_truthy("CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS")
                   ? "enabled"
@@ -962,29 +960,13 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         return false;
     }
 
-    // An approximate/passthru lowering is numerically wrong (see
-    // entry_uses_approximate_stub in lower_to_metal.cpp). Refuse it by default so
-    // the program fails loudly — falling through to the LLVM path and, for these
-    // unsupported GGML kernels, the "missing metallib" abort, exactly like any
-    // other unsupported kernel — instead of silently producing garbage output.
-    // Opt in with CUMETAL_ENABLE_APPROX_KERNELS=1 to run it anyway.
     bool use_direct_msl = lowered_metal.matched && !lowered_metal.metal_source.empty();
     if (use_direct_msl && lowered_metal.approximate) {
-        if (cumetal::diag_env_truthy("CUMETAL_ENABLE_APPROX_KERNELS")) {
-            cumetal::warn_once(
-                "approx-use:" + kernel_name,
-                "kernel '" + kernel_name +
-                    "' uses an approximate/passthru lowering (CUMETAL_ENABLE_APPROX_KERNELS=1);"
-                    " its output is numerically incorrect");
-        } else {
-            cumetal::warn_once(
-                "approx-skip:" + kernel_name,
-                "kernel '" + kernel_name +
-                    "' has only an approximate/passthru lowering and was skipped so results"
-                    " are not silently wrong; set CUMETAL_ENABLE_APPROX_KERNELS=1 to run it"
-                    " anyway (output will be incorrect)");
-            use_direct_msl = false;
-        }
+        cumetal::warn_once(
+            "approx-refused:" + kernel_name,
+            "kernel '" + kernel_name +
+                "' produced an obsolete approximate lowering; refusing known-wrong output");
+        use_direct_msl = false;
     }
 
     std::filesystem::path staged_input = ll_path;

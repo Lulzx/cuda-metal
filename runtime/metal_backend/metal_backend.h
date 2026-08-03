@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -33,6 +34,12 @@ struct DeviceProperties {
     int multi_processor_count = 8;
 };
 
+struct KernelProperties {
+    int max_threads_per_threadgroup = 0;
+    int thread_execution_width = 0;
+    std::size_t static_threadgroup_memory_bytes = 0;
+};
+
 struct KernelArg {
     enum class Kind {
         kBuffer,
@@ -55,6 +62,10 @@ struct LaunchConfig {
 
 cudaError_t initialize(std::string* error_message);
 cudaError_t query_device_properties(DeviceProperties* out_properties, std::string* error_message);
+cudaError_t query_kernel_properties(const std::string& metallib_path,
+                                    const std::string& kernel_name,
+                                    KernelProperties* out_properties,
+                                    std::string* error_message);
 cudaError_t allocate_buffer(std::size_t size,
                             std::shared_ptr<Buffer>* out_buffer,
                             std::string* error_message);
@@ -74,6 +85,9 @@ cudaError_t stream_query_ticket(const std::shared_ptr<Stream>& stream,
 cudaError_t stream_wait_ticket(const std::shared_ptr<Stream>& stream,
                                std::uint64_t ticket,
                                std::string* error_message);
+cudaError_t enqueue_host_function(const std::shared_ptr<Stream>& stream,
+                                  std::function<void()> function,
+                                  std::string* error_message);
 cudaError_t launch_kernel(const std::string& metallib_path,
                           const std::string& kernel_name,
                           const LaunchConfig& config,

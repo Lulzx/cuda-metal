@@ -1,7 +1,21 @@
 #include "cuda_runtime.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <thread>
+
+namespace {
+struct Gate {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+};
+void gate_callback(void* raw) {
+    auto* gate = static_cast<Gate*>(raw);
+    gate->entered.store(true, std::memory_order_release);
+    while (!gate->release.load(std::memory_order_acquire)) std::this_thread::yield();
+}
+}  // namespace
 
 static bool test_malloc_free_async() {
     float* dev = nullptr;
@@ -53,6 +67,37 @@ static bool test_mempool_create_destroy() {
     return true;
 }
 
+static bool test_free_follows_stream() {
+    cudaStream_t stream = nullptr;
+    void* dev = nullptr;
+    if (cudaStreamCreate(&stream) != cudaSuccess ||
+        cudaMallocAsync(&dev, 64, stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: async free ordering setup failed\n");
+        return false;
+    }
+    Gate gate;
+    if (cudaLaunchHostFunc(stream, gate_callback, &gate) != cudaSuccess) return false;
+    while (!gate.entered.load(std::memory_order_acquire)) std::this_thread::yield();
+    if (cudaFreeAsync(dev, stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: queued cudaFreeAsync failed\n");
+        return false;
+    }
+    cudaPointerAttributes attributes{};
+    if (cudaPointerGetAttributes(&attributes, dev) != cudaSuccess ||
+        attributes.type != cudaMemoryTypeManaged) {
+        std::fprintf(stderr, "FAIL: cudaFreeAsync released storage before its stream reached it\n");
+        return false;
+    }
+    gate.release.store(true, std::memory_order_release);
+    if (cudaStreamSynchronize(stream) != cudaSuccess ||
+        cudaPointerGetAttributes(&attributes, dev) != cudaSuccess ||
+        attributes.type == cudaMemoryTypeManaged) {
+        std::fprintf(stderr, "FAIL: cudaFreeAsync did not release storage at stream completion\n");
+        return false;
+    }
+    return cudaStreamDestroy(stream) == cudaSuccess;
+}
+
 static bool test_default_mempool() {
     cudaMemPool_t pool = nullptr;
     cudaError_t err = cudaDeviceGetDefaultMemPool(&pool, 0);
@@ -97,6 +142,7 @@ static bool test_null_args() {
 int main() {
     if (!test_malloc_free_async()) return 1;
     if (!test_mempool_create_destroy()) return 1;
+    if (!test_free_follows_stream()) return 1;
     if (!test_default_mempool()) return 1;
     if (!test_malloc_from_pool()) return 1;
     if (!test_null_args()) return 1;

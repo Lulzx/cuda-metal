@@ -65,6 +65,23 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    int max_threads = 0;
+    int active_blocks = 0;
+    int min_grid = 0;
+    int suggested_block = 0;
+    if (cuFuncGetAttribute(&max_threads, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                           matrix_mul) != CUDA_SUCCESS ||
+        max_threads <= 0 ||
+        cuOccupancyMaxActiveBlocksPerMultiprocessor(
+            &active_blocks, matrix_mul, 64, 0) != CUDA_SUCCESS ||
+        active_blocks <= 0 ||
+        cuOccupancyMaxPotentialBlockSize(
+            &min_grid, &suggested_block, matrix_mul, 0, 0) != CUDA_SUCCESS ||
+        min_grid <= 0 || suggested_block <= 0 || suggested_block > max_threads) {
+        std::fprintf(stderr, "FAIL: Metal-backed function properties/occupancy failed\n");
+        return 1;
+    }
+
     const std::size_t element_count = static_cast<std::size_t>(kMatrixN) * kMatrixN;
     const std::size_t bytes = element_count * sizeof(float);
 

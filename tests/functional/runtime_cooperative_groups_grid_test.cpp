@@ -3,10 +3,9 @@
 #include <cstdio>
 
 // Tests cooperative_groups::grid_group / cudaLaunchCooperativeKernel (spec §8).
-// On Apple Silicon there is no cross-threadgroup barrier. The spec says:
-// - grid_group::sync() is a no-op stub
-// - cudaLaunchCooperativeKernel forwards to cudaLaunchKernel (threadgroup CG works)
-// This test verifies the API compiles and behaves correctly at the host level.
+// On Apple Silicon there is no cross-threadgroup barrier. CuMetal permits a
+// one-threadgroup cooperative grid, where __syncthreads is grid-wide, and
+// rejects larger cooperative grids.
 
 int main() {
     if (cudaInit(0) != cudaSuccess) {
@@ -25,8 +24,9 @@ int main() {
 
     // Verify the attribute query path works (cudaFuncSetAttribute).
     // This ensures cooperative launch infrastructure is wired up.
-    // (actual grid-wide sync requires device code; omitted as no-op on Metal)
+    // Numerical single-block sync and multi-block rejection are covered by
+    // runtime_cooperative_launch_test.
 
-    std::printf("PASS: cudaLaunchCooperativeKernel API available; null func correctly rejected\n");
+    std::printf("PASS: cooperative launch API rejects invalid entry points\n");
     return 0;
 }
