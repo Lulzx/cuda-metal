@@ -2,6 +2,7 @@
 // CuMetal CUB shim: DeviceScan — host-side device prefix scan.
 
 #include <cuda_runtime.h>
+#include <type_traits>
 
 namespace cub {
 

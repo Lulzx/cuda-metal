@@ -15,6 +15,15 @@ struct thread_block {
         return linear_tid();
     }
 
+    // CUDA cooperative_groups API used by 3DGS / tile-based renderers.
+    __device__ __forceinline__ dim3 group_index() const {
+        return dim3(blockIdx.x, blockIdx.y, blockIdx.z);
+    }
+
+    __device__ __forceinline__ dim3 thread_index() const {
+        return dim3(threadIdx.x, threadIdx.y, threadIdx.z);
+    }
+
     __device__ __forceinline__ void sync() const {
         __syncthreads();
     }

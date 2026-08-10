@@ -63,6 +63,19 @@ bash demos/apollo/run.sh
 Optional: `bash demos/apollo/run.sh --full` adds the llm.c GPT-2 FP32 gate.
 Details, scope limits, and artifacts: [demos/apollo/README.md](demos/apollo/README.md).
 
+### 3D Gaussian Splatting (industry CUDA)
+
+The Inria tile-based Gaussian rasterizer (`renderCUDA` + binning kernels) on Apple
+Silicon, with a written image and `device=apple_gpu` provenance:
+
+```bash
+bash demos/3dgs/run.sh
+open demos/3dgs/out/gaussians.png
+```
+
+Preprocess currently runs on the host; tile sort/blend runs on the GPU. Scope and
+limits: [demos/3dgs/README.md](demos/3dgs/README.md).
+
 ### Single sample
 
 ```bash
