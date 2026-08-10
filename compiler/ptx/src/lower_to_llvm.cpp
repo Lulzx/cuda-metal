@@ -1260,21 +1260,162 @@ class GenericLlvmEmitter {
         return result;
     }
 
+    // Soft f32→f64 bit conversion (no native double). Handles 0, normals, inf/nan;
+    // subnormals flush to signed zero (acceptable for emulate path).
+    std::string emit_soft_f32_bits_to_f64_bits(std::ostringstream& os,
+                                               const std::string& f32_bits) {
+        const std::string sign = next_tmp("fp64_pack_f32_sign");
+        const std::string exp_raw = next_tmp("fp64_pack_f32_exp_raw");
+        const std::string exp_m = next_tmp("fp64_pack_f32_expm");
+        const std::string mant_m = next_tmp("fp64_pack_f32_mantm");
+        const std::string zexp = next_tmp("fp64_pack_f32_zexp");
+        const std::string aexp = next_tmp("fp64_pack_f32_aexp");
+        const std::string zmant = next_tmp("fp64_pack_f32_zmant");
+        const std::string is_z = next_tmp("fp64_pack_f32_isz");
+        const std::string de = next_tmp("fp64_pack_f32_de");
+        const std::string de64 = next_tmp("fp64_pack_f32_de64");
+        const std::string m64 = next_tmp("fp64_pack_f32_m64");
+        const std::string s64 = next_tmp("fp64_pack_f32_s64");
+        const std::string ssh = next_tmp("fp64_pack_f32_ssh");
+        const std::string esh = next_tmp("fp64_pack_f32_esh");
+        const std::string msh = next_tmp("fp64_pack_f32_msh");
+        const std::string se_or = next_tmp("fp64_pack_f32_se");
+        const std::string norm = next_tmp("fp64_pack_f32_norm");
+        const std::string pay = next_tmp("fp64_pack_f32_pay");
+        const std::string paysh = next_tmp("fp64_pack_f32_paysh");
+        const std::string inf_exp = next_tmp("fp64_pack_f32_infexp");
+        const std::string spec = next_tmp("fp64_pack_f32_spec");
+        const std::string zbits = next_tmp("fp64_pack_f32_zb");
+        const std::string pick0 = next_tmp("fp64_pack_f32_p0");
+        const std::string not_zmant = next_tmp("fp64_pack_f32_nzm");
+        const std::string is_sub = next_tmp("fp64_pack_f32_sub");
+        const std::string pick1 = next_tmp("fp64_pack_f32_p1");
+        const std::string out = next_tmp("fp64_pack");
+
+        os << "  " << sign << " = lshr i32 " << f32_bits << ", 31\n";
+        os << "  " << exp_raw << " = lshr i32 " << f32_bits << ", 23\n";
+        os << "  " << exp_m << " = and i32 " << exp_raw << ", 255\n";
+        os << "  " << mant_m << " = and i32 " << f32_bits << ", 8388607\n";
+        os << "  " << zexp << " = icmp eq i32 " << exp_m << ", 0\n";
+        os << "  " << aexp << " = icmp eq i32 " << exp_m << ", 255\n";
+        os << "  " << zmant << " = icmp eq i32 " << mant_m << ", 0\n";
+        os << "  " << is_z << " = and i1 " << zexp << ", " << zmant << "\n";
+        os << "  " << de << " = add i32 " << exp_m << ", 896\n"; // 1023-127
+        os << "  " << de64 << " = zext i32 " << de << " to i64\n";
+        os << "  " << m64 << " = zext i32 " << mant_m << " to i64\n";
+        os << "  " << s64 << " = zext i32 " << sign << " to i64\n";
+        os << "  " << ssh << " = shl i64 " << s64 << ", 63\n";
+        os << "  " << esh << " = shl i64 " << de64 << ", 52\n";
+        os << "  " << msh << " = shl i64 " << m64 << ", 29\n";
+        os << "  " << se_or << " = or i64 " << ssh << ", " << esh << "\n";
+        os << "  " << norm << " = or i64 " << se_or << ", " << msh << "\n";
+        os << "  " << pay << " = zext i32 " << mant_m << " to i64\n";
+        os << "  " << paysh << " = shl i64 " << pay << ", 29\n";
+        os << "  " << inf_exp << " = or i64 " << ssh << ", 9218868437227405312\n"; // 0x7ff<<52
+        os << "  " << spec << " = or i64 " << inf_exp << ", " << paysh << "\n";
+        os << "  " << zbits << " = or i64 " << ssh << ", 0\n";
+        os << "  " << pick0 << " = select i1 " << aexp << ", i64 " << spec << ", i64 " << norm
+           << "\n";
+        os << "  " << not_zmant << " = xor i1 " << zmant << ", true\n";
+        os << "  " << is_sub << " = and i1 " << zexp << ", " << not_zmant << "\n";
+        os << "  " << pick1 << " = select i1 " << is_z << ", i64 " << zbits << ", i64 " << pick0
+           << "\n";
+        os << "  " << out << " = select i1 " << is_sub << ", i64 " << zbits << ", i64 " << pick1
+           << "\n";
+        return out;
+    }
+
+    // Soft f64→f32 bit conversion (no native double). Truncates mantissa; overflow → inf;
+    // subnormals/underflow → signed zero.
+    std::string emit_soft_f64_bits_to_f32_bits(std::ostringstream& os,
+                                               const std::string& f64_bits) {
+        const std::string sign = next_tmp("fp64_hi_sign");
+        const std::string exp_raw = next_tmp("fp64_hi_exp_raw");
+        const std::string expm = next_tmp("fp64_hi_expm");
+        const std::string mant64 = next_tmp("fp64_hi_mant64");
+        const std::string sign32 = next_tmp("fp64_hi_sign32");
+        const std::string ssh = next_tmp("fp64_hi_ssh");
+        const std::string zexp = next_tmp("fp64_hi_zexp");
+        const std::string aexp = next_tmp("fp64_hi_aexp");
+        const std::string de64 = next_tmp("fp64_hi_de64");
+        const std::string under = next_tmp("fp64_hi_under");
+        const std::string over = next_tmp("fp64_hi_over");
+        const std::string mant_sh = next_tmp("fp64_hi_mantsh");
+        const std::string mant32 = next_tmp("fp64_hi_mant32");
+        const std::string de32 = next_tmp("fp64_hi_de32");
+        const std::string exp_sh = next_tmp("fp64_hi_expsh");
+        const std::string se = next_tmp("fp64_hi_se");
+        const std::string norm = next_tmp("fp64_hi_norm");
+        const std::string inf = next_tmp("fp64_hi_inf");
+        const std::string nanbits = next_tmp("fp64_hi_nan");
+        const std::string zmant = next_tmp("fp64_hi_zmant");
+        const std::string use_nan = next_tmp("fp64_hi_usenan");
+        const std::string special = next_tmp("fp64_hi_special");
+        const std::string pick0 = next_tmp("fp64_hi_p0");
+        const std::string signed_zero = next_tmp("fp64_hi_sz");
+        const std::string pick1 = next_tmp("fp64_hi_p1");
+        const std::string pick2 = next_tmp("fp64_hi_p2");
+        const std::string out = next_tmp("fp64_hi_bits");
+
+        os << "  " << sign << " = lshr i64 " << f64_bits << ", 63\n";
+        os << "  " << exp_raw << " = lshr i64 " << f64_bits << ", 52\n";
+        os << "  " << expm << " = and i64 " << exp_raw << ", 2047\n";
+        os << "  " << mant64 << " = and i64 " << f64_bits << ", 4503599627370495\n"; // 52 bits
+        os << "  " << sign32 << " = trunc i64 " << sign << " to i32\n";
+        os << "  " << ssh << " = shl i32 " << sign32 << ", 31\n";
+        os << "  " << zexp << " = icmp eq i64 " << expm << ", 0\n";
+        os << "  " << aexp << " = icmp eq i64 " << expm << ", 2047\n";
+        os << "  " << de64 << " = sub i64 " << expm << ", 896\n"; // exp - (1023-127)
+        const std::string under_raw = next_tmp("fp64_hi_under_raw");
+        const std::string over_raw = next_tmp("fp64_hi_over_raw");
+        os << "  " << under_raw << " = icmp slt i64 " << de64 << ", 1\n";
+        os << "  " << over_raw << " = icmp sgt i64 " << de64 << ", 254\n";
+        // under/over apply only to finite normals (not zero/subnormal/inf/nan).
+        const std::string not_zexp = next_tmp("fp64_hi_nzexp");
+        const std::string not_aexp = next_tmp("fp64_hi_naexp");
+        const std::string finite = next_tmp("fp64_hi_finite");
+        os << "  " << not_zexp << " = xor i1 " << zexp << ", true\n";
+        os << "  " << not_aexp << " = xor i1 " << aexp << ", true\n";
+        os << "  " << finite << " = and i1 " << not_zexp << ", " << not_aexp << "\n";
+        os << "  " << under << " = and i1 " << under_raw << ", " << finite << "\n";
+        os << "  " << over << " = and i1 " << over_raw << ", " << finite << "\n";
+        os << "  " << mant_sh << " = lshr i64 " << mant64 << ", 29\n";
+        os << "  " << mant32 << " = trunc i64 " << mant_sh << " to i32\n";
+        os << "  " << de32 << " = trunc i64 " << de64 << " to i32\n";
+        os << "  " << exp_sh << " = shl i32 " << de32 << ", 23\n";
+        os << "  " << se << " = or i32 " << ssh << ", " << exp_sh << "\n";
+        os << "  " << norm << " = or i32 " << se << ", " << mant32 << "\n";
+        os << "  " << inf << " = or i32 " << ssh << ", 2139095040\n"; // 0x7f800000
+        os << "  " << nanbits << " = or i32 " << inf << ", " << mant32 << "\n";
+        os << "  " << zmant << " = icmp eq i64 " << mant64 << ", 0\n";
+        os << "  " << use_nan << " = xor i1 " << zmant << ", true\n";
+        os << "  " << special << " = select i1 " << use_nan << ", i32 " << nanbits << ", i32 " << inf
+           << "\n";
+        os << "  " << pick0 << " = select i1 " << aexp << ", i32 " << special << ", i32 " << norm
+           << "\n";
+        os << "  " << signed_zero << " = or i32 " << ssh << ", 0\n";
+        os << "  " << pick1 << " = select i1 " << under << ", i32 " << signed_zero << ", i32 "
+           << pick0 << "\n";
+        os << "  " << pick2 << " = select i1 " << over << ", i32 " << inf << ", i32 " << pick1
+           << "\n";
+        os << "  " << out << " = select i1 " << zexp << ", i32 " << signed_zero << ", i32 " << pick2
+           << "\n";
+        return out;
+    }
+
     std::optional<Fp64Pair> decode_fp64_pair(std::ostringstream& os,
                                              const std::string& operand) {
         if (is_register_name(operand)) {
             if (ensure_reg_slot(operand).bits != 64) return std::nullopt;
-            const std::string packed = emit_load_reg_bits(os, operand, 64);
-            const std::string hi_bits = next_tmp("fp64_hi_bits");
-            const std::string shifted = next_tmp("fp64_lo_shift");
-            const std::string lo_bits = next_tmp("fp64_lo_bits");
-            os << "  " << hi_bits << " = trunc i64 " << packed << " to i32\n";
-            os << "  " << shifted << " = lshr i64 " << packed << ", 32\n";
-            os << "  " << lo_bits << " = trunc i64 " << shifted << " to i32\n";
+            // Register ABI is IEEE binary64 bits (matches ld.global.b64 / st.global.b64
+            // and host-side double memory). Convert to a Dekker float pair for ALU.
+            const std::string ieee = emit_load_reg_bits(os, operand, 64);
+            const std::string hi_bits = emit_soft_f64_bits_to_f32_bits(os, ieee);
             const std::string hi = next_tmp("fp64_hi");
-            const std::string lo = next_tmp("fp64_lo");
             os << "  " << hi << " = bitcast i32 " << hi_bits << " to float\n";
-            os << "  " << lo << " = bitcast i32 " << lo_bits << " to float\n";
+            // Residual lo is omitted (0): emulate memory-backed doubles at ~f32 precision.
+            // Pure register chains still run Dekker within each op before this collapse.
+            const std::string lo = emit_float_constant(os, 0.0f, "fp64_lo");
             return Fp64Pair{hi, lo};
         }
 
@@ -1303,19 +1444,14 @@ class GenericLlvmEmitter {
 
     bool store_fp64_pair(std::ostringstream& os, const std::string& dst,
                          const Fp64Pair& value) {
-        const std::string hi_bits = next_tmp("fp64_pack_hi");
-        const std::string lo_bits = next_tmp("fp64_pack_lo");
-        os << "  " << hi_bits << " = bitcast float " << value.hi << " to i32\n";
-        os << "  " << lo_bits << " = bitcast float " << value.lo << " to i32\n";
-        const std::string hi64 = next_tmp("fp64_pack_hi64");
-        const std::string lo64 = next_tmp("fp64_pack_lo64");
-        const std::string shifted = next_tmp("fp64_pack_shift");
-        const std::string packed = next_tmp("fp64_pack");
-        os << "  " << hi64 << " = zext i32 " << hi_bits << " to i64\n";
-        os << "  " << lo64 << " = zext i32 " << lo_bits << " to i64\n";
-        os << "  " << shifted << " = shl i64 " << lo64 << ", 32\n";
-        os << "  " << packed << " = or i64 " << hi64 << ", " << shifted << "\n";
-        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, packed, 64);
+        // Collapse Dekker pair to f32 then expand to IEEE binary64 bits so memory
+        // stores (st.global.b64 of a double bit pattern) remain host-compatible.
+        const std::string summed = next_tmp("fp64_pack_sum");
+        os << "  " << summed << " = fadd float " << value.hi << ", " << value.lo << "\n";
+        const std::string f32_bits = next_tmp("fp64_pack_f32bits");
+        os << "  " << f32_bits << " = bitcast float " << summed << " to i32\n";
+        const std::string ieee = emit_soft_f32_bits_to_f64_bits(os, f32_bits);
+        return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, ieee, 64);
     }
 
     Fp64Pair emit_fp64_pair_add(std::ostringstream& os,

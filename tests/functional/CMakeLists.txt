@@ -2890,6 +2890,18 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
     set_tests_properties(functional_cumetalc_host_stdlib_implicit PROPERTIES SKIP_RETURN_CODE 77)
 
+    # Source-path double kernels: registration JIT must default to FP64 emulate
+    # (native AIR double fails Metal pipeline creation on Apple Silicon).
+    add_test(
+        NAME functional_cumetalc_double_vector_add
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/double_vector_add.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_double_vector_add
+    )
+    set_tests_properties(functional_cumetalc_double_vector_add PROPERTIES SKIP_RETURN_CODE 77)
+
     add_test(
         NAME functional_installed_cumetalc_link_executable
         COMMAND bash

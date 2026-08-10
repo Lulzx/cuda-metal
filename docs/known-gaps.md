@@ -34,15 +34,14 @@ as gaps have been closed.
   cooperative groups or cooperative launch; its iterative TGS solver already expresses phase
   boundaries as separate host-side kernel launches, so this gap is not on the current PhysX
   rigid-solver critical path.
-- FP64: `--fp64=emulate` applies to `.f64` instructions in every kernel; entry names have no
-  semantic effect. Register `mov`, add/subtract/multiply/divide/FMA, negation, min/max,
-  comparisons, and FP32↔emulated-FP64 conversion use packed FP32 pairs (~44-bit mantissa)
-  without emitting native `double` ALU instructions. IEEE-binary64 memory loads/stores,
-  integer conversions, and rounded FP64 conversions are not yet represented by this packed
-  register ABI and fail lowering explicitly instead of falling through to native double.
-  When a driver-JIT kernel contains `.f64` ops under the emulate default, the runtime prints a
-  one-time `CUMETAL WARNING` noting the reduced (~44-bit) precision; `CUMETAL_FP64_MODE=native`
-  compiles true doubles (which fail at launch on current hardware, useful only for testing).
+- FP64: driver and registration JIT default to `--fp64=emulate` / `CUMETAL_FP64_MODE=emulate`.
+  Entry names have no semantic effect. ALU uses Dekker FP32 pairs (~44-bit mantissa) without
+  native AIR `double` (which Metal rejects at pipeline creation). Register storage is IEEE
+  binary64 bit patterns so `ld.global.b64`/`st.global.b64` double kernels from clang interoperate
+  with host memory (at ~f32 precision after soft f64↔f32 conversion). Explicit `ld.global.f64` /
+  `st.global.f64`, integer conversions, and rounded FP64 conversions still fail lowering
+  explicitly. A one-time `CUMETAL WARNING` notes the reduced precision; `CUMETAL_FP64_MODE=native`
+  compiles true doubles (fails at launch on current hardware).
 - **Legacy default-stream ordering is complete.** Every blocking user stream publishes a
   monotonically increasing `MTLSharedEvent` value and waits on the latest legacy-default value;
   each legacy-default submission waits on the latest value from every blocking stream. The

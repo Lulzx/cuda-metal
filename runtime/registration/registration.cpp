@@ -1000,9 +1000,22 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     } else {
         REG_DEBUG("using LLVM IR lowering path for '%s'", kernel_name.c_str());
         maybe_dump_ptx_for_llvm_debug(kernel_name, ptx_source);
+        // Match the driver JIT path: default kEmulate. Native AIR `double` ALU is
+        // accepted by xcrun metal but fails at Metal pipeline creation on Apple GPU
+        // (XPC_ERROR_CONNECTION_INTERRUPTED). See cuda_driver.cpp emit_ptx_to_temp_metallib.
         cumetal::ptx::LowerToLlvmOptions lower_options;
         lower_options.entry_name = kernel_name;
         lower_options.strict = true;
+        lower_options.fp64_mode = cumetal::ptx::fp64_mode_from_env();
+        if (lower_options.fp64_mode == cumetal::ptx::Fp64Mode::kEmulate &&
+            ptx_source.find(".f64") != std::string::npos) {
+            cumetal::warn_once(
+                "fp64-emulate",
+                "kernel uses FP64 (double) instructions, emulated with Dekker FP32-pair "
+                "arithmetic (~44-bit mantissa, not full IEEE-754 double); results lose "
+                "precision. Set CUMETAL_FP64_MODE=native to compile true doubles (fails "
+                "at launch on current Apple Silicon)");
+        }
         const auto lowered = cumetal::ptx::lower_ptx_to_llvm_ir(ptx_source, lower_options);
         if (!lowered.ok || lowered.llvm_ir.empty()) {
             if (!lowered.error.empty()) {
