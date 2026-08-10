@@ -2,6 +2,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+// Host samples often omit <stdlib.h> because nvcc's CUDA headers transitively
+// declare malloc/free/exit. cumetalc force-includes this header, so pull those
+// declarations in here for source compatibility.
+#include <stdlib.h>
 
 #include "cuda.h"
 

@@ -2878,6 +2878,18 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
     set_tests_properties(functional_cumetalc_link_executable PROPERTIES SKIP_RETURN_CODE 77)
 
+    # Real samples often omit <stdlib.h>/<math.h>; nvcc's headers expose malloc/free/exit.
+    # cuda_runtime.h must transitively provide them under cumetalc's -include path.
+    add_test(
+        NAME functional_cumetalc_host_stdlib_implicit
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/host_stdlib_implicit.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_host_stdlib_implicit
+    )
+    set_tests_properties(functional_cumetalc_host_stdlib_implicit PROPERTIES SKIP_RETURN_CODE 77)
+
     add_test(
         NAME functional_installed_cumetalc_link_executable
         COMMAND bash
