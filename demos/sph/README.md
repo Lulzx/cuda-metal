@@ -5,14 +5,10 @@ solved *and* rendered by CUDA kernels, running on an Apple GPU through CuMetal.
 
 <video src="https://github.com/Lulzx/cuda-metal/raw/main/demos/sph/media/dambreak.mp4" poster="https://github.com/Lulzx/cuda-metal/raw/main/demos/sph/media/dambreak-poster.png" controls muted loop playsinline width="100%"></video>
 
-<!-- Fallback: GitHub serves raw .mp4 as octet-stream, which some browsers will
-     not play inline, so the still below links to the blob view's player. -->
-
-[![Dam break rendered on CuMetal](media/dambreak-poster.png)](https://github.com/Lulzx/cuda-metal/blob/main/demos/sph/media/dambreak.mp4)
-
-*1920x1080, 60 fps, 5 s of video for 1.5 s of physics. If the player above does
-not appear, click the still — it opens the same file with GitHub's player. This
-copy is downscaled to 720p; `run.sh` writes full-resolution `out/dambreak.mp4`.*
+*1920x1080, 60 fps, 5 s of video for 1.5 s of physics. This copy is downscaled
+to 720p; `run.sh` writes full-resolution `out/dambreak.mp4`. If your viewer
+strips `<video>`, the same file plays
+[here](https://github.com/Lulzx/cuda-metal/blob/main/demos/sph/media/dambreak.mp4).*
 
 ![Four stages of the dam break](media/dambreak-stages.png)
 
