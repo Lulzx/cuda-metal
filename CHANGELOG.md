@@ -6,6 +6,48 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-26
+
+### Added
+
+- **Three runnable demos.** The Apollo demo is the front door; a 3D Gaussian Splatting demo runs
+  industry CUDA on Apple GPUs; a 3D SPH dam break demo covers heavy simulation plus rendering.
+- **`%lanemask_eq/le/lt/ge/gt` lower to real values,** derived from the simdgroup lane index.
+- **Host `malloc`/`free`/`exit` are exposed via `cuda_runtime.h`.**
+- **Layered CI groundwork and LLVM compatibility.**
+
+### Fixed
+
+- **`__activemask()` returned zero.** Clang lowers its inline asm to `mov.u32 %r, %activemask`
+  rather than the standalone `activemask.b32` opcode, so it arrived as a special-register read and
+  fell through to the generic path, which minted an uninitialised register slot. Any PTX special
+  register CuMetal does not lower now refuses to lower instead of reading zero.
+- **One `.callprototype` declaration made every entry in its module unlowerable,** including
+  entries that never make an indirect call. The label is not followed directly by `:`, so the
+  parser read it as an opcode.
+- **Kernels lowered through the NVVM path shipped without a `.cumetal-abi` sidecar.**
+  `cuLaunchKernel` then guessed the argument count by scanning `kernelParams` for a NULL
+  terminator that CUDA does not guarantee, reading past the end of the caller's array. The sidecar
+  is now derived from the imported IR's kernel ABI, and a launch that still has to fall back to the
+  scan warns.
+- **A double kernel launch on the source path under FP64 emulation.**
+- **The PhysX GRB conformance build no longer configures against PhysX 5.6.1.** Four CMake
+  variables were missing, including one that left the snippets directory never linking `PhysXGpu`.
+
+### Changed
+
+- **`cudaResourceType` is declared at namespace scope** with its four constants, matching the CUDA
+  Toolkit, so stock sources compile without qualifying every use.
+- **The legacy `__pipeline_*` helpers are callable from device code.** They are device primitives
+  in CUDA; declaring them host-only made any device use a compile error. The copy stays
+  synchronous, which trivially satisfies a later wait.
+- **`assert` in `.cu` files no longer expands to nothing.** A `__device__` overload replaces the
+  blanket macro no-op, so host-side assertions keep working and only device-side ones are dropped,
+  which Metal cannot report anyway.
+- **`cudaCreateTextureObject` warns once** when a linear or pitch2D resource is built while
+  `CUMETAL_USE_METAL_DEVICE_ADDRESSES` is off. Device code dereferencing the resource pointer reads
+  zeros with no error in that mode.
+
 ## [0.1.3] - 2026-07-30
 
 ### Removed
