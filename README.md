@@ -76,6 +76,21 @@ open demos/3dgs/out/gaussians.png
 Preprocess currently runs on the host; tile sort/blend runs on the GPU. Scope and
 limits: [demos/3dgs/README.md](demos/3dgs/README.md).
 
+### 3D SPH dam break (heavy simulation + rendering)
+
+~200k-particle weakly-compressible SPH in the DualSPHysics style, with the
+neighbour search, physics, and the particle rasterizer all written as CUDA
+kernels:
+
+```bash
+bash demos/sph/run.sh --selftest    # GPU vs host brute-force SPH reference
+bash demos/sph/run.sh               # 1920x1080 60 fps -> demos/sph/out/dambreak.mp4
+```
+
+Uses `__shared__`/`__syncthreads()` prefix sums, `atomicAdd` counting sort, and
+an `atomicMin` depth pass. Gated on physics (dam-break front speed, density
+drift), not on "it ran": [demos/sph/README.md](demos/sph/README.md).
+
 ### Single sample
 
 ```bash
