@@ -50,11 +50,23 @@ inline void memcpy_async(Group, T* dst, const T* src, size_t count) {
 
 } // namespace cuda
 
-// Legacy __pipeline_ functions
-inline void __pipeline_memcpy_async(void* dst, const void* src, size_t count) {
-    std::memcpy(dst, src, count);
+// Legacy __pipeline_ functions.
+//
+// These are device-side primitives in real CUDA, so they must be callable from
+// __global__/__device__ code; declaring them host-only made any device use a
+// compile error. Metal has no equivalent of the Ampere async-copy pipeline, so
+// the copy runs synchronously and commit/wait become no-ops -- correct, merely
+// slower, since a synchronous copy trivially satisfies any later wait.
+// std::memcpy is not callable from device code, so copy byte-wise.
+__host__ __device__ __forceinline__ void __pipeline_memcpy_async(void* dst, const void* src,
+                                                                 size_t count) {
+    char* d = static_cast<char*>(dst);
+    const char* s = static_cast<const char*>(src);
+    for (size_t i = 0; i < count; ++i) {
+        d[i] = s[i];
+    }
 }
-inline void __pipeline_commit() {}
-inline void __pipeline_wait_prior(int) {}
+__host__ __device__ __forceinline__ void __pipeline_commit() {}
+__host__ __device__ __forceinline__ void __pipeline_wait_prior(int) {}
 
 #endif // __cplusplus

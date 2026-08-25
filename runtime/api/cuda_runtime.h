@@ -508,6 +508,19 @@ typedef struct cudaResourceDesc {
     } res;
 } cudaResourceDesc;
 
+#ifdef __cplusplus
+// The CUDA Toolkit declares the resource-type constants as `enum cudaResourceType`
+// at namespace scope, and ordinary CUDA code spells them unqualified. CuMetal grew
+// them as an anonymous enum nested in cudaResourceDesc, so stock sources failed to
+// compile until they qualified every use. Re-export both spellings.
+typedef decltype(cudaResourceDesc::cudaResourceTypeArray) cudaResourceType;
+
+constexpr cudaResourceType cudaResourceTypeArray = cudaResourceDesc::cudaResourceTypeArray;
+constexpr cudaResourceType cudaResourceTypeMipmappedArray = cudaResourceDesc::cudaResourceTypeMipmappedArray;
+constexpr cudaResourceType cudaResourceTypeLinear = cudaResourceDesc::cudaResourceTypeLinear;
+constexpr cudaResourceType cudaResourceTypePitch2D = cudaResourceDesc::cudaResourceTypePitch2D;
+#endif  // __cplusplus
+
 typedef struct cudaTextureDesc {
     cudaTextureAddressMode addressMode[3];
     cudaTextureFilterMode filterMode;
@@ -954,9 +967,18 @@ static inline cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t e
 #include <__clang_cuda_device_functions.h>
 #include <__clang_cuda_math.h>
 
-#if defined(assert)
-#undef assert
-#define assert(expr) ((void)0)
+// Apple's assert() expands to __assert_rtn, which is __host__, so any assert
+// inside a __global__/__device__ function is rejected -- in both compilation
+// passes, since clang parses device bodies during the host pass too. CUDA solves
+// this by shipping a __device__ assert that traps; Metal has no trap-and-report
+// path, so the device overload is a no-op and device-side assertions are
+// dropped. Declaring a __device__ overload rather than neutering the assert
+// macro keeps host-side assertions in .cu files working normally.
+#include <cassert>
+#if defined(__APPLE__)
+__device__ inline void __assert_rtn(const char*, const char*, int, const char*) {}
+#else
+__device__ inline void __assert_fail(const char*, const char*, unsigned, const char*) {}
 #endif
 
 // Optional workaround for CUDA codepaths that reference device-side printf in

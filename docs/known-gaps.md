@@ -11,6 +11,9 @@ as gaps have been closed.
 - Multi-GPU / peer-to-peer (Apple Silicon is single-GPU die).
 - Full texture/surface object GPU sampling (lifecycle + array memcpy supported; device-side
   `tex.*` / `suld.*` etc. error at compile for PTX path; see intrinsic-map.md).
+  Kernels that sidestep sampling by dereferencing a linear/pitch2D resource's
+  `devPtr` directly need `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`; without it the
+  loads read as zeros. `cudaCreateTextureObject` warns once in that case.
 - MLIR GPU-dialect kernel fusion / advanced scheduling (optional Phase 5 path not taken).
 
 ## Partial / conservative implementations

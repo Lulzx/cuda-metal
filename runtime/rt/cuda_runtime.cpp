@@ -5073,6 +5073,21 @@ cudaError_t cudaCreateTextureObject(cudaTextureObject_t* pTexObject,
     if (pTexObject == nullptr || pResDesc == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
+    // Device-side tex.* sampling is not wired (see docs/known-gaps.md). Kernels
+    // that instead dereference the resource's devPtr only work when cudaMalloc
+    // hands out real Metal GPU addresses, which is not the default. Without it
+    // the loads read as zeros and nothing reports an error -- a silent wrong
+    // answer, so say so once.
+    if (!use_metal_device_addresses() &&
+        (pResDesc->resType == cudaResourceDesc::cudaResourceTypeLinear ||
+         pResDesc->resType == cudaResourceDesc::cudaResourceTypePitch2D)) {
+        cumetal::warn_once(
+            "texture_object_needs_device_addresses",
+            "cudaCreateTextureObject() on a linear/pitch2D resource while "
+            "CUMETAL_USE_METAL_DEVICE_ADDRESSES is off. Device code that "
+            "dereferences the resource pointer will read zeros instead of your "
+            "data, with no error. Set CUMETAL_USE_METAL_DEVICE_ADDRESSES=1.");
+    }
     std::lock_guard<std::mutex> lock(g_tex_mutex);
     *pTexObject = g_next_tex_id++;
     g_texture_objects[*pTexObject] = *pResDesc;

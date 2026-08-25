@@ -343,6 +343,30 @@ scope boundaries live in
 [docs/known-gaps.md](docs/known-gaps.md). Compatibility claims without those
 conditions are meaningless.
 
+## Projects using CuMetal
+
+External projects that use CuMetal as their Apple Silicon GPU backend. These are
+third-party results, verified by their authors rather than by this repository.
+
+- **[cu_vslam_rs](https://github.com/jeff-hykin/cu_vslam_rs)** by
+  [@jeff-hykin](https://github.com/jeff-hykin) — NVIDIA's
+  [cuVSLAM](https://github.com/nvidia-isaac/cuVSLAM) visual odometry stack, for
+  which NVIDIA ships no macOS build, compiled for Apple Silicon against CuMetal
+  and packaged as an SDK by a nix flake (`nix build ...#sdk-metal`). The CUDA
+  kernels are not rewritten in Metal; they go through CuMetal's PTX path. Its
+  `metal_smoke` test asserts actual camera motion rather than a success status
+  code, because CuMetal defects have historically returned success while
+  producing an identity pose. Stereo runs on either backend; RGB-D requires the
+  GPU, since cuVSLAM v17 lifts depth into landmarks only in a CUDA kernel.
+
+  Getting it working needed `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`: its feature
+  detector builds texture objects over linear memory and dereferences the
+  resource pointer in device code, which reads as zeros under CuMetal's default
+  addressing with no error reported. `cudaCreateTextureObject` now warns about
+  that case instead of failing silently.
+
+If you have shipped something on CuMetal, open a PR adding it here.
+
 ## Known hard limits
 
 - No dynamic parallelism.
