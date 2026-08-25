@@ -537,6 +537,18 @@ void parse_instructions(const std::string& body,
             continue;
         }
 
+        // `name : .callprototype (...) _ (...);` declares the signature of an
+        // indirect-call target. It is a declaration, not an instruction, but the
+        // leading label is not followed directly by ':' so the generic path read
+        // `name` as an opcode and rejected the entire module -- including entries
+        // that never make an indirect call. Skip it. An entry that really does
+        // call through the prototype still fails later, at the call site, where
+        // indirect device calls are refused.
+        if (line_text.find(".callprototype") != std::string::npos ||
+            line_text.find(".calltargets") != std::string::npos) {
+            continue;
+        }
+
         if (line_text.back() == ':') {
             EntryFunction::Instruction label;
             label.line = current_line;

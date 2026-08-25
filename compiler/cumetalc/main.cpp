@@ -75,6 +75,8 @@ std::string build_ptx_abi_sidecar(std::string_view ptx_source,
     parse_options.strict = false;
     const auto parsed = cumetal::ptx::parse_ptx(ptx_source, parse_options);
     if (!parsed.ok) {
+        std::cerr << "cumetalc: PTX ABI sidecar not written: parse failed: " << parsed.error
+                  << "\n";
         return {};
     }
     for (const auto& entry : parsed.module.entries) {
@@ -88,6 +90,46 @@ std::string build_ptx_abi_sidecar(std::string_view ptx_source,
         for (const auto& param : entry.params) {
             text += param.is_pointer ? "arg buffer 8\n"
                                      : "arg bytes " + std::to_string(ptx_param_size(param)) + "\n";
+        }
+        return text;
+    }
+    std::cerr << "cumetalc: PTX ABI sidecar not written: no entry named '" << requested_entry
+              << "' in the parsed PTX\n";
+    return {};
+}
+
+// The NVVM route (.cu -> clang LLVM IR -> MSL) never produces PTX, so
+// build_ptx_abi_sidecar() never ran for it and the metallib shipped with no ABI
+// sidecar. The driver then fell back to scanning kernelParams for a NULL
+// terminator that CUDA never promises, walked off the end of the array, and
+// segfaulted. The imported IR already carries the kernel's real ABI, so derive
+// the sidecar from that instead.
+std::string build_ir_abi_sidecar(const cumetal::ir::Module& module,
+                                 const std::string& requested_entry) {
+    for (const auto& function : module.functions) {
+        if (!function.is_kernel || !function.kernel_abi.has_value()) {
+            continue;
+        }
+        if (!requested_entry.empty() && function.name != requested_entry) {
+            continue;
+        }
+        const cumetal::ir::KernelAbi& abi = *function.kernel_abi;
+        std::string text = "CUMETAL_ABI_V1\nkernel " + function.name + "\n";
+        text += "shared " + std::to_string(abi.static_threadgroup_memory) + "\n";
+        for (const auto& argument : abi.arguments) {
+            if (argument.kind == cumetal::ir::ArgumentKind::kPointer) {
+                text += "arg buffer 8\n";
+                continue;
+            }
+            if (argument.size == 0 || argument.size > 4096) {
+                // The runtime rejects these outright; emitting a sidecar the
+                // runtime refuses is worse than emitting none.
+                std::cerr << "cumetalc: PTX ABI sidecar not written: argument '"
+                          << argument.name << "' of kernel '" << function.name
+                          << "' has unusable size " << argument.size << "\n";
+                return {};
+            }
+            text += "arg bytes " + std::to_string(argument.size) + "\n";
         }
         return text;
     }
@@ -1150,6 +1192,7 @@ int main(int argc, char** argv) {
                 std::cerr << "cumetalc failed: " << compiled.error << "\n";
                 return 1;
             }
+            abi_sidecar = build_ir_abi_sidecar(compiled.gpu_ir, ptx_entry_name);
             if (emit_stage != EmitStage::kMetallib) {
                 if (!emit_inspection_stage(compiled, emit_stage, options.output,
                                            options.overwrite, &io_error)) {

@@ -754,6 +754,36 @@ bool is_register_name(std::string_view token) {
     return !token.empty() && token.front() == '%';
 }
 
+// is_register_name() accepts any '%'-prefixed token, so an unhandled PTX special
+// register looks exactly like an undeclared virtual register: the generic path
+// mints a fresh slot and reads zero, which is a silent wrong answer rather than
+// a diagnostic. `%activemask` did that for a long time. Anything named here that
+// emit_special_register_value() does not lower must refuse to lower instead.
+bool is_ptx_special_register(std::string_view token) {
+    static const std::unordered_set<std::string_view> kSpecial = {
+        "%tid", "%ntid", "%ctaid", "%nctaid", "%gridid", "%laneid", "%warpid",
+        "%nwarpid", "%warpsize", "%activemask", "%smid", "%nsmid",
+        "%lanemask_eq", "%lanemask_le", "%lanemask_lt", "%lanemask_ge",
+        "%lanemask_gt", "%clock", "%clock_hi", "%clock64", "%globaltimer",
+        "%globaltimer_lo", "%globaltimer_hi", "%total_smem_size",
+        "%dynamic_smem_size", "%reserved_smem_offset_begin",
+        "%reserved_smem_offset_end", "%reserved_smem_offset_cap",
+        "%current_graph_exec", "%is_explicit_cluster", "%nclusterid",
+        "%clusterid", "%cluster_ctaid", "%cluster_nctaid", "%cluster_ctarank",
+        "%cluster_nctarank",
+    };
+    if (token.empty() || token.front() != '%') {
+        return false;
+    }
+    // Strip a dimensional suffix (%tid.x -> %tid) before matching.
+    const std::size_t dot = token.find('.');
+    const std::string_view base = dot == std::string_view::npos ? token : token.substr(0, dot);
+    if (kSpecial.count(base) != 0) {
+        return true;
+    }
+    return kSpecial.count(token) != 0;
+}
+
 std::string extract_register_name(std::string_view text) {
     const std::size_t percent = text.find('%');
     if (percent == std::string::npos) {
@@ -1653,7 +1683,8 @@ class GenericLlvmEmitter {
                 if (op.find("%ctaid.") != std::string::npos) needs_bid = true;
                 if (op.find("%ntid.") != std::string::npos) needs_tpg = true;
                 if (op.find("%nctaid.") != std::string::npos) needs_gpg = true;
-                if (op.find("%laneid") != std::string::npos) needs_lane = true;
+                if (op.find("%laneid") != std::string::npos ||
+                    op.find("%lanemask_") != std::string::npos) needs_lane = true;
                 if (shared_symbols_ != nullptr &&
                     shared_symbols_->find(trim(op)) != shared_symbols_->end()) {
                     needs_threadgroup_buffer = true;
@@ -1758,6 +1789,69 @@ class GenericLlvmEmitter {
             }
             const std::string ext = next_tmp("laneext");
             os << "  " << ext << " = zext i32 %" << it->second << " to " << llvm_int_type(dst_bits) << "\n";
+            return ext;
+        }
+        // The lanemask registers are pure functions of the lane index, so derive
+        // them from AIR's simdgroup lane rather than leaving them to the generic
+        // register path, which silently read zero.
+        if (starts_with(token, "%lanemask_")) {
+            const auto it = builtin_scalar_arg_name_.find("air.thread_index_in_simdgroup");
+            if (it == builtin_scalar_arg_name_.end()) {
+                return std::nullopt;
+            }
+            const std::string eq = next_tmp("lanemask_eq");
+            os << "  " << eq << " = shl i32 1, %" << it->second << "\n";
+            std::string value;
+            if (token == "%lanemask_eq") {
+                value = eq;
+            } else {
+                const std::string lt = next_tmp("lanemask_lt");
+                os << "  " << lt << " = add i32 " << eq << ", -1\n";
+                if (token == "%lanemask_lt") {
+                    value = lt;
+                } else if (token == "%lanemask_ge") {
+                    value = next_tmp("lanemask_ge");
+                    os << "  " << value << " = xor i32 " << lt << ", -1\n";
+                } else {
+                    // le = lt | eq, which stays correct for lane 31 where
+                    // shifting by laneid + 1 would overflow.
+                    const std::string le = next_tmp("lanemask_le");
+                    os << "  " << le << " = or i32 " << lt << ", " << eq << "\n";
+                    if (token == "%lanemask_le") {
+                        value = le;
+                    } else if (token == "%lanemask_gt") {
+                        value = next_tmp("lanemask_gt");
+                        os << "  " << value << " = xor i32 " << le << ", -1\n";
+                    } else {
+                        return std::nullopt;
+                    }
+                }
+            }
+            if (dst_bits == 32) {
+                return value;
+            }
+            const std::string ext = next_tmp("lanemask_ext");
+            os << "  " << ext << " = zext i32 " << value << " to " << llvm_int_type(dst_bits)
+               << "\n";
+            return ext;
+        }
+        if (token == "%activemask") {
+            // clang lowers __activemask()'s inline asm to `mov.u32 %r, %activemask`
+            // rather than the standalone `activemask.b32` opcode, so it arrives
+            // here as a special register read rather than through
+            // emit_activemask(). Without this case it fell through to the generic
+            // register path, which minted an uninitialised slot and read zero.
+            declarations_.insert("declare i64 @air.simd_ballot.i64(i1)");
+            const std::string active64 = next_tmp("sreg_activemask64");
+            os << "  " << active64 << " = call i64 @air.simd_ballot.i64(i1 true)\n";
+            const std::string active32 = next_tmp("sreg_activemask32");
+            os << "  " << active32 << " = trunc i64 " << active64 << " to i32\n";
+            if (dst_bits == 32) {
+                return active32;
+            }
+            const std::string ext = next_tmp("sreg_activemask_ext");
+            os << "  " << ext << " = zext i32 " << active32 << " to " << llvm_int_type(dst_bits)
+               << "\n";
             return ext;
         }
         if (token == "%warpsize") {
@@ -4758,6 +4852,20 @@ class GenericLlvmEmitter {
                                 std::ostringstream& os,
                                 bool* out_terminated) {
         *out_terminated = false;
+
+        // Refuse rather than silently reading zero for a special register we do
+        // not lower. Probe with 32 bits into a scratch stream: the handled ones
+        // are pure reads, so discarding the emitted IR here is safe.
+        for (std::size_t i = 1; i < instr.operands.size(); ++i) {
+            const std::string& operand = instr.operands[i];
+            if (!is_ptx_special_register(operand)) {
+                continue;
+            }
+            std::ostringstream probe;
+            if (!emit_special_register_value(probe, operand, 32)) {
+                return fail(instr, "unsupported PTX special register '" + operand + "'");
+            }
+        }
 
         if (!instr.predicate.empty() && opcode_root(instr.opcode) != "bra") {
             return fail(instr, "predicated non-branch instructions not yet supported");

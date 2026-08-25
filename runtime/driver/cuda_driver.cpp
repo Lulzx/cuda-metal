@@ -1536,6 +1536,16 @@ CUresult cuLaunchKernel(CUfunction f,
             // Legacy/prebuilt metallibs do not yet carry CuMetal's ABI
             // metadata. Preserve their existing compatibility path; all
             // source-recompiled modules use the exact metadata count above.
+            //
+            // CUDA does not require kernelParams to be NULL-terminated, so this
+            // scan can run off the end of the caller's array and read whatever
+            // follows. Say so: a kernel that reaches here and then misbehaves is
+            // almost always missing its .cumetal-abi sidecar.
+            cumetal::warn_once(
+                "driver_launch_without_abi_metadata",
+                "cuLaunchKernel is guessing the argument count by scanning "
+                "kernelParams for a NULL terminator, which CUDA does not "
+                "guarantee. The metallib has no .cumetal-abi sidecar.");
             for (; arg_count < 31; ++arg_count) {
                 if (kernelParams[arg_count] == nullptr) {
                     break;
