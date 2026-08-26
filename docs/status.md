@@ -317,6 +317,10 @@ Post-Phase 5 work completed (continued, part 2):
   - `cublasSgemmBatched` / `cublasDgemmBatched` / `cublasGemmBatchedEx` —
     array-of-pointers batched GEMM with device-resident GPU-address table
     translation.
+  - `cublasSgetrfBatched` / `cublasDgetrfBatched` — Accelerate-backed batched
+    LU over tracked UMA matrices, including CUDA's null-pivot form. The focused
+    native-address test covers factors, pivots, singular `info`, and truncated
+    device pointer tables.
   - `cublasStrsm` / `cublasDtrsm` — triangular solve (BLAS3); supports LEFT/RIGHT side,
     UPPER/LOWER fill, N/T/C transpose, UNIT/NON_UNIT diagonal, alpha scaling.
   - `cublasSetVector` / `cublasGetVector` / `cublasSetMatrix` / `cublasGetMatrix` —

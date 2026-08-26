@@ -46,6 +46,123 @@ int main() {
         }
     }
 
+    // Batched LU consumes the same device-resident pointer-table ABI. Check a
+    // pivoted factorization, a singular matrix's per-batch info, and the
+    // no-pivot CUDA spelling rather than accepting a host-only pointer table.
+    {
+        const double nonsingular[4] = {4.0, 2.0, 1.0, 3.0};
+        const double singular[4] = {1.0, 2.0, 2.0, 4.0};
+        double* lu[batch_count]{};
+        if (!check(allocate_and_copy(&lu[0], nonsingular, 4), "allocate LU matrix 0") ||
+            !check(allocate_and_copy(&lu[1], singular, 4), "allocate LU matrix 1")) {
+            return 1;
+        }
+        double** lu_table = nullptr;
+        int* pivots = nullptr;
+        int* info = nullptr;
+        if (!check(cudaMalloc(reinterpret_cast<void**>(&lu_table), sizeof(lu)) == cudaSuccess,
+                   "allocate LU pointer table") ||
+            !check(cudaMemcpy(lu_table, lu, sizeof(lu), cudaMemcpyHostToDevice) == cudaSuccess,
+                   "copy LU pointer table") ||
+            !check(cudaMalloc(reinterpret_cast<void**>(&pivots),
+                              batch_count * dim * sizeof(int)) == cudaSuccess,
+                   "allocate LU pivots") ||
+            !check(cudaMalloc(reinterpret_cast<void**>(&info),
+                              batch_count * sizeof(int)) == cudaSuccess,
+                   "allocate LU info")) {
+            return 1;
+        }
+        if (!check(cublasDgetrfBatched(handle, dim, lu_table, dim, pivots, info,
+                                       batch_count) == CUBLAS_STATUS_SUCCESS,
+                   "device-table DgetrfBatched")) {
+            return 1;
+        }
+        int host_info[batch_count]{};
+        int host_pivots[batch_count * dim]{};
+        double host_lu[4]{};
+        if (!check(cudaMemcpy(host_info, info, sizeof(host_info),
+                              cudaMemcpyDeviceToHost) == cudaSuccess,
+                   "copy batched LU info") ||
+            !check(cudaMemcpy(host_pivots, pivots, sizeof(host_pivots),
+                              cudaMemcpyDeviceToHost) == cudaSuccess,
+                   "copy batched LU pivots") ||
+            !check(cudaMemcpy(host_lu, lu[0], sizeof(host_lu),
+                              cudaMemcpyDeviceToHost) == cudaSuccess,
+                   "copy batched LU factors") ||
+            !check(host_info[0] == 0 && host_info[1] == 2,
+                   "batched LU per-matrix info") ||
+            !check(std::fabs(host_lu[0] - 4.0) < 1.0e-12 &&
+                       std::fabs(host_lu[1] - 0.5) < 1.0e-12 &&
+                       std::fabs(host_lu[2] - 1.0) < 1.0e-12 &&
+                       std::fabs(host_lu[3] - 2.5) < 1.0e-12 &&
+                       host_pivots[0] == 1 && host_pivots[1] == 2,
+                   "pivoted batched LU factors")) {
+            return 1;
+        }
+        if (!check(cudaMemcpy(lu[0], nonsingular, sizeof(nonsingular),
+                              cudaMemcpyHostToDevice) == cudaSuccess,
+                   "reset no-pivot LU matrix") ||
+            !check(cublasDgetrfBatched(handle, dim, lu_table, dim, nullptr, info, 1) ==
+                       CUBLAS_STATUS_SUCCESS,
+                   "no-pivot DgetrfBatched")) {
+            return 1;
+        }
+        int no_pivot_info = -1;
+        double no_pivot_lu[4]{};
+        if (!check(cudaMemcpy(&no_pivot_info, info, sizeof(no_pivot_info),
+                              cudaMemcpyDeviceToHost) == cudaSuccess &&
+                       cudaMemcpy(no_pivot_lu, lu[0], sizeof(no_pivot_lu),
+                                  cudaMemcpyDeviceToHost) == cudaSuccess &&
+                       no_pivot_info == 0 &&
+                       std::fabs(no_pivot_lu[1] - 0.5) < 1.0e-12 &&
+                       std::fabs(no_pivot_lu[3] - 2.5) < 1.0e-12,
+                   "copy and verify no-pivot DgetrfBatched")) {
+            return 1;
+        }
+        if (!check(cublasDgetrfBatched(handle, dim, lu_table, dim, pivots, info,
+                                       batch_count + 1) == CUBLAS_STATUS_INVALID_VALUE,
+                   "reject truncated LU pointer table")) {
+            return 1;
+        }
+        cudaFree(info);
+        cudaFree(pivots);
+        cudaFree(lu_table);
+        for (double* matrix_ptr : lu) cudaFree(matrix_ptr);
+
+        float* slu = nullptr;
+        float** slu_table = nullptr;
+        int* sinfo = nullptr;
+        const float float_matrix[4] = {4.0f, 2.0f, 1.0f, 3.0f};
+        if (!check(allocate_and_copy(&slu, float_matrix, 4), "allocate float LU matrix") ||
+            !check(cudaMalloc(reinterpret_cast<void**>(&slu_table), sizeof(slu)) ==
+                       cudaSuccess,
+                   "allocate float LU table") ||
+            !check(cudaMemcpy(slu_table, &slu, sizeof(slu), cudaMemcpyHostToDevice) ==
+                       cudaSuccess,
+                   "copy float LU table") ||
+            !check(cudaMalloc(reinterpret_cast<void**>(&sinfo), sizeof(int)) == cudaSuccess,
+                   "allocate float LU info") ||
+            !check(cublasSgetrfBatched(handle, dim, slu_table, dim, nullptr, sinfo, 1) ==
+                       CUBLAS_STATUS_SUCCESS,
+                   "no-pivot SgetrfBatched")) {
+            return 1;
+        }
+        int host_sinfo = -1;
+        float host_slu[4]{};
+        if (!check(cudaMemcpy(&host_sinfo, sinfo, sizeof(host_sinfo),
+                              cudaMemcpyDeviceToHost) == cudaSuccess &&
+                       cudaMemcpy(host_slu, slu, sizeof(host_slu),
+                                  cudaMemcpyDeviceToHost) == cudaSuccess &&
+                       host_sinfo == 0 && near(host_slu[1], 0.5f) &&
+                       near(host_slu[3], 2.5f),
+                   "copy and verify no-pivot SgetrfBatched")) {
+            return 1;
+        }
+        cudaFree(sinfo);
+        cudaFree(slu_table);
+        cudaFree(slu);
+    }
+
     const float** a_table = nullptr;
     const float** b_table = nullptr;
     float** c_table = nullptr;

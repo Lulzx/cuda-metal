@@ -508,9 +508,7 @@ blocks:
   `XPC_ERROR_CONNECTION_INTERRUPTED`, so it is likewise `run-fail`, not claimed as
   graph conformance.
 - **Dynamic parallelism (CDP)** -- device-side stream creation and launch. 3 samples.
-- **Scattered API surface** -- batched LU factorization
-  (`cublasSgetrfBatched` / `cublasDgetrfBatched`) and
-  `CUBLAS_POINTER_MODE_DEVICE`.
+- **Scattered API surface** -- `CUBLAS_POINTER_MODE_DEVICE`.
   Batched GEMM/TRSM and device-resident
   pointer tables are already covered; the broad former `cublas*Batched` label
   was stale. The 32-bit signed/unsigned
@@ -534,6 +532,13 @@ stream-ordered allocation/default-pool subset. NVIDIA's unmodified
 21-dispatch run was deliberately not used as evidence in this resource-bounded
 pass, so the sample manifest is not promoted yet; release-threshold caching also
 remains a performance hint rather than allocator-reuse parity.
+
+`cublasSgetrfBatched` / `cublasDgetrfBatched` now factor tracked UMA matrices
+from a device-resident pointer table. Focused runtime coverage checks single and
+double precision, pivoted and no-pivot forms, singular per-batch `info`, and a
+truncated-table negative path while native Metal addresses are enabled. NVIDIA's
+unmodified `simpleCUBLAS_LU` host source compiles, but its 10,000-matrix run was
+not executed in this resource-bounded pass, so its manifest entry is not promoted.
 
 `cudaDeviceProp::cooperativeLaunch` is reported as **0** on purpose. Grid-wide
 `grid.sync()` across more than one threadgroup is a no-op under Metal, so

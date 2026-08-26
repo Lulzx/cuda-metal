@@ -143,6 +143,101 @@ bool read_pointer_table(const void* table,
     return true;
 }
 
+template <typename T>
+bool resolve_writable_span(void* pointer, std::size_t count, T** output) {
+    if (pointer == nullptr || output == nullptr) return false;
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!cumetal::rt::resolve_allocation_for_pointer(pointer, &resolved) ||
+        resolved.buffer == nullptr || resolved.buffer->contents() == nullptr ||
+        count > resolved.remaining_size / sizeof(T)) {
+        return false;
+    }
+    *output = reinterpret_cast<T*>(
+        static_cast<unsigned char*>(resolved.buffer->contents()) + resolved.offset);
+    return true;
+}
+
+void lapack_getrf(int n, float* matrix, int lda, int* pivots, int* info) {
+    sgetrf_(&n, &n, matrix, &lda, pivots, info);
+}
+
+void lapack_getrf(int n, double* matrix, int lda, int* pivots, int* info) {
+    dgetrf_(&n, &n, matrix, &lda, pivots, info);
+}
+
+template <typename T>
+int getrf_without_pivoting(int n, T* matrix, int lda) {
+    for (int k = 0; k < n; ++k) {
+        const T diagonal = matrix[k + k * lda];
+        if (diagonal == static_cast<T>(0)) return k + 1;
+        for (int row = k + 1; row < n; ++row) {
+            matrix[row + k * lda] /= diagonal;
+        }
+        for (int col = k + 1; col < n; ++col) {
+            const T upper = matrix[k + col * lda];
+            for (int row = k + 1; row < n; ++row) {
+                matrix[row + col * lda] -= matrix[row + k * lda] * upper;
+            }
+        }
+    }
+    return 0;
+}
+
+template <typename T>
+cublasStatus_t getrf_batched(cublasHandle_t handle,
+                             int n,
+                             T* const a_array[],
+                             int lda,
+                             int* pivot_array,
+                             int* info_array,
+                             int batch_count) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (n < 0 || batch_count < 0 || lda < std::max(1, n)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n == 0 || batch_count == 0) return CUBLAS_STATUS_SUCCESS;
+    if (a_array == nullptr || info_array == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+
+    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
+    if (sync_status != CUBLAS_STATUS_SUCCESS) return sync_status;
+
+    std::vector<void*> matrices;
+    if (!read_pointer_table(a_array, batch_count, &matrices)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    int* info = nullptr;
+    if (!resolve_writable_span(info_array, static_cast<std::size_t>(batch_count), &info)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    int* pivots = nullptr;
+    if (pivot_array != nullptr &&
+        !resolve_writable_span(pivot_array,
+                               static_cast<std::size_t>(n) * batch_count,
+                               &pivots)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+
+    const std::size_t matrix_elements = static_cast<std::size_t>(lda) * n;
+    for (int batch = 0; batch < batch_count; ++batch) {
+        T* matrix = nullptr;
+        if (!resolve_writable_span(matrices[batch], matrix_elements, &matrix)) {
+            return CUBLAS_STATUS_INVALID_VALUE;
+        }
+        int factor_info = 0;
+        if (pivots != nullptr) {
+            lapack_getrf(n, matrix, lda,
+                         pivots + static_cast<std::size_t>(batch) * n,
+                         &factor_info);
+        } else {
+            factor_info = getrf_without_pivoting(n, matrix, lda);
+        }
+        info[batch] = factor_info;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 // Helper: read element of symmetric n×n matrix (column-major, upper or lower stored).
 template<typename T>
 static inline T symm_elem(const T* a, int lda, int i, int j, bool upper) {
@@ -2040,6 +2135,28 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t handle,
         }
     }
     return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasSgetrfBatched(cublasHandle_t handle,
+                                    int n,
+                                    float* const a_array[],
+                                    int lda,
+                                    int* pivot_array,
+                                    int* info_array,
+                                    int batch_count) {
+    return getrf_batched(handle, n, a_array, lda, pivot_array, info_array,
+                         batch_count);
+}
+
+cublasStatus_t cublasDgetrfBatched(cublasHandle_t handle,
+                                    int n,
+                                    double* const a_array[],
+                                    int lda,
+                                    int* pivot_array,
+                                    int* info_array,
+                                    int batch_count) {
+    return getrf_batched(handle, n, a_array, lda, pivot_array, info_array,
+                         batch_count);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

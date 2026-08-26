@@ -457,8 +457,23 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t handle,
                                    cudaDataType_t ctype,
                                    int ldc,
                                    int batch_count,
-                                   cublasComputeType_t compute_type,
-                                   cublasGemmAlgo_t algo);
+                                    cublasComputeType_t compute_type,
+                                    cublasGemmAlgo_t algo);
+
+cublasStatus_t cublasSgetrfBatched(cublasHandle_t handle,
+                                    int n,
+                                    float* const a_array[],
+                                    int lda,
+                                    int* pivot_array,
+                                    int* info_array,
+                                    int batch_count);
+cublasStatus_t cublasDgetrfBatched(cublasHandle_t handle,
+                                    int n,
+                                    double* const a_array[],
+                                    int lda,
+                                    int* pivot_array,
+                                    int* info_array,
+                                    int batch_count);
 
 // Strsm / Dtrsm — triangular solve with multiple right-hand sides.
 cublasStatus_t cublasStrsm(cublasHandle_t handle,
