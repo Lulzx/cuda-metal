@@ -146,6 +146,14 @@
 extern "C" {
 #endif
 
+// Clang's CUDA device frontend needs a device declaration in scope before a
+// kernel can call printf. The host libc declaration remains host-only; CUDA
+// overload resolution selects this declaration in device code, which Clang
+// lowers to PTX vprintf for CuMetal's bounded ring-buffer backend.
+#if defined(__clang__) && defined(__CUDA__)
+__device__ int printf(const char* format, ...);
+#endif
+
 typedef enum cudaError {
     cudaSuccess = 0,
     cudaErrorInvalidValue = 1,

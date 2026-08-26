@@ -63,7 +63,7 @@ compile-fail 0_Introduction/simpleCooperativeGroups
 compile-fail 0_Introduction/simpleCubemapTexture
 compile-fail 0_Introduction/simpleLayeredTexture
 compile-fail 0_Introduction/simplePitchLinearTexture
-compile-fail 0_Introduction/simplePrintf
+no-lowering  0_Introduction/simplePrintf
 compile-fail 0_Introduction/simpleSurfaceWrite
 compile-fail 0_Introduction/simpleTexture
 compile-fail 0_Introduction/simpleTexture3D

@@ -475,7 +475,13 @@ blocks:
 - **thrust/CUB header surface** -- `thrust/copy.h`, `thrust/random.h`,
   `thrust/adjacent_difference.h`, `cub/device/device_{find,transform,segmented_scan}.cuh`.
   6 samples. Some of the underlying algorithms already exist; the headers do not.
-- **Device-side `printf`** -- Metal has no equivalent. 2 samples.
+- **Clang-generated device `printf` ABI** -- the clean-room header now declares
+  device `printf`, and CuMetal's bounded ring-buffer backend handles its tested
+  literal-format PTX form. Clang source compilation instead emits a module-global
+  format byte array plus a local argument tuple passed to `vprintf`; relocation
+  and tuple decoding for that form remain unimplemented, so `simplePrintf` is
+  `no-lowering`. Other sample uses are additionally blocked by cooperative-groups
+  or dynamic-parallelism gaps.
 - **Tensor cores** -- `mma.h` / `nvcuda::wmma`. 4 samples.
 - **CUDA graph memory nodes** -- `cudaGraphAddMemAllocNode`,
   `cudaGraphAddMemFreeNode`, graph-memory attributes, trimming, and their
@@ -540,8 +546,14 @@ that error even when no command buffer was enqueued, and the error remains visib
 `CUMETAL_DEBUG_DUMP_IR_DIR=<dir>` dumps the emitted LLVM IR.
 
 - `clock`, `simpleHyperQ`, `eigenvalues`, `convolutionSeparable`, `threadFenceReduction`,
-  `LargeKernelParameter` hit "registered kernel missing metallib" -- the lowering
+  `LargeKernelParameter`, and `simplePrintf` hit "registered kernel missing metallib" -- the lowering
   path declines these kernels outright.
+
+  `clock` and `simpleHyperQ` require PTX `%clock`; public Metal exposes no
+  per-thread CUDA-compatible cycle counter, so CuMetal rejects it rather than
+  substituting wall time or a constant. `simplePrintf` is the Clang `vprintf`
+  relocation/tuple ABI gap described above. The remaining entries are
+  implementable compiler/runtime work, not classified as platform limits.
 
 Three samples formerly appeared in that list because of missing CUDA libdevice
 integer helpers. `scalarProd` needed signed/unsigned 24-bit multiply, which now
