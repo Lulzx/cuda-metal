@@ -9,8 +9,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/cuda_projects/_common.sh
 source "${SCRIPT_DIR}/_common.sh"
 
-if [[ ! -f "${CUDA_SAMPLES_DIR}/Samples/0_Introduction/vectorAdd/vectorAdd.cu" ]]; then
+if ! CATEGORY_ROOT="$(cumetal_cuda_samples_category_root "${CUDA_SAMPLES_DIR}")"; then
     echo "SKIP: cuda-samples checkout not found at ${CUDA_SAMPLES_DIR}"
+    exit 77
+fi
+if [[ ! -f "${CATEGORY_ROOT}/0_Introduction/vectorAdd/vectorAdd.cu" ]]; then
+    echo "SKIP: vectorAdd.cu missing from ${CATEGORY_ROOT}"
     exit 77
 fi
 

@@ -108,3 +108,17 @@ cumetal_cuda_projects_compile_link() {
         -L"${cumetal_build_dir}" -lcumetal -Wl,-rpath,"${cumetal_build_dir}" \
         -o "${out_dir}/${out_bin}"
 }
+
+# Upstream renamed the C++ sample tree from Samples/ to cpp/ . Resolve it rather than
+# hardcoding, so this test does not quietly turn into a skip against a newer checkout.
+cumetal_cuda_samples_category_root() {
+    local samples_dir="$1"
+    local candidate
+    for candidate in "${samples_dir}/cpp" "${samples_dir}/Samples"; do
+        if [[ -d "${candidate}/0_Introduction/vectorAdd" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}

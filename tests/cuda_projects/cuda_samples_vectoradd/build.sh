@@ -4,6 +4,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 CUMETAL_BUILD_DIR="${CUMETAL_BUILD_DIR:-${ROOT_DIR}/build}"
 CUDA_SAMPLES_DIR="${1:-/Users/lulzx/work/cuda-samples}"
+# shellcheck source=tests/cuda_projects/_common.sh
+source "${SCRIPT_DIR}/../_common.sh"
+if ! CATEGORY_ROOT="$(cumetal_cuda_samples_category_root "${CUDA_SAMPLES_DIR}")"; then
+    echo "FAIL: no cuda-samples C++ tree under ${CUDA_SAMPLES_DIR}" >&2
+    exit 1
+fi
 CLANG_BIN="${CUMETAL_CLANG:-/opt/homebrew/opt/llvm/bin/clang++}"
 [[ -x "${CLANG_BIN}" ]] || CLANG_BIN="$(command -v clang++)"
 OUT_DIR="${SCRIPT_DIR}/build"; mkdir -p "${OUT_DIR}"
@@ -17,7 +23,7 @@ PATH="${CUMETAL_BUILD_DIR}/cuda_toolchain:${ROOT_DIR}/scripts/cuda_toolchain:${P
     "${CUMETAL_CUDA_DEVICE_FLAGS[@]}" -nocudainc -nocudalib \
     -I"${ROOT_DIR}/runtime/api" -include cuda_runtime.h \
     -I"${CUDA_SAMPLES_DIR}/Common" \
-    -c "${CUDA_SAMPLES_DIR}/Samples/0_Introduction/vectorAdd/vectorAdd.cu" \
+    -c "${CATEGORY_ROOT}/0_Introduction/vectorAdd/vectorAdd.cu" \
     -o "${OUT_DIR}/vectorAdd.o"
 echo "Linking..."
 xcrun clang++ "${OUT_DIR}/vectorAdd.o" \
