@@ -353,6 +353,7 @@ $L1:
     .reg .b32 %r<7>;
     .reg .b64 %rd<3>;
     .param .b32 call_arg;
+    .param .b32 call_arg2;
     .param .b32 call_ret;
     .param .b64 call_arg64;
     .param .b64 sin_ptr_arg;
@@ -376,6 +377,11 @@ $L1:
     call.uni (call_ret), __nv_clzll, (call_arg64);
     call.uni (call_ret), __nv_popc, (call_arg);
     call.uni (call_ret), __nv_ffs, (call_arg);
+    st.param.b32 [call_arg2], %r2;
+    call.uni (call_ret), __nv_mul24, (call_arg, call_arg2);
+    call.uni (call_ret), __nv_umul24, (call_arg, call_arg2);
+    call.uni (call_ret), __nv_umin, (call_arg, call_arg2);
+    call.uni (call_ret), __nv_umax, (call_arg, call_arg2);
     call.uni (call_ret), __nv_fast_fdividef, (call_arg, call_arg);
     st.param.b64 [sin_ptr_arg], %rd1;
     st.param.b64 [cos_ptr_arg], %rd2;
@@ -388,6 +394,10 @@ $L1:
     vector_memory_options.strict = true;
     const auto vector_memory_lowered =
         cumetal::ptx::lower_ptx_to_llvm_ir(vector_memory_ptx, vector_memory_options);
+    if (!vector_memory_lowered.ok) {
+        std::fprintf(stderr, "vector memory lowering error: %s\n",
+                     vector_memory_lowered.error.c_str());
+    }
     if (!expect(vector_memory_lowered.ok, "v2/v4 vector memory lowering succeeds")) {
         return 1;
     }
@@ -418,6 +428,19 @@ $L1:
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@llvm.cttz.i32") &&
                     contains(vector_memory_lowered.llvm_ir, "ffs_zero"),
                 "__nv_ffs lowers to count-trailing-zeros plus one")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "mul24_a_shifted") &&
+                    contains(vector_memory_lowered.llvm_ir, "ashr i32") &&
+                    contains(vector_memory_lowered.llvm_ir, "umul24_a") &&
+                    contains(vector_memory_lowered.llvm_ir, "and i32") &&
+                    contains(vector_memory_lowered.llvm_ir, " = mul i32"),
+                "__nv_mul24 and __nv_umul24 preserve signed and unsigned low-24-bit semantics")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "icmp ult i32") &&
+                    contains(vector_memory_lowered.llvm_ir, "icmp ugt i32"),
+                "__nv_umin and __nv_umax use unsigned comparisons")) {
         return 1;
     }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sin.f32") &&
@@ -465,6 +488,62 @@ $L1:
     if (!expect(!malformed_clz_lowered.ok &&
                     contains(malformed_clz_lowered.error, "__nv_clz expects 1 arg"),
                 "strict lowering rejects malformed __nv_clz calls")) {
+        return 1;
+    }
+
+    const std::string malformed_mul24_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_mul24()
+{
+    .param .b32 call_arg;
+    .param .b32 call_ret;
+    call.uni (call_ret), __nv_mul24, (call_arg);
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_mul24_options;
+    malformed_mul24_options.entry_name = "malformed_mul24";
+    malformed_mul24_options.strict = true;
+    const auto malformed_mul24_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_mul24_ptx, malformed_mul24_options);
+    if (!expect(!malformed_mul24_lowered.ok &&
+                    contains(malformed_mul24_lowered.error, "__nv_mul24 expects 2 args"),
+                "strict lowering rejects malformed __nv_mul24 calls")) {
+        return 1;
+    }
+
+    const std::string reused_call_slot_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry reused_call_slot()
+{
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<2>;
+    {
+        .param .b32 param1;
+        .param .b32 retval;
+        st.param.b32 [param1], %r1;
+        call.uni (retval), __nv_abs, (param1);
+    }
+    {
+        .param .b64 param1;
+        .param .b32 retval;
+        st.param.b64 [param1], %rd1;
+        call.uni (retval), __nv_clzll, (param1);
+    }
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions reused_call_slot_options;
+    reused_call_slot_options.entry_name = "reused_call_slot";
+    reused_call_slot_options.strict = true;
+    const auto reused_call_slot_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(reused_call_slot_ptx, reused_call_slot_options);
+    if (!expect(reused_call_slot_lowered.ok &&
+                    contains(reused_call_slot_lowered.llvm_ir, "alloca i32") &&
+                    contains(reused_call_slot_lowered.llvm_ir, "alloca i64"),
+                "lexically reused PTX call-slot names keep distinct integer widths")) {
         return 1;
     }
 
@@ -670,9 +749,10 @@ $L1:
 .shared .align 4 .u32 scalar_shared;
 .visible .entry use_scalar_shared()
 {
-    .reg .b32 %r<2>;
+    .reg .b32 %r<3>;
     mov.u32 %r1, 7;
     st.shared.u32 [scalar_shared], %r1;
+    atom.shared.exch.b32 %r2, [scalar_shared], 0;
     ret;
 }
 )PTX";
@@ -684,8 +764,10 @@ $L1:
                                            scalar_shared_options);
     if (!expect(scalar_shared_lowered.ok &&
                     contains(scalar_shared_lowered.llvm_ir,
-                             "ptrtoint i8 addrspace(3)* %__air_tg0 to i64"),
-                "declared scalar shared symbol resolves to threadgroup memory")) {
+                             "ptrtoint i8 addrspace(3)* %__air_tg0 to i64") &&
+                    contains(scalar_shared_lowered.llvm_ir,
+                             "atomicrmw xchg i32 addrspace(3)*"),
+                "declared scalar shared symbol resolves for ordinary and atomic memory access")) {
         return 1;
     }
 

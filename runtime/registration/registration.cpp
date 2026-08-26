@@ -875,6 +875,16 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         return false;
     }
 
+    // Multiple host threads may launch the same newly registered kernel at
+    // once. Cache lookup and publication must be one transaction: otherwise
+    // they all observe a miss and concurrently overwrite the same .metal or
+    // .metallib path, so some launches compile a partial artifact and silently
+    // do no work. JIT is a cold-path operation; serializing it globally favors
+    // correctness and still allows all warm in-process launches to bypass this
+    // function through emitted_kernel_metallibs.
+    static std::mutex jit_emit_mutex;
+    std::lock_guard<std::mutex> jit_emit_lock(jit_emit_mutex);
+
     REG_DEBUG("emit kernel '%s' ptx_size=%zu", kernel_name.c_str(), ptx_source.size());
 
     // ── Persistent JIT cache lookup ────────────────────────────────────────

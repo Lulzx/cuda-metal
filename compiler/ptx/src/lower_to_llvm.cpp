@@ -1057,7 +1057,6 @@ class GenericLlvmEmitter {
     std::unordered_map<std::string, RegSlot> reg_slots_;
     std::unordered_map<std::string, PointerAs> reg_pointer_as_;
     std::unordered_map<std::string, LocalSymbolInfo> local_symbols_;
-    std::unordered_map<std::string, int> call_param_bits_;
     std::unordered_map<std::string, std::string> call_param_slots_;
 
     std::unordered_set<std::string> declarations_;
@@ -1971,7 +1970,12 @@ class GenericLlvmEmitter {
     }
 
     std::optional<std::string> get_param_slot(const std::string& name, int bits, bool create) {
-        auto it = call_param_slots_.find(name);
+        // PTX call-sequence parameters are lexically scoped, and clang freely
+        // reuses names such as `param1` at different widths in one entry. Key
+        // by width as well as spelling so a later b64 sequence cannot load from
+        // the i32 alloca created by an earlier b32 sequence.
+        const std::string slot_key = name + ":" + std::to_string(bits);
+        auto it = call_param_slots_.find(slot_key);
         if (it != call_param_slots_.end()) {
             return it->second;
         }
@@ -1983,8 +1987,7 @@ class GenericLlvmEmitter {
         entry_allocas_ << "  " << slot << " = alloca " << llvm_int_type(bits) << ", align " << std::max(1, bits / 8) << "\n";
         entry_allocas_ << "  store " << llvm_int_type(bits) << " 0, " << llvm_int_type(bits) << "* " << slot
                        << ", align " << std::max(1, bits / 8) << "\n";
-        call_param_slots_[name] = slot;
-        call_param_bits_[name] = bits;
+        call_param_slots_[slot_key] = slot;
         return slot;
     }
 
@@ -3371,6 +3374,36 @@ class GenericLlvmEmitter {
             return store_ret_bits(hi, 32);
         }
 
+        if (callee == "__nv_mul24" || callee == "__nv_umul24") {
+            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
+            auto a = load_call_slot_value(os, arg_names[0], 32);
+            auto b = load_call_slot_value(os, arg_names[1], 32);
+            if (!a || !b) return fail(instr, callee + " args missing call slots");
+
+            std::string a24;
+            std::string b24;
+            if (callee == "__nv_mul24") {
+                // CUDA __mul24 multiplies the sign-extended low 24 bits of
+                // each operand and returns the low 32 bits of the product.
+                const std::string a_shifted = next_tmp("mul24_a_shifted");
+                const std::string b_shifted = next_tmp("mul24_b_shifted");
+                a24 = next_tmp("mul24_a");
+                b24 = next_tmp("mul24_b");
+                os << "  " << a_shifted << " = shl i32 " << *a << ", 8\n";
+                os << "  " << b_shifted << " = shl i32 " << *b << ", 8\n";
+                os << "  " << a24 << " = ashr i32 " << a_shifted << ", 8\n";
+                os << "  " << b24 << " = ashr i32 " << b_shifted << ", 8\n";
+            } else {
+                a24 = next_tmp("umul24_a");
+                b24 = next_tmp("umul24_b");
+                os << "  " << a24 << " = and i32 " << *a << ", 16777215\n";
+                os << "  " << b24 << " = and i32 " << *b << ", 16777215\n";
+            }
+            const std::string product = next_tmp("mul24");
+            os << "  " << product << " = mul i32 " << a24 << ", " << b24 << "\n";
+            return store_ret_bits(product, 32);
+        }
+
         if (callee == "__nv_popc") {
             if (arg_names.empty()) return fail(instr, "__nv_popc expects 1 arg");
             auto value = load_call_slot_value(os, arg_names[0], 32);
@@ -3469,24 +3502,26 @@ class GenericLlvmEmitter {
             return store_ret_bits(bits, 32);
         }
 
-        if (callee == "__nv_min") {
-            if (arg_names.size() < 2) return fail(instr, "__nv_min expects 2 args");
+        if (callee == "__nv_min" || callee == "__nv_umin") {
+            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
             auto a = load_call_slot_value(os, arg_names[0], 32);
             auto b = load_call_slot_value(os, arg_names[1], 32);
-            if (!a || !b) return fail(instr, "__nv_min args missing");
+            if (!a || !b) return fail(instr, callee + " args missing");
             const std::string cmp = next_tmp("min_cmp");
-            os << "  " << cmp << " = icmp slt i32 " << *a << ", " << *b << "\n";
+            os << "  " << cmp << " = icmp " << (callee == "__nv_umin" ? "ult" : "slt")
+               << " i32 " << *a << ", " << *b << "\n";
             const std::string sel = next_tmp("min_sel");
             os << "  " << sel << " = select i1 " << cmp << ", i32 " << *a << ", i32 " << *b << "\n";
             return store_ret_bits(sel, 32);
         }
-        if (callee == "__nv_max") {
-            if (arg_names.size() < 2) return fail(instr, "__nv_max expects 2 args");
+        if (callee == "__nv_max" || callee == "__nv_umax") {
+            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
             auto a = load_call_slot_value(os, arg_names[0], 32);
             auto b = load_call_slot_value(os, arg_names[1], 32);
-            if (!a || !b) return fail(instr, "__nv_max args missing");
+            if (!a || !b) return fail(instr, callee + " args missing");
             const std::string cmp = next_tmp("max_cmp");
-            os << "  " << cmp << " = icmp sgt i32 " << *a << ", " << *b << "\n";
+            os << "  " << cmp << " = icmp " << (callee == "__nv_umax" ? "ugt" : "sgt")
+               << " i32 " << *a << ", " << *b << "\n";
             const std::string sel = next_tmp("max_sel");
             os << "  " << sel << " = select i1 " << cmp << ", i32 " << *a << ", i32 " << *b << "\n";
             return store_ret_bits(sel, 32);
@@ -3871,10 +3906,19 @@ class GenericLlvmEmitter {
             : llvm_int_type(bits);
 
         const ParsedMemOperand mem = parse_memory_operand(instr.operands[1]);
-        if (!mem.ok || !is_register_name(mem.base)) {
+        if (!mem.ok) {
             return fail(instr, "atom: cannot parse memory operand");
         }
-        const std::string base_i64 = emit_load_reg_bits(os, mem.base, 64);
+        std::optional<std::string> resolved_base;
+        if (is_register_name(mem.base)) {
+            resolved_base = emit_load_reg_bits(os, mem.base, 64);
+        } else if (addr_space == 3) {
+            resolved_base = resolve_threadgroup_symbol_address(os, mem.base);
+        }
+        if (!resolved_base.has_value()) {
+            return fail(instr, "atom: cannot resolve memory base '" + mem.base + "'");
+        }
+        const std::string base_i64 = *resolved_base;
         const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
         const std::string ptr_i8 = next_tmp("atom_i2p");
         os << "  " << ptr_i8 << " = inttoptr i64 " << addr_i64

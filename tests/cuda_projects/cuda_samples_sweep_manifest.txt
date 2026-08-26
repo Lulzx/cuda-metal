@@ -19,6 +19,7 @@
 
 pass         0_Introduction/asyncAPI
 pass         0_Introduction/matrixMul
+pass         0_Introduction/mergeSort
 pass         0_Introduction/simpleAssert
 pass         0_Introduction/simpleAtomicIntrinsics
 pass         0_Introduction/simpleCallback
@@ -33,6 +34,8 @@ pass         0_Introduction/vectorAdd
 pass         2_Concepts_and_Techniques/histogram
 pass         2_Concepts_and_Techniques/inlinePTX
 pass         2_Concepts_and_Techniques/scan
+pass         2_Concepts_and_Techniques/scalarProd
+pass         2_Concepts_and_Techniques/sortingNetworks
 pass         3_CUDA_Features/StreamPriorities
 pass         4_CUDA_Libraries/batchCUBLAS
 pass         4_CUDA_Libraries/conjugateGradient
@@ -47,12 +50,9 @@ waive        2_Concepts_and_Techniques/reductionMultiBlockCG
 waive        4_CUDA_Libraries/conjugateGradientMultiBlockCG
 
 no-lowering  0_Introduction/clock
-no-lowering  0_Introduction/mergeSort
 no-lowering  0_Introduction/simpleHyperQ
 no-lowering  2_Concepts_and_Techniques/convolutionSeparable
 no-lowering  2_Concepts_and_Techniques/eigenvalues
-no-lowering  2_Concepts_and_Techniques/scalarProd
-no-lowering  2_Concepts_and_Techniques/sortingNetworks
 no-lowering  2_Concepts_and_Techniques/threadFenceReduction
 no-lowering  6_Performance/LargeKernelParameter
 

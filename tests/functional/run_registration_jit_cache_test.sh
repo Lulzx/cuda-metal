@@ -104,10 +104,11 @@ fi
 
 run_with_build() {
     local build_dir="$1"
+    shift
     DYLD_LIBRARY_PATH="$build_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
     CUMETAL_CACHE_DIR="$JIT_CACHE_DIR" \
     CUMETAL_DEBUG_REGISTRATION=1 \
-    "$TEST_BINARY" "$PTX_PATH"
+    "$TEST_BINARY" "$PTX_PATH" "$@"
 }
 
 first_cache_event() {
@@ -135,8 +136,13 @@ assert_first_event() {
 }
 
 # Build A: cold miss, then cross-process reuse.
-build_a_first_stderr="$(run_with_build "$BUILD_A_DIR" 2>&1 >/dev/null)"
+build_a_first_stderr="$(run_with_build "$BUILD_A_DIR" --concurrent-first-use 2>&1 >/dev/null)"
 assert_first_event "$build_a_first_stderr" "miss" "build A first run"
+if [ "$(grep -c "jit cache miss:" <<<"$build_a_first_stderr")" -ne 1 ]; then
+    echo "FAIL: concurrent first use performed more than one cache-miss compilation"
+    echo "$build_a_first_stderr"
+    exit 1
+fi
 if ! grep -q "args=lazy" <<<"$build_a_first_stderr"; then
     echo "FAIL: fatbin registration eagerly built the PTX argument index"
     echo "stderr was:"

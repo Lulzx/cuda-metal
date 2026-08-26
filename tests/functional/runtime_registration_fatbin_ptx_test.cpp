@@ -10,7 +10,9 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <thread>
 #include <vector>
+#include <atomic>
 
 extern "C" {
 void** __cudaRegisterFatBinary(const void* fat_cubin);
@@ -70,6 +72,8 @@ int main(int argc, char** argv) {
     }
 
     const std::string ptx_path = argv[1];
+    const bool concurrent_first_use =
+        argc > 2 && std::string(argv[2]) == "--concurrent-first-use";
     if (!std::filesystem::exists(ptx_path)) {
         std::fprintf(stderr, "SKIP: PTX not found at %s\n", ptx_path.c_str());
         return 77;
@@ -175,12 +179,44 @@ int main(int argc, char** argv) {
                         1,
                         1);
 
-    if (cudaLaunchKernel(reinterpret_cast<const void*>(&vector_add_host_stub),
-                         grid_dim,
-                         block_dim,
-                         args,
-                         0,
-                         nullptr) != cudaSuccess) {
+    if (concurrent_first_use) {
+        constexpr int kLaunchThreads = 8;
+        std::atomic<int> ready{0};
+        std::atomic<bool> start{false};
+        std::atomic<int> launch_failures{0};
+        std::vector<std::thread> threads;
+        threads.reserve(kLaunchThreads);
+        for (int i = 0; i < kLaunchThreads; ++i) {
+            threads.emplace_back([&]() {
+                ready.fetch_add(1, std::memory_order_release);
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                if (cudaLaunchKernel(reinterpret_cast<const void*>(&vector_add_host_stub),
+                                     grid_dim,
+                                     block_dim,
+                                     args,
+                                     0,
+                                     nullptr) != cudaSuccess) {
+                    launch_failures.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+        }
+        while (ready.load(std::memory_order_acquire) != kLaunchThreads) {
+            std::this_thread::yield();
+        }
+        start.store(true, std::memory_order_release);
+        for (auto& thread : threads) thread.join();
+        if (launch_failures.load(std::memory_order_relaxed) != 0) {
+            std::fprintf(stderr, "FAIL: concurrent first-use registration launch failed\n");
+            return 1;
+        }
+    } else if (cudaLaunchKernel(reinterpret_cast<const void*>(&vector_add_host_stub),
+                                grid_dim,
+                                block_dim,
+                                args,
+                                0,
+                                nullptr) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaLaunchKernel through fatbin PTX registration failed\n");
         return 1;
     }

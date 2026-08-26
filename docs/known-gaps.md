@@ -426,7 +426,7 @@ as gaps have been closed.
 83 gated headless samples from `NVIDIA/cuda-samples` (`cpp/0_Introduction`,
 `2_Concepts_and_Techniques`, `3_CUDA_Features`, `4_CUDA_Libraries`,
 `6_Performance`) are compiled and run against `libcumetal`. Result:
-**25 pass, 2 waive cleanly, 56 do not build or run**.
+**28 pass, 2 waive cleanly, 53 do not build or run**.
 
 This runs as `conformance_cuda_samples_sweep`. The samples themselves are not
 vendored -- the test skips (77) unless a `cuda-samples` checkout is present at
@@ -514,10 +514,23 @@ that error even when no command buffer was enqueued, and the error remains visib
 `cudaGetLastError()`. `CUMETAL_DEBUG_LAUNCH=1` prints the detailed launch reason, and
 `CUMETAL_DEBUG_DUMP_IR_DIR=<dir>` dumps the emitted LLVM IR.
 
-- `clock`, `mergeSort`, `simpleHyperQ`, `scalarProd`, `eigenvalues`,
-  `sortingNetworks`, `convolutionSeparable`, `threadFenceReduction`,
+- `clock`, `simpleHyperQ`, `eigenvalues`, `convolutionSeparable`, `threadFenceReduction`,
   `LargeKernelParameter` hit "registered kernel missing metallib" -- the lowering
   path declines these kernels outright.
+
+Three samples formerly appeared in that list because of missing CUDA libdevice
+integer helpers. `scalarProd` needed signed/unsigned 24-bit multiply, which now
+masks or sign-extends the low 24 bits before returning the low 32-bit product.
+`mergeSort` needed unsigned min/max. Both it and `sortingNetworks` pass their
+unmodified key/value validation; merge sort also passes its stability check.
+
+The intermittent `simpleCallback` failure was a cold-cache race, not singleton
+teardown. Eight host threads could all observe the same registration-JIT miss and
+overwrite one `.metal`/`.metallib` cache path concurrently; a launch that consumed
+a partial artifact silently left its workload unchanged. Cache lookup, compilation,
+and publication are now serialized. A functional test starts eight simultaneous
+first-use launches and requires exactly one miss, and the upstream sample passed
+100/100 runs with a distinct empty cache for every run.
 
 The last three of those used to SIGBUS instead, which turned out to be a
 memory-safety bug in the runtime rather than anything to do with their kernels.
