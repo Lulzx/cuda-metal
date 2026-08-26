@@ -31,8 +31,10 @@ as gaps have been closed.
   Kernels that sidestep sampling by dereferencing a linear/pitch2D resource's
   `devPtr` directly need `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`; without it the
   loads read as zeros. `cudaCreateTextureObject` warns once in that case.
-- CUDA graph kernel/memcpy/memset/host-node capture and replay exist, but graph
-  memory nodes, executable updates, and the remaining node types are incomplete.
+- CUDA graph kernel/memcpy/memset/host-node capture and replay, cloning, root
+  introspection, kernel-node parameter updates, and topology-compatible
+  executable updates exist. Graph memory nodes, cross-stream event-capture
+  topology, and the remaining advanced node types are incomplete.
 - MLIR GPU-dialect kernel fusion / advanced scheduling remains an optional
   architecture direction, not a compatibility claim.
 

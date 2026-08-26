@@ -516,7 +516,7 @@ eliminates the need for DMA transfers in the classical sense.
 | CUDA API | Implementation | Notes |
 |----------|---------------|-------|
 | `cudaMalloc(ptr, size)` | `[device newBufferWithLength:size options:MTLStorageModeShared]`; return `buffer.contents` | Pointer returned is CPU-accessible |
-| `cudaMallocManaged(ptr, size, flags)` | Same as `cudaMalloc` — all memory is already managed | UMA makes this a no-op distinction |
+| `cudaMallocManaged(ptr, size, flags)` | Same allocation path as `cudaMalloc` for default / `cudaMemAttachGlobal` | UMA removes migration, but `cudaMemAttachHost` / `cudaMemAttachSingle` remain unsupported until their attachment semantics are modeled |
 | `cudaMallocHost(ptr, size)` | `[device newBufferWithLength:size options:MTLStorageModeShared]`; return `buffer.contents` | Must be `MTLBuffer` — pointer needs to be trackable for kernel argument binding |
 | `cudaFree(ptr)` | Look up `MTLBuffer` by `contents` pointer in allocation table; release reference | ARC handles dealloc after release |
 | `cudaMemcpy(dst, src, size, kind)` | `memcpy(dst, src, size)` for all directions | UMA: H↔D, D↔H, D↔D all share physical memory |
@@ -697,6 +697,10 @@ populated from Metal device queries:
 | `unifiedAddressing` | `true` (always, on Apple Silicon) |
 | `managedMemory` | `true` |
 | `concurrentManagedAccess` | `true` |
+| `canMapHostMemory` | `true` for tracked `cudaHostAlloc` / registration-backed buffers |
+| `pageableMemoryAccess` | `false`; arbitrary `malloc` pointers are not tracked `MTLBuffer` arguments |
+| `pageableMemoryAccessUsesHostPageTables` | `false` for the same binding reason |
+| `persistingL2CacheMaxSize` / `accessPolicyMaxWindowSize` | `0`; public Metal exposes no CUDA persisting-L2 policy |
 
 **GPU core counts** (from Apple published specs, updated as new chips release):
 

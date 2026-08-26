@@ -268,6 +268,8 @@ Durable platform/legal boundaries:
 - Current public Metal compilation rejects native AIR `double`. FP64 register
   emulation provides about a 44-bit mantissa, and unsupported binary64
   memory/conversion boundaries fail compilation.
+- Public Metal exposes no CUDA persisting-L2/access-policy-window control;
+  CuMetal reports those capabilities as zero and rejects nontrivial requests.
 
 Engineering gaps, not fundamental impossibilities:
 
