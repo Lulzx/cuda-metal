@@ -507,11 +507,12 @@ them were fixed. Both are worth knowing about, because both produced zeros with
 `functional_cuda_projects_device_sync_primitives` covers both, verified failing against
 each unfixed version.
 
-Worth noting for anyone debugging a kernel that "runs" but returns zeros: a failed
-launch is visible to `cudaGetLastError()` right after the launch, but
-`cudaDeviceSynchronize()` currently returns `cudaSuccess` and clears it. Both defects
-above were invisible for exactly that reason. `CUMETAL_DEBUG_LAUNCH=1` prints the real
-reason, and `CUMETAL_DEBUG_DUMP_IR_DIR=<dir>` dumps the emitted LLVM IR.
+For anyone debugging a kernel that "runs" but returns zeros, failed Metal pipeline
+creation is retained as a pending launch error: `cudaDeviceSynchronize()` now returns
+that error even when no command buffer was enqueued, and the error remains visible to
+`cudaGetLastError()`. `CUMETAL_DEBUG_LAUNCH=1` prints the detailed launch reason, and
+`CUMETAL_DEBUG_DUMP_IR_DIR=<dir>` dumps the emitted LLVM IR.
+
 - `clock`, `mergeSort`, `simpleHyperQ`, `scalarProd`, `eigenvalues`,
   `sortingNetworks`, `convolutionSeparable`, `threadFenceReduction`,
   `LargeKernelParameter` hit "registered kernel missing metallib" -- the lowering

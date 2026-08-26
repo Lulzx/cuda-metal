@@ -4,7 +4,12 @@
 #include <cstring>
 #include <thread>
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::fprintf(stderr, "usage: %s <path-to-metallib>\n", argv[0]);
+        return 64;
+    }
+
     if (cudaInit(0) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaInit failed\n");
         return 1;
@@ -117,6 +122,37 @@ int main() {
         std::strcmp(cudaGetErrorString(cudaErrorPeerAccessNotEnabled),
                     "cudaErrorPeerAccessNotEnabled") != 0) {
         std::fprintf(stderr, "FAIL: peer-access error name/string mismatch\n");
+        return 1;
+    }
+
+    // Use a real metallib but request a function that cannot exist.  This
+    // reaches Metal pipeline lookup and models a generated <<<>>> host stub,
+    // whose cudaLaunchKernel return value is not available to the caller.
+    const cumetalKernel_t missing_kernel{
+        .metallib_path = argv[1],
+        .kernel_name = "__cumetal_missing_kernel_for_error_test__",
+        .arg_count = 0,
+        .arg_info = nullptr,
+    };
+    (void)cudaLaunchKernel(&missing_kernel, dim3(1), dim3(1), nullptr, 0, nullptr);
+    if (cudaGetLastError() != cudaErrorInvalidValue ||
+        cudaGetLastError() != cudaSuccess) {
+        std::fprintf(stderr,
+                     "FAIL: failed launch should set a get-and-clearable immediate error\n");
+        return 1;
+    }
+    if (cudaDeviceSynchronize() != cudaErrorInvalidValue) {
+        std::fprintf(stderr,
+                     "FAIL: cudaDeviceSynchronize should propagate a failed launch\n");
+        return 1;
+    }
+    if (cudaGetLastError() != cudaErrorInvalidValue ||
+        cudaGetLastError() != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: synchronized launch error should remain get-and-clearable\n");
+        return 1;
+    }
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaDeviceSynchronize should consume the launch error once\n");
         return 1;
     }
 

@@ -2176,8 +2176,14 @@ add_test(
 
 add_test(
     NAME functional_runtime_error_api
-    COMMAND cumetal_runtime_error_api_test
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+            ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
+            $<TARGET_FILE:cumetal_runtime_error_api_test>
+            ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
 )
+
+set_tests_properties(functional_runtime_error_api PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
     NAME functional_runtime_profiler_api

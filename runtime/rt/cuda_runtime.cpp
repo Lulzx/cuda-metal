@@ -199,6 +199,12 @@ RuntimeState& runtime_state() {
 }
 
 thread_local cudaError_t tls_last_error = cudaSuccess;
+// A generated CUDA kernel launch has no return value at the call site: Clang's
+// host stub calls cudaLaunchKernel and leaves callers to observe failures at a
+// later error or synchronization API.  Pipeline creation can fail before Metal
+// has a command buffer to enqueue, so retain that failure separately from the
+// ordinary last-error slot until cudaDeviceSynchronize consumes it.
+thread_local cudaError_t tls_pending_launch_error = cudaSuccess;
 thread_local std::shared_ptr<cumetal::metal_backend::Stream> tls_per_thread_stream;
 
 // Per-stream graph capture state.
@@ -249,6 +255,18 @@ void clear_pending_launch_state() {
 
 void set_last_error(cudaError_t error) {
     tls_last_error = error;
+}
+
+void record_pending_launch_error(cudaError_t error) {
+    if (error != cudaSuccess && tls_pending_launch_error == cudaSuccess) {
+        tls_pending_launch_error = error;
+    }
+}
+
+cudaError_t take_pending_launch_error() {
+    const cudaError_t error = tls_pending_launch_error;
+    tls_pending_launch_error = cudaSuccess;
+    return error;
 }
 
 // ── Device printf drain (spec §5.3) ─────────────────────────────────────────
@@ -2965,6 +2983,7 @@ cudaError_t cudaDeviceReset(void) {
     cumetal::native_registration::clear();
     cumetal::registration::clear();
     clear_pending_launch_state();
+    tls_pending_launch_error = cudaSuccess;
     state.current_device = 0;
     state.device_flags = cudaDeviceScheduleAuto;
     return fail(cudaSuccess);
@@ -2978,7 +2997,11 @@ cudaError_t cudaDeviceSynchronize(void) {
 
     std::string error;
     const cudaError_t status = cumetal::metal_backend::synchronize(&error);
-    return fail(status);
+    const cudaError_t pending_launch_error = take_pending_launch_error();
+    if (status != cudaSuccess) {
+        return fail(status);
+    }
+    return fail(pending_launch_error);
 }
 
 cudaError_t cudaStreamCreate(cudaStream_t* stream) {
@@ -4316,11 +4339,13 @@ cudaError_t cudaLaunchKernel(const void* func,
                     ? cumetal::metal_backend::stream_synchronize(backend_stream, &sync_error)
                     : cumetal::metal_backend::synchronize(&sync_error);
             if (sync_status != cudaSuccess) {
+                record_pending_launch_error(sync_status);
                 return launch_fail(sync_status, "post-launch debug sync");
             }
         }
     }
 
+    record_pending_launch_error(status);
     return launch_fail(status, "metal_backend::launch_kernel");
 }
 
