@@ -1049,8 +1049,11 @@ runtime, the following become thin dispatch layers:
 | cuRAND | `<random>` CPU + Metal compute | Low |
 | cuDNN (conv, attention) | `MPSGraph` | High — semantic gaps |
 
-Phase 4.5 implements cuBLAS and cuRAND shims (low complexity, high impact). cuDNN is
-a separate project.
+Phase 4.5 began with cuBLAS and cuRAND shims (low complexity, high impact).
+The repository now also carries explicitly bounded cuFFT, cuSPARSE, cuSOLVER,
+and cuDNN compatibility subsets. These are extensions of the same shim model,
+not claims of full NVIDIA library parity; implemented behavior and remaining
+gaps are recorded in `docs/status.md` and `docs/known-gaps.md`.
 
 ### Phase 5 — Performance (ongoing)
 

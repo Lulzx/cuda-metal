@@ -20,8 +20,10 @@ offload are not complete.
 Earlier phase labels below describe implemented project milestones, not proof
 that arbitrary CUDA programs are supported. Phase 5 benchmark infrastructure is
 implemented for the covered kernels.
-Intentional non-goals per §2.2 (CUDA Graphs, dynamic parallelism, texture objects,
-multi-GPU, graphics interop) remain deferred to v2.
+Spec §2.2 separates durable limits from deferred engineering work. Multi-GPU
+and graphics interop remain out of scope; dynamic parallelism remains deferred.
+CUDA Graphs and texture/surface objects have tested partial implementations,
+with their remaining semantic gaps tracked in [known-gaps.md](known-gaps.md).
 
 v1 toolchain-completeness work (2026-07-26):
 
@@ -661,7 +663,10 @@ Device intrinsics added to `cuda_runtime.h`:
 
 `cuda_fp16.h` expanded:
 - Comparison: `__hge`, `__hle`
-- Math: `__hfma`, `__hneg`, `__habs`, `__hmax`, `__hmin`
+- Math: `__hfma`, `__hfma2`, `__hneg`, `__habs`, `__hmax`, `__hmin`
+- Packed construction: scalar-duplicating `__float2half2_rn` and the two-lane
+  `__half2` constructor. Host behavior is unit-tested; the upstream
+  `fp16ScalarProduct` source is compile-verified but not yet claimed as a GPU pass.
 - Conversions: `__half2int_rn`, `__half2uint_rn`, `__half2short_rn`, `__half2ll_rn`, `__int2half_rn`, `__uint2half_rn`, `__short2half_rn`, `__ll2half_rn`
 
 Driver API additions:

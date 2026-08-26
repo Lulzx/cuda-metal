@@ -30,6 +30,21 @@ int main() {
     const __half a = __float2half(3.0f);
     const __half b = __float2half(2.0f);
 
+    const __half2 duplicated = __float2half2_rn(-1.5f);
+    if (std::fabs(__low2float(duplicated) + 1.5f) > 0.01f ||
+        std::fabs(__high2float(duplicated) + 1.5f) > 0.01f) {
+        std::fprintf(stderr, "FAIL: __float2half2_rn did not duplicate its input\n");
+        return 1;
+    }
+    const __half2 fma2 = __hfma2(__half2(2.0f, 3.0f),
+                                 __half2(4.0f, 5.0f),
+                                 __half2(1.0f, 2.0f));
+    if (std::fabs(__low2float(fma2) - 9.0f) > 0.01f ||
+        std::fabs(__high2float(fma2) - 17.0f) > 0.01f) {
+        std::fprintf(stderr, "FAIL: __hfma2 produced the wrong lane values\n");
+        return 1;
+    }
+
     const float sum = __half2float(a + b);
     if (std::fabs(sum - 5.0f) > 0.01f) {
         std::fprintf(stderr, "FAIL: __half add: got %g, expected 5.0\n", static_cast<double>(sum));

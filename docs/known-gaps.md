@@ -506,8 +506,7 @@ blocks:
   `XPC_ERROR_CONNECTION_INTERRUPTED`, so it is likewise `run-fail`, not claimed as
   graph conformance.
 - **Dynamic parallelism (CDP)** -- device-side stream creation and launch. 3 samples.
-- **Scattered API surface** -- `__float2half2_rn`, `cublas*Batched`,
-  `CUBLAS_POINTER_MODE_DEVICE`,
+- **Scattered API surface** -- `cublas*Batched`, `CUBLAS_POINTER_MODE_DEVICE`,
   `cudaDevAttrMemoryPoolsSupported`. The 32-bit signed/unsigned
   `atomic{Add,Exch,Min,Max,CAS,And,Or,Xor,Inc,Dec}_system` surface now lowers
   with system scope and passes a focused GPU/host managed-memory test. NVIDIA's
@@ -516,6 +515,12 @@ blocks:
   not promoted yet. Arbitrary pageable `malloc` pointers remain unsupported as
   kernel arguments; the runtime reports both pageable-memory attributes as 0
   instead of steering applications onto that invalid path.
+
+The scalar-to-packed-half `__float2half2_rn`, packed `__half2` constructor, and
+`__hfma2` surface are implemented. Their host semantics pass the focused FP16
+unit test, and NVIDIA's unmodified `fp16ScalarProduct` translation unit compiles.
+The sample has not been promoted in the sweep manifest because no resource-bounded
+GPU execution has yet established its numerical outcome.
 
 `cudaDeviceProp::cooperativeLaunch` is reported as **0** on purpose. Grid-wide
 `grid.sync()` across more than one threadgroup is a no-op under Metal, so

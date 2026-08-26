@@ -68,6 +68,10 @@ struct __half {
 struct __attribute__((aligned(4))) __half2 {
     __half x;
     __half y;
+
+    __half2() = default;
+    __half2(__half vx, __half vy) : x(vx), y(vy) {}
+    __half2(float vx, float vy) : x(__half(vx)), y(__half(vy)) {}
 };
 typedef __half half;
 typedef __half2 half2;
@@ -77,6 +81,10 @@ static_assert(sizeof(__half2) == 4, "CuMetal __half2 must be 32-bit");
 
 inline __half __float2half(float f) { return __half(f); }
 inline __half __float2half_rn(float f) { return __half(f); }
+inline __half2 __float2half2_rn(float f) {
+    const __half h = __float2half_rn(f);
+    return {h, h};
+}
 inline float __half2float(const __half& h) { return static_cast<float>(h); }
 inline __half2 make_half2(__half x, __half y) { return {x, y}; }
 inline __half2 make_half2(float x, float y) { return {__float2half_rn(x), __float2half_rn(y)}; }
@@ -96,6 +104,12 @@ inline __half2 __hsub2(const __half2& a, const __half2& b) {
 inline __half2 __hmul2(const __half2& a, const __half2& b) {
     return {__half(static_cast<float>(a.x) * static_cast<float>(b.x)),
             __half(static_cast<float>(a.y) * static_cast<float>(b.y))};
+}
+inline __half2 __hfma2(const __half2& a, const __half2& b, const __half2& c) {
+    return {__half(static_cast<float>(a.x) * static_cast<float>(b.x) +
+                   static_cast<float>(c.x)),
+            __half(static_cast<float>(a.y) * static_cast<float>(b.y) +
+                   static_cast<float>(c.y))};
 }
 inline __half2 __hmax2(const __half2& a, const __half2& b) {
     return {
@@ -187,6 +201,10 @@ typedef _Float16 __half;
 typedef struct __attribute__((aligned(4))) __half2 {
     __half x;
     __half y;
+#ifdef __cplusplus
+    __host__ __device__ __half2() = default;
+    __host__ __device__ __half2(__half vx, __half vy) : x(vx), y(vy) {}
+#endif
 } __half2;
 typedef __half half;
 typedef __half2 half2;
@@ -196,6 +214,10 @@ static __device__ __forceinline__ __half __float2half(float f) {
 }
 static __device__ __forceinline__ __half __float2half_rn(float f) {
     return static_cast<__half>(f);
+}
+static __device__ __forceinline__ __half2 __float2half2_rn(float f) {
+    const __half h = __float2half_rn(f);
+    return {h, h};
 }
 static __device__ __forceinline__ float __half2float(__half h) {
     return static_cast<float>(h);
@@ -217,6 +239,16 @@ static __device__ __forceinline__ __half2 __hsub2(__half2 a, __half2 b) {
 }
 static __device__ __forceinline__ __half2 __hmul2(__half2 a, __half2 b) {
     return {a.x * b.x, a.y * b.y};
+}
+static __device__ __forceinline__ __half2 __hfma2(__half2 a, __half2 b, __half2 c) {
+    return {
+        static_cast<__half>(__builtin_fmaf(static_cast<float>(a.x),
+                                           static_cast<float>(b.x),
+                                           static_cast<float>(c.x))),
+        static_cast<__half>(__builtin_fmaf(static_cast<float>(a.y),
+                                           static_cast<float>(b.y),
+                                           static_cast<float>(c.y)))
+    };
 }
 static __device__ __forceinline__ __half2 __hmax2(__half2 a, __half2 b) {
     return {a.x > b.x ? a.x : b.x, a.y > b.y ? a.y : b.y};
