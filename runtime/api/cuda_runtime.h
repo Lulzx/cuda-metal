@@ -374,6 +374,7 @@ typedef enum cudaDeviceAttr {
     cudaDevAttrPciDomainId = 50,
     cudaDevAttrCooperativeLaunch = 95,
     cudaDevAttrSharedMemPerBlockOptin = 97,
+    cudaDevAttrMemoryPoolsSupported = 115,
 } cudaDeviceAttr;
 
 typedef enum cudaComputeMode {

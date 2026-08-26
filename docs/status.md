@@ -609,6 +609,11 @@ Supported runtime API subset:
 - `cudaMalloc`, `cudaMallocManaged`, `cudaMallocHost`, `cudaFree`
 - `cudaMallocAsync`, `cudaMallocFromPoolAsync`, `cudaFreeAsync` (free lifetime is deferred in
   stream order; allocation does not drain the stream)
+- `cudaMemPoolCreate`, `cudaMemPoolDestroy`, `cudaDeviceGetDefaultMemPool`,
+  `cudaDeviceSetMemPool`, and pool attribute queries/setters for the conservative
+  shared-memory pool subset. `cudaDevAttrMemoryPoolsSupported` reports 1; focused
+  attribute and async-lifetime tests pass. Release-threshold reuse remains a
+  performance hint, not allocator-cache parity.
 - `cudaHostAlloc`, `cudaFreeHost`, `cudaHostGetDevicePointer`, `cudaHostGetFlags`
 - `cudaMemGetInfo`
 - `cudaMemcpy`, `cudaMemcpyAsync`
@@ -706,6 +711,7 @@ Driver API additions:
 - `cudaDevAttrTccDriver` → 0, `cudaDevAttrKernelExecTimeout` → 0, `cudaDevAttrAsyncEngineCount` → 0
 - `cudaDevAttrPageableMemoryAccess` → 0, `cudaDevAttrPageableMemoryAccessUsesHostPageTables` → 0
 - `cudaDevAttrSharedMemPerBlockOptin` → sharedMemPerBlock
+- `cudaDevAttrMemoryPoolsSupported` → 1 for the tested stream-ordered/default-pool subset
 
 `cooperative_groups::thread_block_tile<N>` extended with:
 - `shfl(val, src_rank)`, `shfl_down(val, delta)`, `shfl_xor(val, mask)`

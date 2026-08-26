@@ -702,6 +702,12 @@ populated from Metal device queries:
 | `pageableMemoryAccessUsesHostPageTables` | `false` for the same binding reason |
 | `persistingL2CacheMaxSize` / `accessPolicyMaxWindowSize` | `0`; public Metal exposes no CUDA persisting-L2 policy |
 
+`cudaDevAttrMemoryPoolsSupported` reports true for CuMetal's conservative
+stream-ordered shared-memory pool subset: allocation returns a tracked buffer,
+free is deferred behind earlier work in its stream, and default/custom pool
+handles are available. Pool release thresholds are accepted as performance
+hints; they do not promise CUDA allocator-cache reuse behavior.
+
 **GPU core counts** (from Apple published specs, updated as new chips release):
 
 | Chip | GPU Cores | Reported `multiProcessorCount` |

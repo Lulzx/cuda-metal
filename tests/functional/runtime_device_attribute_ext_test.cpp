@@ -80,6 +80,14 @@ int main() {
         return 1;
     }
 
+    // Stream-ordered allocation/free and the default memory-pool surface are implemented.
+    if (cudaDeviceGetAttribute(&value, cudaDevAttrMemoryPoolsSupported, 0) !=
+            cudaSuccess ||
+        value != 1) {
+        std::fprintf(stderr, "FAIL: cudaDevAttrMemoryPoolsSupported should be 1, got %d\n", value);
+        return 1;
+    }
+
     // PCI Bus / Device / Domain ID: 0 on Apple Silicon (no discrete PCI GPU).
     if (cudaDeviceGetAttribute(&value, cudaDevAttrPciBusId, 0) != cudaSuccess || value != 0) {
         std::fprintf(stderr, "FAIL: cudaDevAttrPciBusId should be 0, got %d\n", value);

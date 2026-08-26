@@ -508,8 +508,12 @@ blocks:
   `XPC_ERROR_CONNECTION_INTERRUPTED`, so it is likewise `run-fail`, not claimed as
   graph conformance.
 - **Dynamic parallelism (CDP)** -- device-side stream creation and launch. 3 samples.
-- **Scattered API surface** -- `cublas*Batched`, `CUBLAS_POINTER_MODE_DEVICE`,
-  `cudaDevAttrMemoryPoolsSupported`. The 32-bit signed/unsigned
+- **Scattered API surface** -- batched LU factorization
+  (`cublasSgetrfBatched` / `cublasDgetrfBatched`) and
+  `CUBLAS_POINTER_MODE_DEVICE`.
+  Batched GEMM/TRSM and device-resident
+  pointer tables are already covered; the broad former `cublas*Batched` label
+  was stale. The 32-bit signed/unsigned
   `atomic{Add,Exch,Min,Max,CAS,And,Or,Xor,Inc,Dec}_system` surface now lowers
   with system scope and passes a focused GPU/host managed-memory test. NVIDIA's
   unmodified `systemWideAtomics` source now compiles, but its large stress run
@@ -523,6 +527,13 @@ The scalar-to-packed-half `__float2half2_rn`, packed `__half2` constructor, and
 unit test, and NVIDIA's unmodified `fp16ScalarProduct` translation unit compiles.
 The sample has not been promoted in the sweep manifest because no resource-bounded
 GPU execution has yet established its numerical outcome.
+
+`cudaDevAttrMemoryPoolsSupported` is now present and reports the existing
+stream-ordered allocation/default-pool subset. NVIDIA's unmodified
+`streamOrderedAllocation` translation unit compiles. Its million-element,
+21-dispatch run was deliberately not used as evidence in this resource-bounded
+pass, so the sample manifest is not promoted yet; release-threshold caching also
+remains a performance hint rather than allocator-reuse parity.
 
 `cudaDeviceProp::cooperativeLaunch` is reported as **0** on purpose. Grid-wide
 `grid.sync()` across more than one threadgroup is a no-op under Metal, so

@@ -2190,6 +2190,7 @@ cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device) {
         case cudaDevAttrCanMapHostMemory:
         case cudaDevAttrIntegrated:
         case cudaDevAttrConcurrentKernels:
+        case cudaDevAttrMemoryPoolsSupported:
             *value = 1;
             break;
         case cudaDevAttrPageableMemoryAccess:
