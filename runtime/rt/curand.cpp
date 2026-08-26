@@ -17,6 +17,7 @@ struct curandGenerator_st {
     curandRngType_t rng_type = CURAND_RNG_PSEUDO_DEFAULT;
     curandOrdering_t ordering = CURAND_ORDERING_PSEUDO_DEFAULT;
     unsigned int quasi_dimensions = 1;
+    bool host_generator = false;
     std::mutex mutex;
 };
 
@@ -25,32 +26,12 @@ extern "C" int cumetalRuntimeIsDevicePointer(const void* ptr);
 namespace {
 constexpr int kCurandCompatVersion = 12000;
 
-template <typename Operation>
-curandStatus_t enqueue_generation(curandGenerator_t generator, Operation operation) {
-    cudaStream_t stream = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(generator->mutex);
-        stream = generator->stream;
-    }
-    return cumetal::rt::enqueue_host_operation(stream, std::move(operation)) == cudaSuccess
-               ? CURAND_STATUS_SUCCESS
-               : CURAND_STATUS_PREEXISTING_FAILURE;
-}
-}  // namespace
-
-extern "C" {
-
-// Host generator — on Apple Silicon UMA, host and device share memory; identical to device generator.
-curandStatus_t curandCreateGeneratorHost(curandGenerator_t* generator, curandRngType_t rng_type) {
-    return curandCreateGenerator(generator, rng_type);
-}
-
-curandStatus_t curandCreateGenerator(curandGenerator_t* generator, curandRngType_t rng_type) {
+curandStatus_t create_generator(curandGenerator_t* generator,
+                                curandRngType_t rng_type,
+                                bool host_generator) {
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
-    // Accept all pseudo and quasi types; on Apple Silicon UMA all generators
-    // use the same host-side PRNG since there is no distinct device memory.
     const bool pseudo = (rng_type == CURAND_RNG_PSEUDO_DEFAULT   ||
                          rng_type == CURAND_RNG_PSEUDO_XORWOW    ||
                          rng_type == CURAND_RNG_PSEUDO_MRG32K3A  ||
@@ -71,8 +52,46 @@ curandStatus_t curandCreateGenerator(curandGenerator_t* generator, curandRngType
         return CURAND_STATUS_ALLOCATION_FAILED;
     }
     created->rng_type = rng_type;
+    created->host_generator = host_generator;
     *generator = created;
     return CURAND_STATUS_SUCCESS;
+}
+
+template <typename Operation>
+curandStatus_t enqueue_generation(curandGenerator_t generator, Operation operation) {
+    cudaStream_t stream = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(generator->mutex);
+        stream = generator->stream;
+    }
+    return cumetal::rt::enqueue_host_operation(stream, std::move(operation)) == cudaSuccess
+               ? CURAND_STATUS_SUCCESS
+               : CURAND_STATUS_PREEXISTING_FAILURE;
+}
+
+template <typename Output, typename Operation>
+curandStatus_t dispatch_generation(curandGenerator_t generator,
+                                   Output* output_ptr,
+                                   Operation operation) {
+    if (!generator->host_generator && cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
+        return CURAND_STATUS_TYPE_ERROR;
+    }
+    if (generator->host_generator) {
+        operation();
+        return CURAND_STATUS_SUCCESS;
+    }
+    return enqueue_generation(generator, std::move(operation));
+}
+}  // namespace
+
+extern "C" {
+
+curandStatus_t curandCreateGeneratorHost(curandGenerator_t* generator, curandRngType_t rng_type) {
+    return create_generator(generator, rng_type, true);
+}
+
+curandStatus_t curandCreateGenerator(curandGenerator_t* generator, curandRngType_t rng_type) {
+    return create_generator(generator, rng_type, false);
 }
 
 curandStatus_t curandDestroyGenerator(curandGenerator_t generator) {
@@ -85,7 +104,7 @@ curandStatus_t curandDestroyGenerator(curandGenerator_t generator) {
         std::lock_guard<std::mutex> lock(generator->mutex);
         stream = generator->stream;
     }
-    if (cudaStreamSynchronize(stream) != cudaSuccess) {
+    if (!generator->host_generator && cudaStreamSynchronize(stream) != cudaSuccess) {
         return CURAND_STATUS_PREEXISTING_FAILURE;
     }
     delete generator;
@@ -110,7 +129,7 @@ curandStatus_t curandSetStream(curandGenerator_t generator, cudaStream_t stream)
         std::lock_guard<std::mutex> lock(generator->mutex);
         old_stream = generator->stream;
     }
-    if (cudaStreamSynchronize(old_stream) != cudaSuccess) {
+    if (!generator->host_generator && cudaStreamSynchronize(old_stream) != cudaSuccess) {
         return CURAND_STATUS_PREEXISTING_FAILURE;
     }
     std::lock_guard<std::mutex> lock(generator->mutex);
@@ -139,7 +158,7 @@ curandStatus_t curandSetPseudoRandomGeneratorSeed(curandGenerator_t generator,
         std::lock_guard<std::mutex> lock(generator->mutex);
         stream = generator->stream;
     }
-    if (cudaStreamSynchronize(stream) != cudaSuccess) {
+    if (!generator->host_generator && cudaStreamSynchronize(stream) != cudaSuccess) {
         return CURAND_STATUS_PREEXISTING_FAILURE;
     }
     std::lock_guard<std::mutex> lock(generator->mutex);
@@ -159,7 +178,7 @@ curandStatus_t curandSetGeneratorOffset(curandGenerator_t generator, unsigned lo
         std::lock_guard<std::mutex> lock(generator->mutex);
         stream = generator->stream;
     }
-    if (cudaStreamSynchronize(stream) != cudaSuccess) {
+    if (!generator->host_generator && cudaStreamSynchronize(stream) != cudaSuccess) {
         return CURAND_STATUS_PREEXISTING_FAILURE;
     }
     std::lock_guard<std::mutex> lock(generator->mutex);
@@ -179,10 +198,7 @@ curandStatus_t curandGenerateUniform(curandGenerator_t generator, float* output_
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
-        return CURAND_STATUS_TYPE_ERROR;
-    }
-    return enqueue_generation(generator, [=]() {
+    return dispatch_generation(generator, output_ptr, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
             output_ptr[i] = generator->uniform(generator->engine);
@@ -203,10 +219,7 @@ curandStatus_t curandGenerateUniformDouble(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
-        return CURAND_STATUS_TYPE_ERROR;
-    }
-    return enqueue_generation(generator, [=]() {
+    return dispatch_generation(generator, output_ptr, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
             output_ptr[i] = generator->uniform_double(generator->engine);
@@ -232,10 +245,7 @@ curandStatus_t curandGenerateNormal(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
-        return CURAND_STATUS_TYPE_ERROR;
-    }
-    return enqueue_generation(generator, [=]() {
+    return dispatch_generation(generator, output_ptr, [=]() {
         std::normal_distribution<float> distribution(mean, stddev);
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
@@ -262,10 +272,7 @@ curandStatus_t curandGenerateNormalDouble(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
-        return CURAND_STATUS_TYPE_ERROR;
-    }
-    return enqueue_generation(generator, [=]() {
+    return dispatch_generation(generator, output_ptr, [=]() {
         std::normal_distribution<double> distribution(mean, stddev);
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
@@ -292,10 +299,7 @@ curandStatus_t curandGenerateLogNormal(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
-        return CURAND_STATUS_TYPE_ERROR;
-    }
-    return enqueue_generation(generator, [=]() {
+    return dispatch_generation(generator, output_ptr, [=]() {
         std::lognormal_distribution<float> distribution(mean, stddev);
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
@@ -322,10 +326,7 @@ curandStatus_t curandGenerateLogNormalDouble(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
-        return CURAND_STATUS_TYPE_ERROR;
-    }
-    return enqueue_generation(generator, [=]() {
+    return dispatch_generation(generator, output_ptr, [=]() {
         std::lognormal_distribution<double> distribution(mean, stddev);
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
@@ -345,10 +346,7 @@ curandStatus_t curandGenerate(curandGenerator_t generator, unsigned int* output_
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
-        return CURAND_STATUS_TYPE_ERROR;
-    }
-    return enqueue_generation(generator, [=]() {
+    return dispatch_generation(generator, output_ptr, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
             output_ptr[i] = static_cast<unsigned int>(generator->engine());
@@ -369,10 +367,7 @@ curandStatus_t curandGenerateLongLong(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
-        return CURAND_STATUS_TYPE_ERROR;
-    }
-    return enqueue_generation(generator, [=]() {
+    return dispatch_generation(generator, output_ptr, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
             output_ptr[i] = generator->engine();
@@ -397,10 +392,7 @@ curandStatus_t curandGeneratePoisson(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
-        return CURAND_STATUS_TYPE_ERROR;
-    }
-    return enqueue_generation(generator, [=]() {
+    return dispatch_generation(generator, output_ptr, [=]() {
         std::poisson_distribution<unsigned int> distribution(lambda);
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
@@ -422,10 +414,7 @@ curandStatus_t curandGenerateExponential(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
-        return CURAND_STATUS_TYPE_ERROR;
-    }
-    return enqueue_generation(generator, [=]() {
+    return dispatch_generation(generator, output_ptr, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         std::uniform_real_distribution<float> u(0.0f, 1.0f);
         for (size_t i = 0; i < num; ++i) {
@@ -449,10 +438,7 @@ curandStatus_t curandGenerateExponentialDouble(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    if (cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
-        return CURAND_STATUS_TYPE_ERROR;
-    }
-    return enqueue_generation(generator, [=]() {
+    return dispatch_generation(generator, output_ptr, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         std::uniform_real_distribution<double> u(0.0, 1.0);
         for (size_t i = 0; i < num; ++i) {

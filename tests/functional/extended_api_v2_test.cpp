@@ -43,18 +43,15 @@ static void test_curand_create_generator_host() {
     CHECK(curandSetPseudoRandomGeneratorSeed(gen, 42ULL) == CURAND_STATUS_SUCCESS,
           "curandSetSeed on host generator");
 
-    // On UMA, device memory == host memory so we can pass a malloc'd buffer.
-    // Use cudaMalloc which on CuMetal returns a host-coherent pointer.
-    float* buf = nullptr;
-    CHECK(cudaMalloc(reinterpret_cast<void**>(&buf), 16 * sizeof(float)) == cudaSuccess,
-          "cudaMalloc for host-gen test");
+    // A host generator must accept ordinary host memory, not just a CuMetal
+    // allocation that happens to be CPU-addressable on UMA.
+    float buf[16] = {};
     CHECK(curandGenerateUniform(gen, buf, 16) == CURAND_STATUS_SUCCESS,
-          "curandGenerateUniform on host generator");
+          "curandGenerateUniform on host generator with host output");
     for (int i = 0; i < 16; ++i) {
         CHECK(buf[i] >= 0.0f && buf[i] < 1.0f, "host-gen uniform in [0,1)");
     }
 
-    cudaFree(buf);
     curandDestroyGenerator(gen);
 }
 

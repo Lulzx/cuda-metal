@@ -812,7 +812,7 @@ cudaError_t update_event_completion(cudaEvent_t event, bool wait_for_completion)
     if (stream == nullptr || ticket == 0) {
         std::lock_guard<std::mutex> lock(event->mutex);
         event->complete = true;
-        if (!event->disable_timing) {
+        if (!event->disable_timing && !event->timing_valid) {
             event->timestamp = std::chrono::steady_clock::now();
             event->timing_valid = true;
         }
@@ -840,7 +840,7 @@ cudaError_t update_event_completion(cudaEvent_t event, bool wait_for_completion)
 
     std::lock_guard<std::mutex> lock(event->mutex);
     event->complete = true;
-    if (!event->disable_timing) {
+    if (!event->disable_timing && !event->timing_valid) {
         event->timestamp = std::chrono::steady_clock::now();
         event->timing_valid = true;
     }
@@ -3473,35 +3473,24 @@ cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
         return fail(resolve_status);
     }
 
-    std::uint64_t tail_ticket = 0;
-    bool complete = true;
+    std::uint64_t marker_ticket = 0;
     (void)legacy_stream;
     std::string error;
-    const cudaError_t tail_status =
-        cumetal::metal_backend::stream_tail_ticket(backend_stream, &tail_ticket, &error);
-    if (tail_status != cudaSuccess) {
-        return fail(tail_status);
-    }
-
-    if (tail_ticket > 0) {
-        const cudaError_t query_status =
-            cumetal::metal_backend::stream_query_ticket(backend_stream, tail_ticket,
-                                                        &complete, &error);
-        if (query_status != cudaSuccess) {
-            return fail(query_status);
-        }
+    const cudaError_t marker_status =
+        cumetal::metal_backend::stream_record_marker(backend_stream, &marker_ticket, &error);
+    if (marker_status != cudaSuccess) {
+        return fail(marker_status);
     }
 
     {
         std::lock_guard<std::mutex> lock(event->mutex);
         event->stream = std::move(backend_stream);
-        event->ticket = tail_ticket;
+        event->ticket = marker_ticket;
         event->recorded_once = true;
-        event->complete = complete;
-        event->timing_valid = false;
-        if (event->complete && !event->disable_timing) {
+        event->complete = false;
+        event->timing_valid = !event->disable_timing;
+        if (!event->disable_timing) {
             event->timestamp = std::chrono::steady_clock::now();
-            event->timing_valid = true;
         }
     }
 

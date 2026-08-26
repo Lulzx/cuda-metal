@@ -85,6 +85,9 @@ cudaError_t stream_query_ticket(const std::shared_ptr<Stream>& stream,
 cudaError_t stream_wait_ticket(const std::shared_ptr<Stream>& stream,
                                std::uint64_t ticket,
                                std::string* error_message);
+cudaError_t stream_record_marker(const std::shared_ptr<Stream>& stream,
+                                 std::uint64_t* out_ticket,
+                                 std::string* error_message);
 cudaError_t enqueue_host_function(const std::shared_ptr<Stream>& stream,
                                   std::function<void()> function,
                                   std::string* error_message);

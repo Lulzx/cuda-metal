@@ -79,9 +79,21 @@ static bool test_generic_spmv() {
 
     float alpha = 1.0f, beta = 0.0f;
     size_t bufSize = 0;
-    cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                            &alpha, matA, vecX, &beta, vecY,
-                            CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT, &bufSize);
+    if (cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                               &alpha, matA, vecX, &beta, vecY,
+                               CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT, &bufSize) !=
+            CUSPARSE_STATUS_SUCCESS ||
+        bufSize == 0) {
+        std::fprintf(stderr, "FAIL: SpMV bufferSize should report usable workspace\n");
+        return false;
+    }
+    if (cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                               &alpha, matA, vecX, &beta, vecY,
+                               CUDA_R_32F, CUSPARSE_SPMV_ALG_DEFAULT, nullptr) !=
+        CUSPARSE_STATUS_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: SpMV bufferSize should reject null output\n");
+        return false;
+    }
 
     cusparseStatus_t st = cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
                                         &alpha, matA, vecX, &beta, vecY,

@@ -1149,6 +1149,40 @@ cudaError_t stream_wait_ticket(const std::shared_ptr<Stream>& stream,
     return stream_impl->wait_ticket(ticket, error_message);
 }
 
+cudaError_t stream_record_marker(const std::shared_ptr<Stream>& stream,
+                                 std::uint64_t* out_ticket,
+                                 std::string* error_message) {
+    if (out_ticket == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "stream_record_marker missing output";
+        }
+        return cudaErrorInvalidValue;
+    }
+    auto stream_impl = std::dynamic_pointer_cast<StreamImpl>(stream);
+    if (stream_impl == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "stream_record_marker received unknown stream type";
+        }
+        return cudaErrorInvalidValue;
+    }
+
+    std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
+    @autoreleasepool {
+        id<MTLCommandBuffer> marker = [stream_impl->queue() commandBuffer];
+        if (marker == nil) {
+            if (error_message != nullptr) {
+                *error_message = "stream_record_marker failed to create command buffer";
+            }
+            return cudaErrorUnknown;
+        }
+        const auto fences = encode_submission_waits(marker, stream_impl, {});
+        encode_resource_signals(marker, fences);
+        *out_ticket = stream_impl->add_pending(marker);
+        [marker commit];
+    }
+    return cudaSuccess;
+}
+
 cudaError_t enqueue_host_function(const std::shared_ptr<Stream>& stream,
                                   std::function<void()> function,
                                   std::string* error_message) {

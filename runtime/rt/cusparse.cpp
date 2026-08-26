@@ -222,17 +222,25 @@ cusparseStatus_t cusparseDestroyDnMat(cusparseDnMatDescr_t dnMatDescr) {
 }
 
 // SpMV: y = alpha * op(A) * x + beta * y  (CSR, float)
-cusparseStatus_t cusparseSpMV_bufferSize(cusparseHandle_t /*handle*/,
+cusparseStatus_t cusparseSpMV_bufferSize(cusparseHandle_t handle,
                                           cusparseOperation_t /*opA*/,
-                                          const void* /*alpha*/,
-                                          cusparseSpMatDescr_t /*matA*/,
-                                          cusparseDnVecDescr_t /*vecX*/,
-                                          const void* /*beta*/,
-                                          cusparseDnVecDescr_t /*vecY*/,
-                                          cudaDataType /*computeType*/,
+                                          const void* alpha,
+                                          cusparseSpMatDescr_t matA,
+                                          cusparseDnVecDescr_t vecX,
+                                          const void* beta,
+                                          cusparseDnVecDescr_t vecY,
+                                          cudaDataType computeType,
                                           cusparseSpMVAlg_t /*alg*/,
                                           size_t* bufferSize) {
-    if (bufferSize) *bufferSize = 0;
+    if (!handle || !alpha || !matA || !vecX || !beta || !vecY || !bufferSize) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (computeType != CUDA_R_32F && computeType != CUDA_R_64F) {
+        return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    }
+    // The CPU/UMA implementation consumes no external workspace, but CUDA
+    // callers commonly allocate the reported size unconditionally.
+    *bufferSize = 1;
     return CUSPARSE_STATUS_SUCCESS;
 }
 

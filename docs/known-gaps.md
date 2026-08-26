@@ -423,10 +423,10 @@ as gaps have been closed.
 
 ## NVIDIA cuda-samples sweep (2026-08-26)
 
-88 headless samples from `NVIDIA/cuda-samples` (`cpp/0_Introduction`,
+83 gated headless samples from `NVIDIA/cuda-samples` (`cpp/0_Introduction`,
 `2_Concepts_and_Techniques`, `3_CUDA_Features`, `4_CUDA_Libraries`,
 `6_Performance`) are compiled and run against `libcumetal`. Result:
-**21 pass, 2 waive cleanly, 60 do not build or run**.
+**25 pass, 2 waive cleanly, 56 do not build or run**.
 
 This runs as `conformance_cuda_samples_sweep`. The samples themselves are not
 vendored -- the test skips (77) unless a `cuda-samples` checkout is present at
@@ -477,11 +477,12 @@ blocks:
 "does not support Cooperative Kernel Launch, waiving" path instead of silently
 computing the wrong answer.
 
-Samples that compile and launch but do not produce correct results -- these are
-real lowering or runtime defects, not coverage gaps:
-
-- `simpleStreams`, `MersenneTwisterGP11213`, `conjugateGradient`,
-  `conjugateGradientUM` compute wrong values. Not yet diagnosed.
+Four samples formerly classified as runtime failures now pass after fixing three
+compatibility contracts: legacy-stream event recording enqueues a real marker and
+therefore waits for prior blocking-stream host operations (`simpleStreams`); host
+cuRAND generators accept ordinary host output and execute synchronously
+(`MersenneTwisterGP11213`); and `cusparseSpMV_bufferSize()` reports a usable nonzero
+workspace size (`conjugateGradient`, `conjugateGradientUM`).
 
 `simpleAtomicIntrinsics` and `scan` were in that list until two silent defects behind
 them were fixed. Both are worth knowing about, because both produced zeros with

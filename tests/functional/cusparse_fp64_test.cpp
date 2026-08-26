@@ -38,10 +38,12 @@ static void test_spmv_fp64() {
 
     double alpha = 1.0, beta = 0.0;
     size_t bufSize = 0;
-    cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                            &alpha, matA, vecX, &beta, vecY,
-                            CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &bufSize);
-    CHECK(bufSize == 0, "SpMV FP64 buffer size is 0");
+    const cusparseStatus_t buffer_status =
+        cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                &alpha, matA, vecX, &beta, vecY,
+                                CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &bufSize);
+    CHECK(buffer_status == CUSPARSE_STATUS_SUCCESS && bufSize > 0,
+          "SpMV FP64 buffer size is usable");
 
     cusparseStatus_t st = cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
                                         &alpha, matA, vecX, &beta, vecY,

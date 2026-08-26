@@ -1,10 +1,13 @@
 #include "cuda_runtime.h"
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -14,6 +17,11 @@ constexpr std::size_t kThreadsPerBlock = 256;
 
 bool nearly_equal(float a, float b) {
     return std::fabs(a - b) < 1e-5f;
+}
+
+void delayed_host_store(void* user_data) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    static_cast<std::atomic<bool>*>(user_data)->store(true, std::memory_order_release);
 }
 
 }  // namespace
@@ -79,6 +87,25 @@ int main(int argc, char** argv) {
 
     if (cudaEventQuery(start) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: fresh event query should be success\n");
+        return 1;
+    }
+
+    cudaEvent_t legacy_marker = nullptr;
+    std::atomic<bool> host_store_complete{false};
+    if (cudaEventCreate(&legacy_marker) != cudaSuccess ||
+        cudaLaunchHostFunc(stream, delayed_host_store, &host_store_complete) != cudaSuccess ||
+        cudaEventRecord(legacy_marker, nullptr) != cudaSuccess ||
+        cudaEventSynchronize(legacy_marker) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: legacy-stream event marker setup failed\n");
+        return 1;
+    }
+    if (!host_store_complete.load(std::memory_order_acquire)) {
+        std::fprintf(stderr,
+                     "FAIL: legacy-stream event did not wait for blocking-stream host work\n");
+        return 1;
+    }
+    if (cudaEventDestroy(legacy_marker) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaEventDestroy(legacy_marker) failed\n");
         return 1;
     }
 
