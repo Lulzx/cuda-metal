@@ -1085,6 +1085,68 @@ DONE:
                 "untyped .b32 memory dataflow falls back instead of guessing"))
         return 1;
 
+    // ── Regression: float temporaries held in .b32 %r registers ─────────────
+    // Optimized clang PTX keeps floats in `.b32 %rN`. Typing `neg.f32` /
+    // `fma.rn.f32` results from the *register spelling* emitted `uint vrN`,
+    // which truncated every intermediate (and clamped negatives to 0) --
+    // silently wrong answers, not a compile failure. The instruction suffix is
+    // authoritative. Found by demos/diffusion, whose DDPM update step is
+    // exactly this shape.
+    const std::string fma_b32_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry ddpm_step(
+    .param .u64 .ptr .align 1 ddpm_step_param_0,
+    .param .u64 .ptr .align 1 ddpm_step_param_1,
+    .param .f32 ddpm_step_param_2,
+    .param .f32 ddpm_step_param_3,
+    .param .u32 ddpm_step_param_4
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<12>;
+    .reg .b64 %rd<8>;
+
+    ld.param.b64 %rd4, [ddpm_step_param_0];
+    cvta.to.global.u64 %rd1, %rd4;
+    ld.param.b64 %rd5, [ddpm_step_param_1];
+    cvta.to.global.u64 %rd2, %rd5;
+    mov.u32 %r5, %ctaid.x;
+    mov.u32 %r6, %ntid.x;
+    ld.param.b32 %r7, [ddpm_step_param_4];
+    mov.u32 %r8, %tid.x;
+    mad.lo.s32 %r1, %r5, %r6, %r8;
+    setp.ge.s32 %p1, %r1, %r7;
+    @%p1 bra $L__BB0_2;
+    ld.param.b32 %r3, [ddpm_step_param_3];
+    ld.param.b32 %r2, [ddpm_step_param_2];
+    mul.wide.s32 %rd6, %r1, 4;
+    add.s64 %rd7, %rd1, %rd6;
+    ld.global.b32 %r9, [%rd7];
+    neg.f32 %r10, %r2;
+    fma.rn.f32 %r11, %r10, %r9, %r3;
+    st.global.b32 [%rd7], %r11;
+$L__BB0_2:
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions fma_b32_options;
+    fma_b32_options.entry_name = "ddpm_step";
+    const auto fma_b32 =
+        cumetal::ptx::lower_ptx_to_metal_source(fma_b32_ptx, fma_b32_options);
+    if (!expect(fma_b32.ok && fma_b32.matched,
+                "float-in-b32 fma/neg kernel lowers through the generic emitter"))
+        return 1;
+    if (!expect(!contains(fma_b32.metal_source, "uint vr10") &&
+                    !contains(fma_b32.metal_source, "uint vr11"),
+                "neg.f32/fma.rn.f32 results are not typed from the .b32 register name"))
+        return 1;
+    if (!expect(contains(fma_b32.metal_source, "float vr10") &&
+                    contains(fma_b32.metal_source, "float vr11"),
+                "neg.f32/fma.rn.f32 results are typed float from the instruction suffix"))
+        return 1;
+
     std::printf("PASS: ptx lower-to-metal unit tests\n");
     return 0;
 }

@@ -2650,7 +2650,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         if (root == "mad" && ops.size() >= 4) {
             if (!all_sources_defined(ops, 1)) return {};
             const std::string dest = get_reg(ops[0]);
-            metal << "    " << reg_type(dest) << " " << mvar(dest) << " = "
+            metal << "    " << instruction_value_type(op, dest) << " " << mvar(dest) << " = "
                   << resolve(ops[1]) << " * " << resolve(ops[2]) << " + " << resolve(ops[3]) << ";\n";
             defined_regs.insert(dest);
             continue;
@@ -2658,7 +2658,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         if (root == "fma" && ops.size() >= 4) {
             if (!all_sources_defined(ops, 1)) return {};
             const std::string dest = get_reg(ops[0]);
-            metal << "    " << reg_type(dest) << " " << mvar(dest) << " = fma("
+            metal << "    " << instruction_value_type(op, dest) << " " << mvar(dest) << " = fma("
                   << resolve(ops[1]) << ", " << resolve(ops[2]) << ", " << resolve(ops[3]) << ");\n";
             defined_regs.insert(dest);
             continue;
@@ -2666,28 +2666,28 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         if (root == "neg" && ops.size() >= 2) {
             if (!all_sources_defined(ops, 1)) return {};
             const std::string dest = get_reg(ops[0]);
-            metal << "    " << reg_type(dest) << " " << mvar(dest) << " = -" << resolve(ops[1]) << ";\n";
+            metal << "    " << instruction_value_type(op, dest) << " " << mvar(dest) << " = -" << resolve(ops[1]) << ";\n";
             defined_regs.insert(dest);
             continue;
         }
         if (root == "rcp" && ops.size() >= 2) {
             if (!all_sources_defined(ops, 1)) return {};
             const std::string dest = get_reg(ops[0]);
-            metal << "    " << reg_type(dest) << " " << mvar(dest) << " = 1.0f / " << resolve(ops[1]) << ";\n";
+            metal << "    " << instruction_value_type(op, dest) << " " << mvar(dest) << " = 1.0f / " << resolve(ops[1]) << ";\n";
             defined_regs.insert(dest);
             continue;
         }
         if (root == "abs" && ops.size() >= 2) {
             if (!all_sources_defined(ops, 1)) return {};
             const std::string dest = get_reg(ops[0]);
-            metal << "    " << reg_type(dest) << " " << mvar(dest) << " = abs(" << resolve(ops[1]) << ");\n";
+            metal << "    " << instruction_value_type(op, dest) << " " << mvar(dest) << " = abs(" << resolve(ops[1]) << ");\n";
             defined_regs.insert(dest);
             continue;
         }
         if ((root == "max" || root == "min") && ops.size() >= 3) {
             if (!all_sources_defined(ops, 1)) return {};
             const std::string dest = get_reg(ops[0]);
-            metal << "    " << reg_type(dest) << " " << mvar(dest) << " = "
+            metal << "    " << instruction_value_type(op, dest) << " " << mvar(dest) << " = "
                   << root << "(" << resolve(ops[1]) << ", " << resolve(ops[2]) << ");\n";
             defined_regs.insert(dest);
             continue;
@@ -2695,7 +2695,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         if (root == "not" && ops.size() >= 2) {
             if (!all_sources_defined(ops, 1)) return {};
             const std::string dest = get_reg(ops[0]);
-            metal << "    " << reg_type(dest) << " " << mvar(dest) << " = ~" << resolve(ops[1]) << ";\n";
+            metal << "    " << instruction_value_type(op, dest) << " " << mvar(dest) << " = ~" << resolve(ops[1]) << ";\n";
             defined_regs.insert(dest);
             continue;
         }
@@ -2706,7 +2706,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
                 if (ops.size() < 2) return false;
                 if (!all_sources_defined(ops, 1)) return false;
                 const std::string dest = get_reg(ops[0]);
-                metal << "    " << reg_type(dest) << " " << mvar(dest)
+                metal << "    " << instruction_value_type(op, dest) << " " << mvar(dest)
                       << " = " << fn << "(" << resolve(ops[1]) << ");\n";
                 defined_regs.insert(dest);
                 return true;
@@ -2721,7 +2721,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         if (root == "selp" && ops.size() >= 4) {
             if (!all_sources_defined(ops, 1)) return {};
             const std::string dest = get_reg(ops[0]);
-            metal << "    " << reg_type(dest) << " " << mvar(dest) << " = "
+            metal << "    " << instruction_value_type(op, dest) << " " << mvar(dest) << " = "
                   << resolve(ops[3]) << " ? " << resolve(ops[1]) << " : " << resolve(ops[2]) << ";\n";
             defined_regs.insert(dest);
             continue;
@@ -2729,7 +2729,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         if (root == "mov" && ops.size() == 2) {
             if (!all_sources_defined(ops, 1)) return {};
             const std::string dest = get_reg(ops[0]);
-            metal << "    " << reg_type(dest) << " " << mvar(dest) << " = " << resolve(ops[1]) << ";\n";
+            metal << "    " << instruction_value_type(op, dest) << " " << mvar(dest) << " = " << resolve(ops[1]) << ";\n";
             defined_regs.insert(dest);
             continue;
         }

@@ -17,3 +17,6 @@ tests/cuda_projects/**/build/softmax
 tests/cuda_projects/**/build/flash_*
 # Apollo demo artifacts
 demos/apollo/out/
+# Diffusion demo artifacts (weights, check tensors, generated images)
+demos/diffusion/out/
+__pycache__/

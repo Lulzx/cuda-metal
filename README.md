@@ -91,6 +91,21 @@ Uses `__shared__`/`__syncthreads()` prefix sums, `atomicAdd` counting sort, and
 an `atomicMin` depth pass. Gated on physics (dam-break front speed, density
 drift), not on "it ran": [demos/sph/README.md](demos/sph/README.md).
 
+### Tiny diffusion model (a real generative model, end to end)
+
+A ~310k-parameter DDPM trained on MNIST in PyTorch, then sampled entirely by
+hand-written CUDA kernels — 1000 denoising steps, ~13 s for 16 images:
+
+```bash
+python3 demos/diffusion/train.py    # ~4 min on MPS -> out/model.bin
+./demos/diffusion/run.sh --check    # forward pass vs the PyTorch reference
+./demos/diffusion/run.sh            # sample -> demos/diffusion/out/samples.png
+```
+
+`--check` gates on `max |cumetal - pytorch| < 2e-3` (measured: 5.2e-06). Writing
+it surfaced a silent wrong-answer bug in the PTX->MSL float typing:
+[demos/diffusion/README.md](demos/diffusion/README.md).
+
 ### Single sample
 
 ```bash
