@@ -139,6 +139,26 @@ classify_sample() {
         echo "no-lowering"
         return
     fi
+    # simpleCudaGraphs has no built-in numerical assertion: it exits zero after
+    # printing each reduction. All twelve launches (manual graph, clone, captured
+    # graph, clone; three iterations each) consume identical input and must agree.
+    # Treating process exit alone as ground truth previously green-washed values
+    # ranging from zero to several times the expected sum.
+    if [[ "${rel}" == "3_CUDA_Features/simpleCudaGraphs" ]]; then
+        local graph_values
+        graph_values="$(sed -n 's/.*final reduced sum = \([-+0-9.eE]*\).*/\1/p' <<<"${run_output}")"
+        if ! awk '
+            NR == 1 { min = max = $1 + 0.0 }
+            { value = $1 + 0.0; if (value < min) min = value; if (value > max) max = value }
+            END {
+                scale = (max < 0 ? -max : max); if (scale < 1.0) scale = 1.0;
+                exit !(NR == 12 && max > 0.0 && (max - min) <= 1.0e-5 * scale)
+            }
+        ' <<<"${graph_values}"; then
+            echo "run-fail"
+            return
+        fi
+    fi
     # EXIT_WAIVED. The sample itself decided a capability it needs is absent and
     # declined to run -- the intended outcome when CuMetal reports it unsupported.
     if (( status == 2 )); then

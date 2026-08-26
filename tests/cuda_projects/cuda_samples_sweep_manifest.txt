@@ -89,9 +89,9 @@ compile-fail 3_CUDA_Features/globalToShmemAsyncCopy
 compile-fail 3_CUDA_Features/graphMemoryFootprint
 compile-fail 3_CUDA_Features/graphMemoryNodes
 compile-fail 3_CUDA_Features/immaTensorCoreGemm
-compile-fail 3_CUDA_Features/jacobiCudaGraphs
+run-fail     3_CUDA_Features/jacobiCudaGraphs
 compile-fail 3_CUDA_Features/newdelete
-compile-fail 3_CUDA_Features/simpleCudaGraphs
+run-fail     3_CUDA_Features/simpleCudaGraphs
 compile-fail 3_CUDA_Features/tf32TensorCoreGemm
 compile-fail 3_CUDA_Features/warpAggregatedAtomicsCG
 compile-fail 4_CUDA_Libraries/conjugateGradientCudaGraphs

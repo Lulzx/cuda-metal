@@ -3,6 +3,10 @@
 #include <cstdio>
 #include <cstring>
 
+static void graph_host_increment(void* data) {
+    ++*static_cast<int*>(data);
+}
+
 static bool test_graph_create_destroy() {
     cudaGraph_t graph = nullptr;
     cudaError_t err = cudaGraphCreate(&graph, 0);
@@ -112,6 +116,83 @@ static bool test_graph_null_args() {
         std::fprintf(stderr, "FAIL: cudaGraphCreate(null) should return InvalidValue\n");
         return false;
     }
+    return true;
+}
+
+static bool test_graph_dependencies_and_updates() {
+    cudaGraph_t graph = nullptr;
+    cudaGraph_t other_graph = nullptr;
+    cudaGraphCreate(&graph, 0);
+    cudaGraphCreate(&other_graph, 0);
+
+    int callback_count = 0;
+    cudaHostNodeParams host_params{graph_host_increment, &callback_count};
+    cudaGraphNode_t root = nullptr;
+    cudaGraphNode_t child = nullptr;
+    cudaGraphNode_t foreign = nullptr;
+    if (cudaGraphAddHostNode(&root, graph, nullptr, 0, &host_params) != cudaSuccess ||
+        cudaGraphAddHostNode(&child, graph, &root, 1, &host_params) != cudaSuccess ||
+        cudaGraphAddHostNode(&foreign, other_graph, nullptr, 0, &host_params) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: canonical host-node construction failed\n");
+        return false;
+    }
+
+    size_t root_count = 0;
+    if (cudaGraphGetRootNodes(graph, nullptr, &root_count) != cudaSuccess || root_count != 1) {
+        std::fprintf(stderr, "FAIL: dependency graph should expose exactly one root\n");
+        return false;
+    }
+    cudaGraphNode_t invalid = nullptr;
+    if (cudaGraphAddHostNode(&invalid, graph, &foreign, 1, &host_params) !=
+        cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: dependency from a foreign graph was accepted\n");
+        return false;
+    }
+
+    cudaKernelNodeParams kernel_params{};
+    kernel_params.func = reinterpret_cast<const void*>(&graph_host_increment);
+    kernel_params.gridDim = dim3(1, 1, 1);
+    kernel_params.blockDim = dim3(1, 1, 1);
+    cudaGraphNode_t kernel_node = nullptr;
+    if (cudaGraphAddKernelNode(&kernel_node, graph, &child, 1, &kernel_params) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: kernel-node construction failed\n");
+        return false;
+    }
+    cudaGraph_t cloned = nullptr;
+    size_t cloned_root_count = 0;
+    if (cudaGraphClone(&cloned, graph) != cudaSuccess ||
+        cudaGraphGetRootNodes(cloned, nullptr, &cloned_root_count) != cudaSuccess ||
+        cloned_root_count != 1) {
+        std::fprintf(stderr, "FAIL: graph clone did not preserve dependency topology\n");
+        return false;
+    }
+
+    cudaGraphExec_t exec = nullptr;
+    if (cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0) != cudaSuccess ||
+        cudaGraphExecKernelNodeSetParams(exec, kernel_node, &kernel_params) != cudaSuccess ||
+        cudaGraphExecKernelNodeSetParams(exec, child, &kernel_params) != cudaErrorInvalidValue ||
+        cudaGraphExecKernelNodeSetParams(exec, kernel_node, nullptr) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: executable kernel-node update contract mismatch\n");
+        return false;
+    }
+    cudaGraphExecUpdateResult update_result = cudaGraphExecUpdateError;
+    if (cudaGraphExecUpdate(exec, cloned, nullptr, &update_result) != cudaSuccess ||
+        update_result != cudaGraphExecUpdateSuccess) {
+        std::fprintf(stderr, "FAIL: same-topology executable graph update failed\n");
+        return false;
+    }
+    cudaGraphNode_t cloned_extra = nullptr;
+    if (cudaGraphAddHostNode(&cloned_extra, cloned, nullptr, 0, &host_params) != cudaSuccess ||
+        cudaGraphExecUpdate(exec, cloned, nullptr, &update_result) != cudaSuccess ||
+        update_result != cudaGraphExecUpdateErrorTopologyChanged) {
+        std::fprintf(stderr, "FAIL: topology-changing graph update was not rejected\n");
+        return false;
+    }
+
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(cloned);
+    cudaGraphDestroy(other_graph);
+    cudaGraphDestroy(graph);
     return true;
 }
 
@@ -226,13 +307,43 @@ static bool test_capture_memset_replay() {
     return true;
 }
 
+static bool test_capture_host_replay() {
+    cudaStream_t stream = nullptr;
+    cudaStreamCreate(&stream);
+    int callback_count = 0;
+
+    cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+    if (cudaLaunchHostFunc(stream, graph_host_increment, &callback_count) != cudaSuccess ||
+        callback_count != 0) {
+        std::fprintf(stderr, "FAIL: captured host function executed eagerly\n");
+        return false;
+    }
+    cudaGraph_t graph = nullptr;
+    cudaStreamEndCapture(stream, &graph);
+    cudaGraphExec_t exec = nullptr;
+    cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+    cudaGraphLaunch(exec, stream);
+    cudaStreamSynchronize(stream);
+    if (callback_count != 1) {
+        std::fprintf(stderr, "FAIL: captured host function did not replay exactly once\n");
+        return false;
+    }
+
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
+    return true;
+}
+
 int main() {
     if (!test_graph_create_destroy()) return 1;
     if (!test_graph_instantiate_launch()) return 1;
     if (!test_stream_capture_status()) return 1;
     if (!test_graph_null_args()) return 1;
+    if (!test_graph_dependencies_and_updates()) return 1;
     if (!test_capture_memcpy_replay()) return 1;
     if (!test_capture_memset_replay()) return 1;
+    if (!test_capture_host_replay()) return 1;
 
     std::printf("PASS: CUDA Graph API tests\n");
     return 0;

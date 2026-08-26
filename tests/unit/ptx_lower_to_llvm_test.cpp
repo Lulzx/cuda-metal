@@ -355,6 +355,7 @@ $L1:
     .param .b32 call_arg;
     .param .b32 call_arg2;
     .param .b32 call_ret;
+    .param .b64 call_ret64;
     .param .b64 call_arg64;
     .param .b64 sin_ptr_arg;
     .param .b64 cos_ptr_arg;
@@ -382,6 +383,7 @@ $L1:
     call.uni (call_ret), __nv_umul24, (call_arg, call_arg2);
     call.uni (call_ret), __nv_umin, (call_arg, call_arg2);
     call.uni (call_ret), __nv_umax, (call_arg, call_arg2);
+    call.uni (call_ret64), __nv_fabs, (call_arg64);
     call.uni (call_ret), __nv_fast_fdividef, (call_arg, call_arg);
     st.param.b64 [sin_ptr_arg], %rd1;
     st.param.b64 [cos_ptr_arg], %rd2;
@@ -441,6 +443,13 @@ $L1:
     if (!expect(contains(vector_memory_lowered.llvm_ir, "icmp ult i32") &&
                     contains(vector_memory_lowered.llvm_ir, "icmp ugt i32"),
                 "__nv_umin and __nv_umax use unsigned comparisons")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir,
+                         "and i64") &&
+                    contains(vector_memory_lowered.llvm_ir,
+                             "9223372036854775807"),
+                "__nv_fabs clears only the binary64 sign bit")) {
         return 1;
     }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sin.f32") &&
@@ -510,6 +519,27 @@ $L1:
     if (!expect(!malformed_mul24_lowered.ok &&
                     contains(malformed_mul24_lowered.error, "__nv_mul24 expects 2 args"),
                 "strict lowering rejects malformed __nv_mul24 calls")) {
+        return 1;
+    }
+
+    const std::string malformed_fabs_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_fabs()
+{
+    .param .b64 call_ret;
+    call.uni (call_ret), __nv_fabs, ();
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_fabs_options;
+    malformed_fabs_options.entry_name = "malformed_fabs";
+    malformed_fabs_options.strict = true;
+    const auto malformed_fabs_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_fabs_ptx, malformed_fabs_options);
+    if (!expect(!malformed_fabs_lowered.ok &&
+                    contains(malformed_fabs_lowered.error, "__nv_fabs expects 1 arg"),
+                "strict lowering rejects malformed __nv_fabs calls")) {
         return 1;
     }
 

@@ -120,12 +120,14 @@ bool load_inline_static_shared_bytes(const char* metallib_path,
 
 struct cudaGraphNode_st {
     cudaGraphNodeType type = cudaGraphNodeTypeEmpty;
+    std::vector<cudaGraphNode_st*> dependencies;
 
     // Kernel node data
     const void* func = nullptr;
     dim3 grid_dim{};
     dim3 block_dim{};
     void** kernel_args = nullptr;
+    std::vector<std::vector<std::uint8_t>> kernel_arg_values;
     int num_args = 0;
     size_t shared_mem = 0;
 
@@ -151,8 +153,11 @@ struct cudaGraph_st {
 };
 
 struct cudaGraphExec_st {
-    // Owned copy of the graph for replay
+    // Owned topological copy of the graph for replay. source_node_index keeps
+    // the CUDA graph-node identity used by executable update APIs.
     std::vector<cudaGraphNode_st> nodes;
+    std::unordered_map<const cudaGraphNode_st*, std::size_t> source_node_index;
+    std::vector<std::vector<std::size_t>> dependency_indices;
 };
 
 struct CUevent_st {
@@ -224,6 +229,121 @@ cudaGraph_t get_capture_graph(cudaStream_t stream) {
         return it->second.graph;
     }
     return nullptr;
+}
+
+bool graph_contains_node(cudaGraph_t graph, cudaGraphNode_t node) {
+    return graph != nullptr && node != nullptr &&
+           std::find(graph->nodes.begin(), graph->nodes.end(), node) != graph->nodes.end();
+}
+
+bool assign_graph_dependencies(cudaGraph_t graph,
+                               cudaGraphNode_t node,
+                               const cudaGraphNode_t* dependencies,
+                               std::size_t dependency_count) {
+    if (graph == nullptr || node == nullptr ||
+        (dependency_count != 0 && dependencies == nullptr)) {
+        return false;
+    }
+    node->dependencies.clear();
+    node->dependencies.reserve(dependency_count);
+    for (std::size_t i = 0; i < dependency_count; ++i) {
+        if (!graph_contains_node(graph, dependencies[i]) || dependencies[i] == node ||
+            std::find(node->dependencies.begin(), node->dependencies.end(), dependencies[i]) !=
+                node->dependencies.end()) {
+            node->dependencies.clear();
+            return false;
+        }
+        node->dependencies.push_back(dependencies[i]);
+    }
+    return true;
+}
+
+void append_captured_graph_node(cudaGraph_t graph, cudaGraphNode_t node) {
+    // Operations captured from one CUDA stream are ordered. Preserve that edge
+    // explicitly so graph introspection agrees with replay semantics.
+    if (!graph->nodes.empty()) {
+        node->dependencies.push_back(graph->nodes.back());
+    }
+    graph->nodes.push_back(node);
+}
+
+bool topologically_order_graph(cudaGraph_t graph,
+                               std::vector<cudaGraphNode_t>* ordered) {
+    if (graph == nullptr || ordered == nullptr) return false;
+    ordered->clear();
+    ordered->reserve(graph->nodes.size());
+
+    std::unordered_map<cudaGraphNode_t, std::size_t> node_index;
+    node_index.reserve(graph->nodes.size());
+    for (std::size_t i = 0; i < graph->nodes.size(); ++i) {
+        if (graph->nodes[i] == nullptr || !node_index.emplace(graph->nodes[i], i).second) {
+            return false;
+        }
+    }
+
+    std::vector<std::size_t> indegree(graph->nodes.size(), 0);
+    std::vector<std::vector<std::size_t>> dependents(graph->nodes.size());
+    for (std::size_t i = 0; i < graph->nodes.size(); ++i) {
+        for (cudaGraphNode_t dependency : graph->nodes[i]->dependencies) {
+            const auto it = node_index.find(dependency);
+            if (it == node_index.end()) return false;
+            ++indegree[i];
+            dependents[it->second].push_back(i);
+        }
+    }
+
+    // Choose ready nodes in graph insertion order for deterministic replay.
+    std::vector<bool> emitted(graph->nodes.size(), false);
+    while (ordered->size() != graph->nodes.size()) {
+        std::size_t ready = graph->nodes.size();
+        for (std::size_t i = 0; i < graph->nodes.size(); ++i) {
+            if (!emitted[i] && indegree[i] == 0) {
+                ready = i;
+                break;
+            }
+        }
+        if (ready == graph->nodes.size()) return false;
+        emitted[ready] = true;
+        ordered->push_back(graph->nodes[ready]);
+        for (std::size_t dependent : dependents[ready]) {
+            --indegree[dependent];
+        }
+    }
+    return true;
+}
+
+bool snapshot_graph_kernel_arguments(cudaGraphNode_t node,
+                                     const void* function,
+                                     void** arguments) {
+    if (node == nullptr || function == nullptr) return false;
+
+    cumetal::registration::RegisteredKernel kernel;
+    const bool registered =
+        cumetal::native_registration::lookup_kernel(function, &kernel) ||
+        cumetal::registration::lookup_registered_kernel(function, &kernel);
+    if (!registered || kernel.arg_info.empty()) {
+        // Zero-argument and synthetic nodes need no snapshot. Refuse to retain
+        // an untyped caller-owned argv because its lifetime is unknowable.
+        node->kernel_args = nullptr;
+        node->kernel_arg_values.clear();
+        return arguments == nullptr;
+    }
+    if (arguments == nullptr) return false;
+
+    node->kernel_arg_values.clear();
+    node->kernel_arg_values.reserve(kernel.arg_info.size());
+    for (std::size_t i = 0; i < kernel.arg_info.size(); ++i) {
+        const std::size_t size = kernel.arg_info[i].size_bytes;
+        if (arguments[i] == nullptr || size == 0 || size > 64u * 1024u) {
+            node->kernel_arg_values.clear();
+            return false;
+        }
+        std::vector<std::uint8_t> value(size);
+        std::memcpy(value.data(), arguments[i], size);
+        node->kernel_arg_values.push_back(std::move(value));
+    }
+    node->kernel_args = nullptr;
+    return true;
 }
 
 struct PendingLaunchArgument {
@@ -2445,7 +2565,7 @@ cudaError_t cudaMemcpyAsync(void* dst,
         node->src = src;
         node->count = count;
         node->memcpy_kind = kind;
-        g->nodes.push_back(node);
+        append_captured_graph_node(g, node);
         return fail(cudaSuccess);
     }
 
@@ -2676,7 +2796,7 @@ cudaError_t cudaMemsetAsync(void* dev_ptr, int value, size_t count, cudaStream_t
         node->dst = dev_ptr;
         node->memset_value = value;
         node->count = count;
-        g->nodes.push_back(node);
+        append_captured_graph_node(g, node);
         return fail(cudaSuccess);
     }
 
@@ -3191,6 +3311,44 @@ cudaError_t cudaGraphCreate(cudaGraph_t* pGraph, unsigned int /*flags*/) {
     return fail(cudaSuccess);
 }
 
+cudaError_t cudaGraphClone(cudaGraph_t* pGraphClone, cudaGraph_t originalGraph) {
+    if (pGraphClone == nullptr || originalGraph == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    auto* clone = new (std::nothrow) cudaGraph_st();
+    if (clone == nullptr) return fail(cudaErrorMemoryAllocation);
+
+    std::unordered_map<const cudaGraphNode_st*, cudaGraphNode_st*> cloned_nodes;
+    cloned_nodes.reserve(originalGraph->nodes.size());
+    clone->nodes.reserve(originalGraph->nodes.size());
+    for (const cudaGraphNode_st* source : originalGraph->nodes) {
+        if (source == nullptr) {
+            delete clone;
+            return fail(cudaErrorInvalidValue);
+        }
+        auto* copied = new (std::nothrow) cudaGraphNode_st(*source);
+        if (copied == nullptr) {
+            delete clone;
+            return fail(cudaErrorMemoryAllocation);
+        }
+        copied->dependencies.clear();
+        cloned_nodes.emplace(source, copied);
+        clone->nodes.push_back(copied);
+    }
+    for (std::size_t i = 0; i < originalGraph->nodes.size(); ++i) {
+        for (const cudaGraphNode_st* dependency : originalGraph->nodes[i]->dependencies) {
+            const auto it = cloned_nodes.find(dependency);
+            if (it == cloned_nodes.end()) {
+                delete clone;
+                return fail(cudaErrorInvalidValue);
+            }
+            clone->nodes[i]->dependencies.push_back(it->second);
+        }
+    }
+    *pGraphClone = clone;
+    return fail(cudaSuccess);
+}
+
 cudaError_t cudaGraphDestroy(cudaGraph_t graph) {
     if (graph == nullptr) {
         return fail(cudaErrorInvalidValue);
@@ -3207,9 +3365,36 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
     }
     if (pErrorNode) { *pErrorNode = nullptr; }
 
-    auto* exec = new cudaGraphExec_st();
-    for (const auto* node : graph->nodes) {
-        exec->nodes.push_back(*node);
+    std::vector<cudaGraphNode_t> ordered;
+    if (!topologically_order_graph(graph, &ordered)) {
+        return fail(cudaErrorInvalidValue);
+    }
+
+    auto* exec = new (std::nothrow) cudaGraphExec_st();
+    if (exec == nullptr) return fail(cudaErrorMemoryAllocation);
+    exec->nodes.reserve(ordered.size());
+    exec->source_node_index.reserve(ordered.size());
+    exec->dependency_indices.reserve(ordered.size());
+    std::unordered_map<const cudaGraphNode_st*, std::size_t> ordered_index;
+    ordered_index.reserve(ordered.size());
+    for (std::size_t i = 0; i < ordered.size(); ++i) ordered_index.emplace(ordered[i], i);
+    for (const auto* node : ordered) {
+        std::vector<std::size_t> dependencies;
+        dependencies.reserve(node->dependencies.size());
+        for (const cudaGraphNode_st* dependency : node->dependencies) {
+            const auto dependency_it = ordered_index.find(dependency);
+            if (dependency_it == ordered_index.end()) {
+                delete exec;
+                return fail(cudaErrorInvalidValue);
+            }
+            dependencies.push_back(dependency_it->second);
+        }
+        std::sort(dependencies.begin(), dependencies.end());
+        cudaGraphNode_st copy = *node;
+        copy.dependencies.clear();
+        exec->source_node_index.emplace(node, exec->nodes.size());
+        exec->nodes.push_back(std::move(copy));
+        exec->dependency_indices.push_back(std::move(dependencies));
     }
     *pGraphExec = exec;
     return fail(cudaSuccess);
@@ -3224,9 +3409,18 @@ cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
         cudaError_t err = cudaSuccess;
         switch (node.type) {
             case cudaGraphNodeTypeKernel:
+            {
+                std::vector<void*> argument_ptrs;
+                argument_ptrs.reserve(node.kernel_arg_values.size());
+                for (const auto& value : node.kernel_arg_values) {
+                    argument_ptrs.push_back(
+                        const_cast<std::uint8_t*>(value.data()));
+                }
                 err = cudaLaunchKernel(node.func, node.grid_dim, node.block_dim,
-                                        node.kernel_args, node.shared_mem, stream);
+                                        argument_ptrs.empty() ? node.kernel_args : argument_ptrs.data(),
+                                        node.shared_mem, stream);
                 break;
+            }
             case cudaGraphNodeTypeMemcpy:
                 err = cudaMemcpyAsync(node.dst, node.src, node.count, node.memcpy_kind, stream);
                 break;
@@ -3235,8 +3429,10 @@ cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
                 break;
             case cudaGraphNodeTypeHost:
                 if (node.host_fn) {
-                    cudaStreamSynchronize(stream);
-                    node.host_fn(node.host_user_data);
+                    err = cudaStreamSynchronize(stream);
+                    if (err == cudaSuccess) {
+                        node.host_fn(node.host_user_data);
+                    }
                 }
                 break;
             default:
@@ -3246,6 +3442,67 @@ cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
             return fail(err);
         }
     }
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
+                                cudaGraphNode_t* hErrorNode_out,
+                                cudaGraphExecUpdateResult* updateResult_out) {
+    if (hGraphExec == nullptr || hGraph == nullptr || updateResult_out == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    if (hErrorNode_out != nullptr) *hErrorNode_out = nullptr;
+    *updateResult_out = cudaGraphExecUpdateError;
+
+    std::vector<cudaGraphNode_t> ordered;
+    if (!topologically_order_graph(hGraph, &ordered)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    if (ordered.size() != hGraphExec->nodes.size()) {
+        *updateResult_out = cudaGraphExecUpdateErrorTopologyChanged;
+        return fail(cudaSuccess);
+    }
+
+    std::unordered_map<const cudaGraphNode_st*, std::size_t> ordered_index;
+    ordered_index.reserve(ordered.size());
+    for (std::size_t i = 0; i < ordered.size(); ++i) ordered_index.emplace(ordered[i], i);
+    std::vector<std::vector<std::size_t>> dependencies;
+    dependencies.reserve(ordered.size());
+    for (std::size_t i = 0; i < ordered.size(); ++i) {
+        if (ordered[i]->type != hGraphExec->nodes[i].type) {
+            if (hErrorNode_out != nullptr) *hErrorNode_out = ordered[i];
+            *updateResult_out = cudaGraphExecUpdateErrorNodeTypeChanged;
+            return fail(cudaSuccess);
+        }
+        std::vector<std::size_t> node_dependencies;
+        node_dependencies.reserve(ordered[i]->dependencies.size());
+        for (const cudaGraphNode_st* dependency : ordered[i]->dependencies) {
+            const auto it = ordered_index.find(dependency);
+            if (it == ordered_index.end()) return fail(cudaErrorInvalidValue);
+            node_dependencies.push_back(it->second);
+        }
+        std::sort(node_dependencies.begin(), node_dependencies.end());
+        dependencies.push_back(std::move(node_dependencies));
+    }
+    if (dependencies != hGraphExec->dependency_indices) {
+        *updateResult_out = cudaGraphExecUpdateErrorTopologyChanged;
+        return fail(cudaSuccess);
+    }
+
+    std::vector<cudaGraphNode_st> updated_nodes;
+    std::unordered_map<const cudaGraphNode_st*, std::size_t> updated_index;
+    updated_nodes.reserve(ordered.size());
+    updated_index.reserve(ordered.size());
+    for (const cudaGraphNode_st* source : ordered) {
+        cudaGraphNode_st copy = *source;
+        copy.dependencies.clear();
+        updated_index.emplace(source, updated_nodes.size());
+        updated_nodes.push_back(std::move(copy));
+    }
+    hGraphExec->nodes = std::move(updated_nodes);
+    hGraphExec->source_node_index = std::move(updated_index);
+    hGraphExec->dependency_indices = std::move(dependencies);
+    *updateResult_out = cudaGraphExecUpdateSuccess;
     return fail(cudaSuccess);
 }
 
@@ -3275,12 +3532,25 @@ cudaError_t cudaGraphGetNodes(cudaGraph_t graph, cudaGraphNode_t* nodes, size_t*
 
 cudaError_t cudaGraphGetRootNodes(cudaGraph_t graph, cudaGraphNode_t* pRootNodes,
                                    size_t* pNumRootNodes) {
-    // All nodes are root nodes in our flat graph model.
-    return cudaGraphGetNodes(graph, pRootNodes, pNumRootNodes);
+    if (graph == nullptr || pNumRootNodes == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    std::vector<cudaGraphNode_t> roots;
+    for (cudaGraphNode_t node : graph->nodes) {
+        if (node != nullptr && node->dependencies.empty()) roots.push_back(node);
+    }
+    if (pRootNodes == nullptr) {
+        *pNumRootNodes = roots.size();
+    } else {
+        const std::size_t count = std::min(*pNumRootNodes, roots.size());
+        for (std::size_t i = 0; i < count; ++i) pRootNodes[i] = roots[i];
+        *pNumRootNodes = count;
+    }
+    return fail(cudaSuccess);
 }
 
 cudaError_t cudaGraphAddKernelNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
-                                    const cudaGraphNode_t* /*pDependencies*/, size_t /*numDependencies*/,
+                                    const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                     const cudaKernelNodeParams* pNodeParams) {
     if (!pGraphNode || !graph || !pNodeParams) return fail(cudaErrorInvalidValue);
     auto* node = new cudaGraphNode_st();
@@ -3288,15 +3558,22 @@ cudaError_t cudaGraphAddKernelNode(cudaGraphNode_t* pGraphNode, cudaGraph_t grap
     node->func = pNodeParams->func;
     node->grid_dim = pNodeParams->gridDim;
     node->block_dim = pNodeParams->blockDim;
-    node->kernel_args = pNodeParams->kernelParams;
     node->shared_mem = pNodeParams->sharedMemBytes;
+    if (!snapshot_graph_kernel_arguments(node, node->func, pNodeParams->kernelParams)) {
+        delete node;
+        return fail(cudaErrorInvalidValue);
+    }
+    if (!assign_graph_dependencies(graph, node, pDependencies, numDependencies)) {
+        delete node;
+        return fail(cudaErrorInvalidValue);
+    }
     graph->nodes.push_back(node);
     *pGraphNode = node;
     return fail(cudaSuccess);
 }
 
 cudaError_t cudaGraphAddMemcpyNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
-                                    const cudaGraphNode_t* /*pDependencies*/, size_t /*numDependencies*/,
+                                    const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                     const cudaMemcpy3DParms* pCopyParams) {
     if (!pGraphNode || !graph || !pCopyParams) return fail(cudaErrorInvalidValue);
     auto* node = new cudaGraphNode_st();
@@ -3306,13 +3583,17 @@ cudaError_t cudaGraphAddMemcpyNode(cudaGraphNode_t* pGraphNode, cudaGraph_t grap
     node->dst = pCopyParams->dstPtr.ptr;
     node->count = pCopyParams->extent.width * pCopyParams->extent.height * pCopyParams->extent.depth;
     node->memcpy_kind = pCopyParams->kind;
+    if (!assign_graph_dependencies(graph, node, pDependencies, numDependencies)) {
+        delete node;
+        return fail(cudaErrorInvalidValue);
+    }
     graph->nodes.push_back(node);
     *pGraphNode = node;
     return fail(cudaSuccess);
 }
 
 cudaError_t cudaGraphAddMemsetNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
-                                    const cudaGraphNode_t* /*pDependencies*/, size_t /*numDependencies*/,
+                                    const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                     const cudaMemsetParams* pMemsetParams) {
     if (!pGraphNode || !graph || !pMemsetParams) return fail(cudaErrorInvalidValue);
     auto* node = new cudaGraphNode_st();
@@ -3320,21 +3601,57 @@ cudaError_t cudaGraphAddMemsetNode(cudaGraphNode_t* pGraphNode, cudaGraph_t grap
     node->dst = pMemsetParams->dst;
     node->memset_value = static_cast<int>(pMemsetParams->value);
     node->count = pMemsetParams->width * pMemsetParams->height * pMemsetParams->elementSize;
+    if (!assign_graph_dependencies(graph, node, pDependencies, numDependencies)) {
+        delete node;
+        return fail(cudaErrorInvalidValue);
+    }
     graph->nodes.push_back(node);
     *pGraphNode = node;
     return fail(cudaSuccess);
 }
 
 cudaError_t cudaGraphAddHostNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
-                                  const cudaGraphNode_t* /*pDependencies*/, size_t /*numDependencies*/,
-                                  cudaHostFn_t fn, void* userData) {
-    if (!pGraphNode || !graph || !fn) return fail(cudaErrorInvalidValue);
+                                  const cudaGraphNode_t* pDependencies, size_t numDependencies,
+                                  const cudaHostNodeParams* pNodeParams) {
+    if (!pGraphNode || !graph || !pNodeParams || !pNodeParams->fn) {
+        return fail(cudaErrorInvalidValue);
+    }
     auto* node = new cudaGraphNode_st();
     node->type = cudaGraphNodeTypeHost;
-    node->host_fn = fn;
-    node->host_user_data = userData;
+    node->host_fn = pNodeParams->fn;
+    node->host_user_data = pNodeParams->userData;
+    if (!assign_graph_dependencies(graph, node, pDependencies, numDependencies)) {
+        delete node;
+        return fail(cudaErrorInvalidValue);
+    }
     graph->nodes.push_back(node);
     *pGraphNode = node;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphExecKernelNodeSetParams(cudaGraphExec_t hGraphExec,
+                                              cudaGraphNode_t hNode,
+                                              const cudaKernelNodeParams* nodeParams) {
+    if (hGraphExec == nullptr || hNode == nullptr || nodeParams == nullptr ||
+        nodeParams->func == nullptr || nodeParams->gridDim.x == 0 ||
+        nodeParams->gridDim.y == 0 || nodeParams->gridDim.z == 0 ||
+        nodeParams->blockDim.x == 0 || nodeParams->blockDim.y == 0 ||
+        nodeParams->blockDim.z == 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const auto it = hGraphExec->source_node_index.find(hNode);
+    if (it == hGraphExec->source_node_index.end()) return fail(cudaErrorInvalidValue);
+    cudaGraphNode_st& node = hGraphExec->nodes[it->second];
+    if (node.type != cudaGraphNodeTypeKernel) return fail(cudaErrorInvalidValue);
+    cudaGraphNode_st updated = node;
+    updated.func = nodeParams->func;
+    updated.grid_dim = nodeParams->gridDim;
+    updated.block_dim = nodeParams->blockDim;
+    updated.shared_mem = nodeParams->sharedMemBytes;
+    if (!snapshot_graph_kernel_arguments(&updated, updated.func, nodeParams->kernelParams)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    node = std::move(updated);
     return fail(cudaSuccess);
 }
 
@@ -3583,9 +3900,12 @@ cudaError_t cudaLaunchKernel(const void* func,
         node->func = func;
         node->grid_dim = grid_dim;
         node->block_dim = block_dim;
-        node->kernel_args = args;
         node->shared_mem = shared_mem;
-        g->nodes.push_back(node);
+        if (!snapshot_graph_kernel_arguments(node, func, args)) {
+            delete node;
+            return launch_fail(cudaErrorInvalidValue, "graph capture could not snapshot kernel arguments");
+        }
+        append_captured_graph_node(g, node);
         return fail(cudaSuccess);
     }
 
@@ -5008,6 +5328,15 @@ cudaError_t cudaMemcpyPeerAsync(void* dst, int /*dstDevice*/,
 cudaError_t cudaLaunchHostFunc(cudaStream_t stream, cudaHostFn_t fn, void* userData) {
     if (fn == nullptr) {
         return fail(cudaErrorInvalidValue);
+    }
+    if (cudaGraph_t graph = get_capture_graph(stream)) {
+        auto* node = new (std::nothrow) cudaGraphNode_st();
+        if (node == nullptr) return fail(cudaErrorMemoryAllocation);
+        node->type = cudaGraphNodeTypeHost;
+        node->host_fn = fn;
+        node->host_user_data = userData;
+        append_captured_graph_node(graph, node);
+        return fail(cudaSuccess);
     }
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {

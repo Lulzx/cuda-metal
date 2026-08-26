@@ -1,20 +1,35 @@
 # Known Gaps
 
 **Note:** This document tracks divergences from the v1 spec (spec.md) and areas of partial coverage.
-See [docs/status.md](status.md) for comprehensive implemented coverage (post-Phase 5, full
-library shims, llama.cpp/llm.c conformance via PTX path, etc.). Many items formerly listed here
+See [docs/status.md](status.md) for comprehensive implemented coverage (post-Phase 5,
+library-shim subsets, llama.cpp/llm.c conformance via PTX path, etc.). Many items formerly listed here
 as gaps have been closed.
 
-## Intentional non-goals (spec §2.2, deferred to v2+)
-- Dynamic parallelism (kernels launching kernels) — compile-time error.
-- CUDA graphics interop (OpenGL/Vulkan/DirectX).
-- Multi-GPU / peer-to-peer (Apple Silicon is single-GPU die).
-- Full texture/surface object GPU sampling (lifecycle + array memcpy supported; device-side
-  `tex.*` / `suld.*` etc. error at compile for PTX path; see intrinsic-map.md).
+## Durable platform / legal limits
+
+- SASS-only binaries cannot run: CuMetal translates documented PTX and does not
+  decompile NVIDIA machine code.
+- CUDA graphics interop (OpenGL/Vulkan/DirectX) is outside the Metal compute ABI CuMetal exposes.
+- Multi-GPU / peer-to-peer execution is outside the single-GPU Apple Silicon target.
+- Native AIR `double` pipelines are rejected by the current public Metal toolchain;
+  the supported subset uses reduced-precision FP32-pair emulation instead.
+- Grid-wide synchronization has no single-dispatch cross-threadgroup Metal barrier.
+  Correct general support requires kernel fission and ordered dispatch, described below.
+
+## Deferred but implementable compatibility work
+
+- Dynamic parallelism (kernels launching kernels) requires a CPU launch trampoline and
+  explicit scheduling/error semantics; current device-side launches fail compilation.
+- Full texture/surface object GPU sampling needs a hidden Metal texture binding ABI.
+  Lifecycle + array memcpy are supported; device-side
+  `tex.*` / `suld.*` etc. error at compile for the PTX path (see intrinsic-map.md).
   Kernels that sidestep sampling by dereferencing a linear/pitch2D resource's
   `devPtr` directly need `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`; without it the
   loads read as zeros. `cudaCreateTextureObject` warns once in that case.
-- MLIR GPU-dialect kernel fusion / advanced scheduling (optional Phase 5 path not taken).
+- CUDA graph kernel/memcpy/memset/host-node capture and replay exist, but graph
+  memory nodes, executable updates, and the remaining node types are incomplete.
+- MLIR GPU-dialect kernel fusion / advanced scheduling remains an optional
+  architecture direction, not a compatibility claim.
 
 ## Partial / conservative implementations
 - Masked `__syncwarp(mask != 0xFFFFFFFF)` lowers to an AIR SIMD-group barrier with
@@ -462,9 +477,19 @@ blocks:
   6 samples. Some of the underlying algorithms already exist; the headers do not.
 - **Device-side `printf`** -- Metal has no equivalent. 2 samples.
 - **Tensor cores** -- `mma.h` / `nvcuda::wmma`. 4 samples.
-- **CUDA graph memory nodes** -- `cudaGraphAddMemFreeNode`,
-  `cudaGraphMemAttributeType`, `cudaGraphExecKernelNodeSetParams`,
-  `cudaHostNodeParams`. 3 samples.
+- **CUDA graph memory nodes** -- `cudaGraphAddMemAllocNode`,
+  `cudaGraphAddMemFreeNode`, graph-memory attributes, trimming, and their
+  virtual-address lifetime semantics. 2 samples. The graph runtime now preserves
+  dependencies, reports actual roots, clones topology, snapshots kernel argument
+  bytes, captures host functions, and supports `cudaGraphExecKernelNodeSetParams`.
+  `simpleCudaGraphs` consequently compiles and runs, but remains `run-fail`: its
+  twelve identical FP64 reductions disagree numerically, and the sweep checks the
+  printed values instead of trusting the sample's unconditional zero exit status.
+  `jacobiCudaGraphs` also compiles after adding topology-checked whole-graph updates
+  and exact binary64-sign-bit `__nv_fabs` lowering. Its first Jacobi kernel emits a
+  metallib but Metal rejects the compute pipeline with
+  `XPC_ERROR_CONNECTION_INTERRUPTED`, so it is likewise `run-fail`, not claimed as
+  graph conformance.
 - **Dynamic parallelism (CDP)** -- device-side stream creation and launch. 3 samples.
 - **Scattered API surface** -- `atomicAdd_system` (system-scope atomics are not
   faithfully expressible on Metal, so no alias is provided), `__float2half2_rn`,

@@ -384,18 +384,27 @@ If you have shipped something on CuMetal, open a PR adding it here.
 
 ## Known hard limits
 
-- No dynamic parallelism.
-- No multi-GPU or peer-to-peer execution.
+Durable platform/legal boundaries:
+
+- No SASS execution or decompilation; binary compatibility requires embedded PTX.
+- No multi-GPU or peer-to-peer execution on the single-GPU Apple Silicon target.
 - No OpenGL, Vulkan, or DirectX interop.
-- No SASS execution.
-- Multi-block cooperative launch/grid sync is rejected; single-block
-  cooperative launch is supported.
-- FP64 register emulation provides about a 44-bit mantissa, not IEEE binary64;
-  unsupported binary64 memory/conversion boundaries fail compilation.
-- Texture and surface object lifecycle exists; general device-side sampling
-  does not.
+- Metal has no single-dispatch cross-threadgroup barrier. Multi-block cooperative
+  launch/grid sync is rejected; single-block cooperative launch is supported.
+- Current public Metal compilation rejects native AIR `double`. FP64 register
+  emulation provides about a 44-bit mantissa, and unsupported binary64
+  memory/conversion boundaries fail compilation.
+
+Engineering gaps, not fundamental impossibilities:
+
+- Dynamic parallelism needs a CPU trampoline and compatible scheduling/error semantics.
+- Texture and surface object lifecycle exists; general device-side sampling needs
+  a Metal texture binding ABI.
+- CUDA graphs cover tested dependency-ordered kernel/linear-memcpy/memset/host-node
+  capture and replay, cloning, and compatible executable updates, but memory nodes
+  and other advanced behavior are incomplete.
 - Device `printf` uses a bounded buffer and limits format strings to 256 bytes.
-- CUDA, cuDNN, PhysX, llama.cpp, and PTX coverage is incomplete.
+- CUDA, library-shim, PhysX, llama.cpp, and PTX coverage is incomplete.
 
 This list is intentionally short. The authoritative list is
 [docs/known-gaps.md](docs/known-gaps.md).

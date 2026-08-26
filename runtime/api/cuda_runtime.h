@@ -481,6 +481,18 @@ typedef enum cudaGraphNodeType {
     cudaGraphNodeTypeCount = 6,
 } cudaGraphNodeType;
 
+typedef enum cudaGraphExecUpdateResult {
+    cudaGraphExecUpdateSuccess = 0,
+    cudaGraphExecUpdateError = 1,
+    cudaGraphExecUpdateErrorTopologyChanged = 2,
+    cudaGraphExecUpdateErrorNodeTypeChanged = 3,
+    cudaGraphExecUpdateErrorFunctionChanged = 4,
+    cudaGraphExecUpdateErrorParametersChanged = 5,
+    cudaGraphExecUpdateErrorNotSupported = 6,
+    cudaGraphExecUpdateErrorUnsupportedFunctionChange = 7,
+    cudaGraphExecUpdateErrorAttributesChanged = 8,
+} cudaGraphExecUpdateResult;
+
 enum {
     cudaDeviceScheduleAuto = 0x00,
     cudaDeviceScheduleSpin = 0x01,
@@ -763,11 +775,15 @@ cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode mo
 cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t* pGraph);
 cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus* pCaptureStatus);
 cudaError_t cudaGraphCreate(cudaGraph_t* pGraph, unsigned int flags);
+cudaError_t cudaGraphClone(cudaGraph_t* pGraphClone, cudaGraph_t originalGraph);
 cudaError_t cudaGraphDestroy(cudaGraph_t graph);
 cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
                                   cudaGraphNode_t* pErrorNode, char* pLogBuffer,
                                   size_t bufferSize);
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream);
+cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
+                                cudaGraphNode_t* hErrorNode_out,
+                                cudaGraphExecUpdateResult* updateResult_out);
 cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec);
 cudaError_t cudaGraphGetNodes(cudaGraph_t graph, cudaGraphNode_t* nodes, size_t* numNodes);
 cudaError_t cudaGraphGetRootNodes(cudaGraph_t graph, cudaGraphNode_t* pRootNodes, size_t* pNumRootNodes);
@@ -953,6 +969,11 @@ typedef struct cudaMemsetParams {
     size_t height;
 } cudaMemsetParams;
 
+typedef struct cudaHostNodeParams {
+    cudaHostFn_t fn;
+    void* userData;
+} cudaHostNodeParams;
+
 cudaError_t cudaGraphAddKernelNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
                                     const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                     const cudaKernelNodeParams* pNodeParams);
@@ -964,7 +985,10 @@ cudaError_t cudaGraphAddMemsetNode(cudaGraphNode_t* pGraphNode, cudaGraph_t grap
                                     const cudaMemsetParams* pMemsetParams);
 cudaError_t cudaGraphAddHostNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
                                   const cudaGraphNode_t* pDependencies, size_t numDependencies,
-                                  cudaHostFn_t fn, void* userData);
+                                  const cudaHostNodeParams* pNodeParams);
+cudaError_t cudaGraphExecKernelNodeSetParams(cudaGraphExec_t hGraphExec,
+                                              cudaGraphNode_t hNode,
+                                              const cudaKernelNodeParams* nodeParams);
 cudaError_t cudaGraphNodeGetType(cudaGraphNode_t node, cudaGraphNodeType* pType);
 cudaError_t cudaStreamGetCaptureInfo(cudaStream_t stream, cudaStreamCaptureStatus* pCaptureStatus,
                                       unsigned long long* pId);
@@ -1492,6 +1516,27 @@ static __device__ __forceinline__ unsigned int __shfl_down_sync(unsigned int mas
                                                       __cumetal_shfl_clamp(width, 0x1f));
     return __cumetal_shfl_i32_bits_to_u32(out_bits);
 }
+static __device__ __forceinline__ unsigned long long __shfl_down_sync(
+    unsigned int mask, unsigned long long val, unsigned int delta, int width = 32) {
+    const unsigned int lo = static_cast<unsigned int>(val);
+    const unsigned int hi = static_cast<unsigned int>(val >> 32);
+    return static_cast<unsigned long long>(__shfl_down_sync(mask, lo, delta, width)) |
+           (static_cast<unsigned long long>(__shfl_down_sync(mask, hi, delta, width)) << 32);
+}
+static __device__ __forceinline__ long long __shfl_down_sync(
+    unsigned int mask, long long val, unsigned int delta, int width = 32) {
+    return static_cast<long long>(
+        __shfl_down_sync(mask, static_cast<unsigned long long>(val), delta, width));
+}
+static __device__ __forceinline__ double __shfl_down_sync(
+    unsigned int mask, double val, unsigned int delta, int width = 32) {
+    unsigned long long bits;
+    __builtin_memcpy(&bits, &val, sizeof(bits));
+    bits = __shfl_down_sync(mask, bits, delta, width);
+    double out;
+    __builtin_memcpy(&out, &bits, sizeof(out));
+    return out;
+}
 static __device__ __forceinline__ int __shfl_up_sync(unsigned int mask, int val, unsigned int delta, int width = 32) {
     return __cumetal_shfl_sync_up_i32(mask, val, delta, __cumetal_shfl_clamp(width, 0));
 }
@@ -1504,6 +1549,27 @@ static __device__ __forceinline__ unsigned int __shfl_up_sync(unsigned int mask,
     const int out_bits = __cumetal_shfl_sync_up_i32(mask, __cumetal_shfl_u32_bits_to_i32(val), delta,
                                                     __cumetal_shfl_clamp(width, 0));
     return __cumetal_shfl_i32_bits_to_u32(out_bits);
+}
+static __device__ __forceinline__ unsigned long long __shfl_up_sync(
+    unsigned int mask, unsigned long long val, unsigned int delta, int width = 32) {
+    const unsigned int lo = static_cast<unsigned int>(val);
+    const unsigned int hi = static_cast<unsigned int>(val >> 32);
+    return static_cast<unsigned long long>(__shfl_up_sync(mask, lo, delta, width)) |
+           (static_cast<unsigned long long>(__shfl_up_sync(mask, hi, delta, width)) << 32);
+}
+static __device__ __forceinline__ long long __shfl_up_sync(
+    unsigned int mask, long long val, unsigned int delta, int width = 32) {
+    return static_cast<long long>(
+        __shfl_up_sync(mask, static_cast<unsigned long long>(val), delta, width));
+}
+static __device__ __forceinline__ double __shfl_up_sync(
+    unsigned int mask, double val, unsigned int delta, int width = 32) {
+    unsigned long long bits;
+    __builtin_memcpy(&bits, &val, sizeof(bits));
+    bits = __shfl_up_sync(mask, bits, delta, width);
+    double out;
+    __builtin_memcpy(&out, &bits, sizeof(out));
+    return out;
 }
 static __device__ __forceinline__ int __shfl_xor_sync(unsigned int mask, int val, int laneMask, int width = 32) {
     unsigned int laneid;
@@ -1526,6 +1592,27 @@ static __device__ __forceinline__ unsigned int __shfl_xor_sync(unsigned int mask
     const int out_bits = __cumetal_shfl_sync_idx_i32(mask, __cumetal_shfl_u32_bits_to_i32(val), srcLane,
                                                      __cumetal_shfl_clamp(width, 0x1f));
     return __cumetal_shfl_i32_bits_to_u32(out_bits);
+}
+static __device__ __forceinline__ unsigned long long __shfl_xor_sync(
+    unsigned int mask, unsigned long long val, int laneMask, int width = 32) {
+    const unsigned int lo = static_cast<unsigned int>(val);
+    const unsigned int hi = static_cast<unsigned int>(val >> 32);
+    return static_cast<unsigned long long>(__shfl_xor_sync(mask, lo, laneMask, width)) |
+           (static_cast<unsigned long long>(__shfl_xor_sync(mask, hi, laneMask, width)) << 32);
+}
+static __device__ __forceinline__ long long __shfl_xor_sync(
+    unsigned int mask, long long val, int laneMask, int width = 32) {
+    return static_cast<long long>(
+        __shfl_xor_sync(mask, static_cast<unsigned long long>(val), laneMask, width));
+}
+static __device__ __forceinline__ double __shfl_xor_sync(
+    unsigned int mask, double val, int laneMask, int width = 32) {
+    unsigned long long bits;
+    __builtin_memcpy(&bits, &val, sizeof(bits));
+    bits = __shfl_xor_sync(mask, bits, laneMask, width);
+    double out;
+    __builtin_memcpy(&out, &bits, sizeof(out));
+    return out;
 }
 
 // Warp vote intrinsics (spec §5.3).

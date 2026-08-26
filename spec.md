@@ -95,19 +95,33 @@ path is legally unambiguous, technically simpler, and invulnerable to vendor kil
 - Remain legally clean: no NVIDIA header redistribution, clean-room runtime ABI, no
   proprietary PTX opcode documentation required.
 
-### 2.2 Non-Goals (v1)
+### 2.2 Durable Limits and Deferred Scope
 
-- Support for CUDA graphics interop (OpenGL / Vulkan / DirectX surface sharing).
-- Dynamic parallelism (kernels launching kernels). Deferred to v2 with CPU trampoline
-  emulation.
-- Multi-GPU across discrete GPUs (Apple Silicon has one GPU die; eGPU via Thunderbolt is
-  explicitly out of scope).
-- CUDA Graphs (MTLCommandBuffer pre-recording is a viable path but deferred).
-- cuDNN / cuBLAS / cuFFT — high-level library shims are a separate project (see §11.1).
-- Windows or Linux ARM (x86 translation via Rosetta 2 is explicitly out of scope).
-- CUDA texture/surface objects (bindless textures). Metal textures exist but the semantic
-  mapping is complex; deferred to v2 (see §8).
-- Drop-in compatibility for closed-source commercial binaries (see §12.1).
+The original v1 plan excluded all of the items below. Later phases implemented
+architecture-compatible subsets of CUDA graphs, library shims, texture/surface
+object lifecycle, and PTX-bearing binary registration. Those subsets do not erase
+the remaining semantic boundaries:
+
+- CUDA graphics interop (OpenGL / Vulkan / DirectX surface sharing) is out of scope.
+- Multi-GPU across discrete GPUs is out of scope. Apple Silicon has one GPU die and
+  eGPU execution via Thunderbolt is not a CuMetal target.
+- Windows and Linux ARM are out of scope; the runtime and AIR backend target macOS
+  on Apple Silicon.
+- SASS-only binaries cannot be translated. The opt-in binary shim supports only
+  containers from which documented PTX can be extracted (see §12.1).
+- Dynamic parallelism (kernels launching kernels) remains deferred. A compatible
+  implementation requires a CPU trampoline and explicit scheduling semantics; it
+  is not a header-only alias.
+- General device-side texture/surface sampling remains deferred. Host lifecycle and
+  CUDA-array memcpy APIs exist, but complete CUDA addressing/filtering semantics need
+  an explicit Metal texture binding ABI (see §8).
+- CUDA graph capture and dependency-ordered replay exist for the tested kernel,
+  linear-memcpy, memset, and host-node subset. Clone, root introspection, kernel-node
+  parameter updates, and topology-compatible executable updates are covered.
+  Graph memory nodes and other advanced behavior remain implementation gaps rather
+  than blanket non-goals.
+- cuBLAS, cuRAND, cuFFT, cuSPARSE, cuSOLVER, and cuDNN expose tested compatibility
+  subsets as Phase 4.5 shims. Full NVIDIA library parity is not a goal (see §11.1).
 
 ### 2.3 Why Not MLIR Yet?
 
@@ -756,18 +770,18 @@ Sources:
 
 ## 8. Known Semantic Gaps
 
-The following CUDA features have no direct Metal equivalent and require workarounds or are
-unsupported in v1:
+The following CUDA features have no direct Metal equivalent and require workarounds or remain
+partially supported after the original v1 phases:
 
-| Feature | Gap | v1 Policy |
+| Feature | Gap | Current policy |
 |---------|-----|-----------|
 | Dynamic parallelism | Metal kernels cannot launch kernels | Compile-time error |
 | Cooperative groups (grid-wide) | No cross-threadgroup barrier in Metal | Partial: threadgroup-scoped CG works |
 | `__ldg()` (texture cache load) | No texture cache hint in AIR | Lowered to plain load; no perf impact on UMA |
-| CUDA graphs | Pre-recorded command buffer equivalent exists | Deferred to v2 |
+| CUDA graphs | CuMetal replays a tested dependency-ordered kernel/linear-memcpy/memset/host-node subset | Partial; graph memory nodes and advanced node types remain |
 | Peer-to-peer memory | No multi-GPU on Apple Silicon | Compile-time error |
 | Occupancy API | Apple GPU architecture differs | Returns conservative estimates (see §6.8) |
-| Texture/surface objects | Metal textures exist but binding model differs | Deferred to v2; compile-time error for now |
+| Texture/surface objects | Host lifecycle exists; Metal device binding model differs | Device-side sampling remains deferred and fails explicitly |
 | Half-precision atomics | Not universally supported in AIR | Software emulation via CAS loop |
 | `cudaProfilerStart/Stop` | Metal GPU capture API exists but differs | Stub (no-op) |
 | FP64 arithmetic | See §8.1 | Conditional support with fallback |
@@ -776,23 +790,23 @@ unsupported in v1:
 
 ### 8.1 FP64 Policy
 
-Apple Silicon GPUs have minimal FP64 support. The GPU ALUs can execute some FP64
-instructions but at drastically reduced throughput (~1/32 of FP32). This is consistent
-across M1–M4.
+Current public Metal GPU compilation rejects the native AIR `double` pipelines CuMetal
+can emit. CuMetal therefore treats native FP64 as a compiler-research mode, not as a
+working runtime path on the tested Apple Silicon hardware.
 
 CuMetal's FP64 compilation modes:
 
 | Mode | Flag | Behavior | Precision |
 |------|------|----------|-----------|
-| Native (default) | `--fp64=native` | Emit AIR FP64 instructions. Works but extremely slow. | IEEE 754 double |
-| Emulate | `--fp64=emulate` | Decompose to FP32 pairs via Dekker's algorithm | ~44 bits mantissa |
-| Warn | `--fp64=warn` | Same as native, but emit a per-instruction warning | IEEE 754 double |
+| Emulate (runtime/JIT default) | `--fp64=emulate` | Decompose supported ALU operations to FP32 pairs | ~44 bits mantissa |
+| Native | `--fp64=native` | Emit AIR FP64 for compiler-path research; pipeline creation fails on current tested hardware | IEEE 754 if a future Metal target accepts it |
+| Warn | `--fp64=warn` | Emit native AIR FP64 plus per-instruction warnings | Same runtime limitation as native |
 
 **Guidance for users:**
 
-- Programs that use occasional `double` for accumulation or reduction: use `--fp64=native`.
-  The throughput penalty is per-instruction; if doubles are <5% of operations, the overall
-  impact is tolerable.
+- Programs that use occasional `double` for accumulation or reduction can use the
+  emulation subset when its precision and supported memory/conversion boundaries are
+  sufficient. Native mode is not a deployment recommendation on current hardware.
 - Programs dominated by FP64 (scientific simulation with `double` throughout): these are
   out of scope for GPU execution on Apple Silicon. The recommended path is CPU execution
   via Apple's AMX (Accelerate Matrix eXtensions) coprocessor, which provides full-speed

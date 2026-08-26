@@ -813,14 +813,18 @@ Library alias compatibility:
 - Optional binary-shim alias: when `CUMETAL_ENABLE_BINARY_SHIM=ON`, build/install also provides
   `libcuda.dylib -> libcumetal.dylib`.
 
-Known limitations (intentional per spec §2.2 and §8):
+Known limitations (see spec §2.2 and §8):
 
 - Default kernel launch uses a CuMetal descriptor (`cumetalKernel_t`).
 - Binary-shim registration: CuMetal `CMTL` envelopes, direct PTX images, and basic CUDA
   fatbin PTX images are supported; full NVCC fatbinary variants are not yet implemented.
-- CUDA Graphs (`cudaGraphCreate`, `cuGraphCreate`): deferred to v2 per spec §2.2.
+- CUDA Graphs: tested dependency-ordered kernel/linear-memcpy/memset/host-node capture and
+  replay, cloning, root introspection, kernel-node parameter updates, and
+  topology-compatible executable updates are implemented. Graph memory nodes,
+  cross-stream event-capture topology, and advanced node types remain incomplete.
 - Dynamic parallelism: compile-time error per spec §2.2.
-- Texture/surface objects: deferred to v2 per spec §2.2 and §8.
+- Texture/surface object lifecycle and CUDA-array memcpy are implemented; general
+  device-side texture/surface sampling remains deferred per spec §2.2 and §8.
 - Multi-GPU peer access: single GPU only on Apple Silicon; peer APIs return appropriate errors.
 - CUDA graphics interop (OpenGL/Vulkan): non-goal per spec §2.2.
 - Multi-block cooperative launch is rejected with not-supported because Metal has no

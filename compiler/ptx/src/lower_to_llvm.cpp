@@ -3457,6 +3457,16 @@ class GenericLlvmEmitter {
             return store_ret_bits(out, 32);
         }
 
+        if (callee == "__nv_fabs") {
+            if (arg_names.empty()) return fail(instr, "__nv_fabs expects 1 arg");
+            auto bits = load_call_slot_value(os, arg_names[0], 64);
+            if (!bits) return fail(instr, "__nv_fabs arg missing");
+            const std::string out = next_tmp("fabs_bits");
+            os << "  " << out << " = and i64 " << *bits
+               << ", 9223372036854775807\n";
+            return store_ret_bits(out, 64);
+        }
+
         if (callee == "__nv_float_as_int" || callee == "__nv_float_as_uint" ||
             callee == "__nv_int_as_float" || callee == "__nv_uint_as_float") {
             if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
