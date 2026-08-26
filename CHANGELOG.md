@@ -6,6 +6,28 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-26
+
+### Fixed
+
+- **Float temporaries held in `.b32` registers were typed as unsigned integers, producing silently
+  wrong results.** Optimized clang PTX keeps floating-point values in `.b32 %rN` registers, and the
+  PTX->MSL emitter typed `neg`, `fma`, `mad`, `abs`, `min`, `max`, `not`, `rcp`, `selp`, `mov`, and
+  the unary math intrinsics from the *register spelling* rather than the instruction suffix. A
+  kernel computing `c * (out[i] - a * p[i]) + b * q[i]` therefore emitted `uint vr11 = -a;`, which
+  truncated every intermediate and clamped negatives to zero -- a wrong answer with no diagnostic.
+  The instruction suffix is now authoritative at all of those sites, as it already was for the
+  binary operators. This is the same flaw as the 0.1.x `cvt` rounding-mode bug, in the handlers
+  that audit had flagged but not reached.
+
+### Added
+
+- **A tiny diffusion-model demo** (`demos/diffusion`). A 312,769-parameter DDPM is trained on MNIST
+  in PyTorch, then sampled entirely by hand-written CUDA kernels through CuMetal: 1000 denoising
+  steps, 16 images in ~13 s on an M4 Pro. `run.sh --check` gates a forward pass against PyTorch's
+  own output at `max |cumetal - pytorch| < 2e-3` (measured 5.2e-06). The demo is what surfaced the
+  `.b32` typing bug above.
+
 ## [0.2.0] - 2026-08-26
 
 ### Added
