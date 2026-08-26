@@ -464,7 +464,7 @@ as gaps have been closed.
 83 gated headless samples from `NVIDIA/cuda-samples` (`cpp/0_Introduction`,
 `2_Concepts_and_Techniques`, `3_CUDA_Features`, `4_CUDA_Libraries`,
 `6_Performance`) are compiled and run against `libcumetal`. Result:
-**28 pass, 2 waive cleanly, 53 do not build or run**.
+**32 pass, 3 waive cleanly, 48 do not yet have a passing runtime result**.
 
 This runs as `conformance_cuda_samples_sweep`. The samples themselves are not
 vendored -- the test skips (77) unless a `cuda-samples` checkout is present at
@@ -499,9 +499,11 @@ blocks:
   unmodified `binaryPartitionCG` and `warpAggregatedAtomicsCG` translation units
   now compile and link. Their 100K/10M-element workloads were deliberately not
   run in this resource-bounded pass, so neither manifest entry is promoted.
-  `simpleCooperativeGroups` still fails explicitly when the LLVM PTX backend
-  reaches Clang's initialized module-global `vprintf` format (`_$_str`). The
-  prior five-sample cluster therefore retains independent runtime/header
+  `simpleCooperativeGroups` still fails explicitly because that kernel falls
+  through to the legacy LLVM PTX backend, which rejects every `vprintf` call.
+  Clang's initialized module-global format (`_$_str`) is already decoded by the
+  direct MSL path; the remaining issue is backend coverage, not format recovery.
+  The prior five-sample cluster therefore retains independent runtime/header
   blockers even though its dynamic partition API gap is closed.
 - **thrust/CUB header surface** -- `thrust/copy.h`, `thrust/random.h`,
   `thrust/adjacent_difference.h`, `cub/device/device_{find,transform,segmented_scan}.cuh`.

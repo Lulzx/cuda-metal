@@ -7,6 +7,8 @@
 #   waive         builds and runs, then waives itself on a capability CuMetal reports
 #                 as absent (exit 2 / EXIT_WAIVED). Reaching this state is correct.
 #   compile-fail  needs CUDA API or device-language surface CuMetal does not have.
+#   run-unverified compiles and links, but its workload has not been run as evidence.
+#                  The next sweep must replace this provisional classification.
 #   no-lowering   compiles and launches, but a kernel declines to lower.
 #   run-fail      compiles and launches, then crashes or computes wrong values.
 #                 These are real defects -- see docs/known-gaps.md.
@@ -56,17 +58,17 @@ waive        4_CUDA_Libraries/conjugateGradientMultiBlockCG
 no-lowering  0_Introduction/clock
 no-lowering  0_Introduction/simpleHyperQ
 no-lowering  2_Concepts_and_Techniques/eigenvalues
-compile-fail 0_Introduction/fp16ScalarProduct
+run-unverified 0_Introduction/fp16ScalarProduct
 waive        0_Introduction/simpleAttributes
 compile-fail 0_Introduction/simpleAWBarrier
-compile-fail 0_Introduction/simpleCooperativeGroups
+no-lowering  0_Introduction/simpleCooperativeGroups
 compile-fail 0_Introduction/simpleCubemapTexture
 compile-fail 0_Introduction/simpleLayeredTexture
 compile-fail 0_Introduction/simplePitchLinearTexture
 compile-fail 0_Introduction/simpleSurfaceWrite
 compile-fail 0_Introduction/simpleTexture
 compile-fail 0_Introduction/simpleTexture3D
-compile-fail 0_Introduction/systemWideAtomics
+run-unverified 0_Introduction/systemWideAtomics
 compile-fail 2_Concepts_and_Techniques/convolutionTexture
 compile-fail 2_Concepts_and_Techniques/dct8x8
 compile-fail 2_Concepts_and_Techniques/interval
@@ -74,9 +76,9 @@ compile-fail 2_Concepts_and_Techniques/radixSortThrust
 compile-fail 2_Concepts_and_Techniques/reduction
 compile-fail 2_Concepts_and_Techniques/segmentationTreeThrust
 compile-fail 2_Concepts_and_Techniques/shfl_scan
-compile-fail 2_Concepts_and_Techniques/streamOrderedAllocation
+run-unverified 2_Concepts_and_Techniques/streamOrderedAllocation
 compile-fail 3_CUDA_Features/bf16TensorCoreGemm
-compile-fail 3_CUDA_Features/binaryPartitionCG
+run-unverified 3_CUDA_Features/binaryPartitionCG
 compile-fail 3_CUDA_Features/cdpAdvancedQuicksort
 compile-fail 3_CUDA_Features/cdpQuadtree
 compile-fail 3_CUDA_Features/cdpSimplePrint
@@ -92,13 +94,13 @@ run-fail     3_CUDA_Features/jacobiCudaGraphs
 compile-fail 3_CUDA_Features/newdelete
 run-fail     3_CUDA_Features/simpleCudaGraphs
 compile-fail 3_CUDA_Features/tf32TensorCoreGemm
-compile-fail 3_CUDA_Features/warpAggregatedAtomicsCG
+run-unverified 3_CUDA_Features/warpAggregatedAtomicsCG
 compile-fail 4_CUDA_Libraries/conjugateGradientCudaGraphs
 compile-fail 4_CUDA_Libraries/conjugateGradientPrecond
 compile-fail 4_CUDA_Libraries/cubDeviceFind
 compile-fail 4_CUDA_Libraries/cubDeviceSegmentedScan
 compile-fail 4_CUDA_Libraries/cubDeviceTransform
 compile-fail 4_CUDA_Libraries/lineOfSight
-compile-fail 4_CUDA_Libraries/simpleCUBLAS_LU
+run-unverified 4_CUDA_Libraries/simpleCUBLAS_LU
 compile-fail 4_CUDA_Libraries/simpleCUFFT
 compile-fail 6_Performance/UnifiedMemoryPerf

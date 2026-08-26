@@ -55,6 +55,11 @@ set_tests_properties(
 )
 
 add_test(
+    NAME unit_cuda_samples_sweep_status
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_sweep_status.sh
+)
+
+add_test(
     NAME conformance_cuda_samples_vectoradd_gpu
     COMMAND bash
         ${CMAKE_CURRENT_SOURCE_DIR}/run_cuda_samples_vectoradd_gpu.sh

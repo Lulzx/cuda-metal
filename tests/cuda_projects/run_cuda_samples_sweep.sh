@@ -18,6 +18,8 @@ MANIFEST="${3:-${ROOT_DIR}/tests/cuda_projects/cuda_samples_sweep_manifest.txt}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/cuda_projects/_common.sh
 source "${SCRIPT_DIR}/_common.sh"
+# shellcheck source=tests/cuda_projects/sweep_status.sh
+source "${SCRIPT_DIR}/sweep_status.sh"
 
 CUDA_SAMPLES_DIR="${CUMETAL_CUDA_SAMPLES_DIR:-${ROOT_DIR}/../cuda-samples}"
 
@@ -176,7 +178,7 @@ classify_sample() {
     echo "pass"
 }
 
-declare -a REGRESSIONS=() IMPROVEMENTS=()
+declare -a REGRESSIONS=() IMPROVEMENTS=() EVIDENCE_UPDATES=()
 declare -i total=0 present=0 matched=0 gated_total=0 gated_present=0
 
 echo "cuda-samples sweep against ${CATEGORY_ROOT}"
@@ -201,13 +203,17 @@ while read -r expected rel; do
     fi
 
     printf '  %-12s %-58s (expected %s)\n' "${actual}" "${rel}" "${expected}"
-    # pass and waive are the gated states: both mean the sample reached a correct
-    # outcome, so falling out of either is a regression.
-    if [[ "${expected}" == "pass" || "${expected}" == "waive" ]]; then
-        REGRESSIONS+=( "${rel}: expected ${expected}, got ${actual}" )
-    elif [[ "${actual}" == "pass" || "${actual}" == "waive" ]]; then
-        IMPROVEMENTS+=( "${rel}: ${expected} -> ${actual}" )
-    fi
+    case "$(cumetal_sweep_transition "${expected}" "${actual}")" in
+        regression)
+            REGRESSIONS+=( "${rel}: expected ${expected}, got ${actual}" )
+            ;;
+        improvement)
+            IMPROVEMENTS+=( "${rel}: ${expected} -> ${actual}" )
+            ;;
+        evidence-update)
+            EVIDENCE_UPDATES+=( "${rel}: ${expected} -> ${actual}" )
+            ;;
+    esac
 done < "${MANIFEST}"
 
 echo
@@ -230,6 +236,14 @@ if (( ${#REGRESSIONS[@]} > 0 )); then
     echo "FAIL: ${#REGRESSIONS[@]} sample(s) regressed:"
     printf '  - %s\n' "${REGRESSIONS[@]}"
     echo "Logs: ${OUT_ROOT}/<sample>/build-and-run.log"
+    exit 1
+fi
+
+if (( ${#EVIDENCE_UPDATES[@]} > 0 )); then
+    echo
+    echo "FAIL: ${#EVIDENCE_UPDATES[@]} previously unrun sample(s) now have runtime evidence:"
+    printf '  - %s\n' "${EVIDENCE_UPDATES[@]}"
+    echo "Update ${MANIFEST} and docs/known-gaps.md with the observed classifications."
     exit 1
 fi
 
