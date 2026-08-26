@@ -51,6 +51,41 @@ int main() {
         return 1;
     }
 
+    size_t persisting_l2_size = 1;
+    if (cudaDeviceGetLimit(&persisting_l2_size, cudaLimitPersistingL2CacheSize) !=
+            cudaSuccess ||
+        persisting_l2_size != 0) {
+        std::fprintf(stderr, "FAIL: unsupported persisting-L2 limit must be 0\n");
+        return 1;
+    }
+    if (cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, 1) !=
+        cudaErrorNotSupported) {
+        std::fprintf(stderr, "FAIL: nonzero persisting-L2 limit should be unsupported\n");
+        return 1;
+    }
+    if (cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, 0) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: clearing the unsupported persisting-L2 limit failed\n");
+        return 1;
+    }
+
+    cudaStreamAttrValue attr{};
+    attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+    if (cudaStreamSetAttribute(nullptr, cudaStreamAttributeAccessPolicyWindow,
+                               &attr) != cudaErrorNotSupported ||
+        cudaStreamGetAttribute(nullptr, cudaStreamAttributeAccessPolicyWindow,
+                               &attr) != cudaErrorNotSupported ||
+        cudaCtxResetPersistingL2Cache() != cudaErrorNotSupported) {
+        std::fprintf(stderr, "FAIL: persisting-L2 APIs should report unsupported\n");
+        return 1;
+    }
+    if (cudaStreamSetAttribute(nullptr, cudaStreamAttributeAccessPolicyWindow,
+                               nullptr) != cudaErrorInvalidValue ||
+        cudaStreamGetAttribute(nullptr, cudaStreamAttributeAccessPolicyWindow,
+                               nullptr) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: null stream-attribute values should be rejected\n");
+        return 1;
+    }
+
     // --- cudaStreamCreateWithPriority ---
     cudaStream_t stream = nullptr;
     if (cudaStreamCreateWithPriority(&stream, cudaStreamDefault, 0) != cudaSuccess) {

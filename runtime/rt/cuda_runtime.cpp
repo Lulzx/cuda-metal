@@ -2115,6 +2115,8 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     // wrong answers.
     prop->cooperativeLaunch = 0;
     prop->cooperativeMultiDeviceLaunch = 0;
+    prop->persistingL2CacheMaxSize = 0;
+    prop->accessPolicyMaxWindowSize = 0;
     for (size_t i = 0; i < sizeof(prop->cumetalReserved) / sizeof(prop->cumetalReserved[0]); ++i) {
         prop->cumetalReserved[i] = 0;
     }
@@ -3187,6 +3189,57 @@ cudaError_t cudaStreamGetFlags(cudaStream_t stream, unsigned int* flags) {
         return fail(cudaErrorInvalidValue);
     }
     return fail(cudaSuccess);
+}
+
+cudaError_t cudaStreamSetAttribute(cudaStream_t stream, cudaStreamAttrID attr,
+                                   const cudaStreamAttrValue* value) {
+    if (value == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    if (attr != cudaStreamAttributeAccessPolicyWindow) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+    std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
+    const cudaError_t resolve_status =
+        resolve_runtime_stream(stream, &backend_stream, nullptr);
+    if (resolve_status != cudaSuccess || backend_stream == nullptr) {
+        return fail(resolve_status == cudaSuccess ? cudaErrorInvalidValue : resolve_status);
+    }
+    // Public Metal has no API for CUDA's persisting-L2 access-policy window.
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaStreamGetAttribute(cudaStream_t stream, cudaStreamAttrID attr,
+                                   cudaStreamAttrValue* value) {
+    if (value == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    if (attr != cudaStreamAttributeAccessPolicyWindow) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+    std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
+    const cudaError_t resolve_status =
+        resolve_runtime_stream(stream, &backend_stream, nullptr);
+    if (resolve_status != cudaSuccess || backend_stream == nullptr) {
+        return fail(resolve_status == cudaSuccess ? cudaErrorInvalidValue : resolve_status);
+    }
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaCtxResetPersistingL2Cache(void) {
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+    return fail(cudaErrorNotSupported);
 }
 
 cudaError_t cudaStreamDestroy(cudaStream_t stream) {
@@ -5362,11 +5415,15 @@ cudaError_t cudaDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPr
     return fail(cudaSuccess);
 }
 
-// Device limits — Metal exposes no equivalent knobs; no-op set, sensible get.
-cudaError_t cudaDeviceSetLimit(cudaLimit /*limit*/, size_t /*value*/) {
+// Device limits — Metal exposes no equivalent knobs; no-op where harmless and
+// reject requests that would otherwise claim unsupported cache policy.
+cudaError_t cudaDeviceSetLimit(cudaLimit limit, size_t value) {
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {
         return fail(init_status);
+    }
+    if (limit == cudaLimitPersistingL2CacheSize && value != 0) {
+        return fail(cudaErrorNotSupported);
     }
     return fail(cudaSuccess);
 }
@@ -5388,6 +5445,9 @@ cudaError_t cudaDeviceGetLimit(size_t* pValue, cudaLimit limit) {
             break;
         case cudaLimitMallocHeapSize:
             *pValue = 8u * 1024u * 1024u;  // 8 MB
+            break;
+        case cudaLimitPersistingL2CacheSize:
+            *pValue = 0;
             break;
         default:
             *pValue = 0;

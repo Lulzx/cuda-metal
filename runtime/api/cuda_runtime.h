@@ -330,7 +330,9 @@ typedef struct cudaDeviceProp {
     // writes past the end of the smaller frame. Real CUDA absorbs new fields into
     // fixed-size reserved space; do the same so the next addition is free. Take a
     // slot from here rather than appending, and rebuild consumers if you cannot.
-    int cumetalReserved[62];
+    int persistingL2CacheMaxSize;    // 0 (public Metal has no persisting-L2 policy)
+    int accessPolicyMaxWindowSize;   // 0 (stream access-policy windows unsupported)
+    int cumetalReserved[60];
 } cudaDeviceProp;
 
 typedef enum cudaDeviceAttr {
@@ -424,6 +426,28 @@ typedef struct cudaPointerAttributes {
 typedef struct CUstream_st* cudaStream_t;
 typedef struct CUevent_st* cudaEvent_t;
 typedef void (*cudaStreamCallback_t)(cudaStream_t stream, cudaError_t status, void* user_data);
+
+typedef enum cudaAccessProperty {
+    cudaAccessPropertyNormal = 0,
+    cudaAccessPropertyStreaming = 1,
+    cudaAccessPropertyPersisting = 2,
+} cudaAccessProperty;
+
+typedef struct cudaAccessPolicyWindow {
+    void* base_ptr;
+    size_t num_bytes;
+    float hitRatio;
+    cudaAccessProperty hitProp;
+    cudaAccessProperty missProp;
+} cudaAccessPolicyWindow;
+
+typedef enum cudaStreamAttrID {
+    cudaStreamAttributeAccessPolicyWindow = 1,
+} cudaStreamAttrID;
+
+typedef union cudaStreamAttrValue {
+    cudaAccessPolicyWindow accessPolicyWindow;
+} cudaStreamAttrValue;
 
 #define cudaStreamLegacy ((cudaStream_t)0x1)
 #define cudaStreamPerThread ((cudaStream_t)0x2)
@@ -775,6 +799,11 @@ cudaError_t cudaStreamCreate(cudaStream_t* stream);
 cudaError_t cudaStreamCreateWithFlags(cudaStream_t* stream, unsigned int flags);
 cudaError_t cudaStreamCreateWithPriority(cudaStream_t* stream, unsigned int flags, int priority);
 cudaError_t cudaStreamGetFlags(cudaStream_t stream, unsigned int* flags);
+cudaError_t cudaStreamSetAttribute(cudaStream_t stream, cudaStreamAttrID attr,
+                                   const cudaStreamAttrValue* value);
+cudaError_t cudaStreamGetAttribute(cudaStream_t stream, cudaStreamAttrID attr,
+                                   cudaStreamAttrValue* value);
+cudaError_t cudaCtxResetPersistingL2Cache(void);
 cudaError_t cudaDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority);
 cudaError_t cudaStreamDestroy(cudaStream_t stream);
 cudaError_t cudaStreamSynchronize(cudaStream_t stream);

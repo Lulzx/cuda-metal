@@ -13,6 +13,11 @@ as gaps have been closed.
 - Multi-GPU / peer-to-peer execution is outside the single-GPU Apple Silicon target.
 - Native AIR `double` pipelines are rejected by the current public Metal toolchain;
   the supported subset uses reduced-precision FP32-pair emulation instead.
+- CUDA persisting-L2 cache policy has no public Metal equivalent. CuMetal exposes
+  the clean-room `cudaAccessPolicyWindow` / stream-attribute API surface, reports
+  both related device capabilities as zero, and returns `cudaErrorNotSupported`
+  for nontrivial policy requests. The upstream `simpleAttributes` sample now
+  compiles and takes its own capability waiver before allocation or launch.
 - Grid-wide synchronization has no single-dispatch cross-threadgroup Metal barrier.
   Correct general support requires kernel fission and ordered dispatch, described below.
 
@@ -501,8 +506,8 @@ blocks:
   `XPC_ERROR_CONNECTION_INTERRUPTED`, so it is likewise `run-fail`, not claimed as
   graph conformance.
 - **Dynamic parallelism (CDP)** -- device-side stream creation and launch. 3 samples.
-- **Scattered API surface** -- `__float2half2_rn`, `cudaAccessPolicyWindow`,
-  `cublas*Batched`, `CUBLAS_POINTER_MODE_DEVICE`,
+- **Scattered API surface** -- `__float2half2_rn`, `cublas*Batched`,
+  `CUBLAS_POINTER_MODE_DEVICE`,
   `cudaDevAttrMemoryPoolsSupported`. The 32-bit signed/unsigned
   `atomic{Add,Exch,Min,Max,CAS,And,Or,Xor,Inc,Dec}_system` surface now lowers
   with system scope and passes a focused GPU/host managed-memory test. NVIDIA's

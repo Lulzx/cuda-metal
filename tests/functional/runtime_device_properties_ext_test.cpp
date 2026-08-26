@@ -109,6 +109,10 @@ int main() {
         std::fprintf(stderr, "FAIL: pageableMemoryAccessUsesHostPageTables must be 0\n");
         return 1;
     }
+    if (prop.persistingL2CacheMaxSize != 0 || prop.accessPolicyMaxWindowSize != 0) {
+        std::fprintf(stderr, "FAIL: unsupported persisting-L2 capabilities must be 0\n");
+        return 1;
+    }
 
     // Verify cudaComputeMode enum values compile correctly.
     static_assert(cudaComputeModeDefault         == 0, "cudaComputeModeDefault should be 0");

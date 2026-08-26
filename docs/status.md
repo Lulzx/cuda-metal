@@ -681,6 +681,8 @@ Driver API additions:
 - `pageableMemoryAccess = 0`, `pageableMemoryAccessUsesHostPageTables = 0`;
   Apple Silicon is UMA, but CuMetal currently binds only tracked Metal-backed
   allocations, not arbitrary `malloc` pointers
+- `persistingL2CacheMaxSize = 0`, `accessPolicyMaxWindowSize = 0`; the fields
+  consume reserved ABI space instead of growing `cudaDeviceProp`
 
 `cudaComputeMode` enum added: `cudaComputeModeDefault`, `cudaComputeModeExclusive`, `cudaComputeModeProhibited`, `cudaComputeModeExclusiveProcess`
 
@@ -717,6 +719,13 @@ Device atomics added (CUDA device code path, spec §6.7):
   `atomic{Add,Exch,Min,Max,CAS,And,Or,Xor,Inc,Dec}_system` on tracked managed
   allocations. A focused test observes host and GPU atomic contributions to the
   same UMA bytes. Arbitrary pageable pointers are not included in this claim.
+
+Persisting-L2 compatibility surface added:
+- `cudaAccessPolicyWindow`, `cudaStreamAttrValue`, access-property and stream-attribute enums
+- `cudaStreamSetAttribute`, `cudaStreamGetAttribute`, and
+  `cudaCtxResetPersistingL2Cache` return `cudaErrorNotSupported` because public
+  Metal exposes no equivalent policy; nonzero `cudaLimitPersistingL2CacheSize`
+  requests are likewise rejected rather than silently accepted
 
 Device intrinsics added (guarded by `#ifndef __CLANG_CUDA_DEVICE_FUNCTIONS_H__`):
 - `__syncwarp`, `__threadfence`, `__threadfence_block`, `__threadfence_system`

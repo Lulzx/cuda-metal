@@ -57,7 +57,7 @@ no-lowering  0_Introduction/clock
 no-lowering  0_Introduction/simpleHyperQ
 no-lowering  2_Concepts_and_Techniques/eigenvalues
 compile-fail 0_Introduction/fp16ScalarProduct
-compile-fail 0_Introduction/simpleAttributes
+waive        0_Introduction/simpleAttributes
 compile-fail 0_Introduction/simpleAWBarrier
 compile-fail 0_Introduction/simpleCooperativeGroups
 compile-fail 0_Introduction/simpleCubemapTexture
