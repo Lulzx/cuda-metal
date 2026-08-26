@@ -138,7 +138,8 @@ API is used.
 
 ## Compiler reality
 
-`cumetalc` can emit every useful stage:
+`cumetalc` can emit inspectable compiler stages, a `.metallib`, or a runnable
+executable:
 
 ```bash
 cumetalc kernel.cu --emit=cumetal-ir -o kernel.cumetal
@@ -147,32 +148,12 @@ cumetalc kernel.cu --emit=metallib   -o kernel.metallib
 cumetalc kernel.cu --emit=exe        -o kernel
 ```
 
-Important switches:
-
-| Switch | Meaning |
-| --- | --- |
-| `--backend=cumetal-ir\|legacy` | Select the typed shared-IR backend or the compatibility backend. There is no silent fallback. |
-| `--cuda-device` | Ask a CUDA-capable Clang to produce PTX before CuMetal lowering. |
-| `--entry NAME` | Compile one kernel and its reachable device-call closure. |
-| `--ptx-strict` | Reject unsupported PTX instead of tolerating it. |
-| `--fp64=native\|emulate\|warn` | Choose the FP64 policy. Default: `emulate`. |
-| `--save-temps` | Keep link intermediates. |
-
-The default backend follows the input because measured coverage says it should:
-
-| Input corpus | `legacy` | `cumetal-ir` |
-| --- | ---: | ---: |
-| direct `.cu` | 0/19 | **10/19** |
-| `.cu --cuda-device` / PTX | **17/19** | 6/19 |
-
-Direct `.cu` therefore defaults to `cumetal-ir`; PTX and `--cuda-device`
-default to `legacy`. This is engineering, not ideology. When the measurements
-change, the default should change.
-
-The complete compiler boundary is in
-[docs/compiler-architecture.md](docs/compiler-architecture.md). Unsupported
-instructions, calls, pointer conversions, CFGs, and ABI forms are tracked in
-[docs/known-gaps.md](docs/known-gaps.md).
+Direct `.cu` input currently defaults to the typed shared-IR backend; PTX and
+`--cuda-device` use the broader compatibility backend. The measured selection
+gate, command-line policy switches, and legality stages are in
+[the compiler architecture guide](docs/compiler-architecture.md). Unsupported
+instructions, calls, pointer conversions, CFGs, and ABI forms remain in
+[known gaps](docs/known-gaps.md).
 
 ## Runtime and libraries
 
@@ -181,37 +162,16 @@ tracks allocations, resolves CUDA pointers to Metal buffers, preserves the
 per-thread error model, and maps streams and events onto command queues and
 shared-event ordering.
 
-The same library also exports compatibility surfaces for:
-
-- cuBLAS and cublasLt
-- cuRAND
-- cuFFT
-- cuSPARSE
-- cuSOLVER Dense
-- cuDNN
-- CUDA Graphs
-- NVML
-- NCCL single-rank operations
-- a small CPU-backed Thrust surface over unified memory
-- async allocation, texture, and surface object lifecycle APIs
-
-These names do not imply full NVIDIA parity. Some operations use
-MetalPerformanceShaders, some use Accelerate, some exploit unified memory, and
-some are deliberately partial. Read [docs/status.md](docs/status.md) before
-building on one.
-
-Large `cudaMalloc` allocations use `MTLHeap` suballocation at 4 MiB and above.
-Override this for diagnosis:
-
-```bash
-CUMETAL_MTLHEAP_ALLOC=1 ./program   # always
-CUMETAL_MTLHEAP_ALLOC=0 ./program   # never
-```
+The same library exports tested subsets of CUDA graphs, cuBLAS/cublasLt,
+cuRAND, cuFFT, cuSPARSE, cuSOLVER, cuDNN, NVML, NCCL, Thrust, async allocation,
+and texture/surface lifecycle APIs. Those names do not imply full NVIDIA
+parity. Read [current status](docs/status.md) for implemented surfaces and the
+[build guide](docs/build.md) for runtime diagnostic controls.
 
 ## Binary shim
 
-By default, Release builds keep source registration enabled and the
-`libcuda.dylib` alias disabled. Enable the alias explicitly:
+Release builds keep source registration enabled and the `libcuda.dylib` alias
+disabled. Enable the alias explicitly:
 
 ```bash
 cmake -B build-shim \
@@ -220,28 +180,10 @@ cmake -B build-shim \
 cmake --build build-shim
 ```
 
-`CUMETAL_ENABLE_CUDA_REGISTRATION=ON` is the host registration ABI emitted by
-Clang for recompiled `.cu` programs. It is part of the source path.
-`CUMETAL_ENABLE_BINARY_SHIM=ON` only adds the drop-in `libcuda.dylib` name.
-Do not confuse them.
-
-The shim recognizes CMTL envelopes, raw PTX, and basic
-FatBinary/FatBinary2/FatBinary3 PTX wrappers. It does not execute SASS and does
-not understand every NVCC fatbinary variant.
-
-Registered PTX is compiled on first use and cached under:
-
-```text
-$CUMETAL_CACHE_DIR/registration-jit/
-```
-
-The key includes the input, kernel, lowering policy, schema versions,
-toolchain-dependent inputs, and the `libcumetal` Mach-O UUID. Set
-`CUMETAL_DEBUG_REGISTRATION=1` to see format detection, compilation, cache hits,
-ABI inference, and registration.
-
-The legal boundary is documented in
-[docs/legal-notice.md](docs/legal-notice.md).
+Source registration and the binary alias are independent switches. Supported
+container forms, JIT-cache identity, diagnostics, and validation commands are
+in [the build guide](docs/build.md). SASS execution remains unsupported, and
+the legal boundary is in [the legal notice](docs/legal-notice.md).
 
 ## What has actually been demonstrated
 

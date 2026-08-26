@@ -52,6 +52,37 @@ The registration JIT selects the new PTX backend only when
 frontend/backend policy and compiler schema. There is no automatic retry with
 the legacy backend.
 
+### Command-line outputs and policy
+
+`cumetalc` exposes the useful intermediate and final stages directly:
+
+```bash
+cumetalc kernel.cu --emit=cumetal-ir -o kernel.cumetal
+cumetalc kernel.cu --emit=msl        -o kernel.metal
+cumetalc kernel.cu --emit=metallib   -o kernel.metallib
+cumetalc kernel.cu --emit=exe        -o kernel
+```
+
+| Switch | Meaning |
+| --- | --- |
+| `--backend=cumetal-ir\|legacy` | Select the typed shared-IR backend or compatibility backend. There is no silent fallback. |
+| `--cuda-device` | Ask a CUDA-capable Clang to produce PTX before CuMetal lowering. |
+| `--entry NAME` | Compile one kernel and its reachable device-call closure. |
+| `--ptx-strict` | Reject unsupported PTX rather than tolerating it. |
+| `--fp64=native\|emulate\|warn` | Select FP64 policy; runtime/JIT default is `emulate`. |
+| `--save-temps` | Retain link intermediates. |
+
+The default follows measured coverage rather than treating either backend as
+universally complete:
+
+| Input corpus | `legacy` | `cumetal-ir` |
+| --- | ---: | ---: |
+| direct `.cu` | 0/19 | **10/19** |
+| `.cu --cuda-device` / PTX | **17/19** | 6/19 |
+
+Direct `.cu` therefore defaults to `cumetal-ir`; PTX and `--cuda-device`
+default to `legacy`. Re-run the conformance gate before changing that policy.
+
 ## Legality stages
 
 After frontend import, only core and `gpu.*` operations are legal. Metal

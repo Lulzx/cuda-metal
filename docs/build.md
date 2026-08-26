@@ -48,6 +48,32 @@ These used to be a single flag, so a Release build silently replaced the registr
 stub and the source-recompilation path stopped being tested in the shipping configuration.
 Enabling the binary shim without the registration ABI is a configure-time error.
 
+Binary-shim formats and JIT cache
+---------------------------------
+
+The opt-in shim recognizes CMTL envelopes, raw PTX, basic
+FatBinary/FatBinary2/FatBinary3 PTX wrappers, and the bounded ELF forms listed
+in [known gaps](known-gaps.md). It does not execute SASS or accept every NVCC
+fatbinary variant.
+
+Registered PTX is compiled on first use and cached under
+`$CUMETAL_CACHE_DIR/registration-jit/` (by default under the user's Library
+cache). Cache identity includes the input, kernel, lowering policy, compiler
+schema, toolchain-dependent inputs, and the `libcumetal` Mach-O UUID. Set
+`CUMETAL_DEBUG_REGISTRATION=1` to inspect format detection, compilation, cache
+hits, ABI inference, and registration.
+
+Runtime allocation diagnostics
+------------------------------
+
+Large `cudaMalloc` allocations use `MTLHeap` suballocation at 4 MiB and above.
+Override that policy only for diagnosis:
+
+```bash
+CUMETAL_MTLHEAP_ALLOC=1 ./program   # always use heap allocation
+CUMETAL_MTLHEAP_ALLOC=0 ./program   # never use heap allocation
+```
+
 Compile a CUDA program
 ----------------------
 
