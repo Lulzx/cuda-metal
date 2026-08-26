@@ -340,6 +340,13 @@ Post-Phase 5 work completed (continued, part 2):
   resolves device alpha/beta storage. `functional_cusparse_api` covers the
   state and negative paths.
 
+- **Texture/surface object metadata**: object creation retains CUDA resource,
+  sampler, and optional view descriptors; the matching texture/surface query
+  APIs return exact copies and reject stale handles. Array copies and object
+  lifecycle remain host-side prerequisites only—device sampling still awaits
+  the explicit Metal texture/sampler binding ABI. Test:
+  `functional_texture_surface_api`.
+
 - **Miscellaneous extended APIs** (`runtime/api/`, `runtime/rt/`, `runtime/driver/`):
   Fills remaining API gaps identified in post-Phase-5 survey.
   - **cuRAND**: `curandGeneratePoisson(generator, ptr, n, lambda)` — Poisson-distributed

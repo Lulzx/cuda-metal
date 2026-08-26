@@ -949,9 +949,17 @@ cudaError_t cudaCreateTextureObject(cudaTextureObject_t* pTexObject,
                                      const cudaTextureDesc* pTexDesc,
                                      const cudaResourceViewDesc* pResViewDesc);
 cudaError_t cudaDestroyTextureObject(cudaTextureObject_t texObject);
+cudaError_t cudaGetTextureObjectResourceDesc(cudaResourceDesc* pResDesc,
+                                              cudaTextureObject_t texObject);
+cudaError_t cudaGetTextureObjectTextureDesc(cudaTextureDesc* pTexDesc,
+                                             cudaTextureObject_t texObject);
+cudaError_t cudaGetTextureObjectResourceViewDesc(cudaResourceViewDesc* pResViewDesc,
+                                                  cudaTextureObject_t texObject);
 cudaError_t cudaCreateSurfaceObject(cudaSurfaceObject_t* pSurfObject,
                                      const cudaResourceDesc* pResDesc);
 cudaError_t cudaDestroySurfaceObject(cudaSurfaceObject_t surfObject);
+cudaError_t cudaGetSurfaceObjectResourceDesc(cudaResourceDesc* pResDesc,
+                                              cudaSurfaceObject_t surfObject);
 cudaChannelFormatDesc cudaCreateChannelDesc(int x, int y, int z, int w,
                                              cudaChannelFormatKind f);
 

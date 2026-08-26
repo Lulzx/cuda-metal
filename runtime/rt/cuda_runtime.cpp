@@ -5528,9 +5528,10 @@ cudaError_t cudaLaunchCooperativeKernel(const void* func,
 }
 
 // ── Texture / Surface API ────────────────────────────────────────────────────
-// Apple Silicon UMA has no dedicated texture unit accessible via CUDA semantics.
-// These stubs allow code that declares texture objects to compile and link;
-// actual texture sampling is backed by linear memory reads.
+// Metal exposes native texture and sampler objects, but CuMetal does not yet
+// carry CUDA resource/sampler descriptors through the compiler's kernel ABI to
+// Metal bindings. These host objects therefore retain lifecycle/copy state only;
+// there is deliberately no fake linear-load sampling fallback.
 
 struct CuMetalArray {
     void* data = nullptr;
@@ -5626,17 +5627,37 @@ cudaError_t cudaMemcpyFromArray(void* dst, cudaArray_const_t src, size_t wOffset
 
 namespace {
 std::mutex g_tex_mutex;
-std::unordered_map<cudaTextureObject_t, cudaResourceDesc> g_texture_objects;
+struct TextureObjectRecord {
+    cudaResourceDesc resource{};
+    cudaTextureDesc texture{};
+    cudaResourceViewDesc view{};
+};
+std::unordered_map<cudaTextureObject_t, TextureObjectRecord> g_texture_objects;
 std::unordered_map<cudaSurfaceObject_t, cudaResourceDesc> g_surface_objects;
 cudaTextureObject_t g_next_tex_id = 1;
 cudaSurfaceObject_t g_next_surf_id = 1;
+
+bool valid_resource_desc(const cudaResourceDesc& desc) {
+    switch (desc.resType) {
+        case cudaResourceDesc::cudaResourceTypeArray:
+            return desc.res.array.array != nullptr;
+        case cudaResourceDesc::cudaResourceTypeLinear:
+            return desc.res.linear.devPtr != nullptr && desc.res.linear.sizeInBytes > 0;
+        case cudaResourceDesc::cudaResourceTypePitch2D:
+            return desc.res.pitch2D.devPtr != nullptr && desc.res.pitch2D.width > 0 &&
+                   desc.res.pitch2D.height > 0 && desc.res.pitch2D.pitchInBytes > 0;
+        default:
+            return false;
+    }
+}
 }  // namespace
 
 cudaError_t cudaCreateTextureObject(cudaTextureObject_t* pTexObject,
                                      const cudaResourceDesc* pResDesc,
-                                     const cudaTextureDesc* /*pTexDesc*/,
-                                     const cudaResourceViewDesc* /*pResViewDesc*/) {
-    if (pTexObject == nullptr || pResDesc == nullptr) {
+                                     const cudaTextureDesc* pTexDesc,
+                                     const cudaResourceViewDesc* pResViewDesc) {
+    if (pTexObject == nullptr || pResDesc == nullptr || pTexDesc == nullptr ||
+        !valid_resource_desc(*pResDesc)) {
         return fail(cudaErrorInvalidValue);
     }
     // Device-side tex.* sampling is not wired (see docs/known-gaps.md). Kernels
@@ -5656,19 +5677,55 @@ cudaError_t cudaCreateTextureObject(cudaTextureObject_t* pTexObject,
     }
     std::lock_guard<std::mutex> lock(g_tex_mutex);
     *pTexObject = g_next_tex_id++;
-    g_texture_objects[*pTexObject] = *pResDesc;
+    TextureObjectRecord record;
+    record.resource = *pResDesc;
+    record.texture = *pTexDesc;
+    if (pResViewDesc != nullptr) record.view = *pResViewDesc;
+    g_texture_objects[*pTexObject] = record;
     return fail(cudaSuccess);
 }
 
 cudaError_t cudaDestroyTextureObject(cudaTextureObject_t texObject) {
     std::lock_guard<std::mutex> lock(g_tex_mutex);
-    g_texture_objects.erase(texObject);
+    if (g_texture_objects.erase(texObject) == 0) {
+        return fail(cudaErrorInvalidResourceHandle);
+    }
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGetTextureObjectResourceDesc(cudaResourceDesc* pResDesc,
+                                              cudaTextureObject_t texObject) {
+    if (pResDesc == nullptr) return fail(cudaErrorInvalidValue);
+    std::lock_guard<std::mutex> lock(g_tex_mutex);
+    const auto found = g_texture_objects.find(texObject);
+    if (found == g_texture_objects.end()) return fail(cudaErrorInvalidResourceHandle);
+    *pResDesc = found->second.resource;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGetTextureObjectTextureDesc(cudaTextureDesc* pTexDesc,
+                                             cudaTextureObject_t texObject) {
+    if (pTexDesc == nullptr) return fail(cudaErrorInvalidValue);
+    std::lock_guard<std::mutex> lock(g_tex_mutex);
+    const auto found = g_texture_objects.find(texObject);
+    if (found == g_texture_objects.end()) return fail(cudaErrorInvalidResourceHandle);
+    *pTexDesc = found->second.texture;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGetTextureObjectResourceViewDesc(cudaResourceViewDesc* pResViewDesc,
+                                                  cudaTextureObject_t texObject) {
+    if (pResViewDesc == nullptr) return fail(cudaErrorInvalidValue);
+    std::lock_guard<std::mutex> lock(g_tex_mutex);
+    const auto found = g_texture_objects.find(texObject);
+    if (found == g_texture_objects.end()) return fail(cudaErrorInvalidResourceHandle);
+    *pResViewDesc = found->second.view;
     return fail(cudaSuccess);
 }
 
 cudaError_t cudaCreateSurfaceObject(cudaSurfaceObject_t* pSurfObject,
                                      const cudaResourceDesc* pResDesc) {
-    if (pSurfObject == nullptr || pResDesc == nullptr) {
+    if (pSurfObject == nullptr || pResDesc == nullptr || !valid_resource_desc(*pResDesc)) {
         return fail(cudaErrorInvalidValue);
     }
     std::lock_guard<std::mutex> lock(g_tex_mutex);
@@ -5679,7 +5736,19 @@ cudaError_t cudaCreateSurfaceObject(cudaSurfaceObject_t* pSurfObject,
 
 cudaError_t cudaDestroySurfaceObject(cudaSurfaceObject_t surfObject) {
     std::lock_guard<std::mutex> lock(g_tex_mutex);
-    g_surface_objects.erase(surfObject);
+    if (g_surface_objects.erase(surfObject) == 0) {
+        return fail(cudaErrorInvalidResourceHandle);
+    }
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGetSurfaceObjectResourceDesc(cudaResourceDesc* pResDesc,
+                                              cudaSurfaceObject_t surfObject) {
+    if (pResDesc == nullptr) return fail(cudaErrorInvalidValue);
+    std::lock_guard<std::mutex> lock(g_tex_mutex);
+    const auto found = g_surface_objects.find(surfObject);
+    if (found == g_surface_objects.end()) return fail(cudaErrorInvalidResourceHandle);
+    *pResDesc = found->second;
     return fail(cudaSuccess);
 }
 

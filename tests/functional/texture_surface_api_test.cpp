@@ -41,17 +41,59 @@ static bool test_texture_object_lifecycle() {
     texDesc.addressMode[1] = cudaAddressModeClamp;
     texDesc.filterMode = cudaFilterModePoint;
     texDesc.readMode = cudaReadModeElementType;
+    texDesc.normalizedCoords = 1;
+
+    cudaResourceViewDesc viewDesc;
+    std::memset(&viewDesc, 0, sizeof(viewDesc));
+    viewDesc.width = 8;
+    viewDesc.height = 7;
+    viewDesc.firstLayer = 2;
+    viewDesc.lastLayer = 5;
 
     cudaTextureObject_t texObj = 0;
-    cudaError_t err = cudaCreateTextureObject(&texObj, &resDesc, &texDesc, nullptr);
+    cudaError_t err = cudaCreateTextureObject(&texObj, &resDesc, &texDesc, &viewDesc);
     if (err != cudaSuccess || texObj == 0) {
         std::fprintf(stderr, "FAIL: cudaCreateTextureObject returned %d\n", err);
+        return false;
+    }
+
+    cudaResourceDesc queriedResDesc;
+    cudaTextureDesc queriedTexDesc;
+    cudaResourceViewDesc queriedViewDesc;
+    std::memset(&queriedResDesc, 0, sizeof(queriedResDesc));
+    std::memset(&queriedTexDesc, 0, sizeof(queriedTexDesc));
+    std::memset(&queriedViewDesc, 0, sizeof(queriedViewDesc));
+    if (cudaGetTextureObjectResourceDesc(&queriedResDesc, texObj) != cudaSuccess ||
+        cudaGetTextureObjectTextureDesc(&queriedTexDesc, texObj) != cudaSuccess ||
+        cudaGetTextureObjectResourceViewDesc(&queriedViewDesc, texObj) != cudaSuccess ||
+        queriedResDesc.resType != cudaResourceDesc::cudaResourceTypeArray ||
+        queriedResDesc.res.array.array != arr ||
+        queriedTexDesc.addressMode[0] != cudaAddressModeClamp ||
+        queriedTexDesc.filterMode != cudaFilterModePoint ||
+        queriedTexDesc.normalizedCoords != 1 ||
+        queriedViewDesc.width != 8 || queriedViewDesc.height != 7 ||
+        queriedViewDesc.firstLayer != 2 || queriedViewDesc.lastLayer != 5) {
+        std::fprintf(stderr, "FAIL: texture descriptor round trip\n");
+        return false;
+    }
+    if (cudaGetTextureObjectResourceDesc(nullptr, texObj) != cudaErrorInvalidValue ||
+        cudaCreateTextureObject(nullptr, &resDesc, &texDesc, nullptr) !=
+            cudaErrorInvalidValue ||
+        cudaCreateTextureObject(&texObj, &resDesc, nullptr, nullptr) !=
+            cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: texture descriptor negative path\n");
         return false;
     }
 
     err = cudaDestroyTextureObject(texObj);
     if (err != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaDestroyTextureObject returned %d\n", err);
+        return false;
+    }
+    if (cudaDestroyTextureObject(texObj) != cudaErrorInvalidResourceHandle ||
+        cudaGetTextureObjectTextureDesc(&queriedTexDesc, texObj) !=
+            cudaErrorInvalidResourceHandle) {
+        std::fprintf(stderr, "FAIL: stale texture handle accepted\n");
         return false;
     }
 
@@ -76,9 +118,25 @@ static bool test_surface_object_lifecycle() {
         return false;
     }
 
+    cudaResourceDesc queriedResDesc;
+    std::memset(&queriedResDesc, 0, sizeof(queriedResDesc));
+    if (cudaGetSurfaceObjectResourceDesc(&queriedResDesc, surfObj) != cudaSuccess ||
+        queriedResDesc.resType != cudaResourceDesc::cudaResourceTypeArray ||
+        queriedResDesc.res.array.array != arr ||
+        cudaGetSurfaceObjectResourceDesc(nullptr, surfObj) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: surface resource descriptor round trip\n");
+        return false;
+    }
+
     err = cudaDestroySurfaceObject(surfObj);
     if (err != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaDestroySurfaceObject returned %d\n", err);
+        return false;
+    }
+    if (cudaDestroySurfaceObject(surfObj) != cudaErrorInvalidResourceHandle ||
+        cudaGetSurfaceObjectResourceDesc(&queriedResDesc, surfObj) !=
+            cudaErrorInvalidResourceHandle) {
+        std::fprintf(stderr, "FAIL: stale surface handle accepted\n");
         return false;
     }
 

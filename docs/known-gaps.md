@@ -28,7 +28,9 @@ as gaps have been closed.
 - Dynamic parallelism (kernels launching kernels) requires a CPU launch trampoline and
   explicit scheduling/error semantics; current device-side launches fail compilation.
 - Full texture/surface object GPU sampling needs a hidden Metal texture binding ABI.
-  Lifecycle + array memcpy are supported; device-side
+  Lifecycle, array memcpy, and full resource/texture/view descriptor retention
+  and query are supported with stale-handle and invalid-resource coverage;
+  device-side
   `tex.*` / `suld.*` etc. error at compile for the PTX path (see intrinsic-map.md).
   Kernels that sidestep sampling by dereferencing a linear/pitch2D resource's
   `devPtr` directly need `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`; without it the
@@ -492,7 +494,9 @@ blocks:
 
 - **Texture and surface fetch in device code** -- `tex2D`, `tex3D`,
   `tex2DLayered`, `texCubemap`, `surf2Dwrite`, `cudaBoundaryMode*`. Texture
-  *objects* exist on the host side; the device-side fetch builtins do not. 7 samples.
+  *objects* retain queryable resource, sampler, and view descriptors on the host
+  side; the compiler/runtime Metal binding ABI and device-side fetch builtins do
+  not yet exist. 7 samples.
 - **`libcu++` device headers** -- `cuda/pipeline`, `cuda/barrier`,
   `cooperative_groups/memcpy_async.h`. 5 samples.
 - **Remaining cooperative-groups surface** -- `block_tile_memory` is still
