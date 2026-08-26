@@ -117,6 +117,11 @@ cumetal_add_cuda_project_test(
 )
 
 cumetal_add_cuda_project_test(
+    functional_cuda_projects_cooperative_thread_group
+    cooperative_thread_group cooperative_thread_group.cu cooperative_thread_group
+)
+
+cumetal_add_cuda_project_test(
     functional_cuda_projects_sgemm_naive
     sgemm sgemm_naive.cu sgemm_naive
 )

@@ -39,6 +39,14 @@ as gaps have been closed.
   architecture direction, not a compatibility claim.
 
 ## Partial / conservative implementations
+- Static cooperative groups now include a generic `thread_group` value that
+  preserves block versus tile synchronization domains, plus tile-scoped
+  `shfl`, `shfl_up`, `shfl_down`, `shfl_xor`, `any`, `all`, and `ballot` for
+  warp-sized-or-smaller tiles. A focused 64-thread GPU test covers generic
+  block/tile reductions, independent 16-lane barriers and votes, and all four
+  tiles across two SIMD groups. Dynamic active-lane groups and partitioning
+  (`coalesced_group`, `binary_partition`, `labeled_partition`) remain absent;
+  multi-warp static tiles still use a conservative whole-block barrier.
 - Masked `__syncwarp(mask != 0xFFFFFFFF)` lowers to an AIR SIMD-group barrier with
   threadgroup-memory visibility. AIR does not consume CUDA's explicit member mask, so
   additional currently active lanes can receive stronger ordering. Divergent lower/upper
@@ -482,8 +490,14 @@ blocks:
   *objects* exist on the host side; the device-side fetch builtins do not. 7 samples.
 - **`libcu++` device headers** -- `cuda/pipeline`, `cuda/barrier`,
   `cooperative_groups/memcpy_async.h`. 5 samples.
-- **cooperative_groups beyond the basics** -- `thread_group`, `coalesced_group`,
-  `binary_partition`, `block_tile_memory`, tile `shfl_up`. 5 samples.
+- **cooperative_groups beyond static blocks/tiles** -- `coalesced_group`,
+  `binary_partition`, `labeled_partition`, and `block_tile_memory` remain
+  missing. Generic `thread_group` conversion and tile `shfl_up` are now covered
+  by a focused GPU test, but the unmodified `simpleCooperativeGroups` sample
+  still fails explicitly when the LLVM PTX backend reaches Clang's initialized
+  module-global `vprintf` format (`_$_str`), so the cuda-samples manifest is not
+  promoted. 5 samples remain blocked across this surface and independent
+  lowering gaps.
 - **thrust/CUB header surface** -- `thrust/copy.h`, `thrust/random.h`,
   `thrust/adjacent_difference.h`, `cub/device/device_{find,transform,segmented_scan}.cuh`.
   6 samples. Some of the underlying algorithms already exist; the headers do not.
@@ -577,10 +591,13 @@ them were fixed. Both are worth knowing about, because both produced zeros with
 `functional_cuda_projects_device_sync_primitives` covers both, verified failing against
 each unfixed version.
 
-For anyone debugging a kernel that "runs" but returns zeros, failed Metal pipeline
-creation is retained as a pending launch error: `cudaDeviceSynchronize()` now returns
-that error even when no command buffer was enqueued, and the error remains visible to
-`cudaGetLastError()`. `CUMETAL_DEBUG_LAUNCH=1` prints the detailed launch reason, and
+For anyone debugging a kernel that "runs" but returns zeros, every
+`cudaLaunchKernel` failure is retained as a pending launch error, including
+pre-submission registration/JIT validation and Metal pipeline-creation failures.
+`cudaDeviceSynchronize()` returns that error even when no command buffer was
+enqueued, and it remains visible to `cudaGetLastError()`. The focused runtime
+error test covers both a missing Metal function and an early registered-kernel
+failure. `CUMETAL_DEBUG_LAUNCH=1` prints the detailed launch reason, and
 `CUMETAL_DEBUG_DUMP_IR_DIR=<dir>` dumps the emitted LLVM IR.
 
 - `clock`, `simpleHyperQ`, and `eigenvalues` hit "registered

@@ -489,6 +489,7 @@ void parse_instructions(const std::string& body,
     }
 
     int line = start_line;
+    bool skipping_multiline_directive = false;
 
     std::istringstream stream(body);
     std::string raw_line;
@@ -521,6 +522,18 @@ void parse_instructions(const std::string& body,
             continue;
         }
 
+        if (skipping_multiline_directive) {
+            const std::size_t semi = line_text.find(';');
+            if (semi == std::string::npos) {
+                continue;
+            }
+            skipping_multiline_directive = false;
+            line_text = trim(line_text.substr(semi + 1));
+            if (line_text.empty()) {
+                continue;
+            }
+        }
+
         // PTX sometimes emits inline lexical declarations followed by a real
         // instruction on the same source line:
         //   { .reg .b16 tmp; mov.b32 {tmp, %rs35}, %r1; }
@@ -528,6 +541,7 @@ void parse_instructions(const std::string& body,
         while (!line_text.empty() && line_text[0] == '.') {
             const std::size_t semi = line_text.find(';');
             if (semi == std::string::npos) {
+                skipping_multiline_directive = true;
                 line_text.clear();
                 break;
             }

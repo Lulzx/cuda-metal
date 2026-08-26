@@ -17,6 +17,16 @@ bool contains(const std::string& haystack, const std::string& needle) {
     return haystack.find(needle) != std::string::npos;
 }
 
+std::size_t count_occurrences(const std::string& haystack, const std::string& needle) {
+    std::size_t count = 0;
+    std::size_t offset = 0;
+    while ((offset = haystack.find(needle, offset)) != std::string::npos) {
+        ++count;
+        offset += needle.size();
+    }
+    return count;
+}
+
 }  // namespace
 
 int main() {
@@ -613,7 +623,7 @@ $L1:
 .visible .entry masked_vote()
 {
     .reg .pred %p<5>;
-    .reg .b32 %r<8>;
+    .reg .b32 %r<9>;
     mov.u32 %r1, %laneid;
     and.b32 %r2, %r1, 1;
     setp.eq.u32 %p1, %r2, 0;
@@ -622,6 +632,9 @@ $L1:
     vote.sync.all.pred %p3, %p1, 0x00000055;
     activemask.b32 %r4;
     shfl.sync.idx.b32 %r5|%p4, %r1, 0, 0x1f, 0x0000ffff;
+    shfl.sync.down.b32 %r6, %r1, 1, 0x101f, 0x0000ffff;
+    shfl.sync.up.b32 %r7, %r1, 1, 0x1000, 0x0000ffff;
+    shfl.sync.bfly.b32 %r8, %r1, 1, 0x101f, 0x0000ffff;
     bar.warp.sync 0x0000ffff;
     ret;
 }
@@ -647,6 +660,17 @@ $L1:
     if (!expect(contains(masked_vote_lowered.llvm_ir, "shfl_lane_participates") &&
                     contains(masked_vote_lowered.llvm_ir, "shfl_defined"),
                 "partial shuffle predicates non-member lanes")) {
+        return 1;
+    }
+    if (!expect(contains(masked_vote_lowered.llvm_ir,
+                         "call i32 @air.simd_shuffle_down.u.i32") &&
+                    contains(masked_vote_lowered.llvm_ir,
+                             "call i32 @air.simd_shuffle_up.u.i32") &&
+                    contains(masked_vote_lowered.llvm_ir,
+                             "call i32 @air.simd_shuffle_xor.u.i32") &&
+                    count_occurrences(masked_vote_lowered.llvm_ir,
+                                      " = trunc i32 1 to i16") == 3,
+                "directional AIR shuffles receive the PTX delta or XOR mask")) {
         return 1;
     }
     if (!expect(contains(masked_vote_lowered.llvm_ir,
@@ -940,7 +964,7 @@ $L1:
 .visible .entry use_extern_shared()
 {
     .reg .b64 %rd<2>;
-    mov.u64 %rd1, dynamic_smem;
+    mov.b64 %rd1, dynamic_smem;
     ret;
 }
 )PTX";
@@ -1187,7 +1211,8 @@ $L1:
     .param .u64 local_depot_frame_param_0
 )
 {
-    .local .align 4 .b8 __local_depot0[288];
+    .local .align 4 .b8
+    __local_depot0[288];
     .reg .b64 %SP;
     .reg .b64 %SPL;
     .reg .b32 %r<2>;

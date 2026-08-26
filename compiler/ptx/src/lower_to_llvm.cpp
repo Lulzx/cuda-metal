@@ -530,13 +530,25 @@ std::unordered_map<std::string, LocalDepotInfo> parse_ptx_local_depots(
 
     std::istringstream lines{body};
     std::string line;
+    std::string declaration;
     while (std::getline(lines, line)) {
         std::string t = trim(line);
         if (const std::size_t comment = t.find("//"); comment != std::string::npos) {
             t = trim(t.substr(0, comment));
         }
-        // Only declarations start with `.local`; `ld.local`/`st.local` do not.
-        if (!starts_with(t, ".local")) continue;
+        if (declaration.empty()) {
+            // Only declarations start with `.local`; `ld.local`/`st.local` do not.
+            if (!starts_with(t, ".local")) continue;
+            declaration = t;
+        } else if (!t.empty()) {
+            declaration += " " + t;
+        }
+        // LLVM's NVPTX printer may wrap the symbol and extent onto the next
+        // line after the type token. Parse the complete semicolon-terminated
+        // declaration instead of silently losing the stack frame.
+        if (declaration.find(';') == std::string::npos) continue;
+        t = std::move(declaration);
+        declaration.clear();
 
         std::size_t type_pos = std::string::npos;
         std::size_t type_len = 0;
@@ -2231,10 +2243,10 @@ class GenericLlvmEmitter {
             }
             return fail(instr, "mov float source unsupported");
         }
-            auto iv = emit_integer_from_any(os, src, std::max(dst_bits, ty.bits > 0 ? ty.bits : dst_bits),
+        auto iv = emit_integer_from_any(os, src, std::max(dst_bits, ty.bits > 0 ? ty.bits : dst_bits),
                                         ty.is_signed);
         if (!iv.has_value()) {
-            return fail(instr, "mov source unsupported");
+            return fail(instr, "mov source unsupported: '" + src + "'");
         }
         const int src_bits = std::max(dst_bits, ty.bits > 0 ? ty.bits : dst_bits);
         if (resolve_param_symbol_address(os, src).has_value()) {
@@ -4894,9 +4906,12 @@ class GenericLlvmEmitter {
         const std::string local = next_tmp("shfl_local");
         os << "  " << local << " = sub i32 " << lane << ", " << base << "\n";
 
+        const bool is_down = instr.opcode.find(".down.") != std::string::npos;
+        const bool is_up = instr.opcode.find(".up.") != std::string::npos;
+        const bool is_bfly = instr.opcode.find(".bfly.") != std::string::npos;
         std::string target;
         std::string valid;
-        if (instr.opcode.find(".down.") != std::string::npos) {
+        if (is_down) {
             const std::string t = next_tmp("shfl_t");
             os << "  " << t << " = add i32 " << lane << ", " << *sel << "\n";
             const std::string limit = next_tmp("shfl_limit");
@@ -4906,7 +4921,7 @@ class GenericLlvmEmitter {
             target = t;
             valid = ok;
             declarations_.insert("declare i32 @air.simd_shuffle_down.u.i32(i32, i16)");
-        } else if (instr.opcode.find(".up.") != std::string::npos) {
+        } else if (is_up) {
             const std::string t = next_tmp("shfl_t");
             os << "  " << t << " = sub i32 " << lane << ", " << *sel << "\n";
             const std::string ok = next_tmp("shfl_ok");
@@ -4914,7 +4929,7 @@ class GenericLlvmEmitter {
             target = t;
             valid = ok;
             declarations_.insert("declare i32 @air.simd_shuffle_up.u.i32(i32, i16)");
-        } else if (instr.opcode.find(".bfly.") != std::string::npos) {
+        } else if (is_bfly) {
             const std::string tlocal = next_tmp("shfl_tlocal");
             os << "  " << tlocal << " = xor i32 " << local << ", " << *sel << "\n";
             const std::string t = next_tmp("shfl_t");
@@ -4937,21 +4952,26 @@ class GenericLlvmEmitter {
             declarations_.insert("declare i32 @air.simd_shuffle.u.i32(i32, i16)");
         }
 
-        const std::string target16 = next_tmp("shfl_t16");
-        os << "  " << target16 << " = trunc i32 " << target << " to i16\n";
+        // Apple's AIR intrinsics take the original relative delta / XOR mask.
+        // Only the index form takes an absolute lane. Passing the PTX target
+        // lane here double-applies the current lane in AIR (for example,
+        // shfl.down delta=1 returned lane 3 to lane 0 in a 16-lane tile).
+        const std::string air_selector = (is_down || is_up || is_bfly) ? *sel : target;
+        const std::string selector16 = next_tmp("shfl_s16");
+        os << "  " << selector16 << " = trunc i32 " << air_selector << " to i16\n";
         const std::string call = next_tmp("shfl_call");
-        if (instr.opcode.find(".down.") != std::string::npos) {
+        if (is_down) {
             os << "  " << call << " = call i32 @air.simd_shuffle_down.u.i32(i32 " << *src
-               << ", i16 " << target16 << ")\n";
-        } else if (instr.opcode.find(".up.") != std::string::npos) {
+               << ", i16 " << selector16 << ")\n";
+        } else if (is_up) {
             os << "  " << call << " = call i32 @air.simd_shuffle_up.u.i32(i32 " << *src
-               << ", i16 " << target16 << ")\n";
-        } else if (instr.opcode.find(".bfly.") != std::string::npos) {
+               << ", i16 " << selector16 << ")\n";
+        } else if (is_bfly) {
             os << "  " << call << " = call i32 @air.simd_shuffle_xor.u.i32(i32 " << *src
-               << ", i16 " << target16 << ")\n";
+               << ", i16 " << selector16 << ")\n";
         } else {
             os << "  " << call << " = call i32 @air.simd_shuffle.u.i32(i32 " << *src
-               << ", i16 " << target16 << ")\n";
+               << ", i16 " << selector16 << ")\n";
         }
 
         const std::string defined = next_tmp("shfl_defined");
