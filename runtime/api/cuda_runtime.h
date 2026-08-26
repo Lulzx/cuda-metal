@@ -321,8 +321,8 @@ typedef struct cudaDeviceProp {
     int pciDomainID;                // 0
     int tccDriver;                  // 0 (not a Tesla compute cluster)
     int kernelExecTimeoutEnabled;   // 0 (Metal does not enforce GPU timeout by default)
-    int pageableMemoryAccess;       // 1 (UMA: device can access host pageable memory)
-    int pageableMemoryAccessUsesHostPageTables; // 1 (same page tables on Apple Silicon)
+    int pageableMemoryAccess;       // 0 (arbitrary malloc pointers are not Metal-bound)
+    int pageableMemoryAccessUsesHostPageTables; // 0 (CuMetal requires tracked allocations)
     int cooperativeLaunch;          // 0 -- see cuda_runtime.cpp for why
     int cooperativeMultiDeviceLaunch; // 0 (single device)
     // Growing this struct breaks any consumer binary built against an older
@@ -1058,7 +1058,7 @@ static inline cudaError_t cudaOccupancyMaxPotentialBlockSize(
 }
 
 static inline cudaError_t cudaMallocManaged(void** dev_ptr, size_t size) {
-    return ::cudaMallocManaged(dev_ptr, size, 0);
+    return ::cudaMallocManaged(dev_ptr, size, cudaMemAttachGlobal);
 }
 
 // Typed cudaMalloc overload — matches the real CUDA SDK signature so that
@@ -1410,6 +1410,91 @@ static __device__ __forceinline__ unsigned int atomicDec(unsigned int* ptr, unsi
         assumed = old;
         unsigned int next = (assumed == 0u || assumed > val) ? val : (assumed - 1u);
         old = __uAtomicCAS(ptr, assumed, next);
+    } while (assumed != old);
+    return old;
+}
+
+// System-scope variants use Clang's documented CUDA NVVM wrappers. On Apple
+// Silicon, managed allocations are shared UMA buffers, so these reach the same
+// bytes as host atomics. Keep the `_system` spelling distinct: collapsing it to
+// ordinary device-scope helpers would compile but would not express host/device
+// atomic visibility in the generated PTX.
+static __device__ __forceinline__ int atomicAdd_system(int* ptr, int val) {
+    return __iAtomicAdd_system(ptr, val);
+}
+static __device__ __forceinline__ unsigned int atomicAdd_system(unsigned int* ptr,
+                                                                 unsigned int val) {
+    return __uAtomicAdd_system(ptr, val);
+}
+static __device__ __forceinline__ int atomicExch_system(int* ptr, int val) {
+    return __iAtomicExch_system(ptr, val);
+}
+static __device__ __forceinline__ unsigned int atomicExch_system(unsigned int* ptr,
+                                                                  unsigned int val) {
+    return __uAtomicExch_system(ptr, val);
+}
+static __device__ __forceinline__ int atomicMin_system(int* ptr, int val) {
+    return __iAtomicMin_system(ptr, val);
+}
+static __device__ __forceinline__ unsigned int atomicMin_system(unsigned int* ptr,
+                                                                 unsigned int val) {
+    return __uAtomicMin_system(ptr, val);
+}
+static __device__ __forceinline__ int atomicMax_system(int* ptr, int val) {
+    return __iAtomicMax_system(ptr, val);
+}
+static __device__ __forceinline__ unsigned int atomicMax_system(unsigned int* ptr,
+                                                                 unsigned int val) {
+    return __uAtomicMax_system(ptr, val);
+}
+static __device__ __forceinline__ int atomicCAS_system(int* ptr, int cmp, int val) {
+    return __iAtomicCAS_system(ptr, cmp, val);
+}
+static __device__ __forceinline__ unsigned int atomicCAS_system(unsigned int* ptr,
+                                                                 unsigned int cmp,
+                                                                 unsigned int val) {
+    return __uAtomicCAS_system(ptr, cmp, val);
+}
+static __device__ __forceinline__ int atomicAnd_system(int* ptr, int val) {
+    return __iAtomicAnd_system(ptr, val);
+}
+static __device__ __forceinline__ unsigned int atomicAnd_system(unsigned int* ptr,
+                                                                 unsigned int val) {
+    return __uAtomicAnd_system(ptr, val);
+}
+static __device__ __forceinline__ int atomicOr_system(int* ptr, int val) {
+    return __iAtomicOr_system(ptr, val);
+}
+static __device__ __forceinline__ unsigned int atomicOr_system(unsigned int* ptr,
+                                                                unsigned int val) {
+    return __uAtomicOr_system(ptr, val);
+}
+static __device__ __forceinline__ int atomicXor_system(int* ptr, int val) {
+    return __iAtomicXor_system(ptr, val);
+}
+static __device__ __forceinline__ unsigned int atomicXor_system(unsigned int* ptr,
+                                                                 unsigned int val) {
+    return __uAtomicXor_system(ptr, val);
+}
+static __device__ __forceinline__ unsigned int atomicInc_system(unsigned int* ptr,
+                                                                 unsigned int val) {
+    unsigned int old = *ptr;
+    unsigned int assumed;
+    do {
+        assumed = old;
+        const unsigned int next = (assumed >= val) ? 0u : (assumed + 1u);
+        old = __uAtomicCAS_system(ptr, assumed, next);
+    } while (assumed != old);
+    return old;
+}
+static __device__ __forceinline__ unsigned int atomicDec_system(unsigned int* ptr,
+                                                                 unsigned int val) {
+    unsigned int old = *ptr;
+    unsigned int assumed;
+    do {
+        assumed = old;
+        const unsigned int next = (assumed == 0u || assumed > val) ? val : (assumed - 1u);
+        old = __uAtomicCAS_system(ptr, assumed, next);
     } while (assumed != old);
     return old;
 }

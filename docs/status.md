@@ -678,7 +678,9 @@ Driver API additions:
 - `asyncEngineCount = 0`, `computeMode = cudaComputeModeDefault`
 - `pciBusID`, `pciDeviceID`, `pciDomainID` (all 0 — no discrete PCI GPU)
 - `tccDriver = 0`, `kernelExecTimeoutEnabled = 0`
-- `pageableMemoryAccess = 1`, `pageableMemoryAccessUsesHostPageTables = 1`
+- `pageableMemoryAccess = 0`, `pageableMemoryAccessUsesHostPageTables = 0`;
+  Apple Silicon is UMA, but CuMetal currently binds only tracked Metal-backed
+  allocations, not arbitrary `malloc` pointers
 
 `cudaComputeMode` enum added: `cudaComputeModeDefault`, `cudaComputeModeExclusive`, `cudaComputeModeProhibited`, `cudaComputeModeExclusiveProcess`
 
@@ -695,7 +697,7 @@ Driver API additions:
 - `cudaDevAttrComputeMode` → 0, `cudaDevAttrConcurrentKernels` → 1
 - `cudaDevAttrPciBusId`, `cudaDevAttrPciDeviceId`, `cudaDevAttrPciDomainId` → 0
 - `cudaDevAttrTccDriver` → 0, `cudaDevAttrKernelExecTimeout` → 0, `cudaDevAttrAsyncEngineCount` → 0
-- `cudaDevAttrPageableMemoryAccess` → 1, `cudaDevAttrPageableMemoryAccessUsesHostPageTables` → 1
+- `cudaDevAttrPageableMemoryAccess` → 0, `cudaDevAttrPageableMemoryAccessUsesHostPageTables` → 0
 - `cudaDevAttrSharedMemPerBlockOptin` → sharedMemPerBlock
 
 `cooperative_groups::thread_block_tile<N>` extended with:
@@ -711,6 +713,10 @@ CUDA vector types added to `cuda_runtime.h`:
 Device atomics added (CUDA device code path, spec §6.7):
 - `atomicSub`, `atomicExch` (int/uint/float), `atomicMin`/`atomicMax` (int/uint),
   `atomicCAS` (uint/int/ull), `atomicAnd`/`atomicOr`/`atomicXor` (int/uint)
+- System-scope 32-bit signed/unsigned
+  `atomic{Add,Exch,Min,Max,CAS,And,Or,Xor,Inc,Dec}_system` on tracked managed
+  allocations. A focused test observes host and GPU atomic contributions to the
+  same UMA bytes. Arbitrary pageable pointers are not included in this claim.
 
 Device intrinsics added (guarded by `#ifndef __CLANG_CUDA_DEVICE_FUNCTIONS_H__`):
 - `__syncwarp`, `__threadfence`, `__threadfence_block`, `__threadfence_system`

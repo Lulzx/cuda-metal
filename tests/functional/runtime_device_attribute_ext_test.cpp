@@ -68,15 +68,15 @@ int main() {
         return 1;
     }
 
-    // Pageable memory access: 1 on Apple Silicon.
-    if (cudaDeviceGetAttribute(&value, cudaDevAttrPageableMemoryAccess, 0) != cudaSuccess || value != 1) {
-        std::fprintf(stderr, "FAIL: cudaDevAttrPageableMemoryAccess should be 1, got %d\n", value);
+    // Arbitrary pageable pointers are not tracked/bound as Metal buffers: 0.
+    if (cudaDeviceGetAttribute(&value, cudaDevAttrPageableMemoryAccess, 0) != cudaSuccess || value != 0) {
+        std::fprintf(stderr, "FAIL: cudaDevAttrPageableMemoryAccess should be 0, got %d\n", value);
         return 1;
     }
 
-    // Pageable memory access uses host page tables: 1.
-    if (cudaDeviceGetAttribute(&value, cudaDevAttrPageableMemoryAccessUsesHostPageTables, 0) != cudaSuccess || value != 1) {
-        std::fprintf(stderr, "FAIL: cudaDevAttrPageableMemoryAccessUsesHostPageTables should be 1, got %d\n", value);
+    // Arbitrary pageable pointers are not tracked/bound as Metal buffers: 0.
+    if (cudaDeviceGetAttribute(&value, cudaDevAttrPageableMemoryAccessUsesHostPageTables, 0) != cudaSuccess || value != 0) {
+        std::fprintf(stderr, "FAIL: cudaDevAttrPageableMemoryAccessUsesHostPageTables should be 0, got %d\n", value);
         return 1;
     }
 

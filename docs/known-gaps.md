@@ -501,10 +501,16 @@ blocks:
   `XPC_ERROR_CONNECTION_INTERRUPTED`, so it is likewise `run-fail`, not claimed as
   graph conformance.
 - **Dynamic parallelism (CDP)** -- device-side stream creation and launch. 3 samples.
-- **Scattered API surface** -- `atomicAdd_system` (system-scope atomics are not
-  faithfully expressible on Metal, so no alias is provided), `__float2half2_rn`,
-  `cudaAccessPolicyWindow`, `cublas*Batched`, `CUBLAS_POINTER_MODE_DEVICE`,
-  `cudaDevAttrMemoryPoolsSupported`.
+- **Scattered API surface** -- `__float2half2_rn`, `cudaAccessPolicyWindow`,
+  `cublas*Batched`, `CUBLAS_POINTER_MODE_DEVICE`,
+  `cudaDevAttrMemoryPoolsSupported`. The 32-bit signed/unsigned
+  `atomic{Add,Exch,Min,Max,CAS,And,Or,Xor,Inc,Dec}_system` surface now lowers
+  with system scope and passes a focused GPU/host managed-memory test. NVIDIA's
+  unmodified `systemWideAtomics` source now compiles, but its large stress run
+  has not been used as runtime evidence, so the sweep manifest is deliberately
+  not promoted yet. Arbitrary pageable `malloc` pointers remain unsupported as
+  kernel arguments; the runtime reports both pageable-memory attributes as 0
+  instead of steering applications onto that invalid path.
 
 `cudaDeviceProp::cooperativeLaunch` is reported as **0** on purpose. Grid-wide
 `grid.sync()` across more than one threadgroup is a no-op under Metal, so

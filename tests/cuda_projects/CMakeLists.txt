@@ -112,6 +112,11 @@ cumetal_add_cuda_project_test(
 )
 
 cumetal_add_cuda_project_test(
+    functional_cuda_projects_system_atomics
+    system_atomics system_atomics.cu system_atomics
+)
+
+cumetal_add_cuda_project_test(
     functional_cuda_projects_sgemm_naive
     sgemm sgemm_naive.cu sgemm_naive
 )

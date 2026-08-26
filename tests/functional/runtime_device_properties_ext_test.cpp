@@ -101,12 +101,12 @@ int main() {
         std::fprintf(stderr, "FAIL: computeMode should be cudaComputeModeDefault (0), got %d\n", prop.computeMode);
         return 1;
     }
-    if (!prop.pageableMemoryAccess) {
-        std::fprintf(stderr, "FAIL: pageableMemoryAccess should be 1 on Apple Silicon\n");
+    if (prop.pageableMemoryAccess) {
+        std::fprintf(stderr, "FAIL: pageableMemoryAccess must be 0 until malloc pointers are Metal-bound\n");
         return 1;
     }
-    if (!prop.pageableMemoryAccessUsesHostPageTables) {
-        std::fprintf(stderr, "FAIL: pageableMemoryAccessUsesHostPageTables should be 1\n");
+    if (prop.pageableMemoryAccessUsesHostPageTables) {
+        std::fprintf(stderr, "FAIL: pageableMemoryAccessUsesHostPageTables must be 0\n");
         return 1;
     }
 

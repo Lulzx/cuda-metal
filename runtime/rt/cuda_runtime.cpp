@@ -2102,8 +2102,12 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     prop->pciDomainID = 0;
     prop->tccDriver = 0;                // Not a Tesla compute cluster driver
     prop->kernelExecTimeoutEnabled = 0; // Metal does not enforce kernel timeout by default
-    prop->pageableMemoryAccess = 1;     // UMA: device can access host pageable memory
-    prop->pageableMemoryAccessUsesHostPageTables = 1; // Shared page tables on Apple Silicon
+    // Apple Silicon is UMA, but CuMetal can only bind pointers backed by a
+    // tracked MTLBuffer. Arbitrary malloc pointers are therefore not currently
+    // valid kernel arguments; advertising pageable access made applications
+    // select a path the launch code rejects.
+    prop->pageableMemoryAccess = 0;
+    prop->pageableMemoryAccessUsesHostPageTables = 0;
     // Reported as unsupported on purpose. cudaLaunchCooperativeKernel exists, but
     // grid-wide sync across more than one threadgroup is a no-op under Metal (see
     // the warn_once in the cooperative launch path). Code that probes this flag
@@ -2184,9 +2188,11 @@ cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device) {
         case cudaDevAttrCanMapHostMemory:
         case cudaDevAttrIntegrated:
         case cudaDevAttrConcurrentKernels:
+            *value = 1;
+            break;
         case cudaDevAttrPageableMemoryAccess:
         case cudaDevAttrPageableMemoryAccessUsesHostPageTables:
-            *value = 1;
+            *value = 0;
             break;
         case cudaDevAttrCooperativeLaunch:
             *value = 0;
@@ -2308,7 +2314,11 @@ cudaError_t cudaMalloc(void** dev_ptr, size_t size) {
 }
 
 cudaError_t cudaMallocManaged(void** dev_ptr, size_t size, unsigned int flags) {
-    if (flags != 0) {
+    // CUDA's C++ overload defaults to cudaMemAttachGlobal. Zero was accepted
+    // by older CuMetal headers, so retain it as a compatibility spelling.
+    // Host/single-stream attachment needs migration/stream-attachment state
+    // that CuMetal does not yet model and must not be silently accepted.
+    if (flags != 0 && flags != cudaMemAttachGlobal) {
         return fail(cudaErrorInvalidValue);
     }
     return cudaMalloc(dev_ptr, size);
