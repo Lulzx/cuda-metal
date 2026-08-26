@@ -104,6 +104,13 @@ cumetal_add_cuda_project_test(
     constant_symbol constant_symbol.cu constant_symbol
 )
 
+# libdevice binary64 frexp is implemented with IEEE bit decomposition so it
+# remains available when native Metal double ALU is unavailable.
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_libdevice_frexp
+    libdevice_frexp libdevice_frexp.cu libdevice_frexp
+)
+
 cumetal_add_cuda_project_test(
     functional_cuda_projects_sgemm_naive
     sgemm sgemm_naive.cu sgemm_naive

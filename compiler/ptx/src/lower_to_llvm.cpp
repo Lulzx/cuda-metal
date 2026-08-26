@@ -3369,6 +3369,98 @@ class GenericLlvmEmitter {
                         "direct Metal lowering, which implements the printf ring buffer");
         }
 
+        if (callee == "__nv_frexp") {
+            if (arg_names.size() < 2) return fail(instr, "__nv_frexp expects 2 args");
+            auto input = load_call_slot_value(os, arg_names[0], 64);
+            auto exponent_ptr_bits = load_call_slot_value(os, arg_names[1], 64);
+            if (!input || !exponent_ptr_bits) {
+                return fail(instr, "__nv_frexp args missing call slots");
+            }
+
+            // Implement binary64 frexp entirely in integer IR. Public Metal/AIR
+            // rejects native double ALU, but CUDA's register/call ABI still uses
+            // IEEE-754 bits. This preserves normals, signed zero, infinities and
+            // NaNs exactly, and normalizes subnormals with ctlz.
+            const std::string sign = next_tmp("frexp_sign");
+            const std::string exp_shift = next_tmp("frexp_exp_shift");
+            const std::string exp_raw = next_tmp("frexp_exp_raw");
+            const std::string mantissa = next_tmp("frexp_mantissa");
+            os << "  " << sign << " = and i64 " << *input
+               << ", -9223372036854775808\n";
+            os << "  " << exp_shift << " = lshr i64 " << *input << ", 52\n";
+            os << "  " << exp_raw << " = and i64 " << exp_shift << ", 2047\n";
+            os << "  " << mantissa << " = and i64 " << *input
+               << ", 4503599627370495\n";
+
+            const std::string zero_exp = next_tmp("frexp_zero_exp");
+            const std::string zero_mantissa = next_tmp("frexp_zero_mantissa");
+            const std::string is_zero = next_tmp("frexp_zero");
+            const std::string is_special = next_tmp("frexp_special");
+            const std::string nonzero_mantissa = next_tmp("frexp_nonzero_mantissa");
+            const std::string is_subnormal = next_tmp("frexp_subnormal");
+            os << "  " << zero_exp << " = icmp eq i64 " << exp_raw << ", 0\n";
+            os << "  " << zero_mantissa << " = icmp eq i64 " << mantissa << ", 0\n";
+            os << "  " << is_zero << " = and i1 " << zero_exp << ", " << zero_mantissa << "\n";
+            os << "  " << is_special << " = icmp eq i64 " << exp_raw << ", 2047\n";
+            os << "  " << nonzero_mantissa << " = xor i1 " << zero_mantissa << ", true\n";
+            os << "  " << is_subnormal << " = and i1 " << zero_exp << ", "
+               << nonzero_mantissa << "\n";
+
+            declarations_.insert("declare i64 @llvm.ctlz.i64(i64, i1 immarg)");
+            const std::string leading = next_tmp("frexp_leading");
+            const std::string sub_shift = next_tmp("frexp_sub_shift");
+            const std::string normalized_full = next_tmp("frexp_normalized_full");
+            const std::string normalized_mantissa = next_tmp("frexp_normalized_mantissa");
+            os << "  " << leading << " = call i64 @llvm.ctlz.i64(i64 " << mantissa
+               << ", i1 false)\n";
+            os << "  " << sub_shift << " = sub i64 " << leading << ", 11\n";
+            os << "  " << normalized_full << " = shl i64 " << mantissa << ", "
+               << sub_shift << "\n";
+            os << "  " << normalized_mantissa << " = and i64 " << normalized_full
+               << ", 4503599627370495\n";
+
+            const std::string normal_result0 = next_tmp("frexp_normal_result0");
+            const std::string normal_result = next_tmp("frexp_normal_result");
+            const std::string sub_result0 = next_tmp("frexp_sub_result0");
+            const std::string sub_result = next_tmp("frexp_sub_result");
+            os << "  " << normal_result0 << " = or i64 " << sign
+               << ", 4602678819172646912\n"; // sign | (1022 << 52)
+            os << "  " << normal_result << " = or i64 " << normal_result0 << ", "
+               << mantissa << "\n";
+            os << "  " << sub_result0 << " = or i64 " << sign
+               << ", 4602678819172646912\n";
+            os << "  " << sub_result << " = or i64 " << sub_result0 << ", "
+               << normalized_mantissa << "\n";
+            const std::string finite_result = next_tmp("frexp_finite_result");
+            const std::string zero_or_special = next_tmp("frexp_zero_or_special");
+            const std::string result_bits = next_tmp("frexp_result");
+            os << "  " << finite_result << " = select i1 " << is_subnormal << ", i64 "
+               << sub_result << ", i64 " << normal_result << "\n";
+            os << "  " << zero_or_special << " = or i1 " << is_zero << ", "
+               << is_special << "\n";
+            os << "  " << result_bits << " = select i1 " << zero_or_special << ", i64 "
+               << *input << ", i64 " << finite_result << "\n";
+
+            const std::string normal_exp64 = next_tmp("frexp_normal_exp64");
+            const std::string sub_exp64 = next_tmp("frexp_sub_exp64");
+            const std::string finite_exp64 = next_tmp("frexp_finite_exp64");
+            const std::string exponent64 = next_tmp("frexp_exponent64");
+            const std::string exponent32 = next_tmp("frexp_exponent");
+            os << "  " << normal_exp64 << " = sub i64 " << exp_raw << ", 1022\n";
+            os << "  " << sub_exp64 << " = sub i64 -1010, " << leading << "\n";
+            os << "  " << finite_exp64 << " = select i1 " << is_subnormal << ", i64 "
+               << sub_exp64 << ", i64 " << normal_exp64 << "\n";
+            os << "  " << exponent64 << " = select i1 " << zero_or_special
+               << ", i64 0, i64 " << finite_exp64 << "\n";
+            os << "  " << exponent32 << " = trunc i64 " << exponent64 << " to i32\n";
+            const std::string exponent_ptr = next_tmp("frexp_exponent_ptr");
+            os << "  " << exponent_ptr << " = inttoptr i64 " << *exponent_ptr_bits
+               << " to i32*\n";
+            os << "  store i32 " << exponent32 << ", i32* " << exponent_ptr
+               << ", align 4\n";
+            return store_ret_bits(result_bits, 64);
+        }
+
         if (callee == "__nv_abs") {
             if (arg_names.empty()) return fail(instr, "__nv_abs expects 1 arg");
             auto value = load_call_slot_value(os, arg_names[0], 32);

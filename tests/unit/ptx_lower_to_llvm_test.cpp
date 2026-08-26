@@ -387,6 +387,7 @@ $L1:
     call.uni (call_ret), __nv_fast_fdividef, (call_arg, call_arg);
     st.param.b64 [sin_ptr_arg], %rd1;
     st.param.b64 [cos_ptr_arg], %rd2;
+    call.uni (call_ret64), __nv_frexp, (call_arg64, cos_ptr_arg);
     call.uni __nv_fast_sincosf, (call_arg, sin_ptr_arg, cos_ptr_arg);
     ret;
 }
@@ -450,6 +451,13 @@ $L1:
                     contains(vector_memory_lowered.llvm_ir,
                              "9223372036854775807"),
                 "__nv_fabs clears only the binary64 sign bit")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "frexp_subnormal") &&
+                    contains(vector_memory_lowered.llvm_ir, "@llvm.ctlz.i64") &&
+                    contains(vector_memory_lowered.llvm_ir, "frexp_exponent_ptr") &&
+                    contains(vector_memory_lowered.llvm_ir, "4602678819172646912"),
+                "__nv_frexp decomposes binary64 bits and stores the exponent")) {
         return 1;
     }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sin.f32") &&
@@ -540,6 +548,28 @@ $L1:
     if (!expect(!malformed_fabs_lowered.ok &&
                     contains(malformed_fabs_lowered.error, "__nv_fabs expects 1 arg"),
                 "strict lowering rejects malformed __nv_fabs calls")) {
+        return 1;
+    }
+
+    const std::string malformed_frexp_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_frexp()
+{
+    .param .b64 call_arg;
+    .param .b64 call_ret;
+    call.uni (call_ret), __nv_frexp, (call_arg);
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_frexp_options;
+    malformed_frexp_options.entry_name = "malformed_frexp";
+    malformed_frexp_options.strict = true;
+    const auto malformed_frexp_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_frexp_ptx, malformed_frexp_options);
+    if (!expect(!malformed_frexp_lowered.ok &&
+                    contains(malformed_frexp_lowered.error, "__nv_frexp expects 2 args"),
+                "strict lowering rejects malformed __nv_frexp calls")) {
         return 1;
     }
 

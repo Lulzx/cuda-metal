@@ -59,7 +59,9 @@ as gaps have been closed.
   with host memory (at ~f32 precision after soft f64↔f32 conversion). Explicit `ld.global.f64` /
   `st.global.f64`, integer conversions, and rounded FP64 conversions still fail lowering
   explicitly. A one-time `CUMETAL WARNING` notes the reduced precision; `CUMETAL_FP64_MODE=native`
-  compiles true doubles (fails at launch on current hardware).
+  compiles true doubles (fails at launch on current hardware). Signed-zero preservation across
+  the FP32-pair conversion boundary is not claimed: a focused `frexp(-0.0)` diagnostic returned
+  positive zero even though ordinary zero and finite mantissa/exponent cases pass.
 - **Legacy default-stream ordering is complete.** Every blocking user stream publishes a
   monotonically increasing `MTLSharedEvent` value and waits on the latest legacy-default value;
   each legacy-default submission waits on the latest value from every blocking stream. The
@@ -554,7 +556,11 @@ that error even when no command buffer was enqueued, and the error remains visib
   `clock` and `simpleHyperQ` require PTX `%clock`; public Metal exposes no
   per-thread CUDA-compatible cycle counter, so CuMetal rejects it rather than
   substituting wall time or a constant. `eigenvalues` remains implementable
-  compiler/runtime work, not classified as a platform limit. `simplePrintf`
+  compiler/runtime work, not classified as a platform limit. Its binary64
+  `__nv_frexp` call now has integer-only IEEE decomposition with focused GPU
+  mantissa/exponent coverage, but a resource-bounded 32x32 diagnostic compiled
+  its first kernel and then made no progress before a 30-second watchdog; the
+  default sample was not rerun and is not promoted. `simplePrintf`
   left this list after module-global format relocation and packed tuple decoding
   were validated against all 32 records from the unmodified upstream sample.
 
