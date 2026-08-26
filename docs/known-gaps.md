@@ -425,9 +425,16 @@ as gaps have been closed.
 
 88 headless samples from `NVIDIA/cuda-samples` (`cpp/0_Introduction`,
 `2_Concepts_and_Techniques`, `3_CUDA_Features`, `4_CUDA_Libraries`,
-`6_Performance`) were compiled and run against `libcumetal` out of tree. Result:
-**19 pass, 2 waive cleanly, 67 do not build or run**. It is a coverage probe, not
-a CTest harness -- the samples are not vendored.
+`6_Performance`) are compiled and run against `libcumetal`. Result:
+**19 pass, 2 waive cleanly, 62 do not build or run**.
+
+This runs as `conformance_cuda_samples_sweep`. The samples themselves are not
+vendored -- the test skips (77) unless a `cuda-samples` checkout is present at
+`../cuda-samples` or `CUMETAL_CUDA_SAMPLES_DIR`, and supports both the current
+`cpp/` and the older `Samples/` layout. Each sample's outcome is compared against
+`tests/cuda_projects/cuda_samples_sweep_manifest.txt`. Falling out of `pass` or
+`waive` fails the test; so does a sample the manifest calls unsupported that
+starts working, so the unsupported set shrinks on purpose rather than by drift.
 
 The sweep first found one defect that masked everything else: CuMetal's headers
 used `#pragma once` and never defined CUDA's canonical include-guard macros
@@ -473,13 +480,31 @@ computing the wrong answer.
 Samples that compile and launch but do not produce correct results -- these are
 real lowering or runtime defects, not coverage gaps:
 
-- `convolutionSeparable`, `threadFenceReduction`, `LargeKernelParameter` crash
-  (SIGBUS).
 - `simpleAtomicIntrinsics` reports `atomicAdd failed`.
 - `scan`, `simpleStreams`, `MersenneTwisterGP11213`, `conjugateGradient`,
   `conjugateGradientUM` compute wrong values.
 - `clock`, `mergeSort`, `simpleHyperQ`, `scalarProd`, `eigenvalues`,
-  `sortingNetworks` hit "registered kernel missing metallib" -- the lowering
+  `sortingNetworks`, `convolutionSeparable`, `threadFenceReduction`,
+  `LargeKernelParameter` hit "registered kernel missing metallib" -- the lowering
   path declines these kernels outright.
+
+The last three of those used to SIGBUS instead, which turned out to be a
+memory-safety bug in the runtime rather than anything to do with their kernels.
+`__cudaRegisterVar` was registering each `__device__`/`__constant__` variable's
+device-side *name string* as its address -- clang and nvcc both pass the name for
+both the third and fourth argument -- so `cudaMemcpyToSymbol` memcpy'd the
+caller's bytes over a string literal. 27 KB over `"excess_params"` faulted;
+smaller writes would have quietly corrupted the binary's own data. Symbols now map
+to the host shadow, `cudaGetSymbolAddress` resolves through the same table instead
+of disagreeing with `cudaMemcpyToSymbol` about where a symbol lives, and
+`functional_cuda_projects_constant_symbol` covers the round trip. Both the fault
+and the silent-corruption case are gated: the test anchors on the compile-time
+address of the shadow, because a round trip through a wrongly registered address
+is self-consistent and passes every naive check.
+
+Finding it also exposed that `run_standalone_cu.sh` discarded the harness exit
+status (`$(cmd || true)`), so a sample that died on a signal before printing
+anything fell through every content check and was reported PASS. Fixed; the
+crash-before-output case is the loudest failure there is and it read as green.
 
 See also: spec.md §8, [docs/status.md](status.md), [docs/air-abi.md](air-abi.md).

@@ -1,0 +1,106 @@
+# Expected result for each upstream NVIDIA cuda-samples sample, one per line:
+#
+#   <status> <sample-path-under-the-category-root>
+#
+# status:
+#   pass          builds, runs, and self-verifies. Regressions here fail the test.
+#   waive         builds and runs, then waives itself on a capability CuMetal reports
+#                 as absent (exit 2 / EXIT_WAIVED). Reaching this state is correct.
+#   compile-fail  needs CUDA API or device-language surface CuMetal does not have.
+#   no-lowering   compiles and launches, but a kernel declines to lower.
+#   run-fail      compiles and launches, then crashes or computes wrong values.
+#                 These are real defects -- see docs/known-gaps.md.
+#
+# Only `pass` and `waive` are gated. Everything else is recorded so that the
+# non-passing set is visible and shrinks deliberately rather than by accident:
+# a sample that starts passing is reported so this file gets updated.
+#
+# Baselined 2026-08-26 against NVIDIA/cuda-samples @ main on an M4 Pro.
+
+pass         0_Introduction/asyncAPI
+pass         0_Introduction/matrixMul
+pass         0_Introduction/simpleAssert
+pass         0_Introduction/simpleCallback
+pass         0_Introduction/simpleMultiCopy
+pass         0_Introduction/simpleOccupancy
+pass         0_Introduction/simpleTemplates
+pass         0_Introduction/simpleVoteIntrinsics
+pass         0_Introduction/simpleZeroCopy
+pass         0_Introduction/template
+pass         0_Introduction/vectorAdd
+pass         2_Concepts_and_Techniques/histogram
+pass         2_Concepts_and_Techniques/inlinePTX
+pass         3_CUDA_Features/StreamPriorities
+pass         4_CUDA_Libraries/batchCUBLAS
+pass         4_CUDA_Libraries/matrixMulCUBLAS
+pass         4_CUDA_Libraries/simpleCUBLAS
+pass         6_Performance/alignedTypes
+pass         6_Performance/transpose
+
+waive        2_Concepts_and_Techniques/reductionMultiBlockCG
+waive        4_CUDA_Libraries/conjugateGradientMultiBlockCG
+
+no-lowering  0_Introduction/clock
+no-lowering  0_Introduction/mergeSort
+no-lowering  0_Introduction/simpleHyperQ
+no-lowering  2_Concepts_and_Techniques/convolutionSeparable
+no-lowering  2_Concepts_and_Techniques/eigenvalues
+no-lowering  2_Concepts_and_Techniques/scalarProd
+no-lowering  2_Concepts_and_Techniques/sortingNetworks
+no-lowering  2_Concepts_and_Techniques/threadFenceReduction
+no-lowering  6_Performance/LargeKernelParameter
+
+run-fail     0_Introduction/simpleAtomicIntrinsics
+run-fail     0_Introduction/simpleStreams
+run-fail     2_Concepts_and_Techniques/scan
+run-fail     4_CUDA_Libraries/conjugateGradient
+run-fail     4_CUDA_Libraries/conjugateGradientUM
+run-fail     4_CUDA_Libraries/MersenneTwisterGP11213
+
+compile-fail 0_Introduction/fp16ScalarProduct
+compile-fail 0_Introduction/simpleAttributes
+compile-fail 0_Introduction/simpleAWBarrier
+compile-fail 0_Introduction/simpleCooperativeGroups
+compile-fail 0_Introduction/simpleCubemapTexture
+compile-fail 0_Introduction/simpleLayeredTexture
+compile-fail 0_Introduction/simplePitchLinearTexture
+compile-fail 0_Introduction/simplePrintf
+compile-fail 0_Introduction/simpleSurfaceWrite
+compile-fail 0_Introduction/simpleTexture
+compile-fail 0_Introduction/simpleTexture3D
+compile-fail 0_Introduction/systemWideAtomics
+compile-fail 2_Concepts_and_Techniques/convolutionTexture
+compile-fail 2_Concepts_and_Techniques/dct8x8
+compile-fail 2_Concepts_and_Techniques/interval
+compile-fail 2_Concepts_and_Techniques/radixSortThrust
+compile-fail 2_Concepts_and_Techniques/reduction
+compile-fail 2_Concepts_and_Techniques/segmentationTreeThrust
+compile-fail 2_Concepts_and_Techniques/shfl_scan
+compile-fail 2_Concepts_and_Techniques/streamOrderedAllocation
+compile-fail 3_CUDA_Features/bf16TensorCoreGemm
+compile-fail 3_CUDA_Features/binaryPartitionCG
+compile-fail 3_CUDA_Features/cdpAdvancedQuicksort
+compile-fail 3_CUDA_Features/cdpQuadtree
+compile-fail 3_CUDA_Features/cdpSimplePrint
+compile-fail 3_CUDA_Features/cdpSimpleQuicksort
+compile-fail 3_CUDA_Features/cudaCompressibleMemory
+compile-fail 3_CUDA_Features/cudaTensorCoreGemm
+compile-fail 3_CUDA_Features/dmmaTensorCoreGemm
+compile-fail 3_CUDA_Features/globalToShmemAsyncCopy
+compile-fail 3_CUDA_Features/graphMemoryFootprint
+compile-fail 3_CUDA_Features/graphMemoryNodes
+compile-fail 3_CUDA_Features/immaTensorCoreGemm
+compile-fail 3_CUDA_Features/jacobiCudaGraphs
+compile-fail 3_CUDA_Features/newdelete
+compile-fail 3_CUDA_Features/simpleCudaGraphs
+compile-fail 3_CUDA_Features/tf32TensorCoreGemm
+compile-fail 3_CUDA_Features/warpAggregatedAtomicsCG
+compile-fail 4_CUDA_Libraries/conjugateGradientCudaGraphs
+compile-fail 4_CUDA_Libraries/conjugateGradientPrecond
+compile-fail 4_CUDA_Libraries/cubDeviceFind
+compile-fail 4_CUDA_Libraries/cubDeviceSegmentedScan
+compile-fail 4_CUDA_Libraries/cubDeviceTransform
+compile-fail 4_CUDA_Libraries/lineOfSight
+compile-fail 4_CUDA_Libraries/simpleCUBLAS_LU
+compile-fail 4_CUDA_Libraries/simpleCUFFT
+compile-fail 6_Performance/UnifiedMemoryPerf

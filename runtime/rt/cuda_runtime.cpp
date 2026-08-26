@@ -188,8 +188,14 @@ struct RuntimeState {
 };
 
 RuntimeState& runtime_state() {
-    static RuntimeState state;
-    return state;
+    // Immortal on purpose. This is process-lifetime state guarded by a mutex, and a
+    // function-local static gets an atexit destructor: anything that touches it during
+    // teardown -- another static's destructor, a detached worker, a Metal completion
+    // handler -- then locks a destroyed mutex. That surfaced as an intermittent
+    // "mutex lock failed: Invalid argument" abort *after* a test had already printed
+    // PASS. Leaking one object at exit is the fix; the OS reclaims it.
+    static RuntimeState* state = new RuntimeState();
+    return *state;
 }
 
 thread_local cudaError_t tls_last_error = cudaSuccess;
@@ -4715,8 +4721,17 @@ cudaError_t cudaGetSymbolAddress(void** devPtr, const void* symbol) {
     if (devPtr == nullptr || symbol == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    // On UMA, the symbol's host address IS the device address.
-    *devPtr = const_cast<void*>(symbol);
+    // On UMA the symbol's host address IS the device address, but a registered
+    // symbol may still carry a remapping. This used to return the raw pointer
+    // unconditionally while cudaMemcpyToSymbol resolved through the registration
+    // table -- so the two disagreed about where a symbol lives, and the address
+    // handed to the caller was not the memory the runtime read and wrote.
+    const unsigned char* resolved = nullptr;
+    const cudaError_t status = checked_symbol_ptr(symbol, 0, 0, &resolved);
+    if (status != cudaSuccess) {
+        return fail(status);
+    }
+    *devPtr = const_cast<void*>(static_cast<const void*>(resolved));
     return fail(cudaSuccess);
 }
 

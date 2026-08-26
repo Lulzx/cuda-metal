@@ -59,8 +59,14 @@ struct CufftState {
 };
 
 CufftState& state() {
-    static CufftState s;
-    return s;
+    // Immortal on purpose. This is process-lifetime state guarded by a mutex, and a
+    // function-local static gets an atexit destructor: anything that touches it during
+    // teardown -- another static's destructor, a detached worker, a Metal completion
+    // handler -- then locks a destroyed mutex. That surfaced as an intermittent
+    // "mutex lock failed: Invalid argument" abort *after* a test had already printed
+    // PASS. Leaking one object at exit is the fix; the OS reclaims it.
+    static CufftState* s = new CufftState();
+    return *s;
 }
 
 // ── vDSP setup helpers ───────────────────────────────────────────────────────

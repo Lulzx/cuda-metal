@@ -314,8 +314,14 @@ struct RegistrationState {
 };
 
 RegistrationState& state() {
-    static RegistrationState s;
-    return s;
+    // Immortal on purpose. This is process-lifetime state guarded by a mutex, and a
+    // function-local static gets an atexit destructor: anything that touches it during
+    // teardown -- another static's destructor, a detached worker, a Metal completion
+    // handler -- then locks a destroyed mutex. That surfaced as an intermittent
+    // "mutex lock failed: Invalid argument" abort *after* a test had already printed
+    // PASS. Leaking one object at exit is the fix; the OS reclaims it.
+    static RegistrationState* s = new RegistrationState();
+    return *s;
 }
 
 std::string fallback_metallib_path_from_env() {
@@ -1492,9 +1498,6 @@ void __cudaRegisterVar(void** fat_cubin_handle,
                        int constant,
                        int global) {
     (void)fat_cubin_handle;
-    (void)host_var;
-    (void)device_address;
-    (void)device_name;
     (void)ext;
     (void)constant;
     (void)global;
@@ -1503,8 +1506,22 @@ void __cudaRegisterVar(void** fat_cubin_handle,
         return;
     }
 
-    const void* mapped = device_address == nullptr ? static_cast<const void*>(host_var)
-                                                   : static_cast<const void*>(device_address);
+    // `device_address` is NOT an address under the clang/NVCC registration ABI:
+    // CodeGen emits __cudaRegisterVar(handle, (char *)&Var, VarName, VarName, ...),
+    // passing the device-side *name string* for both the third and fourth argument.
+    // Registering it as the device address meant cudaMemcpyToSymbol memcpy'd user
+    // data straight over a string literal -- a SIGBUS when the constant landed in a
+    // read-only page (cuda-samples/LargeKernelParameter, 27 KB over "excess_params"),
+    // and silent corruption of the binary's own data when it did not.
+    //
+    // The host shadow is the storage the runtime reads and writes, so map to it.
+    // Hand-built registrations that do pass a genuine distinct address still win.
+    const bool device_address_is_name =
+        device_address != nullptr && device_name != nullptr &&
+        (device_address == device_name || std::strcmp(device_address, device_name) == 0);
+    const void* mapped = (device_address == nullptr || device_address_is_name)
+                             ? static_cast<const void*>(host_var)
+                             : static_cast<const void*>(device_address);
     void* handle = fat_cubin_handle == nullptr ? nullptr : reinterpret_cast<void*>(fat_cubin_handle);
 
     REG_DEBUG("__cudaRegisterVar: name='%s' host_var=%p mapped=%p size=%zu",

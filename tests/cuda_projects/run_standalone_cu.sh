@@ -24,7 +24,12 @@ mkdir -p "${OUT_DIR}"
 cumetal_cuda_projects_compile_link "${ROOT_DIR}" "${SRC_DIR}" "${OUT_DIR}" "${SRC_CU}" "${OUT_BIN}"
 
 echo "Running ${OUT_BIN}..."
-RUN_OUTPUT="$("${OUT_DIR}/${OUT_BIN}" 2>&1 || true)"
+# The exit status must be captured, not discarded. `$(cmd || true)` swallowed it,
+# so a harness that crashed before printing anything (SIGBUS, SIGSEGV, abort) fell
+# through every content check below and was reported PASS -- the loudest possible
+# failure read as green. Only classify the run after the status is known.
+RUN_STATUS=0
+RUN_OUTPUT="$("${OUT_DIR}/${OUT_BIN}" 2>&1)" || RUN_STATUS=$?
 echo "$RUN_OUTPUT"
 
 if echo "$RUN_OUTPUT" | grep -q "CUMETAL: registered kernel missing metallib"; then
@@ -34,6 +39,14 @@ if echo "$RUN_OUTPUT" | grep -q "CUMETAL: registered kernel missing metallib"; t
     fi
     echo "SKIP: lowering not supported for this kernel (generic PTX emitter or direct path incomplete for tiled/shared/complex kernels; see docs/known-gaps.md)."
     exit 77
+fi
+if (( RUN_STATUS >= 128 )); then
+    echo "FAIL: cuda_projects/${PROJECT_SUBDIR}/${OUT_BIN} died on signal $(( RUN_STATUS - 128 ))."
+    exit 1
+fi
+if (( RUN_STATUS != 0 )); then
+    echo "FAIL: cuda_projects/${PROJECT_SUBDIR}/${OUT_BIN} exited ${RUN_STATUS}."
+    exit 1
 fi
 if echo "$RUN_OUTPUT" | grep -q "FAIL:"; then
     # The kernel launched and ran to completion but produced wrong results.

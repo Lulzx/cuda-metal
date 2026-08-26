@@ -36,6 +36,24 @@ set_tests_properties(
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
 )
 
+# Full upstream cuda-samples sweep, gated against a recorded baseline. Skips when
+# no cuda-samples checkout is present. See cuda_samples_sweep_manifest.txt.
+add_test(
+    NAME conformance_cuda_samples_sweep
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_cuda_samples_sweep.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(
+    conformance_cuda_samples_sweep
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        TIMEOUT 2400
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
 add_test(
     NAME conformance_cuda_samples_vectoradd_gpu
     COMMAND bash
@@ -48,6 +66,15 @@ set_tests_properties(
         SKIP_RETURN_CODE 77
         RUN_SERIAL TRUE
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
+# Runtime-level regression: __cudaRegisterVar used to map a __device__/__constant__
+# symbol onto its device-side name string, so cudaMemcpyToSymbol wrote over a string
+# literal. Host-side symbol APIs only, so it gates on the runtime rather than on
+# whether any particular kernel lowers.
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_constant_symbol
+    constant_symbol constant_symbol.cu constant_symbol
 )
 
 cumetal_add_cuda_project_test(
