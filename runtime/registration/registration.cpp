@@ -295,6 +295,8 @@ struct RegistrationRecord {
     std::string metallib_path;
     std::string kernel_name;
     std::vector<cumetalKernelArgInfo_t> arg_info;
+    std::vector<cumetal::ptx::ExternalConstantSymbol> external_constant_symbols;
+    std::size_t external_constant_buffer_size = 0;
     bool arg_info_resolved = false;
     std::vector<std::string> printf_formats;
     std::size_t static_shared_bytes = 0;
@@ -303,7 +305,9 @@ struct RegistrationRecord {
 struct RegistrationSymbolRecord {
     void* module_handle = nullptr;
     const void* device_address = nullptr;
+    std::string device_name;
     std::size_t size = 0;
+    bool constant = false;
 };
 
 struct RegistrationState {
@@ -1270,6 +1274,12 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
                 (void)find_arg_info_for_ptx_entry(*module.ptx_source,
                                                   found->second.kernel_name,
                                                   &found->second.arg_info);
+                found->second.external_constant_symbols =
+                    cumetal::ptx::find_referenced_external_constant_symbols(
+                        *module.ptx_source, found->second.kernel_name);
+                found->second.external_constant_buffer_size =
+                    cumetal::ptx::compute_external_constant_buffer_bytes(
+                        *module.ptx_source);
             }
             found->second.arg_info_resolved = true;
         }
@@ -1309,6 +1319,30 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
     out->arg_info = record.arg_info;
     out->printf_formats = record.printf_formats;
     out->static_shared_bytes = record.static_shared_bytes;
+    out->constant_symbols.clear();
+    out->constant_buffer_size = record.external_constant_buffer_size;
+    if (!record.external_constant_symbols.empty()) {
+        RegistrationState& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        for (const auto& expected : record.external_constant_symbols) {
+            RegisteredConstantSymbol binding{
+                .name = expected.name,
+                .address = nullptr,
+                .offset = expected.offset_bytes,
+                .size = expected.size_bytes,
+            };
+            for (const auto& [host_symbol, registered] : s.symbols) {
+                (void)host_symbol;
+                if (registered.module_handle == record.module_handle &&
+                    registered.constant && registered.device_name == expected.name &&
+                    registered.size == expected.size_bytes) {
+                    binding.address = registered.device_address;
+                    break;
+                }
+            }
+            out->constant_symbols.push_back(std::move(binding));
+        }
+    }
     return true;
 }
 
@@ -1509,7 +1543,6 @@ void __cudaRegisterVar(void** fat_cubin_handle,
                        int global) {
     (void)fat_cubin_handle;
     (void)ext;
-    (void)constant;
     (void)global;
 
     if (host_var == nullptr) {
@@ -1543,7 +1576,9 @@ void __cudaRegisterVar(void** fat_cubin_handle,
     s.symbols[host_var] = cumetal::registration::RegistrationSymbolRecord{
         .module_handle = handle,
         .device_address = mapped,
+        .device_name = device_name != nullptr ? device_name : "",
         .size = size,
+        .constant = constant != 0,
     };
 }
 

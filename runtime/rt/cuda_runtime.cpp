@@ -4231,7 +4231,9 @@ cudaError_t cudaLaunchKernel(const void* func,
     const bool needs_printf = use_registered_kernel && !registered_kernel.printf_formats.empty();
 
     std::vector<cumetal::metal_backend::KernelArg> launch_args;
-    launch_args.reserve(static_cast<std::size_t>(arg_count) + (needs_printf ? 2u : 0u));
+    launch_args.reserve(static_cast<std::size_t>(arg_count) +
+                        (registered_kernel.constant_symbols.empty() ? 0u : 1u) +
+                        (needs_printf ? 2u : 0u));
 
     for (std::uint32_t i = 0; i < arg_count; ++i) {
         if (args == nullptr || args[i] == nullptr) {
@@ -4319,6 +4321,49 @@ cudaError_t cudaLaunchKernel(const void* func,
             std::memcpy(arg.bytes.data(), args[i], info.size_bytes);
             launch_args.push_back(std::move(arg));
         }
+    }
+
+    // Clang emits module-scope __constant__ storage as external PTX symbols,
+    // not declared kernel parameters. Per spec section 5.4.1, lay their CPU
+    // shadows into one module constant buffer and bind it at reserved Metal
+    // index 30. Writable __device__ globals intentionally do not use this path:
+    // they require persistent GPU storage and copy-back semantics.
+    if (!registered_kernel.constant_symbols.empty()) {
+        if (registered_kernel.constant_buffer_size == 0 ||
+            registered_kernel.constant_buffer_size > 64u * 1024u) {
+            return launch_fail(cudaErrorInvalidValue,
+                               "registered constant buffer size is invalid");
+        }
+        std::shared_ptr<cumetal::metal_backend::Buffer> constant_buffer;
+        std::string alloc_error;
+        const cudaError_t alloc_status = cumetal::metal_backend::allocate_buffer(
+            registered_kernel.constant_buffer_size, &constant_buffer, &alloc_error);
+        if (alloc_status != cudaSuccess || constant_buffer == nullptr ||
+            constant_buffer->contents() == nullptr) {
+            return launch_fail(alloc_status == cudaSuccess ? cudaErrorMemoryAllocation
+                                                           : alloc_status,
+                               "constant symbol buffer allocation failed");
+        }
+        std::memset(constant_buffer->contents(), 0,
+                    registered_kernel.constant_buffer_size);
+        for (const auto& symbol : registered_kernel.constant_symbols) {
+            if (symbol.address == nullptr || symbol.size == 0 ||
+                symbol.offset > registered_kernel.constant_buffer_size ||
+                symbol.size > registered_kernel.constant_buffer_size - symbol.offset) {
+                return launch_fail(cudaErrorInvalidValue,
+                                   "referenced constant symbol was not registered");
+            }
+            std::memcpy(static_cast<unsigned char*>(constant_buffer->contents()) +
+                            symbol.offset,
+                        symbol.address, symbol.size);
+        }
+
+        cumetal::metal_backend::KernelArg constant_arg;
+        constant_arg.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer;
+        constant_arg.buffer = std::move(constant_buffer);
+        constant_arg.offset = 0;
+        constant_arg.binding_index = 30;
+        launch_args.push_back(std::move(constant_arg));
     }
 
     // Append hidden printf ring-buffer args if the kernel uses device printf (spec §5.3).

@@ -31,6 +31,7 @@ pass         0_Introduction/simpleVoteIntrinsics
 pass         0_Introduction/simpleZeroCopy
 pass         0_Introduction/template
 pass         0_Introduction/vectorAdd
+pass         2_Concepts_and_Techniques/convolutionSeparable
 pass         2_Concepts_and_Techniques/histogram
 pass         2_Concepts_and_Techniques/inlinePTX
 pass         2_Concepts_and_Techniques/scan
@@ -44,6 +45,7 @@ pass         4_CUDA_Libraries/matrixMulCUBLAS
 pass         4_CUDA_Libraries/MersenneTwisterGP11213
 pass         4_CUDA_Libraries/simpleCUBLAS
 pass         6_Performance/alignedTypes
+pass         6_Performance/LargeKernelParameter
 pass         6_Performance/transpose
 
 waive        2_Concepts_and_Techniques/reductionMultiBlockCG
@@ -51,11 +53,8 @@ waive        4_CUDA_Libraries/conjugateGradientMultiBlockCG
 
 no-lowering  0_Introduction/clock
 no-lowering  0_Introduction/simpleHyperQ
-no-lowering  2_Concepts_and_Techniques/convolutionSeparable
 no-lowering  2_Concepts_and_Techniques/eigenvalues
 no-lowering  2_Concepts_and_Techniques/threadFenceReduction
-no-lowering  6_Performance/LargeKernelParameter
-
 compile-fail 0_Introduction/fp16ScalarProduct
 compile-fail 0_Introduction/simpleAttributes
 compile-fail 0_Introduction/simpleAWBarrier

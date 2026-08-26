@@ -11,8 +11,9 @@
 // The array is deliberately large (27904 B, matching cuda-samples/LargeKernelParameter,
 // the case that first crashed) so a stray write lands well outside any one string.
 //
-// Host-side symbol APIs only -- no launch -- so this gates on the runtime, not on
-// whether a given kernel can be lowered.
+// The final launch reads well past Metal's 4 KB setBytes limit, proving that the
+// registered constant is bound as a real read-only buffer rather than an inline
+// byte argument.
 #include <cuda_runtime.h>
 
 #include <cstdio>
@@ -24,10 +25,8 @@
 __constant__ int const_params[CONST_ELEMS];
 __device__ int dev_params[DEV_ELEMS];
 
-// A kernel must exist for the translation unit to carry a fatbin and reach
-// __cudaRegisterVar at all. It is never launched.
-__global__ void touch_symbols(int *out) {
-    *out = const_params[0] + dev_params[0];
+__global__ void read_const_symbol(int *out) {
+    *out = const_params[0] + const_params[4096];
 }
 
 static const char *kProbeName = "const_params";
@@ -152,7 +151,31 @@ int main() {
         return 1;
     }
 
-    (void)touch_symbols;
-    std::printf("PASS: constant/device symbol registration round-trips\n");
+    int *device_out = nullptr;
+    if (check("cudaMalloc(output)", cudaMalloc(&device_out, sizeof(*device_out)))) {
+        return 1;
+    }
+    read_const_symbol<<<1, 1>>>(device_out);
+    if (check("read_const_symbol launch", cudaGetLastError()) ||
+        check("read_const_symbol synchronize", cudaDeviceSynchronize())) {
+        cudaFree(device_out);
+        return 1;
+    }
+    int host_output = 0;
+    if (check("read_const_symbol copyback",
+              cudaMemcpy(&host_output, device_out, sizeof(host_output),
+                         cudaMemcpyDeviceToHost))) {
+        cudaFree(device_out);
+        return 1;
+    }
+    cudaFree(device_out);
+    const int expected_output = host_const[0] + host_const[4096];
+    if (host_output != expected_output) {
+        std::printf("FAIL: constant kernel expected %d got %d\n", expected_output,
+                    host_output);
+        return 1;
+    }
+
+    std::printf("PASS: constant/device symbol registration and constant kernel binding validated\n");
     return 0;
 }

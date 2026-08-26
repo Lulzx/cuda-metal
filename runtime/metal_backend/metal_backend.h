@@ -49,6 +49,9 @@ struct KernelArg {
     Kind kind = Kind::kBytes;
     std::shared_ptr<Buffer> buffer;
     std::size_t offset = 0;
+    // SIZE_MAX means use the argument's ordinal. Hidden ABI resources can
+    // select a reserved Metal binding without padding the logical argument list.
+    std::size_t binding_index = SIZE_MAX;
     std::vector<std::uint8_t> bytes;
 };
 

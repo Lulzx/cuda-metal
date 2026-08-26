@@ -350,6 +350,8 @@ struct ParsedConstB8Array {
 
 struct ConstSymbolInfo {
     std::string llvm_global_name;
+    std::string llvm_param_name;
+    std::size_t byte_offset = 0;
     std::size_t byte_count = 0;
 };
 
@@ -1946,6 +1948,13 @@ class GenericLlvmEmitter {
         const auto it = const_symbols_->find(symbol);
         if (it == const_symbols_->end() || it->second.byte_count == 0) {
             return std::nullopt;
+        }
+        if (!it->second.llvm_param_name.empty()) {
+            const std::string p2i = next_tmp("const_arg_p2i");
+            os << "  " << p2i << " = ptrtoint i8 addrspace(2)* %"
+               << it->second.llvm_param_name << " to i64\n";
+            return pointer_add_bytes(os, p2i,
+                                     static_cast<std::int64_t>(it->second.byte_offset));
         }
         const std::string gep = next_tmp("const_gep");
         os << "  " << gep << " = getelementptr inbounds [" << it->second.byte_count << " x i8], ["
@@ -5112,6 +5121,163 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
 
 }  // namespace
 
+std::vector<ExternalConstantSymbol> find_referenced_external_constant_symbols(
+    std::string_view ptx,
+    std::string_view entry_name) {
+    std::vector<ExternalConstantSymbol> out;
+    const bool include_all = entry_name.empty();
+    const std::string body = extract_entry_body(ptx, entry_name);
+    if (!include_all && body.empty()) {
+        return out;
+    }
+
+    const auto is_identifier_char = [](char c) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        return std::isalnum(u) != 0 || c == '_' || c == '$' || c == '.';
+    };
+    const auto body_references = [&](const std::string& symbol) {
+        std::size_t pos = 0;
+        while ((pos = body.find(symbol, pos)) != std::string::npos) {
+            const bool left_ok = pos == 0 || !is_identifier_char(body[pos - 1]);
+            const std::size_t end = pos + symbol.size();
+            const bool right_ok = end == body.size() || !is_identifier_char(body[end]);
+            if (left_ok && right_ok) {
+                return true;
+            }
+            pos = end;
+        }
+        return false;
+    };
+
+    const std::vector<std::pair<std::string_view, std::size_t>> types = {
+        {".b64", 8}, {".u64", 8}, {".s64", 8}, {".f64", 8},
+        {".b32", 4}, {".u32", 4}, {".s32", 4}, {".f32", 4},
+        {".b16", 2}, {".u16", 2}, {".s16", 2}, {".f16", 2},
+        {".b8", 1},  {".u8", 1},  {".s8", 1},
+    };
+
+    std::istringstream lines{std::string(ptx)};
+    std::string line;
+    std::size_t next_offset = 0;
+    while (std::getline(lines, line)) {
+        std::string declaration = trim(line);
+        if (const std::size_t comment = declaration.find("//");
+            comment != std::string::npos) {
+            declaration = trim(declaration.substr(0, comment));
+        }
+        if (declaration.empty() || declaration.front() != '.' ||
+            declaration.find(".const") == std::string::npos ||
+            declaration.find(';') == std::string::npos ||
+            declaration.find('=') != std::string::npos ||
+            declaration.find('{') != std::string::npos) {
+            continue;
+        }
+
+        std::size_t alignment = 1;
+        if (const std::size_t align_pos = declaration.find(".align");
+            align_pos != std::string::npos) {
+            std::size_t begin = align_pos + 6;
+            while (begin < declaration.size() &&
+                   std::isspace(static_cast<unsigned char>(declaration[begin])) != 0) {
+                ++begin;
+            }
+            std::size_t end = begin;
+            while (end < declaration.size() &&
+                   std::isdigit(static_cast<unsigned char>(declaration[end])) != 0) {
+                ++end;
+            }
+            try {
+                alignment = std::max<std::size_t>(
+                    1, static_cast<std::size_t>(
+                           std::stoull(declaration.substr(begin, end - begin))));
+            } catch (...) {
+                continue;
+            }
+        }
+
+        std::size_t type_pos = std::string::npos;
+        std::size_t type_len = 0;
+        std::size_t element_bytes = 0;
+        for (const auto& [token, bytes] : types) {
+            const std::size_t found = declaration.find(token);
+            if (found != std::string::npos) {
+                type_pos = found;
+                type_len = token.size();
+                element_bytes = bytes;
+                break;
+            }
+        }
+        if (type_pos == std::string::npos) {
+            continue;
+        }
+
+        std::size_t name_begin = type_pos + type_len;
+        while (name_begin < declaration.size() &&
+               std::isspace(static_cast<unsigned char>(declaration[name_begin])) != 0) {
+            ++name_begin;
+        }
+        std::size_t name_end = name_begin;
+        while (name_end < declaration.size() &&
+               !std::isspace(static_cast<unsigned char>(declaration[name_end])) &&
+               declaration[name_end] != '[' && declaration[name_end] != ';') {
+            ++name_end;
+        }
+        const std::string symbol = declaration.substr(name_begin, name_end - name_begin);
+        if (symbol.empty()) {
+            continue;
+        }
+
+        std::size_t count = 1;
+        if (name_end < declaration.size() && declaration[name_end] == '[') {
+            const std::size_t close = declaration.find(']', name_end + 1);
+            if (close == std::string::npos) {
+                continue;
+            }
+            try {
+                count = static_cast<std::size_t>(
+                    std::stoull(trim(declaration.substr(name_end + 1, close - name_end - 1))));
+            } catch (...) {
+                continue;
+            }
+        }
+        if (count == 0 || element_bytes == 0 || count > SIZE_MAX / element_bytes) {
+            continue;
+        }
+        const std::size_t size_bytes = count * element_bytes;
+        const std::size_t remainder = next_offset % alignment;
+        if (remainder != 0) {
+            const std::size_t padding = alignment - remainder;
+            if (next_offset > SIZE_MAX - padding) {
+                continue;
+            }
+            next_offset += padding;
+        }
+        const std::size_t symbol_offset = next_offset;
+        if (next_offset > SIZE_MAX - size_bytes) {
+            continue;
+        }
+        next_offset += size_bytes;
+        if (include_all || body_references(symbol)) {
+            out.push_back({.name = symbol,
+                           .offset_bytes = symbol_offset,
+                           .size_bytes = size_bytes});
+        }
+    }
+    return out;
+}
+
+std::size_t compute_external_constant_buffer_bytes(std::string_view ptx) {
+    const auto symbols = find_referenced_external_constant_symbols(ptx, {});
+    if (symbols.empty()) {
+        return 0;
+    }
+    const ExternalConstantSymbol& last = symbols.back();
+    if (last.offset_bytes > SIZE_MAX - last.size_bytes) {
+        return SIZE_MAX;
+    }
+    return last.offset_bytes + last.size_bytes;
+}
+
 LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOptions& options) {
     LowerToLlvmResult result;
 
@@ -5208,6 +5374,8 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         const_symbols.emplace(array.symbol,
                               ConstSymbolInfo{
                                   .llvm_global_name = llvm_name,
+                                  .llvm_param_name = {},
+                                  .byte_offset = 0,
                                   .byte_count = array.bytes.size(),
                               });
         std::ostringstream def;
@@ -5221,6 +5389,41 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         }
         def << "], align " << std::max(1, array.align);
         const_global_defs.push_back(def.str());
+    }
+
+    const auto external_constant_symbols =
+        find_referenced_external_constant_symbols(ptx, pipeline.entry_name);
+    const std::size_t external_constant_buffer_bytes =
+        compute_external_constant_buffer_bytes(ptx);
+    if (external_constant_buffer_bytes > 64u * 1024u) {
+        result.error = "external PTX constant buffer exceeds CUDA's 64 KB module limit";
+        return result;
+    }
+    if (!external_constant_symbols.empty()) {
+        if (params.size() > 30) {
+            result.error = "kernel argument ABI conflicts with reserved constant buffer index 30";
+            return result;
+        }
+        const std::string param_name = "__cumetal_constant_buffer";
+        arg_decls.push_back("i8 addrspace(2)* %" + param_name);
+        params.push_back({.ptx_type = ".b8",
+                          .llvm_type = "i8 addrspace(2)*",
+                          .name = param_name,
+                          .raw_name = param_name + "[" +
+                                      std::to_string(external_constant_buffer_bytes) + "]"});
+        for (const ExternalConstantSymbol& symbol : external_constant_symbols) {
+            if (symbol.name.empty() || symbol.size_bytes == 0 ||
+                const_symbols.count(symbol.name) != 0) {
+                continue;
+            }
+            const_symbols.emplace(symbol.name,
+                                  ConstSymbolInfo{
+                                      .llvm_global_name = {},
+                                      .llvm_param_name = param_name,
+                                      .byte_offset = symbol.offset_bytes,
+                                      .byte_count = symbol.size_bytes,
+                                  });
+        }
     }
 
     const auto shared_symbols = parse_ptx_shared_symbols(ptx, pipeline.entry_name);
@@ -5375,11 +5578,14 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         }
 
         if (is_constant_buffer_pointer(param.llvm_type)) {
+            const int pointee_size = byte_size_for_llvm_type(param.llvm_type);
+            const std::size_t location_index =
+                param.name == "__cumetal_constant_buffer" ? 30u : i;
             ir << "!" << arg_meta_ids[i] << " = !{i32 " << i
                << ", !\"air.buffer\", !\"air.buffer_size\", i32 " << arg_size
-               << ", !\"air.location_index\", i32 " << i
+               << ", !\"air.location_index\", i32 " << location_index
                << ", i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 "
-               << arg_size << ", !\"air.arg_type_align_size\", i32 " << arg_align
+               << pointee_size << ", !\"air.arg_type_align_size\", i32 " << pointee_size
                << ", !\"air.arg_type_name\", !\"" << air_type_name << "\", !\"air.arg_name\", !\""
                << param.name << "\"}\n";
             continue;

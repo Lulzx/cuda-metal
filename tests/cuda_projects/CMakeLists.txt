@@ -76,10 +76,9 @@ cumetal_add_cuda_project_test(
     device_sync_primitives device_sync_primitives.cu device_sync_primitives
 )
 
-# Runtime-level regression: __cudaRegisterVar used to map a __device__/__constant__
-# symbol onto its device-side name string, so cudaMemcpyToSymbol wrote over a string
-# literal. Host-side symbol APIs only, so it gates on the runtime rather than on
-# whether any particular kernel lowers.
+# Regression: __cudaRegisterVar used to map a __device__/__constant__ symbol onto
+# its device-side name string, and external PTX constants were not bound into
+# kernels. The project checks symbol APIs and a >4 KB constant-buffer kernel read.
 cumetal_add_cuda_project_test(
     functional_cuda_projects_constant_symbol
     constant_symbol constant_symbol.cu constant_symbol

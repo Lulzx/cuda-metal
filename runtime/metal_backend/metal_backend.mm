@@ -1982,9 +1982,18 @@ cudaError_t launch_kernel(const std::string& metallib_path,
 
         for (std::size_t i = 0; i < args.size(); ++i) {
             const KernelArg& arg = args[i];
+            const std::size_t binding_index =
+                arg.binding_index == SIZE_MAX ? i : arg.binding_index;
+            if (binding_index > 30) {
+                if (error_message != nullptr) {
+                    *error_message = "kernel arg " + std::to_string(i) +
+                                     " has invalid Metal buffer index";
+                }
+                return cudaErrorInvalidValue;
+            }
             if (arg.kind == KernelArg::Kind::kBuffer) {
                 if (arg.buffer == nullptr) {
-                    [encoder setBuffer:nil offset:0 atIndex:i];
+                    [encoder setBuffer:nil offset:0 atIndex:binding_index];
                     continue;
                 }
 
@@ -1996,7 +2005,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                     return cudaErrorInvalidValue;
                 }
 
-                [encoder setBuffer:buffer_impl->handle() offset:arg.offset atIndex:i];
+                [encoder setBuffer:buffer_impl->handle() offset:arg.offset atIndex:binding_index];
             } else {
                 if (arg.bytes.empty()) {
                     if (error_message != nullptr) {
@@ -2012,7 +2021,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                     return cudaErrorInvalidValue;
                 }
 
-                [encoder setBytes:arg.bytes.data() length:arg.bytes.size() atIndex:i];
+                [encoder setBytes:arg.bytes.data() length:arg.bytes.size() atIndex:binding_index];
             }
         }
 
@@ -2236,9 +2245,18 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
 
         for (std::size_t i = 0; i < args.size(); ++i) {
             const KernelArg& arg = args[i];
+            const std::size_t binding_index =
+                arg.binding_index == SIZE_MAX ? i : arg.binding_index;
+            if (binding_index > 30) {
+                if (error_message != nullptr) {
+                    *error_message = "kernel arg " + std::to_string(i) +
+                                     " has invalid Metal buffer index";
+                }
+                return cudaErrorInvalidValue;
+            }
             if (arg.kind == KernelArg::Kind::kBuffer) {
                 if (arg.buffer == nullptr) {
-                    [encoder setBuffer:nil offset:0 atIndex:i];
+                    [encoder setBuffer:nil offset:0 atIndex:binding_index];
                     continue;
                 }
                 auto* buffer_impl = dynamic_cast<BufferImpl*>(arg.buffer.get());
@@ -2249,7 +2267,7 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
                     }
                     return cudaErrorInvalidValue;
                 }
-                [encoder setBuffer:buffer_impl->handle() offset:arg.offset atIndex:i];
+                [encoder setBuffer:buffer_impl->handle() offset:arg.offset atIndex:binding_index];
             } else {
                 if (arg.bytes.empty()) {
                     if (error_message != nullptr) {
@@ -2265,7 +2283,7 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
                     }
                     return cudaErrorInvalidValue;
                 }
-                [encoder setBytes:arg.bytes.data() length:arg.bytes.size() atIndex:i];
+                [encoder setBytes:arg.bytes.data() length:arg.bytes.size() atIndex:binding_index];
             }
         }
 

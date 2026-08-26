@@ -43,6 +43,22 @@ struct LowerToLlvmResult {
     std::string error;
 };
 
+// A module-scope PTX `.const` declaration without an initializer is storage
+// supplied by the CUDA registration ABI rather than an LLVM constant global.
+// Return only declarations referenced by the selected entry, in declaration
+// order, so compiler and runtime agree on hidden Metal buffer bindings.
+struct ExternalConstantSymbol {
+    std::string name;
+    std::size_t offset_bytes = 0;
+    std::size_t size_bytes = 0;
+};
+
+std::vector<ExternalConstantSymbol> find_referenced_external_constant_symbols(
+    std::string_view ptx,
+    std::string_view entry_name);
+
+std::size_t compute_external_constant_buffer_bytes(std::string_view ptx);
+
 LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx,
                                        const LowerToLlvmOptions& options = {});
 

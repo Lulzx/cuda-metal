@@ -611,6 +611,11 @@ Supported runtime API subset:
 - `cudaMemGetInfo`
 - `cudaMemcpy`, `cudaMemcpyAsync`
 - `cudaMemcpyToSymbol`, `cudaMemcpyFromSymbol`, `cudaMemcpyToSymbolAsync`, `cudaMemcpyFromSymbolAsync`
+  - External PTX constants referenced directly by a kernel entry are laid out in
+    one aligned, at-most-64-KB module buffer and bound read-only at Metal index 30.
+    The unmodified `LargeKernelParameter` CUDA sample passes both its 4 KB and
+    32,764-byte parameter cases; unmodified `convolutionSeparable` passes with
+    zero relative L2 error.
 - `cudaMemset`, `cudaMemsetAsync`
 - `cudaLaunchKernel`
 - `cudaConfigureCall`, `cudaSetupArgument`, `cudaLaunch`

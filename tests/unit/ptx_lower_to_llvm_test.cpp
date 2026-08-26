@@ -749,6 +749,108 @@ $L1:
         return 1;
     }
 
+    const std::string external_const_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .const .align 1 .b8 unrelated_table[3];
+.visible .const .align 16 .b8 external_table[27904];
+.visible .entry read_external_const(
+    .param .u64 read_external_const_param_0
+)
+{
+    .reg .b64 %rd<4>;
+    .reg .b32 %r<2>;
+    ld.param.u64 %rd1, [read_external_const_param_0];
+    mov.b64 %rd2, external_table;
+    add.s64 %rd3, %rd2, 16384;
+    ld.const.u32 %r1, [%rd3];
+    st.global.u32 [%rd1], %r1;
+    ret;
+}
+)PTX";
+    const auto external_symbols =
+        cumetal::ptx::find_referenced_external_constant_symbols(
+            external_const_ptx, "read_external_const");
+    if (external_symbols.size() != 1 ||
+        external_symbols.front().name != "external_table" ||
+        external_symbols.front().offset_bytes != 16 ||
+        external_symbols.front().size_bytes != 27904) {
+        std::fprintf(stderr, "external constant scan returned %zu symbols", external_symbols.size());
+        for (const auto& symbol : external_symbols) {
+            std::fprintf(stderr, " [%s:%zu+%zu]", symbol.name.c_str(),
+                         symbol.offset_bytes, symbol.size_bytes);
+        }
+        std::fprintf(stderr, "\n");
+    }
+    if (!expect(external_symbols.size() == 1 &&
+                    external_symbols.front().name == "external_table" &&
+                    external_symbols.front().offset_bytes == 16 &&
+                    external_symbols.front().size_bytes == 27904,
+                "external constant scan is entry-specific and preserves byte size")) {
+        return 1;
+    }
+    if (!expect(cumetal::ptx::compute_external_constant_buffer_bytes(
+                    external_const_ptx) == 27920,
+                "module constant layout includes aligned unreferenced declarations")) {
+        return 1;
+    }
+    cumetal::ptx::LowerToLlvmOptions external_const_options;
+    external_const_options.entry_name = "read_external_const";
+    external_const_options.strict = true;
+    const auto external_const_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(external_const_ptx,
+                                           external_const_options);
+    if (!external_const_lowered.ok) {
+        std::fprintf(stderr, "external const lowering error: %s\n",
+                     external_const_lowered.error.c_str());
+    }
+    const bool external_const_shape_ok =
+        external_const_lowered.ok &&
+                    contains(external_const_lowered.llvm_ir,
+                             "i8 addrspace(2)* %__cumetal_constant_buffer") &&
+                    contains(external_const_lowered.llvm_ir,
+                             "ptrtoint i8 addrspace(2)* %__cumetal_constant_buffer to i64") &&
+                    contains(external_const_lowered.llvm_ir,
+                             "add i64 %const_arg_p2i_") &&
+                    contains(external_const_lowered.llvm_ir, ", 16\n") &&
+                    contains(external_const_lowered.llvm_ir,
+                             "!\"air.buffer_size\", i32 27920") &&
+                    contains(external_const_lowered.llvm_ir,
+                             "!\"air.location_index\", i32 30") &&
+                    !contains(external_const_lowered.llvm_ir,
+                              "__cumetal_const_unrelated_table");
+    if (!external_const_shape_ok) {
+        std::fprintf(stderr, "external const IR:\n%s\n",
+                     external_const_lowered.llvm_ir.c_str());
+    }
+    if (!expect(external_const_shape_ok,
+                "referenced external constant lowers to the module buffer at index 30")) {
+        return 1;
+    }
+
+    const std::string oversized_external_const_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .const .align 1 .b8 too_large[65537];
+.visible .entry reject_large_const()
+{
+    .reg .b64 %rd<2>;
+    mov.b64 %rd1, too_large;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions oversized_const_options;
+    oversized_const_options.entry_name = "reject_large_const";
+    oversized_const_options.strict = true;
+    const auto oversized_const_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(oversized_external_const_ptx,
+                                           oversized_const_options);
+    if (!expect(!oversized_const_lowered.ok &&
+                    contains(oversized_const_lowered.error, "exceeds CUDA's 64 KB"),
+                "external constant modules above 64 KB fail explicitly")) {
+        return 1;
+    }
+
     const std::string extern_shared_ptx = R"PTX(
 .version 8.0
 .target sm_80

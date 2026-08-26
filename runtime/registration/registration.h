@@ -9,6 +9,13 @@
 
 namespace cumetal::registration {
 
+struct RegisteredConstantSymbol {
+    std::string name;
+    const void* address = nullptr;
+    std::size_t offset = 0;
+    std::size_t size = 0;
+};
+
 struct RegisteredKernel {
     std::string metallib_path;
     std::string kernel_name;
@@ -19,6 +26,10 @@ struct RegisteredKernel {
     // Total bytes of static __shared__ memory (non-extern .shared declarations).
     // Used to call setThreadgroupMemoryLength when no dynamic shared memory is specified.
     std::size_t static_shared_bytes = 0;
+    // Module-scope external `.const` storage referenced by this entry. These
+    // become hidden read-only Metal buffer arguments after the CUDA arguments.
+    std::vector<RegisteredConstantSymbol> constant_symbols;
+    std::size_t constant_buffer_size = 0;
     std::string provenance;
     std::string semantic_quality;
 };
