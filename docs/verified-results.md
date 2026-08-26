@@ -37,6 +37,9 @@ ctest --test-dir build -R bench_phase5_all_kernels --output-on-failure
 
 - Upstream `cuda-samples` vector addition builds without source changes and
   passes a numerical plus Apple-GPU provenance gate.
+- Upstream `cuda-samples` `simplePrintf` builds without source changes and emits
+  all 32 expected block/thread/value records through the Apple-GPU ring-buffer
+  path. The focused in-tree Clang-ABI test independently checks the same record set.
 - llm.c GPT-2 FP32 passes logits, loss, tensor, and GPU-provenance checks on the
   tested path. It uses explicit workload specializations and is not proof of
   arbitrary PTX support.

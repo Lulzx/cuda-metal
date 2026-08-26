@@ -1591,11 +1591,27 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         return {};
     }
 
+    // Metal requires grid/thread coordinate attributes in one kernel to use
+    // either all scalar types or all vectors of the same width.  Switch the
+    // whole coordinate family to uint3 only when PTX actually uses y/z (or the
+    // grid-count builtin needed to flatten a multidimensional grid).
+    const bool needs_vector_builtins =
+        ptx.find("%tid.y") != std::string_view::npos ||
+        ptx.find("%tid.z") != std::string_view::npos ||
+        ptx.find("%ntid.y") != std::string_view::npos ||
+        ptx.find("%ntid.z") != std::string_view::npos ||
+        ptx.find("%ctaid.y") != std::string_view::npos ||
+        ptx.find("%ctaid.z") != std::string_view::npos ||
+        ptx.find("%nctaid.") != std::string_view::npos;
+
     // Build line-number → printf call map from the phase1 output (if available).
     std::unordered_map<int, const cumetal::passes::PrintfLoweredCall*> line_to_printf;
+    std::unordered_set<int> printf_scaffold_lines;
     if (pipeline_hint != nullptr) {
         for (const auto& pc : pipeline_hint->printf_calls) {
             line_to_printf[pc.source_line] = &pc;
+            printf_scaffold_lines.insert(pc.abi_scaffold_lines.begin(),
+                                         pc.abi_scaffold_lines.end());
         }
     }
     const bool has_printf = !line_to_printf.empty();
@@ -1627,7 +1643,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
                 break;
             }
         }
-        if (!has_global_mem) {
+        if (!has_global_mem && !has_printf) {
             return {};
         }
     }
@@ -1646,6 +1662,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         ThreadGid64,   // (u64)ThreadGid
         ByteOffset,    // ThreadGid64 * byte_per_elem  (from shl / mul)
         DerivedPtr,    // ParamPtr + ByteOffset  → param[gid]
+        Builtin,       // another Metal thread/grid builtin, expression in param_name
     };
     struct RegInfo {
         RegKind kind = RegKind::Unknown;
@@ -1777,11 +1794,24 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             const std::string dest = get_reg(ops[0]);
             if (!dest.empty()) {
                 if (ops[1] == "%tid.x") {
-                    reg[dest] = {.kind = RegKind::ThreadTid};
+                    reg[dest] = {.kind = RegKind::ThreadTid, .param_name = "__tid.x"};
                 } else if (ops[1] == "%ntid.x") {
-                    reg[dest] = {.kind = RegKind::ThreadNtid};
+                    reg[dest] = {.kind = RegKind::ThreadNtid, .param_name = "__ntid.x"};
                 } else if (ops[1] == "%ctaid.x") {
-                    reg[dest] = {.kind = RegKind::ThreadCtaid};
+                    reg[dest] = {.kind = RegKind::ThreadCtaid, .param_name = "__ctaid.x"};
+                } else {
+                    static const std::unordered_map<std::string, std::string> kBuiltinExpr = {
+                        {"%tid.y", "__tid.y"},       {"%tid.z", "__tid.z"},
+                        {"%ntid.y", "__ntid.y"},    {"%ntid.z", "__ntid.z"},
+                        {"%ctaid.y", "__ctaid.y"},  {"%ctaid.z", "__ctaid.z"},
+                        {"%nctaid.x", "__nctaid.x"},{"%nctaid.y", "__nctaid.y"},
+                        {"%nctaid.z", "__nctaid.z"},
+                    };
+                    const auto builtin = kBuiltinExpr.find(ops[1]);
+                    if (builtin != kBuiltinExpr.end()) {
+                        reg[dest] = {.kind = RegKind::Builtin,
+                                     .param_name = builtin->second};
+                    }
                 }
             }
             continue;
@@ -2181,8 +2211,27 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         metal << ",\n    constant uint& __printf_cap [[buffer(" << buf_idx << ")]]";
         ++buf_idx;
     }
-    metal << ",\n    uint gid [[thread_position_in_grid]],\n"
-          << "    ushort __laneid [[thread_index_in_simdgroup]]) {\n";
+    if (needs_vector_builtins) {
+        metal << ",\n    uint3 __grid_pos [[thread_position_in_grid]]";
+    } else {
+        metal << ",\n    uint gid [[thread_position_in_grid]]";
+    }
+    if (needs_vector_builtins && ptx.find("%tid.") != std::string_view::npos) {
+        metal << ",\n    uint3 __tid [[thread_position_in_threadgroup]]";
+    }
+    if (needs_vector_builtins && ptx.find("%ntid.") != std::string_view::npos) {
+        metal << ",\n    uint3 __ntid [[threads_per_threadgroup]]";
+    }
+    if (needs_vector_builtins && ptx.find("%ctaid.") != std::string_view::npos) {
+        metal << ",\n    uint3 __ctaid [[threadgroup_position_in_grid]]";
+    }
+    if (needs_vector_builtins && ptx.find("%nctaid.") != std::string_view::npos) {
+        metal << ",\n    uint3 __nctaid [[threadgroups_per_grid]]";
+    }
+    metal << ",\n    ushort __laneid [[thread_index_in_simdgroup]]) {\n";
+    if (needs_vector_builtins) {
+        metal << "    uint gid = __grid_pos.x;\n";
+    }
 
     // Metal variable name for a PTX register: %rd0 → vrd0, %f1 → vf1
     auto mvar = [](const std::string& r) -> std::string {
@@ -2219,6 +2268,13 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             return "gid";
         }
         if (it != reg.end() && it->second.kind == RegKind::ParamScalar) {
+            return it->second.param_name;
+        }
+        if (needs_vector_builtins && it != reg.end() &&
+            (it->second.kind == RegKind::ThreadTid ||
+             it->second.kind == RegKind::ThreadNtid ||
+             it->second.kind == RegKind::ThreadCtaid ||
+             it->second.kind == RegKind::Builtin)) {
             return it->second.param_name;
         }
         return mvar(r);
@@ -2265,7 +2321,12 @@ std::string emit_metal_source_generic(const std::string& entry_name,
     // to reference undeclared vrd* variables in generated MSL.
     for (const auto& kv : reg) {
         if (kv.second.kind == RegKind::ThreadGid ||
-            kv.second.kind == RegKind::ParamScalar) {
+            kv.second.kind == RegKind::ParamScalar ||
+            (needs_vector_builtins &&
+             (kv.second.kind == RegKind::ThreadTid ||
+              kv.second.kind == RegKind::ThreadNtid ||
+              kv.second.kind == RegKind::ThreadCtaid ||
+              kv.second.kind == RegKind::Builtin))) {
             defined_regs.insert(kv.first);
         }
     }
@@ -2289,6 +2350,8 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         const auto& op = instr.opcode;
         const auto& ops = instr.operands;
 
+        if (printf_scaffold_lines.count(instr.line)) continue;
+
         // ── Structural: parameter loads, labels, ret ────────────────────────
         if (op.size() >= 8 && op.substr(0, 8) == "ld.param") continue;
         if (op == "ptx.label") continue;
@@ -2296,7 +2359,8 @@ std::string emit_metal_source_generic(const std::string& entry_name,
 
         // mov %r, %tid/ntid/ctaid.x → structural
         if ((op == "mov.u32" || op == "mov.s32") && ops.size() == 2 &&
-            (ops[1] == "%tid.x" || ops[1] == "%ntid.x" || ops[1] == "%ctaid.x")) {
+            (ops[1].rfind("%tid.", 0) == 0 || ops[1].rfind("%ntid.", 0) == 0 ||
+             ops[1].rfind("%ctaid.", 0) == 0 || ops[1].rfind("%nctaid.", 0) == 0)) {
             continue;
         }
 

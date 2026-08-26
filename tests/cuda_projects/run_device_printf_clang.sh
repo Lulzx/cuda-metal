@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Compile Clang's real CUDA device-printf ABI and verify every GPU record.
+set -euo pipefail
+
+ROOT_DIR="${1:?}"
+BUILD_DIR="${2:?}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tests/cuda_projects/_common.sh
+source "${SCRIPT_DIR}/_common.sh"
+
+if ! cumetal_cuda_projects_check_prereqs "${ROOT_DIR}"; then
+    exit 77
+fi
+
+SOURCE_DIR="${ROOT_DIR}/tests/cuda_projects/device_printf_clang"
+OUTPUT_DIR="${BUILD_DIR}/device_printf_clang"
+mkdir -p "${OUTPUT_DIR}"
+cumetal_cuda_projects_compile_link \
+    "${ROOT_DIR}" "${SOURCE_DIR}" "${OUTPUT_DIR}" \
+    device_printf_clang.cu device_printf_clang
+
+OUTPUT_FILE="$(mktemp)"
+CACHE_DIR="$(mktemp -d)"
+trap 'rm -f "$OUTPUT_FILE"; rm -rf "$CACHE_DIR"' EXIT
+
+run_status=0
+CUMETAL_CACHE_DIR="${CACHE_DIR}" CUMETAL_TRACE_GPU=1 \
+    "${OUTPUT_DIR}/device_printf_clang" >"${OUTPUT_FILE}" 2>&1 || run_status=$?
+cat "${OUTPUT_FILE}"
+if (( run_status != 0 )); then
+    exit "${run_status}"
+fi
+if ! grep -q '^HOST_DONE$' "${OUTPUT_FILE}"; then
+    echo "FAIL: host completion marker missing"
+    exit 1
+fi
+if ! grep -q 'CUMETAL_PROVENANCE .*source=generic_ptx .*device=apple_gpu .*launch_success=true' \
+        "${OUTPUT_FILE}"; then
+    echo "FAIL: no successful Apple-GPU provenance record"
+    exit 1
+fi
+if [[ "$(grep -c '^PRINTF\[' "${OUTPUT_FILE}")" -ne 32 ]]; then
+    echo "FAIL: expected exactly 32 device printf records"
+    exit 1
+fi
+for block in 0 1 2 3; do
+    for thread in 0 1 2 3 4 5 6 7; do
+        if [[ "$(grep -Fxc "PRINTF[${block},${thread}]=37" "${OUTPUT_FILE}")" -ne 1 ]]; then
+            echo "FAIL: missing or duplicate PRINTF[${block},${thread}]=37"
+            exit 1
+        fi
+    done
+done
+
+echo "PASS: Clang device printf ABI emitted all expected GPU records"

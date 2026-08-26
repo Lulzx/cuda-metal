@@ -147,6 +147,59 @@ int main() {
         return 1;
     }
 
+    const std::string clang_abi_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.global .align 1 .b8 _$_str[8] = {120, 61, 37, 100, 10, 0, 0, 0};
+.visible .entry clang_printf(.param .u32 value) {
+    .local .align 8 .b8 __local_depot0[8];
+    mov.b64 %SPL, __local_depot0;
+    cvta.local.u64 %SP, %SPL;
+    add.u64 %rd1, %SP, 0;
+    add.u64 %rd2, %SPL, 0;
+    ld.param.b32 %r1, [value];
+    st.local.b32 [%rd2], %r1;
+    st.param.b64 [param1], %rd1;
+    mov.b64 %rd3, _$_str;
+    cvta.global.u64 %rd4, %rd3;
+    st.param.b64 [param0], %rd4;
+    call.uni (retval0), vprintf, (param0, param1);
+    ret;
+}
+)PTX";
+    const auto clang_parsed = cumetal::ptx::parse_ptx(clang_abi_ptx);
+    if (!expect(clang_parsed.ok, "parse Clang vprintf ABI PTX")) return 1;
+    cumetal::passes::PrintfLowerOptions clang_options;
+    clang_options.ptx_source = clang_abi_ptx;
+    const auto clang_lowered =
+        cumetal::passes::lower_printf_calls(clang_parsed.module.entries[0], clang_options);
+    if (!expect(clang_lowered.ok && clang_lowered.calls.size() == 1,
+                "Clang vprintf ABI call lowers")) return 1;
+    if (!expect(clang_lowered.formats.size() == 1 &&
+                    clang_lowered.formats[0].token == "x=%d\n" &&
+                    clang_lowered.formats[0].literal,
+                "initialized global format bytes become a literal format")) return 1;
+    if (!expect(clang_lowered.calls[0].arguments.size() == 1 &&
+                    clang_lowered.calls[0].arguments[0] == "%r1",
+                "packed local argument tuple is decoded")) return 1;
+    if (!expect(!clang_lowered.calls[0].abi_scaffold_lines.empty(),
+                "Clang ABI pointer scaffolding is identified")) return 1;
+
+    std::string wide_clang_ptx = clang_abi_ptx;
+    const std::size_t wide_store = wide_clang_ptx.find("st.local.b32 [%rd2], %r1;");
+    if (!expect(wide_store != std::string::npos, "find Clang tuple store fixture")) return 1;
+    wide_clang_ptx.replace(wide_store,
+                           std::string("st.local.b32 [%rd2], %r1;").size(),
+                           "st.local.b64 [%rd2], %rd5;");
+    const auto wide_parsed = cumetal::ptx::parse_ptx(wide_clang_ptx);
+    if (!expect(wide_parsed.ok, "parse unsupported wide Clang tuple")) return 1;
+    clang_options.ptx_source = wide_clang_ptx;
+    const auto wide_lowered =
+        cumetal::passes::lower_printf_calls(wide_parsed.module.entries[0], clang_options);
+    if (!expect(wide_lowered.ok && wide_lowered.formats.size() == 1 &&
+                    !wide_lowered.formats[0].literal,
+                "wide Clang tuple is left unresolved instead of truncated")) return 1;
+
     std::printf("PASS: printf lower unit tests\n");
     return 0;
 }

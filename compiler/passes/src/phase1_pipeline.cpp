@@ -72,6 +72,7 @@ Phase1PipelineOutput run_phase1_pipeline(std::string_view ptx, const Phase1Pipel
 
     PrintfLowerOptions printf_options;
     printf_options.strict = options.strict;
+    printf_options.ptx_source = ptx;
     const auto printf_lowered = lower_printf_calls(*entry, printf_options);
     if (!printf_lowered.ok) {
         out.error = "printf_lower failed: " + printf_lowered.error;

@@ -1147,6 +1147,65 @@ $L__BB0_2:
                 "neg.f32/fma.rn.f32 results are typed float from the instruction suffix"))
         return 1;
 
+    // Clang lowers device printf to vprintf(format-global, packed-local-tuple).
+    // This is the shape emitted by the unmodified cuda-samples simplePrintf
+    // kernel, including multidimensional grid/block builtins.
+    const std::string clang_printf_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+.extern .func (.param .b32 func_retval0) vprintf(
+    .param .b64 vprintf_param_0,
+    .param .b64 vprintf_param_1
+);
+.global .align 1 .b8 _$_str[24] = {91, 37, 100, 44, 32, 37, 100, 93, 58, 9, 9, 86, 97, 108, 117, 101, 32, 105, 115, 58, 37, 100, 10};
+.visible .entry clang_printf(.param .u32 value) {
+    .local .align 8 .b8 __local_depot0[16];
+    mov.b64 %SPL, __local_depot0;
+    cvta.local.u64 %SP, %SPL;
+    ld.param.b32 %r1, [value];
+    add.u64 %rd1, %SP, 0;
+    add.u64 %rd2, %SPL, 0;
+    mov.u32 %r2, %ctaid.y;
+    mov.u32 %r3, %nctaid.x;
+    mov.u32 %r4, %ctaid.x;
+    mad.lo.s32 %r5, %r2, %r3, %r4;
+    mov.u32 %r6, %tid.z;
+    mov.u32 %r7, %ntid.x;
+    mov.u32 %r8, %ntid.y;
+    mov.u32 %r9, %tid.y;
+    mov.u32 %r10, %tid.x;
+    mad.lo.s32 %r11, %r8, %r6, %r9;
+    mad.lo.s32 %r12, %r11, %r7, %r10;
+    st.local.v2.b32 [%rd2], {%r5, %r12};
+    st.local.b32 [%rd2+8], %r1;
+    st.param.b64 [param1], %rd1;
+    mov.b64 %rd3, _$_str;
+    cvta.global.u64 %rd4, %rd3;
+    st.param.b64 [param0], %rd4;
+    call.uni (retval0), vprintf, (param0, param1);
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions clang_printf_options;
+    clang_printf_options.entry_name = "clang_printf";
+    const auto clang_printf = cumetal::ptx::lower_ptx_to_metal_source(
+        clang_printf_ptx, clang_printf_options);
+    if (!expect(clang_printf.ok && clang_printf.matched,
+                "Clang vprintf ABI kernel lowers through direct Metal")) return 1;
+    if (!expect(clang_printf.printf_formats.size() == 1 &&
+                    clang_printf.printf_formats[0] == "[%d, %d]:\t\tValue is:%d\n",
+                "Clang vprintf global format reaches runtime format table")) return 1;
+    if (!expect(contains(clang_printf.metal_source, "threadgroups_per_grid") &&
+                    contains(clang_printf.metal_source, "thread_position_in_threadgroup") &&
+                    contains(clang_printf.metal_source, "threads_per_threadgroup") &&
+                    contains(clang_printf.metal_source, "threadgroup_position_in_grid"),
+                "multidimensional CUDA builtins map to Metal kernel attributes")) return 1;
+    if (!expect(contains(clang_printf.metal_source, "__pfw") &&
+                    contains(clang_printf.metal_source, "vr5") &&
+                    contains(clang_printf.metal_source, "vr12"),
+                "decoded printf values are written to the ring buffer")) return 1;
+
     std::printf("PASS: ptx lower-to-metal unit tests\n");
     return 0;
 }

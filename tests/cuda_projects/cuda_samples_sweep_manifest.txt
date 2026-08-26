@@ -25,6 +25,7 @@ pass         0_Introduction/simpleAtomicIntrinsics
 pass         0_Introduction/simpleCallback
 pass         0_Introduction/simpleMultiCopy
 pass         0_Introduction/simpleOccupancy
+pass         0_Introduction/simplePrintf
 pass         0_Introduction/simpleStreams
 pass         0_Introduction/simpleTemplates
 pass         0_Introduction/simpleVoteIntrinsics
@@ -62,7 +63,6 @@ compile-fail 0_Introduction/simpleCooperativeGroups
 compile-fail 0_Introduction/simpleCubemapTexture
 compile-fail 0_Introduction/simpleLayeredTexture
 compile-fail 0_Introduction/simplePitchLinearTexture
-no-lowering  0_Introduction/simplePrintf
 compile-fail 0_Introduction/simpleSurfaceWrite
 compile-fail 0_Introduction/simpleTexture
 compile-fail 0_Introduction/simpleTexture3D

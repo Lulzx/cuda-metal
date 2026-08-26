@@ -22,11 +22,19 @@ struct PrintfLoweredCall {
     std::uint32_t format_id = 0;
     std::string format_token;
     std::vector<std::string> arguments;
+    // PTX instructions used only to construct Clang's vprintf ABI arguments
+    // (module-global format pointer plus packed local argument tuple).  The
+    // direct Metal emitter consumes the decoded values and skips these lines.
+    std::vector<int> abi_scaffold_lines;
 };
 
 struct PrintfLowerOptions {
     bool strict = false;
     std::size_t max_format_length = 256;
+    // Optional complete PTX module.  Clang's CUDA frontend passes vprintf a
+    // global format pointer and a local tuple pointer, so the entry alone is
+    // insufficient to recover the initialized format bytes.
+    std::string_view ptx_source;
 };
 
 struct PrintfLowerResult {

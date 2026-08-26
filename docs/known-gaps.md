@@ -76,8 +76,11 @@ as gaps have been closed.
   former host drain for diagnostics. This is conservative buffer-level hazard
   ordering; it does not yet infer disjoint byte ranges within one arena.
 - Device printf: compiler-recognized printf calls use a 256-byte-format bounded ring buffer and
-  post-launch drain. A raw PTX `call ... vprintf` reaching the generic LLVM backend is rejected
-  with an actionable diagnostic; it is never lowered to a silent zero-return no-op.
+  post-launch drain. Direct literal PTX calls and Clang's initialized module-global format plus
+  packed 32-bit local argument-tuple ABI are supported; the unmodified upstream `simplePrintf`
+  sample emits all 32 expected records. Wider tuple values are not yet representable by the
+  current 32-bit ring record. A raw unrecognized `call ... vprintf` reaching the generic LLVM
+  backend is rejected with an actionable diagnostic, never a silent zero-return no-op.
 - Raw PTX `redux.sync.*` reaches a semantic AIR mapping in the phase IR, but the generic LLVM
   emitter does not yet have a validated AIR reduction ABI. It now fails explicitly instead of
   returning the caller lane's input as if a warp reduction had occurred. CUDA header
@@ -475,13 +478,12 @@ blocks:
 - **thrust/CUB header surface** -- `thrust/copy.h`, `thrust/random.h`,
   `thrust/adjacent_difference.h`, `cub/device/device_{find,transform,segmented_scan}.cuh`.
   6 samples. Some of the underlying algorithms already exist; the headers do not.
-- **Clang-generated device `printf` ABI** -- the clean-room header now declares
-  device `printf`, and CuMetal's bounded ring-buffer backend handles its tested
-  literal-format PTX form. Clang source compilation instead emits a module-global
-  format byte array plus a local argument tuple passed to `vprintf`; relocation
-  and tuple decoding for that form remain unimplemented, so `simplePrintf` is
-  `no-lowering`. Other sample uses are additionally blocked by cooperative-groups
-  or dynamic-parallelism gaps.
+- **Broader device `printf` formats** -- the clean-room header and bounded ring-buffer backend
+  now handle direct literal PTX plus Clang's initialized module-global format / packed 32-bit
+  local tuple form. The unmodified `simplePrintf` sample passes. The ring record still stores
+  one 32-bit word per argument, so binary64 and full 64-bit integer formatting remain explicit
+  follow-on work. Other samples can still be blocked independently by cooperative-groups or
+  dynamic-parallelism gaps.
 - **Tensor cores** -- `mma.h` / `nvcuda::wmma`. 4 samples.
 - **CUDA graph memory nodes** -- `cudaGraphAddMemAllocNode`,
   `cudaGraphAddMemFreeNode`, graph-memory attributes, trimming, and their
@@ -545,15 +547,16 @@ that error even when no command buffer was enqueued, and the error remains visib
 `cudaGetLastError()`. `CUMETAL_DEBUG_LAUNCH=1` prints the detailed launch reason, and
 `CUMETAL_DEBUG_DUMP_IR_DIR=<dir>` dumps the emitted LLVM IR.
 
-- `clock`, `simpleHyperQ`, `eigenvalues`, and `simplePrintf` hit "registered
+- `clock`, `simpleHyperQ`, and `eigenvalues` hit "registered
   kernel missing metallib" -- the lowering path declines these kernels
   outright.
 
   `clock` and `simpleHyperQ` require PTX `%clock`; public Metal exposes no
   per-thread CUDA-compatible cycle counter, so CuMetal rejects it rather than
-  substituting wall time or a constant. `simplePrintf` is the Clang `vprintf`
-  relocation/tuple ABI gap described above. The remaining entries are
-  implementable compiler/runtime work, not classified as platform limits.
+  substituting wall time or a constant. `eigenvalues` remains implementable
+  compiler/runtime work, not classified as a platform limit. `simplePrintf`
+  left this list after module-global format relocation and packed tuple decoding
+  were validated against all 32 records from the unmodified upstream sample.
 
 Three samples formerly appeared in that list because of missing CUDA libdevice
 integer helpers. `scalarProd` needed signed/unsigned 24-bit multiply, which now

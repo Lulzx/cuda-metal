@@ -68,6 +68,25 @@ set_tests_properties(
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
 )
 
+# Clang does not pass device printf arguments directly in the PTX call tuple: it
+# emits an initialized module-global format and a packed local vprintf tuple.
+# Verify that exact source-frontend ABI, including a multidimensional launch.
+add_test(
+    NAME functional_cuda_projects_device_printf_clang
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_device_printf_clang.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(
+    functional_cuda_projects_device_printf_clang
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        TIMEOUT 60
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
 # Regression: LLVM `fence` crashed Apple's AIR backend at pipeline creation (so every
 # atomicCAS-bearing kernel silently did nothing), and scalar __shared__ objects were
 # counted as zero bytes when sizing threadgroup memory.

@@ -3,9 +3,14 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdlib>
 #include <map>
+#include <optional>
+#include <regex>
+#include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace cumetal::passes {
@@ -161,10 +166,269 @@ bool fail_or_warn(bool strict,
     return false;
 }
 
+std::string extract_register(std::string_view text) {
+    const std::size_t begin = text.find('%');
+    if (begin == std::string_view::npos) return {};
+    std::size_t end = begin + 1;
+    while (end < text.size()) {
+        const unsigned char c = static_cast<unsigned char>(text[end]);
+        if (std::isalnum(c) == 0 && c != '_' && c != '.' && c != '$') break;
+        ++end;
+    }
+    return end > begin + 1 ? std::string(text.substr(begin, end - begin)) : std::string{};
+}
+
+std::string bracket_contents(const std::string& operand) {
+    const std::size_t open = operand.find('[');
+    const std::size_t close = operand.find(']', open == std::string::npos ? 0 : open + 1);
+    if (open == std::string::npos || close == std::string::npos || close <= open + 1) return {};
+    return trim(std::string_view(operand).substr(open + 1, close - open - 1));
+}
+
+std::optional<std::size_t> decimal_offset(std::string_view token) {
+    const std::string value = trim(token);
+    if (value.empty()) return std::size_t{0};
+    char* end = nullptr;
+    const long long parsed = std::strtoll(value.c_str(), &end, 10);
+    if (end == value.c_str() || *end != '\0' || parsed < 0) return std::nullopt;
+    return static_cast<std::size_t>(parsed);
+}
+
+struct AddressRef {
+    std::string reg;
+    std::size_t offset = 0;
+};
+
+std::optional<AddressRef> parse_address(const std::string& operand) {
+    const std::string contents = bracket_contents(operand);
+    const std::string reg = extract_register(contents);
+    if (reg.empty()) return std::nullopt;
+    const std::size_t reg_end = contents.find(reg) + reg.size();
+    std::string_view suffix(contents.data() + reg_end, contents.size() - reg_end);
+    const std::size_t plus = suffix.find('+');
+    if (plus == std::string_view::npos) return AddressRef{reg, 0};
+    auto offset = decimal_offset(suffix.substr(plus + 1));
+    if (!offset) return std::nullopt;
+    return AddressRef{reg, *offset};
+}
+
+struct GlobalFormat {
+    std::string bytes;
+    bool truncated = false;
+};
+
+std::unordered_map<std::string, GlobalFormat> parse_initialized_b8_globals(
+    std::string_view ptx,
+    std::size_t max_format_length) {
+    std::unordered_map<std::string, GlobalFormat> globals;
+    const std::regex declaration(
+        R"(\.global\s+(?:\.align\s+\d+\s+)?\.b8\s+([^\s\[]+)\s*\[\s*\d+\s*\]\s*=\s*\{([^}]*)\})");
+    const std::string source(ptx);
+    for (std::sregex_iterator it(source.begin(), source.end(), declaration), end; it != end; ++it) {
+        GlobalFormat format;
+        std::string values = (*it)[2].str();
+        std::size_t begin = 0;
+        bool valid = true;
+        while (begin <= values.size()) {
+            const std::size_t comma = values.find(',', begin);
+            const std::string token = trim(std::string_view(values).substr(
+                begin, comma == std::string::npos ? std::string::npos : comma - begin));
+            if (!token.empty()) {
+                char* parse_end = nullptr;
+                const long value = std::strtol(token.c_str(), &parse_end, 0);
+                if (parse_end == token.c_str() || *parse_end != '\0' || value < 0 || value > 255) {
+                    valid = false;
+                    break;
+                }
+                if (value == 0) break;
+                if (format.bytes.size() < max_format_length) {
+                    format.bytes.push_back(static_cast<char>(value));
+                } else {
+                    format.truncated = true;
+                }
+            }
+            if (comma == std::string::npos) break;
+            begin = comma + 1;
+        }
+        if (valid && !format.bytes.empty()) {
+            globals.emplace((*it)[1].str(), std::move(format));
+        }
+    }
+    return globals;
+}
+
+struct PackedArgument {
+    std::size_t offset = 0;
+    std::string value;
+    int source_line = 0;
+};
+
+// Decode the ABI emitted by Clang for CUDA device printf:
+//   vprintf(pointer-to-initialized-global-format, pointer-to-packed-local-values).
+// This deliberately accepts only unambiguous 32-bit tuple stores.  Wider values
+// need a wider ring-buffer record before they can be represented without loss.
+std::optional<PrintfLowerResult> lower_clang_vprintf_abi(
+    const cumetal::ptx::EntryFunction& entry,
+    const PrintfLowerOptions& options) {
+    if (options.ptx_source.empty()) return std::nullopt;
+    const auto globals = parse_initialized_b8_globals(options.ptx_source, options.max_format_length);
+    if (globals.empty()) return std::nullopt;
+
+    std::unordered_map<std::string, std::size_t> local_pointer;
+    std::unordered_map<std::string, std::string> global_pointer;
+    std::unordered_map<std::string, std::string> call_param_value;
+    std::vector<PackedArgument> packed;
+    std::set<int> scaffold_lines;
+    PrintfLowerResult result;
+    std::map<std::string, std::uint32_t> format_ids;
+    std::size_t printf_calls_seen = 0;
+
+    for (const auto& instruction : entry.instructions) {
+        const auto& op = instruction.opcode;
+        const auto& operands = instruction.operands;
+
+        if (op == "mov.b64" && operands.size() == 2) {
+            const std::string dest = extract_register(operands[0]);
+            const std::string src_reg = extract_register(operands[1]);
+            if (!dest.empty() && operands[1].find("__local_depot") != std::string::npos) {
+                local_pointer[dest] = 0;
+                scaffold_lines.insert(instruction.line);
+            } else if (!dest.empty() && globals.contains(trim(operands[1]))) {
+                global_pointer[dest] = trim(operands[1]);
+                scaffold_lines.insert(instruction.line);
+            } else if (!dest.empty() && !src_reg.empty() && local_pointer.contains(src_reg)) {
+                local_pointer[dest] = local_pointer.at(src_reg);
+                scaffold_lines.insert(instruction.line);
+            }
+        } else if (op.rfind("cvta.local", 0) == 0 && operands.size() == 2) {
+            const std::string dest = extract_register(operands[0]);
+            const std::string src = extract_register(operands[1]);
+            if (!dest.empty() && local_pointer.contains(src)) {
+                local_pointer[dest] = local_pointer.at(src);
+                scaffold_lines.insert(instruction.line);
+            }
+        } else if (op.rfind("cvta.global", 0) == 0 && operands.size() == 2) {
+            const std::string dest = extract_register(operands[0]);
+            const std::string src = extract_register(operands[1]);
+            if (!dest.empty() && global_pointer.contains(src)) {
+                global_pointer[dest] = global_pointer.at(src);
+                scaffold_lines.insert(instruction.line);
+            }
+        } else if (op == "add.u64" && operands.size() == 3) {
+            const std::string dest = extract_register(operands[0]);
+            const std::string base = extract_register(operands[1]);
+            auto offset = decimal_offset(operands[2]);
+            if (!dest.empty() && offset && local_pointer.contains(base)) {
+                local_pointer[dest] = local_pointer.at(base) + *offset;
+                scaffold_lines.insert(instruction.line);
+            }
+        } else if (op.rfind("st.local", 0) == 0 && operands.size() == 2) {
+            const auto address = parse_address(operands[0]);
+            if (address && local_pointer.contains(address->reg) &&
+                op.find(".b32") == std::string::npos) {
+                // The current runtime record has one 32-bit word per argument.
+                // Refuse wider Clang tuples instead of dropping high bits or
+                // accidentally treating a partial tuple as complete.
+                return std::nullopt;
+            }
+            if (address && local_pointer.contains(address->reg)) {
+                std::string values = trim(operands[1]);
+                if (values.size() >= 2 && values.front() == '{' && values.back() == '}') {
+                    values = values.substr(1, values.size() - 2);
+                }
+                const auto lanes = split_call_args(values);
+                if (lanes.empty()) return std::nullopt;
+                for (std::size_t lane = 0; lane < lanes.size(); ++lane) {
+                    const std::string value_reg = extract_register(lanes[lane]);
+                    if (value_reg.empty()) return std::nullopt;
+                    packed.push_back({local_pointer.at(address->reg) + address->offset + lane * 4,
+                                      value_reg,
+                                      instruction.line});
+                }
+                scaffold_lines.insert(instruction.line);
+            }
+        } else if (op.rfind("st.param", 0) == 0 && operands.size() == 2) {
+            const std::string param = bracket_contents(operands[0]);
+            if (!param.empty()) {
+                call_param_value[param] = trim(operands[1]);
+                scaffold_lines.insert(instruction.line);
+            }
+        }
+
+        if (op.rfind("call", 0) != 0) continue;
+        const std::size_t callee_index = find_printf_callee_index(operands);
+        if (callee_index == operands.size()) continue;
+        ++printf_calls_seen;
+        if (callee_index + 1 >= operands.size()) return std::nullopt;
+        const auto args = split_call_args(operands[callee_index + 1]);
+        if (args.size() != 2 || is_quoted_string(trim(args[0]))) return std::nullopt;
+        const auto format_value = call_param_value.find(trim(args[0]));
+        const auto tuple_value = call_param_value.find(trim(args[1]));
+        if (format_value == call_param_value.end() || tuple_value == call_param_value.end()) {
+            return std::nullopt;
+        }
+        const std::string format_reg = extract_register(format_value->second);
+        const std::string tuple_reg = extract_register(tuple_value->second);
+        if (!global_pointer.contains(format_reg) || !local_pointer.contains(tuple_reg)) {
+            return std::nullopt;
+        }
+        const auto format_it = globals.find(global_pointer.at(format_reg));
+        if (format_it == globals.end()) return std::nullopt;
+
+        std::vector<PackedArgument> call_args;
+        const std::size_t tuple_base = local_pointer.at(tuple_reg);
+        for (const auto& arg : packed) {
+            if (arg.offset >= tuple_base) call_args.push_back(arg);
+        }
+        std::sort(call_args.begin(), call_args.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.offset < rhs.offset;
+        });
+        if (call_args.empty()) return std::nullopt;
+        for (std::size_t i = 0; i < call_args.size(); ++i) {
+            if (call_args[i].offset != tuple_base + i * 4) return std::nullopt;
+        }
+
+        std::uint32_t format_id = 0;
+        const auto existing = format_ids.find(format_it->second.bytes);
+        if (existing == format_ids.end()) {
+            format_id = static_cast<std::uint32_t>(result.formats.size());
+            format_ids.emplace(format_it->second.bytes, format_id);
+            result.formats.push_back({.id = format_id,
+                                      .token = format_it->second.bytes,
+                                      .literal = true,
+                                      .truncated = format_it->second.truncated});
+            if (format_it->second.truncated) {
+                result.warnings.push_back(
+                    "printf_lower: module-global format truncated to " +
+                    std::to_string(options.max_format_length) + " bytes at line " +
+                    std::to_string(instruction.line));
+            }
+        } else {
+            format_id = existing->second;
+        }
+        PrintfLoweredCall call;
+        call.source_line = instruction.line;
+        call.source_opcode = instruction.opcode;
+        call.format_id = format_id;
+        call.format_token = format_it->second.bytes;
+        for (const auto& arg : call_args) call.arguments.push_back(arg.value);
+        call.abi_scaffold_lines.assign(scaffold_lines.begin(), scaffold_lines.end());
+        result.calls.push_back(std::move(call));
+        packed.clear();
+    }
+
+    if (printf_calls_seen == 0 || result.calls.size() != printf_calls_seen) return std::nullopt;
+    result.ok = true;
+    return result;
+}
+
 }  // namespace
 
 PrintfLowerResult lower_printf_calls(const cumetal::ptx::EntryFunction& entry,
                                      const PrintfLowerOptions& options) {
+    if (auto clang_abi = lower_clang_vprintf_abi(entry, options)) {
+        return std::move(*clang_abi);
+    }
     PrintfLowerResult result;
 
     std::map<std::string, std::uint32_t> format_ids;
