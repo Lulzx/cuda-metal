@@ -396,6 +396,26 @@ Implementation:
 - The constant buffer is bound at a reserved buffer index (`kConstantBufferIndex = 30`).
 - Maximum constant buffer size: 64 KB (matching CUDA). Exceeding this emits a compile error.
 
+#### 5.4.2 Registered Device Globals
+
+Clang emits an uninitialized module-scope `__device__` variable as an external
+PTX `.global` declaration and registers its host shadow through
+`__cudaRegisterVar`.
+
+Implementation for the runtime-registration path:
+
+- Each referenced external writable global owns one persistent shared
+  `MTLBuffer`; it is not recreated for each launch.
+- The initial host-shadow bytes are copied into that buffer when it is first
+  resolved after runtime initialization.
+- Symbol copy/address APIs and kernel hidden AS1 arguments resolve to the same
+  shared bytes, so GPU writes persist across launches and become host-visible
+  after normal stream/device synchronization.
+- Missing registrations and Metal binding exhaustion fail explicitly.
+
+This does not imply Driver API `cuModuleGetGlobal` support or general lowering
+of initialized PTX globals; those remain separately tracked gaps.
+
 ### 5.5 AIR Kernel Metadata Injection
 
 Every kernel function must carry specific LLVM metadata for the Metal driver to accept it.

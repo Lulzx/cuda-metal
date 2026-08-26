@@ -355,6 +355,11 @@ struct ConstSymbolInfo {
     std::size_t byte_count = 0;
 };
 
+struct GlobalSymbolInfo {
+    std::string llvm_param_name;
+    std::size_t byte_count = 0;
+};
+
 struct SharedSymbolInfo {
     std::size_t offset_bytes = 0;  // byte offset within the threadgroup buffer
     std::size_t size_bytes   = 0;  // size of this symbol in bytes
@@ -943,11 +948,13 @@ class GenericLlvmEmitter {
     GenericLlvmEmitter(const cumetal::ptx::EntryFunction& entry,
                       std::vector<ParamInfo>* params,
                       std::vector<std::string>* arg_decls,
+                      const std::unordered_map<std::string, GlobalSymbolInfo>* global_symbols,
                       const std::unordered_map<std::string, ConstSymbolInfo>* const_symbols,
                       const std::unordered_map<std::string, SharedSymbolInfo>* shared_symbols,
                       const std::unordered_map<std::string, LocalDepotInfo>* local_depots,
                       cumetal::ptx::Fp64Mode fp64_mode = cumetal::ptx::Fp64Mode::kNative)
-        : entry_(entry), params_(params), arg_decls_(arg_decls), const_symbols_(const_symbols),
+        : entry_(entry), params_(params), arg_decls_(arg_decls), global_symbols_(global_symbols),
+          const_symbols_(const_symbols),
           shared_symbols_(shared_symbols), local_depots_(local_depots), fp64_mode_(fp64_mode) {
         if (params_ != nullptr) {
             for (std::size_t i = 0; i < params_->size(); ++i) {
@@ -1039,6 +1046,7 @@ class GenericLlvmEmitter {
     const cumetal::ptx::EntryFunction& entry_;
     std::vector<ParamInfo>* params_ = nullptr;
     std::vector<std::string>* arg_decls_ = nullptr;
+    const std::unordered_map<std::string, GlobalSymbolInfo>* global_symbols_ = nullptr;
     const std::unordered_map<std::string, ConstSymbolInfo>* const_symbols_ = nullptr;
     const std::unordered_map<std::string, SharedSymbolInfo>* shared_symbols_ = nullptr;
     const std::unordered_map<std::string, LocalDepotInfo>* local_depots_ = nullptr;
@@ -1940,6 +1948,22 @@ class GenericLlvmEmitter {
         return tmp;
     }
 
+    std::optional<std::string> resolve_global_symbol_address(std::ostringstream& os,
+                                                             const std::string& symbol) {
+        if (global_symbols_ == nullptr) {
+            return std::nullopt;
+        }
+        const auto it = global_symbols_->find(symbol);
+        if (it == global_symbols_->end() || it->second.byte_count == 0 ||
+            it->second.llvm_param_name.empty()) {
+            return std::nullopt;
+        }
+        const std::string p2i = next_tmp("global_arg_p2i");
+        os << "  " << p2i << " = ptrtoint i8 addrspace(1)* %"
+           << it->second.llvm_param_name << " to i64\n";
+        return p2i;
+    }
+
     std::optional<std::string> resolve_const_symbol_address(std::ostringstream& os,
                                                             const std::string& symbol) {
         if (const_symbols_ == nullptr) {
@@ -2072,6 +2096,15 @@ class GenericLlvmEmitter {
             }
             const std::string cast = next_tmp("tg_addrtr");
             os << "  " << cast << " = trunc i64 " << *tg << " to " << llvm_int_type(bits) << "\n";
+            return cast;
+        }
+        if (const auto global = resolve_global_symbol_address(os, operand)) {
+            if (bits == 64) {
+                return *global;
+            }
+            const std::string cast = next_tmp("global_addrtr");
+            os << "  " << cast << " = trunc i64 " << *global << " to "
+               << llvm_int_type(bits) << "\n";
             return cast;
         }
         if (const auto cst = resolve_const_symbol_address(os, operand)) {
@@ -2210,6 +2243,8 @@ class GenericLlvmEmitter {
             reg_pointer_as_[dst] = PointerAs::kLocal;
         } else if (resolve_threadgroup_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kShared;
+        } else if (resolve_global_symbol_address(os, src).has_value()) {
+            reg_pointer_as_[dst] = PointerAs::kGlobal;
         } else if (resolve_const_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kParam;
         }
@@ -3186,6 +3221,8 @@ class GenericLlvmEmitter {
             base_i64 = emit_load_reg_bits(os, mem.base, 64);
         } else if (const auto sym = resolve_param_symbol_address(os, mem.base)) {
             base_i64 = *sym;
+        } else if (const auto global = resolve_global_symbol_address(os, mem.base)) {
+            base_i64 = *global;
         } else if (const auto cst = resolve_const_symbol_address(os, mem.base)) {
             base_i64 = *cst;
         } else if (const auto local = resolve_local_symbol_address(os, mem.base)) {
@@ -3201,7 +3238,7 @@ class GenericLlvmEmitter {
                                 mem.base + "'");
             }
         } else {
-            return fail(instr, "memory base must be register or param/local/const symbol");
+            return fail(instr, "memory base must be register or param/local/global/const symbol");
         }
         const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
 
@@ -3933,6 +3970,8 @@ class GenericLlvmEmitter {
             resolved_base = emit_load_reg_bits(os, mem.base, 64);
         } else if (addr_space == 3) {
             resolved_base = resolve_threadgroup_symbol_address(os, mem.base);
+        } else {
+            resolved_base = resolve_global_symbol_address(os, mem.base);
         }
         if (!resolved_base.has_value()) {
             return fail(instr, "atom: cannot resolve memory base '" + mem.base + "'");
@@ -5083,6 +5122,7 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
                                                  const std::string& entry_name,
                                                  std::vector<ParamInfo>* params,
                                                  std::vector<std::string>* arg_decls,
+                                                 const std::unordered_map<std::string, GlobalSymbolInfo>* global_symbols,
                                                  const std::unordered_map<std::string, ConstSymbolInfo>* const_symbols,
                                                  const std::unordered_map<std::string, SharedSymbolInfo>* shared_symbols,
                                                  cumetal::ptx::Fp64Mode fp64_mode = cumetal::ptx::Fp64Mode::kNative) {
@@ -5109,7 +5149,8 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
     }
 
     const auto local_depots = parse_ptx_local_depots(ptx_source, entry_name);
-    GenericLlvmEmitter emitter(*entry, params, arg_decls, const_symbols, shared_symbols,
+    GenericLlvmEmitter emitter(*entry, params, arg_decls, global_symbols, const_symbols,
+                               shared_symbols,
                                &local_depots, fp64_mode);
     return emitter.run();
 }
@@ -5121,9 +5162,10 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
 
 }  // namespace
 
-std::vector<ExternalConstantSymbol> find_referenced_external_constant_symbols(
+static std::vector<ExternalConstantSymbol> find_referenced_external_symbols(
     std::string_view ptx,
-    std::string_view entry_name) {
+    std::string_view entry_name,
+    std::string_view state_space) {
     std::vector<ExternalConstantSymbol> out;
     const bool include_all = entry_name.empty();
     const std::string body = extract_entry_body(ptx, entry_name);
@@ -5166,7 +5208,7 @@ std::vector<ExternalConstantSymbol> find_referenced_external_constant_symbols(
             declaration = trim(declaration.substr(0, comment));
         }
         if (declaration.empty() || declaration.front() != '.' ||
-            declaration.find(".const") == std::string::npos ||
+            declaration.find(state_space) == std::string::npos ||
             declaration.find(';') == std::string::npos ||
             declaration.find('=') != std::string::npos ||
             declaration.find('{') != std::string::npos) {
@@ -5266,6 +5308,12 @@ std::vector<ExternalConstantSymbol> find_referenced_external_constant_symbols(
     return out;
 }
 
+std::vector<ExternalConstantSymbol> find_referenced_external_constant_symbols(
+    std::string_view ptx,
+    std::string_view entry_name) {
+    return find_referenced_external_symbols(ptx, entry_name, ".const");
+}
+
 std::size_t compute_external_constant_buffer_bytes(std::string_view ptx) {
     const auto symbols = find_referenced_external_constant_symbols(ptx, {});
     if (symbols.empty()) {
@@ -5276,6 +5324,12 @@ std::size_t compute_external_constant_buffer_bytes(std::string_view ptx) {
         return SIZE_MAX;
     }
     return last.offset_bytes + last.size_bytes;
+}
+
+std::vector<ExternalGlobalSymbol> find_referenced_external_global_symbols(
+    std::string_view ptx,
+    std::string_view entry_name) {
+    return find_referenced_external_symbols(ptx, entry_name, ".global");
 }
 
 LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOptions& options) {
@@ -5361,6 +5415,33 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         (void)parse_major_minor(it->second, &language_major, &language_minor);
     }
 
+    std::unordered_map<std::string, GlobalSymbolInfo> global_symbols;
+    const auto external_global_symbols =
+        find_referenced_external_global_symbols(ptx, pipeline.entry_name);
+    for (const ExternalGlobalSymbol& symbol : external_global_symbols) {
+        if (symbol.name.empty() || symbol.size_bytes == 0 ||
+            global_symbols.count(symbol.name) != 0) {
+            continue;
+        }
+        if (params.size() >= 31) {
+            result.error = "external PTX global exceeds Metal's kernel buffer binding limit";
+            return result;
+        }
+        const std::string param_name =
+            sanitize_llvm_identifier("__cumetal_global_" + symbol.name,
+                                     "__cumetal_global_arg");
+        arg_decls.push_back("i8 addrspace(1)* %" + param_name);
+        params.push_back({.ptx_type = ".b8",
+                          .llvm_type = "i8 addrspace(1)*",
+                          .name = param_name,
+                          .raw_name = param_name});
+        global_symbols.emplace(symbol.name,
+                               GlobalSymbolInfo{
+                                   .llvm_param_name = param_name,
+                                   .byte_count = symbol.size_bytes,
+                               });
+    }
+
     std::unordered_map<std::string, ConstSymbolInfo> const_symbols;
     std::vector<std::string> const_global_defs;
     for (const ParsedConstB8Array& array : parse_ptx_const_b8_arrays(ptx)) {
@@ -5440,6 +5521,7 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
                                                   pipeline.entry_name,
                                                   &generic_params,
                                                   &generic_arg_decls,
+                                                  &global_symbols,
                                                   &const_symbols,
                                                   &shared_symbols,
                                                   options.fp64_mode);

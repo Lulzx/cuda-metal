@@ -4232,6 +4232,7 @@ cudaError_t cudaLaunchKernel(const void* func,
 
     std::vector<cumetal::metal_backend::KernelArg> launch_args;
     launch_args.reserve(static_cast<std::size_t>(arg_count) +
+                        registered_kernel.global_symbols.size() +
                         (registered_kernel.constant_symbols.empty() ? 0u : 1u) +
                         (needs_printf ? 2u : 0u));
 
@@ -4321,6 +4322,22 @@ cudaError_t cudaLaunchKernel(const void* func,
             std::memcpy(arg.bytes.data(), args[i], info.size_bytes);
             launch_args.push_back(std::move(arg));
         }
+    }
+
+    // Writable module-scope __device__ variables are persistent shared Metal
+    // buffers owned by the registration record. Symbol copies and every kernel
+    // launch bind the same UMA storage, so GPU writes survive subsequent
+    // launches and become visible after the existing symbol-copy synchronization.
+    for (const auto& symbol : registered_kernel.global_symbols) {
+        if (symbol.buffer == nullptr || symbol.size == 0) {
+            return launch_fail(cudaErrorInvalidValue,
+                               "referenced device global was not registered");
+        }
+        cumetal::metal_backend::KernelArg global_arg;
+        global_arg.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer;
+        global_arg.buffer = symbol.buffer;
+        global_arg.offset = 0;
+        launch_args.push_back(std::move(global_arg));
     }
 
     // Clang emits module-scope __constant__ storage as external PTX symbols,
@@ -5100,6 +5117,10 @@ cudaError_t cudaGetSymbolAddress(void** devPtr, const void* symbol) {
     if (devPtr == nullptr || symbol == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
     // On UMA the symbol's host address IS the device address, but a registered
     // symbol may still carry a remapping. This used to return the raw pointer
     // unconditionally while cudaMemcpyToSymbol resolved through the registration
@@ -5114,15 +5135,25 @@ cudaError_t cudaGetSymbolAddress(void** devPtr, const void* symbol) {
     return fail(cudaSuccess);
 }
 
-// Symbol size query: CuMetal doesn't track symbol sizes separately from the
-// symbol pointer. Return cudaErrorInvalidSymbol to indicate the symbol table
-// doesn't store sizes; callers should use sizeof() at compile time.
-cudaError_t cudaGetSymbolSize(size_t* /*size*/, const void* symbol) {
-    if (symbol == nullptr) {
+// Symbol sizes come from __cudaRegisterVar and are stable for the life of the
+// registration module.
+cudaError_t cudaGetSymbolSize(size_t* size, const void* symbol) {
+    if (size == nullptr || symbol == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    // Symbol table doesn't store sizes separately; callers should use sizeof().
-    return fail(cudaErrorInvalidValue);
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+    const void* resolved = nullptr;
+    std::size_t resolved_size = 0;
+    if (!cumetal::registration::lookup_registered_symbol(
+            symbol, &resolved, &resolved_size) || resolved == nullptr ||
+        resolved_size == 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    *size = resolved_size;
+    return fail(cudaSuccess);
 }
 
 // Unified Memory advisory APIs — no-ops on Apple Silicon UMA.

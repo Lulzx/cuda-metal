@@ -77,8 +77,9 @@ cumetal_add_cuda_project_test(
 )
 
 # Regression: __cudaRegisterVar used to map a __device__/__constant__ symbol onto
-# its device-side name string, and external PTX constants were not bound into
-# kernels. The project checks symbol APIs and a >4 KB constant-buffer kernel read.
+# its device-side name string, and external PTX symbols were not bound into
+# kernels. The project checks symbol APIs, a >4 KB constant-buffer read, and
+# persistent writable device-global state across two launches.
 cumetal_add_cuda_project_test(
     functional_cuda_projects_constant_symbol
     constant_symbol constant_symbol.cu constant_symbol

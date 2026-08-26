@@ -297,6 +297,7 @@ struct RegistrationRecord {
     std::vector<cumetalKernelArgInfo_t> arg_info;
     std::vector<cumetal::ptx::ExternalConstantSymbol> external_constant_symbols;
     std::size_t external_constant_buffer_size = 0;
+    std::vector<cumetal::ptx::ExternalGlobalSymbol> external_global_symbols;
     bool arg_info_resolved = false;
     std::vector<std::string> printf_formats;
     std::size_t static_shared_bytes = 0;
@@ -308,6 +309,8 @@ struct RegistrationSymbolRecord {
     std::string device_name;
     std::size_t size = 0;
     bool constant = false;
+    bool requires_metal_storage = false;
+    std::shared_ptr<cumetal::metal_backend::Buffer> global_buffer;
 };
 
 struct RegistrationState {
@@ -1248,6 +1251,63 @@ void remove_owned_metallibs(const std::vector<std::string>& owned) {
 
 thread_local std::vector<LaunchConfiguration> tls_launch_stack;
 
+bool ensure_registered_global_symbol_buffer(
+    const void* host_symbol,
+    std::shared_ptr<cumetal::metal_backend::Buffer>* out_buffer,
+    std::size_t* out_size) {
+    if (host_symbol == nullptr || out_buffer == nullptr) {
+        return false;
+    }
+
+    const void* initial_bytes = nullptr;
+    std::size_t symbol_size = 0;
+    {
+        RegistrationState& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        const auto found = s.symbols.find(host_symbol);
+        if (found == s.symbols.end() || found->second.constant ||
+            !found->second.requires_metal_storage ||
+            found->second.device_address == nullptr || found->second.size == 0) {
+            return false;
+        }
+        if (found->second.global_buffer != nullptr) {
+            *out_buffer = found->second.global_buffer;
+            if (out_size != nullptr) {
+                *out_size = found->second.size;
+            }
+            return true;
+        }
+        initial_bytes = found->second.device_address;
+        symbol_size = found->second.size;
+    }
+
+    std::shared_ptr<cumetal::metal_backend::Buffer> candidate;
+    std::string allocation_error;
+    if (cumetal::metal_backend::allocate_buffer(
+            symbol_size, &candidate, &allocation_error) != cudaSuccess ||
+        candidate == nullptr || candidate->contents() == nullptr) {
+        return false;
+    }
+    std::memcpy(candidate->contents(), initial_bytes, symbol_size);
+
+    RegistrationState& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    const auto found = s.symbols.find(host_symbol);
+    if (found == s.symbols.end() || found->second.constant ||
+        !found->second.requires_metal_storage ||
+        found->second.size != symbol_size) {
+        return false;
+    }
+    if (found->second.global_buffer == nullptr) {
+        found->second.global_buffer = std::move(candidate);
+    }
+    *out_buffer = found->second.global_buffer;
+    if (out_size != nullptr) {
+        *out_size = found->second.size;
+    }
+    return *out_buffer != nullptr;
+}
+
 bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) {
     if (host_function == nullptr || out == nullptr) {
         return false;
@@ -1280,6 +1340,9 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
                 found->second.external_constant_buffer_size =
                     cumetal::ptx::compute_external_constant_buffer_bytes(
                         *module.ptx_source);
+                found->second.external_global_symbols =
+                    cumetal::ptx::find_referenced_external_global_symbols(
+                        *module.ptx_source, found->second.kernel_name);
             }
             found->second.arg_info_resolved = true;
         }
@@ -1343,6 +1406,37 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
             out->constant_symbols.push_back(std::move(binding));
         }
     }
+    out->global_symbols.clear();
+    for (const auto& expected : record.external_global_symbols) {
+        const void* host_symbol = nullptr;
+        {
+            RegistrationState& s = state();
+            std::lock_guard<std::mutex> lock(s.mutex);
+            for (const auto& [candidate_host, registered] : s.symbols) {
+                if (registered.module_handle == record.module_handle &&
+                    !registered.constant && registered.device_name == expected.name &&
+                    registered.size == expected.size_bytes) {
+                    host_symbol = candidate_host;
+                    break;
+                }
+            }
+        }
+
+        RegisteredGlobalSymbol binding{
+            .name = expected.name,
+            .buffer = nullptr,
+            .size = expected.size_bytes,
+        };
+        std::size_t actual_size = 0;
+        if (host_symbol != nullptr) {
+            (void)ensure_registered_global_symbol_buffer(
+                host_symbol, &binding.buffer, &actual_size);
+        }
+        if (actual_size != expected.size_bytes) {
+            binding.buffer.reset();
+        }
+        out->global_symbols.push_back(std::move(binding));
+    }
     return true;
 }
 
@@ -1353,17 +1447,28 @@ bool lookup_registered_symbol(const void* host_symbol,
         return false;
     }
 
-    RegistrationState& s = state();
-    std::lock_guard<std::mutex> lock(s.mutex);
-    const auto found = s.symbols.find(host_symbol);
-    if (found == s.symbols.end() || found->second.device_address == nullptr) {
-        return false;
+    {
+        RegistrationState& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        const auto found = s.symbols.find(host_symbol);
+        if (found == s.symbols.end() || found->second.device_address == nullptr) {
+            return false;
+        }
+        if (found->second.constant || !found->second.requires_metal_storage) {
+            *out_device_symbol = found->second.device_address;
+            if (out_size != nullptr) {
+                *out_size = found->second.size;
+            }
+            return true;
+        }
     }
 
-    *out_device_symbol = found->second.device_address;
-    if (out_size != nullptr) {
-        *out_size = found->second.size;
+    std::shared_ptr<cumetal::metal_backend::Buffer> buffer;
+    if (!ensure_registered_global_symbol_buffer(host_symbol, &buffer, out_size) ||
+        buffer == nullptr || buffer->contents() == nullptr) {
+        return false;
     }
+    *out_device_symbol = buffer->contents();
     return true;
 }
 
@@ -1579,6 +1684,7 @@ void __cudaRegisterVar(void** fat_cubin_handle,
         .device_name = device_name != nullptr ? device_name : "",
         .size = size,
         .constant = constant != 0,
+        .requires_metal_storage = device_address_is_name || device_address == nullptr,
     };
 }
 

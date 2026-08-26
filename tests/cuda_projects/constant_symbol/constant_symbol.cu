@@ -29,6 +29,11 @@ __global__ void read_const_symbol(int *out) {
     *out = const_params[0] + const_params[4096];
 }
 
+__global__ void increment_device_symbol(int *out) {
+    dev_params[7] += 3;
+    *out = dev_params[7];
+}
+
 static const char *kProbeName = "const_params";
 
 static int check(const char *what, cudaError_t status) {
@@ -129,16 +134,41 @@ int main() {
         std::printf("FAIL: const_params shadow does not hold the bytes written to it\n");
         return 1;
     }
-    if (std::memcmp(static_cast<const void *>(dev_params), host_dev, sizeof(host_dev)) != 0) {
-        std::printf("FAIL: dev_params shadow does not hold the bytes written to it\n");
-        return 1;
-    }
-
     // cudaGetSymbolAddress must agree with where cudaMemcpyToSymbol wrote.
     void *addr = nullptr;
     if (check("cudaGetSymbolAddress", cudaGetSymbolAddress(&addr, const_params))) {
         return 1;
     }
+    size_t symbol_size = 0;
+    if (check("cudaGetSymbolSize(const_params)",
+              cudaGetSymbolSize(&symbol_size, const_params)) ||
+        symbol_size != sizeof(host_const)) {
+        std::printf("FAIL: const_params size expected %zu got %zu\n",
+                    sizeof(host_const), symbol_size);
+        return 1;
+    }
+    if (check("cudaGetSymbolSize(dev_params)",
+              cudaGetSymbolSize(&symbol_size, dev_params)) ||
+        symbol_size != sizeof(host_dev)) {
+        std::printf("FAIL: dev_params size expected %zu got %zu\n",
+                    sizeof(host_dev), symbol_size);
+        return 1;
+    }
+    void *device_symbol_address = nullptr;
+    if (check("cudaGetSymbolAddress(dev_params)",
+              cudaGetSymbolAddress(&device_symbol_address, dev_params)) ||
+        device_symbol_address == nullptr ||
+        std::memcmp(device_symbol_address, host_dev, sizeof(host_dev)) != 0) {
+        std::printf("FAIL: dev_params persistent storage was not initialized from symbol bytes\n");
+        return 1;
+    }
+    int unregistered_symbol = 0;
+    if (cudaGetSymbolSize(nullptr, const_params) != cudaErrorInvalidValue ||
+        cudaGetSymbolSize(&symbol_size, &unregistered_symbol) != cudaErrorInvalidValue) {
+        std::printf("FAIL: cudaGetSymbolSize negative paths were not rejected\n");
+        return 1;
+    }
+    cudaGetLastError();
     if (addr != static_cast<void *>(const_params)) {
         std::printf("FAIL: cudaGetSymbolAddress returned %p, expected %p\n", addr,
                     static_cast<void *>(const_params));
@@ -176,6 +206,40 @@ int main() {
         return 1;
     }
 
-    std::printf("PASS: constant/device symbol registration and constant kernel binding validated\n");
+    if (check("cudaMalloc(device global output)",
+              cudaMalloc(&device_out, sizeof(*device_out)))) {
+        return 1;
+    }
+    increment_device_symbol<<<1, 1>>>(device_out);
+    increment_device_symbol<<<1, 1>>>(device_out);
+    if (check("increment_device_symbol launch", cudaGetLastError()) ||
+        check("increment_device_symbol synchronize", cudaDeviceSynchronize())) {
+        cudaFree(device_out);
+        return 1;
+    }
+    host_output = 0;
+    if (check("increment_device_symbol copyback",
+              cudaMemcpy(&host_output, device_out, sizeof(host_output),
+                         cudaMemcpyDeviceToHost))) {
+        cudaFree(device_out);
+        return 1;
+    }
+    cudaFree(device_out);
+    const int expected_device_value = host_dev[7] + 6;
+    if (host_output != expected_device_value) {
+        std::printf("FAIL: persistent device global expected %d got %d\n",
+                    expected_device_value, host_output);
+        return 1;
+    }
+    if (check("cudaMemcpyFromSymbol(dev_params after kernels)",
+              cudaMemcpyFromSymbol(dev_readback, dev_params, sizeof(dev_readback), 0,
+                                   cudaMemcpyDeviceToHost)) ||
+        dev_readback[7] != expected_device_value) {
+        std::printf("FAIL: device global copyback expected %d got %d\n",
+                    expected_device_value, dev_readback[7]);
+        return 1;
+    }
+
+    std::printf("PASS: constant/device symbol registration and persistent kernel binding validated\n");
     return 0;
 }

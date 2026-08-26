@@ -59,6 +59,12 @@ std::vector<ExternalConstantSymbol> find_referenced_external_constant_symbols(
 
 std::size_t compute_external_constant_buffer_bytes(std::string_view ptx);
 
+using ExternalGlobalSymbol = ExternalConstantSymbol;
+
+std::vector<ExternalGlobalSymbol> find_referenced_external_global_symbols(
+    std::string_view ptx,
+    std::string_view entry_name);
+
 LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx,
                                        const LowerToLlvmOptions& options = {});
 

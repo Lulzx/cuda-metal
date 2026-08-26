@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cuda_runtime.h"
+#include "metal_backend.h"
 
 #include <cstddef>
 #include <string>
@@ -13,6 +14,12 @@ struct RegisteredConstantSymbol {
     std::string name;
     const void* address = nullptr;
     std::size_t offset = 0;
+    std::size_t size = 0;
+};
+
+struct RegisteredGlobalSymbol {
+    std::string name;
+    std::shared_ptr<cumetal::metal_backend::Buffer> buffer;
     std::size_t size = 0;
 };
 
@@ -30,6 +37,9 @@ struct RegisteredKernel {
     // become hidden read-only Metal buffer arguments after the CUDA arguments.
     std::vector<RegisteredConstantSymbol> constant_symbols;
     std::size_t constant_buffer_size = 0;
+    // Persistent writable module-scope `.global` storage. Each buffer is shared
+    // by symbol APIs and every kernel launch in the registration module.
+    std::vector<RegisteredGlobalSymbol> global_symbols;
     std::string provenance;
     std::string semantic_quality;
 };

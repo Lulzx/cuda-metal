@@ -37,6 +37,7 @@ pass         2_Concepts_and_Techniques/inlinePTX
 pass         2_Concepts_and_Techniques/scan
 pass         2_Concepts_and_Techniques/scalarProd
 pass         2_Concepts_and_Techniques/sortingNetworks
+pass         2_Concepts_and_Techniques/threadFenceReduction
 pass         3_CUDA_Features/StreamPriorities
 pass         4_CUDA_Libraries/batchCUBLAS
 pass         4_CUDA_Libraries/conjugateGradient
@@ -54,7 +55,6 @@ waive        4_CUDA_Libraries/conjugateGradientMultiBlockCG
 no-lowering  0_Introduction/clock
 no-lowering  0_Introduction/simpleHyperQ
 no-lowering  2_Concepts_and_Techniques/eigenvalues
-no-lowering  2_Concepts_and_Techniques/threadFenceReduction
 compile-fail 0_Introduction/fp16ScalarProduct
 compile-fail 0_Introduction/simpleAttributes
 compile-fail 0_Introduction/simpleAWBarrier

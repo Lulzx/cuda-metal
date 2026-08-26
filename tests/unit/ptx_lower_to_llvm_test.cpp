@@ -851,6 +851,58 @@ $L1:
         return 1;
     }
 
+    const std::string external_global_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .global .align 4 .u32 persistent_counter;
+.visible .global .align 4 .u32 unrelated_counter;
+.visible .entry increment_external_global(
+    .param .u64 increment_external_global_param_0
+)
+{
+    .reg .b64 %rd<3>;
+    .reg .b32 %r<4>;
+    ld.param.u64 %rd1, [increment_external_global_param_0];
+    mov.b64 %rd2, persistent_counter;
+    ld.global.u32 %r1, [%rd2];
+    add.u32 %r2, %r1, 1;
+    st.global.u32 [%rd2], %r2;
+    atom.acquire.sys.global.cas.b32 %r3, [persistent_counter], %r1, %r2;
+    st.global.u32 [%rd1], %r2;
+    ret;
+}
+)PTX";
+    const auto external_globals =
+        cumetal::ptx::find_referenced_external_global_symbols(
+            external_global_ptx, "increment_external_global");
+    if (!expect(external_globals.size() == 1 &&
+                    external_globals.front().name == "persistent_counter" &&
+                    external_globals.front().size_bytes == 4,
+                "external global scan is entry-specific")) {
+        return 1;
+    }
+    cumetal::ptx::LowerToLlvmOptions external_global_options;
+    external_global_options.entry_name = "increment_external_global";
+    external_global_options.strict = true;
+    const auto external_global_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(external_global_ptx,
+                                           external_global_options);
+    if (!external_global_lowered.ok) {
+        std::fprintf(stderr, "external global lowering error: %s\n",
+                     external_global_lowered.error.c_str());
+    }
+    if (!expect(external_global_lowered.ok &&
+                    contains(external_global_lowered.llvm_ir,
+                             "i8 addrspace(1)* %__cumetal_global_persistent_counter") &&
+                    contains(external_global_lowered.llvm_ir,
+                             "ptrtoint i8 addrspace(1)* %__cumetal_global_persistent_counter to i64") &&
+                    contains(external_global_lowered.llvm_ir, "cmpxchg") &&
+                    !contains(external_global_lowered.llvm_ir,
+                              "__cumetal_global_unrelated_counter"),
+                "referenced external global lowers to a writable hidden buffer")) {
+        return 1;
+    }
+
     const std::string extern_shared_ptx = R"PTX(
 .version 8.0
 .target sm_80

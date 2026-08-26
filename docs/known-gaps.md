@@ -545,9 +545,9 @@ that error even when no command buffer was enqueued, and the error remains visib
 `cudaGetLastError()`. `CUMETAL_DEBUG_LAUNCH=1` prints the detailed launch reason, and
 `CUMETAL_DEBUG_DUMP_IR_DIR=<dir>` dumps the emitted LLVM IR.
 
-- `clock`, `simpleHyperQ`, `eigenvalues`, `threadFenceReduction`, and
-  `simplePrintf` hit "registered kernel missing metallib" -- the lowering path
-  declines these kernels outright.
+- `clock`, `simpleHyperQ`, `eigenvalues`, and `simplePrintf` hit "registered
+  kernel missing metallib" -- the lowering path declines these kernels
+  outright.
 
   `clock` and `simpleHyperQ` require PTX `%clock`; public Metal exposes no
   per-thread CUDA-compatible cycle counter, so CuMetal rejects it rather than
@@ -586,9 +586,13 @@ address of the shadow, because a round trip through a wrongly registered address
 is self-consistent and passes every naive check. The unmodified
 `LargeKernelParameter` sample now passes both its 4 KB and 32,764-byte cases.
 The same module-buffer path lets unmodified `convolutionSeparable` pass with
-zero relative L2 error. Writable external `__device__` globals remain separate
-work: they need persistent GPU storage and copy-back semantics, not a per-launch
-constant snapshot.
+zero relative L2 error. Runtime-registered writable external `__device__`
+globals now use persistent shared Metal buffers rather than per-launch
+snapshots. Symbol APIs and kernels resolve the same bytes; two-launch persistence
+is gated in `functional_cuda_projects_constant_symbol`, and unmodified
+`threadFenceReduction` passes its single-pass 64-block reduction with exact
+CPU/GPU agreement. Driver API `cuModuleGetGlobal` and initialized PTX globals
+remain separate gaps.
 
 Finding it also exposed that `run_standalone_cu.sh` discarded the harness exit
 status (`$(cmd || true)`), so a sample that died on a signal before printing

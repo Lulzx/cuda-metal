@@ -371,8 +371,8 @@ Post-Phase 5 work completed (continued, part 2):
     - `cuDevicePrimaryCtxRetain`/`cuDevicePrimaryCtxRelease` — create/destroy primary context
       (single GPU on Apple Silicon).
     - `cuStreamGetPriority`/`cuStreamGetFlags` — return 0 (single-priority stream model).
-    - `cuModuleGetGlobal` — stub returning `CUDA_ERROR_NOT_FOUND` (no runtime-addressable
-      `__device__` globals in CuMetal).
+    - `cuModuleGetGlobal` — stub returning `CUDA_ERROR_NOT_FOUND` (Driver-loaded modules do
+      not yet expose globals; runtime-registration globals are covered separately below).
   - **Runtime peer copy**: `cudaMemcpyPeer`/`cudaMemcpyPeerAsync` — UMA single GPU;
     forward to `cudaMemcpy`/`cudaMemcpyAsync` with `cudaMemcpyDefault`.
   - `cudaLaunchHostFunc(stream, fn, userData)` — enqueues a CPU callback between shared-event
@@ -616,6 +616,11 @@ Supported runtime API subset:
     The unmodified `LargeKernelParameter` CUDA sample passes both its 4 KB and
     32,764-byte parameter cases; unmodified `convolutionSeparable` passes with
     zero relative L2 error.
+  - Runtime-registered writable `__device__` globals use persistent shared
+    Metal buffers. Symbol APIs and kernels resolve the same bytes; the
+    unmodified `threadFenceReduction` sample passes its single-pass 64-block
+    reduction with exact CPU/GPU agreement.
+- `cudaGetSymbolAddress`, `cudaGetSymbolSize`
 - `cudaMemset`, `cudaMemsetAsync`
 - `cudaLaunchKernel`
 - `cudaConfigureCall`, `cudaSetupArgument`, `cudaLaunch`
@@ -637,7 +642,6 @@ Supported runtime API subset:
   `cudaErrorNotSupported`)
 - `cudaDeviceSetCacheConfig`, `cudaDeviceGetCacheConfig` (no-op stubs; all memory is UMA)
 - `cudaDeviceSetSharedMemConfig`, `cudaDeviceGetSharedMemConfig` (no-op stubs)
-- `cudaGetSymbolAddress`, `cudaGetSymbolSize`
 - `cudaMemPrefetchAsync`, `cudaMemAdvise`, `cudaMemRangeGetAttribute` (meaningful no-ops on Apple Silicon UMA)
 - `cudaDeviceGetStreamPriorityRange` (returns 0,0 — Metal has no priority queues)
 - `cudaMemcpy2D`, `cudaMemcpy2DAsync`, `cudaMemset2D` (row-by-row on UMA)
