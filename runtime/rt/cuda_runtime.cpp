@@ -3944,6 +3944,11 @@ cudaError_t cudaLaunchKernel(const void* func,
                          grid_dim.x, grid_dim.y, grid_dim.z,
                          block_dim.x, block_dim.y, block_dim.z);
         }
+        // Generated <<<...>>> host stubs discard cudaLaunchKernel's return
+        // value. Preserve every launch failure, including validation and lazy
+        // registration/JIT failures that return before backend submission, so
+        // the next device synchronization cannot report a false success.
+        record_pending_launch_error(err);
         return fail(err);
     };
 
@@ -4774,13 +4779,11 @@ cudaError_t cudaLaunchKernel(const void* func,
                     ? cumetal::metal_backend::stream_synchronize(backend_stream, &sync_error)
                     : cumetal::metal_backend::synchronize(&sync_error);
             if (sync_status != cudaSuccess) {
-                record_pending_launch_error(sync_status);
                 return launch_fail(sync_status, "post-launch debug sync");
             }
         }
     }
 
-    record_pending_launch_error(status);
     return launch_fail(status, "metal_backend::launch_kernel");
 }
 
