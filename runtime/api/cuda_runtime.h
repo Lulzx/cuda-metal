@@ -1,4 +1,40 @@
 #pragma once
+// CuMetal: define CUDA's canonical include-guard macros. Third-party code
+// (NVIDIA's own Common/helper_cuda.h, among others) feature-detects on these
+// to decide whether to declare its CUDA-dependent helpers, so a header that
+// only uses `#pragma once` silently compiles to nothing useful downstream.
+#ifndef __CUDA_RUNTIME_H__
+#define __CUDA_RUNTIME_H__ 1
+#endif
+// cuda_runtime.h is CuMetal's umbrella header: the headers below are pure
+// forwarders back to it, so anything that includes this one has already got
+// their contents and must see their guards defined too. helper_cuda.h keys
+// checkCudaErrors()/_cudaGetErrorEnum() off __DRIVER_TYPES_H__ specifically.
+#ifndef __DRIVER_TYPES_H__
+#define __DRIVER_TYPES_H__ 1
+#endif
+#ifndef __CUDA_RUNTIME_API_H__
+#define __CUDA_RUNTIME_API_H__ 1
+#endif
+#ifndef __VECTOR_TYPES_H__
+#define __VECTOR_TYPES_H__ 1
+#endif
+#ifndef __VECTOR_FUNCTIONS_H__
+#define __VECTOR_FUNCTIONS_H__ 1
+#endif
+#ifndef __CHANNEL_DESCRIPTOR_H__
+#define __CHANNEL_DESCRIPTOR_H__ 1
+#endif
+#ifndef __DEVICE_LAUNCH_PARAMETERS_H__
+#define __DEVICE_LAUNCH_PARAMETERS_H__ 1
+#endif
+#ifndef __MATH_FUNCTIONS_H__
+#define __MATH_FUNCTIONS_H__ 1
+#endif
+#ifndef __CUDA_PROFILER_API_H__
+#define __CUDA_PROFILER_API_H__ 1
+#endif
+
 
 #include <stddef.h>
 #include <stdint.h>
@@ -11,6 +47,20 @@
 
 #ifndef CUDARTAPI
 #define CUDARTAPI
+#endif
+
+// CUDART_CB — calling convention for host callbacks (__stdcall on Windows, empty
+// elsewhere). Samples spell callbacks `void CUDART_CB fn(void *)`; with the macro
+// undeclared that parses as a variable of type void.
+#ifndef CUDART_CB
+#define CUDART_CB
+#endif
+
+// __grid_constant__ marks a by-value kernel parameter as read-only and uniform
+// across the grid. CuMetal already copies kernel arguments into Metal's argument
+// buffer, so the annotation carries no codegen difference here.
+#ifndef __grid_constant__
+#define __grid_constant__
 #endif
 
 #if defined(__clang__) && defined(__CUDA__)
@@ -108,8 +158,22 @@ typedef enum cudaError {
     cudaErrorPeerAccessNotEnabled = 51,
     cudaErrorDevicesUnavailable = 46,
     cudaErrorIllegalAddress = 700,
+    cudaErrorLaunchOutOfResources = 701,
+    cudaErrorLaunchFailure = 719,
+    cudaErrorNotPermitted = 800,
     cudaErrorNotSupported = 801,
     cudaErrorUnknown = 999,
+    // Deprecated numbering CUDA keeps for source compatibility. cudaErrorAssert
+    // is what a device-side assert() reports; samples compare against it by name.
+    cudaErrorAssert = 710,
+    cudaErrorInvalidDeviceFunction = 8,
+    cudaErrorInvalidConfiguration = 9,
+    cudaErrorInvalidDevice = 10,
+    cudaErrorInvalidMemcpyDirection = 21,
+    cudaErrorInsufficientDriver = 35,
+    cudaErrorNoDevice = 100,
+    cudaErrorInvalidResourceHandle = 400,
+    cudaErrorCudartUnloading = 4,
 } cudaError_t;
 
 typedef enum cudaMemcpyKind {
@@ -251,6 +315,14 @@ typedef struct cudaDeviceProp {
     int kernelExecTimeoutEnabled;   // 0 (Metal does not enforce GPU timeout by default)
     int pageableMemoryAccess;       // 1 (UMA: device can access host pageable memory)
     int pageableMemoryAccessUsesHostPageTables; // 1 (same page tables on Apple Silicon)
+    int cooperativeLaunch;          // 0 -- see cuda_runtime.cpp for why
+    int cooperativeMultiDeviceLaunch; // 0 (single device)
+    // Growing this struct breaks any consumer binary built against an older
+    // header: callers stack-allocate a cudaDeviceProp and cudaGetDeviceProperties
+    // writes past the end of the smaller frame. Real CUDA absorbs new fields into
+    // fixed-size reserved space; do the same so the next addition is free. Take a
+    // slot from here rather than appending, and rebuild consumers if you cannot.
+    int cumetalReserved[62];
 } cudaDeviceProp;
 
 typedef enum cudaDeviceAttr {
@@ -355,6 +427,13 @@ enum {
     cudaEventInterprocess = 0x4,
 };
 
+// cudaMallocManaged attachment flags.
+enum {
+    cudaMemAttachGlobal = 0x01,
+    cudaMemAttachHost = 0x02,
+    cudaMemAttachSingle = 0x04,
+};
+
 enum {
     cudaStreamDefault = 0x0,
     cudaStreamNonBlocking = 0x1,
@@ -409,6 +488,10 @@ enum {
     cudaDeviceScheduleBlockingSync = 0x04,
     cudaDeviceMapHost = 0x08,
     cudaDeviceLmemResizeToMax = 0x10,
+    cudaDeviceScheduleMask = 0x07,
+    cudaDeviceMask = 0x1f,
+    // Deprecated spellings kept by real CUDA for source compatibility.
+    cudaDeviceBlockingSync = 0x04,
 };
 
 typedef enum cumetalArgKind {
@@ -922,7 +1005,7 @@ static inline cudaError_t cudaFuncSetAttribute(KernelFn* func, cudaFuncAttribute
 
 template <typename KernelFn>
 static inline cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        int* numBlocks, KernelFn* func, int blockSize, size_t dynamicSMemSize) {
+        int* numBlocks, KernelFn* func, int blockSize, size_t dynamicSMemSize = 0) {
     return ::cudaOccupancyMaxActiveBlocksPerMultiprocessor(
         numBlocks, reinterpret_cast<const void*>(func), blockSize, dynamicSMemSize);
 }
@@ -936,7 +1019,8 @@ static inline cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags
 
 template <typename KernelFn>
 static inline cudaError_t cudaOccupancyMaxPotentialBlockSize(
-        int* minGridSize, int* blockSize, KernelFn* func, size_t dynamicSMemSize, int blockSizeLimit) {
+        int* minGridSize, int* blockSize, KernelFn* func, size_t dynamicSMemSize = 0,
+        int blockSizeLimit = 0) {
     return ::cudaOccupancyMaxPotentialBlockSize(
         minGridSize, blockSize, reinterpret_cast<const void*>(func), dynamicSMemSize, blockSizeLimit);
 }
@@ -954,6 +1038,98 @@ static inline cudaError_t cudaMalloc(T** dev_ptr, size_t size) {
 
 static inline cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event) {
     return ::cudaStreamWaitEvent(stream, event, 0);
+}
+
+// Real CUDA declares these in cuda_runtime.h as typed C++ templates with default
+// arguments layered over the C ABI. Without them, ordinary CUDA source that calls
+// `cudaMallocHost(&h_ptr, bytes)` or `cudaEventRecord(evt)` does not compile.
+template <typename T>
+static inline cudaError_t cudaMallocHost(T** ptr, size_t size, unsigned int flags = 0) {
+    return flags ? ::cudaHostAlloc(reinterpret_cast<void**>(ptr), size, flags)
+                 : ::cudaMallocHost(reinterpret_cast<void**>(ptr), size);
+}
+
+template <typename T>
+static inline cudaError_t cudaHostAlloc(T** ptr, size_t size, unsigned int flags) {
+    return ::cudaHostAlloc(reinterpret_cast<void**>(ptr), size, flags);
+}
+
+template <typename T>
+static inline cudaError_t cudaMallocManaged(T** dev_ptr, size_t size,
+                                            unsigned int flags = cudaMemAttachGlobal) {
+    return ::cudaMallocManaged(reinterpret_cast<void**>(dev_ptr), size, flags);
+}
+
+template <typename T>
+static inline cudaError_t cudaMallocAsync(T** dev_ptr, size_t size, cudaStream_t stream) {
+    return ::cudaMallocAsync(reinterpret_cast<void**>(dev_ptr), size, stream);
+}
+
+static inline cudaError_t cudaEventRecord(cudaEvent_t event) {
+    return ::cudaEventRecord(event, 0);
+}
+
+static inline cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count,
+                                          cudaMemcpyKind kind) {
+    return ::cudaMemcpyAsync(dst, src, count, kind, 0);
+}
+
+static inline cudaError_t cudaMemsetAsync(void* dev_ptr, int value, size_t count) {
+    return ::cudaMemsetAsync(dev_ptr, value, count, 0);
+}
+
+static inline cudaError_t cudaStreamCreateWithFlags(cudaStream_t* stream) {
+    return ::cudaStreamCreateWithFlags(stream, cudaStreamDefault);
+}
+
+// __device__ variables are passed to the symbol APIs by reference, not by address:
+// `cudaMemcpyToSymbol(devVar, &host, n)`. The C entry point takes the address.
+//
+// The reference overloads must NOT swallow pointer arguments. `cudaMemcpyToSymbol(&var, ...)`
+// and `cudaMemcpyToSymbol(nullptr, ...)` are the C spelling, and a `const T &`
+// template binds them exactly -- beating the `const void *` entry point, which needs
+// a pointer conversion -- so the address of the *pointer variable* would be handed to
+// the runtime instead of the symbol. Constrain the templates to non-pointer T.
+template <typename T>
+struct cumetal_symbol_by_ref { static const bool value = true; };
+template <typename T>
+struct cumetal_symbol_by_ref<T*> { static const bool value = false; };
+template <>
+struct cumetal_symbol_by_ref<decltype(nullptr)> { static const bool value = false; };
+
+template <bool B, typename T = void>
+struct cumetal_symbol_enable_if {};
+template <typename T>
+struct cumetal_symbol_enable_if<true, T> { typedef T type; };
+
+#define CUMETAL_SYMBOL_BY_REF(T) \
+    typename cumetal_symbol_enable_if<cumetal_symbol_by_ref<T>::value, cudaError_t>::type
+
+template <typename T>
+static inline CUMETAL_SYMBOL_BY_REF(T) cudaMemcpyToSymbol(const T& symbol, const void* src, size_t count,
+                                             size_t offset = 0,
+                                             cudaMemcpyKind kind = cudaMemcpyHostToDevice) {
+    return ::cudaMemcpyToSymbol(reinterpret_cast<const void*>(&symbol), src, count, offset, kind);
+}
+
+template <typename T>
+static inline CUMETAL_SYMBOL_BY_REF(T) cudaMemcpyFromSymbol(void* dst, const T& symbol, size_t count,
+                                               size_t offset = 0,
+                                               cudaMemcpyKind kind = cudaMemcpyDeviceToHost) {
+    return ::cudaMemcpyFromSymbol(dst, reinterpret_cast<const void*>(&symbol), count, offset, kind);
+}
+
+template <typename T>
+static inline CUMETAL_SYMBOL_BY_REF(T) cudaMemcpyToSymbolAsync(const T& symbol, const void* src, size_t count,
+                                                  size_t offset, cudaMemcpyKind kind,
+                                                  cudaStream_t stream) {
+    return ::cudaMemcpyToSymbolAsync(reinterpret_cast<const void*>(&symbol), src, count, offset,
+                                     kind, stream);
+}
+
+template <typename T>
+static inline CUMETAL_SYMBOL_BY_REF(T) cudaGetSymbolAddress(void** devPtr, const T& symbol) {
+    return ::cudaGetSymbolAddress(devPtr, reinterpret_cast<const void*>(&symbol));
 }
 #endif
 
@@ -1179,6 +1355,31 @@ static __device__ __forceinline__ int atomicXor(int* ptr, int val) {
 }
 static __device__ __forceinline__ unsigned int atomicXor(unsigned int* ptr, unsigned int val) {
     return __uAtomicXor(ptr, val);
+}
+
+// atomicInc/atomicDec are the wrapping counters CUDA exposes only for unsigned.
+// There is no single Metal instruction for them, so build them on a CAS loop --
+// same construction the double-precision atomicAdd above uses.
+static __device__ __forceinline__ unsigned int atomicInc(unsigned int* ptr, unsigned int val) {
+    unsigned int old = *ptr;
+    unsigned int assumed;
+    do {
+        assumed = old;
+        unsigned int next = (assumed >= val) ? 0u : (assumed + 1u);
+        old = __uAtomicCAS(ptr, assumed, next);
+    } while (assumed != old);
+    return old;
+}
+
+static __device__ __forceinline__ unsigned int atomicDec(unsigned int* ptr, unsigned int val) {
+    unsigned int old = *ptr;
+    unsigned int assumed;
+    do {
+        assumed = old;
+        unsigned int next = (assumed == 0u || assumed > val) ? val : (assumed - 1u);
+        old = __uAtomicCAS(ptr, assumed, next);
+    } while (assumed != old);
+    return old;
 }
 
 // ── Synchronization, memory fences, bit ops, FMA ────────────────────────────

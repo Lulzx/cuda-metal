@@ -1,4 +1,13 @@
 #pragma once
+#include "library_types.h"
+// CuMetal: define CUDA's canonical include-guard macros. Third-party code
+// (NVIDIA's own Common/helper_cuda.h, among others) feature-detects on these
+// to decide whether to declare its CUDA-dependent helpers, so a header that
+// only uses `#pragma once` silently compiles to nothing useful downstream.
+#ifndef CURAND_H_
+#define CURAND_H_ 1
+#endif
+
 
 #include <stddef.h>
 
@@ -48,15 +57,6 @@ typedef enum curandOrdering {
     CURAND_ORDERING_QUASI_DEFAULT  = 201,
 } curandOrdering_t;
 
-// libraryPropertyType — mirrors CUDA library_types.h; guarded for multi-header includes.
-#ifndef CUMETAL_LIBRARY_PROPERTY_TYPE_DEFINED
-#define CUMETAL_LIBRARY_PROPERTY_TYPE_DEFINED
-typedef enum libraryPropertyType_t {
-    MAJOR_VERSION = 0,
-    MINOR_VERSION = 1,
-    PATCH_LEVEL   = 2,
-} libraryPropertyType;
-#endif
 
 curandStatus_t curandCreateGenerator(curandGenerator_t* generator, curandRngType_t rng_type);
 // Host generator — on Apple Silicon UMA, host and device share memory; identical to device generator.

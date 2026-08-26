@@ -1,4 +1,18 @@
 #pragma once
+#include "library_types.h"
+// Real cusparse.h declares every entry point with CUSPARSEAPI (empty off Windows).
+// helper_cuda.h keys its cuSPARSE error strings off `#ifdef CUSPARSEAPI`.
+#ifndef CUSPARSEAPI
+#define CUSPARSEAPI
+#endif
+// CuMetal: define CUDA's canonical include-guard macros. Third-party code
+// (NVIDIA's own Common/helper_cuda.h, among others) feature-detects on these
+// to decide whether to declare its CUDA-dependent helpers, so a header that
+// only uses `#pragma once` silently compiles to nothing useful downstream.
+#ifndef CUSPARSE_H_
+#define CUSPARSE_H_ 1
+#endif
+
 
 #include <stddef.h>
 #include <stdint.h>
@@ -16,6 +30,10 @@ typedef enum cusparseStatus_t {
     CUSPARSE_STATUS_EXECUTION_FAILED = 6,
     CUSPARSE_STATUS_INTERNAL_ERROR = 7,
     CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED = 8,
+    CUSPARSE_STATUS_MAPPING_ERROR = 5,
+    CUSPARSE_STATUS_ZERO_PIVOT = 9,
+    CUSPARSE_STATUS_NOT_SUPPORTED = 10,
+    CUSPARSE_STATUS_INSUFFICIENT_RESOURCES = 11,
 } cusparseStatus_t;
 
 typedef struct cusparseContext* cusparseHandle_t;
@@ -78,16 +96,6 @@ typedef enum cusparseSpMMAlg_t {
     CUSPARSE_SPMM_CSR_ALG3 = 12,
 } cusparseSpMMAlg_t;
 
-typedef int cudaDataType;
-#ifndef CUDA_R_32F
-#define CUDA_R_32F 0
-#define CUDA_R_64F 1
-#define CUDA_R_16F 2
-#define CUDA_R_32I 10
-#define CUDA_R_8I  3
-#define CUDA_C_32F 4
-#define CUDA_C_64F 5
-#endif
 
 // Handle management
 cusparseStatus_t cusparseCreate(cusparseHandle_t* handle);

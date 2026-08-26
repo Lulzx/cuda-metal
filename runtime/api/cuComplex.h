@@ -1,4 +1,12 @@
 #pragma once
+// CuMetal: define CUDA's canonical include-guard macros. Third-party code
+// (NVIDIA's own Common/helper_cuda.h, among others) feature-detects on these
+// to decide whether to declare its CUDA-dependent helpers, so a header that
+// only uses `#pragma once` silently compiles to nothing useful downstream.
+#ifndef CU_COMPLEX_H_
+#define CU_COMPLEX_H_ 1
+#endif
+
 
 // CuMetal cuComplex shim: complex number types for CUDA.
 // Compatible with NVIDIA's cuComplex.h used by cuFFT, cuSOLVER, and scientific computing.

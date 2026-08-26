@@ -116,6 +116,29 @@ CUresult map_cuda_error(cudaError_t error) {
             return CUDA_ERROR_DEVICES_UNAVAILABLE;
         case cudaErrorNotSupported:
             return CUDA_ERROR_NOT_SUPPORTED;
+        case cudaErrorCudartUnloading:
+            return CUDA_ERROR_DEINITIALIZED;
+        case cudaErrorNoDevice:
+            return CUDA_ERROR_NO_DEVICE;
+        case cudaErrorInvalidDevice:
+            return CUDA_ERROR_INVALID_DEVICE;
+        case cudaErrorInvalidDeviceFunction:
+            return CUDA_ERROR_NOT_FOUND;
+        case cudaErrorInvalidConfiguration:
+        case cudaErrorInvalidMemcpyDirection:
+            return CUDA_ERROR_INVALID_VALUE;
+        case cudaErrorInvalidResourceHandle:
+            return CUDA_ERROR_INVALID_HANDLE;
+        case cudaErrorLaunchOutOfResources:
+            return CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES;
+        case cudaErrorLaunchFailure:
+            return CUDA_ERROR_LAUNCH_FAILED;
+        case cudaErrorAssert:
+            return CUDA_ERROR_ASSERT;
+        case cudaErrorNotPermitted:
+            return CUDA_ERROR_NOT_PERMITTED;
+        case cudaErrorInsufficientDriver:
+            return CUDA_ERROR_NOT_SUPPORTED;
         case cudaErrorPeerAccessAlreadyEnabled:
             return CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED;
         case cudaErrorPeerAccessNotEnabled:

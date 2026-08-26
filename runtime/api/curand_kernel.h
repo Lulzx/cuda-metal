@@ -1,4 +1,12 @@
 #pragma once
+// CuMetal: define CUDA's canonical include-guard macros. Third-party code
+// (NVIDIA's own Common/helper_cuda.h, among others) feature-detects on these
+// to decide whether to declare its CUDA-dependent helpers, so a header that
+// only uses `#pragma once` silently compiles to nothing useful downstream.
+#ifndef CURAND_KERNEL_H_
+#define CURAND_KERNEL_H_ 1
+#endif
+
 // CuMetal curand_kernel.h — device-side random number generation.
 // Provides curandState types and device functions for in-kernel RNG.
 // On Apple Silicon UMA, these run as host-callable functions since

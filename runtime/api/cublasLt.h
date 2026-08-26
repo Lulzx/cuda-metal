@@ -1,4 +1,13 @@
 #pragma once
+#include "library_types.h"
+// CuMetal: define CUDA's canonical include-guard macros. Third-party code
+// (NVIDIA's own Common/helper_cuda.h, among others) feature-detects on these
+// to decide whether to declare its CUDA-dependent helpers, so a header that
+// only uses `#pragma once` silently compiles to nothing useful downstream.
+#ifndef CUBLASLT_H
+#define CUBLASLT_H 1
+#endif
+
 
 #include "cublas_v2.h"
 

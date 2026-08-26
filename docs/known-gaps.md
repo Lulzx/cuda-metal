@@ -421,4 +421,65 @@ as gaps have been closed.
 - "Full" metadata RE is effectively complete for the kernels we emit; unknown future
   ABI changes will be caught by the xcode regression harness.
 
+## NVIDIA cuda-samples sweep (2026-08-26)
+
+88 headless samples from `NVIDIA/cuda-samples` (`cpp/0_Introduction`,
+`2_Concepts_and_Techniques`, `3_CUDA_Features`, `4_CUDA_Libraries`,
+`6_Performance`) were compiled and run against `libcumetal` out of tree. Result:
+**19 pass, 2 waive cleanly, 67 do not build or run**. It is a coverage probe, not
+a CTest harness -- the samples are not vendored.
+
+The sweep first found one defect that masked everything else: CuMetal's headers
+used `#pragma once` and never defined CUDA's canonical include-guard macros
+(`__DRIVER_TYPES_H__`, `CUBLAS_API_H_`, `_CUFFT_H_`, ...). NVIDIA's own
+`Common/helper_cuda.h` -- and plenty of third-party CUDA code -- feature-detects
+on those to decide whether to declare `checkCudaErrors()` and friends, so 82 of
+88 samples failed with "use of undeclared identifier 'checkCudaErrors'" while
+the headers themselves compiled clean. Fixed, along with a `cudaDataType`
+collision (`cusparse.h` declared it `typedef int`, `cublas_v2.h` as an enum, so
+including both was a hard typedef-redefinition error); `library_types.h` now
+owns that type the way real CUDA does.
+
+What the sweep says is still missing, in rough order of how many samples it
+blocks:
+
+- **Texture and surface fetch in device code** -- `tex2D`, `tex3D`,
+  `tex2DLayered`, `texCubemap`, `surf2Dwrite`, `cudaBoundaryMode*`. Texture
+  *objects* exist on the host side; the device-side fetch builtins do not. 7 samples.
+- **`libcu++` device headers** -- `cuda/pipeline`, `cuda/barrier`,
+  `cooperative_groups/memcpy_async.h`. 5 samples.
+- **cooperative_groups beyond the basics** -- `thread_group`, `coalesced_group`,
+  `binary_partition`, `block_tile_memory`, tile `shfl_up`. 5 samples.
+- **thrust/CUB header surface** -- `thrust/copy.h`, `thrust/random.h`,
+  `thrust/adjacent_difference.h`, `cub/device/device_{find,transform,segmented_scan}.cuh`.
+  6 samples. Some of the underlying algorithms already exist; the headers do not.
+- **Device-side `printf`** -- Metal has no equivalent. 2 samples.
+- **Tensor cores** -- `mma.h` / `nvcuda::wmma`. 4 samples.
+- **CUDA graph memory nodes** -- `cudaGraphAddMemFreeNode`,
+  `cudaGraphMemAttributeType`, `cudaGraphExecKernelNodeSetParams`,
+  `cudaHostNodeParams`. 3 samples.
+- **Dynamic parallelism (CDP)** -- device-side stream creation and launch. 3 samples.
+- **Scattered API surface** -- `atomicAdd_system` (system-scope atomics are not
+  faithfully expressible on Metal, so no alias is provided), `__float2half2_rn`,
+  `cudaAccessPolicyWindow`, `cublas*Batched`, `CUBLAS_POINTER_MODE_DEVICE`,
+  `cudaDevAttrMemoryPoolsSupported`.
+
+`cudaDeviceProp::cooperativeLaunch` is reported as **0** on purpose. Grid-wide
+`grid.sync()` across more than one threadgroup is a no-op under Metal, so
+`reductionMultiBlockCG` and `conjugateGradientMultiBlockCG` take the sample's own
+"does not support Cooperative Kernel Launch, waiving" path instead of silently
+computing the wrong answer.
+
+Samples that compile and launch but do not produce correct results -- these are
+real lowering or runtime defects, not coverage gaps:
+
+- `convolutionSeparable`, `threadFenceReduction`, `LargeKernelParameter` crash
+  (SIGBUS).
+- `simpleAtomicIntrinsics` reports `atomicAdd failed`.
+- `scan`, `simpleStreams`, `MersenneTwisterGP11213`, `conjugateGradient`,
+  `conjugateGradientUM` compute wrong values.
+- `clock`, `mergeSort`, `simpleHyperQ`, `scalarProd`, `eigenvalues`,
+  `sortingNetworks` hit "registered kernel missing metallib" -- the lowering
+  path declines these kernels outright.
+
 See also: spec.md §8, [docs/status.md](status.md), [docs/air-abi.md](air-abi.md).

@@ -1960,6 +1960,16 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     prop->kernelExecTimeoutEnabled = 0; // Metal does not enforce kernel timeout by default
     prop->pageableMemoryAccess = 1;     // UMA: device can access host pageable memory
     prop->pageableMemoryAccessUsesHostPageTables = 1; // Shared page tables on Apple Silicon
+    // Reported as unsupported on purpose. cudaLaunchCooperativeKernel exists, but
+    // grid-wide sync across more than one threadgroup is a no-op under Metal (see
+    // the warn_once in the cooperative launch path). Code that probes this flag
+    // before using grid.sync() must take the fallback path, not silently get
+    // wrong answers.
+    prop->cooperativeLaunch = 0;
+    prop->cooperativeMultiDeviceLaunch = 0;
+    for (size_t i = 0; i < sizeof(prop->cumetalReserved) / sizeof(prop->cumetalReserved[0]); ++i) {
+        prop->cumetalReserved[i] = 0;
+    }
 
     return fail(cudaSuccess);
 }
@@ -4455,6 +4465,30 @@ const char* cudaGetErrorName(cudaError_t error) {
             return "cudaErrorIllegalAddress";
         case cudaErrorNotSupported:
             return "cudaErrorNotSupported";
+        case cudaErrorCudartUnloading:
+            return "cudaErrorCudartUnloading";
+        case cudaErrorInvalidDeviceFunction:
+            return "cudaErrorInvalidDeviceFunction";
+        case cudaErrorInvalidConfiguration:
+            return "cudaErrorInvalidConfiguration";
+        case cudaErrorInvalidDevice:
+            return "cudaErrorInvalidDevice";
+        case cudaErrorInvalidMemcpyDirection:
+            return "cudaErrorInvalidMemcpyDirection";
+        case cudaErrorInsufficientDriver:
+            return "cudaErrorInsufficientDriver";
+        case cudaErrorNoDevice:
+            return "cudaErrorNoDevice";
+        case cudaErrorInvalidResourceHandle:
+            return "cudaErrorInvalidResourceHandle";
+        case cudaErrorLaunchOutOfResources:
+            return "cudaErrorLaunchOutOfResources";
+        case cudaErrorAssert:
+            return "cudaErrorAssert";
+        case cudaErrorLaunchFailure:
+            return "cudaErrorLaunchFailure";
+        case cudaErrorNotPermitted:
+            return "cudaErrorNotPermitted";
         case cudaErrorUnknown:
             return "cudaErrorUnknown";
     }
@@ -4487,6 +4521,30 @@ const char* cudaGetErrorString(cudaError_t error) {
             return "cudaErrorIllegalAddress";
         case cudaErrorNotSupported:
             return "operation not supported";
+        case cudaErrorCudartUnloading:
+            return "driver shutting down";
+        case cudaErrorInvalidDeviceFunction:
+            return "invalid device function";
+        case cudaErrorInvalidConfiguration:
+            return "invalid configuration argument";
+        case cudaErrorInvalidDevice:
+            return "invalid device ordinal";
+        case cudaErrorInvalidMemcpyDirection:
+            return "invalid copy direction for memcpy";
+        case cudaErrorInsufficientDriver:
+            return "CUDA driver version is insufficient for CUDA runtime version";
+        case cudaErrorNoDevice:
+            return "no CUDA-capable device is detected";
+        case cudaErrorInvalidResourceHandle:
+            return "invalid resource handle";
+        case cudaErrorLaunchOutOfResources:
+            return "too many resources requested for launch";
+        case cudaErrorAssert:
+            return "device-side assert triggered";
+        case cudaErrorLaunchFailure:
+            return "unspecified launch failure";
+        case cudaErrorNotPermitted:
+            return "operation not permitted";
         case cudaErrorUnknown:
             return "cudaErrorUnknown";
     }

@@ -1,4 +1,12 @@
 #pragma once
+// CuMetal: define CUDA's canonical include-guard macros. Third-party code
+// (NVIDIA's own Common/helper_cuda.h, among others) feature-detects on these
+// to decide whether to declare its CUDA-dependent helpers, so a header that
+// only uses `#pragma once` silently compiles to nothing useful downstream.
+#ifndef __cuda_cuda_h__
+#define __cuda_cuda_h__ 1
+#endif
+
 
 #include <stddef.h>
 #include <stdint.h>
@@ -83,6 +91,13 @@ typedef enum CUresult {
     CUDA_ERROR_LAUNCH_TIMEOUT = 702,
     CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED = 704,
     CUDA_ERROR_PEER_ACCESS_NOT_ENABLED = 705,
+    CUDA_ERROR_DEINITIALIZED = 4,
+    CUDA_ERROR_NO_DEVICE = 100,
+    CUDA_ERROR_INVALID_HANDLE = 400,
+    CUDA_ERROR_LAUNCH_FAILED = 719,
+    CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES = 701,
+    CUDA_ERROR_ASSERT = 710,
+    CUDA_ERROR_NOT_PERMITTED = 800,
     CUDA_ERROR_NOT_SUPPORTED = 801,
     CUDA_ERROR_UNKNOWN = 999,
 } CUresult;
