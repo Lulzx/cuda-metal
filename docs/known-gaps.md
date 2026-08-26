@@ -39,14 +39,17 @@ as gaps have been closed.
   architecture direction, not a compatibility claim.
 
 ## Partial / conservative implementations
-- Static cooperative groups now include a generic `thread_group` value that
-  preserves block versus tile synchronization domains, plus tile-scoped
-  `shfl`, `shfl_up`, `shfl_down`, `shfl_xor`, `any`, `all`, and `ballot` for
-  warp-sized-or-smaller tiles. A focused 64-thread GPU test covers generic
-  block/tile reductions, independent 16-lane barriers and votes, and all four
-  tiles across two SIMD groups. Dynamic active-lane groups and partitioning
-  (`coalesced_group`, `binary_partition`, `labeled_partition`) remain absent;
-  multi-warp static tiles still use a conservative whole-block barrier.
+- Cooperative groups include a generic `thread_group` value that preserves
+  block versus tile synchronization domains; tile-scoped shuffles/votes; and
+  mask/rank-aware `coalesced_group`, `binary_partition`, and
+  `labeled_partition`. Focused GPU tests cover generic block/tile reductions,
+  independent 16-lane barriers across two SIMD groups, noncontiguous 24-lane
+  active groups, two-way and three-label partitions, arbitrary-size reduction,
+  generic conversion, subgroup votes, and invalid source-rank handling. The
+  dynamic reduction is correctness-first and gathers every group rank at its
+  leader rather than claiming tree-reduction performance. Multi-warp static
+  tiles still use a conservative whole-block barrier, and `block_tile_memory`
+  remains absent.
 - Masked `__syncwarp(mask != 0xFFFFFFFF)` lowers to an AIR SIMD-group barrier with
   threadgroup-memory visibility. AIR does not consume CUDA's explicit member mask, so
   additional currently active lanes can receive stronger ordering. Divergent lower/upper
@@ -490,14 +493,16 @@ blocks:
   *objects* exist on the host side; the device-side fetch builtins do not. 7 samples.
 - **`libcu++` device headers** -- `cuda/pipeline`, `cuda/barrier`,
   `cooperative_groups/memcpy_async.h`. 5 samples.
-- **cooperative_groups beyond static blocks/tiles** -- `coalesced_group`,
-  `binary_partition`, `labeled_partition`, and `block_tile_memory` remain
-  missing. Generic `thread_group` conversion and tile `shfl_up` are now covered
-  by a focused GPU test, but the unmodified `simpleCooperativeGroups` sample
-  still fails explicitly when the LLVM PTX backend reaches Clang's initialized
-  module-global `vprintf` format (`_$_str`), so the cuda-samples manifest is not
-  promoted. 5 samples remain blocked across this surface and independent
-  lowering gaps.
+- **Remaining cooperative-groups surface** -- `block_tile_memory` is still
+  missing. Generic `thread_group`, `coalesced_group`, binary/labeled partitions,
+  tile `shfl_up`, and dynamic-group reduction have focused GPU coverage; the
+  unmodified `binaryPartitionCG` and `warpAggregatedAtomicsCG` translation units
+  now compile and link. Their 100K/10M-element workloads were deliberately not
+  run in this resource-bounded pass, so neither manifest entry is promoted.
+  `simpleCooperativeGroups` still fails explicitly when the LLVM PTX backend
+  reaches Clang's initialized module-global `vprintf` format (`_$_str`). The
+  prior five-sample cluster therefore retains independent runtime/header
+  blockers even though its dynamic partition API gap is closed.
 - **thrust/CUB header surface** -- `thrust/copy.h`, `thrust/random.h`,
   `thrust/adjacent_difference.h`, `cub/device/device_{find,transform,segmented_scan}.cuh`.
   6 samples. Some of the underlying algorithms already exist; the headers do not.

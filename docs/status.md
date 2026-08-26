@@ -717,10 +717,20 @@ Driver API additions:
 - `cudaDevAttrSharedMemPerBlockOptin` → sharedMemPerBlock
 - `cudaDevAttrMemoryPoolsSupported` → 1 for the tested stream-ordered/default-pool subset
 
-`cooperative_groups::thread_block_tile<N>` extended with:
-- `shfl(val, src_rank)`, `shfl_down(val, delta)`, `shfl_xor(val, mask)`
-- `any(pred)`, `all(pred)`, `ballot(pred)` (via `__nvvm_vote_*` builtins)
-- `cooperative_groups::less<T>` binary operator alongside existing `plus<T>` and `greater<T>`
+Cooperative-groups compatibility includes:
+- `thread_block_tile<N>` shuffles (`shfl`, `shfl_up`, `shfl_down`, `shfl_xor`),
+  member-scoped barriers, and `any`/`all`/`ballot` for SIMD-sized-or-smaller tiles
+- generic `thread_group` conversion from blocks, static tiles, and dynamic groups
+- mask/rank-aware `coalesced_group`, `coalesced_threads`, `binary_partition`, and
+  `labeled_partition`
+- exact correctness-first reduction for arbitrary-size dynamic groups
+- `less<T>` alongside `plus<T>` and `greater<T>`
+
+Focused 64-thread and 32-thread GPU projects validate the static and dynamic
+surfaces respectively. NVIDIA's unmodified `binaryPartitionCG` and
+`warpAggregatedAtomicsCG` sources compile and link, but their large workloads
+were not run in the resource-bounded validation pass and are not runtime-pass
+claims.
 
 CUDA vector types added to `cuda_runtime.h`:
 - All standard types: `char2/3/4`, `short2/3/4`, `int2/3/4`, `uint2/4`,

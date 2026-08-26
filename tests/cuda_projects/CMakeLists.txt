@@ -122,6 +122,11 @@ cumetal_add_cuda_project_test(
 )
 
 cumetal_add_cuda_project_test(
+    functional_cuda_projects_dynamic_cooperative_groups
+    dynamic_cooperative_groups dynamic_cooperative_groups.cu dynamic_cooperative_groups
+)
+
+cumetal_add_cuda_project_test(
     functional_cuda_projects_sgemm_naive
     sgemm sgemm_naive.cu sgemm_naive
 )

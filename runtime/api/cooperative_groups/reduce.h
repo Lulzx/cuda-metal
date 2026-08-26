@@ -28,6 +28,22 @@ __device__ __forceinline__ T reduce(const thread_block_tile<TileSize>& tile, T v
     return shared[tile_base];
 }
 
+// Dynamic groups are not necessarily power-of-two sized or contiguous in
+// physical lane space. Gather each dense group rank at the leader, then
+// broadcast the exact result. This is intentionally correctness-first; a
+// tree reduction can replace it later without changing semantics.
+template <typename T, typename BinaryOp>
+__device__ __forceinline__ T reduce(const coalesced_group& group, T value, BinaryOp op) {
+    T result = value;
+    for (unsigned int src_rank = 1u; src_rank < group.size(); ++src_rank) {
+        const T candidate = group.shfl(value, src_rank);
+        if (group.thread_rank() == 0u) {
+            result = op(result, candidate);
+        }
+    }
+    return group.shfl(result, 0u);
+}
+
 }  // namespace cooperative_groups
 
 #endif
