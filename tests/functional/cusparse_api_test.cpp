@@ -23,6 +23,21 @@ static bool test_handle_lifecycle() {
         std::fprintf(stderr, "FAIL: cusparseGetVersion returned %d\n", version);
         return false;
     }
+    cusparsePointerMode_t pointer_mode = CUSPARSE_POINTER_MODE_DEVICE;
+    if (cusparseGetPointerMode(handle, &pointer_mode) != CUSPARSE_STATUS_SUCCESS ||
+        pointer_mode != CUSPARSE_POINTER_MODE_HOST ||
+        cusparseSetPointerMode(handle, CUSPARSE_POINTER_MODE_HOST) !=
+            CUSPARSE_STATUS_SUCCESS ||
+        cusparseGetPointerMode(handle, &pointer_mode) != CUSPARSE_STATUS_SUCCESS ||
+        pointer_mode != CUSPARSE_POINTER_MODE_HOST ||
+        cusparseSetPointerMode(handle, CUSPARSE_POINTER_MODE_DEVICE) !=
+            CUSPARSE_STATUS_NOT_SUPPORTED ||
+        cusparseSetPointerMode(handle, static_cast<cusparsePointerMode_t>(-1)) !=
+            CUSPARSE_STATUS_INVALID_VALUE ||
+        cusparseGetPointerMode(handle, nullptr) != CUSPARSE_STATUS_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: cuSPARSE pointer mode contract\n");
+        return false;
+    }
     if (cusparseDestroy(handle) != CUSPARSE_STATUS_SUCCESS) {
         std::fprintf(stderr, "FAIL: cusparseDestroy\n");
         return false;

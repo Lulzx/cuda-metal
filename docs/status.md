@@ -308,6 +308,10 @@ Post-Phase 5 work completed (continued, part 2):
 - **cuBLAS extended APIs** (`runtime/rt/cublas.cpp`, `runtime/api/cublas_v2.h`):
   Added `cudaDataType_t`, `cublasDiagType_t`, `cublasSideMode_t`, `cublasGemmAlgo_t` enums.
   New functions:
+  - `cublasSetPointerMode` / `cublasGetPointerMode` — per-handle host/device
+    scalar-location state. The synchronous S/D AXPY, SCAL, and DOT subset maps
+    tracked device scalars through the allocation table and rejects wrong-location
+    pointers; `functional_cublas_api` covers device alpha/result and negative paths.
   - `cublasGemmEx` — extended GEMM: routes CUDA_R_32F → cublasSgemm,
     CUDA_R_64F → cublasDgemm, all-FP16/FP16-compute and
     FP16-input/FP32-output directly to MPS, and other mixed types through the
@@ -327,9 +331,14 @@ Post-Phase 5 work completed (continued, part 2):
     strided host↔device copy helpers (no-op overhead on Apple Silicon UMA).
   - Async vector/matrix transfer variants enqueue their strided copies on the supplied CUDA
     stream; they no longer ignore it or execute inline.
-  Tests: `functional_cublas_extended_api`,
+  Tests: `functional_cublas_api`, `functional_cublas_extended_api`,
   `functional_cublas_device_pointer_table`.
 
+- **cuSPARSE pointer-mode API**: `cusparseSetPointerMode` /
+  `cusparseGetPointerMode` retain the supported host mode. Device scalar mode
+  returns `CUSPARSE_STATUS_NOT_SUPPORTED` until every implemented sparse path
+  resolves device alpha/beta storage. `functional_cusparse_api` covers the
+  state and negative paths.
 
 - **Miscellaneous extended APIs** (`runtime/api/`, `runtime/rt/`, `runtime/driver/`):
   Fills remaining API gaps identified in post-Phase-5 survey.

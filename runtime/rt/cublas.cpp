@@ -17,6 +17,7 @@
 struct cublasContext {
     cudaStream_t stream = nullptr;
     cublasMath_t math_mode = CUBLAS_DEFAULT_MATH;
+    cublasPointerMode_t pointer_mode = CUBLAS_POINTER_MODE_HOST;
     std::mutex mutex;
 };
 
@@ -71,6 +72,37 @@ bool is_valid_fill_mode(cublasFillMode_t mode) {
 bool is_valid_math_mode(cublasMath_t mode) {
     return mode == CUBLAS_DEFAULT_MATH || mode == CUBLAS_TENSOR_OP_MATH ||
            mode == CUBLAS_PEDANTIC_MATH || mode == CUBLAS_TF32_TENSOR_OP_MATH;
+}
+
+bool is_valid_pointer_mode(cublasPointerMode_t mode) {
+    return mode == CUBLAS_POINTER_MODE_HOST || mode == CUBLAS_POINTER_MODE_DEVICE;
+}
+
+template <typename T>
+T* scalar_pointer_for_mode(cublasHandle_t handle, T* pointer) {
+    if (handle == nullptr || pointer == nullptr) return nullptr;
+    cublasPointerMode_t mode;
+    {
+        std::lock_guard<std::mutex> lock(handle->mutex);
+        mode = handle->pointer_mode;
+    }
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    const bool tracked = cumetal::rt::resolve_allocation_for_pointer(pointer, &resolved);
+    const bool is_device = tracked && resolved.kind == cumetal::rt::AllocationKind::kDevice;
+    if (mode == CUBLAS_POINTER_MODE_HOST) {
+        return is_device ? nullptr : pointer;
+    }
+    if (!is_device || resolved.buffer == nullptr || resolved.buffer->contents() == nullptr ||
+        resolved.remaining_size < sizeof(T)) {
+        return nullptr;
+    }
+    return reinterpret_cast<T*>(
+        static_cast<unsigned char*>(resolved.buffer->contents()) + resolved.offset);
+}
+
+template <typename T>
+const T* scalar_pointer_for_mode(cublasHandle_t handle, const T* pointer) {
+    return scalar_pointer_for_mode(handle, const_cast<T*>(pointer));
 }
 
 cublasStatus_t map_cuda_status_to_cublas(cudaError_t status) {
@@ -327,6 +359,27 @@ cublasStatus_t cublasGetMathMode(cublasHandle_t handle, cublasMath_t* mode) {
     return CUBLAS_STATUS_SUCCESS;
 }
 
+cublasStatus_t cublasSetPointerMode(cublasHandle_t handle, cublasPointerMode_t mode) {
+    if (handle == nullptr) {
+        return CUBLAS_STATUS_NOT_INITIALIZED;
+    }
+    if (!is_valid_pointer_mode(mode)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    std::lock_guard<std::mutex> lock(handle->mutex);
+    handle->pointer_mode = mode;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasGetPointerMode(cublasHandle_t handle, cublasPointerMode_t* mode) {
+    if (handle == nullptr || mode == nullptr) {
+        return CUBLAS_STATUS_NOT_INITIALIZED;
+    }
+    std::lock_guard<std::mutex> lock(handle->mutex);
+    *mode = handle->pointer_mode;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 cublasStatus_t cublasSaxpy(cublasHandle_t handle,
                            int n,
                            const float* alpha,
@@ -337,7 +390,8 @@ cublasStatus_t cublasSaxpy(cublasHandle_t handle,
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
-    if (n < 0 || incx <= 0 || incy <= 0 || alpha == nullptr) {
+    const float* alpha_value_ptr = scalar_pointer_for_mode(handle, alpha);
+    if (n < 0 || incx <= 0 || incy <= 0 || alpha_value_ptr == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
     if (n == 0) {
@@ -353,7 +407,7 @@ cublasStatus_t cublasSaxpy(cublasHandle_t handle,
     const cublasStatus_t sync_status = synchronize_handle_stream(handle);
     if (sync_status != CUBLAS_STATUS_SUCCESS) return sync_status;
 
-    const float alpha_value = *alpha;
+    const float alpha_value = *alpha_value_ptr;
     for (int i = 0; i < n; ++i) {
         y[i * incy] = alpha_value * x[i * incx] + y[i * incy];
     }
@@ -364,7 +418,8 @@ cublasStatus_t cublasSscal(cublasHandle_t handle, int n, const float* alpha, flo
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
-    if (n < 0 || incx <= 0 || alpha == nullptr) {
+    const float* alpha_value_ptr = scalar_pointer_for_mode(handle, alpha);
+    if (n < 0 || incx <= 0 || alpha_value_ptr == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
     if (n == 0) {
@@ -380,7 +435,7 @@ cublasStatus_t cublasSscal(cublasHandle_t handle, int n, const float* alpha, flo
     const cublasStatus_t sync_status = synchronize_handle_stream(handle);
     if (sync_status != CUBLAS_STATUS_SUCCESS) return sync_status;
 
-    const float alpha_value = *alpha;
+    const float alpha_value = *alpha_value_ptr;
     for (int i = 0; i < n; ++i) {
         x[i * incx] *= alpha_value;
     }
@@ -460,7 +515,8 @@ cublasStatus_t cublasDaxpy(cublasHandle_t handle,
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
-    if (n < 0 || incx <= 0 || incy <= 0 || alpha == nullptr) {
+    const double* alpha_value_ptr = scalar_pointer_for_mode(handle, alpha);
+    if (n < 0 || incx <= 0 || incy <= 0 || alpha_value_ptr == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
     if (n == 0) {
@@ -478,7 +534,7 @@ cublasStatus_t cublasDaxpy(cublasHandle_t handle,
         return sync_status;
     }
 
-    const double alpha_value = *alpha;
+    const double alpha_value = *alpha_value_ptr;
     for (int i = 0; i < n; ++i) {
         y[i * incy] = alpha_value * x[i * incx] + y[i * incy];
     }
@@ -489,7 +545,8 @@ cublasStatus_t cublasDscal(cublasHandle_t handle, int n, const double* alpha, do
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
-    if (n < 0 || incx <= 0 || alpha == nullptr) {
+    const double* alpha_value_ptr = scalar_pointer_for_mode(handle, alpha);
+    if (n < 0 || incx <= 0 || alpha_value_ptr == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
     if (n == 0) {
@@ -507,7 +564,7 @@ cublasStatus_t cublasDscal(cublasHandle_t handle, int n, const double* alpha, do
         return sync_status;
     }
 
-    const double alpha_value = *alpha;
+    const double alpha_value = *alpha_value_ptr;
     for (int i = 0; i < n; ++i) {
         x[i * incx] *= alpha_value;
     }
@@ -589,11 +646,12 @@ cublasStatus_t cublasSdot(cublasHandle_t handle,
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
-    if (n < 0 || incx <= 0 || incy <= 0 || result == nullptr) {
+    float* result_ptr = scalar_pointer_for_mode(handle, result);
+    if (n < 0 || incx <= 0 || incy <= 0 || result_ptr == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
     if (n == 0) {
-        *result = 0.0f;
+        *result_ptr = 0.0f;
         return CUBLAS_STATUS_SUCCESS;
     }
     if (x == nullptr || y == nullptr) {
@@ -602,10 +660,6 @@ cublasStatus_t cublasSdot(cublasHandle_t handle,
     if (cumetalRuntimeIsDevicePointer(x) == 0 || cumetalRuntimeIsDevicePointer(y) == 0) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
-    if (cumetalRuntimeIsDevicePointer(result) != 0) {
-        return CUBLAS_STATUS_INVALID_VALUE;
-    }
-
     const cublasStatus_t sync_status = synchronize_handle_stream(handle);
     if (sync_status != CUBLAS_STATUS_SUCCESS) {
         return sync_status;
@@ -615,7 +669,7 @@ cublasStatus_t cublasSdot(cublasHandle_t handle,
     for (int i = 0; i < n; ++i) {
         sum += static_cast<double>(x[i * incx]) * static_cast<double>(y[i * incy]);
     }
-    *result = static_cast<float>(sum);
+    *result_ptr = static_cast<float>(sum);
     return CUBLAS_STATUS_SUCCESS;
 }
 
@@ -629,11 +683,12 @@ cublasStatus_t cublasDdot(cublasHandle_t handle,
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
-    if (n < 0 || incx <= 0 || incy <= 0 || result == nullptr) {
+    double* result_ptr = scalar_pointer_for_mode(handle, result);
+    if (n < 0 || incx <= 0 || incy <= 0 || result_ptr == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
     if (n == 0) {
-        *result = 0.0;
+        *result_ptr = 0.0;
         return CUBLAS_STATUS_SUCCESS;
     }
     if (x == nullptr || y == nullptr) {
@@ -642,10 +697,6 @@ cublasStatus_t cublasDdot(cublasHandle_t handle,
     if (cumetalRuntimeIsDevicePointer(x) == 0 || cumetalRuntimeIsDevicePointer(y) == 0) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
-    if (cumetalRuntimeIsDevicePointer(result) != 0) {
-        return CUBLAS_STATUS_INVALID_VALUE;
-    }
-
     const cublasStatus_t sync_status = synchronize_handle_stream(handle);
     if (sync_status != CUBLAS_STATUS_SUCCESS) {
         return sync_status;
@@ -655,7 +706,7 @@ cublasStatus_t cublasDdot(cublasHandle_t handle,
     for (int i = 0; i < n; ++i) {
         sum += x[i * incx] * y[i * incy];
     }
-    *result = sum;
+    *result_ptr = sum;
     return CUBLAS_STATUS_SUCCESS;
 }
 

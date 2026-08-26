@@ -7,6 +7,8 @@ as gaps have been closed.
 
 ## Durable platform / legal limits
 
+- CuMetal targets macOS on Apple Silicon. Windows, Linux ARM, discrete-GPU,
+  and Thunderbolt eGPU execution are outside the supported platform.
 - SASS-only binaries cannot run: CuMetal translates documented PTX and does not
   decompile NVIDIA machine code.
 - CUDA graphics interop (OpenGL/Vulkan/DirectX) is outside the Metal compute ABI CuMetal exposes.
@@ -529,10 +531,20 @@ blocks:
   `XPC_ERROR_CONNECTION_INTERRUPTED`, so it is likewise `run-fail`, not claimed as
   graph conformance.
 - **Dynamic parallelism (CDP)** -- device-side stream creation and launch. 3 samples.
-- **Scattered API surface** -- `CUBLAS_POINTER_MODE_DEVICE`.
-  Batched GEMM/TRSM and device-resident
-  pointer tables are already covered; the broad former `cublas*Batched` label
-  was stale. The 32-bit signed/unsigned
+- **Library pointer modes** -- cuBLAS handle state supports host and device
+  pointer modes. The synchronous S/D AXPY, SCAL, and DOT paths resolve tracked
+  device scalar storage (including native Metal-address allocations), and reject
+  a scalar from the wrong location; focused runtime coverage exercises device
+  alpha and result values. The remaining cuBLAS operations have not all been
+  audited for device scalar arguments, and graph capture still needs asynchronous
+  library-node semantics. cuSPARSE exposes host pointer-mode state; selecting
+  device mode returns `CUSPARSE_STATUS_NOT_SUPPORTED` instead of silently
+  dereferencing the wrong address. NVIDIA's unmodified
+  `conjugateGradientCudaGraphs` translation unit now compiles and links, but its
+  workload was not run in this resource-bounded pass, so the manifest records it
+  as `run-unverified` rather than claiming graph conformance.
+- Batched GEMM/TRSM and device-resident pointer tables are already covered; the
+  broad former `cublas*Batched` label was stale. The 32-bit signed/unsigned
   `atomic{Add,Exch,Min,Max,CAS,And,Or,Xor,Inc,Dec}_system` surface now lowers
   with system scope and passes a focused GPU/host managed-memory test. NVIDIA's
   unmodified `systemWideAtomics` source now compiles, but its large stress run

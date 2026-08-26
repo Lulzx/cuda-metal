@@ -16,6 +16,7 @@ extern "C" {
 
 struct cusparseContext {
     cudaStream_t stream = nullptr;
+    cusparsePointerMode_t pointer_mode = CUSPARSE_POINTER_MODE_HOST;
 };
 
 struct cusparseMatDescr {
@@ -76,6 +77,26 @@ cusparseStatus_t cusparseSetStream(cusparseHandle_t handle, cudaStream_t streamI
 cusparseStatus_t cusparseGetStream(cusparseHandle_t handle, cudaStream_t* streamId) {
     if (handle == nullptr) return CUSPARSE_STATUS_NOT_INITIALIZED;
     if (streamId) *streamId = handle->stream;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSetPointerMode(cusparseHandle_t handle, cusparsePointerMode_t mode) {
+    if (handle == nullptr) return CUSPARSE_STATUS_NOT_INITIALIZED;
+    if (mode != CUSPARSE_POINTER_MODE_HOST && mode != CUSPARSE_POINTER_MODE_DEVICE) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    // The current CPU/UMA sparse paths dereference host alpha/beta values when
+    // the API call executes. Do not claim device-scalar mode until every
+    // implemented sparse operation resolves tracked device scalar storage.
+    if (mode == CUSPARSE_POINTER_MODE_DEVICE) return CUSPARSE_STATUS_NOT_SUPPORTED;
+    handle->pointer_mode = mode;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseGetPointerMode(cusparseHandle_t handle, cusparsePointerMode_t* mode) {
+    if (handle == nullptr) return CUSPARSE_STATUS_NOT_INITIALIZED;
+    if (mode == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *mode = handle->pointer_mode;
     return CUSPARSE_STATUS_SUCCESS;
 }
 

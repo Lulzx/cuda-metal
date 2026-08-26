@@ -50,6 +50,11 @@ typedef enum cusparseOperation_t {
     CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE = 2,
 } cusparseOperation_t;
 
+typedef enum cusparsePointerMode_t {
+    CUSPARSE_POINTER_MODE_HOST = 0,
+    CUSPARSE_POINTER_MODE_DEVICE = 1,
+} cusparsePointerMode_t;
+
 typedef enum cusparseIndexType_t {
     CUSPARSE_INDEX_16U = 1,
     CUSPARSE_INDEX_32I = 2,
@@ -102,6 +107,8 @@ cusparseStatus_t cusparseCreate(cusparseHandle_t* handle);
 cusparseStatus_t cusparseDestroy(cusparseHandle_t handle);
 cusparseStatus_t cusparseSetStream(cusparseHandle_t handle, cudaStream_t streamId);
 cusparseStatus_t cusparseGetStream(cusparseHandle_t handle, cudaStream_t* streamId);
+cusparseStatus_t cusparseSetPointerMode(cusparseHandle_t handle, cusparsePointerMode_t mode);
+cusparseStatus_t cusparseGetPointerMode(cusparseHandle_t handle, cusparsePointerMode_t* mode);
 int cusparseGetVersion(cusparseHandle_t handle, int* version);
 
 // Matrix descriptor

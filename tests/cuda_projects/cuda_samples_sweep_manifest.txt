@@ -95,7 +95,7 @@ compile-fail 3_CUDA_Features/newdelete
 run-fail     3_CUDA_Features/simpleCudaGraphs
 compile-fail 3_CUDA_Features/tf32TensorCoreGemm
 run-unverified 3_CUDA_Features/warpAggregatedAtomicsCG
-compile-fail 4_CUDA_Libraries/conjugateGradientCudaGraphs
+run-unverified 4_CUDA_Libraries/conjugateGradientCudaGraphs
 compile-fail 4_CUDA_Libraries/conjugateGradientPrecond
 compile-fail 4_CUDA_Libraries/cubDeviceFind
 compile-fail 4_CUDA_Libraries/cubDeviceSegmentedScan

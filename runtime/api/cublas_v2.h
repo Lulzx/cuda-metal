@@ -54,6 +54,11 @@ typedef enum cublasMath_t {
     CUBLAS_TF32_TENSOR_OP_MATH = 3,
 } cublasMath_t;
 
+typedef enum cublasPointerMode_t {
+    CUBLAS_POINTER_MODE_HOST = 0,
+    CUBLAS_POINTER_MODE_DEVICE = 1,
+} cublasPointerMode_t;
+
 typedef enum cublasComputeType_t {
     CUBLAS_COMPUTE_16F = 64,
     CUBLAS_COMPUTE_32F = 68,
@@ -98,6 +103,8 @@ cublasStatus_t cublasSetStream(cublasHandle_t handle, cudaStream_t stream_id);
 cublasStatus_t cublasGetStream(cublasHandle_t handle, cudaStream_t* stream_id);
 cublasStatus_t cublasSetMathMode(cublasHandle_t handle, cublasMath_t mode);
 cublasStatus_t cublasGetMathMode(cublasHandle_t handle, cublasMath_t* mode);
+cublasStatus_t cublasSetPointerMode(cublasHandle_t handle, cublasPointerMode_t mode);
+cublasStatus_t cublasGetPointerMode(cublasHandle_t handle, cublasPointerMode_t* mode);
 
 cublasStatus_t cublasSaxpy(cublasHandle_t handle,
                            int n,

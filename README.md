@@ -202,6 +202,8 @@ tolerances, and provenance requirements remain in
 
 Durable platform/legal boundaries:
 
+- CuMetal targets macOS on Apple Silicon; Windows, Linux ARM, discrete GPUs,
+  and Thunderbolt eGPU execution are outside the supported platform.
 - No SASS execution or decompilation; binary compatibility requires embedded PTX.
 - No multi-GPU or peer-to-peer execution on the single-GPU Apple Silicon target.
 - No OpenGL, Vulkan, or DirectX interop.

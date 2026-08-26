@@ -78,6 +78,94 @@ int main() {
         return 1;
     }
 
+    cublasPointerMode_t pointer_mode = CUBLAS_POINTER_MODE_DEVICE;
+    if (cublasGetPointerMode(handle, &pointer_mode) != CUBLAS_STATUS_SUCCESS ||
+        pointer_mode != CUBLAS_POINTER_MODE_HOST) {
+        std::fprintf(stderr, "FAIL: cublasGetPointerMode default mismatch\n");
+        return 1;
+    }
+    if (cublasGetPointerMode(handle, nullptr) != CUBLAS_STATUS_NOT_INITIALIZED ||
+        cublasSetPointerMode(handle, static_cast<cublasPointerMode_t>(-1)) !=
+            CUBLAS_STATUS_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: cuBLAS pointer-mode negative path mismatch\n");
+        return 1;
+    }
+
+    constexpr int kPointerModeCount = 3;
+    const float pointer_mode_x[kPointerModeCount] = {1.0f, 2.0f, 3.0f};
+    const float pointer_mode_y[kPointerModeCount] = {4.0f, 5.0f, 6.0f};
+    const float pointer_mode_alpha = 2.0f;
+    float* dev_pointer_mode_x = nullptr;
+    float* dev_pointer_mode_y = nullptr;
+    float* dev_pointer_mode_scalar = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&dev_pointer_mode_x), sizeof(pointer_mode_x)) !=
+            cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&dev_pointer_mode_y), sizeof(pointer_mode_y)) !=
+            cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&dev_pointer_mode_scalar), sizeof(float)) !=
+            cudaSuccess ||
+        cudaMemcpy(dev_pointer_mode_x, pointer_mode_x, sizeof(pointer_mode_x),
+                   cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dev_pointer_mode_y, pointer_mode_y, sizeof(pointer_mode_y),
+                   cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dev_pointer_mode_scalar, &pointer_mode_alpha, sizeof(float),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: pointer-mode setup\n");
+        return 1;
+    }
+    if (cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_DEVICE) != CUBLAS_STATUS_SUCCESS ||
+        cublasGetPointerMode(handle, &pointer_mode) != CUBLAS_STATUS_SUCCESS ||
+        pointer_mode != CUBLAS_POINTER_MODE_DEVICE ||
+        cublasSaxpy(handle, kPointerModeCount, dev_pointer_mode_scalar,
+                    dev_pointer_mode_x, 1, dev_pointer_mode_y, 1) != CUBLAS_STATUS_SUCCESS ||
+        cublasSscal(handle, kPointerModeCount, dev_pointer_mode_scalar,
+                    dev_pointer_mode_x, 1) != CUBLAS_STATUS_SUCCESS ||
+        cublasSdot(handle, kPointerModeCount, dev_pointer_mode_x, 1,
+                   dev_pointer_mode_y, 1, dev_pointer_mode_scalar) != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuBLAS device pointer mode operations\n");
+        return 1;
+    }
+    float pointer_mode_result = 0.0f;
+    float pointer_mode_x_result[kPointerModeCount] = {};
+    float pointer_mode_y_result[kPointerModeCount] = {};
+    if (cudaMemcpy(&pointer_mode_result, dev_pointer_mode_scalar, sizeof(float),
+                   cudaMemcpyDeviceToHost) != cudaSuccess ||
+        cudaMemcpy(pointer_mode_x_result, dev_pointer_mode_x, sizeof(pointer_mode_x_result),
+                   cudaMemcpyDeviceToHost) != cudaSuccess ||
+        cudaMemcpy(pointer_mode_y_result, dev_pointer_mode_y, sizeof(pointer_mode_y_result),
+                   cudaMemcpyDeviceToHost) != cudaSuccess ||
+        !nearly_equal(pointer_mode_result, 120.0f) ||
+        !nearly_equal(pointer_mode_x_result[0], 2.0f) ||
+        !nearly_equal(pointer_mode_x_result[1], 4.0f) ||
+        !nearly_equal(pointer_mode_x_result[2], 6.0f) ||
+        !nearly_equal(pointer_mode_y_result[0], 6.0f) ||
+        !nearly_equal(pointer_mode_y_result[1], 9.0f) ||
+        !nearly_equal(pointer_mode_y_result[2], 12.0f)) {
+        std::fprintf(stderr, "FAIL: cuBLAS device pointer mode result mismatch\n");
+        return 1;
+    }
+    if (cublasSaxpy(handle, kPointerModeCount, &pointer_mode_alpha,
+                    dev_pointer_mode_x, 1, dev_pointer_mode_y, 1) !=
+            CUBLAS_STATUS_INVALID_VALUE ||
+        cublasSdot(handle, kPointerModeCount, dev_pointer_mode_x, 1,
+                   dev_pointer_mode_y, 1, &pointer_mode_result) !=
+            CUBLAS_STATUS_INVALID_VALUE ||
+        cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST) != CUBLAS_STATUS_SUCCESS ||
+        cublasSscal(handle, kPointerModeCount, dev_pointer_mode_scalar,
+                    dev_pointer_mode_x, 1) != CUBLAS_STATUS_INVALID_VALUE ||
+        cublasSdot(handle, kPointerModeCount, dev_pointer_mode_x, 1,
+                   dev_pointer_mode_y, 1, dev_pointer_mode_scalar) !=
+            CUBLAS_STATUS_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: cuBLAS pointer mode did not reject wrong scalar location\n");
+        return 1;
+    }
+    if (cudaFree(dev_pointer_mode_x) != cudaSuccess ||
+        cudaFree(dev_pointer_mode_y) != cudaSuccess ||
+        cudaFree(dev_pointer_mode_scalar) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: pointer-mode cleanup\n");
+        return 1;
+    }
+
     constexpr int kVecCount = 2048;
     std::vector<float> host_x(kVecCount);
     std::vector<float> host_y(kVecCount);
