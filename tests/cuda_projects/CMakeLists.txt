@@ -68,6 +68,14 @@ set_tests_properties(
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
 )
 
+# Regression: LLVM `fence` crashed Apple's AIR backend at pipeline creation (so every
+# atomicCAS-bearing kernel silently did nothing), and scalar __shared__ objects were
+# counted as zero bytes when sizing threadgroup memory.
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_device_sync_primitives
+    device_sync_primitives device_sync_primitives.cu device_sync_primitives
+)
+
 # Runtime-level regression: __cudaRegisterVar used to map a __device__/__constant__
 # symbol onto its device-side name string, so cudaMemcpyToSymbol wrote over a string
 # literal. Host-side symbol APIs only, so it gates on the runtime rather than on

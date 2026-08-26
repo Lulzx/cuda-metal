@@ -426,7 +426,7 @@ as gaps have been closed.
 88 headless samples from `NVIDIA/cuda-samples` (`cpp/0_Introduction`,
 `2_Concepts_and_Techniques`, `3_CUDA_Features`, `4_CUDA_Libraries`,
 `6_Performance`) are compiled and run against `libcumetal`. Result:
-**19 pass, 2 waive cleanly, 62 do not build or run**.
+**21 pass, 2 waive cleanly, 60 do not build or run**.
 
 This runs as `conformance_cuda_samples_sweep`. The samples themselves are not
 vendored -- the test skips (77) unless a `cuda-samples` checkout is present at
@@ -480,9 +480,38 @@ computing the wrong answer.
 Samples that compile and launch but do not produce correct results -- these are
 real lowering or runtime defects, not coverage gaps:
 
-- `simpleAtomicIntrinsics` reports `atomicAdd failed`.
-- `scan`, `simpleStreams`, `MersenneTwisterGP11213`, `conjugateGradient`,
-  `conjugateGradientUM` compute wrong values.
+- `simpleStreams`, `MersenneTwisterGP11213`, `conjugateGradient`,
+  `conjugateGradientUM` compute wrong values. Not yet diagnosed.
+
+`simpleAtomicIntrinsics` and `scan` were in that list until two silent defects behind
+them were fixed. Both are worth knowing about, because both produced zeros with
+`cudaSuccess` reported everywhere the caller looked:
+
+- **Apple's AIR backend cannot lower LLVM's `fence`.** Emitting one crashes the Metal
+  compiler service when the pipeline state is created -- `XPC_ERROR_CONNECTION_INTERRUPTED`,
+  "after multiple retries" -- long after the metallib has been written and validated.
+  The kernel then never runs. This was not only about explicit `__threadfence()`: clang
+  plants a membar next to `atomicCAS`, so every CAS-bearing kernel was affected, and
+  `atomicInc`/`atomicDec` with it. `membar`/`fence` now lowers to a call to
+  `air.atomic.fence(mem_flags, memory_order, scope)`, which is what Metal's own compiler
+  emits for `atomic_thread_fence`.
+- **Scalar `__shared__` objects were sized as zero bytes.**
+  `compute_static_shared_bytes()` counted only `.bN name[N]` array declarations, while
+  the layout pass that assigns offsets accepted the full type set. A scalar
+  `__shared__ unsigned x`, which clang emits as `.shared .align 4 .u32 name;`, was given
+  an offset by one pass and counted as nothing by the other, so the threadgroup
+  allocation came out at length 0: every store dropped, every load zero. This is the
+  same shape as the `.local` stack-depot bug -- two parsers for one thing, the stricter
+  one silently winning.
+
+`functional_cuda_projects_device_sync_primitives` covers both, verified failing against
+each unfixed version.
+
+Worth noting for anyone debugging a kernel that "runs" but returns zeros: a failed
+launch is visible to `cudaGetLastError()` right after the launch, but
+`cudaDeviceSynchronize()` currently returns `cudaSuccess` and clears it. Both defects
+above were invisible for exactly that reason. `CUMETAL_DEBUG_LAUNCH=1` prints the real
+reason, and `CUMETAL_DEBUG_DUMP_IR_DIR=<dir>` dumps the emitted LLVM IR.
 - `clock`, `mergeSort`, `simpleHyperQ`, `scalarProd`, `eigenvalues`,
   `sortingNetworks`, `convolutionSeparable`, `threadFenceReduction`,
   `LargeKernelParameter` hit "registered kernel missing metallib" -- the lowering

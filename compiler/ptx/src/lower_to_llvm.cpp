@@ -3999,8 +3999,29 @@ class GenericLlvmEmitter {
     }
 
     bool emit_membar_or_fence(std::ostringstream& os,
-                              const cumetal::ptx::EntryFunction::Instruction& /*instr*/) {
-        os << "  fence seq_cst\n";
+                              const cumetal::ptx::EntryFunction::Instruction& instr) {
+        // Apple's AIR backend cannot lower LLVM's `fence` instruction. Emitting one
+        // crashes the Metal compiler service when the pipeline state is created
+        // (XPC_ERROR_CONNECTION_INTERRUPTED, "after multiple retries"), long after the
+        // metallib has been written and validated -- so the kernel simply never runs.
+        // Metal spells a fence as a call, which is what its own compiler emits for
+        // atomic_thread_fence:
+        //
+        //   air.atomic.fence(mem_flags, memory_order, scope)
+        //     mem_flags    0 none, 1 device, 2 threadgroup, 3 device|threadgroup
+        //     memory_order 0 relaxed, 5 seq_cst
+        //     scope        2
+        //
+        // This is not only about explicit __threadfence(): clang plants a membar next
+        // to atomicCAS, so every CAS-bearing kernel -- and anything built on one, such
+        // as atomicInc/atomicDec -- was silently doing nothing.
+        //
+        // membar.cta / fence...cta is threadgroup scope; .gl and .sys are device, and
+        // a bare membar is treated as the wider one.
+        const bool cta_scope = instr.opcode.find(".cta") != std::string::npos;
+        const int mem_flags = cta_scope ? 2 : 3;
+        declarations_.insert("declare void @air.atomic.fence(i32, i32, i32)");
+        os << "  call void @air.atomic.fence(i32 " << mem_flags << ", i32 5, i32 2)\n";
         return true;
     }
 
@@ -5426,12 +5447,28 @@ std::size_t compute_static_shared_bytes(std::string_view ptx_text,
         if (t.find(".shared") == std::string::npos) continue;
         if (t.find(".extern") != std::string::npos) continue;
 
+        // This table has to match parse_ptx_shared_symbols() above, which lays the
+        // objects out. It used to list only .b64/.b32/.b16/.b8, while the layout pass
+        // accepted the full set -- so a scalar `__shared__ unsigned x`, which clang
+        // emits as `.shared .align 4 .u32 name;`, was given an offset by one pass and
+        // counted as zero bytes by this one. The threadgroup allocation then came out
+        // at length 0, and every store to it was dropped while every load returned 0:
+        // no error, no warning, just a kernel quietly computing nothing.
         int elem_bytes = 1;
         std::size_t b_pos = std::string::npos;
+        std::size_t type_len = 0;
         for (const auto& p : std::vector<std::pair<std::string, int>>{
-                {".b64", 8}, {".b32", 4}, {".b16", 2}, {".b8", 1}}) {
+                {".b64", 8}, {".u64", 8}, {".s64", 8}, {".f64", 8},
+                {".b32", 4}, {".u32", 4}, {".s32", 4}, {".f32", 4},
+                {".b16", 2}, {".u16", 2}, {".s16", 2}, {".f16", 2},
+                {".b8", 1}, {".u8", 1}, {".s8", 1}, {".pred", 1}}) {
             const auto pos = t.find(p.first);
-            if (pos != std::string::npos) { b_pos = pos; elem_bytes = p.second; break; }
+            if (pos != std::string::npos) {
+                b_pos = pos;
+                type_len = p.first.size();
+                elem_bytes = p.second;
+                break;
+            }
         }
         if (b_pos == std::string::npos) continue;
 
@@ -5447,12 +5484,15 @@ std::size_t compute_static_shared_bytes(std::string_view ptx_text,
             }
         }
 
-        const std::size_t type_len = (elem_bytes == 1) ? 3u : 4u;
         std::size_t sym_begin = b_pos + type_len;
         while (sym_begin < t.size() && std::isspace(static_cast<unsigned char>(t[sym_begin])) != 0) ++sym_begin;
+        // A declaration without '[' is a scalar shared object, not something to skip:
+        // it still occupies one element's worth of threadgroup memory.
         const std::size_t bracket_open = t.find('[', sym_begin);
-        if (bracket_open == std::string::npos) continue;
-        const std::string symbol = trim(t.substr(sym_begin, bracket_open - sym_begin));
+        const bool is_scalar = bracket_open == std::string::npos;
+        const std::size_t symbol_end = is_scalar ? t.find(';', sym_begin) : bracket_open;
+        if (symbol_end == std::string::npos) continue;
+        const std::string symbol = trim(t.substr(sym_begin, symbol_end - sym_begin));
         if (symbol.empty() || seen.count(symbol) != 0) continue;
         // Clang commonly emits static shared objects at module scope.  For an
         // entry-specific query, count only declarations referenced by the
@@ -5463,8 +5503,8 @@ std::size_t compute_static_shared_bytes(std::string_view ptx_text,
         }
         seen.insert(symbol);
 
-        const std::size_t bracket_close = t.find(']', bracket_open + 1);
-        std::size_t elem_count = 0;
+        std::size_t elem_count = is_scalar ? 1u : 0u;
+        const std::size_t bracket_close = is_scalar ? std::string::npos : t.find(']', bracket_open + 1);
         if (bracket_close != std::string::npos) {
             const std::string cnt = trim(t.substr(bracket_open + 1, bracket_close - bracket_open - 1));
             if (!cnt.empty()) {

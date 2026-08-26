@@ -20,6 +20,7 @@
 pass         0_Introduction/asyncAPI
 pass         0_Introduction/matrixMul
 pass         0_Introduction/simpleAssert
+pass         0_Introduction/simpleAtomicIntrinsics
 pass         0_Introduction/simpleCallback
 pass         0_Introduction/simpleMultiCopy
 pass         0_Introduction/simpleOccupancy
@@ -30,6 +31,7 @@ pass         0_Introduction/template
 pass         0_Introduction/vectorAdd
 pass         2_Concepts_and_Techniques/histogram
 pass         2_Concepts_and_Techniques/inlinePTX
+pass         2_Concepts_and_Techniques/scan
 pass         3_CUDA_Features/StreamPriorities
 pass         4_CUDA_Libraries/batchCUBLAS
 pass         4_CUDA_Libraries/matrixMulCUBLAS
@@ -50,9 +52,7 @@ no-lowering  2_Concepts_and_Techniques/sortingNetworks
 no-lowering  2_Concepts_and_Techniques/threadFenceReduction
 no-lowering  6_Performance/LargeKernelParameter
 
-run-fail     0_Introduction/simpleAtomicIntrinsics
 run-fail     0_Introduction/simpleStreams
-run-fail     2_Concepts_and_Techniques/scan
 run-fail     4_CUDA_Libraries/conjugateGradient
 run-fail     4_CUDA_Libraries/conjugateGradientUM
 run-fail     4_CUDA_Libraries/MersenneTwisterGP11213
