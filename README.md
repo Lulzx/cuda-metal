@@ -51,77 +51,15 @@ cmake --build build -j"$(sysctl -n hw.ncpu)"
 bash scripts/ci_report.sh build --exclude-regex '^bench_'
 ```
 
-### Apollo demo (the front door)
-
-One command that climbs from vector-add through reduction, SGEMM, and a path
-tracer, refusing any stage that lacks `device=apple_gpu` provenance:
+### Try it
 
 ```bash
 bash demos/apollo/run.sh
 ```
 
-Optional: `bash demos/apollo/run.sh --full` adds the llm.c GPT-2 FP32 gate.
-Details, scope limits, and artifacts: [demos/apollo/README.md](demos/apollo/README.md).
-
-### 3D Gaussian Splatting (industry CUDA)
-
-The Inria tile-based Gaussian rasterizer (`renderCUDA` + binning kernels) on Apple
-Silicon, with a written image and `device=apple_gpu` provenance:
-
-```bash
-bash demos/3dgs/run.sh
-open demos/3dgs/out/gaussians.png
-```
-
-Preprocess currently runs on the host; tile sort/blend runs on the GPU. Scope and
-limits: [demos/3dgs/README.md](demos/3dgs/README.md).
-
-### 3D SPH dam break (heavy simulation + rendering)
-
-~200k-particle weakly-compressible SPH in the DualSPHysics style, with the
-neighbour search, physics, and the particle rasterizer all written as CUDA
-kernels:
-
-```bash
-bash demos/sph/run.sh --selftest    # GPU vs host brute-force SPH reference
-bash demos/sph/run.sh               # 1920x1080 60 fps -> demos/sph/out/dambreak.mp4
-```
-
-Uses `__shared__`/`__syncthreads()` prefix sums, `atomicAdd` counting sort, and
-an `atomicMin` depth pass. Gated on physics (dam-break front speed, density
-drift), not on "it ran": [demos/sph/README.md](demos/sph/README.md).
-
-### Tiny diffusion model (a real generative model, end to end)
-
-A ~310k-parameter DDPM trained on MNIST in PyTorch, then sampled entirely by
-hand-written CUDA kernels — 1000 denoising steps, ~13 s for 16 images:
-
-```bash
-python3 demos/diffusion/train.py    # ~4 min on MPS -> out/model.bin
-./demos/diffusion/run.sh --check    # forward pass vs the PyTorch reference
-./demos/diffusion/run.sh            # sample -> demos/diffusion/out/samples.png
-```
-
-`--check` gates on `max |cumetal - pytorch| < 2e-3` (measured: 5.2e-06). Writing
-it surfaced a silent wrong-answer bug in the PTX->MSL float typing:
-[demos/diffusion/README.md](demos/diffusion/README.md).
-
-### Single sample
-
-```bash
-./build/cumetalc samples/vectorAdd/vectorAdd.cu -o /tmp/vectorAdd
-CUMETAL_TRACE_GPU=1 /tmp/vectorAdd
-```
-
-The program should print a numerical `PASS`. The trace should contain a
-`CUMETAL_PROVENANCE` record with `device=apple_gpu` and
-`launch_success=true`. A correct number without GPU provenance is not proof of
-GPU execution.
-
-Runtime-compiled MSL preserves Metal's fast-math default. Set
-`CUMETAL_MSL_MATH_MODE=safe` to request safe Metal math for JIT-compiled source;
-GPU provenance reports the selected `math_mode`. Precompiled metallibs retain
-the policy used when they were built.
+Apollo progresses from vector addition through a path tracer and requires
+Apple-GPU provenance at every stage. The 3D Gaussian Splatting, SPH, diffusion,
+and single-sample workflows are in [the demos guide](docs/demos.md).
 
 Install it without changing shell startup files:
 
@@ -307,80 +245,16 @@ The legal boundary is documented in
 
 ## What has actually been demonstrated
 
-### Small kernels
-
 Vector add, SAXPY, reduction, matrix operations, atomics, shared memory, warp
 operations, streams, events, and selected CUDA library calls have numerical GPU
 tests. The suite includes negative cases because accepting a program is not the
 same as implementing it correctly.
 
-### Performance
-
-The Phase 5 gate compares CuMetal with hand-written Metal for three
-memory-bound kernels. On an Apple M4 Pro, rebuilt and measured on 2026-07-27:
-
-| Kernel | Elements | CuMetal / native Metal |
-| --- | ---: | ---: |
-| vector add | 262,144 | 1.063× |
-| SAXPY | 262,144 | 1.036× |
-| FP32 reduction | 262,144 | 1.008× |
-
-The gate uses the fastest of 20 synchronized wall-clock iterations. These
-kernels take roughly 0.2 ms, so averages mostly measure scheduler interference.
-The target is at most 2× native Metal, not a suspicious claim that translated
-code beats the baseline.
-
-Reproduce it:
-
-```bash
-ctest --test-dir build -R bench_phase5_all_kernels --output-on-failure
-```
-
-### Real programs
-
-- Upstream `cuda-samples` vector add builds without source changes and passes a
-  numerical plus Apple-GPU provenance gate.
-- llm.c GPT-2 FP32 passes logits, loss, tensor, and GPU-provenance checks on the
-  tested path. It uses explicit workload specializations and is not proof of
-  arbitrary PTX support.
-- llama.cpp's unmodified GGML CUDA backend builds against CuMetal. SmolLM2-135M
-  greedy decoding was coherent from one-layer offload through saturation on the
-  verified Apple M4 Pro setup. FlashAttention is advertised as unsupported, so
-  llama.cpp selects its ordinary attention path.
-- A reduced PhysX 5.6 GRB path runs selected sphere, box, convex, and triangle
-  mesh contacts on the GPU. It is a selected-shape conformance target, not
-  general PhysX GPU support.
-
-Exact commands, models, tolerances, provenance requirements, results, and
-scope boundaries live in
-[docs/apple-gpu-execution.md](docs/apple-gpu-execution.md),
-[docs/testing.md](docs/testing.md), and
-[docs/known-gaps.md](docs/known-gaps.md). Compatibility claims without those
-conditions are meaningless.
-
-## Projects using CuMetal
-
-External projects that use CuMetal as their Apple Silicon GPU backend. These are
-third-party results, verified by their authors rather than by this repository.
-
-- **[cu_vslam_rs](https://github.com/jeff-hykin/cu_vslam_rs)** by
-  [@jeff-hykin](https://github.com/jeff-hykin) — NVIDIA's
-  [cuVSLAM](https://github.com/nvidia-isaac/cuVSLAM) visual odometry stack, for
-  which NVIDIA ships no macOS build, compiled for Apple Silicon against CuMetal
-  and packaged as an SDK by a nix flake (`nix build ...#sdk-metal`). The CUDA
-  kernels are not rewritten in Metal; they go through CuMetal's PTX path. Its
-  `metal_smoke` test asserts actual camera motion rather than a success status
-  code, because CuMetal defects have historically returned success while
-  producing an identity pose. Stereo runs on either backend; RGB-D requires the
-  GPU, since cuVSLAM v17 lifts depth into landmarks only in a CUDA kernel.
-
-  Getting it working needed `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`: its feature
-  detector builds texture objects over linear memory and dereferences the
-  resource pointer in device code, which reads as zeros under CuMetal's default
-  addressing with no error reported. `cudaCreateTextureObject` now warns about
-  that case instead of failing silently.
-
-If you have shipped something on CuMetal, open a PR adding it here.
+The recorded native-Metal comparison, real-program gates, their scope, and
+third-party projects using CuMetal are in
+[verified results](docs/verified-results.md). Exact commands, models,
+tolerances, and provenance requirements remain in
+[the Apple-GPU execution record](docs/apple-gpu-execution.md).
 
 ## Known hard limits
 
@@ -406,31 +280,18 @@ Engineering gaps, not fundamental impossibilities:
 - Device `printf` uses a bounded buffer and limits format strings to 256 bytes.
 - CUDA, library-shim, PhysX, llama.cpp, and PTX coverage is incomplete.
 
-This list is intentionally short. The authoritative list is
+This summary is intentionally short. The authoritative classification of
+platform boundaries and implementable engineering gaps is in
 [docs/known-gaps.md](docs/known-gaps.md).
 
 ## Test without lying to yourself
 
-Run both the normal source-first build and the binary-shim build:
+For routine source-first validation:
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 bash scripts/ci_report.sh build --exclude-regex '^bench_'
-
-cmake -B build-shim \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DCUMETAL_ENABLE_BINARY_SHIM=ON
-cmake --build build-shim
-bash scripts/ci_report.sh build-shim --exclude-regex '^bench_'
-```
-
-For focused work:
-
-```bash
-ctest --test-dir build -R unit_ --output-on-failure
-ctest --test-dir build -R functional_ --output-on-failure
-ctest --test-dir build -R conformance_ --output-on-failure
 ```
 
 Report passes, skips, and failures separately. A registered test is not a
@@ -438,10 +299,8 @@ passing test. A skip is not evidence of compatibility. A correct answer without
 GPU provenance may be a CPU fallback. The test policy exists because all three
 mistakes have happened before.
 
-The hosted and Apple-GPU CI definitions are temporarily disabled and retained
-as `.github/workflows/*.yml.disabled` for later re-enablement. The equivalent
-local test selections and runner contract remain documented in
-[docs/testing.md](docs/testing.md).
+Binary-shim validation, focused test selections, CUDA sample setup, CI state,
+and the runner contract are documented in [the testing guide](docs/testing.md).
 
 ## Tools
 
@@ -462,6 +321,8 @@ local test selections and runner contract remain documented in
 - [Current status](docs/status.md) — what is implemented
 - [Known gaps](docs/known-gaps.md) — what is partial, wrong, or absent
 - [Build guide](docs/build.md) — toolchains and validation
+- [Demos](docs/demos.md) — runnable showcases and their evidence gates
+- [Verified results](docs/verified-results.md) — benchmarks, real programs, and downstream usage
 - [Testing guide](docs/testing.md) — gates and conformance workflows
 - [Compiler architecture](docs/compiler-architecture.md) — lowering paths and migration boundaries
 - [Apple-GPU execution record](docs/apple-gpu-execution.md) — evidence and provenance
