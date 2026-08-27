@@ -49,8 +49,31 @@ int main() {
         return 1;
     }
 
-    if (cuMemAllocManaged(&ptr, kBytes, 1) != CUDA_ERROR_INVALID_VALUE) {
-        std::fprintf(stderr, "FAIL: unsupported managed flags should fail\n");
+    // GLOBAL attachment is what unified memory already gives, so it must be
+    // accepted; CUDA's own C++ overload passes it by default.
+    if (cuMemAllocManaged(&ptr, kBytes, CU_MEM_ATTACH_GLOBAL) != CUDA_SUCCESS || ptr == 0) {
+        std::fprintf(stderr, "FAIL: CU_MEM_ATTACH_GLOBAL should be accepted\n");
+        return 1;
+    }
+    if (cuMemFree(ptr) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuMemFree after CU_MEM_ATTACH_GLOBAL failed\n");
+        return 1;
+    }
+
+    // HOST and SINGLE need migration and stream-attachment state CuMetal does
+    // not model, so they must be refused rather than quietly aliased to GLOBAL.
+    if (cuMemAllocManaged(&ptr, kBytes, CU_MEM_ATTACH_HOST) != CUDA_ERROR_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: CU_MEM_ATTACH_HOST should be refused, not silently accepted\n");
+        return 1;
+    }
+
+    if (cuMemAllocManaged(&ptr, kBytes, CU_MEM_ATTACH_SINGLE) != CUDA_ERROR_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: CU_MEM_ATTACH_SINGLE should be refused\n");
+        return 1;
+    }
+
+    if (cuMemAllocManaged(&ptr, kBytes, 0x8) != CUDA_ERROR_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: undefined managed flags should fail\n");
         return 1;
     }
 

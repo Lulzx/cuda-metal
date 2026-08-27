@@ -2970,6 +2970,51 @@ bool ptx_uses_fp64(std::string_view ptx) {
     return ptx.find(".f64") != std::string_view::npos;
 }
 
+// Global-space accesses the generic emitter cannot represent.
+//
+// It models a global pointer as a `float*` and scales the index by the element
+// size, so an eight-byte element becomes a `float` at twice the index: only the
+// low half of each value is read or written. Copying a 16-byte struct emitted
+// MSL that touched elements 0 and 2 and left 1 and 3 untouched. Vector forms
+// fare no better -- `ld.global.v2.b64` binds the first destination register and
+// drops the rest. Neither is a compile error, so both produced wrong answers
+// silently; the LLVM path lowers both correctly, so decline here instead.
+//
+// Scoped to `ld`/`st` opcodes in global space on purpose. `.local` vector
+// traffic goes through the stack-depot machinery and works (clang emits
+// `st.local.v2.b32` for a printf argument buffer), and addressing traffic
+// (`ld.param.u64`, `cvta.global.u64`, `mov.u64`) never reaches this path.
+bool ptx_uses_unsupported_global_access(std::string_view ptx) {
+    static constexpr std::string_view kWide[] = {".b64", ".u64", ".s64", ".f64"};
+    static constexpr std::string_view kVector[] = {".v2.", ".v4."};
+    for (std::size_t pos = ptx.find(".global"); pos != std::string_view::npos;
+         pos = ptx.find(".global", pos + 1)) {
+        std::size_t start = pos;
+        while (start > 0 && ptx[start - 1] != ' ' && ptx[start - 1] != '\t' &&
+               ptx[start - 1] != '\n') {
+            --start;
+        }
+        const std::string_view head = ptx.substr(start, pos - start);
+        if (head.rfind("ld", 0) != 0 && head.rfind("st", 0) != 0) {
+            continue;
+        }
+        const std::size_t end = ptx.find_first_of(" \t\n", pos);
+        const std::string_view opcode =
+            ptx.substr(start, end == std::string_view::npos ? end : end - start);
+        for (const std::string_view wide : kWide) {
+            if (opcode.find(wide) != std::string_view::npos) {
+                return true;
+            }
+        }
+        for (const std::string_view vec : kVector) {
+            if (opcode.find(vec) != std::string_view::npos) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerToMetalOptions& options) {
@@ -3034,6 +3079,15 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
             "kernel '" + pipeline.entry_name +
             "' uses FP64; the direct-MSL lowering has no FP64 support, deferring to the "
             "LLVM path");
+        result.ok = true;
+        result.matched = false;
+        return result;
+    }
+    if (!metal_source.empty() && ptx_uses_unsupported_global_access(ptx)) {
+        result.warnings.push_back(
+            "kernel '" + pipeline.entry_name +
+            "' uses vector or 64-bit global memory access, which the direct-MSL lowering "
+            "cannot represent; deferring to the LLVM path");
         result.ok = true;
         result.matched = false;
         return result;

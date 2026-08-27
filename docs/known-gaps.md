@@ -493,7 +493,7 @@ as gaps have been closed.
 83 gated headless samples from `NVIDIA/cuda-samples` (`cpp/0_Introduction`,
 `2_Concepts_and_Techniques`, `3_CUDA_Features`, `4_CUDA_Libraries`,
 `6_Performance`) are compiled and run against `libcumetal`. Result:
-**33 pass, 3 waive cleanly, 47 do not yet have a passing runtime result**.
+**40 pass, 3 waive cleanly, 40 do not yet have a passing runtime result**.
 
 This runs as `conformance_cuda_samples_sweep`. The samples themselves are not
 vendored -- the test skips (77) unless a `cuda-samples` checkout is present at

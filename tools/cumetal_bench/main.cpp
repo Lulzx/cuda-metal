@@ -278,10 +278,18 @@ BenchResult bench_vector_add_native(const Options& opts,
         .shared_memory_bytes = 0,
     };
 
+    // Designated initializers on purpose. KernelArg gained a `binding_index`
+    // member between `offset` and `bytes`, and the positional form that used to
+    // sit here put its trailing `{}` into that member instead: every argument
+    // then bound to Metal buffer index 0, so the kernel read both operands from
+    // one buffer and never wrote the output at all.
     std::vector<cumetal::metal_backend::KernelArg> args(3);
-    args[0] = {cumetal::metal_backend::KernelArg::Kind::kBuffer, ba, 0, {}};
-    args[1] = {cumetal::metal_backend::KernelArg::Kind::kBuffer, bb, 0, {}};
-    args[2] = {cumetal::metal_backend::KernelArg::Kind::kBuffer, bc, 0, {}};
+    args[0] = {.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer,
+               .buffer = ba, .offset = 0};
+    args[1] = {.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer,
+               .buffer = bb, .offset = 0};
+    args[2] = {.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer,
+               .buffer = bc, .offset = 0};
 
     // Warmup
     for (int i = 0; i < opts.warmup_iterations; ++i) {
@@ -461,9 +469,12 @@ BenchResult bench_saxpy_native(const Options& opts,
     };
 
     std::vector<cumetal::metal_backend::KernelArg> args(3);
-    args[0] = {cumetal::metal_backend::KernelArg::Kind::kBuffer, by,     0, {}};
-    args[1] = {cumetal::metal_backend::KernelArg::Kind::kBuffer, bx,     0, {}};
-    args[2] = {cumetal::metal_backend::KernelArg::Kind::kBuffer, balpha, 0, {}};
+    args[0] = {.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer,
+               .buffer = by, .offset = 0};
+    args[1] = {.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer,
+               .buffer = bx, .offset = 0};
+    args[2] = {.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer,
+               .buffer = balpha, .offset = 0};
 
     // Warmup
     for (int i = 0; i < opts.warmup_iterations; ++i) {
@@ -634,8 +645,10 @@ BenchResult bench_reduce_native(const Options& opts, const std::vector<float>& h
         .shared_memory_bytes = shared_mem,
     };
     std::vector<cumetal::metal_backend::KernelArg> args(2);
-    args[0] = {cumetal::metal_backend::KernelArg::Kind::kBuffer, binput,  0, {}};
-    args[1] = {cumetal::metal_backend::KernelArg::Kind::kBuffer, boutput, 0, {}};
+    args[0] = {.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer,
+               .buffer = binput, .offset = 0};
+    args[1] = {.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer,
+               .buffer = boutput, .offset = 0};
 
     for (int i = 0; i < opts.warmup_iterations; ++i) {
         if (cumetal::metal_backend::launch_kernel(opts.metallib_path, "reduce_f32", cfg, args,

@@ -60,6 +60,36 @@ const char* legacy_source_for_provenance(const std::string& provenance) {
     return "unknown";
 }
 
+
+// Metal's setBytes is capped at 4 KB. CUDA raised the kernel parameter limit to
+// 32764 bytes in 12.1, and a __grid_constant__ struct that large is exactly what
+// NVIDIA's LargeKernelParameter sample passes. A [[buffer(N)]] parameter accepts
+// either binding, so stage an oversized payload into a transient buffer; the
+// command buffer retains it until the launch completes.
+bool bind_byte_argument(id<MTLComputeCommandEncoder> encoder,
+                        id<MTLDevice> device,
+                        const std::vector<std::uint8_t>& bytes,
+                        std::size_t binding_index,
+                        const std::string& context,
+                        std::string* error_message) {
+    if (bytes.size() <= 4096) {
+        [encoder setBytes:bytes.data() length:bytes.size() atIndex:binding_index];
+        return true;
+    }
+    id<MTLBuffer> staged = [device newBufferWithBytes:bytes.data()
+                                               length:bytes.size()
+                                              options:MTLResourceStorageModeShared];
+    if (staged == nil) {
+        if (error_message != nullptr) {
+            *error_message = context + ": could not stage a " + std::to_string(bytes.size()) +
+                             "-byte parameter into a buffer";
+        }
+        return false;
+    }
+    [encoder setBuffer:staged offset:0 atIndex:binding_index];
+    return true;
+}
+
 const char* semantic_quality_for_provenance(const std::string& provenance) {
     if (provenance == "cpu_fallback") return "cpu_fallback";
     if (provenance == "unsupported") return "unsupported";
@@ -1951,7 +1981,9 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         fence_buffers.reserve(args.size());
         for (std::size_t i = 0; i < args.size(); ++i) {
             if (args[i].kind == KernelArg::Kind::kBytes) {
-                if (args[i].bytes.empty() || args[i].bytes.size() > 4096) {
+                // Upper bound is CUDA's kernel parameter limit, not setBytes'
+                // 4 KB cap; bind_byte_argument stages anything larger.
+                if (args[i].bytes.empty() || args[i].bytes.size() > 32764) {
                     if (error_message != nullptr) {
                         *error_message = "kernel arg " + std::to_string(i) +
                                          " has invalid byte payload";
@@ -2019,15 +2051,10 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                     }
                     return cudaErrorInvalidValue;
                 }
-                if (arg.bytes.size() > 4096) {
-                    if (error_message != nullptr) {
-                        *error_message = "kernel arg " + std::to_string(i) +
-                                         " byte payload exceeds 4KB setBytes limit";
-                    }
+                if (!bind_byte_argument(encoder, backend.device, arg.bytes, binding_index,
+                                        "kernel arg " + std::to_string(i), error_message)) {
                     return cudaErrorInvalidValue;
                 }
-
-                [encoder setBytes:arg.bytes.data() length:arg.bytes.size() atIndex:binding_index];
             }
         }
 
@@ -2214,7 +2241,9 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
         fence_buffers.reserve(args.size());
         for (std::size_t i = 0; i < args.size(); ++i) {
             if (args[i].kind == KernelArg::Kind::kBytes) {
-                if (args[i].bytes.empty() || args[i].bytes.size() > 4096) {
+                // Upper bound is CUDA's kernel parameter limit, not setBytes'
+                // 4 KB cap; bind_byte_argument stages anything larger.
+                if (args[i].bytes.empty() || args[i].bytes.size() > 32764) {
                     if (error_message != nullptr) {
                         *error_message = "launch_kernel_timed arg " + std::to_string(i) +
                                          " has invalid byte payload";
@@ -2282,14 +2311,11 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
                     }
                     return cudaErrorInvalidValue;
                 }
-                if (arg.bytes.size() > 4096) {
-                    if (error_message != nullptr) {
-                        *error_message = "launch_kernel_timed arg " + std::to_string(i) +
-                                         " byte payload exceeds 4KB setBytes limit";
-                    }
+                if (!bind_byte_argument(encoder, backend.device, arg.bytes, binding_index,
+                                        "launch_kernel_timed arg " + std::to_string(i),
+                                        error_message)) {
                     return cudaErrorInvalidValue;
                 }
-                [encoder setBytes:arg.bytes.data() length:arg.bytes.size() atIndex:binding_index];
             }
         }
 

@@ -18,6 +18,23 @@ extern "C" {
 void** __cudaRegisterFatBinary(const void* fat_cubin);
 void** __cudaRegisterFatBinary3(const void* fat_cubin, ...);
 void __cudaUnregisterFatBinary(void** fat_cubin_handle);
+
+// A failed launch is retained as a pending error and consumed by the next device
+// synchronization, whether or not the caller read the launch's own return value:
+// generated <<<...>>> host stubs discard it, so that is the only place such a
+// failure would otherwise become visible. Every deliberately failed launch below
+// therefore asserts that propagation and consumes it, so that a later
+// synchronization cannot report it and be mistaken for a different failure.
+bool consume_expected_launch_failure(const char* what) {
+    if (cudaDeviceSynchronize() != cudaErrorInvalidValue) {
+        std::fprintf(stderr,
+                     "FAIL: cudaDeviceSynchronize should report the failed launch (%s)\n",
+                     what);
+        return false;
+    }
+    return true;
+}
+
 void __cudaRegisterFunction(void** fat_cubin_handle,
                             const void* host_function,
                             char* device_function,
@@ -252,6 +269,10 @@ int main(int argc, char** argv) {
                          0,
                          nullptr) != cudaErrorInvalidValue) {
         std::fprintf(stderr, "FAIL: launch should fail after __cudaUnregisterFatBinary\n");
+        return 1;
+    }
+
+    if (!consume_expected_launch_failure("after __cudaUnregisterFatBinary")) {
         return 1;
     }
 
@@ -556,6 +577,9 @@ int main(int argc, char** argv) {
                      "FAIL: malformed ELF registration should not produce a launchable kernel\n");
         return 1;
     }
+    if (!consume_expected_launch_failure("malformed ELF registration")) {
+        return 1;
+    }
     __cudaUnregisterFatBinary(fatbin_handle);
 
     std::vector<std::uint8_t> malformed_extended_count =
@@ -593,6 +617,9 @@ int main(int argc, char** argv) {
         std::fprintf(
             stderr,
             "FAIL: out-of-range extended section count should not launch\n");
+        return 1;
+    }
+    if (!consume_expected_launch_failure("out-of-range extended section count")) {
         return 1;
     }
     __cudaUnregisterFatBinary(fatbin_handle);

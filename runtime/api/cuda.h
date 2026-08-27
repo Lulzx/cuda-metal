@@ -43,6 +43,16 @@ enum {
     CU_STREAM_NON_BLOCKING = 0x1,
 };
 
+// cuMemAllocManaged attachment flags. CuMetal implements GLOBAL: on unified
+// memory every allocation is already visible to host and device. HOST and
+// SINGLE describe migration and stream-attachment state that CuMetal does not
+// model, so they are rejected rather than silently treated as GLOBAL.
+enum {
+    CU_MEM_ATTACH_GLOBAL = 0x1,
+    CU_MEM_ATTACH_HOST = 0x2,
+    CU_MEM_ATTACH_SINGLE = 0x4,
+};
+
 enum {
     CU_EVENT_DEFAULT = 0x0,
     CU_EVENT_BLOCKING_SYNC = 0x1,

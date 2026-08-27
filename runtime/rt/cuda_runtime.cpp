@@ -4906,7 +4906,10 @@ cudaError_t cudaLaunchKernel(const void* func,
             arg.offset = resolved.offset;
             launch_args.push_back(std::move(arg));
         } else {
-            if (info.size_bytes == 0 || info.size_bytes > 4096) {
+            // CUDA's kernel parameter limit: 4 KB before 12.1, 32764 bytes
+            // after. The Metal backend binds anything over setBytes' 4 KB cap
+            // through a staged buffer instead.
+            if (info.size_bytes == 0 || info.size_bytes > 32764) {
                 return launch_fail(cudaErrorInvalidValue, "byte arg size invalid");
             }
 
