@@ -4138,6 +4138,68 @@ class GenericLlvmEmitter {
             return store_ret_bits(*bits, 32);
         }
 
+        // fmin/fmax on doubles. clang emits these whenever the source calls
+        // fmin()/fmax() on a double, which HiGHS's PDLP convergence kernels do
+        // for every constraint row. Without them those two kernels refuse to
+        // lower, and a solver that ignores the launch error then reads an
+        // untouched result buffer and "converges" on zeros.
+        //
+        // These are order comparisons, not arithmetic, so they are exact under
+        // emulation: a normalized pair orders by hi and then by lo, which is
+        // the same comparison emit_setp already makes for setp.lt.f64. The
+        // selected operand is returned as its original IEEE bits, so nothing
+        // round-trips through the pair.
+        if (callee == "__nv_fmin" || callee == "__nv_fmax") {
+            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
+            auto a_bits = load_call_slot_value(os, arg_names[0], 64);
+            auto b_bits = load_call_slot_value(os, arg_names[1], 64);
+            if (!a_bits || !b_bits) return fail(instr, callee + " args missing");
+            const bool want_max = (callee == "__nv_fmax");
+            const char* strict_op = want_max ? "ogt" : "olt";
+            std::string pick_a;
+            if (fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                const Fp64Pair a = fp64_pair_from_ieee_bits(os, *a_bits);
+                const Fp64Pair b = fp64_pair_from_ieee_bits(os, *b_bits);
+                const std::string hi_ord = next_tmp("fmm_hiord");
+                const std::string hi_eq = next_tmp("fmm_hieq");
+                const std::string lo_ord = next_tmp("fmm_loord");
+                const std::string tie = next_tmp("fmm_tie");
+                const std::string ord = next_tmp("fmm_ord");
+                os << "  " << hi_ord << " = fcmp " << strict_op << " float " << a.hi << ", "
+                   << b.hi << "\n";
+                os << "  " << hi_eq << " = fcmp oeq float " << a.hi << ", " << b.hi << "\n";
+                os << "  " << lo_ord << " = fcmp " << strict_op << " float " << a.lo << ", "
+                   << b.lo << "\n";
+                os << "  " << tie << " = and i1 " << hi_eq << ", " << lo_ord << "\n";
+                os << "  " << ord << " = or i1 " << hi_ord << ", " << tie << "\n";
+                // CUDA returns the operand that is not NaN when exactly one is.
+                // Every comparison above is false against a NaN, which already
+                // gives fmin(NaN, b) = b; the other direction has to be said.
+                const std::string b_nan = next_tmp("fmm_bnan");
+                const std::string out_pred = next_tmp("fmm_pick");
+                os << "  " << b_nan << " = fcmp uno float " << b.hi << ", " << b.hi << "\n";
+                os << "  " << out_pred << " = or i1 " << ord << ", " << b_nan << "\n";
+                pick_a = out_pred;
+            } else {
+                const std::string a = next_tmp("fmm_a");
+                const std::string b = next_tmp("fmm_b");
+                const std::string ord = next_tmp("fmm_ord");
+                const std::string b_nan = next_tmp("fmm_bnan");
+                const std::string out_pred = next_tmp("fmm_pick");
+                os << "  " << a << " = bitcast i64 " << *a_bits << " to double\n";
+                os << "  " << b << " = bitcast i64 " << *b_bits << " to double\n";
+                os << "  " << ord << " = fcmp " << strict_op << " double " << a << ", " << b
+                   << "\n";
+                os << "  " << b_nan << " = fcmp uno double " << b << ", " << b << "\n";
+                os << "  " << out_pred << " = or i1 " << ord << ", " << b_nan << "\n";
+                pick_a = out_pred;
+            }
+            const std::string out = next_tmp("fmm_bits");
+            os << "  " << out << " = select i1 " << pick_a << ", i64 " << *a_bits << ", i64 "
+               << *b_bits << "\n";
+            return store_ret_bits(out, 64);
+        }
+
         if (callee == "__nv_fmaxf") {
             if (arg_names.size() < 2) return fail(instr, "__nv_fmaxf expects 2 args");
             auto a_bits = load_call_slot_value(os, arg_names[0], 32);
@@ -4572,6 +4634,27 @@ class GenericLlvmEmitter {
         }
         const bool is_float = (ty.kind == PtxTypeSpec::Kind::kFloat);
         const int bits = ty.bits;
+
+        // Metal has no 64-bit atomic of any kind: `atomic_ulong` fails the
+        // library's own _valid_compare_exchange_type check, and there is no
+        // atomic double. Emitting a 64-bit cmpxchg or atomicrmw anyway produced
+        // AIR that crashed the Metal compiler service -- the launch came back
+        // as XPC_ERROR_CONNECTION_INTERRUPTED, which says nothing about the
+        // cause and takes the service down with it. Refusing here fails the
+        // kernel where the reason is still legible.
+        //
+        // This is what a CUDA atomicAdd(double*) becomes: clang lowers it to a
+        // CAS loop over the IEEE bits, so the 64-bit atomic arrives as
+        // atom.cas.b64 rather than as a float add. HiGHS's PDLP convergence
+        // kernels accumulate their residuals that way, which is why they do not
+        // run. Supporting them needs a lock built out of the 32-bit atomics
+        // Metal does have, not a wider atomic.
+        if (bits == 64) {
+            return fail(instr,
+                        "atom: Metal has no 64-bit atomic (this is what "
+                        "atomicAdd(double*) lowers to)");
+        }
+
         const std::string elem_ty_str = is_float
             ? (bits == 32 ? "float" : (bits == 64 ? "double" : "half"))
             : llvm_int_type(bits);
