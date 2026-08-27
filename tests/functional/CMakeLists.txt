@@ -481,6 +481,10 @@ add_executable(cumetal_cusparse_spmv_conformance_test
     cusparse_spmv_conformance_test.cpp
 )
 
+add_executable(cumetal_cusparse_graph_capture_test
+    cusparse_graph_capture_test.cpp
+)
+
 add_executable(cumetal_blas1_stride_test
     blas1_stride_test.cpp
 )
@@ -1111,6 +1115,11 @@ target_link_libraries(cumetal_cusparse_fp64_test
 )
 
 target_link_libraries(cumetal_cusparse_spmv_conformance_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cusparse_graph_capture_test
     PRIVATE
         cumetal_runtime
 )
@@ -2876,6 +2885,22 @@ add_test(
 )
 set_tests_properties(functional_cusparse_spmv_conformance_simd
     PROPERTIES ENVIRONMENT "CUMETAL_SPARSE_METAL=1;CUMETAL_SPARSE_METAL_KERNEL=simd")
+
+# Forced onto the Metal path: the matrix is far too small for auto mode, and
+# capturing the CPU path would prove nothing about the GPU one.
+add_test(
+    NAME functional_cusparse_graph_capture
+    COMMAND cumetal_cusparse_graph_capture_test
+)
+set_tests_properties(functional_cusparse_graph_capture
+    PROPERTIES ENVIRONMENT "CUMETAL_SPARSE_METAL=1")
+
+add_test(
+    NAME functional_cusparse_graph_capture_cpu
+    COMMAND cumetal_cusparse_graph_capture_test
+)
+set_tests_properties(functional_cusparse_graph_capture_cpu
+    PROPERTIES ENVIRONMENT "CUMETAL_SPARSE_METAL=0")
 
 add_test(
     NAME functional_blas1_stride

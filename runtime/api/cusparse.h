@@ -155,6 +155,10 @@ cusparseStatus_t cusparseDestroySpMat(cusparseSpMatDescr_t spMatDescr);
 cusparseStatus_t cusparseCreateDnVec(cusparseDnVecDescr_t* dnVecDescr,
                                       int64_t size, void* values, cudaDataType valueType);
 cusparseStatus_t cusparseDestroyDnVec(cusparseDnVecDescr_t dnVecDescr);
+cusparseStatus_t cusparseDnVecGetValues(cusparseDnVecDescr_t dnVecDescr, void** values);
+cusparseStatus_t cusparseDnVecSetValues(cusparseDnVecDescr_t dnVecDescr, void* values);
+cusparseStatus_t cusparseDnVecGet(cusparseDnVecDescr_t dnVecDescr,
+                                   int64_t* size, void** values, cudaDataType* valueType);
 
 cusparseStatus_t cusparseCreateDnMat(cusparseDnMatDescr_t* dnMatDescr,
                                       int64_t rows, int64_t cols, int64_t ld,
@@ -173,6 +177,19 @@ cusparseStatus_t cusparseSpMV_bufferSize(cusparseHandle_t handle,
                                           cudaDataType computeType,
                                           cusparseSpMVAlg_t alg,
                                           size_t* bufferSize);
+// Analysis hook. cuSPARSE lets a caller pay a one-time cost here so that the
+// SpMV calls that follow are cheaper; it is optional, and skipping it changes
+// speed, not results.
+cusparseStatus_t cusparseSpMV_preprocess(cusparseHandle_t handle,
+                                          cusparseOperation_t opA,
+                                          const void* alpha,
+                                          cusparseSpMatDescr_t matA,
+                                          cusparseDnVecDescr_t vecX,
+                                          const void* beta,
+                                          cusparseDnVecDescr_t vecY,
+                                          cudaDataType computeType,
+                                          cusparseSpMVAlg_t alg,
+                                          void* externalBuffer);
 cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
                                cusparseOperation_t opA,
                                const void* alpha,

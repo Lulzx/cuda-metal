@@ -168,6 +168,14 @@ struct cudaGraphNode_st {
     cudaHostFn_t host_fn = nullptr;
     void* host_user_data = nullptr;
 
+    // Captured library call. A cuSPARSE or cuBLAS entry point launches its work
+    // through the backend rather than through cudaLaunchKernel, so there is no
+    // cudaKernelNodeParams to record; what gets recorded instead is a closure
+    // over the arguments as they stood at capture time. It replays as a kernel
+    // node because that is what it is -- CUDA records the kernels a captured
+    // library call launches -- and cudaGraphNodeGetType agrees.
+    std::function<cudaError_t(cudaStream_t)> library_op;
+
     // Graph allocation/free node data. The backing buffer is reserved when the
     // allocation node is created so its CUDA address remains fixed, but it is
     // inserted into the live allocation table only when replay reaches the
@@ -2018,6 +2026,26 @@ cudaError_t enqueue_host_operation(cudaStream_t stream, std::function<void()> op
     return enqueue_stream_host_op(stream, std::move(operation));
 }
 
+cudaError_t resolve_backend_stream(cudaStream_t stream,
+                                   std::shared_ptr<cumetal::metal_backend::Stream>* out) {
+    return resolve_runtime_stream(stream, out, nullptr);
+}
+
+bool capture_library_call(cudaStream_t stream, std::function<cudaError_t(cudaStream_t)> op) {
+    cudaGraph_t graph = get_capture_graph(stream);
+    if (graph == nullptr || !op) {
+        return false;
+    }
+    auto* node = new (std::nothrow) cudaGraphNode_st();
+    if (node == nullptr) {
+        return false;
+    }
+    node->type = cudaGraphNodeTypeKernel;
+    node->library_op = std::move(op);
+    append_captured_graph_node(graph, node);
+    return true;
+}
+
 }  // namespace cumetal::rt
 
 extern "C" {
@@ -3668,6 +3696,10 @@ cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
         switch (node.type) {
             case cudaGraphNodeTypeKernel:
             {
+                if (node.library_op) {
+                    err = node.library_op(stream);
+                    break;
+                }
                 std::vector<void*> argument_ptrs;
                 argument_ptrs.reserve(node.kernel_arg_values.size());
                 for (const auto& value : node.kernel_arg_values) {

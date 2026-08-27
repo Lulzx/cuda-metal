@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -322,6 +323,35 @@ cusparseStatus_t cusparseCreateDnVec(cusparseDnVecDescr_t* dnVecDescr,
 
 cusparseStatus_t cusparseDestroyDnVec(cusparseDnVecDescr_t dnVecDescr) {
     delete dnVecDescr;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDnVecGetValues(cusparseDnVecDescr_t dnVecDescr, void** values) {
+    if (dnVecDescr == nullptr || values == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *values = dnVecDescr->values;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Repoint a dense vector descriptor at a different buffer, keeping its length
+// and element type. Callers that alternate between buffers use this to avoid
+// building a descriptor per call.
+//
+// Nothing derived from `values` is cached on this descriptor, so there is
+// nothing to invalidate. That is not true of cusparseSpMatDescr, which caches
+// longest_row: see the INVARIANT on it before adding anything that repoints a
+// sparse descriptor's arrays.
+cusparseStatus_t cusparseDnVecSetValues(cusparseDnVecDescr_t dnVecDescr, void* values) {
+    if (dnVecDescr == nullptr || values == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    dnVecDescr->values = values;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDnVecGet(cusparseDnVecDescr_t dnVecDescr,
+                                   int64_t* size, void** values, cudaDataType* valueType) {
+    if (dnVecDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (size != nullptr) *size = dnVecDescr->size;
+    if (values != nullptr) *values = dnVecDescr->values;
+    if (valueType != nullptr) *valueType = dnVecDescr->valueType;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
@@ -795,7 +825,7 @@ std::int64_t sparse_metal_threshold_nnz() {
 }
 
 // Returns false when the GPU path did not run, for any reason.
-bool try_spmv_gather_metal(cusparseHandle_t handle,
+bool try_spmv_gather_metal(cudaStream_t stream,
                            const cusparseSpMatDescr* mat,
                            bool transpose,
                            std::int64_t axis,
@@ -821,8 +851,13 @@ bool try_spmv_gather_metal(cusparseHandle_t handle,
         spmv_note(why);
         return false;
     }
-    if (handle != nullptr && handle->stream != nullptr) {
-        spmv_note("handle is on an explicit stream");
+    // Whatever stream the handle carries is the stream this dispatch belongs on,
+    // so that the SpMV is ordered against the caller's other work on it exactly
+    // as a real cuSPARSE call would be. A null handle stream resolves to the
+    // default stream, which is the same thing the CPU path below would wait on.
+    std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
+    if (cumetal::rt::resolve_backend_stream(stream, &backend_stream) != cudaSuccess) {
+        spmv_note("the handle's stream does not resolve to a backend stream");
         return false;
     }
     const std::size_t elem = compute_type == CUDA_R_64F ? 8u : 4u;
@@ -887,12 +922,8 @@ bool try_spmv_gather_metal(cusparseHandle_t handle,
     }
 
     std::string error;
-    // A null backend stream is the default stream, which is what a handle left
-    // on the default stream needs. Mapping an explicit cudaStream_t onto a
-    // backend stream is plumbing the runtime does not expose here, so a handle
-    // with one set takes the CPU path, which synchronizes that stream properly.
-    if (cumetal::metal_backend::launch_kernel(*source, kernel, config, args, nullptr, &error) !=
-        cudaSuccess) {
+    if (cumetal::metal_backend::launch_kernel(*source, kernel, config, args, backend_stream,
+                                              &error) != cudaSuccess) {
         spmv_note(error.empty() ? "launch failed" : error.c_str());
         return false;
     }
@@ -912,6 +943,51 @@ bool try_spmv_gather_metal(cusparseHandle_t handle,
 }
 
 }  // extern "C++"
+
+// cuSPARSE lets a caller pay a one-time analysis cost so the SpMV calls that
+// follow are cheaper. It is optional there and it is optional here: skipping it
+// changes speed, not results.
+//
+// There is real work to do, though, and making this a bare no-op would waste it.
+// Which kernel serves a matrix is decided from its longest row, which costs a
+// pass over the offsets, and the first SpMV on a descriptor otherwise pays for
+// that pass itself. Doing it here moves the cost to where the caller asked for
+// it. Failing to do it is not an error -- the matrix may be a shape the GPU path
+// declines anyway -- so this reports success as long as the arguments are
+// well-formed.
+cusparseStatus_t cusparseSpMV_preprocess(cusparseHandle_t handle,
+                                          cusparseOperation_t opA,
+                                          const void* alpha,
+                                          cusparseSpMatDescr_t matA,
+                                          cusparseDnVecDescr_t vecX,
+                                          const void* beta,
+                                          cusparseDnVecDescr_t vecY,
+                                          cudaDataType computeType,
+                                          cusparseSpMVAlg_t /*alg*/,
+                                          void* /*externalBuffer*/) {
+    if (!handle || !matA || !vecX || !vecY || !alpha || !beta) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (computeType != CUDA_R_32F && computeType != CUDA_R_64F) {
+        return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    }
+    if (matA->format != CUMETAL_SPMAT_COO && cumetal_sparse_indices_are_32bit(matA)) {
+        bool transpose = false;
+        int64_t axis = 0;
+        cumetal_sparse_view(matA, opA, &transpose, &axis);
+        (void)longest_row(matA, axis);
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+static cusparseStatus_t spmv_dispatch(cudaStream_t stream,
+                                      cusparseOperation_t opA,
+                                      const void* alpha,
+                                      cusparseSpMatDescr_t matA,
+                                      const void* x_values,
+                                      const void* beta,
+                                      void* y_values,
+                                      cudaDataType computeType);
 
 cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
                                cusparseOperation_t opA,
@@ -939,24 +1015,69 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
     const int64_t xlen = op_t ? matA->rows : matA->cols;
     if (vecY->size != ylen || vecX->size != xlen) return CUSPARSE_STATUS_INVALID_VALUE;
 
+    // Under stream capture the call must be recorded, not performed. What gets
+    // recorded is the arguments as they stand now: the vector descriptors are
+    // read here and their pointers baked into the node, which is what CUDA does
+    // and what makes cusparseDnVecSetValues between replays a no-op on an
+    // already-captured graph rather than a surprise.
+    //
+    // The matrix descriptor is held by pointer instead, because its structure is
+    // fixed for its lifetime (see the INVARIANT on cusparseSpMatDescr) and its
+    // values are meant to be rewritable in place between replays -- a scaling
+    // pass does exactly that.
+    if (handle->stream != nullptr) {
+        struct Scalar { unsigned char bytes[8]; };
+        Scalar a{}, b{};
+        const std::size_t elem = computeType == CUDA_R_64F ? 8u : 4u;
+        std::memcpy(a.bytes, alpha, elem);
+        std::memcpy(b.bytes, beta, elem);
+        void* x = vecX->values;
+        void* y = vecY->values;
+        if (cumetal::rt::capture_library_call(
+                handle->stream, [=](cudaStream_t replay_stream) {
+                    return spmv_dispatch(replay_stream, opA, a.bytes, matA, x, b.bytes, y,
+                                         computeType) == CUSPARSE_STATUS_SUCCESS
+                               ? cudaSuccess
+                               : cudaErrorInvalidValue;
+                })) {
+            return CUSPARSE_STATUS_SUCCESS;
+        }
+    }
+
+    return spmv_dispatch(handle->stream, opA, alpha, matA, vecX->values, beta, vecY->values,
+                         computeType);
+}
+
+// Runs one SpMV over already-resolved operands. Split out from cusparseSpMV so
+// that a graph node can replay it on whatever stream the graph was launched on,
+// with the arguments it was captured with.
+static cusparseStatus_t spmv_dispatch(cudaStream_t stream,
+                                      cusparseOperation_t opA,
+                                      const void* alpha,
+                                      cusparseSpMatDescr_t matA,
+                                      const void* x_values,
+                                      const void* beta,
+                                      void* y_values,
+                                      cudaDataType computeType) {
+    const bool op_t = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    const int64_t ylen = op_t ? matA->cols : matA->rows;
     bool transpose = false;
     int64_t axis = 0;
     cumetal_sparse_view(matA, opA, &transpose, &axis);
 
-    // The GPU path is enqueued on the handle's stream and deliberately does not
+    // The GPU path is enqueued on that stream and deliberately does not
     // synchronize: it is ordered against the caller's other stream work the way
     // a real cuSPARSE call is, and a host read of y needs its own
     // synchronization either way. Only the CPU path below has to wait, because
     // it dereferences the operands itself.
     if (matA->format != CUMETAL_SPMAT_COO &&
-        try_spmv_gather_metal(handle, matA, transpose, axis, ylen, alpha, beta,
-                              vecX->values, vecY->values, computeType)) {
+        try_spmv_gather_metal(stream, matA, transpose, axis, ylen, alpha, beta,
+                              x_values, y_values, computeType)) {
         return CUSPARSE_STATUS_SUCCESS;
     }
 
-    // Order this call after prior work on the handle's stream (see
-    // synchronize_handle_stream) before computing on the CPU.
-    synchronize_handle_stream(handle);
+    // Order this call after prior work on the stream before computing on the CPU.
+    cudaStreamSynchronize(stream);
 
     const int base = (matA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
     const int* offsets = static_cast<const int*>(matA->rowOffsets);
@@ -966,8 +1087,8 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
         const double a = *static_cast<const double*>(alpha);
         const double b = *static_cast<const double*>(beta);
         const double* vals = static_cast<const double*>(matA->values);
-        const double* x = static_cast<const double*>(vecX->values);
-        double* y = static_cast<double*>(vecY->values);
+        const double* x = static_cast<const double*>(x_values);
+        double* y = static_cast<double*>(y_values);
         if (matA->format == CUMETAL_SPMAT_COO)
             cumetal_spmv_coo(matA->nnz, offsets, indices, vals, base, transpose, a, b, x, y, ylen);
         else
@@ -976,8 +1097,8 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
         const float a = *static_cast<const float*>(alpha);
         const float b = *static_cast<const float*>(beta);
         const float* vals = static_cast<const float*>(matA->values);
-        const float* x = static_cast<const float*>(vecX->values);
-        float* y = static_cast<float*>(vecY->values);
+        const float* x = static_cast<const float*>(x_values);
+        float* y = static_cast<float*>(y_values);
         if (matA->format == CUMETAL_SPMAT_COO)
             cumetal_spmv_coo(matA->nnz, offsets, indices, vals, base, transpose, a, b, x, y, ylen);
         else
