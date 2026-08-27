@@ -19,12 +19,16 @@ downloads the LP instances into `out/` (gitignored). HiGHS itself comes from
 [cuPDLP-C](https://github.com/COPT-Public/cuPDLP-C) is the PDLP first-order LP
 solver that HiGHS vendors as its GPU path; `libhighs` exports ~104 `cupdlp_*`
 symbols of its own. So building cuPDLP-C unmodified and comparing it against its
-CPU build answers whether HiGHS's GPU solver works through CuMetal.
+CPU build tests the core GPU solver that HiGHS vendors, without yet exercising
+HiGHS's own `CUPDLP_GPU=ON` integration layer.
 
 It is built with `cupdlp_float = double`, the upstream default, rather than the
-reduced `SFLOAT` configuration. Metal has no `double`, so every FP64 operation
-runs on CuMetal's Dekker FP32-pair emulation while storage stays IEEE-754
-binary64.
+reduced `SFLOAT` configuration. **Storage is IEEE-754 binary64; arithmetic is
+not.** CuMetal decodes each value into an FP32 pair, runs the operation at about
+a 48-bit significand within binary32's exponent envelope, and encodes the result
+back into binary64. The binary64 container is what every part of the CUDA ABI
+sees, so `cudaMemcpy`, `.local` spills, warp shuffles and reading the same eight
+bytes as a `uint64_t` all behave normally; only the arithmetic is reduced.
 
 ## What it checks
 
@@ -72,9 +76,9 @@ provenance=generic_ptx_lowering_fp64_emulated semantic_quality=reduced_precision
 ```
 
 rather than `semantic_quality=exact`. The lowering translates this kernel's own
-PTX with no substitution, but Metal has no `double`, so the arithmetic carries
-about a 48-bit significand instead of CUDA's FP64 semantics, and `exact` would
-overstate what ran.
+PTX with no substitution, so the translation provenance is honest; the numerical
+contract is what differs, and `exact` would overstate what ran. Keeping those two
+separate is the point of reporting both fields.
 
 `stair` hits the iteration limit on both builds; it is a hard instance. Its
 Metal residuals come out better than the CPU run's (gap 9.05e-03 vs 1.41e-02).
@@ -90,8 +94,10 @@ path additionally requires `cusparseDnVecSetValues`, `cusparseSpMV_preprocess`,
 and CUDA-graph capture of library nodes, none of which CuMetal implements yet.
 See `docs/known-gaps.md`.
 
-The FP64 here is not IEEE-754: about a 48-bit significand within binary32's
-exponent envelope. See `docs/known-gaps.md` and
+The arithmetic is not IEEE-754 binary64, as above: about a 48-bit significand
+within binary32's exponent envelope, against binary64's 53 bits and much wider
+range. Measured worst relative round-trip error is 3.29e-15 against a 2^-48
+(3.55e-15) contract. See `docs/known-gaps.md` and
 `tests/cuda_projects/fp64/fp64_precision.cu`.
 
 ## Patches applied to cuPDLP-C

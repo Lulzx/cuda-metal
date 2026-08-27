@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CuMetal HiGHS/cuPDLP-C demo — an LP solver's CUDA GPU path, on Apple Silicon.
+# CuMetal HiGHS/cuPDLP-C demo: an LP solver's CUDA GPU path, on Apple Silicon.
 #
 # Usage:
 #   bash demos/highs/run.sh              # 8-problem corpus, CPU vs Metal (~2-4 min)
@@ -7,9 +7,11 @@
 #   bash demos/highs/run.sh --build-dir=path/to/build
 #
 # cuPDLP-C is the PDLP solver HiGHS vendors as its GPU path (HiGHS >= 1.7 exports
-# ~104 cupdlp_* symbols of its own). It is built here unmodified except for three
-# patches forced by building a standalone cuPDLP-C against a current HiGHS -- none
-# of them Metal-related; see scripts/build_cupdlp_cumetal.sh.
+# ~104 cupdlp_* symbols of its own). This exercises that solver, not HiGHS's own
+# CUPDLP_GPU=ON integration layer, which needs API surface CuMetal does not have
+# yet. It is built unmodified except for three patches forced by building a
+# standalone cuPDLP-C against a current HiGHS -- none of them Metal-related; see
+# scripts/build_cupdlp_cumetal.sh.
 #
 # Exit 0 only if every problem reaches the same model status on both builds, the
 # objectives agree, and the Metal run shows Apple-GPU provenance. A correct
