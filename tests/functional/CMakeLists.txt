@@ -2867,6 +2867,16 @@ add_test(
 set_tests_properties(functional_cusparse_spmv_conformance_cpu
     PROPERTIES ENVIRONMENT "CUMETAL_SPARSE_METAL=0")
 
+# The cooperative kernel is routed to by the longest row, which no matrix small
+# enough for a conformance test will ever have, so pin it. Left unpinned this
+# suite would report the simdgroup path green without ever running it.
+add_test(
+    NAME functional_cusparse_spmv_conformance_simd
+    COMMAND cumetal_cusparse_spmv_conformance_test
+)
+set_tests_properties(functional_cusparse_spmv_conformance_simd
+    PROPERTIES ENVIRONMENT "CUMETAL_SPARSE_METAL=1;CUMETAL_SPARSE_METAL_KERNEL=simd")
+
 add_test(
     NAME functional_blas1_stride
     COMMAND cumetal_blas1_stride_test

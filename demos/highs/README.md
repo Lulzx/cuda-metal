@@ -118,26 +118,33 @@ microbenchmark; `CUMETAL_SPARSE_METAL=1`/`0` overrides the choice and
 Two LPs from the Mittelmann test set are large enough to answer what that does to
 a real solve. Solver wall time, median of 3, 99 fixed iterations, M4 Pro:
 
-| instance | shape | cpu | auto | forced Metal |
-| --- | --- | ---: | ---: | ---: |
-| `ex10` | 69,609 x 17,680, 1.18M nnz | 0.792 s | **0.327 s** | 0.327 s |
-| `datt256` | 11,078 x 262,144, 1.77M nnz | 1.273 s | **0.991 s** | 2.880 s |
+| instance | shape | cpu | auto | scalar kernel forced | cooperative kernel forced |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `ex10` | 69,609 x 17,680, 1.18M nnz | 1.178 s | **0.312 s** | 0.313 s | 0.306 s |
+| `datt256` | 11,078 x 262,144, 1.77M nnz | 1.909 s | **0.883 s** | 5.295 s | 1.084 s |
 
-All three configurations reach the same objective on each instance.
+All four configurations reach the same objective on each instance.
 
-`ex10` is the straightforward case: 61% of its CPU solve is `Ax` and `A'y`, both
-go to the GPU, and the solve is 2.4x faster.
+`ex10` is the straightforward case: most of its CPU solve is `Ax` and `A'y`, both
+go to the GPU, and the solve is 3.8x faster.
 
-`datt256` is the interesting one. Forced onto the GPU it is 2.3x *slower* than
-the CPU, because after reformulation its longest row holds 57,840 entries against
-a mean of 136. One thread per row means one thread grinds through that row while
-the other 11,076 idle, and no amount of parallelism hides a serial loop. Auto
-mode measures that and splits the two products: `Ax` on the CPU, `A'y` on the
-GPU, beating both fixed policies. Choosing per call, on the machine's actual
-economics, is the point of having the choice at all.
+`datt256` is the interesting one. Forced onto the thread-per-row kernel it is
+2.8x *slower* than the CPU, because after reformulation its longest row holds
+57,840 entries against a mean of 136. One thread per row means one thread grinds
+through that row while the other 11,076 idle, and no amount of parallelism hides
+a serial loop. A synthetic matrix with the same dimensions and mean row length
+runs 6x faster on the GPU, so a uniform-row benchmark would have missed this
+entirely.
 
-A synthetic matrix with the same dimensions and mean row length runs 6x faster on
-the GPU, so a uniform-row benchmark would have missed this entirely.
+Splitting that row across a simdgroup cuts the serial depth by 32 and fixes the
+kernel outright: 5.295 s becomes 1.084 s, and in isolation that SpMV goes from
+22.9 ms to 1.8 ms, which is faster than the CPU's 2.0 ms rather than 11x slower.
+Auto mode is faster still, at 0.883 s, because the two products want different
+kernels and it picks per call rather than per solve. Which one runs is chosen
+from the row distribution: the cooperative kernel wins as soon as rows are long
+enough to fill a simdgroup and loses on uniformly short ones, so a matrix of
+4-entry rows still takes the scalar kernel. `CUMETAL_SPARSE_METAL_KERNEL=scalar`
+or `=simd` pins one, and `CUMETAL_DEBUG_SPARSE=1` reports which ran and why.
 
 ## What this does not show
 
@@ -147,6 +154,9 @@ the solver speedups above are on two much larger LPs that are not part of this
 demo. FP64 cuBLAS L1 (dot, norm) is still a scalar CPU loop
 over unified memory, and solver-level synchronization is unoptimized. Do not read
 these solve times as a benchmark.
+
+On `datt256` that CPU loop is now most of what is left: with both products on the
+GPU, `UpdateIterates` is 4.49 s of the 5.51 s solve.
 
 This is standalone cuPDLP-C, not HiGHS's own GPU build. HiGHS's `CUPDLP_GPU=ON`
 path additionally requires `cusparseDnVecSetValues`, `cusparseSpMV_preprocess`,

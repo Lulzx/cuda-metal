@@ -5,6 +5,7 @@
 #include "runtime_internal.h"
 #include "sparse_kernels_msl.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -551,6 +552,20 @@ const std::string* sparse_kernels_source_path() {
     return cached;
 }
 
+// CUMETAL_SPARSE_METAL: unset = auto, "1" = always, "0" = never. Matches the
+// CUMETAL_MTLHEAP_ALLOC convention.
+enum class SparseMetalPolicy { kAuto, kAlways, kNever };
+
+SparseMetalPolicy sparse_metal_policy() {
+    static const SparseMetalPolicy policy = [] {
+        const char* v = std::getenv("CUMETAL_SPARSE_METAL");
+        if (v == nullptr || v[0] == '\0') return SparseMetalPolicy::kAuto;
+        if (v[0] == '0') return SparseMetalPolicy::kNever;
+        return SparseMetalPolicy::kAlways;
+    }();
+    return policy;
+}
+
 // One thread per compressed row means the longest row is a serial loop no amount
 // of parallelism hides, so that length, not the average, is what can defeat the
 // kernel. datt256 from the Mittelmann set carries a fully dense row: after
@@ -560,30 +575,143 @@ const std::string* sparse_kernels_source_path() {
 // dimensions and mean row length ran 6x faster, which is exactly the case a
 // uniform-row benchmark cannot see.
 //
-// The bound is on that serial depth alone, and it is a conservative measured
-// cutoff for this particular thread-per-row kernel rather than a property of
-// Metal sparse work: a cooperative kernel that splits a long row across a
-// simdgroup would move it, as would a different chip or element type. Average density is not a useful
-// discriminator here: ex10's rows are also uneven relative to their mean (256
-// against 16.7, so under 7% of the work the kernel schedules is useful) and it
-// still runs 4.6x faster, because 69608 rows keep the GPU busy and a 256-element
-// tail is short. 4096 sits between the two measured cases, well above the length
-// that is demonstrably fine and well below the one that is demonstrably not.
+// Average density is not the discriminator: ex10's rows are also uneven relative
+// to their mean (256 against 16.7, so under 7% of the work the scalar kernel
+// schedules is useful) and it still runs 4.6x faster, because 69608 rows keep
+// the GPU busy and a 256-element tail is short.
+//
+// So the bound below is on serial depth alone, and it is not a fence around the
+// GPU: the cooperative kernel divides that depth by the simdgroup width, which
+// makes 4096 the point where one kernel hands off to the other, and only past
+// 32x4096 the point where the CPU takes the work back.
 constexpr std::int64_t kMaxGatherSerialDepth = 4096;
 
-bool gather_shape_is_efficient(const cusparseSpMatDescr* mat, std::int64_t axis) {
+// Apple GPUs execute 32 threads per simdgroup. The cooperative kernel reads the
+// real width from the dispatch and strides over rows, so this is only used to
+// estimate what that kernel would cost; being wrong here costs a routing
+// decision, never a wrong answer.
+constexpr std::int64_t kAssumedSimdWidth = 32;
+
+// Threads the GPU keeps in flight, used only to weigh a kernel's depth against
+// its total work. Fitted to the measurements below rather than read from the
+// device: any value from a few thousand up routes every measured case the same
+// way, so the model is not sensitive to it.
+constexpr std::int64_t kEffectiveParallelThreads = 8192;
+
+enum class GatherKernel { kNone, kScalar, kSimd };
+
+std::int64_t longest_row(const cusparseSpMatDescr* mat, std::int64_t axis) {
     if (mat->longest_row < 0) {
         const int* offsets = static_cast<const int*>(mat->rowOffsets);
-        if (offsets == nullptr) return false;
-        const int base = mat->idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
+        if (offsets == nullptr) return -1;
         std::int64_t longest = 0;
         for (std::int64_t i = 0; i < axis; ++i) {
+            // A difference of offsets, so the index base cancels.
             const std::int64_t len = static_cast<std::int64_t>(offsets[i + 1]) - offsets[i];
             if (len > longest) longest = len;
         }
         const_cast<cusparseSpMatDescr*>(mat)->longest_row = longest;  // see INVARIANT
     }
-    return mat->longest_row > 0 && mat->longest_row <= kMaxGatherSerialDepth;
+    return mat->longest_row;
+}
+
+// CUMETAL_SPARSE_METAL_KERNEL: unset = choose from the row distribution,
+// "scalar" or "simd" to pin one. Pinning exists so a test can exercise a kernel
+// the heuristic would never route to it: without it the cooperative path would
+// only ever run on matrices too large for a conformance test to hold.
+const char* pinned_gather_kernel() {
+    static const char* pinned = [] {
+        const char* v = std::getenv("CUMETAL_SPARSE_METAL_KERNEL");
+        if (v == nullptr || v[0] == '\0') return static_cast<const char*>(nullptr);
+        return v;
+    }();
+    return pinned;
+}
+
+// Each kernel is costed as a makespan: how long the slowest thread runs, which
+// is whichever of its depth and its share of the total work is larger.
+//
+//   scalar   max(L, nnz/P)
+//   simd     max(L/W, max(nnz, W*rows)/P)
+//
+// L is the longest row. The scalar kernel walks it in one thread, so it is that
+// kernel's depth outright; the cooperative kernel splits it across a simdgroup,
+// so its depth is L/W. The second term is the throughput floor. The cooperative
+// kernel's is the larger of the two because a row shorter than W leaves lanes
+// idle, and a matrix of uniformly short rows pays for every one of them.
+//
+// Measured on an M4 Pro at a fixed 1.6M nonzeros, FP64, synchronizing per call,
+// uniform rows so the two terms are the throughput ones (us per SpMV):
+//
+//   row length      4      8     16     32     48     64    128    256    512
+//   scalar        523    600    545    488    498    542    441    566    600
+//   cooperative  1437    788    630    454    409    375    332    249    423
+//
+// The crossover sits at the simdgroup width, which is what the model says: below
+// it the cooperative kernel is buying a depth reduction on rows that have no
+// depth to give, and pays the idle lanes for it.
+//
+// And with one pathological row against a short remainder, which is the shape
+// that motivated all of this (rows/length/longest -> us):
+//
+//   11078/136/57840   scalar 22911   cooperative 1805   cpu 1995
+//   11078/136/16384   scalar  6242   cooperative  636   cpu 2543
+//   400000/4/57840    scalar 29903   cooperative 2789   cpu 3147
+//   400000/4/256      scalar   500   cooperative 1454   cpu 3018
+//
+// The last two are the same longest row deciding differently because the rest of
+// the matrix differs, which is why the rule is not a bound on L alone.
+GatherKernel cheaper_gather_kernel(std::int64_t longest, std::int64_t rows, std::int64_t nnz) {
+    const std::int64_t P = kEffectiveParallelThreads;
+    const std::int64_t W = kAssumedSimdWidth;
+    const std::int64_t scalar_cost = std::max<std::int64_t>(longest, nnz / P);
+    const std::int64_t simd_cost =
+        std::max<std::int64_t>(longest / W, std::max<std::int64_t>(nnz, W * rows) / P);
+    return simd_cost < scalar_cost ? GatherKernel::kSimd : GatherKernel::kScalar;
+}
+
+// Which gather kernel to run, or kNone to leave the product on the CPU. `why`
+// receives the reason for kNone.
+GatherKernel choose_gather_kernel(const cusparseSpMatDescr* mat, std::int64_t axis,
+                                  SparseMetalPolicy policy, char* why, std::size_t why_size) {
+    const std::int64_t longest = longest_row(mat, axis);
+    if (longest < 0) {
+        std::snprintf(why, why_size, "the descriptor has no row offsets");
+        return GatherKernel::kNone;
+    }
+    if (const char* pinned = pinned_gather_kernel(); pinned != nullptr) {
+        if (pinned[0] == 's' && pinned[1] == 'i') return GatherKernel::kSimd;
+        if (pinned[0] == 's') return GatherKernel::kScalar;
+        std::snprintf(why, why_size, "CUMETAL_SPARSE_METAL_KERNEL=%s is not a kernel name",
+                      pinned);
+        return GatherKernel::kNone;
+    }
+    if (longest == 0) {
+        // Every row empty: the answer is a scale of y, and a dispatch to compute
+        // it would cost more than the CPU loop that writes it.
+        std::snprintf(why, why_size, "the matrix has no nonzeros in any row");
+        return GatherKernel::kNone;
+    }
+    const GatherKernel variant = cheaper_gather_kernel(longest, axis, mat->nnz);
+    if (policy == SparseMetalPolicy::kAlways) return variant;
+
+    // Past this depth the CPU's own loop over unified memory wins, whichever
+    // kernel would have run. Measured at the bound rather than assumed: a single
+    // row of 131072 against a mean of 136 costs the cooperative kernel 4028us
+    // against the CPU's 3646, and doubling it to 262144 costs 8266 against 4266.
+    const std::int64_t depth = variant == GatherKernel::kSimd
+                                   ? (longest + kAssumedSimdWidth - 1) / kAssumedSimdWidth
+                                   : longest;
+    if (depth <= kMaxGatherSerialDepth) return variant;
+    std::snprintf(why, why_size,
+                  "longest row %lld leaves the %s kernel a serial depth of %lld, past the "
+                  "%lld bound (axis=%lld nnz=%lld)",
+                  static_cast<long long>(longest),
+                  variant == GatherKernel::kSimd ? "cooperative" : "scalar",
+                  static_cast<long long>(depth),
+                  static_cast<long long>(kMaxGatherSerialDepth),
+                  static_cast<long long>(axis), static_cast<long long>(mat->nnz));
+    return GatherKernel::kNone;
 }
 
 // A device pointer resolves to a Metal buffer plus a byte offset. Metal requires
@@ -608,26 +736,26 @@ bool resolve_arg(const void* ptr,
 // unsupported shape) and for reasons that are defects (the kernel failed to
 // compile). Both produce the same correct answer through the CPU path, which is
 // exactly how a broken kernel stays invisible, so make the reason reportable.
-void spmv_note(const char* reason) {
+bool spmv_debug() {
     static const bool on = [] {
         const char* v = std::getenv("CUMETAL_DEBUG_SPARSE");
         return v != nullptr && v[0] != '\0' && v[0] != '0';
     }();
-    if (on) std::fprintf(stderr, "CUMETAL_DEBUG_SPARSE: SpMV on CPU (%s)\n", reason);
+    return on;
 }
 
-// CUMETAL_SPARSE_METAL: unset = auto, "1" = always, "0" = never. Matches the
-// CUMETAL_MTLHEAP_ALLOC convention.
-enum class SparseMetalPolicy { kAuto, kAlways, kNever };
+void spmv_note(const char* reason) {
+    if (spmv_debug()) std::fprintf(stderr, "CUMETAL_DEBUG_SPARSE: SpMV on CPU (%s)\n", reason);
+}
 
-SparseMetalPolicy sparse_metal_policy() {
-    static const SparseMetalPolicy policy = [] {
-        const char* v = std::getenv("CUMETAL_SPARSE_METAL");
-        if (v == nullptr || v[0] == '\0') return SparseMetalPolicy::kAuto;
-        if (v[0] == '0') return SparseMetalPolicy::kNever;
-        return SparseMetalPolicy::kAlways;
-    }();
-    return policy;
+// The GPU path taking a call is as much a routing decision as declining one, and
+// a kernel that runs but was the wrong choice looks identical from outside. Say
+// which one ran and on what evidence.
+void spmv_note_gpu(const char* kernel, const cusparseSpMatDescr* mat, std::int64_t axis) {
+    if (!spmv_debug()) return;
+    std::fprintf(stderr, "CUMETAL_DEBUG_SPARSE: SpMV on %s (axis=%lld nnz=%lld longest_row=%lld)\n",
+                 kernel, static_cast<long long>(axis), static_cast<long long>(mat->nnz),
+                 static_cast<long long>(mat->longest_row));
 }
 
 // Below this many nonzeros the CPU loop over unified memory wins: a Metal
@@ -683,23 +811,15 @@ bool try_spmv_gather_metal(cusparseHandle_t handle,
         return false;
     }
     if (transpose) { spmv_note("scatter shape needs atomics"); return false; }
-    if (policy == SparseMetalPolicy::kAuto) {
-        if (mat->nnz < sparse_metal_threshold_nnz()) {
-            spmv_note("below the measured nonzero threshold");
-            return false;
-        }
-        if (!gather_shape_is_efficient(mat, axis)) {
-            char why[160];
-            std::snprintf(why, sizeof(why),
-                          "longest row %lld exceeds the %lld serial-depth bound "
-                          "(axis=%lld nnz=%lld)",
-                          static_cast<long long>(mat->longest_row),
-                          static_cast<long long>(kMaxGatherSerialDepth),
-                          static_cast<long long>(axis),
-                          static_cast<long long>(mat->nnz));
-            spmv_note(why);
-            return false;
-        }
+    if (policy == SparseMetalPolicy::kAuto && mat->nnz < sparse_metal_threshold_nnz()) {
+        spmv_note("below the measured nonzero threshold");
+        return false;
+    }
+    char why[192] = {0};
+    const GatherKernel variant = choose_gather_kernel(mat, axis, policy, why, sizeof(why));
+    if (variant == GatherKernel::kNone) {
+        spmv_note(why);
+        return false;
     }
     if (handle != nullptr && handle->stream != nullptr) {
         spmv_note("handle is on an explicit stream");
@@ -745,18 +865,28 @@ bool try_spmv_gather_metal(cusparseHandle_t handle,
     args[5].bytes.resize(sizeof(params));
     std::memcpy(args[5].bytes.data(), &params, sizeof(params));
 
-    // One thread per compressed row. LP constraint matrices have short rows, so
-    // a simdgroup per row would idle most lanes; a wide-row variant is the
-    // change to make if a workload with long rows shows up.
     constexpr unsigned kBlock = 256;
     cumetal::metal_backend::LaunchConfig config{};
-    config.grid = dim3(static_cast<unsigned>((axis + kBlock - 1) / kBlock), 1, 1);
     config.block = dim3(kBlock, 1, 1);
     config.shared_memory_bytes = 0;
+    const char* kernel = nullptr;
+    if (variant == GatherKernel::kScalar) {
+        // One thread per compressed row.
+        config.grid = dim3(static_cast<unsigned>((axis + kBlock - 1) / kBlock), 1, 1);
+        kernel = compute_type == CUDA_R_64F ? "cumetal_spmv_gather_f64"
+                                            : "cumetal_spmv_gather_f32";
+    } else {
+        // One simdgroup per row. Sized so that a 32-wide simdgroup gives each
+        // one a single row; on any other width the kernel's grid stride picks
+        // up the remainder rather than dropping it.
+        const std::int64_t rows_per_group = kBlock / kAssumedSimdWidth;
+        config.grid = dim3(static_cast<unsigned>((axis + rows_per_group - 1) / rows_per_group),
+                           1, 1);
+        kernel = compute_type == CUDA_R_64F ? "cumetal_spmv_gather_simd_f64"
+                                            : "cumetal_spmv_gather_simd_f32";
+    }
 
     std::string error;
-    const char* kernel = compute_type == CUDA_R_64F ? "cumetal_spmv_gather_f64"
-                                                    : "cumetal_spmv_gather_f32";
     // A null backend stream is the default stream, which is what a handle left
     // on the default stream needs. Mapping an explicit cudaStream_t onto a
     // backend stream is plumbing the runtime does not expose here, so a handle
@@ -766,6 +896,7 @@ bool try_spmv_gather_metal(cusparseHandle_t handle,
         spmv_note(error.empty() ? "launch failed" : error.c_str());
         return false;
     }
+    spmv_note_gpu(kernel, mat, axis);
     // Profiling aid. Leaving the launch async is correct and is what makes the
     // GPU path worth having, but it also means a caller's own SpMV timers
     // measure enqueue rather than execution, which is easy to misread as a
