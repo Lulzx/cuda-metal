@@ -4,6 +4,7 @@
 #include "metal_backend.h"
 #include "runtime_internal.h"
 #include "sparse_kernels_msl.h"
+#include "library_kernel_source.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -550,36 +551,9 @@ struct SpmvParams {
 };
 static_assert(sizeof(SpmvParams) == 32, "SpmvParams must match the MSL layout");
 
-// The MSL is compiled by the Metal backend's runtime source path, which reads
-// from a file, so stage it once per process into the same cache the JIT uses.
 const std::string* sparse_kernels_source_path() {
-    static const std::string* cached = [] {
-        namespace fs = std::filesystem;
-        std::error_code ec;
-        fs::path dir;
-        if (const char* d = std::getenv("CUMETAL_CACHE_DIR"); d != nullptr && d[0] != '\0') {
-            dir = fs::path(d);
-        } else if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
-            dir = fs::path(home) / "Library" / "Caches" / "io.cumetal";
-        } else {
-            dir = fs::temp_directory_path(ec);
-            if (ec) return static_cast<std::string*>(nullptr);
-        }
-        dir /= "library-kernels";
-        fs::create_directories(dir, ec);
-        if (ec) return static_cast<std::string*>(nullptr);
-        const fs::path out = dir / "sparse_kernels.metal";
-        // Rewrite unconditionally: the source is compiled into this binary, so a
-        // stale file from an older build must not win.
-        std::FILE* f = std::fopen(out.c_str(), "wb");
-        if (f == nullptr) return static_cast<std::string*>(nullptr);
-        const auto& src = cumetal::rt::kSparseKernelsMsl;
-        const bool wrote = std::fwrite(src.data(), 1, src.size(), f) == src.size();
-        std::fclose(f);
-        if (!wrote) return static_cast<std::string*>(nullptr);
-        return new std::string(out.string());
-    }();
-    return cached;
+    return cumetal::rt::stage_library_kernel_source("sparse_kernels",
+                                                    cumetal::rt::kSparseKernelsMsl);
 }
 
 // CUMETAL_SPARSE_METAL: unset = auto, "1" = always, "0" = never. Matches the
@@ -744,22 +718,11 @@ GatherKernel choose_gather_kernel(const cusparseSpMatDescr* mat, std::int64_t ax
     return GatherKernel::kNone;
 }
 
-// A device pointer resolves to a Metal buffer plus a byte offset. Metal requires
-// the offset to satisfy the bound type's alignment, so reject anything that does
-// not and let the CPU path take it.
 bool resolve_arg(const void* ptr,
                  std::size_t required_bytes,
                  std::size_t alignment,
                  cumetal::metal_backend::KernelArg* out) {
-    if (ptr == nullptr) return false;
-    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
-    if (!cumetal::rt::resolve_allocation_for_pointer(ptr, &resolved)) return false;
-    if (resolved.buffer == nullptr || resolved.remaining_size < required_bytes) return false;
-    if (resolved.offset % alignment != 0) return false;
-    out->kind = cumetal::metal_backend::KernelArg::Kind::kBuffer;
-    out->buffer = resolved.buffer;
-    out->offset = resolved.offset;
-    return true;
+    return cumetal::rt::resolve_kernel_buffer_arg(ptr, required_bytes, alignment, out);
 }
 
 // The GPU path may decline for reasons that are capability questions (an

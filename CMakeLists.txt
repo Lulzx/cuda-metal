@@ -226,6 +226,7 @@ add_library(cumetal_runtime SHARED
     runtime/registration/native_registration.cpp
     ${CUMETAL_REGISTRATION_SOURCE}
     runtime/rt/allocation_table.cpp
+    runtime/rt/library_kernel_source.cpp
     runtime/rt/cublas.cpp
     runtime/rt/cufft.cpp
     runtime/rt/curand.cpp

@@ -2,6 +2,8 @@
 #include "cuda_bf16.h"
 #include "metal_backend.h"
 #include "runtime_internal.h"
+#include "blas1_kernels_msl.h"
+#include "library_kernel_source.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -103,6 +105,305 @@ T* scalar_pointer_for_mode(cublasHandle_t handle, T* pointer) {
 template <typename T>
 const T* scalar_pointer_for_mode(cublasHandle_t handle, const T* pointer) {
     return scalar_pointer_for_mode(handle, const_cast<T*>(pointer));
+}
+
+// ── FP64 level-1 on the GPU ─────────────────────────────────────────────────
+//
+// cuPDLP-C's GPU path calls cublasDaxpy, cublasDdot, cublasDnrm2 and
+// cublasDscal on vectors the length of the LP. Serving those from the scalar
+// CPU loops below made them 26% of a profiled PDLP solve on datt256 while the
+// sparse products were already on the GPU, so the level-1 calls had become the
+// thing worth moving.
+//
+// Every entry point keeps its CPU loop. The GPU path is allowed to decline --
+// for a short vector, an untracked pointer, a misaligned offset, a kernel that
+// will not compile -- and the answer is the same either way, only slower. That
+// also means a broken kernel is invisible from the results alone, which is what
+// CUMETAL_DEBUG_CUBLAS_BLAS1 is for.
+
+// Mirrors Blas1Params in blas1_kernels_msl.h.
+struct Blas1Params {
+    std::uint32_t n;
+    std::uint32_t incx;
+    std::uint32_t incy;
+    std::uint32_t op;
+    std::uint64_t alpha_bits;
+};
+static_assert(sizeof(Blas1Params) == 24, "Blas1Params must match the MSL layout");
+
+constexpr std::uint32_t kReduceOpDot = 0;
+constexpr std::uint32_t kReduceOpSumSq = 1;
+constexpr std::uint32_t kReduceOpAbsSum = 2;
+
+constexpr unsigned kBlas1Block = 256;
+
+// Partials the reduction leaves for the host to fold. Capping the grid keeps
+// that fold trivially short; the kernel walks the vector with a grid stride, so
+// a cap costs each thread more elements rather than leaving any uncomputed.
+constexpr unsigned kMaxReducePartials = 1024;
+
+// CUMETAL_BLAS_METAL: unset = auto, "1" = always, "0" = never. Same convention
+// as CUMETAL_SPARSE_METAL.
+enum class Blas1MetalPolicy { kAuto, kAlways, kNever };
+
+Blas1MetalPolicy blas1_metal_policy() {
+    static const Blas1MetalPolicy policy = [] {
+        const char* v = std::getenv("CUMETAL_BLAS_METAL");
+        if (v == nullptr || v[0] == '\0') return Blas1MetalPolicy::kAuto;
+        if (v[0] == '0') return Blas1MetalPolicy::kNever;
+        return Blas1MetalPolicy::kAlways;
+    }();
+    return policy;
+}
+
+// The elementwise kernels and the reductions cross over at very different
+// lengths, so one threshold cannot serve both. Completed-call latency on an
+// M4 Pro (cumetal_cublas_blas1_metal_bench, microseconds):
+//
+//        n        axpy cpu/gpu       dot cpu/gpu      nrm2 cpu/gpu
+//     1024          2.8 / 11.5        1.8 / 110.8       2.5 / 107.0
+//     4096          7.4 /  5.1        5.0 / 107.3       8.3 / 106.8
+//    16384         26.9 /  5.8       18.4 / 106.2      30.1 / 106.7
+//    65536        100.5 / 10.6       73.0 / 108.5     126.2 / 106.0
+//   262144        430.6 / 35.6      350.4 / 135.0     516.1 / 129.2
+//  1048576       1628.5 / 172.6    1361.5 / 157.8    2000.9 / 138.8
+//
+// axpy pays only for the enqueue, which the command-buffer batching amortizes,
+// so it is ahead from a few thousand elements. The reductions have to
+// synchronize to return a scalar to the host, and that wait is the flat ~106 us
+// floor in their columns -- it does not shrink with n, so nothing below about
+// 100k can win no matter how fast the kernel is.
+//
+// Both defaults sit past their measured crossover rather than on it, for the
+// same reason the sparse threshold does: right at the crossing the two paths
+// are within noise of each other and the choice wins or loses a few percent at
+// random.
+constexpr long long kDefaultBlas1ElementwiseThresholdN = 4096;
+constexpr long long kDefaultBlas1ReduceThresholdN = 131072;
+
+long long threshold_from_env(const char* name, long long fallback) {
+    const char* v = std::getenv(name);
+    if (v == nullptr || v[0] == '\0') return fallback;
+    char* end = nullptr;
+    const long long parsed = std::strtoll(v, &end, 10);
+    return (end != nullptr && *end == '\0' && parsed >= 0) ? parsed : fallback;
+}
+
+long long blas1_elementwise_threshold_n() {
+    static const long long threshold = threshold_from_env(
+        "CUMETAL_BLAS_METAL_THRESHOLD_N", kDefaultBlas1ElementwiseThresholdN);
+    return threshold;
+}
+
+long long blas1_reduce_threshold_n() {
+    static const long long threshold = threshold_from_env(
+        "CUMETAL_BLAS_METAL_REDUCE_THRESHOLD_N", kDefaultBlas1ReduceThresholdN);
+    return threshold;
+}
+
+bool blas1_debug() {
+    static const bool on = [] {
+        const char* v = std::getenv("CUMETAL_DEBUG_CUBLAS_BLAS1");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return on;
+}
+
+void blas1_note(const char* op, const char* why) {
+    if (blas1_debug()) {
+        fprintf(stderr, "CUMETAL_DEBUG_CUBLAS_BLAS1: %s on the CPU: %s\n", op, why);
+    }
+}
+
+void blas1_note_gpu(const char* kernel, long long n) {
+    if (blas1_debug()) {
+        fprintf(stderr, "CUMETAL_DEBUG_CUBLAS_BLAS1: %s on the Apple GPU n=%lld\n", kernel, n);
+    }
+}
+
+const std::string* blas1_source_path() {
+    return cumetal::rt::stage_library_kernel_source("blas1_kernels",
+                                                    cumetal::rt::kBlas1KernelsMsl);
+}
+
+// Shared by every level-1 kernel: the size gate, the stream, and the staged
+// source. Returns false with a reason whenever the CPU loop should run instead.
+bool blas1_metal_prologue(const char* op,
+                          cublasHandle_t handle,
+                          int n,
+                          long long threshold,
+                          std::shared_ptr<cumetal::metal_backend::Stream>* stream,
+                          const std::string** source) {
+    const Blas1MetalPolicy policy = blas1_metal_policy();
+    if (policy == Blas1MetalPolicy::kNever) {
+        blas1_note(op, "CUMETAL_BLAS_METAL=0");
+        return false;
+    }
+    if (policy != Blas1MetalPolicy::kAlways && n < threshold) {
+        blas1_note(op, "below the dispatch-cost threshold");
+        return false;
+    }
+    // The handle's stream is the stream this work belongs on, so it is ordered
+    // against the caller's other work exactly as real cuBLAS would order it. A
+    // null stream resolves to the default stream, which is the same one the CPU
+    // path would synchronize against.
+    if (cumetal::rt::resolve_backend_stream(handle->stream, stream) != cudaSuccess) {
+        blas1_note(op, "the handle's stream does not resolve to a backend stream");
+        return false;
+    }
+    *source = blas1_source_path();
+    if (*source == nullptr) {
+        blas1_note(op, "could not stage the kernel source");
+        return false;
+    }
+    return true;
+}
+
+void blas1_pack_params(Blas1Params params, cumetal::metal_backend::KernelArg* out) {
+    out->kind = cumetal::metal_backend::KernelArg::Kind::kBytes;
+    out->bytes.resize(sizeof(params));
+    std::memcpy(out->bytes.data(), &params, sizeof(params));
+}
+
+std::size_t blas1_span_bytes(int n, int inc) {
+    // The last element touched is (n-1)*inc, so the allocation has to reach
+    // through it -- not merely hold n elements.
+    return (static_cast<std::size_t>(n - 1) * static_cast<std::size_t>(inc) + 1) *
+           sizeof(double);
+}
+
+// axpy / scal / copy / swap: nothing is read back, so the launch stays async and
+// the caller's own stream ordering decides when it lands. Synchronizing here
+// would be the single change most likely to make the GPU path slower than the
+// loop it replaced.
+bool blas1_launch_elementwise(const char* op,
+                              const char* kernel,
+                              cublasHandle_t handle,
+                              int n,
+                              std::vector<cumetal::metal_backend::KernelArg> args,
+                              Blas1Params params) {
+    std::shared_ptr<cumetal::metal_backend::Stream> stream;
+    const std::string* source = nullptr;
+    if (!blas1_metal_prologue(op, handle, n, blas1_elementwise_threshold_n(),
+                              &stream, &source)) {
+        return false;
+    }
+
+    blas1_pack_params(params, &args.back());
+
+    cumetal::metal_backend::LaunchConfig config{};
+    config.block = dim3(kBlas1Block, 1, 1);
+    config.grid = dim3(static_cast<unsigned>((static_cast<long long>(n) + kBlas1Block - 1) /
+                                             kBlas1Block), 1, 1);
+    config.shared_memory_bytes = 0;
+
+    std::string error;
+    if (cumetal::metal_backend::launch_kernel(*source, kernel, config, args, stream,
+                                              &error) != cudaSuccess) {
+        blas1_note(op, error.empty() ? "launch failed" : error.c_str());
+        return false;
+    }
+    blas1_note_gpu(kernel, n);
+    return true;
+}
+
+// A device scratch buffer for the reduction partials, grown as needed and kept
+// for the process. Allocating one per call would put a cudaMalloc on the path of
+// every dot product.
+double* reduce_partials_buffer(unsigned count) {
+    static std::mutex mutex;
+    static double* buffer = nullptr;
+    static unsigned capacity = 0;
+
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (count > capacity) {
+        double* grown = nullptr;
+        if (cudaMalloc(reinterpret_cast<void**>(&grown), count * sizeof(double)) != cudaSuccess) {
+            return nullptr;
+        }
+        if (buffer != nullptr) cudaFree(buffer);
+        buffer = grown;
+        capacity = count;
+    }
+    return buffer;
+}
+
+// dot / nrm2 / asum. The result has to reach the host, so unlike the
+// elementwise kernels this one synchronizes -- which is what real cuBLAS does
+// too in CUBLAS_POINTER_MODE_HOST.
+//
+// The host folds the per-threadgroup partials in true binary64. That is both
+// cheaper than another dispatch and more accurate than folding them in the
+// emulated pair.
+bool blas1_reduce(const char* op,
+                  cublasHandle_t handle,
+                  int n,
+                  const double* x, int incx,
+                  const double* y, int incy,
+                  std::uint32_t reduce_op,
+                  double* out) {
+    std::shared_ptr<cumetal::metal_backend::Stream> stream;
+    const std::string* source = nullptr;
+    if (!blas1_metal_prologue(op, handle, n, blas1_reduce_threshold_n(),
+                              &stream, &source)) {
+        return false;
+    }
+
+    const unsigned groups = static_cast<unsigned>(std::min<long long>(
+        (static_cast<long long>(n) + kBlas1Block - 1) / kBlas1Block, kMaxReducePartials));
+    double* partials = reduce_partials_buffer(groups);
+    if (partials == nullptr) {
+        blas1_note(op, "could not allocate the partials buffer");
+        return false;
+    }
+
+    std::vector<cumetal::metal_backend::KernelArg> args(4);
+    // y is unused for the single-vector reductions, but Metal still binds the
+    // argument, so point it at x rather than leaving it null.
+    const double* y_arg = reduce_op == kReduceOpDot ? y : x;
+    const int y_inc = reduce_op == kReduceOpDot ? incy : incx;
+    if (!cumetal::rt::resolve_kernel_buffer_arg(partials, groups * sizeof(double),
+                                                sizeof(double), &args[0]) ||
+        !cumetal::rt::resolve_kernel_buffer_arg(x, blas1_span_bytes(n, incx),
+                                                sizeof(double), &args[1]) ||
+        !cumetal::rt::resolve_kernel_buffer_arg(y_arg, blas1_span_bytes(n, y_inc),
+                                                sizeof(double), &args[2])) {
+        blas1_note(op, "an operand is not a tracked device allocation, or is misaligned");
+        return false;
+    }
+
+    Blas1Params params{};
+    params.n = static_cast<std::uint32_t>(n);
+    params.incx = static_cast<std::uint32_t>(incx);
+    params.incy = static_cast<std::uint32_t>(y_inc);
+    params.op = reduce_op;
+    blas1_pack_params(params, &args[3]);
+
+    cumetal::metal_backend::LaunchConfig config{};
+    config.block = dim3(kBlas1Block, 1, 1);
+    config.grid = dim3(groups, 1, 1);
+    // One float2 per simdgroup. The execution width is a device property the
+    // host does not know here, so size for the narrowest plausible one: being
+    // generous wastes a few hundred bytes, being short would corrupt the
+    // reduction.
+    config.shared_memory_bytes = (kBlas1Block / 8) * sizeof(float) * 2;
+
+    std::string error;
+    if (cumetal::metal_backend::launch_kernel(*source, "cumetal_dreduce_f64", config, args,
+                                              stream, &error) != cudaSuccess) {
+        blas1_note(op, error.empty() ? "launch failed" : error.c_str());
+        return false;
+    }
+    if (cumetal::metal_backend::synchronize(&error) != cudaSuccess) {
+        blas1_note(op, error.empty() ? "synchronize failed" : error.c_str());
+        return false;
+    }
+
+    double total = 0.0;
+    for (unsigned i = 0; i < groups; ++i) total += partials[i];
+    *out = total;
+    blas1_note_gpu("cumetal_dreduce_f64", n);
+    return true;
 }
 
 cublasStatus_t map_cuda_status_to_cublas(cudaError_t status) {
@@ -529,12 +830,32 @@ cublasStatus_t cublasDaxpy(cublasHandle_t handle,
         return CUBLAS_STATUS_INVALID_VALUE;
     }
 
-    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
-    if (sync_status != CUBLAS_STATUS_SUCCESS) {
-        return sync_status;
-    }
-
+    // No synchronize here on purpose. The GPU path below enqueues on the
+    // handle's own stream, so it is already ordered against the caller's other
+    // work; waiting first would serialize every axpy against the GPU and give
+    // back exactly the latency this path exists to remove. The CPU fallback
+    // does its own synchronize before touching the data.
     const double alpha_value = *alpha_value_ptr;
+    {
+        std::vector<cumetal::metal_backend::KernelArg> args(3);
+        Blas1Params params{};
+        params.n = static_cast<std::uint32_t>(n);
+        params.incx = static_cast<std::uint32_t>(incx);
+        params.incy = static_cast<std::uint32_t>(incy);
+        std::memcpy(&params.alpha_bits, &alpha_value, sizeof(alpha_value));
+        if (cumetal::rt::resolve_kernel_buffer_arg(y, blas1_span_bytes(n, incy),
+                                                   sizeof(double), &args[0]) &&
+            cumetal::rt::resolve_kernel_buffer_arg(x, blas1_span_bytes(n, incx),
+                                                   sizeof(double), &args[1]) &&
+            blas1_launch_elementwise("Daxpy", "cumetal_daxpy_f64", handle, n,
+                                     std::move(args), params)) {
+            return CUBLAS_STATUS_SUCCESS;
+        }
+    }
+    const cublasStatus_t cpu_sync = synchronize_handle_stream(handle);
+    if (cpu_sync != CUBLAS_STATUS_SUCCESS) {
+        return cpu_sync;
+    }
     for (int i = 0; i < n; ++i) {
         y[i * incy] = alpha_value * x[i * incx] + y[i * incy];
     }
@@ -559,12 +880,30 @@ cublasStatus_t cublasDscal(cublasHandle_t handle, int n, const double* alpha, do
         return CUBLAS_STATUS_INVALID_VALUE;
     }
 
-    const cublasStatus_t sync_status = synchronize_handle_stream(handle);
-    if (sync_status != CUBLAS_STATUS_SUCCESS) {
-        return sync_status;
-    }
-
+    // No synchronize here on purpose. The GPU path below enqueues on the
+    // handle's own stream, so it is already ordered against the caller's other
+    // work; waiting first would serialize every axpy against the GPU and give
+    // back exactly the latency this path exists to remove. The CPU fallback
+    // does its own synchronize before touching the data.
     const double alpha_value = *alpha_value_ptr;
+    {
+        std::vector<cumetal::metal_backend::KernelArg> args(2);
+        Blas1Params params{};
+        params.n = static_cast<std::uint32_t>(n);
+        params.incx = static_cast<std::uint32_t>(incx);
+        params.incy = static_cast<std::uint32_t>(incx);
+        std::memcpy(&params.alpha_bits, &alpha_value, sizeof(alpha_value));
+        if (cumetal::rt::resolve_kernel_buffer_arg(x, blas1_span_bytes(n, incx),
+                                                   sizeof(double), &args[0]) &&
+            blas1_launch_elementwise("Dscal", "cumetal_dscal_f64", handle, n,
+                                     std::move(args), params)) {
+            return CUBLAS_STATUS_SUCCESS;
+        }
+    }
+    const cublasStatus_t cpu_sync = synchronize_handle_stream(handle);
+    if (cpu_sync != CUBLAS_STATUS_SUCCESS) {
+        return cpu_sync;
+    }
     for (int i = 0; i < n; ++i) {
         x[i * incx] *= alpha_value;
     }
@@ -700,6 +1039,12 @@ cublasStatus_t cublasDdot(cublasHandle_t handle,
     const cublasStatus_t sync_status = synchronize_handle_stream(handle);
     if (sync_status != CUBLAS_STATUS_SUCCESS) {
         return sync_status;
+    }
+
+    double gpu_result = 0.0;
+    if (blas1_reduce("Ddot", handle, n, x, incx, y, incy, kReduceOpDot, &gpu_result)) {
+        *result_ptr = gpu_result;
+        return CUBLAS_STATUS_SUCCESS;
     }
 
     double sum = 0.0;
@@ -848,6 +1193,12 @@ cublasStatus_t cublasDnrm2(cublasHandle_t handle,
     }
 
     double sum_sq = 0.0;
+    if (blas1_reduce("Dnrm2", handle, n, x, incx, nullptr, incx, kReduceOpSumSq, &sum_sq)) {
+        *result = std::sqrt(sum_sq);
+        return CUBLAS_STATUS_SUCCESS;
+    }
+
+    sum_sq = 0.0;
     for (int i = 0; i < n; ++i) {
         const double v = x[i * incx];
         sum_sq += v * v;

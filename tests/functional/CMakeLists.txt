@@ -151,6 +151,15 @@ add_executable(cumetal_cublas_extended_api_test
     cublas_extended_api_test.cpp
 )
 
+add_executable(cumetal_cublas_blas1_metal_test
+    cublas_blas1_metal_test.cpp
+)
+
+# Not a CTest: it measures the threshold the dispatch uses, it does not assert it.
+add_executable(cumetal_cublas_blas1_metal_bench
+    cublas_blas1_metal_bench.cpp
+)
+
 add_executable(cumetal_cublas_device_pointer_table_test
     cublas_device_pointer_table_test.cpp
 )
@@ -691,6 +700,16 @@ target_link_libraries(cumetal_curand_uniform_test
 )
 
 target_link_libraries(cumetal_cublas_api_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cublas_blas1_metal_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cublas_blas1_metal_bench
     PRIVATE
         cumetal_runtime
 )
@@ -1411,6 +1430,13 @@ target_compile_options(cumetal_curand_uniform_test
 )
 
 target_compile_options(cumetal_cublas_api_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_cublas_blas1_metal_test
     PRIVATE
         -Wall
         -Wextra
@@ -2216,6 +2242,15 @@ add_test(
 add_test(
     NAME functional_cublas_api
     COMMAND cumetal_cublas_api_test
+)
+
+# Runs the binary on both paths. The wrapper, not the binary, is the test:
+# the GPU path may decline and fall back, so a green binary alone would not
+# show that the Metal kernels ran at all.
+add_test(
+    NAME functional_cublas_blas1_metal
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_cublas_blas1_metal.sh
+            $<TARGET_FILE:cumetal_cublas_blas1_metal_test>
 )
 
 add_test(

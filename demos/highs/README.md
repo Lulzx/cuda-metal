@@ -161,12 +161,27 @@ or `=simd` pins one, and `CUMETAL_DEBUG_SPARSE=1` reports which ran and why.
 No solver speedup on this corpus. These eight instances are all far below the
 size where the GPU sparse path pays for itself, and forcing it makes them slower;
 the solver speedups above are on two much larger LPs that are not part of this
-demo. FP64 cuBLAS L1 (dot, norm) is still a scalar CPU loop
-over unified memory, and solver-level synchronization is unoptimized. Do not read
-these solve times as a benchmark.
+demo. Solver-level synchronization is unoptimized. Do not read these solve times
+as a benchmark.
 
-On `datt256` that CPU loop is now most of what is left: with both products on the
-GPU, `UpdateIterates` is 4.49 s of the 5.51 s solve.
+FP64 cuBLAS level-1 is no longer a scalar CPU loop. `cublasDaxpy`, `cublasDscal`,
+`cublasDdot` and `cublasDnrm2` have Metal kernels using the same Dekker pair as
+the sparse ones, and route by length: the elementwise kernels take over at 4096
+elements, the reductions at 131072. The gap between those two thresholds is not
+arbitrary. An axpy only pays for its enqueue, which the command-buffer batching
+amortizes to a few microseconds, while a dot has to synchronize to hand a scalar
+back to the host, and that wait is a flat ~106 us floor no kernel speed can move.
+`cumetal_cublas_blas1_metal_bench` prints the table both defaults came from.
+
+Measured on `datt256`, `--presolve off`, HiGHS 1.15.1 `CUPDLP_GPU=ON`, median of
+three: 3.96 s before, 3.16 s after, against 5.17 s for the same HiGHS built
+`CUPDLP_GPU=OFF`. The first run after a rebuild is several seconds slower while
+the new MSL is compiled and cached.
+
+What is left on that instance is not level-1 at all. Profiling the GPU build
+puts 71% of the solve in `cupdlp_movement_interaction_cuda`, which is cuPDLP's
+own FP64 tree reduction and already runs on Metal, and 0.5% in the sparse
+products. cuBLAS level-1 was 26% of it before this change.
 
 This is standalone cuPDLP-C, not HiGHS's own GPU build. HiGHS's `CUPDLP_GPU=ON`
 path additionally requires `cusparseDnVecSetValues`, `cusparseSpMV_preprocess`,
