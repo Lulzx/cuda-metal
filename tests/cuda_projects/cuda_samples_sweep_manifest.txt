@@ -68,7 +68,7 @@ compile-fail 0_Introduction/simplePitchLinearTexture
 compile-fail 0_Introduction/simpleSurfaceWrite
 compile-fail 0_Introduction/simpleTexture
 compile-fail 0_Introduction/simpleTexture3D
-run-fail     0_Introduction/systemWideAtomics
+pass         0_Introduction/systemWideAtomics
 compile-fail 2_Concepts_and_Techniques/convolutionTexture
 compile-fail 2_Concepts_and_Techniques/dct8x8
 compile-fail 2_Concepts_and_Techniques/interval

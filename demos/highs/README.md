@@ -120,8 +120,8 @@ a real solve. Solver wall time, median of 3, 99 fixed iterations, M4 Pro:
 
 | instance | shape | cpu | auto | scalar kernel forced | cooperative kernel forced |
 | --- | --- | ---: | ---: | ---: | ---: |
-| `ex10` | 69,609 x 17,680, 1.18M nnz | 1.197 s | **0.323 s** | 0.322 s | 0.324 s |
-| `datt256` | 11,078 x 262,144, 1.77M nnz | 1.905 s | **0.879 s** | 5.312 s | 1.071 s |
+| `ex10` | 69,609 x 17,680, 1.18M nnz | 1.180 s | **0.276 s** | 0.270 s | 0.270 s |
+| `datt256` | 11,078 x 262,144, 1.77M nnz | 1.884 s | **0.823 s** | 5.360 s | 1.065 s |
 
 All four configurations reach bit-identical primal and dual objectives and the
 same primal infeasibility on each instance.

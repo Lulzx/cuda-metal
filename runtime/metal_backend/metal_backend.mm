@@ -159,6 +159,11 @@ private:
     std::uint64_t last_access_value_ = 0;
 };
 
+struct ResourceFenceReservation {
+    id<MTLSharedEvent> event = nil;
+    std::uint64_t signal_value = 0;
+};
+
 class StreamImpl final : public Stream {
 public:
     StreamImpl(id<MTLCommandQueue> queue,
@@ -220,6 +225,71 @@ public:
         host_operation_cv_.wait(lock, [&] { return pending_host_operations_ == 0; });
     }
 
+    // ── open batch ──────────────────────────────────────────────────────
+    //
+    // A command buffer costs about 100us to put through the queue, and CuMetal
+    // used to spend one per kernel launch: a profile of a one-element kernel in
+    // a tight loop sat 87% of its samples inside -[MTLCommandQueue
+    // commandBuffer], blocked in _dispatch_semaphore_wait_slow waiting for a
+    // slot. So consecutive launches on a stream now encode into one buffer and
+    // one compute encoder, which is committed at the first point that needs the
+    // work to have been submitted.
+    //
+    // A compute encoder is serial by default -- each dispatch completes before
+    // the next begins -- so batching preserves the ordering CUDA promises within
+    // a stream without any fence between the dispatches.
+    //
+    // Every method below is called with submission_mutex_ held except
+    // flush_open_batch(), which takes it.
+
+    bool has_open_batch() const { return open_buffer_ != nil; }
+    id<MTLComputeCommandEncoder> open_encoder() const { return open_encoder_; }
+    std::uint64_t open_batch_value() const { return open_batch_value_; }
+    unsigned open_batch_dispatches() const { return open_batch_dispatches_; }
+    const std::vector<ResourceFenceReservation>& open_batch_waits() const {
+        return open_batch_waits_;
+    }
+
+    void begin_batch(id<MTLCommandBuffer> command_buffer,
+                     id<MTLComputeCommandEncoder> encoder,
+                     std::vector<ResourceFenceReservation> reservations,
+                     std::vector<ResourceFenceReservation> waits,
+                     std::uint64_t batch_value) {
+        open_buffer_ = command_buffer;
+        open_encoder_ = encoder;
+        open_batch_reservations_ = std::move(reservations);
+        open_batch_waits_ = std::move(waits);
+        open_batch_value_ = batch_value;
+        open_batch_dispatches_ = 1;
+    }
+
+    void note_batch_dispatch() { ++open_batch_dispatches_; }
+
+    std::uint64_t flush_open_batch_locked() {
+        if (open_buffer_ == nil) {
+            return 0;
+        }
+        id<MTLCommandBuffer> command_buffer = open_buffer_;
+        [open_encoder_ endEncoding];
+        for (const ResourceFenceReservation& reservation : open_batch_reservations_) {
+            [command_buffer encodeSignalEvent:reservation.event
+                                        value:reservation.signal_value];
+        }
+        open_buffer_ = nil;
+        open_encoder_ = nil;
+        open_batch_reservations_.clear();
+        open_batch_waits_.clear();
+        open_batch_value_ = 0;
+        open_batch_dispatches_ = 0;
+        [command_buffer commit];
+        return add_pending(command_buffer);
+    }
+
+    void flush_open_batch() {
+        std::lock_guard<std::mutex> lock(submission_mutex_);
+        (void)flush_open_batch_locked();
+    }
+
     std::uint64_t add_pending(id<MTLCommandBuffer> command_buffer) {
         std::lock_guard<std::mutex> lock(mutex_);
         const std::uint64_t ticket = next_ticket_++;
@@ -227,12 +297,17 @@ public:
         return ticket;
     }
 
-    std::uint64_t tail_ticket() const {
+    // Every path that asks about completion has to submit the open batch first,
+    // or it would report a ticket that does not cover work already issued, and
+    // a caller that waits on it would read memory the GPU has not written.
+    std::uint64_t tail_ticket() {
+        flush_open_batch();
         std::lock_guard<std::mutex> lock(mutex_);
         return next_ticket_ - 1;
     }
 
     cudaError_t poll_completed(std::string* error_message) {
+        flush_open_batch();
         for (;;) {
             id<MTLCommandBuffer> completed_buffer = nil;
             {
@@ -260,6 +335,7 @@ public:
     }
 
     cudaError_t query_ticket(std::uint64_t ticket, bool* out_complete, std::string* error_message) {
+        flush_open_batch();
         if (out_complete == nullptr) {
             if (error_message != nullptr) {
                 *error_message = "query_ticket missing out_complete";
@@ -290,6 +366,7 @@ public:
     }
 
     cudaError_t wait_ticket(std::uint64_t ticket, std::string* error_message) {
+        flush_open_batch();
         if (ticket == 0) {
             return cudaSuccess;
         }
@@ -349,6 +426,12 @@ private:
     std::mutex host_operation_mutex_;
     std::condition_variable host_operation_cv_;
     std::size_t pending_host_operations_ = 0;
+    id<MTLCommandBuffer> open_buffer_ = nil;
+    id<MTLComputeCommandEncoder> open_encoder_ = nil;
+    std::vector<ResourceFenceReservation> open_batch_reservations_;
+    std::vector<ResourceFenceReservation> open_batch_waits_;
+    std::uint64_t open_batch_value_ = 0;
+    unsigned open_batch_dispatches_ = 0;
 };
 
 struct BackendState {
@@ -358,6 +441,12 @@ struct BackendState {
     };
 
     std::mutex mutex;
+    // Held for the whole of any submission that opens, extends or submits an
+    // open batch, and taken before any stream's submission mutex. One thread at
+    // a time may therefore submit another stream's batch while holding its own
+    // stream's lock, which is what breaks the cross-stream wait described on
+    // flush_other_open_batches.
+    std::mutex batch_mutex;
     // Resource and legacy-default-stream reservations are one submission
     // transaction. Keeping them under one lock prevents cross-queue wait cycles
     // when host threads submit concurrently.
@@ -378,18 +467,14 @@ struct BackendState {
     std::vector<std::weak_ptr<StreamImpl>> streams;
 };
 
-struct ResourceFenceReservation {
-    id<MTLSharedEvent> event = nil;
-    std::uint64_t signal_value = 0;
-};
-
 BackendState& state();
 std::vector<std::shared_ptr<StreamImpl>> collect_live_streams_locked(BackendState& backend);
 
 std::vector<ResourceFenceReservation> encode_submission_waits(
     id<MTLCommandBuffer> command_buffer,
     const std::shared_ptr<StreamImpl>& stream_impl,
-    std::vector<BufferImpl*> buffers) {
+    std::vector<BufferImpl*> buffers,
+    std::vector<ResourceFenceReservation>* out_waits = nullptr) {
     buffers.erase(std::remove(buffers.begin(), buffers.end(), nullptr), buffers.end());
     std::sort(buffers.begin(), buffers.end(), std::less<BufferImpl*>{});
     buffers.erase(std::unique(buffers.begin(), buffers.end()), buffers.end());
@@ -451,8 +536,132 @@ std::vector<ResourceFenceReservation> encode_submission_waits(
     for (const ResourceFenceReservation& wait : waits) {
         [command_buffer encodeWaitForEvent:wait.event value:wait.signal_value];
     }
+    if (out_waits != nullptr) {
+        *out_waits = waits;
+    }
     reservations.push_back({.event = signal_event, .signal_value = signal_value});
     return reservations;
+}
+
+// Submit every other stream's open batch.
+//
+// A submission waits on other streams by shared-event value -- the legacy
+// default stream waits on each blocking stream's latest, and a blocking stream
+// waits on the default stream's. Those values are reserved when a batch opens
+// and only signalled when it is committed, so waiting on a stream whose batch is
+// still open waits for a signal that will never come: the GPU sat on it until
+// the command buffer timed out. Every submission that is not an extension of the
+// caller's own batch therefore closes the others first.
+//
+// Called with backend.batch_mutex held, so no other thread is opening a batch
+// while this runs, and the per-stream locks taken here cannot cycle against a
+// thread taking them in the other order.
+void flush_other_open_batches(const std::shared_ptr<StreamImpl>& self) {
+    std::vector<std::shared_ptr<StreamImpl>> streams;
+    {
+        BackendState& backend = state();
+        std::lock_guard<std::mutex> lock(backend.mutex);
+        streams = collect_live_streams_locked(backend);
+        if (backend.default_stream != nullptr) {
+            streams.push_back(backend.default_stream);
+        }
+    }
+    for (const std::shared_ptr<StreamImpl>& stream : streams) {
+        if (stream == nullptr || stream == self) {
+            continue;
+        }
+        stream->flush_open_batch();
+    }
+}
+
+// Whether `buffers` can join a batch that already reserved `batch_value` on
+// `stream_impl`'s access event -- that is, whether every wait the new work would
+// need is already encoded on that command buffer. On success the buffers' last
+// access is moved onto the batch, exactly as encode_submission_waits would have
+// done for a fresh submission.
+//
+// Anything touched by another stream since the batch opened, or any legacy
+// default-stream ordering that has moved on, means the answer is no and the
+// caller submits the batch and starts a new one. The common case -- one stream
+// launching over the same operands -- says yes, because after the first launch
+// every buffer's last access is already this batch's.
+bool try_extend_submission(const std::shared_ptr<StreamImpl>& stream_impl,
+                           std::vector<BufferImpl*> buffers,
+                           std::uint64_t batch_value,
+                           const std::vector<ResourceFenceReservation>& encoded_waits) {
+    buffers.erase(std::remove(buffers.begin(), buffers.end(), nullptr), buffers.end());
+    std::sort(buffers.begin(), buffers.end(), std::less<BufferImpl*>{});
+    buffers.erase(std::unique(buffers.begin(), buffers.end()), buffers.end());
+
+    BackendState& backend = state();
+    std::scoped_lock lock(backend.mutex, backend.submission_fence_mutex);
+    if (stream_impl == nullptr) {
+        return false;
+    }
+    id<MTLSharedEvent> signal_event = stream_impl->access_event();
+
+    const auto covered = [&](id<MTLSharedEvent> event, std::uint64_t value) {
+        if (event == nil || value == 0) {
+            return true;
+        }
+        // Our own event at or below the batch's value is ordered by the encoder,
+        // which runs its dispatches one after another.
+        if (event == signal_event && value <= batch_value) {
+            return true;
+        }
+        for (const ResourceFenceReservation& wait : encoded_waits) {
+            if (wait.event == event && wait.signal_value >= value) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (stream_impl->is_legacy_default()) {
+        const auto live_streams = collect_live_streams_locked(backend);
+        for (const auto& user_stream : live_streams) {
+            if (!user_stream->participates_in_legacy_sync()) {
+                continue;
+            }
+            if (!covered(user_stream->access_event(),
+                         user_stream->latest_submission_value())) {
+                return false;
+            }
+        }
+    } else if (stream_impl->participates_in_legacy_sync() &&
+               backend.default_stream != nullptr) {
+        if (!covered(backend.default_stream->access_event(),
+                     backend.default_stream->latest_submission_value())) {
+            return false;
+        }
+    }
+
+    for (BufferImpl* buffer : buffers) {
+        const auto [wait_event, wait_value] = buffer->last_access();
+        if (!covered(wait_event, wait_value)) {
+            return false;
+        }
+    }
+    for (BufferImpl* buffer : buffers) {
+        buffer->set_last_access(signal_event, batch_value);
+    }
+    return true;
+}
+
+// Dispatches encoded into one command buffer before it is submitted. Bounded so
+// that a long run of launches still makes progress visible to the GPU and the
+// buffer's own resource list stays reasonable; 0 turns batching off entirely,
+// which is the way back to a command buffer per launch.
+unsigned max_batch_dispatches() {
+    static const unsigned value = [] {
+        if (const char* v = std::getenv("CUMETAL_BATCH_DISPATCHES");
+            v != nullptr && v[0] != '\0') {
+            const long long parsed = std::atoll(v);
+            if (parsed >= 0 && parsed <= 4096) return static_cast<unsigned>(parsed);
+        }
+        return 64u;
+    }();
+    return value;
 }
 
 void encode_resource_signals(
@@ -1210,7 +1419,15 @@ cudaError_t stream_record_marker(const std::shared_ptr<Stream>& stream,
         return cudaErrorInvalidValue;
     }
 
+    std::unique_lock<std::mutex> batch_lock(state().batch_mutex);
+
     std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
+    // Any command buffer other than the open batch has to come after it: it
+    // will wait on this stream's latest submission value, which the batch holds
+    // and has not signalled yet -- and the same is true of every other stream it
+    // may wait on.
+    (void)stream_impl->flush_open_batch_locked();
+    flush_other_open_batches(stream_impl);
     @autoreleasepool {
         id<MTLCommandBuffer> marker = [stream_impl->queue() commandBuffer];
         if (marker == nil) {
@@ -1252,7 +1469,15 @@ cudaError_t enqueue_host_function(const std::shared_ptr<Stream>& stream,
         return cudaErrorInvalidValue;
     }
 
+    std::unique_lock<std::mutex> batch_lock(state().batch_mutex);
+
     std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
+    // Any command buffer other than the open batch has to come after it: it
+    // will wait on this stream's latest submission value, which the batch holds
+    // and has not signalled yet -- and the same is true of every other stream it
+    // may wait on.
+    (void)stream_impl->flush_open_batch_locked();
+    flush_other_open_batches(stream_impl);
     id<MTLCommandQueue> queue = stream_impl->queue();
     @autoreleasepool {
         // The marker inherits all prior same-stream and legacy-default waits.
@@ -1375,7 +1600,14 @@ cudaError_t gemm_f32(bool transa,
     if (queue_status != cudaSuccess) {
         return queue_status;
     }
+    std::unique_lock<std::mutex> batch_lock(state().batch_mutex);
     std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
+    // Any command buffer other than the open batch has to come after it: it
+    // will wait on this stream's latest submission value, which the batch holds
+    // and has not signalled yet -- and the same is true of every other stream it
+    // may wait on.
+    (void)stream_impl->flush_open_batch_locked();
+    flush_other_open_batches(stream_impl);
 
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
@@ -1518,7 +1750,14 @@ cudaError_t gemm_f16(bool transa,
     if (queue_status != cudaSuccess) {
         return queue_status;
     }
+    std::unique_lock<std::mutex> batch_lock(state().batch_mutex);
     std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
+    // Any command buffer other than the open batch has to come after it: it
+    // will wait on this stream's latest submission value, which the batch holds
+    // and has not signalled yet -- and the same is true of every other stream it
+    // may wait on.
+    (void)stream_impl->flush_open_batch_locked();
+    flush_other_open_batches(stream_impl);
 
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
@@ -1661,7 +1900,14 @@ cudaError_t gemm_f16_f32(bool transa,
     if (queue_status != cudaSuccess) {
         return queue_status;
     }
+    std::unique_lock<std::mutex> batch_lock(state().batch_mutex);
     std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
+    // Any command buffer other than the open batch has to come after it: it
+    // will wait on this stream's latest submission value, which the batch holds
+    // and has not signalled yet -- and the same is true of every other stream it
+    // may wait on.
+    (void)stream_impl->flush_open_batch_locked();
+    flush_other_open_batches(stream_impl);
 
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
@@ -1816,7 +2062,14 @@ cudaError_t gemm_strided_batched_f32(bool transa,
     if (queue_status != cudaSuccess) {
         return queue_status;
     }
+    std::unique_lock<std::mutex> batch_lock(state().batch_mutex);
     std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
+    // Any command buffer other than the open batch has to come after it: it
+    // will wait on this stream's latest submission value, which the batch holds
+    // and has not signalled yet -- and the same is true of every other stream it
+    // may wait on.
+    (void)stream_impl->flush_open_batch_locked();
+    flush_other_open_batches(stream_impl);
 
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
@@ -1974,17 +2227,10 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         }
         queue = stream_impl != nullptr ? stream_impl->queue() : backend.queue;
     }
+    std::unique_lock<std::mutex> batch_lock(state().batch_mutex);
     std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
 
     @autoreleasepool {
-        id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
-        if (command_buffer == nil) {
-            if (error_message != nullptr) {
-                *error_message = "failed to create command buffer";
-            }
-            return cudaErrorUnknown;
-        }
-
         std::vector<BufferImpl*> fence_buffers;
         fence_buffers.reserve(args.size());
         for (std::size_t i = 0; i < args.size(); ++i) {
@@ -2013,15 +2259,56 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             }
             fence_buffers.push_back(buffer_impl);
         }
-        const auto fences =
-            encode_submission_waits(command_buffer, stream_impl, std::move(fence_buffers));
+        // A per-launch completion handler needs a command buffer per launch, so
+        // tracing turns batching off rather than reporting one buffer's timing
+        // as if it were one kernel's.
+        const bool trace_async =
+            stream_impl != nullptr && env_truthy(std::getenv("CUMETAL_TRACE_GPU"));
+        const bool batching_allowed =
+            stream_impl != nullptr && !trace_async && max_batch_dispatches() > 0;
 
-        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-        if (encoder == nil) {
-            if (error_message != nullptr) {
-                *error_message = "failed to create compute encoder";
+        id<MTLComputeCommandEncoder> encoder = nil;
+        bool batched = false;
+        if (batching_allowed && stream_impl->has_open_batch() &&
+            stream_impl->open_batch_dispatches() < max_batch_dispatches() &&
+            try_extend_submission(stream_impl, fence_buffers,
+                                  stream_impl->open_batch_value(),
+                                  stream_impl->open_batch_waits())) {
+            encoder = stream_impl->open_encoder();
+            stream_impl->note_batch_dispatch();
+            batched = true;
+        }
+
+        id<MTLCommandBuffer> command_buffer = nil;
+        std::vector<ResourceFenceReservation> fences;
+        if (!batched) {
+            // Whatever is open cannot serve this launch, and a fresh buffer must
+            // come after it: it will wait on this stream's latest submission
+            // value, which the open batch holds and has not signalled yet -- and
+            // the same is true of every other stream it may wait on.
+            (void)stream_impl->flush_open_batch_locked();
+            flush_other_open_batches(stream_impl);
+            command_buffer = [queue commandBuffer];
+            if (command_buffer == nil) {
+                if (error_message != nullptr) {
+                    *error_message = "failed to create command buffer";
+                }
+                return cudaErrorUnknown;
             }
-            return cudaErrorUnknown;
+            std::vector<ResourceFenceReservation> waits;
+            fences = encode_submission_waits(command_buffer, stream_impl,
+                                             std::move(fence_buffers), &waits);
+            encoder = [command_buffer computeCommandEncoder];
+            if (encoder == nil) {
+                if (error_message != nullptr) {
+                    *error_message = "failed to create compute encoder";
+                }
+                return cudaErrorUnknown;
+            }
+            if (batching_allowed) {
+                stream_impl->begin_batch(command_buffer, encoder, fences, std::move(waits),
+                                         fences.empty() ? 0 : fences.front().signal_value);
+            }
         }
 
         [encoder setComputePipelineState:pipeline];
@@ -2075,11 +2362,14 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             MTLSizeMake(config.block.x, config.block.y, config.block.z);
         [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
 
+        // The batch keeps the encoder open; flush ends it, signals and commits.
+        if (batching_allowed) {
+            return cudaSuccess;
+        }
+
         [encoder endEncoding];
         encode_resource_signals(command_buffer, fences);
 
-        const bool trace_async =
-            stream_impl != nullptr && env_truthy(std::getenv("CUMETAL_TRACE_GPU"));
         if (trace_async) {
             const std::string trace_kernel = kernel_name;
             const std::string trace_source = lowering_source;
@@ -2234,7 +2524,14 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
     }
     const std::shared_ptr<StreamImpl> default_stream =
         std::dynamic_pointer_cast<StreamImpl>(legacy_default_stream());
+    std::unique_lock<std::mutex> batch_lock(state().batch_mutex);
     std::unique_lock<std::mutex> submission_lock(default_stream->submission_mutex());
+    // Any command buffer other than the open batch has to come after it: it
+    // will wait on this stream's latest submission value, which the batch holds
+    // and has not signalled yet -- and the same is true of every other stream it
+    // may wait on.
+    (void)default_stream->flush_open_batch_locked();
+    flush_other_open_batches(default_stream);
 
     @autoreleasepool {
         id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
