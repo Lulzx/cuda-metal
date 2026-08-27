@@ -242,8 +242,47 @@ public:
     // Every method below is called with submission_mutex_ held except
     // flush_open_batch(), which takes it.
 
+    enum class EncoderKind { kNone, kCompute, kBlit };
+
     bool has_open_batch() const { return open_buffer_ != nil; }
-    id<MTLComputeCommandEncoder> open_encoder() const { return open_encoder_; }
+    bool batch_kind_is(EncoderKind kind) const { return open_kind_ == kind; }
+
+    // A batch holds one encoder of one kind for its whole life, and work of the
+    // other kind starts a new command buffer.
+    //
+    // Ending one encoder and beginning another inside the same command buffer
+    // is legal and would save a buffer, but Metal only turns that ordering into
+    // a memory dependency for *hazard-tracked* resources. An MTLHeapDescriptor
+    // leaves hazardTrackingMode at its default, which for a heap means
+    // untracked, and resources allocated from it inherit that; a buffer created
+    // straight from the device is tracked. CuMetal allocates from a heap above
+    // CUMETAL_MTLHEAP_THRESHOLD_BYTES, so its large buffers are exactly the
+    // untracked ones.
+    //
+    // NVIDIA's asyncAPI sample copies in, increments on the GPU and copies out.
+    // With a blit and a compute encoder sharing a command buffer, elements came
+    // back one increment short: the copy-out read them before the kernel wrote
+    // them. It reproduced only above the heap threshold, which is what named
+    // the cause.
+    //
+    // Two ways to get the shared command buffer back, neither taken yet: set
+    // the heap's hazardTrackingMode to tracked and let Metal insert the
+    // dependency, or keep it untracked and put an MTLFence between the
+    // encoders. Both are worth measuring. Meanwhile a memcpy costs one command
+    // buffer, still far less than the two plus a dispatch_async of the
+    // host-function path it replaced, and kernel-to-kernel batching -- which is
+    // what carries the win -- is untouched.
+    id<MTLComputeCommandEncoder> batch_compute_encoder() const {
+        return open_kind_ == EncoderKind::kCompute
+                   ? static_cast<id<MTLComputeCommandEncoder>>(open_encoder_)
+                   : nil;
+    }
+
+    id<MTLBlitCommandEncoder> batch_blit_encoder() const {
+        return open_kind_ == EncoderKind::kBlit
+                   ? static_cast<id<MTLBlitCommandEncoder>>(open_encoder_)
+                   : nil;
+    }
     std::uint64_t open_batch_value() const { return open_batch_value_; }
     unsigned open_batch_dispatches() const { return open_batch_dispatches_; }
     const std::vector<ResourceFenceReservation>& open_batch_waits() const {
@@ -251,12 +290,14 @@ public:
     }
 
     void begin_batch(id<MTLCommandBuffer> command_buffer,
-                     id<MTLComputeCommandEncoder> encoder,
+                     id<MTLCommandEncoder> encoder,
+                     EncoderKind kind,
                      std::vector<ResourceFenceReservation> reservations,
                      std::vector<ResourceFenceReservation> waits,
                      std::uint64_t batch_value) {
         open_buffer_ = command_buffer;
         open_encoder_ = encoder;
+        open_kind_ = kind;
         open_batch_reservations_ = std::move(reservations);
         open_batch_waits_ = std::move(waits);
         open_batch_value_ = batch_value;
@@ -270,13 +311,12 @@ public:
             return 0;
         }
         id<MTLCommandBuffer> command_buffer = open_buffer_;
-        [open_encoder_ endEncoding];
+        end_open_encoder();
         for (const ResourceFenceReservation& reservation : open_batch_reservations_) {
             [command_buffer encodeSignalEvent:reservation.event
                                         value:reservation.signal_value];
         }
         open_buffer_ = nil;
-        open_encoder_ = nil;
         open_batch_reservations_.clear();
         open_batch_waits_.clear();
         open_batch_value_ = 0;
@@ -426,8 +466,17 @@ private:
     std::mutex host_operation_mutex_;
     std::condition_variable host_operation_cv_;
     std::size_t pending_host_operations_ = 0;
+    void end_open_encoder() {
+        if (open_encoder_ != nil) {
+            [open_encoder_ endEncoding];
+        }
+        open_encoder_ = nil;
+        open_kind_ = EncoderKind::kNone;
+    }
+
     id<MTLCommandBuffer> open_buffer_ = nil;
-    id<MTLComputeCommandEncoder> open_encoder_ = nil;
+    id<MTLCommandEncoder> open_encoder_ = nil;
+    EncoderKind open_kind_ = EncoderKind::kNone;
     std::vector<ResourceFenceReservation> open_batch_reservations_;
     std::vector<ResourceFenceReservation> open_batch_waits_;
     std::uint64_t open_batch_value_ = 0;
@@ -2151,6 +2200,105 @@ cudaError_t gemm_strided_batched_f32(bool transa,
     }
 }
 
+cudaError_t blit_copy(const std::shared_ptr<Buffer>& dst_buffer,
+                      std::size_t dst_offset,
+                      const std::shared_ptr<Buffer>& src_buffer,
+                      std::size_t src_offset,
+                      std::size_t bytes,
+                      const std::shared_ptr<Stream>& stream,
+                      std::string* error_message) {
+    if (bytes == 0) {
+        return cudaSuccess;
+    }
+    if (!ensure_initialized(error_message)) {
+        return cudaErrorInitializationError;
+    }
+    auto* dst_impl = dynamic_cast<BufferImpl*>(dst_buffer.get());
+    auto* src_impl = dynamic_cast<BufferImpl*>(src_buffer.get());
+    if (dst_impl == nullptr || src_impl == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "blit_copy received unexpected buffer type";
+        }
+        return cudaErrorInvalidValue;
+    }
+
+    std::shared_ptr<StreamImpl> stream_impl = std::dynamic_pointer_cast<StreamImpl>(stream);
+    BackendState& backend = state();
+    if (stream_impl == nullptr) {
+        std::lock_guard<std::mutex> lock(backend.mutex);
+        stream_impl = backend.default_stream;
+    }
+    if (stream_impl == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "blit_copy has no stream to submit on";
+        }
+        return cudaErrorInvalidValue;
+    }
+
+    std::unique_lock<std::mutex> batch_lock(backend.batch_mutex);
+    std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
+
+    @autoreleasepool {
+        std::vector<BufferImpl*> fence_buffers{dst_impl, src_impl};
+        id<MTLBlitCommandEncoder> encoder = nil;
+        if (max_batch_dispatches() > 0 && stream_impl->has_open_batch() &&
+            stream_impl->batch_kind_is(StreamImpl::EncoderKind::kBlit) &&
+            stream_impl->open_batch_dispatches() < max_batch_dispatches() &&
+            try_extend_submission(stream_impl, fence_buffers, stream_impl->open_batch_value(),
+                                  stream_impl->open_batch_waits())) {
+            encoder = stream_impl->batch_blit_encoder();
+            if (encoder != nil) {
+                stream_impl->note_batch_dispatch();
+            }
+        }
+
+        id<MTLCommandBuffer> command_buffer = nil;
+        std::vector<ResourceFenceReservation> fences;
+        if (encoder == nil) {
+            (void)stream_impl->flush_open_batch_locked();
+            flush_other_open_batches(stream_impl);
+            command_buffer = [stream_impl->queue() commandBuffer];
+            if (command_buffer == nil) {
+                if (error_message != nullptr) {
+                    *error_message = "blit_copy failed to create command buffer";
+                }
+                return cudaErrorUnknown;
+            }
+            std::vector<ResourceFenceReservation> waits;
+            fences = encode_submission_waits(command_buffer, stream_impl,
+                                             std::move(fence_buffers), &waits);
+            encoder = [command_buffer blitCommandEncoder];
+            if (encoder == nil) {
+                if (error_message != nullptr) {
+                    *error_message = "blit_copy failed to create blit encoder";
+                }
+                return cudaErrorUnknown;
+            }
+            if (max_batch_dispatches() > 0) {
+                stream_impl->begin_batch(command_buffer, encoder,
+                                         StreamImpl::EncoderKind::kBlit, fences,
+                                         std::move(waits),
+                                         fences.empty() ? 0 : fences.front().signal_value);
+            }
+        }
+
+        [encoder copyFromBuffer:src_impl->handle()
+                   sourceOffset:src_offset
+                       toBuffer:dst_impl->handle()
+              destinationOffset:dst_offset
+                           size:bytes];
+
+        if (max_batch_dispatches() > 0) {
+            return cudaSuccess;
+        }
+        [encoder endEncoding];
+        encode_resource_signals(command_buffer, fences);
+        [command_buffer commit];
+        stream_impl->add_pending(command_buffer);
+        return cudaSuccess;
+    }
+}
+
 cudaError_t launch_kernel(const std::string& metallib_path,
                           const std::string& kernel_name,
                           const LaunchConfig& config,
@@ -2270,13 +2418,16 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         id<MTLComputeCommandEncoder> encoder = nil;
         bool batched = false;
         if (batching_allowed && stream_impl->has_open_batch() &&
+            stream_impl->batch_kind_is(StreamImpl::EncoderKind::kCompute) &&
             stream_impl->open_batch_dispatches() < max_batch_dispatches() &&
             try_extend_submission(stream_impl, fence_buffers,
                                   stream_impl->open_batch_value(),
                                   stream_impl->open_batch_waits())) {
-            encoder = stream_impl->open_encoder();
-            stream_impl->note_batch_dispatch();
-            batched = true;
+            encoder = stream_impl->batch_compute_encoder();
+            if (encoder != nil) {
+                stream_impl->note_batch_dispatch();
+                batched = true;
+            }
         }
 
         id<MTLCommandBuffer> command_buffer = nil;
@@ -2306,7 +2457,9 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                 return cudaErrorUnknown;
             }
             if (batching_allowed) {
-                stream_impl->begin_batch(command_buffer, encoder, fences, std::move(waits),
+                stream_impl->begin_batch(command_buffer, encoder,
+                                         StreamImpl::EncoderKind::kCompute, fences,
+                                         std::move(waits),
                                          fences.empty() ? 0 : fences.front().signal_value);
             }
         }

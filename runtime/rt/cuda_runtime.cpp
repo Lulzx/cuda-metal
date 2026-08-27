@@ -2792,6 +2792,41 @@ cudaError_t cudaMemcpyAsync(void* dst,
     }
     (void)resolved_kind;
 
+    // When both ends are tracked allocations this is a Metal blit in the
+    // stream's own command buffer -- a real stream-ordered GPU copy.
+    //
+    // The fallback below is a host function, and a host function is expensive:
+    // two command buffers, a dispatch_async and a shared-event round trip, plus
+    // a cudaDeviceSynchronize that then has to wait for it. That is a great deal
+    // of machinery for what cuPDLP asks of it, which is to move eight bytes from
+    // one device buffer to another between two kernels; it was 77% of a PDLP
+    // iteration on datt256. It stays for the cases the blit cannot serve, which
+    // is pageable host memory on either end.
+    cumetal::rt::AllocationTable::ResolvedAllocation dst_alloc;
+    cumetal::rt::AllocationTable::ResolvedAllocation src_alloc;
+    if (count > 0 && resolve_allocation_for_pointer(dst, &dst_alloc) &&
+        resolve_allocation_for_pointer(src, &src_alloc) &&
+        dst_alloc.buffer != nullptr && src_alloc.buffer != nullptr &&
+        dst_alloc.remaining_size >= count && src_alloc.remaining_size >= count) {
+        std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
+        if (resolve_runtime_stream(stream, &backend_stream, nullptr) == cudaSuccess) {
+            std::string error;
+            const cudaError_t blit_status = cumetal::metal_backend::blit_copy(
+                dst_alloc.buffer, dst_alloc.offset, src_alloc.buffer, src_alloc.offset, count,
+                backend_stream, &error);
+            if (blit_status == cudaSuccess) {
+                if (trace_enabled()) {
+                    char buf[128];
+                    std::snprintf(buf, sizeof(buf),
+                                  "memcpyAsync(blit) kind=%d count=%zu dst=%p src=%p",
+                                  static_cast<int>(kind), count, dst, src);
+                    trace_op("CPYA", buf);
+                }
+                return fail(cudaSuccess);
+            }
+        }
+    }
+
     void* host_dst = host_accessible_pointer(dst, count);
     const void* host_src = host_accessible_pointer(src, count);
     if ((host_dst == nullptr || host_src == nullptr) && count > 0) {

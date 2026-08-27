@@ -94,6 +94,18 @@ cudaError_t stream_record_marker(const std::shared_ptr<Stream>& stream,
 cudaError_t enqueue_host_function(const std::shared_ptr<Stream>& stream,
                                   std::function<void()> function,
                                   std::string* error_message);
+// Stream-ordered device-to-device copy, encoded as a Metal blit. This is what
+// cudaMemcpyAsync becomes when both ends resolve to Metal buffers: a real GPU
+// operation in the stream's command buffer, rather than a host callback that
+// has to be waited for.
+cudaError_t blit_copy(const std::shared_ptr<Buffer>& dst_buffer,
+                      std::size_t dst_offset,
+                      const std::shared_ptr<Buffer>& src_buffer,
+                      std::size_t src_offset,
+                      std::size_t bytes,
+                      const std::shared_ptr<Stream>& stream,
+                      std::string* error_message);
+
 cudaError_t launch_kernel(const std::string& metallib_path,
                           const std::string& kernel_name,
                           const LaunchConfig& config,

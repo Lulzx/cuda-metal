@@ -152,6 +152,15 @@ cumetal_add_cuda_project_test(
     transpose transpose_standalone.cu transpose_standalone
 )
 
+# A blit and a compute dispatch in one command buffer are ordered by Metal only
+# for hazard-tracked resources, and heap allocations are not tracked. This is
+# the shape that caught it: copy in, increment, copy out, above the heap
+# threshold.
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_async_memcpy_hazard
+    async_memcpy async_memcpy_hazard.cu async_memcpy_hazard
+)
+
 # Measures every mapped libdevice math function against the host libm. Strict:
 # a mis-mapped builtin computes the wrong function silently, and a newly
 # unsupported one means a lowering regression.
