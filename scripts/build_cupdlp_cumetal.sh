@@ -12,7 +12,7 @@
 #   CUMETAL_JOBS         build parallelism (default: 2 -- higher can wedge a laptop
 #                        when a test suite is running at the same time)
 #
-# cuPDLP-C needs three source patches that have nothing to do with Metal; they
+# cuPDLP-C needs three build patches that have nothing to do with Metal; they
 # are applied here rather than upstreamed because they are all consequences of
 # building an old standalone cuPDLP-C against a current HiGHS:
 #
@@ -25,6 +25,10 @@
 #      at namespace scope, colliding with wrapper_highs.h's identical names.
 #   3. cupdlp/CMakeLists.txt hardcodes /usr/local/cuda/include, so the CUDA
 #      headers have to be put on the C/C++ flags explicitly.
+#
+# Patch 4 is a different kind of thing and is kept separate on purpose: it is an
+# upstream correctness bug rather than a build-compatibility shim. It is not
+# Metal-related either. See the comment on it below.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -110,6 +114,38 @@ target_link_libraries(
 )
 add_dependencies(plc cupdlp)""")
 open(p, 'w').write(s)
+PY
+fi
+
+# ── patch 4: upstream out-of-bounds read in the power method ─────────────
+# PDHG_Power_Method takes the squared norm of `ax` over nCols elements, but
+# vec_Alloc sized `ax` to nRows (cupdlp_utils.c). Those agree only on a square
+# LP, so on anything else it reads the wrong length, and which way it goes
+# depends on the shape:
+#
+#   datt256   11,078 x 262,144   reads ~251k doubles past the end of ax
+#   ex10      69,609 x 17,680    stays in bounds, norms a quarter of the vector
+#
+# The first segfaults under CuMetal, where every cudaMalloc is its own MTLBuffer
+# and the page after one is usually unmapped; it cost two of five runs on
+# datt256. The second is quieter: nothing crashes and the printed power-method
+# residual is simply wrong (10637.216 against the correct 35847.690 at
+# iteration 0).
+#
+# The step size the power method returns is not affected either way -- that one
+# norms `aty`, which really is nCols long -- so this changes crash rate and a
+# diagnostic, not the solve. It reproduces without CuMetal: the CPU build takes
+# the same line, and only CUDA's slab allocator hides the read.
+if ! grep -q "vec_Alloc sized to nRows" cupdlp/cupdlp_step.c 2>/dev/null; then
+    echo "Patching cuPDLP-C power-method norm length ..."
+    python3 - <<'PY'
+p = 'cupdlp/cupdlp_step.c'
+s = open(p).read()
+old = "    cupdlp_twoNormSquared(work, lp->nCols, ax->data, &res);"
+new = ("    // ax is vec_Alloc sized to nRows, not nCols; upstream reads nCols.\n"
+       "    cupdlp_twoNormSquared(work, lp->nRows, ax->data, &res);")
+assert s.count(old) == 1, "power-method norm line not found; upstream may have fixed it"
+open(p, 'w').write(s.replace(old, new))
 PY
 fi
 

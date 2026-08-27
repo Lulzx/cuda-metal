@@ -120,10 +120,20 @@ a real solve. Solver wall time, median of 3, 99 fixed iterations, M4 Pro:
 
 | instance | shape | cpu | auto | scalar kernel forced | cooperative kernel forced |
 | --- | --- | ---: | ---: | ---: | ---: |
-| `ex10` | 69,609 x 17,680, 1.18M nnz | 1.178 s | **0.312 s** | 0.313 s | 0.306 s |
-| `datt256` | 11,078 x 262,144, 1.77M nnz | 1.909 s | **0.883 s** | 5.295 s | 1.084 s |
+| `ex10` | 69,609 x 17,680, 1.18M nnz | 1.197 s | **0.323 s** | 0.322 s | 0.324 s |
+| `datt256` | 11,078 x 262,144, 1.77M nnz | 1.905 s | **0.879 s** | 5.312 s | 1.071 s |
 
-All four configurations reach the same objective on each instance.
+All four configurations reach bit-identical primal and dual objectives and the
+same primal infeasibility on each instance.
+
+These are measured with patch 4 from `scripts/build_cupdlp_cumetal.sh` applied.
+Without it `PDHG_Power_Method` reads `ax` -- a vector `vec_Alloc` sized to
+`nRows` -- for `nCols` elements, which segfaults on `datt256` often enough to
+lose runs, and on `ex10` silently norms a quarter of the vector. The step size
+the power method returns is unaffected either way, so the timings above did not
+change when it was patched; the run-to-run crashes did. It is an upstream bug,
+not a Metal one, and it reproduces without CuMetal -- CUDA's slab allocator just
+hides the read where a per-allocation `MTLBuffer` faults on it.
 
 `ex10` is the straightforward case: most of its CPU solve is `Ax` and `A'y`, both
 go to the GPU, and the solve is 3.8x faster.

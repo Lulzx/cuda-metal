@@ -9,8 +9,9 @@
 # cuPDLP-C is the PDLP solver HiGHS vendors as its GPU path (HiGHS >= 1.7 exports
 # ~104 cupdlp_* symbols of its own). This exercises that solver, not HiGHS's own
 # CUPDLP_GPU=ON integration layer, which needs API surface CuMetal does not have
-# yet. It is built unmodified except for three patches forced by building a
-# standalone cuPDLP-C against a current HiGHS -- none of them Metal-related; see
+# yet. It is built unmodified except for four patches, none of them
+# Metal-related: three forced by building a standalone cuPDLP-C against a current
+# HiGHS, and one upstream out-of-bounds read in PDHG_Power_Method. See
 # scripts/build_cupdlp_cumetal.sh.
 #
 # Exit 0 only if every problem reaches the same model status on both builds, the
