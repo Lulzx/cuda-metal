@@ -17,38 +17,39 @@ downloads the LP instances into `out/` (gitignored). HiGHS itself comes from
 ## What this is
 
 [cuPDLP-C](https://github.com/COPT-Public/cuPDLP-C) is the PDLP first-order LP
-solver that HiGHS vendors as its GPU path — `libhighs` exports ~104 `cupdlp_*`
-symbols of its own. So "does HiGHS's GPU solver work through CuMetal" is
-answerable by building cuPDLP-C unmodified and comparing it to its CPU build.
+solver that HiGHS vendors as its GPU path; `libhighs` exports ~104 `cupdlp_*`
+symbols of its own. So building cuPDLP-C unmodified and comparing it against its
+CPU build answers whether HiGHS's GPU solver works through CuMetal.
 
-It is built with `cupdlp_float = double`, the upstream default — not the reduced
-`SFLOAT` configuration. Metal has no `double`, so every FP64 operation runs on
-CuMetal's Dekker FP32-pair emulation while storage stays IEEE-754 binary64.
+It is built with `cupdlp_float = double`, the upstream default, rather than the
+reduced `SFLOAT` configuration. Metal has no `double`, so every FP64 operation
+runs on CuMetal's Dekker FP32-pair emulation while storage stays IEEE-754
+binary64.
 
 ## What it checks
 
 For each problem, both builds solve and must agree on:
 
-- **model status class** — `Optimal` vs `Iteration limit`. ("Optimal current" vs
-  "Optimal average" is only which iterate PDLP accepted, not a disagreement.)
-- **primal objective**, within 1e-3 relative. PDLP's own default gap tolerance is
-  1e-4, so two runs legitimately stop at different points inside it.
-- **primal infeasibility, dual infeasibility and relative duality gap.** The
+- Model status class: `Optimal` vs `Iteration limit`. ("Optimal current" and
+  "Optimal average" differ only in which iterate PDLP accepted.)
+- Primal objective, within 1e-3 relative. PDLP's own default gap tolerance is
+  1e-4, so two runs stop at different points inside it.
+- Primal infeasibility, dual infeasibility, and relative duality gap. The
   objective alone is not enough: a run can report a plausible objective while its
   residuals say the point is not feasible. Each must be within 10× what the CPU
-  build achieved, and — only when the solver claims convergence — under 1e-3
-  absolute. A run stopped at the iteration limit legitimately has a large gap
-  (`stair` ends near 1e-2 on both builds), so the absolute ceiling would fail a
-  run that agrees perfectly well with its reference.
-- every reported value **finite**.
+  build achieved, and, once the solver claims convergence, under 1e-3 absolute.
+  A run stopped at the iteration limit has a large gap by construction (`stair`
+  ends near 1e-2 on both builds), so applying the absolute ceiling there would
+  fail a run that matches its reference.
+- Every reported value finite.
 
-Iteration counts are deliberately *not* compared. The builds follow different
-trajectories — `shell` converges in 5,600 iterations against the CPU's 12,000 —
-and that is a path difference, not a disagreement about the answer.
+Iteration counts are not compared. The builds follow different trajectories,
+`shell` converging in 5,600 iterations against the CPU's 12,000, which says
+nothing about whether they agree on the answer.
 
 Then one run is traced and must show `device=apple_gpu` with no
-`source=approximate_stub`. A correct number without that provenance is **not** a
-pass — it would mean a CPU fallback produced it.
+`source=approximate_stub`. A correct number without that provenance fails the
+demo, because it would mean a CPU fallback produced it.
 
 ## Measured (M4 Pro, Debug build, shim ON)
 
@@ -70,33 +71,34 @@ pass — it would mean a CPU fallback produced it.
 provenance=generic_ptx_lowering_fp64_emulated semantic_quality=reduced_precision_fp64
 ```
 
-not `semantic_quality=exact`. The lowering is a real, structurally faithful
-translation with no substitution — but Metal has no `double`, so the arithmetic
-is roughly a 48-bit significand rather than CUDA's FP64 semantics, and calling
-that `exact` would be its own kind of green-wash.
+rather than `semantic_quality=exact`. The lowering translates this kernel's own
+PTX with no substitution, but Metal has no `double`, so the arithmetic carries
+about a 48-bit significand instead of CUDA's FP64 semantics, and `exact` would
+overstate what ran.
 
-`stair` hits the iteration limit on **both** builds; it is a hard instance, not a
-Metal failure. Its Metal residuals are in fact slightly *better* than the CPU
-run's (gap 9.05e-03 vs 1.41e-02).
+`stair` hits the iteration limit on both builds; it is a hard instance. Its
+Metal residuals come out better than the CPU run's (gap 9.05e-03 vs 1.41e-02).
 
 ## What this does not show
 
-- **No speedup.** cuBLAS L1 and the FP64 sparse SpMV are still scalar CPU loops
-  over unified memory, so this is a correctness result only. Do not read the
-  timings as a benchmark.
-- **Not HiGHS's own GPU build.** This is standalone cuPDLP-C. HiGHS's
-  `CUPDLP_GPU=ON` path additionally requires `cusparseDnVecSetValues`,
-  `cusparseSpMV_preprocess`, and CUDA-graph capture of library nodes, none of
-  which CuMetal implements yet. See `docs/known-gaps.md`.
-- **Not full IEEE-754 FP64.** ~48-bit significand within binary32's exponent
-  envelope; see `docs/known-gaps.md` and
-  `tests/cuda_projects/fp64/fp64_precision.cu`.
+No speedup. cuBLAS L1 and the FP64 sparse SpMV are still scalar CPU loops over
+unified memory, so this is a correctness result. Do not read the timings as a
+benchmark.
+
+This is standalone cuPDLP-C, not HiGHS's own GPU build. HiGHS's `CUPDLP_GPU=ON`
+path additionally requires `cusparseDnVecSetValues`, `cusparseSpMV_preprocess`,
+and CUDA-graph capture of library nodes, none of which CuMetal implements yet.
+See `docs/known-gaps.md`.
+
+The FP64 here is not IEEE-754: about a 48-bit significand within binary32's
+exponent envelope. See `docs/known-gaps.md` and
+`tests/cuda_projects/fp64/fp64_precision.cu`.
 
 ## Patches applied to cuPDLP-C
 
-Three, none Metal-related — all consequences of building an old standalone
-cuPDLP-C against a current HiGHS. They are applied by
-`scripts/build_cupdlp_cumetal.sh` at build time:
+Three, none of them Metal-related. All follow from building an old standalone
+cuPDLP-C against a current HiGHS, and `scripts/build_cupdlp_cumetal.sh` applies
+them at build time:
 
 1. HiGHS ≥ 1.7 exports the same `Init_Scaling` / `cupdlp_*` symbols, so
    `libcupdlp` must be named by path to stay ahead of `libhighs` at link time.
