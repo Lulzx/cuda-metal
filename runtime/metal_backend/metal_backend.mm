@@ -247,41 +247,36 @@ public:
     bool has_open_batch() const { return open_buffer_ != nil; }
     bool batch_kind_is(EncoderKind kind) const { return open_kind_ == kind; }
 
-    // A batch holds one encoder of one kind for its whole life, and work of the
-    // other kind starts a new command buffer.
+    // The encoder for a given kind of work, switching the batch over to it when
+    // the last operation needed the other one. A command buffer takes any
+    // number of encoders in sequence, so a memcpy between two kernels costs an
+    // endEncoding and a new encoder rather than a whole new command buffer.
     //
-    // Ending one encoder and beginning another inside the same command buffer
-    // is legal and would save a buffer, but Metal only turns that ordering into
-    // a memory dependency for *hazard-tracked* resources. An MTLHeapDescriptor
-    // leaves hazardTrackingMode at its default, which for a heap means
-    // untracked, and resources allocated from it inherit that; a buffer created
-    // straight from the device is tracked. CuMetal allocates from a heap above
-    // CUMETAL_MTLHEAP_THRESHOLD_BYTES, so its large buffers are exactly the
-    // untracked ones.
-    //
-    // NVIDIA's asyncAPI sample copies in, increments on the GPU and copies out.
-    // With a blit and a compute encoder sharing a command buffer, elements came
-    // back one increment short: the copy-out read them before the kernel wrote
-    // them. It reproduced only above the heap threshold, which is what named
-    // the cause.
-    //
-    // Two ways to get the shared command buffer back, neither taken yet: set
-    // the heap's hazardTrackingMode to tracked and let Metal insert the
-    // dependency, or keep it untracked and put an MTLFence between the
-    // encoders. Both are worth measuring. Meanwhile a memcpy costs one command
-    // buffer, still far less than the two plus a dispatch_async of the
-    // host-function path it replaced, and kernel-to-kernel batching -- which is
-    // what carries the win -- is untouched.
-    id<MTLComputeCommandEncoder> batch_compute_encoder() const {
-        return open_kind_ == EncoderKind::kCompute
-                   ? static_cast<id<MTLComputeCommandEncoder>>(open_encoder_)
-                   : nil;
+    // Switching is only sound because CuMetal asks for hazard tracking on its
+    // heaps -- see heap_hazard_tracking_enabled. Metal gives encoder order the
+    // force of a memory dependency for tracked resources and not for untracked
+    // ones, and the first version of this ran with the heap's default, which is
+    // untracked. NVIDIA's asyncAPI came back with elements one increment short,
+    // the copy-out having read them before the kernel wrote them, and only
+    // above the heap threshold. mixed_encoder_batching_enabled is conditioned
+    // on tracking rather than merely defaulted alongside it, so that
+    // combination is not reachable.
+    id<MTLComputeCommandEncoder> batch_compute_encoder() {
+        if (open_kind_ != EncoderKind::kCompute) {
+            end_open_encoder();
+            open_encoder_ = [open_buffer_ computeCommandEncoder];
+            open_kind_ = open_encoder_ != nil ? EncoderKind::kCompute : EncoderKind::kNone;
+        }
+        return static_cast<id<MTLComputeCommandEncoder>>(open_encoder_);
     }
 
-    id<MTLBlitCommandEncoder> batch_blit_encoder() const {
-        return open_kind_ == EncoderKind::kBlit
-                   ? static_cast<id<MTLBlitCommandEncoder>>(open_encoder_)
-                   : nil;
+    id<MTLBlitCommandEncoder> batch_blit_encoder() {
+        if (open_kind_ != EncoderKind::kBlit) {
+            end_open_encoder();
+            open_encoder_ = [open_buffer_ blitCommandEncoder];
+            open_kind_ = open_encoder_ != nil ? EncoderKind::kBlit : EncoderKind::kNone;
+        }
+        return static_cast<id<MTLBlitCommandEncoder>>(open_encoder_);
     }
     std::uint64_t open_batch_value() const { return open_batch_value_; }
     unsigned open_batch_dispatches() const { return open_batch_dispatches_; }
@@ -1104,6 +1099,49 @@ std::vector<std::shared_ptr<StreamImpl>> collect_live_streams_locked(BackendStat
     return live;
 }
 
+// Metal gives encoder order inside a command buffer the force of a memory
+// dependency only for hazard-tracked resources. An MTLHeapDescriptor leaves
+// hazard tracking off by default and the resources allocated from it inherit
+// that, so CuMetal's heap allocations -- everything above
+// CUMETAL_MTLHEAP_THRESHOLD_BYTES -- were the untracked ones, while a buffer
+// created straight from the device is tracked. Asking for tracking puts the
+// heap back on the same footing as the rest.
+//
+// It was worth measuring rather than assuming, since tracking is off by default
+// presumably because it is not free. On HiGHS's PDLP loop over datt256 it is
+// not measurable: 4.33s against 4.40s with a batch held to one encoder kind,
+// and 4.07s against 4.03s with mixed kinds allowed, median of 5 either way,
+// which is the wrong side of the noise to call a cost.
+//
+// CUMETAL_MTLHEAP_TRACKED=0 turns it off, which also disables mixed-encoder
+// batching below, because that would then be silently wrong.
+bool heap_hazard_tracking_enabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("CUMETAL_MTLHEAP_TRACKED");
+        return v == nullptr || v[0] == '\0' || env_truthy(v);
+    }();
+    return enabled;
+}
+
+// Whether one batch may hold a blit and a compute encoder in turn rather than
+// starting a new command buffer for the other kind. Worth 7.5% on the same
+// datt256 loop, 4.40s to 4.07s, because cuPDLP puts a device-to-device copy
+// between its reduction kernels every iteration.
+//
+// Conditioned on hazard tracking, not merely defaulted alongside it: without it
+// the copy and the kernel have no dependency and the reader sees whatever was
+// in the buffer. That failure is silent and partial -- 93,383 of 4,194,304
+// elements in the regression test -- so it is not a combination to leave
+// reachable by setting one variable.
+bool mixed_encoder_batching_enabled() {
+    static const bool enabled = [] {
+        if (!heap_hazard_tracking_enabled()) return false;
+        const char* v = std::getenv("CUMETAL_BATCH_MIXED_ENCODERS");
+        return v == nullptr || v[0] == '\0' || env_truthy(v);
+    }();
+    return enabled;
+}
+
 id<MTLBuffer> allocate_buffer_from_heap_locked(BackendState& backend,
                                                std::size_t size,
                                                std::string* error_message) {
@@ -1128,6 +1166,9 @@ id<MTLBuffer> allocate_buffer_from_heap_locked(BackendState& backend,
     }
 
     MTLHeapDescriptor* descriptor = [[MTLHeapDescriptor alloc] init];
+    if (heap_hazard_tracking_enabled()) {
+        [descriptor setHazardTrackingMode:MTLHazardTrackingModeTracked];
+    }
     [descriptor setStorageMode:MTLStorageModeShared];
     [descriptor setSize:arena_size];
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 110000
@@ -2242,7 +2283,8 @@ cudaError_t blit_copy(const std::shared_ptr<Buffer>& dst_buffer,
         std::vector<BufferImpl*> fence_buffers{dst_impl, src_impl};
         id<MTLBlitCommandEncoder> encoder = nil;
         if (max_batch_dispatches() > 0 && stream_impl->has_open_batch() &&
-            stream_impl->batch_kind_is(StreamImpl::EncoderKind::kBlit) &&
+            (mixed_encoder_batching_enabled() ||
+             stream_impl->batch_kind_is(StreamImpl::EncoderKind::kBlit)) &&
             stream_impl->open_batch_dispatches() < max_batch_dispatches() &&
             try_extend_submission(stream_impl, fence_buffers, stream_impl->open_batch_value(),
                                   stream_impl->open_batch_waits())) {
@@ -2418,7 +2460,8 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         id<MTLComputeCommandEncoder> encoder = nil;
         bool batched = false;
         if (batching_allowed && stream_impl->has_open_batch() &&
-            stream_impl->batch_kind_is(StreamImpl::EncoderKind::kCompute) &&
+            (mixed_encoder_batching_enabled() ||
+             stream_impl->batch_kind_is(StreamImpl::EncoderKind::kCompute)) &&
             stream_impl->open_batch_dispatches() < max_batch_dispatches() &&
             try_extend_submission(stream_impl, fence_buffers,
                                   stream_impl->open_batch_value(),
