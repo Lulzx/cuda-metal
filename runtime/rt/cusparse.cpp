@@ -26,6 +26,11 @@ struct cusparseMatDescr {
     cusparseDiagType_t diag = CUSPARSE_DIAG_TYPE_NON_UNIT;
 };
 
+// CSC is not stored separately: the arrays a caller hands to
+// cusparseCreateCsc describe A-transpose in exactly CSR layout, so the CSR
+// kernels serve it once the operation is flipped. Only the tag is needed.
+enum SpMatFormat { CUMETAL_SPMAT_CSR, CUMETAL_SPMAT_COO, CUMETAL_SPMAT_CSC };
+
 struct cusparseSpMatDescr {
     int64_t rows = 0;
     int64_t cols = 0;
@@ -37,7 +42,7 @@ struct cusparseSpMatDescr {
     cusparseIndexType_t colType = CUSPARSE_INDEX_32I;
     cusparseIndexBase_t idxBase = CUSPARSE_INDEX_BASE_ZERO;
     cudaDataType valueType = CUDA_R_32F;
-    bool is_csr = true;
+    SpMatFormat format = CUMETAL_SPMAT_CSR;
 };
 
 struct cusparseDnVecDescr {
@@ -56,6 +61,21 @@ struct cusparseDnMatDescr {
 };
 
 // Handle management
+
+// These entry points compute on the CPU over unified memory, so they must be
+// ordered against GPU work the caller already enqueued -- on real CUDA the
+// library call joins the handle's stream and that ordering is implicit.
+//
+// This used to read `if (handle->stream) cudaStreamSynchronize(handle->stream)`,
+// which skipped synchronization entirely for a handle left on the default
+// stream: the null stream is the default stream, not "no stream". An SpMV would
+// then read its input vector while the kernel producing it was still in flight
+// and quietly return zeros. cudaStreamSynchronize(nullptr) waits on the default
+// stream, which is what CUDA's semantics require here.
+static void synchronize_handle_stream(cusparseHandle_t handle) {
+    if (handle == nullptr) return;
+    cudaStreamSynchronize(handle->stream);
+}
 
 cusparseStatus_t cusparseCreate(cusparseHandle_t* handle) {
     if (handle == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
@@ -100,9 +120,47 @@ cusparseStatus_t cusparseGetPointerMode(cusparseHandle_t handle, cusparsePointer
     return CUSPARSE_STATUS_SUCCESS;
 }
 
-int cusparseGetVersion(cusparseHandle_t /*handle*/, int* version) {
-    if (version) *version = 12000;
+cusparseStatus_t cusparseGetVersion(cusparseHandle_t handle, int* version) {
+    if (handle == nullptr) return CUSPARSE_STATUS_NOT_INITIALIZED;
+    if (version == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *version = 12000;
     return CUSPARSE_STATUS_SUCCESS;
+}
+
+const char* cusparseGetErrorName(cusparseStatus_t status) {
+    switch (status) {
+        case CUSPARSE_STATUS_SUCCESS:                   return "CUSPARSE_STATUS_SUCCESS";
+        case CUSPARSE_STATUS_NOT_INITIALIZED:           return "CUSPARSE_STATUS_NOT_INITIALIZED";
+        case CUSPARSE_STATUS_ALLOC_FAILED:              return "CUSPARSE_STATUS_ALLOC_FAILED";
+        case CUSPARSE_STATUS_INVALID_VALUE:             return "CUSPARSE_STATUS_INVALID_VALUE";
+        case CUSPARSE_STATUS_ARCH_MISMATCH:             return "CUSPARSE_STATUS_ARCH_MISMATCH";
+        case CUSPARSE_STATUS_MAPPING_ERROR:             return "CUSPARSE_STATUS_MAPPING_ERROR";
+        case CUSPARSE_STATUS_EXECUTION_FAILED:          return "CUSPARSE_STATUS_EXECUTION_FAILED";
+        case CUSPARSE_STATUS_INTERNAL_ERROR:            return "CUSPARSE_STATUS_INTERNAL_ERROR";
+        case CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED: return "CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED";
+        case CUSPARSE_STATUS_ZERO_PIVOT:                return "CUSPARSE_STATUS_ZERO_PIVOT";
+        case CUSPARSE_STATUS_NOT_SUPPORTED:             return "CUSPARSE_STATUS_NOT_SUPPORTED";
+        case CUSPARSE_STATUS_INSUFFICIENT_RESOURCES:    return "CUSPARSE_STATUS_INSUFFICIENT_RESOURCES";
+    }
+    return "CUSPARSE_STATUS_UNKNOWN";
+}
+
+const char* cusparseGetErrorString(cusparseStatus_t status) {
+    switch (status) {
+        case CUSPARSE_STATUS_SUCCESS:                   return "success";
+        case CUSPARSE_STATUS_NOT_INITIALIZED:           return "library not initialized";
+        case CUSPARSE_STATUS_ALLOC_FAILED:              return "resource allocation failed";
+        case CUSPARSE_STATUS_INVALID_VALUE:             return "an invalid value was used as an argument";
+        case CUSPARSE_STATUS_ARCH_MISMATCH:             return "device architecture mismatch";
+        case CUSPARSE_STATUS_MAPPING_ERROR:             return "a texture memory access failed";
+        case CUSPARSE_STATUS_EXECUTION_FAILED:          return "the GPU program failed to execute";
+        case CUSPARSE_STATUS_INTERNAL_ERROR:            return "an internal operation failed";
+        case CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED: return "the matrix type is not supported by this function";
+        case CUSPARSE_STATUS_ZERO_PIVOT:                return "a zero pivot was encountered";
+        case CUSPARSE_STATUS_NOT_SUPPORTED:             return "the operation is not supported";
+        case CUSPARSE_STATUS_INSUFFICIENT_RESOURCES:    return "insufficient resources";
+    }
+    return "unknown error";
 }
 
 // Matrix descriptor
@@ -172,7 +230,7 @@ cusparseStatus_t cusparseCreateCsr(cusparseSpMatDescr_t* spMatDescr,
     sp->colType = csrColIndType;
     sp->idxBase = idxBase;
     sp->valueType = valueType;
-    sp->is_csr = true;
+    sp->format = CUMETAL_SPMAT_CSR;
     *spMatDescr = sp;
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -195,7 +253,35 @@ cusparseStatus_t cusparseCreateCoo(cusparseSpMatDescr_t* spMatDescr,
     sp->colType = cooIdxType;
     sp->idxBase = idxBase;
     sp->valueType = valueType;
-    sp->is_csr = false;
+    sp->format = CUMETAL_SPMAT_COO;
+    *spMatDescr = sp;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseCreateCsc(cusparseSpMatDescr_t* spMatDescr,
+                                    int64_t rows, int64_t cols, int64_t nnz,
+                                    void* cscColOffsets, void* cscRowInd,
+                                    void* cscValues,
+                                    cusparseIndexType_t cscColOffsetsType,
+                                    cusparseIndexType_t cscRowIndType,
+                                    cusparseIndexBase_t idxBase,
+                                    cudaDataType valueType) {
+    if (spMatDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    auto* sp = new cusparseSpMatDescr();
+    // rows/cols stay the logical shape of A. The arrays are CSR-of-A-transpose:
+    // the offset array is indexed by column and the index array holds row ids,
+    // which is why the compressed axis below has `cols` entries.
+    sp->rows = rows;
+    sp->cols = cols;
+    sp->nnz = nnz;
+    sp->rowOffsets = cscColOffsets;
+    sp->colInd = cscRowInd;
+    sp->values = cscValues;
+    sp->rowType = cscColOffsetsType;
+    sp->colType = cscRowIndType;
+    sp->idxBase = idxBase;
+    sp->valueType = valueType;
+    sp->format = CUMETAL_SPMAT_CSC;
     *spMatDescr = sp;
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -265,6 +351,132 @@ cusparseStatus_t cusparseSpMV_bufferSize(cusparseHandle_t handle,
     return CUSPARSE_STATUS_SUCCESS;
 }
 
+extern "C++" {
+
+// ── shared sparse kernels ───────────────────────────────────────────────────
+//
+// A compressed matrix is described by one offset array over a "compressed
+// axis" plus one index array. For CSR that axis is the rows of A; for CSC it
+// is the columns, which makes the very same arrays a CSR description of
+// A-transpose. So there is one kernel here, not three: the caller resolves
+// (format, opA) into a single `transpose` flag over the CSR view.
+//
+// The two directions cannot share a loop. Non-transpose gathers along the
+// compressed axis and writes each output once. Transpose scatters into
+// arbitrary output positions, so y must be scaled by beta up front and then
+// accumulated into.
+
+template <typename T>
+static void cumetal_spmv_compressed(int64_t axis, const int* offsets, const int* indices,
+                                    const T* vals, int base, bool transpose,
+                                    T alpha, T beta,
+                                    const T* x, T* y, int64_t ylen) {
+    if (!transpose) {
+        for (int64_t i = 0; i < axis; ++i) {
+            T sum = static_cast<T>(0);
+            const int begin = offsets[i] - base;
+            const int end = offsets[i + 1] - base;
+            for (int k = begin; k < end; ++k) sum += vals[k] * x[indices[k] - base];
+            y[i] = alpha * sum + beta * y[i];
+        }
+        return;
+    }
+    for (int64_t i = 0; i < ylen; ++i) y[i] = beta * y[i];
+    for (int64_t i = 0; i < axis; ++i) {
+        const T xi = alpha * x[i];
+        const int begin = offsets[i] - base;
+        const int end = offsets[i + 1] - base;
+        for (int k = begin; k < end; ++k) y[indices[k] - base] += vals[k] * xi;
+    }
+}
+
+template <typename T>
+static void cumetal_spmv_coo(int64_t nnz, const int* rowInd, const int* colInd,
+                             const T* vals, int base, bool transpose,
+                             T alpha, T beta,
+                             const T* x, T* y, int64_t ylen) {
+    for (int64_t i = 0; i < ylen; ++i) y[i] = beta * y[i];
+    for (int64_t e = 0; e < nnz; ++e) {
+        const int r = rowInd[e] - base;
+        const int c = colInd[e] - base;
+        if (transpose) y[c] += alpha * vals[e] * x[r];
+        else           y[r] += alpha * vals[e] * x[c];
+    }
+}
+
+template <typename T>
+static void cumetal_spmm_compressed(int64_t axis, const int* offsets, const int* indices,
+                                    const T* vals, int base, bool transpose, int64_t n,
+                                    T alpha, T beta,
+                                    const T* B, int64_t ldb, T* C, int64_t ldc,
+                                    int64_t crows) {
+    if (!transpose) {
+        for (int64_t i = 0; i < axis; ++i) {
+            const int begin = offsets[i] - base;
+            const int end = offsets[i + 1] - base;
+            for (int64_t j = 0; j < n; ++j) {
+                T sum = static_cast<T>(0);
+                for (int k = begin; k < end; ++k)
+                    sum += vals[k] * B[indices[k] - base + j * ldb];
+                C[i + j * ldc] = alpha * sum + beta * C[i + j * ldc];
+            }
+        }
+        return;
+    }
+    for (int64_t i = 0; i < crows; ++i)
+        for (int64_t j = 0; j < n; ++j) C[i + j * ldc] = beta * C[i + j * ldc];
+    for (int64_t i = 0; i < axis; ++i) {
+        const int begin = offsets[i] - base;
+        const int end = offsets[i + 1] - base;
+        for (int64_t j = 0; j < n; ++j) {
+            const T bij = alpha * B[i + j * ldb];
+            for (int k = begin; k < end; ++k)
+                C[indices[k] - base + j * ldc] += vals[k] * bij;
+        }
+    }
+}
+
+template <typename T>
+static void cumetal_spmm_coo(int64_t nnz, const int* rowInd, const int* colInd,
+                             const T* vals, int base, bool transpose, int64_t n,
+                             T alpha, T beta,
+                             const T* B, int64_t ldb, T* C, int64_t ldc, int64_t crows) {
+    for (int64_t i = 0; i < crows; ++i)
+        for (int64_t j = 0; j < n; ++j) C[i + j * ldc] = beta * C[i + j * ldc];
+    for (int64_t e = 0; e < nnz; ++e) {
+        const int r = rowInd[e] - base;
+        const int c = colInd[e] - base;
+        const int out = transpose ? c : r;
+        const int in = transpose ? r : c;
+        for (int64_t j = 0; j < n; ++j)
+            C[out + j * ldc] += alpha * vals[e] * B[in + j * ldb];
+    }
+}
+
+// Resolve (storage format, requested operation) into one flag over the CSR
+// view, plus the length of that view's compressed axis.
+static void cumetal_sparse_view(const cusparseSpMatDescr* mat, cusparseOperation_t op,
+                                bool* transpose, int64_t* axis) {
+    bool t = (op != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    if (mat->format == CUMETAL_SPMAT_CSC) {
+        // The arrays are CSR-of-A-transpose, so every operation flips and the
+        // compressed axis is A's column count.
+        t = !t;
+        *axis = mat->cols;
+    } else {
+        *axis = mat->rows;
+    }
+    *transpose = t;
+}
+
+// The kernels above index with `int`. Reading a 64-bit index array through an
+// int* would read half of each entry, so refuse rather than compute garbage.
+static bool cumetal_sparse_indices_are_32bit(const cusparseSpMatDescr* mat) {
+    return mat->rowType == CUSPARSE_INDEX_32I && mat->colType == CUSPARSE_INDEX_32I;
+}
+
+}  // extern "C++"
+
 cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
                                cusparseOperation_t opA,
                                const void* alpha,
@@ -281,76 +493,48 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F) {
         return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
     }
+    if (!cumetal_sparse_indices_are_32bit(matA)) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
 
-    // Synchronize stream before CPU computation on UMA
-    if (handle->stream) cudaStreamSynchronize(handle->stream);
+    // op(A) is m-by-k, so y has m entries and x has k.
+    const bool op_t = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    const int64_t ylen = op_t ? matA->cols : matA->rows;
+    const int64_t xlen = op_t ? matA->rows : matA->cols;
+    if (vecY->size != ylen || vecX->size != xlen) return CUSPARSE_STATUS_INVALID_VALUE;
+
+    // Order this call after prior work on the handle's stream (see
+    // synchronize_handle_stream) before computing on the CPU.
+    synchronize_handle_stream(handle);
 
     const int base = (matA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
-    const int64_t m = (opA == CUSPARSE_OPERATION_NON_TRANSPOSE) ? matA->rows : matA->cols;
+    const int* offsets = static_cast<const int*>(matA->rowOffsets);
+    const int* indices = static_cast<const int*>(matA->colInd);
 
-    if (matA->is_csr) {
-        const int* rowPtr = static_cast<const int*>(matA->rowOffsets);
-        const int* colIdx = static_cast<const int*>(matA->colInd);
-        if (computeType == CUDA_R_64F) {
-            const double a = *static_cast<const double*>(alpha);
-            const double b = *static_cast<const double*>(beta);
-            const double* vals = static_cast<const double*>(matA->values);
-            const double* x = static_cast<const double*>(vecX->values);
-            double* y = static_cast<double*>(vecY->values);
-            for (int64_t i = 0; i < m; ++i) {
-                double sum = 0.0;
-                const int row_start = rowPtr[i] - base;
-                const int row_end = rowPtr[i + 1] - base;
-                for (int j = row_start; j < row_end; ++j) {
-                    sum += vals[j] * x[colIdx[j] - base];
-                }
-                y[i] = a * sum + b * y[i];
-            }
-        } else {
-            const float a = *static_cast<const float*>(alpha);
-            const float b = *static_cast<const float*>(beta);
-            const float* vals = static_cast<const float*>(matA->values);
-            const float* x = static_cast<const float*>(vecX->values);
-            float* y = static_cast<float*>(vecY->values);
-            for (int64_t i = 0; i < m; ++i) {
-                float sum = 0.0f;
-                const int row_start = rowPtr[i] - base;
-                const int row_end = rowPtr[i + 1] - base;
-                for (int j = row_start; j < row_end; ++j) {
-                    sum += vals[j] * x[colIdx[j] - base];
-                }
-                y[i] = a * sum + b * y[i];
-            }
-        }
+    bool transpose = false;
+    int64_t axis = 0;
+    cumetal_sparse_view(matA, opA, &transpose, &axis);
+
+    if (computeType == CUDA_R_64F) {
+        const double a = *static_cast<const double*>(alpha);
+        const double b = *static_cast<const double*>(beta);
+        const double* vals = static_cast<const double*>(matA->values);
+        const double* x = static_cast<const double*>(vecX->values);
+        double* y = static_cast<double*>(vecY->values);
+        if (matA->format == CUMETAL_SPMAT_COO)
+            cumetal_spmv_coo(matA->nnz, offsets, indices, vals, base, transpose, a, b, x, y, ylen);
+        else
+            cumetal_spmv_compressed(axis, offsets, indices, vals, base, transpose, a, b, x, y, ylen);
     } else {
-        // COO format
-        const int* rowInd = static_cast<const int*>(matA->rowOffsets);
-        const int* colIdx = static_cast<const int*>(matA->colInd);
-        if (computeType == CUDA_R_64F) {
-            const double a = *static_cast<const double*>(alpha);
-            const double b = *static_cast<const double*>(beta);
-            const double* vals = static_cast<const double*>(matA->values);
-            const double* x = static_cast<const double*>(vecX->values);
-            double* y = static_cast<double*>(vecY->values);
-            for (int64_t i = 0; i < m; ++i) y[i] = b * y[i];
-            for (int64_t e = 0; e < matA->nnz; ++e) {
-                const int r = rowInd[e] - base;
-                const int c = colIdx[e] - base;
-                y[r] += a * vals[e] * x[c];
-            }
-        } else {
-            const float a = *static_cast<const float*>(alpha);
-            const float b = *static_cast<const float*>(beta);
-            const float* vals = static_cast<const float*>(matA->values);
-            const float* x = static_cast<const float*>(vecX->values);
-            float* y = static_cast<float*>(vecY->values);
-            for (int64_t i = 0; i < m; ++i) y[i] = b * y[i];
-            for (int64_t e = 0; e < matA->nnz; ++e) {
-                const int r = rowInd[e] - base;
-                const int c = colIdx[e] - base;
-                y[r] += a * vals[e] * x[c];
-            }
-        }
+        const float a = *static_cast<const float*>(alpha);
+        const float b = *static_cast<const float*>(beta);
+        const float* vals = static_cast<const float*>(matA->values);
+        const float* x = static_cast<const float*>(vecX->values);
+        float* y = static_cast<float*>(vecY->values);
+        if (matA->format == CUMETAL_SPMAT_COO)
+            cumetal_spmv_coo(matA->nnz, offsets, indices, vals, base, transpose, a, b, x, y, ylen);
+        else
+            cumetal_spmv_compressed(axis, offsets, indices, vals, base, transpose, a, b, x, y, ylen);
     }
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -373,7 +557,7 @@ cusparseStatus_t cusparseSpMM_bufferSize(cusparseHandle_t /*handle*/,
 
 cusparseStatus_t cusparseSpMM(cusparseHandle_t handle,
                                cusparseOperation_t opA,
-                               cusparseOperation_t /*opB*/,
+                               cusparseOperation_t opB,
                                const void* alpha,
                                cusparseSpMatDescr_t matA,
                                cusparseDnMatDescr_t matB,
@@ -388,88 +572,56 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t handle,
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F) {
         return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
     }
+    if (!cumetal_sparse_indices_are_32bit(matA)) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    // The dense loops below index B and C as column-major with a leading
+    // dimension and read B in its stored orientation.
+    if (opB != CUSPARSE_OPERATION_NON_TRANSPOSE) return CUSPARSE_STATUS_NOT_SUPPORTED;
+    if (matB->order != CUSPARSE_ORDER_COL || matC->order != CUSPARSE_ORDER_COL) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
 
-    if (handle->stream) cudaStreamSynchronize(handle->stream);
+    const bool op_t = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
+    const int64_t m = op_t ? matA->cols : matA->rows;
+    const int64_t k = op_t ? matA->rows : matA->cols;
+    const int64_t n = matB->cols;
+    if (matB->rows != k || matC->rows != m || matC->cols != n) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+
+    synchronize_handle_stream(handle);
 
     const int base = (matA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
-    const int64_t m = (opA == CUSPARSE_OPERATION_NON_TRANSPOSE) ? matA->rows : matA->cols;
-    const int64_t n = matB->cols;
     const int64_t ldb = matB->ld;
     const int64_t ldc = matC->ld;
+    const int* offsets = static_cast<const int*>(matA->rowOffsets);
+    const int* indices = static_cast<const int*>(matA->colInd);
 
-    if (matA->is_csr) {
-        const int* rowPtr = static_cast<const int*>(matA->rowOffsets);
-        const int* colIdx = static_cast<const int*>(matA->colInd);
-        if (computeType == CUDA_R_64F) {
-            const double a = *static_cast<const double*>(alpha);
-            const double b = *static_cast<const double*>(beta);
-            const double* vals = static_cast<const double*>(matA->values);
-            const double* B = static_cast<const double*>(matB->values);
-            double* C = static_cast<double*>(matC->values);
-            for (int64_t i = 0; i < m; ++i) {
-                for (int64_t j = 0; j < n; ++j) {
-                    double sum = 0.0;
-                    const int row_start = rowPtr[i] - base;
-                    const int row_end = rowPtr[i + 1] - base;
-                    for (int k = row_start; k < row_end; ++k) {
-                        sum += vals[k] * B[colIdx[k] - base + j * ldb];
-                    }
-                    C[i + j * ldc] = a * sum + b * C[i + j * ldc];
-                }
-            }
-        } else {
-            const float a = *static_cast<const float*>(alpha);
-            const float b = *static_cast<const float*>(beta);
-            const float* vals = static_cast<const float*>(matA->values);
-            const float* B = static_cast<const float*>(matB->values);
-            float* C = static_cast<float*>(matC->values);
-            for (int64_t i = 0; i < m; ++i) {
-                for (int64_t j = 0; j < n; ++j) {
-                    float sum = 0.0f;
-                    const int row_start = rowPtr[i] - base;
-                    const int row_end = rowPtr[i + 1] - base;
-                    for (int k = row_start; k < row_end; ++k) {
-                        sum += vals[k] * B[colIdx[k] - base + j * ldb];
-                    }
-                    C[i + j * ldc] = a * sum + b * C[i + j * ldc];
-                }
-            }
-        }
+    bool transpose = false;
+    int64_t axis = 0;
+    cumetal_sparse_view(matA, opA, &transpose, &axis);
+
+    if (computeType == CUDA_R_64F) {
+        const double a = *static_cast<const double*>(alpha);
+        const double b = *static_cast<const double*>(beta);
+        const double* vals = static_cast<const double*>(matA->values);
+        const double* B = static_cast<const double*>(matB->values);
+        double* C = static_cast<double*>(matC->values);
+        if (matA->format == CUMETAL_SPMAT_COO)
+            cumetal_spmm_coo(matA->nnz, offsets, indices, vals, base, transpose, n, a, b, B, ldb, C, ldc, m);
+        else
+            cumetal_spmm_compressed(axis, offsets, indices, vals, base, transpose, n, a, b, B, ldb, C, ldc, m);
     } else {
-        // COO format
-        const int* rowInd = static_cast<const int*>(matA->rowOffsets);
-        const int* colIdx = static_cast<const int*>(matA->colInd);
-        if (computeType == CUDA_R_64F) {
-            const double a = *static_cast<const double*>(alpha);
-            const double b = *static_cast<const double*>(beta);
-            const double* vals = static_cast<const double*>(matA->values);
-            const double* B = static_cast<const double*>(matB->values);
-            double* C = static_cast<double*>(matC->values);
-            for (int64_t i = 0; i < m; ++i)
-                for (int64_t j = 0; j < n; ++j)
-                    C[i + j * ldc] = b * C[i + j * ldc];
-            for (int64_t e = 0; e < matA->nnz; ++e) {
-                const int r = rowInd[e] - base;
-                const int c = colIdx[e] - base;
-                for (int64_t j = 0; j < n; ++j)
-                    C[r + j * ldc] += a * vals[e] * B[c + j * ldb];
-            }
-        } else {
-            const float a = *static_cast<const float*>(alpha);
-            const float b = *static_cast<const float*>(beta);
-            const float* vals = static_cast<const float*>(matA->values);
-            const float* B = static_cast<const float*>(matB->values);
-            float* C = static_cast<float*>(matC->values);
-            for (int64_t i = 0; i < m; ++i)
-                for (int64_t j = 0; j < n; ++j)
-                    C[i + j * ldc] = b * C[i + j * ldc];
-            for (int64_t e = 0; e < matA->nnz; ++e) {
-                const int r = rowInd[e] - base;
-                const int c = colIdx[e] - base;
-                for (int64_t j = 0; j < n; ++j)
-                    C[r + j * ldc] += a * vals[e] * B[c + j * ldb];
-            }
-        }
+        const float a = *static_cast<const float*>(alpha);
+        const float b = *static_cast<const float*>(beta);
+        const float* vals = static_cast<const float*>(matA->values);
+        const float* B = static_cast<const float*>(matB->values);
+        float* C = static_cast<float*>(matC->values);
+        if (matA->format == CUMETAL_SPMAT_COO)
+            cumetal_spmm_coo(matA->nnz, offsets, indices, vals, base, transpose, n, a, b, B, ldb, C, ldc, m);
+        else
+            cumetal_spmm_compressed(axis, offsets, indices, vals, base, transpose, n, a, b, B, ldb, C, ldc, m);
     }
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -489,7 +641,7 @@ cusparseStatus_t cusparseScsrmv(cusparseHandle_t handle,
     if (!handle || !alpha || !beta || !csrValA || !csrRowPtrA || !csrColIndA || !x || !y) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
-    if (handle->stream) cudaStreamSynchronize(handle->stream);
+    synchronize_handle_stream(handle);
 
     const int base = descrA ? static_cast<int>(descrA->base) : 0;
     for (int i = 0; i < m; ++i) {
@@ -519,7 +671,7 @@ cusparseStatus_t cusparseDcsrmv(cusparseHandle_t handle,
     if (!handle || !alpha || !beta || !csrValA || !csrRowPtrA || !csrColIndA || !x || !y) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
-    if (handle->stream) cudaStreamSynchronize(handle->stream);
+    synchronize_handle_stream(handle);
 
     const int base = descrA ? static_cast<int>(descrA->base) : 0;
     for (int i = 0; i < m; ++i) {
@@ -579,11 +731,11 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t handle,
                                      cusparseSpSVAlg_t,
                                      cusparseSpSVDescr_t) {
     if (!handle || !matA || !vecX || !vecY || !alpha) return CUSPARSE_STATUS_INVALID_VALUE;
-    if (!matA->is_csr) return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    if (matA->format != CUMETAL_SPMAT_CSR) return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F)
         return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
 
-    if (handle->stream) cudaStreamSynchronize(handle->stream);
+    synchronize_handle_stream(handle);
 
     const int* rowPtr = static_cast<const int*>(matA->rowOffsets);
     const int* colIdx = static_cast<const int*>(matA->colInd);

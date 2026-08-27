@@ -19,4 +19,5 @@ tests/cuda_projects/**/build/flash_*
 demos/apollo/out/
 # Diffusion demo artifacts (weights, check tensors, generated images)
 demos/diffusion/out/
+demos/highs/out/
 __pycache__/

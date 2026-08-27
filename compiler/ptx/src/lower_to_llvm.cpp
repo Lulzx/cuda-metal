@@ -1454,20 +1454,423 @@ class GenericLlvmEmitter {
         return out;
     }
 
+    // Branch-free 32-bit leading-zero count; returns 32 for v == 0.
+    // Emitted inline rather than via llvm.ctlz so the result does not depend on
+    // whether the AIR backend lowers that intrinsic.
+    std::string emit_clz_i32(std::ostringstream& os, const std::string& v) {
+        // Each step asks whether the top `width` bits are all zero; if so the
+        // value is shifted up by `width` and the count advances.
+        static const struct { int width; const char* mask; } kSteps[] = {
+            {16, "-65536"},       // 0xFFFF0000
+            {8,  "-16777216"},    // 0xFF000000
+            {4,  "-268435456"},   // 0xF0000000
+            {2,  "-1073741824"},  // 0xC0000000
+            {1,  "-2147483648"},  // 0x80000000
+        };
+        std::string t = v;
+        std::string n = "0";
+        for (const auto& step : kSteps) {
+            const std::string masked = next_tmp("clz_mask");
+            const std::string has_top = next_tmp("clz_has");
+            const std::string shifted = next_tmp("clz_sh");
+            const std::string t_next = next_tmp("clz_t");
+            const std::string n_add = next_tmp("clz_nadd");
+            const std::string n_next = next_tmp("clz_n");
+            os << "  " << masked << " = and i32 " << t << ", " << step.mask << "\n";
+            os << "  " << has_top << " = icmp ne i32 " << masked << ", 0\n";
+            os << "  " << shifted << " = shl i32 " << t << ", " << step.width << "\n";
+            os << "  " << t_next << " = select i1 " << has_top << ", i32 " << t << ", i32 "
+               << shifted << "\n";
+            os << "  " << n_add << " = add i32 " << n << ", " << step.width << "\n";
+            os << "  " << n_next << " = select i1 " << has_top << ", i32 " << n << ", i32 "
+               << n_add << "\n";
+            t = t_next;
+            n = n_next;
+        }
+        // v == 0 leaves every step taking the shift branch, giving n == 31; the
+        // true count is 32.
+        const std::string is_zero = next_tmp("clz_isz");
+        const std::string out = next_tmp("clz");
+        os << "  " << is_zero << " = icmp eq i32 " << v << ", 0\n";
+        os << "  " << out << " = select i1 " << is_zero << ", i32 32, i32 " << n << "\n";
+        return out;
+    }
+
+    // Split IEEE-754 binary64 bits into a Dekker FP32 pair, keeping the residual.
+    //
+    //   hi = roundToNearestEven_f32(x)
+    //   lo = roundToNearestEven_f32(x - hi)     (computed from the binary64
+    //                                            significand with integer math,
+    //                                            never from an already-rounded hi)
+    //
+    // The pair carries 48 of binary64's 53 significand bits, so the split is
+    // where precision is lost; because it is deterministic, re-splitting a value
+    // this pair produced returns the same pair, and error does not compound
+    // across a chain of instructions.
+    //
+    // Documented deviations from IEEE-754: binary64 subnormal inputs flush to
+    // signed zero (inherited from emit_soft_f64_bits_to_f32_bits), and a residual
+    // whose own exponent falls below the binary32 normal range is dropped rather
+    // than represented as a binary32 subnormal. Signed zero, infinity and NaN
+    // pass through hi unchanged with lo set to a signed zero.
+    Fp64Pair emit_soft_f64_bits_to_f32_pair(std::ostringstream& os,
+                                            const std::string& f64_bits) {
+        const std::string sign64 = next_tmp("fp64_split_s64");
+        const std::string sign = next_tmp("fp64_split_sign");
+        const std::string sign_sh = next_tmp("fp64_split_signsh");
+        const std::string exp_raw = next_tmp("fp64_split_eraw");
+        const std::string exp = next_tmp("fp64_split_e");
+        const std::string exp32 = next_tmp("fp64_split_e32");
+        const std::string mant = next_tmp("fp64_split_M");
+        const std::string keep = next_tmp("fp64_split_keep");
+        const std::string res = next_tmp("fp64_split_R");
+        os << "  " << sign64 << " = lshr i64 " << f64_bits << ", 63\n";
+        os << "  " << sign << " = trunc i64 " << sign64 << " to i32\n";
+        os << "  " << sign_sh << " = shl i32 " << sign << ", 31\n";
+        os << "  " << exp_raw << " = lshr i64 " << f64_bits << ", 52\n";
+        os << "  " << exp << " = and i64 " << exp_raw << ", 2047\n";
+        os << "  " << exp32 << " = trunc i64 " << exp << " to i32\n";
+        os << "  " << mant << " = and i64 " << f64_bits << ", 4503599627370495\n";
+        os << "  " << keep << " = lshr i64 " << mant << ", 29\n";   // bits hi will keep
+        os << "  " << res << " = and i64 " << mant << ", 536870911\n"; // bits 28..0
+
+        // Round-to-nearest-even at bit 29.
+        const std::string gt_half = next_tmp("fp64_split_gt");
+        const std::string eq_half = next_tmp("fp64_split_eq");
+        const std::string keep_odd_bit = next_tmp("fp64_split_kob");
+        const std::string keep_odd = next_tmp("fp64_split_ko");
+        const std::string tie_up = next_tmp("fp64_split_tie");
+        const std::string round_up_raw = next_tmp("fp64_split_upraw");
+        const std::string finite_lo = next_tmp("fp64_split_fina");
+        const std::string finite_hi = next_tmp("fp64_split_finb");
+        const std::string finite = next_tmp("fp64_split_fin");
+        const std::string round_up = next_tmp("fp64_split_up");
+        os << "  " << gt_half << " = icmp ugt i64 " << res << ", 268435456\n";
+        os << "  " << eq_half << " = icmp eq i64 " << res << ", 268435456\n";
+        os << "  " << keep_odd_bit << " = and i64 " << keep << ", 1\n";
+        os << "  " << keep_odd << " = icmp ne i64 " << keep_odd_bit << ", 0\n";
+        os << "  " << tie_up << " = and i1 " << eq_half << ", " << keep_odd << "\n";
+        os << "  " << round_up_raw << " = or i1 " << gt_half << ", " << tie_up << "\n";
+        // Only round finite normals: adding to a NaN significand can carry the
+        // exponent field into the sign bit, and zero/subnormal inputs flush.
+        os << "  " << finite_lo << " = icmp ne i64 " << exp << ", 0\n";
+        os << "  " << finite_hi << " = icmp ne i64 " << exp << ", 2047\n";
+        os << "  " << finite << " = and i1 " << finite_lo << ", " << finite_hi << "\n";
+        os << "  " << round_up << " = and i1 " << round_up_raw << ", " << finite << "\n";
+
+        // Adding one ulp-of-hi to the raw bit pattern carries out of the
+        // significand into the exponent for free, and saturates to infinity if
+        // the exponent runs out -- both exactly what rounding up should do.
+        const std::string bumped = next_tmp("fp64_split_bumped");
+        const std::string rounded = next_tmp("fp64_split_rounded");
+        os << "  " << bumped << " = add i64 " << f64_bits << ", 536870912\n";
+        os << "  " << rounded << " = select i1 " << round_up << ", i64 " << bumped << ", i64 "
+           << f64_bits << "\n";
+        // The low 29 bits of `rounded` are now the discarded ones, so the
+        // truncating conversion below loses nothing further.
+        const std::string hi_bits = emit_soft_f64_bits_to_f32_bits(os, rounded);
+        const std::string hi = next_tmp("fp64_split_hi");
+        os << "  " << hi << " = bitcast i32 " << hi_bits << " to float\n";
+
+        // Signed residual x - hi, in units of 2^(e-52) and bounded by 2^28 in
+        // magnitude. Rounding up makes it negative, which flips lo's sign
+        // relative to x -- a Dekker pair permits that.
+        const std::string res_signed = next_tmp("fp64_split_rs");
+        const std::string res_neg = next_tmp("fp64_split_rneg");
+        const std::string res_negated = next_tmp("fp64_split_rnegd");
+        const std::string res_mag64 = next_tmp("fp64_split_rmag64");
+        const std::string res_mag = next_tmp("fp64_split_rmag");
+        const std::string lowered = next_tmp("fp64_split_low");
+        os << "  " << lowered << " = sub i64 " << res << ", 536870912\n";
+        os << "  " << res_signed << " = select i1 " << round_up << ", i64 " << lowered << ", i64 "
+           << res << "\n";
+        os << "  " << res_neg << " = icmp slt i64 " << res_signed << ", 0\n";
+        os << "  " << res_negated << " = sub i64 0, " << res_signed << "\n";
+        os << "  " << res_mag64 << " = select i1 " << res_neg << ", i64 " << res_negated
+           << ", i64 " << res_signed << "\n";
+        os << "  " << res_mag << " = trunc i64 " << res_mag64 << " to i32\n";
+
+        const std::string clz = emit_clz_i32(os, res_mag);
+        const std::string norm = next_tmp("fp64_split_norm");
+        const std::string mant_sh = next_tmp("fp64_split_mantsh");
+        const std::string lo_mant = next_tmp("fp64_split_lomant");
+        os << "  " << norm << " = shl i32 " << res_mag << ", " << clz << "\n";
+        os << "  " << mant_sh << " = lshr i32 " << norm << ", 8\n";
+        os << "  " << lo_mant << " = and i32 " << mant_sh << ", 8388607\n";
+
+        // Leading residual bit sits at position 31-clz of a value scaled by
+        // 2^(e-52), so the binary32 biased exponent is E - 917 - clz.
+        const std::string e_tmp = next_tmp("fp64_split_etmp");
+        const std::string e_lo = next_tmp("fp64_split_elo");
+        os << "  " << e_tmp << " = sub i32 " << exp32 << ", " << clz << "\n";
+        os << "  " << e_lo << " = sub i32 " << e_tmp << ", 917\n";
+
+        const std::string res_nz = next_tmp("fp64_split_rnz");
+        const std::string e_lo_ok_lo = next_tmp("fp64_split_eloa");
+        const std::string e_lo_ok_hi = next_tmp("fp64_split_elob");
+        const std::string e_lo_ok = next_tmp("fp64_split_eloc");
+        const std::string ok0 = next_tmp("fp64_split_ok0");
+        const std::string ok = next_tmp("fp64_split_ok");
+        os << "  " << res_nz << " = icmp ne i32 " << res_mag << ", 0\n";
+        os << "  " << e_lo_ok_lo << " = icmp sgt i32 " << e_lo << ", 0\n";
+        os << "  " << e_lo_ok_hi << " = icmp slt i32 " << e_lo << ", 255\n";
+        os << "  " << e_lo_ok << " = and i1 " << e_lo_ok_lo << ", " << e_lo_ok_hi << "\n";
+        os << "  " << ok0 << " = and i1 " << res_nz << ", " << finite << "\n";
+        os << "  " << ok << " = and i1 " << ok0 << ", " << e_lo_ok << "\n";
+
+        const std::string lo_sign_flip = next_tmp("fp64_split_lsf");
+        const std::string lo_sign = next_tmp("fp64_split_lsign");
+        const std::string e_sh = next_tmp("fp64_split_esh");
+        const std::string packed0 = next_tmp("fp64_split_p0");
+        const std::string packed = next_tmp("fp64_split_p1");
+        const std::string lo_bits = next_tmp("fp64_split_lobits");
+        const std::string lo = next_tmp("fp64_split_lo");
+        os << "  " << lo_sign_flip << " = select i1 " << res_neg << ", i32 -2147483648, i32 0\n";
+        os << "  " << lo_sign << " = xor i32 " << sign_sh << ", " << lo_sign_flip << "\n";
+        os << "  " << e_sh << " = shl i32 " << e_lo << ", 23\n";
+        os << "  " << packed0 << " = or i32 " << lo_sign << ", " << e_sh << "\n";
+        os << "  " << packed << " = or i32 " << packed0 << ", " << lo_mant << "\n";
+        // Dropped residual keeps x's sign as a signed zero.
+        os << "  " << lo_bits << " = select i1 " << ok << ", i32 " << packed << ", i32 "
+           << sign_sh << "\n";
+        os << "  " << lo << " = bitcast i32 " << lo_bits << " to float\n";
+        return Fp64Pair{hi, lo};
+    }
+
+    // Combine a Dekker FP32 pair back into IEEE-754 binary64 bits.
+    //
+    // Deliberately does NOT compute hi + lo in FP32 first: that is what collapsed
+    // every value to 24 bits. Instead both limbs are widened exactly, the smaller
+    // is aligned into the larger's significand, and the 53-bit result is packed
+    // directly. The join is exact whenever both limbs' significant bits fit
+    // binary64's 53-bit window, which a normalized pair usually satisfies; an
+    // unusually small lo can sit farther below hi than that, so the alignment
+    // rounds to nearest even rather than assuming exact representability.
+    std::string emit_soft_f32_pair_to_f64_bits(std::ostringstream& os,
+                                               const std::string& hi,
+                                               const std::string& lo) {
+        const std::string hi_bits = next_tmp("fp64_join_hib");
+        const std::string lo_bits = next_tmp("fp64_join_lob");
+        os << "  " << hi_bits << " = bitcast float " << hi << " to i32\n";
+        os << "  " << lo_bits << " = bitcast float " << lo << " to i32\n";
+        const std::string hi64 = emit_soft_f32_bits_to_f64_bits(os, hi_bits);
+        const std::string lo64 = emit_soft_f32_bits_to_f64_bits(os, lo_bits);
+
+        // Fallback for anything the exact path cannot handle (zero/inf/nan hi, an
+        // unnormalized pair, cancellation). This is the old collapse, so the
+        // result is never worse than before the split path existed.
+        const std::string collapsed = next_tmp("fp64_join_sum");
+        const std::string collapsed_bits = next_tmp("fp64_join_sumb");
+        os << "  " << collapsed << " = fadd float " << hi << ", " << lo << "\n";
+        os << "  " << collapsed_bits << " = bitcast float " << collapsed << " to i32\n";
+        const std::string fallback = emit_soft_f32_bits_to_f64_bits(os, collapsed_bits);
+
+        const std::string hi_exp_raw = next_tmp("fp64_join_hieraw");
+        const std::string hi_exp = next_tmp("fp64_join_hie");
+        const std::string lo_exp_raw = next_tmp("fp64_join_loeraw");
+        const std::string lo_exp = next_tmp("fp64_join_loe");
+        os << "  " << hi_exp_raw << " = lshr i64 " << hi64 << ", 52\n";
+        os << "  " << hi_exp << " = and i64 " << hi_exp_raw << ", 2047\n";
+        os << "  " << lo_exp_raw << " = lshr i64 " << lo64 << ", 52\n";
+        os << "  " << lo_exp << " = and i64 " << lo_exp_raw << ", 2047\n";
+
+        const std::string mant_mask = "4503599627370495";       // (1<<52)-1
+        const std::string implicit = "4503599627370496";        // 1<<52
+        const std::string overflow_bit = "9007199254740992";    // 1<<53
+
+        const std::string hi_mant = next_tmp("fp64_join_him");
+        const std::string m_hi = next_tmp("fp64_join_mhi");
+        const std::string lo_mant = next_tmp("fp64_join_lom");
+        const std::string m_lo = next_tmp("fp64_join_mlo");
+        os << "  " << hi_mant << " = and i64 " << hi64 << ", " << mant_mask << "\n";
+        os << "  " << m_hi << " = or i64 " << hi_mant << ", " << implicit << "\n";
+        os << "  " << lo_mant << " = and i64 " << lo64 << ", " << mant_mask << "\n";
+        os << "  " << m_lo << " = or i64 " << lo_mant << ", " << implicit << "\n";
+
+        const std::string shift = next_tmp("fp64_join_shift");
+        const std::string shift_ok_lo = next_tmp("fp64_join_shoka");
+        const std::string shift_ok_hi = next_tmp("fp64_join_shokb");
+        const std::string shift_ok = next_tmp("fp64_join_shok");
+        const std::string shift_safe = next_tmp("fp64_join_shsafe");
+        os << "  " << shift << " = sub i64 " << hi_exp << ", " << lo_exp << "\n";
+        os << "  " << shift_ok_lo << " = icmp sgt i64 " << shift << ", 0\n";
+        os << "  " << shift_ok_hi << " = icmp slt i64 " << shift << ", 64\n";
+        os << "  " << shift_ok << " = and i1 " << shift_ok_lo << ", " << shift_ok_hi << "\n";
+        // Keep the shift in range even when unused; an out-of-range shl/lshr is
+        // poison in LLVM and would contaminate the select.
+        os << "  " << shift_safe << " = select i1 " << shift_ok << ", i64 " << shift << ", i64 1\n";
+
+        // Align lo into hi's significand. For shift <= 29 nothing is dropped --
+        // lo is a float, so its binary64 significand has 29 trailing zeros --
+        // and the join is exact. Beyond that the discarded bits are rounded to
+        // nearest even rather than truncated, so the packed result is the
+        // correctly rounded sum instead of assuming exact representability.
+        const std::string delta_trunc = next_tmp("fp64_join_dtrunc");
+        const std::string keep_mask = next_tmp("fp64_join_kmask");
+        const std::string dropped = next_tmp("fp64_join_dropped");
+        const std::string half_sh = next_tmp("fp64_join_halfsh");
+        const std::string half = next_tmp("fp64_join_half");
+        const std::string drop_gt = next_tmp("fp64_join_dgt");
+        const std::string drop_eq = next_tmp("fp64_join_deq");
+        const std::string dt_odd_bit = next_tmp("fp64_join_dob");
+        const std::string dt_odd = next_tmp("fp64_join_dodd");
+        const std::string drop_tie = next_tmp("fp64_join_dtie");
+        const std::string drop_up = next_tmp("fp64_join_dup");
+        const std::string delta_inc = next_tmp("fp64_join_dinc");
+        const std::string delta = next_tmp("fp64_join_delta");
+        os << "  " << delta_trunc << " = lshr i64 " << m_lo << ", " << shift_safe << "\n";
+        os << "  " << half_sh << " = sub i64 " << shift_safe << ", 1\n";
+        os << "  " << half << " = shl i64 1, " << half_sh << "\n";
+        os << "  " << keep_mask << " = sub i64 " << half << ", 1\n";
+        // dropped = m_lo & ((1 << shift) - 1); (half << 1) - 1 == (1 << shift) - 1
+        const std::string full_mask = next_tmp("fp64_join_fmask");
+        const std::string half2 = next_tmp("fp64_join_half2");
+        os << "  " << half2 << " = shl i64 " << half << ", 1\n";
+        os << "  " << full_mask << " = sub i64 " << half2 << ", 1\n";
+        os << "  " << dropped << " = and i64 " << m_lo << ", " << full_mask << "\n";
+        os << "  " << drop_gt << " = icmp ugt i64 " << dropped << ", " << half << "\n";
+        os << "  " << drop_eq << " = icmp eq i64 " << dropped << ", " << half << "\n";
+        os << "  " << dt_odd_bit << " = and i64 " << delta_trunc << ", 1\n";
+        os << "  " << dt_odd << " = icmp ne i64 " << dt_odd_bit << ", 0\n";
+        os << "  " << drop_tie << " = and i1 " << drop_eq << ", " << dt_odd << "\n";
+        os << "  " << drop_up << " = or i1 " << drop_gt << ", " << drop_tie << "\n";
+        os << "  " << delta_inc << " = add i64 " << delta_trunc << ", 1\n";
+        os << "  " << delta << " = select i1 " << drop_up << ", i64 " << delta_inc << ", i64 "
+           << delta_trunc << "\n";
+        (void) keep_mask;
+
+        const std::string hi_sign = next_tmp("fp64_join_hs");
+        const std::string lo_sign = next_tmp("fp64_join_ls");
+        const std::string same_sign = next_tmp("fp64_join_same");
+        const std::string sum = next_tmp("fp64_join_add");
+        const std::string dif = next_tmp("fp64_join_sub");
+        const std::string m = next_tmp("fp64_join_m");
+        os << "  " << hi_sign << " = lshr i64 " << hi64 << ", 63\n";
+        os << "  " << lo_sign << " = lshr i64 " << lo64 << ", 63\n";
+        os << "  " << same_sign << " = icmp eq i64 " << hi_sign << ", " << lo_sign << "\n";
+        os << "  " << sum << " = add i64 " << m_hi << ", " << delta << "\n";
+        os << "  " << dif << " = sub i64 " << m_hi << ", " << delta << "\n";
+        os << "  " << m << " = select i1 " << same_sign << ", i64 " << sum << ", i64 " << dif
+           << "\n";
+
+        // A normalized pair moves the significand by at most one bit either way:
+        // adding can carry out of bit 52, and subtracting can only borrow when hi
+        // is an exact power of two.
+        const std::string carry = next_tmp("fp64_join_carry");
+        const std::string m_sh = next_tmp("fp64_join_msh");
+        const std::string m1 = next_tmp("fp64_join_m1");
+        const std::string e_inc = next_tmp("fp64_join_einc");
+        const std::string e1 = next_tmp("fp64_join_e1");
+        os << "  " << carry << " = icmp uge i64 " << m << ", " << overflow_bit << "\n";
+        // Renormalizing a carry drops one bit, so it needs its own round to
+        // nearest even rather than a bare shift: round up when that bit is set
+        // and the surviving LSB is odd (a tie with nothing below rounds to even).
+        const std::string c_lost = next_tmp("fp64_join_clost");
+        const std::string c_sh = next_tmp("fp64_join_csh");
+        const std::string c_odd_bit = next_tmp("fp64_join_cob");
+        const std::string c_tie = next_tmp("fp64_join_ctie");
+        const std::string c_up = next_tmp("fp64_join_cup");
+        const std::string c_inc = next_tmp("fp64_join_cinc");
+        os << "  " << c_lost << " = and i64 " << m << ", 1\n";
+        os << "  " << c_sh << " = lshr i64 " << m << ", 1\n";
+        os << "  " << c_odd_bit << " = and i64 " << c_sh << ", 1\n";
+        os << "  " << c_tie << " = and i64 " << c_lost << ", " << c_odd_bit << "\n";
+        os << "  " << c_up << " = icmp ne i64 " << c_tie << ", 0\n";
+        os << "  " << c_inc << " = add i64 " << c_sh << ", 1\n";
+        os << "  " << m_sh << " = select i1 " << c_up << ", i64 " << c_inc << ", i64 " << c_sh
+           << "\n";
+        os << "  " << m1 << " = select i1 " << carry << ", i64 " << m_sh << ", i64 " << m << "\n";
+        os << "  " << e_inc << " = add i64 " << hi_exp << ", 1\n";
+        os << "  " << e1 << " = select i1 " << carry << ", i64 " << e_inc << ", i64 " << hi_exp
+           << "\n";
+        // Rounding up can itself carry out again, but only from an all-ones
+        // significand, so the value is then a power of two and one more shift
+        // is exact.
+        const std::string recarry = next_tmp("fp64_join_recarry");
+        const std::string m1b_sh = next_tmp("fp64_join_m1bsh");
+        const std::string m1b = next_tmp("fp64_join_m1b");
+        const std::string e1b_inc = next_tmp("fp64_join_e1binc");
+        const std::string e1b = next_tmp("fp64_join_e1b");
+        os << "  " << recarry << " = icmp uge i64 " << m1 << ", " << overflow_bit << "\n";
+        os << "  " << m1b_sh << " = lshr i64 " << m1 << ", 1\n";
+        os << "  " << m1b << " = select i1 " << recarry << ", i64 " << m1b_sh << ", i64 " << m1
+           << "\n";
+        os << "  " << e1b_inc << " = add i64 " << e1 << ", 1\n";
+        os << "  " << e1b << " = select i1 " << recarry << ", i64 " << e1b_inc << ", i64 " << e1
+           << "\n";
+
+        const std::string borrow = next_tmp("fp64_join_borrow");
+        const std::string m1_sh = next_tmp("fp64_join_m1sh");
+        const std::string m2 = next_tmp("fp64_join_m2");
+        const std::string e_dec = next_tmp("fp64_join_edec");
+        const std::string e2 = next_tmp("fp64_join_e2");
+        os << "  " << borrow << " = icmp ult i64 " << m1b << ", " << implicit << "\n";
+        os << "  " << m1_sh << " = shl i64 " << m1b << ", 1\n";
+        os << "  " << m2 << " = select i1 " << borrow << ", i64 " << m1_sh << ", i64 " << m1b
+           << "\n";
+        os << "  " << e_dec << " = sub i64 " << e1b << ", 1\n";
+        os << "  " << e2 << " = select i1 " << borrow << ", i64 " << e_dec << ", i64 " << e1b
+           << "\n";
+
+        const std::string normalized = next_tmp("fp64_join_normok");
+        const std::string e_ok_lo = next_tmp("fp64_join_eoka");
+        const std::string e_ok_hi = next_tmp("fp64_join_eokb");
+        const std::string e_ok = next_tmp("fp64_join_eok");
+        const std::string hi_finite_lo = next_tmp("fp64_join_hfa");
+        const std::string hi_finite_hi = next_tmp("fp64_join_hfb");
+        const std::string hi_finite = next_tmp("fp64_join_hf");
+        const std::string lo_nz = next_tmp("fp64_join_lonz");
+        const std::string lo_mag = next_tmp("fp64_join_lomag");
+        os << "  " << normalized << " = icmp uge i64 " << m2 << ", " << implicit << "\n";
+        os << "  " << e_ok_lo << " = icmp sgt i64 " << e2 << ", 0\n";
+        os << "  " << e_ok_hi << " = icmp slt i64 " << e2 << ", 2047\n";
+        os << "  " << e_ok << " = and i1 " << e_ok_lo << ", " << e_ok_hi << "\n";
+        os << "  " << hi_finite_lo << " = icmp ne i64 " << hi_exp << ", 0\n";
+        os << "  " << hi_finite_hi << " = icmp ne i64 " << hi_exp << ", 2047\n";
+        os << "  " << hi_finite << " = and i1 " << hi_finite_lo << ", " << hi_finite_hi << "\n";
+        os << "  " << lo_mag << " = and i32 " << lo_bits << ", 2147483647\n";
+        os << "  " << lo_nz << " = icmp ne i32 " << lo_mag << ", 0\n";
+
+        const std::string g0 = next_tmp("fp64_join_g0");
+        const std::string g1 = next_tmp("fp64_join_g1");
+        const std::string g2 = next_tmp("fp64_join_g2");
+        const std::string use_exact = next_tmp("fp64_join_use");
+        os << "  " << g0 << " = and i1 " << shift_ok << ", " << hi_finite << "\n";
+        os << "  " << g1 << " = and i1 " << g0 << ", " << normalized << "\n";
+        os << "  " << g2 << " = and i1 " << g1 << ", " << e_ok << "\n";
+        os << "  " << use_exact << " = and i1 " << g2 << ", " << lo_nz << "\n";
+
+        const std::string sign_sh = next_tmp("fp64_join_ssh");
+        const std::string e_sh = next_tmp("fp64_join_esh");
+        const std::string mant_out = next_tmp("fp64_join_mout");
+        const std::string packed0 = next_tmp("fp64_join_p0");
+        const std::string packed = next_tmp("fp64_join_p1");
+        const std::string exact_or_hi = next_tmp("fp64_join_exhi");
+        const std::string out = next_tmp("fp64_join");
+        os << "  " << sign_sh << " = shl i64 " << hi_sign << ", 63\n";
+        os << "  " << e_sh << " = shl i64 " << e2 << ", 52\n";
+        os << "  " << mant_out << " = and i64 " << m2 << ", " << mant_mask << "\n";
+        os << "  " << packed0 << " = or i64 " << sign_sh << ", " << e_sh << "\n";
+        os << "  " << packed << " = or i64 " << packed0 << ", " << mant_out << "\n";
+        // lo == 0 is the common case and needs no work: hi widens exactly.
+        os << "  " << exact_or_hi << " = select i1 " << lo_nz << ", i64 " << fallback << ", i64 "
+           << hi64 << "\n";
+        os << "  " << out << " = select i1 " << use_exact << ", i64 " << packed << ", i64 "
+           << exact_or_hi << "\n";
+        return out;
+    }
+
     std::optional<Fp64Pair> decode_fp64_pair(std::ostringstream& os,
                                              const std::string& operand) {
         if (is_register_name(operand)) {
             if (ensure_reg_slot(operand).bits != 64) return std::nullopt;
             // Register ABI is IEEE binary64 bits (matches ld.global.b64 / st.global.b64
-            // and host-side double memory). Convert to a Dekker float pair for ALU.
+            // and host-side double memory). Convert to a Dekker float pair for ALU,
+            // keeping the residual: binary64 carries 53 significand bits and the
+            // pair carries 48, so the split is the only place precision is lost
+            // and the loss does not compound across a chain of instructions.
             const std::string ieee = emit_load_reg_bits(os, operand, 64);
-            const std::string hi_bits = emit_soft_f64_bits_to_f32_bits(os, ieee);
-            const std::string hi = next_tmp("fp64_hi");
-            os << "  " << hi << " = bitcast i32 " << hi_bits << " to float\n";
-            // Residual lo is omitted (0): emulate memory-backed doubles at ~f32 precision.
-            // Pure register chains still run Dekker within each op before this collapse.
-            const std::string lo = emit_float_constant(os, 0.0f, "fp64_lo");
-            return Fp64Pair{hi, lo};
+            return emit_soft_f64_bits_to_f32_pair(os, ieee);
         }
 
         double value = 0.0;
@@ -1493,16 +1896,87 @@ class GenericLlvmEmitter {
             emit_float_constant(os, lo_value, "fp64_imm_lo")};
     }
 
+    // Call parameters are untyped bit containers, so libdevice FP64 entry points
+    // hand over IEEE binary64 bits rather than a register the pair decoder can
+    // read. These two convert at that boundary using the same residual-preserving
+    // split/join as decode_fp64_pair/store_fp64_pair.
+    Fp64Pair fp64_pair_from_ieee_bits(std::ostringstream& os, const std::string& ieee_bits) {
+        return emit_soft_f64_bits_to_f32_pair(os, ieee_bits);
+    }
+
+    std::string fp64_ieee_bits_from_pair(std::ostringstream& os, const Fp64Pair& value) {
+        return emit_soft_f32_pair_to_f64_bits(os, value.hi, value.lo);
+    }
+
     bool store_fp64_pair(std::ostringstream& os, const std::string& dst,
                          const Fp64Pair& value) {
-        // Collapse Dekker pair to f32 then expand to IEEE binary64 bits so memory
-        // stores (st.global.b64 of a double bit pattern) remain host-compatible.
-        const std::string summed = next_tmp("fp64_pack_sum");
-        os << "  " << summed << " = fadd float " << value.hi << ", " << value.lo << "\n";
-        const std::string f32_bits = next_tmp("fp64_pack_f32bits");
-        os << "  " << f32_bits << " = bitcast float " << summed << " to i32\n";
-        const std::string ieee = emit_soft_f32_bits_to_f64_bits(os, f32_bits);
+        // Join both limbs into IEEE binary64 bits, so the register slot always
+        // holds the CUDA-visible bit pattern. Global stores, .local spills,
+        // mov.b64, warp shuffles and aliasing the same eight bytes as a
+        // uint64_t therefore need no special handling: nothing anywhere holds a
+        // private packed-pair format.
+        const std::string ieee = emit_soft_f32_pair_to_f64_bits(os, value.hi, value.lo);
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, ieee, 64);
+    }
+
+    // A pair renormalization ends in `fadd leading, error`, which mishandles two
+    // cases that the leading term itself gets right:
+    //
+    //   zero      IEEE gives -0.0 + 0.0 == +0.0, so -0.0 * 1.0 came back as +0.0.
+    //   infinity  the exact-error term of an infinite product or sum is NaN
+    //             (fma(inf, 1.0, -inf)), and inf + NaN poisons the result.
+    //
+    // Both are repaired by falling back to the leading term, which already
+    // carries what IEEE prescribes for the operation. The low limb is dropped
+    // whenever the result is non-finite so a NaN residual cannot leak into the
+    // packer. Tests use integer bit comparisons rather than fcmp because the
+    // module is compiled with air.compile.fast_math_enable, under which the
+    // backend may assume no NaN or infinity operands.
+    Fp64Pair finalize_pair(std::ostringstream& os,
+                           const std::string& hi,
+                           const std::string& lo,
+                           const std::string& leading) {
+        const std::string hi_bits = next_tmp("fp64_fin_hib");
+        const std::string hi_mag = next_tmp("fp64_fin_himag");
+        const std::string hi_nan = next_tmp("fp64_fin_hinan");
+        const std::string lead_bits = next_tmp("fp64_fin_lb");
+        const std::string lead_mag = next_tmp("fp64_fin_lmag");
+        const std::string lead_nan = next_tmp("fp64_fin_lnan");
+        const std::string lead_ok = next_tmp("fp64_fin_lok");
+        const std::string use_lead = next_tmp("fp64_fin_usel");
+        const std::string hi1 = next_tmp("fp64_fin_hi1");
+        os << "  " << hi_bits << " = bitcast float " << hi << " to i32\n";
+        os << "  " << hi_mag << " = and i32 " << hi_bits << ", 2147483647\n";
+        os << "  " << hi_nan << " = icmp ugt i32 " << hi_mag << ", 2139095040\n";
+        os << "  " << lead_bits << " = bitcast float " << leading << " to i32\n";
+        os << "  " << lead_mag << " = and i32 " << lead_bits << ", 2147483647\n";
+        os << "  " << lead_nan << " = icmp ugt i32 " << lead_mag << ", 2139095040\n";
+        os << "  " << lead_ok << " = xor i1 " << lead_nan << ", true\n";
+        os << "  " << use_lead << " = and i1 " << hi_nan << ", " << lead_ok << "\n";
+        os << "  " << hi1 << " = select i1 " << use_lead << ", float " << leading << ", float "
+           << hi << "\n";
+
+        const std::string hi1_bits = next_tmp("fp64_fin_h1b");
+        const std::string hi1_mag = next_tmp("fp64_fin_h1mag");
+        const std::string hi1_zero = next_tmp("fp64_fin_h1z");
+        const std::string hi2 = next_tmp("fp64_fin_hi2");
+        os << "  " << hi1_bits << " = bitcast float " << hi1 << " to i32\n";
+        os << "  " << hi1_mag << " = and i32 " << hi1_bits << ", 2147483647\n";
+        os << "  " << hi1_zero << " = icmp eq i32 " << hi1_mag << ", 0\n";
+        os << "  " << hi2 << " = select i1 " << hi1_zero << ", float " << leading << ", float "
+           << hi1 << "\n";
+
+        const std::string hi2_bits = next_tmp("fp64_fin_h2b");
+        const std::string hi2_mag = next_tmp("fp64_fin_h2mag");
+        const std::string finite = next_tmp("fp64_fin_fin");
+        const std::string zero = emit_float_constant(os, 0.0f, "fp64_fin_zero");
+        const std::string lo_out = next_tmp("fp64_fin_lo");
+        os << "  " << hi2_bits << " = bitcast float " << hi2 << " to i32\n";
+        os << "  " << hi2_mag << " = and i32 " << hi2_bits << ", 2147483647\n";
+        os << "  " << finite << " = icmp ult i32 " << hi2_mag << ", 2139095040\n";
+        os << "  " << lo_out << " = select i1 " << finite << ", float " << lo << ", float " << zero
+           << "\n";
+        return {hi2, lo_out};
     }
 
     Fp64Pair emit_fp64_pair_add(std::ostringstream& os,
@@ -1539,7 +2013,7 @@ class GenericLlvmEmitter {
         os << "  " << hi << " = fadd float " << sum << ", " << err2 << "\n";
         os << "  " << delta << " = fsub float " << hi << ", " << sum << "\n";
         os << "  " << lo << " = fsub float " << err2 << ", " << delta << "\n";
-        return {hi, lo};
+        return finalize_pair(os, hi, lo, sum);
     }
 
     Fp64Pair emit_fp64_pair_div(std::ostringstream& os,
@@ -1558,7 +2032,8 @@ class GenericLlvmEmitter {
         os << "  " << correction << " = fdiv float "
            << residual_sum << ", " << b.hi << "\n";
         const Fp64Pair correction_pair{correction, zero};
-        return emit_fp64_pair_add(os, q, correction_pair);
+        const Fp64Pair result = emit_fp64_pair_add(os, q, correction_pair);
+        return finalize_pair(os, result.hi, result.lo, quotient);
     }
 
     Fp64Pair emit_fp64_pair_mul(std::ostringstream& os,
@@ -1590,7 +2065,7 @@ class GenericLlvmEmitter {
         os << "  " << hi << " = fadd float " << product << ", " << error2 << "\n";
         os << "  " << delta << " = fsub float " << hi << ", " << product << "\n";
         os << "  " << lo << " = fsub float " << error2 << ", " << delta << "\n";
-        return {hi, lo};
+        return finalize_pair(os, hi, lo, product);
     }
 
     std::optional<std::string> encode_value_to_reg_bits(std::ostringstream& os,
@@ -3614,6 +4089,42 @@ class GenericLlvmEmitter {
             const std::string out = next_tmp("fabs_bits");
             os << "  " << out << " = and i64 " << *bits
                << ", 9223372036854775807\n";
+            return store_ret_bits(out, 64);
+        }
+
+        // CUDA's fma(double,double,double) -- __nv_fma from fma(), __nv_fma_rn
+        // from __fma_rn(). The PTX instruction form
+        // (fma.rn.f64) is handled in emit_mad_or_fma; clang emits this call form
+        // whenever the source calls fma()/__fma_rn() rather than relying on
+        // contraction, which is what cuPDLP-C's gradient-step kernels do.
+        if (callee == "__nv_fma_rn" || callee == "__nv_fma") {
+            if (arg_names.size() < 3) return fail(instr, callee + " expects 3 args");
+            auto a_bits = load_call_slot_value(os, arg_names[0], 64);
+            auto b_bits = load_call_slot_value(os, arg_names[1], 64);
+            auto c_bits = load_call_slot_value(os, arg_names[2], 64);
+            if (!a_bits || !b_bits || !c_bits) return fail(instr, callee + " args missing");
+            if (fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                const Fp64Pair a = fp64_pair_from_ieee_bits(os, *a_bits);
+                const Fp64Pair b = fp64_pair_from_ieee_bits(os, *b_bits);
+                const Fp64Pair c = fp64_pair_from_ieee_bits(os, *c_bits);
+                const Fp64Pair product = emit_fp64_pair_mul(os, a, b);
+                const Fp64Pair sum = emit_fp64_pair_add(os, product, c);
+                return store_ret_bits(fp64_ieee_bits_from_pair(os, sum), 64);
+            }
+            // Native FP64: multiply-then-add, matching the non-emulated path in
+            // emit_mad_or_fma (no llvm.fma intrinsic is declared in this module).
+            const std::string a_val = next_tmp("fma_a");
+            const std::string b_val = next_tmp("fma_b");
+            const std::string c_val = next_tmp("fma_c");
+            const std::string mul = next_tmp("fma_mul");
+            const std::string add = next_tmp("fma_add");
+            const std::string out = next_tmp("fma_bits");
+            os << "  " << a_val << " = bitcast i64 " << *a_bits << " to double\n";
+            os << "  " << b_val << " = bitcast i64 " << *b_bits << " to double\n";
+            os << "  " << c_val << " = bitcast i64 " << *c_bits << " to double\n";
+            os << "  " << mul << " = fmul double " << a_val << ", " << b_val << "\n";
+            os << "  " << add << " = fadd double " << mul << ", " << c_val << "\n";
+            os << "  " << out << " = bitcast double " << add << " to i64\n";
             return store_ret_bits(out, 64);
         }
 
@@ -5679,7 +6190,11 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
 
     if (use_generic_body) {
         for (const std::string& decl : generic_body.declarations) {
-            ir << decl << "\n";
+            // Attribute group #1 mirrors what `xcrun metal -emit-llvm` puts on
+            // AIR builtin declarations. `convergent` is the one that matters:
+            // the SIMD shuffles read other lanes' registers, so a backend free
+            // to treat the call as non-convergent may move or scalarize it.
+            ir << decl << " #1\n";
         }
         if (!generic_body.declarations.empty()) {
             ir << "\n";
@@ -5720,7 +6235,8 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     const int language_version_tuple_id = next_meta_id++;
 
     ir << "attributes #0 = { \"air.kernel\" \"air.version\"=\"" << air_major << "."
-       << air_minor << "\" }\n\n";
+       << air_minor << "\" }\n";
+    ir << "attributes #1 = { convergent mustprogress nounwind willreturn }\n\n";
     ir << "!air.kernel = !{!" << kernel_node_id << "}\n";
     ir << "!" << kernel_node_id << " = !{" << kernel_type.str() << ", !" << empty_tuple_id << ", !"
        << kernel_args_tuple_id << "}\n";

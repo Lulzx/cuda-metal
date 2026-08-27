@@ -424,7 +424,10 @@ typedef struct cudaPointerAttributes {
     void* hostPointer;
 } cudaPointerAttributes;
 
+#ifndef CUMETAL_CUDA_STREAM_T_DEFINED
+#define CUMETAL_CUDA_STREAM_T_DEFINED 1
 typedef struct CUstream_st* cudaStream_t;
+#endif  // CUMETAL_CUDA_STREAM_T_DEFINED
 typedef struct CUevent_st* cudaEvent_t;
 typedef void (*cudaStreamCallback_t)(cudaStream_t stream, cudaError_t status, void* user_data);
 
@@ -1364,12 +1367,55 @@ static __device__ __forceinline__ double abs(double x) {
     return __builtin_fabs(x);
 }
 
+// Host-only: in device code clang already declares __device__ int min/max, and
+// a __host__ __device__ overload of the same signature is rejected outright.
 static __host__ __forceinline__ int max(int a, int b) {
     return a > b ? a : b;
 }
 
 static __host__ __forceinline__ int min(int a, int b) {
     return a < b ? a : b;
+}
+
+// CUDA's math overlay overloads unqualified min/max for floating-point operands,
+// the same way it does for abs above. Without these, `min(x, ub)` on two doubles
+// picks min(int, int): the PTX comes out as
+//     cvt.rzi.s32.f64 -> __nv_min -> cvt.rn.f64.s32
+// which truncates both operands to integers and writes the result back as a
+// double. That is a silent wrong answer wherever a kernel clamps floating-point
+// values, e.g. bound projection in an LP solver.
+static __host__ __device__ __forceinline__ float max(float a, float b) {
+    return __builtin_fmaxf(a, b);
+}
+
+static __host__ __device__ __forceinline__ float min(float a, float b) {
+    return __builtin_fminf(a, b);
+}
+
+static __host__ __device__ __forceinline__ double max(double a, double b) {
+    return __builtin_fmax(a, b);
+}
+
+static __host__ __device__ __forceinline__ double min(double a, double b) {
+    return __builtin_fmin(a, b);
+}
+
+// CUDA promotes mixed float/double arguments to double rather than letting the
+// call become ambiguous.
+static __host__ __device__ __forceinline__ double max(float a, double b) {
+    return __builtin_fmax((double) a, b);
+}
+
+static __host__ __device__ __forceinline__ double max(double a, float b) {
+    return __builtin_fmax(a, (double) b);
+}
+
+static __host__ __device__ __forceinline__ double min(float a, double b) {
+    return __builtin_fmin((double) a, b);
+}
+
+static __host__ __device__ __forceinline__ double min(double a, float b) {
+    return __builtin_fmin(a, (double) b);
 }
 
 template <typename T>

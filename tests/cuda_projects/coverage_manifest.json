@@ -78,6 +78,14 @@
       "binary": "rtiow",
       "harness": "strict",
       "expect_pattern": "OK: GPU render matches CPU reference."
+    },
+    {
+      "name": "fp64_precision",
+      "subdir": "fp64",
+      "source": "fp64_precision.cu",
+      "binary": "fp64_precision",
+      "harness": "strict",
+      "expect_pattern": "PASS: fp64 emulation meets the ~48-bit significand contract"
     }
   ]
 }

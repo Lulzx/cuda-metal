@@ -50,7 +50,7 @@ the overall impact on wall-clock time is tolerable.
 **`--fp64=emulate`**
 
 Use this when:
-- ~44-bit mantissa precision is acceptable for your application
+- ~48-bit significand precision, with binary32's exponent range, is acceptable
 - FP64 throughput matters more than full IEEE precision
 - Example use cases: some ML training loops, iterative solvers with loose tolerance
 

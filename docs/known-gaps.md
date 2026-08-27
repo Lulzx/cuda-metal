@@ -79,15 +79,36 @@ as gaps have been closed.
   boundaries as separate host-side kernel launches, so this gap is not on the current PhysX
   rigid-solver critical path.
 - FP64: driver and registration JIT default to `--fp64=emulate` / `CUMETAL_FP64_MODE=emulate`.
-  Entry names have no semantic effect. ALU uses Dekker FP32 pairs (~44-bit mantissa) without
-  native AIR `double` (which Metal rejects at pipeline creation). Register storage is IEEE
-  binary64 bit patterns so `ld.global.b64`/`st.global.b64` double kernels from clang interoperate
-  with host memory (at ~f32 precision after soft f64↔f32 conversion). Explicit `ld.global.f64` /
-  `st.global.f64`, integer conversions, and rounded FP64 conversions still fail lowering
-  explicitly. A one-time `CUMETAL WARNING` notes the reduced precision; `CUMETAL_FP64_MODE=native`
-  compiles true doubles (fails at launch on current hardware). Signed-zero preservation across
-  the FP32-pair conversion boundary is not claimed: a focused `frexp(-0.0)` diagnostic returned
-  positive zero even though ordinary zero and finite mantissa/exponent cases pass.
+  Entry names have no semantic effect. ALU uses Dekker FP32 pairs without native AIR `double`
+  (which Metal rejects at pipeline creation).
+
+  **Storage is always IEEE-754 binary64.** Register slots, `.local` spills, global memory and
+  libdevice call slots all hold the ordinary CUDA-visible bit pattern; the FP32 pair exists only
+  inside a single instruction's ALU. `mov.b64`, warp shuffles, `cudaMemcpy`, the CPU-backed
+  cuBLAS/cuSPARSE paths, and aliasing the same eight bytes as a `uint64_t` therefore need no
+  special handling. Only FP64 *arithmetic* is reduced precision, which is a narrower and more
+  defensible contract than a private packed-pair format would be.
+
+  The conversion contract:
+  - `ld` splits binary64 into `hi = roundToNearestEven_f32(x)` and `lo = RNE_f32(x - hi)`, with
+    the residual taken from the binary64 significand by integer arithmetic rather than derived
+    from an already-rounded `hi`.
+  - `st` packs both limbs back by aligning `lo` into `hi`'s significand and rounding to nearest
+    even -- never via `hi + lo` in FP32, which is what previously collapsed every value to 24 bits.
+  - Round-tripping is idempotent: a value the packer produced re-splits to the same pair, so
+    error does not compound across a chain of instructions.
+
+  **Accuracy: relative error <= 2^-48 (~48-bit significand), plus an absolute floor at binary32's
+  minimum normal.** The low limb is itself a binary32, so a residual below `FLT_MIN` cannot be
+  represented; precision degrades smoothly from 48 bits toward 24 as `|x|` approaches `FLT_MIN`,
+  and the whole representation inherits binary32's exponent range (values above `FLT_MAX`
+  overflow to infinity, and intermediates below `FLT_MIN` flush to zero). Binary64 subnormal
+  inputs flush to signed zero. Signed zero, infinity and NaN are preserved.
+
+  Explicit `ld.global.f64` / `st.global.f64` and rounded FP64 integer conversions
+  (`cvt.rzi.s32.f64` and friends) still fail lowering explicitly rather than computing something
+  wrong. A one-time `CUMETAL WARNING` notes the reduced precision; `CUMETAL_FP64_MODE=native`
+  compiles true doubles (fails at launch on current hardware).
 - **Legacy default-stream ordering is complete.** Every blocking user stream publishes a
   monotonically increasing `MTLSharedEvent` value and waits on the latest legacy-default value;
   each legacy-default submission waits on the latest value from every blocking stream. The

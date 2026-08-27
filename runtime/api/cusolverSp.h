@@ -18,7 +18,10 @@
 extern "C" {
 #endif
 
+#ifndef CUMETAL_CUDA_STREAM_T_DEFINED
+#define CUMETAL_CUDA_STREAM_T_DEFINED 1
 typedef struct CUstream_st* cudaStream_t;
+#endif  // CUMETAL_CUDA_STREAM_T_DEFINED
 typedef struct cusolverSpContext* cusolverSpHandle_t;
 
 // Handle management

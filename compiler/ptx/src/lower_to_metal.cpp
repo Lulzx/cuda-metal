@@ -2958,6 +2958,18 @@ std::string emit_metal_source_generic(const std::string& entry_name,
     return metal.str();
 }
 
+// Metal has no `double` at any language version, and the generic emitter above
+// has no FP64 lowering: an f64 load becomes a `float` read at a two-element
+// stride -- the low half of each double reinterpreted as a float -- and the
+// arithmetic is emitted as a literal `double`. The literal `double` is what
+// makes Metal reject the source, which is the only reason this fails loudly
+// instead of returning garbage. Detect f64 up front so the kernel is declined
+// here and routed to the PTX->LLVM->AIR path, whose Dekker FP32-pair emulation
+// is a real (if reduced-precision) implementation.
+bool ptx_uses_fp64(std::string_view ptx) {
+    return ptx.find(".f64") != std::string_view::npos;
+}
+
 }  // namespace
 
 LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerToMetalOptions& options) {
@@ -3017,6 +3029,15 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
     // Generic first means the substitution now only applies where real translation is genuinely
     // unavailable, which is the case these tables were written for.
     std::string metal_source = emit_metal_source_generic(pipeline.entry_name, ptx, &pipeline);
+    if (!metal_source.empty() && ptx_uses_fp64(ptx)) {
+        result.warnings.push_back(
+            "kernel '" + pipeline.entry_name +
+            "' uses FP64; the direct-MSL lowering has no FP64 support, deferring to the "
+            "LLVM path");
+        result.ok = true;
+        result.matched = false;
+        return result;
+    }
     bool approximate = false;
     MetalLoweringKind lowering_kind = MetalLoweringKind::kNone;
     if (!metal_source.empty()) {

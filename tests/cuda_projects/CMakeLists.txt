@@ -196,6 +196,33 @@ set_tests_properties(
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
 )
 
+# FP64 emulation contract. Metal has no `double`, so FP64 arithmetic runs on
+# Dekker FP32 pairs while storage stays IEEE-754 binary64. Strict runner: this
+# pins the measured ~48-bit significand, the split/pack idempotence that keeps
+# error from compounding, and special-value behaviour. It exists because "the
+# kernel compiled and ran" says nothing about how many significand bits
+# survived -- the previous implementation dropped the low limb at every register
+# write and ran at ~24 bits, which compiles and runs perfectly while quietly
+# turning an LP solver's residuals into noise.
+add_test(
+    NAME functional_cuda_projects_fp64_precision
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        fp64
+        fp64_precision.cu
+        fp64_precision
+        "PASS: fp64 emulation meets the ~48-bit significand contract"
+)
+set_tests_properties(
+    functional_cuda_projects_fp64_precision
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
 add_test(
     NAME functional_cuda_projects_ggml_output_ops
     COMMAND bash

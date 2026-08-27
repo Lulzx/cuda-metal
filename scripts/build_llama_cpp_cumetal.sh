@@ -157,14 +157,50 @@ if [[ "\${1:-}" == "-v" ]]; then
     exit 0
 fi
 
+# ── nvcc -dlink: relocatable device-code link ────────────────────────────────
+# CUDA_SEPARABLE_COMPILATION makes cmake run a device-link pass that fuses the
+# per-TU device images into one object. CuMetal has no such image: each TU
+# registers its own kernels with the runtime at load time, so there is nothing
+# to fuse. Emit an empty object so the host link that follows still finds the
+# file cmake told it to expect. Falling through to the normal path instead
+# would attempt a real host link of the device objects against
+# deviceLinkLibs.rsp, which lists no CUDA runtime and so fails on every
+# __cudaRegister* symbol.
+DLINK=0
+DLINK_OUT=""
+WANT_OUT=0
+for arg in "\$@"; do
+    if [[ \$WANT_OUT -eq 1 ]]; then DLINK_OUT="\$arg"; WANT_OUT=0; continue; fi
+    case "\$arg" in
+        -dlink|--device-link) DLINK=1 ;;
+        -o)                   WANT_OUT=1 ;;
+        -o*)                  DLINK_OUT="\${arg#-o}" ;;
+    esac
+done
+if [[ \$DLINK -eq 1 ]]; then
+    if [[ -z "\$DLINK_OUT" ]]; then
+        echo "nvcc shim: -dlink without -o" >&2
+        exit 1
+    fi
+    exec "\${REAL_CLANG}" -x c++ -c /dev/null -o "\$DLINK_OUT"
+fi
+
 # ── real compilation: filter nvcc-only flags, delegate to clang++ ─────────────
 ARGS=()
 SKIP_NEXT=0
 OPTIONS_FILE_NEXT=0
+XCOMPILER_NEXT=0
 HAS_CUDA_SOURCE=0
 COMPILE_ONLY=0
 IS_CMAKE_PROBE=0
 for arg in "\$@"; do
+    if [[ \$XCOMPILER_NEXT -eq 1 ]]; then
+        OLDIFS="\$IFS"; IFS=','
+        for hostflag in \$arg; do ARGS+=("\$hostflag"); done
+        IFS="\$OLDIFS"
+        XCOMPILER_NEXT=0
+        continue
+    fi
     if [[ \$OPTIONS_FILE_NEXT -eq 1 ]]; then
         ARGS+=("@\$arg")
         OPTIONS_FILE_NEXT=0
@@ -187,6 +223,23 @@ for arg in "\$@"; do
         -gencode)                              SKIP_NEXT=1; continue ;;
         --generate-code=*)                     continue ;;
         arch=compute_*|code=sm_*|code=lto_*)  continue ;;
+        # nvcc -arch / --gpu-architecture: cmake emits these from
+        # CMAKE_CUDA_ARCHITECTURES (including the literal "all"). clang selects
+        # the arch via --cuda-gpu-arch, which this shim already appends.
+        -arch|--gpu-architecture)              SKIP_NEXT=1; continue ;;
+        -arch=*|--gpu-architecture=*)          continue ;;
+        # nvcc host-compiler passthrough. cmake emits -Xcompiler=-fPIC for any
+        # shared CUDA library target. The value is a comma-separated list of
+        # host flags, which clang takes directly.
+        -Xcompiler|--compiler-options)         XCOMPILER_NEXT=1; continue ;;
+        -Xcompiler=*|--compiler-options=*)
+            OLDIFS="\$IFS"; IFS=','
+            for hostflag in \${arg#*=}; do ARGS+=("\$hostflag"); done
+            IFS="\$OLDIFS"
+            continue ;;
+        # Flags for nvcc-internal sub-tools that clang has no equivalent for.
+        -Xptxas|-Xcudafe|-Xnvlink|-Xarchive)   SKIP_NEXT=1; continue ;;
+        -Xptxas=*|-Xcudafe=*|-Xnvlink=*|-Xarchive=*) continue ;;
         # nvcc forwarding wrappers / language selectors (clang is invoked directly)
         -forward-unknown-to-host-compiler|--forward-unknown-to-host-compiler) continue ;;
         -forward-unknown-to-host-linker|--forward-unknown-to-host-linker) continue ;;

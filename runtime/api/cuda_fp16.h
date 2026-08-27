@@ -369,4 +369,25 @@ static __device__ __forceinline__ __half atomicAdd(__half* addr, __half val) {
 
 #endif  // device vs host
 
+#else  // !__cplusplus
+
+// ── C-mode __half ───────────────────────────────────────────────────────────
+// Everything above is C++-only, but cublas_v2.h declares cublasHgemm and
+// friends in terms of __half and is included from plain C translation units
+// (cuPDLP-C compiles its .c sources with the host compiler, not nvcc). NVIDIA's
+// own cuda_fp16.h exposes the storage type to C for exactly this reason, so a
+// C consumer can name the type in a prototype even though it cannot do half
+// arithmetic. Match that: opaque 16-bit storage, no operators.
+typedef struct __half {
+    uint16_t __x;
+} __half;
+
+typedef struct __attribute__((aligned(4))) __half2 {
+    __half x;
+    __half y;
+} __half2;
+
+typedef __half half;
+typedef __half2 half2;
+
 #endif  // __cplusplus

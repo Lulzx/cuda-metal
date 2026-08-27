@@ -914,6 +914,6 @@ Known limitations (see spec §2.2 and §8):
 - Masked `__syncwarp` uses AIR SIMD-group scope with threadgroup-memory visibility;
   divergent half-warp ordering, partial-mask vote/ballot, activemask, shuffle caller
   membership, and automatic source-path static shared memory are GPU-tested (spec §5.3).
-- FP64: generic FP32-pair register emulation is available at ~44-bit mantissa; unsupported
+- FP64: generic FP32-pair register emulation is available at ~48-bit significand; unsupported
   binary64 memory/conversion forms fail compilation (spec §8.1).
 - Device printf: buffer-based; format strings limited to 256 bytes (spec §5.3).

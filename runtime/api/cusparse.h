@@ -42,7 +42,10 @@ typedef struct cusparseSpMatDescr* cusparseSpMatDescr_t;
 typedef struct cusparseDnVecDescr* cusparseDnVecDescr_t;
 typedef struct cusparseDnMatDescr* cusparseDnMatDescr_t;
 
+#ifndef CUMETAL_CUDA_STREAM_T_DEFINED
+#define CUMETAL_CUDA_STREAM_T_DEFINED 1
 typedef struct CUstream_st* cudaStream_t;
+#endif  // CUMETAL_CUDA_STREAM_T_DEFINED
 
 typedef enum cusparseOperation_t {
     CUSPARSE_OPERATION_NON_TRANSPOSE = 0,
@@ -109,7 +112,9 @@ cusparseStatus_t cusparseSetStream(cusparseHandle_t handle, cudaStream_t streamI
 cusparseStatus_t cusparseGetStream(cusparseHandle_t handle, cudaStream_t* streamId);
 cusparseStatus_t cusparseSetPointerMode(cusparseHandle_t handle, cusparsePointerMode_t mode);
 cusparseStatus_t cusparseGetPointerMode(cusparseHandle_t handle, cusparsePointerMode_t* mode);
-int cusparseGetVersion(cusparseHandle_t handle, int* version);
+cusparseStatus_t cusparseGetVersion(cusparseHandle_t handle, int* version);
+const char* cusparseGetErrorName(cusparseStatus_t status);
+const char* cusparseGetErrorString(cusparseStatus_t status);
 
 // Matrix descriptor
 cusparseStatus_t cusparseCreateMatDescr(cusparseMatDescr_t* descrA);
@@ -130,6 +135,15 @@ cusparseStatus_t cusparseCreateCsr(cusparseSpMatDescr_t* spMatDescr,
                                     cusparseIndexType_t csrColIndType,
                                     cusparseIndexBase_t idxBase,
                                     cudaDataType valueType);
+cusparseStatus_t cusparseCreateCsc(cusparseSpMatDescr_t* spMatDescr,
+                                    int64_t rows, int64_t cols, int64_t nnz,
+                                    void* cscColOffsets, void* cscRowInd,
+                                    void* cscValues,
+                                    cusparseIndexType_t cscColOffsetsType,
+                                    cusparseIndexType_t cscRowIndType,
+                                    cusparseIndexBase_t idxBase,
+                                    cudaDataType valueType);
+
 cusparseStatus_t cusparseCreateCoo(cusparseSpMatDescr_t* spMatDescr,
                                     int64_t rows, int64_t cols, int64_t nnz,
                                     void* cooRowInd, void* cooColInd, void* cooValues,
