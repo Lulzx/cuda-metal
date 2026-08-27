@@ -50,6 +50,16 @@ struct cusparseSpMatDescr {
     cusparseIndexBase_t idxBase = CUSPARSE_INDEX_BASE_ZERO;
     cudaDataType valueType = CUDA_R_32F;
     SpMatFormat format = CUMETAL_SPMAT_CSR;
+    // Longest run in the offset array, computed once on first use. The gather
+    // kernel gives one thread per compressed row, so this is the serial depth
+    // every other thread waits on. -1 means not yet measured.
+    //
+    // INVARIANT: a descriptor's sparsity structure is fixed for its lifetime.
+    // Values may be rewritten in place, which is what a scaling pass does, but
+    // rowOffsets and colInd may not. Any entry point added later that repoints
+    // or mutates those arrays must reset this to -1, or the dispatch decision
+    // will be made from a stale shape.
+    std::int64_t longest_row = -1;
 };
 
 struct cusparseDnVecDescr {
@@ -541,6 +551,41 @@ const std::string* sparse_kernels_source_path() {
     return cached;
 }
 
+// One thread per compressed row means the longest row is a serial loop no amount
+// of parallelism hides, so that length, not the average, is what can defeat the
+// kernel. datt256 from the Mittelmann set carries a fully dense row: after
+// cuPDLP reformulates it the longest run is 57840 against a mean of 136, and one
+// thread grinds through it while the other 11076 idle. In the solver that made
+// SpMV 3.3x slower than the CPU loop, even though a synthetic matrix of the same
+// dimensions and mean row length ran 6x faster, which is exactly the case a
+// uniform-row benchmark cannot see.
+//
+// The bound is on that serial depth alone, and it is a conservative measured
+// cutoff for this particular thread-per-row kernel rather than a property of
+// Metal sparse work: a cooperative kernel that splits a long row across a
+// simdgroup would move it, as would a different chip or element type. Average density is not a useful
+// discriminator here: ex10's rows are also uneven relative to their mean (256
+// against 16.7, so under 7% of the work the kernel schedules is useful) and it
+// still runs 4.6x faster, because 69608 rows keep the GPU busy and a 256-element
+// tail is short. 4096 sits between the two measured cases, well above the length
+// that is demonstrably fine and well below the one that is demonstrably not.
+constexpr std::int64_t kMaxGatherSerialDepth = 4096;
+
+bool gather_shape_is_efficient(const cusparseSpMatDescr* mat, std::int64_t axis) {
+    if (mat->longest_row < 0) {
+        const int* offsets = static_cast<const int*>(mat->rowOffsets);
+        if (offsets == nullptr) return false;
+        const int base = mat->idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
+        std::int64_t longest = 0;
+        for (std::int64_t i = 0; i < axis; ++i) {
+            const std::int64_t len = static_cast<std::int64_t>(offsets[i + 1]) - offsets[i];
+            if (len > longest) longest = len;
+        }
+        const_cast<cusparseSpMatDescr*>(mat)->longest_row = longest;  // see INVARIANT
+    }
+    return mat->longest_row > 0 && mat->longest_row <= kMaxGatherSerialDepth;
+}
+
 // A device pointer resolves to a Metal buffer plus a byte offset. Metal requires
 // the offset to satisfy the bound type's alignment, so reject anything that does
 // not and let the CPU path take it.
@@ -638,9 +683,23 @@ bool try_spmv_gather_metal(cusparseHandle_t handle,
         return false;
     }
     if (transpose) { spmv_note("scatter shape needs atomics"); return false; }
-    if (policy == SparseMetalPolicy::kAuto && mat->nnz < sparse_metal_threshold_nnz()) {
-        spmv_note("below the measured nonzero threshold");
-        return false;
+    if (policy == SparseMetalPolicy::kAuto) {
+        if (mat->nnz < sparse_metal_threshold_nnz()) {
+            spmv_note("below the measured nonzero threshold");
+            return false;
+        }
+        if (!gather_shape_is_efficient(mat, axis)) {
+            char why[160];
+            std::snprintf(why, sizeof(why),
+                          "longest row %lld exceeds the %lld serial-depth bound "
+                          "(axis=%lld nnz=%lld)",
+                          static_cast<long long>(mat->longest_row),
+                          static_cast<long long>(kMaxGatherSerialDepth),
+                          static_cast<long long>(axis),
+                          static_cast<long long>(mat->nnz));
+            spmv_note(why);
+            return false;
+        }
     }
     if (handle != nullptr && handle->stream != nullptr) {
         spmv_note("handle is on an explicit stream");
@@ -706,6 +765,17 @@ bool try_spmv_gather_metal(cusparseHandle_t handle,
         cudaSuccess) {
         spmv_note(error.empty() ? "launch failed" : error.c_str());
         return false;
+    }
+    // Profiling aid. Leaving the launch async is correct and is what makes the
+    // GPU path worth having, but it also means a caller's own SpMV timers
+    // measure enqueue rather than execution, which is easy to misread as a
+    // speedup. Setting this attributes the real cost back to the call.
+    static const bool sync_for_profiling = [] {
+        const char* v = std::getenv("CUMETAL_SPARSE_SYNC");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    if (sync_for_profiling) {
+        cumetal::metal_backend::synchronize(&error);
     }
     return true;
 }

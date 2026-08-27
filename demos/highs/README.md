@@ -115,18 +115,38 @@ threshold is a conservative M4 Pro default measured with a synchronizing
 microbenchmark; `CUMETAL_SPARSE_METAL=1`/`0` overrides the choice and
 `CUMETAL_SPARSE_METAL_THRESHOLD_NNZ` moves it.
 
-Large LPs carry millions of nonzeros, which is the regime the table above says is
-worth the dispatch. Whether that turns into a faster solver depends on what
-fraction of an iteration is spent in SpMV, which this corpus is too small to
-answer.
+Two LPs from the Mittelmann test set are large enough to answer what that does to
+a real solve. Solver wall time, median of 3, 99 fixed iterations, M4 Pro:
+
+| instance | shape | cpu | auto | forced Metal |
+| --- | --- | ---: | ---: | ---: |
+| `ex10` | 69,609 x 17,680, 1.18M nnz | 0.792 s | **0.327 s** | 0.327 s |
+| `datt256` | 11,078 x 262,144, 1.77M nnz | 1.273 s | **0.991 s** | 2.880 s |
+
+All three configurations reach the same objective on each instance.
+
+`ex10` is the straightforward case: 61% of its CPU solve is `Ax` and `A'y`, both
+go to the GPU, and the solve is 2.4x faster.
+
+`datt256` is the interesting one. Forced onto the GPU it is 2.3x *slower* than
+the CPU, because after reformulation its longest row holds 57,840 entries against
+a mean of 136. One thread per row means one thread grinds through that row while
+the other 11,076 idle, and no amount of parallelism hides a serial loop. Auto
+mode measures that and splits the two products: `Ax` on the CPU, `A'y` on the
+GPU, beating both fixed policies. Choosing per call, on the machine's actual
+economics, is the point of having the choice at all.
+
+A synthetic matrix with the same dimensions and mean row length runs 6x faster on
+the GPU, so a uniform-row benchmark would have missed this entirely.
 
 ## What this does not show
 
-No speedup. The measurement above is a microbenchmark of one operation, not a
-solver result, and on this corpus the GPU sparse path is the slower choice. FP64
-cuBLAS L1 (dot, norm) is still a scalar CPU loop over unified memory, and
-solver-level synchronization is unoptimized. Do not read the timings as a
-benchmark.
+No solver speedup on this corpus. These eight instances are all far below the
+size where the GPU sparse path pays for itself, and forcing it makes them slower;
+the solver speedups above are on two much larger LPs that are not part of this
+demo. FP64 cuBLAS L1 (dot, norm) is still a scalar CPU loop
+over unified memory, and solver-level synchronization is unoptimized. Do not read
+these solve times as a benchmark.
 
 This is standalone cuPDLP-C, not HiGHS's own GPU build. HiGHS's `CUPDLP_GPU=ON`
 path additionally requires `cusparseDnVecSetValues`, `cusparseSpMV_preprocess`,
