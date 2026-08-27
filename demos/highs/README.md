@@ -33,6 +33,18 @@ For each problem, both builds solve and must agree on:
   "Optimal average" is only which iterate PDLP accepted, not a disagreement.)
 - **primal objective**, within 1e-3 relative. PDLP's own default gap tolerance is
   1e-4, so two runs legitimately stop at different points inside it.
+- **primal infeasibility, dual infeasibility and relative duality gap.** The
+  objective alone is not enough: a run can report a plausible objective while its
+  residuals say the point is not feasible. Each must be within 10× what the CPU
+  build achieved, and — only when the solver claims convergence — under 1e-3
+  absolute. A run stopped at the iteration limit legitimately has a large gap
+  (`stair` ends near 1e-2 on both builds), so the absolute ceiling would fail a
+  run that agrees perfectly well with its reference.
+- every reported value **finite**.
+
+Iteration counts are deliberately *not* compared. The builds follow different
+trajectories — `shell` converges in 5,600 iterations against the CPU's 12,000 —
+and that is a path difference, not a disagreement about the answer.
 
 Then one run is traced and must show `device=apple_gpu` with no
 `source=approximate_stub`. A correct number without that provenance is **not** a
@@ -51,9 +63,21 @@ pass — it would mean a CPU fallback produced it.
 | standata | Optimal +1.25745066e+03 (920) | Optimal +1.25777205e+03 (1080) | 2.6e-04 |
 | stair | Iteration limit −2.51238976e+02 | Iteration limit −2.51313524e+02 | 3.0e-04 |
 
-482 kernel launches traced, all `device=apple_gpu semantic_quality=exact`.
+482 kernel launches traced, all `device=apple_gpu`. Because these kernels use
+`double`, they report:
+
+```text
+provenance=generic_ptx_lowering_fp64_emulated semantic_quality=reduced_precision_fp64
+```
+
+not `semantic_quality=exact`. The lowering is a real, structurally faithful
+translation with no substitution — but Metal has no `double`, so the arithmetic
+is roughly a 48-bit significand rather than CUDA's FP64 semantics, and calling
+that `exact` would be its own kind of green-wash.
+
 `stair` hits the iteration limit on **both** builds; it is a hard instance, not a
-Metal failure.
+Metal failure. Its Metal residuals are in fact slightly *better* than the CPU
+run's (gap 9.05e-03 vs 1.41e-02).
 
 ## What this does not show
 

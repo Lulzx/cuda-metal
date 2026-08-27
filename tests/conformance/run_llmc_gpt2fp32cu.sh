@@ -97,7 +97,7 @@ if rg -q "CUMETAL_LLMC_EMULATION" "$OUTPUT_FILE"; then
 fi
 
 if [[ "$REQUIRE_NO_EMULATION" == "1" ]]; then
-  if ! rg -q 'CUMETAL_PROVENANCE .*source=(generic_ptx|specialized_msl|metallib) provenance=(generic_ptx_lowering|library_substitution|workload_specialization|precompiled_metallib) semantic_quality=(exact|tolerance_bounded|semantic_emulation|performance_degraded) device=apple_gpu .*launch_success=true' \
+  if ! rg -q 'CUMETAL_PROVENANCE .*source=(generic_ptx|specialized_msl|metallib) provenance=(generic_ptx_lowering|generic_ptx_lowering_fp64_emulated|library_substitution|workload_specialization|precompiled_metallib) semantic_quality=(exact|reduced_precision_fp64|tolerance_bounded|semantic_emulation|performance_degraded) device=apple_gpu .*launch_success=true' \
       "$OUTPUT_FILE"; then
     echo "FAIL: llm.c recorded no successful Apple-GPU kernel launch"
     exit 1

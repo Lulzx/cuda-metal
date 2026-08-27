@@ -57,9 +57,9 @@ for p in "${PROBLEMS[@]}"; do
 done
 
 echo
-printf "%-10s | %-9s %-17s %6s | %-9s %-17s %6s | %-9s\n" \
-       problem "cpu" "objective" "iters" "metal" "objective" "iters" "rel diff"
-printf -- "-%.0s" {1..104}; echo
+printf "%-10s | %-9s %-17s | %-9s %-17s %-8s %-8s %-8s | %-8s\n" \
+       problem "cpu" "objective" "metal" "objective" "p.infeas" "d.infeas" "gap" "rel diff"
+printf -- "-%.0s" {1..114}; echo
 
 fails=0
 for p in "${PROBLEMS[@]}"; do
@@ -69,22 +69,18 @@ for p in "${PROBLEMS[@]}"; do
         > "${OUT_DIR}/${p}.cpu.log" 2>&1 ) || true
     ( cd "${OUT_DIR}" && "${CUPDLP_DIR}/build/bin/plc" -fname "${mps}" -nIterLim 20000 \
         > "${OUT_DIR}/${p}.metal.log" 2>&1 ) || true
-    read -r cs co ci < <(python3 "${SCRIPT_DIR}/parse_plc.py" "${OUT_DIR}/${p}.cpu.log")
-    read -r gs go gi < <(python3 "${SCRIPT_DIR}/parse_plc.py" "${OUT_DIR}/${p}.metal.log")
-    rel="$(python3 -c "
-a,b='$co','$go'
-try: print('%.1e' % (abs(float(a)-float(b))/max(abs(float(a)),1e-12)))
-except Exception: print('n/a')")"
-    verdict=ok
-    # "Optimal current" vs "Optimal average" is which iterate PDLP accepted, not
-    # a disagreement; compare the status class only.
-    if [[ "$cs" != "$gs" ]]; then verdict="STATUS ${cs}!=${gs}"; fails=$((fails+1))
-    elif [[ "$rel" == "n/a" ]]; then verdict="NO-RESULT"; fails=$((fails+1))
-    elif (( $(python3 -c "print(1 if float('$rel') > 1e-3 else 0)") )); then
-        verdict="OBJECTIVE"; fails=$((fails+1))
-    fi
-    printf "%-10s | %-9s %-17s %6s | %-9s %-17s %6s | %-9s %s\n" \
-           "$p" "$cs" "$co" "$ci" "$gs" "$go" "$gi" "$rel" "$verdict"
+    read -r cs co cpi cdi cg ci < <(python3 "${SCRIPT_DIR}/parse_plc.py" "${OUT_DIR}/${p}.cpu.log")
+    read -r gs go gpi gdi gg gi < <(python3 "${SCRIPT_DIR}/parse_plc.py" "${OUT_DIR}/${p}.metal.log")
+    # Iteration counts are deliberately not compared: the two builds follow
+    # different trajectories (shell converges in 5600 vs 12000) and that is a
+    # path difference, not a disagreement about the answer.
+    verdict="$(python3 "${SCRIPT_DIR}/gate.py" \
+        "$cs" "$co" "$cpi" "$cdi" "$cg" "$gs" "$go" "$gpi" "$gdi" "$gg")"
+    rel="${verdict%%|*}"
+    verdict="${verdict#*|}"
+    [[ "$verdict" != "ok" ]] && fails=$((fails+1))
+    printf "%-10s | %-9s %-17s | %-9s %-17s %-8s %-8s %-8s | %-8s %s\n" \
+           "$p" "$cs" "$co" "$gs" "$go" "$gpi" "$gdi" "$gg" "$rel" "$verdict"
 done
 
 echo

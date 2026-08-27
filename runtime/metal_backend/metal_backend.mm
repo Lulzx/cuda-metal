@@ -52,6 +52,7 @@ const char* legacy_source_for_provenance(const std::string& provenance) {
     if (provenance == "generic_nvvm_lowering") return "generic_nvvm";
     if (provenance == "generic_ptx_lowering") return "generic_ptx";
     if (provenance == "library_substitution") return "specialized_msl";
+    if (provenance == "generic_ptx_lowering_fp64_emulated") return "generic_ptx";
     if (provenance == "workload_specialization") return "specialized_msl";
     if (provenance == "precompiled_metallib") return "metallib";
     if (provenance == "cpu_fallback") return "cpu_fallback";
@@ -62,6 +63,11 @@ const char* legacy_source_for_provenance(const std::string& provenance) {
 const char* semantic_quality_for_provenance(const std::string& provenance) {
     if (provenance == "cpu_fallback") return "cpu_fallback";
     if (provenance == "unsupported") return "unsupported";
+    // A structurally faithful lowering is still not CUDA's FP64 semantics:
+    // Metal has no `double`, so the arithmetic runs on FP32 pairs at roughly a
+    // 48-bit significand within binary32's exponent range. Reporting that as
+    // `exact` would be the same kind of green-wash as calling a stub a pass.
+    if (provenance == "generic_ptx_lowering_fp64_emulated") return "reduced_precision_fp64";
     return "exact";
 }
 
