@@ -149,6 +149,8 @@ ctest --test-dir build -R functional_runtime_ptx_lowering_regression --output-on
 ctest --test-dir build -R functional_runtime_matrix_mul_tiled --output-on-failure
 ctest --test-dir build -R functional_runtime_dynamic_shared --output-on-failure
 ctest --test-dir build -R functional_runtime_registration_printf --output-on-failure
+ctest --test-dir build -R functional_cuda_graph_api --output-on-failure
+ctest --test-dir build -R functional_async_mempool_api --output-on-failure
 ctest --test-dir build -R functional_driver_extended_api --output-on-failure
 # CUDA registration-path tests (always built; CUMETAL_ENABLE_CUDA_REGISTRATION=ON):
 ctest --test-dir build -R functional_runtime_registration_path --output-on-failure
@@ -198,6 +200,22 @@ ctest --test-dir build -R functional_cuda_projects_ --output-on-failure
 # Manifest-complete strict sweep with classified TSV/JSON output:
 python3 tests/cuda_projects/sweep_cuda_projects.py
 ```
+
+The separate NVIDIA sample gate requires a full `cuda-samples` checkout. It is
+intentionally run serially because several upstream workloads are large:
+
+```bash
+CUMETAL_CUDA_SAMPLES_DIR=/path/to/cuda-samples \
+ctest --test-dir build -R '^conformance_cuda_samples_sweep$' --output-on-failure
+```
+
+Its expected outcomes live in
+`tests/cuda_projects/cuda_samples_sweep_manifest.txt`. The gate skips unless
+most enrolled samples are present, rejects regressions from `pass` or `waive`,
+and also rejects an unsupported classification that starts succeeding. Keep
+compile/link-only results as `run-unverified`; they are not runtime evidence.
+The 2026-08-27 snapshot is 33 pass, 3 waive, and 47 without a passing runtime
+result. See [known gaps](known-gaps.md) for the blocker breakdown.
 
 Notes:
 - `conformance_phase4_functional` now prints per-test progress (`[i/N]`) and applies a per-test timeout.

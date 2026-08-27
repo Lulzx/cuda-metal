@@ -198,6 +198,9 @@ third-party projects using CuMetal are in
 tolerances, and provenance requirements remain in
 [the Apple-GPU execution record](docs/apple-gpu-execution.md).
 
+The current NVIDIA `cuda-samples` gate records 33 passing samples, 3 explicit
+waivers, and 47 samples without a passing runtime result.
+
 ## Known hard limits
 
 Durable platform/legal boundaries:

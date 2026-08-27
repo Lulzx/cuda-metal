@@ -1,8 +1,8 @@
 # Apple GPU execution implementation record
 
-This document records the July 2026 work that moved CuMetal's CUDA source and
-binary-shim paths away from implicit CPU emulation and established positive,
-numerically checked Apple GPU execution.
+This document records the July-August 2026 work that moved CuMetal's CUDA
+source and binary-shim paths away from implicit CPU emulation and established
+positive, numerically checked Apple GPU execution.
 
 ## Result
 
@@ -17,6 +17,10 @@ The following end-to-end results were verified on an Apple M4 Pro:
 - NVIDIA's unmodified `cuda-samples` `vectorAdd` source compiled through the
   in-tree CUDA toolchain shims, printed `Test PASSED`, and emitted completed
   `generic_ptx` Apple-GPU provenance.
+- NVIDIA's unmodified `cuda-samples` `simpleCUFFT` compiled and passed its
+  numerical convolution check. Its device pointwise-multiply kernel exercised
+  generic PTX address lowering, while the cuFFT compatibility calls verified
+  ordering with preceding Metal work on the bound/default stream.
 - llm.c's GPT-2 FP32 conformance workload passed logits, loss, tensor, and
   overall numerical checks with CPU emulation disabled.
 - llama.cpp's unmodified GGML CUDA backend, linked against `libcumetal`, loaded
@@ -167,6 +171,27 @@ ctest --test-dir build -R \
   'functional_cuda_source_gpu_vector_add|conformance_cuda_samples_vectoradd_gpu|functional_cuda_projects_ggml_output_ops' \
   --output-on-failure
 ```
+
+Run the focused regressions for the `simpleCUFFT` paths:
+
+```bash
+ctest --test-dir build -R \
+  '^(unit_ptx_lower_to_metal|functional_cufft_c2c)$' \
+  --output-on-failure
+```
+
+Run the focused CUDA graph-memory and allocator regressions:
+
+```bash
+ctest --test-dir build -R \
+  '^(functional_cuda_graph_api|functional_async_mempool_api)$' \
+  --output-on-failure
+```
+
+The unmodified upstream sample is also enrolled in the manifest-driven NVIDIA
+sample sweep described in [the testing guide](testing.md). Its numerical pass
+is runtime evidence; graph-memory samples that only compile and link remain
+explicitly `run-unverified`.
 
 Run the verified llama.cpp smoke test:
 

@@ -52,6 +52,12 @@ The registration JIT selects the new PTX backend only when
 frontend/backend policy and compiler schema. There is no automatic retry with
 the legacy backend.
 
+The legacy direct PTX-to-MSL compatibility path derives Metal element indices
+from PTX byte addresses. It preserves both a derived pointer's byte stride and
+literal byte displacement; for example, `gid * 8 + {0,4}` becomes adjacent
+scalar indices rather than two aliases of `gid`. A focused regression covers
+the `float2` access shape used by NVIDIA's `simpleCUFFT` sample.
+
 ### Command-line outputs and policy
 
 `cumetalc` exposes the useful intermediate and final stages directly:

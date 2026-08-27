@@ -40,6 +40,14 @@ ctest --test-dir build -R bench_phase5_all_kernels --output-on-failure
 - Upstream `cuda-samples` `simplePrintf` builds without source changes and emits
   all 32 expected block/thread/value records through the Apple-GPU ring-buffer
   path. The focused in-tree Clang-ABI test independently checks the same record set.
+- Upstream `cuda-samples` `simpleCUFFT` builds without source changes and passes
+  its numerical convolution check. This exercises a 56-point cuFFT transform,
+  a device pointwise-multiply kernel, and stream ordering between Metal work and
+  the synchronous CPU/vDSP compatibility layer.
+- Focused graph runtime tests pass allocation/free nodes, fixed returned
+  addresses, linear copy nodes, synchronous and asynchronous external free,
+  relaunch, cross-graph free, auto-free-on-launch, memory counters, trimming,
+  and negative parameter/lifetime cases.
 - llm.c GPT-2 FP32 passes logits, loss, tensor, and GPU-provenance checks on the
   tested path. It uses explicit workload specializations and is not proof of
   arbitrary PTX support.
@@ -54,6 +62,21 @@ ctest --test-dir build -R bench_phase5_all_kernels --output-on-failure
 Exact commands, models, tolerances, provenance requirements, and scope
 boundaries live in [the Apple-GPU execution record](apple-gpu-execution.md),
 [the testing guide](testing.md), and [known gaps](known-gaps.md).
+
+## NVIDIA cuda-samples conformance snapshot
+
+The resource-bounded sweep recorded on 2026-08-27 classifies 83 headless
+samples: 33 pass, 3 waive cleanly, and 47 do not yet have a passing runtime
+result. The manifest is an executable compatibility boundary: a regression out
+of `pass` or `waive` fails, and a formerly unsupported sample that begins to
+work also fails until its classification and documentation are reviewed.
+
+Two graph-memory samples, `graphMemoryNodes` and `graphMemoryFootprint`, compile
+and link unmodified. Their large or clock-spinning workloads were deliberately
+not executed during the resource-bounded pass, so they remain
+`run-unverified`; compilation is not reported as runtime conformance. The exact
+classification and remaining blockers are maintained in
+[known gaps](known-gaps.md).
 
 ## Projects using CuMetal
 
