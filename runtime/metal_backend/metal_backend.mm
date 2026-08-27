@@ -639,8 +639,16 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
                 return nil;
             }
             MTLCompileOptions* compileOpts = [[MTLCompileOptions alloc] init];
-            const cumetal::MetalMathMode math_mode =
-                cumetal::current_metal_math_mode();
+            // A source may pin its own math mode. Dekker FP32-pair arithmetic
+            // needs exact IEEE rounding per step: under fast math the compiler
+            // may reassociate `s - a.hi`, which is the very cancellation the
+            // algorithm relies on to recover the error term. Only a marker in
+            // the source can express that, since the global mode is a
+            // process-wide policy.
+            cumetal::MetalMathMode math_mode = cumetal::current_metal_math_mode();
+            if ([src rangeOfString:@"cumetal-math-mode: safe"].location != NSNotFound) {
+                math_mode = cumetal::MetalMathMode::kSafe;
+            }
             if (@available(macOS 15.0, *)) {
                 compileOpts.mathMode =
                     math_mode == cumetal::MetalMathMode::kSafe

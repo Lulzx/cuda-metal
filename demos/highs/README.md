@@ -51,7 +51,12 @@ Iteration counts are not compared. The builds follow different trajectories,
 `shell` converging in 5,600 iterations against the CPU's 12,000, which says
 nothing about whether they agree on the answer.
 
-Then one run is traced and must show `device=apple_gpu` with no
+One problem is then re-solved with `CUMETAL_SPARSE_METAL=1`, which forces the
+Metal SpMV path, and must clear the same gates. Auto mode keeps these instances'
+sparse products on the CPU (see below), so without this stage the demo would
+never exercise the GPU sparse kernels at all.
+
+Finally one run is traced and must show `device=apple_gpu` with no
 `source=approximate_stub`. A correct number without that provenance fails the
 demo, because it would mean a CPU fallback produced it.
 
@@ -68,8 +73,9 @@ demo, because it would mean a CPU fallback produced it.
 | standata | Optimal +1.25745066e+03 (920) | Optimal +1.25777205e+03 (1080) | 2.6e-04 |
 | stair | Iteration limit −2.51238976e+02 | Iteration limit −2.51313524e+02 | 3.0e-04 |
 
-482 kernel launches traced, all `device=apple_gpu`. Because these kernels use
-`double`, they report:
+482 kernel launches traced, all `device=apple_gpu`. With `CUMETAL_SPARSE_METAL=1`
+that becomes 608, the extra 126 being `cumetal_spmv_gather_f64` for `Ax` and
+`A'y`. Because these kernels use `double`, they report:
 
 ```text
 provenance=generic_ptx_lowering_fp64_emulated semantic_quality=reduced_precision_fp64
@@ -83,10 +89,43 @@ separate is the point of reporting both fields.
 `stair` hits the iteration limit on both builds; it is a hard instance. Its
 Metal residuals come out better than the CPU run's (gap 9.05e-03 vs 1.41e-02).
 
+## Where the sparse products actually run
+
+CuMetal has a Metal SpMV kernel for the gather shapes, which is what both of
+cuPDLP's products reduce to: `Ax` is CSR non-transpose, and `A'y` is CSC
+transpose, which is the same loop over the other compressed axis. Neither needs
+atomic scatter.
+
+It is not used here by default. On an M4 Pro a Metal dispatch costs on the order
+of 100 us, and completed CSR SpMV only overtakes the CPU loop over unified memory
+somewhere near 1e5 nonzeros:
+
+| nonzeros | Metal | CPU | speedup |
+| ---: | ---: | ---: | ---: |
+| 3.2e4 | 36.9 us | 36.6 us | 0.99x |
+| 1.3e5 | 149.6 us | 149.1 us | 1.00x |
+| 5.1e5 | 227.8 us | 848.4 us | 3.72x |
+| 2.0e6 | 427.0 us | 3859.8 us | 9.04x |
+| 8.2e6 | 1987.4 us | 14869.3 us | 7.48x |
+| 3.2e7 | 11220.6 us | 65799.4 us | 5.86x |
+
+Every instance in this corpus is far below that, so auto mode routes them to the
+CPU, and forcing the GPU path makes the solver 20-27% slower end to end. The
+threshold is a conservative M4 Pro default measured with a synchronizing
+microbenchmark; `CUMETAL_SPARSE_METAL=1`/`0` overrides the choice and
+`CUMETAL_SPARSE_METAL_THRESHOLD_NNZ` moves it.
+
+Large LPs carry millions of nonzeros, which is the regime the table above says is
+worth the dispatch. Whether that turns into a faster solver depends on what
+fraction of an iteration is spent in SpMV, which this corpus is too small to
+answer.
+
 ## What this does not show
 
-No speedup. cuBLAS L1 and the FP64 sparse SpMV are still scalar CPU loops over
-unified memory, so this is a correctness result. Do not read the timings as a
+No speedup. The measurement above is a microbenchmark of one operation, not a
+solver result, and on this corpus the GPU sparse path is the slower choice. FP64
+cuBLAS L1 (dot, norm) is still a scalar CPU loop over unified memory, and
+solver-level synchronization is unoptimized. Do not read the timings as a
 benchmark.
 
 This is standalone cuPDLP-C, not HiGHS's own GPU build. HiGHS's `CUPDLP_GPU=ON`

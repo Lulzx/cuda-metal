@@ -1,10 +1,17 @@
 #include "cusparse.h"
 #include "cuda_runtime.h"
 
+#include "metal_backend.h"
+#include "runtime_internal.h"
+#include "sparse_kernels_msl.h"
+
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
+#include <string>
 #include <vector>
 
 // ── cuSPARSE shim ───────────────────────────────────────────────────────────
@@ -477,6 +484,234 @@ static bool cumetal_sparse_indices_are_32bit(const cusparseSpMatDescr* mat) {
 
 }  // extern "C++"
 
+
+extern "C++" {
+
+// ── Metal-native SpMV ───────────────────────────────────────────────────────
+//
+// Only the gather shape runs on the GPU: one output element per compressed row.
+// CSR non-transpose and CSC transpose both reduce to that same loop, and those
+// are the two products a PDLP iteration is built from (Ax and A'y). The scatter
+// shapes would need atomic accumulation into y, and Metal has no FP64 atomic,
+// so they stay on the CPU path below. cusparseSpMV still honours any opA; only
+// which implementation serves it changes.
+//
+// Falling back is always allowed: every precondition here is a capability
+// question, not a correctness one, and the CPU path computes the same product.
+
+struct SpmvParams {
+    std::uint32_t axis;
+    std::int32_t base;
+    std::uint32_t beta_is_zero;
+    std::uint32_t pad;
+    std::uint64_t alpha_bits;
+    std::uint64_t beta_bits;
+};
+static_assert(sizeof(SpmvParams) == 32, "SpmvParams must match the MSL layout");
+
+// The MSL is compiled by the Metal backend's runtime source path, which reads
+// from a file, so stage it once per process into the same cache the JIT uses.
+const std::string* sparse_kernels_source_path() {
+    static const std::string* cached = [] {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::path dir;
+        if (const char* d = std::getenv("CUMETAL_CACHE_DIR"); d != nullptr && d[0] != '\0') {
+            dir = fs::path(d);
+        } else if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+            dir = fs::path(home) / "Library" / "Caches" / "io.cumetal";
+        } else {
+            dir = fs::temp_directory_path(ec);
+            if (ec) return static_cast<std::string*>(nullptr);
+        }
+        dir /= "library-kernels";
+        fs::create_directories(dir, ec);
+        if (ec) return static_cast<std::string*>(nullptr);
+        const fs::path out = dir / "sparse_kernels.metal";
+        // Rewrite unconditionally: the source is compiled into this binary, so a
+        // stale file from an older build must not win.
+        std::FILE* f = std::fopen(out.c_str(), "wb");
+        if (f == nullptr) return static_cast<std::string*>(nullptr);
+        const auto& src = cumetal::rt::kSparseKernelsMsl;
+        const bool wrote = std::fwrite(src.data(), 1, src.size(), f) == src.size();
+        std::fclose(f);
+        if (!wrote) return static_cast<std::string*>(nullptr);
+        return new std::string(out.string());
+    }();
+    return cached;
+}
+
+// A device pointer resolves to a Metal buffer plus a byte offset. Metal requires
+// the offset to satisfy the bound type's alignment, so reject anything that does
+// not and let the CPU path take it.
+bool resolve_arg(const void* ptr,
+                 std::size_t required_bytes,
+                 std::size_t alignment,
+                 cumetal::metal_backend::KernelArg* out) {
+    if (ptr == nullptr) return false;
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!cumetal::rt::resolve_allocation_for_pointer(ptr, &resolved)) return false;
+    if (resolved.buffer == nullptr || resolved.remaining_size < required_bytes) return false;
+    if (resolved.offset % alignment != 0) return false;
+    out->kind = cumetal::metal_backend::KernelArg::Kind::kBuffer;
+    out->buffer = resolved.buffer;
+    out->offset = resolved.offset;
+    return true;
+}
+
+// The GPU path may decline for reasons that are capability questions (an
+// unsupported shape) and for reasons that are defects (the kernel failed to
+// compile). Both produce the same correct answer through the CPU path, which is
+// exactly how a broken kernel stays invisible, so make the reason reportable.
+void spmv_note(const char* reason) {
+    static const bool on = [] {
+        const char* v = std::getenv("CUMETAL_DEBUG_SPARSE");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    if (on) std::fprintf(stderr, "CUMETAL_DEBUG_SPARSE: SpMV on CPU (%s)\n", reason);
+}
+
+// CUMETAL_SPARSE_METAL: unset = auto, "1" = always, "0" = never. Matches the
+// CUMETAL_MTLHEAP_ALLOC convention.
+enum class SparseMetalPolicy { kAuto, kAlways, kNever };
+
+SparseMetalPolicy sparse_metal_policy() {
+    static const SparseMetalPolicy policy = [] {
+        const char* v = std::getenv("CUMETAL_SPARSE_METAL");
+        if (v == nullptr || v[0] == '\0') return SparseMetalPolicy::kAuto;
+        if (v[0] == '0') return SparseMetalPolicy::kNever;
+        return SparseMetalPolicy::kAlways;
+    }();
+    return policy;
+}
+
+// Below this many nonzeros the CPU loop over unified memory wins: a Metal
+// dispatch costs on the order of 100 us, which buys a great many scalar
+// multiply-adds. A conservative M4 Pro default rather than a property of the
+// architecture: it moves with the chip, the element type, the row distribution,
+// and any improvement to command submission or to the kernel itself. Measured
+// with an SpMV microbenchmark that synchronizes per call, so it times completed
+// work rather than enqueue:
+//
+//   nonzeros    3.2e4    1.3e5    5.1e5    2.0e6    8.2e6    3.2e7
+//   Metal/CPU   0.99x    1.00x    3.72x    9.04x    7.48x    5.86x
+//
+// The crossover itself sits near 1e5 and is largely independent of row density,
+// but the band around it is noisy enough that a threshold there wins or loses a
+// few percent at random. This sits above that band, where the win is
+// unambiguous. The first two columns are at the threshold's CPU side and show
+// it costs nothing to route them there.
+//
+// Synchronizing per call also makes this conservative for a real pipeline, where
+// several GPU operations queue behind one another and no single SpMV pays a
+// host-visible synchronization. Erring toward the CPU unless the GPU win is
+// obvious is the intended bias. The small Netlib instances in the HiGHS demo sit
+// below this threshold, so auto mode keeps their sparse products on the CPU;
+// large LPs can carry millions of nonzeros, which is where the GPU path earns
+// its place.
+std::int64_t sparse_metal_threshold_nnz() {
+    static const std::int64_t threshold = [] {
+        if (const char* v = std::getenv("CUMETAL_SPARSE_METAL_THRESHOLD_NNZ");
+            v != nullptr && v[0] != '\0') {
+            const long long parsed = std::atoll(v);
+            if (parsed > 0) return static_cast<std::int64_t>(parsed);
+        }
+        return static_cast<std::int64_t>(250000);
+    }();
+    return threshold;
+}
+
+// Returns false when the GPU path did not run, for any reason.
+bool try_spmv_gather_metal(cusparseHandle_t handle,
+                           const cusparseSpMatDescr* mat,
+                           bool transpose,
+                           std::int64_t axis,
+                           std::int64_t ylen,
+                           const void* alpha,
+                           const void* beta,
+                           const void* x,
+                           void* y,
+                           cudaDataType compute_type) {
+    const SparseMetalPolicy policy = sparse_metal_policy();
+    if (policy == SparseMetalPolicy::kNever) {
+        spmv_note("disabled by CUMETAL_SPARSE_METAL=0");
+        return false;
+    }
+    if (transpose) { spmv_note("scatter shape needs atomics"); return false; }
+    if (policy == SparseMetalPolicy::kAuto && mat->nnz < sparse_metal_threshold_nnz()) {
+        spmv_note("below the measured nonzero threshold");
+        return false;
+    }
+    if (handle != nullptr && handle->stream != nullptr) {
+        spmv_note("handle is on an explicit stream");
+        return false;
+    }
+    const std::size_t elem = compute_type == CUDA_R_64F ? 8u : 4u;
+    const std::size_t nnz = static_cast<std::size_t>(mat->nnz);
+
+    const std::string* source = sparse_kernels_source_path();
+    if (source == nullptr) { spmv_note("could not stage the kernel source"); return false; }
+
+    std::vector<cumetal::metal_backend::KernelArg> args(6);
+    if (!resolve_arg(mat->rowOffsets, (static_cast<std::size_t>(axis) + 1) * sizeof(int),
+                     sizeof(int), &args[0]) ||
+        !resolve_arg(mat->colInd, nnz * sizeof(int), sizeof(int), &args[1]) ||
+        !resolve_arg(mat->values, nnz * elem, elem, &args[2]) ||
+        !resolve_arg(x, elem, elem, &args[3]) ||
+        !resolve_arg(y, static_cast<std::size_t>(ylen) * elem, elem, &args[4])) {
+        spmv_note("an operand is not a tracked device allocation, or is misaligned");
+        return false;
+    }
+
+    SpmvParams params{};
+    params.axis = static_cast<std::uint32_t>(axis);
+    params.base = mat->idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
+    if (compute_type == CUDA_R_64F) {
+        const double a = *static_cast<const double*>(alpha);
+        const double b = *static_cast<const double*>(beta);
+        params.beta_is_zero = b == 0.0 ? 1u : 0u;
+        std::memcpy(&params.alpha_bits, &a, sizeof(a));
+        std::memcpy(&params.beta_bits, &b, sizeof(b));
+    } else {
+        const float a = *static_cast<const float*>(alpha);
+        const float b = *static_cast<const float*>(beta);
+        params.beta_is_zero = b == 0.0f ? 1u : 0u;
+        std::uint32_t abits = 0, bbits = 0;
+        std::memcpy(&abits, &a, sizeof(a));
+        std::memcpy(&bbits, &b, sizeof(b));
+        params.alpha_bits = abits;
+        params.beta_bits = bbits;
+    }
+    args[5].kind = cumetal::metal_backend::KernelArg::Kind::kBytes;
+    args[5].bytes.resize(sizeof(params));
+    std::memcpy(args[5].bytes.data(), &params, sizeof(params));
+
+    // One thread per compressed row. LP constraint matrices have short rows, so
+    // a simdgroup per row would idle most lanes; a wide-row variant is the
+    // change to make if a workload with long rows shows up.
+    constexpr unsigned kBlock = 256;
+    cumetal::metal_backend::LaunchConfig config{};
+    config.grid = dim3(static_cast<unsigned>((axis + kBlock - 1) / kBlock), 1, 1);
+    config.block = dim3(kBlock, 1, 1);
+    config.shared_memory_bytes = 0;
+
+    std::string error;
+    const char* kernel = compute_type == CUDA_R_64F ? "cumetal_spmv_gather_f64"
+                                                    : "cumetal_spmv_gather_f32";
+    // A null backend stream is the default stream, which is what a handle left
+    // on the default stream needs. Mapping an explicit cudaStream_t onto a
+    // backend stream is plumbing the runtime does not expose here, so a handle
+    // with one set takes the CPU path, which synchronizes that stream properly.
+    if (cumetal::metal_backend::launch_kernel(*source, kernel, config, args, nullptr, &error) !=
+        cudaSuccess) {
+        spmv_note(error.empty() ? "launch failed" : error.c_str());
+        return false;
+    }
+    return true;
+}
+
+}  // extern "C++"
+
 cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
                                cusparseOperation_t opA,
                                const void* alpha,
@@ -503,6 +738,21 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
     const int64_t xlen = op_t ? matA->rows : matA->cols;
     if (vecY->size != ylen || vecX->size != xlen) return CUSPARSE_STATUS_INVALID_VALUE;
 
+    bool transpose = false;
+    int64_t axis = 0;
+    cumetal_sparse_view(matA, opA, &transpose, &axis);
+
+    // The GPU path is enqueued on the handle's stream and deliberately does not
+    // synchronize: it is ordered against the caller's other stream work the way
+    // a real cuSPARSE call is, and a host read of y needs its own
+    // synchronization either way. Only the CPU path below has to wait, because
+    // it dereferences the operands itself.
+    if (matA->format != CUMETAL_SPMAT_COO &&
+        try_spmv_gather_metal(handle, matA, transpose, axis, ylen, alpha, beta,
+                              vecX->values, vecY->values, computeType)) {
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+
     // Order this call after prior work on the handle's stream (see
     // synchronize_handle_stream) before computing on the CPU.
     synchronize_handle_stream(handle);
@@ -510,10 +760,6 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
     const int base = (matA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
     const int* offsets = static_cast<const int*>(matA->rowOffsets);
     const int* indices = static_cast<const int*>(matA->colInd);
-
-    bool transpose = false;
-    int64_t axis = 0;
-    cumetal_sparse_view(matA, opA, &transpose, &axis);
 
     if (computeType == CUDA_R_64F) {
         const double a = *static_cast<const double*>(alpha);

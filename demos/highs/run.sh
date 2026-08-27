@@ -85,6 +85,30 @@ for p in "${PROBLEMS[@]}"; do
            "$p" "$cs" "$co" "$gs" "$go" "$gpi" "$gdi" "$gg" "$rel" "$verdict"
 done
 
+# The corpus above runs in auto mode, and every one of these instances is below
+# the nonzero threshold at which a Metal SpMV beats the CPU loop, so their sparse
+# products stay on the CPU. Force the GPU path on one problem so the demo
+# actually exercises it, under the same gates.
+echo
+echo "=== Metal sparse path (forced, one problem) ==="
+( cd "${OUT_DIR}" && CUMETAL_SPARSE_METAL=1 CUMETAL_TRACE_GPU=1 \
+    "${CUPDLP_DIR}/build/bin/plc" -fname "${LP_DIR}/afiro.mps" -nIterLim 20000 \
+    > "${OUT_DIR}/afiro.sparse-gpu.log" 2>&1 ) || true
+read -r ss so spi sdi sg si < <(python3 "${SCRIPT_DIR}/parse_plc.py" "${OUT_DIR}/afiro.sparse-gpu.log")
+read -r cs co cpi cdi cg ci < <(python3 "${SCRIPT_DIR}/parse_plc.py" "${OUT_DIR}/afiro.cpu.log")
+spmv="$(grep -c 'kernel="cumetal_spmv' "${OUT_DIR}/afiro.sparse-gpu.log" || true)"
+verdict="$(python3 "${SCRIPT_DIR}/gate.py" "$cs" "$co" "$cpi" "$cdi" "$cg" \
+    "$ss" "$so" "$spi" "$sdi" "$sg")"
+printf "  afiro with CUMETAL_SPARSE_METAL=1: %-9s %-17s %s\n" "$ss" "$so" "${verdict#*|}"
+printf "  %s SpMV kernel launches on the Apple GPU (Ax and A'y both)\n" "${spmv}"
+if [[ "${verdict#*|}" != "ok" ]]; then
+    echo "  FAIL: forced Metal sparse path disagrees with the CPU reference"
+    fails=$((fails+1))
+elif [[ "${spmv}" -eq 0 ]]; then
+    echo "  FAIL: no SpMV kernel ran even with the Metal path forced"
+    fails=$((fails+1))
+fi
+
 echo
 echo "=== Apple-GPU provenance ==="
 ( cd "${OUT_DIR}" && CUMETAL_TRACE_GPU=1 "${CUPDLP_DIR}/build/bin/plc" \

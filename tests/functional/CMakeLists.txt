@@ -477,6 +477,10 @@ add_executable(cumetal_cusparse_fp64_test
     cusparse_fp64_test.cpp
 )
 
+add_executable(cumetal_cusparse_spmv_conformance_test
+    cusparse_spmv_conformance_test.cpp
+)
+
 add_executable(cumetal_blas1_stride_test
     blas1_stride_test.cpp
 )
@@ -1102,6 +1106,11 @@ target_link_libraries(cumetal_thrust_api_test
 )
 
 target_link_libraries(cumetal_cusparse_fp64_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cusparse_spmv_conformance_test
     PRIVATE
         cumetal_runtime
 )
@@ -2840,6 +2849,23 @@ add_test(
     NAME functional_cusparse_fp64
     COMMAND cumetal_cusparse_fp64_test
 )
+
+# Both implementations must produce the same answers. The test matrices are far
+# below the size where the GPU path pays for itself, so the Metal variant has to
+# force it on: left on auto it would silently test the CPU path twice.
+add_test(
+    NAME functional_cusparse_spmv_conformance
+    COMMAND cumetal_cusparse_spmv_conformance_test
+)
+set_tests_properties(functional_cusparse_spmv_conformance
+    PROPERTIES ENVIRONMENT "CUMETAL_SPARSE_METAL=1")
+
+add_test(
+    NAME functional_cusparse_spmv_conformance_cpu
+    COMMAND cumetal_cusparse_spmv_conformance_test
+)
+set_tests_properties(functional_cusparse_spmv_conformance_cpu
+    PROPERTIES ENVIRONMENT "CUMETAL_SPARSE_METAL=0")
 
 add_test(
     NAME functional_blas1_stride
