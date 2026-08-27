@@ -287,6 +287,11 @@ struct RegistrationModule {
     std::unordered_map<std::string, std::string> emitted_kernel_metallibs;
     std::unordered_map<std::string, std::vector<std::string>> emitted_kernel_printf_formats;
     std::unordered_map<std::string, std::size_t> emitted_kernel_static_shared_bytes;
+    // How each JIT-emitted kernel actually reached the GPU. Without this the
+    // PTX->LLVM->AIR->metallib path is indistinguishable from a user-supplied
+    // prebuilt binary, because a loaded .metallib carries no lowering marker
+    // the way direct-MSL output does (its `// cumetal-provenance:` comment).
+    std::unordered_map<std::string, std::string> emitted_kernel_provenance;
     std::vector<std::string> owned_metallibs;
 };
 
@@ -301,6 +306,7 @@ struct RegistrationRecord {
     bool arg_info_resolved = false;
     std::vector<std::string> printf_formats;
     std::size_t static_shared_bytes = 0;
+    std::string provenance;
 };
 
 struct RegistrationSymbolRecord {
@@ -875,12 +881,24 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
                                      std::uint64_t cache_prefix_hash,
                                      std::string* out_path,
                                      std::vector<std::string>* out_printf_formats = nullptr,
-                                     bool* out_is_persistent = nullptr) {
+                                     bool* out_is_persistent = nullptr,
+                                     std::string* out_provenance = nullptr) {
     if (ptx_source.empty() || kernel_name.empty() || out_path == nullptr) {
         REG_DEBUG("emit_ptx_entry_to_temp_metallib: invalid argument (ptx=%zu, kernel=%s)",
                   ptx_source.size(), kernel_name.c_str());
         return false;
     }
+
+    // Whether this kernel's FP64 arithmetic runs on the FP32-pair emulation.
+    // Computed from the PTX rather than from the lowering result so a warm JIT
+    // cache reports the same provenance as a cold one. Only the LLVM path can
+    // lower FP64 (the direct-MSL lowering declines it), so this is the single
+    // place that needs to know.
+    const bool fp64_emulated =
+        cumetal::ptx::fp64_mode_from_env() == cumetal::ptx::Fp64Mode::kEmulate &&
+        ptx_source.find(".f64") != std::string::npos;
+    const char* const generic_ptx_provenance =
+        fp64_emulated ? "generic_ptx_lowering_fp64_emulated" : "generic_ptx_lowering";
 
     // Multiple host threads may launch the same newly registered kernel at
     // once. Cache lookup and publication must be one transaction: otherwise
@@ -941,6 +959,14 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
             REG_DEBUG("jit cache hit: %s", hit_path.c_str());
             *out_path = hit_path.string();
             if (out_is_persistent != nullptr) *out_is_persistent = true;
+            if (out_provenance != nullptr) {
+                // .metal came from direct MSL lowering and carries its own
+                // `// cumetal-provenance:` marker, which the Metal backend
+                // reads; leave it to that. .metallib came from the
+                // PTX->LLVM->AIR path and carries nothing, so name it.
+                *out_provenance =
+                    hit_path.extension() == ".metallib" ? generic_ptx_provenance : "";
+            }
             return true;
         }
         REG_DEBUG("jit cache miss: %s", cached_metallib.c_str());
@@ -1019,6 +1045,11 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         }
         *out_path = msl_final.string();
         if (out_is_persistent != nullptr) *out_is_persistent = !cached_metallib.empty();
+        if (out_provenance != nullptr) {
+            // The emitted MSL already carries a provenance comment; the backend
+            // parses it. Nothing to override.
+            *out_provenance = "";
+        }
         return true;
     } else {
         REG_DEBUG("using LLVM IR lowering path for '%s'", kernel_name.c_str());
@@ -1035,9 +1066,9 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
             cumetal::warn_once(
                 "fp64-emulate",
                 "kernel uses FP64 (double) instructions, emulated with Dekker FP32-pair "
-                "arithmetic (~44-bit mantissa, not full IEEE-754 double); results lose "
-                "precision. Set CUMETAL_FP64_MODE=native to compile true doubles (fails "
-                "at launch on current Apple Silicon)");
+                "arithmetic (~48-bit significand with binary32 exponent range, not full "
+                "IEEE-754 double); results lose precision. Set CUMETAL_FP64_MODE=native to "
+                "compile true doubles (fails at launch on current Apple Silicon)");
         }
         const auto lowered = cumetal::ptx::lower_ptx_to_llvm_ir(ptx_source, lower_options);
         if (!lowered.ok || lowered.llvm_ir.empty()) {
@@ -1103,6 +1134,14 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
 
     REG_DEBUG("emit success: %s", emitted.output.c_str());
     *out_path = emitted.output.string();
+    if (out_provenance != nullptr) {
+        // A real translation of this kernel's PTX, via LLVM IR and AIR. It is
+        // emitted as a .metallib, which the Metal backend would otherwise
+        // report as `precompiled_metallib` -- the same label a user-supplied
+        // prebuilt binary gets. Naming it keeps the provenance contract able
+        // to distinguish "we translated this" from "we loaded this".
+        *out_provenance = generic_ptx_provenance;
+    }
     // Persistent cache entries (those routed through jit_cache_path_for) should
     // survive process exit and __cudaUnregisterFatBinary cleanup.
     if (out_is_persistent != nullptr) *out_is_persistent = !cached_metallib.empty();
@@ -1112,7 +1151,8 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
 std::string resolve_metallib_path_for_kernel(void* module_handle,
                                               const std::string& kernel_name,
                                               std::vector<std::string>* out_printf_formats,
-                                              std::size_t* out_static_shared_bytes) {
+                                              std::size_t* out_static_shared_bytes,
+                                              std::string* out_provenance = nullptr) {
     if (module_handle == nullptr || kernel_name.empty()) {
         return fallback_metallib_path_from_env();
     }
@@ -1131,6 +1171,7 @@ std::string resolve_metallib_path_for_kernel(void* module_handle,
         if (!module.metallib_path.empty()) {
             REG_DEBUG("resolve_metallib '%s': prebuilt metallib '%s'",
                       kernel_name.c_str(), module.metallib_path.c_str());
+            if (out_provenance != nullptr) *out_provenance = "precompiled_metallib";
             return module.metallib_path;
         }
 
@@ -1148,6 +1189,12 @@ std::string resolve_metallib_path_for_kernel(void* module_handle,
                 const auto ssb_it = module.emitted_kernel_static_shared_bytes.find(kernel_name);
                 if (ssb_it != module.emitted_kernel_static_shared_bytes.end()) {
                     *out_static_shared_bytes = ssb_it->second;
+                }
+            }
+            if (out_provenance != nullptr) {
+                const auto pv_it = module.emitted_kernel_provenance.find(kernel_name);
+                if (pv_it != module.emitted_kernel_provenance.end()) {
+                    *out_provenance = pv_it->second;
                 }
             }
             return cached->second;
@@ -1176,9 +1223,11 @@ std::string resolve_metallib_path_for_kernel(void* module_handle,
     std::string emitted_path;
     std::vector<std::string> local_printf_formats;
     bool is_persistent = false;
+    std::string local_provenance;
     if (!emit_ptx_entry_to_temp_metallib(*ptx_source, kernel_name, cache_prefix_hash,
                                          &emitted_path,
-                                         &local_printf_formats, &is_persistent)) {
+                                         &local_printf_formats, &is_persistent,
+                                         &local_provenance)) {
         REG_DEBUG("resolve_metallib '%s': JIT compile failed, using env fallback",
                   kernel_name.c_str());
         return fallback_metallib_path_from_env();
@@ -1215,11 +1264,21 @@ std::string resolve_metallib_path_for_kernel(void* module_handle,
                 *out_static_shared_bytes = ssb_it->second;
             }
         }
+        if (out_provenance != nullptr) {
+            const auto pv_it = module.emitted_kernel_provenance.find(kernel_name);
+            if (pv_it != module.emitted_kernel_provenance.end()) {
+                *out_provenance = pv_it->second;
+            }
+        }
         return inserted.first->second;
     }
 
     module.emitted_kernel_printf_formats.emplace(kernel_name, local_printf_formats);
     module.emitted_kernel_static_shared_bytes.emplace(kernel_name, static_shared);
+    module.emitted_kernel_provenance.emplace(kernel_name, local_provenance);
+    if (out_provenance != nullptr) {
+        *out_provenance = local_provenance;
+    }
     if (out_printf_formats != nullptr) {
         *out_printf_formats = std::move(local_printf_formats);
     }
@@ -1352,11 +1411,14 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
     if (record.metallib_path.empty()) {
         std::vector<std::string> printf_formats;
         std::size_t static_shared_bytes = 0;
+        std::string provenance;
         std::string metallib_path =
             resolve_metallib_path_for_kernel(record.module_handle, record.kernel_name,
-                                             &printf_formats, &static_shared_bytes);
+                                             &printf_formats, &static_shared_bytes,
+                                             &provenance);
         if (metallib_path.empty()) {
             metallib_path = fallback_metallib_path_from_env();
+            provenance = "precompiled_metallib";
         }
 
         RegistrationState& s = state();
@@ -1373,12 +1435,14 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
             if (static_shared_bytes > 0) {
                 found->second.static_shared_bytes = static_shared_bytes;
             }
+            found->second.provenance = std::move(provenance);
         }
         record = found->second;
     }
 
     out->metallib_path = record.metallib_path;
     out->kernel_name = record.kernel_name;
+    out->provenance = record.provenance;
     out->arg_info = record.arg_info;
     out->printf_formats = record.printf_formats;
     out->static_shared_bytes = record.static_shared_bytes;
