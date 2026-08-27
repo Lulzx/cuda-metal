@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -2308,6 +2309,89 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         return reg_type(dest);
     };
 
+    auto element_bytes = [](const std::string& type) -> int {
+        if (type == "double" || type == "ulong" || type == "long") return 8;
+        if (type == "float" || type == "uint" || type == "int") return 4;
+        if (type == "ushort" || type == "short") return 2;
+        if (type == "uchar" || type == "char") return 1;
+        return 0;
+    };
+
+    auto byte_displacement = [&](const std::string& address,
+                                 std::int64_t* displacement) -> bool {
+        if (displacement == nullptr) return false;
+        *displacement = 0;
+        const std::string address_reg = get_reg(address);
+        const std::size_t reg_pos = address.find(address_reg);
+        if (address_reg.empty() || reg_pos == std::string::npos) return false;
+        std::size_t pos = reg_pos + address_reg.size();
+        while (pos < address.size() &&
+               std::isspace(static_cast<unsigned char>(address[pos]))) {
+            ++pos;
+        }
+        if (pos < address.size() && address[pos] == ']') return true;
+        if (pos >= address.size() || (address[pos] != '+' && address[pos] != '-')) {
+            return false;
+        }
+        const bool negative = address[pos] == '-';
+        ++pos;
+        while (pos < address.size() &&
+               std::isspace(static_cast<unsigned char>(address[pos]))) {
+            ++pos;
+        }
+        std::uint64_t magnitude = 0;
+        bool saw_digit = false;
+        while (pos < address.size() &&
+               std::isdigit(static_cast<unsigned char>(address[pos]))) {
+            saw_digit = true;
+            const unsigned digit = static_cast<unsigned>(address[pos] - '0');
+            if (magnitude >
+                (static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) -
+                 digit) /
+                    10u) {
+                return false;
+            }
+            magnitude = magnitude * 10u + digit;
+            ++pos;
+        }
+        while (pos < address.size() &&
+               std::isspace(static_cast<unsigned char>(address[pos]))) {
+            ++pos;
+        }
+        if (!saw_digit || pos >= address.size() || address[pos] != ']') return false;
+        const std::int64_t signed_magnitude = static_cast<std::int64_t>(magnitude);
+        *displacement = negative ? -signed_magnitude : signed_magnitude;
+        return true;
+    };
+
+    auto memory_index = [&](const RegInfo& info,
+                            const std::string& address,
+                            const std::string& type) -> std::string {
+        const int width = element_bytes(type);
+        std::int64_t displacement = 0;
+        if (width == 0 || !byte_displacement(address, &displacement) ||
+            displacement % width != 0) {
+            return {};
+        }
+        const std::int64_t element_displacement = displacement / width;
+        std::string index;
+        if (info.kind == RegKind::DerivedPtr) {
+            if (info.byte_per_elem <= 0 || info.byte_per_elem % width != 0) return {};
+            const int stride = info.byte_per_elem / width;
+            index = stride == 1 ? "gid" : "gid * " + std::to_string(stride);
+        } else if (info.kind == RegKind::ParamPtr) {
+            index = "0";
+        } else {
+            return {};
+        }
+        if (element_displacement > 0) {
+            index += " + " + std::to_string(element_displacement);
+        } else if (element_displacement < 0) {
+            index += " - " + std::to_string(-element_displacement);
+        }
+        return index;
+    };
+
     std::unordered_set<std::string> consumed_guards;
 
     // Track registers that have been defined so far in the emitted Metal body.
@@ -2395,7 +2479,10 @@ std::string emit_metal_source_generic(const std::string& entry_name,
                                            : info->param_name;
             const std::string etype =
                 param_etype.count(pname) ? param_etype.at(pname) : "float";
-            metal << "    " << etype << " " << mvar(dest) << " = " << pname << "[gid];\n";
+            const std::string index = memory_index(*info, ops[1], etype);
+            if (index.empty()) return {};
+            metal << "    " << etype << " " << mvar(dest) << " = " << pname
+                  << "[" << index << "];\n";
             defined_regs.insert(dest);
             continue;
         }
@@ -2407,7 +2494,12 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             const std::string& pname = (info->kind == RegKind::DerivedPtr)
                                            ? info->base_param
                                            : info->param_name;
-            metal << "    " << pname << "[gid] = " << resolve(ops[1]) << ";\n";
+            const std::string etype =
+                param_etype.count(pname) ? param_etype.at(pname) : "float";
+            const std::string index = memory_index(*info, ops[0], etype);
+            if (index.empty()) return {};
+            metal << "    " << pname << "[" << index << "] = " << resolve(ops[1])
+                  << ";\n";
             continue;
         }
 

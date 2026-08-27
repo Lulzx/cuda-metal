@@ -50,6 +50,10 @@ typedef enum cufftResult {
     CUFFT_NOT_IMPLEMENTED = 0xE,
     CUFFT_LICENSE_ERROR = 0x0F,
     CUFFT_NOT_SUPPORTED = 0x10,
+    CUFFT_MISSING_DEPENDENCY = 0x11,
+    CUFFT_NVRTC_FAILURE = 0x12,
+    CUFFT_NVJITLINK_FAILURE = 0x13,
+    CUFFT_NVSHMEM_FAILURE = 0x14,
 } cufftResult;
 
 typedef enum cufftType {

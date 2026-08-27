@@ -504,6 +504,9 @@ Implemented:
     operations and lowers the scalar libdevice calls exercised by the reduced
     PhysX GRB path (sqrt/rsqrt, popcount, bit reinterpretation, min/max,
     fast division, and sin/cos)
+  - generic direct PTX-to-MSL scalar global loads/stores preserve derived-pointer
+    byte strides and literal byte displacements; a focused float2-shaped unit
+    test covers the `gid*8 + {0,4}` form exercised by `simpleCUFFT`
   - PhysX 5.6 reduced GRB runtime executes production metallibs on Apple GPU;
     `cumetalc` emits exact source-level `.cumetal-abi` argument records plus
     static shared-memory byte requirements,
@@ -846,13 +849,22 @@ Supported library shim subset:
   - `curandGenerateLogNormal`, `curandGenerateLogNormalDouble`
   - generation is enqueued on the bound stream; state-changing setters and destruction wait
     for prior generator work so callbacks cannot race generator lifetime/state.
-- cuFFT (`cufft.h`)
+- cuFFT (`cufft.h`, `cufftXt.h`)
   - `cufftCreate`, `cufftDestroy`, `cufftSetStream`, `cufftGetSize`, `cufftGetVersion`
-  - `cufftPlan1d`, `cufftPlan2d`, `cufftPlan3d`, `cufftPlanMany`
-  - `cufftMakePlan1d`, `cufftMakePlan2d`, `cufftMakePlan3d`, `cufftMakePlanMany`
+  - `cufftPlan1d` / `cufftMakePlan1d`; rank-1 `cufftPlanMany` / `cufftMakePlanMany`
+  - 2D/3D planning entry points remain source-compatible, but execution fails explicitly
+    until per-axis multidimensional transforms are implemented
+  - contiguous rank-1 `cufftXtMakePlanMany` for matching FP32/FP64 C2C, R2C, and C2R types;
+    unsupported layouts and type combinations fail explicitly
   - `cufftExecC2C`, `cufftExecR2C`, `cufftExecC2R` (single-precision)
   - `cufftExecZ2Z`, `cufftExecD2Z`, `cufftExecZ2D` (double-precision)
-  - Backed by Apple Accelerate `vDSP_DFT_Execute` (arbitrary N, any batch size)
+  - synchronous execution waits for the plan's bound/default CUDA stream before CPU/vDSP
+    access, preserving order with preceding Metal kernels
+  - Backed by Apple Accelerate `vDSP_DFT_Execute` for supported lengths, with a bounded
+    direct-DFT correctness path for other rank-1 lengths through 1,024 elements
+  - rank > 1 execution and larger lengths rejected by vDSP return `CUFFT_NOT_SUPPORTED`
+    instead of flattening dimensions or reporting an internal error
+  - NVIDIA's unmodified `simpleCUFFT` sample passes its numerical convolution check
   - `libcufft.dylib` symlink alias to `libcumetal.dylib`
 - cuBLAS v2 (`cublas_v2.h`)
   - `cublasCreate`, `cublasDestroy`, `cublasGetVersion`

@@ -2,7 +2,7 @@
 // Uses a 1D C2C plan with a known input and verifies the inverse result equals
 // N * input[i] within floating-point tolerance.
 
-#include "cufft.h"
+#include "cufftXt.h"
 #include "cuda_runtime.h"
 
 #include <cmath>
@@ -10,7 +10,9 @@
 #include <vector>
 
 int main() {
-    const int N = 64;
+    // 56 includes a factor of seven and is rejected by vDSP's DFT setup. This
+    // exercises CuMetal's bounded direct-DFT correctness path used by simpleCUFFT.
+    const int N = 56;
 
     // Allocate host arrays.
     std::vector<cufftComplex> h_in(N), h_mid(N), h_out(N);
@@ -33,9 +35,11 @@ int main() {
         return 1;
     }
 
-    if (cudaMemcpy(d_in, h_in.data(), N * sizeof(cufftComplex), cudaMemcpyHostToDevice) !=
-        cudaSuccess) {
-        std::fprintf(stderr, "FAIL: cudaMemcpy H->D\n");
+    cudaStream_t stream = nullptr;
+    if (cudaStreamCreate(&stream) != cudaSuccess ||
+        cudaMemcpyAsync(d_in, h_in.data(), N * sizeof(cufftComplex),
+                        cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: queued cudaMemcpy H->D\n");
         return 1;
     }
 
@@ -45,8 +49,28 @@ int main() {
         return 1;
     }
 
+    cufftHandle xt_plan = 0;
+    long long xt_n[1] = {N};
+    long long xt_embed[1] = {N};
+    size_t work_size = 1;
+    if (cufftCreate(&xt_plan) != CUFFT_SUCCESS ||
+        cufftXtMakePlanMany(xt_plan, 1, xt_n, xt_embed, 1, N, CUDA_C_32F,
+                            nullptr, 1, N, CUDA_C_32F, 1, &work_size,
+                            CUDA_C_32F) != CUFFT_NOT_SUPPORTED ||
+        cufftXtMakePlanMany(xt_plan, 1, xt_n, nullptr, 1, N, CUDA_R_32F,
+                            nullptr, 1, N, CUDA_C_32F, 1, &work_size,
+                            CUDA_R_32F) != CUFFT_NOT_SUPPORTED ||
+        cufftXtMakePlanMany(xt_plan, 1, xt_n, nullptr, 1, N, CUDA_C_32F,
+                            nullptr, 1, N, CUDA_C_32F, 1, &work_size,
+                            CUDA_C_32F) != CUFFT_SUCCESS ||
+        cufftSetStream(xt_plan, stream) != CUFFT_SUCCESS ||
+        work_size != 0) {
+        std::fprintf(stderr, "FAIL: cufftXtMakePlanMany compatibility contract\n");
+        return 1;
+    }
+
     // Forward transform: d_in → d_out.
-    if (cufftExecC2C(plan, d_in, d_out, CUFFT_FORWARD) != CUFFT_SUCCESS) {
+    if (cufftExecC2C(xt_plan, d_in, d_out, CUFFT_FORWARD) != CUFFT_SUCCESS) {
         std::fprintf(stderr, "FAIL: cufftExecC2C FORWARD\n");
         return 1;
     }
@@ -57,8 +81,18 @@ int main() {
         return 1;
     }
 
-    if (cufftDestroy(plan) != CUFFT_SUCCESS) {
+    if (cufftDestroy(plan) != CUFFT_SUCCESS ||
+        cufftDestroy(xt_plan) != CUFFT_SUCCESS) {
         std::fprintf(stderr, "FAIL: cufftDestroy\n");
+        return 1;
+    }
+
+    cufftHandle unsupported_2d = 0;
+    if (cufftPlan2d(&unsupported_2d, 2, 2, CUFFT_C2C) != CUFFT_SUCCESS ||
+        cufftExecC2C(unsupported_2d, d_in, d_out, CUFFT_FORWARD) !=
+            CUFFT_NOT_SUPPORTED ||
+        cufftDestroy(unsupported_2d) != CUFFT_SUCCESS) {
+        std::fprintf(stderr, "FAIL: multidimensional cuFFT did not fail explicitly\n");
         return 1;
     }
 
@@ -85,6 +119,7 @@ int main() {
 
     cudaFree(d_in);
     cudaFree(d_out);
+    cudaStreamDestroy(stream);
 
     std::printf("PASS: cuFFT C2C round-trip (N=%d)\n", N);
     return 0;

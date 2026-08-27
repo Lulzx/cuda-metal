@@ -649,6 +649,7 @@ install(FILES
     runtime/api/cuda_runtime.h
     runtime/api/cuda_runtime_api.h
     runtime/api/cufft.h
+    runtime/api/cufftXt.h
     runtime/api/curand.h
     runtime/api/cusparse.h
     runtime/api/cusolver_common.h

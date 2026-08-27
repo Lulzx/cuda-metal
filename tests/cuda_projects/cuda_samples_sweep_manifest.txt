@@ -102,5 +102,5 @@ compile-fail 4_CUDA_Libraries/cubDeviceSegmentedScan
 compile-fail 4_CUDA_Libraries/cubDeviceTransform
 compile-fail 4_CUDA_Libraries/lineOfSight
 run-unverified 4_CUDA_Libraries/simpleCUBLAS_LU
-compile-fail 4_CUDA_Libraries/simpleCUFFT
+pass         4_CUDA_Libraries/simpleCUFFT
 compile-fail 6_Performance/UnifiedMemoryPerf

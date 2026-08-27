@@ -8,17 +8,20 @@
 // Split-complex ↔ interleaved conversion is performed in temporary scratch buffers.
 // Batched transforms loop over batch count.
 
-#include "cufft.h"
+#include "cufftXt.h"
 
 #include <Accelerate/Accelerate.h>
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <new>
+#include <numbers>
 #include <vector>
 
 namespace {
@@ -127,6 +130,50 @@ static void interleave_d(const double* re, const double* im, cufftDoubleComplex*
     vDSP_ztocD(&sc, 1, reinterpret_cast<DSPDoubleComplex*>(dst), 2, n);
 }
 
+// vDSP supports only selected factorizations. Keep uncommon small sizes correct
+// with a bounded direct DFT; reject larger unsupported sizes rather than starting
+// an unexpectedly expensive O(N^2) operation.
+constexpr std::size_t kDirectDftMaxElements = 1024;
+
+template <typename Scalar>
+bool direct_dft(const Scalar* re_in,
+                const Scalar* im_in,
+                Scalar* re_out,
+                Scalar* im_out,
+                std::size_t n,
+                bool inverse) {
+    if (re_in == nullptr || im_in == nullptr || re_out == nullptr || im_out == nullptr ||
+        n == 0 || n > kDirectDftMaxElements) {
+        return false;
+    }
+    std::vector<long double> twiddle_re(n);
+    std::vector<long double> twiddle_im(n);
+    const long double direction = inverse ? 1.0L : -1.0L;
+    for (std::size_t phase = 0; phase < n; ++phase) {
+        const long double angle =
+            2.0L * std::numbers::pi_v<long double> * static_cast<long double>(phase) /
+            static_cast<long double>(n);
+        twiddle_re[phase] = std::cos(angle);
+        twiddle_im[phase] = direction * std::sin(angle);
+    }
+    for (std::size_t k = 0; k < n; ++k) {
+        long double sum_re = 0.0L;
+        long double sum_im = 0.0L;
+        for (std::size_t sample = 0; sample < n; ++sample) {
+            const std::size_t phase = (k * sample) % n;
+            const long double c = twiddle_re[phase];
+            const long double s = twiddle_im[phase];
+            const long double in_re = static_cast<long double>(re_in[sample]);
+            const long double in_im = static_cast<long double>(im_in[sample]);
+            sum_re += in_re * c - in_im * s;
+            sum_im += in_re * s + in_im * c;
+        }
+        re_out[k] = static_cast<Scalar>(sum_re);
+        im_out[k] = static_cast<Scalar>(sum_im);
+    }
+    return true;
+}
+
 // ── C2C execution (single) ───────────────────────────────────────────────────
 
 static cufftResult exec_c2c(CufftPlanEntry& p, cufftComplex* idata, cufftComplex* odata,
@@ -134,12 +181,10 @@ static cufftResult exec_c2c(CufftPlanEntry& p, cufftComplex* idata, cufftComplex
     if (idata == nullptr || odata == nullptr) {
         return CUFFT_INVALID_VALUE;
     }
+    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
     const vDSP_DFT_Direction vdir =
         (direction == CUFFT_FORWARD) ? vDSP_DFT_FORWARD : vDSP_DFT_INVERSE;
     vDSP_DFT_Setup setup = get_dft_setup_f(p, vdir);
-    if (setup == nullptr) {
-        return CUFFT_INTERNAL_ERROR;
-    }
     vDSP_Length n = 1;
     for (int d : p.n) {
         n *= static_cast<vDSP_Length>(d);
@@ -149,7 +194,13 @@ static cufftResult exec_c2c(CufftPlanEntry& p, cufftComplex* idata, cufftComplex
         const cufftComplex* in = idata + b * static_cast<ptrdiff_t>(n);
         cufftComplex* out = odata + b * static_cast<ptrdiff_t>(n);
         deinterleave_f(in, re_in.data(), im_in.data(), n);
-        vDSP_DFT_Execute(setup, re_in.data(), im_in.data(), re_out.data(), im_out.data());
+        if (setup != nullptr) {
+            vDSP_DFT_Execute(setup, re_in.data(), im_in.data(), re_out.data(),
+                             im_out.data());
+        } else if (!direct_dft(re_in.data(), im_in.data(), re_out.data(),
+                               im_out.data(), n, direction == CUFFT_INVERSE)) {
+            return CUFFT_NOT_SUPPORTED;
+        }
         interleave_f(re_out.data(), im_out.data(), out, n);
     }
     return CUFFT_SUCCESS;
@@ -162,12 +213,10 @@ static cufftResult exec_z2z(CufftPlanEntry& p, cufftDoubleComplex* idata,
     if (idata == nullptr || odata == nullptr) {
         return CUFFT_INVALID_VALUE;
     }
+    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
     const vDSP_DFT_Direction vdir =
         (direction == CUFFT_FORWARD) ? vDSP_DFT_FORWARD : vDSP_DFT_INVERSE;
     vDSP_DFT_SetupD setup = get_dft_setup_d(p, vdir);
-    if (setup == nullptr) {
-        return CUFFT_INTERNAL_ERROR;
-    }
     vDSP_Length n = 1;
     for (int d : p.n) {
         n *= static_cast<vDSP_Length>(d);
@@ -177,7 +226,13 @@ static cufftResult exec_z2z(CufftPlanEntry& p, cufftDoubleComplex* idata,
         const cufftDoubleComplex* in = idata + b * static_cast<ptrdiff_t>(n);
         cufftDoubleComplex* out = odata + b * static_cast<ptrdiff_t>(n);
         deinterleave_d(in, re_in.data(), im_in.data(), n);
-        vDSP_DFT_ExecuteD(setup, re_in.data(), im_in.data(), re_out.data(), im_out.data());
+        if (setup != nullptr) {
+            vDSP_DFT_ExecuteD(setup, re_in.data(), im_in.data(), re_out.data(),
+                              im_out.data());
+        } else if (!direct_dft(re_in.data(), im_in.data(), re_out.data(),
+                               im_out.data(), n, direction == CUFFT_INVERSE)) {
+            return CUFFT_NOT_SUPPORTED;
+        }
         interleave_d(re_out.data(), im_out.data(), out, n);
     }
     return CUFFT_SUCCESS;
@@ -189,10 +244,8 @@ static cufftResult exec_r2c(CufftPlanEntry& p, cufftReal* idata, cufftComplex* o
     if (idata == nullptr || odata == nullptr) {
         return CUFFT_INVALID_VALUE;
     }
+    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
     vDSP_DFT_Setup setup = get_dft_setup_f(p, vDSP_DFT_FORWARD);
-    if (setup == nullptr) {
-        return CUFFT_INTERNAL_ERROR;
-    }
     // For zrop: n real input samples → n/2+1 complex output (half-spectrum convention).
     // vDSP packs the half-spectrum as n/2 complex + (dc, nyquist) in first slot.
     vDSP_Length n = 1;
@@ -204,6 +257,20 @@ static cufftResult exec_r2c(CufftPlanEntry& p, cufftReal* idata, cufftComplex* o
     for (int b = 0; b < p.batch; ++b) {
         const cufftReal* in = idata + b * static_cast<ptrdiff_t>(n);
         cufftComplex* out = odata + b * static_cast<ptrdiff_t>(nc + 1);
+        if (setup == nullptr) {
+            std::vector<float> full_re_in(n), full_im_in(n, 0.0f);
+            std::vector<float> full_re_out(n), full_im_out(n);
+            std::copy_n(in, n, full_re_in.data());
+            if (!direct_dft(full_re_in.data(), full_im_in.data(), full_re_out.data(),
+                            full_im_out.data(), n, false)) {
+                return CUFFT_NOT_SUPPORTED;
+            }
+            for (vDSP_Length k = 0; k <= nc; ++k) {
+                out[k].x = full_re_out[k];
+                out[k].y = full_im_out[k];
+            }
+            continue;
+        }
         // Pack real input into split complex (imaginary = 0).
         for (vDSP_Length i = 0; i < nc; ++i) {
             re_in[i] = in[2 * i];
@@ -229,10 +296,8 @@ static cufftResult exec_c2r(CufftPlanEntry& p, cufftComplex* idata, cufftReal* o
     if (idata == nullptr || odata == nullptr) {
         return CUFFT_INVALID_VALUE;
     }
+    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
     vDSP_DFT_Setup setup = get_dft_setup_f(p, vDSP_DFT_INVERSE);
-    if (setup == nullptr) {
-        return CUFFT_INTERNAL_ERROR;
-    }
     vDSP_Length n = 1;
     for (int d : p.n) {
         n *= static_cast<vDSP_Length>(d);
@@ -242,6 +307,25 @@ static cufftResult exec_c2r(CufftPlanEntry& p, cufftComplex* idata, cufftReal* o
     for (int b = 0; b < p.batch; ++b) {
         const cufftComplex* in = idata + b * static_cast<ptrdiff_t>(nc + 1);
         cufftReal* out = odata + b * static_cast<ptrdiff_t>(n);
+        if (setup == nullptr) {
+            std::vector<float> full_re_in(n), full_im_in(n);
+            std::vector<float> full_re_out(n), full_im_out(n);
+            for (vDSP_Length k = 0; k <= nc; ++k) {
+                full_re_in[k] = in[k].x;
+                full_im_in[k] = in[k].y;
+            }
+            for (vDSP_Length k = nc + 1; k < n; ++k) {
+                const vDSP_Length mirrored = n - k;
+                full_re_in[k] = in[mirrored].x;
+                full_im_in[k] = -in[mirrored].y;
+            }
+            if (!direct_dft(full_re_in.data(), full_im_in.data(), full_re_out.data(),
+                            full_im_out.data(), n, true)) {
+                return CUFFT_NOT_SUPPORTED;
+            }
+            std::copy_n(full_re_out.data(), n, out);
+            continue;
+        }
         // Pack half-spectrum into vDSP zrop format (DC in re[0], Nyquist in im[0]).
         re_in[0] = in[0].x;
         im_in[0] = in[nc].x;
@@ -266,10 +350,8 @@ static cufftResult exec_d2z(CufftPlanEntry& p, cufftDoubleReal* idata,
     if (idata == nullptr || odata == nullptr) {
         return CUFFT_INVALID_VALUE;
     }
+    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
     vDSP_DFT_SetupD setup = get_dft_setup_d(p, vDSP_DFT_FORWARD);
-    if (setup == nullptr) {
-        return CUFFT_INTERNAL_ERROR;
-    }
     vDSP_Length n = 1;
     for (int d : p.n) {
         n *= static_cast<vDSP_Length>(d);
@@ -279,6 +361,20 @@ static cufftResult exec_d2z(CufftPlanEntry& p, cufftDoubleReal* idata,
     for (int b = 0; b < p.batch; ++b) {
         const cufftDoubleReal* in = idata + b * static_cast<ptrdiff_t>(n);
         cufftDoubleComplex* out = odata + b * static_cast<ptrdiff_t>(nc + 1);
+        if (setup == nullptr) {
+            std::vector<double> full_re_in(n), full_im_in(n, 0.0);
+            std::vector<double> full_re_out(n), full_im_out(n);
+            std::copy_n(in, n, full_re_in.data());
+            if (!direct_dft(full_re_in.data(), full_im_in.data(), full_re_out.data(),
+                            full_im_out.data(), n, false)) {
+                return CUFFT_NOT_SUPPORTED;
+            }
+            for (vDSP_Length k = 0; k <= nc; ++k) {
+                out[k].x = full_re_out[k];
+                out[k].y = full_im_out[k];
+            }
+            continue;
+        }
         for (vDSP_Length i = 0; i < nc; ++i) {
             re_in[i] = in[2 * i];
             im_in[i] = in[2 * i + 1];
@@ -301,10 +397,8 @@ static cufftResult exec_z2d(CufftPlanEntry& p, cufftDoubleComplex* idata,
     if (idata == nullptr || odata == nullptr) {
         return CUFFT_INVALID_VALUE;
     }
+    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
     vDSP_DFT_SetupD setup = get_dft_setup_d(p, vDSP_DFT_INVERSE);
-    if (setup == nullptr) {
-        return CUFFT_INTERNAL_ERROR;
-    }
     vDSP_Length n = 1;
     for (int d : p.n) {
         n *= static_cast<vDSP_Length>(d);
@@ -314,6 +408,25 @@ static cufftResult exec_z2d(CufftPlanEntry& p, cufftDoubleComplex* idata,
     for (int b = 0; b < p.batch; ++b) {
         const cufftDoubleComplex* in = idata + b * static_cast<ptrdiff_t>(nc + 1);
         cufftDoubleReal* out = odata + b * static_cast<ptrdiff_t>(n);
+        if (setup == nullptr) {
+            std::vector<double> full_re_in(n), full_im_in(n);
+            std::vector<double> full_re_out(n), full_im_out(n);
+            for (vDSP_Length k = 0; k <= nc; ++k) {
+                full_re_in[k] = in[k].x;
+                full_im_in[k] = in[k].y;
+            }
+            for (vDSP_Length k = nc + 1; k < n; ++k) {
+                const vDSP_Length mirrored = n - k;
+                full_re_in[k] = in[mirrored].x;
+                full_im_in[k] = -in[mirrored].y;
+            }
+            if (!direct_dft(full_re_in.data(), full_im_in.data(), full_re_out.data(),
+                            full_im_out.data(), n, true)) {
+                return CUFFT_NOT_SUPPORTED;
+            }
+            std::copy_n(full_re_out.data(), n, out);
+            continue;
+        }
         re_in[0] = in[0].x;
         im_in[0] = in[nc].x;
         for (vDSP_Length k = 1; k < nc; ++k) {
@@ -339,8 +452,25 @@ static cufftResult make_plan(cufftHandle h, int rank, int* n, cufftType type, in
     if (p == nullptr) {
         return CUFFT_INVALID_PLAN;
     }
-    if (n == nullptr || rank < 1 || batch < 1) {
+    if (n == nullptr || rank < 1 || rank > 3 || batch < 1) {
         return CUFFT_INVALID_VALUE;
+    }
+    switch (type) {
+        case CUFFT_R2C:
+        case CUFFT_C2R:
+        case CUFFT_C2C:
+        case CUFFT_D2Z:
+        case CUFFT_Z2D:
+        case CUFFT_Z2Z: break;
+        default: return CUFFT_INVALID_TYPE;
+    }
+    std::size_t total_elements = 1;
+    for (int i = 0; i < rank; ++i) {
+        if (n[i] < 1 || static_cast<std::size_t>(n[i]) >
+                            std::numeric_limits<std::size_t>::max() / total_elements) {
+            return CUFFT_INVALID_SIZE;
+        }
+        total_elements *= static_cast<std::size_t>(n[i]);
     }
     p->type = type;
     p->rank = rank;
@@ -350,6 +480,11 @@ static cufftResult make_plan(cufftHandle h, int rank, int* n, cufftType type, in
         *workSize = 0;
     }
     return CUFFT_SUCCESS;
+}
+
+cufftResult synchronize_plan_stream(const CufftPlanEntry& plan) {
+    return cudaStreamSynchronize(plan.stream) == cudaSuccess ? CUFFT_SUCCESS
+                                                              : CUFFT_EXEC_FAILED;
 }
 
 }  // namespace
@@ -501,6 +636,69 @@ cufftResult cufftMakePlanMany(cufftHandle plan,
     return make_plan(plan, rank, n, type, batch, workSize);
 }
 
+cufftResult cufftXtMakePlanMany(cufftHandle plan,
+                                 int rank,
+                                 long long int* n,
+                                 long long int* inembed,
+                                 long long int /*istride*/,
+                                 long long int /*idist*/,
+                                 cudaDataType inputtype,
+                                 long long int* onembed,
+                                 long long int /*ostride*/,
+                                 long long int /*odist*/,
+                                 cudaDataType outputtype,
+                                 long long int batch,
+                                 size_t* workSize,
+                                 cudaDataType executiontype) {
+    if (n == nullptr || workSize == nullptr || rank < 1 || rank > 3 || batch < 1) {
+        return CUFFT_INVALID_VALUE;
+    }
+    if (rank != 1) {
+        // Multidimensional transforms require per-axis passes; flattening the
+        // dimensions into one 1D transform would be numerically wrong.
+        return CUFFT_NOT_SUPPORTED;
+    }
+    if (inembed != nullptr || onembed != nullptr) {
+        // The vDSP-backed plan currently implements contiguous batches only.
+        return CUFFT_NOT_SUPPORTED;
+    }
+
+    cufftType type = CUFFT_C2C;
+    if (inputtype == CUDA_C_32F && outputtype == CUDA_C_32F &&
+        executiontype == CUDA_C_32F) {
+        type = CUFFT_C2C;
+    } else if (inputtype == CUDA_R_32F && outputtype == CUDA_C_32F &&
+               executiontype == CUDA_C_32F) {
+        type = CUFFT_R2C;
+    } else if (inputtype == CUDA_C_32F && outputtype == CUDA_R_32F &&
+               executiontype == CUDA_C_32F) {
+        type = CUFFT_C2R;
+    } else if (inputtype == CUDA_C_64F && outputtype == CUDA_C_64F &&
+               executiontype == CUDA_C_64F) {
+        type = CUFFT_Z2Z;
+    } else if (inputtype == CUDA_R_64F && outputtype == CUDA_C_64F &&
+               executiontype == CUDA_C_64F) {
+        type = CUFFT_D2Z;
+    } else if (inputtype == CUDA_C_64F && outputtype == CUDA_R_64F &&
+               executiontype == CUDA_C_64F) {
+        type = CUFFT_Z2D;
+    } else {
+        return CUFFT_NOT_SUPPORTED;
+    }
+
+    if (batch > std::numeric_limits<int>::max()) return CUFFT_INVALID_SIZE;
+    std::vector<int> dimensions;
+    dimensions.reserve(static_cast<std::size_t>(rank));
+    for (int i = 0; i < rank; ++i) {
+        if (n[i] < 1 || n[i] > std::numeric_limits<int>::max()) {
+            return CUFFT_INVALID_SIZE;
+        }
+        dimensions.push_back(static_cast<int>(n[i]));
+    }
+    return make_plan(plan, rank, dimensions.data(), type,
+                     static_cast<int>(batch), workSize);
+}
+
 // ── Execute ───────────────────────────────────────────────────────────────────
 
 cufftResult cufftExecC2C(cufftHandle plan, cufftComplex* idata, cufftComplex* odata,
@@ -514,6 +712,8 @@ cufftResult cufftExecC2C(cufftHandle plan, cufftComplex* idata, cufftComplex* od
     if (p->type != CUFFT_C2C) {
         return CUFFT_INVALID_TYPE;
     }
+    const cufftResult sync_status = synchronize_plan_stream(*p);
+    if (sync_status != CUFFT_SUCCESS) return sync_status;
     return exec_c2c(*p, idata, odata, direction);
 }
 
@@ -527,6 +727,8 @@ cufftResult cufftExecR2C(cufftHandle plan, cufftReal* idata, cufftComplex* odata
     if (p->type != CUFFT_R2C) {
         return CUFFT_INVALID_TYPE;
     }
+    const cufftResult sync_status = synchronize_plan_stream(*p);
+    if (sync_status != CUFFT_SUCCESS) return sync_status;
     return exec_r2c(*p, idata, odata);
 }
 
@@ -540,6 +742,8 @@ cufftResult cufftExecC2R(cufftHandle plan, cufftComplex* idata, cufftReal* odata
     if (p->type != CUFFT_C2R) {
         return CUFFT_INVALID_TYPE;
     }
+    const cufftResult sync_status = synchronize_plan_stream(*p);
+    if (sync_status != CUFFT_SUCCESS) return sync_status;
     return exec_c2r(*p, idata, odata);
 }
 
@@ -554,6 +758,8 @@ cufftResult cufftExecZ2Z(cufftHandle plan, cufftDoubleComplex* idata,
     if (p->type != CUFFT_Z2Z) {
         return CUFFT_INVALID_TYPE;
     }
+    const cufftResult sync_status = synchronize_plan_stream(*p);
+    if (sync_status != CUFFT_SUCCESS) return sync_status;
     return exec_z2z(*p, idata, odata, direction);
 }
 
@@ -568,6 +774,8 @@ cufftResult cufftExecD2Z(cufftHandle plan, cufftDoubleReal* idata,
     if (p->type != CUFFT_D2Z) {
         return CUFFT_INVALID_TYPE;
     }
+    const cufftResult sync_status = synchronize_plan_stream(*p);
+    if (sync_status != CUFFT_SUCCESS) return sync_status;
     return exec_d2z(*p, idata, odata);
 }
 
@@ -582,6 +790,8 @@ cufftResult cufftExecZ2D(cufftHandle plan, cufftDoubleComplex* idata,
     if (p->type != CUFFT_Z2D) {
         return CUFFT_INVALID_TYPE;
     }
+    const cufftResult sync_status = synchronize_plan_stream(*p);
+    if (sync_status != CUFFT_SUCCESS) return sync_status;
     return exec_z2d(*p, idata, odata);
 }
 

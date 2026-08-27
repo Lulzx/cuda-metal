@@ -467,12 +467,12 @@ as gaps have been closed.
 - "Full" metadata RE is effectively complete for the kernels we emit; unknown future
   ABI changes will be caught by the xcode regression harness.
 
-## NVIDIA cuda-samples sweep (2026-08-26)
+## NVIDIA cuda-samples sweep (2026-08-27)
 
 83 gated headless samples from `NVIDIA/cuda-samples` (`cpp/0_Introduction`,
 `2_Concepts_and_Techniques`, `3_CUDA_Features`, `4_CUDA_Libraries`,
 `6_Performance`) are compiled and run against `libcumetal`. Result:
-**32 pass, 3 waive cleanly, 48 do not yet have a passing runtime result**.
+**33 pass, 3 waive cleanly, 47 do not yet have a passing runtime result**.
 
 This runs as `conformance_cuda_samples_sweep`. The samples themselves are not
 vendored -- the test skips (77) unless a `cuda-samples` checkout is present at
@@ -492,6 +492,14 @@ the headers themselves compiled clean. Fixed, along with a `cudaDataType`
 collision (`cusparse.h` declared it `typedef int`, `cublas_v2.h` as an enum, so
 including both was a hard typedef-redefinition error); `library_types.h` now
 owns that type the way real CUDA does.
+
+The unmodified `simpleCUFFT` sample also exposed two independent silent-wrong
+paths. Generic PTX-to-MSL global memory emission discarded a derived pointer's
+byte stride and literal displacement, so scalar loads for one `float2` both read
+`ptr[gid]` and both stores targeted the same scalar. It now derives checked Metal
+element indices from the PTX byte address. Separately, the synchronous CPU/vDSP
+cuFFT shim did not wait for a preceding Metal kernel on its stream; every execute
+now synchronizes its bound/default stream before accessing plan buffers.
 
 What the sweep says is still missing, in rough order of how many samples it
 blocks:
@@ -541,6 +549,14 @@ blocks:
   implementation. Separately, `simpleCudaGraphs` remains `run-fail` because its
   identical FP64 reductions disagree numerically; `jacobiCudaGraphs` remains
   `run-fail` because Metal rejects its first Jacobi compute pipeline.
+- **cuFFT advanced plans** -- Contiguous rank-1 `cufftXtMakePlanMany` maps matching
+  FP32/FP64 C2C, R2C, and C2R types onto the existing vDSP-backed engine. A bounded
+  direct DFT covers vDSP-unsupported lengths through 1,024 elements, and synchronous
+  shim execution waits for the bound/default CUDA stream. This closes NVIDIA's
+  unmodified `simpleCUFFT` sample, including its 56-point convolution and device
+  pointwise-multiply kernel. Strided/embedded Xt layouts, multidimensional execution,
+  mixed precision, half/bfloat16, and larger vDSP-unsupported lengths remain explicit
+  `CUFFT_NOT_SUPPORTED` gaps.
 - **Dynamic parallelism (CDP)** -- device-side stream creation and launch. 3 samples.
 - **Library pointer modes** -- cuBLAS handle state supports host and device
   pointer modes. The synchronous S/D AXPY, SCAL, and DOT paths resolve tracked

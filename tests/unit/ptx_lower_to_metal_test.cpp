@@ -861,6 +861,51 @@ DONE:
                 "reused-base load is not retargeted to the store's base"))
         return 1;
 
+    // A float2 element is represented by scalar PTX loads/stores at byte
+    // offsets 0 and 4 from a gid*8 derived pointer. The MSL emitter must retain
+    // both the byte stride and the per-access displacement.
+    const std::string vector_stride_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry vector_stride(
+    .param .u64 param_in,
+    .param .u64 param_out
+) {
+    .reg .u64 %rd<5>;
+    .reg .f32 %f<4>;
+    .reg .u32 %r<5>;
+
+    ld.param.u64 %rd0, [param_in];
+    ld.param.u64 %rd1, [param_out];
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r4, %r1, %r2, %r3;
+    mul.wide.u32 %rd2, %r4, 8;
+    add.u64 %rd3, %rd0, %rd2;
+    ld.global.f32 %f0, [%rd3];
+    ld.global.f32 %f1, [%rd3+4];
+    add.u64 %rd4, %rd1, %rd2;
+    st.global.f32 [%rd4], %f0;
+    st.global.f32 [%rd4+4], %f1;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions vector_stride_options;
+    vector_stride_options.entry_name = "vector_stride";
+    const auto vector_stride = cumetal::ptx::lower_ptx_to_metal_source(
+        vector_stride_ptx, vector_stride_options);
+    if (!expect(vector_stride.ok && vector_stride.matched,
+                "float2-shaped scalar PTX lowers through direct Metal"))
+        return 1;
+    if (!expect(contains(vector_stride.metal_source, "param_in[gid * 2]") &&
+                    contains(vector_stride.metal_source, "param_in[gid * 2 + 1]") &&
+                    contains(vector_stride.metal_source, "param_out[gid * 2]") &&
+                    contains(vector_stride.metal_source, "param_out[gid * 2 + 1]"),
+                "global memory lowering preserves byte stride and displacement"))
+        return 1;
+
     // Real PTX must beat the name-matched specialization table.
     //
     // lower_ptx_to_metal_source used to consult the hardcoded llm.c/GGML name table *before*
