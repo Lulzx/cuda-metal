@@ -1,0 +1,63 @@
+# Mittelmann LPfeas benchmark, public set (plato.asu.edu/ftp/lpfeas.html, 2026-08-10).
+# 49 public instances; the other 16 in the 65-problem benchmark are undisclosed.
+#
+# url      relative to a base host (see fetch.py SOURCES) -- the benchmark's
+#          display name and the file name differ for 9 of them.
+# emps     1 = the archive expands to a compressed MPS that needs the NETLIB
+#          emps utility; 0 = it expands to a plain .mps.
+# phase    1 = harness shakedown (10), 2 = rest of the public set,
+#          3 = large instances that still fit a 24 GB laptop,
+#          4 = Dual2_5000 and dlr2: ~9-11 GB of solver state before
+#              HiGHS's own model copy, so they swap a 24 GB machine and
+#              the timings stop meaning anything. Opt in explicitly.
+#
+#name             source  url                                      emps  rows      cols      nnz        phase
+L1_sixm250obs     plato   lptestset/L1_sixm250obs.bz2              1     986069    428032    4280320    2
+Linf_520c         plato   lptestset/Linf_520c.bz2                  1     93326     69004     566193     2
+a2864             plato   lptestset/a2864.mps.bz2                  0     22117     200787    20078717   1
+bdry2             plato   lptestset/bdry2.bz2                      1     376500    250998    1500003    2
+cont1             plato   lptestset/misc/cont1.bz2                 1     160793    40398     399991     2
+cont11            plato   lptestset/misc/cont11.bz2                1     160793    80396     439989     2
+datt256           plato   lptestset/datt256_lp.mps.bz2             0     11077     262144    1503732    1
+dlr1              plato   lptestset/dlr1.mps.bz2                   0     1735470   9121907   18365107   2
+ex10              plato   lptestset/ex10.mps.bz2                   0     69609     17680     1179680    1
+fhnw-bin1         plato   lptestset/fhnw-binschedule1.mps.bz2      0     772872    1141653   8611326    2
+fome13            plato   lptestset/fome/fome13.bz2                1     48569     97840     334984     2
+graph40-40        plato   lptestset/graph40-40.mps.bz2             0     360900    102600    1260900    1
+irish-e           plato   lptestset/irish-electricity.mps.bz2      0     104260    61728     538809     2
+neos              plato   lptestset/misc/neos.bz2                  1     479120    36786     1084461    2
+neos3             plato   lptestset/misc/neos3.bz2                 1     512209    6624      1542816    2
+neos-3025225      plato   lptestset/neos-3025225.mps.bz2           0     91572     69846     9357951    2
+neos5052403       plato   lptestset/neos-5052403-cygnet.mps.bz2    0     38269     32868     4898304    1
+neos-5251015      plato   lptestset/neos-5251015.mps.bz2           0     486531    136971    1955388    2
+ns1687037         plato   lptestset/misc/ns1687037.bz2             1     50622     43749     1406739    2
+ns1688926         plato   lptestset/misc/ns1688926.bz2             1     32768     16587     1712128    2
+nug08-3rd         plato   lptestset/nug/nug08-3rd.bz2              1     19728     20448     139008     2
+pds-100           plato   lptestset/pds/pds-100.bz2                1     156244    505360    1390539    2
+psched3-3         plato   lptestset/physiciansched3-3.mps.bz2      0     266228    79555     1062480    2
+qap15             plato   lptestset/qap15.mps.bz2                  0     6331      22275     110700     2
+rail02            miplib  rail02.mps.gz                            0     95791     270869    756228     2
+rail4284          plato   lptestset/rail/rail4284.bz2              1     4284      1092610   12372358   2
+rmine15           plato   lptestset/rmine15.mps.bz2                0     358395    42438     879732     2
+s82               plato   lptestset/s82.mps.bz2                    0     87878     1690631   7022608    1
+s100              plato   lptestset/s100.mps.bz2                   0     14734     364417    2127672    2
+s250r10           plato   lptestset/s250r10.mps.bz2                0     10963     273142    1572104    1
+savsched1         plato   lptestset/savsched1.mps.bz2              0     295990    328575    1846351    2
+scpm1             plato   lptestset/scpm1.mps.bz2                  0     5000      500000    6250000    1
+shs1023           miplib  shs1023.mps.gz                           0     133944    444625    1044725    2
+square41          plato   lptestset/square41.mps.bz2               0     40161     62234     13628623   1
+stat96v2          meszaros MISC/stat96v2.gz                        1     29089     957432    2852184    2
+stormG2_1000      plato   lptestset/misc/stormG2_1000.bz2          1     528186    1259121   4228817    2
+stp3d             miplib  stp3d.mps.gz                             0     159488    204880    662128     2
+support10         plato   lptestset/supportcase10.mps.bz2          0     165685    14770     551152     2
+tpl-tub-ws16      plato   lptestset/tpl-tub-ws1617.mps.bz2         0     1154615   747691    4720567    2
+woodlands09       plato   lptestset/woodlands09.mps.bz2            0     194599    382147    2646003    2
+Primal2_1000      plato   lptestset/Primal2_1000.mps.bz2           0     1299380   2559380   5498140    2
+L1_sixm1000obs    plato   lptestset/L1_sixm1000obs.bz2             1     3082940   1426256   14262560   2
+degme             meszaros NEW/degme.gz                            1     185501    659415    8127528    2
+set-cover         plato   lptestset/set-cover-model.mps.bz2        0     10000     1102008   20442268   1
+Dual2_5000        plato   lptestset/Dual2_5000.mps.bz2             0     30000600  33050602  93001800   4
+thk_48            plato   lptestset/thk_48.mps.bz2                 0     6366377   8609262   27802878   3
+thk_63            plato   lptestset/thk_63.mps.bz2                 0     5694387   7701112   21592414   3
+L2CTA3D           plato   lptestset/L2CTA3D.mps.bz2                0     210000    10000000  30000000   3
+dlr2              plato   lptestset/dlr2.mps.bz2                   0     7132926   38868107  78091589   4
