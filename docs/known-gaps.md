@@ -37,8 +37,12 @@ as gaps have been closed.
   loads read as zeros. `cudaCreateTextureObject` warns once in that case.
 - CUDA graph kernel/memcpy/memset/host-node capture and replay, cloning, root
   introspection, kernel-node parameter updates, and topology-compatible
-  executable updates exist. Graph memory nodes, cross-stream event-capture
-  topology, and the remaining advanced node types are incomplete.
+  executable updates exist. A focused runtime test covers graph allocation/free
+  nodes, fixed returned addresses, linear memcpy, external synchronous/asynchronous
+  free, cross-graph free, auto-free-on-launch, one-executable enforcement, memory
+  attributes, trimming, and negative paths. Virtual-address/physical-allocation
+  reuse, cross-stream event-capture topology, and the remaining advanced node types
+  are incomplete.
 - MLIR GPU-dialect kernel fusion / advanced scheduling remains an optional
   architecture direction, not a compatibility claim.
 
@@ -521,19 +525,22 @@ blocks:
   follow-on work. Other samples can still be blocked independently by cooperative-groups or
   dynamic-parallelism gaps.
 - **Tensor cores** -- `mma.h` / `nvcuda::wmma`. 4 samples.
-- **CUDA graph memory nodes** -- `cudaGraphAddMemAllocNode`,
-  `cudaGraphAddMemFreeNode`, graph-memory attributes, trimming, and their
-  virtual-address lifetime semantics. 2 samples. The graph runtime now preserves
-  dependencies, reports actual roots, clones topology, snapshots kernel argument
-  bytes, captures host functions, and supports `cudaGraphExecKernelNodeSetParams`.
-  `simpleCudaGraphs` consequently compiles and runs, but remains `run-fail`: its
-  twelve identical FP64 reductions disagree numerically, and the sweep checks the
-  printed values instead of trusting the sample's unconditional zero exit status.
-  `jacobiCudaGraphs` also compiles after adding topology-checked whole-graph updates
-  and exact binary64-sign-bit `__nv_fabs` lowering. Its first Jacobi kernel emits a
-  metallib but Metal rejects the compute pipeline with
-  `XPC_ERROR_CONNECTION_INTERRUPTED`, so it is likewise `run-fail`, not claimed as
-  graph conformance.
+- **CUDA graph memory nodes** -- The clean-room CUDA 12 ABI and runtime now expose
+  `cudaGraphAddMemAllocNode`, `cudaGraphAddMemFreeNode`,
+  `cudaGraphAddMemcpyNode1D`, parameter queries, auto-free instantiation, device
+  graph-memory attributes, and trimming. Focused runtime coverage validates fixed
+  addresses; ordered same-graph free; allocation lifetime beyond graph destruction;
+  `cudaFree`, `cudaFreeAsync`, and relaunch; free-only cross-graph execution;
+  mutually exclusive free ownership; high-water counters; and invalid parameters.
+  NVIDIA's unmodified `graphMemoryFootprint` and `graphMemoryNodes` translation units
+  compile and link. Their clock-spinning / 8-million-element workloads were not run
+  in this resource-bounded pass, so both manifest entries are `run-unverified`, not
+  claimed as sample conformance. CuMetal does not yet reuse one freed graph virtual
+  address for a later allocation or model CUDA's retained physical allocator cache,
+  so `cudaDeviceGraphMemTrim` is a correct no-op only for the current no-cache
+  implementation. Separately, `simpleCudaGraphs` remains `run-fail` because its
+  identical FP64 reductions disagree numerically; `jacobiCudaGraphs` remains
+  `run-fail` because Metal rejects its first Jacobi compute pipeline.
 - **Dynamic parallelism (CDP)** -- device-side stream creation and launch. 3 samples.
 - **Library pointer modes** -- cuBLAS handle state supports host and device
   pointer modes. The synchronous S/D AXPY, SCAL, and DOT paths resolve tracked

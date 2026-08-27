@@ -505,14 +505,36 @@ typedef struct cudaGraphExec_st* cudaGraphExec_t;
 typedef struct cudaGraphNode_st* cudaGraphNode_t;
 
 typedef enum cudaGraphNodeType {
-    cudaGraphNodeTypeKernel = 0,
-    cudaGraphNodeTypeMemcpy = 1,
-    cudaGraphNodeTypeMemset = 2,
-    cudaGraphNodeTypeHost = 3,
-    cudaGraphNodeTypeGraph = 4,
-    cudaGraphNodeTypeEmpty = 5,
-    cudaGraphNodeTypeCount = 6,
+    cudaGraphNodeTypeKernel = 0x00,
+    cudaGraphNodeTypeMemcpy = 0x01,
+    cudaGraphNodeTypeMemset = 0x02,
+    cudaGraphNodeTypeHost = 0x03,
+    cudaGraphNodeTypeGraph = 0x04,
+    cudaGraphNodeTypeEmpty = 0x05,
+    cudaGraphNodeTypeWaitEvent = 0x06,
+    cudaGraphNodeTypeEventRecord = 0x07,
+    cudaGraphNodeTypeExtSemaphoreSignal = 0x08,
+    cudaGraphNodeTypeExtSemaphoreWait = 0x09,
+    cudaGraphNodeTypeMemAlloc = 0x0a,
+    cudaGraphNodeTypeMemFree = 0x0b,
+    cudaGraphNodeTypeConditional = 0x0d,
+    cudaGraphNodeTypeReserved16 = 0x10,
+    cudaGraphNodeTypeCount,
 } cudaGraphNodeType;
+
+typedef enum cudaGraphMemAttributeType {
+    cudaGraphMemAttrUsedMemCurrent = 0x0,
+    cudaGraphMemAttrUsedMemHigh = 0x1,
+    cudaGraphMemAttrReservedMemCurrent = 0x2,
+    cudaGraphMemAttrReservedMemHigh = 0x3,
+} cudaGraphMemAttributeType;
+
+typedef enum cudaGraphInstantiateFlags {
+    cudaGraphInstantiateFlagAutoFreeOnLaunch = 1,
+    cudaGraphInstantiateFlagUpload = 2,
+    cudaGraphInstantiateFlagDeviceLaunch = 4,
+    cudaGraphInstantiateFlagUseNodePriority = 8,
+} cudaGraphInstantiateFlags;
 
 typedef enum cudaGraphExecUpdateResult {
     cudaGraphExecUpdateSuccess = 0,
@@ -818,6 +840,9 @@ cudaError_t cudaGraphDestroy(cudaGraph_t graph);
 cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
                                   cudaGraphNode_t* pErrorNode, char* pLogBuffer,
                                   size_t bufferSize);
+cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec,
+                                           cudaGraph_t graph,
+                                           unsigned long long flags);
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream);
 cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
                                 cudaGraphNode_t* hErrorNode_out,
@@ -967,6 +992,41 @@ cudaChannelFormatDesc cudaCreateChannelDesc(int x, int y, int z, int w,
 // lifetime transitions remain ordered by the selected CUDA stream.
 typedef struct cudaMemPool_st* cudaMemPool_t;
 
+typedef enum cudaMemAllocationType {
+    cudaMemAllocationTypeInvalid = 0,
+    cudaMemAllocationTypePinned = 1,
+    cudaMemAllocationTypeManaged = 2,
+} cudaMemAllocationType;
+
+typedef enum cudaMemAllocationHandleType {
+    cudaMemHandleTypeNone = 0,
+    cudaMemHandleTypePosixFileDescriptor = 1,
+    cudaMemHandleTypeWin32 = 2,
+    cudaMemHandleTypeWin32Kmt = 4,
+} cudaMemAllocationHandleType;
+
+typedef enum cudaMemLocationType {
+    cudaMemLocationTypeInvalid = 0,
+    cudaMemLocationTypeDevice = 1,
+    cudaMemLocationTypeHost = 2,
+} cudaMemLocationType;
+
+typedef struct cudaMemLocation {
+    cudaMemLocationType type;
+    int id;
+} cudaMemLocation;
+
+typedef enum cudaMemAccessFlags {
+    cudaMemAccessFlagsProtNone = 0,
+    cudaMemAccessFlagsProtRead = 1,
+    cudaMemAccessFlagsProtReadWrite = 3,
+} cudaMemAccessFlags;
+
+typedef struct cudaMemAccessDesc {
+    cudaMemLocation location;
+    cudaMemAccessFlags flags;
+} cudaMemAccessDesc;
+
 typedef enum cudaMemPoolAttr {
     cudaMemPoolReuseFollowEventDependencies = 1,
     cudaMemPoolReuseAllowOpportunistic = 2,
@@ -979,12 +1039,20 @@ typedef enum cudaMemPoolAttr {
 } cudaMemPoolAttr;
 
 typedef struct cudaMemPoolProps {
-    int allocType;
-    int handleTypes;
-    int location_type;
-    int location_id;
-    unsigned char reserved[56];
+    cudaMemAllocationType allocType;
+    cudaMemAllocationHandleType handleTypes;
+    cudaMemLocation location;
+    void* win32SecurityAttributes;
+    unsigned char reserved[64];
 } cudaMemPoolProps;
+
+typedef struct cudaMemAllocNodeParams {
+    cudaMemPoolProps poolProps;
+    cudaMemAccessDesc* accessDescs;
+    size_t accessDescCount;
+    size_t bytesize;
+    void* dptr;
+} cudaMemAllocNodeParams;
 
 cudaError_t cudaMallocAsync(void** dev_ptr, size_t size, cudaStream_t stream);
 cudaError_t cudaFreeAsync(void* dev_ptr, cudaStream_t stream);
@@ -1026,12 +1094,40 @@ cudaError_t cudaGraphAddKernelNode(cudaGraphNode_t* pGraphNode, cudaGraph_t grap
 cudaError_t cudaGraphAddMemcpyNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
                                     const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                     const cudaMemcpy3DParms* pCopyParams);
+cudaError_t cudaGraphAddMemcpyNode1D(cudaGraphNode_t* pGraphNode,
+                                      cudaGraph_t graph,
+                                      const cudaGraphNode_t* pDependencies,
+                                      size_t numDependencies,
+                                      void* dst,
+                                      const void* src,
+                                      size_t count,
+                                      cudaMemcpyKind kind);
 cudaError_t cudaGraphAddMemsetNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
                                     const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                     const cudaMemsetParams* pMemsetParams);
 cudaError_t cudaGraphAddHostNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
                                   const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                   const cudaHostNodeParams* pNodeParams);
+cudaError_t cudaGraphAddMemAllocNode(cudaGraphNode_t* pGraphNode,
+                                     cudaGraph_t graph,
+                                     const cudaGraphNode_t* pDependencies,
+                                     size_t numDependencies,
+                                     cudaMemAllocNodeParams* nodeParams);
+cudaError_t cudaGraphAddMemFreeNode(cudaGraphNode_t* pGraphNode,
+                                    cudaGraph_t graph,
+                                    const cudaGraphNode_t* pDependencies,
+                                    size_t numDependencies,
+                                    void* dptr);
+cudaError_t cudaGraphMemAllocNodeGetParams(cudaGraphNode_t node,
+                                           cudaMemAllocNodeParams* params_out);
+cudaError_t cudaGraphMemFreeNodeGetParams(cudaGraphNode_t node, void** dptr_out);
+cudaError_t cudaDeviceGetGraphMemAttribute(int device,
+                                            cudaGraphMemAttributeType attr,
+                                            void* value);
+cudaError_t cudaDeviceSetGraphMemAttribute(int device,
+                                            cudaGraphMemAttributeType attr,
+                                            void* value);
+cudaError_t cudaDeviceGraphMemTrim(int device);
 cudaError_t cudaGraphExecKernelNodeSetParams(cudaGraphExec_t hGraphExec,
                                               cudaGraphNode_t hNode,
                                               const cudaKernelNodeParams* nodeParams);

@@ -221,8 +221,9 @@ Engineering gaps, not fundamental impossibilities:
 - Texture and surface object lifecycle exists; general device-side sampling needs
   a Metal texture binding ABI.
 - CUDA graphs cover tested dependency-ordered kernel/linear-memcpy/memset/host-node
-  capture and replay, cloning, and compatible executable updates, but memory nodes
-  and other advanced behavior are incomplete.
+  capture and replay, cloning, compatible executable updates, and graph-memory
+  allocation/free lifetimes. Allocator reuse, cross-stream capture, and other
+  advanced behavior remain incomplete.
 - Device `printf` uses a bounded buffer and limits format strings to 256 bytes.
 - CUDA, library-shim, PhysX, llama.cpp, and PTX coverage is incomplete.
 

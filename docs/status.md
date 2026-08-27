@@ -885,8 +885,13 @@ Known limitations (see spec §2.2 and §8):
   fatbin PTX images are supported; full NVCC fatbinary variants are not yet implemented.
 - CUDA Graphs: tested dependency-ordered kernel/linear-memcpy/memset/host-node capture and
   replay, cloning, root introspection, kernel-node parameter updates, and
-  topology-compatible executable updates are implemented. Graph memory nodes,
-  cross-stream event-capture topology, and advanced node types remain incomplete.
+  topology-compatible executable updates are implemented. Focused runtime coverage
+  now also passes graph allocation/free nodes, linear 1D copy nodes, fixed addresses,
+  synchronous/asynchronous external free and relaunch, free-only cross-graph execution,
+  auto-free-on-launch, graph-memory counters/trimming, and negative paths. The
+  unmodified `graphMemoryFootprint` and `graphMemoryNodes` samples compile and link,
+  but their heavy workloads were not run and remain `run-unverified`. Graph allocator
+  reuse, cross-stream event-capture topology, and advanced node types remain incomplete.
 - Dynamic parallelism: compile-time error per spec §2.2.
 - Texture/surface object lifecycle and CUDA-array memcpy are implemented; general
   device-side texture/surface sampling remains deferred per spec §2.2 and §8.

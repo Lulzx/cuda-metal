@@ -87,8 +87,8 @@ compile-fail 3_CUDA_Features/cudaCompressibleMemory
 compile-fail 3_CUDA_Features/cudaTensorCoreGemm
 compile-fail 3_CUDA_Features/dmmaTensorCoreGemm
 compile-fail 3_CUDA_Features/globalToShmemAsyncCopy
-compile-fail 3_CUDA_Features/graphMemoryFootprint
-compile-fail 3_CUDA_Features/graphMemoryNodes
+run-unverified 3_CUDA_Features/graphMemoryFootprint
+run-unverified 3_CUDA_Features/graphMemoryNodes
 compile-fail 3_CUDA_Features/immaTensorCoreGemm
 run-fail     3_CUDA_Features/jacobiCudaGraphs
 compile-fail 3_CUDA_Features/newdelete

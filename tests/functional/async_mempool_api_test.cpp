@@ -1,9 +1,15 @@
 #include "cuda_runtime.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <thread>
+
+static_assert(sizeof(cudaMemPoolProps) == 88);
+static_assert(offsetof(cudaMemPoolProps, location) == 8);
+static_assert(offsetof(cudaMemPoolProps, win32SecurityAttributes) == 16);
+static_assert(offsetof(cudaMemPoolProps, reserved) == 24);
 
 namespace {
 struct Gate {
@@ -49,9 +55,9 @@ static bool test_malloc_free_async() {
 static bool test_mempool_create_destroy() {
     cudaMemPool_t pool = nullptr;
     cudaMemPoolProps props = {};
-    props.allocType = 1; // cudaMemAllocationTypePinned
-    props.location_type = 1; // cudaMemLocationTypeDevice
-    props.location_id = 0;
+    props.allocType = cudaMemAllocationTypePinned;
+    props.location.type = cudaMemLocationTypeDevice;
+    props.location.id = 0;
 
     cudaError_t err = cudaMemPoolCreate(&pool, &props);
     if (err != cudaSuccess || pool == nullptr) {

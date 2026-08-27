@@ -117,8 +117,9 @@ the remaining semantic boundaries:
   an explicit Metal texture binding ABI (see §8).
 - CUDA graph capture and dependency-ordered replay exist for the tested kernel,
   linear-memcpy, memset, and host-node subset. Clone, root introspection, kernel-node
-  parameter updates, and topology-compatible executable updates are covered.
-  Graph memory nodes and other advanced behavior remain implementation gaps rather
+  parameter updates, topology-compatible executable updates, and a tested graph-memory
+  allocation/free subset are covered. Advanced node types, cross-stream event-capture
+  topology, allocator reuse, and broader graph behavior remain implementation gaps rather
   than blanket non-goals.
 - cuBLAS, cuRAND, cuFFT, cuSPARSE, cuSOLVER, and cuDNN expose tested compatibility
   subsets as Phase 4.5 shims. Full NVIDIA library parity is not a goal (see §11.1).
@@ -808,7 +809,7 @@ partially supported after the original v1 phases:
 | Dynamic parallelism | Metal kernels cannot launch kernels | Compile-time error |
 | Cooperative groups (grid-wide) | No cross-threadgroup barrier in Metal | Partial: threadgroup-scoped CG works |
 | `__ldg()` (texture cache load) | No texture cache hint in AIR | Lowered to plain load; no perf impact on UMA |
-| CUDA graphs | CuMetal replays a tested dependency-ordered kernel/linear-memcpy/memset/host-node subset | Partial; graph memory nodes and advanced node types remain |
+| CUDA graphs | CuMetal replays tested dependency-ordered compute/copy/host nodes and graph-memory allocation/free lifetimes | Partial; allocator reuse, cross-stream capture, and advanced node types remain |
 | Peer-to-peer memory | No multi-GPU on Apple Silicon | Compile-time error |
 | Occupancy API | Apple GPU architecture differs | Returns conservative estimates (see §6.8) |
 | Texture/surface objects | Host lifecycle exists; Metal device binding model differs | Device-side sampling remains deferred and fails explicitly |

@@ -118,6 +118,30 @@ bool load_inline_static_shared_bytes(const char* metallib_path,
 // Graph nodes record operations; instantiation creates an executable sequence.
 // On Apple Silicon (single GPU, UMA), graphs are replayed sequentially.
 
+struct GraphAllocationState;
+
+enum class GraphFreePlacement {
+    kNone,
+    kOwningGraph,
+    kExternalGraph,
+};
+
+struct GraphLifetimeState {
+    std::mutex mutex;
+    bool contains_memory_nodes = false;
+    std::size_t executable_instances = 0;
+};
+
+struct GraphAllocationState {
+    std::shared_ptr<cumetal::metal_backend::Buffer> buffer;
+    void* base = nullptr;
+    void* alias = nullptr;
+    std::size_t size = 0;
+    bool active = false;
+    bool reserved_accounted = false;
+    GraphFreePlacement free_placement = GraphFreePlacement::kNone;
+};
+
 struct cudaGraphNode_st {
     cudaGraphNodeType type = cudaGraphNodeTypeEmpty;
     std::vector<cudaGraphNode_st*> dependencies;
@@ -143,10 +167,21 @@ struct cudaGraphNode_st {
     // Host node data
     cudaHostFn_t host_fn = nullptr;
     void* host_user_data = nullptr;
+
+    // Graph allocation/free node data. The backing buffer is reserved when the
+    // allocation node is created so its CUDA address remains fixed, but it is
+    // inserted into the live allocation table only when replay reaches the
+    // allocation node.
+    std::shared_ptr<GraphAllocationState> graph_allocation;
+    cudaMemPoolProps graph_pool_props{};
+    std::vector<cudaMemAccessDesc> graph_access_descs;
+    void* graph_free_ptr = nullptr;
 };
 
 struct cudaGraph_st {
     std::vector<cudaGraphNode_st*> nodes;
+    std::shared_ptr<GraphLifetimeState> lifetime =
+        std::make_shared<GraphLifetimeState>();
     ~cudaGraph_st() {
         for (auto* n : nodes) { delete n; }
     }
@@ -158,6 +193,8 @@ struct cudaGraphExec_st {
     std::vector<cudaGraphNode_st> nodes;
     std::unordered_map<const cudaGraphNode_st*, std::size_t> source_node_index;
     std::vector<std::vector<std::size_t>> dependency_indices;
+    std::shared_ptr<GraphLifetimeState> lifetime;
+    bool auto_free_on_launch = false;
 };
 
 struct CUevent_st {
@@ -184,6 +221,14 @@ struct RuntimeState {
     cumetal::rt::AllocationTable allocations;
     std::mutex pending_free_mutex;
     std::unordered_set<void*> pending_async_frees;
+    std::mutex graph_memory_mutex;
+    std::unordered_map<void*, std::weak_ptr<GraphAllocationState>> graph_allocations;
+    std::unordered_map<void*, std::shared_ptr<GraphAllocationState>>
+        live_graph_allocations;
+    std::uint64_t graph_used_current = 0;
+    std::uint64_t graph_used_high = 0;
+    std::uint64_t graph_reserved_current = 0;
+    std::uint64_t graph_reserved_high = 0;
     std::mutex stream_mutex;
     struct StreamRecord {
         std::shared_ptr<cumetal::metal_backend::Stream> backend;
@@ -708,6 +753,104 @@ bool use_metal_device_addresses() {
     const char* value = std::getenv("CUMETAL_USE_METAL_DEVICE_ADDRESSES");
     return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0 &&
            std::strcmp(value, "false") != 0 && std::strcmp(value, "FALSE") != 0;
+}
+
+cudaError_t activate_graph_allocation(
+    const std::shared_ptr<GraphAllocationState>& allocation) {
+    if (allocation == nullptr || allocation->buffer == nullptr ||
+        allocation->base == nullptr || allocation->size == 0) {
+        return cudaErrorInvalidValue;
+    }
+    RuntimeState& state = runtime_state();
+    std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+    if (allocation->active) return cudaErrorInvalidValue;
+
+    std::string error;
+    if (!state.allocations.insert(allocation->base, allocation->size,
+                                  cumetal::rt::AllocationKind::kDevice, 0,
+                                  allocation->buffer, &error)) {
+        return cudaErrorMemoryAllocation;
+    }
+    if (allocation->alias != nullptr && allocation->alias != allocation->base &&
+        !state.allocations.insert(allocation->alias, allocation->size,
+                                  cumetal::rt::AllocationKind::kDevice, 0,
+                                  allocation->buffer, &error, true)) {
+        state.allocations.erase(allocation->base);
+        return cudaErrorMemoryAllocation;
+    }
+    allocation->active = true;
+    // Keep every launched allocation alive independently of graph handles.
+    // A later free node (in this graph or another graph) or cudaFree removes
+    // this ownership. This also preserves an allocation if execution stops
+    // before a same-graph free node is reached.
+    state.live_graph_allocations[allocation->base] = allocation;
+    state.graph_used_current += allocation->size;
+    state.graph_used_high =
+        std::max(state.graph_used_high, state.graph_used_current);
+    return cudaSuccess;
+}
+
+cudaError_t deactivate_graph_allocation(
+    const std::shared_ptr<GraphAllocationState>& allocation) {
+    if (allocation == nullptr) return cudaErrorInvalidValue;
+    RuntimeState& state = runtime_state();
+    std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+    if (!allocation->active) return cudaErrorInvalidValue;
+    if (!state.allocations.erase(allocation->base)) {
+        return cudaErrorInvalidDevicePointer;
+    }
+    allocation->active = false;
+    state.live_graph_allocations.erase(allocation->base);
+    state.graph_used_current =
+        allocation->size > state.graph_used_current
+            ? 0
+            : state.graph_used_current - allocation->size;
+    return cudaSuccess;
+}
+
+void release_graph_allocation(GraphAllocationState* allocation) {
+    if (allocation == nullptr) return;
+    RuntimeState& state = runtime_state();
+    std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+    if (allocation->active) {
+        (void)state.allocations.erase(allocation->base);
+        state.graph_used_current =
+            allocation->size > state.graph_used_current
+                ? 0
+                : state.graph_used_current - allocation->size;
+    }
+    if (allocation->reserved_accounted) {
+        state.graph_reserved_current =
+            allocation->size > state.graph_reserved_current
+                ? 0
+                : state.graph_reserved_current - allocation->size;
+    }
+    state.graph_allocations.erase(allocation->base);
+    state.live_graph_allocations.erase(allocation->base);
+}
+
+void reset_graph_allocation_state() {
+    RuntimeState& state = runtime_state();
+    std::vector<std::shared_ptr<GraphAllocationState>> release_after_unlock;
+    {
+        std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+        release_after_unlock.reserve(state.live_graph_allocations.size());
+        for (auto& [base, allocation] : state.live_graph_allocations) {
+            (void)base;
+            if (allocation != nullptr) {
+                allocation->active = false;
+                release_after_unlock.push_back(allocation);
+            }
+        }
+        for (auto& [base, weak] : state.graph_allocations) {
+            (void)base;
+            if (const auto allocation = weak.lock(); allocation != nullptr) {
+                allocation->active = false;
+            }
+        }
+        state.live_graph_allocations.clear();
+        state.graph_used_current = 0;
+    }
 }
 
 const void* host_accessible_pointer(const void* ptr, std::size_t count) {
@@ -2508,6 +2651,21 @@ cudaError_t cudaFree(void* dev_ptr) {
     }
 
     RuntimeState& state = runtime_state();
+    std::shared_ptr<GraphAllocationState> graph_allocation;
+    {
+        std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+        const auto found = state.graph_allocations.find(dev_ptr);
+        if (found != state.graph_allocations.end()) {
+            graph_allocation = found->second.lock();
+            if (graph_allocation == nullptr) state.graph_allocations.erase(found);
+        }
+    }
+    if (graph_allocation != nullptr) {
+        const cudaError_t status = deactivate_graph_allocation(graph_allocation);
+        return fail(status == cudaErrorInvalidDevicePointer
+                        ? cudaErrorInvalidDevicePointer
+                        : status);
+    }
     if (!state.allocations.erase(dev_ptr)) {
         return fail(cudaErrorInvalidDevicePointer);
     }
@@ -3112,6 +3270,7 @@ cudaError_t cudaDeviceReset(void) {
         tls_per_thread_stream.reset();
     }
 
+    reset_graph_allocation_state();
     state.allocations.clear();
     cumetal::native_registration::clear();
     cumetal::registration::clear();
@@ -3379,6 +3538,12 @@ cudaError_t cudaGraphClone(cudaGraph_t* pGraphClone, cudaGraph_t originalGraph) 
     if (pGraphClone == nullptr || originalGraph == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
+    {
+        std::lock_guard<std::mutex> lock(originalGraph->lifetime->mutex);
+        if (originalGraph->lifetime->contains_memory_nodes) {
+            return fail(cudaErrorNotSupported);
+        }
+    }
     auto* clone = new (std::nothrow) cudaGraph_st();
     if (clone == nullptr) return fail(cudaErrorMemoryAllocation);
 
@@ -3428,6 +3593,14 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
         return fail(cudaErrorInvalidValue);
     }
     if (pErrorNode) { *pErrorNode = nullptr; }
+    // Keep the availability check and instance-count reservation atomic. A
+    // split check/increment lets two concurrent instantiations both observe
+    // zero and violates CUDA's one-executable rule for memory-node graphs.
+    std::unique_lock<std::mutex> lifetime_lock(graph->lifetime->mutex);
+    if (graph->lifetime->contains_memory_nodes &&
+        graph->lifetime->executable_instances != 0) {
+        return fail(cudaErrorInvalidValue);
+    }
 
     std::vector<cudaGraphNode_t> ordered;
     if (!topologically_order_graph(graph, &ordered)) {
@@ -3460,8 +3633,29 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
         exec->nodes.push_back(std::move(copy));
         exec->dependency_indices.push_back(std::move(dependencies));
     }
+    exec->lifetime = graph->lifetime;
+    if (exec->lifetime->contains_memory_nodes) {
+        ++exec->lifetime->executable_instances;
+    }
+    lifetime_lock.unlock();
     *pGraphExec = exec;
     return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec,
+                                           cudaGraph_t graph,
+                                           unsigned long long flags) {
+    if ((flags & ~static_cast<unsigned long long>(
+                     cudaGraphInstantiateFlagAutoFreeOnLaunch)) != 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaError_t status =
+        cudaGraphInstantiate(pGraphExec, graph, nullptr, nullptr, 0);
+    if (status == cudaSuccess && pGraphExec != nullptr && *pGraphExec != nullptr) {
+        (*pGraphExec)->auto_free_on_launch =
+            (flags & cudaGraphInstantiateFlagAutoFreeOnLaunch) != 0;
+    }
+    return fail(status);
 }
 
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
@@ -3499,11 +3693,38 @@ cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
                     }
                 }
                 break;
+            case cudaGraphNodeTypeMemAlloc:
+                err = activate_graph_allocation(node.graph_allocation);
+                break;
+            case cudaGraphNodeTypeMemFree:
+                err = deactivate_graph_allocation(node.graph_allocation);
+                break;
             default:
                 break;
         }
         if (err != cudaSuccess) {
             return fail(err);
+        }
+    }
+    if (graphExec->auto_free_on_launch) {
+        std::unordered_set<GraphAllocationState*> seen;
+        for (const auto& node : graphExec->nodes) {
+            if (node.type != cudaGraphNodeTypeMemAlloc ||
+                node.graph_allocation == nullptr ||
+                !seen.insert(node.graph_allocation.get()).second) {
+                continue;
+            }
+            RuntimeState& state = runtime_state();
+            bool active = false;
+            {
+                std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+                active = node.graph_allocation->active;
+            }
+            if (active) {
+                const cudaError_t err =
+                    deactivate_graph_allocation(node.graph_allocation);
+                if (err != cudaSuccess) return fail(err);
+            }
         }
     }
     return fail(cudaSuccess);
@@ -3517,6 +3738,13 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
     }
     if (hErrorNode_out != nullptr) *hErrorNode_out = nullptr;
     *updateResult_out = cudaGraphExecUpdateError;
+    {
+        std::lock_guard<std::mutex> lock(hGraph->lifetime->mutex);
+        if (hGraph->lifetime->contains_memory_nodes) {
+            *updateResult_out = cudaGraphExecUpdateErrorNotSupported;
+            return fail(cudaSuccess);
+        }
+    }
 
     std::vector<cudaGraphNode_t> ordered;
     if (!topologically_order_graph(hGraph, &ordered)) {
@@ -3573,6 +3801,13 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
 cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec) {
     if (graphExec == nullptr) {
         return fail(cudaErrorInvalidValue);
+    }
+    if (graphExec->lifetime != nullptr) {
+        std::lock_guard<std::mutex> lock(graphExec->lifetime->mutex);
+        if (graphExec->lifetime->contains_memory_nodes &&
+            graphExec->lifetime->executable_instances != 0) {
+            --graphExec->lifetime->executable_instances;
+        }
     }
     delete graphExec;
     return fail(cudaSuccess);
@@ -3656,6 +3891,34 @@ cudaError_t cudaGraphAddMemcpyNode(cudaGraphNode_t* pGraphNode, cudaGraph_t grap
     return fail(cudaSuccess);
 }
 
+cudaError_t cudaGraphAddMemcpyNode1D(cudaGraphNode_t* pGraphNode,
+                                      cudaGraph_t graph,
+                                      const cudaGraphNode_t* pDependencies,
+                                      size_t numDependencies,
+                                      void* dst,
+                                      const void* src,
+                                      size_t count,
+                                      cudaMemcpyKind kind) {
+    if (pGraphNode == nullptr || graph == nullptr || dst == nullptr || src == nullptr ||
+        count == 0 || validate_memcpy_kind(kind) != cudaSuccess) {
+        return fail(cudaErrorInvalidValue);
+    }
+    auto* node = new (std::nothrow) cudaGraphNode_st();
+    if (node == nullptr) return fail(cudaErrorMemoryAllocation);
+    node->type = cudaGraphNodeTypeMemcpy;
+    node->dst = dst;
+    node->src = src;
+    node->count = count;
+    node->memcpy_kind = kind;
+    if (!assign_graph_dependencies(graph, node, pDependencies, numDependencies)) {
+        delete node;
+        return fail(cudaErrorInvalidValue);
+    }
+    graph->nodes.push_back(node);
+    *pGraphNode = node;
+    return fail(cudaSuccess);
+}
+
 cudaError_t cudaGraphAddMemsetNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
                                     const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                     const cudaMemsetParams* pMemsetParams) {
@@ -3690,6 +3953,268 @@ cudaError_t cudaGraphAddHostNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
     }
     graph->nodes.push_back(node);
     *pGraphNode = node;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphAddMemAllocNode(cudaGraphNode_t* pGraphNode,
+                                     cudaGraph_t graph,
+                                     const cudaGraphNode_t* pDependencies,
+                                     size_t numDependencies,
+                                     cudaMemAllocNodeParams* nodeParams) {
+    if (pGraphNode == nullptr || graph == nullptr || nodeParams == nullptr ||
+        nodeParams->bytesize == 0 ||
+        (nodeParams->accessDescCount != 0 && nodeParams->accessDescs == nullptr) ||
+        nodeParams->poolProps.allocType != cudaMemAllocationTypePinned ||
+        nodeParams->poolProps.handleTypes != cudaMemHandleTypeNone ||
+        nodeParams->poolProps.location.type != cudaMemLocationTypeDevice ||
+        nodeParams->poolProps.location.id != 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    for (size_t i = 0; i < nodeParams->accessDescCount; ++i) {
+        const cudaMemAccessDesc& access = nodeParams->accessDescs[i];
+        if (access.location.type != cudaMemLocationTypeDevice ||
+            access.location.id != 0 ||
+            (access.flags != cudaMemAccessFlagsProtRead &&
+             access.flags != cudaMemAccessFlagsProtReadWrite)) {
+            return fail(cudaErrorNotSupported);
+        }
+    }
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) return fail(init_status);
+
+    auto* node = new (std::nothrow) cudaGraphNode_st();
+    if (node == nullptr) return fail(cudaErrorMemoryAllocation);
+    node->type = cudaGraphNodeTypeMemAlloc;
+    node->graph_pool_props = nodeParams->poolProps;
+    if (nodeParams->accessDescCount != 0) {
+        node->graph_access_descs.assign(nodeParams->accessDescs,
+                                        nodeParams->accessDescs +
+                                            nodeParams->accessDescCount);
+    }
+    if (!assign_graph_dependencies(graph, node, pDependencies, numDependencies)) {
+        delete node;
+        return fail(cudaErrorInvalidValue);
+    }
+
+    std::shared_ptr<cumetal::metal_backend::Buffer> buffer;
+    std::string error;
+    const cudaError_t alloc_status = cumetal::metal_backend::allocate_buffer(
+        nodeParams->bytesize, &buffer, &error);
+    if (alloc_status != cudaSuccess || buffer == nullptr ||
+        buffer->contents() == nullptr) {
+        delete node;
+        return fail(alloc_status == cudaSuccess ? cudaErrorMemoryAllocation
+                                                : alloc_status);
+    }
+    const std::uintptr_t device_address = buffer->device_address();
+    if (use_metal_device_addresses() && device_address == 0) {
+        delete node;
+        return fail(cudaErrorMemoryAllocation);
+    }
+    void* host_base = buffer->contents();
+    void* device_base = reinterpret_cast<void*>(device_address);
+    void* base = use_metal_device_addresses() ? device_base : host_base;
+    void* alias = base == host_base ? device_base : host_base;
+
+    std::shared_ptr<GraphAllocationState> allocation(
+        new (std::nothrow) GraphAllocationState(),
+        [](GraphAllocationState* value) {
+            release_graph_allocation(value);
+            delete value;
+        });
+    if (allocation == nullptr) {
+        delete node;
+        return fail(cudaErrorMemoryAllocation);
+    }
+    allocation->buffer = std::move(buffer);
+    allocation->base = base;
+    allocation->alias = alias;
+    allocation->size = nodeParams->bytesize;
+    node->graph_allocation = allocation;
+
+    RuntimeState& state = runtime_state();
+    bool duplicate_address = false;
+    {
+        std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+        if (state.graph_allocations.contains(base)) {
+            duplicate_address = true;
+        } else {
+            state.graph_allocations.emplace(base, allocation);
+            state.graph_reserved_current += allocation->size;
+            allocation->reserved_accounted = true;
+            state.graph_reserved_high =
+                std::max(state.graph_reserved_high, state.graph_reserved_current);
+        }
+    }
+    if (duplicate_address) {
+        delete node;
+        return fail(cudaErrorMemoryAllocation);
+    }
+    {
+        std::lock_guard<std::mutex> lock(graph->lifetime->mutex);
+        graph->lifetime->contains_memory_nodes = true;
+    }
+    graph->nodes.push_back(node);
+    nodeParams->dptr = base;
+    *pGraphNode = node;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphAddMemFreeNode(cudaGraphNode_t* pGraphNode,
+                                    cudaGraph_t graph,
+                                    const cudaGraphNode_t* pDependencies,
+                                    size_t numDependencies,
+                                    void* dptr) {
+    if (pGraphNode == nullptr || graph == nullptr || dptr == nullptr ||
+        (numDependencies != 0 && pDependencies == nullptr)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    std::shared_ptr<GraphAllocationState> allocation;
+    cudaGraphNode_t allocation_node = nullptr;
+    for (cudaGraphNode_t candidate : graph->nodes) {
+        if (candidate != nullptr && candidate->type == cudaGraphNodeTypeMemAlloc &&
+            candidate->graph_allocation != nullptr &&
+            candidate->graph_allocation->base == dptr) {
+            allocation = candidate->graph_allocation;
+            allocation_node = candidate;
+        }
+        if (candidate != nullptr && candidate->type == cudaGraphNodeTypeMemFree &&
+            candidate->graph_free_ptr == dptr) {
+            return fail(cudaErrorInvalidValue);
+        }
+    }
+    if (allocation == nullptr) {
+        RuntimeState& state = runtime_state();
+        std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+        const auto found = state.graph_allocations.find(dptr);
+        if (found != state.graph_allocations.end()) {
+            allocation = found->second.lock();
+        }
+    }
+    if (allocation == nullptr) return fail(cudaErrorInvalidValue);
+
+    std::unordered_set<cudaGraphNode_t> visited;
+    std::function<bool(cudaGraphNode_t)> reaches_allocation =
+        [&](cudaGraphNode_t node) -> bool {
+        if (node == allocation_node) return true;
+        if (node == nullptr || !visited.insert(node).second) return false;
+        for (cudaGraphNode_t dependency : node->dependencies) {
+            if (reaches_allocation(dependency)) return true;
+        }
+        return false;
+    };
+    bool ordered_after_allocation = allocation_node == nullptr;
+    for (size_t i = 0; i < numDependencies; ++i) {
+        if (!graph_contains_node(graph, pDependencies[i])) {
+            return fail(cudaErrorInvalidValue);
+        }
+        visited.clear();
+        if (reaches_allocation(pDependencies[i])) ordered_after_allocation = true;
+    }
+    if (!ordered_after_allocation) return fail(cudaErrorInvalidValue);
+
+    auto* node = new (std::nothrow) cudaGraphNode_st();
+    if (node == nullptr) return fail(cudaErrorMemoryAllocation);
+    node->type = cudaGraphNodeTypeMemFree;
+    node->graph_allocation = std::move(allocation);
+    node->graph_free_ptr = dptr;
+    if (!assign_graph_dependencies(graph, node, pDependencies, numDependencies)) {
+        delete node;
+        return fail(cudaErrorInvalidValue);
+    }
+    {
+        RuntimeState& state = runtime_state();
+        std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+        if (node->graph_allocation->free_placement != GraphFreePlacement::kNone) {
+            delete node;
+            return fail(cudaErrorInvalidValue);
+        }
+        node->graph_allocation->free_placement =
+            allocation_node == nullptr ? GraphFreePlacement::kExternalGraph
+                                       : GraphFreePlacement::kOwningGraph;
+    }
+    {
+        std::lock_guard<std::mutex> lock(graph->lifetime->mutex);
+        graph->lifetime->contains_memory_nodes = true;
+    }
+    graph->nodes.push_back(node);
+    *pGraphNode = node;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphMemAllocNodeGetParams(cudaGraphNode_t node,
+                                           cudaMemAllocNodeParams* params_out) {
+    if (node == nullptr || params_out == nullptr ||
+        node->type != cudaGraphNodeTypeMemAlloc ||
+        node->graph_allocation == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    *params_out = {};
+    params_out->poolProps = node->graph_pool_props;
+    params_out->accessDescs = node->graph_access_descs.empty()
+                                  ? nullptr
+                                  : node->graph_access_descs.data();
+    params_out->accessDescCount = node->graph_access_descs.size();
+    params_out->bytesize = node->graph_allocation->size;
+    params_out->dptr = node->graph_allocation->base;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphMemFreeNodeGetParams(cudaGraphNode_t node,
+                                          void** dptr_out) {
+    if (node == nullptr || dptr_out == nullptr ||
+        node->type != cudaGraphNodeTypeMemFree) {
+        return fail(cudaErrorInvalidValue);
+    }
+    *dptr_out = node->graph_free_ptr;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaDeviceGetGraphMemAttribute(int device,
+                                            cudaGraphMemAttributeType attr,
+                                            void* value) {
+    if (device != 0 || value == nullptr) return fail(cudaErrorInvalidValue);
+    RuntimeState& state = runtime_state();
+    std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+    auto* out = static_cast<std::uint64_t*>(value);
+    switch (attr) {
+        case cudaGraphMemAttrUsedMemCurrent: *out = state.graph_used_current; break;
+        case cudaGraphMemAttrUsedMemHigh: *out = state.graph_used_high; break;
+        case cudaGraphMemAttrReservedMemCurrent:
+            *out = state.graph_reserved_current;
+            break;
+        case cudaGraphMemAttrReservedMemHigh: *out = state.graph_reserved_high; break;
+        default: return fail(cudaErrorInvalidValue);
+    }
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaDeviceSetGraphMemAttribute(int device,
+                                            cudaGraphMemAttributeType attr,
+                                            void* value) {
+    if (device != 0 || value == nullptr) return fail(cudaErrorInvalidValue);
+    const std::uint64_t requested = *static_cast<const std::uint64_t*>(value);
+    if (requested != 0) return fail(cudaErrorInvalidValue);
+    RuntimeState& state = runtime_state();
+    std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+    switch (attr) {
+        case cudaGraphMemAttrUsedMemHigh:
+            state.graph_used_high = state.graph_used_current;
+            break;
+        case cudaGraphMemAttrReservedMemHigh:
+            state.graph_reserved_high = state.graph_reserved_current;
+            break;
+        default:
+            return fail(cudaErrorInvalidValue);
+    }
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaDeviceGraphMemTrim(int device) {
+    if (device != 0) return fail(cudaErrorInvalidValue);
+    // Graph-owned buffers retain fixed virtual addresses for the graph's
+    // lifetime. CuMetal currently keeps no additional unused graph allocator
+    // cache, so there is nothing eligible to return here.
     return fail(cudaSuccess);
 }
 
@@ -5291,9 +5816,22 @@ cudaError_t cudaFreeAsync(void* dev_ptr, cudaStream_t stream) {
             return fail(cudaErrorInvalidDevicePointer);
         }
     }
-    const cudaError_t status = enqueue_stream_host_op(stream, [dev_ptr]() {
+    std::shared_ptr<GraphAllocationState> graph_allocation;
+    {
+        std::lock_guard<std::mutex> lock(state.graph_memory_mutex);
+        const auto found = state.graph_allocations.find(dev_ptr);
+        if (found != state.graph_allocations.end()) {
+            graph_allocation = found->second.lock();
+        }
+    }
+    const cudaError_t status = enqueue_stream_host_op(
+        stream, [dev_ptr, graph_allocation = std::move(graph_allocation)]() {
         RuntimeState& callback_state = runtime_state();
-        (void)callback_state.allocations.erase(dev_ptr);
+        if (graph_allocation != nullptr) {
+            (void)deactivate_graph_allocation(graph_allocation);
+        } else {
+            (void)callback_state.allocations.erase(dev_ptr);
+        }
         std::lock_guard<std::mutex> lock(callback_state.pending_free_mutex);
         callback_state.pending_async_frees.erase(dev_ptr);
     });

@@ -1,5 +1,6 @@
 #include "cuda_runtime.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -335,6 +336,289 @@ static bool test_capture_host_replay() {
     return true;
 }
 
+static bool test_graph_memory_nodes() {
+    std::uint64_t reserved_before = 0;
+    if (cudaDeviceGetGraphMemAttribute(
+            0, cudaGraphMemAttrReservedMemCurrent, &reserved_before) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: initial graph-memory attribute query failed\n");
+        return false;
+    }
+
+    cudaGraph_t graph = nullptr;
+    if (cudaGraphCreate(&graph, 0) != cudaSuccess) return false;
+
+    cudaMemAccessDesc access{};
+    access.location.type = cudaMemLocationTypeDevice;
+    access.location.id = 0;
+    access.flags = cudaMemAccessFlagsProtReadWrite;
+    cudaMemAllocNodeParams alloc{};
+    alloc.poolProps.allocType = cudaMemAllocationTypePinned;
+    alloc.poolProps.handleTypes = cudaMemHandleTypeNone;
+    alloc.poolProps.location.type = cudaMemLocationTypeDevice;
+    alloc.poolProps.location.id = 0;
+    alloc.accessDescs = &access;
+    alloc.accessDescCount = 1;
+    alloc.bytesize = 64;
+
+    cudaGraphNode_t invalid_alloc_node = nullptr;
+    cudaMemAllocNodeParams invalid_alloc = alloc;
+    invalid_alloc.poolProps.location.id = 1;
+    if (cudaGraphAddMemAllocNode(&invalid_alloc_node, graph, nullptr, 0,
+                                 &invalid_alloc) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: graph allocation accepted an invalid device\n");
+        return false;
+    }
+    invalid_alloc = alloc;
+    invalid_alloc.accessDescs->flags = cudaMemAccessFlagsProtNone;
+    if (cudaGraphAddMemAllocNode(&invalid_alloc_node, graph, nullptr, 0,
+                                 &invalid_alloc) != cudaErrorNotSupported) {
+        std::fprintf(stderr, "FAIL: graph allocation accepted unsupported access\n");
+        return false;
+    }
+    access.flags = cudaMemAccessFlagsProtReadWrite;
+
+    cudaGraphNode_t alloc_node = nullptr;
+    if (cudaGraphAddMemAllocNode(&alloc_node, graph, nullptr, 0, &alloc) !=
+            cudaSuccess ||
+        alloc.dptr == nullptr) {
+        std::fprintf(stderr, "FAIL: graph allocation node creation failed\n");
+        return false;
+    }
+    cudaGraphNodeType type = cudaGraphNodeTypeEmpty;
+    cudaMemAllocNodeParams queried{};
+    if (cudaGraphNodeGetType(alloc_node, &type) != cudaSuccess ||
+        type != cudaGraphNodeTypeMemAlloc ||
+        cudaGraphMemAllocNodeGetParams(alloc_node, &queried) != cudaSuccess ||
+        queried.dptr != alloc.dptr || queried.bytesize != alloc.bytesize ||
+        queried.accessDescCount != 1) {
+        std::fprintf(stderr, "FAIL: graph allocation metadata mismatch\n");
+        return false;
+    }
+    cudaGraphNode_t invalid_free = nullptr;
+    if (cudaGraphAddMemFreeNode(&invalid_free, graph, nullptr, 0, alloc.dptr) !=
+        cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: unordered graph free node was accepted\n");
+        return false;
+    }
+
+    cudaMemsetParams memset{};
+    memset.dst = alloc.dptr;
+    memset.value = 0x5a;
+    memset.elementSize = 1;
+    memset.width = alloc.bytesize;
+    memset.height = 1;
+    cudaGraphNode_t memset_node = nullptr;
+    if (cudaGraphAddMemsetNode(&memset_node, graph, &alloc_node, 1, &memset) !=
+        cudaSuccess) {
+        std::fprintf(stderr, "FAIL: graph memset after allocation failed\n");
+        return false;
+    }
+
+    unsigned char copied[64] = {};
+    cudaGraphNode_t copy_node = nullptr;
+    if (cudaGraphAddMemcpyNode1D(&copy_node, graph, &memset_node, 1, copied,
+                                 alloc.dptr, sizeof(copied),
+                                 cudaMemcpyDeviceToHost) != cudaSuccess ||
+        cudaGraphAddMemcpyNode1D(&invalid_alloc_node, graph, &memset_node, 1,
+                                 nullptr, alloc.dptr, sizeof(copied),
+                                 cudaMemcpyDeviceToHost) != cudaErrorInvalidValue ||
+        cudaGraphAddMemcpyNode1D(
+            &invalid_alloc_node, graph, &memset_node, 1, copied, alloc.dptr,
+            sizeof(copied), static_cast<cudaMemcpyKind>(99)) !=
+            cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: graph 1D memcpy-node validation failed\n");
+        return false;
+    }
+    cudaGraphNode_t free_node = nullptr;
+    if (cudaGraphAddMemFreeNode(&free_node, graph, &copy_node, 1, alloc.dptr) !=
+        cudaSuccess) {
+        std::fprintf(stderr, "FAIL: ordered graph free node creation failed\n");
+        return false;
+    }
+    void* queried_free = nullptr;
+    if (cudaGraphNodeGetType(free_node, &type) != cudaSuccess ||
+        type != cudaGraphNodeTypeMemFree ||
+        cudaGraphMemFreeNodeGetParams(free_node, &queried_free) != cudaSuccess ||
+        queried_free != alloc.dptr ||
+        cudaGraphAddMemFreeNode(&invalid_free, graph, &copy_node, 1, alloc.dptr) !=
+            cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: graph free-node validation mismatch\n");
+        return false;
+    }
+
+    cudaGraph_t clone = nullptr;
+    if (cudaGraphClone(&clone, graph) != cudaErrorNotSupported) {
+        std::fprintf(stderr, "FAIL: graph containing memory nodes was cloned\n");
+        return false;
+    }
+    cudaGraphExec_t exec = nullptr;
+    cudaGraphExec_t duplicate_exec = nullptr;
+    cudaGraphExec_t invalid_flags_exec = nullptr;
+    if (cudaGraphInstantiateWithFlags(&invalid_flags_exec, graph, 2ULL) !=
+            cudaErrorInvalidValue ||
+        invalid_flags_exec != nullptr ||
+        cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0) != cudaSuccess ||
+        cudaGraphInstantiate(&duplicate_exec, graph, nullptr, nullptr, 0) !=
+            cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: graph-memory instantiation contract mismatch\n");
+        return false;
+    }
+
+    std::uint64_t reserved_during = 0;
+    std::uint64_t used = 0;
+    if (cudaDeviceGetGraphMemAttribute(
+            0, cudaGraphMemAttrReservedMemCurrent, &reserved_during) != cudaSuccess ||
+        reserved_during < reserved_before + alloc.bytesize ||
+        cudaDeviceGetGraphMemAttribute(0, cudaGraphMemAttrUsedMemCurrent, &used) !=
+            cudaSuccess ||
+        used != 0) {
+        std::fprintf(stderr, "FAIL: graph-memory pre-launch counters mismatch\n");
+        return false;
+    }
+    if (cudaGraphLaunch(exec, nullptr) != cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: graph allocation/free replay failed\n");
+        return false;
+    }
+    for (unsigned char value : copied) {
+        if (value != 0x5a) {
+            std::fprintf(stderr, "FAIL: graph allocation contents were not preserved\n");
+            return false;
+        }
+    }
+    if (cudaDeviceGetGraphMemAttribute(0, cudaGraphMemAttrUsedMemCurrent, &used) !=
+            cudaSuccess ||
+        used != 0 || cudaFree(alloc.dptr) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: graph free did not end allocation lifetime\n");
+        return false;
+    }
+
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    std::uint64_t reserved_after = 0;
+    if (cudaDeviceGraphMemTrim(0) != cudaSuccess ||
+        cudaDeviceGetGraphMemAttribute(
+            0, cudaGraphMemAttrReservedMemCurrent, &reserved_after) != cudaSuccess ||
+        reserved_after != reserved_before) {
+        std::fprintf(stderr, "FAIL: graph reserved memory was not released\n");
+        return false;
+    }
+
+    // An allocation without a free node remains live after graph destruction
+    // until cudaFree, matching CUDA's externally freed graph-allocation path.
+    cudaGraph_t external_graph = nullptr;
+    cudaGraphCreate(&external_graph, 0);
+    cudaMemAllocNodeParams external_alloc = alloc;
+    external_alloc.dptr = nullptr;
+    cudaGraphNode_t external_node = nullptr;
+    cudaGraphExec_t external_exec = nullptr;
+    if (cudaGraphAddMemAllocNode(&external_node, external_graph, nullptr, 0,
+                                 &external_alloc) != cudaSuccess ||
+        cudaGraphInstantiate(&external_exec, external_graph, nullptr, nullptr, 0) !=
+            cudaSuccess ||
+        cudaGraphLaunch(external_exec, nullptr) != cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: externally freed graph allocation did not launch\n");
+        return false;
+    }
+    cudaGraphExecDestroy(external_exec);
+    cudaGraphDestroy(external_graph);
+    if (cudaMemset(external_alloc.dptr, 0x33, external_alloc.bytesize) != cudaSuccess ||
+        cudaFree(external_alloc.dptr) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: graph allocation did not outlive its graph\n");
+        return false;
+    }
+
+    // A free-only graph may release an allocation node owned by a different
+    // graph. The free graph can be instantiated before the allocation becomes
+    // live, as in NVIDIA's graphMemoryNodes sample.
+    cudaGraph_t owner_graph = nullptr;
+    cudaGraph_t free_graph = nullptr;
+    cudaGraphExec_t owner_exec = nullptr;
+    cudaGraphExec_t free_exec = nullptr;
+    cudaMemAllocNodeParams cross_alloc = alloc;
+    cross_alloc.dptr = nullptr;
+    cudaGraphNode_t owner_node = nullptr;
+    cudaGraphNode_t cross_free_node = nullptr;
+    cudaGraphNode_t conflicting_free_node = nullptr;
+    if (cudaGraphCreate(&owner_graph, 0) != cudaSuccess ||
+        cudaGraphAddMemAllocNode(&owner_node, owner_graph, nullptr, 0,
+                                 &cross_alloc) != cudaSuccess ||
+        cudaGraphInstantiate(&owner_exec, owner_graph, nullptr, nullptr, 0) !=
+            cudaSuccess ||
+        cudaGraphCreate(&free_graph, 0) != cudaSuccess ||
+        cudaGraphAddMemFreeNode(&cross_free_node, free_graph, nullptr, 0,
+                                cross_alloc.dptr) != cudaSuccess ||
+        cudaGraphAddMemFreeNode(&conflicting_free_node, owner_graph, &owner_node, 1,
+                                cross_alloc.dptr) != cudaErrorInvalidValue ||
+        cudaGraphInstantiate(&free_exec, free_graph, nullptr, nullptr, 0) !=
+            cudaSuccess ||
+        cudaGraphLaunch(owner_exec, nullptr) != cudaSuccess ||
+        cudaGraphLaunch(owner_exec, nullptr) != cudaErrorInvalidValue ||
+        cudaFreeAsync(cross_alloc.dptr, nullptr) != cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess ||
+        cudaGraphLaunch(owner_exec, nullptr) != cudaSuccess ||
+        cudaGraphLaunch(free_exec, nullptr) != cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess ||
+        cudaFree(cross_alloc.dptr) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: cross-graph allocation free failed\n");
+        return false;
+    }
+    cudaGraphExecDestroy(free_exec);
+    cudaGraphDestroy(free_graph);
+    cudaGraphExecDestroy(owner_exec);
+    cudaGraphDestroy(owner_graph);
+
+    // Auto-free instantiation ends otherwise-unfreed allocations after every
+    // launch and permits the same executable to launch again at the fixed address.
+    cudaGraph_t auto_graph = nullptr;
+    cudaGraphCreate(&auto_graph, 0);
+    cudaMemAllocNodeParams auto_alloc = alloc;
+    auto_alloc.dptr = nullptr;
+    cudaGraphNode_t auto_node = nullptr;
+    cudaGraphExec_t auto_exec = nullptr;
+    if (cudaGraphAddMemAllocNode(&auto_node, auto_graph, nullptr, 0, &auto_alloc) !=
+            cudaSuccess ||
+        cudaGraphInstantiateWithFlags(
+            &auto_exec, auto_graph, cudaGraphInstantiateFlagAutoFreeOnLaunch) !=
+            cudaSuccess ||
+        cudaGraphLaunch(auto_exec, nullptr) != cudaSuccess ||
+        cudaGraphLaunch(auto_exec, nullptr) != cudaSuccess ||
+        cudaDeviceGetGraphMemAttribute(0, cudaGraphMemAttrUsedMemCurrent, &used) !=
+            cudaSuccess ||
+        used != 0 || cudaFree(auto_alloc.dptr) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: graph auto-free-on-launch contract mismatch\n");
+        return false;
+    }
+    cudaGraphExecDestroy(auto_exec);
+    cudaGraphDestroy(auto_graph);
+
+    if (cudaDeviceGetGraphMemAttribute(
+            0, cudaGraphMemAttrReservedMemCurrent, &reserved_after) != cudaSuccess ||
+        reserved_after != reserved_before) {
+        std::fprintf(stderr, "FAIL: graph allocation lifetime leaked reserved memory\n");
+        return false;
+    }
+
+    std::uint64_t zero = 0;
+    std::uint64_t one = 1;
+    if (cudaDeviceSetGraphMemAttribute(0, cudaGraphMemAttrUsedMemHigh, &zero) !=
+            cudaSuccess ||
+        cudaDeviceSetGraphMemAttribute(
+            0, cudaGraphMemAttrReservedMemHigh, &zero) != cudaSuccess ||
+        cudaDeviceSetGraphMemAttribute(0, cudaGraphMemAttrUsedMemCurrent, &zero) !=
+            cudaErrorInvalidValue ||
+        cudaDeviceSetGraphMemAttribute(0, cudaGraphMemAttrUsedMemHigh, &one) !=
+            cudaErrorInvalidValue ||
+        cudaDeviceGetGraphMemAttribute(-1, cudaGraphMemAttrUsedMemCurrent, &zero) !=
+            cudaErrorInvalidValue ||
+        cudaDeviceGraphMemTrim(1) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: graph-memory high-water reset failed\n");
+        return false;
+    }
+    return true;
+}
+
 int main() {
     if (!test_graph_create_destroy()) return 1;
     if (!test_graph_instantiate_launch()) return 1;
@@ -344,6 +628,7 @@ int main() {
     if (!test_capture_memcpy_replay()) return 1;
     if (!test_capture_memset_replay()) return 1;
     if (!test_capture_host_replay()) return 1;
+    if (!test_graph_memory_nodes()) return 1;
 
     std::printf("PASS: CUDA Graph API tests\n");
     return 0;
