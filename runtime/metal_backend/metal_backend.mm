@@ -1,4 +1,5 @@
 #include "metal_backend.h"
+#include "cumetal/ptx/lower_to_llvm.h"
 #include "metal_math_mode.h"
 
 #import <Foundation/Foundation.h>
@@ -507,6 +508,13 @@ struct BackendState {
     std::unordered_map<std::string, std::string> library_lowering_source;
     std::unordered_map<std::string, std::string> library_math_mode;
     std::unordered_map<std::string, id<MTLComputePipelineState>> pipeline_cache;
+    // Which pipelines declare the 64-bit atomic lock bank, and the one bank
+    // they all share. Read off the compiled function's own bindings rather than
+    // carried alongside it: the metallib is the only thing that knows for
+    // certain, and reading it there stays right whichever path -- runtime,
+    // driver, or a prebuilt library -- produced the kernel.
+    std::unordered_map<std::string, bool> pipeline_uses_lock_bank;
+    std::shared_ptr<Buffer> atomic_lock_bank;
     std::vector<HeapArena> buffer_heaps;
     std::vector<std::weak_ptr<StreamImpl>> streams;
 };
@@ -1014,8 +1022,12 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
         }
 
         NSError* pipeline_error = nil;
+        MTLComputePipelineReflection* reflection = nil;
         id<MTLComputePipelineState> pipeline =
-            [backend.device newComputePipelineStateWithFunction:function error:&pipeline_error];
+            [backend.device newComputePipelineStateWithFunction:function
+                                                        options:MTLPipelineOptionBindingInfo
+                                                     reflection:&reflection
+                                                          error:&pipeline_error];
         if (pipeline == nil) {
             if (error_message != nullptr) {
                 *error_message = "failed to create compute pipeline for function: " + kernel_name;
@@ -1034,9 +1046,56 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
             return nil;
         }
 
+        // Matched on the reserved index, not the argument name: the name is a
+        // courtesy the toolchain is free to drop, while index 29 is reserved
+        // for this and nothing else may bind there.
+        bool uses_lock_bank = false;
+        for (id<MTLBinding> binding in [reflection bindings]) {
+            if ([binding type] == MTLBindingTypeBuffer &&
+                [binding index] == cumetal::ptx::kAtomicLockBankBindingIndex) {
+                uses_lock_bank = true;
+                break;
+            }
+        }
+        backend.pipeline_uses_lock_bank[cache_key] = uses_lock_bank;
         backend.pipeline_cache.emplace(cache_key, pipeline);
         return pipeline;
     }
+}
+
+// Metal has no 64-bit atomic, so a kernel that performs one serializes it
+// behind a lock hashed out of this bank. One buffer serves every kernel and
+// every stream in the process: that is what makes the exclusion device-wide
+// rather than per-launch, which is the property the CUDA atomic has. Acquires
+// are paired with releases inside the kernel, so the bank is back to all-zero
+// when a launch ends and never needs re-zeroing.
+//
+// Only kernels that declare it get it bound. Binding a shared read-write buffer
+// into every launch would invent hazards between kernels that never touch it.
+//
+// Its own mutex, and never called while holding the backend's: allocate_buffer
+// takes that one, and taking it twice hangs the process before the GPU ever
+// sees the launch.
+std::shared_ptr<Buffer> ensure_atomic_lock_bank(std::string* error_message) {
+    static std::mutex bank_mutex;
+    std::lock_guard<std::mutex> guard(bank_mutex);
+    BackendState& backend = state();
+    if (backend.atomic_lock_bank != nullptr) {
+        return backend.atomic_lock_bank;
+    }
+    const std::size_t bytes = cumetal::ptx::kAtomicLockBankSlots * sizeof(std::uint32_t);
+    std::string alloc_error;
+    std::shared_ptr<Buffer> bank;
+    if (allocate_buffer(bytes, &bank, &alloc_error) != cudaSuccess || bank == nullptr ||
+        bank->contents() == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "64-bit atomic lock bank allocation failed: " + alloc_error;
+        }
+        return nullptr;
+    }
+    std::memset(bank->contents(), 0, bytes);
+    backend.atomic_lock_bank = bank;
+    return bank;
 }
 
 cudaError_t check_command_buffer_status(id<MTLCommandBuffer> command_buffer, std::string* error_message) {
@@ -2390,6 +2449,8 @@ cudaError_t launch_kernel(const std::string& metallib_path,
     std::string lowering_source = "unknown";
     std::string math_mode = "precompiled";
     bool compile_cache_hit = false;
+    bool needs_lock_bank = false;
+    std::shared_ptr<Buffer> lock_bank;
     {
         std::lock_guard<std::mutex> lock(backend.mutex);
         const std::string pipeline_cache_key = metallib_path + "::" + kernel_name;
@@ -2399,6 +2460,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         if (pipeline == nil) {
             return cudaErrorInvalidValue;
         }
+        needs_lock_bank = backend.pipeline_uses_lock_bank[pipeline_cache_key];
         const auto source_it = backend.library_lowering_source.find(metallib_path);
         if (source_it != backend.library_lowering_source.end()) {
             lowering_source = source_it->second;
@@ -2416,6 +2478,12 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             stream_impl = backend.default_stream;
         }
         queue = stream_impl != nullptr ? stream_impl->queue() : backend.queue;
+    }
+    if (needs_lock_bank) {
+        lock_bank = ensure_atomic_lock_bank(error_message);
+        if (lock_bank == nullptr) {
+            return cudaErrorMemoryAllocation;
+        }
     }
     std::unique_lock<std::mutex> batch_lock(state().batch_mutex);
     std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
@@ -2547,6 +2615,19 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                     return cudaErrorInvalidValue;
                 }
             }
+        }
+
+        if (lock_bank != nullptr) {
+            auto* bank_impl = dynamic_cast<BufferImpl*>(lock_bank.get());
+            if (bank_impl == nullptr) {
+                if (error_message != nullptr) {
+                    *error_message = "atomic lock bank has unexpected buffer type";
+                }
+                return cudaErrorInvalidValue;
+            }
+            [encoder setBuffer:bank_impl->handle()
+                        offset:0
+                       atIndex:cumetal::ptx::kAtomicLockBankBindingIndex];
         }
 
         if (config.shared_memory_bytes > 0) {
@@ -2710,13 +2791,23 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
     BackendState& backend = state();
     id<MTLComputePipelineState> pipeline = nil;
     id<MTLCommandQueue> queue = nil;
+    bool needs_lock_bank = false;
+    std::shared_ptr<Buffer> lock_bank;
     {
         std::lock_guard<std::mutex> lock(backend.mutex);
         pipeline = load_pipeline_locked(backend, metallib_path, kernel_name, error_message);
         if (pipeline == nil) {
             return cudaErrorInvalidValue;
         }
+        const std::string pipeline_cache_key = metallib_path + "::" + kernel_name;
+        needs_lock_bank = backend.pipeline_uses_lock_bank[pipeline_cache_key];
         queue = backend.queue;
+    }
+    if (needs_lock_bank) {
+        lock_bank = ensure_atomic_lock_bank(error_message);
+        if (lock_bank == nullptr) {
+            return cudaErrorMemoryAllocation;
+        }
     }
     const std::shared_ptr<StreamImpl> default_stream =
         std::dynamic_pointer_cast<StreamImpl>(legacy_default_stream());
@@ -2818,6 +2909,19 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
                     return cudaErrorInvalidValue;
                 }
             }
+        }
+
+        if (lock_bank != nullptr) {
+            auto* bank_impl = dynamic_cast<BufferImpl*>(lock_bank.get());
+            if (bank_impl == nullptr) {
+                if (error_message != nullptr) {
+                    *error_message = "atomic lock bank has unexpected buffer type";
+                }
+                return cudaErrorInvalidValue;
+            }
+            [encoder setBuffer:bank_impl->handle()
+                        offset:0
+                       atIndex:cumetal::ptx::kAtomicLockBankBindingIndex];
         }
 
         if (config.shared_memory_bytes > 0) {

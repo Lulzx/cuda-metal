@@ -121,6 +121,14 @@ cumetal_add_cuda_project_test(
     system_atomics system_atomics.cu system_atomics
 )
 
+# 64-bit atomics. Metal has none at any width, so each one is serialized behind
+# a bank of 32-bit locks. The contended cases are the point: a GPU lock either
+# hands over or hangs the device, and nothing short of running it says which.
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_wide_atomics
+    wide_atomics wide_atomics.cu wide_atomics
+)
+
 cumetal_add_cuda_project_test(
     functional_cuda_projects_cooperative_thread_group
     cooperative_thread_group cooperative_thread_group.cu cooperative_thread_group

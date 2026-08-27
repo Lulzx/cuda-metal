@@ -252,6 +252,7 @@ int byte_size_for_param_metadata(const ParamInfo& param) {
 
 struct GenericLlvmBodyResult {
     bool ok = false;
+    bool uses_atomic_lock_bank = false;
     std::string body_ir;
     std::vector<ParamInfo> builtin_params;
     std::vector<std::string> declarations;
@@ -1016,6 +1017,7 @@ class GenericLlvmEmitter {
         }
 
         result.ok = true;
+        result.uses_atomic_lock_bank = !lock_bank_param_.empty();
         result.body_ir = body_.str();
         result.declarations.assign(declarations_.begin(), declarations_.end());
         result.builtin_params = builtin_params_added_;
@@ -4609,6 +4611,219 @@ class GenericLlvmEmitter {
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, result_bits, bits);
     }
 
+    // ── 64-bit atomics ────────────────────────────────────────────────────
+    // Metal has no 64-bit atomic of any width, so a .b64/.f64 atomic is
+    // serialized behind a lock taken from a bank of the 32-bit atomics Metal
+    // does have, hashed on the target address. The bank is one device buffer
+    // the runtime binds at reserved index 29 and shares across every kernel
+    // and stream, which is what makes the exclusion device-wide rather than
+    // per-launch. Two addresses colliding in the hash cost serialization, not
+    // correctness.
+    static constexpr std::size_t kLockBankBindingIndex =
+        cumetal::ptx::kAtomicLockBankBindingIndex;
+
+    std::string lock_bank_param_;
+
+    // Appended lazily: only a kernel that actually performs a 64-bit atomic
+    // pays for the binding. entry_requires_atomic_lock_bank() answers the same
+    // question for the runtime from the same PTX, so the two cannot disagree.
+    const std::string& ensure_lock_bank_param() {
+        static const std::string kNone;
+        if (!lock_bank_param_.empty()) return lock_bank_param_;
+        if (params_ == nullptr || arg_decls_ == nullptr ||
+            params_->size() > kLockBankBindingIndex) {
+            return kNone;
+        }
+        lock_bank_param_ = "__cumetal_atomic_lock_bank";
+        arg_decls_->push_back("i8 addrspace(1)* %" + lock_bank_param_);
+        params_->push_back({.ptx_type = ".b8",
+                            .llvm_type = "i8 addrspace(1)*",
+                            .name = lock_bank_param_,
+                            .raw_name = lock_bank_param_});
+        return lock_bank_param_;
+    }
+
+    // One 64-bit read-modify-write under a bank lock. `src_operand` is the
+    // value operand (for cas, the *new* value; `cmp_operand` is the comparand),
+    // and `dst_reg` receives the pre-operation value when the PTX asked for it.
+    //
+    // The loop shape matters more than the hash does. A lane must never wait on
+    // a lock held by a lane it is executing in lockstep with, so the critical
+    // section is a straight-line if-body inside the retry loop: whoever wins an
+    // iteration finishes and releases within that same iteration, and only then
+    // does the group go round again for the losers. Spinning *inside* the
+    // acquire, the shape a naive lock takes, deadlocks a SIMD group instead.
+    bool emit_wide_atomic(std::ostringstream& os,
+                          const cumetal::ptx::EntryFunction::Instruction& instr,
+                          const std::string& operation,
+                          const PtxTypeSpec& ty,
+                          int addr_space,
+                          const std::string& addr_i64,
+                          const std::string& src_operand,
+                          const std::string* cmp_operand,
+                          const std::string* dst_reg) {
+        const bool is_float = (ty.kind == PtxTypeSpec::Kind::kFloat);
+        if (is_float && operation != "add" && operation != "exch") {
+            return fail(instr, "atom: 64-bit float '" + operation + "' is not supported");
+        }
+        if (operation != "add" && operation != "and" && operation != "or" &&
+            operation != "xor" && operation != "min" && operation != "max" &&
+            operation != "exch" && operation != "cas") {
+            return fail(instr, "atom: 64-bit '" + operation + "' is not supported");
+        }
+
+        const std::string bank = ensure_lock_bank_param();
+        if (bank.empty()) {
+            return fail(instr,
+                        "atom: kernel argument ABI conflicts with the 64-bit atomic "
+                        "lock bank at reserved buffer index 29");
+        }
+
+        // Both operands are loop-invariant; decode them before the retry loop.
+        auto src_bits = emit_integer_from_any(os, src_operand, 64, false);
+        if (!src_bits) return fail(instr, "atom: 64-bit source operand unsupported");
+        std::optional<std::string> cmp_bits;
+        if (cmp_operand != nullptr) {
+            cmp_bits = emit_integer_from_any(os, *cmp_operand, 64, false);
+            if (!cmp_bits) return fail(instr, "atom.cas: 64-bit comparand unsupported");
+        }
+
+        // Hash the 8-byte-aligned address so adjacent words do not all queue on
+        // one lock. Knuth's multiplicative constant, keeping the high bits.
+        const std::string word = next_tmp("wa_word");
+        os << "  " << word << " = lshr i64 " << addr_i64 << ", 3\n";
+        const std::string word32 = next_tmp("wa_word32");
+        os << "  " << word32 << " = trunc i64 " << word << " to i32\n";
+        const std::string mixed = next_tmp("wa_mix");
+        os << "  " << mixed << " = mul i32 " << word32 << ", -1640531527\n";
+        int slot_shift = 32;
+        for (std::size_t n = cumetal::ptx::kAtomicLockBankSlots; n > 1; n >>= 1) --slot_shift;
+        const std::string slot = next_tmp("wa_slot");
+        os << "  " << slot << " = lshr i32 " << mixed << ", " << slot_shift << "\n";
+        const std::string bank32 = next_tmp("wa_bank");
+        os << "  " << bank32 << " = bitcast i8 addrspace(1)* %" << bank
+           << " to i32 addrspace(1)*\n";
+        const std::string lock = next_tmp("wa_lock");
+        os << "  " << lock << " = getelementptr inbounds i32, i32 addrspace(1)* " << bank32
+           << ", i32 " << slot << "\n";
+
+        const std::string payload_i8 = next_tmp("wa_i2p");
+        os << "  " << payload_i8 << " = inttoptr i64 " << addr_i64 << " to i8 addrspace("
+           << addr_space << ")*\n";
+        const std::string payload = next_tmp("wa_ptr");
+        os << "  " << payload << " = bitcast i8 addrspace(" << addr_space << ")* " << payload_i8
+           << " to i64 addrspace(" << addr_space << ")*\n";
+
+        declarations_.insert("declare void @air.atomic.fence(i32, i32, i32)");
+        // An LLVM `atomicrmw` inside a loop is not what the AIR backend expects,
+        // and it does not say so: `xcrun metallib` either bus-errored outright
+        // or emitted a kernel whose spin never made progress -- two threads on
+        // one address hung the GPU. Metal spells an atomic as a call, the same
+        // way it spells a fence (see emit_membar_or_fence), and the loop below
+        // mirrors the CFG `xcrun metal` itself produces for a spin lock:
+        // attempt at the header, test at the latch.
+        //   air.atomic.global.xchg.i32(ptr, value, memory_order, scope, volatile)
+        declarations_.insert(
+            "declare i32 @air.atomic.global.xchg.i32(i32 addrspace(1)* nocapture, i32, i32, "
+            "i32, i1)");
+
+        const std::string tag = next_tmp("wa").substr(1);
+        const std::string pre = tag + "_pre";
+        const std::string head = tag + "_head";
+        const std::string crit = tag + "_crit";
+        const std::string latch = tag + "_latch";
+        const std::string done_lbl = tag + "_done";
+
+        const std::string done = next_tmp("wa_done");
+        const std::string oldp = next_tmp("wa_oldphi");
+        const std::string done2 = next_tmp("wa_done2");
+        const std::string old2 = next_tmp("wa_old2");
+
+        // The enclosing block's label is not known here, so branch into one we
+        // name ourselves and use that as the loop's entry predecessor.
+        os << "  br label %" << pre << "\n";
+        os << pre << ":\n";
+        os << "  br label %" << head << "\n";
+
+        os << head << ":\n";
+        os << "  " << done << " = phi i1 [ false, %" << pre << " ], [ " << done2 << ", %"
+           << latch << " ]\n";
+        os << "  " << oldp << " = phi i64 [ 0, %" << pre << " ], [ " << old2 << ", %"
+           << latch << " ]\n";
+        const std::string got = next_tmp("wa_got");
+        os << "  " << got << " = call i32 @air.atomic.global.xchg.i32(i32 addrspace(1)* "
+           << lock << ", i32 1, i32 0, i32 2, i1 true)\n";
+        const std::string acq = next_tmp("wa_acq");
+        os << "  " << acq << " = icmp eq i32 " << got << ", 0\n";
+        os << "  br i1 " << acq << ", label %" << crit << ", label %" << latch << "\n";
+
+        os << crit << ":\n";
+        // AIR spells a fence as a call; the `fence` instruction crashes the
+        // Metal compiler service (see emit_membar_or_fence).
+        os << "  call void @air.atomic.fence(i32 3, i32 5, i32 2)\n";
+        const std::string old = next_tmp("wa_old");
+        os << "  " << old << " = load i64, i64 addrspace(" << addr_space << ")* " << payload
+           << ", align 8\n";
+
+        std::string newval;
+        if (operation == "exch") {
+            newval = *src_bits;
+        } else if (operation == "cas") {
+            const std::string eq = next_tmp("wa_caseq");
+            os << "  " << eq << " = icmp eq i64 " << old << ", " << *cmp_bits << "\n";
+            newval = next_tmp("wa_casnew");
+            os << "  " << newval << " = select i1 " << eq << ", i64 " << *src_bits << ", i64 "
+               << old << "\n";
+        } else if (is_float) {
+            if (fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                const Fp64Pair a = fp64_pair_from_ieee_bits(os, old);
+                const Fp64Pair b = fp64_pair_from_ieee_bits(os, *src_bits);
+                newval = fp64_ieee_bits_from_pair(os, emit_fp64_pair_add(os, a, b));
+            } else {
+                const std::string ad = next_tmp("wa_ad");
+                const std::string bd = next_tmp("wa_bd");
+                const std::string sd = next_tmp("wa_sd");
+                os << "  " << ad << " = bitcast i64 " << old << " to double\n";
+                os << "  " << bd << " = bitcast i64 " << *src_bits << " to double\n";
+                os << "  " << sd << " = fadd double " << ad << ", " << bd << "\n";
+                newval = next_tmp("wa_sb");
+                os << "  " << newval << " = bitcast double " << sd << " to i64\n";
+            }
+        } else if (operation == "min" || operation == "max") {
+            const std::string cmp = next_tmp("wa_cmp");
+            const std::string pred = ty.is_signed ? (operation == "min" ? "slt" : "sgt")
+                                                  : (operation == "min" ? "ult" : "ugt");
+            os << "  " << cmp << " = icmp " << pred << " i64 " << old << ", " << *src_bits << "\n";
+            newval = next_tmp("wa_sel");
+            os << "  " << newval << " = select i1 " << cmp << ", i64 " << old << ", i64 "
+               << *src_bits << "\n";
+        } else {
+            newval = next_tmp("wa_rmw");
+            os << "  " << newval << " = " << operation << " i64 " << old << ", " << *src_bits
+               << "\n";
+        }
+
+        os << "  store i64 " << newval << ", i64 addrspace(" << addr_space << ")* " << payload
+           << ", align 8\n";
+        os << "  call void @air.atomic.fence(i32 3, i32 5, i32 2)\n";
+        const std::string rel = next_tmp("wa_rel");
+        os << "  " << rel << " = call i32 @air.atomic.global.xchg.i32(i32 addrspace(1)* "
+           << lock << ", i32 0, i32 0, i32 2, i1 true)\n";
+        os << "  br label %" << latch << "\n";
+
+        os << latch << ":\n";
+        os << "  " << done2 << " = phi i1 [ true, %" << crit << " ], [ " << done << ", %"
+           << head << " ]\n";
+        os << "  " << old2 << " = phi i64 [ " << old << ", %" << crit << " ], [ " << oldp
+           << ", %" << head << " ]\n";
+        os << "  br i1 " << done2 << ", label %" << done_lbl << ", label %" << head << "\n";
+
+        os << done_lbl << ":\n";
+
+        if (dst_reg == nullptr) return true;
+        return emit_store_reg_bits(os, *dst_reg, ensure_reg_slot(*dst_reg).bits, old2, 64);
+    }
+
     bool emit_atom(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
         // atom[.scope].operation.type dst, [ptr], src[, cmp]
         if (instr.operands.size() < 3) {
@@ -4635,26 +4850,6 @@ class GenericLlvmEmitter {
         const bool is_float = (ty.kind == PtxTypeSpec::Kind::kFloat);
         const int bits = ty.bits;
 
-        // Metal has no 64-bit atomic of any kind: `atomic_ulong` fails the
-        // library's own _valid_compare_exchange_type check, and there is no
-        // atomic double. Emitting a 64-bit cmpxchg or atomicrmw anyway produced
-        // AIR that crashed the Metal compiler service -- the launch came back
-        // as XPC_ERROR_CONNECTION_INTERRUPTED, which says nothing about the
-        // cause and takes the service down with it. Refusing here fails the
-        // kernel where the reason is still legible.
-        //
-        // This is what a CUDA atomicAdd(double*) becomes: clang lowers it to a
-        // CAS loop over the IEEE bits, so the 64-bit atomic arrives as
-        // atom.cas.b64 rather than as a float add. HiGHS's PDLP convergence
-        // kernels accumulate their residuals that way, which is why they do not
-        // run. Supporting them needs a lock built out of the 32-bit atomics
-        // Metal does have, not a wider atomic.
-        if (bits == 64) {
-            return fail(instr,
-                        "atom: Metal has no 64-bit atomic (this is what "
-                        "atomicAdd(double*) lowers to)");
-        }
-
         const std::string elem_ty_str = is_float
             ? (bits == 32 ? "float" : (bits == 64 ? "double" : "half"))
             : llvm_int_type(bits);
@@ -4676,6 +4871,24 @@ class GenericLlvmEmitter {
         }
         const std::string base_i64 = *resolved_base;
         const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
+
+        // A CUDA atomicAdd(double*) does not arrive as a float add: clang
+        // lowers it to a CAS loop over the IEEE bits, so it reaches here as
+        // atom.cas.b64. Both forms take the lock path.
+        if (bits == 64) {
+            if (operation == "cas" && instr.operands.size() < 4) {
+                return fail(instr, "atom.cas requires 4 operands");
+            }
+            const std::string& src_operand =
+                (operation == "cas") ? instr.operands[3] : instr.operands[2];
+            const std::string* cmp_operand =
+                (operation == "cas") ? &instr.operands[2] : nullptr;
+            const std::string* dst_reg =
+                is_register_name(instr.operands[0]) ? &instr.operands[0] : nullptr;
+            return emit_wide_atomic(os, instr, operation, ty, addr_space, addr_i64,
+                                    src_operand, cmp_operand, dst_reg);
+        }
+
         const std::string ptr_i8 = next_tmp("atom_i2p");
         os << "  " << ptr_i8 << " = inttoptr i64 " << addr_i64
            << " to i8 addrspace(" << addr_space << ")*\n";
@@ -4911,6 +5124,15 @@ class GenericLlvmEmitter {
         if (!mem.ok || !is_register_name(mem.base)) return fail(instr, "red: cannot parse memory operand");
         const std::string base_i64 = emit_load_reg_bits(os, mem.base, 64);
         const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
+
+        // red is atom without a result. It had no 64-bit guard at all, so a
+        // red.global.add.f64 emitted `atomicrmw fadd double` straight into AIR
+        // and took the Metal compiler service down at pipeline creation.
+        if (bits == 64) {
+            return emit_wide_atomic(os, instr, operation, ty, addr_space, addr_i64,
+                                    instr.operands[1], nullptr, nullptr);
+        }
+
         const std::string ptr_i8 = next_tmp("red_i2p");
         os << "  " << ptr_i8 << " = inttoptr i64 " << addr_i64 << " to i8 addrspace(" << addr_space << ")*\n";
         const std::string ptr_t = next_tmp("red_ptr");
@@ -6271,6 +6493,8 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     }
     ir << "}\n\n";
 
+    result.uses_atomic_lock_bank = generic_body.uses_atomic_lock_bank;
+
     if (use_generic_body) {
         for (const std::string& decl : generic_body.declarations) {
             // Attribute group #1 mirrors what `xcrun metal -emit-llvm` puts on
@@ -6351,8 +6575,11 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         }
 
         if (is_device_buffer_pointer(param.llvm_type)) {
+            const std::size_t location_index =
+                param.name == "__cumetal_atomic_lock_bank" ? 29u : i;
             ir << "!" << arg_meta_ids[i]
-               << " = !{i32 " << i << ", !\"air.buffer\", !\"air.location_index\", i32 " << i
+               << " = !{i32 " << i << ", !\"air.buffer\", !\"air.location_index\", i32 "
+               << location_index
                << ", i32 1, !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 "
                << arg_size << ", !\"air.arg_type_align_size\", i32 " << arg_align
                << ", !\"air.arg_type_name\", !\"" << air_type_name << "\", !\"air.arg_name\", !\""

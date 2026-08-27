@@ -1569,6 +1569,72 @@ static __device__ __forceinline__ unsigned int atomicXor(unsigned int* ptr, unsi
     return __uAtomicXor(ptr, val);
 }
 
+// The rest of CUDA's 64-bit atomic surface. These were missing outright, so a
+// program that used them failed to compile rather than failing to lower -- and
+// they are ordinary CUDA, not an exotic corner. Metal still has no atomic this
+// wide; each one arrives at the PTX lowering as an atom.*.b64/u64 and is
+// serialized behind the address-hashed lock bank.
+static __device__ __forceinline__ unsigned long long atomicExch(unsigned long long* ptr,
+                                                                 unsigned long long val) {
+    return __ullAtomicExch(ptr, val);
+}
+static __device__ __forceinline__ unsigned long long atomicMin(unsigned long long* ptr,
+                                                                unsigned long long val) {
+    return __ullAtomicMin(ptr, val);
+}
+static __device__ __forceinline__ unsigned long long atomicMax(unsigned long long* ptr,
+                                                                unsigned long long val) {
+    return __ullAtomicMax(ptr, val);
+}
+static __device__ __forceinline__ unsigned long long atomicAnd(unsigned long long* ptr,
+                                                                unsigned long long val) {
+    return __ullAtomicAnd(ptr, val);
+}
+static __device__ __forceinline__ unsigned long long atomicOr(unsigned long long* ptr,
+                                                               unsigned long long val) {
+    return __ullAtomicOr(ptr, val);
+}
+static __device__ __forceinline__ unsigned long long atomicXor(unsigned long long* ptr,
+                                                                unsigned long long val) {
+    return __ullAtomicXor(ptr, val);
+}
+static __device__ __forceinline__ long long atomicAnd(long long* ptr, long long val) {
+    return __llAtomicAnd(ptr, val);
+}
+static __device__ __forceinline__ long long atomicOr(long long* ptr, long long val) {
+    return __llAtomicOr(ptr, val);
+}
+static __device__ __forceinline__ long long atomicXor(long long* ptr, long long val) {
+    return __llAtomicXor(ptr, val);
+}
+// Clang exposes no signed 64-bit min/max builtin, so these take the CAS loop --
+// the same construction CUDA itself uses below sm_35, and the same one clang
+// gives atomicAdd(double*).
+static __device__ __forceinline__ long long atomicMin(long long* ptr, long long val) {
+    unsigned long long* base = reinterpret_cast<unsigned long long*>(ptr);
+    unsigned long long old = *base;
+    unsigned long long assumed;
+    do {
+        assumed = old;
+        const long long cur = static_cast<long long>(assumed);
+        if (cur <= val) break;
+        old = __ullAtomicCAS(base, assumed, static_cast<unsigned long long>(val));
+    } while (old != assumed);
+    return static_cast<long long>(old);
+}
+static __device__ __forceinline__ long long atomicMax(long long* ptr, long long val) {
+    unsigned long long* base = reinterpret_cast<unsigned long long*>(ptr);
+    unsigned long long old = *base;
+    unsigned long long assumed;
+    do {
+        assumed = old;
+        const long long cur = static_cast<long long>(assumed);
+        if (cur >= val) break;
+        old = __ullAtomicCAS(base, assumed, static_cast<unsigned long long>(val));
+    } while (old != assumed);
+    return static_cast<long long>(old);
+}
+
 // atomicInc/atomicDec are the wrapping counters CUDA exposes only for unsigned.
 // There is no single Metal instruction for them, so build them on a CAS loop --
 // same construction the double-precision atomicAdd above uses.

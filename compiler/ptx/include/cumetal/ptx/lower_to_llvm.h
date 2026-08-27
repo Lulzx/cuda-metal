@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -37,6 +38,10 @@ struct LowerToLlvmOptions {
 
 struct LowerToLlvmResult {
     bool ok = false;
+    // The kernel performs a 64-bit atomic, which Metal has no instruction for.
+    // It therefore takes a hidden `i8 addrspace(1)*` lock-bank parameter that
+    // the runtime must bind at kReservedAtomicLockBankIndex.
+    bool uses_atomic_lock_bank = false;
     std::string entry_name;
     std::string llvm_ir;
     std::vector<std::string> warnings;
@@ -52,6 +57,13 @@ struct ExternalConstantSymbol {
     std::size_t offset_bytes = 0;
     std::size_t size_bytes = 0;
 };
+
+// Reserved Metal buffer index of the 64-bit atomic lock bank, and the number of
+// 32-bit lock words in it. The lowering emits the parameter under a fixed name
+// at this index; the backend spots it by reflecting on the compiled function's
+// bindings, so a metallib is self-describing and no separate flag can drift.
+inline constexpr std::size_t kAtomicLockBankBindingIndex = 29;
+inline constexpr std::size_t kAtomicLockBankSlots = 4096;
 
 std::vector<ExternalConstantSymbol> find_referenced_external_constant_symbols(
     std::string_view ptx,
