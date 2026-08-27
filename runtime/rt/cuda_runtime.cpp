@@ -2253,7 +2253,21 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     prop->minor = 0;
     prop->unifiedAddressing = 1;        // UMA: CPU and GPU share physical DRAM
     prop->managedMemory = 1;            // cudaMallocManaged == cudaMalloc on UMA
-    prop->concurrentManagedAccess = 1;  // CPU+GPU can access managed memory simultaneously
+    // Reported 0, not 1. CUDA's promise here is *coherent* concurrent access:
+    // the host may read and write managed memory while a kernel is running and
+    // both see each other's stores. Metal does not offer that. A shared-storage
+    // MTLBuffer is visible to both, but the memory model only guarantees the
+    // host observes a kernel's writes once its command buffer has completed,
+    // and there is no system-scope atomic between CPU and GPU at all -- Metal's
+    // atomics are device scope.
+    //
+    // Claiming 1 is not harmless, because callers branch on it. NVIDIA's
+    // systemWideAtomics sample skips its own cudaDeviceSynchronize when this is
+    // 1 and then has the CPU and a kernel increment the same counter through
+    // atomicAdd_system; on CuMetal the device's increments were simply lost and
+    // it failed, deterministically. With 0 it takes the serialized path the
+    // attribute is there to select, and passes for the right reason.
+    prop->concurrentManagedAccess = 0;
     prop->maxBufferArguments = 31;      // Metal buffer argument limit per kernel
     // Additional fields (spec §6.8)
     prop->clockRate = 1296000;          // ~1.3 GHz in kHz (conservative estimate)
@@ -2357,15 +2371,18 @@ cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device) {
             break;
         case cudaDevAttrUnifiedAddressing:
         case cudaDevAttrManagedMemory:
-        case cudaDevAttrConcurrentManagedAccess:
         case cudaDevAttrCanMapHostMemory:
         case cudaDevAttrIntegrated:
         case cudaDevAttrConcurrentKernels:
         case cudaDevAttrMemoryPoolsSupported:
             *value = 1;
             break;
+        case cudaDevAttrConcurrentManagedAccess:
         case cudaDevAttrPageableMemoryAccess:
         case cudaDevAttrPageableMemoryAccessUsesHostPageTables:
+            // See cudaDeviceProp::concurrentManagedAccess: sharing the address
+            // space is not the same promise as coherent concurrent access, and
+            // Metal only makes the first one.
             *value = 0;
             break;
         case cudaDevAttrCooperativeLaunch:

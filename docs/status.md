@@ -703,7 +703,11 @@ Driver API additions:
 - `cuLaunchHostFunc` (launches a CPU callback asynchronously on a stream; implemented via `cudaStreamAddCallback`)
 
 `cudaDeviceProp` fields now populated per spec §6.8:
-- `unifiedAddressing = 1`, `managedMemory = 1`, `concurrentManagedAccess = 1` (UMA)
+- `unifiedAddressing = 1`, `managedMemory = 1` (UMA), but
+  `concurrentManagedAccess = 0`: sharing an address space is not the promise that
+  attribute makes. CUDA's is coherent concurrent access, and Metal guarantees the
+  host sees a kernel's writes only once its command buffer completes, with no
+  CPU-GPU atomic at all.
 - `maxBufferArguments = 31` (Metal buffer argument limit)
 - `clockRate`, `memoryClockRate` (1296000 kHz), `memoryBusWidth` (128-bit)
 - `totalConstMem` (64 KB), `sharedMemPerMultiprocessor`, `maxThreadsPerMultiProcessor` (2048)

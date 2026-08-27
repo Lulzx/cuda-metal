@@ -852,8 +852,13 @@ CUresult cuDeviceGetAttribute(int* pi, CUdevice_attribute attrib, CUdevice dev) 
             break;
         case CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING:
         case CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY:
-        case CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS:
             *pi = 1;
+            break;
+        case CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS:
+            // 0: sharing an address space is not the promise this attribute
+            // makes. See cudaDeviceProp::concurrentManagedAccess in
+            // runtime/rt/cuda_runtime.cpp for why Metal cannot honour it.
+            *pi = 0;
             break;
         default:
             return CUDA_ERROR_INVALID_VALUE;

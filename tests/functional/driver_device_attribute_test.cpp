@@ -38,9 +38,16 @@ int main() {
         return 1;
     }
 
+    // 0, not 1. Sharing an address space is not the promise this attribute
+    // makes: CUDA's is coherent concurrent access, host and kernel reading and
+    // writing managed memory at the same time and seeing each other's stores.
+    // Metal guarantees the host sees a kernel's writes only once its command
+    // buffer completes, and has no CPU-GPU atomic at all. NVIDIA's
+    // systemWideAtomics sample branches on this and computed wrong answers when
+    // it was 1.
     if (cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS, 0) != CUDA_SUCCESS ||
-        value != 1) {
-        std::fprintf(stderr, "FAIL: concurrent managed access should be enabled\n");
+        value != 0) {
+        std::fprintf(stderr, "FAIL: concurrent managed access should be reported absent\n");
         return 1;
     }
 

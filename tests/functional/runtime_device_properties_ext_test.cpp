@@ -51,8 +51,15 @@ int main() {
         std::fprintf(stderr, "FAIL: managedMemory should be 1\n");
         return 1;
     }
-    if (!prop.concurrentManagedAccess) {
-        std::fprintf(stderr, "FAIL: concurrentManagedAccess should be 1\n");
+    // 0, not 1. Sharing an address space is not the promise this attribute
+    // makes: CUDA's is coherent concurrent access, host and kernel reading and
+    // writing managed memory at the same time and seeing each other's stores.
+    // Metal guarantees the host sees a kernel's writes only once its command
+    // buffer completes, and has no CPU-GPU atomic at all. NVIDIA's
+    // systemWideAtomics sample branches on this and computed wrong answers when
+    // it was 1.
+    if (prop.concurrentManagedAccess) {
+        std::fprintf(stderr, "FAIL: concurrentManagedAccess should be 0\n");
         return 1;
     }
     if (std::strlen(prop.name) == 0) {
