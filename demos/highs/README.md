@@ -13,8 +13,10 @@ downloads the LPs into `out/`. HiGHS comes from `brew install highs`.
 
 [cuPDLP-C](https://github.com/COPT-Public/cuPDLP-C) is the PDLP solver HiGHS
 vendors as its GPU path; `libhighs` exports ~104 `cupdlp_*` symbols of its own.
-Building it unmodified and diffing it against its CPU build tests that solver,
-not HiGHS's `CUPDLP_GPU=ON` integration layer.
+The `run.sh` comparison builds standalone cuPDLP-C so it can isolate that
+solver's CPU and GPU behavior. Separately, `scripts/build_highs_cumetal.sh`
+builds unmodified HiGHS itself with `CUPDLP_GPU=ON`; the focused HiGHS run
+described below exercises that integration layer on the Apple GPU.
 
 Built with `cupdlp_float = double`, the upstream default, not the reduced
 `SFLOAT` config. Storage is IEEE-754 binary64; arithmetic is not. Values decode
