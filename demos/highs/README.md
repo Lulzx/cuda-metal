@@ -151,9 +151,17 @@ where the GPU sparse path pays, and forcing it makes them slower. The speedups
 above are on two much larger LPs that are not part of this demo. Solver-level
 synchronization is unoptimized. Do not read these solve times as a benchmark.
 
-This is standalone cuPDLP-C, not HiGHS's own GPU build. That additionally needs
-`cusparseDnVecSetValues`, `cusparseSpMV_preprocess` and CUDA-graph capture of
-library nodes, none of which CuMetal implements. See `docs/known-gaps.md`.
+The eight-instance demo above exercises standalone cuPDLP-C. CuMetal now also
+implements the three interfaces that had blocked HiGHS's own GPU integration:
+`cusparseDnVecSetValues`, real `cusparseSpMV_preprocess` analysis, and captured
+cuSPARSE SpMV graph nodes. `functional_cusparse_graph_capture` checks that
+capture is non-eager, replay uses the captured descriptors, and later device
+data is observed on both the forced-Metal and CPU sparse routes. An unmodified
+HiGHS 1.15.1 `CUPDLP_GPU=ON` build from `scripts/build_highs_cumetal.sh` also
+solves `afiro` with `--presolve off` to Optimal in 360 iterations while CuMetal
+traces successful kernel launches on the Apple M4 Pro. This is focused
+integration evidence, not a claim that every HiGHS model or CUDA-library graph
+operation is supported. See `docs/known-gaps.md`.
 
 The arithmetic is not binary64, per the FP32 pair above: 48 significand bits
 against binary64's 53, and binary32's much narrower exponent range. Worst
