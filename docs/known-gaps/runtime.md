@@ -11,6 +11,9 @@
 - Irregular cooperative-group masks and interaction coverage remain narrower
   than CUDA's complete surface.
 - Stream priorities are reported as zero and are not Metal priority queues.
+- CUDA device clocks use a device-wide atomic counter with a fixed monotonic
+  quantum. They preserve wait-loop progress and unsigned wraparound behavior,
+  but values are not GPU cycles and cannot be used for cycle-accurate timing.
 
 ## Graphs and allocators
 

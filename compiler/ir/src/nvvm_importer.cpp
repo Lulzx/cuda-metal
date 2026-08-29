@@ -1029,6 +1029,30 @@ struct Importer {
             operation->opcode = OpCode::kLaneId;
             return true;
         }
+        if (name == "llvm.nvvm.read.ptx.sreg.clock" ||
+            name == "llvm.nvvm.read.ptx.sreg.clock64" ||
+            name == "llvm.nvvm.read.ptx.sreg.globaltimer") {
+            operation->opcode = OpCode::kCall;
+            operation->attributes["callee"] = "cm_device_clock";
+            operation->attributes["builtin"] = "true";
+            if (result.module.semantic_quality == SemanticQuality::kExact) {
+                result.module.semantic_quality = SemanticQuality::kSemanticEmulation;
+            }
+            const std::string caveat =
+                "CUDA device clock uses a monotonic atomic quantum, not GPU cycles";
+            if (std::find(result.module.semantic_caveats.begin(),
+                          result.module.semantic_caveats.end(), caveat) ==
+                result.module.semantic_caveats.end()) {
+                result.module.semantic_caveats.push_back(caveat);
+            }
+            return true;
+        }
+        if (name == "__cumetal_grid_sync") {
+            operation->opcode = OpCode::kCall;
+            operation->attributes["callee"] = "cm_grid_sync";
+            operation->attributes["builtin"] = "true";
+            return true;
+        }
         if (name == "llvm.nvvm.barrier0" ||
             name.starts_with("llvm.nvvm.barrier.cta.sync")) {
             operation->opcode = OpCode::kBarrier;

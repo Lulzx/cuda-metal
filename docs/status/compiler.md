@@ -81,7 +81,10 @@ policy over tracked shared allocations; CAS retries spurious weak failures, and
 signed min/max preserve their signed comparison domain.
 Flat heterogeneous LLVM aggregates lower to typed MSL structs. The dynamic
 cooperative-groups checks and raytracer CPU-reference comparison pass through
-that direct typed path.
+that direct typed path. Native AOT also distinguishes pointer-valued launch
+arguments from by-value aggregates lowered through pointer-shaped host ABI
+parameters, propagates hidden clock/grid-barrier state through device helpers,
+and emits a device-fenced resident cooperative-grid barrier.
 
 ## PTX compatibility
 

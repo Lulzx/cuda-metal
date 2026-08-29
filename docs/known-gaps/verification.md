@@ -7,16 +7,17 @@
 The Phase 4 denominator is the reviewed 185-test manifest at
 `tests/conformance/phase4_functional_manifest.txt`. Every entry has expected
 outcome `pass`; skips and waivers are not removed from the denominator. The
+recorded 2026-08-29 Apple M4 Pro run passed all 185 with zero skips. The
 separate NVIDIA `cuda-samples` manifest has 83 enrolled headless samples; all 83 pass.
 Both are bounded snapshots, not general CUDA compatibility percentages;
 tests and samples outside the enrollments are unclassified.
 
 ## CI
 
-Layered GitHub Actions workflows are enabled. The repository still needs observed
-successful hosted runs before recurring hosted CI is proven. The Apple-GPU lane
-also requires a commissioned trusted runner and repository variable; workflow
-source and local passes do not substitute for observing those remote runs.
+The repository intentionally contains no GitHub Actions workflows. Therefore it
+does not provide recurring hosted or self-hosted CI. Local and commissioned-host
+results must be recorded with their configuration and cannot be generalized to
+an automated schedule.
 
 ## Toolchain matrix
 

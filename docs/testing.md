@@ -13,27 +13,23 @@ inspect any long-lived skip with `ctest -V` before trusting it —
 cases where a skip concealed a real failure and one where a test had never
 executed on any machine.
 
-CI layers
----------
+Verification layers
+-------------------
 
-`.github/workflows/ci.yml` defines the hosted gate for pushes and pull
-requests. It uses the `macos-15` Apple Silicon image and covers both supported
-build policies:
+The repository intentionally contains no GitHub Actions workflows. Release and
+GPU gates are explicit local/commissioned-machine commands; their results must
+be recorded rather than inferred from repository automation.
+
+Both supported build policies remain required:
 
 | Configuration | Purpose |
 | --- | --- |
 | Release + binary shim off | Shipping, source-first configuration |
 | Debug + binary shim on | Development and opt-in alias coverage |
 
-The hosted job builds the complete project, runs the CTest tests carrying the
-`hosted` label, and installs into a temporary prefix to check tools, CUDA
-toolchain shims, library aliases, and the conditional `libcuda.dylib` layout.
-The label contains parser, CFG/SSA, typed IR/MSL, PTX lowering, AIR container,
-negative-path, headers, CLI, cache, ABI registration, and packaging checks. It
-does not contain GPU execution tests. Hosted success is therefore a compiler
-and distribution claim, not an Apple-GPU execution claim.
-
-Run the same selection locally:
+The host selection covers parser, CFG/SSA, typed IR/MSL, PTX lowering, AIR
+container, negative-path, headers, CLI, cache, ABI registration, and packaging
+checks. It does not prove GPU execution:
 
 ```bash
 bash scripts/ci_report.sh build \
@@ -41,20 +37,10 @@ bash scripts/ci_report.sh build \
   --label-regex '^hosted$'
 ```
 
-`.github/workflows/gpu-ci.yml` defines the specification's Apple-GPU hardware
-layer. An enabled workflow definition is not evidence of recurring success.
-Its runner must have the standard self-hosted labels `self-hosted`, `macOS`,
-and `ARM64`, plus the custom label `ci-m1`. When enabled, it runs only on pushes
-to `main` and manual dispatch, never on pull requests. Set the repository Actions variable
-`CUMETAL_GPU_CI_ENABLED=true` after the runner is commissioned to enable the
-push trigger.
-
-The GPU workflow first runs a narrow proof set spanning Metal library loading,
-runtime launch, streams, atomics, warp masks, source-first executable linking,
-and numerical PTX execution. That selection uses both `--require-tests` and
-`--require-no-skips`. Only after every proof test executes does the workflow
-run the full correctness suite (excluding the separately managed benchmark
-gate), where optional external-project tests may still report explicit skips.
+On a commissioned Apple-GPU machine, first run a narrow no-skip proof spanning
+Metal loading, runtime launch, streams, atomics, warp masks, native-AOT source
+linking, and numerical PTX execution, then run the full correctness suite.
+Optional external-project tests may still report explicit skips.
 
 The report policy flags are intentionally distinct:
 

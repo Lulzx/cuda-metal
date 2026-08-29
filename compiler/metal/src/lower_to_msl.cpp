@@ -80,6 +80,148 @@ MslFunction make_atomic_cas_u32_helper(MslAddressSpace address_space) {
     return helper;
 }
 
+MslType atomic_uint_type() {
+    return MslType{.kind = MslTypeKind::kStruct, .struct_name = "atomic_uint"};
+}
+
+MslType memory_order_type() {
+    return MslType{.kind = MslTypeKind::kStruct, .struct_name = "memory_order"};
+}
+
+MslFunction make_device_clock_helper() {
+    const MslType atomic_uint = atomic_uint_type();
+    const MslType pointer =
+        MslType::pointer(atomic_uint, MslAddressSpace::kDevice);
+    MslFunction helper;
+    helper.name = "cm_device_clock";
+    helper.return_type = MslType::uint();
+    helper.parameters = {{.type = pointer, .name = "counter"}};
+    helper.statements.push_back(MslStatement::return_statement(
+        MslExpression::call(
+            "atomic_fetch_add_explicit",
+            {MslExpression::identifier("counter", pointer),
+             MslExpression::literal("1024u", MslType::uint()),
+             MslExpression::identifier("memory_order_relaxed", memory_order_type())},
+            MslType::uint())));
+    return helper;
+}
+
+MslFunction make_grid_sync_helper() {
+    const MslType atomic_uint = atomic_uint_type();
+    const MslType atomic_pointer =
+        MslType::pointer(atomic_uint, MslAddressSpace::kDevice);
+    const MslType uint3 = MslType::vector(MslType::uint(), 3);
+    const MslType memory_order = memory_order_type();
+    const MslExpr barrier =
+        MslExpression::identifier("barrier", atomic_pointer);
+    const MslExpr thread_position =
+        MslExpression::identifier("thread_position", uint3);
+    const MslExpr threadgroups =
+        MslExpression::identifier("threadgroups", uint3);
+    const MslExpr zero = MslExpression::literal("0u", MslType::uint());
+    const auto component = [](const MslExpr& value, std::string name) {
+        return MslExpression::member(value, std::move(name), MslType::uint());
+    };
+    const auto order = [&](std::string name) {
+        return MslExpression::identifier(std::move(name), memory_order);
+    };
+    const auto barrier_call = []() {
+        return MslStatement::expression(MslExpression::call(
+            "threadgroup_barrier",
+            {MslExpression::literal("mem_flags::mem_device", MslType::uint())},
+            MslType::void_type()));
+    };
+    const auto device_fence = [&]() {
+        const MslType thread_scope = {
+            .kind = MslTypeKind::kStruct,
+            .struct_name = "thread_scope",
+        };
+        return MslStatement::expression(MslExpression::call(
+            "atomic_thread_fence",
+            {MslExpression::literal("mem_flags::mem_device", MslType::uint()),
+             order("memory_order_seq_cst"),
+             MslExpression::identifier("thread_scope_device", thread_scope)},
+            MslType::void_type()));
+    };
+    const MslExpr count_value =
+        MslExpression::subscript(barrier, zero, atomic_uint);
+    const MslExpr generation_value = MslExpression::subscript(
+        barrier, MslExpression::literal("1u", MslType::uint()), atomic_uint);
+    const MslExpr count = MslExpression::unary(
+        "&", count_value, atomic_pointer);
+    const MslExpr generation = MslExpression::unary(
+        "&", generation_value, atomic_pointer);
+    const MslExpr thread_or = MslExpression::binary(
+        "|", MslExpression::binary(
+                 "|", component(thread_position, "x"),
+                 component(thread_position, "y"), MslType::uint()),
+        component(thread_position, "z"), MslType::uint());
+    const MslExpr is_leader = MslExpression::binary(
+        "==", thread_or, zero, MslType::boolean());
+    const MslExpr observed =
+        MslExpression::identifier("observed_generation", MslType::uint());
+    const MslExpr arrived =
+        MslExpression::identifier("arrived", MslType::uint());
+    const MslExpr group_count = MslExpression::binary(
+        "*", MslExpression::binary(
+                 "*", component(threadgroups, "x"),
+                 component(threadgroups, "y"), MslType::uint()),
+        component(threadgroups, "z"), MslType::uint());
+
+    std::vector<MslStmt> last_group;
+    last_group.push_back(device_fence());
+    last_group.push_back(MslStatement::expression(MslExpression::call(
+        "atomic_store_explicit", {count, zero, order("memory_order_relaxed")},
+        MslType::void_type())));
+    last_group.push_back(MslStatement::expression(MslExpression::call(
+        "atomic_fetch_add_explicit",
+        {generation, MslExpression::literal("1u", MslType::uint()),
+         order("memory_order_relaxed")},
+        MslType::uint())));
+
+    const MslExpr wait_condition = MslExpression::binary(
+        "==",
+        MslExpression::call(
+            "atomic_load_explicit",
+            {generation, order("memory_order_relaxed")}, MslType::uint()),
+        observed, MslType::boolean());
+    std::vector<MslStmt> leader;
+    leader.push_back(device_fence());
+    leader.push_back(MslStatement::variable(
+        MslType::uint(), "observed_generation",
+        MslExpression::call(
+            "atomic_load_explicit",
+            {generation, order("memory_order_relaxed")}, MslType::uint()),
+        true));
+    leader.push_back(MslStatement::variable(
+        MslType::uint(), "arrived",
+        MslExpression::binary(
+            "+", MslExpression::call(
+                     "atomic_fetch_add_explicit",
+                     {count, MslExpression::literal("1u", MslType::uint()),
+                      order("memory_order_relaxed")},
+                     MslType::uint()),
+            MslExpression::literal("1u", MslType::uint()), MslType::uint()),
+        true));
+    leader.push_back(MslStatement::if_statement(
+        MslExpression::binary("==", arrived, group_count, MslType::boolean()),
+        std::move(last_group),
+        {MslStatement::while_statement(wait_condition, {}), device_fence()}));
+
+    MslFunction helper;
+    helper.name = "cm_grid_sync";
+    helper.parameters = {
+        {.type = atomic_pointer, .name = "barrier"},
+        {.type = uint3, .name = "thread_position"},
+        {.type = uint3, .name = "threadgroups"},
+    };
+    helper.statements.push_back(barrier_call());
+    helper.statements.push_back(
+        MslStatement::if_statement(is_leader, std::move(leader)));
+    helper.statements.push_back(barrier_call());
+    return helper;
+}
+
 std::string wide_atomic_helper_name(std::string_view operation, bool is_signed,
                                     MslAddressSpace address_space) {
     return "cm_wide_atomic_" + std::string(operation) +
@@ -905,6 +1047,8 @@ struct BuiltinUsage {
     bool threads_per_threadgroup = false;
     bool threadgroups_per_grid = false;
     bool lane_id = false;
+    bool device_clock = false;
+    bool grid_barrier = false;
 
     bool merge(const BuiltinUsage& other) {
         const BuiltinUsage before = *this;
@@ -913,11 +1057,15 @@ struct BuiltinUsage {
         threads_per_threadgroup = threads_per_threadgroup || other.threads_per_threadgroup;
         threadgroups_per_grid = threadgroups_per_grid || other.threadgroups_per_grid;
         lane_id = lane_id || other.lane_id;
+        device_clock = device_clock || other.device_clock;
+        grid_barrier = grid_barrier || other.grid_barrier;
         return thread_position != before.thread_position ||
                threadgroup_position != before.threadgroup_position ||
                threads_per_threadgroup != before.threads_per_threadgroup ||
                threadgroups_per_grid != before.threadgroups_per_grid ||
-               lane_id != before.lane_id;
+               lane_id != before.lane_id ||
+               device_clock != before.device_clock ||
+               grid_barrier != before.grid_barrier;
     }
 };
 
@@ -994,6 +1142,19 @@ BuiltinUsageMap analyze_builtin_usage(const ir::Module& module) {
                                  operation.opcode == ir::OpCode::kMetalShuffle ||
                                  operation.opcode == ir::OpCode::kMetalBallot ||
                                  operation.opcode == ir::OpCode::kMetalVote;
+                if (operation.opcode == ir::OpCode::kCall) {
+                    const auto callee = operation.attributes.find("callee");
+                    if (callee != operation.attributes.end() &&
+                        callee->second == "cm_device_clock") {
+                        direct.device_clock = true;
+                    }
+                    if (callee != operation.attributes.end() &&
+                        callee->second == "cm_grid_sync") {
+                        direct.grid_barrier = true;
+                        direct.thread_position = true;
+                        direct.threadgroups_per_grid = true;
+                    }
+                }
             }
         }
         usage[function.name] = direct;
@@ -1171,6 +1332,8 @@ struct AstLowerer {
     bool needs_threadgroups_per_grid = false;
     bool needs_lane_id = false;
     bool needs_wide_atomic_lock_bank = false;
+    bool needs_device_clock = false;
+    bool needs_grid_barrier = false;
     bool cfg_dispatcher_mode = false;
     bool predeclared_ssa_storage = false;
     bool force_cfg_dispatcher = false;
@@ -1197,6 +1360,8 @@ struct AstLowerer {
         needs_threads_per_threadgroup = required.threads_per_threadgroup;
         needs_threadgroups_per_grid = required.threadgroups_per_grid;
         needs_lane_id = required.lane_id;
+        needs_device_clock = required.device_clock;
+        needs_grid_barrier = required.grid_barrier;
         needs_wide_atomic_lock_bank = wide_atomic_usage.at(function.name);
     }
 
@@ -1596,6 +1761,33 @@ struct AstLowerer {
             const MslType return_type = operation.result_types.empty()
                                             ? MslType::void_type()
                                             : lower_result_type(operation);
+            const MslType hidden_atomic_pointer = MslType::pointer(
+                atomic_uint_type(), MslAddressSpace::kDevice);
+            if (callee->second == "cm_device_clock") {
+                const MslExpr tick = MslExpression::call(
+                    "cm_device_clock",
+                    {MslExpression::identifier("cm_device_clock_counter",
+                                               hidden_atomic_pointer)},
+                    MslType::uint());
+                return declare_result(
+                    operation,
+                    return_type == MslType::uint()
+                        ? tick
+                        : MslExpression::cast(return_type, tick));
+            }
+            if (callee->second == "cm_grid_sync") {
+                return MslStatement::expression(MslExpression::call(
+                    "cm_grid_sync",
+                    {MslExpression::identifier("cm_grid_barrier",
+                                               hidden_atomic_pointer),
+                     MslExpression::identifier(
+                         "cm_thread_position",
+                         MslType::vector(MslType::uint(), 3)),
+                     MslExpression::identifier(
+                         "cm_threadgroups_per_grid",
+                         MslType::vector(MslType::uint(), 3))},
+                    MslType::void_type()));
+            }
             auto unary_call = [&](std::string name, MslExpr value) {
                 return MslExpression::call(std::move(name), {std::move(value)},
                                            return_type);
@@ -1731,6 +1923,18 @@ struct AstLowerer {
             const auto callee_usage = builtin_usage.find(callee->second);
             if (callee_usage != builtin_usage.end()) {
                 const BuiltinUsage& required = callee_usage->second;
+                if (required.device_clock) {
+                    arguments.push_back(MslExpression::identifier(
+                        "cm_device_clock_counter",
+                        MslType::pointer(atomic_uint_type(),
+                                         MslAddressSpace::kDevice)));
+                }
+                if (required.grid_barrier) {
+                    arguments.push_back(MslExpression::identifier(
+                        "cm_grid_barrier",
+                        MslType::pointer(atomic_uint_type(),
+                                         MslAddressSpace::kDevice)));
+                }
                 if (required.thread_position) {
                     arguments.push_back(MslExpression::identifier(
                         "cm_thread_position", MslType::vector(MslType::uint(), 3)));
@@ -3756,6 +3960,32 @@ struct AstLowerer {
             });
         }
 
+        if (needs_device_clock) {
+            std::vector<MslAttribute> attributes;
+            if (function.is_kernel) {
+                attributes.push_back(MslAttribute{.name = "buffer", .index = 28});
+            }
+            output.parameters.push_back({
+                .type = MslType::pointer(atomic_uint_type(),
+                                         MslAddressSpace::kDevice),
+                .name = "cm_device_clock_counter",
+                .attributes = std::move(attributes),
+            });
+        }
+
+        if (needs_grid_barrier) {
+            std::vector<MslAttribute> attributes;
+            if (function.is_kernel) {
+                attributes.push_back(MslAttribute{.name = "buffer", .index = 27});
+            }
+            output.parameters.push_back({
+                .type = MslType::pointer(atomic_uint_type(),
+                                         MslAddressSpace::kDevice),
+                .name = "cm_grid_barrier",
+                .attributes = std::move(attributes),
+            });
+        }
+
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::BlockArgument& argument : block.arguments) {
                 declare_block_argument(argument, &output.statements);
@@ -4127,6 +4357,14 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     const BarrierUsageMap barrier_usage = analyze_barrier_usage(metal_module);
     const WideAtomicUsageMap wide_atomic_usage =
         analyze_wide_atomic_usage(metal_module);
+    const bool needs_device_clock = std::any_of(
+        builtin_usage.begin(), builtin_usage.end(),
+        [](const auto& item) { return item.second.device_clock; });
+    const bool needs_grid_barrier = std::any_of(
+        builtin_usage.begin(), builtin_usage.end(),
+        [](const auto& item) { return item.second.grid_barrier; });
+    if (needs_device_clock) result.ast.functions.push_back(make_device_clock_helper());
+    if (needs_grid_barrier) result.ast.functions.push_back(make_grid_sync_helper());
     for (const ir::Function& function : metal_module.functions) {
         const StructurizeResult structurized = check_structurizable(function);
         if (!structurized.ok) {

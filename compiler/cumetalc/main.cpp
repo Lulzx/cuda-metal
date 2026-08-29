@@ -568,27 +568,6 @@ std::string device_symbol_from_stub(std::string symbol) {
     return symbol;
 }
 
-std::vector<std::string> split_llvm_parameters(std::string_view parameters) {
-    std::vector<std::string> result;
-    std::size_t begin = 0;
-    unsigned nesting = 0;
-    for (std::size_t i = 0; i <= parameters.size(); ++i) {
-        const char c = i == parameters.size() ? ',' : parameters[i];
-        if (c == '[' || c == '{' || c == '(' || c == '<') ++nesting;
-        if ((c == ']' || c == '}' || c == ')' || c == '>') && nesting > 0) --nesting;
-        if (c == ',' && nesting == 0) {
-            std::string value(parameters.substr(begin, i - begin));
-            while (!value.empty() &&
-                   std::isspace(static_cast<unsigned char>(value.front())) != 0) {
-                value.erase(value.begin());
-            }
-            if (!value.empty()) result.push_back(std::move(value));
-            begin = i + 1;
-        }
-    }
-    return result;
-}
-
 bool parse_native_host_kernels(std::string_view llvm_ir,
                                std::vector<NativeHostKernel>* kernels,
                                std::string* error) {
@@ -597,7 +576,7 @@ bool parse_native_host_kernels(std::string_view llvm_ir,
         R"(define[^\n@]*@([^ (\n]+)\(([^\n]*)\)[^{\n]*\{)"
     );
     const std::regex setup(
-        R"(@cudaSetupArgument\([^,]+, i64 ([0-9]+), i64 ([0-9]+)\))"
+        R"(@cudaSetupArgument\(ptr [^,%]*?(%[-A-Za-z0-9._]+), i64 ([0-9]+), i64 ([0-9]+)\))"
     );
     for (std::sregex_iterator it(source.begin(), source.end(), header), end;
          it != end; ++it) {
@@ -619,24 +598,31 @@ bool parse_native_host_kernels(std::string_view llvm_ir,
             .stub_symbol = stub,
             .metal_name = metal_name,
         };
-        for (const std::string& parameter :
-             split_llvm_parameters((*it)[2].str())) {
-            kernel.pointer_arguments.push_back(parameter.starts_with("ptr ") ||
-                                               parameter == "ptr");
-        }
         const std::string body = source.substr(body_begin, body_end - body_begin);
+        std::size_t setup_call_count = 0;
+        for (std::size_t at = body.find("@cudaSetupArgument(");
+             at != std::string::npos;
+             at = body.find("@cudaSetupArgument(", at + 1)) {
+            ++setup_call_count;
+        }
         for (std::sregex_iterator setup_it(body.begin(), body.end(), setup), setup_end;
              setup_it != setup_end; ++setup_it) {
-            const auto size = std::stoull((*setup_it)[1].str());
+            const std::string storage = (*setup_it)[1].str();
+            const auto size = std::stoull((*setup_it)[2].str());
             if (size == 0 || size > 64u * 1024u) {
                 if (error != nullptr) *error = "invalid launch argument size in host stub '" + stub + "'";
                 return false;
             }
+            const std::regex pointer_storage(
+                "(?:^|\\n)[[:space:]]*" + storage +
+                R"([[:space:]]*=[[:space:]]*alloca ptr(?:,|\n))");
+            kernel.pointer_arguments.push_back(
+                std::regex_search(body, pointer_storage));
             kernel.argument_sizes.push_back(static_cast<std::uint32_t>(size));
         }
-        if (kernel.argument_sizes.size() != kernel.pointer_arguments.size()) {
+        if (kernel.argument_sizes.size() != setup_call_count) {
             if (error != nullptr) {
-                *error = "host stub ABI extraction disagrees with parameter count for '" +
+                *error = "cannot classify every cudaSetupArgument call in host stub '" +
                          stub + "'";
             }
             return false;

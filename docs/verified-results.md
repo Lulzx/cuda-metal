@@ -25,6 +25,13 @@ device symbols end to end: bounded host-to/from-symbol copies, a 27,904-byte
 constant buffer, symbol address/size queries, and persistent GPU updates across
 two launches.
 
+The reviewed Phase 4 manifest ran 185/185 required functional tests on
+2026-08-29 with zero failures and zero skips. This includes native-AOT numerical
+Apple-GPU execution for by-value aggregates containing device pointers, the
+bounded monotonic `clock()` emulation, and a four-threadgroup cooperative grid
+barrier. The barrier gate checks device-scope visibility across two barriers;
+the clock gate checks monotonic progress rather than claiming GPU-cycle timing.
+
 On 2026-08-29, `functional_typed_{direct,ptx}_{device,system}_atomics` and
 `functional_typed_{direct,ptx}_fence` passed on Apple GPU. The device test
 checks add/sub/min/max/CAS/inc/dec/and/or/xor across 16,384 contending threads;

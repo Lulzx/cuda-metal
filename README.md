@@ -69,6 +69,9 @@ compiler paths and their selection policy are in
 
 ## Current verified boundary
 
+- The fixed Phase 4 functional denominator is **185/185 pass** with zero skips
+  on the recorded Apple M4 Pro run. Default source executables embed native-AOT
+  metallibs and ABI-v2 kernel/symbol metadata without first-launch PTX JIT.
 - The enrolled headless NVIDIA `cuda-samples` snapshot is **83/83 pass**, with
   zero waivers and zero nonpassing manifest entries.
 - With CUDA Clang 21-23, the reviewed 24-file production-metallib matrix is

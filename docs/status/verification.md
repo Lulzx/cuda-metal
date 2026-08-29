@@ -10,6 +10,8 @@ external workloads. `scripts/ci_report.sh` reports pass/skip/fail separately.
 
 High-value executable gates include:
 
+- 185/185 required Phase 4 functional tests with zero skips on the recorded
+  2026-08-29 Apple M4 Pro run;
 - 83-entry `cuda-samples` coverage manifest and sweep classifier;
 - 24-file four-cell frontend/backend production-metallib matrix;
 - numerical PTX instruction sweep with hand-derived oracles;
@@ -17,11 +19,9 @@ High-value executable gates include:
 - Release/shim-off and Debug/shim-on configuration contracts;
 - AIR toolchain identity and metallib load/validation checks.
 
-GitHub Actions definitions are enabled for the hosted Release/shim-off and
-Debug/shim-on matrix. Their source presence does not prove a successful remote
-run. The Apple-GPU workflow is also enabled, but push execution still requires
-a commissioned runner and `CUMETAL_GPU_CI_ENABLED=true`; manual dispatch only
-attempts the job.
+The repository intentionally contains no GitHub Actions workflows. Release,
+shim-policy, and Apple-GPU gates are run explicitly on suitable machines; there
+is no recurring hosted or self-hosted automation to claim.
 
 ## Performance
 

@@ -1060,6 +1060,28 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmClockAndGridSyncHelper = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define void @clock_and_grid_sync(ptr %out) {
+entry:
+  %tick = call i32 @llvm.nvvm.read.ptx.sreg.clock()
+  store i32 %tick, ptr %out, align 4
+  call void @__cumetal_grid_sync()
+  ret void
+}
+
+define ptx_kernel void @clock_grid_kernel(ptr %out) {
+entry:
+  call void @clock_and_grid_sync(ptr %out)
+  ret void
+}
+
+declare i32 @llvm.nvvm.read.ptx.sreg.clock()
+declare void @__cumetal_grid_sync()
+)llvm";
+
 int main() {
     using namespace cumetal;
     if (!ir::llvm_frontend_available()) {
@@ -1619,6 +1641,32 @@ int main() {
                          std::string::npos,
                  "runtime CUDA symbols stay hidden while initialized read-only tables embed their bytes");
     if (!external_symbols.ok) std::cerr << external_symbols.error << "\n";
+
+    const metal::NvvmToMslResult clock_grid = metal::compile_nvvm_to_msl(
+        kNvvmClockAndGridSyncHelper, "clock-grid-helper.ll", "clock_grid_kernel");
+    ok &= expect(clock_grid.ok &&
+                     clock_grid.source.find(
+                         "cm_device_clock_counter [[buffer(28)]]") !=
+                         std::string::npos &&
+                     clock_grid.source.find(
+                         "cm_grid_barrier [[buffer(27)]]") !=
+                         std::string::npos &&
+                     clock_grid.source.find("atomic_fetch_add_explicit") !=
+                         std::string::npos &&
+                     clock_grid.source.find("atomic_thread_fence") !=
+                         std::string::npos &&
+                     clock_grid.source.find(
+                         "clock_and_grid_sync(out, cm_device_clock_counter, cm_grid_barrier, cm_thread_position, cm_threadgroups_per_grid)") !=
+                         std::string::npos &&
+                     clock_grid.source.find(
+                         "cumetal-semantic-quality: semantic_emulation") !=
+                         std::string::npos,
+                 "typed NVVM threads emulated clock and cooperative-grid state through device helpers");
+    if (!clock_grid.ok) {
+        std::cerr << clock_grid.error << "\n";
+    } else if (!ok) {
+        std::cerr << clock_grid.source << "\n";
+    }
 
     const metal::NvvmToMslResult oversized_constant = metal::compile_nvvm_to_msl(
         kNvvmOversizedExternalConstant, "oversized-constant.ll", "read_large");
