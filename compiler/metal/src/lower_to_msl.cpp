@@ -80,6 +80,146 @@ MslFunction make_atomic_cas_u32_helper(MslAddressSpace address_space) {
     return helper;
 }
 
+std::string wide_atomic_helper_name(std::string_view operation, bool is_signed,
+                                    MslAddressSpace address_space) {
+    return "cm_wide_atomic_" + std::string(operation) +
+           (is_signed ? "_signed_" : "_") +
+           (address_space == MslAddressSpace::kThreadgroup ? "threadgroup" : "device") +
+           "_u64";
+}
+
+MslFunction make_wide_atomic_u64_helper(std::string operation, bool is_signed,
+                                        MslAddressSpace address_space) {
+    const MslType u64 = MslType::uint(64);
+    const MslType s64 = MslType::sint(64);
+    const MslType atomic_uint = {
+        .kind = MslTypeKind::kStruct,
+        .struct_name = "atomic_uint",
+    };
+    const MslType memory_order = {
+        .kind = MslTypeKind::kStruct,
+        .struct_name = "memory_order",
+    };
+    const MslType thread_scope = {
+        .kind = MslTypeKind::kStruct,
+        .struct_name = "thread_scope",
+    };
+    const MslType payload_pointer = MslType::pointer(u64, address_space);
+    const MslType lock_bank_pointer =
+        MslType::pointer(atomic_uint, MslAddressSpace::kDevice);
+    const MslExpr payload = MslExpression::identifier("payload", payload_pointer);
+    const MslExpr operand = MslExpression::identifier("operand", u64);
+    const MslExpr compare = MslExpression::identifier("compare", u64);
+    const MslExpr lock_bank =
+        MslExpression::identifier("lock_bank", lock_bank_pointer);
+    const MslExpr relaxed =
+        MslExpression::identifier("memory_order_relaxed", memory_order);
+
+    const MslExpr address = MslExpression::cast(u64, payload, true);
+    const MslExpr word = MslExpression::binary(
+        ">>", address, MslExpression::literal("3u", MslType::uint()), u64);
+    const MslExpr word32 = MslExpression::cast(MslType::uint(), word);
+    const MslExpr mixed = MslExpression::binary(
+        "*", word32, MslExpression::literal("2654435769u", MslType::uint()),
+        MslType::uint());
+    const MslExpr slot = MslExpression::binary(
+        ">>", mixed, MslExpression::literal("22u", MslType::uint()),
+        MslType::uint());
+    const MslExpr lock_value =
+        MslExpression::subscript(lock_bank, slot, atomic_uint);
+    const MslExpr lock = MslExpression::unary(
+        "&", lock_value,
+        MslType::pointer(atomic_uint, MslAddressSpace::kDevice));
+    const MslExpr got = MslExpression::identifier("got", MslType::uint());
+    const MslExpr old = MslExpression::identifier("old", u64);
+    const MslExpr result = MslExpression::identifier("result", u64);
+    const MslExpr done = MslExpression::identifier("done", MslType::boolean());
+
+    const auto fence = [&]() {
+        return MslStatement::expression(MslExpression::call(
+            "atomic_thread_fence",
+            {MslExpression::literal("mem_flags::mem_device", MslType::uint()),
+             MslExpression::identifier("memory_order_seq_cst", memory_order),
+             MslExpression::identifier("thread_scope_device", thread_scope)},
+            MslType::void_type()));
+    };
+
+    MslExpr updated;
+    if (operation == "exch" || operation == "xchg") {
+        updated = operand;
+    } else if (operation == "cas") {
+        updated = MslExpression::conditional(
+            MslExpression::binary("==", old, compare, MslType::boolean()),
+            operand, old, u64);
+    } else if (operation == "min" || operation == "max") {
+        const MslExpr compared_old =
+            is_signed ? MslExpression::bitcast(s64, old) : old;
+        const MslExpr compared_operand =
+            is_signed ? MslExpression::bitcast(s64, operand) : operand;
+        const std::string predicate = operation == "min" ? "<" : ">";
+        updated = MslExpression::conditional(
+            MslExpression::binary(predicate, compared_old, compared_operand,
+                                  MslType::boolean()),
+            old, operand, u64);
+    } else {
+        static const std::unordered_map<std::string, std::string> operators = {
+            {"add", "+"}, {"and", "&"}, {"or", "|"}, {"xor", "^"},
+        };
+        const auto binary = operators.find(operation);
+        updated = binary == operators.end()
+                      ? old
+                      : MslExpression::binary(binary->second, old, operand, u64);
+    }
+
+    std::vector<MslStmt> critical;
+    critical.push_back(fence());
+    critical.push_back(MslStatement::variable(
+        u64, "old", MslExpression::unary("*", payload, u64), true));
+    critical.push_back(MslStatement::assignment(
+        MslExpression::unary("*", payload, u64), updated));
+    critical.push_back(fence());
+    critical.push_back(MslStatement::expression(MslExpression::call(
+        "atomic_exchange_explicit",
+        {lock, MslExpression::literal("0u", MslType::uint()), relaxed},
+        MslType::uint())));
+    critical.push_back(MslStatement::assignment(result, old));
+    critical.push_back(MslStatement::assignment(
+        done, MslExpression::literal("true", MslType::boolean())));
+
+    std::vector<MslStmt> retry;
+    retry.push_back(MslStatement::variable(
+        MslType::uint(), "got",
+        MslExpression::call(
+            "atomic_exchange_explicit",
+            {lock, MslExpression::literal("1u", MslType::uint()), relaxed},
+            MslType::uint()),
+        true));
+    retry.push_back(MslStatement::if_statement(
+        MslExpression::binary(
+            "==", got, MslExpression::literal("0u", MslType::uint()),
+            MslType::boolean()),
+        std::move(critical)));
+
+    MslFunction helper;
+    helper.name = wide_atomic_helper_name(operation, is_signed, address_space);
+    helper.return_type = u64;
+    helper.parameters = {
+        {.type = payload_pointer, .name = "payload"},
+        {.type = u64, .name = "operand"},
+        {.type = u64, .name = "compare"},
+        {.type = lock_bank_pointer, .name = "lock_bank"},
+    };
+    helper.statements.push_back(MslStatement::variable(
+        u64, "result", MslExpression::literal("0ul", u64)));
+    helper.statements.push_back(MslStatement::variable(
+        MslType::boolean(), "done",
+        MslExpression::literal("false", MslType::boolean())));
+    helper.statements.push_back(MslStatement::while_statement(
+        MslExpression::unary("!", done, MslType::boolean()), std::move(retry)));
+    helper.statements.push_back(MslStatement::return_statement(result));
+    return helper;
+}
+
 bool is_native_vector_aggregate(const ir::Type& type) {
     if (type.kind != ir::TypeKind::kAggregate ||
         (type.elements.size() != 2 && type.elements.size() != 4) ||
@@ -785,6 +925,7 @@ using BuiltinUsageMap = std::unordered_map<std::string, BuiltinUsage>;
 using SharedUsageMap =
     std::unordered_map<std::string, std::vector<std::string>>;
 using BarrierUsageMap = std::unordered_map<std::string, bool>;
+using WideAtomicUsageMap = std::unordered_map<std::string, bool>;
 
 std::string shared_parameter_name(std::string_view global) {
     return "cm_shared_" + sanitize_identifier(global);
@@ -963,11 +1104,51 @@ BarrierUsageMap analyze_barrier_usage(const ir::Module& module) {
     return usage;
 }
 
+WideAtomicUsageMap analyze_wide_atomic_usage(const ir::Module& module) {
+    WideAtomicUsageMap usage;
+    for (const ir::Function& function : module.functions) {
+        bool direct = false;
+        for (const ir::BasicBlock& block : function.blocks) {
+            for (const ir::Operation& operation : block.operations) {
+                direct = direct ||
+                         (operation.opcode == ir::OpCode::kMetalAtomic &&
+                          operation.result_types.size() == 1 &&
+                          operation.result_types.front().kind ==
+                              ir::TypeKind::kInteger &&
+                          operation.result_types.front().bit_width == 64);
+            }
+        }
+        usage[function.name] = direct;
+    }
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const ir::Function& function : module.functions) {
+            if (usage[function.name]) continue;
+            for (const ir::BasicBlock& block : function.blocks) {
+                for (const ir::Operation& operation : block.operations) {
+                    if (operation.opcode != ir::OpCode::kCall) continue;
+                    const auto callee = operation.attributes.find("callee");
+                    if (callee != operation.attributes.end() &&
+                        usage.contains(callee->second) && usage.at(callee->second)) {
+                        usage[function.name] = true;
+                        changed = true;
+                        break;
+                    }
+                }
+                if (usage[function.name]) break;
+            }
+        }
+    }
+    return usage;
+}
+
 struct AstLowerer {
     const ir::Module& module;
     const ir::Function& function;
     const BuiltinUsageMap& builtin_usage;
     const SharedUsageMap& shared_usage;
+    const WideAtomicUsageMap& wide_atomic_usage;
     LowerToMslResult result;
     MslFunction output;
     std::unordered_map<ir::ValueId, MslExpr> values;
@@ -989,6 +1170,7 @@ struct AstLowerer {
     bool needs_threads_per_threadgroup = false;
     bool needs_threadgroups_per_grid = false;
     bool needs_lane_id = false;
+    bool needs_wide_atomic_lock_bank = false;
     bool cfg_dispatcher_mode = false;
     bool predeclared_ssa_storage = false;
     bool force_cfg_dispatcher = false;
@@ -999,12 +1181,14 @@ struct AstLowerer {
     AstLowerer(const ir::Module& input_module, const ir::Function& input_function,
                const BuiltinUsageMap& input_builtin_usage,
                const SharedUsageMap& input_shared_usage,
+               const WideAtomicUsageMap& input_wide_atomic_usage,
                bool force_dispatcher = false,
                std::optional<ir::AddressSpace> specialization = std::nullopt)
         : module(input_module),
           function(input_function),
           builtin_usage(input_builtin_usage),
           shared_usage(input_shared_usage),
+          wide_atomic_usage(input_wide_atomic_usage),
           force_cfg_dispatcher(force_dispatcher),
           pointer_specialization(specialization) {
         const BuiltinUsage& required = builtin_usage.at(function.name);
@@ -1013,6 +1197,7 @@ struct AstLowerer {
         needs_threads_per_threadgroup = required.threads_per_threadgroup;
         needs_threadgroups_per_grid = required.threadgroups_per_grid;
         needs_lane_id = required.lane_id;
+        needs_wide_atomic_lock_bank = wide_atomic_usage.at(function.name);
     }
 
     bool fail(const ir::Operation* operation, std::string message) {
@@ -1531,6 +1716,17 @@ struct AstLowerer {
                         MslType::pointer(MslType::uint(8),
                                          MslAddressSpace::kThreadgroup)));
                 }
+            }
+            const auto callee_wide_atomic = wide_atomic_usage.find(callee->second);
+            if (callee_wide_atomic != wide_atomic_usage.end() &&
+                callee_wide_atomic->second) {
+                const MslType atomic_uint = {
+                    .kind = MslTypeKind::kStruct,
+                    .struct_name = "atomic_uint",
+                };
+                arguments.push_back(MslExpression::identifier(
+                    "cm_atomic_lock_bank",
+                    MslType::pointer(atomic_uint, MslAddressSpace::kDevice)));
             }
             const auto callee_usage = builtin_usage.find(callee->second);
             if (callee_usage != builtin_usage.end()) {
@@ -2134,9 +2330,11 @@ struct AstLowerer {
         if (operation.opcode == ir::OpCode::kMetalAtomic) {
             if (operation.results.size() != 1 || operation.result_types.size() != 1 ||
                 operation.result_types.front().kind != ir::TypeKind::kInteger ||
-                operation.result_types.front().bit_width != 32) {
+                (operation.result_types.front().bit_width != 32 &&
+                 operation.result_types.front().bit_width != 64)) {
                 fail(&operation,
-                     "Metal atomic lowering currently requires one 32-bit integer result");
+                     "Metal atomic lowering requires one 32-bit or lock-backed 64-bit "
+                     "integer result");
                 return std::nullopt;
             }
             const auto atomic_op = operation.attributes.find("atomic_op");
@@ -2189,6 +2387,51 @@ struct AstLowerer {
                 operation.attributes.contains("signed") &&
                 operation.attributes.at("signed") == "true" &&
                 (operation_name == "min" || operation_name == "max");
+            if (operation.result_types.front().bit_width == 64) {
+                static const std::unordered_set<std::string> kWideAtomicOperations = {
+                    "add", "and", "or", "xor", "min", "max", "exch", "xchg",
+                    "cas",
+                };
+                if (!kWideAtomicOperations.contains(operation_name)) {
+                    fail(&operation, "unsupported lock-backed 64-bit Metal atomic '" +
+                                         operation_name + "'");
+                    return std::nullopt;
+                }
+                const MslType u64 = MslType::uint(64);
+                const MslType payload_pointer =
+                    MslType::pointer(u64, address_space);
+                const MslExpr payload =
+                    MslExpression::cast(payload_pointer, raw_pointer, true);
+                const auto as_u64 = [&](const ir::Operand& value) {
+                    const MslExpr expression = expression_for(value);
+                    return expression->type.kind == MslTypeKind::kInt &&
+                                   expression->type.lanes == 64
+                               ? MslExpression::bitcast(u64, expression)
+                               : MslExpression::cast(u64, expression);
+                };
+                const MslExpr zero = MslExpression::literal("0ul", u64);
+                const MslExpr operand =
+                    as_u64(operation.operands[is_cas ? 2 : 1]);
+                const MslExpr compare =
+                    is_cas ? as_u64(operation.operands[1]) : zero;
+                MslExpr call = MslExpression::call(
+                    wide_atomic_helper_name(operation_name, is_signed, address_space),
+                    {payload, operand, compare,
+                     MslExpression::identifier(
+                         "cm_atomic_lock_bank",
+                         MslType::pointer(
+                             {.kind = MslTypeKind::kStruct,
+                              .struct_name = "atomic_uint"},
+                             MslAddressSpace::kDevice))},
+                    u64);
+                const MslType result_type = lower_result_type(operation);
+                if (result_type.kind == MslTypeKind::kInt) {
+                    call = MslExpression::bitcast(result_type, call);
+                } else if (result_type != u64) {
+                    call = MslExpression::cast(result_type, call);
+                }
+                return declare_result(operation, std::move(call));
+            }
             const MslType atomic_integer = {
                 .kind = MslTypeKind::kStruct,
                 .struct_name = is_signed ? "atomic_int" : "atomic_uint",
@@ -3497,6 +3740,22 @@ struct AstLowerer {
             }
         }
 
+        if (needs_wide_atomic_lock_bank) {
+            const MslType atomic_uint = {
+                .kind = MslTypeKind::kStruct,
+                .struct_name = "atomic_uint",
+            };
+            std::vector<MslAttribute> attributes;
+            if (function.is_kernel) {
+                attributes.push_back(MslAttribute{.name = "buffer", .index = 29});
+            }
+            output.parameters.push_back({
+                .type = MslType::pointer(atomic_uint, MslAddressSpace::kDevice),
+                .name = "cm_atomic_lock_bank",
+                .attributes = std::move(attributes),
+            });
+        }
+
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::BlockArgument& argument : block.arguments) {
                 declare_block_argument(argument, &output.statements);
@@ -3792,13 +4051,49 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     bool needs_device_cas = false;
     bool needs_threadgroup_cas = false;
     bool needs_fp64_support = false;
+    std::unordered_set<std::string> wide_atomic_helpers;
+    std::vector<MslFunction> wide_atomic_helper_functions;
     for (const ir::Function& function : metal_module.functions) {
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::Operation& operation : block.operations) {
                 needs_fp64_support |= operation.attributes.contains("fp64_mode");
+                if (operation.opcode == ir::OpCode::kMetalAtomic &&
+                    operation.result_types.size() == 1 &&
+                    operation.result_types.front().kind == ir::TypeKind::kInteger &&
+                    operation.result_types.front().bit_width == 64 &&
+                    operation.attributes.contains("atomic_op") &&
+                    !operation.operands.empty()) {
+                    const std::string& atomic_op =
+                        operation.attributes.at("atomic_op");
+                    const bool is_signed =
+                        operation.attributes.contains("signed") &&
+                        operation.attributes.at("signed") == "true" &&
+                        (atomic_op == "min" || atomic_op == "max");
+                    std::vector<MslAddressSpace> spaces;
+                    const MslAddressSpace space = lower_address_space(
+                        operation.operands.front().type.address_space);
+                    if (space == MslAddressSpace::kDevice ||
+                        space == MslAddressSpace::kThreadgroup) {
+                        spaces.push_back(space);
+                    } else {
+                        spaces = {MslAddressSpace::kDevice,
+                                  MslAddressSpace::kThreadgroup};
+                    }
+                    for (const MslAddressSpace helper_space : spaces) {
+                        const std::string helper_name = wide_atomic_helper_name(
+                            atomic_op, is_signed, helper_space);
+                        if (wide_atomic_helpers.insert(helper_name).second) {
+                            wide_atomic_helper_functions.push_back(
+                                make_wide_atomic_u64_helper(
+                                    atomic_op, is_signed, helper_space));
+                        }
+                    }
+                }
                 if (operation.opcode != ir::OpCode::kMetalAtomic ||
                     !operation.attributes.contains("atomic_op") ||
                     operation.attributes.at("atomic_op") != "cas" ||
+                    operation.result_types.size() != 1 ||
+                    operation.result_types.front().bit_width != 32 ||
                     operation.operands.empty()) {
                     continue;
                 }
@@ -3816,9 +4111,14 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         result.ast.functions.push_back(
             make_atomic_cas_u32_helper(MslAddressSpace::kThreadgroup));
     }
+    result.ast.functions.insert(result.ast.functions.end(),
+                                wide_atomic_helper_functions.begin(),
+                                wide_atomic_helper_functions.end());
     const BuiltinUsageMap builtin_usage = analyze_builtin_usage(metal_module);
     const SharedUsageMap shared_usage = analyze_shared_usage(metal_module);
     const BarrierUsageMap barrier_usage = analyze_barrier_usage(metal_module);
+    const WideAtomicUsageMap wide_atomic_usage =
+        analyze_wide_atomic_usage(metal_module);
     for (const ir::Function& function : metal_module.functions) {
         const StructurizeResult structurized = check_structurizable(function);
         if (!structurized.ok) {
@@ -3848,7 +4148,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         }
         for (const std::optional<ir::AddressSpace> specialization : specializations) {
             AstLowerer lowerer(metal_module, function, builtin_usage, shared_usage,
-                               false, specialization);
+                               wide_atomic_usage, false, specialization);
             LowerToMslResult function_result = lowerer.run();
             const bool structurization_failure =
                 !function_result.ok &&
@@ -3869,7 +4169,8 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                     return function_result;
                 }
                 AstLowerer dispatcher_lowerer(metal_module, function, builtin_usage,
-                                              shared_usage, true, specialization);
+                                              shared_usage, wide_atomic_usage, true,
+                                              specialization);
                 function_result = dispatcher_lowerer.run();
                 if (!function_result.ok) {
                     function_result.error =

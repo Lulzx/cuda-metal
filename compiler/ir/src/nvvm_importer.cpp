@@ -1833,9 +1833,10 @@ struct Importer {
         } else if (const auto* compare_exchange =
                        llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&instruction)) {
             const Type value_type = import_type(compare_exchange->getCompareOperand()->getType());
-            if (value_type.kind != TypeKind::kInteger || value_type.bit_width != 32) {
+            if (value_type.kind != TypeKind::kInteger ||
+                (value_type.bit_width != 32 && value_type.bit_width != 64)) {
                 return fail(&instruction,
-                            "typed Metal cmpxchg currently requires a 32-bit integer payload");
+                            "typed Metal cmpxchg requires a 32-bit or lock-backed 64-bit integer payload");
             }
             const ValueId old_value = builder.next_value();
             state->value_types[old_value] = value_type;

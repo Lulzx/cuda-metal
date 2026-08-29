@@ -513,19 +513,33 @@ BODY:
 .version 8.0
 .target sm_80
 .address_size 64
+.shared .align 8 .f64 block_sum;
 .visible .entry wide_atomic(.param .u64 output) {
     .reg .b64 %rd<3>;
     ld.param.u64 %rd1, [output];
     atom.relaxed.sys.global.add.u64 %rd2, [%rd1], 1;
+    st.shared.b64 [block_sum], 0;
+    atom.relaxed.sys.shared.cas.b64 %rd2, [block_sum], 0, 1;
     ret;
 }
 )ptx";
     const metal::PtxToMslResult wide_atomic =
         metal::compile_ptx_to_msl(wide_atomic_ptx);
-    ok &= expect(!wide_atomic.ok &&
-                     wide_atomic.error.find("requires one 32-bit integer result") !=
+    ok &= expect(wide_atomic.ok &&
+                     wide_atomic.source.find(
+                         "cm_atomic_lock_bank [[buffer(29)]]") !=
+                         std::string::npos &&
+                     wide_atomic.source.find("cm_wide_atomic_add_device_u64") !=
+                         std::string::npos &&
+                     wide_atomic.source.find(
+                         "cm_wide_atomic_cas_threadgroup_u64") !=
+                         std::string::npos &&
+                     wide_atomic.source.find("atomic_exchange_explicit") !=
+                         std::string::npos &&
+                     wide_atomic.source.find("threadgroup uchar cm_shared_block_sum[8]") !=
                          std::string::npos,
-                 "typed PTX keeps wide atomics explicit until the lock-bank ABI is implemented");
+                 "typed PTX lowers device and static-shared 64-bit atomics through the lock-bank ABI");
+    if (!wide_atomic.ok) std::cerr << wide_atomic.error << "\n";
 
     const std::string clang_printf_ptx = R"ptx(
 .version 7.0

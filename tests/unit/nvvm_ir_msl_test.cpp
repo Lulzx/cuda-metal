@@ -712,6 +712,25 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmCudaCmpXchg64Helper = R"llvm(
+target datalayout = "e-p6:32:32-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define i64 @cas64_helper(ptr %counter, i64 %compare, i64 %desired) {
+entry:
+  %pair = cmpxchg ptr %counter, i64 %compare, i64 %desired seq_cst monotonic, align 8
+  %old = extractvalue { i64, i1 } %pair, 0
+  ret i64 %old
+}
+
+define ptx_kernel void @cuda_cmpxchg64_helper(ptr %counter, ptr %old_out) {
+entry:
+  %old = call i64 @cas64_helper(ptr %counter, i64 7, i64 9)
+  store i64 %old, ptr %old_out, align 8
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmPointerAlignment = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1451,6 +1470,23 @@ int main() {
                          std::string::npos,
                  "CUDA cmpxchg imports its old-value and success tuple through a retrying Metal CAS");
     if (!cuda_cmpxchg.ok) std::cerr << cuda_cmpxchg.error << "\n";
+
+    const metal::NvvmToMslResult cuda_cmpxchg64_helper =
+        metal::compile_nvvm_to_msl(kNvvmCudaCmpXchg64Helper,
+                                   "cuda-cmpxchg64-helper.ll",
+                                   "cuda_cmpxchg64_helper");
+    ok &= expect(cuda_cmpxchg64_helper.ok &&
+                     cuda_cmpxchg64_helper.source.find(
+                         "cm_wide_atomic_cas_device_u64") != std::string::npos &&
+                     cuda_cmpxchg64_helper.source.find(
+                         "cm_atomic_lock_bank [[buffer(29)]]") !=
+                         std::string::npos &&
+                     cuda_cmpxchg64_helper.source.find("cas64_helper(") !=
+                         std::string::npos &&
+                     cuda_cmpxchg64_helper.source.find(
+                         ", cm_atomic_lock_bank)") != std::string::npos,
+                 "64-bit NVVM cmpxchg threads the lock bank through device helpers");
+    if (!cuda_cmpxchg64_helper.ok) std::cerr << cuda_cmpxchg64_helper.error << "\n";
 
     const metal::NvvmToMslResult pointer_alignment = metal::compile_nvvm_to_msl(
         kNvvmPointerAlignment, "pointer-alignment.ll", "align_pointer");

@@ -1322,15 +1322,15 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     const auto emitted = cumetal::air_emitter::emit_metallib(emit_options);
     remove_path_if_exists(ll_path.string());
     remove_path_if_exists(metal_path.string());
+    for (const std::string& log_line : emitted.logs) {
+        if (!log_line.empty()) {
+            REG_DEBUG("emit_metallib log: %s", log_line.c_str());
+        }
+    }
     if (!emitted.ok || emitted.output.empty()) {
         REG_DEBUG("emit_metallib error for '%s': %s",
                   kernel_name.c_str(),
                   emitted.error.empty() ? "<none>" : emitted.error.c_str());
-        for (const std::string& log_line : emitted.logs) {
-            if (!log_line.empty()) {
-                REG_DEBUG("emit_metallib log: %s", log_line.c_str());
-            }
-        }
         REG_DEBUG("emit_metallib failed for kernel '%s'", kernel_name.c_str());
         remove_path_if_exists(metallib_path.string());
         return false;

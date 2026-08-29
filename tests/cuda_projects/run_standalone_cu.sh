@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build and run one cuda_projects standalone .cu harness.
-# Usage: run_standalone_cu.sh <cumetal-root> <ctest-binary-dir> <project-subdir> <source.cu> <binary-name>
+# Usage: run_standalone_cu.sh <cumetal-root> <ctest-binary-dir> <project-subdir> <source.cu> <binary-name> [legacy|cumetal-ir]
 set -euo pipefail
 
 ROOT_DIR="${1:?}"
@@ -8,6 +8,12 @@ BUILD_DIR="${2:?}"
 PROJECT_SUBDIR="${3:?}"
 SRC_CU="${4:?}"
 OUT_BIN="${5:?}"
+PTX_BACKEND="${6:-legacy}"
+
+if [[ "${PTX_BACKEND}" != legacy && "${PTX_BACKEND}" != cumetal-ir ]]; then
+    echo "invalid PTX backend: ${PTX_BACKEND}" >&2
+    exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/cuda_projects/_common.sh
@@ -29,7 +35,14 @@ echo "Running ${OUT_BIN}..."
 # through every content check below and was reported PASS -- the loudest possible
 # failure read as green. Only classify the run after the status is known.
 RUN_STATUS=0
-RUN_OUTPUT="$("${OUT_DIR}/${OUT_BIN}" 2>&1)" || RUN_STATUS=$?
+if [[ "${PTX_BACKEND}" == cumetal-ir ]]; then
+    TYPED_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/cumetal-typed-runtime.XXXXXX")"
+    trap 'rm -rf "${TYPED_CACHE}"' EXIT HUP INT TERM
+    RUN_OUTPUT="$(CUMETAL_CACHE_DIR="${TYPED_CACHE}" \
+        CUMETAL_PTX_BACKEND=cumetal-ir "${OUT_DIR}/${OUT_BIN}" 2>&1)" || RUN_STATUS=$?
+else
+    RUN_OUTPUT="$("${OUT_DIR}/${OUT_BIN}" 2>&1)" || RUN_STATUS=$?
+fi
 echo "$RUN_OUTPUT"
 
 if echo "$RUN_OUTPUT" | grep -q "CUMETAL: registered kernel missing metallib"; then

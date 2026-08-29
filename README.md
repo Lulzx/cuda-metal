@@ -68,11 +68,12 @@ compiler paths and their selection policy are in
 - The enrolled headless NVIDIA `cuda-samples` snapshot is **83/83 pass**, with
   zero waivers and zero nonpassing manifest entries.
 - With CUDA Clang 21-23, the reviewed 24-file production-metallib matrix is
-  **23/24** for direct `.cu` through typed CuMetal IR, **23/24** for typed PTX,
+  **24/24** for direct `.cu` through typed CuMetal IR, **24/24** for typed PTX,
   and **24/24** for the legacy PTX backend. These are compile results, not
   numerical runtime proof.
 - Vector add, SAXPY, reduction, selected matrix/library operations, typed
-  direct/PTX FP64, 32-bit atomics, fences, and bounded device `printf`, typed direct
+  direct/PTX FP64, 32-bit atomics, lock-backed 64-bit typed-PTX atomics, fences,
+  and bounded device `printf`, typed direct
   constant/device symbols,
   shared memory, warp operations, streams, and events have focused numerical
   Apple-GPU tests.

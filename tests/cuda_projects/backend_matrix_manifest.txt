@@ -31,4 +31,4 @@ tests/cuda_projects/softmax/softmax.cu fail pass pass pass
 tests/cuda_projects/system_atomics/system_atomics.cu fail pass pass pass
 tests/cuda_projects/transpose/transpose_standalone.cu fail pass pass pass
 tests/cuda_projects/vector_add/vector_add.cu fail pass pass pass
-tests/cuda_projects/wide_atomics/wide_atomics.cu fail fail pass fail
+tests/cuda_projects/wide_atomics/wide_atomics.cu fail pass pass pass

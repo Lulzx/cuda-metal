@@ -179,6 +179,26 @@ cumetal_add_cuda_project_test(
     wide_atomics wide_atomics.cu wide_atomics
 )
 
+add_test(
+    NAME functional_cuda_projects_wide_atomics_typed_ptx
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        wide_atomics
+        wide_atomics.cu
+        wide_atomics_typed_ptx
+        cumetal-ir
+)
+set_tests_properties(
+    functional_cuda_projects_wide_atomics_typed_ptx
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        TIMEOUT 120
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
 cumetal_add_cuda_project_test(
     functional_cuda_projects_cooperative_thread_group
     cooperative_thread_group cooperative_thread_group.cu cooperative_thread_group

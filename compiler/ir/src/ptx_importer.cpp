@@ -320,17 +320,23 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
 std::vector<GlobalThreadgroup> scan_threadgroup_globals(std::string_view ptx) {
     const std::string source(ptx);
     const std::regex declaration(
-        R"((?:\.extern\s+)?\.shared\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]*)\s*\]\s*;)"
+        R"((?:\.extern\s+)?\.shared\s+\.align\s+([0-9]+)\s+\.(?:b|u|s|f)(8|16|32|64)\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*(?:\[\s*([0-9]*)\s*\])?\s*;)"
     );
     std::vector<GlobalThreadgroup> globals;
     for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
          iterator != end; ++iterator) {
-        const std::string size = (*iterator)[3].str();
+        const std::uint64_t element_bytes =
+            static_cast<std::uint64_t>(std::stoul((*iterator)[2].str())) / 8;
+        const bool has_array_extent = (*iterator)[4].matched;
+        const std::string extent = (*iterator)[4].str();
+        const bool is_dynamic = has_array_extent && extent.empty();
+        const std::uint64_t element_count =
+            !has_array_extent ? 1 : (is_dynamic ? 0 : std::stoull(extent));
         globals.push_back({
-            .name = (*iterator)[2].str(),
-            .byte_size = size.empty() ? 0 : std::stoull(size),
+            .name = (*iterator)[3].str(),
+            .byte_size = element_bytes * element_count,
             .alignment = static_cast<std::uint32_t>(std::stoul((*iterator)[1].str())),
-            .is_dynamic = size.empty(),
+            .is_dynamic = is_dynamic,
         });
     }
     return globals;
@@ -1207,9 +1213,17 @@ struct Importer {
                     operation.operands.push_back(Operand::value_ref(pointer, pointer_type));
                 }
             } else {
+                const AddressSpace load_address_space =
+                    instruction.opcode.find(".shared") != std::string::npos
+                        ? AddressSpace::kThreadgroup
+                    : instruction.opcode.find(".local") != std::string::npos
+                        ? AddressSpace::kPrivate
+                    : instruction.opcode.find(".const") != std::string::npos
+                        ? AddressSpace::kConstant
+                        : AddressSpace::kDevice;
                 operation.operands.push_back(memory_address_operand(
                     1, Type::pointer(operation.result_types.front(),
-                                     AddressSpace::kDevice)));
+                                     load_address_space)));
             }
             operation.attributes["address"] = instruction.operands[1];
             operation.attributes["alignment"] =
@@ -1220,9 +1234,17 @@ struct Importer {
                    starts_with(instruction.opcode, "st.local")) {
             operation.opcode = OpCode::kStore;
             if (instruction.operands.size() < 2) return fail(&instruction, "malformed store");
+            const AddressSpace store_address_space =
+                instruction.opcode.find(".shared") != std::string::npos
+                    ? AddressSpace::kThreadgroup
+                : instruction.opcode.find(".local") != std::string::npos
+                    ? AddressSpace::kPrivate
+                    : instruction.opcode.find(".const") != std::string::npos
+                    ? AddressSpace::kConstant
+                    : AddressSpace::kDevice;
             operation.operands.push_back(memory_address_operand(
                 0, Type::pointer(ptx_scalar_type(instruction.opcode),
-                                 AddressSpace::kDevice)));
+                                 store_address_space)));
             operation.operands.push_back(
                 bit_container_operand(1, ptx_scalar_type(instruction.opcode)));
             operation.attributes["address"] = instruction.operands[0];
