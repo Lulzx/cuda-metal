@@ -2027,6 +2027,13 @@ struct Importer {
                     .constant_offset = constant_offset,
                     .constant = global.getAddressSpace() == 4,
                 });
+                result.module.external_symbols.push_back({
+                    .name = global.getName().str(),
+                    .byte_size = global_size,
+                    .alignment = alignment,
+                    .constant_offset = constant_offset,
+                    .constant = global.getAddressSpace() == 4,
+                });
                 continue;
             }
             if (!global.isConstant() || !global.hasInitializer() ||

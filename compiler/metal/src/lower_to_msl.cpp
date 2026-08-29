@@ -4041,6 +4041,14 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     for (const std::string& caveat : metal_module.semantic_caveats) {
         result.ast.comments.push_back("cumetal-semantic-caveat: " + caveat);
     }
+    for (const ir::ExternalSymbol& symbol : metal_module.external_symbols) {
+        result.ast.comments.push_back(
+            "cumetal-native-symbol: " +
+            std::string(symbol.constant ? "constant " : "global ") + symbol.name +
+            " " + std::to_string(symbol.byte_size) + " " +
+            std::to_string(symbol.alignment) + " " +
+            std::to_string(symbol.constant_offset));
+    }
     result.ast.structs = collect_msl_structs(metal_module);
     for (const ir::GlobalConstant& global : metal_module.global_constants) {
         result.ast.global_byte_arrays.push_back({

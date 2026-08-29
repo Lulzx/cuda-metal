@@ -27,7 +27,8 @@ build/cumetalc samples/vectorAdd/vectorAdd.cu -o vectorAdd
 ```
 
 That linked source path embeds a typed metallib and uses CuMetal's versioned
-native registration ABI; it does not ship PTX or perform first-launch JIT.
+native registration ABI, including constant/device symbol metadata; it does not
+ship PTX or perform first-launch JIT.
 
 Requirements are macOS 14 or newer on Apple Silicon, CMake, LLVM 18+ libraries,
 a CUDA-capable Clang 21-23 frontend, and Apple's public `metal` and `metallib`

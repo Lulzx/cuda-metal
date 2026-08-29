@@ -3,7 +3,9 @@
 #include "cumetal/common/metallib.h"
 #include "cumetal_native.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iomanip>
 #include <memory>
@@ -19,12 +21,23 @@ namespace {
 struct NativeModule {
     std::string metallib_path;
     std::vector<const void*> host_functions;
+    std::vector<const void*> host_symbols;
+};
+
+struct NativeSymbol {
+    std::string name;
+    const void* host_symbol = nullptr;
+    std::size_t size = 0;
+    std::size_t constant_offset = 0;
+    bool constant = false;
+    std::shared_ptr<cumetal::metal_backend::Buffer> global_buffer;
 };
 
 struct State {
     std::mutex mutex;
     std::unordered_map<CuMetalModuleHandle, std::unique_ptr<NativeModule>> modules;
     std::unordered_map<const void*, cumetal::registration::RegisteredKernel> kernels;
+    std::unordered_map<const void*, NativeSymbol> symbols;
 };
 
 State& state() {
@@ -89,6 +102,22 @@ bool validate_descriptor(const CuMetalModuleDescriptor* descriptor,
         if (error != nullptr) *error = "native module binding table is missing";
         return false;
     }
+    if (descriptor->symbol_count > 0 && descriptor->symbols == nullptr) {
+        if (error != nullptr) *error = "native module symbol table is missing";
+        return false;
+    }
+    std::unordered_set<const void*> host_symbols;
+    for (std::uint32_t i = 0; i < descriptor->symbol_count; ++i) {
+        const CuMetalSymbolDescriptor& symbol = descriptor->symbols[i];
+        if (symbol.name == nullptr || symbol.host_symbol == nullptr || symbol.size == 0 ||
+            symbol.alignment == 0 ||
+            (symbol.kind != CUMETAL_NATIVE_SYMBOL_CONSTANT &&
+             symbol.kind != CUMETAL_NATIVE_SYMBOL_GLOBAL) ||
+            !host_symbols.insert(symbol.host_symbol).second) {
+            if (error != nullptr) *error = "invalid CuMetal native symbol descriptor";
+            return false;
+        }
+    }
     std::unordered_set<const void*> host_stubs;
     for (std::uint32_t i = 0; i < descriptor->kernel_count; ++i) {
         const CuMetalKernelDescriptor& kernel = descriptor->kernels[i];
@@ -98,6 +127,16 @@ bool validate_descriptor(const CuMetalModuleDescriptor* descriptor,
             !host_stubs.insert(kernel.host_stub).second) {
             if (error != nullptr) *error = "invalid CuMetal native kernel descriptor";
             return false;
+        }
+        if (kernel.symbol_count > 0 && kernel.symbol_indices == nullptr) {
+            if (error != nullptr) *error = "native kernel symbol index table is missing";
+            return false;
+        }
+        for (std::uint32_t symbol = 0; symbol < kernel.symbol_count; ++symbol) {
+            if (kernel.symbol_indices[symbol] >= descriptor->symbol_count) {
+                if (error != nullptr) *error = "native kernel symbol index is out of range";
+                return false;
+            }
         }
         for (std::uint32_t argument_index = 0;
              argument_index < kernel.argument_count; ++argument_index) {
@@ -138,10 +177,30 @@ bool lookup_kernel(const void* host_function,
     return true;
 }
 
+bool lookup_symbol(const void* host_symbol, const void** out_device_symbol,
+                   std::size_t* out_size) {
+    if (host_symbol == nullptr || out_device_symbol == nullptr) return false;
+    State& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    const auto found = s.symbols.find(host_symbol);
+    if (found == s.symbols.end()) return false;
+    NativeSymbol& symbol = found->second;
+    if (symbol.constant) {
+        *out_device_symbol = symbol.host_symbol;
+    } else {
+        if (symbol.global_buffer == nullptr || symbol.global_buffer->contents() == nullptr)
+            return false;
+        *out_device_symbol = symbol.global_buffer->contents();
+    }
+    if (out_size != nullptr) *out_size = symbol.size;
+    return true;
+}
+
 void clear() {
     State& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     s.kernels.clear();
+    s.symbols.clear();
     s.modules.clear();
 }
 
@@ -174,32 +233,72 @@ CuMetalModuleHandle cumetalRegisterModule(
     module->metallib_path = metallib.string();
     CuMetalModuleHandle handle = module.get();
 
-    cumetal::native_registration::State& s =
-        cumetal::native_registration::state();
-    std::lock_guard<std::mutex> lock(s.mutex);
-    for (std::uint32_t i = 0; i < descriptor->kernel_count; ++i) {
-        if (s.kernels.contains(descriptor->kernels[i].host_stub)) {
-            return nullptr;
+    std::vector<std::pair<const void*, cumetal::native_registration::NativeSymbol>>
+        prepared_symbols;
+    prepared_symbols.reserve(descriptor->symbol_count);
+    for (std::uint32_t i = 0; i < descriptor->symbol_count; ++i) {
+        const CuMetalSymbolDescriptor& symbol = descriptor->symbols[i];
+        cumetal::native_registration::NativeSymbol prepared{
+            .name = symbol.name,
+            .host_symbol = symbol.host_symbol,
+            .size = symbol.size,
+            .constant_offset = symbol.constant_offset,
+            .constant = symbol.kind == CUMETAL_NATIVE_SYMBOL_CONSTANT,
+        };
+        if (!prepared.constant) {
+            if (cumetal::metal_backend::allocate_buffer(
+                    prepared.size, &prepared.global_buffer, &error) != cudaSuccess ||
+                prepared.global_buffer == nullptr ||
+                prepared.global_buffer->contents() == nullptr) {
+                return nullptr;
+            }
+            std::memcpy(prepared.global_buffer->contents(), prepared.host_symbol,
+                        prepared.size);
         }
+        module->host_symbols.push_back(symbol.host_symbol);
+        prepared_symbols.emplace_back(symbol.host_symbol, std::move(prepared));
     }
+
+    std::vector<std::pair<const void*, cumetal::registration::RegisteredKernel>>
+        prepared_kernels;
+    prepared_kernels.reserve(descriptor->kernel_count);
     for (std::uint32_t i = 0; i < descriptor->kernel_count; ++i) {
         const CuMetalKernelDescriptor& kernel = descriptor->kernels[i];
         cumetal::registration::RegisteredKernel record;
         record.metallib_path = module->metallib_path;
         record.kernel_name = kernel.metal_name;
         record.static_shared_bytes = kernel.static_threadgroup_memory;
-        record.provenance =
-            descriptor->provenance != nullptr
-                ? descriptor->provenance
-                : "generic_nvvm_lowering";
-        record.semantic_quality =
-            descriptor->semantic_quality != nullptr
-                ? descriptor->semantic_quality
-                : "exact";
+        record.provenance = descriptor->provenance != nullptr
+                                ? descriptor->provenance
+                                : "generic_nvvm_lowering";
+        record.semantic_quality = descriptor->semantic_quality != nullptr
+                                      ? descriptor->semantic_quality
+                                      : "exact";
+        for (std::uint32_t symbol_offset = 0;
+             symbol_offset < kernel.symbol_count; ++symbol_offset) {
+            const std::uint32_t symbol_index = kernel.symbol_indices[symbol_offset];
+            const CuMetalSymbolDescriptor& symbol = descriptor->symbols[symbol_index];
+            if (symbol.kind == CUMETAL_NATIVE_SYMBOL_CONSTANT) {
+                record.constant_symbols.push_back({
+                    .name = symbol.name,
+                    .address = symbol.host_symbol,
+                    .offset = symbol.constant_offset,
+                    .size = symbol.size,
+                });
+                record.constant_buffer_size = std::max<std::size_t>(
+                    record.constant_buffer_size,
+                    static_cast<std::size_t>(symbol.constant_offset) + symbol.size);
+            } else {
+                record.global_symbols.push_back({
+                    .name = symbol.name,
+                    .buffer = prepared_symbols[symbol_index].second.global_buffer,
+                    .size = symbol.size,
+                });
+            }
+        }
         for (std::uint32_t argument_index = 0;
              argument_index < kernel.argument_count; ++argument_index) {
-            const CuMetalArgumentDescriptor& argument =
-                kernel.arguments[argument_index];
+            const CuMetalArgumentDescriptor& argument = kernel.arguments[argument_index];
             record.arg_info.push_back({
                 .kind = argument.kind == CUMETAL_NATIVE_ARGUMENT_POINTER
                             ? CUMETAL_ARG_BUFFER
@@ -208,8 +307,24 @@ CuMetalModuleHandle cumetalRegisterModule(
             });
         }
         module->host_functions.push_back(kernel.host_stub);
-        s.kernels[kernel.host_stub] = std::move(record);
+        prepared_kernels.emplace_back(kernel.host_stub, std::move(record));
     }
+
+    cumetal::native_registration::State& s =
+        cumetal::native_registration::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    for (std::uint32_t i = 0; i < descriptor->kernel_count; ++i) {
+        if (s.kernels.contains(descriptor->kernels[i].host_stub)) {
+            return nullptr;
+        }
+    }
+    for (std::uint32_t i = 0; i < descriptor->symbol_count; ++i) {
+        if (s.symbols.contains(descriptor->symbols[i].host_symbol)) return nullptr;
+    }
+    for (auto& [host_symbol, symbol] : prepared_symbols)
+        s.symbols.emplace(host_symbol, std::move(symbol));
+    for (auto& [host_stub, kernel] : prepared_kernels)
+        s.kernels.emplace(host_stub, std::move(kernel));
     s.modules[handle] = std::move(module);
     return handle;
 }
@@ -223,6 +338,9 @@ void cumetalUnregisterModule(CuMetalModuleHandle module_handle) {
     if (module == s.modules.end()) return;
     for (const void* host_function : module->second->host_functions) {
         s.kernels.erase(host_function);
+    }
+    for (const void* host_symbol : module->second->host_symbols) {
+        s.symbols.erase(host_symbol);
     }
     s.modules.erase(module);
 }

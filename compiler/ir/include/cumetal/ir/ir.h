@@ -316,6 +316,14 @@ struct GlobalThreadgroup {
     bool is_dynamic = false;
 };
 
+struct ExternalSymbol {
+    std::string name;
+    std::uint64_t byte_size = 0;
+    std::uint32_t alignment = 1;
+    std::uint64_t constant_offset = 0;
+    bool constant = false;
+};
+
 struct Module {
     std::string source_name;
     IrStage stage = IrStage::kGpuSemantic;
@@ -323,6 +331,7 @@ struct Module {
     std::vector<std::string> semantic_caveats;
     std::vector<GlobalConstant> global_constants;
     std::vector<GlobalThreadgroup> global_threadgroups;
+    std::vector<ExternalSymbol> external_symbols;
     std::vector<Function> functions;
     std::unordered_map<std::string, std::string> attributes;
 };

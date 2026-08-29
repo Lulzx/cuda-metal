@@ -1113,7 +1113,10 @@ cudaError_t checked_symbol_ptr(const void* symbol,
 
     const void* resolved_symbol = symbol;
     std::size_t resolved_size = 0;
-    if (cumetal::registration::lookup_registered_symbol(symbol, &resolved_symbol, &resolved_size)) {
+    if (cumetal::native_registration::lookup_symbol(
+            symbol, &resolved_symbol, &resolved_size) ||
+        cumetal::registration::lookup_registered_symbol(
+            symbol, &resolved_symbol, &resolved_size)) {
         if (resolved_size > 0 && (offset > resolved_size || count > (resolved_size - offset))) {
             return cudaErrorInvalidValue;
         }
@@ -6381,8 +6384,10 @@ cudaError_t cudaGetSymbolSize(size_t* size, const void* symbol) {
     }
     const void* resolved = nullptr;
     std::size_t resolved_size = 0;
-    if (!cumetal::registration::lookup_registered_symbol(
-            symbol, &resolved, &resolved_size) || resolved == nullptr ||
+    if ((!cumetal::native_registration::lookup_symbol(
+             symbol, &resolved, &resolved_size) &&
+         !cumetal::registration::lookup_registered_symbol(
+             symbol, &resolved, &resolved_size)) || resolved == nullptr ||
         resolved_size == 0) {
         return fail(cudaErrorInvalidValue);
     }

@@ -20,6 +20,10 @@ entry), and reports `device=apple_gpu` with `launch_success=true`.
 `functional_cumetalc_native_aot_multi_kernel` separately launches four kernels
 from one embedded native module and checks atomics, thread fences, and static
 shared-memory results.
+`functional_cumetalc_native_aot_symbols` verifies ABI-v2 constant and writable
+device symbols end to end: bounded host-to/from-symbol copies, a 27,904-byte
+constant buffer, symbol address/size queries, and persistent GPU updates across
+two launches.
 
 On 2026-08-29, `functional_typed_{direct,ptx}_{device,system}_atomics` and
 `functional_typed_{direct,ptx}_fence` passed on Apple GPU. The device test

@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define CUMETAL_NATIVE_ABI_VERSION 1u
+#define CUMETAL_NATIVE_ABI_VERSION 2u
 
 /* CuMetal release version. Distinct from CUMETAL_NATIVE_ABI_VERSION above, which versions the
  * native registration struct layout and moves only on an ABI break.
@@ -74,7 +74,23 @@ typedef struct CuMetalKernelDescriptor {
     const CuMetalArgumentDescriptor* arguments;
     uint32_t static_threadgroup_memory;
     uint32_t required_simd_width;
+    uint32_t symbol_count;
+    const uint32_t* symbol_indices;
 } CuMetalKernelDescriptor;
+
+typedef enum CuMetalSymbolKind {
+    CUMETAL_NATIVE_SYMBOL_CONSTANT = 0,
+    CUMETAL_NATIVE_SYMBOL_GLOBAL = 1,
+} CuMetalSymbolKind;
+
+typedef struct CuMetalSymbolDescriptor {
+    const char* name;
+    const void* host_symbol;
+    uint32_t size;
+    uint32_t alignment;
+    uint32_t constant_offset;
+    CuMetalSymbolKind kind;
+} CuMetalSymbolDescriptor;
 
 typedef struct CuMetalModuleDescriptor {
     uint32_t abi_version;
@@ -86,6 +102,8 @@ typedef struct CuMetalModuleDescriptor {
     const CuMetalBindingDescriptor* bindings;
     const char* provenance;
     const char* semantic_quality;
+    uint32_t symbol_count;
+    const CuMetalSymbolDescriptor* symbols;
 } CuMetalModuleDescriptor;
 
 typedef void* CuMetalModuleHandle;

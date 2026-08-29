@@ -3230,14 +3230,14 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
         PROPERTIES SKIP_RETURN_CODE 77)
 
     add_test(
-        NAME functional_cumetalc_native_aot_globals_negative
+        NAME functional_cumetalc_native_aot_symbols
         COMMAND bash
-                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_native_aot_negative.sh
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
                 $<TARGET_FILE:cumetalc>
                 ${CMAKE_SOURCE_DIR}/tests/cuda_projects/constant_symbol/constant_symbol.cu
-                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_native_aot_globals_negative
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_native_aot_symbols
     )
-    set_tests_properties(functional_cumetalc_native_aot_globals_negative
+    set_tests_properties(functional_cumetalc_native_aot_symbols
         PROPERTIES SKIP_RETURN_CODE 77)
 
     # Real samples often omit <stdlib.h>/<math.h>; nvcc's headers expose malloc/free/exit.

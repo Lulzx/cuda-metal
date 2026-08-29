@@ -158,9 +158,10 @@ generated native descriptor, and links both against `libcumetal`. Its executable
 has no `__cudaRegister*` dependency and creates no registration-JIT cache on a
 cold launch. CUDA registration and fatbinary parsing remain compatibility paths.
 
-Native descriptors do not yet describe writable or zero-initialized CUDA module
-globals. Translation units needing those hidden bindings remain an explicit
-native-AOT gap even though non-zero read-only tables can be embedded in MSL.
+Native ABI version 2 describes constant and writable CUDA module globals,
+including per-kernel symbol references, constant-buffer offsets, host shadows,
+and persistent writable Metal buffers. Non-zero read-only tables remain
+embedded directly in MSL.
 
 ## Default-backend gate
 

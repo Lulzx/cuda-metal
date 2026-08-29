@@ -514,7 +514,36 @@ struct NativeHostKernel {
     std::string metal_name;
     std::vector<bool> pointer_arguments;
     std::vector<std::uint32_t> argument_sizes;
+    std::vector<std::uint32_t> symbol_indices;
 };
+
+struct NativeSourceSymbol {
+    std::string name;
+    std::uint32_t size = 0;
+    std::uint32_t alignment = 1;
+    std::uint32_t constant_offset = 0;
+    bool constant = false;
+};
+
+std::vector<NativeSourceSymbol> parse_native_source_symbols(
+    std::string_view metal_source) {
+    const std::regex record(
+        R"(// cumetal-native-symbol: (constant|global) ([^ ]+) ([0-9]+) ([0-9]+) ([0-9]+))"
+    );
+    const std::string source(metal_source);
+    std::vector<NativeSourceSymbol> symbols;
+    for (std::sregex_iterator it(source.begin(), source.end(), record), end;
+         it != end; ++it) {
+        symbols.push_back({
+            .name = (*it)[2].str(),
+            .size = static_cast<std::uint32_t>(std::stoul((*it)[3].str())),
+            .alignment = static_cast<std::uint32_t>(std::stoul((*it)[4].str())),
+            .constant_offset = static_cast<std::uint32_t>(std::stoul((*it)[5].str())),
+            .constant = (*it)[1].str() == "constant",
+        });
+    }
+    return symbols;
+}
 
 std::string device_symbol_from_stub(std::string symbol) {
     static constexpr std::string_view marker = "__device_stub__";
@@ -630,6 +659,7 @@ std::uint32_t native_alignment(std::uint32_t size) {
 
 std::string native_registration_source(
     const std::vector<NativeHostKernel>& kernels,
+    const std::vector<NativeSourceSymbol>& symbols,
     const std::vector<std::uint8_t>& metallib,
     std::string_view provenance,
     std::string_view semantic_quality) {
@@ -638,6 +668,10 @@ std::string native_registration_source(
     for (std::size_t i = 0; i < kernels.size(); ++i) {
         out << "extern \"C\" void cm_stub_" << i << "() asm(\""
             << '_' << kernels[i].stub_symbol << "\");\n";
+    }
+    for (std::size_t i = 0; i < symbols.size(); ++i) {
+        out << "extern \"C\" unsigned char cm_symbol_" << i << "[] asm(\"_"
+            << symbols[i].name << "\");\n";
     }
     out << "\nstatic const unsigned char cm_metallib[] = {";
     for (std::size_t i = 0; i < metallib.size(); ++i) {
@@ -676,21 +710,49 @@ std::string native_registration_source(
                 << native_alignment(size) << "},\n";
         }
     }
-    out << "};\nstatic const CuMetalKernelDescriptor cm_kernels[] = {\n";
+    out << "};\n";
+    for (std::size_t i = 0; i < kernels.size(); ++i) {
+        if (!kernels[i].symbol_indices.empty()) {
+            out << "static const uint32_t cm_kernel_symbols_" << i << "[] = {";
+            for (const std::uint32_t symbol : kernels[i].symbol_indices) {
+                out << symbol << ',';
+            }
+            out << "};\n";
+        }
+    }
+    out << "static const CuMetalKernelDescriptor cm_kernels[] = {\n";
     for (std::size_t i = 0; i < kernels.size(); ++i) {
         out << "  {\"" << kernels[i].metal_name << "\",\""
             << kernels[i].metal_name << "\",reinterpret_cast<const void*>(&cm_stub_"
             << i << ")," << kernels[i].argument_sizes.size() << ','
             << (kernels[i].argument_sizes.empty() ? "nullptr" : "cm_args_" + std::to_string(i))
-            << ",0,32},\n";
+            << ",0,32," << kernels[i].symbol_indices.size() << ','
+            << (kernels[i].symbol_indices.empty()
+                    ? "nullptr"
+                    : "cm_kernel_symbols_" + std::to_string(i))
+            << "},\n";
     }
-    out << "};\nstatic CuMetalModuleHandle cm_module;\n"
+    out << "};\n";
+    if (!symbols.empty()) {
+        out << "static const CuMetalSymbolDescriptor cm_symbols[] = {\n";
+        for (std::size_t i = 0; i < symbols.size(); ++i) {
+            out << "  {\"" << symbols[i].name << "\",cm_symbol_" << i << ','
+                << symbols[i].size << ',' << symbols[i].alignment << ','
+                << symbols[i].constant_offset << ','
+                << (symbols[i].constant ? "CUMETAL_NATIVE_SYMBOL_CONSTANT"
+                                        : "CUMETAL_NATIVE_SYMBOL_GLOBAL")
+                << "},\n";
+        }
+        out << "};\n";
+    }
+    out << "static CuMetalModuleHandle cm_module;\n"
            "__attribute__((constructor)) static void cm_register_module() {\n"
            "  const CuMetalModuleDescriptor descriptor = {"
         << "CUMETAL_NATIVE_ABI_VERSION,cm_metallib,sizeof(cm_metallib),"
         << kernels.size() << ",cm_kernels," << binding_base << ','
         << (binding_base == 0 ? "nullptr" : "cm_bindings") << ",\""
-        << provenance << "\",\"" << semantic_quality << "\"};\n"
+        << provenance << "\",\"" << semantic_quality << "\"," << symbols.size()
+        << ',' << (symbols.empty() ? "nullptr" : "cm_symbols") << "};\n"
            "  cm_module = cumetalRegisterModule(&descriptor);\n"
            "  if (cm_module == nullptr) std::abort();\n"
            "}\n"
@@ -851,20 +913,65 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         return 1;
     }
     const std::string metal_text(metal_bytes.begin(), metal_bytes.end());
-    if (metal_text.find("cm___cumetal_constant_symbols") != std::string::npos ||
-        metal_text.find("cm___cumetal_global_") != std::string::npos) {
-        cleanup();
-        std::cerr << "cumetalc failed: native AOT does not yet describe runtime-populated "
-                     "CUDA constant/device globals; use device-only compilation or the "
-                     "CUDA registration compatibility path\n";
-        return 1;
-    }
-    for (const NativeHostKernel& kernel : kernels) {
-        if (metal_text.find("kernel void " + kernel.metal_name + "(") ==
+    const std::vector<NativeSourceSymbol> symbols =
+        parse_native_source_symbols(metal_text);
+    for (NativeHostKernel& kernel : kernels) {
+        const std::string kernel_prefix = "kernel void " + kernel.metal_name + "(";
+        const std::size_t signature_begin = metal_text.find(kernel_prefix);
+        if (signature_begin ==
             std::string::npos) {
             cleanup();
             std::cerr << "cumetalc failed: host stub '" << kernel.stub_symbol
                       << "' has no typed Metal kernel '" << kernel.metal_name << "'\n";
+            return 1;
+        }
+        const std::size_t signature_end = metal_text.find(") {", signature_begin);
+        if (signature_end == std::string::npos) {
+            cleanup();
+            std::cerr << "cumetalc failed: malformed typed Metal kernel signature for '"
+                      << kernel.metal_name << "'\n";
+            return 1;
+        }
+        const std::string_view signature(
+            metal_text.data() + signature_begin, signature_end - signature_begin);
+        const bool uses_constants =
+            signature.find("cm___cumetal_constant_symbols") != std::string_view::npos;
+        for (std::size_t i = 0; i < symbols.size(); ++i) {
+            if ((symbols[i].constant && uses_constants) ||
+                (!symbols[i].constant &&
+                 signature.find("cm___cumetal_global_" + symbols[i].name) !=
+                     std::string_view::npos)) {
+                kernel.symbol_indices.push_back(static_cast<std::uint32_t>(i));
+            }
+        }
+    }
+    if (!symbols.empty()) {
+        std::string rewritten_host(host_llvm_bytes.begin(), host_llvm_bytes.end());
+        for (const NativeSourceSymbol& symbol : symbols) {
+            const std::string internal = "@" + symbol.name + " = internal global";
+            const std::size_t at = rewritten_host.find(internal);
+            if (at == std::string::npos) {
+                cleanup();
+                std::cerr << "cumetalc failed: native CUDA symbol '" << symbol.name
+                          << "' has no host shadow with supported linkage\n";
+                return 1;
+            }
+            rewritten_host.replace(at, internal.size(),
+                                   "@" + symbol.name + " = global");
+        }
+        if (!write_text_output(host_llvm, rewritten_host, true, &io_error)) {
+            cleanup();
+            std::cerr << "cumetalc failed: " << io_error << "\n";
+            return 1;
+        }
+        const std::string recompile_host = quote_shell(compiler.string()) +
+            " -O2 -c " + quote_shell(host_llvm.string()) + " -o " +
+            quote_shell(object_file.string()) + " 2>&1";
+        const CommandResult recompiled = run_command_capture(recompile_host);
+        if (!recompiled.started || recompiled.exit_code != 0) {
+            if (!recompiled.output.empty()) std::cerr << recompiled.output;
+            cleanup();
+            std::cerr << "cumetalc failed: native symbol host-linkage rewrite failed\n";
             return 1;
         }
     }
@@ -900,7 +1007,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         return metal_text.substr(begin, end == std::string::npos ? end : end - begin);
     };
     const std::string generated = native_registration_source(
-        kernels, metallib_bytes,
+        kernels, symbols, metallib_bytes,
         comment_value("// cumetal-provenance: ", "generic_nvvm_lowering"),
         comment_value("// cumetal-semantic-quality: ", "unsupported"));
     if (!write_text_output(registration_source, generated, true, &io_error)) {

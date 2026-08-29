@@ -10,6 +10,8 @@
 namespace {
 
 void host_stub() {}
+unsigned char constant_shadow[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+unsigned char global_shadow[8] = {9, 10, 11, 12, 13, 14, 15, 16};
 
 int fail(const std::string& message) {
     std::cerr << "native registration test failed: " << message << "\n";
@@ -42,6 +44,7 @@ int main() {
         .size = 8,
         .alignment = 8,
     }};
+    const std::uint32_t kernel_symbol_indices[] = {0, 1};
     const CuMetalKernelDescriptor kernels[] = {{
         .cuda_name = "vector_add",
         .metal_name = "vector_add",
@@ -50,7 +53,27 @@ int main() {
         .arguments = arguments,
         .static_threadgroup_memory = 64,
         .required_simd_width = 32,
+        .symbol_count = 2,
+        .symbol_indices = kernel_symbol_indices,
     }};
+    const CuMetalSymbolDescriptor symbols[] = {
+        {
+            .name = "constant_shadow",
+            .host_symbol = constant_shadow,
+            .size = sizeof(constant_shadow),
+            .alignment = 8,
+            .constant_offset = 16,
+            .kind = CUMETAL_NATIVE_SYMBOL_CONSTANT,
+        },
+        {
+            .name = "global_shadow",
+            .host_symbol = global_shadow,
+            .size = sizeof(global_shadow),
+            .alignment = 8,
+            .constant_offset = 0,
+            .kind = CUMETAL_NATIVE_SYMBOL_GLOBAL,
+        },
+    };
     CuMetalModuleDescriptor descriptor = {
         .abi_version = CUMETAL_NATIVE_ABI_VERSION,
         .metallib_data = metallib,
@@ -61,6 +84,8 @@ int main() {
         .bindings = bindings,
         .provenance = "generic_nvvm_lowering",
         .semantic_quality = "exact",
+        .symbol_count = 2,
+        .symbols = symbols,
     };
 
     const CuMetalModuleHandle module = cumetalRegisterModule(&descriptor);
@@ -79,8 +104,28 @@ int main() {
         registered.arg_info.front().kind != CUMETAL_ARG_BUFFER) {
         return fail("registered kernel metadata did not round-trip");
     }
+    if (registered.constant_symbols.size() != 1 ||
+        registered.constant_symbols.front().offset != 16 ||
+        registered.global_symbols.size() != 1 ||
+        registered.global_symbols.front().buffer == nullptr) {
+        return fail("native symbol metadata did not reach the registered kernel");
+    }
+    const void* resolved_symbol = nullptr;
+    std::size_t resolved_size = 0;
+    if (!cumetal::native_registration::lookup_symbol(
+            global_shadow, &resolved_symbol, &resolved_size) ||
+        resolved_symbol == nullptr || resolved_size != sizeof(global_shadow)) {
+        return fail("native writable symbol did not resolve to persistent storage");
+    }
     if (cumetalRegisterModule(&descriptor) != nullptr) {
         return fail("duplicate live host stub registration was accepted");
+    }
+    CuMetalSymbolDescriptor invalid_symbols[] = {symbols[0], symbols[1]};
+    invalid_symbols[0].kind = static_cast<CuMetalSymbolKind>(99);
+    CuMetalModuleDescriptor invalid_descriptor = descriptor;
+    invalid_descriptor.symbols = invalid_symbols;
+    if (cumetalRegisterModule(&invalid_descriptor) != nullptr) {
+        return fail("invalid native symbol kind was accepted");
     }
 
     cumetalUnregisterModule(module);
