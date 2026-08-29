@@ -28,11 +28,9 @@ Homebrew packaging
 ------------------
 
 The formula is maintained in
-[`Lulzx/homebrew-tap`](https://github.com/Lulzx/homebrew-tap). As of 2026-08-29,
-the published formula still targets the older `cuda-metal` v0.1.3 release. Do
-not use it to validate this checkout until the next release and tap update are
-published. The intended formula contract is a Release build with Homebrew LLVM,
-the binary shim off, and a compile-and-execute GPU smoke test:
+[`Lulzx/homebrew-tap`](https://github.com/Lulzx/homebrew-tap). It builds a
+Release configuration with Homebrew LLVM, keeps the binary shim off, and runs a
+compile-and-execute GPU smoke test:
 
 ```bash
 brew install lulzx/tap/cumetal

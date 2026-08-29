@@ -25,6 +25,17 @@ MslAddressSpace lower_address_space(ir::AddressSpace address_space) {
     return MslAddressSpace::kNone;
 }
 
+bool is_ptx_hex_float_literal(std::string_view spelling) {
+    if (spelling.size() != 10 || spelling[0] != '0' ||
+        (spelling[1] != 'f' && spelling[1] != 'F')) {
+        return false;
+    }
+    return std::all_of(spelling.begin() + 2, spelling.end(), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+               (c >= 'A' && c <= 'F');
+    });
+}
+
 bool is_native_vector_aggregate(const ir::Type& type) {
     if (type.kind != ir::TypeKind::kAggregate ||
         (type.elements.size() != 2 && type.elements.size() != 4) ||
@@ -1016,8 +1027,12 @@ struct AstLowerer {
             }
             return MslExpression::identifier(operand.text, lower_type(operand.type));
         }
-        return MslExpression::literal(operand.text == "null" ? "nullptr" : operand.text,
-                                      lower_type(operand.type));
+        std::string spelling = operand.text == "null" ? "nullptr" : operand.text;
+        if (operand.type.kind == ir::TypeKind::kFloat && operand.type.bit_width == 32 &&
+            is_ptx_hex_float_literal(spelling)) {
+            spelling = "as_type<float>(0x" + spelling.substr(2) + "u)";
+        }
+        return MslExpression::literal(std::move(spelling), lower_type(operand.type));
     }
 
     MslStmt declare_result(const ir::Operation& operation, MslExpr initializer) {

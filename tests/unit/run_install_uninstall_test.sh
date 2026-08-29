@@ -11,7 +11,12 @@ PREFIX="$TMP_ROOT/prefix"
 SHELL_RC="$TMP_ROOT/.zshrc"
 HOME_DIR="$TMP_ROOT/home"
 mkdir -p "$HOME_DIR"
-touch "$SHELL_RC"
+cat > "$SHELL_RC" <<'EOF'
+# >>> cumetal >>>
+export PATH="/an/existing/cumetal/bin:$PATH"
+# <<< cumetal <<<
+EOF
+cp "$SHELL_RC" "$TMP_ROOT/shell-before"
 
 cleanup() {
   rm -rf "$TMP_ROOT"
@@ -33,6 +38,7 @@ test -f "$PREFIX/include/cuda_runtime.h"
 test ! -e "$PREFIX/share/cumetal/examples/vectorAdd.cu"
 test -x "$PREFIX/uninstall.sh"
 test -f "$PREFIX/share/cumetal/install_manifest.txt"
+test ! -e "$PREFIX/share/cumetal/shell_config_path"
 
 test ! -e "$HOME_DIR/.zshrc"
 "$PREFIX/bin/cumetal" version | grep -q "^cumetal "
@@ -45,9 +51,15 @@ if [[ -e "$PREFIX/bin/air_inspect" || -e "$PREFIX/lib/libcumetal.dylib" ]]; then
   echo "FAIL: expected installed files to be removed" >&2
   exit 1
 fi
+if find "$PREFIX" -type f -print -quit 2>/dev/null | grep -q .; then
+  echo "FAIL: expected every manifest-backed installed file to be removed" >&2
+  exit 1
+fi
+cmp "$TMP_ROOT/shell-before" "$SHELL_RC"
 
 # Shell configuration remains available as an explicit opt-in and is reversible.
 CUMETAL_SHELL_RC="$SHELL_RC" bash "$INSTALL_SCRIPT" "$BUILD_DIR" "$PREFIX" --shell-config
+test -f "$PREFIX/share/cumetal/shell_config_path"
 grep -qF "# >>> cumetal >>>" "$SHELL_RC"
 grep -qF "# <<< cumetal <<<" "$SHELL_RC"
 grep -qF "export PATH=\"$PREFIX/bin:\$PATH\"" "$SHELL_RC"

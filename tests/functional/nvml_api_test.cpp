@@ -1,4 +1,5 @@
 #include "nvml.h"
+#include "cumetal_native.h"
 
 #include <cstdio>
 #include <cstring>
@@ -68,8 +69,10 @@ static bool test_driver_version() {
     nvmlInit();
     char ver[NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE] = {};
     nvmlReturn_t r = nvmlSystemGetDriverVersion(ver, sizeof(ver));
-    if (r != NVML_SUCCESS || std::strlen(ver) == 0) {
-        std::fprintf(stderr, "FAIL: driver version empty or error %d\n", r);
+    const char* expected = "cumetal-" CUMETAL_VERSION_STRING;
+    if (r != NVML_SUCCESS || std::strcmp(ver, expected) != 0) {
+        std::fprintf(stderr, "FAIL: driver version '%s', expected '%s' (error %d)\n",
+                     ver, expected, r);
         nvmlShutdown();
         return false;
     }

@@ -13,7 +13,7 @@ claim. Implemented surfaces and detailed limitations remain in `status.md` and
   conformance suite" denominator.
 - The typed shared-IR migration gate is not closed. The reproducible 23-file
   production-metallib matrix is 9/23 for direct `.cu` through `cumetal-ir` and
-  6/23 for PTX/`--cuda-device`, versus 23/23 for the legacy PTX backend. The
+  7/23 for PTX/`--cuda-device`, versus 23/23 for the legacy PTX backend. The
   matrix is compile evidence only; promotion still requires numerical GPU tests.
 - The three-kernel Phase 5 benchmark gate has measured Apple-GPU results below
   2x native Metal. It does not yet cover the broader release set required by

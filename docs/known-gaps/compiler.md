@@ -9,7 +9,7 @@ The reproducible production-metallib matrix is:
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
 | direct `.cu` | 0/23 | **9/23** |
-| PTX / `--cuda-device` | **23/23** | **6/23** |
+| PTX / `--cuda-device` | **23/23** | **7/23** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,

@@ -5,7 +5,17 @@ provides a clean-room CUDA compatibility runtime for Apple Silicon. It is
 experimental: supported paths run real Metal kernels, while unsupported paths
 should fail explicitly.
 
-## Start here
+## Install with Homebrew
+
+```bash
+brew install lulzx/tap/cumetal
+cumetal doctor
+```
+
+The tap installs the recommended Release/source-first configuration and keeps
+the optional `libcuda.dylib` alias off.
+
+## Build from source
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -19,8 +29,6 @@ build/cumetalc samples/vectorAdd/vectorAdd.cu -o vectorAdd
 Requirements are macOS 14 or newer on Apple Silicon, CMake, a CUDA-capable LLVM
 Clang, and Apple's public `metal` and `metallib` tools. See the
 [build and installation guide](docs/build.md) before packaging or installing.
-The published Homebrew formula currently targets the older 0.1.3 release, so it
-is not evidence for the behavior documented in this checkout.
 
 For a staged GPU demonstration:
 
@@ -59,7 +67,7 @@ compiler paths and their selection policy are in
 - The enrolled headless NVIDIA `cuda-samples` snapshot is **83/83 pass**, with
   zero waivers and zero nonpassing manifest entries.
 - The reproducible 23-file production-metallib matrix is **9/23** for direct
-  `.cu` through typed CuMetal IR, **6/23** for typed PTX, and **23/23** for the
+  `.cu` through typed CuMetal IR, **7/23** for typed PTX, and **23/23** for the
   legacy PTX backend. These are compile results, not numerical runtime proof.
 - Vector add, SAXPY, reduction, selected matrix/library operations, atomics,
   shared memory, warp operations, streams, and events have focused numerical

@@ -16,7 +16,7 @@ The manifest-controlled 23-file production-metallib matrix currently records:
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
 | direct `.cu` | 0/23 | **9/23** |
-| PTX / `--cuda-device` | **23/23** | **6/23** |
+| PTX / `--cuda-device` | **23/23** | **7/23** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only.

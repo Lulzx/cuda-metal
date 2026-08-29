@@ -62,6 +62,23 @@ python3 demos/diffusion/train.py    # about 4 min on MPS -> out/model.bin
 `5.2e-06`. Building it exposed a silent wrong-answer bug in PTX-to-MSL float
 typing. See [the diffusion guide](../demos/diffusion/README.md).
 
+## HiGHS / cuPDLP-C linear programming
+
+The HiGHS demo builds the pinned CuMetal integration and compares the frozen
+`afiro` problem on CPU and Apple GPU. It requires matching solver status and
+objective, bounded primal/dual residuals, and successful GPU provenance:
+
+```bash
+bash demos/highs/run.sh
+```
+
+`wide48` and `ieee64` pass the recorded residual gate. `fast48` reaches Optimal
+but misses the dual-residual limit, which is reported as a precision failure
+rather than hidden. The `lpfeas/` harness fetches and reports a frozen
+Mittelmann feasibility corpus. See [the HiGHS guide](../demos/highs/README.md)
+for build pins, commands, FP64 semantics, and the current mixed cuSPARSE
+precision boundary.
+
 ## Run one sample
 
 ```bash

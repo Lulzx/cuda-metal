@@ -24,7 +24,7 @@ tests/cuda_projects/libdevice_frexp/libdevice_frexp.cu fail fail pass fail
 tests/cuda_projects/raytracer/rtiow.cu fail fail pass fail
 tests/cuda_projects/reduction/reduction_standalone.cu fail fail pass fail
 tests/cuda_projects/sgemm/sgemm_2d.cu fail fail pass fail
-tests/cuda_projects/sgemm/sgemm_naive.cu fail pass pass fail
+tests/cuda_projects/sgemm/sgemm_naive.cu fail pass pass pass
 tests/cuda_projects/sgemm/sgemm_shmem.cu fail pass pass fail
 tests/cuda_projects/softmax/softmax.cu fail fail pass fail
 tests/cuda_projects/system_atomics/system_atomics.cu fail fail pass fail

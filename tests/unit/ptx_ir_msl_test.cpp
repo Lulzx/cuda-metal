@@ -139,6 +139,26 @@ DONE:
         std::cerr << loop_join.error << "\n";
     }
 
+    const std::string hex_float_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry hex_float(.param .u64 output) {
+    .reg .b64 %rd1;
+    .reg .f32 %f1;
+    ld.param.u64 %rd1, [output];
+    mov.f32 %f1, 0f3f800000;
+    st.global.f32 [%rd1], %f1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult hex_float =
+        metal::compile_ptx_to_msl(hex_float_ptx);
+    ok &= expect(hex_float.ok &&
+                     hex_float.source.find(
+                         "as_type<float>(0x3f800000u)") != std::string::npos,
+                 "PTX hexadecimal float bit patterns become valid exact MSL literals");
+
     const std::string signed_ptx = R"ptx(
 .version 7.0
 .target sm_80

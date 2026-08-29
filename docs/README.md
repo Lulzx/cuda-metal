@@ -38,6 +38,7 @@ describe current implementation and never override it.
 
 - [Legal notice](legal-notice.md)
 - [Contributor license agreement](cla.md)
+- [Release notes](releases/README.md)
 
 Historical snapshots must be labeled with their date. Current claims should
 link to an executable manifest, a focused test, or a measured result whenever

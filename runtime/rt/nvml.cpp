@@ -1,4 +1,5 @@
 #include "nvml.h"
+#include "cumetal_native.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -171,7 +172,7 @@ nvmlReturn_t nvmlDeviceGetClockInfo(nvmlDevice_t device,
 nvmlReturn_t nvmlSystemGetDriverVersion(char* version, unsigned int length) {
     if (!g_initialized) return NVML_ERROR_UNINITIALIZED;
     if (!version || length == 0) return NVML_ERROR_INVALID_ARGUMENT;
-    strncpy(version, "cumetal-0.1.0", length);
+    strncpy(version, "cumetal-" CUMETAL_VERSION_STRING, length);
     version[length - 1] = '\0';
     return NVML_SUCCESS;
 }

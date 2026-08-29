@@ -12,19 +12,15 @@ if [[ -z "$PREFIX" || "$PREFIX" == "/" || ! -d "$PREFIX" ]]; then
 fi
 PREFIX="$(cd "$PREFIX" && pwd -P)"
 
-# Mirror the shell detection logic from install.sh.
-if [[ -n "${CUMETAL_SHELL_RC:-}" ]]; then
-  SHELL_RC="$CUMETAL_SHELL_RC"
-elif [[ "${SHELL:-}" == */fish ]]; then
-  SHELL_RC="${HOME}/.config/fish/config.fish"
-else
-  SHELL_RC="${HOME}/.zshrc"
-fi
-
 MANIFEST="$PREFIX/share/cumetal/install_manifest.txt"
+SHELL_CONFIG_RECORD="$PREFIX/share/cumetal/shell_config_path"
+SHELL_RC=""
+if [[ -f "$SHELL_CONFIG_RECORD" ]]; then
+  IFS= read -r SHELL_RC < "$SHELL_CONFIG_RECORD" || true
+fi
 if [[ -f "$MANIFEST" ]]; then
   DIRECTORY_LIST="$(mktemp)"
-  while IFS= read -r installed_file; do
+  while IFS= read -r installed_file || [[ -n "$installed_file" ]]; do
     [[ -z "$installed_file" ]] && continue
     case "$installed_file" in
       "$PREFIX"/*)
@@ -67,9 +63,10 @@ else
   rm -f "$PREFIX/include/cooperative_groups/reduce.h"
 fi
 rm -f "$MANIFEST"
+rm -f "$SHELL_CONFIG_RECORD"
 rm -f "$PREFIX/uninstall.sh"
 
-if [[ -f "$SHELL_RC" ]] && grep -qF "$MARKER_BEGIN" "$SHELL_RC"; then
+if [[ -n "$SHELL_RC" && -f "$SHELL_RC" ]] && grep -qF "$MARKER_BEGIN" "$SHELL_RC"; then
   tmp="$(mktemp)"
   awk -v begin="$MARKER_BEGIN" -v end="$MARKER_END" '
     $0 == begin {skip=1; next}
@@ -91,6 +88,6 @@ rmdir "$PREFIX/include" 2>/dev/null || true
 rmdir "$PREFIX" 2>/dev/null || true
 
 echo "Removed CuMetal from $PREFIX"
-if [[ -f "$SHELL_RC" ]]; then
+if [[ -n "$SHELL_RC" && -f "$SHELL_RC" ]]; then
   echo "Removed CuMetal environment settings from $SHELL_RC"
 fi

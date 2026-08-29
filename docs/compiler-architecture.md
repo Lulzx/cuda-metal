@@ -30,8 +30,9 @@ The `cumetal-ir` backend currently provides:
 - an explicit Metal legalization pass and a conservative structurizability
   check;
 - inspection output through `--emit=llvm`, `cumetal-ir`, `metal-ir`, and `msl`;
-- a versioned source-native runtime registration ABI in
-  `runtime/api/cumetal_native.h`.
+- a versioned source-native runtime registration ABI surface in
+  `runtime/api/cumetal_native.h`; it is not yet wired into the default source
+  executable path.
 
 The new backend never falls back to legacy lowering. Unsupported opcodes,
 intrinsics, memory semantics, CFG shapes, or MSL constructs are compile-time
@@ -84,7 +85,7 @@ than treating either backend as universally complete:
 | Input corpus | `legacy` | `cumetal-ir` |
 | --- | ---: | ---: |
 | direct `.cu` | 0/23 | **9/23** |
-| `.cu --cuda-device` / PTX | **23/23** | 6/23 |
+| `.cu --cuda-device` / PTX | **23/23** | 7/23 |
 
 Direct `.cu` therefore defaults to `cumetal-ir`; PTX and `--cuda-device`
 default to `legacy`. Reproduce the reviewed per-file baseline with:
@@ -104,9 +105,10 @@ legalization converts supported GPU operations to explicit `metal.*`
 operations. The verifier rejects any `gpu.*` operation surviving that stage,
 and the typed MSL backend rejects anything it cannot represent faithfully.
 
-The initial structurizer accepts straight-line control flow and a conservative
-conditional-return shape. Loops, general if/else regions, and irreducible CFGs
-are rejected until their named region transformations are implemented.
+The structurizer accepts tested straight-line, conditional, and natural-loop
+shapes and has a dispatcher fallback for selected barrier-free CFGs. Residual
+loops, barrier-containing regions, and irreducible/general CFGs that cannot be
+represented safely are rejected.
 
 ## Provenance and semantic quality
 
@@ -139,16 +141,19 @@ Generated MSL contains controlled metadata comments, and completed runtime
 dispatch traces report both fields. Workload substitution and CPU fallback do
 not count as generic compiler coverage.
 
-## Source-native registration
+## Source-native registration target
 
-Source AOT modules use the versioned `CuMetalModuleDescriptor` ABI. Logical CUDA
-arguments and concrete Metal bindings are separate tables. A module embeds
-metallib bytes and maps host stubs directly to kernel descriptors through
-`cumetalRegisterModule` and `cumetalUnregisterModule`.
+The versioned `CuMetalModuleDescriptor` ABI is implemented and unit-tested as a
+target surface. Logical CUDA arguments and concrete Metal bindings are separate
+tables. It can embed metallib bytes and map host stubs directly to kernel
+descriptors through `cumetalRegisterModule` and `cumetalUnregisterModule`.
 
 The runtime validates descriptor versions, argument/binding ranges, SIMD width,
-and host-stub uniqueness before registration. `__cudaRegister*` and fatbinary
-parsing remain compatibility-only.
+and host-stub uniqueness before registration. The current `cumetalc file.cu -o
+program` flow does not yet emit/use this descriptor; it still uses CUDA source
+registration and first-launch PTX lowering. Closing that integration is required
+before `__cudaRegister*` and fatbinary parsing become compatibility-only in the
+actual source executable path.
 
 ## Default-backend gate
 

@@ -42,10 +42,3 @@ Only vector add, SAXPY, and reduction currently form the measured native-Metal
 comparison. The spec's every-functional-kernel language is not closed, and the
 release set of memory-bound kernels needs an explicit decision before the 2x
 target becomes a broad performance claim.
-
-## Packaging
-
-The published Homebrew tap currently references the older `cuda-metal` v0.1.3
-archive and version test. It must be updated only after a new verified CuMetal
-release exists, then audited and install-tested from the published bottle/source
-formula.

@@ -76,6 +76,11 @@ $MARKER_END
 EOF
   fi
 
+  # Record the exact file changed so uninstall only reverses shell integration
+  # created by this installation. A default install must not affect an older or
+  # unrelated CuMetal marker in the user's current shell configuration.
+  printf '%s\n' "$SHELL_RC" > "$PREFIX/share/cumetal/shell_config_path"
+
   echo "Updated $SHELL_RC with CuMetal's bin directory"
 fi
 
