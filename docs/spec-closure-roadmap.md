@@ -54,7 +54,7 @@ coexist.
 | [CUDA semantics](../spec/04-semantics.md) | Fixed-width warp, memory, synchronization, atomic, FP64, graph, dynamic-launch, texture/surface, and `printf` behavior is form-specific rather than blanket compatible. | `known-gaps/runtime.md`, `fp64-policy.md`, P2 runtime semantic subsets, and P2 library rows. |
 | [Verification](../spec/05-verification.md) | Evidence classes are separated, the Phase 4 denominator is fixed, and the named five-kernel Phase 5 release set passes; observed recurring verification and the full Xcode matrix remain open. | P1 Phase 4 correctness, P1 AIR ABI, and the Phase 5 closure record below. |
 | [Roadmap](../spec/06-roadmap.md) | Priorities and closure criteria are instantiated by the table below. | This document and `unit_documentation_consistency`. |
-| [Legal and clean room](../spec/07-legal.md) | No new compatibility work is authorized by the roadmap. Source-first packaging, public Apple APIs, clean-room headers, no SASS translation, attribution, and bounded opt-in binary language remain mandatory gates. The detailed legal/tooling notice still needs P0 reconciliation with the MSL production path and the spec's non-advice boundary. | `known-gaps/platform.md`, Release shim-off configuration, and P0 documentation integrity. |
+| [Legal and clean room](../spec/07-legal.md) | Source-first packaging, public Apple APIs, clean-room headers, no SASS translation, attribution, bounded opt-in binary language, and the non-advice boundary are mandatory gates. The detailed notice identifies typed MSL through public Apple tools as the production contract and direct AIR/container generation as research/regression tooling. | `legal-notice.md`, `known-gaps/platform.md`, Release shim-off configuration, and `unit_documentation_consistency`. |
 
 The durable guardrails are not lower-priority work. A change that violates one
 is a regression even if it improves a compatibility count.
@@ -90,10 +90,11 @@ The 2026-08-29 reconciliation resolved these stale current-state claims:
 - the old production architecture diagram showing direct AIR emission;
 - the FP64 table that predated `fast48`, `wide48`, and `ieee64`.
 
-The following remain explicit P0/P1 work rather than silently accepted debt:
+The legal/tooling notice now matches MSL as the production contract, treats direct
+AIR/container generation as research/regression tooling, and records engineering policy
+without making legal determinations. The following remain explicit P0/P1 work rather than
+silently accepted debt:
 
-- keep legal and AIR/tooling notes aligned with MSL as the production contract
-  and direct AIR/container generation as research/regression tooling;
 - distinguish AIR matrix logic from actual access to four distinct Xcode
   toolchains;
 - keep historical release/audit snapshots dated while current indexes derive

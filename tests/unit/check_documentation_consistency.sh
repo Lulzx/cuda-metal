@@ -97,6 +97,10 @@ expect_fragment docs/spec-closure-roadmap.md "no first-launch PTX JIT"
 expect_fragment docs/spec-closure-roadmap.md "CPU/UMA fallback is reported as GPU execution"
 expect_fragment docs/spec-closure-roadmap.md "Big-endian and SASS-only inputs remain explicit non-goals"
 expect_fragment docs/spec-closure-roadmap.md 'observable `ieee64` exception status'
+expect_fragment docs/legal-notice.md "This is engineering policy, not legal advice"
+expect_fragment docs/legal-notice.md "production compiler emits typed Metal Shading Language"
+expect_fragment docs/legal-notice.md "research and regression tooling only"
+expect_fragment docs/legal-notice.md "does not claim a private AIR ABI as a supported production interface"
 
 # Keep source-first packaging policy tied to its actual CMake default.
 expect_fragment CMakeLists.txt 'set(CUMETAL_ENABLE_BINARY_SHIM_DEFAULT OFF)'

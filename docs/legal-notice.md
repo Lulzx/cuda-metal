@@ -1,25 +1,29 @@
 # Legal Notice
 
-CuMetal is a clean-room implementation. This document explains the project's legal posture
-with respect to NVIDIA's CUDA EULA and Apple's AIR ABI.
+CuMetal is a clean-room implementation. This is engineering policy, not legal advice.
+The document records the intended technical boundaries of the project's source and
+compatibility paths; it does not determine whether a particular use complies with a license
+or law.
 
 ---
 
-## NVIDIA CUDA EULA — Translation Layer Warning
+## Source Recompilation and Binary Compatibility
 
-As of 2024, NVIDIA's CUDA EULA contains a clause prohibiting the use of translation layers
-to run CUDA code on non-NVIDIA hardware. This clause applies to **binary drop-in shims**
-that intercept CUDA API calls and redirect them to non-NVIDIA GPU backends (e.g., loading
-a replacement `libcuda.dylib` that intercepts fatbinary registration).
+NVIDIA's license terms have included restrictions concerning translation layers on
+non-NVIDIA platforms. Those terms can change and their application depends on the software,
+license, jurisdiction, and facts involved. Users must review the terms that govern their use
+and obtain legal advice when needed.
 
-**This clause does NOT apply to source-level recompilation.**
+CuMetal's primary and recommended engineering path recompiles source that the user controls.
+Its optional binary alias is a technically distinct compatibility path and is not presented as
+having the same licensing or interoperability considerations.
 
-| Usage Model | Legal Risk | Notes |
-|-------------|------------|-------|
-| Recompile `.cu` source with `cumetalc` | **None** — you compiled your own source code with a different compiler | Primary recommended path |
-| Link open-source CUDA programs against `libcumetal.dylib` | **Low** — no NVIDIA binary involved | Research and personal projects |
-| Drop-in `libcuda.dylib` for closed-source PTX-shipping binaries | **High** — may violate NVIDIA EULA | Opt-in only; use at own risk |
-| Drop-in for closed-source SASS-only binaries | Not supported | SASS is not translatable |
+| Usage model | Project engineering status | User responsibility |
+|-------------|----------------------------|---------------------|
+| Recompile controlled `.cu` source with `cumetalc` | Primary recommended path | Confirm rights to the source and applicable dependencies |
+| Link a source-built program against `libcumetal.dylib` | Source-recompilation runtime path | Review the program and dependency licenses |
+| Load the `libcuda.dylib` alias for a PTX-bearing binary | Bounded, opt-in compatibility path | Review all governing terms before use |
+| Load a SASS-only binary | Unsupported | CuMetal does not translate or execute SASS |
 
 CuMetal's binary shim is the **`libcuda.dylib` alias**, and only that alias. It is provided as an
 opt-in convenience and is **disabled by default** (`CUMETAL_ENABLE_BINARY_SHIM=OFF` in release
@@ -28,11 +32,9 @@ builds). Its use is at the user's own discretion and risk.
 The host **registration ABI** (`__cudaRegisterFatBinary`, `__cudaRegisterFunction`,
 `__cudaPopCallConfiguration`) is a separate thing and is built unconditionally
 (`CUMETAL_ENABLE_CUDA_REGISTRATION=ON`). Clang emits calls to those symbols when it compiles
-*your own* `.cu` source, so they are part of the source-recompilation path — the row marked
-"None" in the table above — and carry none of the binary shim's exposure. No NVIDIA binary is
-involved: you compiled your code with a different compiler, and these are that compiler's host
-calling convention. The two switches were previously one, which meant a release build silently
-disabled the source path along with the alias.
+controlled `.cu` source, so they are required by the source-recompilation path and are not the
+optional alias. They implement the compiler's host calling convention; their presence alone
+does not make an arbitrary binary compatible or determine its legal status.
 
 ---
 
@@ -54,23 +56,15 @@ from the ZLUDA project's `ptx` crate (Apache 2.0), which is itself a clean-room 
 
 ## Apple AIR ABI
 
-CuMetal generates `.metallib` files that conform to Apple's AIR (Apple Intermediate
-Representation) ABI. This ABI was reverse-engineered from publicly distributed Apple
-toolchain outputs (`.metallib` files produced by `xcrun metal`). No Apple proprietary
-source code was accessed or copied.
+CuMetal's production compiler emits typed Metal Shading Language and invokes Apple's public
+`xcrun metal` and `xcrun metallib` tools to produce `.metallib` files. Direct AIR/container
+generation, `air_inspect`, and `air_validate` are research and regression tooling only; the
+project does not claim a private AIR ABI as a supported production interface.
 
-**Legal basis for interoperability reverse engineering:**
-
-- **United States**: *Sega v. Accolade*, 977 F.2d 1510 (9th Cir. 1992) — reverse
-  engineering for interoperability is fair use under U.S. copyright law. *Sony Computer
-  Entertainment v. Connectix*, 203 F.3d 596 (9th Cir. 2000) — intermediate copying
-  during reverse engineering is permissible when the final product contains no copied code.
-- **European Union**: Directive 2009/24/EC, Article 6 — decompilation for interoperability
-  is permitted without authorization from the rightholder when necessary to achieve
-  interoperability of an independently created computer program.
-- **Key distinction**: CuMetal does not decompile or redistribute any Apple binary. It
-  generates new `.metallib` files that conform to the reverse-engineered ABI specification.
-  No Apple code is included in CuMetal's output.
+AIR/metallib research inspects outputs produced by publicly distributed Apple tools. Project
+policy prohibits accessing or copying Apple proprietary source, using private Apple APIs, or
+redistributing Apple code. Whether a particular interoperability activity is permitted is a
+fact- and jurisdiction-specific legal question outside this engineering notice.
 
 The AIR ABI reverse engineering is documented in `docs/air-abi.md` and builds on the
 open-source community work of:
@@ -86,10 +80,8 @@ The PTX parser is derived from the ZLUDA project's `ptx` crate, licensed under A
 ZLUDA is used with attribution. Modifications to the parser are maintained in CuMetal's
 fork and may be contributed back upstream.
 
-ZLUDA's CUDA EULA history: ZLUDA initially provided a binary drop-in CUDA replacement for
-AMD GPUs. AMD ceased funding ZLUDA in 2022 after NVIDIA added the translation-layer clause
-to its EULA. CuMetal draws the same strategic lesson: the primary path is source
-recompilation, not binary translation.
+CuMetal's architectural policy is independent of another project's legal history: the primary
+path is source recompilation, and binary compatibility remains bounded and opt-in.
 
 ---
 
