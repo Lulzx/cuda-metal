@@ -154,6 +154,38 @@ Profiling puts 71% of that solve in `cupdlp_movement_interaction_cuda`, cuPDLP's
 own FP64 tree reduction, which already runs on Metal, and 0.5% in the sparse
 products. Level-1 was 26% before this change.
 
+## Current HiGHS CPU vs GPU benchmark
+
+Measured on an Apple M4 Pro on 2026-08-29 with unmodified HiGHS 1.15.1, three
+timed repeats after warmup, and the persistent JIT cache warm. Times are the
+median HiGHS-reported wall seconds; the CPU and GPU binaries come from the same
+source tree and differ by `CUPDLP_GPU`.
+
+| instance | presolve | CPU | GPU | CPU / GPU | result agreement |
+| --- | --- | ---: | ---: | ---: | --- |
+| `ex10` | default | 2.54 s | 2.70 s | 0.94x | Optimal, 5.2e-08 objective rel diff |
+| `graph40-40` | default | 1.38 s | 2.03 s | 0.68x | Unknown on both, identical objective |
+| `datt256` | default | 3.34 s | 3.40 s | 0.98x | Optimal, identical objective |
+| `ex10` | off | 1.02 s | 1.49 s | 0.68x | Optimal, 1.0e-09 objective rel diff |
+| `graph40-40` | off | 0.72 s | 1.34 s | 0.54x | Optimal, identical objective |
+| `datt256` | off | 5.33 s | **3.91 s** | **1.36x** | Optimal, 2.7e-10 objective rel diff |
+
+This is not a blanket GPU win: CPU is faster on `ex10` and `graph40-40`, while
+the GPU wins on the large, irregular `datt256` solve when CPU-only presolve is
+removed. Across the three presolve-off cases, the shifted geometric means are
+both 2.19 s. Trace verification separately confirmed 7,039, 3,401, and 11,992
+Apple-GPU launches respectively, including 1,180, 516, and 1,910 sparse SpMV
+launches, with no approximate stubs. All traced arithmetic reports
+`reduced_precision_fp64` under the FP32-pair contract described above.
+
+The registration cache is part of the measurement contract. A regression had
+moved PTX metadata lowering ahead of persistent artifact lookup, so every new
+HiGHS process repeated 21 lowering pipelines even when its metallibs were
+cached. Cache sidecars now restore the kernel metadata before lowering. In the
+same exact-process timing harness, the first cold run took 15.66 s; the next
+process took 1.25 s with 21 artifact hits, 21 metadata hits, and zero lowering
+passes. A legacy cache without sidecars lowers once to populate them.
+
 ## What this does not show
 
 No solver speedup on this corpus. All eight instances are far below the size
