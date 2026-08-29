@@ -47,8 +47,8 @@ and remaining addressing/filtering modes do not. Device `printf` has a bounded
 buffer and 256-byte format limit. Focused Clang-ABI tests cover 32/64-bit
 signed/unsigned integers, hex flags, `size_t`, pointers, promoted binary64
 floating values, characters, fixed precision, and escaped percent signs
-on both PTX backends. Device-string materialization, dynamic `*` width/precision,
-and complete overflow-return parity remain gaps.
+on both PTX backends. Dynamic `*` width/precision is also tested on both paths.
+Device-string materialization and complete overflow-return parity remain gaps.
 
 ## FP64 and atomics
 

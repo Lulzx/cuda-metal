@@ -478,10 +478,20 @@ std::uint32_t minimum_printf_words(std::string_view fmt) {
         if (++i >= fmt.size()) break;
         if (fmt[i] == '%') continue;
         while (i < fmt.size() && std::strchr("-+ #0", fmt[i]) != nullptr) ++i;
-        while (i < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[i]))) ++i;
+        if (i < fmt.size() && fmt[i] == '*') {
+            ++words;
+            ++i;
+        } else {
+            while (i < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[i]))) ++i;
+        }
         if (i < fmt.size() && fmt[i] == '.') {
             ++i;
-            while (i < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[i]))) ++i;
+            if (i < fmt.size() && fmt[i] == '*') {
+                ++words;
+                ++i;
+            } else {
+                while (i < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[i]))) ++i;
+            }
         }
         bool wide = false;
         while (i < fmt.size() && std::strchr("lhzjt", fmt[i]) != nullptr) {
@@ -492,6 +502,24 @@ std::uint32_t minimum_printf_words(std::string_view fmt) {
         words += wide || fmt[i] == 'p' || fmt[i] == 's' ? 2u : 1u;
     }
     return words;
+}
+
+template <typename T>
+void emit_printf_value(const std::string& spec,
+                       bool dynamic_width,
+                       int width,
+                       bool dynamic_precision,
+                       int precision,
+                       T value) {
+    if (dynamic_width && dynamic_precision) {
+        std::fprintf(stderr, spec.c_str(), width, precision, value);
+    } else if (dynamic_width) {
+        std::fprintf(stderr, spec.c_str(), width, value);
+    } else if (dynamic_precision) {
+        std::fprintf(stderr, spec.c_str(), precision, value);
+    } else {
+        std::fprintf(stderr, spec.c_str(), value);
+    }
 }
 
 void drain_one_printf_record(const std::string& fmt,
@@ -517,15 +545,36 @@ void drain_one_printf_record(const std::string& fmt,
                 fmt[i] == '#' || fmt[i] == '0')) {
             spec += fmt[i++];
         }
-        // Width
-        while (i < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[i]))) {
+        // Width. Dynamic width and precision are promoted int slots preceding
+        // the conversion value in CUDA's packed varargs tuple.
+        bool dynamic_width = false;
+        int width = 0;
+        if (i < fmt.size() && fmt[i] == '*') {
+            dynamic_width = true;
             spec += fmt[i++];
-        }
-        // Precision
-        if (i < fmt.size() && fmt[i] == '.') {
-            spec += fmt[i++];
+            if (arg_idx < n_args) {
+                width = static_cast<int>(args[arg_idx++]);
+            }
+        } else {
             while (i < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[i]))) {
                 spec += fmt[i++];
+            }
+        }
+        // Precision
+        bool dynamic_precision = false;
+        int precision = 0;
+        if (i < fmt.size() && fmt[i] == '.') {
+            spec += fmt[i++];
+            if (i < fmt.size() && fmt[i] == '*') {
+                dynamic_precision = true;
+                spec += fmt[i++];
+                if (arg_idx < n_args) {
+                    precision = static_cast<int>(args[arg_idx++]);
+                }
+            } else {
+                while (i < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[i]))) {
+                    spec += fmt[i++];
+                }
             }
         }
         // Track length modifiers so packed 64-bit scalar slots do not shift
@@ -558,8 +607,9 @@ void drain_one_printf_record(const std::string& fmt,
                 (static_cast<std::uint64_t>(args[arg_idx + 1u]) << 32u);
             arg_idx += 2u;
             spec += 'p';
-            std::fprintf(stderr, spec.c_str(),
-                         reinterpret_cast<void*>(static_cast<std::uintptr_t>(raw)));
+            emit_printf_value(
+                spec, dynamic_width, width, dynamic_precision, precision,
+                reinterpret_cast<void*>(static_cast<std::uintptr_t>(raw)));
             continue;
         }
         if (wide_modifier && arg_idx + 1u < n_args) {
@@ -569,9 +619,13 @@ void drain_one_printf_record(const std::string& fmt,
             spec += "ll";
             spec += conv;
             if (conv == 'd' || conv == 'i') {
-                std::fprintf(stderr, spec.c_str(), static_cast<long long>(raw));
+                emit_printf_value(spec, dynamic_width, width,
+                                  dynamic_precision, precision,
+                                  static_cast<long long>(raw));
             } else if (conv == 'u' || conv == 'o' || conv == 'x' || conv == 'X') {
-                std::fprintf(stderr, spec.c_str(), static_cast<unsigned long long>(raw));
+                emit_printf_value(spec, dynamic_width, width,
+                                  dynamic_precision, precision,
+                                  static_cast<unsigned long long>(raw));
             } else {
                 std::fputs(spec.c_str(), stderr);
             }
@@ -593,21 +647,29 @@ void drain_one_printf_record(const std::string& fmt,
                     (static_cast<std::uint64_t>(args[arg_idx++]) << 32u);
                 double value = 0.0;
                 std::memcpy(&value, &bits, sizeof(value));
-                std::fprintf(stderr, spec.c_str(), value);
+                emit_printf_value(spec, dynamic_width, width,
+                                  dynamic_precision, precision, value);
             } else {
                 float value = 0.0f;
                 std::memcpy(&value, &raw, sizeof(value));
-                std::fprintf(stderr, spec.c_str(), static_cast<double>(value));
+                emit_printf_value(spec, dynamic_width, width,
+                                  dynamic_precision, precision,
+                                  static_cast<double>(value));
             }
         } else if (conv == 'd' || conv == 'i') {
             spec += conv;
-            std::fprintf(stderr, spec.c_str(), static_cast<int>(raw));
+            emit_printf_value(spec, dynamic_width, width,
+                              dynamic_precision, precision,
+                              static_cast<int>(raw));
         } else if (conv == 'u' || conv == 'o' || conv == 'x' || conv == 'X') {
             spec += conv;
-            std::fprintf(stderr, spec.c_str(), raw);
+            emit_printf_value(spec, dynamic_width, width,
+                              dynamic_precision, precision, raw);
         } else if (conv == 'c') {
             spec += conv;
-            std::fprintf(stderr, spec.c_str(), static_cast<int>(raw));
+            emit_printf_value(spec, dynamic_width, width,
+                              dynamic_precision, precision,
+                              static_cast<int>(raw));
         } else {
             spec += conv;
             std::fputs(spec.c_str(), stderr);

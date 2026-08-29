@@ -63,4 +63,9 @@ if [[ "$(grep -Ec '^WIDE signed=-1234567890123 unsigned=1234605616436508552 hex=
     exit 1
 fi
 
-echo "PASS: Clang device printf ABI emitted integer, wide, pointer, floating, character, and escaped-percent GPU records (${PTX_BACKEND})"
+if [[ "$(grep -Fxc 'DYNAMIC int=   -42 float=    3.12 left=7    ' "${OUTPUT_FILE}")" -ne 1 ]]; then
+    echo "FAIL: missing or malformed dynamic-width/precision device printf record"
+    exit 1
+fi
+
+echo "PASS: Clang device printf ABI emitted scalar and dynamic-width/precision GPU records (${PTX_BACKEND})"

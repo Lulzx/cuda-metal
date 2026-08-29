@@ -20,6 +20,11 @@ __global__ void print_wide_values(const int* pointer) {
            3.125, 'Q');
 }
 
+__global__ void print_dynamic_values() {
+    printf("DYNAMIC int=%*d float=%*.*f left=%-*u\n",
+           6, -42, 8, 2, 3.125, 5, 7u);
+}
+
 int main() {
     print_coordinates<<<dim3(2, 2), dim3(2, 2, 2)>>>(37);
     if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess) {
@@ -34,6 +39,13 @@ int main() {
     print_wide_values<<<1, 1>>>(pointer);
     if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess) {
         std::printf("FAIL: wide cudaDeviceSynchronize: %s\n",
+                    cudaGetErrorString(error));
+        cudaFree(pointer);
+        return 1;
+    }
+    print_dynamic_values<<<1, 1>>>();
+    if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess) {
+        std::printf("FAIL: dynamic cudaDeviceSynchronize: %s\n",
                     cudaGetErrorString(error));
         cudaFree(pointer);
         return 1;
