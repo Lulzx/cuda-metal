@@ -481,14 +481,27 @@ struct Importer {
 
     bool function_references_global(const llvm::Function& function,
                                     const llvm::GlobalVariable& global) const {
-        for (const llvm::BasicBlock& block : function) {
-            for (const llvm::Instruction& instruction : block) {
-                for (const llvm::Use& operand : instruction.operands()) {
-                    if (referenced_global(*operand.get()) == &global) return true;
+        std::unordered_set<const llvm::Function*> visited;
+        const auto references = [&](const auto& self,
+                                    const llvm::Function& candidate) -> bool {
+            if (!visited.insert(&candidate).second) return false;
+            for (const llvm::BasicBlock& block : candidate) {
+                for (const llvm::Instruction& instruction : block) {
+                    for (const llvm::Use& operand : instruction.operands()) {
+                        if (referenced_global(*operand.get()) == &global) return true;
+                    }
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    const llvm::Function* callee =
+                        call == nullptr ? nullptr : call->getCalledFunction();
+                    if (callee != nullptr && !callee->isDeclaration() &&
+                        self(self, *callee)) {
+                        return true;
+                    }
                 }
             }
-        }
-        return false;
+            return false;
+        };
+        return references(references, function);
     }
 
     static bool function_uses_vprintf(const llvm::Function& function) {
@@ -729,13 +742,8 @@ struct Importer {
 
         for (const ExternalGlobalInfo& info : external_globals) {
             if (!function_references_global(function, *info.global)) continue;
-            if (!state->output.is_kernel) {
-                return fail(nullptr,
-                            "externally initialized CUDA globals referenced from device "
-                            "helpers are not yet supported by typed NVVM lowering");
-            }
             const std::uint32_t binding_index = info.constant ? 30u : argument_index++;
-            if (!info.constant && binding_index >= 29u) {
+            if (state->output.is_kernel && !info.constant && binding_index >= 29u) {
                 return fail(nullptr, "CUDA device global conflicts with reserved Metal bindings");
             }
             const Type pointer_type = Type::pointer(
@@ -767,6 +775,9 @@ struct Importer {
                 .known_byte_offset = 0,
                 .alignment = info.alignment,
             };
+            state->external_globals[info.global] = {
+                .base = base, .byte_offset = info.constant ? info.constant_offset : 0};
+            if (!state->output.is_kernel) continue;
             const std::uint32_t logical_index =
                 static_cast<std::uint32_t>(state->output.kernel_abi->arguments.size());
             const std::string hidden_role =
@@ -791,8 +802,6 @@ struct Importer {
                 .alignment = info.alignment,
                 .hidden_role = hidden_role,
             });
-            state->external_globals[info.global] = {
-                .base = base, .byte_offset = info.constant ? info.constant_offset : 0};
         }
 
         if (function_uses_vprintf(function)) {
@@ -1170,6 +1179,19 @@ struct Importer {
         }
         for (const llvm::Use& argument : call.args()) {
             operation->operands.push_back(import_operand(*argument.get(), *state));
+        }
+        if (!callee->isDeclaration()) {
+            bool passed_constant_symbols = false;
+            for (const ExternalGlobalInfo& info : external_globals) {
+                if (!function_references_global(*callee, *info.global)) continue;
+                const auto binding = state->external_globals.find(info.global);
+                if (binding == state->external_globals.end()) {
+                    return fail(&call, "missing transitive CUDA global binding for device helper");
+                }
+                if (info.constant && passed_constant_symbols) continue;
+                operation->operands.push_back(binding->second.base);
+                passed_constant_symbols |= info.constant;
+            }
         }
         return true;
     }

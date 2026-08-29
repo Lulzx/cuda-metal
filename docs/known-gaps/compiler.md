@@ -33,9 +33,10 @@ Remaining typed-path blockers include combinations of:
 - FP64 modes and operations beyond the numerically proven `fast48`
   arithmetic/storage/comparison/rounding corpus, including observable IEEE
   exception status;
-- externally initialized constant/global symbols referenced through device
-  helpers, plus native-AOT metadata that lets the runtime populate those hidden
-  bindings without the current CUDA registration path.
+- native-AOT metadata that lets the runtime populate hidden constant/global
+  bindings without the current CUDA registration path, plus unproven symbol
+  combinations beyond the directly and transitively referenced buffers covered
+  by typed NVVM tests.
 
 The old direct legacy `.cu` path is textual qualifier stripping and fails this
 corpus. It is not a correctness fallback.

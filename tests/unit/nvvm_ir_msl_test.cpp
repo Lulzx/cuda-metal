@@ -1009,6 +1009,21 @@ entry:
   store i32 %next, ptr %out, align 4
   ret void
 }
+
+define i32 @read_symbols_helper() {
+entry:
+  %constant = load i32, ptr getelementptr (i8, ptr addrspacecast (ptr addrspace(4) @constants to ptr), i64 16), align 4
+  %global = load i32, ptr getelementptr (i8, ptr addrspacecast (ptr addrspace(1) @writable to ptr), i64 12), align 4
+  %sum = add i32 %constant, %global
+  ret i32 %sum
+}
+
+define ptx_kernel void @read_symbols_through_helper(ptr %out) {
+entry:
+  %value = call i32 @read_symbols_helper()
+  store i32 %value, ptr %out, align 4
+  ret void
+}
 )llvm";
 
 constexpr const char* kNvvmOversizedExternalConstant = R"llvm(
@@ -1555,8 +1570,11 @@ int main() {
                      external_symbols.source.find("getelementptr") == std::string::npos &&
                      external_symbols.source.find("addrspacecast") == std::string::npos &&
                      external_symbols.source.find("constant uchar constants[") ==
+                         std::string::npos &&
+                     external_symbols.source.find(
+                         "read_symbols_helper(cm___cumetal_constant_symbols, cm___cumetal_global_writable)") !=
                          std::string::npos,
-                 "externally initialized CUDA symbols use hidden runtime buffers with byte offsets");
+                 "externally initialized CUDA symbols use hidden runtime buffers with byte offsets and thread through helpers");
     if (!external_symbols.ok) std::cerr << external_symbols.error << "\n";
 
     const metal::NvvmToMslResult oversized_constant = metal::compile_nvvm_to_msl(
