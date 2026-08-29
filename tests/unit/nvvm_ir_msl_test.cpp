@@ -767,6 +767,28 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmHeterogeneousAggregate = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%mixed = type { i32, float, i64 }
+
+define %mixed @make_mixed(i32 %integer, float %real) {
+entry:
+  %v0 = insertvalue %mixed poison, i32 %integer, 0
+  %v1 = insertvalue %mixed %v0, float %real, 1
+  %v2 = insertvalue %mixed %v1, i64 7, 2
+  ret %mixed %v2
+}
+
+define ptx_kernel void @heterogeneous_aggregate(ptr %out, i32 %integer, float %real) {
+entry:
+  %value = call %mixed @make_mixed(i32 %integer, float %real)
+  %field = extractvalue %mixed %value, 1
+  store float %field, ptr %out, align 4
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmNoaliasScope = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1308,6 +1330,20 @@ int main() {
                      cuda_math.source.find("ctz(") != std::string::npos &&
                      cuda_math.source.find(" ? ") != std::string::npos,
                  "CUDA math and bit-count declarations map to semantics-correct Metal builtins");
+
+    const metal::NvvmToMslResult heterogeneous_aggregate =
+        metal::compile_nvvm_to_msl(kNvvmHeterogeneousAggregate,
+                                   "heterogeneous-aggregate.ll",
+                                   "heterogeneous_aggregate");
+    ok &= expect(heterogeneous_aggregate.ok &&
+                     heterogeneous_aggregate.source.find("struct mixed") !=
+                         std::string::npos &&
+                     heterogeneous_aggregate.source.find(
+                         "mixed{integer, real, 7}") !=
+                         std::string::npos &&
+                     heterogeneous_aggregate.source.find(".field1") !=
+                         std::string::npos,
+                 "flat heterogeneous LLVM aggregates use typed MSL brace initialization");
 
     const metal::NvvmToMslResult noalias_scope = metal::compile_nvvm_to_msl(
         kNvvmNoaliasScope, "noalias-scope.ll", "noalias_scope");

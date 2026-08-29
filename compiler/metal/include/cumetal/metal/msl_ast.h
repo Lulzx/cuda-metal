@@ -80,6 +80,11 @@ struct MslCall {
     std::vector<MslExpr> arguments;
 };
 
+struct MslAggregateInit {
+    MslType type;
+    std::vector<MslExpr> elements;
+};
+
 struct MslCast {
     MslType target;
     MslExpr operand;
@@ -110,6 +115,7 @@ struct MslVoteMask {
 struct MslExpression {
     MslType type;
     std::variant<MslIdentifier, MslLiteral, MslUnary, MslBinary, MslCall,
+                 MslAggregateInit,
                  MslCast, MslSubscript, MslMember, MslConditional, MslVoteMask>
         value;
     ir::SourceLocation location;
@@ -119,6 +125,7 @@ struct MslExpression {
     static MslExpr unary(std::string operation, MslExpr operand, MslType type);
     static MslExpr binary(std::string operation, MslExpr left, MslExpr right, MslType type);
     static MslExpr call(std::string callee, std::vector<MslExpr> arguments, MslType type);
+    static MslExpr aggregate_init(MslType type, std::vector<MslExpr> elements);
     static MslExpr cast(MslType target, MslExpr operand, bool reinterpret = false);
     static MslExpr bitcast(MslType target, MslExpr operand);
     static MslExpr subscript(MslExpr base, MslExpr index, MslType type);

@@ -1083,9 +1083,11 @@ struct Importer {
             }
             const Type aggregate_type = import_type(insert->getType());
             const auto constructor = homogeneous_aggregate_constructor(aggregate_type);
-            if (!constructor) {
+            if (aggregate_type.kind != TypeKind::kAggregate ||
+                aggregate_type.elements.empty() ||
+                aggregate_type.elements.size() > 16) {
                 return fail(&instruction,
-                            "LLVM insertvalue requires a homogeneous 2-4 element aggregate");
+                            "LLVM insertvalue requires a flat 1-16 element aggregate");
             }
             std::vector<std::optional<Operand>> components(aggregate_type.elements.size());
             const llvm::Value* aggregate = insert->getAggregateOperand();
@@ -1108,7 +1110,11 @@ struct Importer {
                 return true;
             }
             operation.opcode = OpCode::kAggregateConstruct;
-            operation.attributes["constructor"] = *constructor;
+            if (constructor.has_value()) {
+                operation.attributes["constructor"] = *constructor;
+            } else {
+                operation.attributes["aggregate_init"] = "true";
+            }
             for (const auto& component : components) {
                 operation.operands.push_back(*component);
             }

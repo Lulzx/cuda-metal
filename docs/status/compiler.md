@@ -16,7 +16,7 @@ production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/23 | **13/23** |
+| direct `.cu` | 0/23 | **15/23** |
 | PTX / `--cuda-device` | **23/23** | **7/23** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
@@ -41,6 +41,9 @@ functions without direct equivalents.
 CUDA's double-signature `frexp` call is narrowed only for the proven
 float-to-double-call-to-float pattern, preserving the integer exponent output
 without admitting general FP64 arithmetic.
+Flat heterogeneous LLVM aggregates lower to typed MSL structs. The dynamic
+cooperative-groups checks and raytracer CPU-reference comparison pass through
+that direct typed path.
 
 ## PTX compatibility
 

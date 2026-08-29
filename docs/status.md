@@ -17,7 +17,7 @@ is split by subsystem.
 - Enrolled headless `cuda-samples`: **83/83 pass**, zero waivers, zero
   nonpassing manifest entries.
 - Production-metallib source corpus with CUDA Clang 21-23: direct typed IR
-  **13/23**, typed PTX **7/23**, legacy PTX **23/23**.
+  **15/23**, typed PTX **7/23**, legacy PTX **23/23**.
 - Phase 5 measured kernels: vector add, SAXPY, and reduction meet the recorded
   2x native-Metal ceiling on Apple M4 Pro.
 - Current production PTX compatibility is broader than the typed path. This is

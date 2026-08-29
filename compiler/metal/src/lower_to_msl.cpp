@@ -1166,16 +1166,32 @@ struct AstLowerer {
                 fail(&operation, "malformed aggregate extraction");
                 return std::nullopt;
             }
+            const ir::Type& aggregate_type = operation.operands[0].type;
+            if (is_native_vector_aggregate(aggregate_type)) {
+                return declare_result(
+                    operation,
+                    MslExpression::subscript(expression_for(operation.operands[0]),
+                                             expression_for(operation.operands[1]),
+                                             lower_result_type(operation)));
+            }
+            if (aggregate_type.kind != ir::TypeKind::kAggregate ||
+                operation.operands[1].kind != ir::OperandKind::kImmediate) {
+                fail(&operation, "struct aggregate extraction requires a constant index");
+                return std::nullopt;
+            }
             return declare_result(
                 operation,
-                MslExpression::subscript(expression_for(operation.operands[0]),
-                                         expression_for(operation.operands[1]),
-                                         lower_result_type(operation)));
+                MslExpression::member(
+                    expression_for(operation.operands[0]),
+                    "field" + operation.operands[1].text,
+                    lower_result_type(operation)));
         }
 
         if (operation.opcode == ir::OpCode::kAggregateConstruct) {
             const auto constructor = operation.attributes.find("constructor");
-            if (operation.results.empty() || constructor == operation.attributes.end()) {
+            const bool aggregate_init = operation.attributes.contains("aggregate_init");
+            if (operation.results.empty() ||
+                (constructor == operation.attributes.end() && !aggregate_init)) {
                 fail(&operation, "malformed aggregate construction");
                 return std::nullopt;
             }
@@ -1184,10 +1200,14 @@ struct AstLowerer {
             for (const ir::Operand& operand : operation.operands) {
                 elements.push_back(expression_for(operand));
             }
+            const MslType result_type = lower_result_type(operation);
             return declare_result(
                 operation,
-                MslExpression::call(constructor->second, std::move(elements),
-                                    lower_result_type(operation)));
+                aggregate_init
+                    ? MslExpression::aggregate_init(result_type,
+                                                    std::move(elements))
+                    : MslExpression::call(constructor->second,
+                                          std::move(elements), result_type));
         }
 
         if (operation.opcode == ir::OpCode::kCall) {

@@ -199,6 +199,13 @@ private:
                         print_expression(node.arguments[i]);
                     }
                     out_ << ")";
+                } else if constexpr (std::is_same_v<Node, MslAggregateInit>) {
+                    out_ << node.type.str() << "{";
+                    for (std::size_t i = 0; i < node.elements.size(); ++i) {
+                        if (i != 0) out_ << ", ";
+                        print_expression(node.elements[i]);
+                    }
+                    out_ << "}";
                 } else if constexpr (std::is_same_v<Node, MslCast>) {
                     if (node.bitcast) {
                         out_ << "as_type<" << node.target.str() << ">(";
@@ -465,6 +472,18 @@ MslExpr MslExpression::call(std::string callee, std::vector<MslExpr> arguments, 
     return std::make_shared<MslExpression>(MslExpression{
         .type = std::move(type),
         .value = MslCall{.callee = std::move(callee), .arguments = std::move(arguments)},
+    });
+}
+
+MslExpr MslExpression::aggregate_init(MslType type,
+                                      std::vector<MslExpr> elements) {
+    const MslType result_type = type;
+    return std::make_shared<MslExpression>(MslExpression{
+        .type = result_type,
+        .value = MslAggregateInit{
+            .type = std::move(type),
+            .elements = std::move(elements),
+        },
     });
 }
 
