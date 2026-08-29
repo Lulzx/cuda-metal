@@ -55,6 +55,10 @@ add_executable(cumetal_metal_backend_cross_queue_fence_test
     metal_backend_cross_queue_fence_test.cpp
 )
 
+add_executable(cumetal_typed_constant_symbol_test
+    typed_constant_symbol_test.cpp
+)
+
 add_executable(cumetal_runtime_null_stream_sync_test
     runtime_null_stream_sync_test.cpp
 )
@@ -592,6 +596,17 @@ target_link_libraries(cumetal_metal_backend_cross_queue_fence_test
 )
 
 target_include_directories(cumetal_metal_backend_cross_queue_fence_test
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/runtime/metal_backend
+        ${CMAKE_SOURCE_DIR}/runtime/api
+)
+
+target_link_libraries(cumetal_typed_constant_symbol_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_include_directories(cumetal_typed_constant_symbol_test
     PRIVATE
         ${CMAKE_SOURCE_DIR}/runtime/metal_backend
         ${CMAKE_SOURCE_DIR}/runtime/api
@@ -2707,6 +2722,18 @@ foreach(frontend IN ITEMS direct ptx)
             PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
     endforeach()
 endforeach()
+
+add_test(
+    NAME functional_typed_direct_constant_symbol
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_typed_constant_symbol.sh
+            $<TARGET_FILE:cumetalc>
+            $<TARGET_FILE:cumetal_typed_constant_symbol_test>
+            ${CMAKE_SOURCE_DIR}/tests/cuda_projects/constant_symbol/constant_symbol.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/typed-direct-constant-symbol.metallib
+)
+set_tests_properties(functional_typed_direct_constant_symbol
+    PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
 
 foreach(frontend IN ITEMS direct ptx)
     add_test(

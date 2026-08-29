@@ -16,7 +16,7 @@ production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/23 | **17/23** |
+| direct `.cu` | 0/23 | **18/23** |
 | PTX / `--cuda-device` | **23/23** | **20/23** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
@@ -43,6 +43,11 @@ bit containers for that same libdevice surface. Direct and PTX-produced typed
 artifacts have separate Apple-GPU numerical gates for the complete 32-bit CUDA
 atomic family, device/threadgroup fences, and host-concurrent system atomics;
 the broader libdevice numerical proof remains attributed to the direct path.
+Externally initialized direct-NVVM `__constant__` and writable `__device__`
+symbols use explicit hidden Metal buffers instead of embedded zero initializers.
+The constant buffer has checked aligned offsets and a 64 KiB limit; the writable
+buffer remains persistent across launches. A focused Apple-GPU test checks both
+host-populated constant reads and two-launch writable-symbol persistence.
 It also recognizes compiler-marked implicit definitions, bounded private local
 depots, static/dynamic shared symbols, and canonical one-block or
 unconditional-header natural loops without routing barrier code through the CFG

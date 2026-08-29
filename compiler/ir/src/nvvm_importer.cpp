@@ -18,6 +18,7 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/Operator.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/IRReader/IRReader.h>
@@ -389,6 +390,12 @@ struct FunctionState {
     std::unordered_map<ValueId, ValueId> integer_pointer_sources;
     std::unordered_map<const llvm::Value*, std::vector<std::optional<Operand>>>
         aggregate_components;
+    struct ExternalGlobalBinding {
+        Operand base;
+        std::uint64_t byte_offset = 0;
+    };
+    std::unordered_map<const llvm::GlobalVariable*, ExternalGlobalBinding>
+        external_globals;
 };
 
 struct Importer {
@@ -396,6 +403,15 @@ struct Importer {
     NvvmImportResult result;
     llvm::Module* input = nullptr;
     std::string fallback_source;
+    struct ExternalGlobalInfo {
+        const llvm::GlobalVariable* global = nullptr;
+        std::uint64_t byte_size = 0;
+        std::uint32_t alignment = 1;
+        std::uint64_t constant_offset = 0;
+        bool constant = false;
+    };
+    std::vector<ExternalGlobalInfo> external_globals;
+    std::uint64_t external_constant_buffer_size = 0;
 
     bool fail(const llvm::Instruction* instruction, std::string message) {
         if (instruction != nullptr) {
@@ -429,6 +445,88 @@ struct Importer {
             return Operand::symbol("<undefined>", import_type(value.getType()));
         }
         return Operand::value_ref(found->second, state.value_types.at(found->second));
+    }
+
+    static const llvm::GlobalVariable* referenced_global(const llvm::Value& value) {
+        if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(&value)) {
+            return global;
+        }
+        const auto* constant = llvm::dyn_cast<llvm::ConstantExpr>(&value);
+        if (constant == nullptr || constant->getNumOperands() == 0) return nullptr;
+        if (constant->isCast() || constant->getOpcode() == llvm::Instruction::GetElementPtr) {
+            return referenced_global(*constant->getOperand(0));
+        }
+        return nullptr;
+    }
+
+    bool function_references_global(const llvm::Function& function,
+                                    const llvm::GlobalVariable& global) const {
+        for (const llvm::BasicBlock& block : function) {
+            for (const llvm::Instruction& instruction : block) {
+                for (const llvm::Use& operand : instruction.operands()) {
+                    if (referenced_global(*operand.get()) == &global) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    std::optional<Operand> import_external_pointer(
+        const llvm::Value& value, FunctionState* state, BasicBlock* output_block,
+        const SourceLocation& location) {
+        const llvm::GlobalVariable* global = referenced_global(value);
+        if (global == nullptr) return std::nullopt;
+        const auto found = state->external_globals.find(global);
+        if (found == state->external_globals.end()) return std::nullopt;
+
+        std::int64_t expression_offset = 0;
+        const llvm::Value* cursor = &value;
+        while (const auto* expression = llvm::dyn_cast<llvm::ConstantExpr>(cursor)) {
+            if (expression->getOpcode() == llvm::Instruction::GetElementPtr) {
+                llvm::APInt offset(64, 0, true);
+                const auto* gep = llvm::cast<llvm::GEPOperator>(expression);
+                if (!gep->accumulateConstantOffset(input->getDataLayout(), offset)) {
+                    return std::nullopt;
+                }
+                expression_offset += offset.getSExtValue();
+            } else if (!expression->isCast()) {
+                return std::nullopt;
+            }
+            cursor = expression->getOperand(0);
+        }
+
+        const std::uint64_t base_offset = found->second.byte_offset;
+        if (expression_offset < 0 &&
+            static_cast<std::uint64_t>(-expression_offset) > base_offset) {
+            return std::nullopt;
+        }
+        const std::int64_t total_offset =
+            static_cast<std::int64_t>(base_offset) + expression_offset;
+        if (total_offset == 0) return found->second.base;
+
+        const ValueId pointer = builder.next_value();
+        state->value_types[pointer] = found->second.base.type;
+        Operation offset;
+        offset.opcode = OpCode::kPointerOffset;
+        offset.results = {pointer};
+        offset.result_types = {found->second.base.type};
+        offset.operands = {
+            found->second.base,
+            Operand::immediate(std::to_string(total_offset), Type::integer(64)),
+        };
+        offset.attributes["offset_unit"] = "bytes";
+        offset.location = location;
+        output_block->operations.push_back(std::move(offset));
+        return Operand::value_ref(pointer, found->second.base.type);
+    }
+
+    Operand import_pointer_operand(const llvm::Value& value, FunctionState* state,
+                                   BasicBlock* output_block,
+                                   const SourceLocation& location) {
+        if (auto external = import_external_pointer(value, state, output_block, location)) {
+            return *external;
+        }
+        return import_operand(value, *state);
     }
 
     bool allocate_function(const llvm::Function& function, FunctionState* state) {
@@ -482,6 +580,74 @@ struct Importer {
                 });
             }
             ++argument_index;
+        }
+
+        for (const ExternalGlobalInfo& info : external_globals) {
+            if (!function_references_global(function, *info.global)) continue;
+            if (!state->output.is_kernel) {
+                return fail(nullptr,
+                            "externally initialized CUDA globals referenced from device "
+                            "helpers are not yet supported by typed NVVM lowering");
+            }
+            const std::uint32_t binding_index = info.constant ? 30u : argument_index++;
+            if (!info.constant && binding_index >= 29u) {
+                return fail(nullptr, "CUDA device global conflicts with reserved Metal bindings");
+            }
+            const Type pointer_type = Type::pointer(
+                Type::integer(8),
+                info.constant ? AddressSpace::kConstant : AddressSpace::kDevice);
+            const ValueId value = builder.next_value();
+            const std::string name = info.constant
+                ? "__cumetal_constant_symbols"
+                : "__cumetal_global_" + info.global->getName().str();
+            Operand base = Operand::value_ref(value, pointer_type);
+            if (info.constant) {
+                const auto existing = std::find_if(
+                    state->output.arguments.begin(), state->output.arguments.end(),
+                    [](const FunctionArgument& argument) {
+                        return argument.name == "__cumetal_constant_symbols";
+                    });
+                if (existing != state->output.arguments.end()) {
+                    base = Operand::value_ref(existing->value, existing->type);
+                    state->external_globals[info.global] = {
+                        .base = base, .byte_offset = info.constant_offset};
+                    continue;
+                }
+            }
+            state->value_types[value] = pointer_type;
+            state->output.arguments.push_back({.value = value, .name = name, .type = pointer_type});
+            state->output.pointer_provenance[value] = {
+                .base_kind = PointerBaseKind::kAllocation,
+                .base_name = name,
+                .known_byte_offset = 0,
+                .alignment = info.alignment,
+            };
+            const std::uint32_t logical_index =
+                static_cast<std::uint32_t>(state->output.kernel_abi->arguments.size());
+            const std::string hidden_role =
+                info.constant ? "constant_symbols" : "global_symbol:" + info.global->getName().str();
+            state->output.kernel_abi->arguments.push_back({
+                .name = name,
+                .kind = ArgumentKind::kPointer,
+                .type = pointer_type,
+                .size = 8,
+                .alignment = 8,
+                .address_space = pointer_type.address_space,
+                .binding_indices = {binding_index},
+                .hidden_role = hidden_role,
+            });
+            state->output.kernel_abi->bindings.push_back({
+                .kind = BindingKind::kBuffer,
+                .binding_index = binding_index,
+                .logical_argument_index = logical_index,
+                .type = pointer_type,
+                .size = static_cast<std::uint32_t>(
+                    info.constant ? external_constant_buffer_size : info.byte_size),
+                .alignment = info.alignment,
+                .hidden_role = hidden_role,
+            });
+            state->external_globals[info.global] = {
+                .base = base, .byte_offset = info.constant ? info.constant_offset : 0};
         }
 
         std::uint32_t unnamed_block = 0;
@@ -793,8 +959,10 @@ struct Importer {
         const std::uint64_t destination_alignment = copy.getDestAlign().value().value();
         const std::uint64_t source_alignment = copy.getSourceAlign().value().value();
         const SourceLocation location = import_location(copy, fallback_source);
-        const Operand destination = import_operand(*copy.getDest(), *state);
-        const Operand source = import_operand(*copy.getSource(), *state);
+        const Operand destination = import_pointer_operand(
+            *copy.getDest(), state, output_block, location);
+        const Operand source = import_pointer_operand(
+            *copy.getSource(), state, output_block, location);
 
         auto offset_pointer = [&](const Operand& base, std::uint64_t offset) {
             if (offset == 0) return base;
@@ -865,7 +1033,8 @@ struct Importer {
         const std::uint64_t destination_alignment = set.getDestAlign().value().value();
         const std::uint64_t byte_value = byte->getZExtValue() & 0xffu;
         const SourceLocation location = import_location(set, fallback_source);
-        const Operand destination = import_operand(*set.getDest(), *state);
+        const Operand destination = import_pointer_operand(
+            *set.getDest(), state, output_block, location);
 
         auto offset_pointer = [&](std::uint64_t offset) {
             if (offset == 0) return destination;
@@ -1283,7 +1452,8 @@ struct Importer {
                 has_dynamic_offset = true;
             }
             operation.opcode = OpCode::kPointerOffset;
-            operation.operands.push_back(import_operand(*gep->getPointerOperand(), *state));
+            operation.operands.push_back(import_pointer_operand(
+                *gep->getPointerOperand(), state, output_block, operation.location));
             operation.operands.push_back(std::move(byte_offset));
             if (operation.operands.front().type.is_pointer()) {
                 operation.result_types.front() = operation.operands.front().type;
@@ -1332,11 +1502,13 @@ struct Importer {
             }
         } else if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction)) {
             operation.opcode = OpCode::kLoad;
-            operation.operands.push_back(import_operand(*load->getPointerOperand(), *state));
+            operation.operands.push_back(import_pointer_operand(
+                *load->getPointerOperand(), state, output_block, operation.location));
             operation.attributes["alignment"] = std::to_string(load->getAlign().value());
         } else if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction)) {
             operation.opcode = OpCode::kStore;
-            operation.operands.push_back(import_operand(*store->getPointerOperand(), *state));
+            operation.operands.push_back(import_pointer_operand(
+                *store->getPointerOperand(), state, output_block, operation.location));
             operation.operands.push_back(import_operand(*store->getValueOperand(), *state));
             operation.attributes["alignment"] = std::to_string(store->getAlign().value());
         } else if (const auto* set = llvm::dyn_cast<llvm::MemSetInst>(&instruction)) {
@@ -1355,7 +1527,8 @@ struct Importer {
             if (!import_call(*call, state, &operation)) return false;
         } else if (const auto* atomic = llvm::dyn_cast<llvm::AtomicRMWInst>(&instruction)) {
             operation.opcode = OpCode::kAtomic;
-            operation.operands.push_back(import_operand(*atomic->getPointerOperand(), *state));
+            operation.operands.push_back(import_pointer_operand(
+                *atomic->getPointerOperand(), state, output_block, operation.location));
             operation.operands.push_back(import_operand(*atomic->getValOperand(), *state));
             operation.attributes["atomic_op"] =
                 llvm::AtomicRMWInst::getOperationName(atomic->getOperation()).str();
@@ -1387,7 +1560,8 @@ struct Importer {
             operation.result_types = {value_type};
             operation.opcode = OpCode::kAtomic;
             operation.operands = {
-                import_operand(*compare_exchange->getPointerOperand(), *state),
+                import_pointer_operand(*compare_exchange->getPointerOperand(), state,
+                                       output_block, operation.location),
                 import_operand(*compare_exchange->getCompareOperand(), *state),
                 import_operand(*compare_exchange->getNewValOperand(), *state),
             };
@@ -1529,6 +1703,32 @@ struct Importer {
                             ? global.getAlign()->value()
                             : 1),
                     .is_dynamic = is_dynamic_threadgroup,
+                });
+                continue;
+            }
+            if (global.isExternallyInitialized() && global.hasInitializer() &&
+                (global.getAddressSpace() == 1 || global.getAddressSpace() == 4) &&
+                !global.getName().starts_with("llvm.")) {
+                const std::uint32_t alignment = static_cast<std::uint32_t>(
+                    global.getAlign().has_value() ? global.getAlign()->value() : 1);
+                std::uint64_t constant_offset = 0;
+                if (global.getAddressSpace() == 4) {
+                    const std::uint64_t mask = alignment - 1;
+                    external_constant_buffer_size =
+                        (external_constant_buffer_size + mask) & ~mask;
+                    constant_offset = external_constant_buffer_size;
+                    external_constant_buffer_size += global_size;
+                    if (external_constant_buffer_size > 64u * 1024u) {
+                        result.error = "externally initialized CUDA constant storage exceeds 64 KiB";
+                        return std::move(result);
+                    }
+                }
+                external_globals.push_back({
+                    .global = &global,
+                    .byte_size = global_size,
+                    .alignment = alignment,
+                    .constant_offset = constant_offset,
+                    .constant = global.getAddressSpace() == 4,
                 });
                 continue;
             }

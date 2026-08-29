@@ -98,6 +98,9 @@ struct ArgumentDescriptor {
     std::uint32_t alignment = 0;
     AddressSpace address_space = AddressSpace::kNone;
     std::vector<std::uint32_t> binding_indices;
+    // Hidden runtime-owned ABI arguments are present in the Metal function
+    // signature but are not CUDA launch parameters supplied by the caller.
+    std::optional<std::string> hidden_role;
 };
 
 enum class BindingKind : std::uint8_t {

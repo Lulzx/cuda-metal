@@ -19,6 +19,12 @@ word; the fence test checks all payload words and the completion counter. These
 tests execute the independently produced direct-NVVM and PTX typed metallibs,
 not the legacy backend.
 
+On the same date, `functional_typed_direct_constant_symbol` passed on Apple GPU.
+It reads two host-populated `__constant__` locations 16 KiB apart and verifies a
+writable `__device__` location retains GPU updates across two launches. The test
+also checks that hidden symbol buffers do not leak into the caller-visible CUDA
+kernel ABI.
+
 ## Performance gate
 
 The Phase 5 gate compares CuMetal with hand-written Metal for three memory-bound

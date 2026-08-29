@@ -8,7 +8,7 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/23 | **17/23** |
+| direct `.cu` | 0/23 | **18/23** |
 | PTX / `--cuda-device` | **23/23** | **20/23** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
@@ -31,7 +31,9 @@ Remaining typed-path blockers include combinations of:
   the proven flat typed-struct path;
 - FP64 legality and libdevice forms beyond the numerically proven 42-function
   float surface;
-- constant/global address-space emission and Apple MSL legality.
+- externally initialized constant/global symbols referenced through device
+  helpers, plus native-AOT metadata that lets the runtime populate those hidden
+  bindings without the current CUDA registration path.
 
 The old direct legacy `.cu` path is textual qualifier stripping and fails this
 corpus. It is not a correctness fallback.

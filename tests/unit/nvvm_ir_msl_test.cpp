@@ -913,6 +913,42 @@ entry:
 
 }  // namespace
 
+constexpr const char* kNvvmExternalSymbols = R"llvm(
+target datalayout = "e-p6:32:32-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+@constants = dso_local addrspace(4) externally_initialized constant [8 x i32] zeroinitializer, align 4
+@writable = dso_local addrspace(1) externally_initialized global [8 x i32] zeroinitializer, align 4
+
+define ptx_kernel void @read_constants(ptr %out) {
+entry:
+  %value = load i32, ptr getelementptr (i8, ptr addrspacecast (ptr addrspace(4) @constants to ptr), i64 16), align 4
+  store i32 %value, ptr %out, align 4
+  ret void
+}
+
+define ptx_kernel void @write_global(ptr %out) {
+entry:
+  %value = load i32, ptr getelementptr (i8, ptr addrspacecast (ptr addrspace(1) @writable to ptr), i64 12), align 4
+  %next = add i32 %value, 1
+  store i32 %next, ptr getelementptr (i8, ptr addrspacecast (ptr addrspace(1) @writable to ptr), i64 12), align 4
+  store i32 %next, ptr %out, align 4
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmOversizedExternalConstant = R"llvm(
+target datalayout = "e-p6:32:32-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+@too_large = addrspace(4) externally_initialized constant [65537 x i8] zeroinitializer, align 1
+define ptx_kernel void @read_large(ptr %out) {
+entry:
+  %value = load i8, ptr addrspacecast (ptr addrspace(4) @too_large to ptr), align 1
+  store i8 %value, ptr %out, align 1
+  ret void
+}
+)llvm";
+
 int main() {
     using namespace cumetal;
     if (!ir::llvm_frontend_available()) {
@@ -1415,6 +1451,30 @@ int main() {
                      inline_active_mask.source.find("simd_active_threads_mask()") !=
                          std::string::npos,
                  "Clang-compatible inline activemask lowers to the Metal active-lane mask");
+
+    const metal::NvvmToMslResult external_symbols = metal::compile_nvvm_to_msl(
+        kNvvmExternalSymbols, "external-symbols.ll", {});
+    ok &= expect(external_symbols.ok &&
+                     external_symbols.source.find(
+                         "cm___cumetal_constant_symbols [[buffer(30)]]") !=
+                         std::string::npos &&
+                     external_symbols.source.find(
+                         "cm___cumetal_global_writable [[buffer(1)]]") !=
+                         std::string::npos &&
+                     external_symbols.source.find(" + 16") != std::string::npos &&
+                     external_symbols.source.find(" + 12") != std::string::npos &&
+                     external_symbols.source.find("getelementptr") == std::string::npos &&
+                     external_symbols.source.find("addrspacecast") == std::string::npos &&
+                     external_symbols.source.find("constant uchar constants[") ==
+                         std::string::npos,
+                 "externally initialized CUDA symbols use hidden runtime buffers with byte offsets");
+    if (!external_symbols.ok) std::cerr << external_symbols.error << "\n";
+
+    const metal::NvvmToMslResult oversized_constant = metal::compile_nvvm_to_msl(
+        kNvvmOversizedExternalConstant, "oversized-constant.ll", "read_large");
+    ok &= expect(!oversized_constant.ok &&
+                     oversized_constant.error.find("exceeds 64 KiB") != std::string::npos,
+                 "typed NVVM rejects constant symbol storage beyond Metal's 64 KiB limit");
 
     if (!ok) return 1;
     std::cout << "NVVM -> CuMetal IR -> typed MSL tests passed\n";

@@ -117,6 +117,7 @@ std::string build_ir_abi_sidecar(const cumetal::ir::Module& module,
         std::string text = "CUMETAL_ABI_V1\nkernel " + function.name + "\n";
         text += "shared " + std::to_string(abi.static_threadgroup_memory) + "\n";
         for (const auto& argument : abi.arguments) {
+            if (argument.hidden_role.has_value()) continue;
             if (argument.kind == cumetal::ir::ArgumentKind::kPointer) {
                 text += "arg buffer 8\n";
                 continue;
@@ -806,7 +807,7 @@ int main(int argc, char** argv) {
     // over the manifest-controlled 23-file source/sample corpus (see
     // tests/cuda_projects/backend_matrix_manifest.txt and docs/compiler-architecture.md):
     //
-    //   direct .cu           legacy 0/23   cumetal-ir 17/23
+    //   direct .cu           legacy 0/23   cumetal-ir 18/23
     //   --cuda-device (PTX)  legacy 23/23  cumetal-ir 20/23
     //
     // These are production-metallib compilation counts, not runtime correctness
