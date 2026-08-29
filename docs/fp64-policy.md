@@ -53,12 +53,13 @@ through the virtual FP64 support ABI:
 - add, subtract, multiply, divide, square root, and true fused FMA;
 - negation, absolute value, raw moves, loads/stores, shared memory, and shuffles;
 - ordered comparisons, equality/inequality, and NaN/number predicates;
+- IEEE remainder and round-to-integer operations;
 - binary16/binary32 and signed/unsigned 32/64-bit integer conversions.
 
 Round-to-nearest-even and PTX's directed arithmetic modes are preserved in
 `ieee64`. `wide48` intentionally accepts round-to-nearest-even arithmetic only.
-The support runtime itself also exports remainder, round-to-integer,
-classification, exception-status, and flag operations, but
+The support runtime itself also exports classification, exception-status, and
+flag operations, but
 not all of those operations are wired into CUDA/PTX lowering yet. In
 particular, source-level IEEE exception flags are not currently observable
 through the CUDA runtime. These are compiler-integration gaps, not claims that

@@ -82,6 +82,15 @@ __global__ void libdevice_fp64(double* out, const double* in) {
     out[2] = fmin(in[4], in[5]);
     out[3] = fmax(in[6], in[7]);
 }
+__global__ void rounding_fp64(double* out, const double* in) {
+    if (threadIdx.x != 0) return;
+    out[0] = remainder(in[0], in[1]);
+    out[1] = floor(in[2]);
+    out[2] = ceil(in[2]);
+    out[3] = trunc(in[2]);
+    out[4] = round(in[3]);
+    out[5] = rint(in[3]);
+}
 
 static uint64_t bits_of(double d) { uint64_t u; memcpy(&u, &d, sizeof u); return u; }
 
@@ -340,6 +349,23 @@ int main() {
     math_bad += bits_of(math_output[2]) != bits_of(1.0);
     math_bad += bits_of(math_output[3]) != bits_of(0.0);
     report("libdevice fma/sqrt/min/max", math_bad, 4, 0.0, "rel");
+
+    double rounding_input[4] = {5.5, 2.0, -1.25, 2.5};
+    double rounding_output[6] = {};
+    cudaMemcpy(d_in, rounding_input, sizeof rounding_input, cudaMemcpyHostToDevice);
+    rounding_fp64<<<1,1>>>(d_z, d_in);
+    cudaDeviceSynchronize();
+    cudaMemcpy(rounding_output, d_z, sizeof rounding_output, cudaMemcpyDeviceToHost);
+    const double rounding_want[6] = {-0.5, -2.0, -1.0, -1.0, 3.0, 2.0};
+    int rounding_bad = 0;
+    for (int i = 0; i < 6; ++i) {
+        if (bits_of(rounding_output[i]) != bits_of(rounding_want[i])) {
+            printf("    rounding[%d] got %.17g want %.17g\n", i,
+                   rounding_output[i], rounding_want[i]);
+            ++rounding_bad;
+        }
+    }
+    report("remainder and round-to-int", rounding_bad, 6, 0.0, "rel");
 
     if (failures == 0) printf("PASS: fp64 emulation meets the ~48-bit significand contract\n");
     else printf("FAIL: %d fp64 contract violation(s)\n", failures);

@@ -1644,6 +1644,7 @@ $L_done:
     neg.f64 %fd5, %fd4;
     cvt.rn.f32.f64 %f2, %fd6;
     cvt.rzi.s32.f64 %r2, %fd6;
+    cvt.rni.f64.f64 %fd6, %fd5;
     setp.eq.f64 %p1, %fd1, %fd2;
     setp.lt.f64 %p2, %fd1, %fd2;
     setp.num.f64 %p3, %fd1, %fd2;
@@ -1671,6 +1672,7 @@ $L_done:
                     contains(ieee64_lowered.llvm_ir, "@vf64_fma_round") &&
                     contains(ieee64_lowered.llvm_ir, "@vf64_f64_to_f32") &&
                     contains(ieee64_lowered.llvm_ir, "@vf64_f64_to_i32") &&
+                    contains(ieee64_lowered.llvm_ir, "@vf64_round_to_int") &&
                     contains(ieee64_lowered.llvm_ir, "@vf64_eq") &&
                     contains(ieee64_lowered.llvm_ir, "@vf64_lt") &&
                     contains(ieee64_lowered.llvm_ir, "vf64_is_nan") &&

@@ -104,9 +104,9 @@ as gaps have been closed.
   loads and stores, shuffles, spills, and raw integer aliases. `ieee64` lowering
   covers add/subtract/multiply/divide, true fused FMA, square root, and
   binary16/binary32/signed-or-unsigned 32/64-bit conversions with PTX rounding
-  modes. Remainder/round-to-integer and observable exception flags exist in the
-  linked VF64 runtime but are not all wired into source-level PTX
-  lowering yet. See `docs/fp64-policy.md` for the exact boundary.
+  modes. Observable exception flags exist in the linked VF64 runtime but are
+  not yet wired into source-level PTX lowering. See `docs/fp64-policy.md` for
+  the exact boundary.
 - **Legacy default-stream ordering is complete.** Every blocking user stream publishes a
   monotonically increasing `MTLSharedEvent` value and waits on the latest legacy-default value;
   each legacy-default submission waits on the latest value from every blocking stream. The

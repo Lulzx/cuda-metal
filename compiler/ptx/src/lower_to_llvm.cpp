@@ -3672,6 +3672,21 @@ class GenericLlvmEmitter {
                 cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64) {
                 auto raw = decode_fp64_raw_bits(os, src);
                 if (!raw) return fail(instr, "VF64 conversion source unsupported");
+                const bool rounds_to_integer =
+                    instr.opcode.find(".rni.") != std::string::npos ||
+                    instr.opcode.find(".rmi.") != std::string::npos ||
+                    instr.opcode.find(".rpi.") != std::string::npos ||
+                    instr.opcode.find(".rzi.") != std::string::npos;
+                if (rounds_to_integer) {
+                    declarations_.insert(
+                        "declare i64 @vf64_round_to_int(i64, i32, i1)");
+                    const std::string rounded = next_tmp("vf64_cvt_round_to_int");
+                    os << "  " << rounded
+                       << " = call i64 @vf64_round_to_int(i64 " << *raw
+                       << ", i32 " << rounding << ", i1 true)\n";
+                    return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits,
+                                               rounded, 64);
+                }
                 return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *raw, 64);
             }
             if (cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64 &&
@@ -6151,6 +6166,35 @@ class GenericLlvmEmitter {
             const std::string out = next_tmp("fast_fdividef");
             os << "  " << out << " = fdiv fast float " << *numerator << ", " << *denominator << "\n";
             return store_ret_f32(out);
+        }
+        if (uses_vf64_support() && callee == "__nv_remainder") {
+            if (arg_names.size() < 2) return fail(instr, "__nv_remainder expects 2 args");
+            auto x_bits = load_call_slot_value(os, arg_names[0], 64);
+            auto y_bits = load_call_slot_value(os, arg_names[1], 64);
+            if (!x_bits || !y_bits) return fail(instr, "__nv_remainder args missing");
+            declarations_.insert("declare i64 @vf64_remainder(i64, i64)");
+            const std::string result = next_tmp("vf64_remainder");
+            os << "  " << result << " = call i64 @vf64_remainder(i64 " << *x_bits
+               << ", i64 " << *y_bits << ")\n";
+            return store_ret_bits(result, 64);
+        }
+        if (uses_vf64_support() &&
+            (callee == "__nv_floor" || callee == "__nv_ceil" ||
+             callee == "__nv_trunc" || callee == "__nv_round" ||
+             callee == "__nv_rint" || callee == "__nv_nearbyint")) {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            auto input_bits = load_call_slot_value(os, arg_names[0], 64);
+            if (!input_bits) return fail(instr, callee + " arg missing");
+            int rounding = 0;
+            if (callee == "__nv_trunc") rounding = 1;
+            else if (callee == "__nv_floor") rounding = 2;
+            else if (callee == "__nv_ceil") rounding = 3;
+            else if (callee == "__nv_round") rounding = 4;
+            declarations_.insert("declare i64 @vf64_round_to_int(i64, i32, i1)");
+            const std::string result = next_tmp("vf64_round_to_int");
+            os << "  " << result << " = call i64 @vf64_round_to_int(i64 "
+               << *input_bits << ", i32 " << rounding << ", i1 true)\n";
+            return store_ret_bits(result, 64);
         }
         if (callee == "__nv_sqrt") {
             if (arg_names.empty()) return fail(instr, "__nv_sqrt expects 1 arg");
