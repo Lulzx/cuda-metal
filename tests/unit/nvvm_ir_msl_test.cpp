@@ -993,6 +993,7 @@ target triple = "nvptx64-nvidia-cuda"
 
 @constants = dso_local addrspace(4) externally_initialized constant [8 x i32] zeroinitializer, align 4
 @writable = dso_local addrspace(1) externally_initialized global [8 x i32] zeroinitializer, align 4
+@embedded = dso_local addrspace(4) externally_initialized constant [2 x i32] [i32 287454020, i32 1432778632], align 4
 
 define ptx_kernel void @read_constants(ptr %out) {
 entry:
@@ -1014,8 +1015,10 @@ define i32 @read_symbols_helper() {
 entry:
   %constant = load i32, ptr getelementptr (i8, ptr addrspacecast (ptr addrspace(4) @constants to ptr), i64 16), align 4
   %global = load i32, ptr getelementptr (i8, ptr addrspacecast (ptr addrspace(1) @writable to ptr), i64 12), align 4
-  %sum = add i32 %constant, %global
-  ret i32 %sum
+  %table = load i32, ptr addrspacecast (ptr addrspace(4) @embedded to ptr), align 4
+  %sum0 = add i32 %constant, %global
+  %sum1 = add i32 %sum0, %table
+  ret i32 %sum1
 }
 
 define ptx_kernel void @read_symbols_through_helper(ptr %out) {
@@ -1567,6 +1570,10 @@ int main() {
                          std::string::npos &&
                      external_symbols.source.find(" + 16") != std::string::npos &&
                      external_symbols.source.find(" + 12") != std::string::npos &&
+                     external_symbols.source.find("constant uchar embedded[8]") !=
+                         std::string::npos &&
+                     external_symbols.source.find("0x44, 0x33, 0x22, 0x11") !=
+                         std::string::npos &&
                      external_symbols.source.find("getelementptr") == std::string::npos &&
                      external_symbols.source.find("addrspacecast") == std::string::npos &&
                      external_symbols.source.find("constant uchar constants[") ==
@@ -1574,7 +1581,7 @@ int main() {
                      external_symbols.source.find(
                          "read_symbols_helper(cm___cumetal_constant_symbols, cm___cumetal_global_writable)") !=
                          std::string::npos,
-                 "externally initialized CUDA symbols use hidden runtime buffers with byte offsets and thread through helpers");
+                 "runtime CUDA symbols stay hidden while initialized read-only tables embed their bytes");
     if (!external_symbols.ok) std::cerr << external_symbols.error << "\n";
 
     const metal::NvvmToMslResult oversized_constant = metal::compile_nvvm_to_msl(

@@ -8,8 +8,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/23 | **22/23** |
-| PTX / `--cuda-device` | **23/23** | **22/23** |
+| direct `.cu` | 0/24 | **23/24** |
+| PTX / `--cuda-device` | **24/24** | **23/24** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,

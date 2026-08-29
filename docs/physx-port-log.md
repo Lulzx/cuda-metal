@@ -2,6 +2,36 @@
 
 This log records progress and decisions for the PhysX GPU-on-CuMetal port.
 
+## 2026-08-29 — Partial-lane shuffle initialization and convex-plane bounds
+
+- A clean rebuild exposed a host crash after `convexPlaneNphase_Kernel` cleared
+  the first adjacent contact-manager pointer. The generated PTX had simplified
+  `threadIdx.x < 3` to `threadIdx.x != 3`, so lane 4 wrote a `uint4` at byte 256,
+  immediately beyond the 256-byte persistent manifold.
+- PhysX initializes a lane-local `uint4` only for lanes 0-3 before shuffling
+  values from those source lanes. Stock Clang treated the irrelevant values in
+  the other lanes as undefined, inferred a false `threadIdx.x < 4` range, and
+  erased the later bounds check. CuMetal now enables deterministic automatic
+  variable initialization for its optimized CUDA-to-PTX frontend.
+- A standalone 32-lane Apple-GPU regression reproduces the partial-lane
+  initialization and verifies two adjacent sentinels numerically. The focused
+  box/plane gate again preserves four contacts and matches CPU transforms after
+  rebuilding the selected PhysX kernel manifest.
+- The same clean rebuild exposed an independent typed stage-2 regression:
+  `convexConvexNphase_stage2Kernel` completed but produced no dynamic convex
+  contacts. An artifact-only A/B test restored the contact when stage 2 came
+  from the documented known-good compiler, while current stage 1, finishing,
+  convex-plane, and runtime artifacts remained selected.
+- Clang marks source-initialized CUDA constant lookup tables as
+  `externally_initialized`. The typed importer had moved PhysX's non-zero
+  tables into a hidden registration-backed buffer, but a standalone precompiled
+  metallib has no native-AOT record to populate that buffer. Non-zero read-only
+  initializers now remain embedded with their exact bytes; zero-initialized
+  CUDA symbol storage remains on the runtime registration path. The typed unit
+  test covers both classifications and transitive helper use.
+- After rebuilding all 127 selected artifacts, all six registered PhysX GRB
+  conformance tests pass, including the 30-step stacked convex/convex gate.
+
 ## 2026-07-22 — Scaling synchronization and determinism audit
 
 - Rechecked all PhysX 5.6.1 GPU sources for `cooperative_groups`, `grid_group`,

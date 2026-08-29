@@ -189,6 +189,14 @@ cumetal_add_cuda_project_test(
     dynamic_cooperative_groups dynamic_cooperative_groups.cu dynamic_cooperative_groups
 )
 
+# CUDA warp code commonly initializes a scalar only in the lanes later selected
+# by a shuffle.  Clang must not use the other lanes' undefined scalar values to
+# infer a false threadIdx.x range and erase a subsequent guarded store.
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_partial_lane_shuffle_guard
+    partial_lane_shuffle_guard partial_lane_shuffle_guard.cu partial_lane_shuffle_guard
+)
+
 cumetal_add_cuda_project_test(
     functional_cuda_projects_sgemm_naive
     sgemm sgemm_naive.cu sgemm_naive

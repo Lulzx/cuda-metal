@@ -894,6 +894,7 @@ int main(int argc, char** argv) {
         std::string command =
             quote_shell(compiler.string()) +
             " -x cuda --cuda-device-only -S -std=c++17 -O1 -fno-jump-tables"
+            " -ftrivial-auto-var-init=zero"
             " --cuda-gpu-arch=" +
             quote_shell(cuda_arch) +
             " -Xclang -target-feature -Xclang +ptx70"

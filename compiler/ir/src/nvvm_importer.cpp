@@ -1992,8 +1992,18 @@ struct Importer {
                 });
                 continue;
             }
+            // Clang marks source-initialized CUDA constant tables as
+            // externally_initialized too. A standalone precompiled metallib
+            // has no registration record from which to populate a hidden
+            // symbol buffer, so preserve non-zero read-only initializers as
+            // embedded MSL constants. Zero-initialized __constant__ storage
+            // and writable __device__ globals remain registration-backed.
+            const bool registration_backed_constant =
+                global.getAddressSpace() == 4 &&
+                global.getInitializer() != nullptr &&
+                global.getInitializer()->isNullValue();
             if (global.isExternallyInitialized() && global.hasInitializer() &&
-                (global.getAddressSpace() == 1 || global.getAddressSpace() == 4) &&
+                (global.getAddressSpace() == 1 || registration_backed_constant) &&
                 !global.getName().starts_with("llvm.")) {
                 const std::uint32_t alignment = static_cast<std::uint32_t>(
                     global.getAlign().has_value() ? global.getAlign()->value() : 1);

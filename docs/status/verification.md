@@ -11,7 +11,7 @@ external workloads. `scripts/ci_report.sh` reports pass/skip/fail separately.
 High-value executable gates include:
 
 - 83-entry `cuda-samples` coverage manifest and sweep classifier;
-- 23-file four-cell frontend/backend production-metallib matrix;
+- 24-file four-cell frontend/backend production-metallib matrix;
 - numerical PTX instruction sweep with hand-derived oracles;
 - runtime/API negative paths and GPU provenance checks;
 - Release/shim-off and Debug/shim-on configuration contracts;
