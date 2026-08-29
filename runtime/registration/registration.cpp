@@ -11,6 +11,7 @@
 
 #include <dlfcn.h>
 #include <mach-o/loader.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
@@ -22,6 +23,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -57,6 +59,16 @@ bool is_debug_registration() {
 // an entry from outliving the compiler that produced it -- see cumetal_binary_uuid() below.
 constexpr std::string_view kRegistrationJitCacheSchema =
     "cumetal-registration-jit-v13-grid-y-chunk-offset";
+
+constexpr std::string_view kRegistrationMetadataMagic = "CUMETA01";
+constexpr std::size_t kMaxRegistrationMetadataBytes = 4u * 1024u * 1024u;
+constexpr std::uint32_t kMaxRegistrationPrintfFormats = 4096u;
+
+struct RegistrationCacheMetadata {
+    std::vector<std::string> printf_formats;
+    bool uses_device_heap = false;
+    bool uses_device_launch_queue = false;
+};
 
 // Identity of the libcumetal binary currently executing, taken from its Mach-O LC_UUID.
 //
@@ -242,6 +254,113 @@ std::filesystem::path jit_cache_path_for(std::uint64_t prefix_hash,
         return {};
     }
     return root / (jit_cache_key(prefix_hash, kernel_name) + ".metallib");
+}
+
+std::filesystem::path jit_metadata_path_for(const std::filesystem::path& artifact_path) {
+    std::filesystem::path metadata_path = artifact_path;
+    metadata_path.replace_extension(".metadata");
+    return metadata_path;
+}
+
+void append_u32_le(std::vector<std::uint8_t>* bytes, std::uint32_t value) {
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+        bytes->push_back(static_cast<std::uint8_t>((value >> shift) & 0xffu));
+    }
+}
+
+bool consume_u32_le(const std::vector<std::uint8_t>& bytes,
+                    std::size_t* offset,
+                    std::uint32_t* value) {
+    if (offset == nullptr || value == nullptr || *offset > bytes.size() ||
+        bytes.size() - *offset < 4) {
+        return false;
+    }
+    *value = 0;
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+        *value |= static_cast<std::uint32_t>(bytes[(*offset)++]) << shift;
+    }
+    return true;
+}
+
+bool write_registration_metadata(const std::filesystem::path& artifact_path,
+                                 const RegistrationCacheMetadata& metadata) {
+    if (artifact_path.empty() ||
+        metadata.printf_formats.size() > kMaxRegistrationPrintfFormats) {
+        return false;
+    }
+
+    std::vector<std::uint8_t> bytes(kRegistrationMetadataMagic.begin(),
+                                    kRegistrationMetadataMagic.end());
+    std::uint32_t flags = 0;
+    if (metadata.uses_device_heap) flags |= 1u;
+    if (metadata.uses_device_launch_queue) flags |= 2u;
+    append_u32_le(&bytes, flags);
+    append_u32_le(&bytes, static_cast<std::uint32_t>(metadata.printf_formats.size()));
+    for (const std::string& format : metadata.printf_formats) {
+        if (format.size() > std::numeric_limits<std::uint32_t>::max() ||
+            bytes.size() + 4 + format.size() > kMaxRegistrationMetadataBytes) {
+            return false;
+        }
+        append_u32_le(&bytes, static_cast<std::uint32_t>(format.size()));
+        bytes.insert(bytes.end(), format.begin(), format.end());
+    }
+
+    const std::filesystem::path destination = jit_metadata_path_for(artifact_path);
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    std::filesystem::path temporary = destination;
+    temporary += ".tmp-" + std::to_string(::getpid()) + "-" + std::to_string(stamp);
+    std::string error;
+    if (!cumetal::common::write_file_bytes(temporary, bytes, &error)) {
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(temporary, destination, ec);
+    if (ec) {
+        std::filesystem::remove(temporary, ec);
+        return false;
+    }
+    return true;
+}
+
+bool read_registration_metadata(const std::filesystem::path& artifact_path,
+                                RegistrationCacheMetadata* metadata) {
+    if (artifact_path.empty() || metadata == nullptr) return false;
+    std::string error;
+    const std::vector<std::uint8_t> bytes = cumetal::common::read_file_bytes(
+        jit_metadata_path_for(artifact_path), &error);
+    if (bytes.size() < kRegistrationMetadataMagic.size() + 8 ||
+        bytes.size() > kMaxRegistrationMetadataBytes ||
+        !std::equal(kRegistrationMetadataMagic.begin(),
+                    kRegistrationMetadataMagic.end(), bytes.begin())) {
+        return false;
+    }
+
+    std::size_t offset = kRegistrationMetadataMagic.size();
+    std::uint32_t flags = 0;
+    std::uint32_t count = 0;
+    if (!consume_u32_le(bytes, &offset, &flags) ||
+        !consume_u32_le(bytes, &offset, &count) ||
+        (flags & ~3u) != 0 || count > kMaxRegistrationPrintfFormats) {
+        return false;
+    }
+
+    RegistrationCacheMetadata parsed;
+    parsed.uses_device_heap = (flags & 1u) != 0;
+    parsed.uses_device_launch_queue = (flags & 2u) != 0;
+    parsed.printf_formats.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::uint32_t size = 0;
+        if (!consume_u32_le(bytes, &offset, &size) || offset > bytes.size() ||
+            size > bytes.size() - offset) {
+            return false;
+        }
+        parsed.printf_formats.emplace_back(
+            reinterpret_cast<const char*>(bytes.data() + offset), size);
+        offset += size;
+    }
+    if (offset != bytes.size()) return false;
+    *metadata = std::move(parsed);
+    return true;
 }
 
 }  // namespace
@@ -928,60 +1047,28 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
 
     REG_DEBUG("emit kernel '%s' ptx_size=%zu", kernel_name.c_str(), ptx_source.size());
 
-    // Recover compiler metadata even on a persistent cache hit. The metallib
-    // contains the hidden printf parameters but not the host-side format table
-    // used to decide whether to bind and drain the ring buffer.
-    cumetal::ptx::LowerToMetalOptions lower_to_metal_options;
-    lower_to_metal_options.entry_name = kernel_name;
-    lower_to_metal_options.allow_workload_specializations =
-        cumetal::diag_env_truthy("CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS");
-    if (const char* backend = std::getenv("CUMETAL_PTX_BACKEND");
-        backend != nullptr && std::string_view(backend) == "cumetal-ir") {
-        lower_to_metal_options.backend =
-            cumetal::ptx::PtxMetalBackend::kCumetalIr;
-    }
-    const auto lowered_metal =
-        cumetal::ptx::lower_ptx_to_metal_source(ptx_source, lower_to_metal_options);
-    if (!lowered_metal.ok) {
-        REG_DEBUG("lower_ptx_to_metal_source failed for kernel '%s'", kernel_name.c_str());
-        return false;
-    }
-    if (out_printf_formats != nullptr) {
-        *out_printf_formats = lowered_metal.printf_formats;
-    }
-    if (out_uses_device_heap != nullptr) {
-        *out_uses_device_heap = lowered_metal.uses_device_heap;
-    }
-    if (out_uses_device_launch_queue != nullptr &&
-        (ptx_source.find("cudaLaunchDevice") != std::string::npos ||
-         ptx_source.find("cudaMemcpyAsync") != std::string::npos)) {
-        cumetal::ptx::LowerToLlvmOptions metadata_options;
-        metadata_options.entry_name = kernel_name;
-        metadata_options.strict = true;
-        metadata_options.fp64_mode = cumetal::ptx::fp64_mode_from_env();
-        const auto lowered_llvm_metadata =
-            cumetal::ptx::lower_ptx_to_llvm_ir(ptx_source, metadata_options);
-        if (!lowered_llvm_metadata.ok) {
-            REG_DEBUG("device launch metadata lowering failed for '%s': %s",
-                      kernel_name.c_str(), lowered_llvm_metadata.error.c_str());
-            return false;
+    const auto publish_metadata = [&](const RegistrationCacheMetadata& metadata) {
+        if (out_printf_formats != nullptr) {
+            *out_printf_formats = metadata.printf_formats;
         }
-        *out_uses_device_launch_queue =
-            lowered_llvm_metadata.uses_device_launch_queue;
-    }
+        if (out_uses_device_heap != nullptr) {
+            *out_uses_device_heap = metadata.uses_device_heap;
+        }
+        if (out_uses_device_launch_queue != nullptr) {
+            *out_uses_device_launch_queue = metadata.uses_device_launch_queue;
+        }
+    };
 
-    // ── Persistent JIT cache lookup ────────────────────────────────────────
-    // If a metallib for this exact (ptx_source, kernel_name) pair was compiled
-    // in a prior run it lives at jit_cache_path_for(...).  Reuse it and skip
-    // the expensive xcrun compile step.
+    // Check the persistent artifact and its metadata sidecar before invoking
+    // either PTX lowering pipeline. A warm process must not repeat compiler
+    // work merely to reconstruct host-side launch metadata.
     const std::filesystem::path cached_metallib =
         jit_cache_path_for(cache_prefix_hash, kernel_name);
+    std::filesystem::path cached_hit_path;
     if (!cached_metallib.empty()) {
         std::error_code ec;
-        bool hit = false;
-        std::filesystem::path hit_path;
         if (std::filesystem::exists(cached_metallib, ec) && !ec) {
-            // Check for stale unrunnable experimental container from before we started
+            // Check for stale unrunnable experimental containers from before we started
             // refusing to cache them. Treat as miss so we get a clean failure path.
             bool bad_experimental = false;
             {
@@ -999,35 +1086,93 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
                 REG_DEBUG("jit cache hit but contains experimental container (unusable); removing and treating as miss: %s",
                           cached_metallib.c_str());
                 std::filesystem::remove(cached_metallib, ec);
+                std::filesystem::remove(jit_metadata_path_for(cached_metallib), ec);
             } else {
-                hit = true;
-                hit_path = cached_metallib;
+                cached_hit_path = cached_metallib;
             }
         }
-        if (!hit) {
-            // Support for direct MSL source caches (written as <hash>.metal for runtime newLibraryWithSource)
-            auto msl_p = cached_metallib;
-            msl_p.replace_extension(".metal");
-            if (std::filesystem::exists(msl_p, ec) && !ec) {
-                hit = true;
-                hit_path = msl_p;
+        if (cached_hit_path.empty()) {
+            // Support direct MSL source caches (written as <hash>.metal for
+            // runtime newLibraryWithSource).
+            auto msl_path = cached_metallib;
+            msl_path.replace_extension(".metal");
+            if (std::filesystem::exists(msl_path, ec) && !ec) {
+                cached_hit_path = msl_path;
             }
         }
-        if (hit) {
-            REG_DEBUG("jit cache hit: %s", hit_path.c_str());
-            *out_path = hit_path.string();
-            if (out_is_persistent != nullptr) *out_is_persistent = true;
-            if (out_provenance != nullptr) {
-                // .metal came from direct MSL lowering and carries its own
-                // `// cumetal-provenance:` marker, which the Metal backend
-                // reads; leave it to that. .metallib came from the
-                // PTX->LLVM->AIR path and carries nothing, so name it.
-                *out_provenance =
-                    hit_path.extension() == ".metallib" ? generic_ptx_provenance : "";
+        if (!cached_hit_path.empty()) {
+            RegistrationCacheMetadata cached_metadata;
+            if (read_registration_metadata(cached_hit_path, &cached_metadata)) {
+                REG_DEBUG("jit metadata cache hit: %s",
+                          jit_metadata_path_for(cached_hit_path).c_str());
+                REG_DEBUG("jit cache hit: %s", cached_hit_path.c_str());
+                publish_metadata(cached_metadata);
+                *out_path = cached_hit_path.string();
+                if (out_is_persistent != nullptr) *out_is_persistent = true;
+                if (out_provenance != nullptr) {
+                    *out_provenance = cached_hit_path.extension() == ".metallib"
+                                          ? generic_ptx_provenance
+                                          : "";
+                }
+                return true;
             }
-            return true;
+            REG_DEBUG("jit metadata cache miss: %s",
+                      jit_metadata_path_for(cached_hit_path).c_str());
+        } else {
+            REG_DEBUG("jit cache miss: %s", cached_metallib.c_str());
         }
-        REG_DEBUG("jit cache miss: %s", cached_metallib.c_str());
+    }
+
+    // A cold artifact, or a legacy artifact without a metadata sidecar, still
+    // needs lowering once. The resulting metadata is persisted below so later
+    // processes take the fast path above.
+    cumetal::ptx::LowerToMetalOptions lower_to_metal_options;
+    lower_to_metal_options.entry_name = kernel_name;
+    lower_to_metal_options.allow_workload_specializations =
+        cumetal::diag_env_truthy("CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS");
+    if (const char* backend = std::getenv("CUMETAL_PTX_BACKEND");
+        backend != nullptr && std::string_view(backend) == "cumetal-ir") {
+        lower_to_metal_options.backend =
+            cumetal::ptx::PtxMetalBackend::kCumetalIr;
+    }
+    const auto lowered_metal =
+        cumetal::ptx::lower_ptx_to_metal_source(ptx_source, lower_to_metal_options);
+    if (!lowered_metal.ok) {
+        REG_DEBUG("lower_ptx_to_metal_source failed for kernel '%s'", kernel_name.c_str());
+        return false;
+    }
+    RegistrationCacheMetadata metadata{
+        .printf_formats = lowered_metal.printf_formats,
+        .uses_device_heap = lowered_metal.uses_device_heap,
+    };
+    if (ptx_source.find("cudaLaunchDevice") != std::string::npos ||
+        ptx_source.find("cudaMemcpyAsync") != std::string::npos) {
+        cumetal::ptx::LowerToLlvmOptions metadata_options;
+        metadata_options.entry_name = kernel_name;
+        metadata_options.strict = true;
+        metadata_options.fp64_mode = cumetal::ptx::fp64_mode_from_env();
+        const auto lowered_llvm_metadata =
+            cumetal::ptx::lower_ptx_to_llvm_ir(ptx_source, metadata_options);
+        if (!lowered_llvm_metadata.ok) {
+            REG_DEBUG("device launch metadata lowering failed for '%s': %s",
+                      kernel_name.c_str(), lowered_llvm_metadata.error.c_str());
+            return false;
+        }
+        metadata.uses_device_launch_queue = lowered_llvm_metadata.uses_device_launch_queue;
+    }
+
+    if (!cached_hit_path.empty()) {
+        (void)write_registration_metadata(cached_hit_path, metadata);
+        REG_DEBUG("jit cache hit: %s", cached_hit_path.c_str());
+        publish_metadata(metadata);
+        *out_path = cached_hit_path.string();
+        if (out_is_persistent != nullptr) *out_is_persistent = true;
+        if (out_provenance != nullptr) {
+            *out_provenance = cached_hit_path.extension() == ".metallib"
+                                  ? generic_ptx_provenance
+                                  : "";
+        }
+        return true;
     }
 
     // ── Compilation ───────────────────────────────────────────────────────
@@ -1073,9 +1218,6 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         staged_input = metal_path;
         emit_options.kernel_name =
             lowered_metal.entry_name.empty() ? kernel_name : lowered_metal.entry_name;
-        if (out_printf_formats != nullptr) {
-            *out_printf_formats = lowered_metal.printf_formats;
-        }
         // Short-circuit: deliver the .metal source directly. The Metal backend will
         // compile it at runtime with newLibraryWithSource (no offline metal tools needed).
         // Store under a .metal path (derived from cache key if persistent).
@@ -1092,6 +1234,10 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
             // The emitted MSL already carries a provenance comment; the backend
             // parses it. Nothing to override.
             *out_provenance = "";
+        }
+        publish_metadata(metadata);
+        if (!cached_metallib.empty()) {
+            (void)write_registration_metadata(msl_final, metadata);
         }
         return true;
     } else {
@@ -1122,12 +1268,9 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
             REG_DEBUG("lower_ptx_to_llvm_ir failed for kernel '%s'", kernel_name.c_str());
             return false;
         }
-        if (out_printf_formats != nullptr) {
-            *out_printf_formats = lowered.printf_formats;
-        }
-        if (out_uses_device_heap != nullptr) {
-            *out_uses_device_heap = lowered.uses_device_heap;
-        }
+        metadata.printf_formats = lowered.printf_formats;
+        metadata.uses_device_heap = lowered.uses_device_heap;
+        metadata.uses_device_launch_queue = lowered.uses_device_launch_queue;
         const std::vector<std::uint8_t> ll_bytes(lowered.llvm_ir.begin(), lowered.llvm_ir.end());
         if (!cumetal::common::write_file_bytes(ll_path, ll_bytes, &io_error)) {
             REG_DEBUG("write LLVM IR failed: %s", io_error.c_str());
@@ -1190,6 +1333,10 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         // prebuilt binary gets. Naming it keeps the provenance contract able
         // to distinguish "we translated this" from "we loaded this".
         *out_provenance = generic_ptx_provenance;
+    }
+    publish_metadata(metadata);
+    if (!cached_metallib.empty()) {
+        (void)write_registration_metadata(emitted.output, metadata);
     }
     // Persistent cache entries (those routed through jit_cache_path_for) should
     // survive process exit and __cudaUnregisterFatBinary cleanup.

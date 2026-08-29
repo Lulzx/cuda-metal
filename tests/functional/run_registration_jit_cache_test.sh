@@ -120,6 +120,11 @@ cache_artifacts() {
         \( -name "*.metallib" -o -name "*.metal" \) -print 2>/dev/null | sort
 }
 
+metadata_artifacts() {
+    find "$JIT_CACHE_DIR/registration-jit" -maxdepth 1 -type f \
+        -name "*.metadata" -print 2>/dev/null | sort
+}
+
 assert_first_event() {
     local stderr_text="$1"
     local expected="$2"
@@ -157,11 +162,27 @@ if [ "$(wc -l <<<"$build_a_artifacts" | tr -d ' ')" -ne 1 ]; then
     echo "$build_a_artifacts"
     exit 1
 fi
+build_a_metadata="$(metadata_artifacts)"
+if [ "$(wc -l <<<"$build_a_metadata" | tr -d ' ')" -ne 1 ]; then
+    echo "FAIL: build A first run did not create exactly one metadata sidecar"
+    echo "metadata artifacts were:"
+    echo "$build_a_metadata"
+    exit 1
+fi
 
 build_a_second_stderr="$(run_with_build "$BUILD_A_DIR" 2>&1 >/dev/null)"
 assert_first_event "$build_a_second_stderr" "hit" "build A second run"
+if ! grep -q "jit metadata cache hit:" <<<"$build_a_second_stderr"; then
+    echo "FAIL: build A second run did not restore metadata from its sidecar"
+    echo "$build_a_second_stderr"
+    exit 1
+fi
 if [ "$(cache_artifacts)" != "$build_a_artifacts" ]; then
     echo "FAIL: build A cache contents changed on reuse"
+    exit 1
+fi
+if [ "$(metadata_artifacts)" != "$build_a_metadata" ]; then
+    echo "FAIL: build A metadata sidecar changed on reuse"
     exit 1
 fi
 
@@ -177,6 +198,10 @@ if [ "$(wc -l <<<"$both_build_artifacts" | tr -d ' ')" -ne 2 ]; then
     echo "$both_build_artifacts"
     exit 1
 fi
+if [ "$(metadata_artifacts | wc -l | tr -d ' ')" -ne 2 ]; then
+    echo "FAIL: distinct libcumetal UUID did not create a second metadata sidecar"
+    exit 1
+fi
 if ! grep -Fqx "$build_a_artifacts" <<<"$both_build_artifacts"; then
     echo "FAIL: build A cache artifact disappeared after build B run"
     exit 1
@@ -184,6 +209,11 @@ fi
 
 build_b_second_stderr="$(run_with_build "$BUILD_B_DIR" 2>&1 >/dev/null)"
 assert_first_event "$build_b_second_stderr" "hit" "build B second run"
+if ! grep -q "jit metadata cache hit:" <<<"$build_b_second_stderr"; then
+    echo "FAIL: build B second run did not restore metadata from its sidecar"
+    echo "$build_b_second_stderr"
+    exit 1
+fi
 if [ "$(cache_artifacts)" != "$both_build_artifacts" ]; then
     echo "FAIL: build B cache contents changed on reuse"
     exit 1

@@ -2878,6 +2878,16 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
 
     set_tests_properties(functional_runtime_registration_printf PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_runtime_registration_metadata_cache
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_registration_metadata_cache_test.sh
+                $<TARGET_FILE:cumetal_runtime_registration_printf_test>
+                ${CMAKE_CURRENT_SOURCE_DIR}/reference/printf_scale.ptx
+    )
+
+    set_tests_properties(functional_runtime_registration_metadata_cache PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 add_test(
