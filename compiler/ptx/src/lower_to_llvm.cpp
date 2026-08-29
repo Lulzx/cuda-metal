@@ -3450,11 +3450,44 @@ class GenericLlvmEmitter {
         if (opcode_uses_float_math(instr.opcode)) {
             const int bits = (ty.bits > 0) ? ty.bits : 32;
             if (bits == 64 && uses_vf64_support()) {
-                auto raw = decode_fp64_raw_bits(os, instr.operands[1]);
-                if (!raw) return fail(instr, "VF64 neg source unsupported");
-                const std::string result = next_tmp("vf64_neg");
-                os << "  " << result << " = xor i64 " << *raw
-                   << ", -9223372036854775808\n";
+                auto a = decode_fp64_raw_bits(os, instr.operands[1]);
+                auto b = decode_fp64_raw_bits(os, instr.operands[2]);
+                if (!a || !b) return fail(instr, "VF64 min/max source unsupported");
+                declarations_.insert("declare i1 @vf64_lt(i64, i64)");
+                const std::string compared = next_tmp("vf64_minmax_compare");
+                if (is_min) {
+                    os << "  " << compared << " = call i1 @vf64_lt(i64 " << *a
+                       << ", i64 " << *b << ")\n";
+                } else {
+                    os << "  " << compared << " = call i1 @vf64_lt(i64 " << *b
+                       << ", i64 " << *a << ")\n";
+                }
+                const std::string b_nan = emit_vf64_is_nan(os, *b);
+                const std::string choose_a = next_tmp("vf64_minmax_choose_a");
+                os << "  " << choose_a << " = or i1 " << compared << ", " << b_nan
+                   << "\n";
+                const std::string selected = next_tmp("vf64_minmax_selected");
+                os << "  " << selected << " = select i1 " << choose_a << ", i64 "
+                   << *a << ", i64 " << *b << "\n";
+                const std::string a_magnitude = next_tmp("vf64_minmax_a_magnitude");
+                const std::string b_magnitude = next_tmp("vf64_minmax_b_magnitude");
+                const std::string a_zero = next_tmp("vf64_minmax_a_zero");
+                const std::string b_zero = next_tmp("vf64_minmax_b_zero");
+                const std::string both_zero = next_tmp("vf64_minmax_both_zero");
+                const std::string zero_result = next_tmp("vf64_minmax_zero_result");
+                const std::string result = next_tmp("vf64_minmax_result");
+                os << "  " << a_magnitude << " = and i64 " << *a
+                   << ", 9223372036854775807\n";
+                os << "  " << b_magnitude << " = and i64 " << *b
+                   << ", 9223372036854775807\n";
+                os << "  " << a_zero << " = icmp eq i64 " << a_magnitude << ", 0\n";
+                os << "  " << b_zero << " = icmp eq i64 " << b_magnitude << ", 0\n";
+                os << "  " << both_zero << " = and i1 " << a_zero << ", " << b_zero
+                   << "\n";
+                os << "  " << zero_result << " = " << (is_min ? "or" : "and")
+                   << " i64 " << *a << ", " << *b << "\n";
+                os << "  " << result << " = select i1 " << both_zero << ", i64 "
+                   << zero_result << ", i64 " << selected << "\n";
                 return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, result, 64);
             }
             if (bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
@@ -3520,6 +3553,14 @@ class GenericLlvmEmitter {
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         if (opcode_uses_float_math(instr.opcode)) {
             const int bits = (ty.bits > 0) ? ty.bits : 32;
+            if (bits == 64 && uses_vf64_support()) {
+                auto raw = decode_fp64_raw_bits(os, instr.operands[1]);
+                if (!raw) return fail(instr, "VF64 neg source unsupported");
+                const std::string result = next_tmp("vf64_neg");
+                os << "  " << result << " = xor i64 " << *raw
+                   << ", -9223372036854775808\n";
+                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, result, 64);
+            }
             if (bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
                 auto pair = decode_fp64_pair(os, instr.operands[1]);
                 if (!pair) return fail(instr, "fp64 neg emulation source unsupported");
@@ -5792,6 +5833,22 @@ class GenericLlvmEmitter {
             auto b_bits = load_call_slot_value(os, arg_names[1], 64);
             auto c_bits = load_call_slot_value(os, arg_names[2], 64);
             if (!a_bits || !b_bits || !c_bits) return fail(instr, callee + " args missing");
+            if (uses_vf64_support()) {
+                const std::string function =
+                    fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48
+                        ? "vf64_wide_fma"
+                        : "vf64_fma_round";
+                declarations_.insert(
+                    fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48
+                        ? "declare i64 @vf64_wide_fma(i64, i64, i64)"
+                        : "declare i64 @vf64_fma_round(i64, i64, i64, i32)");
+                const std::string result = next_tmp("vf64_libdevice_fma");
+                os << "  " << result << " = call i64 @" << function << "(i64 "
+                   << *a_bits << ", i64 " << *b_bits << ", i64 " << *c_bits;
+                if (fp64_mode_ == cumetal::ptx::Fp64Mode::kIEEE64) os << ", i32 0";
+                os << ")\n";
+                return store_ret_bits(result, 64);
+            }
             if (fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
                 const Fp64Pair a = fp64_pair_from_ieee_bits(os, *a_bits);
                 const Fp64Pair b = fp64_pair_from_ieee_bits(os, *b_bits);
@@ -5832,6 +5889,26 @@ class GenericLlvmEmitter {
             auto a_bits = load_call_slot_value(os, arg_names[0], 64);
             auto b_bits = load_call_slot_value(os, arg_names[1], 64);
             if (!a_bits || !b_bits) return fail(instr, callee + " args missing");
+            if (uses_vf64_support()) {
+                if (fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48) {
+                    return fail(instr, "wide48 does not support directed libdevice arithmetic");
+                }
+                const std::string operation = callee.find("dadd") != std::string::npos
+                                                  ? "add"
+                                              : callee.find("dmul") != std::string::npos
+                                                  ? "mul"
+                                                  : "div";
+                const std::string function = "vf64_" + operation + "_round";
+                declarations_.insert("declare i64 @" + function + "(i64, i64, i32)");
+                const int rounding = callee.size() >= 3 &&
+                                             callee.compare(callee.size() - 3, 3, "_rd") == 0
+                                         ? 2
+                                         : 3;
+                const std::string result = next_tmp("vf64_directed_libdevice");
+                os << "  " << result << " = call i64 @" << function << "(i64 "
+                   << *a_bits << ", i64 " << *b_bits << ", i32 " << rounding << ")\n";
+                return store_ret_bits(result, 64);
+            }
             const Fp64Pair a = fp64_pair_from_ieee_bits(os, *a_bits);
             const Fp64Pair b = fp64_pair_from_ieee_bits(os, *b_bits);
             Fp64Pair result;
@@ -5905,7 +5982,22 @@ class GenericLlvmEmitter {
             const bool want_max = (callee == "__nv_fmax");
             const char* strict_op = want_max ? "ogt" : "olt";
             std::string pick_a;
-            if (fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+            if (uses_vf64_support()) {
+                declarations_.insert("declare i1 @vf64_lt(i64, i64)");
+                const std::string ordered = next_tmp("vf64_fmm_ordered");
+                if (want_max) {
+                    os << "  " << ordered << " = call i1 @vf64_lt(i64 " << *b_bits
+                       << ", i64 " << *a_bits << ")\n";
+                } else {
+                    os << "  " << ordered << " = call i1 @vf64_lt(i64 " << *a_bits
+                       << ", i64 " << *b_bits << ")\n";
+                }
+                const std::string b_nan = emit_vf64_is_nan(os, *b_bits);
+                const std::string choose_a = next_tmp("vf64_fmm_choose_a");
+                os << "  " << choose_a << " = or i1 " << ordered << ", " << b_nan
+                   << "\n";
+                pick_a = choose_a;
+            } else if (fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
                 const Fp64Pair a = fp64_pair_from_ieee_bits(os, *a_bits);
                 const Fp64Pair b = fp64_pair_from_ieee_bits(os, *b_bits);
                 const std::string hi_ord = next_tmp("fmm_hiord");
@@ -5945,6 +6037,28 @@ class GenericLlvmEmitter {
             const std::string out = next_tmp("fmm_bits");
             os << "  " << out << " = select i1 " << pick_a << ", i64 " << *a_bits << ", i64 "
                << *b_bits << "\n";
+            if (uses_vf64_support()) {
+                const std::string a_magnitude = next_tmp("vf64_fmm_a_magnitude");
+                const std::string b_magnitude = next_tmp("vf64_fmm_b_magnitude");
+                const std::string a_zero = next_tmp("vf64_fmm_a_zero");
+                const std::string b_zero = next_tmp("vf64_fmm_b_zero");
+                const std::string both_zero = next_tmp("vf64_fmm_both_zero");
+                const std::string zero_result = next_tmp("vf64_fmm_zero_result");
+                const std::string final_result = next_tmp("vf64_fmm_result");
+                os << "  " << a_magnitude << " = and i64 " << *a_bits
+                   << ", 9223372036854775807\n";
+                os << "  " << b_magnitude << " = and i64 " << *b_bits
+                   << ", 9223372036854775807\n";
+                os << "  " << a_zero << " = icmp eq i64 " << a_magnitude << ", 0\n";
+                os << "  " << b_zero << " = icmp eq i64 " << b_magnitude << ", 0\n";
+                os << "  " << both_zero << " = and i1 " << a_zero << ", " << b_zero
+                   << "\n";
+                os << "  " << zero_result << " = " << (want_max ? "and" : "or")
+                   << " i64 " << *a_bits << ", " << *b_bits << "\n";
+                os << "  " << final_result << " = select i1 " << both_zero << ", i64 "
+                   << zero_result << ", i64 " << out << "\n";
+                return store_ret_bits(final_result, 64);
+            }
             return store_ret_bits(out, 64);
         }
 
@@ -6042,6 +6156,22 @@ class GenericLlvmEmitter {
             if (arg_names.empty()) return fail(instr, "__nv_sqrt expects 1 arg");
             auto input_bits = load_call_slot_value(os, arg_names[0], 64);
             if (!input_bits) return fail(instr, "__nv_sqrt arg missing");
+            if (uses_vf64_support()) {
+                const std::string function =
+                    fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48
+                        ? "vf64_wide_sqrt"
+                        : "vf64_sqrt_round";
+                declarations_.insert(
+                    fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48
+                        ? "declare i64 @vf64_wide_sqrt(i64)"
+                        : "declare i64 @vf64_sqrt_round(i64, i32)");
+                const std::string result = next_tmp("vf64_libdevice_sqrt");
+                os << "  " << result << " = call i64 @" << function << "(i64 "
+                   << *input_bits;
+                if (fp64_mode_ == cumetal::ptx::Fp64Mode::kIEEE64) os << ", i32 0";
+                os << ")\n";
+                return store_ret_bits(result, 64);
+            }
             if (fp64_mode_ != cumetal::ptx::Fp64Mode::kEmulate) {
                 declarations_.insert("declare double @llvm.sqrt.f64(double)");
                 const std::string input = next_tmp("sqrt_f64_input");

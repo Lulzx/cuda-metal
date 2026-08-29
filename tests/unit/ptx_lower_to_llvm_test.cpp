@@ -1639,6 +1639,9 @@ $L_done:
     mul.rn.f64 %fd4, %fd3, %fd1;
     div.rp.f64 %fd5, %fd4, %fd1;
     fma.rm.f64 %fd6, %fd5, %fd1, %fd2;
+    min.f64 %fd3, %fd1, %fd2;
+    max.f64 %fd4, %fd1, %fd2;
+    neg.f64 %fd5, %fd4;
     cvt.rn.f32.f64 %f2, %fd6;
     cvt.rzi.s32.f64 %r2, %fd6;
     setp.eq.f64 %p1, %fd1, %fd2;
@@ -1670,7 +1673,9 @@ $L_done:
                     contains(ieee64_lowered.llvm_ir, "@vf64_f64_to_i32") &&
                     contains(ieee64_lowered.llvm_ir, "@vf64_eq") &&
                     contains(ieee64_lowered.llvm_ir, "@vf64_lt") &&
-                    contains(ieee64_lowered.llvm_ir, "vf64_is_nan"),
+                    contains(ieee64_lowered.llvm_ir, "vf64_is_nan") &&
+                    contains(ieee64_lowered.llvm_ir, "vf64_minmax_result") &&
+                    contains(ieee64_lowered.llvm_ir, "vf64_neg"),
                 "ieee64 lowering contains only integer-bit VF64 calls")) {
         return 1;
     }

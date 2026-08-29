@@ -75,6 +75,13 @@ __global__ void compare_fp64(int* out, const double* in) {
     out[6] = in[3] < in[4];
     out[7] = in[5] != in[0];
 }
+__global__ void libdevice_fp64(double* out, const double* in) {
+    if (threadIdx.x != 0) return;
+    out[0] = fma(in[0], in[1], in[2]);
+    out[1] = sqrt(in[3]);
+    out[2] = fmin(in[4], in[5]);
+    out[3] = fmax(in[6], in[7]);
+}
 
 static uint64_t bits_of(double d) { uint64_t u; memcpy(&u, &d, sizeof u); return u; }
 
@@ -317,6 +324,22 @@ int main() {
         }
     }
     report("binary64 comparisons", cmp_bad, 8, 0.0, "rel");
+
+    double math_input[8] = {
+        1.0000000000000002, 1.0000000000000002, -1.0000000000000004,
+        2.0, NAN, 1.0, -0.0, 0.0
+    };
+    double math_output[4] = {};
+    cudaMemcpy(d_in, math_input, sizeof math_input, cudaMemcpyHostToDevice);
+    libdevice_fp64<<<1,1>>>(d_z, d_in);
+    cudaDeviceSynchronize();
+    cudaMemcpy(math_output, d_z, sizeof math_output, cudaMemcpyDeviceToHost);
+    int math_bad = 0;
+    math_bad += bits_of(math_output[0]) != bits_of(fma(math_input[0], math_input[1], math_input[2]));
+    math_bad += bits_of(math_output[1]) != bits_of(sqrt(math_input[3]));
+    math_bad += bits_of(math_output[2]) != bits_of(1.0);
+    math_bad += bits_of(math_output[3]) != bits_of(0.0);
+    report("libdevice fma/sqrt/min/max", math_bad, 4, 0.0, "rel");
 
     if (failures == 0) printf("PASS: fp64 emulation meets the ~48-bit significand contract\n");
     else printf("FAIL: %d fp64 contract violation(s)\n", failures);
