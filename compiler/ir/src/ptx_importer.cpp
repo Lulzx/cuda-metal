@@ -6,6 +6,7 @@
 #include <cctype>
 #include <map>
 #include <optional>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -112,7 +113,7 @@ std::vector<std::string> source_registers(const Instruction& instruction) {
         return starts_with(name, "%tid.") || starts_with(name, "%ctaid.") ||
                starts_with(name, "%ntid.") || starts_with(name, "%nctaid.") ||
                name == "%laneid" || name == "%warpid" || name == "%smid" ||
-               starts_with(name, "%clock");
+               name == "%activemask" || starts_with(name, "%clock");
     });
     return sources;
 }
@@ -247,7 +248,71 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
             .argument_types = {Type::integer(32)},
         };
     }
+    if (name == "__nv_popc" || name == "__nv_clz" || name == "__nv_abs" ||
+        name == "__nv_ffs") {
+        return BuiltinSignature{
+            .metal_name = name == "__nv_popc" ? "popcount" :
+                          name == "__nv_clz" ? "clz" :
+                          name == "__nv_abs" ? "__cumetal_signed_abs" :
+                                               "__cumetal_ffs",
+            .return_type = Type::integer(32),
+            .argument_types = {Type::integer(32)},
+        };
+    }
     return std::nullopt;
+}
+
+std::vector<GlobalThreadgroup> scan_threadgroup_globals(std::string_view ptx) {
+    const std::string source(ptx);
+    const std::regex declaration(
+        R"((?:\.extern\s+)?\.shared\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]*)\s*\]\s*;)"
+    );
+    std::vector<GlobalThreadgroup> globals;
+    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
+         iterator != end; ++iterator) {
+        const std::string size = (*iterator)[3].str();
+        globals.push_back({
+            .name = (*iterator)[2].str(),
+            .byte_size = size.empty() ? 0 : std::stoull(size),
+            .alignment = static_cast<std::uint32_t>(std::stoul((*iterator)[1].str())),
+            .is_dynamic = size.empty(),
+        });
+    }
+    return globals;
+}
+
+struct LocalDepot {
+    std::string name;
+    std::uint64_t byte_size = 0;
+    std::uint32_t alignment = 1;
+};
+
+std::vector<LocalDepot> scan_local_depots(std::string_view ptx) {
+    const std::string source(ptx);
+    const std::regex declaration(
+        R"(\.local\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*;)"
+    );
+    std::vector<LocalDepot> depots;
+    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
+         iterator != end; ++iterator) {
+        depots.push_back({
+            .name = (*iterator)[2].str(),
+            .byte_size = std::stoull((*iterator)[3].str()),
+            .alignment = static_cast<std::uint32_t>(std::stoul((*iterator)[1].str())),
+        });
+    }
+    return depots;
+}
+
+std::unordered_set<std::string> scan_implicit_definitions(std::string_view ptx) {
+    const std::string source(ptx);
+    const std::regex marker(R"(//\s*implicit-def:\s*(%[A-Za-z0-9_.$]+))");
+    std::unordered_set<std::string> definitions;
+    for (std::sregex_iterator iterator(source.begin(), source.end(), marker), end;
+         iterator != end; ++iterator) {
+        definitions.insert((*iterator)[1].str());
+    }
+    return definitions;
 }
 
 std::string branch_target(const Instruction& instruction) {
@@ -343,6 +408,11 @@ struct Importer {
     std::vector<std::map<std::string, ValueId>> block_arguments;
     std::unordered_map<std::string, Operand> call_parameter_slots;
     std::unordered_map<std::string, Operand> call_return_slots;
+    std::unordered_set<std::string> threadgroup_symbols;
+    std::unordered_map<std::string, LocalDepot> local_depots;
+    std::unordered_map<std::string, Operand> local_depot_values;
+    std::unordered_set<std::string> implicit_definitions;
+    std::unordered_map<std::string, ValueId> implicit_values;
 
     bool fail(const Instruction* instruction, std::string message) {
         if (instruction != nullptr && instruction->line != 0) {
@@ -445,14 +515,30 @@ struct Importer {
                 const std::string root = root_opcode(instruction.opcode);
                 if (root == "setp") {
                     inferred = Type::predicate();
+                } else if (root == "mov" && instruction.operands.size() >= 2 &&
+                           starts_with(trim(instruction.operands[1]), "0f")) {
+                    inferred = Type::floating(32);
                 } else if (starts_with(instruction.opcode, "ld.param") &&
                            instruction.operands.size() >= 2) {
                     const auto parameter = parameter_types.find(
                         parameter_name_from_operand(instruction.operands[1]));
                     if (parameter != parameter_types.end()) inferred = parameter->second;
                 } else if (root == "cvta") {
-                    inferred = Type::pointer(Type::integer(8), AddressSpace::kDevice);
+                    inferred = Type::pointer(
+                        Type::integer(8),
+                        instruction.opcode.find(".shared") != std::string::npos
+                            ? AddressSpace::kThreadgroup
+                            : AddressSpace::kDevice);
                 } else if ((root == "add" || root == "mov") && instruction.operands.size() >= 2) {
+                    const std::string source_symbol =
+                        parameter_name_from_operand(instruction.operands[1]);
+                    if (threadgroup_symbols.contains(source_symbol)) {
+                        inferred = Type::pointer(Type::integer(8),
+                                                 AddressSpace::kThreadgroup);
+                    } else if (local_depots.contains(source_symbol)) {
+                        inferred = Type::pointer(Type::integer(8),
+                                                 AddressSpace::kPrivate);
+                    }
                     for (const std::string& source : source_registers(instruction)) {
                         const auto type = register_types.find(source);
                         if (type != register_types.end() && type->second.is_pointer()) {
@@ -473,6 +559,13 @@ struct Importer {
     }
 
     void allocate_values() {
+        for (const std::string& name : implicit_definitions) {
+            const ValueId value = builder.next_value();
+            implicit_values[name] = value;
+            const auto type = register_types.find(name);
+            value_types[value] =
+                type == register_types.end() ? Type::integer(32) : type->second;
+        }
         for (RawBlock& block : raw_blocks) {
             std::unordered_set<std::string> locally_defined;
             for (const Instruction* instruction : block.instructions) {
@@ -556,7 +649,9 @@ struct Importer {
             for (std::size_t block_index = 0; block_index < raw_blocks.size(); ++block_index) {
                 const RawBlock& block = raw_blocks[block_index];
                 std::unordered_map<std::string, ValueId> next_in;
-                if (block.predecessors.size() >= 2) {
+                if (block_index == 0) {
+                    next_in = implicit_values;
+                } else if (block.predecessors.size() >= 2) {
                     for (const auto& [name, argument] : block_arguments[block_index]) {
                         next_in[name] = argument;
                     }
@@ -594,7 +689,7 @@ struct Importer {
                 (void)value;
             }
             for (const std::string& name : raw_blocks[block_index].uses_before_definition) {
-                if (block_index == 0 || !incoming[block_index].contains(name)) {
+                if (!incoming[block_index].contains(name)) {
                     return fail(nullptr, "PTX register '" + name + "' is used before definition in block '" +
                                              raw_blocks[block_index].name + "'");
                 }
@@ -613,7 +708,20 @@ struct Importer {
                 return Operand::value_ref(value->second, value_types[value->second]);
             }
         }
-        return Operand::immediate(trim(token), fallback_type);
+        const std::string symbol = parameter_name_from_operand(token);
+        if (threadgroup_symbols.contains(symbol)) {
+            return Operand::symbol(
+                symbol, Type::pointer(Type::integer(8), AddressSpace::kThreadgroup));
+        }
+        if (const auto depot = local_depot_values.find(symbol);
+            depot != local_depot_values.end()) {
+            return depot->second;
+        }
+        const std::string spelling = trim(token);
+        if (spelling.size() == 10 && starts_with(spelling, "0f")) {
+            return Operand::immediate(spelling, Type::floating(32));
+        }
+        return Operand::immediate(spelling, fallback_type);
     }
 
     bool append_guard(Operation* operation, const Instruction& instruction,
@@ -658,6 +766,27 @@ struct Importer {
             return index < instruction.operands.size()
                        ? operand_for(instruction.operands[index], *environment, fallback)
                        : Operand::immediate("0", fallback);
+        };
+        const auto bit_container_operand = [&](std::size_t index, const Type& expected) {
+            Operand operand = source_operand(index, expected);
+            const bool same_width = operand.type.bit_width == expected.bit_width;
+            const bool float_integer_pair =
+                (operand.type.kind == TypeKind::kFloat &&
+                 expected.kind == TypeKind::kInteger) ||
+                (operand.type.kind == TypeKind::kInteger &&
+                 expected.kind == TypeKind::kFloat);
+            if (!same_width || !float_integer_pair) return operand;
+            Operation conversion;
+            conversion.opcode = OpCode::kConvert;
+            conversion.location = operation.location;
+            conversion.operands.push_back(operand);
+            const ValueId converted = builder.next_value();
+            conversion.results.push_back(converted);
+            conversion.result_types.push_back(expected);
+            conversion.attributes["bitcast"] = "true";
+            value_types[converted] = expected;
+            block->operations.push_back(std::move(conversion));
+            return Operand::value_ref(converted, expected);
         };
 
         if (starts_with(instruction.opcode, "st.param")) {
@@ -726,7 +855,17 @@ struct Importer {
         } else if (root == "mov" && instruction.operands.size() >= 2 &&
                    instruction.operands[1].find("%laneid") != std::string::npos) {
             operation.opcode = OpCode::kLaneId;
+        } else if (root == "mov" && instruction.operands.size() >= 2 &&
+                   instruction.operands[1].find("%activemask") != std::string::npos) {
+            operation.opcode = OpCode::kBallot;
+            operation.attributes["kind"] = "active_mask";
         } else if (root == "mov") {
+            if (starts_with(trim(instruction.operands[1]), "0f")) {
+                for (std::size_t i = 0; i < operation.results.size(); ++i) {
+                    operation.result_types[i] = Type::floating(32);
+                    value_types[operation.results[i]] = Type::floating(32);
+                }
+            }
             operation.opcode = OpCode::kConvert;
             operation.operands.push_back(source_operand(1, operation.result_types.front()));
         } else if (root == "cvta") {
@@ -760,14 +899,17 @@ struct Importer {
             operation.operands.push_back(
                 source_operand(0, Type::pointer(ptx_scalar_type(instruction.opcode),
                                                 AddressSpace::kDevice)));
-            operation.operands.push_back(source_operand(1, ptx_scalar_type(instruction.opcode)));
+            operation.operands.push_back(
+                bit_container_operand(1, ptx_scalar_type(instruction.opcode)));
             operation.attributes["address"] = instruction.operands[0];
             operation.attributes["alignment"] =
                 std::to_string(type_size(ptx_scalar_type(instruction.opcode)));
         } else if (root == "setp") {
             operation.opcode = OpCode::kCompare;
-            operation.operands.push_back(source_operand(1, ptx_scalar_type(instruction.opcode)));
-            operation.operands.push_back(source_operand(2, ptx_scalar_type(instruction.opcode)));
+            operation.operands.push_back(
+                bit_container_operand(1, ptx_scalar_type(instruction.opcode)));
+            operation.operands.push_back(
+                bit_container_operand(2, ptx_scalar_type(instruction.opcode)));
             operation.attributes["predicate"] = comparison_predicate(instruction.opcode);
             if (has_signed_integer_type(instruction.opcode)) {
                 operation.attributes["signed"] = "true";
@@ -818,6 +960,30 @@ struct Importer {
             operation.operands.push_back(
                 Operand::immediate("1.0", operation.result_types.front()));
             operation.operands.push_back(source_operand(1, operation.result_types.front()));
+        } else if (root == "not") {
+            const Type type = ptx_scalar_type(instruction.opcode);
+            operation.opcode = OpCode::kBitXor;
+            operation.operands.push_back(bit_container_operand(1, type));
+            operation.operands.push_back(Operand::immediate(
+                type.bit_width == 64 ? "18446744073709551615" :
+                type.bit_width == 16 ? "65535" : "4294967295",
+                type));
+        } else if (root == "abs" || root == "min" || root == "max") {
+            const Type type = ptx_scalar_type(instruction.opcode);
+            for (std::size_t i = 0; i < operation.results.size(); ++i) {
+                operation.result_types[i] = type;
+                value_types[operation.results[i]] = type;
+            }
+            operation.opcode = OpCode::kCall;
+            operation.attributes["builtin"] = "true";
+            operation.attributes["callee"] =
+                root == "abs"
+                    ? (type.kind == TypeKind::kFloat ? "fabs" : "__cumetal_signed_abs")
+                    : (root == "min" ? "min" : "max");
+            const std::size_t arity = root == "abs" ? 1 : 2;
+            for (std::size_t i = 0; i < arity; ++i) {
+                operation.operands.push_back(bit_container_operand(i + 1, type));
+            }
         } else if (root == "call") {
             const bool has_return = instruction.operands.size() == 3;
             if ((!has_return && instruction.operands.size() != 2) ||
@@ -888,11 +1054,9 @@ struct Importer {
                                               "' has no CuMetal IR normalization");
             }
             const std::size_t first_source = destinations.empty() ? 0 : 1;
+            const Type arithmetic_type = ptx_scalar_type(instruction.opcode);
             for (std::size_t i = first_source; i < instruction.operands.size(); ++i) {
-                operation.operands.push_back(
-                    source_operand(i, operation.result_types.empty()
-                                          ? ptx_scalar_type(instruction.opcode)
-                                          : operation.result_types.front()));
+                operation.operands.push_back(bit_container_operand(i, arithmetic_type));
             }
             if (!operation.result_types.empty() && operation.result_types.front().is_pointer()) {
                 operation.opcode = OpCode::kPointerOffset;
@@ -999,6 +1163,40 @@ struct Importer {
             function.blocks.push_back(std::move(block));
         }
 
+
+        for (const auto& [name, value] : implicit_values) {
+            Operation initialization;
+            initialization.opcode = OpCode::kConvert;
+            initialization.results = {value};
+            initialization.result_types = {value_types[value]};
+            initialization.operands = {
+                Operand::immediate("0", value_types[value]),
+            };
+            initialization.attributes["ptx_implicit_def"] = name;
+            function.blocks.front().operations.push_back(std::move(initialization));
+        }
+
+        for (const auto& [name, depot] : local_depots) {
+            const Type pointer_type =
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate);
+            const ValueId value = builder.next_value();
+            value_types[value] = pointer_type;
+            local_depot_values[name] = Operand::value_ref(value, pointer_type);
+            function.pointer_provenance[value] = {
+                .base_kind = PointerBaseKind::kAllocation,
+                .base_name = name,
+                .known_byte_offset = 0,
+                .alignment = depot.alignment,
+            };
+            Operation allocation;
+            allocation.opcode = OpCode::kAlloca;
+            allocation.results = {value};
+            allocation.result_types = {pointer_type};
+            allocation.attributes["byte_size"] = std::to_string(depot.byte_size);
+            allocation.attributes["alignment"] = std::to_string(depot.alignment);
+            function.blocks.front().operations.push_back(std::move(allocation));
+        }
+
         for (std::size_t block_index = 0; block_index < raw_blocks.size(); ++block_index) {
             BasicBlock& block = function.blocks[block_index];
             std::unordered_map<std::string, ValueId> environment = incoming[block_index];
@@ -1077,6 +1275,14 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     importer.result.module.stage = IrStage::kGpuSemantic;
     importer.result.module.attributes["frontend"] = "ptx";
     importer.result.module.attributes["ir_schema"] = "1";
+    importer.result.module.global_threadgroups = scan_threadgroup_globals(ptx);
+    for (const GlobalThreadgroup& global : importer.result.module.global_threadgroups) {
+        importer.threadgroup_symbols.insert(global.name);
+    }
+    for (LocalDepot depot : scan_local_depots(ptx)) {
+        importer.local_depots.emplace(depot.name, std::move(depot));
+    }
+    importer.implicit_definitions = scan_implicit_definitions(ptx);
 
     cumetal::ptx::ParseOptions parse_options;
     parse_options.strict = options.strict;

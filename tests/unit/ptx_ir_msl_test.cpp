@@ -103,6 +103,21 @@ int main() {
                      undefined.error.find("used before definition") != std::string::npos,
                  "undefined PTX registers fail before MSL emission");
 
+    const std::string explicit_implicit_def_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .entry explicit_implicit_def() {
+    .reg .b32 %r<3>;
+    // implicit-def: %r1
+    add.u32 %r2, %r1, 1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult explicit_implicit_def =
+        metal::compile_ptx_to_msl(explicit_implicit_def_ptx);
+    ok &= expect(explicit_implicit_def.ok,
+                 "compiler-emitted PTX implicit-def markers receive a valid refinement");
+
     const std::string loop_join_ptx = R"ptx(
 .version 7.0
 .target sm_80
@@ -138,6 +153,85 @@ DONE:
     if (!loop_join.ok) {
         std::cerr << loop_join.error << "\n";
     }
+
+    const std::string barrier_self_loop_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.extern .shared .align 4 .b8 scratch[];
+.visible .entry barrier_self_loop(.param .u32 count) {
+    .reg .pred %p1;
+    .reg .b32 %r<3>;
+    .reg .b64 %rd1;
+    ld.param.u32 %r1, [count];
+    mov.b64 %rd1, scratch;
+    mov.u32 %r2, 0;
+LOOP:
+    st.shared.b32 [%rd1], %r2;
+    bar.sync 0;
+    add.u32 %r2, %r2, 1;
+    setp.lt.u32 %p1, %r2, %r1;
+    @%p1 bra LOOP;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult barrier_self_loop =
+        metal::compile_ptx_to_msl(barrier_self_loop_ptx);
+    ok &= expect(barrier_self_loop.ok &&
+                     barrier_self_loop.source.find("while (true)") != std::string::npos &&
+                     barrier_self_loop.source.find("threadgroup_barrier") != std::string::npos &&
+                     barrier_self_loop.source.find("[[threadgroup(0)]]") != std::string::npos,
+                 "single-block barrier loops preserve dynamic shared memory and structure");
+    if (!barrier_self_loop.ok) std::cerr << barrier_self_loop.error << "\n";
+
+    const std::string unconditional_loop_header_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .entry unconditional_loop_header(.param .u32 count) {
+    .reg .pred %p1;
+    .reg .b32 %r<3>;
+    ld.param.u32 %r1, [count];
+    mov.u32 %r2, 0;
+HEADER:
+    bra BODY;
+BODY:
+    bar.sync 0;
+    add.u32 %r2, %r2, 1;
+    setp.lt.u32 %p1, %r2, %r1;
+    @%p1 bra HEADER;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult unconditional_loop_header =
+        metal::compile_ptx_to_msl(unconditional_loop_header_ptx);
+    ok &= expect(unconditional_loop_header.ok &&
+                     unconditional_loop_header.source.find("while (true)") !=
+                         std::string::npos,
+                 "unconditional natural-loop headers structurize through their latch");
+    if (!unconditional_loop_header.ok) {
+        std::cerr << unconditional_loop_header.error << "\n";
+    }
+
+    const std::string local_depot_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry local_depot() {
+    .local .align 8 .b8 depot[32];
+    .reg .b64 %rd1;
+    mov.b64 %rd1, depot;
+    st.local.b32 [%rd1], 7;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult local_depot =
+        metal::compile_ptx_to_msl(local_depot_ptx);
+    ok &= expect(local_depot.ok &&
+                     local_depot.source.find("thread uchar") != std::string::npos &&
+                     local_depot.source.find("reinterpret_cast<thread uint*>") !=
+                         std::string::npos,
+                 "PTX local depots retain bounded private byte-array storage");
+    if (!local_depot.ok) std::cerr << local_depot.error << "\n";
 
     const std::string hex_float_ptx = R"ptx(
 .version 7.0

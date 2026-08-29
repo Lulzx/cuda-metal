@@ -17,7 +17,7 @@ production-metallib matrix records:
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
 | direct `.cu` | 0/23 | **15/23** |
-| PTX / `--cuda-device` | **23/23** | **8/23** |
+| PTX / `--cuda-device` | **23/23** | **16/23** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler
@@ -42,6 +42,10 @@ The PTX typed path now preserves Clang call-sequence parameter slots and FP32
 bit containers for that same libdevice surface; its matrix cell has production
 metallib proof, while numerical proof remains attributed to the direct typed
 path until a PTX-artifact runner is enrolled.
+It also recognizes compiler-marked implicit definitions, bounded private local
+depots, static/dynamic shared symbols, and canonical one-block or
+unconditional-header natural loops without routing barrier code through the CFG
+dispatcher.
 CUDA's double-signature `frexp` call is narrowed only for the proven
 float-to-double-call-to-float pattern, preserving the integer exponent output
 without admitting general FP64 arithmetic.

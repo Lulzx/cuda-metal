@@ -1608,6 +1608,18 @@ struct AstLowerer {
                 return std::nullopt;
             }
             const ir::ValueId result_value = operation.results.front();
+            if (const auto byte_size = operation.attributes.find("byte_size");
+                byte_size != operation.attributes.end()) {
+                const std::string storage_name = value_name(result_value) + "_storage";
+                const MslType pointer_type = lower_result_type(operation);
+                values[result_value] =
+                    MslExpression::identifier(storage_name, pointer_type);
+                if (cfg_dispatcher_mode || predeclared_ssa_storage) {
+                    return std::nullopt;
+                }
+                return MslStatement::private_byte_array(
+                    storage_name, std::stoull(byte_size->second));
+            }
             const MslType storage_type =
                 lower_type(*operation.result_types.front().pointee());
             const std::string storage_name = value_name(result_value) + "_storage";
@@ -2180,6 +2192,17 @@ struct AstLowerer {
         }
         const std::size_t first = block_indices.at(terminator.successors[0].block);
         const std::size_t second = block_indices.at(terminator.successors[1].block);
+        // A canonical do/while-style PTX loop can lower to one block whose
+        // conditional terminator targets the block itself or its exit.  The
+        // natural-loop node set contains only the header in that case; do not
+        // mistake it for an acyclic conditional and recurse back into an
+        // already-active structured region.
+        if (first == header_index && second != header_index) {
+            return std::pair{first, second};
+        }
+        if (second == header_index && first != header_index) {
+            return std::pair{second, first};
+        }
         const std::unordered_set<std::size_t> loop =
             natural_loop_nodes(header_index);
         if (loop.size() == 1) return std::nullopt;
@@ -2522,6 +2545,37 @@ struct AstLowerer {
         if (!emit_operations(header, &loop_statements)) return false;
         const ir::Operation& terminator = header.operations.back();
         if (!body_and_exit) {
+            if (terminator.opcode == ir::OpCode::kBranch &&
+                terminator.successors.size() == 1) {
+                const std::size_t body_index =
+                    block_indices.at(terminator.successors.front().block);
+                if (!natural_loop_nodes(header_index).contains(body_index)) {
+                    return fail(&terminator,
+                                "unconditional natural loop header exits immediately");
+                }
+                if (!emit_loop_region(body_index, header_index, header_index,
+                                      &terminator.successors.front(),
+                                      &loop_statements)) {
+                    return false;
+                }
+                statements->push_back(MslStatement::while_statement(
+                    MslExpression::literal("true", MslType::boolean()),
+                    std::move(loop_statements)));
+                if (exits_enclosing_loop) {
+                    statements->push_back(MslStatement::if_statement(
+                        *continue_enclosing,
+                        {MslStatement::continue_statement()}));
+                    statements->push_back(MslStatement::break_statement());
+                    return true;
+                }
+                if (exits_to_enclosing_header) return true;
+                if (continuation_stop_index.has_value()) {
+                    return emit_loop_region(exit_index, *continuation_stop_index,
+                                            enclosing_header_index, nullptr,
+                                            statements);
+                }
+                return emit_from(exit_index, statements);
+            }
             if (terminator.opcode != ir::OpCode::kCondBranch ||
                 terminator.successors.size() != 2 || terminator.operands.empty()) {
                 return fail(&terminator,
@@ -3002,6 +3056,15 @@ struct AstLowerer {
                         };
                     }
                     const ir::ValueId value = operation.results.front();
+                    if (const auto byte_size = operation.attributes.find("byte_size");
+                        byte_size != operation.attributes.end()) {
+                        const std::string storage_name = value_name(value) + "_storage";
+                        output.statements.push_back(MslStatement::private_byte_array(
+                            storage_name, std::stoull(byte_size->second)));
+                        values[value] = MslExpression::identifier(
+                            storage_name, lower_result_type(operation));
+                        continue;
+                    }
                     const MslType storage_type =
                         lower_type(*operation.result_types.front().pointee());
                     const std::string storage_name = value_name(value) + "_storage";

@@ -170,6 +170,11 @@ struct MslThreadgroupByteArray {
     std::uint64_t byte_size = 0;
 };
 
+struct MslPrivateByteArray {
+    std::string name;
+    std::uint64_t byte_size = 0;
+};
+
 struct MslSwitchCase {
     MslExpr value;
     std::vector<MslStmt> statements;
@@ -189,8 +194,8 @@ struct MslContinue {};
 
 struct MslStatement {
     std::variant<MslVariableDeclaration, MslAssignment, MslExpressionStatement,
-                 MslIf, MslWhile, MslThreadgroupByteArray, MslSwitch, MslReturn,
-                 MslBreak, MslContinue>
+                 MslIf, MslWhile, MslThreadgroupByteArray, MslPrivateByteArray,
+                 MslSwitch, MslReturn, MslBreak, MslContinue>
         value;
     ir::SourceLocation location;
 
@@ -203,6 +208,7 @@ struct MslStatement {
                                 std::vector<MslStmt> else_statements = {});
     static MslStmt while_statement(MslExpr condition, std::vector<MslStmt> statements);
     static MslStmt threadgroup_byte_array(std::string name, std::uint64_t byte_size);
+    static MslStmt private_byte_array(std::string name, std::uint64_t byte_size);
     static MslStmt switch_statement(MslExpr selector, std::vector<MslSwitchCase> cases);
     static MslStmt return_statement(std::optional<MslExpr> value = std::nullopt);
     static MslStmt break_statement();
