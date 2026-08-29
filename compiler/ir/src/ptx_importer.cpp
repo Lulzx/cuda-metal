@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -163,6 +164,92 @@ std::string parameter_name_from_operand(std::string_view operand) {
     return inside;
 }
 
+std::vector<std::string> grouped_names(std::string_view operand) {
+    std::string contents = trim(operand);
+    if (contents.size() >= 2 && contents.front() == '(' && contents.back() == ')') {
+        contents = trim(std::string_view(contents).substr(1, contents.size() - 2));
+    }
+    std::vector<std::string> names;
+    std::size_t begin = 0;
+    while (begin < contents.size()) {
+        const std::size_t comma = contents.find(',', begin);
+        const std::size_t end = comma == std::string::npos ? contents.size() : comma;
+        const std::string name = trim(std::string_view(contents).substr(begin, end - begin));
+        if (!name.empty()) names.push_back(name);
+        if (comma == std::string::npos) break;
+        begin = comma + 1;
+    }
+    return names;
+}
+
+struct BuiltinSignature {
+    std::string metal_name;
+    Type return_type;
+    std::vector<Type> argument_types;
+    bool tolerance_bounded = false;
+};
+
+std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
+    static const std::unordered_map<std::string, std::string> kFloatBuiltins = {
+        {"__nv_fminf", "fmin"}, {"__nv_fmaxf", "fmax"},
+        {"__nv_sqrtf", "sqrt"}, {"__nv_rsqrtf", "rsqrt"},
+        {"__nv_fabsf", "fabs"}, {"__nv_acosf", "acos"},
+        {"__nv_expf", "exp"}, {"__nv_fast_expf", "exp"},
+        {"__nv_exp2f", "exp2"}, {"__nv_exp10f", "exp10"},
+        {"__nv_expm1f", "expm1"}, {"__nv_logf", "log"},
+        {"__nv_log2f", "log2"}, {"__nv_log10f", "log10"},
+        {"__nv_log1pf", "log1p"}, {"__nv_sinf", "sin"},
+        {"__nv_cosf", "cos"}, {"__nv_tanf", "tan"},
+        {"__nv_sinhf", "sinh"}, {"__nv_coshf", "cosh"},
+        {"__nv_tanhf", "tanh"}, {"__nv_asinf", "asin"},
+        {"__nv_atanf", "atan"}, {"__nv_atan2f", "atan2"},
+        {"__nv_asinhf", "asinh"}, {"__nv_acoshf", "acosh"},
+        {"__nv_atanhf", "atanh"}, {"__nv_cbrtf", "cbrt"},
+        {"__nv_erff", "erf"}, {"__nv_erfcf", "erfc"},
+        {"__nv_floorf", "floor"}, {"__nv_ceilf", "ceil"},
+        {"__nv_truncf", "trunc"}, {"__nv_roundf", "round"},
+        {"__nv_rintf", "rint"}, {"__nv_powf", "pow"},
+        {"__nv_hypotf", "hypot"}, {"__nv_fmodf", "fmod"},
+        {"__nv_copysignf", "copysign"}, {"__nv_fdimf", "fdim"},
+        {"__nv_remainderf", "remainder"}, {"__nv_fmaf", "fma"},
+    };
+    const auto builtin = kFloatBuiltins.find(std::string(name));
+    if (builtin != kFloatBuiltins.end()) {
+        const std::size_t arity =
+            name == "__nv_fmaf" ? 3 :
+            (name == "__nv_atan2f" || name == "__nv_powf" ||
+             name == "__nv_hypotf" || name == "__nv_fmodf" ||
+             name == "__nv_copysignf" || name == "__nv_fdimf" ||
+             name == "__nv_remainderf" || name == "__nv_fminf" ||
+             name == "__nv_fmaxf" ? 2 : 1);
+        static const std::unordered_set<std::string> kExpandedMath = {
+            "__nv_expm1f", "__nv_log1pf", "__nv_cbrtf", "__nv_erff",
+            "__nv_erfcf", "__nv_hypotf", "__nv_remainderf",
+        };
+        return BuiltinSignature{
+            .metal_name = builtin->second,
+            .return_type = Type::floating(32),
+            .argument_types = std::vector<Type>(arity, Type::floating(32)),
+            .tolerance_bounded = kExpandedMath.contains(std::string(name)),
+        };
+    }
+    if (name == "__nv_float_as_uint" || name == "__nv_float_as_int") {
+        return BuiltinSignature{
+            .metal_name = "__cumetal_float_as_uint",
+            .return_type = Type::integer(32),
+            .argument_types = {Type::floating(32)},
+        };
+    }
+    if (name == "__nv_uint_as_float" || name == "__nv_int_as_float") {
+        return BuiltinSignature{
+            .metal_name = "__cumetal_uint_as_float",
+            .return_type = Type::floating(32),
+            .argument_types = {Type::integer(32)},
+        };
+    }
+    return std::nullopt;
+}
+
 std::string branch_target(const Instruction& instruction) {
     return instruction.operands.empty() ? std::string{} : trim(instruction.operands.back());
 }
@@ -254,6 +341,8 @@ struct Importer {
     std::vector<std::unordered_map<std::string, ValueId>> incoming;
     std::vector<std::unordered_map<std::string, ValueId>> outgoing;
     std::vector<std::map<std::string, ValueId>> block_arguments;
+    std::unordered_map<std::string, Operand> call_parameter_slots;
+    std::unordered_map<std::string, Operand> call_return_slots;
 
     bool fail(const Instruction* instruction, std::string message) {
         if (instruction != nullptr && instruction->line != 0) {
@@ -571,22 +660,40 @@ struct Importer {
                        : Operand::immediate("0", fallback);
         };
 
-        if (starts_with(instruction.opcode, "ld.param")) {
+        if (starts_with(instruction.opcode, "st.param")) {
+            if (instruction.operands.size() < 2) {
+                return fail(&instruction, "malformed st.param instruction");
+            }
+            const std::string name = parameter_name_from_operand(instruction.operands[0]);
+            if (name.empty()) return fail(&instruction, "call parameter slot has no name");
+            call_parameter_slots[name] =
+                source_operand(1, ptx_scalar_type(instruction.opcode));
+            return true;
+        } else if (starts_with(instruction.opcode, "ld.param")) {
             if (instruction.operands.size() < 2 || operation.results.empty()) {
                 return fail(&instruction, "malformed ld.param instruction");
             }
             const std::string name = parameter_name_from_operand(instruction.operands[1]);
             const auto argument = parameter_values.find(name);
             if (argument == parameter_values.end()) {
-                return fail(&instruction, "unknown kernel parameter '" + name + "'");
-            }
-            operation.opcode = OpCode::kParameter;
-            operation.operands.push_back(
-                Operand::value_ref(argument->second, parameter_types[name]));
-            operation.attributes["parameter"] = name;
-            if (operation.result_types.front().is_pointer()) {
-                function->pointer_provenance[operation.results.front()] =
-                    function->pointer_provenance[argument->second];
+                const auto returned = call_return_slots.find(name);
+                if (returned == call_return_slots.end()) {
+                    return fail(&instruction, "unknown kernel or call parameter '" + name + "'");
+                }
+                operation.opcode = OpCode::kConvert;
+                operation.operands.push_back(returned->second);
+                if (!(returned->second.type == operation.result_types.front())) {
+                    operation.attributes["bitcast"] = "true";
+                }
+            } else {
+                operation.opcode = OpCode::kParameter;
+                operation.operands.push_back(
+                    Operand::value_ref(argument->second, parameter_types[name]));
+                operation.attributes["parameter"] = name;
+                if (operation.result_types.front().is_pointer()) {
+                    function->pointer_provenance[operation.results.front()] =
+                        function->pointer_provenance[argument->second];
+                }
             }
         } else if (root == "mov" && instruction.operands.size() >= 2 &&
                    instruction.operands[1].find("%tid.") != std::string::npos) {
@@ -706,8 +813,74 @@ struct Importer {
         } else if (root == "cvt") {
             operation.opcode = OpCode::kConvert;
             operation.operands.push_back(source_operand(1, operation.result_types.front()));
+        } else if (root == "rcp") {
+            operation.opcode = OpCode::kDiv;
+            operation.operands.push_back(
+                Operand::immediate("1.0", operation.result_types.front()));
+            operation.operands.push_back(source_operand(1, operation.result_types.front()));
         } else if (root == "call") {
-            return fail(&instruction, "device calls are not yet supported by the PTX importer");
+            const bool has_return = instruction.operands.size() == 3;
+            if ((!has_return && instruction.operands.size() != 2) ||
+                (has_return && grouped_names(instruction.operands[0]).size() != 1)) {
+                return fail(&instruction, "malformed or multi-result PTX call");
+            }
+            const std::size_t callee_index = has_return ? 1 : 0;
+            const std::size_t arguments_index = has_return ? 2 : 1;
+            const std::string callee = trim(instruction.operands[callee_index]);
+            const auto signature = cuda_builtin_signature(callee);
+            if (!signature.has_value()) {
+                return fail(&instruction, "device call target '" + callee +
+                                              "' has no typed PTX signature");
+            }
+            const std::vector<std::string> argument_names =
+                grouped_names(instruction.operands[arguments_index]);
+            if (argument_names.size() != signature->argument_types.size()) {
+                return fail(&instruction, "device call target '" + callee +
+                                              "' received the wrong argument count");
+            }
+            operation.opcode = OpCode::kCall;
+            operation.attributes["callee"] = signature->metal_name;
+            operation.attributes["builtin"] = "true";
+            for (std::size_t i = 0; i < argument_names.size(); ++i) {
+                const auto slot = call_parameter_slots.find(argument_names[i]);
+                if (slot == call_parameter_slots.end()) {
+                    return fail(&instruction, "call parameter slot '" + argument_names[i] +
+                                                  "' was not initialized");
+                }
+                Operand argument = slot->second;
+                if (!(argument.type == signature->argument_types[i])) {
+                    Operation conversion;
+                    conversion.opcode = OpCode::kConvert;
+                    conversion.location = operation.location;
+                    conversion.operands.push_back(argument);
+                    const ValueId converted = builder.next_value();
+                    conversion.results.push_back(converted);
+                    conversion.result_types.push_back(signature->argument_types[i]);
+                    conversion.attributes["bitcast"] = "true";
+                    value_types[converted] = signature->argument_types[i];
+                    block->operations.push_back(std::move(conversion));
+                    argument = Operand::value_ref(converted, signature->argument_types[i]);
+                }
+                operation.operands.push_back(std::move(argument));
+            }
+            if (has_return) {
+                const ValueId result_value = builder.next_value();
+                operation.results.push_back(result_value);
+                operation.result_types.push_back(signature->return_type);
+                value_types[result_value] = signature->return_type;
+                call_return_slots[grouped_names(instruction.operands[0]).front()] =
+                    Operand::value_ref(result_value, signature->return_type);
+            }
+            if (signature->tolerance_bounded) {
+                result.module.semantic_quality = SemanticQuality::kToleranceBounded;
+                const std::string caveat =
+                    "Metal-missing float math functions use numerically tested typed expansions";
+                if (std::find(result.module.semantic_caveats.begin(),
+                              result.module.semantic_caveats.end(), caveat) ==
+                    result.module.semantic_caveats.end()) {
+                    result.module.semantic_caveats.push_back(caveat);
+                }
+            }
         } else {
             operation.opcode = arithmetic_opcode(root);
             if (operation.opcode == OpCode::kInvalid) {

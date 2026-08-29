@@ -176,6 +176,70 @@ DONE:
                      signed_result.source.find(" / int(-2)") != std::string::npos,
                  "signed PTX division preserves signed semantics in MSL");
 
+    const std::string call_slots_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.extern .func (.param .b32 result) __nv_fmaxf(
+    .param .b32 lhs,
+    .param .b32 rhs
+);
+.visible .entry call_slots(.param .u64 output) {
+    .reg .b64 %rd1;
+    .reg .b32 %r<4>;
+    ld.param.u64 %rd1, [output];
+    mov.b32 %r1, 0f3f800000;
+    mov.b32 %r2, 0f40000000;
+    .param .b32 param0;
+    .param .b32 param1;
+    .param .b32 retval0;
+    st.param.b32 [param0], %r1;
+    st.param.b32 [param1], %r2;
+    call.uni (retval0), __nv_fmaxf, (param0, param1);
+    ld.param.b32 %r3, [retval0];
+    st.global.b32 [%rd1], %r3;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult call_slots =
+        metal::compile_ptx_to_msl(call_slots_ptx);
+    ok &= expect(call_slots.ok &&
+                     call_slots.source.find("fmax(") != std::string::npos &&
+                     call_slots.source.find("as_type<float>") != std::string::npos &&
+                     call_slots.source.find("as_type<uint>") != std::string::npos,
+                 "PTX call slots preserve float bits across a typed libdevice call");
+    if (!call_slots.ok) std::cerr << call_slots.error << "\n";
+
+    const std::string missing_call_slot_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .entry missing_call_slot() {
+    .param .b32 retval0;
+    call.uni (retval0), __nv_expf, (param0);
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult missing_call_slot =
+        metal::compile_ptx_to_msl(missing_call_slot_ptx);
+    ok &= expect(!missing_call_slot.ok &&
+                     missing_call_slot.error.find("was not initialized") != std::string::npos,
+                 "uninitialized PTX call slots fail explicitly");
+
+    const std::string reciprocal_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .entry reciprocal(.param .f32 value) {
+    .reg .f32 %f<3>;
+    ld.param.f32 %f1, [value];
+    rcp.rn.f32 %f2, %f1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult reciprocal =
+        metal::compile_ptx_to_msl(reciprocal_ptx);
+    ok &= expect(reciprocal.ok && reciprocal.source.find(" / ") != std::string::npos,
+                 "PTX reciprocal lowers to a typed floating division");
+
     if (!ok) return 1;
     std::cout << "PTX -> CuMetal IR -> typed MSL tests passed\n";
     return 0;

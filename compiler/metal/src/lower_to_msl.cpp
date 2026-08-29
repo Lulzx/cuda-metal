@@ -1250,6 +1250,17 @@ struct AstLowerer {
                     operation,
                     MslExpression::conditional(is_zero, zero, one_based, result_type));
             }
+            if (callee->second == "__cumetal_float_as_uint" ||
+                callee->second == "__cumetal_uint_as_float") {
+                if (operation.results.empty() || operation.operands.size() != 1) {
+                    fail(&operation, "malformed CUDA bit reinterpretation builtin");
+                    return std::nullopt;
+                }
+                return declare_result(
+                    operation,
+                    MslExpression::bitcast(lower_result_type(operation),
+                                           expression_for(operation.operands.front())));
+            }
             std::vector<MslExpr> arguments;
             for (const ir::Operand& operand : operation.operands) {
                 arguments.push_back(expression_for(operand));

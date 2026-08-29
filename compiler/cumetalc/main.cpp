@@ -806,8 +806,8 @@ int main(int argc, char** argv) {
     // over the manifest-controlled 23-file source/sample corpus (see
     // tests/cuda_projects/backend_matrix_manifest.txt and docs/compiler-architecture.md):
     //
-    //   direct .cu           legacy 0/23   cumetal-ir  9/23
-    //   --cuda-device (PTX)  legacy 23/23  cumetal-ir  7/23
+    //   direct .cu           legacy 0/23   cumetal-ir 15/23
+    //   --cuda-device (PTX)  legacy 23/23  cumetal-ir  8/23
     //
     // These are production-metallib compilation counts, not runtime correctness
     // counts. Legacy's direct-.cu mode is the qualifier-stripping prototype documented in
