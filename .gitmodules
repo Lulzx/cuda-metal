@@ -1,0 +1,3 @@
+[submodule "third_party/f64-metal"]
+	path = third_party/f64-metal
+	url = https://github.com/Lulzx/f64-metal.git
