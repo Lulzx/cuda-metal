@@ -238,6 +238,21 @@ classify_sample() {
             return
         fi
     fi
+    # Upstream exits from this sample using only the device-reduced residual.
+    # A broken warp-tile reduction once sampled just the first warp, reported a
+    # tiny residual, and exited success while the sample's independent host
+    # equation check printed Error amount = 1.0. Require that host oracle too.
+    if [[ "${rel}" == "4_CUDA_Libraries/conjugateGradientMultiBlockCG" ]]; then
+        local equation_error
+        equation_error="$(sed -n \
+            's/.*Test Summary:  Error amount = \([-+0-9.eE]*\).*/\1/p' \
+            <<<"${run_output}" | tail -1)"
+        if ! awk 'BEGIN { value = ARGV[1] + 0.0; exit !(ARGV[1] != "" && value >= 0.0 && value <= 1.0e-4) }' \
+            "${equation_error}"; then
+            echo "run-fail"
+            return
+        fi
+    fi
     # EXIT_WAIVED. The sample itself decided a capability it needs is absent and
     # declined to run -- the intended outcome when CuMetal reports it unsupported.
     if (( status == 2 )); then

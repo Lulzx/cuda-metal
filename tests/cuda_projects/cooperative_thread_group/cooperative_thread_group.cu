@@ -1,4 +1,5 @@
 #include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
 #include <cuda_runtime.h>
 
 #include <stdio.h>
@@ -66,11 +67,22 @@ __global__ void cooperative_thread_group_probe(int* output) {
         }
     }
     output[453u + tid] = prefix32;
+
+    output[517u + tid] =
+        cg::reduce(tile32, static_cast<int>(tid), cg::plus<int>());
+    if (tile32.meta_group_rank() == 0u) {
+        output[581u + tid] =
+            cg::reduce(tile32, static_cast<int>(tile32.thread_rank()),
+                       cg::plus<int>());
+    }
+    // This write must remain reachable for the other warp when only the first
+    // warp executes the nested reduction above.
+    output[645u + tid] = static_cast<int>(tid + 7u);
 }
 
 int main() {
     constexpr unsigned int kThreads = 64u;
-    constexpr unsigned int kOutputs = 517u;
+    constexpr unsigned int kOutputs = 709u;
     int* device_output = nullptr;
     int host_output[kOutputs] = {};
 
@@ -138,6 +150,17 @@ int main() {
             fprintf(stderr,
                     "FAIL: 32-lane prefix scan mismatch at thread %u: got %d expected %u\n",
                     tid, host_output[453u + tid], rank32 + 1u);
+            return 1;
+        }
+        const int expected_reduce = tid < 32u ? 496 : 1520;
+        if (host_output[517u + tid] != expected_reduce ||
+            (tid < 32u && host_output[581u + tid] != 496) ||
+            host_output[645u + tid] != static_cast<int>(tid + 7u)) {
+            fprintf(stderr,
+                    "FAIL: tile reduction/divergence mismatch at thread %u: "
+                    "all=%d nested=%d tail=%d\n",
+                    tid, host_output[517u + tid], host_output[581u + tid],
+                    host_output[645u + tid]);
             return 1;
         }
     }

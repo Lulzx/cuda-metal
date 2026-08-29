@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -57,6 +58,10 @@ std::uint32_t ptx_scalar_size(std::string_view type) {
 }
 
 std::uint32_t ptx_param_size(const cumetal::ptx::Parameter& param) {
+    if (param.byte_size > 0 &&
+        param.byte_size <= std::numeric_limits<std::uint32_t>::max()) {
+        return static_cast<std::uint32_t>(param.byte_size);
+    }
     const auto open = param.name.rfind('[');
     const auto close = param.name.rfind(']');
     if (open != std::string::npos && close == param.name.size() - 1 && close > open + 1) {

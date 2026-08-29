@@ -39,6 +39,9 @@ struct CUstream_st {};
 // NGL=0). Disabled by default; no cost when off.
 namespace {
 
+constexpr int kCudaVisibleMultiprocessorCount = 1;
+constexpr std::uint64_t kMaxResidentCooperativeBlocks = 4;
+
 extern "C" int cumetalDriverRuntimeActivatePrimaryContext(int device);
 bool trace_enabled() {
     static int v = -1;
@@ -2503,7 +2506,12 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     prop->name[sizeof(prop->name) - 1] = '\0';
     prop->totalGlobalMem = backend_props.total_global_mem;
     prop->warpSize = 32;
-    prop->multiProcessorCount = backend_props.multi_processor_count;
+    // Metal exposes GPU-core count but no public guarantee that an arbitrary
+    // kernel has one threadgroup simultaneously resident on every core. CUDA's
+    // standard cooperative-launch sizing formula multiplies this value by
+    // occupancy, so expose one guaranteed-progress partition. Explicit
+    // cooperative launches retain the separately tested four-block ceiling.
+    prop->multiProcessorCount = kCudaVisibleMultiprocessorCount;
     prop->maxThreadsPerBlock = backend_props.max_threads_per_block > 0
                                    ? std::min(backend_props.max_threads_per_block, 1024)
                                    : 1024;
@@ -6936,14 +6944,9 @@ cudaError_t cudaLaunchCooperativeKernel(const void* func,
                                          void** args,
                                          size_t sharedMem,
                                          cudaStream_t stream) {
-    cudaDeviceProp prop{};
-    if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) {
-        return fail(cudaErrorInitializationError);
-    }
     const std::uint64_t block_count =
         static_cast<std::uint64_t>(gridDim.x) * gridDim.y * gridDim.z;
-    if (block_count == 0 ||
-        block_count > static_cast<std::uint64_t>(prop.multiProcessorCount)) {
+    if (block_count == 0 || block_count > kMaxResidentCooperativeBlocks) {
         return fail(cudaErrorCooperativeLaunchTooLarge);
     }
     return cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);

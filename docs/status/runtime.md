@@ -46,8 +46,11 @@ launch success. CPU or approximate paths must identify themselves.
   configurations, and the 1,023-record overflow boundary.
 - Texture/surface objects, arrays, memcpy, and source descriptor helpers cover a
   tested subset.
-- Cooperative launch supports resident multi-block grids up to a conservative
-  one-block-per-reported-core cap.
+- Cooperative launch supports resident grids up to four blocks. CUDA-visible
+  `multiProcessorCount` is 1 because public Metal exposes physical GPU-core
+  count but no per-kernel simultaneous-residency query; this makes CUDA's
+  occupancy-derived grid formula choose a guaranteed-progress partition while
+  explicitly sized launches retain the tested four-block ceiling.
 - Warp/cooperative-group coverage includes contiguous and irregular masked
   votes, shuffles, barrier ordering, and binary/labeled partitions.
 - Device `printf` uses a bounded runtime buffer and 256-byte format limit;

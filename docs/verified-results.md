@@ -41,6 +41,21 @@ bounded monotonic `clock()` emulation, and a four-threadgroup cooperative grid
 barrier. The barrier gate checks device-scope visibility across two barriers;
 the clock gate checks monotonic progress rather than claiming GPU-cycle timing.
 
+On 2026-08-30 the full 83-sample NVIDIA gate returned to 83/83 with zero
+waivers. The `conjugateGradientMultiBlockCG` entry ran its unmodified
+1,048,576-row workload through generic PTX and software `fast48` on Apple GPU;
+the gate now requires the independently computed host equation error to be at
+most `1e-4` in addition to upstream's device-reduced residual. The observed
+printed error was `0.000000` and residual was `1.596402e-6`. This also covers a
+warp-tile reduction invoked from only one warp of a larger block and a
+guaranteed-progress occupancy-derived cooperative grid.
+
+The complete Debug/shim-on test inventory then passed 272/272 serially, and a
+clean Debug build with `CUMETAL_ENABLE_BINARY_SHIM=OFF` passed 269/269. Both
+runs included Phase 4, the 83-sample gate, all six PhysX comparisons, the
+Clang-version/backend matrices, and the typed-PTX and native-AOT numerical
+corpora. These are local Apple M4 Pro results, not recurring CI evidence.
+
 On 2026-08-29, `functional_typed_{direct,ptx}_{device,system}_atomics` and
 `functional_typed_{direct,ptx}_fence` passed on Apple GPU. The device test
 checks add/sub/min/max/CAS/inc/dec/and/or/xor across 16,384 contending threads;

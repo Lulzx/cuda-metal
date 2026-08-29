@@ -73,10 +73,10 @@ compiler paths and their selection policy are in
   on the recorded Apple M4 Pro run. Default source executables embed native-AOT
   metallibs and ABI-v3 kernel/symbol/`printf` metadata without first-launch PTX
   JIT.
-- The enrolled headless NVIDIA `cuda-samples` manifest target is **83/83 pass**,
-  with zero waivers and zero nonpassing entries. A 2026-08-30 rerun currently
-  reaches 82/83: `conjugateGradientMultiBlockCG` hits the macOS GPU watchdog,
-  so the target is not a current all-green claim.
+- The enrolled headless NVIDIA `cuda-samples` gate is **83/83 pass**, with zero
+  waivers and zero nonpassing entries on the 2026-08-30 rerun. Its cooperative
+  CG case now gates both device residual and the independent host equation
+  error, so a partial-warp false positive cannot count as a pass.
 - With CUDA Clang 21-23, the reviewed 24-file production-metallib matrix is
   **24/24** for direct `.cu` through typed CuMetal IR, **24/24** for typed PTX,
   and **24/24** for the legacy PTX backend. These are compile results, not
@@ -105,7 +105,8 @@ matrix is `tests/cuda_projects/backend_matrix_manifest.txt`.
   interop.
 - CUDA and library APIs are tested subsets, not NVIDIA-compatible drop-ins.
 - Cross-threadgroup synchronization is limited to a resident cooperative grid
-  capped at one block per reported GPU core.
+  capped at four blocks; CUDA-visible `multiProcessorCount` is conservatively
+  1 because public Metal has no per-kernel residency query.
 - FP64 uses `fast48`, `wide48`, or software `ieee64`; observable IEEE exception
   status is not fully integrated.
 - Dynamic launch uses a bounded device queue drained by the host.

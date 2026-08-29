@@ -2700,6 +2700,17 @@ add_test(
 set_tests_properties(functional_driver_launch_extra PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
+    NAME functional_cumetalc_ptx_aggregate_abi
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_ptx_aggregate_abi.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/reference/aggregate_param.ptx
+            ${CMAKE_CURRENT_BINARY_DIR}/aggregate_param.metallib
+)
+set_tests_properties(functional_cumetalc_ptx_aggregate_abi PROPERTIES
+    SKIP_RETURN_CODE 77)
+
+add_test(
     NAME functional_driver_launch_extra_scalar
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_axpy.sh

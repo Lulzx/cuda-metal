@@ -9,13 +9,13 @@ compatibility claim. Implemented surfaces and detailed limitations remain in
 ## Current evidence boundary
 
 - The manifest-driven NVIDIA sample gate contains 83 enrolled headless samples,
-  all currently classified `pass` as of 2026-08-29. The authoritative inputs are
+  all currently classified `pass` as of 2026-08-30. The authoritative inputs are
   `tests/cuda_projects/cuda_samples_sweep_manifest.txt` and
   `conformance_cuda_samples_sweep`. This proves only that enrolled snapshot and
   does not establish general CUDA compatibility or replace the separate fixed
   185-test Phase 4 functional denominator.
 - The reviewed Phase 4 functional denominator passed 185/185 with zero skips on
-  Apple M4 Pro on 2026-08-29. This closes the local percentage gate, but it does
+  Apple M4 Pro on 2026-08-30. This closes the local percentage gate, but it does
   not substitute for a recurring verification mechanism or a commissioned GPU
   lane. GitHub Actions workflows are intentionally absent.
 - The typed shared-IR migration gate is not closed. With CUDA Clang 21-23, the
@@ -30,11 +30,12 @@ compatibility claim. Implemented surfaces and detailed limitations remain in
   specializations disabled. Native ABI v3 carries kernel, symbol, and device
   `printf` metadata and performs no first-launch PTX JIT. This closes the
   reviewed numerical corpus, not the residual language combinations in P1.
-- The manifest target still contains 83 enrolled headless samples and requires
-  83/83 pass. A 2026-08-30 rerun reached 82/83 because
-  `conjugateGradientMultiBlockCG` exceeded the macOS GPU watchdog; three PhysX
-  comparisons also failed. Repository-wide readiness remains open until those
-  runtime regressions are fixed and the complete suite is green again.
+- The manifest still contains 83 enrolled headless samples and the 2026-08-30
+  rerun passes 83/83. `conjugateGradientMultiBlockCG` now uses a
+  guaranteed-progress occupancy-derived cooperative grid and must satisfy its
+  independent host equation error, while the PhysX friction, stacked, and
+  triangle-mesh comparisons pass with aggregate PTX ABI sizes preserved in
+  their metallib sidecars.
 - The named five-kernel Phase 5 release set—vector add, SAXPY, STREAM copy,
   STREAM triad, and FP32 reduction—has measured Apple-GPU results below 2x
   native Metal on the recorded Apple M4 Pro system. The reproducible gate is

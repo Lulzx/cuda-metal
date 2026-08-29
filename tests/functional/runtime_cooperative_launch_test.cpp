@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
     cudaDeviceProp prop{};
     if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess ||
         cudaLaunchCooperativeKernel(
-            &kernel, dim3(static_cast<unsigned int>(prop.multiProcessorCount + 1), 1, 1),
+            &kernel, dim3(5, 1, 1),
             block, args, 0, nullptr) != cudaErrorCooperativeLaunchTooLarge) {
         std::fprintf(stderr, "FAIL: oversized cooperative launch was accepted\n");
         return 1;

@@ -35,8 +35,10 @@ int main() {
         std::fprintf(stderr, "FAIL: maxThreadsPerBlock should be positive\n");
         return 1;
     }
-    if (prop.multiProcessorCount <= 0) {
-        std::fprintf(stderr, "FAIL: multiProcessorCount should be positive\n");
+    if (prop.multiProcessorCount != 1) {
+        std::fprintf(stderr,
+                     "FAIL: multiProcessorCount should expose one guaranteed-progress "
+                     "cooperative partition\n");
         return 1;
     }
     if (prop.major != 8 || prop.minor != 0) {

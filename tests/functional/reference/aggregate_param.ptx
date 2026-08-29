@@ -1,0 +1,15 @@
+.version 7.0
+.target sm_70
+.address_size 64
+
+.visible .entry aggregate_param(
+    .param .align 4 .b8 packed[12],
+    .param .u64 output
+) {
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<2>;
+    ld.param.b32 %r1, [packed+8];
+    ld.param.u64 %rd1, [output];
+    st.global.b32 [%rd1], %r1;
+    ret;
+}

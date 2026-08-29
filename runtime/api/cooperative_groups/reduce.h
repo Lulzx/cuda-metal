@@ -8,6 +8,19 @@ namespace cooperative_groups {
 
 template <int TileSize, typename T, typename BinaryOp>
 __device__ __forceinline__ T reduce(const thread_block_tile<TileSize>& tile, T value, BinaryOp op) {
+    if constexpr (TileSize <= 32) {
+        // CUDA tiles up to a warp are SIMD collectives. A block-wide barrier is
+        // both unnecessary and invalid when a tile reduction is called from a
+        // branch taken by only one warp of a multi-warp block.
+        for (unsigned int offset = TileSize / 2u; offset > 0; offset >>= 1u) {
+            const T other = tile.shfl_down(value, offset);
+            if (tile.thread_rank() < offset) {
+                value = op(value, other);
+            }
+        }
+        return tile.shfl(value, 0u);
+    }
+
     __shared__ T shared[1024];
     const unsigned int linear_tid = threadIdx.z * (blockDim.y * blockDim.x) + threadIdx.y * blockDim.x +
                                     threadIdx.x;
