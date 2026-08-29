@@ -126,11 +126,12 @@ const std::string& cumetal_binary_uuid() {
 
 std::string registration_lowering_policy() {
     const char* backend = std::getenv("CUMETAL_PTX_BACKEND");
-    const char* fp64 = std::getenv("CUMETAL_FP64_MODE");
     std::string policy = "frontend=ptx;backend=";
     policy += backend != nullptr && backend[0] != '\0' ? backend : "legacy";
     policy += ";fp64=";
-    policy += fp64 != nullptr && fp64[0] != '\0' ? fp64 : "emulate";
+    policy += cumetal::ptx::fp64_mode_name(cumetal::ptx::fp64_mode_from_env());
+    policy += ";vf64_support_sha256=";
+    policy += CUMETAL_VF64_SUPPORT_SHA256;
     policy += ";workload_specializations=";
     policy += cumetal::diag_env_truthy("CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS")
                   ? "enabled"
@@ -1029,11 +1030,16 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     // cache reports the same provenance as a cold one. Only the LLVM path can
     // lower FP64 (the direct-MSL lowering declines it), so this is the single
     // place that needs to know.
-    const bool fp64_emulated =
-        cumetal::ptx::fp64_mode_from_env() == cumetal::ptx::Fp64Mode::kEmulate &&
-        ptx_source.find(".f64") != std::string::npos;
-    const char* const generic_ptx_provenance =
-        fp64_emulated ? "generic_ptx_lowering_fp64_emulated" : "generic_ptx_lowering";
+    const auto fp64_mode = cumetal::ptx::fp64_mode_from_env();
+    const bool uses_fp64 = ptx_source.find(".f64") != std::string::npos;
+    const char* generic_ptx_provenance = "generic_ptx_lowering";
+    if (uses_fp64 && fp64_mode == cumetal::ptx::Fp64Mode::kEmulate) {
+        generic_ptx_provenance = "generic_ptx_lowering_fp64_emulated";
+    } else if (uses_fp64 && fp64_mode == cumetal::ptx::Fp64Mode::kWide48) {
+        generic_ptx_provenance = "generic_ptx_lowering_fp64_wide48";
+    } else if (uses_fp64 && fp64_mode == cumetal::ptx::Fp64Mode::kIEEE64) {
+        generic_ptx_provenance = "generic_ptx_lowering_fp64_ieee64";
+    }
 
     // Multiple host threads may launch the same newly registered kernel at
     // once. Cache lookup and publication must be one transaction: otherwise

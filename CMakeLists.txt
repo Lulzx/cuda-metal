@@ -241,6 +241,11 @@ add_library(cumetal_runtime SHARED
     runtime/metal_backend/metal_backend.mm
 )
 
+file(SHA256
+    "${CMAKE_SOURCE_DIR}/third_party/f64-metal/Sources/F64Metal/Shaders/Interop/VF64Support.metal"
+    CUMETAL_VF64_SUPPORT_SHA256
+)
+
 set_target_properties(cumetal_runtime
     PROPERTIES
         OUTPUT_NAME cumetal
@@ -277,6 +282,7 @@ target_link_libraries(cumetal_runtime
 target_compile_definitions(cumetal_runtime
     PRIVATE
         CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        CUMETAL_VF64_SUPPORT_SHA256="${CUMETAL_VF64_SUPPORT_SHA256}"
 )
 
 target_compile_options(cumetal_runtime

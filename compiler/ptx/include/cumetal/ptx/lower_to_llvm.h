@@ -31,6 +31,17 @@ inline Fp64Mode fp64_mode_from_env() {
     return Fp64Mode::kEmulate;
 }
 
+inline std::string_view fp64_mode_name(Fp64Mode mode) {
+    switch (mode) {
+        case Fp64Mode::kNative: return "native";
+        case Fp64Mode::kEmulate: return "fast48";
+        case Fp64Mode::kWide48: return "wide48";
+        case Fp64Mode::kIEEE64: return "ieee64";
+        case Fp64Mode::kWarn: return "warn";
+    }
+    return "unknown";
+}
+
 struct LowerToLlvmOptions {
     bool strict = false;
     std::string entry_name;

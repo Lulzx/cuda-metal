@@ -55,6 +55,8 @@ const char* legacy_source_for_provenance(const std::string& provenance) {
     if (provenance == "generic_ptx_lowering") return "generic_ptx";
     if (provenance == "library_substitution") return "specialized_msl";
     if (provenance == "generic_ptx_lowering_fp64_emulated") return "generic_ptx";
+    if (provenance == "generic_ptx_lowering_fp64_wide48") return "generic_ptx";
+    if (provenance == "generic_ptx_lowering_fp64_ieee64") return "generic_ptx";
     if (provenance == "workload_specialization") return "specialized_msl";
     if (provenance == "precompiled_metallib") return "metallib";
     if (provenance == "cpu_fallback") return "cpu_fallback";
@@ -100,6 +102,7 @@ const char* semantic_quality_for_provenance(const std::string& provenance) {
     // 48-bit significand within binary32's exponent range. Reporting that as
     // `exact` would be the same kind of green-wash as calling a stub a pass.
     if (provenance == "generic_ptx_lowering_fp64_emulated") return "reduced_precision_fp64";
+    if (provenance == "generic_ptx_lowering_fp64_wide48") return "reduced_precision_fp64";
     return "exact";
 }
 
