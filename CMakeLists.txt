@@ -274,6 +274,11 @@ target_link_libraries(cumetal_runtime
         "-framework MetalPerformanceShaders"
 )
 
+target_compile_definitions(cumetal_runtime
+    PRIVATE
+        CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
 target_compile_options(cumetal_runtime
     PRIVATE
         -Wall

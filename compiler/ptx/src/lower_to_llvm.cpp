@@ -2109,6 +2109,79 @@ class GenericLlvmEmitter {
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, ieee, 64);
     }
 
+    bool uses_vf64_support() const {
+        return fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48 ||
+               fp64_mode_ == cumetal::ptx::Fp64Mode::kIEEE64;
+    }
+
+    std::optional<std::string> decode_fp64_raw_bits(
+        std::ostringstream& os, const std::string& operand
+    ) {
+        if (is_register_name(operand)) {
+            if (ensure_reg_slot(operand).bits != 64) return std::nullopt;
+            return emit_load_reg_bits(os, operand, 64);
+        }
+        std::uint64_t bits = 0;
+        bool parsed = false;
+        if (operand.size() == 18 && operand[0] == '0' && operand[1] == 'd') {
+            try {
+                bits = std::stoull(operand.substr(2), nullptr, 16);
+                parsed = true;
+            } catch (...) {
+            }
+        } else {
+            char* end = nullptr;
+            const double value = std::strtod(operand.c_str(), &end);
+            if (end != operand.c_str() && *end == '\0') {
+                std::memcpy(&bits, &value, sizeof(bits));
+                parsed = true;
+            }
+        }
+        if (!parsed) return std::nullopt;
+        const std::string raw = next_tmp("vf64_imm");
+        os << "  " << raw << " = or i64 0, " << static_cast<std::int64_t>(bits) << "\n";
+        return raw;
+    }
+
+    static int vf64_rounding_mode(const std::string& opcode) {
+        if (opcode.find(".rz") != std::string::npos) return 1;
+        if (opcode.find(".rm") != std::string::npos) return 2;
+        if (opcode.find(".rp") != std::string::npos) return 3;
+        return 0;
+    }
+
+    bool emit_vf64_binary_call(
+        std::ostringstream& os,
+        const cumetal::ptx::EntryFunction::Instruction& instr,
+        const std::string& operation
+    ) {
+        auto a = decode_fp64_raw_bits(os, instr.operands[1]);
+        auto b = decode_fp64_raw_bits(os, instr.operands[2]);
+        if (!a || !b) return fail(instr, "VF64 binary source unsupported");
+        const int rounding = vf64_rounding_mode(instr.opcode);
+        std::string function;
+        std::string arguments;
+        if (fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48) {
+            if (rounding != 0) {
+                return fail(instr, "wide48 supports round-to-nearest-even arithmetic only");
+            }
+            function = "vf64_wide_" + operation;
+            declarations_.insert("declare i64 @" + function + "(i64, i64)");
+            arguments = "i64 " + *a + ", i64 " + *b;
+        } else {
+            function = "vf64_" + operation + "_round";
+            declarations_.insert("declare i64 @" + function + "(i64, i64, i32)");
+            arguments = "i64 " + *a + ", i64 " + *b + ", i32 " +
+                        std::to_string(rounding);
+        }
+        const std::string result = next_tmp("vf64_" + operation);
+        os << "  " << result << " = call i64 @" << function << "(" << arguments << ")\n";
+        return emit_store_reg_bits(
+            os, instr.operands[0], ensure_reg_slot(instr.operands[0]).bits,
+            result, 64
+        );
+    }
+
     // A pair renormalization ends in `fadd leading, error`, which mishandles two
     // cases that the leading term itself gets right:
     //
@@ -2966,6 +3039,11 @@ class GenericLlvmEmitter {
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         int dst_bits = ensure_reg_slot(dst).bits;
         if (ty.kind == PtxTypeSpec::Kind::kFloat && (ty.bits == 32 || ty.bits == 64)) {
+            if (ty.bits == 64 && uses_vf64_support()) {
+                auto raw = decode_fp64_raw_bits(os, src);
+                if (!raw) return fail(instr, "VF64 mov.f64 source unsupported");
+                return emit_store_reg_bits(os, dst, dst_bits, *raw, 64);
+            }
             if (ty.bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
                 auto pair = decode_fp64_pair(os, src);
                 if (!pair) return fail(instr, "mov.f64 emulation source unsupported");
@@ -3101,6 +3179,13 @@ class GenericLlvmEmitter {
         }
 
         // FP64 emulation: decompose to FP32 Dekker pairs when --fp64=emulate
+        if (ty.bits == 64 && uses_vf64_support()) {
+            if (llvm_op == "fadd") return emit_vf64_binary_call(os, instr, "add");
+            if (llvm_op == "fsub") return emit_vf64_binary_call(os, instr, "sub");
+            if (llvm_op == "fmul") return emit_vf64_binary_call(os, instr, "mul");
+            if (llvm_op == "fdiv") return emit_vf64_binary_call(os, instr, "div");
+            return fail(instr, "unsupported VF64 binary operation");
+        }
         if (ty.bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
             auto a = decode_fp64_pair(os, instr.operands[1]);
             auto b = decode_fp64_pair(os, instr.operands[2]);
@@ -3268,6 +3353,34 @@ class GenericLlvmEmitter {
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         if (opcode_uses_float_math(instr.opcode)) {
             const int bits = (ty.bits == 64) ? 64 : 32;
+            if (bits == 64 && uses_vf64_support()) {
+                auto a = decode_fp64_raw_bits(os, instr.operands[1]);
+                auto b = decode_fp64_raw_bits(os, instr.operands[2]);
+                auto c = decode_fp64_raw_bits(os, instr.operands[3]);
+                if (!a || !b || !c) return fail(instr, "VF64 fma source unsupported");
+                const int rounding = vf64_rounding_mode(instr.opcode);
+                std::string function;
+                std::string arguments;
+                if (fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48) {
+                    if (rounding != 0) {
+                        return fail(instr, "wide48 supports round-to-nearest-even fma only");
+                    }
+                    function = "vf64_wide_fma";
+                    declarations_.insert("declare i64 @vf64_wide_fma(i64, i64, i64)");
+                    arguments = "i64 " + *a + ", i64 " + *b + ", i64 " + *c;
+                } else {
+                    function = "vf64_fma_round";
+                    declarations_.insert("declare i64 @vf64_fma_round(i64, i64, i64, i32)");
+                    arguments = "i64 " + *a + ", i64 " + *b + ", i64 " + *c +
+                                ", i32 " + std::to_string(rounding);
+                }
+                const std::string result = next_tmp("vf64_fma");
+                os << "  " << result << " = call i64 @" << function << "("
+                   << arguments << ")\n";
+                return emit_store_reg_bits(
+                    os, dst, ensure_reg_slot(dst).bits, result, 64
+                );
+            }
             if (bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
                 auto a = decode_fp64_pair(os, instr.operands[1]);
                 auto b = decode_fp64_pair(os, instr.operands[2]);
@@ -3313,6 +3426,14 @@ class GenericLlvmEmitter {
 
         if (opcode_uses_float_math(instr.opcode)) {
             const int bits = (ty.bits > 0) ? ty.bits : 32;
+            if (bits == 64 && uses_vf64_support()) {
+                auto raw = decode_fp64_raw_bits(os, instr.operands[1]);
+                if (!raw) return fail(instr, "VF64 neg source unsupported");
+                const std::string result = next_tmp("vf64_neg");
+                os << "  " << result << " = xor i64 " << *raw
+                   << ", -9223372036854775808\n";
+                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, result, 64);
+            }
             if (bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
                 auto a = decode_fp64_pair(os, instr.operands[1]);
                 auto b = decode_fp64_pair(os, instr.operands[2]);
@@ -3481,6 +3602,87 @@ class GenericLlvmEmitter {
         const bool converts_fp64 =
             (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64) ||
             (cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64);
+        if (uses_vf64_support() && converts_fp64) {
+            const int rounding = vf64_rounding_mode(instr.opcode);
+            if (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64 &&
+                cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64) {
+                auto raw = decode_fp64_raw_bits(os, src);
+                if (!raw) return fail(instr, "VF64 conversion source unsupported");
+                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *raw, 64);
+            }
+            if (cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64 &&
+                cvt.src.kind == PtxTypeSpec::Kind::kFloat &&
+                (cvt.src.bits == 16 || cvt.src.bits == 32)) {
+                auto value = decode_float_operand(os, src, cvt.src.bits);
+                if (!value) return fail(instr, "float-to-VF64 conversion source unsupported");
+                const std::string raw = next_tmp("vf64_from_float_raw");
+                os << "  " << raw << " = bitcast "
+                   << (cvt.src.bits == 16 ? "half" : "float") << " " << value->ir
+                   << " to " << llvm_int_type(cvt.src.bits) << "\n";
+                const std::string function = cvt.src.bits == 16
+                                                 ? "vf64_f16_to_f64"
+                                                 : "vf64_f32_to_f64";
+                declarations_.insert("declare i64 @" + function + "(" +
+                                     llvm_int_type(cvt.src.bits) + ")");
+                const std::string converted = next_tmp("vf64_from_float");
+                os << "  " << converted << " = call i64 @" << function << "("
+                   << llvm_int_type(cvt.src.bits) << " " << raw << ")\n";
+                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits,
+                                           converted, 64);
+            }
+            if (cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64 &&
+                cvt.src.kind == PtxTypeSpec::Kind::kInt &&
+                (cvt.src.bits == 32 || cvt.src.bits == 64)) {
+                auto value = emit_integer_from_any(os, src, cvt.src.bits,
+                                                   cvt.src.is_signed);
+                if (!value) return fail(instr, "integer-to-VF64 conversion source unsupported");
+                const std::string function = std::string("vf64_") +
+                    (cvt.src.is_signed ? "i" : "ui") +
+                    std::to_string(cvt.src.bits) + "_to_f64";
+                declarations_.insert("declare i64 @" + function + "(" +
+                                     llvm_int_type(cvt.src.bits) + ", i32)");
+                const std::string converted = next_tmp("vf64_from_int");
+                os << "  " << converted << " = call i64 @" << function << "("
+                   << llvm_int_type(cvt.src.bits) << " " << *value << ", i32 "
+                   << rounding << ")\n";
+                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits,
+                                           converted, 64);
+            }
+            if (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64 &&
+                cvt.dst.kind == PtxTypeSpec::Kind::kFloat &&
+                (cvt.dst.bits == 16 || cvt.dst.bits == 32)) {
+                auto raw = decode_fp64_raw_bits(os, src);
+                if (!raw) return fail(instr, "VF64-to-float conversion source unsupported");
+                const std::string function = cvt.dst.bits == 16
+                                                 ? "vf64_f64_to_f16"
+                                                 : "vf64_f64_to_f32";
+                declarations_.insert("declare " + llvm_int_type(cvt.dst.bits) +
+                                     " @" + function + "(i64, i32)");
+                const std::string converted = next_tmp("vf64_to_float");
+                os << "  " << converted << " = call " << llvm_int_type(cvt.dst.bits)
+                   << " @" << function << "(i64 " << *raw << ", i32 " << rounding
+                   << ")\n";
+                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits,
+                                           converted, cvt.dst.bits);
+            }
+            if (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64 &&
+                cvt.dst.kind == PtxTypeSpec::Kind::kInt &&
+                (cvt.dst.bits == 32 || cvt.dst.bits == 64)) {
+                auto raw = decode_fp64_raw_bits(os, src);
+                if (!raw) return fail(instr, "VF64-to-integer conversion source unsupported");
+                const std::string function = std::string("vf64_f64_to_") +
+                    (cvt.dst.is_signed ? "i" : "ui") + std::to_string(cvt.dst.bits);
+                declarations_.insert("declare " + llvm_int_type(cvt.dst.bits) +
+                                     " @" + function + "(i64, i32, i1)");
+                const std::string converted = next_tmp("vf64_to_int");
+                os << "  " << converted << " = call " << llvm_int_type(cvt.dst.bits)
+                   << " @" << function << "(i64 " << *raw << ", i32 " << rounding
+                   << ", i1 true)\n";
+                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits,
+                                           converted, cvt.dst.bits);
+            }
+            return fail(instr, "this VF64 conversion is not supported");
+        }
         if (fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate && converts_fp64) {
             if (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64 &&
                 cvt.dst.kind == PtxTypeSpec::Kind::kFloat) {
@@ -6985,6 +7187,35 @@ class GenericLlvmEmitter {
     }
 
     bool emit_sqrt(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
+        if (instr.opcode.find(".f64") != std::string::npos && uses_vf64_support()) {
+            if (instr.operands.size() < 2 || !is_register_name(instr.operands[0])) {
+                return fail(instr, "VF64 sqrt requires dst and src");
+            }
+            auto raw = decode_fp64_raw_bits(os, instr.operands[1]);
+            if (!raw) return fail(instr, "VF64 sqrt source unsupported");
+            const int rounding = vf64_rounding_mode(instr.opcode);
+            std::string function;
+            std::string arguments;
+            if (fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48) {
+                if (rounding != 0) {
+                    return fail(instr, "wide48 supports round-to-nearest-even sqrt only");
+                }
+                function = "vf64_wide_sqrt";
+                declarations_.insert("declare i64 @vf64_wide_sqrt(i64)");
+                arguments = "i64 " + *raw;
+            } else {
+                function = "vf64_sqrt_round";
+                declarations_.insert("declare i64 @vf64_sqrt_round(i64, i32)");
+                arguments = "i64 " + *raw + ", i32 " + std::to_string(rounding);
+            }
+            const std::string result = next_tmp("vf64_sqrt");
+            os << "  " << result << " = call i64 @" << function << "("
+               << arguments << ")\n";
+            return emit_store_reg_bits(
+                os, instr.operands[0], ensure_reg_slot(instr.operands[0]).bits,
+                result, 64
+            );
+        }
         return emit_float_math_unary(os, instr, "air.fast_sqrt");
     }
 
@@ -7023,6 +7254,14 @@ class GenericLlvmEmitter {
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         const int bits = (ty.bits > 0) ? ty.bits : ensure_reg_slot(dst).bits;
         if (ty.kind == PtxTypeSpec::Kind::kFloat) {
+            if (bits == 64 && uses_vf64_support()) {
+                auto raw = decode_fp64_raw_bits(os, instr.operands[1]);
+                if (!raw) return fail(instr, "VF64 abs source unsupported");
+                const std::string result = next_tmp("vf64_abs");
+                os << "  " << result << " = and i64 " << *raw
+                   << ", 9223372036854775807\n";
+                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, result, 64);
+            }
             if (bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
                 auto pair = decode_fp64_pair(os, instr.operands[1]);
                 if (!pair) return fail(instr, "fp64 abs emulation source unsupported");

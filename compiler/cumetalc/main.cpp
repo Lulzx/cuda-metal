@@ -154,7 +154,7 @@ void print_usage(const char* argv0) {
                  " [--backend legacy|cumetal-ir]"
                  " [--emit llvm|cumetal-ir|metal-ir|msl|metallib|exe]"
                  " [--link|--no-link] [--save-temps]"
-                 " [--fp64=native|emulate|warn]\n";
+                 " [--fp64=fast48|wide48|ieee64|native|emulate|warn]\n";
 }
 
 std::string lower_ext(const std::filesystem::path& path) {
@@ -597,6 +597,7 @@ int main(int argc, char** argv) {
     std::string ptx_entry_name;
     bool ptx_strict = false;
     cumetal::ptx::Fp64Mode ptx_fp64_mode = cumetal::ptx::Fp64Mode::kNative;
+    bool needs_vf64_support = false;
     bool cuda_device_frontend = false;
     std::string cuda_arch = "sm_80";
     std::filesystem::path cuda_clang;
@@ -756,13 +757,17 @@ int main(int argc, char** argv) {
             const std::string fp64_mode_str = arg.substr(7);
             if (fp64_mode_str == "native") {
                 ptx_fp64_mode = cumetal::ptx::Fp64Mode::kNative;
-            } else if (fp64_mode_str == "emulate") {
+            } else if (fp64_mode_str == "emulate" || fp64_mode_str == "fast48") {
                 ptx_fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
+            } else if (fp64_mode_str == "wide48") {
+                ptx_fp64_mode = cumetal::ptx::Fp64Mode::kWide48;
+            } else if (fp64_mode_str == "ieee64") {
+                ptx_fp64_mode = cumetal::ptx::Fp64Mode::kIEEE64;
             } else if (fp64_mode_str == "warn") {
                 ptx_fp64_mode = cumetal::ptx::Fp64Mode::kWarn;
             } else {
                 std::cerr << "invalid --fp64 mode: " << fp64_mode_str
-                          << " (valid: native, emulate, warn)\n";
+                          << " (valid: fast48, wide48, ieee64, native, emulate, warn)\n";
                 return 2;
             }
         } else if (arg == "--link") {
@@ -1050,6 +1055,10 @@ int main(int argc, char** argv) {
                 options.input = temp_stage_file;
                 options.kernel_name = lowered.entry_name;
                 temp_files.push_back(temp_stage_file);
+                needs_vf64_support =
+                    ptx_source.find(".f64") != std::string::npos &&
+                    (ptx_fp64_mode == cumetal::ptx::Fp64Mode::kWide48 ||
+                     ptx_fp64_mode == cumetal::ptx::Fp64Mode::kIEEE64);
             }
         }
     } else if (input_ext == ".ll" || input_ext == ".llvm") {
@@ -1253,6 +1262,12 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (needs_vf64_support) {
+        options.additional_link_inputs.push_back(
+            std::filesystem::path(CUMETAL_SOURCE_DIR) / "third_party" / "f64-metal" /
+            "Sources" / "F64Metal" / "Shaders" / "Interop" / "VF64Support.metal"
+        );
+    }
     const auto result = cumetal::air_emitter::emit_metallib(options);
     for (const auto& temp_file : temp_files) {
         std::error_code ec;

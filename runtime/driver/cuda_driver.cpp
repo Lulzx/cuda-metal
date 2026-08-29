@@ -597,6 +597,15 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path) {
     emit_options.validate_output = false;
     emit_options.fallback_to_experimental = true;
     emit_options.kernel_name = lowered.entry_name.empty() ? "vector_add" : lowered.entry_name;
+    if (ptx.find(".f64") != std::string::npos &&
+        (lower_opts.fp64_mode == cumetal::ptx::Fp64Mode::kWide48 ||
+         lower_opts.fp64_mode == cumetal::ptx::Fp64Mode::kIEEE64)) {
+        emit_options.additional_link_inputs.push_back(
+            std::filesystem::path(CUMETAL_SOURCE_DIR) / "third_party" /
+            "f64-metal" / "Sources" / "F64Metal" / "Shaders" /
+            "Interop" / "VF64Support.metal"
+        );
+    }
 
     const auto emitted = cumetal::air_emitter::emit_metallib(emit_options);
     std::error_code ec;

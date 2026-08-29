@@ -12,6 +12,8 @@ namespace cumetal::ptx {
 enum class Fp64Mode {
     kNative,   // emit AIR FP64 instructions as-is (fails at Metal pipeline create on Apple GPU)
     kEmulate,  // Dekker FP32-pair ALU + IEEE binary64 register/memory bits; runtime default
+    kWide48,   // full-binary64-range scaled FP32-pair arithmetic via VF64 support AIR
+    kIEEE64,   // correctly rounded software binary64 via VF64 support AIR
     kWarn,     // same as kNative but emit a per-instruction warning for .f64 ops
 };
 
@@ -21,6 +23,9 @@ inline Fp64Mode fp64_mode_from_env() {
     if (env != nullptr) {
         const std::string_view mode(env);
         if (mode == "native") return Fp64Mode::kNative;
+        if (mode == "emulate" || mode == "fast48") return Fp64Mode::kEmulate;
+        if (mode == "wide48") return Fp64Mode::kWide48;
+        if (mode == "ieee64") return Fp64Mode::kIEEE64;
         if (mode == "warn") return Fp64Mode::kWarn;
     }
     return Fp64Mode::kEmulate;

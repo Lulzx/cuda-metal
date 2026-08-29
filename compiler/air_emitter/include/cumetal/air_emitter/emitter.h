@@ -20,6 +20,9 @@ struct EmitOptions {
     bool validate_output = true;
     bool run_xcrun_validate = false;
     std::string kernel_name = "vector_add";
+    // Additional AIR modules or Metal sources to compile and statically link
+    // into the result. Used by software ISA backends such as VF64.
+    std::vector<std::filesystem::path> additional_link_inputs;
 };
 
 struct EmitResult {

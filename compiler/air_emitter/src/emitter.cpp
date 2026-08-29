@@ -561,7 +561,8 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
             const CommandResult cmd = run_command_capture(command);
             result.logs.push_back("$ " + command);
             result.logs.push_back(cmd.output);
-            if (cmd.started && cmd.exit_code == 0) {
+            if (options.additional_link_inputs.empty() &&
+                cmd.started && cmd.exit_code == 0) {
                 result.logs.push_back("used xcrun metal AOT for LLVM IR -> metallib");
                 std::filesystem::remove_all(temp_dir);
                 result.ok = true;
@@ -618,9 +619,59 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
         return result;
     }
 
+    std::filesystem::path packaged_air = temp_air;
+    if (!options.additional_link_inputs.empty()) {
+        const std::string xcrun_path = find_tool("xcrun");
+        const std::string xcrun_bin = xcrun_path.empty() ? "xcrun" : xcrun_path;
+        std::vector<std::filesystem::path> link_inputs = {temp_air};
+        for (std::size_t index = 0; index < options.additional_link_inputs.size(); ++index) {
+            const auto& input = options.additional_link_inputs[index];
+            if (!std::filesystem::exists(input)) {
+                result.error = "additional AIR link input does not exist: " + input.string();
+                std::filesystem::remove_all(temp_dir);
+                return result;
+            }
+            const std::string input_ext = lower_ext(input);
+            if (input_ext == ".air") {
+                link_inputs.push_back(input);
+                continue;
+            }
+            if (input_ext != ".metal") {
+                result.error = "additional link input must be .air or .metal: " + input.string();
+                std::filesystem::remove_all(temp_dir);
+                return result;
+            }
+            const auto compiled = temp_dir / ("support-" + std::to_string(index) + ".air");
+            const std::string command = xcrun_bin + " metal -std=metal3.2 -c " +
+                quote_shell(input.string()) + " -o " + quote_shell(compiled.string()) + " 2>&1";
+            const CommandResult cmd = run_command_capture(command);
+            result.logs.push_back("$ " + command);
+            if (!cmd.output.empty()) result.logs.push_back(cmd.output);
+            if (!cmd.started || cmd.exit_code != 0) {
+                result.error = "failed to compile additional Metal link input";
+                std::filesystem::remove_all(temp_dir);
+                return result;
+            }
+            link_inputs.push_back(compiled);
+        }
+
+        packaged_air = temp_dir / "linked.air";
+        std::string command = xcrun_bin + " air-link";
+        for (const auto& input : link_inputs) command += " " + quote_shell(input.string());
+        command += " -o " + quote_shell(packaged_air.string()) + " 2>&1";
+        const CommandResult linked = run_command_capture(command);
+        result.logs.push_back("$ " + command);
+        if (!linked.output.empty()) result.logs.push_back(linked.output);
+        if (!linked.started || linked.exit_code != 0) {
+            result.error = "failed to statically link additional AIR modules";
+            std::filesystem::remove_all(temp_dir);
+            return result;
+        }
+    }
+
     const std::string xcrun_for_metallib = find_tool("xcrun");
     const std::string xcrun_metallib_bin = xcrun_for_metallib.empty() ? "xcrun" : xcrun_for_metallib;
-    const std::string metallib_command = xcrun_metallib_bin + " metallib " + quote_shell(temp_air.string()) +
+    const std::string metallib_command = xcrun_metallib_bin + " metallib " + quote_shell(packaged_air.string()) +
                                          " -o " + quote_shell(options.output.string()) + " 2>&1";
     const CommandResult pack_cmd = run_command_capture(metallib_command);
     result.logs.push_back("$ " + metallib_command);

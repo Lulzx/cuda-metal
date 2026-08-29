@@ -223,6 +223,7 @@ ValidationResult validate_file(const std::filesystem::path& path, const Validati
                  .message = "function list is empty in parsed container"});
         }
 
+        std::size_t kernel_count = 0;
         for (const auto& kernel : result.summary.kernels) {
             if (options.require_bitcode) {
                 validate_kernel_bitcode(path, bytes, kernel, options, &result.diagnostics);
@@ -231,11 +232,19 @@ ValidationResult validate_file(const std::filesystem::path& path, const Validati
             if (options.require_kernel_metadata) {
                 const bool has_air_kernel = kernel_has_metadata(kernel, "air.kernel");
                 const bool has_air_version = kernel_has_metadata(kernel, "air.version");
-                if (!has_air_kernel || !has_air_version) {
+                if (!has_air_kernel) {
+                    result.diagnostics.push_back(
+                        {.severity = Severity::kInfo,
+                         .message = "function " + kernel.name +
+                                    " is a linked helper, not an AIR kernel"});
+                    continue;
+                }
+                ++kernel_count;
+                if (!has_air_version) {
                     result.diagnostics.push_back(
                         {.severity = Severity::kError,
                          .message = "kernel " + kernel.name +
-                                    " is missing required metadata (air.kernel/air.version)"});
+                                    " is missing required metadata (air.version)"});
                 } else {
                     result.diagnostics.push_back(
                         {.severity = Severity::kInfo,
@@ -243,6 +252,11 @@ ValidationResult validate_file(const std::filesystem::path& path, const Validati
                                     " includes required metadata fields"});
                 }
             }
+        }
+        if (options.require_kernel_metadata && kernel_count == 0) {
+            result.diagnostics.push_back(
+                {.severity = Severity::kError,
+                 .message = "function list contains no AIR kernels"});
         }
     } else if ((options.require_function_list || options.require_kernel_metadata) &&
                !options.run_metal_library_archive) {

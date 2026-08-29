@@ -1277,6 +1277,15 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
             return false;
         }
         emit_options.kernel_name = lowered.entry_name.empty() ? kernel_name : lowered.entry_name;
+        if (ptx_source.find(".f64") != std::string::npos &&
+            (lower_options.fp64_mode == cumetal::ptx::Fp64Mode::kWide48 ||
+             lower_options.fp64_mode == cumetal::ptx::Fp64Mode::kIEEE64)) {
+            emit_options.additional_link_inputs.push_back(
+                std::filesystem::path(CUMETAL_SOURCE_DIR) / "third_party" /
+                "f64-metal" / "Sources" / "F64Metal" / "Shaders" /
+                "Interop" / "VF64Support.metal"
+            );
+        }
     }
     emit_options.input = staged_input;
 

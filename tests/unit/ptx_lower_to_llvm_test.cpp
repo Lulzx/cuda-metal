@@ -1622,6 +1622,51 @@ $L_done:
         return 1;
     }
 
+    const std::string ieee64_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry ieee64_work()
+{
+    .reg .f32 %f<3>;
+    .reg .f64 %fd<7>;
+    .reg .s32 %r<3>;
+    mov.f32 %f1, 1.25;
+    cvt.rn.f64.f32 %fd1, %f1;
+    mov.s32 %r1, -17;
+    cvt.rn.f64.s32 %fd2, %r1;
+    add.rz.f64 %fd3, %fd1, %fd2;
+    mul.rn.f64 %fd4, %fd3, %fd1;
+    div.rp.f64 %fd5, %fd4, %fd1;
+    fma.rm.f64 %fd6, %fd5, %fd1, %fd2;
+    cvt.rn.f32.f64 %f2, %fd6;
+    cvt.rzi.s32.f64 %r2, %fd6;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions ieee64_options;
+    ieee64_options.entry_name = "ieee64_work";
+    ieee64_options.strict = true;
+    ieee64_options.fp64_mode = cumetal::ptx::Fp64Mode::kIEEE64;
+    const auto ieee64_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(ieee64_ptx, ieee64_options);
+    if (!expect(ieee64_lowered.ok,
+                "ieee64 arithmetic and conversions lower to the VF64 ABI")) {
+        std::fprintf(stderr, "  error: %s\n", ieee64_lowered.error.c_str());
+        return 1;
+    }
+    if (!expect(!contains(ieee64_lowered.llvm_ir, "double") &&
+                    contains(ieee64_lowered.llvm_ir, "@vf64_f32_to_f64") &&
+                    contains(ieee64_lowered.llvm_ir, "@vf64_i32_to_f64") &&
+                    contains(ieee64_lowered.llvm_ir, "@vf64_add_round") &&
+                    contains(ieee64_lowered.llvm_ir, "@vf64_mul_round") &&
+                    contains(ieee64_lowered.llvm_ir, "@vf64_div_round") &&
+                    contains(ieee64_lowered.llvm_ir, "@vf64_fma_round") &&
+                    contains(ieee64_lowered.llvm_ir, "@vf64_f64_to_f32") &&
+                    contains(ieee64_lowered.llvm_ir, "@vf64_f64_to_i32"),
+                "ieee64 lowering contains only integer-bit VF64 calls")) {
+        return 1;
+    }
+
     const std::string directed_fp64_ptx = R"PTX(
 .version 8.0
 .target sm_80
