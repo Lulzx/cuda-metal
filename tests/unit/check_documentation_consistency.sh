@@ -101,6 +101,9 @@ expect_fragment docs/legal-notice.md "This is engineering policy, not legal advi
 expect_fragment docs/legal-notice.md "production compiler emits typed Metal Shading Language"
 expect_fragment docs/legal-notice.md "research and regression tooling only"
 expect_fragment docs/legal-notice.md "does not claim a private AIR ABI as a supported production interface"
+expect_fragment docs/known-gaps/compiler.md "LZ4/Zstd-compressed PTX entries"
+expect_fragment docs/status/runtime.md "Decompression is capped at 64 MiB"
+expect_fragment docs/spec-closure-roadmap.md "LZ4/Zstd PTX entry support"
 
 # Keep source-first packaging policy tied to its actual CMake default.
 expect_fragment CMakeLists.txt 'set(CUMETAL_ENABLE_BINARY_SHIM_DEFAULT OFF)'

@@ -1,10 +1,12 @@
 #include "cuda_runtime.h"
+#include "compressed_fatbin_fixture.h"
 #include "elf_fatbin_fixture.h"
 
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -91,6 +93,8 @@ int main(int argc, char** argv) {
     const std::string ptx_path = argv[1];
     const bool concurrent_first_use =
         argc > 2 && std::string(argv[2]) == "--concurrent-first-use";
+    const std::string fallback_metallib =
+        argc > 2 && !concurrent_first_use ? argv[2] : "";
     if (!std::filesystem::exists(ptx_path)) {
         std::fprintf(stderr, "SKIP: PTX not found at %s\n", ptx_path.c_str());
         return 77;
@@ -126,6 +130,20 @@ int main(int argc, char** argv) {
         cumetal::test::make_elf64_image(".ptx", raw_ptx_payload);
     const std::vector<std::uint8_t> elf32_raw_ptx =
         cumetal::test::make_elf32_image(".ptx", raw_ptx_payload);
+    const std::vector<std::uint8_t> lz4_fatbin =
+        cumetal::test::make_compressed_fatbin(
+            ptx_file_bytes, cumetal::test::FatbinCompression::kLz4);
+    const std::vector<std::uint8_t> zstd_fatbin =
+        cumetal::test::make_compressed_fatbin(
+            ptx_file_bytes, cumetal::test::FatbinCompression::kZstd);
+    if (lz4_fatbin.empty() || zstd_fatbin.empty()) {
+        std::fprintf(stderr, "FAIL: compressed fatbin fixture creation failed\n");
+        return 1;
+    }
+    const std::vector<std::uint8_t> elf_lz4_fatbin =
+        cumetal::test::make_elf64_image(".nv_fatbin", lz4_fatbin);
+    const std::vector<std::uint8_t> elf_zstd_fatbin =
+        cumetal::test::make_elf64_image(".nv_fatbin", zstd_fatbin);
 
     FatbinBlobHeader padded_header{};
     padded_header.header_size = 64;
@@ -274,6 +292,120 @@ int main(int argc, char** argv) {
 
     if (!consume_expected_launch_failure("after __cudaUnregisterFatBinary")) {
         return 1;
+    }
+
+    const auto run_compressed_registration =
+        [&](const std::vector<std::uint8_t>& image, const char* name) -> bool {
+        FatbinWrapper compressed_wrapper{};
+        compressed_wrapper.data = image.data();
+        void** compressed_handle =
+            __cudaRegisterFatBinary(&compressed_wrapper);
+        if (compressed_handle == nullptr) {
+            std::fprintf(stderr, "FAIL: %s registration returned null\n", name);
+            return false;
+        }
+        __cudaRegisterFunction(
+            compressed_handle,
+            reinterpret_cast<const void*>(&vector_add_host_stub),
+            device_function, nullptr, 0, nullptr, nullptr, nullptr, nullptr,
+            nullptr);
+        if (cudaMemset(dev_c, 0, bytes) != cudaSuccess ||
+            cudaLaunchKernel(
+                reinterpret_cast<const void*>(&vector_add_host_stub), grid_dim,
+                block_dim, args, 0, nullptr) != cudaSuccess ||
+            cudaDeviceSynchronize() != cudaSuccess ||
+            cudaMemcpy(host_c.data(), dev_c, bytes,
+                       cudaMemcpyDeviceToHost) != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: %s registration launch failed\n", name);
+            __cudaUnregisterFatBinary(compressed_handle);
+            return false;
+        }
+        for (std::size_t i = 0; i < kElementCount; ++i) {
+            const float expected = host_a[i] + host_b[i];
+            if (!nearly_equal(host_c[i], expected)) {
+                std::fprintf(stderr,
+                             "FAIL: %s mismatch at %zu (got=%f expected=%f)\n",
+                             name, i, static_cast<double>(host_c[i]),
+                             static_cast<double>(expected));
+                __cudaUnregisterFatBinary(compressed_handle);
+                return false;
+            }
+        }
+        __cudaUnregisterFatBinary(compressed_handle);
+        std::printf("COMPRESSED_REGISTRATION_OK %s\n", name);
+        return true;
+    };
+
+    if (!run_compressed_registration(lz4_fatbin, "LZ4 fatbin") ||
+        !run_compressed_registration(zstd_fatbin, "Zstd fatbin") ||
+        !run_compressed_registration(elf_lz4_fatbin, "ELF LZ4 fatbin") ||
+        !run_compressed_registration(elf_zstd_fatbin, "ELF Zstd fatbin")) {
+        return 1;
+    }
+
+    std::vector<std::uint8_t> malformed_compressed = lz4_fatbin;
+    cumetal::test::write_value<std::uint32_t>(
+        &malformed_compressed, 16u + 16u, 1u);
+    FatbinWrapper malformed_compressed_wrapper{};
+    malformed_compressed_wrapper.data = malformed_compressed.data();
+    void** malformed_compressed_handle =
+        __cudaRegisterFatBinary(&malformed_compressed_wrapper);
+    if (malformed_compressed_handle == nullptr) {
+        std::fprintf(stderr,
+                     "FAIL: malformed compressed registration returned null handle\n");
+        return 1;
+    }
+    __cudaRegisterFunction(
+        malformed_compressed_handle,
+        reinterpret_cast<const void*>(&vector_add_host_stub), device_function,
+        nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr);
+    if (cudaLaunchKernel(
+            reinterpret_cast<const void*>(&vector_add_host_stub), grid_dim,
+            block_dim, args, 0, nullptr) != cudaErrorInvalidValue ||
+        !consume_expected_launch_failure("malformed compressed fatbin")) {
+        std::fprintf(stderr,
+                     "FAIL: malformed compressed registration was launchable\n");
+        __cudaUnregisterFatBinary(malformed_compressed_handle);
+        return 1;
+    }
+    __cudaUnregisterFatBinary(malformed_compressed_handle);
+
+    if (!fallback_metallib.empty()) {
+        std::vector<std::uint8_t> unsupported_entry_version = lz4_fatbin;
+        cumetal::test::write_value<std::uint16_t>(
+            &unsupported_entry_version, 16u + 2u, 0x0102u);
+        if (setenv("CUMETAL_FATBIN_METALLIB",
+                   fallback_metallib.c_str(), 1) != 0) {
+            std::fprintf(stderr,
+                         "FAIL: could not configure environment fallback test\n");
+            return 1;
+        }
+        FatbinWrapper unsupported_wrapper{};
+        unsupported_wrapper.data = unsupported_entry_version.data();
+        void** unsupported_handle =
+            __cudaRegisterFatBinary(&unsupported_wrapper);
+        __cudaRegisterFunction(
+            unsupported_handle,
+            reinterpret_cast<const void*>(&vector_add_host_stub),
+            device_function, nullptr, 0, nullptr, nullptr, nullptr, nullptr,
+            nullptr);
+        const cudaError_t unsupported_launch = cudaLaunchKernel(
+            reinterpret_cast<const void*>(&vector_add_host_stub), grid_dim,
+            block_dim, args, 0, nullptr);
+        const cudaError_t unsupported_sync = cudaDeviceSynchronize();
+        unsetenv("CUMETAL_FATBIN_METALLIB");
+        if (unsupported_launch != cudaErrorInvalidValue ||
+            unsupported_sync != cudaErrorInvalidValue) {
+            std::fprintf(stderr,
+                         "FAIL: unsupported fatbin version used the environment metallib fallback "
+                         "(launch=%d sync=%d)\n",
+                         static_cast<int>(unsupported_launch),
+                         static_cast<int>(unsupported_sync));
+            __cudaUnregisterFatBinary(unsupported_handle);
+            return 1;
+        }
+        __cudaUnregisterFatBinary(unsupported_handle);
+        std::printf("UNSUPPORTED_FATBIN_FALLBACK_REFUSED\n");
     }
 
     FatbinWrapperPrefixed wrapper_prefixed{};
@@ -682,6 +814,6 @@ int main(int argc, char** argv) {
     }
 
     std::printf(
-        "PASS: runtime registration supports fatbin, bounded ELF32/ELF64 extended indexes, and FatBinary3 PTX paths\n");
+        "PASS: runtime registration supports bounded LZ4/Zstd fatbins, ELF32/ELF64 extended indexes, and FatBinary3 PTX paths\n");
     return 0;
 }

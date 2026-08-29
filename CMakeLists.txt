@@ -239,9 +239,15 @@ else()
     set(CUMETAL_REGISTRATION_SOURCE runtime/registration/registration_stub.cpp)
 endif()
 
+find_path(CUMETAL_LZ4_INCLUDE_DIR NAMES lz4.h REQUIRED)
+find_library(CUMETAL_LZ4_LIBRARY NAMES lz4 REQUIRED)
+find_path(CUMETAL_ZSTD_INCLUDE_DIR NAMES zstd.h REQUIRED)
+find_library(CUMETAL_ZSTD_LIBRARY NAMES zstd REQUIRED)
+
 add_library(cumetal_runtime SHARED
     runtime/cache/module_cache.cpp
     runtime/common/fatbin_elf.cpp
+    runtime/common/fatbin_ptx.cpp
     runtime/common/metal_math_mode.cpp
     runtime/driver/cuda_driver.cpp
     runtime/error/library_conflict.cpp
@@ -291,6 +297,9 @@ target_include_directories(cumetal_runtime
         runtime/registration
         runtime/rt
         runtime/metal_backend
+    PRIVATE
+        ${CUMETAL_LZ4_INCLUDE_DIR}
+        ${CUMETAL_ZSTD_INCLUDE_DIR}
 )
 
 target_link_libraries(cumetal_runtime
@@ -299,6 +308,8 @@ target_link_libraries(cumetal_runtime
         "-framework Foundation"
         "-framework Metal"
         "-framework MetalPerformanceShaders"
+        ${CUMETAL_LZ4_LIBRARY}
+        ${CUMETAL_ZSTD_LIBRARY}
 )
 
 target_compile_definitions(cumetal_runtime

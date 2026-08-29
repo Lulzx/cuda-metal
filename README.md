@@ -31,8 +31,8 @@ native registration ABI, including constant/device symbol metadata; it does not
 ship PTX or perform first-launch JIT.
 
 Requirements are macOS 14 or newer on Apple Silicon, CMake, LLVM 18+ libraries,
-a CUDA-capable Clang 21-23 frontend, and Apple's public `metal` and `metallib`
-tools. See the
+a CUDA-capable Clang 21-23 frontend, LZ4/Zstd libraries, and Apple's public
+`metal` and `metallib` tools. See the
 [build and installation guide](docs/build.md) before packaging or installing.
 
 For a staged GPU demonstration:

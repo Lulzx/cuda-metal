@@ -1,4 +1,5 @@
 #include "fatbin_elf.h"
+#include "fatbin_ptx.h"
 
 #include <cstdint>
 #include <cstring>
@@ -12,14 +13,6 @@ constexpr std::size_t kElf32SectionHeaderSize = 40;
 constexpr std::size_t kElf64HeaderSize = 64;
 constexpr std::size_t kElf64SectionHeaderSize = 64;
 constexpr std::uint32_t kFatbinBlobMagic = 0xBA55ED50u;
-constexpr std::uint16_t kFatbinHeaderMinSize = 16u;
-
-struct FatbinBlobHeader {
-    std::uint32_t magic = 0;
-    std::uint16_t version = 0;
-    std::uint16_t header_size = 0;
-    std::uint64_t fat_size = 0;
-};
 
 struct SectionView {
     std::uint32_t name_offset = 0;
@@ -91,43 +84,6 @@ SectionView read_section(const std::uint8_t* bytes,
     return section;
 }
 
-bool extract_ptx(const std::uint8_t* bytes,
-                 std::size_t size,
-                 std::string* out_ptx) {
-    constexpr std::string_view kMarker = ".version";
-    if (bytes == nullptr || out_ptx == nullptr || size < kMarker.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i + kMarker.size() <= size; ++i) {
-        if (std::memcmp(bytes + i, kMarker.data(), kMarker.size()) != 0) {
-            continue;
-        }
-        const char* start = reinterpret_cast<const char*>(bytes + i);
-        std::size_t candidate_size = size - i;
-        if (const void* terminator = std::memchr(start, '\0', candidate_size);
-            terminator != nullptr) {
-            candidate_size = static_cast<const char*>(terminator) - start;
-        } else {
-            for (std::size_t j = candidate_size; j > 0; --j) {
-                if (start[j - 1] == '}') {
-                    candidate_size = j;
-                    break;
-                }
-            }
-        }
-        if (candidate_size == 0) {
-            continue;
-        }
-        std::string candidate(start, candidate_size);
-        if (candidate.find(".entry") == std::string::npos) {
-            continue;
-        }
-        *out_ptx = std::move(candidate);
-        return true;
-    }
-    return false;
-}
-
 bool is_ptx_section_name(std::string_view name) {
     return name == ".nv_fatbin" || name == ".nvFatBinSegment" ||
            name == ".ptx" || name == ".nv_ptx";
@@ -139,24 +95,24 @@ ElfPtxStatus extract_from_section(const std::uint8_t* bytes,
     const auto* section_bytes = bytes + static_cast<std::size_t>(section.offset);
     const std::size_t section_size = static_cast<std::size_t>(section.size);
 
-    for (std::size_t i = 0; i + sizeof(FatbinBlobHeader) <= section_size; ++i) {
+    constexpr std::size_t kFatbinOuterHeaderSize = 16u;
+    for (std::size_t i = 0;
+         i + kFatbinOuterHeaderSize <= section_size; ++i) {
         if (read_value<std::uint32_t>(section_bytes, i) != kFatbinBlobMagic) {
             continue;
         }
-        FatbinBlobHeader header{};
-        std::memcpy(&header, section_bytes + i, sizeof(header));
-        if (header.header_size < kFatbinHeaderMinSize ||
-            !checked_range(i + header.header_size, header.fat_size, section_size)) {
+        const PtxExtractStatus status = extract_fatbin_ptx(
+            section_bytes + i, section_size - i, out_ptx);
+        if (status == PtxExtractStatus::kFound) return ElfPtxStatus::kFound;
+        if (status == PtxExtractStatus::kMalformed) {
             return ElfPtxStatus::kMalformed;
         }
-        if (extract_ptx(section_bytes + i + header.header_size,
-                        static_cast<std::size_t>(header.fat_size),
-                        out_ptx)) {
-            return ElfPtxStatus::kFound;
+        if (status == PtxExtractStatus::kUnsupported) {
+            return ElfPtxStatus::kUnsupported;
         }
     }
 
-    return extract_ptx(section_bytes, section_size, out_ptx)
+    return extract_ptx_bytes(section_bytes, section_size, out_ptx)
                ? ElfPtxStatus::kFound
                : ElfPtxStatus::kNoPtx;
 }

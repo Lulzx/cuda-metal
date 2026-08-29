@@ -51,9 +51,10 @@ offsets, and persistent GPU writes across launches.
 PTX support is per instruction form. Direct PTX texture/surface instructions,
 TMA/cluster operations, FP8, unrestricted device calls, and other unsupported
 forms fail. The binary parser covers bounded raw PTX, CuMetal envelopes, common
-fatbin PTX wrappers, and checked little-endian ELF32/ELF64 sections. Compressed
-PTX payloads and remaining variants are open; SASS-only and big-endian inputs
-are outside the current target.
+fatbin PTX wrappers, version-`0x0101` LZ4/Zstd-compressed PTX entries, and
+checked little-endian ELF32/ELF64 sections. Other entry versions, codecs, and
+remaining container variants are open; SASS-only and big-endian inputs are
+outside the current target.
 
 ## AIR and Apple tools
 

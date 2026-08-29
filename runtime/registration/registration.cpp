@@ -7,6 +7,7 @@
 #include "cumetal/ptx/lower_to_llvm.h"
 #include "cumetal/ptx/parser.h"
 #include "fatbin_elf.h"
+#include "fatbin_ptx.h"
 #include "metal_math_mode.h"
 
 #include <dlfcn.h>
@@ -378,8 +379,6 @@ namespace cumetal::registration {
 constexpr std::uint32_t kCumetalFatbinMagic = 0x4C544D43u;  // "CMTL"
 constexpr std::uint32_t kCumetalFatbinVersion = 1u;
 constexpr std::uint32_t kFatbinWrapperMagic = 0x466243b1u;
-constexpr std::uint32_t kFatbinBlobMagic = 0xBA55ED50u;
-constexpr std::uint16_t kFatbinHeaderMinSize = 16u;
 constexpr std::size_t kMaxFatbinImageBytes = 64ull * 1024ull * 1024ull;
 
 struct CumetalFatbinImage {
@@ -395,13 +394,6 @@ struct FatbinWrapper {
     const void* unknown = nullptr;
 };
 
-struct FatbinBlobHeader {
-    std::uint32_t magic = 0;
-    std::uint16_t version = 0;
-    std::uint16_t header_size = 0;
-    std::uint64_t fat_size = 0;
-};
-
 struct ParsedFatbinImage {
     std::string metallib_path;
     std::string ptx_source;
@@ -411,6 +403,7 @@ struct ParsedFatbinImage {
 struct RegistrationModule {
     std::string metallib_path;
     std::shared_ptr<const std::string> ptx_source;
+    bool allow_environment_fallback = true;
     std::optional<std::uint64_t> jit_cache_prefix_hash;
     std::unordered_map<std::string, std::string> emitted_kernel_metallibs;
     std::unordered_map<std::string, std::vector<std::string>> emitted_kernel_printf_formats;
@@ -526,76 +519,6 @@ bool parse_direct_ptx_image(const void* fat_cubin, std::string* out_ptx) {
     return extract_ptx_cstr(chars, 1ull << 20, out_ptx);
 }
 
-bool extract_ptx_from_blob(const std::uint8_t* bytes,
-                           std::size_t size,
-                           std::string* out_ptx) {
-    if (bytes == nullptr || out_ptx == nullptr || size == 0) {
-        return false;
-    }
-
-    static constexpr char kMarker[] = ".version";
-    constexpr std::size_t kMarkerLen = sizeof(kMarker) - 1;
-    for (std::size_t i = 0; i + kMarkerLen < size; ++i) {
-        if (std::memcmp(bytes + i, kMarker, kMarkerLen) != 0) {
-            continue;
-        }
-
-        std::string candidate;
-        if (extract_ptx_cstr(reinterpret_cast<const char*>(bytes + i), size - i, &candidate)) {
-            *out_ptx = std::move(candidate);
-            return true;
-        }
-
-        const char* candidate_start = reinterpret_cast<const char*>(bytes + i);
-        std::size_t candidate_size = size - i;
-        const void* terminator = std::memchr(candidate_start, '\0', candidate_size);
-        if (terminator != nullptr) {
-            candidate_size = static_cast<const char*>(terminator) - candidate_start;
-        } else {
-            for (std::size_t j = candidate_size; j > 0; --j) {
-                if (candidate_start[j - 1] == '}') {
-                    candidate_size = j;
-                    break;
-                }
-            }
-        }
-
-        if (candidate_size == 0) {
-            continue;
-        }
-
-        const std::string sliced(candidate_start, candidate_size);
-        if (sliced.find(".version") == std::string::npos || sliced.find(".entry") == std::string::npos) {
-            continue;
-        }
-        *out_ptx = sliced;
-        return true;
-    }
-    return false;
-}
-
-bool parse_fatbin_blob_ptx(const void* fat_cubin, std::string* out_ptx) {
-    if (fat_cubin == nullptr || out_ptx == nullptr) {
-        return false;
-    }
-
-    const auto* blob = static_cast<const std::uint8_t*>(fat_cubin);
-    FatbinBlobHeader header{};
-    std::memcpy(&header, blob, sizeof(header));
-    if (header.magic != kFatbinBlobMagic || header.header_size < kFatbinHeaderMinSize) {
-        return false;
-    }
-
-    const std::size_t header_size = static_cast<std::size_t>(header.header_size);
-    const std::size_t fat_size = static_cast<std::size_t>(header.fat_size);
-    if (fat_size == 0 || header_size > kMaxFatbinImageBytes || fat_size > kMaxFatbinImageBytes ||
-        header_size > (kMaxFatbinImageBytes - fat_size)) {
-        return false;
-    }
-
-    return extract_ptx_from_blob(blob + header_size, fat_size, out_ptx);
-}
-
 bool parse_fatbin_wrapper_ptx(const void* fat_cubin,
                               std::string* out_ptx,
                               bool* recognized_invalid) {
@@ -627,8 +550,15 @@ bool parse_fatbin_wrapper_ptx(const void* fat_cubin,
         if (parse_direct_ptx_image(data, out_ptx)) {
             return true;
         }
-        if (parse_fatbin_blob_ptx(data, out_ptx)) {
+        const cumetal::fatbin::PtxExtractStatus fatbin_status =
+            cumetal::fatbin::extract_fatbin_ptx(
+                data, kMaxFatbinImageBytes, out_ptx);
+        if (fatbin_status == cumetal::fatbin::PtxExtractStatus::kFound) {
             return true;
+        }
+        if (fatbin_status != cumetal::fatbin::PtxExtractStatus::kNotFatbin) {
+            if (recognized_invalid != nullptr) *recognized_invalid = true;
+            return false;
         }
         const cumetal::fatbin::ElfPtxStatus elf_status =
             cumetal::fatbin::extract_elf_ptx(
@@ -674,9 +604,17 @@ ParsedFatbinImage parse_fatbin_image(const void* fat_cubin) {
         REG_DEBUG("%s", "parse_fatbin_image: malformed/unsupported ELF in fatbin wrapper");
         return parsed;
     }
-    if (parse_fatbin_blob_ptx(fat_cubin, &parsed.ptx_source)) {
+    const cumetal::fatbin::PtxExtractStatus fatbin_status =
+        cumetal::fatbin::extract_fatbin_ptx(
+            fat_cubin, kMaxFatbinImageBytes, &parsed.ptx_source);
+    if (fatbin_status == cumetal::fatbin::PtxExtractStatus::kFound) {
         REG_DEBUG("parse_fatbin_image: fatbin blob format, ptx_size=%zu",
                   parsed.ptx_source.size());
+        return parsed;
+    }
+    if (fatbin_status != cumetal::fatbin::PtxExtractStatus::kNotFatbin) {
+        parsed.allow_environment_fallback = false;
+        REG_DEBUG("%s", "parse_fatbin_image: non-PTX/malformed/unsupported fatbin refused");
         return parsed;
     }
     if (parse_direct_ptx_image(fat_cubin, &parsed.ptx_source)) {
@@ -1378,6 +1316,7 @@ std::string resolve_metallib_path_for_kernel(void* module_handle,
     }
 
     std::shared_ptr<const std::string> ptx_source;
+    bool allow_environment_fallback = true;
     std::uint64_t cache_prefix_hash = kFnv1a64Offset;
     {
         RegistrationState& s = state();
@@ -1388,6 +1327,7 @@ std::string resolve_metallib_path_for_kernel(void* module_handle,
         }
 
         RegistrationModule& module = *found->second;
+        allow_environment_fallback = module.allow_environment_fallback;
         if (!module.metallib_path.empty()) {
             REG_DEBUG("resolve_metallib '%s': prebuilt metallib '%s'",
                       kernel_name.c_str(), module.metallib_path.c_str());
@@ -1444,8 +1384,11 @@ std::string resolve_metallib_path_for_kernel(void* module_handle,
     }
 
     if (ptx_source == nullptr || ptx_source->empty()) {
-        REG_DEBUG("resolve_metallib '%s': no PTX, using env fallback", kernel_name.c_str());
-        return fallback_metallib_path_from_env();
+        REG_DEBUG("resolve_metallib '%s': no PTX, env fallback allowed=%d",
+                  kernel_name.c_str(),
+                  static_cast<int>(allow_environment_fallback));
+        return allow_environment_fallback ? fallback_metallib_path_from_env()
+                                          : std::string{};
     }
 
     // Compute static shared memory size from the PTX source before JIT compilation.
@@ -1468,7 +1411,8 @@ std::string resolve_metallib_path_for_kernel(void* module_handle,
                                          &local_provenance)) {
         REG_DEBUG("resolve_metallib '%s': JIT compile failed, using env fallback",
                   kernel_name.c_str());
-        return fallback_metallib_path_from_env();
+        return allow_environment_fallback ? fallback_metallib_path_from_env()
+                                          : std::string{};
     }
     REG_DEBUG("resolve_metallib '%s': JIT compiled -> '%s' (persistent=%d)",
               kernel_name.c_str(), emitted_path.c_str(), static_cast<int>(is_persistent));
@@ -1682,10 +1626,6 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
                                              &uses_device_launch_queue,
                                              &static_shared_bytes,
                                              &provenance);
-        if (metallib_path.empty()) {
-            metallib_path = fallback_metallib_path_from_env();
-            provenance = "precompiled_metallib";
-        }
 
         RegistrationState& s = state();
         std::lock_guard<std::mutex> lock(s.mutex);
@@ -1927,6 +1867,7 @@ void** __cudaRegisterFatBinary(const void* fat_cubin) {
     module->metallib_path = parsed.metallib_path;
     module->ptx_source =
         std::make_shared<const std::string>(std::move(parsed.ptx_source));
+    module->allow_environment_fallback = parsed.allow_environment_fallback;
 
     if (parsed.allow_environment_fallback && module->metallib_path.empty() &&
         module->ptx_source->empty()) {
@@ -2044,6 +1985,7 @@ void __cudaRegisterFunction(void** fat_cubin_handle,
 
     std::vector<std::string> printf_formats;
     bool lazy_metallib_resolution = true;
+    bool allow_environment_fallback = true;
     std::string metallib_path;
     {
         cumetal::registration::RegistrationState& s = cumetal::registration::state();
@@ -2052,9 +1994,11 @@ void __cudaRegisterFunction(void** fat_cubin_handle,
         if (module_it != s.modules.end() && module_it->second != nullptr) {
             metallib_path = module_it->second->metallib_path;
             lazy_metallib_resolution = metallib_path.empty();
+            allow_environment_fallback =
+                module_it->second->allow_environment_fallback;
         }
     }
-    if (metallib_path.empty()) {
+    if (metallib_path.empty() && allow_environment_fallback) {
         metallib_path = cumetal::registration::fallback_metallib_path_from_env();
     }
 

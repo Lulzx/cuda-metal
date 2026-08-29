@@ -3,6 +3,9 @@
 Build
 -----
 
+Source builds require CMake, LLVM 18 or newer, and the LZ4 and Zstd development
+libraries. On Homebrew these are `llvm`, `lz4`, and `zstd`.
+
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
@@ -52,9 +55,10 @@ Binary-shim formats and JIT cache
 ---------------------------------
 
 The opt-in shim recognizes CMTL envelopes, raw PTX, basic
-FatBinary/FatBinary2/FatBinary3 PTX wrappers, and the bounded ELF forms listed
-in [known gaps](known-gaps.md). It does not execute SASS or accept every NVCC
-fatbinary variant.
+FatBinary/FatBinary2/FatBinary3 PTX wrappers, bounded version-`0x0101`
+LZ4/Zstd-compressed PTX entries, and the ELF forms listed in
+[known gaps](known-gaps.md). Decompression is capped at 64 MiB. It does not
+execute SASS or accept every NVCC fatbinary variant.
 
 Registered PTX is compiled on first use and cached under
 `$CUMETAL_CACHE_DIR/registration-jit/` (by default under the user's Library

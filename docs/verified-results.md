@@ -65,6 +65,16 @@ exactly once, and verifies that an exactly-full record is rejected without any
 payload write. This is record-level numerical/ABI evidence; the existing
 registered-runtime test separately covers host formatting and drain behavior.
 
+On 2026-08-30, `functional_driver_module_load_data_ptx` and
+`functional_runtime_registration_fatbin_ptx` loaded direct and ELF-embedded
+version-`0x0101` PTX entries compressed with both LZ4 and Zstd, launched vector
+addition, and checked every output on Apple GPU. The same parser rejected
+truncated payload ranges, corrupt compressed sizes, dual-codec flags, and a
+declared expansion beyond the 64 MiB ceiling before allocation. Registration
+also rejected an unsupported entry version while a valid fallback metallib was
+configured, proving that recognized invalid images cannot silently escape
+through `CUMETAL_FATBIN_METALLIB`.
+
 On 2026-08-29, the `fp64_precision` contract probe passed twice on Apple GPU:
 once with an 11-kernel metallib compiled directly from Clang NVVM through typed
 CuMetal IR, and once with each kernel compiled from PTX through the typed

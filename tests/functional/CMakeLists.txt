@@ -948,6 +948,12 @@ target_link_libraries(cumetal_nested_device_pointer_test
 target_link_libraries(cumetal_driver_module_load_data_ptx_test
     PRIVATE
         cumetal_runtime
+        ${CUMETAL_LZ4_LIBRARY}
+        ${CUMETAL_ZSTD_LIBRARY}
+)
+target_include_directories(cumetal_driver_module_load_data_ptx_test PRIVATE
+    ${CUMETAL_LZ4_INCLUDE_DIR}
+    ${CUMETAL_ZSTD_INCLUDE_DIR}
 )
 
 target_link_libraries(cumetal_driver_launch_extra_test
@@ -1084,6 +1090,12 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     target_link_libraries(cumetal_runtime_registration_fatbin_ptx_test
         PRIVATE
             cumetal_runtime
+            ${CUMETAL_LZ4_LIBRARY}
+            ${CUMETAL_ZSTD_LIBRARY}
+    )
+    target_include_directories(cumetal_runtime_registration_fatbin_ptx_test PRIVATE
+        ${CUMETAL_LZ4_INCLUDE_DIR}
+        ${CUMETAL_ZSTD_INCLUDE_DIR}
     )
 
     target_link_libraries(cumetal_runtime_legacy_launch_registration_test
@@ -2976,6 +2988,7 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_registration_fatbin_ptx.sh
                 $<TARGET_FILE:cumetal_runtime_registration_fatbin_ptx_test>
                 ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx
+                ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
     )
 
     set_tests_properties(functional_runtime_registration_fatbin_ptx PROPERTIES SKIP_RETURN_CODE 77)

@@ -6,6 +6,7 @@
 #include "cumetal_diag.h"
 #include "cuda_runtime.h"
 #include "fatbin_elf.h"
+#include "fatbin_ptx.h"
 #include "metal_backend.h"
 #include "module_cache.h"
 
@@ -55,8 +56,6 @@ extern "C" void* cumetalRuntimeGetHostPointer(const void* ptr, size_t count);
 
 constexpr int kCudaCompatVersion = 12000;
 constexpr std::uint32_t kFatbinWrapperMagic = 0x466243b1u;
-constexpr std::uint32_t kFatbinBlobMagic = 0xBA55ED50u;
-constexpr std::uint16_t kFatbinHeaderMinSize = 16u;
 constexpr std::size_t kMaxImageBytes = 64ull * 1024ull * 1024ull;
 
 struct FatbinWrapper {
@@ -64,13 +63,6 @@ struct FatbinWrapper {
     std::uint32_t version = 0;
     const void* data = nullptr;
     const void* unknown = nullptr;
-};
-
-struct FatbinBlobHeader {
-    std::uint32_t magic = 0;
-    std::uint16_t version = 0;
-    std::uint16_t header_size = 0;
-    std::uint64_t fat_size = 0;
 };
 
 struct DriverState {
@@ -395,56 +387,6 @@ bool extract_ptx_cstr(const char* chars, std::size_t max_bytes, std::string* out
     return true;
 }
 
-bool extract_ptx_from_blob(const std::uint8_t* bytes,
-                           std::size_t size,
-                           std::string* out_ptx) {
-    if (bytes == nullptr || out_ptx == nullptr || size < 16) {
-        return false;
-    }
-
-    static constexpr char kMarker[] = ".version";
-    constexpr std::size_t kMarkerLen = sizeof(kMarker) - 1;
-
-    for (std::size_t i = 0; i + kMarkerLen < size; ++i) {
-        if (std::memcmp(bytes + i, kMarker, kMarkerLen) != 0) {
-            continue;
-        }
-
-        std::string candidate;
-        if (extract_ptx_cstr(reinterpret_cast<const char*>(bytes + i), size - i, &candidate)) {
-            *out_ptx = std::move(candidate);
-            return true;
-        }
-
-        const char* candidate_start = reinterpret_cast<const char*>(bytes + i);
-        std::size_t candidate_size = size - i;
-        const void* terminator = std::memchr(candidate_start, '\0', candidate_size);
-        if (terminator != nullptr) {
-            candidate_size = static_cast<const char*>(terminator) - candidate_start;
-        } else {
-            for (std::size_t j = candidate_size; j > 0; --j) {
-                if (candidate_start[j - 1] == '}') {
-                    candidate_size = j;
-                    break;
-                }
-            }
-        }
-
-        if (candidate_size == 0) {
-            continue;
-        }
-
-        const std::string sliced(candidate_start, candidate_size);
-        if (sliced.find(".version") == std::string::npos || sliced.find(".entry") == std::string::npos) {
-            continue;
-        }
-        *out_ptx = sliced;
-        return true;
-    }
-
-    return false;
-}
-
 bool parse_direct_ptx_image(const void* image, std::string* out_ptx) {
     if (image == nullptr || out_ptx == nullptr) {
         return false;
@@ -459,25 +401,9 @@ bool parse_direct_ptx_image(const void* image, std::string* out_ptx) {
 }
 
 bool parse_fatbin_blob_ptx(const void* image, std::string* out_ptx) {
-    if (image == nullptr || out_ptx == nullptr) {
-        return false;
-    }
-
-    const auto* blob = static_cast<const std::uint8_t*>(image);
-    FatbinBlobHeader header{};
-    std::memcpy(&header, blob, sizeof(header));
-    if (header.magic != kFatbinBlobMagic || header.header_size < kFatbinHeaderMinSize) {
-        return false;
-    }
-
-    const std::size_t header_size = static_cast<std::size_t>(header.header_size);
-    const std::size_t fat_size = static_cast<std::size_t>(header.fat_size);
-    if (fat_size == 0 || header_size > kMaxImageBytes || fat_size > kMaxImageBytes ||
-        header_size > (kMaxImageBytes - fat_size)) {
-        return false;
-    }
-
-    return extract_ptx_from_blob(blob + header_size, fat_size, out_ptx);
+    return cumetal::fatbin::extract_fatbin_ptx(
+               image, kMaxImageBytes, out_ptx) ==
+           cumetal::fatbin::PtxExtractStatus::kFound;
 }
 
 bool parse_fatbin_wrapper_ptx(const void* image, std::string* out_ptx) {

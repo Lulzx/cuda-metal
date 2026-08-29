@@ -1,4 +1,5 @@
 #include "cuda.h"
+#include "compressed_fatbin_fixture.h"
 #include "elf_fatbin_fixture.h"
 
 #include <cmath>
@@ -210,6 +211,20 @@ int main(int argc, char** argv) {
         cumetal::test::make_elf64_image(".ptx", raw_ptx_payload);
     const std::vector<std::uint8_t> elf32_raw_ptx =
         cumetal::test::make_elf32_image(".ptx", raw_ptx_payload);
+    const std::vector<std::uint8_t> lz4_fatbin =
+        cumetal::test::make_compressed_fatbin(
+            ptx_file_bytes, cumetal::test::FatbinCompression::kLz4);
+    const std::vector<std::uint8_t> zstd_fatbin =
+        cumetal::test::make_compressed_fatbin(
+            ptx_file_bytes, cumetal::test::FatbinCompression::kZstd);
+    if (lz4_fatbin.empty() || zstd_fatbin.empty()) {
+        std::fprintf(stderr, "FAIL: compressed fatbin fixture creation failed\n");
+        return 1;
+    }
+    const std::vector<std::uint8_t> elf_lz4_fatbin =
+        cumetal::test::make_elf64_image(".nv_fatbin", lz4_fatbin);
+    const std::vector<std::uint8_t> elf_zstd_fatbin =
+        cumetal::test::make_elf64_image(".nv_fatbin", zstd_fatbin);
 
     FatbinBlobHeader padded_header{};
     padded_header.header_size = 64;
@@ -267,6 +282,28 @@ int main(int argc, char** argv) {
     if (cuModuleUnload(module) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: cuModuleUnload after fatbin blob load failed\n");
         return 1;
+    }
+
+    const std::vector<std::uint8_t>* compressed_images[] = {
+        &lz4_fatbin, &zstd_fatbin, &elf_lz4_fatbin, &elf_zstd_fatbin};
+    const char* compressed_names[] = {
+        "LZ4 fatbin", "Zstd fatbin", "ELF LZ4 fatbin", "ELF Zstd fatbin"};
+    for (std::size_t i = 0; i < 4; ++i) {
+        module = nullptr;
+        if (cuModuleLoadData(&module, compressed_images[i]->data()) !=
+                CUDA_SUCCESS ||
+            module == nullptr) {
+            std::fprintf(stderr, "FAIL: cuModuleLoadData(%s) failed\n",
+                         compressed_names[i]);
+            return 1;
+        }
+        if (!run_vector_add(module)) return 1;
+        if (cuModuleUnload(module) != CUDA_SUCCESS) {
+            std::fprintf(stderr, "FAIL: cuModuleUnload after %s failed\n",
+                         compressed_names[i]);
+            return 1;
+        }
+        std::printf("COMPRESSED_DRIVER_OK %s\n", compressed_names[i]);
     }
 
     if (cuModuleLoadData(&module, elf_fatbin.data()) != CUDA_SUCCESS ||
@@ -392,6 +429,40 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    std::vector<std::uint8_t> malformed_compressed_size = lz4_fatbin;
+    cumetal::test::write_value<std::uint32_t>(
+        &malformed_compressed_size, 16u + 16u, 1u);
+    std::vector<std::uint8_t> oversized_decompression = lz4_fatbin;
+    cumetal::test::write_value<std::uint64_t>(
+        &oversized_decompression, 16u + 56u,
+        64ull * 1024ull * 1024ull + 1ull);
+    std::vector<std::uint8_t> ambiguous_compression = lz4_fatbin;
+    cumetal::test::write_value<std::uint64_t>(
+        &ambiguous_compression, 16u + 40u, 0x2000ull | 0x8000ull);
+    std::vector<std::uint8_t> truncated_compressed_entry = lz4_fatbin;
+    cumetal::test::write_value<std::uint32_t>(
+        &truncated_compressed_entry, 16u + 8u,
+        static_cast<std::uint32_t>(truncated_compressed_entry.size()));
+    std::vector<std::uint8_t> unsupported_entry_version = lz4_fatbin;
+    cumetal::test::write_value<std::uint16_t>(
+        &unsupported_entry_version, 16u + 2u, 0x0102u);
+    const std::vector<std::uint8_t>* invalid_compressed[] = {
+        &malformed_compressed_size,
+        &oversized_decompression,
+        &ambiguous_compression,
+        &truncated_compressed_entry,
+        &unsupported_entry_version,
+    };
+    for (const auto* invalid : invalid_compressed) {
+        module = nullptr;
+        if (cuModuleLoadData(&module, invalid->data()) !=
+            CUDA_ERROR_INVALID_IMAGE) {
+            std::fprintf(stderr,
+                         "FAIL: malformed compressed fatbin was accepted\n");
+            return 1;
+        }
+    }
+
     std::vector<std::uint8_t> malformed_elf = elf_fatbin;
     cumetal::test::write_value<std::uint64_t>(
         &malformed_elf, 40, 64ull * 1024ull * 1024ull - 32ull);
@@ -477,6 +548,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("PASS: cuModuleLoadData supports PTX text, fatbin, and bounded ELF32/ELF64 extended-index variants\n");
+    std::printf("PASS: cuModuleLoadData supports PTX text, bounded LZ4/Zstd fatbins, and ELF32/ELF64 variants\n");
     return 0;
 }

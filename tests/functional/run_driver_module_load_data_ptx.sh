@@ -22,4 +22,32 @@ if ! xcrun --find metallib >/dev/null 2>&1; then
   exit 77
 fi
 
-"$TEST_BINARY" "$PTX_PATH"
+OUTPUT_FILE="$(mktemp)"
+CACHE_DIR="$(mktemp -d)"
+trap 'rm -f "$OUTPUT_FILE"; rm -rf "$CACHE_DIR"' EXIT
+
+set +e
+CUMETAL_CACHE_DIR="$CACHE_DIR" CUMETAL_TRACE_GPU=1 \
+  "$TEST_BINARY" "$PTX_PATH" >"$OUTPUT_FILE" 2>&1
+STATUS=$?
+set -e
+cat "$OUTPUT_FILE"
+if [[ $STATUS -ne 0 ]]; then
+  exit "$STATUS"
+fi
+for name in \
+  "LZ4 fatbin" \
+  "Zstd fatbin" \
+  "ELF LZ4 fatbin" \
+  "ELF Zstd fatbin"
+do
+  if ! grep -Fqx "COMPRESSED_DRIVER_OK ${name}" "$OUTPUT_FILE"; then
+    echo "FAIL: missing compressed Driver API execution marker for ${name}"
+    exit 1
+  fi
+done
+if ! grep -q 'CUMETAL_PROVENANCE .*device=apple_gpu .*launch_success=true' \
+    "$OUTPUT_FILE"; then
+  echo "FAIL: compressed Driver API output lacks Apple-GPU provenance"
+  exit 1
+fi
