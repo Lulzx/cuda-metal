@@ -80,7 +80,8 @@ cumetalc kernel.cu --emit=exe        -o kernel
 | `--save-temps` | Retain link intermediates. |
 
 The default follows measured production-metallib compilation coverage rather
-than treating either backend as universally complete:
+than treating either backend as universally complete. The reviewed table below
+uses CUDA Clang 21/22:
 
 | Input corpus | `legacy` | `cumetal-ir` |
 | --- | ---: | ---: |
@@ -97,6 +98,10 @@ ctest --test-dir build -R '^conformance_compiler_backend_matrix$' --output-on-fa
 The matrix proves that a backend produced and validated a production metallib;
 it does not prove numerical correctness or GPU execution. Default-backend
 promotion additionally requires the runtime evidence in the gate below.
+CUDA Clang 23.1.0 currently reduces the typed PTX cell to 6/23 because
+`sgemm_naive` reaches generated MSL with duplicate SSA declarations. Until the
+supported frontend compiler range and versioned matrix are defined, invoke the
+reviewed gate with `CUMETAL_CUDA_CLANG` pointing to CUDA Clang 21 or 22.
 
 ## Legality stages
 

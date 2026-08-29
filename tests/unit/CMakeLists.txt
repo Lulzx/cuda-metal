@@ -585,6 +585,13 @@ add_test(
             ${CMAKE_SOURCE_DIR}/scripts/ci_report.sh
 )
 
+add_test(
+    NAME unit_documentation_consistency
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/check_documentation_consistency.sh
+            ${CMAKE_SOURCE_DIR}
+)
+
 # Hosted CI deliberately selects tests by capability rather than by name.
 # Keep GPU execution out of this label so a hosted runner cannot turn a
 # missing Metal device into a green-but-skipped hardware claim.

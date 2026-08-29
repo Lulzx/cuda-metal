@@ -11,7 +11,8 @@
   production libraries.
 - Direct AIR generation remains tooling/research only.
 
-The manifest-controlled 23-file production-metallib matrix currently records:
+With CUDA Clang 21/22, the reviewed manifest-controlled 23-file
+production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
@@ -19,7 +20,10 @@ The manifest-controlled 23-file production-metallib matrix currently records:
 | PTX / `--cuda-device` | **23/23** | **7/23** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
-Matrix results prove compilation only.
+Matrix results prove compilation only. With CUDA Clang 23.1.0, direct typed IR
+remains 9/23 and legacy PTX remains 23/23, but typed PTX is 6/23 because
+`sgemm_naive` reaches generated MSL with duplicate SSA declarations. The
+supported frontend compiler range and versioned matrix are not yet closed.
 
 ## Typed representation
 

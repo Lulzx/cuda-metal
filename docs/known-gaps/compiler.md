@@ -4,7 +4,7 @@
 
 ## Typed CuMetal IR migration
 
-The reproducible production-metallib matrix is:
+With CUDA Clang 21/22, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
@@ -13,7 +13,11 @@ The reproducible production-metallib matrix is:
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
-not runtime correctness.
+not runtime correctness. CUDA Clang 23.1.0 currently produces 6/23 in the typed
+PTX cell because `sgemm_naive` reaches generated MSL with duplicate SSA
+declarations. CuMetal still needs to declare a supported CUDA Clang range and
+run a versioned frontend matrix instead of presenting one compiler's result as
+toolchain-independent.
 
 Remaining typed-path blockers include combinations of:
 
