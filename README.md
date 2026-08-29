@@ -77,11 +77,11 @@ compiler paths and their selection policy are in
   waivers and zero nonpassing entries on the 2026-08-30 rerun. Its cooperative
   CG case now gates both device residual and the independent host equation
   error, so a partial-warp false positive cannot count as a pass.
-- With CUDA Clang 21-23, the reviewed 24-file production-metallib matrix is
-  **24/24** for direct `.cu` through typed CuMetal IR, **24/24** for typed PTX,
-  and **24/24** for the legacy PTX backend. These are compile results, not
+- With CUDA Clang 21-23, the reviewed 25-file production-metallib matrix is
+  **25/25** for direct `.cu` through typed CuMetal IR, **25/25** for typed PTX,
+  and **25/25** for the legacy PTX backend. These are compile results, not
   numerical runtime proof.
-- The exact in-tree 22-project corpus passes numerical Apple-GPU execution both
+- The exact in-tree 23-project corpus passes numerical Apple-GPU execution both
   through typed PTX and through direct native AOT, with workload
   specializations disabled. The native path embeds metallibs and performs no
   first-launch PTX JIT.

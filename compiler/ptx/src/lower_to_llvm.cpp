@@ -2917,6 +2917,36 @@ class GenericLlvmEmitter {
                 }
             }
         }
+        if (const auto parameter = param_by_raw_.find(operand);
+            parameter != param_by_raw_.end()) {
+            const ParamInfo& info =
+                (*params_)[static_cast<std::size_t>(parameter->second)];
+            if (!is_constant_buffer_pointer(info.llvm_type)) {
+                if (is_pointer_type(info.llvm_type)) {
+                    const std::string pointer_bits = next_tmp("param_value_p2i");
+                    os << "  " << pointer_bits << " = ptrtoint " << info.llvm_type
+                       << " %" << info.name << " to i64\n";
+                    if (bits == 64) return pointer_bits;
+                    const std::string narrowed = next_tmp("param_value_trunc");
+                    os << "  " << narrowed << " = trunc i64 " << pointer_bits
+                       << " to " << llvm_int_type(bits) << "\n";
+                    return narrowed;
+                }
+                const int parameter_bits = byte_size_for_param_metadata(info) * 8;
+                if (parameter_bits == bits) return "%" + info.name;
+                const std::string converted = next_tmp("param_value_cast");
+                if (parameter_bits < bits) {
+                    os << "  " << converted << " = zext "
+                       << llvm_int_type(parameter_bits) << " %" << info.name
+                       << " to " << llvm_int_type(bits) << "\n";
+                } else {
+                    os << "  " << converted << " = trunc "
+                       << llvm_int_type(parameter_bits) << " %" << info.name
+                       << " to " << llvm_int_type(bits) << "\n";
+                }
+                return converted;
+            }
+        }
         if (const auto addr = resolve_param_symbol_address(os, operand)) {
             if (bits == 64) {
                 return *addr;
@@ -3085,7 +3115,10 @@ class GenericLlvmEmitter {
             return fail(instr, "mov source unsupported: '" + src + "'");
         }
         const int src_bits = std::max(dst_bits, ty.bits > 0 ? ty.bits : dst_bits);
-        if (resolve_param_symbol_address(os, src).has_value()) {
+        if (const auto parameter = param_pointer_as_by_raw_.find(src);
+            parameter != param_pointer_as_by_raw_.end()) {
+            reg_pointer_as_[dst] = parameter->second;
+        } else if (resolve_param_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kParam;
         } else if (resolve_local_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kLocal;
@@ -4290,6 +4323,19 @@ class GenericLlvmEmitter {
             // Param aggregate / call-sequence slots.
             if (is_register_name(mem.base)) {
                 const auto as_it = reg_pointer_as_.find(mem.base);
+                if (as_it != reg_pointer_as_.end() &&
+                    as_it->second != PointerAs::kParam && is_load) {
+                    if (!is_register_name(data_token)) {
+                        return fail(instr,
+                                    "ld.param selected-pointer destination must be register");
+                    }
+                    const std::string selected =
+                        emit_load_reg_bits(os, mem.base, ty.bits);
+                    reg_pointer_as_[data_token] = as_it->second;
+                    return emit_store_reg_bits(os, data_token,
+                                               ensure_reg_slot(data_token).bits,
+                                               selected, ty.bits);
+                }
                 if (as_it != reg_pointer_as_.end() && as_it->second == PointerAs::kParam) {
                     const std::string base_i64 = emit_load_reg_bits(os, mem.base, 64);
                     const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
@@ -7680,6 +7726,12 @@ class GenericLlvmEmitter {
         const std::string sel = next_tmp("selpi");
         os << "  " << sel << " = select i1 " << p << ", " << llvm_int_type(bits) << " " << *a << ", "
            << llvm_int_type(bits) << " " << *b << "\n";
+        const auto a_space = reg_pointer_as_.find(instr.operands[1]);
+        const auto b_space = reg_pointer_as_.find(instr.operands[2]);
+        if (a_space != reg_pointer_as_.end() && b_space != reg_pointer_as_.end() &&
+            a_space->second == b_space->second) {
+            reg_pointer_as_[dst] = a_space->second;
+        }
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, sel, bits);
     }
 

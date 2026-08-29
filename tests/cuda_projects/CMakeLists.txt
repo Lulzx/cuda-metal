@@ -142,6 +142,29 @@ set_tests_properties(
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
 )
 
+# Direct `.func` calls must retain pointer argument provenance, scalar returns,
+# loop-carried values, and early exits in the typed PTX path. This is a focused
+# numerical gate in addition to the exact manifest-controlled corpus.
+add_test(
+    NAME functional_cuda_projects_device_calls_typed_ptx
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        device_calls
+        device_calls.cu
+        device_calls_typed_ptx
+        cumetal-ir
+)
+set_tests_properties(
+    functional_cuda_projects_device_calls_typed_ptx
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        TIMEOUT 60
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=0"
+)
+
 # Regression: LLVM `fence` crashed Apple's AIR backend at pipeline creation (so every
 # atomicCAS-bearing kernel silently did nothing), and scalar __shared__ objects were
 # counted as zero bytes when sizing threadgroup memory.

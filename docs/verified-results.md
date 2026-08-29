@@ -25,14 +25,16 @@ device symbols end to end: bounded host-to/from-symbol copies, a 27,904-byte
 constant buffer, symbol address/size queries, and persistent GPU updates across
 two launches.
 
-On 2026-08-30, the exact manifest-controlled 22-project corpus passed twice on
-Apple M4 Pro with workload specializations disabled: 22/22 through typed PTX
-and 22/22 through direct native AOT. The GGML probe checks its complete output
+On 2026-08-30, the exact manifest-controlled 23-project corpus passed twice on
+Apple M4 Pro with workload specializations disabled: 23/23 through typed PTX
+and 23/23 through direct native AOT. The device-call probe passes pointer
+arguments and offsets through a scalar-returning noinline helper with a loop,
+pointer merge, and early exit. The GGML probe checks its complete output
 operator set; the raytracer performs a 47-value differential preflight and a
 full CPU-reference image comparison. The native-AOT device-`printf` gate also
 checks all 32 coordinate records, dynamic width, a wide scalar, tracked string
 materialization, and a bounded unterminated string. These are numerical/runtime
-results, separate from the 24-file cross-Clang compile matrix.
+results, separate from the 25-file cross-Clang compile matrix.
 
 The reviewed Phase 4 manifest ran 185/185 required functional tests on
 2026-08-29 with zero failures and zero skips. This includes native-AOT numerical

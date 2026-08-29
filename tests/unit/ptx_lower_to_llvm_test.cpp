@@ -1532,6 +1532,63 @@ $L_done:
         return 1;
     }
 
+    const std::string selected_pointer_parameter_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .func selected_pointer_helper(
+    .param .b64 first,
+    .param .b64 second,
+    .param .b32 choose
+) {
+    .reg .pred %p1;
+    .reg .b32 %r1;
+    .reg .b64 %rd<5>;
+    ld.param.b32 %r1, [choose];
+    setp.ne.u32 %p1, %r1, 0;
+    mov.b64 %rd1, first;
+    mov.b64 %rd2, second;
+    selp.b64 %rd3, %rd1, %rd2, %p1;
+    ld.param.b64 %rd4, [%rd3];
+    st.global.b32 [%rd4], 7;
+    ret;
+}
+.visible .entry selected_pointer_parameter(
+    .param .u64 first,
+    .param .u64 second
+) {
+    .reg .b64 %rd<3>;
+    ld.param.b64 %rd1, [first];
+    ld.param.b64 %rd2, [second];
+    .param .b64 helper_first;
+    .param .b64 helper_second;
+    .param .b32 helper_choose;
+    st.param.b64 [helper_first], %rd1;
+    st.param.b64 [helper_second], %rd2;
+    st.param.b32 [helper_choose], 1;
+    call.uni selected_pointer_helper, (helper_first, helper_second, helper_choose);
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions selected_pointer_parameter_options;
+    selected_pointer_parameter_options.entry_name = "selected_pointer_parameter";
+    selected_pointer_parameter_options.strict = true;
+    const auto selected_pointer_parameter_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(
+            selected_pointer_parameter_ptx, selected_pointer_parameter_options);
+    if (!expect(selected_pointer_parameter_lowered.ok &&
+                    contains(selected_pointer_parameter_lowered.llvm_ir,
+                             "define internal void @selected_pointer_helper") &&
+                    contains(selected_pointer_parameter_lowered.llvm_ir,
+                             "select i1"),
+                "device helpers preserve selected pointer-valued parameter symbols")) {
+        if (!selected_pointer_parameter_lowered.ok) {
+            std::fprintf(stderr, "  error: %s\n",
+                         selected_pointer_parameter_lowered.error.c_str());
+        }
+        return 1;
+    }
+
     // Without a parseable depot declaration the frame size is unknown; refuse to
     // lower rather than emit an under-sized frame that reads zeros.
     const std::string undeclared_depot_ptx = R"PTX(

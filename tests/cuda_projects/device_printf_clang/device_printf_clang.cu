@@ -2,12 +2,22 @@
 
 #include <cstdio>
 
+__device__ __noinline__ void print_coordinate_record(int block, int thread,
+                                                      int value) {
+    printf("PRINTF[%d,%d]=%d\n", block, thread, value);
+}
+
+__device__ __noinline__ void print_coordinate_helper(int block, int thread,
+                                                      int value) {
+    print_coordinate_record(block, thread, value);
+}
+
 __global__ void print_coordinates(int value) {
     const int block = static_cast<int>(blockIdx.y * gridDim.x + blockIdx.x);
     const int thread = static_cast<int>(
         threadIdx.z * blockDim.x * blockDim.y +
         threadIdx.y * blockDim.x + threadIdx.x);
-    printf("PRINTF[%d,%d]=%d\n", block, thread, value);
+    print_coordinate_helper(block, thread, value);
 }
 
 __global__ void print_wide_values(const int* pointer) {

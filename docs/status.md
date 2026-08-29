@@ -18,9 +18,9 @@ is split by subsystem.
   nonpassing entries on the 2026-08-30 rerun. The cooperative CG entry requires
   both its device residual and independent host equation error.
 - Production-metallib source corpus with CUDA Clang 21-23: direct typed IR
-  **24/24**, typed PTX **24/24**, legacy PTX **24/24**.
-- Exact in-tree numerical corpus: typed PTX **22/22** and direct native AOT
-  **22/22** on Apple M4 Pro with workload specializations disabled.
+  **25/25**, typed PTX **25/25**, legacy PTX **25/25**.
+- Exact in-tree numerical corpus: typed PTX **23/23** and direct native AOT
+  **23/23** on Apple M4 Pro with workload specializations disabled.
 - The named five-kernel Phase 5 release set—vector add, SAXPY, STREAM copy,
   STREAM triad, and reduction—meets the recorded 2x native-Metal ceiling on
   Apple M4 Pro.

@@ -85,8 +85,8 @@ uses CUDA Clang 21-23:
 
 | Input corpus | `legacy` | `cumetal-ir` |
 | --- | ---: | ---: |
-| direct `.cu` | 0/24 | **24/24** |
-| `.cu --cuda-device` / PTX | **24/24** | **24/24** |
+| direct `.cu` | 0/25 | **25/25** |
+| `.cu --cuda-device` / PTX | **25/25** | **25/25** |
 
 Direct `.cu` therefore defaults to `cumetal-ir`; PTX and `--cuda-device`
 default to `legacy`. Reproduce the reviewed per-file baseline with:

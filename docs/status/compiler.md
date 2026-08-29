@@ -13,19 +13,19 @@
   production libraries.
 - Direct AIR generation remains tooling/research only.
 
-With CUDA Clang 21-23, the reviewed manifest-controlled 24-file
+With CUDA Clang 21-23, the reviewed manifest-controlled 25-file
 production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/24 | **24/24** |
-| PTX / `--cuda-device` | **24/24** | **24/24** |
+| direct `.cu` | 0/25 | **25/25** |
+| PTX / `--cuda-device` | **25/25** | **25/25** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler
 identity and requires the same manifest with CUDA Clang 21, 22, and 23.
 
-The separate exact `coverage_manifest.json` numerical corpus passes all 22
+The separate exact `coverage_manifest.json` numerical corpus passes all 23
 projects through both typed PTX and direct native AOT on Apple M4 Pro. Both
 gates disable workload specializations and require every enrolled project to
 pass. The native-AOT gate launches embedded metallibs without registration JIT
@@ -58,6 +58,12 @@ bounded atomic ring-record ABI. Focused Apple-GPU tests validate every record
 from a 32-lane multidimensional launch and prove a capacity-boundary record is
 rejected without payload writes; unresolved formats and unsupported tuple
 widths fail explicitly.
+The typed PTX frontend also materializes the selected kernel's reachable direct
+`.func` graph for scalar signatures and returns. The numerical device-call
+project passes pointer arguments and offsets through a noinline helper with a
+loop, pointer merge, and early exit; nested noinline `printf` helpers receive
+the bounded ring state transitively. Undefined and recursive call graphs fail
+explicitly rather than falling back.
 Both typed frontends lower FP64 values as raw binary64 storage and call private
 software-ALU helpers in the kernel translation unit. The `fp64_precision`
 corpus passes independently produced direct-NVVM and typed-PTX metallibs on

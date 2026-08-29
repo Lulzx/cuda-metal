@@ -498,6 +498,16 @@ bool is_terminating_instruction(const Instruction& instruction) {
     return root == "bra" || root == "ret" || root == "exit" || root == "trap";
 }
 
+std::optional<std::string> direct_call_target(const Instruction& instruction) {
+    if (root_opcode(instruction.opcode) != "call") return std::nullopt;
+    const bool has_return = instruction.operands.size() == 3;
+    if ((!has_return && instruction.operands.size() != 2) ||
+        (has_return && grouped_names(instruction.operands.front()).size() != 1)) {
+        return std::nullopt;
+    }
+    return trim(instruction.operands[has_return ? 1 : 0]);
+}
+
 OpCode arithmetic_opcode(std::string_view root) {
     if (root == "add") return OpCode::kAdd;
     if (root == "sub") return OpCode::kSub;
@@ -591,6 +601,10 @@ struct Importer {
     Builder builder;
     PtxImportResult result;
     const cumetal::ptx::EntryFunction* entry = nullptr;
+    bool is_kernel = true;
+    std::unordered_map<std::string, const cumetal::ptx::EntryFunction*>
+        device_functions;
+    std::unordered_set<std::string> printf_functions;
     std::unordered_map<std::string, Type> parameter_types;
     std::unordered_map<std::string, ValueId> parameter_values;
     // Older CUDA Clang releases materialize the address of a by-value
@@ -628,6 +642,7 @@ struct Importer {
     std::unordered_set<int> printf_scaffold_lines;
     std::optional<Operand> printf_buffer;
     std::optional<Operand> printf_capacity;
+    std::optional<Operand> function_return;
 
     bool fail(const Instruction* instruction, std::string message) {
         if (instruction != nullptr && instruction->line != 0) {
@@ -720,6 +735,71 @@ struct Importer {
         for (const auto& parameter : entry->params) {
             parameter_types[parameter.name] = parameter_type(parameter);
         }
+
+        // Older CUDA Clang PTX (notably 21) omits `.ptr` from device-function
+        // parameters even when the CUDA source type is a pointer. Recover that
+        // information from actual address use before forward type inference.
+        // This is deliberately bounded to direct dataflow through the common
+        // mov/ld.param, add, and selp forms; ambiguous integer-only values stay
+        // integers instead of being guessed as pointers.
+        std::unordered_set<std::string> required_device_pointers;
+        for (const Instruction& instruction : entry->instructions) {
+            const std::string root = root_opcode(instruction.opcode);
+            if (root != "ld" && root != "st") continue;
+            if (instruction.opcode.find(".param") != std::string::npos ||
+                instruction.opcode.find(".shared") != std::string::npos ||
+                instruction.opcode.find(".local") != std::string::npos ||
+                instruction.opcode.find(".const") != std::string::npos) {
+                continue;
+            }
+            const std::size_t memory_index = root == "st" ? 0 : 1;
+            if (instruction.operands.size() <= memory_index) continue;
+            const std::string base =
+                first_register(instruction.operands[memory_index]);
+            if (!base.empty()) required_device_pointers.insert(base);
+        }
+        bool pointer_changed = true;
+        for (int iteration = 0; iteration < 12 && pointer_changed; ++iteration) {
+            pointer_changed = false;
+            for (const Instruction& instruction : entry->instructions) {
+                const std::vector<std::string> destinations =
+                    destination_registers(instruction);
+                if (std::none_of(destinations.begin(), destinations.end(),
+                                 [&](const std::string& destination) {
+                                     return required_device_pointers.contains(destination);
+                                 })) {
+                    continue;
+                }
+                const std::string root = root_opcode(instruction.opcode);
+                std::vector<std::size_t> pointer_sources;
+                if (root == "mov" || starts_with(instruction.opcode, "ld.param")) {
+                    pointer_sources = {1};
+                } else if (root == "add") {
+                    pointer_sources = {1};
+                } else if (root == "selp") {
+                    pointer_sources = {1, 2};
+                }
+                for (const std::size_t source_index : pointer_sources) {
+                    if (instruction.operands.size() <= source_index) continue;
+                    const std::string source =
+                        first_register(instruction.operands[source_index]);
+                    if (!source.empty() &&
+                        required_device_pointers.insert(source).second) {
+                        pointer_changed = true;
+                    }
+                    const std::string parameter = parameter_name_from_operand(
+                        instruction.operands[source_index]);
+                    const auto parameter_type_it = parameter_types.find(parameter);
+                    if (parameter_type_it != parameter_types.end() &&
+                        !parameter_type_it->second.is_pointer()) {
+                        parameter_type_it->second = Type::pointer(
+                            Type::integer(8), AddressSpace::kDevice);
+                        pointer_changed = true;
+                    }
+                }
+            }
+        }
+
         bool changed = true;
         for (int iteration = 0; iteration < 12 && changed; ++iteration) {
             changed = false;
@@ -743,9 +823,7 @@ struct Importer {
                     inferred = Type::floating(32);
                 } else if (root == "mov" && instruction.operands.size() >= 2 &&
                            parameter_types.contains(parameter_name_from_operand(
-                               instruction.operands[1])) &&
-                           parameter_types.at(parameter_name_from_operand(
-                               instruction.operands[1])).kind == TypeKind::kAggregate) {
+                               instruction.operands[1]))) {
                     inferred = parameter_types.at(parameter_name_from_operand(
                         instruction.operands[1]));
                 } else if (root == "mov" && instruction.operands.size() >= 2 &&
@@ -761,6 +839,14 @@ struct Importer {
                     if (parameter != parameter_types.end() &&
                         parameter->second.kind != TypeKind::kAggregate) {
                         inferred = parameter->second;
+                    } else {
+                        const std::string base =
+                            first_register(instruction.operands[1]);
+                        const auto base_type = register_types.find(base);
+                        if (base_type != register_types.end() &&
+                            base_type->second.is_pointer()) {
+                            inferred = base_type->second;
+                        }
                     }
                 } else if (root == "cvta") {
                     const AddressSpace space =
@@ -1263,8 +1349,22 @@ struct Importer {
             }
             const std::string name = parameter_name_from_operand(instruction.operands[0]);
             if (name.empty()) return fail(&instruction, "call parameter slot has no name");
-            call_parameter_slots[name] =
+            const Operand stored =
                 source_operand(1, ptx_scalar_type(instruction.opcode));
+            const bool is_return_slot = std::any_of(
+                entry->return_params.begin(), entry->return_params.end(),
+                [&](const cumetal::ptx::Parameter& parameter) {
+                    return parameter.name == name;
+                });
+            if (is_return_slot) {
+                if (entry->return_params.size() != 1) {
+                    return fail(&instruction,
+                                "typed PTX device calls support at most one return value");
+                }
+                function_return = stored;
+            } else {
+                call_parameter_slots[name] = stored;
+            }
             return true;
         } else if (starts_with(instruction.opcode, "ld.param")) {
             if (instruction.operands.size() < 2 || operation.results.empty()) {
@@ -1292,16 +1392,39 @@ struct Importer {
             if (argument == parameter_values.end()) {
                 const auto returned = call_return_slots.find(name);
                 if (returned == call_return_slots.end()) {
-                    return fail(&instruction, "unknown kernel or call parameter '" + name + "'");
-                }
-                operation.opcode = OpCode::kConvert;
-                operation.operands.push_back(returned->second);
-                if (starts_with(instruction.opcode, "ld.param.b64") &&
-                    returned->second.type == Type::floating(32)) {
-                    operation.result_types.front() = Type::floating(32);
-                    value_types[operation.results.front()] = Type::floating(32);
-                } else if (!(returned->second.type == operation.result_types.front())) {
-                    operation.attributes["bitcast"] = "true";
+                    const auto indirect = environment->find(base_register);
+                    if (indirect == environment->end() ||
+                        !value_types[indirect->second].is_pointer()) {
+                        return fail(&instruction,
+                                    "unknown kernel or call parameter '" + name + "'");
+                    }
+                    // Clang may select between addresses of pointer-valued PTX
+                    // parameters and then load through the selected param-space
+                    // address. Parameter operands already denote their loaded
+                    // SSA values in CuMetal IR, so the selected value is the
+                    // pointer itself and this ld.param is an exact typed copy.
+                    operation.opcode = OpCode::kConvert;
+                    operation.operands.push_back(Operand::value_ref(
+                        indirect->second, value_types[indirect->second]));
+                    operation.result_types.front() = value_types[indirect->second];
+                    value_types[operation.results.front()] =
+                        value_types[indirect->second];
+                    const auto provenance =
+                        function->pointer_provenance.find(indirect->second);
+                    if (provenance != function->pointer_provenance.end()) {
+                        function->pointer_provenance[operation.results.front()] =
+                            provenance->second;
+                    }
+                } else {
+                    operation.opcode = OpCode::kConvert;
+                    operation.operands.push_back(returned->second);
+                    if (starts_with(instruction.opcode, "ld.param.b64") &&
+                        returned->second.type == Type::floating(32)) {
+                        operation.result_types.front() = Type::floating(32);
+                        value_types[operation.results.front()] = Type::floating(32);
+                    } else if (!(returned->second.type == operation.result_types.front())) {
+                        operation.attributes["bitcast"] = "true";
+                    }
                 }
             } else {
                 const Type& argument_type = parameter_types[name];
@@ -1789,10 +1912,47 @@ struct Importer {
                 block->operations.push_back(std::move(operation));
                 return true;
             }
-            const auto signature = cuda_builtin_signature(callee);
+            std::optional<BuiltinSignature> signature =
+                cuda_builtin_signature(callee);
+            const bool builtin_call = signature.has_value();
             if (!signature.has_value()) {
-                return fail(&instruction, "device call target '" + callee +
-                                              "' has no typed PTX signature");
+                const auto function = device_functions.find(callee);
+                if (function == device_functions.end()) {
+                    return fail(&instruction, "device call target '" + callee +
+                                                  "' has no typed PTX definition");
+                }
+                if (function->second->return_params.size() > 1) {
+                    return fail(&instruction, "device call target '" + callee +
+                                                  "' has multiple return values");
+                }
+                std::vector<Type> argument_types;
+                argument_types.reserve(function->second->params.size());
+                const auto imported = std::find_if(
+                    result.module.functions.begin(), result.module.functions.end(),
+                    [&](const Function& candidate) {
+                        return candidate.name == callee;
+                    });
+                for (std::size_t index = 0;
+                     index < function->second->params.size(); ++index) {
+                    if (imported != result.module.functions.end() &&
+                        index < imported->arguments.size()) {
+                        argument_types.push_back(imported->arguments[index].type);
+                    } else {
+                        argument_types.push_back(
+                            parameter_type(function->second->params[index]));
+                    }
+                }
+                signature = BuiltinSignature{
+                    .metal_name = callee,
+                    .return_type =
+                        imported != result.module.functions.end()
+                            ? imported->return_type
+                            : function->second->return_params.empty()
+                                  ? Type::void_type()
+                                  : parameter_type(
+                                        function->second->return_params.front()),
+                    .argument_types = std::move(argument_types),
+                };
             }
             const std::vector<std::string> argument_names =
                 grouped_names(instruction.operands[arguments_index]);
@@ -1802,7 +1962,7 @@ struct Importer {
             }
             operation.opcode = OpCode::kCall;
             operation.attributes["callee"] = signature->metal_name;
-            operation.attributes["builtin"] = "true";
+            if (builtin_call) operation.attributes["builtin"] = "true";
             if (signature->return_type == Type::floating(64)) {
                 operation.attributes["fp64_mode"] =
                     result.module.attributes.at("fp64_mode");
@@ -1850,7 +2010,19 @@ struct Importer {
                 }
                 operation.operands.push_back(std::move(argument));
             }
+            if (!builtin_call && printf_functions.contains(callee)) {
+                if (!printf_buffer.has_value() || !printf_capacity.has_value()) {
+                    return fail(&instruction,
+                                "missing transitive printf binding for PTX device helper");
+                }
+                operation.operands.push_back(*printf_buffer);
+                operation.operands.push_back(*printf_capacity);
+            }
             if (has_return) {
+                if (signature->return_type.kind == TypeKind::kVoid) {
+                    return fail(&instruction, "void device call target '" + callee +
+                                                  "' was given a return slot");
+                }
                 const ValueId result_value = builder.next_value();
                 operation.results.push_back(result_value);
                 operation.result_types.push_back(signature->return_type);
@@ -1858,7 +2030,7 @@ struct Importer {
                 call_return_slots[grouped_names(instruction.operands[0]).front()] =
                     Operand::value_ref(result_value, signature->return_type);
             }
-            if (signature->tolerance_bounded) {
+            if (builtin_call && signature->tolerance_bounded) {
                 result.module.semantic_quality = SemanticQuality::kToleranceBounded;
                 const std::string caveat =
                     "Metal-missing float math functions use numerically tested typed expansions";
@@ -1950,9 +2122,15 @@ struct Importer {
     bool materialize_function() {
         Function function;
         function.name = entry->name;
-        function.is_kernel = true;
-        function.return_type = Type::void_type();
-        function.kernel_abi = KernelAbi{};
+        function.is_kernel = is_kernel;
+        if (entry->return_params.size() > 1) {
+            return fail(nullptr,
+                        "typed PTX device functions support at most one return value");
+        }
+        function.return_type = entry->return_params.empty()
+                                   ? Type::void_type()
+                                   : parameter_type(entry->return_params.front());
+        if (is_kernel) function.kernel_abi = KernelAbi{};
 
         for (std::size_t index = 0; index < entry->params.size(); ++index) {
             const auto& parameter = entry->params[index];
@@ -1974,82 +2152,92 @@ struct Importer {
                     .no_alias = false,
                 };
             }
-            const std::uint32_t size = type_size(type);
-            function.kernel_abi->arguments.push_back({
-                .name = parameter.name,
-                .kind = type.is_pointer() ? ArgumentKind::kPointer : ArgumentKind::kScalar,
-                .type = type,
-                .size = size,
-                .alignment = std::min<std::uint32_t>(size, 8),
-                .address_space = type.is_pointer() ? type.address_space : AddressSpace::kConstant,
-                .binding_indices = {static_cast<std::uint32_t>(index)},
-            });
-            function.kernel_abi->bindings.push_back({
-                .kind = type.is_pointer() ? BindingKind::kBuffer : BindingKind::kBytes,
-                .binding_index = static_cast<std::uint32_t>(index),
-                .logical_argument_index = static_cast<std::uint32_t>(index),
-                .type = type,
-                .size = size,
-                .alignment = std::min<std::uint32_t>(size, 8),
-            });
+            if (is_kernel) {
+                const std::uint32_t size = type_size(type);
+                function.kernel_abi->arguments.push_back({
+                    .name = parameter.name,
+                    .kind = type.is_pointer() ? ArgumentKind::kPointer
+                                              : ArgumentKind::kScalar,
+                    .type = type,
+                    .size = size,
+                    .alignment = std::min<std::uint32_t>(size, 8),
+                    .address_space = type.is_pointer() ? type.address_space
+                                                       : AddressSpace::kConstant,
+                    .binding_indices = {static_cast<std::uint32_t>(index)},
+                });
+                function.kernel_abi->bindings.push_back({
+                    .kind = type.is_pointer() ? BindingKind::kBuffer
+                                              : BindingKind::kBytes,
+                    .binding_index = static_cast<std::uint32_t>(index),
+                    .logical_argument_index = static_cast<std::uint32_t>(index),
+                    .type = type,
+                    .size = size,
+                    .alignment = std::min<std::uint32_t>(size, 8),
+                });
+            }
         }
 
         // Registration appends referenced writable globals immediately after
         // the explicit CUDA arguments. Mirror that declaration order in the
         // typed ABI so every kernel sees the persistent registered buffer.
-        for (const auto& symbol : module_global_symbols) {
-            const std::uint32_t binding_index =
-                static_cast<std::uint32_t>(function.arguments.size());
-            if (binding_index >= 29u) {
-                return fail(nullptr,
-                            "CUDA device global conflicts with reserved Metal bindings");
+        if (is_kernel) {
+            for (const auto& symbol : module_global_symbols) {
+                const std::uint32_t binding_index =
+                    static_cast<std::uint32_t>(function.arguments.size());
+                if (binding_index >= 29u) {
+                    return fail(
+                        nullptr,
+                        "CUDA device global conflicts with reserved Metal bindings");
+                }
+                const Type pointer_type =
+                    Type::pointer(Type::integer(8), AddressSpace::kDevice);
+                const ValueId value = builder.next_value();
+                value_types[value] = pointer_type;
+                const std::string argument_name =
+                    "__cumetal_global_" + symbol.name;
+                module_global_values.emplace(
+                    symbol.name, Operand::value_ref(value, pointer_type));
+                function.arguments.push_back({
+                    .value = value,
+                    .name = argument_name,
+                    .type = pointer_type,
+                });
+                function.pointer_provenance[value] = {
+                    .base_kind = PointerBaseKind::kAllocation,
+                    .base_name = argument_name,
+                    .known_byte_offset = 0,
+                    .alignment = symbol.alignment,
+                };
+                const std::uint32_t logical_index =
+                    static_cast<std::uint32_t>(
+                        function.kernel_abi->arguments.size());
+                const std::string hidden_role = "global_symbol:" + symbol.name;
+                function.kernel_abi->arguments.push_back({
+                    .name = argument_name,
+                    .kind = ArgumentKind::kPointer,
+                    .type = pointer_type,
+                    .size = 8,
+                    .alignment = 8,
+                    .address_space = AddressSpace::kDevice,
+                    .binding_indices = {binding_index},
+                    .hidden_role = hidden_role,
+                });
+                function.kernel_abi->bindings.push_back({
+                    .kind = BindingKind::kBuffer,
+                    .binding_index = binding_index,
+                    .logical_argument_index = logical_index,
+                    .type = pointer_type,
+                    .size = static_cast<std::uint32_t>(symbol.byte_size),
+                    .alignment = symbol.alignment,
+                    .hidden_role = hidden_role,
+                });
             }
-            const Type pointer_type =
-                Type::pointer(Type::integer(8), AddressSpace::kDevice);
-            const ValueId value = builder.next_value();
-            value_types[value] = pointer_type;
-            const std::string argument_name = "__cumetal_global_" + symbol.name;
-            module_global_values.emplace(
-                symbol.name, Operand::value_ref(value, pointer_type));
-            function.arguments.push_back({
-                .value = value,
-                .name = argument_name,
-                .type = pointer_type,
-            });
-            function.pointer_provenance[value] = {
-                .base_kind = PointerBaseKind::kAllocation,
-                .base_name = argument_name,
-                .known_byte_offset = 0,
-                .alignment = symbol.alignment,
-            };
-            const std::uint32_t logical_index =
-                static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
-            const std::string hidden_role = "global_symbol:" + symbol.name;
-            function.kernel_abi->arguments.push_back({
-                .name = argument_name,
-                .kind = ArgumentKind::kPointer,
-                .type = pointer_type,
-                .size = 8,
-                .alignment = 8,
-                .address_space = AddressSpace::kDevice,
-                .binding_indices = {binding_index},
-                .hidden_role = hidden_role,
-            });
-            function.kernel_abi->bindings.push_back({
-                .kind = BindingKind::kBuffer,
-                .binding_index = binding_index,
-                .logical_argument_index = logical_index,
-                .type = pointer_type,
-                .size = static_cast<std::uint32_t>(symbol.byte_size),
-                .alignment = symbol.alignment,
-                .hidden_role = hidden_role,
-            });
         }
 
-        if (!printf_calls.empty()) {
+        if (printf_functions.contains(entry->name)) {
             std::uint32_t binding_index =
                 static_cast<std::uint32_t>(function.arguments.size());
-            if (binding_index + 1 >= 29u) {
+            if (is_kernel && binding_index + 1 >= 29u) {
                 return fail(nullptr,
                             "typed printf hidden arguments conflict with reserved Metal bindings");
             }
@@ -2078,51 +2266,53 @@ struct Importer {
                 .known_byte_offset = 0,
                 .alignment = 4,
             };
-            const std::uint32_t buffer_logical =
-                static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
-            function.kernel_abi->arguments.push_back({
-                .name = "__cumetal_printf_buffer",
-                .kind = ArgumentKind::kPointer,
-                .type = buffer_type,
-                .size = 8,
-                .alignment = 8,
-                .address_space = AddressSpace::kDevice,
-                .binding_indices = {binding_index},
-                .hidden_role = "printf_buffer",
-            });
-            function.kernel_abi->bindings.push_back({
-                .kind = BindingKind::kBuffer,
-                .binding_index = binding_index++,
-                .logical_argument_index = buffer_logical,
-                .type = buffer_type,
-                .size = 0,
-                .alignment = 4,
-                .hidden_role = "printf_buffer",
-            });
-            const std::uint32_t capacity_logical =
-                static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
-            function.kernel_abi->arguments.push_back({
-                .name = "__cumetal_printf_capacity",
-                .kind = ArgumentKind::kScalar,
-                .type = capacity_type,
-                .size = 4,
-                .alignment = 4,
-                .address_space = AddressSpace::kConstant,
-                .binding_indices = {binding_index},
-                .hidden_role = "printf_capacity",
-            });
-            function.kernel_abi->bindings.push_back({
-                .kind = BindingKind::kBytes,
-                .binding_index = binding_index,
-                .logical_argument_index = capacity_logical,
-                .type = capacity_type,
-                .size = 4,
-                .alignment = 4,
-                .hidden_role = "printf_capacity",
-            });
+            if (is_kernel) {
+                const std::uint32_t buffer_logical =
+                    static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
+                function.kernel_abi->arguments.push_back({
+                    .name = "__cumetal_printf_buffer",
+                    .kind = ArgumentKind::kPointer,
+                    .type = buffer_type,
+                    .size = 8,
+                    .alignment = 8,
+                    .address_space = AddressSpace::kDevice,
+                    .binding_indices = {binding_index},
+                    .hidden_role = "printf_buffer",
+                });
+                function.kernel_abi->bindings.push_back({
+                    .kind = BindingKind::kBuffer,
+                    .binding_index = binding_index++,
+                    .logical_argument_index = buffer_logical,
+                    .type = buffer_type,
+                    .size = 0,
+                    .alignment = 4,
+                    .hidden_role = "printf_buffer",
+                });
+                const std::uint32_t capacity_logical =
+                    static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
+                function.kernel_abi->arguments.push_back({
+                    .name = "__cumetal_printf_capacity",
+                    .kind = ArgumentKind::kScalar,
+                    .type = capacity_type,
+                    .size = 4,
+                    .alignment = 4,
+                    .address_space = AddressSpace::kConstant,
+                    .binding_indices = {binding_index},
+                    .hidden_role = "printf_capacity",
+                });
+                function.kernel_abi->bindings.push_back({
+                    .kind = BindingKind::kBytes,
+                    .binding_index = binding_index,
+                    .logical_argument_index = capacity_logical,
+                    .type = capacity_type,
+                    .size = 4,
+                    .alignment = 4,
+                    .hidden_role = "printf_capacity",
+                });
+            }
         }
 
-        if (!module_constant_symbols.empty()) {
+        if (is_kernel && !module_constant_symbols.empty()) {
             if (function.arguments.size() > 30) {
                 return fail(nullptr,
                             "kernel argument ABI conflicts with reserved constant buffer index 30");
@@ -2222,6 +2412,7 @@ struct Importer {
         for (std::size_t block_index = 0; block_index < raw_blocks.size(); ++block_index) {
             BasicBlock& block = function.blocks[block_index];
             std::unordered_map<std::string, ValueId> environment = incoming[block_index];
+            function_return.reset();
             for (const Instruction* instruction : raw_blocks[block_index].instructions) {
                 if (!translate_instruction(&function, &block, *instruction, &environment)) {
                     return false;
@@ -2269,6 +2460,13 @@ struct Importer {
                        (root_opcode(last->opcode) == "ret" ||
                         root_opcode(last->opcode) == "exit")) {
                 terminator.opcode = OpCode::kReturn;
+                if (!is_kernel && function.return_type.kind != TypeKind::kVoid) {
+                    if (!function_return.has_value()) {
+                        return fail(last,
+                                    "non-void PTX device function has no return value");
+                    }
+                    terminator.operands.push_back(*function_return);
+                }
                 terminator.location = {
                     .file = result.module.source_name,
                     .line = static_cast<std::uint32_t>(std::max(0, last->line)),
@@ -2279,6 +2477,10 @@ struct Importer {
                     make_successor(block_index, raw_blocks[block_index].successors.front()));
             } else {
                 terminator.opcode = OpCode::kReturn;
+                if (!is_kernel && function.return_type.kind != TypeKind::kVoid) {
+                    return fail(last,
+                                "non-void PTX device function falls through without a return value");
+                }
             }
             block.operations.push_back(std::move(terminator));
         }
@@ -2323,43 +2525,75 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     }
     importer.result.warnings = parsed.warnings;
     if (!importer.select_entry(parsed, options)) return importer.result;
-    const cumetal::passes::PrintfLowerResult printf_lowered =
-        cumetal::passes::lower_printf_calls(
-            *importer.entry,
-            {.strict = options.strict, .ptx_source = ptx});
-    importer.result.warnings.insert(importer.result.warnings.end(),
-                                    printf_lowered.warnings.begin(),
-                                    printf_lowered.warnings.end());
-    if (!printf_lowered.ok) {
-        importer.result.error = printf_lowered.error;
-        return importer.result;
+    const cumetal::ptx::EntryFunction* selected_entry = importer.entry;
+    for (const cumetal::ptx::EntryFunction& function : parsed.module.functions) {
+        importer.device_functions.emplace(function.name, &function);
     }
-    for (const auto& format : printf_lowered.formats) {
-        if (!format.literal) {
-            importer.result.error =
-                "typed printf requires a decoded literal format string";
-            return importer.result;
+
+    std::vector<const cumetal::ptx::EntryFunction*> reachable_helpers;
+    std::unordered_set<std::string> visiting;
+    std::unordered_set<std::string> visited;
+    const auto visit_call_graph = [&](const auto& self,
+                                      const cumetal::ptx::EntryFunction& function)
+        -> std::optional<bool> {
+        if (visited.contains(function.name)) {
+            return importer.printf_functions.contains(function.name);
         }
-        importer.result.printf_formats.push_back(format.token);
-    }
-    for (const auto& call : printf_lowered.calls) {
-        importer.printf_calls.emplace(call.source_line, call);
-        importer.printf_scaffold_lines.insert(call.abi_scaffold_lines.begin(),
-                                              call.abi_scaffold_lines.end());
-        importer.printf_scaffold_lines.erase(call.source_line);
+        if (!visiting.insert(function.name).second) {
+            importer.result.error =
+                "recursive PTX device-call cycle involving '" + function.name + "'";
+            return std::nullopt;
+        }
+        bool uses_printf = false;
+        for (const Instruction& instruction : function.instructions) {
+            const std::optional<std::string> target = direct_call_target(instruction);
+            if (!target.has_value()) continue;
+            if (*target == "vprintf" || *target == "printf") {
+                uses_printf = true;
+                continue;
+            }
+            const auto callee = importer.device_functions.find(*target);
+            if (callee == importer.device_functions.end()) continue;
+            const std::optional<bool> child_uses_printf =
+                self(self, *callee->second);
+            if (!child_uses_printf.has_value()) return std::nullopt;
+            uses_printf |= *child_uses_printf;
+        }
+        visiting.erase(function.name);
+        visited.insert(function.name);
+        if (uses_printf) importer.printf_functions.insert(function.name);
+        if (!function.name.empty() && function.name != importer.entry->name &&
+            importer.device_functions.contains(function.name)) {
+            reachable_helpers.push_back(&function);
+        }
+        return uses_printf;
+    };
+    if (!visit_call_graph(visit_call_graph, *selected_entry).has_value()) {
+        return importer.result;
     }
     for (const ModuleConstantSymbol& symbol : scan_module_constant_symbols(ptx)) {
         importer.module_constant_buffer_size =
             std::max(importer.module_constant_buffer_size,
                      symbol.offset + symbol.byte_size);
         bool referenced = false;
-        for (const Instruction& instruction : importer.entry->instructions) {
+        const auto symbol_referenced = [&](const Instruction& instruction) {
             referenced = std::any_of(
                 instruction.operands.begin(), instruction.operands.end(),
                 [&](const std::string& operand) {
                     return parameter_name_from_operand(operand) == symbol.name;
                 });
-            if (referenced) break;
+            return referenced;
+        };
+        for (const Instruction& instruction : selected_entry->instructions) {
+            if (symbol_referenced(instruction)) break;
+        }
+        for (const auto* helper : reachable_helpers) {
+            if (referenced || std::any_of(helper->instructions.begin(),
+                                          helper->instructions.end(),
+                                          symbol_referenced)) {
+                referenced = true;
+                break;
+            }
         }
         if (referenced) {
             importer.module_constant_symbols.emplace(symbol.name, symbol);
@@ -2371,22 +2605,98 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         return importer.result;
     }
     for (const ModuleConstantSymbol& symbol : scan_module_global_symbols(ptx)) {
-        const bool referenced = std::any_of(
-            importer.entry->instructions.begin(), importer.entry->instructions.end(),
-            [&](const Instruction& instruction) {
-                return std::any_of(
-                    instruction.operands.begin(), instruction.operands.end(),
-                    [&](const std::string& operand) {
-                        return parameter_name_from_operand(operand) == symbol.name;
-                    });
-            });
+        const auto references_symbol = [&](const Instruction& instruction) {
+            return std::any_of(
+                instruction.operands.begin(), instruction.operands.end(),
+                [&](const std::string& operand) {
+                    return parameter_name_from_operand(operand) == symbol.name;
+                });
+        };
+        bool referenced = std::any_of(
+            selected_entry->instructions.begin(), selected_entry->instructions.end(),
+            references_symbol);
+        for (const auto* helper : reachable_helpers) {
+            referenced |= std::any_of(helper->instructions.begin(),
+                                      helper->instructions.end(), references_symbol);
+        }
         if (referenced) importer.module_global_symbols.push_back(symbol);
     }
-    importer.infer_register_types();
-    importer.build_cfg();
-    importer.allocate_values();
-    if (!importer.construct_ssa()) return importer.result;
-    if (!importer.materialize_function()) return importer.result;
+
+    const auto import_function = [&](const cumetal::ptx::EntryFunction* function,
+                                     bool is_kernel) -> bool {
+        Importer next;
+        next.builder = importer.builder;
+        next.result = std::move(importer.result);
+        next.entry = function;
+        next.is_kernel = is_kernel;
+        next.device_functions = importer.device_functions;
+        next.printf_functions = importer.printf_functions;
+        next.threadgroup_symbols = importer.threadgroup_symbols;
+        next.local_depots = importer.local_depots;
+        next.implicit_definitions = importer.implicit_definitions;
+        next.module_constant_symbols = importer.module_constant_symbols;
+        next.module_constant_buffer_size = importer.module_constant_buffer_size;
+        next.module_global_symbols = importer.module_global_symbols;
+
+        const cumetal::passes::PrintfLowerResult printf_lowered =
+            cumetal::passes::lower_printf_calls(
+                *function, {.strict = options.strict, .ptx_source = ptx});
+        next.result.warnings.insert(next.result.warnings.end(),
+                                    printf_lowered.warnings.begin(),
+                                    printf_lowered.warnings.end());
+        if (!printf_lowered.ok) {
+            next.result.error = printf_lowered.error;
+            importer = std::move(next);
+            return false;
+        }
+        std::vector<std::uint32_t> format_ids;
+        for (const auto& format : printf_lowered.formats) {
+            if (!format.literal) {
+                next.result.error =
+                    "typed printf requires a decoded literal format string";
+                importer = std::move(next);
+                return false;
+            }
+            const auto existing = std::find(next.result.printf_formats.begin(),
+                                            next.result.printf_formats.end(),
+                                            format.token);
+            if (existing == next.result.printf_formats.end()) {
+                next.result.printf_formats.push_back(format.token);
+                format_ids.push_back(static_cast<std::uint32_t>(
+                    next.result.printf_formats.size() - 1));
+            } else {
+                format_ids.push_back(static_cast<std::uint32_t>(
+                    std::distance(next.result.printf_formats.begin(), existing)));
+            }
+        }
+        for (auto call : printf_lowered.calls) {
+            if (call.format_id >= format_ids.size()) {
+                next.result.error = "typed printf format id is out of range";
+                importer = std::move(next);
+                return false;
+            }
+            call.format_id = format_ids[call.format_id];
+            next.printf_calls.emplace(call.source_line, call);
+            next.printf_scaffold_lines.insert(call.abi_scaffold_lines.begin(),
+                                               call.abi_scaffold_lines.end());
+            next.printf_scaffold_lines.erase(call.source_line);
+        }
+
+        next.infer_register_types();
+        next.build_cfg();
+        next.allocate_values();
+        if (!next.construct_ssa() || !next.materialize_function()) {
+            importer = std::move(next);
+            return false;
+        }
+        importer = std::move(next);
+        return true;
+    };
+
+    for (const cumetal::ptx::EntryFunction* helper : reachable_helpers) {
+        if (!import_function(helper, false)) return importer.result;
+    }
+    if (!import_function(selected_entry, true)) return importer.result;
 
     const VerifyResult verification = verify(importer.result.module);
     if (!verification.ok) {

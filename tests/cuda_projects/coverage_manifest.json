@@ -36,6 +36,13 @@
       "harness": "standard"
     },
     {
+      "name": "device_calls",
+      "subdir": "device_calls",
+      "source": "device_calls.cu",
+      "binary": "device_calls",
+      "harness": "standard"
+    },
+    {
       "name": "device_sync_primitives",
       "subdir": "device_sync_primitives",
       "source": "device_sync_primitives.cu",

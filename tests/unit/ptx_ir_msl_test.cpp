@@ -572,6 +572,116 @@ BODY:
                  "PTX call slots preserve float bits across a typed libdevice call");
     if (!call_slots.ok) std::cerr << call_slots.error << "\n";
 
+    const std::string direct_device_call_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .func (.param .b32 add_one_ret) add_one(
+    .param .b32 add_one_value
+) {
+    .reg .b32 %r<3>;
+    ld.param.b32 %r1, [add_one_value];
+    add.u32 %r2, %r1, 1;
+    st.param.b32 [add_one_ret], %r2;
+    ret;
+}
+.visible .entry direct_device_call(.param .u64 output) {
+    .reg .b32 %r<3>;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    mov.u32 %r1, 41;
+    .param .b32 param0;
+    .param .b32 retval0;
+    st.param.b32 [param0], %r1;
+    call.uni (retval0), add_one, (param0);
+    ld.param.b32 %r2, [retval0];
+    st.global.b32 [%rd1], %r2;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult direct_device_call =
+        metal::compile_ptx_to_msl(direct_device_call_ptx);
+    ok &= expect(direct_device_call.ok &&
+                     direct_device_call.source.find("uint add_one(uint") !=
+                         std::string::npos &&
+                     direct_device_call.source.find("add_one(") !=
+                         direct_device_call.source.rfind("add_one("),
+                 "typed PTX materializes direct scalar device helpers and return slots");
+    if (!direct_device_call.ok) std::cerr << direct_device_call.error << "\n";
+
+    const std::string inferred_pointer_device_call_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .func (.param .b32 pointer_load_ret) pointer_load(
+    .param .b64 pointer_load_address
+) {
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<2>;
+    ld.param.b64 %rd1, [pointer_load_address];
+    ld.global.b32 %r1, [%rd1];
+    st.param.b32 [pointer_load_ret], %r1;
+    ret;
+}
+.visible .entry inferred_pointer_device_call(
+    .param .u64 .ptr .align 1 output
+) {
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<2>;
+    ld.param.b64 %rd1, [output];
+    .param .b64 argument0;
+    st.param.b64 [argument0], %rd1;
+    .param .b32 retval0;
+    call.uni (retval0), pointer_load, (argument0);
+    ld.param.b32 %r1, [retval0];
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult inferred_pointer_device_call =
+        metal::compile_ptx_to_msl(inferred_pointer_device_call_ptx);
+    ok &= expect(inferred_pointer_device_call.ok &&
+                     inferred_pointer_device_call.source.find(
+                         "uint pointer_load(device uchar*") != std::string::npos,
+                 "typed PTX infers pointer-valued device parameters when older Clang omits .ptr");
+    if (!inferred_pointer_device_call.ok) {
+        std::cerr << inferred_pointer_device_call.error << "\n";
+    }
+
+    const std::string recursive_device_call_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .func recursive_helper() {
+    call.uni recursive_helper, ();
+    ret;
+}
+.visible .entry recursive_device_call() {
+    call.uni recursive_helper, ();
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult recursive_device_call =
+        metal::compile_ptx_to_msl(recursive_device_call_ptx);
+    ok &= expect(!recursive_device_call.ok &&
+                     recursive_device_call.error.find(
+                         "recursive PTX device-call cycle") != std::string::npos,
+                 "recursive typed PTX device-call graphs fail explicitly");
+
+    const std::string missing_device_call_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .entry missing_device_call() {
+    call.uni absent_helper, ();
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult missing_device_call =
+        metal::compile_ptx_to_msl(missing_device_call_ptx);
+    ok &= expect(!missing_device_call.ok &&
+                     missing_device_call.error.find(
+                         "has no typed PTX definition") != std::string::npos,
+                 "undefined typed PTX device-call targets fail explicitly");
+
     const std::string missing_call_slot_ptx = R"ptx(
 .version 7.0
 .target sm_80

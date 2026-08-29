@@ -505,15 +505,23 @@ struct Importer {
     }
 
     static bool function_uses_vprintf(const llvm::Function& function) {
-        for (const llvm::BasicBlock& block : function) {
-            for (const llvm::Instruction& instruction : block) {
-                const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                const llvm::Function* callee =
-                    call == nullptr ? nullptr : call->getCalledFunction();
-                if (callee != nullptr && callee->getName() == "vprintf") return true;
+        std::unordered_set<const llvm::Function*> visited;
+        const auto uses_vprintf = [&](const auto& self,
+                                      const llvm::Function& candidate) -> bool {
+            if (!visited.insert(&candidate).second) return false;
+            for (const llvm::BasicBlock& block : candidate) {
+                for (const llvm::Instruction& instruction : block) {
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    const llvm::Function* callee =
+                        call == nullptr ? nullptr : call->getCalledFunction();
+                    if (callee == nullptr) continue;
+                    if (callee->getName() == "vprintf") return true;
+                    if (!callee->isDeclaration() && self(self, *callee)) return true;
+                }
             }
-        }
-        return false;
+            return false;
+        };
+        return uses_vprintf(uses_vprintf, function);
     }
 
     bool constant_pointer_base_and_offset(const llvm::Value& value,
@@ -806,11 +814,7 @@ struct Importer {
         }
 
         if (function_uses_vprintf(function)) {
-            if (!state->output.is_kernel) {
-                return fail(nullptr,
-                            "typed vprintf in device helpers is not yet supported");
-            }
-            if (argument_index + 1 >= 29u) {
+            if (state->output.is_kernel && argument_index + 1 >= 29u) {
                 return fail(nullptr,
                             "typed vprintf hidden arguments conflict with reserved Metal bindings");
             }
@@ -833,48 +837,50 @@ struct Importer {
                 .known_byte_offset = 0,
                 .alignment = 4,
             };
-            const std::uint32_t buffer_logical =
-                static_cast<std::uint32_t>(state->output.kernel_abi->arguments.size());
-            state->output.kernel_abi->arguments.push_back({
-                .name = "__cumetal_printf_buffer",
-                .kind = ArgumentKind::kPointer,
-                .type = buffer_type,
-                .size = 8,
-                .alignment = 8,
-                .address_space = AddressSpace::kDevice,
-                .binding_indices = {argument_index},
-                .hidden_role = "printf_buffer",
-            });
-            state->output.kernel_abi->bindings.push_back({
-                .kind = BindingKind::kBuffer,
-                .binding_index = argument_index++,
-                .logical_argument_index = buffer_logical,
-                .type = buffer_type,
-                .size = 0,
-                .alignment = 4,
-                .hidden_role = "printf_buffer",
-            });
-            const std::uint32_t capacity_logical =
-                static_cast<std::uint32_t>(state->output.kernel_abi->arguments.size());
-            state->output.kernel_abi->arguments.push_back({
-                .name = "__cumetal_printf_capacity",
-                .kind = ArgumentKind::kScalar,
-                .type = capacity_type,
-                .size = 4,
-                .alignment = 4,
-                .address_space = AddressSpace::kConstant,
-                .binding_indices = {argument_index},
-                .hidden_role = "printf_capacity",
-            });
-            state->output.kernel_abi->bindings.push_back({
-                .kind = BindingKind::kBytes,
-                .binding_index = argument_index++,
-                .logical_argument_index = capacity_logical,
-                .type = capacity_type,
-                .size = 4,
-                .alignment = 4,
-                .hidden_role = "printf_capacity",
-            });
+            if (state->output.is_kernel) {
+                const std::uint32_t buffer_logical =
+                    static_cast<std::uint32_t>(state->output.kernel_abi->arguments.size());
+                state->output.kernel_abi->arguments.push_back({
+                    .name = "__cumetal_printf_buffer",
+                    .kind = ArgumentKind::kPointer,
+                    .type = buffer_type,
+                    .size = 8,
+                    .alignment = 8,
+                    .address_space = AddressSpace::kDevice,
+                    .binding_indices = {argument_index},
+                    .hidden_role = "printf_buffer",
+                });
+                state->output.kernel_abi->bindings.push_back({
+                    .kind = BindingKind::kBuffer,
+                    .binding_index = argument_index++,
+                    .logical_argument_index = buffer_logical,
+                    .type = buffer_type,
+                    .size = 0,
+                    .alignment = 4,
+                    .hidden_role = "printf_buffer",
+                });
+                const std::uint32_t capacity_logical =
+                    static_cast<std::uint32_t>(state->output.kernel_abi->arguments.size());
+                state->output.kernel_abi->arguments.push_back({
+                    .name = "__cumetal_printf_capacity",
+                    .kind = ArgumentKind::kScalar,
+                    .type = capacity_type,
+                    .size = 4,
+                    .alignment = 4,
+                    .address_space = AddressSpace::kConstant,
+                    .binding_indices = {argument_index},
+                    .hidden_role = "printf_capacity",
+                });
+                state->output.kernel_abi->bindings.push_back({
+                    .kind = BindingKind::kBytes,
+                    .binding_index = argument_index++,
+                    .logical_argument_index = capacity_logical,
+                    .type = capacity_type,
+                    .size = 4,
+                    .alignment = 4,
+                    .hidden_role = "printf_capacity",
+                });
+            }
         }
 
         std::uint32_t unnamed_block = 0;
@@ -1216,6 +1222,15 @@ struct Importer {
                 if (info.constant && passed_constant_symbols) continue;
                 operation->operands.push_back(binding->second.base);
                 passed_constant_symbols |= info.constant;
+            }
+            if (function_uses_vprintf(*callee)) {
+                if (!state->printf_buffer.has_value() ||
+                    !state->printf_capacity.has_value()) {
+                    return fail(&call,
+                                "missing transitive printf binding for device helper");
+                }
+                operation->operands.push_back(*state->printf_buffer);
+                operation->operands.push_back(*state->printf_capacity);
             }
         }
         return true;
