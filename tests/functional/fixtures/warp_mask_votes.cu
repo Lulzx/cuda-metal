@@ -9,7 +9,7 @@ extern "C" __global__ void warp_mask_votes(unsigned int* output) {
     const unsigned int even_mask = member_mask & 0x55555555u;
     const unsigned int group_base = lane & 16u;
 
-    const unsigned int base = threadIdx.x * 7u;
+    const unsigned int base = threadIdx.x * 9u;
     output[base + 0u] = __ballot_sync(member_mask, even);
     output[base + 1u] = static_cast<unsigned int>(__any_sync(member_mask, even));
     output[base + 2u] = static_cast<unsigned int>(__all_sync(even_mask, even));
@@ -32,6 +32,20 @@ extern "C" __global__ void warp_mask_votes(unsigned int* output) {
         output[base + 6u] = second_scratch[16u + ((lane - 15u) & 15u)];
     }
 
+    // Non-contiguous member set: prove vote, shuffle, and ordering for an
+    // irregular mask rather than only contiguous half-warps.
+    constexpr unsigned int irregular_mask = 0xa5a55a5au;
+    if ((irregular_mask & (1u << lane)) != 0u) {
+        scratch[lane] = 3000u + lane;
+        __syncwarp(irregular_mask);
+        output[base + 7u] = __ballot_sync(irregular_mask, true);
+        output[base + 8u] = scratch[1] +
+            __shfl_sync(irregular_mask, lane, 1);
+    } else {
+        output[base + 7u] = 0xdeadc0deu;
+        output[base + 8u] = lane;
+    }
+
     // Mirror PhysX's warp-cooperative contact-stream allocation and write:
     // participating lanes ballot, lane zero allocates one packed region,
     // the offset is broadcast, and each lane writes one float4.
@@ -39,13 +53,13 @@ extern "C" __global__ void warp_mask_votes(unsigned int* output) {
     const unsigned int contact_mask = __ballot_sync(0xffffffffu, writes_contact);
     unsigned int byte_offset = 0xffffffffu;
     if (lane == 0u) {
-        byte_offset = atomicAdd(output + 224u, __popc(contact_mask) * 16u);
+        byte_offset = atomicAdd(output + 288u, __popc(contact_mask) * 16u);
     }
     byte_offset = __shfl_sync(0xffffffffu, byte_offset, 0);
     if (writes_contact) {
         const unsigned int preceding = contact_mask & ((1u << lane) - 1u);
         const unsigned int contact_index = __popc(preceding);
-        float4* contact_stream = reinterpret_cast<float4*>(output + 225u);
+        float4* contact_stream = reinterpret_cast<float4*>(output + 289u);
         contact_stream[byte_offset / 16u + contact_index] =
             make_float4(100.0f + lane, 200.0f + lane, 300.0f + lane, -0.25f * lane);
     }

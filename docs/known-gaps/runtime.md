@@ -11,7 +11,9 @@
   grandchild execution, invalid child configurations, and record overflow have
   focused Apple-GPU tests. Queue growth and hardware-recursive scheduling parity
   remain absent.
-- Irregular cooperative-group masks and interaction coverage remain narrower
+- Contiguous half-warp and non-contiguous `0xa5a55a5a` masks have focused
+  vote, shuffle, barrier-ordering, binary/labeled partition, and divergent
+  coalesced-group tests. Arbitrary mask/topology interactions remain narrower
   than CUDA's complete surface.
 - Stream priorities are reported as zero and are not Metal priority queues.
 - CUDA device clocks use a device-wide atomic counter with a fixed monotonic

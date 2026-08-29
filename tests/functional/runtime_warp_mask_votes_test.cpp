@@ -12,7 +12,7 @@
 namespace {
 
 constexpr std::uint32_t kThreads = 32;
-constexpr std::uint32_t kWordsPerThread = 7;
+constexpr std::uint32_t kWordsPerThread = 9;
 constexpr std::uint32_t kCounterWord = kThreads * kWordsPerThread;
 constexpr std::uint32_t kContactStreamWord = kCounterWord + 1u;
 constexpr std::uint32_t kContactCount = 4;
@@ -66,6 +66,8 @@ int main(int argc, char** argv) {
 
     for (std::uint32_t lane = 0; lane < kThreads; ++lane) {
         const bool lower = lane < 16u;
+        constexpr std::uint32_t kIrregularMask = 0xa5a55a5au;
+        const bool irregular_member = (kIrregularMask & (1u << lane)) != 0u;
         const std::array<std::uint32_t, kWordsPerThread> expected{
             lower ? 0x00005555u : 0x55550000u,
             1u,
@@ -76,6 +78,8 @@ int main(int argc, char** argv) {
                   : (200u + 16u + ((lane - 15u) & 15u)),
             lower ? (1000u + ((lane + 1u) & 15u))
                   : (2000u + 16u + ((lane - 15u) & 15u)),
+            irregular_member ? kIrregularMask : 0xdeadc0deu,
+            irregular_member ? 3002u : lane,
         };
         for (std::uint32_t word = 0; word < kWordsPerThread; ++word) {
             const std::uint32_t actual = output[lane * kWordsPerThread + word];
@@ -155,6 +159,6 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "FAIL: cudaFree\n");
         return 1;
     }
-    std::printf("PASS: source warp votes, masked barriers, and cooperative packed stream writes\n");
+    std::printf("PASS: source warp votes, contiguous/irregular masked barriers, and cooperative packed stream writes\n");
     return 0;
 }
