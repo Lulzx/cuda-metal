@@ -21,6 +21,7 @@
 #include <mutex>
 #include <new>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -73,11 +74,26 @@ struct FatbinBlobHeader {
 };
 
 struct DriverState {
+    struct VmmHandleRecord {
+        std::size_t size = 0;
+        CUmemAllocationProp prop{};
+    };
+    struct VmmReservationRecord {
+        std::size_t size = 0;
+        bool mapped = false;
+        bool access_enabled = false;
+        CUmemAllocationProp mapped_prop{};
+    };
+
     std::mutex mutex;
     bool initialized = false;
     std::unordered_set<CUctx_st*> contexts;
     std::unordered_set<CUmod_st*> modules;
     std::unordered_set<CUfunc_st*> functions;
+    std::unordered_map<CUmemGenericAllocationHandle, VmmHandleRecord> vmm_handles;
+    std::unordered_map<CUdeviceptr, VmmReservationRecord> vmm_reservations;
+    CUmemGenericAllocationHandle next_vmm_handle = 1;
+    CUctx_st* runtime_primary_context = nullptr;
     unsigned int primary_ctx_flags = 0;
 };
 
@@ -114,6 +130,8 @@ CUresult map_cuda_error(cudaError_t error) {
             return CUDA_ERROR_NOT_INITIALIZED;
         case cudaErrorLaunchTimeout:
             return CUDA_ERROR_LAUNCH_TIMEOUT;
+        case cudaErrorCooperativeLaunchTooLarge:
+            return CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES;
         case cudaErrorNotReady:
             return CUDA_ERROR_NOT_READY;
         case cudaErrorIllegalAddress:
@@ -663,9 +681,44 @@ bool is_runtime_device_pointer_word(CUdeviceptr value) {
     return cumetalRuntimeIsDevicePointer(reinterpret_cast<const void*>(raw)) != 0;
 }
 
+constexpr std::size_t kDriverVmmGranularity = 64u * 1024u;
+
+bool is_power_of_two(std::size_t value) {
+    return value != 0 && (value & (value - 1)) == 0;
+}
+
+bool valid_vmm_prop(const CUmemAllocationProp& prop) {
+    return prop.type == CU_MEM_ALLOCATION_TYPE_PINNED &&
+           prop.requestedHandleTypes == CU_MEM_HANDLE_TYPE_NONE &&
+           prop.location.type == CU_MEM_LOCATION_TYPE_DEVICE &&
+           prop.location.id == 0 && prop.win32HandleMetaData == nullptr &&
+           (prop.allocFlags.compressionType == CU_MEM_ALLOCATION_COMP_NONE ||
+            prop.allocFlags.compressionType == CU_MEM_ALLOCATION_COMP_GENERIC) &&
+           prop.allocFlags.gpuDirectRDMACapable == 0 && prop.allocFlags.usage == 0;
+}
+
 }  // namespace
 
 extern "C" {
+
+int cumetalDriverRuntimeActivatePrimaryContext(int device) {
+    if (device != 0) return 0;
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.initialized = true;
+    if (state.runtime_primary_context == nullptr) {
+        auto* context = new (std::nothrow) CUctx_st{};
+        if (context == nullptr) return 0;
+        context->device = device;
+        context->flags = state.primary_ctx_flags;
+        state.contexts.insert(context);
+        state.runtime_primary_context = context;
+    }
+    if (g_current_context == nullptr) {
+        g_current_context = state.runtime_primary_context;
+    }
+    return 1;
+}
 
 CUresult cuInit(unsigned int flags) {
     if (flags != 0) {
@@ -852,6 +905,8 @@ CUresult cuDeviceGetAttribute(int* pi, CUdevice_attribute attrib, CUdevice dev) 
             break;
         case CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING:
         case CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY:
+        case CU_DEVICE_ATTRIBUTE_VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED:
+        case CU_DEVICE_ATTRIBUTE_GENERIC_COMPRESSION_SUPPORTED:
             *pi = 1;
             break;
         case CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS:
@@ -917,6 +972,9 @@ CUresult cuCtxDestroy(CUcontext ctx) {
             return CUDA_ERROR_INVALID_CONTEXT;
         }
         state.contexts.erase(ctx);
+        if (state.runtime_primary_context == ctx) {
+            state.runtime_primary_context = nullptr;
+        }
         if (g_current_context == ctx) {
             g_current_context = nullptr;
             g_context_stack.clear();
@@ -1673,7 +1731,180 @@ CUresult cuMemFree(CUdeviceptr dptr) {
     if (ready != CUDA_SUCCESS) {
         return ready;
     }
+    {
+        DriverState& state = driver_state();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (state.vmm_reservations.contains(dptr)) {
+            // VMM allocations have a distinct unmap/address-free lifecycle.
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+    }
     return map_cuda_error(cudaFree(reinterpret_cast<void*>(static_cast<std::uintptr_t>(dptr))));
+}
+
+CUresult cuMemGetAllocationGranularity(
+    size_t* granularity, const CUmemAllocationProp* prop,
+    CUmemAllocationGranularity_flags option) {
+    if (granularity == nullptr || prop == nullptr ||
+        (option != CU_MEM_ALLOC_GRANULARITY_MINIMUM &&
+         option != CU_MEM_ALLOC_GRANULARITY_RECOMMENDED)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    if (!valid_vmm_prop(*prop)) return CUDA_ERROR_INVALID_VALUE;
+    *granularity = kDriverVmmGranularity;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size, size_t alignment,
+                             CUdeviceptr addr, unsigned long long flags) {
+    if (ptr == nullptr || size == 0 || size % kDriverVmmGranularity != 0 ||
+        (alignment != 0 &&
+         (!is_power_of_two(alignment) || alignment < kDriverVmmGranularity)) ||
+        addr != 0 || flags != 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+
+    void* allocation = nullptr;
+    const cudaError_t status = cudaMalloc(&allocation, size);
+    if (status != cudaSuccess) return map_cuda_error(status);
+    const CUdeviceptr device_ptr =
+        static_cast<CUdeviceptr>(reinterpret_cast<std::uintptr_t>(allocation));
+    {
+        DriverState& state = driver_state();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.vmm_reservations.emplace(
+            device_ptr, DriverState::VmmReservationRecord{.size = size});
+    }
+    *ptr = device_ptr;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size) {
+    if (ptr == 0 || size == 0) return CUDA_ERROR_INVALID_VALUE;
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const auto found = state.vmm_reservations.find(ptr);
+    if (found == state.vmm_reservations.end() || found->second.size != size ||
+        found->second.mapped) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const cudaError_t status =
+        cudaFree(reinterpret_cast<void*>(static_cast<std::uintptr_t>(ptr)));
+    if (status != cudaSuccess) return map_cuda_error(status);
+    state.vmm_reservations.erase(found);
+    return CUDA_SUCCESS;
+}
+
+CUresult cuMemCreate(CUmemGenericAllocationHandle* handle, size_t size,
+                     const CUmemAllocationProp* prop,
+                     unsigned long long flags) {
+    if (handle == nullptr || prop == nullptr || size == 0 ||
+        size % kDriverVmmGranularity != 0 || flags != 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    if (!valid_vmm_prop(*prop)) return CUDA_ERROR_INVALID_VALUE;
+
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    CUmemGenericAllocationHandle candidate = state.next_vmm_handle++;
+    if (candidate == 0) candidate = state.next_vmm_handle++;
+    state.vmm_handles.emplace(
+        candidate, DriverState::VmmHandleRecord{.size = size, .prop = *prop});
+    *handle = candidate;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuMemRelease(CUmemGenericAllocationHandle handle) {
+    if (handle == 0) return CUDA_ERROR_INVALID_VALUE;
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    return state.vmm_handles.erase(handle) == 1 ? CUDA_SUCCESS
+                                                : CUDA_ERROR_INVALID_VALUE;
+}
+
+CUresult cuMemGetAllocationPropertiesFromHandle(
+    CUmemAllocationProp* prop, CUmemGenericAllocationHandle handle) {
+    if (prop == nullptr || handle == 0) return CUDA_ERROR_INVALID_VALUE;
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const auto found = state.vmm_handles.find(handle);
+    if (found == state.vmm_handles.end()) return CUDA_ERROR_INVALID_VALUE;
+    *prop = found->second.prop;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t offset,
+                  CUmemGenericAllocationHandle handle,
+                  unsigned long long flags) {
+    if (ptr == 0 || size == 0 || offset != 0 || handle == 0 || flags != 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const auto reservation = state.vmm_reservations.find(ptr);
+    const auto allocation = state.vmm_handles.find(handle);
+    if (reservation == state.vmm_reservations.end() ||
+        allocation == state.vmm_handles.end() || reservation->second.mapped ||
+        reservation->second.size != size || allocation->second.size != size) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    reservation->second.mapped = true;
+    reservation->second.access_enabled = false;
+    reservation->second.mapped_prop = allocation->second.prop;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuMemUnmap(CUdeviceptr ptr, size_t size) {
+    if (ptr == 0 || size == 0) return CUDA_ERROR_INVALID_VALUE;
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const auto found = state.vmm_reservations.find(ptr);
+    if (found == state.vmm_reservations.end() || found->second.size != size ||
+        !found->second.mapped) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    found->second.mapped = false;
+    found->second.access_enabled = false;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuMemSetAccess(CUdeviceptr ptr, size_t size,
+                        const CUmemAccessDesc* desc, size_t count) {
+    if (ptr == 0 || size == 0 || desc == nullptr || count != 1 ||
+        desc[0].location.type != CU_MEM_LOCATION_TYPE_DEVICE ||
+        desc[0].location.id != 0 ||
+        (desc[0].flags != CU_MEM_ACCESS_FLAGS_PROT_READ &&
+         desc[0].flags != CU_MEM_ACCESS_FLAGS_PROT_READWRITE)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const auto found = state.vmm_reservations.find(ptr);
+    if (found == state.vmm_reservations.end() || found->second.size != size ||
+        !found->second.mapped) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    found->second.access_enabled = true;
+    return CUDA_SUCCESS;
 }
 
 CUresult cuMemAllocHost(void** pp, size_t bytesize) {

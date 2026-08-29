@@ -7,7 +7,11 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cstring>
+#include <initializer_list>
+#include <iostream>
 #include <vector>
+#include "generate.h"
+#include "iterator/zip_iterator.h"
 
 namespace thrust {
 
@@ -46,6 +50,12 @@ public:
         alloc_(v.size());
         cudaMemcpy(data_, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice);
     }
+    device_vector(std::initializer_list<T> values) {
+        alloc_(values.size());
+        if (values.size() != 0) {
+            cudaMemcpy(data_, values.begin(), values.size() * sizeof(T), cudaMemcpyHostToDevice);
+        }
+    }
     device_vector(const device_vector& o) {
         alloc_(o.size_);
         cudaMemcpy(data_, o.data_, size_ * sizeof(T), cudaMemcpyDeviceToDevice);
@@ -80,11 +90,8 @@ public:
     device_ptr<const T> begin() const { return device_ptr<const T>(data_); }
     device_ptr<const T> end() const { return device_ptr<const T>(data_ + size_); }
 
-    T operator[](size_t i) const {
-        T val;
-        cudaMemcpy(&val, data_ + i, sizeof(T), cudaMemcpyDeviceToHost);
-        return val;
-    }
+    T& operator[](size_t i) { return data_[i]; }
+    const T& operator[](size_t i) const { return data_[i]; }
 };
 
 } // namespace thrust

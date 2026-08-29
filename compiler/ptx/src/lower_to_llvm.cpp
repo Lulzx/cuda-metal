@@ -9,6 +9,7 @@
 #include <cstring>
 #include <map>
 #include <optional>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -253,9 +254,14 @@ int byte_size_for_param_metadata(const ParamInfo& param) {
 struct GenericLlvmBodyResult {
     bool ok = false;
     bool uses_atomic_lock_bank = false;
+    bool uses_device_heap = false;
+    bool uses_device_launch_queue = false;
+    bool uses_device_clock = false;
     std::string body_ir;
+    std::string helper_ir;
     std::vector<ParamInfo> builtin_params;
     std::vector<std::string> declarations;
+    std::unordered_map<std::string, std::vector<int>> device_function_param_address_spaces;
     std::vector<std::string> warnings;
     std::string error;
 };
@@ -266,10 +272,10 @@ bool starts_with(std::string_view text, std::string_view prefix) {
 
 std::string opcode_root(std::string_view opcode) {
     const std::size_t dot = opcode.find('.');
-    if (dot == std::string::npos) {
-        return std::string(opcode);
-    }
-    return std::string(opcode.substr(0, dot));
+    std::string root = dot == std::string::npos ? std::string(opcode)
+                                                : std::string(opcode.substr(0, dot));
+    while (!root.empty() && root.back() == ';') root.pop_back();
+    return root;
 }
 
 std::vector<std::string> split_comma_list(std::string text) {
@@ -349,6 +355,12 @@ struct ParsedConstB8Array {
     int align = 1;
 };
 
+struct ParsedConstU64Array {
+    std::string symbol;
+    std::vector<std::uint64_t> values;
+    int align = 8;
+};
+
 struct ConstSymbolInfo {
     std::string llvm_global_name;
     std::string llvm_param_name;
@@ -381,13 +393,15 @@ std::string quote_llvm_global_name(const std::string& symbol) {
     return out;
 }
 
-std::vector<ParsedConstB8Array> parse_ptx_const_b8_arrays(std::string_view ptx_text) {
+std::vector<ParsedConstB8Array> parse_ptx_initialized_b8_arrays(std::string_view ptx_text) {
     std::vector<ParsedConstB8Array> out;
     std::istringstream lines{std::string(ptx_text)};
     std::string line;
     while (std::getline(lines, line)) {
         const std::string t = trim(line);
-        if (t.find(".const") == std::string::npos || t.find(".b8") == std::string::npos ||
+        const bool read_only_initializer =
+            t.find(".const") != std::string::npos || t.find(".global") != std::string::npos;
+        if (!read_only_initializer || t.find(".b8") == std::string::npos ||
             t.find('{') == std::string::npos || t.find('}') == std::string::npos) {
             continue;
         }
@@ -466,34 +480,134 @@ std::vector<ParsedConstB8Array> parse_ptx_const_b8_arrays(std::string_view ptx_t
     return out;
 }
 
-// Extract the body text (between the outermost braces) of the named .entry.
-// Returns an empty string when the entry name is empty, the entry is absent, or
-// its braces are unbalanced.
-std::string extract_entry_body(std::string_view ptx_text, std::string_view entry_name) {
-    if (entry_name.empty()) {
+std::uint64_t stable_device_function_token(std::string_view symbol) {
+    // Device function pointers cannot be represented by public Metal/AIR. Keep
+    // PTX vtable identity instead: indirect-call lowering dispatches these stable
+    // nonzero tokens to direct, inlined device-function bodies. Restrict the hash
+    // to signed i64 range so textual LLVM constants are portable across parsers.
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const unsigned char c : symbol) {
+        hash ^= c;
+        hash *= 1099511628211ull;
+    }
+    hash &= 0x7fffffffffffffffull;
+    return hash == 0 ? 1 : hash;
+}
+
+std::vector<ParsedConstU64Array> parse_ptx_initialized_u64_arrays(
+    std::string_view ptx_text) {
+    std::vector<ParsedConstU64Array> out;
+    std::istringstream lines{std::string(ptx_text)};
+    std::string line;
+    while (std::getline(lines, line)) {
+        const std::string t = trim(line);
+        if ((t.find(".const") == std::string::npos &&
+             t.find(".global") == std::string::npos) ||
+            t.find(".u64") == std::string::npos ||
+            t.find('{') == std::string::npos || t.find('}') == std::string::npos) {
+            continue;
+        }
+        int align = 8;
+        if (const std::size_t align_pos = t.find(".align");
+            align_pos != std::string::npos) {
+            std::size_t pos = align_pos + 6;
+            while (pos < t.size() &&
+                   std::isspace(static_cast<unsigned char>(t[pos])) != 0) ++pos;
+            std::size_t end = pos;
+            while (end < t.size() &&
+                   std::isdigit(static_cast<unsigned char>(t[end])) != 0) ++end;
+            if (end > pos) {
+                try { align = std::max(1, std::stoi(t.substr(pos, end - pos))); }
+                catch (...) { align = 8; }
+            }
+        }
+        const std::size_t u64_pos = t.find(".u64");
+        std::size_t sym_begin = u64_pos + 4;
+        while (sym_begin < t.size() &&
+               std::isspace(static_cast<unsigned char>(t[sym_begin])) != 0) ++sym_begin;
+        const std::size_t bracket_open = t.find('[', sym_begin);
+        const std::size_t bracket_close =
+            bracket_open == std::string::npos ? std::string::npos
+                                              : t.find(']', bracket_open + 1);
+        if (bracket_open == std::string::npos || bracket_close == std::string::npos) continue;
+        const std::string symbol = trim(t.substr(sym_begin, bracket_open - sym_begin));
+        std::size_t declared_count = 0;
+        try {
+            declared_count = static_cast<std::size_t>(std::stoull(
+                trim(t.substr(bracket_open + 1, bracket_close - bracket_open - 1))));
+        } catch (...) { continue; }
+        const std::size_t brace_open = t.find('{', bracket_close);
+        const std::size_t brace_close =
+            brace_open == std::string::npos ? std::string::npos
+                                            : t.find('}', brace_open + 1);
+        if (symbol.empty() || brace_open == std::string::npos ||
+            brace_close == std::string::npos) continue;
+        std::vector<std::uint64_t> values;
+        for (const std::string& raw_item : split_comma_list(
+                 t.substr(brace_open + 1, brace_close - brace_open - 1))) {
+            const std::string item = trim(raw_item);
+            if (const auto immediate = parse_signed_immediate(item)) {
+                values.push_back(static_cast<std::uint64_t>(*immediate));
+            } else if (!item.empty()) {
+                values.push_back(stable_device_function_token(item));
+            }
+        }
+        values.resize(declared_count, 0);
+        if (!values.empty()) {
+            out.push_back({.symbol = symbol, .values = std::move(values), .align = align});
+        }
+    }
+    return out;
+}
+
+// Extract the body text (between the outermost braces) of a named PTX callable.
+// Device functions need this as well as kernels: clang gives each callable its
+// own `.local` depot, and using only the entry's declarations leaves helper
+// stack frames without a known size.
+std::string extract_callable_body(std::string_view ptx_text,
+                                  std::string_view callable_name) {
+    if (callable_name.empty()) {
         return {};
     }
     std::size_t search_from = 0;
     while (true) {
         const std::size_t entry_pos = ptx_text.find(".entry", search_from);
-        if (entry_pos == std::string_view::npos) break;
-        std::size_t name_begin = entry_pos + 6;
-        while (name_begin < ptx_text.size() &&
-               std::isspace(static_cast<unsigned char>(ptx_text[name_begin])) != 0) {
-            ++name_begin;
-        }
-        std::size_t name_end = name_begin;
-        while (name_end < ptx_text.size() &&
-               std::isspace(static_cast<unsigned char>(ptx_text[name_end])) == 0 &&
-               ptx_text[name_end] != '(' && ptx_text[name_end] != '{') {
-            ++name_end;
-        }
-        if (ptx_text.substr(name_begin, name_end - name_begin) != entry_name) {
-            search_from = name_end;
+        const std::size_t function_pos = ptx_text.find(".func", search_from);
+        const std::size_t callable_pos =
+            entry_pos == std::string_view::npos ? function_pos
+            : function_pos == std::string_view::npos ? entry_pos
+            : std::min(entry_pos, function_pos);
+        if (callable_pos == std::string_view::npos) break;
+
+        const std::size_t body_begin = ptx_text.find('{', callable_pos);
+        const std::size_t declaration_end = ptx_text.find(';', callable_pos);
+        if (body_begin == std::string_view::npos ||
+            (declaration_end != std::string_view::npos && declaration_end < body_begin)) {
+            search_from = callable_pos + 5;
             continue;
         }
-        const std::size_t body_begin = ptx_text.find('{', name_end);
-        if (body_begin == std::string_view::npos) break;
+        const std::string_view header =
+            ptx_text.substr(callable_pos, body_begin - callable_pos);
+        std::size_t name_pos = header.find(callable_name);
+        bool exact_name = false;
+        while (name_pos != std::string_view::npos) {
+            const auto is_name_char = [](char c) {
+                return std::isalnum(static_cast<unsigned char>(c)) != 0 ||
+                       c == '_' || c == '$' || c == '.';
+            };
+            const bool left_ok = name_pos == 0 || !is_name_char(header[name_pos - 1]);
+            const std::size_t after = name_pos + callable_name.size();
+            const bool right_ok = after == header.size() || !is_name_char(header[after]);
+            if (left_ok && right_ok) {
+                exact_name = true;
+                break;
+            }
+            name_pos = header.find(callable_name, name_pos + 1);
+        }
+        if (!exact_name) {
+            search_from = body_begin + 1;
+            continue;
+        }
         std::size_t depth = 1;
         std::size_t body_end = body_begin + 1;
         for (; body_end < ptx_text.size() && depth != 0; ++body_end) {
@@ -506,6 +620,13 @@ std::string extract_entry_body(std::string_view ptx_text, std::string_view entry
         break;
     }
     return {};
+}
+
+// Retain the entry-specific spelling at call sites that intentionally operate
+// only on the selected kernel body (call discovery and entry metadata).
+std::string extract_entry_body(std::string_view ptx_text,
+                               std::string_view entry_name) {
+    return extract_callable_body(ptx_text, entry_name);
 }
 
 struct LocalDepotInfo {
@@ -522,9 +643,9 @@ struct LocalDepotInfo {
 // a register-tiled kernel into one that quietly computes zeros.
 std::unordered_map<std::string, LocalDepotInfo> parse_ptx_local_depots(
     std::string_view ptx_text,
-    std::string_view entry_name) {
+    std::string_view callable_name) {
     std::unordered_map<std::string, LocalDepotInfo> out;
-    const std::string body = extract_entry_body(ptx_text, entry_name);
+    const std::string body = extract_callable_body(ptx_text, callable_name);
     if (body.empty()) {
         return out;
     }
@@ -965,10 +1086,32 @@ class GenericLlvmEmitter {
                       const std::unordered_map<std::string, ConstSymbolInfo>* const_symbols,
                       const std::unordered_map<std::string, SharedSymbolInfo>* shared_symbols,
                       const std::unordered_map<std::string, LocalDepotInfo>* local_depots,
-                      cumetal::ptx::Fp64Mode fp64_mode = cumetal::ptx::Fp64Mode::kNative)
+                      const std::vector<cumetal::passes::PrintfLoweredCall>* printf_calls,
+                      cumetal::ptx::Fp64Mode fp64_mode = cumetal::ptx::Fp64Mode::kNative,
+                      const std::vector<cumetal::ptx::EntryFunction>* device_functions = nullptr,
+                      bool kernel_mode = true,
+                      std::string return_param_name = {},
+                      int return_bits = 0,
+                      bool module_uses_device_heap = false,
+                      bool module_uses_device_printf = false,
+                      bool module_uses_device_launch_queue = false,
+                      bool module_uses_device_clock = false,
+                      bool module_uses_grid_barrier = false,
+                      bool module_uses_grid_y_offset = false,
+                      const std::vector<std::string>* device_kernel_names = nullptr,
+                      const std::vector<int>* parameter_address_spaces = nullptr)
         : entry_(entry), params_(params), arg_decls_(arg_decls), global_symbols_(global_symbols),
           const_symbols_(const_symbols),
-          shared_symbols_(shared_symbols), local_depots_(local_depots), fp64_mode_(fp64_mode) {
+          shared_symbols_(shared_symbols), local_depots_(local_depots), fp64_mode_(fp64_mode),
+          device_functions_(device_functions), kernel_mode_(kernel_mode),
+          return_param_name_(std::move(return_param_name)), return_bits_(return_bits),
+          module_uses_device_heap_(module_uses_device_heap),
+          module_uses_device_printf_(module_uses_device_printf),
+          module_uses_device_launch_queue_(module_uses_device_launch_queue),
+          module_uses_device_clock_(module_uses_device_clock),
+          module_uses_grid_barrier_(module_uses_grid_barrier),
+          module_uses_grid_y_offset_(module_uses_grid_y_offset),
+          device_kernel_names_(device_kernel_names) {
         if (params_ != nullptr) {
             for (std::size_t i = 0; i < params_->size(); ++i) {
                 param_by_raw_[(*params_)[i].raw_name] = static_cast<int>(i);
@@ -979,6 +1122,20 @@ class GenericLlvmEmitter {
                         param_by_raw_[base] = static_cast<int>(i);
                     }
                 }
+                if (parameter_address_spaces != nullptr &&
+                    i < parameter_address_spaces->size()) {
+                    const int encoded = (*parameter_address_spaces)[i];
+                    if (encoded >= static_cast<int>(PointerAs::kUnknown) &&
+                        encoded <= static_cast<int>(PointerAs::kLocal)) {
+                        param_pointer_as_by_raw_[(*params_)[i].raw_name] =
+                            static_cast<PointerAs>(encoded);
+                    }
+                }
+            }
+        }
+        if (printf_calls != nullptr) {
+            for (const auto& call : *printf_calls) {
+                printf_call_by_line_[call.source_line] = &call;
             }
         }
     }
@@ -989,7 +1146,7 @@ class GenericLlvmEmitter {
             result.error = "internal error: missing param vectors";
             return result;
         }
-        if (!append_required_builtin_params()) {
+        if (kernel_mode_ && !append_required_builtin_params()) {
             result.error = error_;
             return result;
         }
@@ -999,6 +1156,7 @@ class GenericLlvmEmitter {
         // so the kernel can load the actual value from the buffer.
         for (std::size_t i = 0; i < params_->size(); ++i) {
             ParamInfo& p = (*params_)[i];
+            if (!kernel_mode_) continue;
             if (is_builtin_param(p)) continue;
             if (is_pointer_type(p.llvm_type)) continue;
             if (p.llvm_type == "<3 x i32>") continue;
@@ -1018,10 +1176,18 @@ class GenericLlvmEmitter {
 
         result.ok = true;
         result.uses_atomic_lock_bank = !lock_bank_param_.empty();
+        result.uses_device_heap = uses_device_heap_;
+        result.uses_device_launch_queue = module_uses_device_launch_queue_;
+        result.uses_device_clock = module_uses_device_clock_;
         result.body_ir = body_.str();
         result.declarations.assign(declarations_.begin(), declarations_.end());
         result.builtin_params = builtin_params_added_;
         result.warnings = warnings_;
+        for (const auto& [name, spaces] : device_function_param_address_spaces_) {
+            auto& encoded = result.device_function_param_address_spaces[name];
+            encoded.reserve(spaces.size());
+            for (const PointerAs space : spaces) encoded.push_back(static_cast<int>(space));
+        }
         return result;
     }
 
@@ -1067,6 +1233,7 @@ class GenericLlvmEmitter {
     cumetal::ptx::Fp64Mode fp64_mode_ = cumetal::ptx::Fp64Mode::kNative;
 
     std::unordered_map<std::string, int> param_by_raw_;
+    std::unordered_map<std::string, PointerAs> param_pointer_as_by_raw_;
     std::unordered_map<std::string, std::string> builtin_vector_arg_name_;
     std::unordered_map<std::string, std::string> builtin_scalar_arg_name_;
     std::vector<ParamInfo> builtin_params_added_;
@@ -1076,12 +1243,33 @@ class GenericLlvmEmitter {
     std::vector<int> exec_indices_;
     std::unordered_map<int, int> exec_pos_by_instr_index_;
     std::unordered_map<std::string, int> label_to_exec_pos_;
+    std::unordered_map<std::string, std::vector<std::string>> branch_tables_;
     std::unordered_map<int, int> next_exec_pos_by_exec_pos_;
 
     std::unordered_map<std::string, RegSlot> reg_slots_;
     std::unordered_map<std::string, PointerAs> reg_pointer_as_;
+    // Preserve the pointee address space when PTX spills generic pointers into
+    // a `.local` depot and reloads one through a computed index.
+    std::unordered_map<std::string, std::string> reg_local_origin_;
+    std::unordered_map<std::string, PointerAs> local_pointer_payload_as_;
     std::unordered_map<std::string, LocalSymbolInfo> local_symbols_;
     std::unordered_map<std::string, std::string> call_param_slots_;
+    std::unordered_map<std::string, PointerAs> call_param_pointer_as_;
+    std::unordered_map<std::string, std::vector<PointerAs>>
+        device_function_param_address_spaces_;
+    std::unordered_map<int, const cumetal::passes::PrintfLoweredCall*> printf_call_by_line_;
+    bool uses_device_heap_ = false;
+    const std::vector<cumetal::ptx::EntryFunction>* device_functions_ = nullptr;
+    bool kernel_mode_ = true;
+    std::string return_param_name_;
+    int return_bits_ = 0;
+    bool module_uses_device_heap_ = false;
+    bool module_uses_device_printf_ = false;
+    bool module_uses_device_launch_queue_ = false;
+    bool module_uses_device_clock_ = false;
+    bool module_uses_grid_barrier_ = false;
+    bool module_uses_grid_y_offset_ = false;
+    const std::vector<std::string>* device_kernel_names_ = nullptr;
 
     std::unordered_set<std::string> declarations_;
     std::vector<std::string> warnings_;
@@ -2183,6 +2371,10 @@ class GenericLlvmEmitter {
                 if (op.find("%nctaid.") != std::string::npos) needs_gpg = true;
                 if (op.find("%laneid") != std::string::npos ||
                     op.find("%lanemask_") != std::string::npos) needs_lane = true;
+                if (op.find("__cumetal_grid_sync") != std::string::npos) {
+                    needs_tid = true;
+                    needs_gpg = true;
+                }
                 if (shared_symbols_ != nullptr &&
                     shared_symbols_->find(trim(op)) != shared_symbols_->end()) {
                     needs_threadgroup_buffer = true;
@@ -2210,7 +2402,9 @@ class GenericLlvmEmitter {
     bool index_control_flow() {
         exec_indices_.clear();
         for (int i = 0; i < static_cast<int>(entry_.instructions.size()); ++i) {
-            if (entry_.instructions[static_cast<std::size_t>(i)].opcode == "ptx.label") {
+            const std::string& opcode =
+                entry_.instructions[static_cast<std::size_t>(i)].opcode;
+            if (opcode == "ptx.label" || opcode == "ptx.branchtargets") {
                 continue;
             }
             exec_pos_by_instr_index_[i] = static_cast<int>(exec_indices_.size());
@@ -2236,6 +2430,15 @@ class GenericLlvmEmitter {
                 target_pos = -1;
             }
             label_to_exec_pos_[instr.operands[0]] = target_pos;
+        }
+        for (const auto& instr : entry_.instructions) {
+            if (instr.opcode != "ptx.branchtargets" || instr.operands.empty()) continue;
+            if (instr.operands.size() < 2) {
+                return fail(instr, "branch-target table is empty");
+            }
+            branch_tables_[instr.operands[0]] =
+                std::vector<std::string>(instr.operands.begin() + 1,
+                                         instr.operands.end());
         }
         return true;
     }
@@ -2264,11 +2467,25 @@ class GenericLlvmEmitter {
             os << "  " << ext << " = zext i32 " << ex << " to " << llvm_int_type(dst_bits) << "\n";
             return ext;
         };
-
         if (token == "%tid.x") return emit_extract("air.thread_position_in_threadgroup", "__air_tid3", 0);
         if (token == "%tid.y") return emit_extract("air.thread_position_in_threadgroup", "__air_tid3", 1);
         if (token == "%tid.z") return emit_extract("air.thread_position_in_threadgroup", "__air_tid3", 2);
         if (token == "%ctaid.x") return emit_extract("air.threadgroup_position_in_grid", "__air_bid3", 0);
+        if (token == "%ctaid.y" && module_uses_grid_y_offset_) {
+            const auto base = emit_extract("air.threadgroup_position_in_grid",
+                                           "__air_bid3", 1);
+            if (!base) return std::nullopt;
+            const std::string offset = next_tmp("grid_y_offset");
+            const std::string adjusted = next_tmp("grid_y_adjusted");
+            os << "  " << offset
+               << " = load i32, i32 addrspace(2)* %__cumetal_grid_y_offset, align 4\n"
+               << "  " << adjusted << " = add i32 " << *base << ", " << offset << "\n";
+            if (dst_bits == 32) return adjusted;
+            const std::string ext = next_tmp("grid_y_ext");
+            os << "  " << ext << " = zext i32 " << adjusted << " to "
+               << llvm_int_type(dst_bits) << "\n";
+            return ext;
+        }
         if (token == "%ctaid.y") return emit_extract("air.threadgroup_position_in_grid", "__air_bid3", 1);
         if (token == "%ctaid.z") return emit_extract("air.threadgroup_position_in_grid", "__air_bid3", 2);
         if (token == "%ntid.x") return emit_extract("air.threads_per_threadgroup", "__air_tpg3", 0);
@@ -2359,6 +2576,30 @@ class GenericLlvmEmitter {
             const std::string ext = next_tmp("warpext");
             os << "  " << ext << " = zext i32 32 to " << llvm_int_type(dst_bits) << "\n";
             return ext;
+        }
+        if (token == "%clock" || token == "%clock64" || token == "%globaltimer" ||
+            token == "%globaltimer_lo") {
+            if (!module_uses_device_clock_) {
+                return std::nullopt;
+            }
+            // Metal Shading Language has no public device cycle-counter API.
+            // A device-wide atomic counter retains CUDA's unsigned monotonic
+            // and wraparound behavior, which is what clock-based wait loops
+            // and ordering probes rely on. The 1024-unit quantum keeps waits
+            // bounded; values are deliberately not advertised as GPU cycles.
+            const std::string tick = next_tmp("device_clock");
+            os << "  " << tick
+               << " = atomicrmw add i32 addrspace(1)* %__cumetal_device_clock, i32 1024 monotonic\n";
+            if (dst_bits <= 32) {
+                return tick;
+            }
+            const std::string ext = next_tmp("device_clock_ext");
+            os << "  " << ext << " = zext i32 " << tick << " to "
+               << llvm_int_type(dst_bits) << "\n";
+            return ext;
+        }
+        if (token == "%clock_hi" || token == "%globaltimer_hi") {
+            return std::string("0");
         }
         return std::nullopt;
     }
@@ -2534,6 +2775,16 @@ class GenericLlvmEmitter {
         return ld;
     }
 
+    std::optional<std::string> load_call_slot_value_at(std::ostringstream& os,
+                                                       const std::string& name,
+                                                       int bits,
+                                                       std::int64_t byte_offset) {
+        const std::string slot_name = byte_offset == 0
+                                          ? name
+                                          : name + "@" + std::to_string(byte_offset);
+        return load_call_slot_value(os, slot_name, bits);
+    }
+
     std::optional<std::string> emit_integer_from_any(std::ostringstream& os,
                                                      const std::string& operand,
                                                      int bits,
@@ -2562,6 +2813,13 @@ class GenericLlvmEmitter {
                 const auto v = static_cast<int64_t>(std::stoull(operand.substr(2), nullptr, 16));
                 return std::to_string(v);
             } catch (...) {}
+        }
+        if (bits == 64 && device_kernel_names_ != nullptr) {
+            for (const auto& kernel_name : *device_kernel_names_) {
+                if (operand == kernel_name) {
+                    return std::to_string(stable_device_function_token(kernel_name));
+                }
+            }
         }
         if (const auto addr = resolve_param_symbol_address(os, operand)) {
             if (bits == 64) {
@@ -2730,12 +2988,18 @@ class GenericLlvmEmitter {
             reg_pointer_as_[dst] = PointerAs::kParam;
         } else if (resolve_local_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kLocal;
+            reg_local_origin_[dst] = src;
         } else if (resolve_threadgroup_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kShared;
         } else if (resolve_global_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kGlobal;
         } else if (resolve_const_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kParam;
+        } else if (is_register_name(src) && reg_pointer_as_.count(src)) {
+            reg_pointer_as_[dst] = reg_pointer_as_[src];
+        }
+        if (is_register_name(src) && reg_local_origin_.count(src)) {
+            reg_local_origin_[dst] = reg_local_origin_[src];
         }
         return emit_store_reg_bits(os, dst, dst_bits, *iv, src_bits);
     }
@@ -2756,6 +3020,17 @@ class GenericLlvmEmitter {
             reg_pointer_as_[dst] = PointerAs::kParam;
         } else if (instr.opcode.find(".to.local") != std::string::npos) {
             reg_pointer_as_[dst] = PointerAs::kLocal;
+        } else if (instr.opcode.find(".global") != std::string::npos) {
+            reg_pointer_as_[dst] = PointerAs::kGlobal;
+        } else if (instr.opcode.find(".local") != std::string::npos) {
+            reg_pointer_as_[dst] = PointerAs::kLocal;
+        } else if (instr.opcode.find(".shared") != std::string::npos) {
+            reg_pointer_as_[dst] = PointerAs::kShared;
+        } else if (is_register_name(src) && reg_pointer_as_.count(src)) {
+            reg_pointer_as_[dst] = reg_pointer_as_[src];
+        }
+        if (is_register_name(src) && reg_local_origin_.count(src)) {
+            reg_local_origin_[dst] = reg_local_origin_[src];
         }
         return emit_store_reg_bits(os, dst, 64, *src_v, 64);
     }
@@ -2786,8 +3061,14 @@ class GenericLlvmEmitter {
         os << "  " << out << " = " << op << " " << llvm_int_type(bits) << " " << *a << ", " << *b << "\n";
         if (reg_pointer_as_.count(instr.operands[1]) && (opcode_root(instr.opcode) == "add" || opcode_root(instr.opcode) == "sub")) {
             reg_pointer_as_[dst] = reg_pointer_as_[instr.operands[1]];
+            if (reg_local_origin_.count(instr.operands[1])) {
+                reg_local_origin_[dst] = reg_local_origin_[instr.operands[1]];
+            }
         } else if (reg_pointer_as_.count(instr.operands[2]) && (opcode_root(instr.opcode) == "add")) {
             reg_pointer_as_[dst] = reg_pointer_as_[instr.operands[2]];
+            if (reg_local_origin_.count(instr.operands[2])) {
+                reg_local_origin_[dst] = reg_local_origin_[instr.operands[2]];
+            }
         }
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, out, bits);
     }
@@ -2799,6 +3080,21 @@ class GenericLlvmEmitter {
             return fail(instr, "float binary op requires dst, a, b");
         }
         const std::string& dst = instr.operands[0];
+        if (instr.opcode.find(".f16x2") != std::string::npos) {
+            auto a = emit_integer_from_any(os, instr.operands[1], 32, false);
+            auto b = emit_integer_from_any(os, instr.operands[2], 32, false);
+            if (!a || !b) return fail(instr, "f16x2 binary source unsupported");
+            const std::string av = next_tmp("f16x2_a");
+            const std::string bv = next_tmp("f16x2_b");
+            const std::string result = next_tmp("f16x2_result");
+            const std::string packed = next_tmp("f16x2_packed");
+            os << "  " << av << " = bitcast i32 " << *a << " to <2 x half>\n";
+            os << "  " << bv << " = bitcast i32 " << *b << " to <2 x half>\n";
+            os << "  " << result << " = " << llvm_op << " <2 x half> "
+               << av << ", " << bv << "\n";
+            os << "  " << packed << " = bitcast <2 x half> " << result << " to i32\n";
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, packed, 32);
+        }
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         if (ty.kind != PtxTypeSpec::Kind::kFloat) {
             return fail(instr, "float op without float suffix");
@@ -2950,6 +3246,25 @@ class GenericLlvmEmitter {
             return fail(instr, "mad/fma requires dst, a, b, c");
         }
         const std::string& dst = instr.operands[0];
+        if (instr.opcode.find(".f16x2") != std::string::npos) {
+            auto a = emit_integer_from_any(os, instr.operands[1], 32, false);
+            auto b = emit_integer_from_any(os, instr.operands[2], 32, false);
+            auto c = emit_integer_from_any(os, instr.operands[3], 32, false);
+            if (!a || !b || !c) return fail(instr, "f16x2 fma source unsupported");
+            const std::string av = next_tmp("f16x2_fma_a");
+            const std::string bv = next_tmp("f16x2_fma_b");
+            const std::string cv = next_tmp("f16x2_fma_c");
+            const std::string product = next_tmp("f16x2_fma_product");
+            const std::string result = next_tmp("f16x2_fma_result");
+            const std::string packed = next_tmp("f16x2_fma_packed");
+            os << "  " << av << " = bitcast i32 " << *a << " to <2 x half>\n";
+            os << "  " << bv << " = bitcast i32 " << *b << " to <2 x half>\n";
+            os << "  " << cv << " = bitcast i32 " << *c << " to <2 x half>\n";
+            os << "  " << product << " = fmul <2 x half> " << av << ", " << bv << "\n";
+            os << "  " << result << " = fadd <2 x half> " << product << ", " << cv << "\n";
+            os << "  " << packed << " = bitcast <2 x half> " << result << " to i32\n";
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, packed, 32);
+        }
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         if (opcode_uses_float_math(instr.opcode)) {
             const int bits = (ty.bits == 64) ? 64 : 32;
@@ -3167,12 +3482,6 @@ class GenericLlvmEmitter {
             (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64) ||
             (cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64);
         if (fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate && converts_fp64) {
-            if (instr.opcode.find(".rni.") != std::string::npos ||
-                instr.opcode.find(".rmi.") != std::string::npos ||
-                instr.opcode.find(".rpi.") != std::string::npos ||
-                instr.opcode.find(".rzi.") != std::string::npos) {
-                return fail(instr, "rounded fp64 conversion is not supported by FP32-pair emulation");
-            }
             if (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64 &&
                 cvt.dst.kind == PtxTypeSpec::Kind::kFloat) {
                 auto pair = decode_fp64_pair(os, src);
@@ -3197,6 +3506,41 @@ class GenericLlvmEmitter {
                 if (!value) return fail(instr, "f32-to-fp64 conversion source unsupported");
                 const std::string zero = emit_float_constant(os, 0.0f, "fp64_cvt_zero");
                 return store_fp64_pair(os, dst, Fp64Pair{value->ir, zero});
+            }
+            if (cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64 &&
+                cvt.src.kind == PtxTypeSpec::Kind::kInt && cvt.src.bits <= 32) {
+                auto value = decode_integer_operand(os, src, cvt.src.bits,
+                                                    cvt.src.is_signed);
+                if (!value) {
+                    auto special = emit_integer_from_any(os, src, cvt.src.bits,
+                                                         cvt.src.is_signed);
+                    if (!special) {
+                        return fail(instr, "integer-to-fp64 conversion source unsupported");
+                    }
+                    value = Value{.ir = *special, .type = cvt.src,
+                                  .bits = cvt.src.bits};
+                }
+                const std::string converted = next_tmp("int_to_fp64_hi");
+                os << "  " << converted << " = "
+                   << (cvt.src.is_signed ? "sitofp " : "uitofp ")
+                   << llvm_int_type(cvt.src.bits) << " " << value->ir
+                   << " to float\n";
+                const std::string zero = emit_float_constant(os, 0.0f, "fp64_cvt_zero");
+                return store_fp64_pair(os, dst, Fp64Pair{converted, zero});
+            }
+            if (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64 &&
+                cvt.dst.kind == PtxTypeSpec::Kind::kInt && cvt.dst.bits <= 32) {
+                auto pair = decode_fp64_pair(os, src);
+                if (!pair) return fail(instr, "fp64-to-integer conversion source unsupported");
+                const std::string combined = next_tmp("fp64_to_int_value");
+                os << "  " << combined << " = fadd float " << pair->hi << ", "
+                   << pair->lo << "\n";
+                const std::string converted = next_tmp("fp64_to_int");
+                os << "  " << converted << " = "
+                   << (cvt.dst.is_signed ? "fptosi float " : "fptoui float ")
+                   << combined << " to " << llvm_int_type(cvt.dst.bits) << "\n";
+                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits,
+                                           converted, cvt.dst.bits);
             }
             return fail(instr,
                         "this fp64 conversion is not supported by FP32-pair emulation");
@@ -3357,6 +3701,8 @@ class GenericLlvmEmitter {
         else if (instr.opcode.find(".le") != std::string::npos) cmp = "le";
         else if (instr.opcode.find(".gt") != std::string::npos) cmp = "gt";
         else if (instr.opcode.find(".ge") != std::string::npos) cmp = "ge";
+        else if (instr.opcode.find(".num") != std::string::npos) cmp = "num";
+        else if (instr.opcode.find(".nan") != std::string::npos) cmp = "nan";
         else return fail(instr, "unsupported setp comparison");
 
         std::string pred_value;
@@ -3365,6 +3711,12 @@ class GenericLlvmEmitter {
                 auto a = decode_fp64_pair(os, instr.operands[1]);
                 auto b = decode_fp64_pair(os, instr.operands[2]);
                 if (!a || !b) return fail(instr, "fp64 setp emulation source unsupported");
+                if (cmp == "num" || cmp == "nan") {
+                    const std::string out = next_tmp("fp64_cmp_ordered");
+                    os << "  " << out << " = fcmp " << (cmp == "num" ? "ord" : "uno")
+                       << " float " << a->hi << ", " << b->hi << "\n";
+                    return emit_store_reg_bits(os, dst, 1, out, 1);
+                }
                 const std::string hi_eq = next_tmp("fp64_cmp_hieq");
                 const std::string lo_eq = next_tmp("fp64_cmp_loeq");
                 const std::string equal = next_tmp("fp64_cmp_eq");
@@ -3409,7 +3761,9 @@ class GenericLlvmEmitter {
             else if (cmp == "lt") cc = "olt";
             else if (cmp == "le") cc = "ole";
             else if (cmp == "gt") cc = "ogt";
-            else cc = "oge";
+            else if (cmp == "ge") cc = "oge";
+            else if (cmp == "num") cc = "ord";
+            else cc = "uno";
             os << "  " << out << " = fcmp " << cc << " " << llvm_float_type(ty.bits)
                << " " << a->ir << ", " << b->ir << "\n";
             pred_value = out;
@@ -3561,6 +3915,11 @@ class GenericLlvmEmitter {
                         return emit_store_reg_bits(os, dst, ldp_slot_bits, *bitsv, ldp_slot_bits);
                     }
                     if (ty.kind == PtxTypeSpec::Kind::kInt) {
+                        if (const auto pointer_space =
+                                param_pointer_as_by_raw_.find(p.raw_name);
+                            pointer_space != param_pointer_as_by_raw_.end()) {
+                            reg_pointer_as_[dst] = pointer_space->second;
+                        }
                         std::string srcv;
                         int src_bits = 0;
                         if (is_pointer_type(p.llvm_type)) {
@@ -3651,8 +4010,17 @@ class GenericLlvmEmitter {
             }
 
             if (starts_with(instr.opcode, "st.param")) {
-                auto slot = get_param_slot(mem.base, ty.bits, true);
+                const std::string slot_name = mem.offset == 0
+                                                  ? mem.base
+                                                  : mem.base + "@" + std::to_string(mem.offset);
+                auto slot = get_param_slot(slot_name, ty.bits, true);
                 if (!slot) return fail(instr, "unable to allocate call param slot");
+                if (is_register_name(data_token)) {
+                    if (const auto provenance = reg_pointer_as_.find(data_token);
+                        provenance != reg_pointer_as_.end()) {
+                        call_param_pointer_as_[mem.base] = provenance->second;
+                    }
+                }
                 if (ty.kind == PtxTypeSpec::Kind::kFloat) {
                     auto fv = decode_float_operand(os, data_token, ty.bits);
                     if (!fv) return fail(instr, "st.param float source unsupported");
@@ -3671,7 +4039,10 @@ class GenericLlvmEmitter {
 
             if (starts_with(instr.opcode, "ld.param")) {
                 if (!is_register_name(data_token)) return fail(instr, "ld.param dst must be register");
-                auto slot = get_param_slot(mem.base, ty.bits, false);
+                const std::string slot_name = mem.offset == 0
+                                                  ? mem.base
+                                                  : mem.base + "@" + std::to_string(mem.offset);
+                auto slot = get_param_slot(slot_name, ty.bits, false);
                 if (!slot) return fail(instr, "ld.param unknown param slot");
                 const std::string ld = next_tmp("ldcallp");
                 os << "  " << ld << " = load " << llvm_int_type(ty.bits) << ", " << llvm_int_type(ty.bits)
@@ -3703,6 +4074,19 @@ class GenericLlvmEmitter {
             addr_space = 1;
         } else {
             return fail(instr, "only global/const/param/shared/local ld/st supported in generic LLVM path");
+        }
+        if (instr.opcode.find(".global") == std::string::npos &&
+            instr.opcode.find(".shared") == std::string::npos &&
+            instr.opcode.find(".const") == std::string::npos &&
+            instr.opcode.find(".local") == std::string::npos &&
+            is_register_name(mem.base)) {
+            if (const auto provenance = reg_pointer_as_.find(mem.base);
+                provenance != reg_pointer_as_.end()) {
+                if (provenance->second == PointerAs::kShared) addr_space = 3;
+                else if (provenance->second == PointerAs::kLocal) addr_space = 0;
+                else if (provenance->second == PointerAs::kParam) addr_space = 2;
+                else if (provenance->second == PointerAs::kGlobal) addr_space = 1;
+            }
         }
 
         std::string base_i64;
@@ -3751,7 +4135,34 @@ class GenericLlvmEmitter {
             auto bitsv = encode_value_to_reg_bits(os, v, slot_bits);
             if (!bitsv) return fail(instr, "load encode failed");
             // bitsv has already been extended/truncated to slot_bits by encode_value_to_reg_bits
-            return emit_store_reg_bits(os, data_token, slot_bits, *bitsv, slot_bits);
+            const bool stored =
+                emit_store_reg_bits(os, data_token, slot_bits, *bitsv, slot_bits);
+            if (stored && ty.bits == 64) {
+                if (addr_space == 0 && is_register_name(mem.base) &&
+                    reg_local_origin_.count(mem.base)) {
+                    const std::string& origin = reg_local_origin_.at(mem.base);
+                    const auto payload = local_pointer_payload_as_.find(origin);
+                    if (payload != local_pointer_payload_as_.end() &&
+                        payload->second != PointerAs::kUnknown) {
+                        reg_pointer_as_[data_token] = payload->second;
+                    } else {
+                        reg_pointer_as_.erase(data_token);
+                    }
+                } else {
+                    // The address space of the load describes where the pointer
+                    // value is stored, not what the loaded value points at. CUDA
+                    // code commonly stages global pointers in shared memory
+                    // (PhysX does this for contact-preparation descriptors), so
+                    // treating every ld.shared.u64 result as a shared pointer
+                    // redirects later generic stores into threadgroup memory.
+                    // Explicit shared pointers retain their provenance through
+                    // mov/cvta and the local-spill payload tracking above. In the
+                    // absence of such evidence, a loaded device pointer is global.
+                    reg_pointer_as_[data_token] =
+                        addr_space == 2 ? PointerAs::kParam : PointerAs::kGlobal;
+                }
+            }
+            return stored;
         }
 
         if (ty.kind == PtxTypeSpec::Kind::kFloat) {
@@ -3771,6 +4182,18 @@ class GenericLlvmEmitter {
         }
         auto iv = emit_integer_from_any(os, data_token, ty.bits, ty.is_signed);
         if (!iv) return fail(instr, "store int source unsupported");
+        if (addr_space == 0 && ty.bits == 64 && is_register_name(mem.base) &&
+            reg_local_origin_.count(mem.base) && is_register_name(data_token) &&
+            reg_pointer_as_.count(data_token)) {
+            const std::string& origin = reg_local_origin_.at(mem.base);
+            const PointerAs payload = reg_pointer_as_.at(data_token);
+            const auto previous = local_pointer_payload_as_.find(origin);
+            if (previous == local_pointer_payload_as_.end()) {
+                local_pointer_payload_as_[origin] = payload;
+            } else if (previous->second != payload) {
+                previous->second = PointerAs::kUnknown;
+            }
+        }
         const std::string ptr =
             emit_ptr_from_i64(addr_i64, addr_space, ty.bits, false);
         if (addr_space == 0) {
@@ -3788,18 +4211,214 @@ class GenericLlvmEmitter {
             return fail(instr, "mul.wide requires dst,a,b");
         }
         const std::string& dst = instr.operands[0];
-        // Support mul.wide.u32 and mul.wide.s32 only.
-        const bool is_signed = instr.opcode.find(".s32") != std::string::npos;
-        auto a32 = emit_integer_from_any(os, instr.operands[1], 32, is_signed);
-        auto b32 = emit_integer_from_any(os, instr.operands[2], 32, is_signed);
-        if (!a32 || !b32) return fail(instr, "mul.wide source unsupported");
-        const std::string a64 = next_tmp("mw_a");
-        const std::string b64 = next_tmp("mw_b");
-        os << "  " << a64 << " = " << (is_signed ? "sext " : "zext ") << "i32 " << *a32 << " to i64\n";
-        os << "  " << b64 << " = " << (is_signed ? "sext " : "zext ") << "i32 " << *b32 << " to i64\n";
+        const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
+        if (ty.kind != PtxTypeSpec::Kind::kInt ||
+            (ty.bits != 16 && ty.bits != 32)) {
+            return fail(instr, "mul.wide supports 16- and 32-bit integer operands");
+        }
+        const int result_bits = ty.bits * 2;
+        auto a = emit_integer_from_any(os, instr.operands[1], ty.bits, ty.is_signed);
+        auto b = emit_integer_from_any(os, instr.operands[2], ty.bits, ty.is_signed);
+        if (!a || !b) return fail(instr, "mul.wide source unsupported");
+        const std::string wide_ty = llvm_int_type(result_bits);
+        const std::string narrow_ty = llvm_int_type(ty.bits);
+        const std::string a_wide = next_tmp("mw_a");
+        const std::string b_wide = next_tmp("mw_b");
+        os << "  " << a_wide << " = " << (ty.is_signed ? "sext " : "zext ")
+           << narrow_ty << " " << *a << " to " << wide_ty << "\n";
+        os << "  " << b_wide << " = " << (ty.is_signed ? "sext " : "zext ")
+           << narrow_ty << " " << *b << " to " << wide_ty << "\n";
         const std::string prod = next_tmp("mw");
-        os << "  " << prod << " = mul i64 " << a64 << ", " << b64 << "\n";
-        return emit_store_reg_bits(os, dst, 64, prod, 64);
+        os << "  " << prod << " = mul " << wide_ty << " " << a_wide << ", " << b_wide << "\n";
+        return emit_store_reg_bits(os, dst, result_bits, prod, result_bits);
+    }
+
+    std::optional<std::string> emit_device_malloc(
+        std::ostringstream& os, const std::string& arg_name) {
+        auto requested64 = load_call_slot_value(os, arg_name, 64);
+        if (!requested64) return std::nullopt;
+        uses_device_heap_ = true;
+
+        const std::string requested32 = next_tmp("heap_requested");
+        const std::string with_header = next_tmp("heap_with_header");
+        const std::string total = next_tmp("heap_total");
+        os << "  " << requested32 << " = trunc i64 " << *requested64 << " to i32\n";
+        os << "  " << with_header << " = add i32 " << requested32 << ", 31\n";
+        os << "  " << total << " = and i32 " << with_header << ", -16\n";
+
+        const std::string free_head_ptr = next_tmp("heap_free_head_ptr");
+        const std::string capacity_ptr = next_tmp("heap_capacity_ptr");
+        const std::string capacity = next_tmp("heap_capacity");
+        const std::string heap_i8 = next_tmp("heap_base_i8");
+        os << "  " << heap_i8
+           << " = bitcast i32 addrspace(1)* %__cumetal_device_heap to i8 addrspace(1)*\n";
+        os << "  " << free_head_ptr
+           << " = getelementptr inbounds i32, i32 addrspace(1)* %__cumetal_device_heap, i64 1\n";
+        os << "  " << capacity_ptr
+           << " = getelementptr inbounds i32, i32 addrspace(1)* %__cumetal_device_heap, i64 2\n";
+        os << "  " << capacity << " = load i32, i32 addrspace(1)* "
+           << capacity_ptr << ", align 4\n";
+        const std::string capacity64 = next_tmp("heap_capacity64");
+        const std::string size_valid = next_tmp("heap_size_valid");
+        os << "  " << capacity64 << " = zext i32 " << capacity << " to i64\n";
+        os << "  " << size_valid << " = icmp ule i64 " << *requested64 << ", "
+           << capacity64 << "\n";
+
+        const std::string pop_label = "heap_pop_" + std::to_string(tmp_id_++);
+        const std::string reuse_label = "heap_reuse_" + std::to_string(tmp_id_++);
+        const std::string claim_label = "heap_claim_" + std::to_string(tmp_id_++);
+        const std::string bump_label = "heap_bump_" + std::to_string(tmp_id_++);
+        const std::string ready_label = "heap_ready_" + std::to_string(tmp_id_++);
+        const std::string null_label = "heap_null_" + std::to_string(tmp_id_++);
+        const std::string done_label = "heap_done_" + std::to_string(tmp_id_++);
+        os << "  br i1 " << size_valid << ", label %" << pop_label
+           << ", label %" << null_label << "\n\n";
+
+        os << pop_label << ":\n";
+        const std::string head = next_tmp("heap_head");
+        const std::string no_free = next_tmp("heap_no_free");
+        os << "  " << head << " = load atomic i32, i32 addrspace(1)* "
+           << free_head_ptr << " monotonic, align 4\n";
+        os << "  " << no_free << " = icmp eq i32 " << head << ", 0\n";
+        os << "  br i1 " << no_free << ", label %" << bump_label
+           << ", label %" << reuse_label << "\n\n";
+
+        os << reuse_label << ":\n";
+        const std::string head64 = next_tmp("heap_head64");
+        const std::string block_i8 = next_tmp("heap_block_i8");
+        const std::string block_i32 = next_tmp("heap_block_i32");
+        const std::string block_size = next_tmp("heap_block_size");
+        const std::string fits_free = next_tmp("heap_fits_free");
+        os << "  " << head64 << " = zext i32 " << head << " to i64\n";
+        os << "  " << block_i8
+           << " = getelementptr inbounds i8, i8 addrspace(1)* " << heap_i8 << ", i64 "
+           << head64 << "\n";
+        os << "  " << block_i32 << " = bitcast i8 addrspace(1)* " << block_i8
+           << " to i32 addrspace(1)*\n";
+        os << "  " << block_size << " = load i32, i32 addrspace(1)* "
+           << block_i32 << ", align 4\n";
+        os << "  " << fits_free << " = icmp uge i32 " << block_size << ", "
+           << total << "\n";
+        os << "  br i1 " << fits_free << ", label %" << claim_label
+           << ", label %" << bump_label << "\n\n";
+
+        os << claim_label << ":\n";
+        const std::string next_ptr = next_tmp("heap_next_ptr");
+        const std::string next = next_tmp("heap_next");
+        const std::string popped = next_tmp("heap_popped");
+        const std::string pop_ok = next_tmp("heap_pop_ok");
+        os << "  " << next_ptr
+           << " = getelementptr inbounds i32, i32 addrspace(1)* " << block_i32
+           << ", i64 1\n";
+        os << "  " << next << " = load i32, i32 addrspace(1)* " << next_ptr
+           << ", align 4\n";
+        os << "  " << popped << " = cmpxchg i32 addrspace(1)* " << free_head_ptr
+           << ", i32 " << head << ", i32 " << next << " monotonic monotonic\n";
+        os << "  " << pop_ok << " = extractvalue { i32, i1 } " << popped << ", 1\n";
+        os << "  br i1 " << pop_ok << ", label %" << ready_label
+           << ", label %" << pop_label << "\n\n";
+
+        os << bump_label << ":\n";
+        const std::string bump = next_tmp("heap_bump");
+        const std::string end = next_tmp("heap_end");
+        const std::string fits_capacity = next_tmp("heap_fits_capacity");
+        os << "  " << bump
+           << " = atomicrmw add i32 addrspace(1)* %__cumetal_device_heap, i32 "
+           << total << " monotonic\n";
+        os << "  " << end << " = add i32 " << bump << ", " << total << "\n";
+        os << "  " << fits_capacity << " = icmp ule i32 " << end << ", "
+           << capacity << "\n";
+        os << "  br i1 " << fits_capacity << ", label %" << ready_label
+           << ", label %" << null_label << "\n\n";
+
+        os << ready_label << ":\n";
+        const std::string chosen = next_tmp("heap_chosen");
+        const std::string chosen64 = next_tmp("heap_chosen64");
+        const std::string chosen_i8 = next_tmp("heap_chosen_i8");
+        const std::string chosen_i32 = next_tmp("heap_chosen_i32");
+        const std::string payload = next_tmp("heap_payload");
+        const std::string payload_bits = next_tmp("heap_payload_bits");
+        os << "  " << chosen << " = phi i32 [ " << head << ", %" << claim_label
+           << " ], [ " << bump << ", %" << bump_label << " ]\n";
+        os << "  " << chosen64 << " = zext i32 " << chosen << " to i64\n";
+        os << "  " << chosen_i8
+           << " = getelementptr inbounds i8, i8 addrspace(1)* " << heap_i8 << ", i64 "
+           << chosen64 << "\n";
+        os << "  " << chosen_i32 << " = bitcast i8 addrspace(1)* " << chosen_i8
+           << " to i32 addrspace(1)*\n";
+        os << "  store i32 " << total << ", i32 addrspace(1)* " << chosen_i32
+           << ", align 4\n";
+        os << "  " << payload << " = getelementptr inbounds i8, i8 addrspace(1)* "
+           << chosen_i8 << ", i64 16\n";
+        os << "  " << payload_bits << " = ptrtoint i8 addrspace(1)* " << payload
+           << " to i64\n";
+        os << "  br label %" << done_label << "\n\n";
+
+        os << null_label << ":\n";
+        os << "  br label %" << done_label << "\n\n";
+        os << done_label << ":\n";
+        const std::string result = next_tmp("heap_result");
+        os << "  " << result << " = phi i64 [ " << payload_bits << ", %"
+           << ready_label << " ], [ 0, %" << null_label << " ]\n";
+        return result;
+    }
+
+    bool emit_device_free(std::ostringstream& os, const std::string& arg_name) {
+        auto pointer_bits = load_call_slot_value(os, arg_name, 64);
+        if (!pointer_bits) return false;
+        uses_device_heap_ = true;
+        const std::string is_null = next_tmp("heap_free_null");
+        os << "  " << is_null << " = icmp eq i64 " << *pointer_bits << ", 0\n";
+        const std::string push_label = "heap_free_push_" + std::to_string(tmp_id_++);
+        const std::string loop_label = "heap_free_loop_" + std::to_string(tmp_id_++);
+        const std::string done_label = "heap_free_done_" + std::to_string(tmp_id_++);
+        os << "  br i1 " << is_null << ", label %" << done_label
+           << ", label %" << push_label << "\n\n";
+        os << push_label << ":\n";
+        const std::string pointer = next_tmp("heap_free_pointer");
+        const std::string header = next_tmp("heap_free_header");
+        const std::string header_bits = next_tmp("heap_free_header_bits");
+        const std::string base_bits = next_tmp("heap_free_base_bits");
+        const std::string offset64 = next_tmp("heap_free_offset64");
+        const std::string offset = next_tmp("heap_free_offset");
+        const std::string header_i32 = next_tmp("heap_free_header_i32");
+        const std::string next_ptr = next_tmp("heap_free_next_ptr");
+        const std::string free_head_ptr = next_tmp("heap_free_head_ptr");
+        os << "  " << pointer << " = inttoptr i64 " << *pointer_bits
+           << " to i8 addrspace(1)*\n";
+        os << "  " << header << " = getelementptr inbounds i8, i8 addrspace(1)* "
+           << pointer << ", i64 -16\n";
+        os << "  " << header_bits << " = ptrtoint i8 addrspace(1)* " << header
+           << " to i64\n";
+        os << "  " << base_bits
+           << " = ptrtoint i32 addrspace(1)* %__cumetal_device_heap to i64\n";
+        os << "  " << offset64 << " = sub i64 " << header_bits << ", " << base_bits
+           << "\n";
+        os << "  " << offset << " = trunc i64 " << offset64 << " to i32\n";
+        os << "  " << header_i32 << " = bitcast i8 addrspace(1)* " << header
+           << " to i32 addrspace(1)*\n";
+        os << "  " << next_ptr
+           << " = getelementptr inbounds i32, i32 addrspace(1)* " << header_i32
+           << ", i64 1\n";
+        os << "  " << free_head_ptr
+           << " = getelementptr inbounds i32, i32 addrspace(1)* %__cumetal_device_heap, i64 1\n";
+        os << "  br label %" << loop_label << "\n\n";
+        os << loop_label << ":\n";
+        const std::string old_head = next_tmp("heap_free_old_head");
+        const std::string pushed = next_tmp("heap_free_pushed");
+        const std::string push_ok = next_tmp("heap_free_push_ok");
+        os << "  " << old_head << " = load atomic i32, i32 addrspace(1)* "
+           << free_head_ptr << " monotonic, align 4\n";
+        os << "  store i32 " << old_head << ", i32 addrspace(1)* " << next_ptr
+           << ", align 4\n";
+        os << "  " << pushed << " = cmpxchg i32 addrspace(1)* " << free_head_ptr
+           << ", i32 " << old_head << ", i32 " << offset
+           << " monotonic monotonic\n";
+        os << "  " << push_ok << " = extractvalue { i32, i1 } " << pushed << ", 1\n";
+        os << "  br i1 " << push_ok << ", label %" << done_label
+           << ", label %" << loop_label << "\n\n";
+        os << done_label << ":\n";
+        return true;
     }
 
     bool emit_call(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
@@ -3852,10 +4471,809 @@ class GenericLlvmEmitter {
             return store_ret_bits(bits, 32);
         };
 
+        if (callee == "__cumetal_grid_sync") {
+            if (!module_uses_grid_barrier_ || !arg_names.empty()) {
+                return fail(instr, "grid sync requires the cooperative-grid barrier ABI");
+            }
+            const auto tid_it = builtin_vector_arg_name_.find(
+                "air.thread_position_in_threadgroup");
+            const auto gpg_it = builtin_vector_arg_name_.find(
+                "air.threadgroups_per_grid");
+            if (tid_it == builtin_vector_arg_name_.end() ||
+                gpg_it == builtin_vector_arg_name_.end()) {
+                return fail(instr, "grid sync AIR builtins are unavailable");
+            }
+            declarations_.insert("declare void @air.wg.barrier(i32, i32)");
+            os << "  call void @air.wg.barrier(i32 3, i32 1)\n";
+            const std::string tidx = next_tmp("grid_sync_tidx");
+            const std::string tidy = next_tmp("grid_sync_tidy");
+            const std::string tidz = next_tmp("grid_sync_tidz");
+            os << "  " << tidx << " = extractelement <3 x i32> %" << tid_it->second
+               << ", i64 0\n";
+            os << "  " << tidy << " = extractelement <3 x i32> %" << tid_it->second
+               << ", i64 1\n";
+            os << "  " << tidz << " = extractelement <3 x i32> %" << tid_it->second
+               << ", i64 2\n";
+            const std::string xy = next_tmp("grid_sync_tid_xy");
+            const std::string xyz = next_tmp("grid_sync_tid_xyz");
+            const std::string is_leader = next_tmp("grid_sync_is_leader");
+            os << "  " << xy << " = or i32 " << tidx << ", " << tidy << "\n";
+            os << "  " << xyz << " = or i32 " << xy << ", " << tidz << "\n";
+            os << "  " << is_leader << " = icmp eq i32 " << xyz << ", 0\n";
+
+            const std::string leader_label = "grid_sync_leader_" + std::to_string(tmp_id_++);
+            const std::string wait_label = "grid_sync_wait_" + std::to_string(tmp_id_++);
+            const std::string last_label = "grid_sync_last_" + std::to_string(tmp_id_++);
+            const std::string spin_label = "grid_sync_spin_" + std::to_string(tmp_id_++);
+            const std::string arrive_done_label =
+                "grid_sync_arrive_done_" + std::to_string(tmp_id_++);
+            const std::string done_label = "grid_sync_done_" + std::to_string(tmp_id_++);
+            os << "  br i1 " << is_leader << ", label %" << leader_label
+               << ", label %" << wait_label << "\n\n";
+
+            os << leader_label << ":\n";
+            const std::string gen_ptr = next_tmp("grid_sync_gen_ptr");
+            const std::string generation = next_tmp("grid_sync_generation");
+            const std::string old_count = next_tmp("grid_sync_old_count");
+            const std::string arrived = next_tmp("grid_sync_arrived");
+            os << "  " << gen_ptr
+               << " = getelementptr inbounds i32, i32 addrspace(1)* %__cumetal_grid_barrier, i64 1\n";
+            os << "  " << generation << " = load atomic i32, i32 addrspace(1)* "
+               << gen_ptr << " acquire, align 4\n";
+            os << "  " << old_count
+               << " = atomicrmw add i32 addrspace(1)* %__cumetal_grid_barrier, i32 1 acq_rel\n";
+            os << "  " << arrived << " = add i32 " << old_count << ", 1\n";
+            const std::string gpx = next_tmp("grid_sync_gpx");
+            const std::string gpy = next_tmp("grid_sync_gpy");
+            const std::string gpz = next_tmp("grid_sync_gpz");
+            const std::string gp_xy = next_tmp("grid_sync_gp_xy");
+            const std::string gp_xyz = next_tmp("grid_sync_gp_xyz");
+            const std::string is_last = next_tmp("grid_sync_is_last");
+            os << "  " << gpx << " = extractelement <3 x i32> %" << gpg_it->second
+               << ", i64 0\n";
+            os << "  " << gpy << " = extractelement <3 x i32> %" << gpg_it->second
+               << ", i64 1\n";
+            os << "  " << gpz << " = extractelement <3 x i32> %" << gpg_it->second
+               << ", i64 2\n";
+            os << "  " << gp_xy << " = mul i32 " << gpx << ", " << gpy << "\n";
+            os << "  " << gp_xyz << " = mul i32 " << gp_xy << ", " << gpz << "\n";
+            os << "  " << is_last << " = icmp eq i32 " << arrived << ", " << gp_xyz
+               << "\n";
+            os << "  br i1 " << is_last << ", label %" << last_label
+               << ", label %" << spin_label << "\n\n";
+
+            os << last_label << ":\n";
+            os << "  store atomic i32 0, i32 addrspace(1)* %__cumetal_grid_barrier release, align 4\n";
+            const std::string advanced = next_tmp("grid_sync_advanced");
+            os << "  " << advanced << " = atomicrmw add i32 addrspace(1)* " << gen_ptr
+               << ", i32 1 release\n";
+            os << "  br label %" << arrive_done_label << "\n\n";
+
+            os << spin_label << ":\n";
+            const std::string observed = next_tmp("grid_sync_observed");
+            const std::string released = next_tmp("grid_sync_released");
+            os << "  " << observed << " = load atomic volatile i32, i32 addrspace(1)* "
+               << gen_ptr << " acquire, align 4\n";
+            os << "  " << released << " = icmp ne i32 " << observed << ", "
+               << generation << "\n";
+            os << "  br i1 " << released << ", label %" << arrive_done_label
+               << ", label %" << spin_label << "\n\n";
+
+            os << arrive_done_label << ":\n";
+            os << "  br label %" << done_label << "\n\n";
+            os << wait_label << ":\n";
+            os << "  br label %" << done_label << "\n\n";
+            os << done_label << ":\n";
+            os << "  call void @air.wg.barrier(i32 3, i32 1)\n";
+            return true;
+        }
+
+        if (callee == "cudaStreamCreateWithFlags") {
+            if (arg_names.size() != 2) {
+                return fail(instr, "cudaStreamCreateWithFlags expects stream pointer and flags");
+            }
+            auto stream_pointer = load_call_slot_value(os, arg_names[0], 64);
+            auto flags = load_call_slot_value(os, arg_names[1], 32);
+            if (!stream_pointer || !flags) {
+                return fail(instr, "cudaStreamCreateWithFlags arguments unavailable");
+            }
+            int address_space = 0;
+            if (const auto provenance = call_param_pointer_as_.find(arg_names[0]);
+                provenance != call_param_pointer_as_.end()) {
+                switch (provenance->second) {
+                    case PointerAs::kGlobal: address_space = 1; break;
+                    case PointerAs::kParam: address_space = 2; break;
+                    case PointerAs::kShared: address_space = 3; break;
+                    case PointerAs::kLocal:
+                    case PointerAs::kUnknown: address_space = 0; break;
+                }
+            }
+            const std::string stream_slot = next_tmp("device_stream_slot");
+            os << "  " << stream_slot << " = inttoptr i64 " << *stream_pointer
+               << " to i64";
+            if (address_space != 0) os << " addrspace(" << address_space << ")";
+            os << "*\n";
+            // Host queue draining serializes child records in issue order. Use
+            // the address of the caller's stream variable as a stable nonzero
+            // device-stream token; distinct variables remain distinct handles.
+            os << "  store i64 " << *stream_pointer << ", i64";
+            if (address_space != 0) os << " addrspace(" << address_space << ")";
+            os << "* " << stream_slot << ", align 8\n";
+            return store_ret_bits("0", 32);
+        }
+        if (callee == "cudaStreamDestroy") {
+            if (arg_names.size() != 1 ||
+                !load_call_slot_value(os, arg_names[0], 64)) {
+                return fail(instr, "cudaStreamDestroy stream argument unavailable");
+            }
+            return store_ret_bits("0", 32);
+        }
+        if (callee == "cudaGetLastError" || callee == "cudaPeekAtLastError") {
+            if (!arg_names.empty()) {
+                return fail(instr, callee + " expects no arguments");
+            }
+            return store_ret_bits("0", 32);
+        }
+        if (callee == "cudaGetErrorString") {
+            if (arg_names.size() != 1 ||
+                !load_call_slot_value(os, arg_names[0], 32)) {
+                return fail(instr, "cudaGetErrorString error argument unavailable");
+            }
+            // Device-side callers use this only on an error branch. Successful
+            // child-queue operations keep that branch inactive; return a null
+            // pointer rather than exposing a host string address to Metal.
+            return store_ret_bits("0", 64);
+        }
+
+        if (callee == "cudaMemcpyAsync") {
+            if (!module_uses_device_launch_queue_ || arg_names.size() != 5) {
+                return fail(instr, "device cudaMemcpyAsync requires five arguments and the device queue ABI");
+            }
+            auto destination = load_call_slot_value(os, arg_names[0], 64);
+            auto source = load_call_slot_value(os, arg_names[1], 64);
+            auto count = load_call_slot_value(os, arg_names[2], 64);
+            auto kind = load_call_slot_value(os, arg_names[3], 32);
+            auto stream = load_call_slot_value(os, arg_names[4], 64);
+            if (!destination || !source || !count || !kind || !stream) {
+                return fail(instr, "device cudaMemcpyAsync argument slots unavailable");
+            }
+
+            const std::string record_count_ptr = next_tmp("cdp_copy_record_count_ptr");
+            const std::string record_index = next_tmp("cdp_copy_record_index");
+            const std::string has_record = next_tmp("cdp_copy_has_record");
+            const std::string write_label = "cdp_copy_write_" + std::to_string(tmp_id_++);
+            const std::string overflow_label = "cdp_copy_overflow_" + std::to_string(tmp_id_++);
+            const std::string done_label = "cdp_copy_done_" + std::to_string(tmp_id_++);
+            os << "  " << record_count_ptr
+               << " = getelementptr inbounds i32, i32 addrspace(1)* "
+               << "%__cumetal_device_launch_queue, i64 1\n"
+               << "  " << record_index << " = atomicrmw add i32 addrspace(1)* "
+               << record_count_ptr << ", i32 1 monotonic\n"
+               << "  " << has_record << " = icmp ult i32 " << record_index << ", 1023\n"
+               << "  br i1 " << has_record << ", label %" << write_label
+               << ", label %" << overflow_label << "\n\n"
+               << write_label << ":\n";
+            const std::string record_word = next_tmp("cdp_copy_record_word");
+            const std::string record_base = next_tmp("cdp_copy_record_base");
+            os << "  " << record_word << " = mul i32 " << record_index << ", 16\n"
+               << "  " << record_word << "_base = add i32 " << record_word << ", 4\n"
+               << "  " << record_base
+               << " = getelementptr inbounds i32, i32 addrspace(1)* "
+               << "%__cumetal_device_launch_queue, i32 " << record_word << "_base\n";
+            const auto store_copy_word = [&](int offset, const std::string& value) {
+                const std::string pointer = next_tmp("cdp_copy_field");
+                os << "  " << pointer
+                   << " = getelementptr inbounds i32, i32 addrspace(1)* "
+                   << record_base << ", i32 " << offset << "\n"
+                   << "  store i32 " << value << ", i32 addrspace(1)* " << pointer
+                   << ", align 4\n";
+            };
+            const auto store_copy_i64 = [&](int offset, const std::string& value,
+                                             const std::string& stem) {
+                const std::string low = next_tmp(stem + "_low");
+                const std::string shift = next_tmp(stem + "_shift");
+                const std::string high = next_tmp(stem + "_high");
+                os << "  " << low << " = trunc i64 " << value << " to i32\n"
+                   << "  " << shift << " = lshr i64 " << value << ", 32\n"
+                   << "  " << high << " = trunc i64 " << shift << " to i32\n";
+                store_copy_word(offset, low);
+                store_copy_word(offset + 1, high);
+            };
+            store_copy_i64(0, *destination, "cdp_copy_destination");
+            store_copy_i64(2, *source, "cdp_copy_source");
+            store_copy_i64(4, *count, "cdp_copy_count");
+            store_copy_word(6, *kind);
+            store_copy_i64(7, *stream, "cdp_copy_stream");
+            for (int offset = 9; offset < 15; ++offset) store_copy_word(offset, "0");
+            store_copy_word(15, "1");
+            os << "  br label %" << done_label << "\n\n"
+               << overflow_label << ":\n  br label %" << done_label << "\n\n"
+               << done_label << ":\n";
+            const std::string copy_status = next_tmp("cdp_copy_status");
+            os << "  " << copy_status << " = phi i32 [ 0, %" << write_label
+               << " ], [ 1, %" << overflow_label << " ]\n";
+            return store_ret_bits(copy_status, 32);
+        }
+
+        if (callee == "cudaGetParameterBuffer") {
+            if (!module_uses_device_launch_queue_ || arg_names.size() != 2) {
+                return fail(instr, "cudaGetParameterBuffer requires the device launch queue ABI");
+            }
+            auto alignment64 = load_call_slot_value(os, arg_names[0], 64);
+            auto size64 = load_call_slot_value(os, arg_names[1], 64);
+            if (!alignment64 || !size64) {
+                return fail(instr, "cudaGetParameterBuffer arguments unavailable");
+            }
+            const std::string alignment32 = next_tmp("cdp_alignment");
+            const std::string size32 = next_tmp("cdp_size");
+            const std::string alignment_nonzero = next_tmp("cdp_alignment_nonzero");
+            const std::string alignment = next_tmp("cdp_alignment_safe");
+            const std::string reserve = next_tmp("cdp_reserve");
+            const std::string raw = next_tmp("cdp_raw");
+            const std::string with_header = next_tmp("cdp_with_header");
+            const std::string alignment_minus_one = next_tmp("cdp_alignment_minus_one");
+            const std::string rounded = next_tmp("cdp_rounded");
+            const std::string alignment_mask = next_tmp("cdp_alignment_mask");
+            const std::string aligned = next_tmp("cdp_aligned");
+            const std::string end = next_tmp("cdp_end");
+            const std::string capacity = next_tmp("cdp_capacity");
+            const std::string fits = next_tmp("cdp_fits");
+            const std::string ok_label = "cdp_param_ok_" + std::to_string(tmp_id_++);
+            const std::string fail_label = "cdp_param_fail_" + std::to_string(tmp_id_++);
+            const std::string done_label = "cdp_param_done_" + std::to_string(tmp_id_++);
+            os << "  " << alignment32 << " = trunc i64 " << *alignment64 << " to i32\n"
+               << "  " << size32 << " = trunc i64 " << *size64 << " to i32\n"
+               << "  " << alignment_nonzero << " = icmp ne i32 " << alignment32 << ", 0\n"
+               << "  " << alignment << " = select i1 " << alignment_nonzero
+               << ", i32 " << alignment32 << ", i32 1\n"
+               << "  " << alignment_minus_one << " = sub i32 " << alignment << ", 1\n"
+               << "  " << reserve << " = add i32 " << size32 << ", 8\n"
+               << "  " << reserve << "_aligned = add i32 " << reserve << ", "
+               << alignment_minus_one << "\n"
+               << "  " << raw << " = atomicrmw add i32 addrspace(1)* "
+               << "%__cumetal_device_launch_queue, i32 " << reserve
+               << "_aligned monotonic\n"
+               << "  " << with_header << " = add i32 " << raw << ", 8\n"
+               << "  " << rounded << " = add i32 " << with_header << ", "
+               << alignment_minus_one << "\n"
+               << "  " << alignment_mask << " = sub i32 0, " << alignment << "\n"
+               << "  " << aligned << " = and i32 " << rounded << ", "
+               << alignment_mask << "\n"
+               << "  " << end << " = add i32 " << aligned << ", " << size32 << "\n"
+               << "  " << capacity
+               << " = load i32, i32 addrspace(2)* %__cumetal_device_launch_queue_capacity, align 4\n"
+               << "  " << fits << " = icmp ule i32 " << end << ", " << capacity << "\n"
+               << "  br i1 " << fits << ", label %" << ok_label << ", label %"
+               << fail_label << "\n\n"
+               << ok_label << ":\n";
+            const std::string queue_i8 = next_tmp("cdp_queue_i8");
+            const std::string header_offset = next_tmp("cdp_header_offset");
+            const std::string header_ptr_i8 = next_tmp("cdp_header_i8");
+            const std::string header_ptr = next_tmp("cdp_header");
+            const std::string param_ptr_i8 = next_tmp("cdp_param_i8");
+            const std::string param_bits = next_tmp("cdp_param_bits");
+            os << "  " << queue_i8 << " = bitcast i32 addrspace(1)* "
+               << "%__cumetal_device_launch_queue to i8 addrspace(1)*\n"
+               << "  " << header_offset << " = sub i32 " << aligned << ", 8\n"
+               << "  " << header_ptr_i8
+               << " = getelementptr inbounds i8, i8 addrspace(1)* " << queue_i8
+               << ", i32 " << header_offset << "\n"
+               << "  " << header_ptr << " = bitcast i8 addrspace(1)* " << header_ptr_i8
+               << " to i32 addrspace(1)*\n"
+               << "  store i32 " << size32 << ", i32 addrspace(1)* " << header_ptr
+               << ", align 4\n"
+               << "  " << param_ptr_i8
+               << " = getelementptr inbounds i8, i8 addrspace(1)* " << queue_i8
+               << ", i32 " << aligned << "\n"
+               << "  " << param_bits << " = ptrtoint i8 addrspace(1)* " << param_ptr_i8
+               << " to i64\n"
+               << "  br label %" << done_label << "\n\n"
+               << fail_label << ":\n  br label %" << done_label << "\n\n"
+               << done_label << ":\n";
+            const std::string result_ptr = next_tmp("cdp_param_result");
+            os << "  " << result_ptr << " = phi i64 [ " << param_bits << ", %"
+               << ok_label << " ], [ 0, %" << fail_label << " ]\n";
+            return store_ret_bits(result_ptr, 64);
+        }
+
+        if (callee == "cudaLaunchDevice") {
+            if (!module_uses_device_launch_queue_ || arg_names.size() != 6) {
+                return fail(instr, "cudaLaunchDevice requires six arguments and the device launch queue ABI");
+            }
+            auto token = load_call_slot_value(os, arg_names[0], 64);
+            auto parameter_buffer = load_call_slot_value(os, arg_names[1], 64);
+            auto shared_bytes = load_call_slot_value(os, arg_names[4], 32);
+            auto stream = load_call_slot_value(os, arg_names[5], 64);
+            std::array<std::optional<std::string>, 3> grid;
+            std::array<std::optional<std::string>, 3> block;
+            for (int axis = 0; axis < 3; ++axis) {
+                grid[static_cast<std::size_t>(axis)] =
+                    load_call_slot_value_at(os, arg_names[2], 32, axis * 4);
+                block[static_cast<std::size_t>(axis)] =
+                    load_call_slot_value_at(os, arg_names[3], 32, axis * 4);
+            }
+            if (!token || !parameter_buffer || !shared_bytes || !stream ||
+                !grid[0] || !grid[1] || !grid[2] ||
+                !block[0] || !block[1] || !block[2]) {
+                return fail(instr, "cudaLaunchDevice argument slots unavailable");
+            }
+            const std::string record_count_ptr = next_tmp("cdp_record_count_ptr");
+            const std::string record_index = next_tmp("cdp_record_index");
+            const std::string has_record = next_tmp("cdp_has_record");
+            const std::string write_label = "cdp_launch_write_" + std::to_string(tmp_id_++);
+            const std::string overflow_label = "cdp_launch_overflow_" + std::to_string(tmp_id_++);
+            const std::string done_label = "cdp_launch_done_" + std::to_string(tmp_id_++);
+            os << "  " << record_count_ptr
+               << " = getelementptr inbounds i32, i32 addrspace(1)* "
+               << "%__cumetal_device_launch_queue, i64 1\n"
+               << "  " << record_index << " = atomicrmw add i32 addrspace(1)* "
+               << record_count_ptr << ", i32 1 monotonic\n"
+               << "  " << has_record << " = icmp ult i32 " << record_index << ", 1023\n"
+               << "  br i1 " << has_record << ", label %" << write_label
+               << ", label %" << overflow_label << "\n\n"
+               << write_label << ":\n";
+            const std::string record_word = next_tmp("cdp_record_word");
+            const std::string record_base = next_tmp("cdp_record_base");
+            os << "  " << record_word << " = mul i32 " << record_index << ", 16\n"
+               << "  " << record_word << "_base = add i32 " << record_word << ", 4\n"
+               << "  " << record_base
+               << " = getelementptr inbounds i32, i32 addrspace(1)* "
+               << "%__cumetal_device_launch_queue, i32 " << record_word << "_base\n";
+            const auto store_record_word = [&](int offset, const std::string& value) {
+                const std::string ptr = next_tmp("cdp_record_field");
+                os << "  " << ptr << " = getelementptr inbounds i32, i32 addrspace(1)* "
+                   << record_base << ", i32 " << offset << "\n"
+                   << "  store i32 " << value << ", i32 addrspace(1)* " << ptr
+                   << ", align 4\n";
+            };
+            const std::string token_low = next_tmp("cdp_token_low");
+            const std::string token_shift = next_tmp("cdp_token_shift");
+            const std::string token_high = next_tmp("cdp_token_high");
+            const std::string queue_bits = next_tmp("cdp_queue_bits");
+            const std::string parameter_offset64 = next_tmp("cdp_parameter_offset64");
+            const std::string parameter_offset = next_tmp("cdp_parameter_offset");
+            const std::string parameter_header_bits = next_tmp("cdp_parameter_header_bits");
+            const std::string parameter_header_i8 = next_tmp("cdp_parameter_header_i8");
+            const std::string parameter_header = next_tmp("cdp_parameter_header");
+            const std::string parameter_size = next_tmp("cdp_parameter_size");
+            os << "  " << token_low << " = trunc i64 " << *token << " to i32\n"
+               << "  " << token_shift << " = lshr i64 " << *token << ", 32\n"
+               << "  " << token_high << " = trunc i64 " << token_shift << " to i32\n"
+               << "  " << queue_bits << " = ptrtoint i32 addrspace(1)* "
+               << "%__cumetal_device_launch_queue to i64\n"
+               << "  " << parameter_offset64 << " = sub i64 " << *parameter_buffer
+               << ", " << queue_bits << "\n"
+               << "  " << parameter_offset << " = trunc i64 " << parameter_offset64
+               << " to i32\n"
+               << "  " << parameter_header_bits << " = sub i64 " << *parameter_buffer
+               << ", 8\n"
+               << "  " << parameter_header_i8 << " = inttoptr i64 "
+               << parameter_header_bits << " to i8 addrspace(1)*\n"
+               << "  " << parameter_header << " = bitcast i8 addrspace(1)* "
+               << parameter_header_i8 << " to i32 addrspace(1)*\n"
+               << "  " << parameter_size << " = load i32, i32 addrspace(1)* "
+               << parameter_header << ", align 4\n";
+            store_record_word(0, token_low);
+            store_record_word(1, token_high);
+            store_record_word(2, parameter_offset);
+            store_record_word(3, parameter_size);
+            for (int axis = 0; axis < 3; ++axis) {
+                store_record_word(4 + axis, *grid[static_cast<std::size_t>(axis)]);
+                store_record_word(7 + axis, *block[static_cast<std::size_t>(axis)]);
+            }
+            store_record_word(10, *shared_bytes);
+            const std::string stream_low = next_tmp("cdp_stream_low");
+            const std::string stream_shift = next_tmp("cdp_stream_shift");
+            const std::string stream_high = next_tmp("cdp_stream_high");
+            os << "  " << stream_low << " = trunc i64 " << *stream << " to i32\n"
+               << "  " << stream_shift << " = lshr i64 " << *stream << ", 32\n"
+               << "  " << stream_high << " = trunc i64 " << stream_shift << " to i32\n";
+            store_record_word(11, stream_low);
+            store_record_word(12, stream_high);
+            store_record_word(13, "0");
+            store_record_word(14, "0");
+            store_record_word(15, "0");
+            os << "  br label %" << done_label << "\n\n"
+               << overflow_label << ":\n  br label %" << done_label << "\n\n"
+               << done_label << ":\n";
+            const std::string launch_status = next_tmp("cdp_launch_status");
+            os << "  " << launch_status << " = phi i32 [ 0, %" << write_label
+               << " ], [ 1, %" << overflow_label << " ]\n";
+            return store_ret_bits(launch_status, 32);
+        }
+
+        const bool is_device_allocation =
+            callee == "malloc" || callee == "_Znwm" || callee == "_Znam";
+        const bool is_device_deallocation =
+            callee == "free" || callee == "_ZdlPv" || callee == "_ZdaPv" ||
+            callee == "_ZdlPvm" || callee == "_ZdaPvm";
+        if (is_device_allocation) {
+            if (arg_names.empty()) return fail(instr, "device allocation expects 1 arg");
+            auto result = emit_device_malloc(os, arg_names[0]);
+            if (!result) return fail(instr, "device allocation size arg missing");
+            return store_ret_bits(*result, 64);
+        }
+        if (is_device_deallocation) {
+            if (arg_names.empty()) return fail(instr, "device deallocation expects 1 arg");
+            if (!emit_device_free(os, arg_names[0])) {
+                return fail(instr, "device deallocation pointer arg missing");
+            }
+            return true;
+        }
+
+        if (callee == "__cumetal_wmma_bf16_mma_8x8" ||
+            callee == "__cumetal_wmma_f32_mma_8x8") {
+            const bool bf16_inputs = callee == "__cumetal_wmma_bf16_mma_8x8";
+            if (arg_names.size() != 3) {
+                return fail(instr, bf16_inputs
+                    ? "BF16 WMMA marker expects destination, A, B"
+                    : "FP32 WMMA marker expects destination, A, B");
+            }
+            auto destination_bits = load_call_slot_value(os, arg_names[0], 64);
+            auto a_bits = load_call_slot_value(os, arg_names[1], 64);
+            auto b_bits = load_call_slot_value(os, arg_names[2], 64);
+            if (!destination_bits || !a_bits || !b_bits) {
+                return fail(instr, bf16_inputs
+                    ? "BF16 WMMA marker pointer arguments unavailable"
+                    : "FP32 WMMA marker pointer arguments unavailable");
+            }
+
+            const std::string destination_i8 = next_tmp("wmma_dst_i8");
+            const std::string a_i8 = next_tmp("wmma_a_i8");
+            const std::string b_i8 = next_tmp("wmma_b_i8");
+            const std::string destination = next_tmp("wmma_dst");
+            const std::string a = next_tmp("wmma_a");
+            const std::string b = next_tmp("wmma_b");
+            os << "  " << destination_i8 << " = inttoptr i64 " << *destination_bits
+               << " to i8 addrspace(3)*\n"
+               << "  " << a_i8 << " = inttoptr i64 " << *a_bits
+               << " to i8 addrspace(3)*\n"
+               << "  " << b_i8 << " = inttoptr i64 " << *b_bits
+               << " to i8 addrspace(3)*\n"
+               << "  " << destination << " = bitcast i8 addrspace(3)* "
+               << destination_i8 << " to float addrspace(3)*\n"
+               << "  " << a << " = bitcast i8 addrspace(3)* " << a_i8
+               << " to " << (bf16_inputs ? "bfloat" : "float") << " addrspace(3)*\n"
+               << "  " << b << " = bitcast i8 addrspace(3)* " << b_i8
+               << " to " << (bf16_inputs ? "bfloat" : "float") << " addrspace(3)*\n";
+
+            const std::string matrix_shape = "<2 x i64> <i64 8, i64 8>";
+            const std::string matrix_stride = "<2 x i64> <i64 1, i64 8>";
+            const std::string matrix_origin = "<2 x i64> zeroinitializer";
+            const std::string input_type = bf16_inputs ? "bfloat" : "float";
+            const std::string input_vector = bf16_inputs ? "v64bf16" : "v64f32";
+            declarations_.insert(
+                "declare <64 x " + input_type + "> "
+                "@air.simdgroup_matrix_8x8_load." + input_vector + ".p3" +
+                (bf16_inputs ? "bf16" : "f32") + "(" + input_type +
+                " addrspace(3)*, <2 x i64>, <2 x i64>, <2 x i64>)");
+            declarations_.insert(
+                "declare <64 x float> "
+                "@air.simdgroup_matrix_8x8_load.v64f32.p3f32("
+                "float addrspace(3)*, <2 x i64>, <2 x i64>, <2 x i64>)");
+            const std::string mma_suffix = bf16_inputs
+                ? "v64f32.v64bf16.v64bf16.v64f32"
+                : "v64f32.v64f32.v64f32.v64f32";
+            declarations_.insert(
+                "declare <64 x float> "
+                "@air.simdgroup_matrix_8x8_multiply_accumulate." + mma_suffix +
+                "(<64 x " + input_type + ">, <64 x " + input_type +
+                ">, <64 x float>)");
+            declarations_.insert(
+                "declare void @air.simdgroup_matrix_8x8_store.v64f32.p3f32("
+                "<64 x float>, float addrspace(3)*, <2 x i64>, <2 x i64>, "
+                "<2 x i64>)");
+
+            const std::string a_matrix = next_tmp("wmma_a_matrix");
+            const std::string b_matrix = next_tmp("wmma_b_matrix");
+            const std::string c_matrix = next_tmp("wmma_c_matrix");
+            const std::string d_matrix = next_tmp("wmma_d_matrix");
+            os << "  " << a_matrix << " = call fast <64 x " << input_type << "> "
+               << "@air.simdgroup_matrix_8x8_load." << input_vector << ".p3"
+               << (bf16_inputs ? "bf16" : "f32") << "("
+               << input_type << " addrspace(3)* " << a << ", " << matrix_shape << ", "
+               << matrix_stride << ", " << matrix_origin << ")\n"
+               << "  " << b_matrix << " = call fast <64 x " << input_type << "> "
+               << "@air.simdgroup_matrix_8x8_load." << input_vector << ".p3"
+               << (bf16_inputs ? "bf16" : "f32") << "("
+               << input_type << " addrspace(3)* " << b << ", " << matrix_shape << ", "
+               << matrix_stride << ", " << matrix_origin << ")\n"
+               << "  " << c_matrix << " = call fast <64 x float> "
+               << "@air.simdgroup_matrix_8x8_load.v64f32.p3f32("
+               << "float addrspace(3)* " << destination << ", " << matrix_shape
+               << ", " << matrix_stride << ", " << matrix_origin << ")\n"
+               << "  " << d_matrix << " = call fast <64 x float> "
+               << "@air.simdgroup_matrix_8x8_multiply_accumulate."
+               << mma_suffix << "(<64 x " << input_type << "> " << a_matrix
+               << ", <64 x " << input_type << "> " << b_matrix
+               << ", <64 x float> " << c_matrix
+               << ")\n"
+               << "  call void @air.simdgroup_matrix_8x8_store.v64f32.p3f32("
+               << "<64 x float> " << d_matrix << ", float addrspace(3)* "
+               << destination << ", " << matrix_shape << ", " << matrix_stride
+               << ", " << matrix_origin << ")\n";
+            return true;
+        }
+
+        const auto ptx_parameter_bits = [](const cumetal::ptx::Parameter& parameter) {
+            const PtxTypeSpec type = parse_primary_type_from_opcode(parameter.type);
+            return type.bits > 0 ? type.bits : 0;
+        };
+        const auto find_device_function = [&](const std::string& name)
+            -> const cumetal::ptx::EntryFunction* {
+            if (device_functions_ == nullptr) return nullptr;
+            for (const auto& function : *device_functions_) {
+                if (function.name == name) return &function;
+            }
+            return nullptr;
+        };
+        const auto compatible_device_function = [&](
+            const cumetal::ptx::EntryFunction& function) {
+            if (function.params.size() != arg_names.size() ||
+                function.return_params.size() != dest_names.size()) return false;
+            for (const auto& parameter : function.params) {
+                // Aggregate-by-value call slots need a byte-addressable ABI;
+                // scalar virtual calls are lowered here first.
+                if (ptx_parameter_bits(parameter) < 16) return false;
+            }
+            return function.return_params.empty() ||
+                   ptx_parameter_bits(function.return_params.front()) > 0;
+        };
+        const auto emit_direct_device_call = [&](
+            const cumetal::ptx::EntryFunction& function,
+            std::optional<std::string>* returned) -> bool {
+            std::vector<std::pair<int, std::string>> arguments;
+            auto& parameter_spaces =
+                device_function_param_address_spaces_[function.name];
+            if (parameter_spaces.size() < function.params.size()) {
+                parameter_spaces.resize(function.params.size(), PointerAs::kUnknown);
+            }
+            for (std::size_t i = 0; i < function.params.size(); ++i) {
+                const int bits = ptx_parameter_bits(function.params[i]);
+                if (bits <= 0) return false;
+                if (const auto provenance =
+                        call_param_pointer_as_.find(arg_names[i]);
+                    provenance != call_param_pointer_as_.end()) {
+                    if (parameter_spaces[i] == PointerAs::kUnknown ||
+                        parameter_spaces[i] == provenance->second) {
+                        parameter_spaces[i] = provenance->second;
+                    } else {
+                        return false;
+                    }
+                }
+                auto value = load_call_slot_value(os, arg_names[i], bits);
+                if (!value) return false;
+                arguments.emplace_back(bits, *value);
+            }
+            const int result_bits = function.return_params.empty()
+                                        ? 0
+                                        : ptx_parameter_bits(function.return_params.front());
+            const std::string call_result =
+                result_bits > 0 ? next_tmp("device_call") : std::string{};
+            os << "  ";
+            if (result_bits > 0) {
+                os << call_result << " = ";
+            }
+            os << "call " << (result_bits > 0 ? llvm_int_type(result_bits) : "void")
+               << " @" << function.name << "(";
+            for (std::size_t i = 0; i < arguments.size(); ++i) {
+                if (i > 0) os << ", ";
+                os << llvm_int_type(arguments[i].first) << " " << arguments[i].second;
+            }
+            if (module_uses_device_heap_) {
+                if (!arguments.empty()) os << ", ";
+                os << "i32 addrspace(1)* %__cumetal_device_heap";
+            }
+            if (module_uses_device_printf_) {
+                if (!arguments.empty() || module_uses_device_heap_) os << ", ";
+                os << "i32 addrspace(1)* %__cumetal_printf_buffer, "
+                      "i32 addrspace(2)* %__cumetal_printf_capacity";
+            }
+            if (module_uses_device_launch_queue_) {
+                if (!arguments.empty() || module_uses_device_heap_ ||
+                    module_uses_device_printf_) {
+                    os << ", ";
+                }
+                os << "i32 addrspace(1)* %__cumetal_device_launch_queue, "
+                      "i32 addrspace(2)* %__cumetal_device_launch_queue_capacity";
+            }
+            if (module_uses_device_clock_) {
+                if (!arguments.empty() || module_uses_device_heap_ ||
+                    module_uses_device_printf_ || module_uses_device_launch_queue_) {
+                    os << ", ";
+                }
+                os << "i32 addrspace(1)* %__cumetal_device_clock";
+            }
+            if (module_uses_grid_barrier_) {
+                if (!arguments.empty() || module_uses_device_heap_ ||
+                    module_uses_device_printf_ || module_uses_device_launch_queue_ ||
+                    module_uses_device_clock_) {
+                    os << ", ";
+                }
+                os << "i32 addrspace(1)* %__cumetal_grid_barrier";
+            }
+            if (module_uses_grid_y_offset_) {
+                if (!arguments.empty() || module_uses_device_heap_ ||
+                    module_uses_device_printf_ || module_uses_device_launch_queue_ ||
+                    module_uses_device_clock_ || module_uses_grid_barrier_) {
+                    os << ", ";
+                }
+                os << "i32 addrspace(2)* %__cumetal_grid_y_offset";
+            }
+            os << ")\n";
+            if (returned != nullptr && result_bits > 0) *returned = call_result;
+            return true;
+        };
+
+        if (const auto* function = find_device_function(callee);
+            function != nullptr && compatible_device_function(*function)) {
+            std::optional<std::string> returned;
+            if (!emit_direct_device_call(*function, &returned)) {
+                return fail(instr, "device function call arguments are unavailable");
+            }
+            if (returned) {
+                return store_ret_bits(*returned,
+                                      ptx_parameter_bits(function->return_params.front()));
+            }
+            return true;
+        }
+
+        if (is_register_name(callee) && device_functions_ != nullptr) {
+            std::vector<const cumetal::ptx::EntryFunction*> candidates;
+            for (const auto& function : *device_functions_) {
+                if (compatible_device_function(function)) candidates.push_back(&function);
+            }
+            if (candidates.empty()) {
+                return fail(instr, "indirect call has no ABI-compatible device target");
+            }
+            const std::string token = emit_load_reg_bits(os, callee, 64);
+            const std::string merge_label =
+                "device_dispatch_merge_" + std::to_string(tmp_id_++);
+            const std::string miss_label =
+                "device_dispatch_miss_" + std::to_string(tmp_id_++);
+            std::vector<std::string> check_labels;
+            std::vector<std::string> call_labels;
+            check_labels.reserve(candidates.size());
+            call_labels.reserve(candidates.size());
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                check_labels.push_back(
+                    "device_dispatch_check_" + std::to_string(tmp_id_++));
+                call_labels.push_back(
+                    "device_dispatch_call_" + std::to_string(tmp_id_++));
+            }
+            std::vector<std::pair<std::string, std::string>> returned_values;
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                const std::string& check_label = check_labels[i];
+                const std::string& call_label = call_labels[i];
+                if (i == 0) os << "  br label %" << check_label << "\n\n";
+                os << check_label << ":\n";
+                const std::string matches = next_tmp("device_dispatch_match");
+                os << "  " << matches << " = icmp eq i64 " << token << ", "
+                   << stable_device_function_token(candidates[i]->name) << "\n";
+                const std::string next_label =
+                    i + 1 < candidates.size()
+                        ? check_labels[i + 1]
+                        : miss_label;
+                os << "  br i1 " << matches << ", label %" << call_label
+                   << ", label %" << next_label << "\n\n";
+                os << call_label << ":\n";
+                std::optional<std::string> returned;
+                if (!emit_direct_device_call(*candidates[i], &returned)) {
+                    return fail(instr, "indirect device call arguments are unavailable");
+                }
+                if (returned) returned_values.emplace_back(*returned, call_label);
+                os << "  br label %" << merge_label << "\n\n";
+            }
+            os << miss_label << ":\n";
+            declarations_.insert("declare void @llvm.trap()");
+            os << "  call void @llvm.trap()\n  br label %" << merge_label << "\n\n";
+            os << merge_label << ":\n";
+            if (!dest_names.empty()) {
+                const int bits = ptx_parameter_bits(candidates.front()->return_params.front());
+                const std::string result = next_tmp("device_dispatch_result");
+                os << "  " << result << " = phi " << llvm_int_type(bits) << " ";
+                for (std::size_t i = 0; i < returned_values.size(); ++i) {
+                    if (i > 0) os << ", ";
+                    os << "[ " << returned_values[i].first << ", %"
+                       << returned_values[i].second << " ]";
+                }
+                if (!returned_values.empty()) os << ", ";
+                os << "[ 0, %" << miss_label << " ]\n";
+                return store_ret_bits(result, bits);
+            }
+            return true;
+        }
+
         if (callee == "vprintf") {
-            return fail(instr,
-                        "vprintf is unsupported by the LLVM PTX backend; use the "
-                        "direct Metal lowering, which implements the printf ring buffer");
+            const auto printf_it = printf_call_by_line_.find(instr.line);
+            if (printf_it == printf_call_by_line_.end()) {
+                return fail(instr, "vprintf ABI was not decoded by printf lowering");
+            }
+            const auto& call = *printf_it->second;
+            if (call.arguments.size() > 1024) {
+                return fail(instr, "vprintf argument tuple is unreasonably large");
+            }
+
+            std::uint32_t payload_words = 0;
+            for (std::size_t i = 0; i < call.arguments.size(); ++i) {
+                const int bits = i < call.argument_bits.size()
+                                     ? call.argument_bits[i]
+                                     : 32;
+                if (bits != 32 && bits != 64) {
+                    return fail(instr, "vprintf argument width is not 32 or 64 bits");
+                }
+                payload_words += static_cast<std::uint32_t>(bits / 32);
+            }
+            const std::uint32_t record_words = 2u + payload_words;
+            const std::string old_pos = next_tmp("printf_pos");
+            os << "  " << old_pos
+               << " = atomicrmw add i32 addrspace(1)* %__cumetal_printf_buffer, i32 "
+               << record_words << " monotonic\n";
+            const std::string end_pos = next_tmp("printf_end");
+            os << "  " << end_pos << " = add i32 " << old_pos << ", " << record_words << "\n";
+            const std::string cap = next_tmp("printf_cap");
+            os << "  " << cap
+               << " = load i32, i32 addrspace(2)* %__cumetal_printf_capacity, align 4\n";
+            const std::string fits = next_tmp("printf_fits");
+            os << "  " << fits << " = icmp ult i32 " << end_pos << ", " << cap << "\n";
+
+            const std::string write_label = "printf_write_" + std::to_string(tmp_id_++);
+            const std::string done_label = "printf_done_" + std::to_string(tmp_id_++);
+            os << "  br i1 " << fits << ", label %" << write_label
+               << ", label %" << done_label << "\n\n";
+            os << write_label << ":\n";
+
+            auto emit_record_word = [&](std::uint32_t relative_index,
+                                        const std::string& value) {
+                const std::string index32 = next_tmp("printf_index");
+                os << "  " << index32 << " = add i32 " << old_pos << ", "
+                   << relative_index << "\n";
+                const std::string index64 = next_tmp("printf_index64");
+                os << "  " << index64 << " = zext i32 " << index32 << " to i64\n";
+                const std::string word_ptr = next_tmp("printf_word");
+                os << "  " << word_ptr
+                   << " = getelementptr inbounds i32, i32 addrspace(1)* "
+                      "%__cumetal_printf_buffer, i64 "
+                   << index64 << "\n";
+                os << "  store i32 " << value << ", i32 addrspace(1)* " << word_ptr
+                   << ", align 4\n";
+            };
+
+            emit_record_word(1u, std::to_string(call.format_id));
+            emit_record_word(2u, std::to_string(payload_words));
+            std::uint32_t payload_offset = 0;
+            for (std::size_t i = 0; i < call.arguments.size(); ++i) {
+                const std::string arg = trim(call.arguments[i]);
+                const int arg_bits = i < call.argument_bits.size()
+                                         ? call.argument_bits[i]
+                                         : 32;
+                // Clang may pack an immediate directly into a v2.b32 tuple
+                // (for example an expected tile size), so accept both register
+                // values and integer literals as their raw ABI bits.
+                auto bits = emit_integer_from_any(os, arg, arg_bits, false);
+                if (!bits) {
+                    return fail(instr, "vprintf decoded unsupported " +
+                                           std::to_string(arg_bits) +
+                                           "-bit argument '" + arg + "'");
+                }
+                if (arg_bits == 32) {
+                    emit_record_word(3u + payload_offset, *bits);
+                    ++payload_offset;
+                } else {
+                    const std::string low = next_tmp("printf_arg_low");
+                    os << "  " << low << " = trunc i64 " << *bits << " to i32\n";
+                    const std::string shifted = next_tmp("printf_arg_shift");
+                    os << "  " << shifted << " = lshr i64 " << *bits << ", 32\n";
+                    const std::string high = next_tmp("printf_arg_high");
+                    os << "  " << high << " = trunc i64 " << shifted << " to i32\n";
+                    emit_record_word(3u + payload_offset, low);
+                    emit_record_word(4u + payload_offset, high);
+                    payload_offset += 2;
+                }
+            }
+            os << "  br label %" << done_label << "\n\n";
+            os << done_label << ":\n";
+            return store_ret_bits("0", 32);
         }
 
         if (callee == "__nv_frexp") {
@@ -4130,6 +5548,65 @@ class GenericLlvmEmitter {
             return store_ret_bits(out, 64);
         }
 
+        // CUDA interval arithmetic spells directed binary64 operations as
+        // libdevice calls. Apple GPUs have no public FP64 ALU, so evaluate in
+        // CuMetal's normalized FP32 pair and widen the low component by a
+        // conservative pair-precision error bound in the requested direction.
+        // The padding is intentionally larger than one pair ULP: preserving an
+        // enclosure matters more here than reproducing round-to-nearest bits.
+        const bool directed_double =
+            callee == "__nv_dadd_rd" || callee == "__nv_dadd_ru" ||
+            callee == "__nv_dmul_rd" || callee == "__nv_dmul_ru" ||
+            callee == "__nv_ddiv_rd" || callee == "__nv_ddiv_ru";
+        if (directed_double) {
+            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
+            auto a_bits = load_call_slot_value(os, arg_names[0], 64);
+            auto b_bits = load_call_slot_value(os, arg_names[1], 64);
+            if (!a_bits || !b_bits) return fail(instr, callee + " args missing");
+            const Fp64Pair a = fp64_pair_from_ieee_bits(os, *a_bits);
+            const Fp64Pair b = fp64_pair_from_ieee_bits(os, *b_bits);
+            Fp64Pair result;
+            if (callee.find("dadd") != std::string::npos) {
+                result = emit_fp64_pair_add(os, a, b);
+            } else if (callee.find("dmul") != std::string::npos) {
+                result = emit_fp64_pair_mul(os, a, b);
+            } else {
+                result = emit_fp64_pair_div(os, a, b);
+            }
+
+            declarations_.insert("declare float @llvm.fabs.f32(float)");
+            const std::string magnitude = next_tmp("directed_fp64_abs");
+            os << "  " << magnitude << " = call float @llvm.fabs.f32(float "
+               << result.hi << ")\n";
+            const std::string relative = next_tmp("directed_fp64_relative");
+            const std::string scale = emit_float_constant(
+                os, 5.684341886080802e-14f, "directed_fp64_scale");
+            os << "  " << relative << " = fmul float " << magnitude << ", "
+               << scale << "\n";
+            const std::string minimum = emit_float_constant(
+                os, 1.1754943508222875e-38f, "directed_fp64_minimum");
+            const std::string padding = next_tmp("directed_fp64_padding");
+            os << "  " << padding << " = fadd float " << relative << ", "
+               << minimum << "\n";
+            std::string signed_padding = padding;
+            if (callee.size() >= 3 &&
+                callee.compare(callee.size() - 3, 3, "_rd") == 0) {
+                signed_padding = next_tmp("directed_fp64_negative_padding");
+                os << "  " << signed_padding << " = fneg float " << padding << "\n";
+            }
+            const std::string zero = emit_float_constant(os, 0.0f,
+                                                         "directed_fp64_zero");
+            result = emit_fp64_pair_add(os, result, Fp64Pair{zero, signed_padding});
+            return store_ret_bits(fp64_ieee_bits_from_pair(os, result), 64);
+        }
+
+        if (callee == "__nv_longlong_as_double") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            auto bits = load_call_slot_value(os, arg_names[0], 64);
+            if (!bits) return fail(instr, callee + " arg missing");
+            return store_ret_bits(*bits, 64);
+        }
+
         if (callee == "__nv_float_as_int" || callee == "__nv_float_as_uint" ||
             callee == "__nv_int_as_float" || callee == "__nv_uint_as_float") {
             if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
@@ -4291,6 +5768,48 @@ class GenericLlvmEmitter {
             const std::string out = next_tmp("fast_fdividef");
             os << "  " << out << " = fdiv fast float " << *numerator << ", " << *denominator << "\n";
             return store_ret_f32(out);
+        }
+        if (callee == "__nv_sqrt") {
+            if (arg_names.empty()) return fail(instr, "__nv_sqrt expects 1 arg");
+            auto input_bits = load_call_slot_value(os, arg_names[0], 64);
+            if (!input_bits) return fail(instr, "__nv_sqrt arg missing");
+            if (fp64_mode_ != cumetal::ptx::Fp64Mode::kEmulate) {
+                declarations_.insert("declare double @llvm.sqrt.f64(double)");
+                const std::string input = next_tmp("sqrt_f64_input");
+                const std::string root = next_tmp("sqrt_f64");
+                const std::string bits = next_tmp("sqrt_f64_bits");
+                os << "  " << input << " = bitcast i64 " << *input_bits << " to double\n";
+                os << "  " << root << " = call double @llvm.sqrt.f64(double " << input << ")\n";
+                os << "  " << bits << " = bitcast double " << root << " to i64\n";
+                return store_ret_bits(bits, 64);
+            }
+            declarations_.insert("declare float @air.fast_sqrt.f32(float)");
+            const Fp64Pair input = fp64_pair_from_ieee_bits(os, *input_bits);
+            const std::string approximate = next_tmp("sqrt_pair_approximate");
+            const std::string root = next_tmp("sqrt_pair_root");
+            const std::string zero = next_tmp("sqrt_pair_zero");
+            os << "  " << approximate << " = fadd float " << input.hi << ", "
+               << input.lo << "\n";
+            os << "  " << root << " = call float @air.fast_sqrt.f32(float "
+               << approximate << ")\n";
+            os << "  " << zero << " = fsub float " << root << ", " << root << "\n";
+            const Fp64Pair initial{root, zero};
+            const Fp64Pair square = emit_fp64_pair_mul(os, initial, initial);
+            const Fp64Pair residual = emit_fp64_pair_add(os, input, square, true);
+            const Fp64Pair twice_root = emit_fp64_pair_add(os, initial, initial);
+            Fp64Pair correction = emit_fp64_pair_div(os, residual, twice_root);
+            const std::string is_zero = next_tmp("sqrt_pair_is_zero");
+            os << "  " << is_zero << " = fcmp oeq float " << root
+               << ", 0.000000e+00\n";
+            const std::string correction_hi = next_tmp("sqrt_pair_correction_hi");
+            const std::string correction_lo = next_tmp("sqrt_pair_correction_lo");
+            os << "  " << correction_hi << " = select i1 " << is_zero
+               << ", float 0.000000e+00, float " << correction.hi << "\n";
+            os << "  " << correction_lo << " = select i1 " << is_zero
+               << ", float 0.000000e+00, float " << correction.lo << "\n";
+            const Fp64Pair refined = emit_fp64_pair_add(
+                os, initial, Fp64Pair{correction_hi, correction_lo});
+            return store_ret_bits(fp64_ieee_bits_from_pair(os, refined), 64);
         }
         // ---- libdevice float surface ---------------------------------------
         //
@@ -5504,6 +7023,24 @@ class GenericLlvmEmitter {
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         const int bits = (ty.bits > 0) ? ty.bits : ensure_reg_slot(dst).bits;
         if (ty.kind == PtxTypeSpec::Kind::kFloat) {
+            if (bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                auto pair = decode_fp64_pair(os, instr.operands[1]);
+                if (!pair) return fail(instr, "fp64 abs emulation source unsupported");
+                const std::string hi_bits = next_tmp("fp64_abs_hi_bits");
+                const std::string negative = next_tmp("fp64_abs_negative");
+                const std::string abs_hi_bits = next_tmp("fp64_abs_hi_clear_sign");
+                const std::string abs_hi = next_tmp("fp64_abs_hi");
+                const std::string neg_lo = next_tmp("fp64_abs_neg_lo");
+                const std::string abs_lo = next_tmp("fp64_abs_lo");
+                os << "  " << hi_bits << " = bitcast float " << pair->hi << " to i32\n"
+                   << "  " << negative << " = icmp slt i32 " << hi_bits << ", 0\n"
+                   << "  " << abs_hi_bits << " = and i32 " << hi_bits << ", 2147483647\n"
+                   << "  " << abs_hi << " = bitcast i32 " << abs_hi_bits << " to float\n"
+                   << "  " << neg_lo << " = fneg float " << pair->lo << "\n"
+                   << "  " << abs_lo << " = select i1 " << negative << ", float "
+                   << neg_lo << ", float " << pair->lo << "\n";
+                return store_fp64_pair(os, dst, Fp64Pair{abs_hi, abs_lo});
+            }
             const std::string fty = (bits == 64) ? "double" : "float";
             const std::string intr = "llvm.fabs." + fty;
             declarations_.insert("declare " + fty + " @" + intr + "(" + fty + ")");
@@ -5631,6 +7168,15 @@ class GenericLlvmEmitter {
         const std::string p = emit_load_reg_bits(os, pred, 1);
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         if (ty.kind == PtxTypeSpec::Kind::kFloat) {
+            if (ty.bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                auto a = emit_integer_from_any(os, instr.operands[1], 64, false);
+                auto b = emit_integer_from_any(os, instr.operands[2], 64, false);
+                if (!a || !b) return fail(instr, "fp64 selp emulation sources unsupported");
+                const std::string sel = next_tmp("fp64_sel_bits");
+                os << "  " << sel << " = select i1 " << p << ", i64 " << *a
+                   << ", i64 " << *b << "\n";
+                return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, sel, 64);
+            }
             auto a = decode_float_operand(os, instr.operands[1], ty.bits);
             auto b = decode_float_operand(os, instr.operands[2], ty.bits);
             if (!a || !b) return fail(instr, "selp float sources unsupported");
@@ -5893,9 +7439,57 @@ class GenericLlvmEmitter {
         return true;
     }
 
+    bool emit_indexed_branch(std::ostringstream& os,
+                             const cumetal::ptx::EntryFunction::Instruction& instr,
+                             int current_exec_pos,
+                             bool* out_terminated) {
+        if (!instr.predicate.empty()) return fail(instr, "predicated brx.idx is unsupported");
+        if (instr.operands.size() != 2 || !is_register_name(instr.operands[0])) {
+            return fail(instr, "brx.idx expects an index register and target table");
+        }
+        const auto table = branch_tables_.find(instr.operands[1]);
+        if (table == branch_tables_.end()) {
+            return fail(instr, "unknown branch-target table '" + instr.operands[1] + "'");
+        }
+        const std::string index = emit_load_reg_bits(os, instr.operands[0], 32);
+        const int fallthrough_pos = next_exec_pos_by_exec_pos_.count(current_exec_pos)
+                                        ? next_exec_pos_by_exec_pos_.at(current_exec_pos)
+                                        : -1;
+        os << "  switch i32 " << index << ", label %"
+           << block_name_for_exec_pos(fallthrough_pos) << " [\n";
+        for (std::size_t i = 0; i < table->second.size(); ++i) {
+            const auto target = label_to_exec_pos_.find(table->second[i]);
+            if (target == label_to_exec_pos_.end()) {
+                return fail(instr, "unknown indexed branch target '" + table->second[i] + "'");
+            }
+            os << "    i32 " << i << ", label %"
+               << block_name_for_exec_pos(target->second) << "\n";
+        }
+        os << "  ]\n";
+        *out_terminated = true;
+        return true;
+    }
+
     bool fail(const cumetal::ptx::EntryFunction::Instruction& instr, const std::string& msg) {
         error_ = "generic llvm lowering: line " + std::to_string(instr.line) + " opcode '" + instr.opcode + "': " + msg;
         return false;
+    }
+
+    void emit_function_return(std::ostringstream& os) {
+        if (kernel_mode_ || return_bits_ <= 0 || return_param_name_.empty()) {
+            os << "  ret void\n";
+            return;
+        }
+        const auto slot = get_param_slot(return_param_name_, return_bits_, false);
+        if (!slot) {
+            os << "  ret " << llvm_int_type(return_bits_) << " 0\n";
+            return;
+        }
+        const std::string value = next_tmp("function_return");
+        os << "  " << value << " = load " << llvm_int_type(return_bits_) << ", "
+           << llvm_int_type(return_bits_) << "* " << *slot << ", align "
+           << std::max(1, return_bits_ / 8) << "\n";
+        os << "  ret " << llvm_int_type(return_bits_) << " " << value << "\n";
     }
 
     bool emit_instruction_block(const cumetal::ptx::EntryFunction::Instruction& instr,
@@ -5924,12 +7518,15 @@ class GenericLlvmEmitter {
 
         const std::string root = opcode_root(instr.opcode);
         if (root == "ret" || root == "exit") {
-            os << "  ret void\n";
+            emit_function_return(os);
             *out_terminated = true;
             return true;
         }
         if (root == "bra") {
             return emit_branch(os, instr, exec_pos, out_terminated);
+        }
+        if (root == "brx") {
+            return emit_indexed_branch(os, instr, exec_pos, out_terminated);
         }
         if (root == "mov") {
             return emit_mov_instruction(os, instr);
@@ -6015,7 +7612,7 @@ class GenericLlvmEmitter {
 
     bool emit_body() {
         if (exec_indices_.empty()) {
-            body_ << "  ret void\n";
+            emit_function_return(body_);
             return true;
         }
         // Allocas are gathered lazily while lowering; they will be inserted before the first branch.
@@ -6035,7 +7632,8 @@ class GenericLlvmEmitter {
             }
             blocks << block_name_for_exec_pos(pos) << ":\n" << bb.str();
         }
-        blocks << "cm_exit:\n  ret void\n";
+        blocks << "cm_exit:\n";
+        emit_function_return(blocks);
 
         body_.str("");
         body_.clear();
@@ -6053,7 +7651,17 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
                                                  const std::unordered_map<std::string, GlobalSymbolInfo>* global_symbols,
                                                  const std::unordered_map<std::string, ConstSymbolInfo>* const_symbols,
                                                  const std::unordered_map<std::string, SharedSymbolInfo>* shared_symbols,
-                                                 cumetal::ptx::Fp64Mode fp64_mode = cumetal::ptx::Fp64Mode::kNative) {
+                                                 const std::vector<cumetal::passes::PrintfLoweredCall>* printf_calls,
+                                                 const std::unordered_map<std::string,
+                                                     std::vector<cumetal::passes::PrintfLoweredCall>>*
+                                                     device_printf_calls,
+                                                 cumetal::ptx::Fp64Mode fp64_mode = cumetal::ptx::Fp64Mode::kNative,
+                                                 bool module_uses_device_heap = false,
+                                                 bool module_uses_device_printf = false,
+                                                 bool module_uses_device_launch_queue = false,
+                                                 bool module_uses_device_clock = false,
+                                                 bool module_uses_grid_barrier = false,
+                                                 bool module_uses_grid_y_offset = false) {
     GenericLlvmBodyResult out;
 
     cumetal::ptx::ParseOptions parse_opts;
@@ -6076,11 +7684,213 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
         return out;
     }
 
+    const auto parameter_bits = [](const cumetal::ptx::Parameter& parameter) {
+        const PtxTypeSpec type = parse_primary_type_from_opcode(parameter.type);
+        return type.bits > 0 ? type.bits : 0;
+    };
+    const auto integer_type = [](int bits) {
+        return "i" + std::to_string(bits);
+    };
+
+    // Establish the scalar indirect-call target set. Helper bodies are emitted
+    // after the kernel pass records each call argument's actual address space.
+    std::vector<cumetal::ptx::EntryFunction> lowered_functions;
+    bool entry_needs_device_functions = false;
+    for (const auto& instruction : entry->instructions) {
+        if (opcode_root(instruction.opcode) != "call") continue;
+        for (const std::string& operand : instruction.operands) {
+            if (is_register_name(operand)) entry_needs_device_functions = true;
+            for (const auto& function : parsed.module.functions) {
+                if (operand == function.name) entry_needs_device_functions = true;
+            }
+        }
+    }
+    for (const auto& function : parsed.module.functions) {
+        if (!entry_needs_device_functions) break;
+        bool scalar_abi = function.return_params.size() <= 1;
+        for (const auto& parameter : function.params) {
+            scalar_abi = scalar_abi && parameter_bits(parameter) >= 16;
+        }
+        for (const auto& parameter : function.return_params) {
+            scalar_abi = scalar_abi && parameter_bits(parameter) > 0;
+        }
+        if (scalar_abi) lowered_functions.push_back(function);
+    }
+    std::vector<std::string> device_kernel_names;
+    device_kernel_names.reserve(parsed.module.entries.size());
+    for (const auto& kernel : parsed.module.entries) {
+        device_kernel_names.push_back(kernel.name);
+    }
+    // RDC PTX may reference a child kernel that is defined in another fatbin
+    // module and appears here only as an `.extern .entry` declaration. It still
+    // needs the same stable token as a locally defined launch target.
+    const std::string ptx_text(ptx_source);
+    const auto collect_declared_symbols = [&](const std::regex& declaration) {
+        for (std::sregex_iterator it(ptx_text.begin(), ptx_text.end(), declaration), end;
+             it != end; ++it) {
+            const std::string name = (*it)[1].str();
+            if (std::find(device_kernel_names.begin(), device_kernel_names.end(), name) ==
+                device_kernel_names.end()) {
+                device_kernel_names.push_back(name);
+            }
+        }
+    };
+    collect_declared_symbols(std::regex(
+        R"(\.entry\s+([A-Za-z_.$][A-Za-z0-9_.$]*))"));
+    // Clang's RDC PTX declares a kernel defined in another translation unit as
+    // `.extern .func child(...)`, even though its address is passed to
+    // cudaLaunchDevice as a kernel token. Include those declarations as stable
+    // callable identities too. Ordinary extern device functions are harmless:
+    // the token is only materialized when PTX takes the symbol's address.
+    collect_declared_symbols(std::regex(
+        R"(\.extern\s+\.func(?:\s+\([^)]*\))?\s+([A-Za-z_.$][A-Za-z0-9_.$]*))"));
+
     const auto local_depots = parse_ptx_local_depots(ptx_source, entry_name);
     GenericLlvmEmitter emitter(*entry, params, arg_decls, global_symbols, const_symbols,
-                               shared_symbols,
-                               &local_depots, fp64_mode);
-    return emitter.run();
+                               shared_symbols, &local_depots, printf_calls, fp64_mode,
+                               &lowered_functions, true, {}, 0,
+                               module_uses_device_heap, module_uses_device_printf,
+                               module_uses_device_launch_queue, module_uses_device_clock,
+                               module_uses_grid_barrier, module_uses_grid_y_offset,
+                               &device_kernel_names);
+    out = emitter.run();
+    if (out.ok) {
+        std::ostringstream helper_ir;
+        std::unordered_set<std::string> helper_declarations;
+        for (const auto& function : lowered_functions) {
+            std::vector<ParamInfo> function_params;
+            std::vector<std::string> function_arg_decls;
+            for (const auto& parameter : function.params) {
+                const int bits = parameter_bits(parameter);
+                const std::string type = integer_type(bits);
+                const std::string name =
+                    sanitize_llvm_identifier(parameter.name, "arg");
+                function_params.push_back({.ptx_type = parameter.type,
+                                           .llvm_type = type,
+                                           .name = name,
+                                           .raw_name = parameter.name});
+                function_arg_decls.push_back(type + " %" + name);
+            }
+            if (module_uses_device_heap) {
+                function_params.push_back({.ptx_type = ".u32",
+                                           .llvm_type = "i32 addrspace(1)*",
+                                           .name = "__cumetal_device_heap",
+                                           .raw_name = "__cumetal_device_heap"});
+                function_arg_decls.push_back(
+                    "i32 addrspace(1)* %__cumetal_device_heap");
+            }
+            if (module_uses_device_printf) {
+                function_params.push_back({.ptx_type = ".u32",
+                                           .llvm_type = "i32 addrspace(1)*",
+                                           .name = "__cumetal_printf_buffer",
+                                           .raw_name = "__cumetal_printf_buffer"});
+                function_arg_decls.push_back(
+                    "i32 addrspace(1)* %__cumetal_printf_buffer");
+                function_params.push_back({.ptx_type = ".u32",
+                                           .llvm_type = "i32 addrspace(2)*",
+                                           .name = "__cumetal_printf_capacity",
+                                           .raw_name = "__cumetal_printf_capacity"});
+                function_arg_decls.push_back(
+                    "i32 addrspace(2)* %__cumetal_printf_capacity");
+            }
+            if (module_uses_device_launch_queue) {
+                function_params.push_back({.ptx_type = ".u32",
+                                           .llvm_type = "i32 addrspace(1)*",
+                                           .name = "__cumetal_device_launch_queue",
+                                           .raw_name = "__cumetal_device_launch_queue"});
+                function_arg_decls.push_back(
+                    "i32 addrspace(1)* %__cumetal_device_launch_queue");
+                function_params.push_back({.ptx_type = ".u32",
+                                           .llvm_type = "i32 addrspace(2)*",
+                                           .name = "__cumetal_device_launch_queue_capacity",
+                                           .raw_name = "__cumetal_device_launch_queue_capacity"});
+                function_arg_decls.push_back(
+                    "i32 addrspace(2)* %__cumetal_device_launch_queue_capacity");
+            }
+            if (module_uses_device_clock) {
+                function_params.push_back({.ptx_type = ".u32",
+                                           .llvm_type = "i32 addrspace(1)*",
+                                           .name = "__cumetal_device_clock",
+                                           .raw_name = "__cumetal_device_clock"});
+                function_arg_decls.push_back(
+                    "i32 addrspace(1)* %__cumetal_device_clock");
+            }
+            if (module_uses_grid_barrier) {
+                function_params.push_back({.ptx_type = ".u32",
+                                           .llvm_type = "i32 addrspace(1)*",
+                                           .name = "__cumetal_grid_barrier",
+                                           .raw_name = "__cumetal_grid_barrier"});
+                function_arg_decls.push_back(
+                    "i32 addrspace(1)* %__cumetal_grid_barrier");
+            }
+            if (module_uses_grid_y_offset) {
+                function_params.push_back({.ptx_type = ".u32",
+                                           .llvm_type = "i32 addrspace(2)*",
+                                           .name = "__cumetal_grid_y_offset",
+                                           .raw_name = "__cumetal_grid_y_offset"});
+                function_arg_decls.push_back(
+                    "i32 addrspace(2)* %__cumetal_grid_y_offset");
+            }
+            const int return_bits = function.return_params.empty()
+                                        ? 0
+                                        : parameter_bits(function.return_params.front());
+            const std::string return_name = function.return_params.empty()
+                                                ? std::string{}
+                                                : function.return_params.front().name;
+            const auto function_local_depots =
+                parse_ptx_local_depots(ptx_source, function.name);
+            const auto spaces_it =
+                out.device_function_param_address_spaces.find(function.name);
+            const std::vector<int>* spaces =
+                spaces_it == out.device_function_param_address_spaces.end()
+                    ? nullptr
+                    : &spaces_it->second;
+            const std::vector<cumetal::passes::PrintfLoweredCall>* function_printf_calls =
+                nullptr;
+            if (device_printf_calls != nullptr) {
+                const auto calls_it = device_printf_calls->find(function.name);
+                if (calls_it != device_printf_calls->end()) {
+                    function_printf_calls = &calls_it->second;
+                }
+            }
+            GenericLlvmEmitter function_emitter(
+                function, &function_params, &function_arg_decls, global_symbols,
+                const_symbols, shared_symbols, &function_local_depots,
+                function_printf_calls, fp64_mode,
+                &lowered_functions, false, return_name, return_bits,
+                module_uses_device_heap, module_uses_device_printf,
+                module_uses_device_launch_queue, module_uses_device_clock,
+                module_uses_grid_barrier, module_uses_grid_y_offset,
+                &device_kernel_names, spaces);
+            GenericLlvmBodyResult function_body = function_emitter.run();
+            if (!function_body.ok) {
+                out.ok = false;
+                out.error = "device function '" + function.name +
+                            "' lowering failed: " + function_body.error;
+                return out;
+            }
+            helper_ir << "; PTX device function " << function.name << "\n"
+                      << "define internal "
+                      << (return_bits > 0 ? integer_type(return_bits) : "void")
+                      << " @" << function.name << "(";
+            for (std::size_t i = 0; i < function_arg_decls.size(); ++i) {
+                if (i > 0) helper_ir << ", ";
+                helper_ir << function_arg_decls[i];
+            }
+            helper_ir << ") {\nentry:\n" << function_body.body_ir << "}\n\n";
+            helper_declarations.insert(function_body.declarations.begin(),
+                                       function_body.declarations.end());
+        }
+        out.helper_ir = helper_ir.str();
+        std::unordered_set<std::string> all_declarations(out.declarations.begin(),
+                                                         out.declarations.end());
+        all_declarations.insert(helper_declarations.begin(), helper_declarations.end());
+        out.declarations.assign(all_declarations.begin(), all_declarations.end());
+        out.uses_device_heap = out.uses_device_heap || module_uses_device_heap;
+        out.uses_device_launch_queue = module_uses_device_launch_queue;
+        out.uses_device_clock = module_uses_device_clock;
+    }
+    return out;
 }
 
 
@@ -6272,6 +8082,63 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         return result;
     }
 
+    // Device printf may live in a helper rather than directly in the selected
+    // kernel (Clang's CUDA frontend commonly emits exactly that shape). Decode
+    // every device function up front so the kernel ABI can carry the ring
+    // buffer through ordinary helper calls and the runtime receives one module-
+    // wide format table with stable, non-colliding ids.
+    std::unordered_map<std::string, std::vector<cumetal::passes::PrintfLoweredCall>>
+        device_printf_calls;
+    std::vector<cumetal::passes::PrintfFormatEntry> all_printf_formats =
+        pipeline.printf_formats;
+    std::vector<std::string> device_printf_warnings;
+    {
+        cumetal::ptx::ParseOptions parse_options;
+        parse_options.strict = false;
+        const auto parsed_module = cumetal::ptx::parse_ptx(ptx, parse_options);
+        if (!parsed_module.ok) {
+            result.error = "generic parse failed while discovering device printf: " +
+                           parsed_module.error;
+            return result;
+        }
+        for (const auto& function : parsed_module.module.functions) {
+            cumetal::passes::PrintfLowerOptions printf_options;
+            printf_options.strict = options.strict;
+            printf_options.ptx_source = ptx;
+            auto lowered = cumetal::passes::lower_printf_calls(function, printf_options);
+            if (!lowered.ok) {
+                result.error = "device function '" + function.name +
+                               "' printf lowering failed: " + lowered.error;
+                return result;
+            }
+            device_printf_warnings.insert(device_printf_warnings.end(),
+                                          lowered.warnings.begin(),
+                                          lowered.warnings.end());
+            if (lowered.calls.empty()) continue;
+
+            std::unordered_map<std::uint32_t, std::uint32_t> remapped_ids;
+            for (auto format : lowered.formats) {
+                const std::uint32_t new_id =
+                    static_cast<std::uint32_t>(all_printf_formats.size());
+                remapped_ids.emplace(format.id, new_id);
+                format.id = new_id;
+                all_printf_formats.push_back(std::move(format));
+            }
+            for (auto& call : lowered.calls) {
+                const auto id_it = remapped_ids.find(call.format_id);
+                if (id_it == remapped_ids.end()) {
+                    result.error = "device function '" + function.name +
+                                   "' printf call has no format metadata";
+                    return result;
+                }
+                call.format_id = id_it->second;
+            }
+            device_printf_calls.emplace(function.name, std::move(lowered.calls));
+        }
+    }
+    const bool module_uses_device_printf =
+        !pipeline.printf_calls.empty() || !device_printf_calls.empty();
+
     const auto fields = to_field_map(pipeline.metadata);
     int arg_count = 0;
     if (const auto it = fields.find("kernel.arg_count"); it != fields.end()) {
@@ -6372,7 +8239,11 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
 
     std::unordered_map<std::string, ConstSymbolInfo> const_symbols;
     std::vector<std::string> const_global_defs;
-    for (const ParsedConstB8Array& array : parse_ptx_const_b8_arrays(ptx)) {
+    // Clang emits device string literals as initialized `.global .b8` arrays,
+    // even though kernels only read them. Embed all initialized byte arrays in
+    // AIR constant space; writable external `.global` declarations still use
+    // the registration-backed global-buffer path below.
+    for (const ParsedConstB8Array& array : parse_ptx_initialized_b8_arrays(ptx)) {
         if (array.symbol.empty() || array.bytes.empty()) {
             continue;
         }
@@ -6395,6 +8266,39 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
                 def << ", ";
             }
             def << "i8 " << static_cast<unsigned int>(array.bytes[i]);
+        }
+        def << "], align " << std::max(1, array.align);
+        const_global_defs.push_back(def.str());
+    }
+    // Clang represents C++ vtables as initialized `.global .u64` arrays whose
+    // symbolic elements are device-function addresses. AIR has no public
+    // function-pointer ABI, so embed stable tokens in read-only storage. The
+    // later indirect-call lowering uses the same token mapping for direct
+    // dispatch; ordinary numeric u64 initializers retain their exact bits.
+    for (const ParsedConstU64Array& array : parse_ptx_initialized_u64_arrays(ptx)) {
+        if (array.symbol.empty() || array.values.empty() ||
+            const_symbols.count(array.symbol) != 0) {
+            continue;
+        }
+        const std::string llvm_name = quote_llvm_global_name(array.symbol);
+        const std::size_t byte_count = array.values.size() * sizeof(std::uint64_t);
+        const_symbols.emplace(array.symbol,
+                              ConstSymbolInfo{
+                                  .llvm_global_name = llvm_name,
+                                  .llvm_param_name = {},
+                                  .byte_offset = 0,
+                                  .byte_count = byte_count,
+                              });
+        std::ostringstream def;
+        def << llvm_name << " = internal addrspace(2) constant ["
+            << byte_count << " x i8] [";
+        bool first_byte = true;
+        for (const std::uint64_t value : array.values) {
+            for (unsigned shift = 0; shift < 64; shift += 8) {
+                if (!first_byte) def << ", ";
+                first_byte = false;
+                def << "i8 " << ((value >> shift) & 0xffu);
+            }
         }
         def << "], align " << std::max(1, array.align);
         const_global_defs.push_back(def.str());
@@ -6437,6 +8341,133 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
 
     const auto shared_symbols = parse_ptx_shared_symbols(ptx, pipeline.entry_name);
 
+    const std::string selected_entry_body =
+        extract_entry_body(ptx, pipeline.entry_name);
+    const bool entry_directly_uses_device_heap =
+        selected_entry_body.find(", malloc,") != std::string::npos ||
+        selected_entry_body.find(" malloc,") != std::string::npos ||
+        selected_entry_body.find(" free,") != std::string::npos ||
+        selected_entry_body.find("_Znwm") != std::string::npos ||
+        selected_entry_body.find("_Znam") != std::string::npos ||
+        selected_entry_body.find("_ZdlPv") != std::string::npos ||
+        selected_entry_body.find("_ZdaPv") != std::string::npos ||
+        selected_entry_body.find("_ZdlPvm") != std::string::npos ||
+        selected_entry_body.find("_ZdaPvm") != std::string::npos;
+    const bool module_uses_device_heap =
+        ptx.find(", malloc,") != std::string::npos ||
+        ptx.find(" free,") != std::string::npos ||
+        ptx.find("_Znwm") != std::string::npos || ptx.find("_Znam") != std::string::npos ||
+        ptx.find("_ZdlPv") != std::string::npos || ptx.find("_ZdaPv") != std::string::npos ||
+        ptx.find("_ZdlPvm") != std::string::npos || ptx.find("_ZdaPvm") != std::string::npos;
+    const bool entry_has_indirect_call =
+        selected_entry_body.find("call %") != std::string::npos ||
+        selected_entry_body.find("), %") != std::string::npos;
+    const bool entry_uses_device_heap =
+        entry_directly_uses_device_heap ||
+        (module_uses_device_heap && entry_has_indirect_call);
+    if (entry_uses_device_heap) {
+        if (params.size() >= 31) {
+            result.error = "device heap hidden argument exceeds Metal's kernel buffer binding limit";
+            return result;
+        }
+        arg_decls.push_back("i32 addrspace(1)* %__cumetal_device_heap");
+        params.push_back({.ptx_type = ".u32",
+                          .llvm_type = "i32 addrspace(1)*",
+                          .name = "__cumetal_device_heap",
+                          .raw_name = "__cumetal_device_heap"});
+    }
+
+    const bool module_uses_device_launch_queue =
+        ptx.find("cudaGetParameterBuffer") != std::string::npos ||
+        ptx.find("cudaLaunchDevice") != std::string::npos ||
+        ptx.find("cudaMemcpyAsync") != std::string::npos;
+    const bool entry_directly_uses_device_launch_queue =
+        selected_entry_body.find("cudaGetParameterBuffer") != std::string::npos ||
+        selected_entry_body.find("cudaLaunchDevice") != std::string::npos ||
+        selected_entry_body.find("cudaMemcpyAsync") != std::string::npos;
+    const bool entry_uses_device_launch_queue =
+        entry_directly_uses_device_launch_queue ||
+        (module_uses_device_launch_queue && entry_has_indirect_call);
+    const bool module_uses_device_clock =
+        ptx.find("%clock") != std::string::npos ||
+        ptx.find("%globaltimer") != std::string::npos;
+    const bool module_uses_grid_barrier =
+        ptx.find("__cumetal_grid_sync") != std::string::npos;
+    const bool module_uses_grid_y_offset =
+        ptx.find("__cumetal_wmma_f32_mma_8x8") != std::string::npos;
+
+    if (module_uses_device_printf) {
+        if (params.size() > 28) {
+            result.error = "device printf hidden arguments exceed Metal's kernel buffer binding limit";
+            return result;
+        }
+        arg_decls.push_back("i32 addrspace(1)* %__cumetal_printf_buffer");
+        params.push_back({.ptx_type = ".u32",
+                          .llvm_type = "i32 addrspace(1)*",
+                          .name = "__cumetal_printf_buffer",
+                          .raw_name = "__cumetal_printf_buffer"});
+        arg_decls.push_back("i32 %__cumetal_printf_capacity");
+        params.push_back({.ptx_type = ".u32",
+                          .llvm_type = "i32",
+                          .name = "__cumetal_printf_capacity",
+                          .raw_name = "__cumetal_printf_capacity"});
+    }
+
+    if (entry_uses_device_launch_queue) {
+        if (params.size() > 28) {
+            result.error =
+                "device launch queue hidden arguments exceed Metal's kernel buffer binding limit";
+            return result;
+        }
+        arg_decls.push_back("i32 addrspace(1)* %__cumetal_device_launch_queue");
+        params.push_back({.ptx_type = ".u32",
+                          .llvm_type = "i32 addrspace(1)*",
+                          .name = "__cumetal_device_launch_queue",
+                          .raw_name = "__cumetal_device_launch_queue"});
+        arg_decls.push_back("i32 %__cumetal_device_launch_queue_capacity");
+        params.push_back({.ptx_type = ".u32",
+                          .llvm_type = "i32",
+                          .name = "__cumetal_device_launch_queue_capacity",
+                          .raw_name = "__cumetal_device_launch_queue_capacity"});
+    }
+
+    if (module_uses_device_clock) {
+        if (params.size() > kDeviceClockBindingIndex) {
+            result.error =
+                "device clock hidden argument conflicts with reserved Metal buffer index 28";
+            return result;
+        }
+        arg_decls.push_back("i32 addrspace(1)* %__cumetal_device_clock");
+        params.push_back({.ptx_type = ".u32",
+                          .llvm_type = "i32 addrspace(1)*",
+                          .name = "__cumetal_device_clock",
+                          .raw_name = "__cumetal_device_clock"});
+    }
+    if (module_uses_grid_barrier) {
+        if (params.size() > kGridBarrierBindingIndex) {
+            result.error =
+                "grid barrier hidden argument conflicts with reserved Metal buffer index 27";
+            return result;
+        }
+        arg_decls.push_back("i32 addrspace(1)* %__cumetal_grid_barrier");
+        params.push_back({.ptx_type = ".u32",
+                          .llvm_type = "i32 addrspace(1)*",
+                          .name = "__cumetal_grid_barrier",
+                          .raw_name = "__cumetal_grid_barrier"});
+    }
+    if (module_uses_grid_y_offset) {
+        if (params.size() > kGridYOffsetBindingIndex) {
+            result.error =
+                "grid Y offset hidden argument conflicts with reserved Metal buffer index 26";
+            return result;
+        }
+        arg_decls.push_back("i32 %__cumetal_grid_y_offset");
+        params.push_back({.ptx_type = ".u32",
+                          .llvm_type = "i32",
+                          .name = "__cumetal_grid_y_offset",
+                          .raw_name = "__cumetal_grid_y_offset"});
+    }
+
     // Always attempt to lower the kernel's real body first. Nothing may pre-empt this on the
     // strength of the entry name: lowering what the PTX actually says is the only behavior that
     // cannot be silently wrong.
@@ -6452,7 +8483,15 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
                                                   &global_symbols,
                                                   &const_symbols,
                                                   &shared_symbols,
-                                                  options.fp64_mode);
+                                                  &pipeline.printf_calls,
+                                                  &device_printf_calls,
+                                                  options.fp64_mode,
+                                                  entry_uses_device_heap,
+                                                  module_uses_device_printf,
+                                                  entry_uses_device_launch_queue,
+                                                  module_uses_device_clock,
+                                                  module_uses_grid_barrier,
+                                                  module_uses_grid_y_offset);
         if (generic_body.ok) {
             params = std::move(generic_params);
             arg_decls = std::move(generic_arg_decls);
@@ -6492,8 +8531,13 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         return result;
     }
     ir << "}\n\n";
+    if (use_generic_body && !generic_body.helper_ir.empty()) {
+        ir << generic_body.helper_ir;
+    }
 
     result.uses_atomic_lock_bank = generic_body.uses_atomic_lock_bank;
+    result.uses_device_heap = generic_body.uses_device_heap;
+    result.uses_device_clock = generic_body.uses_device_clock;
 
     if (use_generic_body) {
         for (const std::string& decl : generic_body.declarations) {
@@ -6576,7 +8620,13 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
 
         if (is_device_buffer_pointer(param.llvm_type)) {
             const std::size_t location_index =
-                param.name == "__cumetal_atomic_lock_bank" ? 29u : i;
+                param.name == "__cumetal_atomic_lock_bank"
+                    ? kAtomicLockBankBindingIndex
+                    : (param.name == "__cumetal_device_clock"
+                           ? kDeviceClockBindingIndex
+                           : (param.name == "__cumetal_grid_barrier"
+                                  ? kGridBarrierBindingIndex
+                                  : i));
             ir << "!" << arg_meta_ids[i]
                << " = !{i32 " << i << ", !\"air.buffer\", !\"air.location_index\", i32 "
                << location_index
@@ -6600,7 +8650,11 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
         if (is_constant_buffer_pointer(param.llvm_type)) {
             const int pointee_size = byte_size_for_llvm_type(param.llvm_type);
             const std::size_t location_index =
-                param.name == "__cumetal_constant_buffer" ? 30u : i;
+                param.name == "__cumetal_constant_buffer"
+                    ? 30u
+                    : (param.name == "__cumetal_grid_y_offset"
+                           ? kGridYOffsetBindingIndex
+                           : i);
             ir << "!" << arg_meta_ids[i] << " = !{i32 " << i
                << ", !\"air.buffer\", !\"air.buffer_size\", i32 " << arg_size
                << ", !\"air.location_index\", i32 " << location_index
@@ -6634,7 +8688,14 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     result.ok = true;
     result.entry_name = pipeline.entry_name;
     result.llvm_ir = ir.str();
+    for (const auto& format : all_printf_formats) {
+        result.printf_formats.push_back(format.token);
+    }
+    result.uses_device_launch_queue =
+        use_generic_body && generic_body.uses_device_launch_queue;
     result.warnings = pipeline.warnings;
+    result.warnings.insert(result.warnings.end(), device_printf_warnings.begin(),
+                           device_printf_warnings.end());
     if (use_generic_body) {
         result.warnings.insert(result.warnings.end(), generic_body.warnings.begin(), generic_body.warnings.end());
     } else if (!generic_body.error.empty()) {

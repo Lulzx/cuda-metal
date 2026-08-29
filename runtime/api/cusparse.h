@@ -41,6 +41,7 @@ typedef struct cusparseMatDescr* cusparseMatDescr_t;
 typedef struct cusparseSpMatDescr* cusparseSpMatDescr_t;
 typedef struct cusparseDnVecDescr* cusparseDnVecDescr_t;
 typedef struct cusparseDnMatDescr* cusparseDnMatDescr_t;
+typedef struct csrilu02Info* csrilu02Info_t;
 
 #ifndef CUMETAL_CUDA_STREAM_T_DEFINED
 #define CUMETAL_CUDA_STREAM_T_DEFINED 1
@@ -85,6 +86,16 @@ typedef enum cusparseFillMode_t {
     CUSPARSE_FILL_MODE_LOWER = 0,
     CUSPARSE_FILL_MODE_UPPER = 1,
 } cusparseFillMode_t;
+
+typedef enum cusparseSpMatAttribute_t {
+    CUSPARSE_SPMAT_FILL_MODE = 0,
+    CUSPARSE_SPMAT_DIAG_TYPE = 1,
+} cusparseSpMatAttribute_t;
+
+typedef enum cusparseSolvePolicy_t {
+    CUSPARSE_SOLVE_POLICY_NO_LEVEL = 0,
+    CUSPARSE_SOLVE_POLICY_USE_LEVEL = 1,
+} cusparseSolvePolicy_t;
 
 typedef enum cusparseOrder_t {
     CUSPARSE_ORDER_COL = 1,
@@ -151,6 +162,27 @@ cusparseStatus_t cusparseCreateCoo(cusparseSpMatDescr_t* spMatDescr,
                                     cusparseIndexBase_t idxBase,
                                     cudaDataType valueType);
 cusparseStatus_t cusparseDestroySpMat(cusparseSpMatDescr_t spMatDescr);
+cusparseStatus_t cusparseSpMatSetAttribute(cusparseSpMatDescr_t spMatDescr,
+                                           cusparseSpMatAttribute_t attribute,
+                                           const void* data, size_t dataSize);
+
+cusparseStatus_t cusparseCreateCsrilu02Info(csrilu02Info_t* info);
+cusparseStatus_t cusparseDestroyCsrilu02Info(csrilu02Info_t info);
+cusparseStatus_t cusparseScsrilu02_bufferSize(cusparseHandle_t handle, int m, int nnz,
+                                              const cusparseMatDescr_t descrA,
+                                              float* csrValA, const int* csrRowPtrA,
+                                              const int* csrColIndA, csrilu02Info_t info,
+                                              int* bufferSize);
+cusparseStatus_t cusparseScsrilu02_analysis(cusparseHandle_t handle, int m, int nnz,
+                                            const cusparseMatDescr_t descrA,
+                                            const float* csrValA, const int* csrRowPtrA,
+                                            const int* csrColIndA, csrilu02Info_t info,
+                                            cusparseSolvePolicy_t policy, void* buffer);
+cusparseStatus_t cusparseScsrilu02(cusparseHandle_t handle, int m, int nnz,
+                                   const cusparseMatDescr_t descrA,
+                                   float* csrValA, const int* csrRowPtrA,
+                                   const int* csrColIndA, csrilu02Info_t info,
+                                   cusparseSolvePolicy_t policy, void* buffer);
 
 cusparseStatus_t cusparseCreateDnVec(cusparseDnVecDescr_t* dnVecDescr,
                                       int64_t size, void* values, cudaDataType valueType);

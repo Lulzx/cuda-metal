@@ -32,8 +32,6 @@ EOF
 }
 
 run_case_expect_fail "unsupported_foo" "foo.bar %r1, %r2;"
-run_case_expect_fail "unsupported_vprintf" \
-    "call.uni (%r0), vprintf, (\"tid=%u\", %r1);"
 
 # Hopper cluster ops (spec §5.1.1: per-instruction compile-time error)
 run_case_expect_fail "unsupported_cluster_sync"   "cluster.sync.aligned;"

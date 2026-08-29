@@ -109,9 +109,9 @@ the remaining semantic boundaries:
   on Apple Silicon.
 - SASS-only binaries cannot be translated. The opt-in binary shim supports only
   containers from which documented PTX can be extracted (see §12.1).
-- Dynamic parallelism (kernels launching kernels) remains deferred. A compatible
-  implementation requires a CPU trampoline and explicit scheduling semantics; it
-  is not a header-only alias.
+- Dynamic parallelism uses a bounded device launch-record queue drained by the
+  host runtime. This is an explicit CPU scheduling trampoline and does not claim
+  hardware-recursive launch or unrestricted nesting parity.
 - General device-side texture/surface sampling remains deferred. Host lifecycle and
   CUDA-array memcpy APIs exist, but complete CUDA addressing/filtering semantics need
   an explicit Metal texture binding ABI (see §8).
@@ -701,7 +701,7 @@ populated from Metal device queries:
 | `canMapHostMemory` | `true` for tracked `cudaHostAlloc` / registration-backed buffers |
 | `pageableMemoryAccess` | `false`; arbitrary `malloc` pointers are not tracked `MTLBuffer` arguments |
 | `pageableMemoryAccessUsesHostPageTables` | `false` for the same binding reason |
-| `persistingL2CacheMaxSize` / `accessPolicyMaxWindowSize` | `0`; public Metal exposes no CUDA persisting-L2 policy |
+| `persistingL2CacheMaxSize` / `accessPolicyMaxWindowSize` | Conservative quarter-L2 hint budget; policy state round-trips, but public Metal provides no cache-residency guarantee |
 
 `cudaDevAttrMemoryPoolsSupported` reports true for CuMetal's conservative
 stream-ordered shared-memory pool subset: allocation returns a tracked buffer,
@@ -806,8 +806,8 @@ partially supported after the original v1 phases:
 
 | Feature | Gap | Current policy |
 |---------|-----|-----------|
-| Dynamic parallelism | Metal kernels cannot launch kernels | Compile-time error |
-| Cooperative groups (grid-wide) | No cross-threadgroup barrier in Metal | Partial: threadgroup-scoped CG works |
+| Dynamic parallelism | Metal kernels cannot directly launch kernels | Bounded device launch queue plus host scheduling trampoline |
+| Cooperative groups (grid-wide) | Metal has no general cross-threadgroup barrier | Sense-reversing barrier for resident grids capped at one block per reported GPU core |
 | `__ldg()` (texture cache load) | No texture cache hint in AIR | Lowered to plain load; no perf impact on UMA |
 | CUDA graphs | CuMetal replays tested dependency-ordered compute/copy/host nodes and graph-memory allocation/free lifetimes | Partial; allocator reuse, cross-stream capture, and advanced node types remain |
 | Peer-to-peer memory | No multi-GPU on Apple Silicon | Compile-time error |
@@ -816,6 +816,7 @@ partially supported after the original v1 phases:
 | Half-precision atomics | Not universally supported in AIR | Software emulation via CAS loop |
 | `cudaProfilerStart/Stop` | Metal GPU capture API exists but differs | Stub (no-op) |
 | FP64 arithmetic | See §8.1 | Conditional support with fallback |
+| `%clock` / `%clock64` / `%globaltimer` | Metal exposes no CUDA-compatible cycle counter | Monotonic atomic counter; progress semantics only, not cycle-accurate profiling |
 | `__constant__` memory > 64 KB | Metal constant buffer limit | Compile-time error |
 | CUDA printf (> 256 byte format) | Buffer-based emulation limit | Truncation |
 

@@ -5,63 +5,69 @@
 
 namespace thrust {
 
+#if defined(__CUDACC__)
+#define CUMETAL_THRUST_ZIP_HD __host__ __device__
+#else
+#define CUMETAL_THRUST_ZIP_HD
+#endif
+
 template <typename... Iterators>
 class zip_iterator {
     std::tuple<Iterators...> iterators_;
 
     template <size_t... Is>
-    auto deref(std::index_sequence<Is...>) const {
-        return std::make_tuple(*std::get<Is>(iterators_)...);
+    CUMETAL_THRUST_ZIP_HD auto deref(std::index_sequence<Is...>) const {
+        return std::tuple<decltype(*std::get<Is>(iterators_))...>(
+            *std::get<Is>(iterators_)...);
     }
     template <size_t... Is>
-    void increment(std::index_sequence<Is...>) {
+    CUMETAL_THRUST_ZIP_HD void increment(std::index_sequence<Is...>) {
         ((++std::get<Is>(iterators_)), ...);
     }
     template <size_t... Is>
-    void advance_n(ptrdiff_t n, std::index_sequence<Is...>) {
+    CUMETAL_THRUST_ZIP_HD void advance_n(ptrdiff_t n, std::index_sequence<Is...>) {
         ((std::get<Is>(iterators_) += n), ...);
     }
 
 public:
-    typedef decltype(std::declval<zip_iterator>().deref(
-        std::index_sequence_for<Iterators...>{})) value_type;
-    typedef value_type reference;
+    typedef std::tuple<typename std::iterator_traits<Iterators>::value_type...> value_type;
+    typedef std::tuple<decltype(*std::declval<Iterators>())...> reference;
     typedef void pointer;
     typedef ptrdiff_t difference_type;
     typedef std::random_access_iterator_tag iterator_category;
 
-    zip_iterator() = default;
-    explicit zip_iterator(Iterators... its) : iterators_(its...) {}
-    explicit zip_iterator(std::tuple<Iterators...> t) : iterators_(t) {}
+    CUMETAL_THRUST_ZIP_HD zip_iterator() = default;
+    CUMETAL_THRUST_ZIP_HD explicit zip_iterator(Iterators... its) : iterators_(its...) {}
+    CUMETAL_THRUST_ZIP_HD explicit zip_iterator(std::tuple<Iterators...> t) : iterators_(t) {}
 
-    reference operator*() const {
+    CUMETAL_THRUST_ZIP_HD reference operator*() const {
         return deref(std::index_sequence_for<Iterators...>{});
     }
-    zip_iterator& operator++() {
+    CUMETAL_THRUST_ZIP_HD zip_iterator& operator++() {
         increment(std::index_sequence_for<Iterators...>{});
         return *this;
     }
-    zip_iterator operator++(int) { auto t = *this; ++(*this); return t; }
-    zip_iterator& operator+=(ptrdiff_t n) {
+    CUMETAL_THRUST_ZIP_HD zip_iterator operator++(int) { auto t = *this; ++(*this); return t; }
+    CUMETAL_THRUST_ZIP_HD zip_iterator& operator+=(ptrdiff_t n) {
         advance_n(n, std::index_sequence_for<Iterators...>{});
         return *this;
     }
-    zip_iterator operator+(ptrdiff_t n) const { auto t = *this; t += n; return t; }
+    CUMETAL_THRUST_ZIP_HD zip_iterator operator+(ptrdiff_t n) const { auto t = *this; t += n; return t; }
 
-    ptrdiff_t operator-(const zip_iterator& o) const {
+    CUMETAL_THRUST_ZIP_HD ptrdiff_t operator-(const zip_iterator& o) const {
         return std::get<0>(iterators_) - std::get<0>(o.iterators_);
     }
-    reference operator[](ptrdiff_t n) const { return *(*this + n); }
+    CUMETAL_THRUST_ZIP_HD reference operator[](ptrdiff_t n) const { return *(*this + n); }
 
-    bool operator==(const zip_iterator& o) const {
+    CUMETAL_THRUST_ZIP_HD bool operator==(const zip_iterator& o) const {
         return std::get<0>(iterators_) == std::get<0>(o.iterators_);
     }
-    bool operator!=(const zip_iterator& o) const { return !(*this == o); }
-    bool operator<(const zip_iterator& o) const {
+    CUMETAL_THRUST_ZIP_HD bool operator!=(const zip_iterator& o) const { return !(*this == o); }
+    CUMETAL_THRUST_ZIP_HD bool operator<(const zip_iterator& o) const {
         return std::get<0>(iterators_) < std::get<0>(o.iterators_);
     }
 
-    const std::tuple<Iterators...>& get_iterator_tuple() const { return iterators_; }
+    CUMETAL_THRUST_ZIP_HD const std::tuple<Iterators...>& get_iterator_tuple() const { return iterators_; }
 };
 
 template <typename... Iterators>
@@ -80,3 +86,5 @@ using std::make_tuple;
 using std::tuple;
 
 } // namespace thrust
+
+#undef CUMETAL_THRUST_ZIP_HD

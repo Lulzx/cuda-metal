@@ -1,4 +1,7 @@
 #include <cub/cub.h>
+#include <cub/device/device_find.cuh>
+#include <cub/device/device_segmented_scan.cuh>
+#include <cub/device/device_transform.cuh>
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstring>
@@ -118,6 +121,71 @@ static void test_device_rle_encode() {
           "DeviceRunLengthEncode::Encode counts");
 }
 
+static void test_device_find() {
+    int data[] = {1, 3, 5, 8, 8, 12};
+    int values[] = {8, 9};
+    int output[2] = {-1, -1};
+    size_t temp_bytes = 0;
+    char storage[1];
+    auto even = [](int value) { return value % 2 == 0; };
+
+    CHECK(cub::DeviceFind::FindIf(nullptr, temp_bytes, data, output, even, 6) == cudaSuccess &&
+              temp_bytes > 0,
+          "DeviceFind::FindIf storage query");
+    CHECK(cub::DeviceFind::FindIf(storage, temp_bytes, data, output, even, 6) == cudaSuccess &&
+              output[0] == 3,
+          "DeviceFind::FindIf result");
+    CHECK(cub::DeviceFind::LowerBound(storage, temp_bytes, data, 6, values, 2,
+                                      output, std::less<int>{}) == cudaSuccess &&
+              output[0] == 3 && output[1] == 5,
+          "DeviceFind::LowerBound results");
+    CHECK(cub::DeviceFind::UpperBound(storage, temp_bytes, data, 6, values, 2,
+                                      output, std::less<int>{}) == cudaSuccess &&
+              output[0] == 5 && output[1] == 5,
+          "DeviceFind::UpperBound results");
+    CHECK(cub::DeviceFind::FindIf(storage, temp_bytes, data, output, even, -1) ==
+              cudaErrorInvalidValue,
+          "DeviceFind rejects a negative item count");
+}
+
+static void test_device_segmented_scan() {
+    int input[] = {1, 2, 3, 9, 4};
+    int offsets[] = {0, 3, 5};
+    int output[5] = {};
+    size_t temp_bytes = 1;
+    char storage[1];
+
+    CHECK(cub::DeviceSegmentedScan::ExclusiveSegmentedSum(
+              storage, temp_bytes, input, output, offsets, offsets + 1, 2) == cudaSuccess &&
+              output[0] == 0 && output[1] == 1 && output[2] == 3 &&
+              output[3] == 0 && output[4] == 9,
+          "DeviceSegmentedScan exclusive sums");
+    CHECK(cub::DeviceSegmentedScan::InclusiveSegmentedScan(
+              storage, temp_bytes, input, output, offsets, offsets + 1, 2,
+              [](int lhs, int rhs) { return lhs > rhs ? lhs : rhs; }) == cudaSuccess &&
+              output[0] == 1 && output[1] == 2 && output[2] == 3 &&
+              output[3] == 9 && output[4] == 9,
+          "DeviceSegmentedScan inclusive custom operation");
+    CHECK(cub::DeviceSegmentedScan::ExclusiveSegmentedSum(
+              storage, temp_bytes, input, output, offsets, offsets + 1, -1) ==
+              cudaErrorInvalidValue,
+          "DeviceSegmentedScan rejects a negative segment count");
+}
+
+static void test_device_transform() {
+    int lhs[] = {1, 2, 3};
+    int rhs[] = {4, 5, 6};
+    int sum[3] = {};
+    int difference[3] = {};
+
+    CHECK(cub::DeviceTransform::Transform(
+              std::tuple{lhs, rhs}, std::tuple{sum, difference}, 3,
+              [](int a, int b) { return std::tuple{a + b, a - b}; }) == cudaSuccess &&
+              sum[0] == 5 && sum[1] == 7 && sum[2] == 9 &&
+              difference[0] == -3 && difference[1] == -3 && difference[2] == -3,
+          "DeviceTransform multi-input multi-output tuple transform");
+}
+
 int main() {
     test_block_load();
     test_block_load_partial();
@@ -127,6 +195,9 @@ int main() {
     test_device_select_unique();
     test_device_histogram_even();
     test_device_rle_encode();
+    test_device_find();
+    test_device_segmented_scan();
+    test_device_transform();
 
     printf("\n%s (%d failures)\n", g_fail ? "SOME TESTS FAILED" : "ALL TESTS PASSED", g_fail);
     return g_fail ? 1 : 0;

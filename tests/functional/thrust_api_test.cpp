@@ -158,6 +158,67 @@ static bool test_min_max_element() {
     return true;
 }
 
+static bool test_copy_generate_random_and_is_sorted() {
+    thrust::default_random_engine engine(7);
+    thrust::uniform_int_distribution<int> distribution(10, 20);
+    int generated[8] = {};
+    thrust::generate(generated, generated + 8, [&] { return distribution(engine); });
+    for (int value : generated) {
+        if (value < 10 || value > 20) {
+            std::fprintf(stderr, "FAIL: generated random value out of range\n");
+            return false;
+        }
+    }
+    int copied[8] = {};
+    thrust::copy(generated, generated + 8, copied);
+    if (!std::equal(generated, generated + 8, copied)) {
+        std::fprintf(stderr, "FAIL: thrust::copy mismatch\n");
+        return false;
+    }
+    thrust::sort(copied, copied + 8);
+    if (!thrust::is_sorted(copied, copied + 8)) {
+        std::fprintf(stderr, "FAIL: thrust::is_sorted rejected sorted data\n");
+        return false;
+    }
+    return true;
+}
+
+static bool test_segmented_algorithms_and_stream_ordering() {
+    int keys[] = {1, 0, 0, 1, 0};
+    int values[] = {5, 3, 4, 8, 2};
+    int scanned[5] = {};
+    thrust::inclusive_scan_by_key(keys, keys + 5, values, scanned,
+                                  thrust::greater_equal<int>(),
+                                  thrust::minimum<int>());
+    const int expected_scan[] = {5, 3, 3, 8, 2};
+    if (!std::equal(scanned, scanned + 5, expected_scan)) {
+        std::fprintf(stderr, "FAIL: inclusive_scan_by_key segmentation\n");
+        return false;
+    }
+
+    int adjacent[5] = {};
+    thrust::adjacent_difference(keys, keys + 5, adjacent,
+                                thrust::not_equal_to<int>());
+    const int expected_adjacent[] = {1, 1, 0, 1, 1};
+    if (!std::equal(adjacent, adjacent + 5, expected_adjacent)) {
+        std::fprintf(stderr, "FAIL: adjacent_difference predicate\n");
+        return false;
+    }
+
+    auto allocation = thrust::device_malloc<unsigned char>(256);
+    if (cudaMemsetAsync(allocation.get(), 7, 256, nullptr) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: queued memset for Thrust ordering test\n");
+        return false;
+    }
+    const unsigned int sum = thrust::reduce(allocation, allocation + 256, 0u);
+    thrust::device_free(allocation);
+    if (sum != 256u * 7u) {
+        std::fprintf(stderr, "FAIL: host Thrust algorithm raced preceding GPU work\n");
+        return false;
+    }
+    return true;
+}
+
 int main() {
     if (!test_device_vector()) return 1;
     if (!test_host_device_copy()) return 1;
@@ -171,6 +232,8 @@ int main() {
     if (!test_counting_iterator()) return 1;
     if (!test_device_ptr()) return 1;
     if (!test_min_max_element()) return 1;
+    if (!test_copy_generate_random_and_is_sorted()) return 1;
+    if (!test_segmented_algorithms_and_stream_ordering()) return 1;
 
     std::printf("PASS: thrust API tests\n");
     return 0;

@@ -19,12 +19,13 @@ __global__ void system_atomic_kernel(int* slots) {
 }
 
 int main() {
-    void* unsupported = nullptr;
-    if (cudaMallocManaged(&unsupported, sizeof(int), cudaMemAttachHost) !=
-        cudaErrorInvalidValue) {
-        std::printf("FAIL: unimplemented cudaMemAttachHost was accepted\n");
+    void* host_attached = nullptr;
+    if (cudaMallocManaged(&host_attached, sizeof(int), cudaMemAttachHost) !=
+        cudaSuccess) {
+        std::printf("FAIL: cudaMemAttachHost was rejected on UMA\n");
         return 1;
     }
+    cudaFree(host_attached);
     void* explicit_global = nullptr;
     if (cudaMallocManaged(&explicit_global, sizeof(int), cudaMemAttachGlobal) !=
         cudaSuccess) {

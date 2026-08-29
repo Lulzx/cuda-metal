@@ -150,6 +150,8 @@ typedef enum CUdevice_attribute {
     CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76,
     CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY = 83,
     CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS = 89,
+    CU_DEVICE_ATTRIBUTE_VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED = 102,
+    CU_DEVICE_ATTRIBUTE_GENERIC_COMPRESSION_SUPPORTED = 153,
     CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR = 81,
 } CUdevice_attribute;
 
@@ -333,10 +335,92 @@ typedef struct CUDA_MEMCPY3D_st {
     size_t          Depth;
 } CUDA_MEMCPY3D;
 
+// Driver virtual-memory allocation API. On Apple Silicon, CuMetal preserves
+// CUDA's reserve/create/map/access lifecycle over tracked unified-memory
+// buffers. Compression is retained as an allocation hint; Metal provides no
+// public API for forcing or querying the physical compression policy.
+typedef uint64_t CUmemGenericAllocationHandle;
+
+typedef enum CUmemAllocationType_enum {
+    CU_MEM_ALLOCATION_TYPE_INVALID = 0,
+    CU_MEM_ALLOCATION_TYPE_PINNED = 1,
+    CU_MEM_ALLOCATION_TYPE_MAX = 0x7fffffff,
+} CUmemAllocationType;
+
+typedef enum CUmemAllocationHandleType_enum {
+    CU_MEM_HANDLE_TYPE_NONE = 0x0,
+    CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 0x1,
+    CU_MEM_HANDLE_TYPE_WIN32 = 0x2,
+    CU_MEM_HANDLE_TYPE_WIN32_KMT = 0x4,
+} CUmemAllocationHandleType;
+
+typedef enum CUmemLocationType_enum {
+    CU_MEM_LOCATION_TYPE_INVALID = 0,
+    CU_MEM_LOCATION_TYPE_DEVICE = 1,
+    CU_MEM_LOCATION_TYPE_HOST = 2,
+} CUmemLocationType;
+
+typedef struct CUmemLocation_st {
+    CUmemLocationType type;
+    int id;
+} CUmemLocation;
+
+typedef enum CUmemAllocationCompType_enum {
+    CU_MEM_ALLOCATION_COMP_NONE = 0,
+    CU_MEM_ALLOCATION_COMP_GENERIC = 1,
+} CUmemAllocationCompType;
+
+typedef struct CUmemAllocationProp_st {
+    CUmemAllocationType type;
+    CUmemAllocationHandleType requestedHandleTypes;
+    CUmemLocation location;
+    void* win32HandleMetaData;
+    struct {
+        unsigned char compressionType;
+        unsigned char gpuDirectRDMACapable;
+        unsigned short usage;
+        unsigned char reserved[4];
+    } allocFlags;
+} CUmemAllocationProp;
+
+typedef enum CUmemAllocationGranularity_flags_enum {
+    CU_MEM_ALLOC_GRANULARITY_MINIMUM = 0x0,
+    CU_MEM_ALLOC_GRANULARITY_RECOMMENDED = 0x1,
+} CUmemAllocationGranularity_flags;
+
+typedef enum CUmemAccess_flags_enum {
+    CU_MEM_ACCESS_FLAGS_PROT_NONE = 0x0,
+    CU_MEM_ACCESS_FLAGS_PROT_READ = 0x1,
+    CU_MEM_ACCESS_FLAGS_PROT_READWRITE = 0x3,
+} CUmemAccess_flags;
+
+typedef struct CUmemAccessDesc_st {
+    CUmemLocation location;
+    CUmemAccess_flags flags;
+} CUmemAccessDesc;
+
 CUresult cuMemAlloc(CUdeviceptr* dptr, size_t bytesize);
 CUresult cuMemAllocManaged(CUdeviceptr* dptr, size_t bytesize, unsigned int flags);
 CUresult cuMemAllocPitch(CUdeviceptr* dptr, size_t* pPitch, size_t WidthInBytes, size_t Height, unsigned int ElementSizeBytes);
 CUresult cuMemFree(CUdeviceptr dptr);
+CUresult cuMemGetAllocationGranularity(size_t* granularity,
+                                       const CUmemAllocationProp* prop,
+                                       CUmemAllocationGranularity_flags option);
+CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size, size_t alignment,
+                             CUdeviceptr addr, unsigned long long flags);
+CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size);
+CUresult cuMemCreate(CUmemGenericAllocationHandle* handle, size_t size,
+                     const CUmemAllocationProp* prop,
+                     unsigned long long flags);
+CUresult cuMemRelease(CUmemGenericAllocationHandle handle);
+CUresult cuMemGetAllocationPropertiesFromHandle(
+    CUmemAllocationProp* prop, CUmemGenericAllocationHandle handle);
+CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t offset,
+                  CUmemGenericAllocationHandle handle,
+                  unsigned long long flags);
+CUresult cuMemUnmap(CUdeviceptr ptr, size_t size);
+CUresult cuMemSetAccess(CUdeviceptr ptr, size_t size,
+                        const CUmemAccessDesc* desc, size_t count);
 CUresult cuMemAllocHost(void** pp, size_t bytesize);
 CUresult cuMemHostAlloc(void** pp, size_t bytesize, unsigned int flags);
 CUresult cuMemHostGetDevicePointer(CUdeviceptr* pdptr, void* p, unsigned int flags);

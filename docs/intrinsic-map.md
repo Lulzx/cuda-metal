@@ -214,7 +214,7 @@ The following PTX opcodes are passed through to subsequent pipeline stages uncha
 | `cluster.*`, `mbarrier.*` | Per-instruction compile-time error (Hopper distributed shared memory) |
 | `cp.async.bulk.tensor.*` (TMA) | Per-instruction compile-time error |
 | `cvt.rn.f8x2.*` (FP8) | Per-instruction compile-time error |
-| `wmma.*`, `mma.sync.*`, `ldmatrix.*` | Per-instruction compile-time error (tensor cores — no Metal equivalent; use MPSMatrixMultiplication) |
+| Direct PTX `wmma.*`, `mma.sync.*`, `ldmatrix.*` | Per-instruction compile-time error; source-level BF16 WMMA instead lowers a CuMetal marker to public Metal SIMD-group matrix intrinsics |
 | `tex.*`, `tld4.*`, `txq.*` | Per-instruction compile-time error (texture sampling — deferred to v2) |
 | `sust.*`, `suld.*`, `sured.*`, `suq.*` | Per-instruction compile-time error (surface ops — deferred to v2) |
 | Dynamic parallelism (`launch_cooperative_kernel`) | Compile-time error |

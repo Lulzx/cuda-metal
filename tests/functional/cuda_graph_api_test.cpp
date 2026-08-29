@@ -103,6 +103,50 @@ static bool test_stream_capture_status() {
     return true;
 }
 
+static bool test_event_linked_capture_lifetime() {
+    cudaStream_t origin = nullptr;
+    cudaStream_t joined = nullptr;
+    cudaEvent_t event = nullptr;
+    cudaStreamCreate(&origin);
+    cudaStreamCreate(&joined);
+    cudaEventCreate(&event);
+
+    if (cudaStreamBeginCapture(origin, cudaStreamCaptureModeGlobal) != cudaSuccess ||
+        cudaEventRecord(event, origin) != cudaSuccess ||
+        cudaStreamWaitEvent(joined, event, 0) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: event-linked stream capture setup failed\n");
+        return false;
+    }
+
+    cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(joined, &status) != cudaSuccess ||
+        status != cudaStreamCaptureStatusActive) {
+        std::fprintf(stderr, "FAIL: event wait did not join the active capture\n");
+        return false;
+    }
+
+    cudaGraph_t graph = nullptr;
+    if (cudaStreamEndCapture(origin, &graph) != cudaSuccess || graph == nullptr ||
+        cudaStreamIsCapturing(joined, &status) != cudaSuccess ||
+        status != cudaStreamCaptureStatusNone) {
+        std::fprintf(stderr, "FAIL: ending capture did not release joined stream\n");
+        return false;
+    }
+
+    if (cudaStreamWaitEvent(joined, event, 0) != cudaSuccess ||
+        cudaStreamIsCapturing(joined, &status) != cudaSuccess ||
+        status != cudaStreamCaptureStatusNone) {
+        std::fprintf(stderr, "FAIL: stale captured event resurrected its graph\n");
+        return false;
+    }
+
+    cudaGraphDestroy(graph);
+    cudaEventDestroy(event);
+    cudaStreamDestroy(joined);
+    cudaStreamDestroy(origin);
+    return true;
+}
+
 static bool test_graph_null_args() {
     // Null graph should fail
     if (cudaGraphDestroy(nullptr) != cudaErrorInvalidValue) {
@@ -623,6 +667,7 @@ int main() {
     if (!test_graph_create_destroy()) return 1;
     if (!test_graph_instantiate_launch()) return 1;
     if (!test_stream_capture_status()) return 1;
+    if (!test_event_linked_capture_lifetime()) return 1;
     if (!test_graph_null_args()) return 1;
     if (!test_graph_dependencies_and_updates()) return 1;
     if (!test_capture_memcpy_replay()) return 1;

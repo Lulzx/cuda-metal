@@ -3056,6 +3056,40 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
 
     result.entry_name = pipeline.entry_name;
     result.warnings = pipeline.warnings;
+    // This metadata belongs to the PTX kernel ABI, independent of whether the
+    // direct-MSL body matches. The registration JIT also uses this result when
+    // an LLVM-produced metallib is loaded from the persistent cache.
+    for (const auto& fmt : pipeline.printf_formats) {
+        result.printf_formats.push_back(fmt.token);
+    }
+    bool entry_has_indirect_call = false;
+    for (const auto& instruction : pipeline.lowered_instructions) {
+        if (instruction.opcode.rfind("call", 0) != 0) continue;
+        for (const auto& operand : instruction.operands) {
+            if (!operand.empty() && operand.front() == '%') {
+                entry_has_indirect_call = true;
+            }
+            if (operand == "malloc" || operand == "free" ||
+                operand == "_Znwm" || operand == "_Znam" ||
+                operand == "_ZdlPv" || operand == "_ZdaPv" ||
+                operand == "_ZdlPvm" || operand == "_ZdaPvm") {
+                result.uses_device_heap = true;
+                break;
+            }
+        }
+        if (result.uses_device_heap) break;
+    }
+    if (!result.uses_device_heap && entry_has_indirect_call &&
+        (ptx.find(", malloc,") != std::string_view::npos ||
+         ptx.find(" free,") != std::string_view::npos ||
+         ptx.find("_Znwm") != std::string_view::npos ||
+         ptx.find("_Znam") != std::string_view::npos ||
+         ptx.find("_ZdlPv") != std::string_view::npos ||
+         ptx.find("_ZdaPv") != std::string_view::npos ||
+         ptx.find("_ZdlPvm") != std::string_view::npos ||
+         ptx.find("_ZdaPvm") != std::string_view::npos)) {
+        result.uses_device_heap = true;
+    }
 
     // First: translate the kernel's actual PTX. This ordering matters and used to be reversed --
     // the name-matched table below was consulted first, so a kernel whose name merely *contained*
@@ -3153,10 +3187,6 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
         result.warnings.push_back(
             "kernel '" + pipeline.entry_name +
             "' uses an approximate/passthru lowering; its numerical output is incorrect");
-    }
-    // Propagate printf format table for the runtime to use when draining the buffer.
-    for (const auto& fmt : pipeline.printf_formats) {
-        result.printf_formats.push_back(fmt.token);
     }
     return result;
 }

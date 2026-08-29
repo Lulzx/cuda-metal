@@ -1,4 +1,5 @@
 #include "cuda_runtime.h"
+#include "cooperative_groups.h"
 
 #include <cstdio>
 
@@ -8,6 +9,9 @@
 // rejects larger cooperative grids.
 
 int main() {
+    cooperative_groups::block_tile_memory<256> tile_scratch{};
+    static_assert(sizeof(tile_scratch) >= 8u * sizeof(unsigned int));
+
     if (cudaInit(0) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaInit failed\n");
         return 1;

@@ -272,6 +272,10 @@ add_executable(cumetal_driver_mem_alloc_managed_test
     driver_mem_alloc_managed_test.cpp
 )
 
+add_executable(cumetal_driver_vmm_test
+    driver_vmm_test.cpp
+)
+
 add_executable(cumetal_driver_host_alloc_test
     driver_host_alloc_test.cpp
 )
@@ -855,6 +859,11 @@ target_link_libraries(cumetal_driver_mem_get_info_test
 )
 
 target_link_libraries(cumetal_driver_mem_alloc_managed_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_driver_vmm_test
     PRIVATE
         cumetal_runtime
 )
@@ -1640,6 +1649,13 @@ target_compile_options(cumetal_driver_mem_get_info_test
 )
 
 target_compile_options(cumetal_driver_mem_alloc_managed_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_driver_vmm_test
     PRIVATE
         -Wall
         -Wextra
@@ -2485,6 +2501,11 @@ add_test(
 )
 
 add_test(
+    NAME functional_driver_vmm
+    COMMAND cumetal_driver_vmm_test
+)
+
+add_test(
     NAME functional_driver_host_alloc
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
@@ -2529,6 +2550,56 @@ add_test(
             ${CMAKE_CURRENT_BINARY_DIR}/nested_device_pointer.metallib
 )
 set_tests_properties(functional_nested_device_pointer PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_texture_descriptor_device
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/texture_descriptor_probe.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/texture_descriptor_device
+)
+set_tests_properties(functional_texture_descriptor_device PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_memcpy2d_device_synchronization
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/memcpy2d_sync_probe.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/memcpy2d_device_synchronization
+)
+set_tests_properties(functional_memcpy2d_device_synchronization PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_runtime_nested_pointer_relocation
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/runtime_nested_pointer_probe.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/runtime_nested_pointer_relocation
+)
+set_tests_properties(functional_runtime_nested_pointer_relocation PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_device_clock
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_clock_probe.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/device_clock_probe
+)
+set_tests_properties(functional_device_clock PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_cooperative_grid_barrier
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cooperative_grid_barrier_probe.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/cooperative_grid_barrier_probe
+)
+set_tests_properties(functional_cooperative_grid_barrier PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
 
 add_test(
     NAME functional_driver_module_load_data_ptx
@@ -3003,6 +3074,32 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_double_vector_add
     )
     set_tests_properties(functional_cumetalc_double_vector_add PROPERTIES SKIP_RETURN_CODE 77)
+
+    # NVIDIA's tensor-core samples disable their CPU oracle by default. This
+    # small source-path test proves the software WMMA layer's actual tile values
+    # for the three sample variants that finish within the GPU watchdog.
+    add_test(
+        NAME functional_wmma_numeric
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/wmma_numeric_probe.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/wmma_numeric_probe
+    )
+    set_tests_properties(functional_wmma_numeric PROPERTIES SKIP_RETURN_CODE 77)
+
+    # Device-side new/delete uses a persistent bounded heap shared by kernels.
+    # Exercise cross-launch pointer lifetime, free-list reuse, exhaustion, and
+    # the runtime limit lifecycle through the source-first compilation path.
+    add_test(
+        NAME functional_device_heap
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_heap_probe.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/device_heap_probe
+    )
+    set_tests_properties(functional_device_heap PROPERTIES SKIP_RETURN_CODE 77)
 
     add_test(
         NAME functional_installed_cumetalc_link_executable

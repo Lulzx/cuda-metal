@@ -18,6 +18,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -514,7 +515,11 @@ struct BackendState {
     // certain, and reading it there stays right whichever path -- runtime,
     // driver, or a prebuilt library -- produced the kernel.
     std::unordered_map<std::string, bool> pipeline_uses_lock_bank;
+    std::unordered_map<std::string, bool> pipeline_uses_device_clock;
+    std::unordered_map<std::string, bool> pipeline_uses_grid_barrier;
+    std::unordered_map<std::string, bool> pipeline_uses_grid_y_offset;
     std::shared_ptr<Buffer> atomic_lock_bank;
+    std::shared_ptr<Buffer> device_clock;
     std::vector<HeapArena> buffer_heaps;
     std::vector<std::weak_ptr<StreamImpl>> streams;
 };
@@ -1050,14 +1055,30 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
         // courtesy the toolchain is free to drop, while index 29 is reserved
         // for this and nothing else may bind there.
         bool uses_lock_bank = false;
+        bool uses_device_clock = false;
+        bool uses_grid_barrier = false;
+        bool uses_grid_y_offset = false;
         for (id<MTLBinding> binding in [reflection bindings]) {
-            if ([binding type] == MTLBindingTypeBuffer &&
-                [binding index] == cumetal::ptx::kAtomicLockBankBindingIndex) {
+            if ([binding type] != MTLBindingTypeBuffer) {
+                continue;
+            }
+            if ([binding index] == cumetal::ptx::kAtomicLockBankBindingIndex) {
                 uses_lock_bank = true;
-                break;
+            }
+            if ([binding index] == cumetal::ptx::kDeviceClockBindingIndex) {
+                uses_device_clock = true;
+            }
+            if ([binding index] == cumetal::ptx::kGridBarrierBindingIndex) {
+                uses_grid_barrier = true;
+            }
+            if ([binding index] == cumetal::ptx::kGridYOffsetBindingIndex) {
+                uses_grid_y_offset = true;
             }
         }
         backend.pipeline_uses_lock_bank[cache_key] = uses_lock_bank;
+        backend.pipeline_uses_device_clock[cache_key] = uses_device_clock;
+        backend.pipeline_uses_grid_barrier[cache_key] = uses_grid_barrier;
+        backend.pipeline_uses_grid_y_offset[cache_key] = uses_grid_y_offset;
         backend.pipeline_cache.emplace(cache_key, pipeline);
         return pipeline;
     }
@@ -1096,6 +1117,45 @@ std::shared_ptr<Buffer> ensure_atomic_lock_bank(std::string* error_message) {
     std::memset(bank->contents(), 0, bytes);
     backend.atomic_lock_bank = bank;
     return bank;
+}
+
+// Public Metal exposes no shader-visible cycle counter. Kernels containing PTX
+// clock/globaltimer reads instead share this atomic counter. The compiler adds a
+// fixed quantum on each read, preserving unsigned monotonic/wraparound control
+// flow while intentionally not promising cycle-accurate measurements.
+std::shared_ptr<Buffer> ensure_device_clock(std::string* error_message) {
+    static std::mutex clock_mutex;
+    std::lock_guard<std::mutex> guard(clock_mutex);
+    BackendState& backend = state();
+    if (backend.device_clock != nullptr) {
+        return backend.device_clock;
+    }
+    std::string alloc_error;
+    std::shared_ptr<Buffer> counter;
+    if (allocate_buffer(sizeof(std::uint32_t), &counter, &alloc_error) != cudaSuccess ||
+        counter == nullptr || counter->contents() == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "device clock counter allocation failed: " + alloc_error;
+        }
+        return nullptr;
+    }
+    std::memset(counter->contents(), 0, sizeof(std::uint32_t));
+    backend.device_clock = counter;
+    return counter;
+}
+
+std::shared_ptr<Buffer> allocate_grid_barrier(std::string* error_message) {
+    std::string alloc_error;
+    std::shared_ptr<Buffer> barrier;
+    if (allocate_buffer(2u * sizeof(std::uint32_t), &barrier, &alloc_error) != cudaSuccess ||
+        barrier == nullptr || barrier->contents() == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "cooperative grid barrier allocation failed: " + alloc_error;
+        }
+        return nullptr;
+    }
+    std::memset(barrier->contents(), 0, 2u * sizeof(std::uint32_t));
+    return barrier;
 }
 
 cudaError_t check_command_buffer_status(id<MTLCommandBuffer> command_buffer, std::string* error_message) {
@@ -1346,9 +1406,12 @@ cudaError_t query_device_properties(DeviceProperties* out_properties, std::strin
             static_cast<std::uint64_t>(max_threads_per_group.width) *
             static_cast<std::uint64_t>(max_threads_per_group.height) *
             static_cast<std::uint64_t>(max_threads_per_group.depth);
-        const std::uint64_t max_int = static_cast<std::uint64_t>(std::numeric_limits<int>::max());
+        // maxThreadsPerThreadgroup is a per-dimension envelope, not three
+        // independent dimensions that may all be saturated simultaneously.
+        // CUDA's architectural per-block ceiling is 1024 threads.
+        const std::uint64_t cuda_max_threads_per_block = 1024;
         props.max_threads_per_block = static_cast<int>(
-            std::min(max_threads_product, max_int));
+            std::min(max_threads_product, cuda_max_threads_per_block));
 
         props.multi_processor_count = infer_multi_processor_count(props.name);
     }
@@ -1378,7 +1441,7 @@ cudaError_t query_kernel_properties(const std::string& metallib_path,
         return cudaErrorInvalidValue;
     }
     out_properties->max_threads_per_threadgroup =
-        static_cast<int>(pipeline.maxTotalThreadsPerThreadgroup);
+        static_cast<int>(std::min<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup, 1024));
     out_properties->thread_execution_width =
         static_cast<int>(pipeline.threadExecutionWidth);
     out_properties->static_threadgroup_memory_bytes =
@@ -2450,7 +2513,12 @@ cudaError_t launch_kernel(const std::string& metallib_path,
     std::string math_mode = "precompiled";
     bool compile_cache_hit = false;
     bool needs_lock_bank = false;
+    bool needs_device_clock = false;
+    bool needs_grid_barrier = false;
+    bool needs_grid_y_offset = false;
     std::shared_ptr<Buffer> lock_bank;
+    std::shared_ptr<Buffer> device_clock;
+    std::shared_ptr<Buffer> grid_barrier;
     {
         std::lock_guard<std::mutex> lock(backend.mutex);
         const std::string pipeline_cache_key = metallib_path + "::" + kernel_name;
@@ -2461,6 +2529,9 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             return cudaErrorInvalidValue;
         }
         needs_lock_bank = backend.pipeline_uses_lock_bank[pipeline_cache_key];
+        needs_device_clock = backend.pipeline_uses_device_clock[pipeline_cache_key];
+        needs_grid_barrier = backend.pipeline_uses_grid_barrier[pipeline_cache_key];
+        needs_grid_y_offset = backend.pipeline_uses_grid_y_offset[pipeline_cache_key];
         const auto source_it = backend.library_lowering_source.find(metallib_path);
         if (source_it != backend.library_lowering_source.end()) {
             lowering_source = source_it->second;
@@ -2485,12 +2556,42 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             return cudaErrorMemoryAllocation;
         }
     }
+    if (needs_device_clock) {
+        device_clock = ensure_device_clock(error_message);
+        if (device_clock == nullptr) {
+            return cudaErrorMemoryAllocation;
+        }
+    }
+    if (needs_grid_barrier) {
+        grid_barrier = allocate_grid_barrier(error_message);
+        if (grid_barrier == nullptr) {
+            return cudaErrorMemoryAllocation;
+        }
+    }
+    // Large WMMA grids can exceed macOS's per-command-buffer watchdog even
+    // though every individual threadgroup is valid. Kernels opting into the
+    // hidden block-Y offset ABI may be divided into independently committed
+    // slices while retaining their original CUDA blockIdx.y values.
+    constexpr unsigned int kMaxChunkGridY = 16;
+    if (needs_grid_y_offset && config.grid.y > kMaxChunkGridY) {
+        for (unsigned int y = 0; y < config.grid.y; y += kMaxChunkGridY) {
+            LaunchConfig chunk = config;
+            chunk.grid.y = std::min(kMaxChunkGridY, config.grid.y - y);
+            chunk.grid_y_offset = config.grid_y_offset + y;
+            chunk.disable_batching = true;
+            const cudaError_t status = launch_kernel(
+                metallib_path, kernel_name, chunk, args, stream, error_message);
+            if (status != cudaSuccess) return status;
+        }
+        return cudaSuccess;
+    }
     std::unique_lock<std::mutex> batch_lock(state().batch_mutex);
     std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
 
     @autoreleasepool {
         std::vector<BufferImpl*> fence_buffers;
-        fence_buffers.reserve(args.size());
+        fence_buffers.reserve(args.size() + config.resident_buffers.size());
+        std::unordered_set<BufferImpl*> seen_fence_buffers;
         for (std::size_t i = 0; i < args.size(); ++i) {
             if (args[i].kind == KernelArg::Kind::kBytes) {
                 // Upper bound is CUDA's kernel parameter limit, not setBytes'
@@ -2515,7 +2616,24 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                 }
                 return cudaErrorInvalidValue;
             }
-            fence_buffers.push_back(buffer_impl);
+            if (seen_fence_buffers.insert(buffer_impl).second) {
+                fence_buffers.push_back(buffer_impl);
+            }
+        }
+        for (std::size_t i = 0; i < config.resident_buffers.size(); ++i) {
+            if (config.resident_buffers[i] == nullptr) continue;
+            auto* buffer_impl =
+                dynamic_cast<BufferImpl*>(config.resident_buffers[i].get());
+            if (buffer_impl == nullptr) {
+                if (error_message != nullptr) {
+                    *error_message = "resident buffer " + std::to_string(i) +
+                                     " has unexpected buffer type";
+                }
+                return cudaErrorInvalidValue;
+            }
+            if (seen_fence_buffers.insert(buffer_impl).second) {
+                fence_buffers.push_back(buffer_impl);
+            }
         }
         // A per-launch completion handler needs a command buffer per launch, so
         // tracing turns batching off rather than reporting one buffer's timing
@@ -2523,7 +2641,8 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         const bool trace_async =
             stream_impl != nullptr && env_truthy(std::getenv("CUMETAL_TRACE_GPU"));
         const bool batching_allowed =
-            stream_impl != nullptr && !trace_async && max_batch_dispatches() > 0;
+            stream_impl != nullptr && !trace_async && !config.disable_batching &&
+            max_batch_dispatches() > 0;
 
         id<MTLComputeCommandEncoder> encoder = nil;
         bool batched = false;
@@ -2577,6 +2696,17 @@ cudaError_t launch_kernel(const std::string& metallib_path,
 
         [encoder setComputePipelineState:pipeline];
 
+        // Metal cannot infer residency for a resource referenced only by a GPU
+        // virtual address loaded from another buffer. Texture/surface software
+        // descriptors use exactly that pattern, so declare their payloads
+        // explicitly while leaving the kernel's public argument ABI unchanged.
+        for (const auto& resident : config.resident_buffers) {
+            if (resident == nullptr) continue;
+            auto* buffer_impl = dynamic_cast<BufferImpl*>(resident.get());
+            [encoder useResource:buffer_impl->handle()
+                         usage:(MTLResourceUsageRead | MTLResourceUsageWrite)];
+        }
+
         for (std::size_t i = 0; i < args.size(); ++i) {
             const KernelArg& arg = args[i];
             const std::size_t binding_index =
@@ -2628,6 +2758,36 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             [encoder setBuffer:bank_impl->handle()
                         offset:0
                        atIndex:cumetal::ptx::kAtomicLockBankBindingIndex];
+        }
+        if (device_clock != nullptr) {
+            auto* clock_impl = dynamic_cast<BufferImpl*>(device_clock.get());
+            if (clock_impl == nullptr) {
+                if (error_message != nullptr) {
+                    *error_message = "device clock has unexpected buffer type";
+                }
+                return cudaErrorInvalidValue;
+            }
+            [encoder setBuffer:clock_impl->handle()
+                        offset:0
+                       atIndex:cumetal::ptx::kDeviceClockBindingIndex];
+        }
+        if (grid_barrier != nullptr) {
+            auto* barrier_impl = dynamic_cast<BufferImpl*>(grid_barrier.get());
+            if (barrier_impl == nullptr) {
+                if (error_message != nullptr) {
+                    *error_message = "cooperative grid barrier has unexpected buffer type";
+                }
+                return cudaErrorInvalidValue;
+            }
+            [encoder setBuffer:barrier_impl->handle()
+                        offset:0
+                       atIndex:cumetal::ptx::kGridBarrierBindingIndex];
+        }
+        if (needs_grid_y_offset) {
+            const std::uint32_t offset = config.grid_y_offset;
+            [encoder setBytes:&offset
+                       length:sizeof(offset)
+                      atIndex:cumetal::ptx::kGridYOffsetBindingIndex];
         }
 
         if (config.shared_memory_bytes > 0) {
@@ -2792,7 +2952,12 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
     id<MTLComputePipelineState> pipeline = nil;
     id<MTLCommandQueue> queue = nil;
     bool needs_lock_bank = false;
+    bool needs_device_clock = false;
+    bool needs_grid_barrier = false;
+    bool needs_grid_y_offset = false;
     std::shared_ptr<Buffer> lock_bank;
+    std::shared_ptr<Buffer> device_clock;
+    std::shared_ptr<Buffer> grid_barrier;
     {
         std::lock_guard<std::mutex> lock(backend.mutex);
         pipeline = load_pipeline_locked(backend, metallib_path, kernel_name, error_message);
@@ -2801,11 +2966,26 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
         }
         const std::string pipeline_cache_key = metallib_path + "::" + kernel_name;
         needs_lock_bank = backend.pipeline_uses_lock_bank[pipeline_cache_key];
+        needs_device_clock = backend.pipeline_uses_device_clock[pipeline_cache_key];
+        needs_grid_barrier = backend.pipeline_uses_grid_barrier[pipeline_cache_key];
+        needs_grid_y_offset = backend.pipeline_uses_grid_y_offset[pipeline_cache_key];
         queue = backend.queue;
     }
     if (needs_lock_bank) {
         lock_bank = ensure_atomic_lock_bank(error_message);
         if (lock_bank == nullptr) {
+            return cudaErrorMemoryAllocation;
+        }
+    }
+    if (needs_device_clock) {
+        device_clock = ensure_device_clock(error_message);
+        if (device_clock == nullptr) {
+            return cudaErrorMemoryAllocation;
+        }
+    }
+    if (needs_grid_barrier) {
+        grid_barrier = allocate_grid_barrier(error_message);
+        if (grid_barrier == nullptr) {
             return cudaErrorMemoryAllocation;
         }
     }
@@ -2922,6 +3102,36 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
             [encoder setBuffer:bank_impl->handle()
                         offset:0
                        atIndex:cumetal::ptx::kAtomicLockBankBindingIndex];
+        }
+        if (device_clock != nullptr) {
+            auto* clock_impl = dynamic_cast<BufferImpl*>(device_clock.get());
+            if (clock_impl == nullptr) {
+                if (error_message != nullptr) {
+                    *error_message = "device clock has unexpected buffer type";
+                }
+                return cudaErrorInvalidValue;
+            }
+            [encoder setBuffer:clock_impl->handle()
+                        offset:0
+                       atIndex:cumetal::ptx::kDeviceClockBindingIndex];
+        }
+        if (grid_barrier != nullptr) {
+            auto* barrier_impl = dynamic_cast<BufferImpl*>(grid_barrier.get());
+            if (barrier_impl == nullptr) {
+                if (error_message != nullptr) {
+                    *error_message = "cooperative grid barrier has unexpected buffer type";
+                }
+                return cudaErrorInvalidValue;
+            }
+            [encoder setBuffer:barrier_impl->handle()
+                        offset:0
+                       atIndex:cumetal::ptx::kGridBarrierBindingIndex];
+        }
+        if (needs_grid_y_offset) {
+            const std::uint32_t offset = config.grid_y_offset;
+            [encoder setBytes:&offset
+                       length:sizeof(offset)
+                      atIndex:cumetal::ptx::kGridYOffsetBindingIndex];
         }
 
         if (config.shared_memory_bytes > 0) {

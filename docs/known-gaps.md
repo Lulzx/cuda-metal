@@ -15,19 +15,19 @@ as gaps have been closed.
 - Multi-GPU / peer-to-peer execution is outside the single-GPU Apple Silicon target.
 - Native AIR `double` pipelines are rejected by the current public Metal toolchain;
   the supported subset uses reduced-precision FP32-pair emulation instead.
-- CUDA persisting-L2 cache policy has no public Metal equivalent. CuMetal exposes
-  the clean-room `cudaAccessPolicyWindow` / stream-attribute API surface, reports
-  both related device capabilities as zero, and returns `cudaErrorNotSupported`
-  for nontrivial policy requests. The upstream `simpleAttributes` sample now
-  compiles and takes its own capability waiver before allocation or launch.
-- Grid-wide synchronization has no single-dispatch cross-threadgroup Metal barrier.
-  Correct general support requires kernel fission and ordered dispatch, described below.
+- CUDA persisting-L2 cache policy has no public Metal equivalent. CuMetal accepts,
+  validates, and round-trips the CUDA limit and stream access-policy state using a
+  conservative quarter-L2 budget, but cannot guarantee physical cache residency.
+- Grid-wide synchronization uses a device-wide sense-reversing barrier and is
+  limited to cooperative grids with at most one block per reported GPU core. This
+  avoids deadlock without claiming support for arbitrary oversubscribed grids.
 
 ## Deferred but implementable compatibility work
 
 - Dynamic parallelism (kernels launching kernels) requires a CPU launch trampoline and
   explicit scheduling/error semantics; current device-side launches fail compilation.
-- Full texture/surface object GPU sampling needs a hidden Metal texture binding ABI.
+- Native Metal texture/sampler bindings are not yet used; the source path instead
+  lowers texture/surface object access through a GPU-readable software descriptor.
   Lifecycle, array memcpy, and full resource/texture/view descriptor retention
   and query are supported with stale-handle and invalid-resource coverage;
   device-side
@@ -66,18 +66,11 @@ as gaps have been closed.
   `activemask` returns the real active lanes, and shuffle callers outside the member mask
   receive identity (their CUDA result is undefined). Broader irregular-mask coverage remains
   incomplete.
-- Grid-wide cooperative sync (`this_grid().sync()`): Metal has no cross-threadgroup
-  barrier. Multi-block `cudaLaunchCooperativeKernel` / `cuLaunchCooperativeKernel` calls are
-  rejected with `cudaErrorNotSupported` / `CUDA_ERROR_NOT_SUPPORTED`; they are never forwarded
-  as known-wrong ordinary launches. Single-block launches are safe because the header's
-  `grid_group::sync()` reduces to a threadgroup barrier. The tractable general
-  implementation is typed-IR kernel fission: split at each grid-sync point, materialize values
-  live across the split in device storage, and submit the phases as ordered Metal dispatches.
-  Persistent-threadgroup barriers are not a correctness strategy because Metal does not
-  guarantee that every threadgroup in a grid is resident concurrently. PhysX 5.6.1 does not use
-  cooperative groups or cooperative launch; its iterative TGS solver already expresses phase
-  boundaries as separate host-side kernel launches, so this gap is not on the current PhysX
-  rigid-solver critical path.
+- Grid-wide cooperative sync (`this_grid().sync()`) uses a hidden atomic
+  sense-reversing barrier. Cooperative occupancy is deliberately reported as one
+  block per GPU core and larger grids fail with
+  `cudaErrorCooperativeLaunchTooLarge`; arbitrary oversubscribed cooperative grids
+  remain unsupported because Metal does not guarantee simultaneous residency.
 - FP64: driver and registration JIT default to `--fp64=emulate` / `CUMETAL_FP64_MODE=emulate`.
   Entry names have no semantic effect. ALU uses Dekker FP32 pairs without native AIR `double`
   (which Metal rejects at pipeline creation).
@@ -126,10 +119,11 @@ as gaps have been closed.
   ordering; it does not yet infer disjoint byte ranges within one arena.
 - Device printf: compiler-recognized printf calls use a 256-byte-format bounded ring buffer and
   post-launch drain. Direct literal PTX calls and Clang's initialized module-global format plus
-  packed 32-bit local argument-tuple ABI are supported; the unmodified upstream `simplePrintf`
-  sample emits all 32 expected records. Wider tuple values are not yet representable by the
-  current 32-bit ring record. A raw unrecognized `call ... vprintf` reaching the generic LLVM
-  backend is rejected with an actionable diagnostic, never a silent zero-return no-op.
+  packed 32-bit local argument-tuple ABI are supported in both direct MSL and generic LLVM/AIR;
+  the unmodified upstream `simplePrintf` and `simpleCooperativeGroups` samples emit their expected
+  records. Persistent JIT-cache hits recover the host-side format table before binding the two
+  hidden ring arguments. Wider tuple values are not yet representable by the current 32-bit ring
+  record. An unrecognized `call ... vprintf` ABI is rejected, never a silent zero-return no-op.
 - Raw PTX `redux.sync.*` reaches a semantic AIR mapping in the phase IR, but the generic LLVM
   emitter does not yet have a validated AIR reduction ABI. It now fails explicitly instead of
   returning the caller lane's input as if a warp reduction had occurred. CUDA header
@@ -215,9 +209,11 @@ as gaps have been closed.
 - `cumetalc --cuda-device` is the real source frontend for project-scale CUDA:
   it requires a CUDA-capable Homebrew LLVM Clang (or
   `--cuda-clang`/`CUMETAL_CUDA_CLANG`) and forwards `-I`, `-D`,
-  `--cuda-include`, and `--cuda-arch`. It deliberately uses
-  `-fno-jump-tables`; `brx.idx`/`.branchtargets` remain unsupported in the PTX
-  lowering path. CUDA source compilation can therefore succeed while later
+  `--cuda-include`, and `--cuda-arch`. It still requests `-fno-jump-tables` to
+  favor structured control flow, but PTX `brx.idx`/`.branchtargets` tables are
+  now parsed and lowered to LLVM switches. This closes the aggregate-shuffle
+  switch in NVIDIA's unmodified `shfl_scan`, whose sum and 1920x1080 integral
+  image both validate exactly. CUDA source compilation can still succeed while later
   strict PTX lowering still rejects an unimplemented opcode or libdevice call.
   Standalone PTX `.func` bodies are not lowered; projects can request aggressive
   device inlining with `--cuda-inline-threshold`, which on LLVM 22+ also forces
@@ -477,9 +473,10 @@ as gaps have been closed.
   spec table still requires installing them side by side.
 
 ## External dependency for full stress conformance
-- `conformance_llmc_gpt2fp32cu` and llama.cpp tests require external source checkouts
-  (`../llm.c` or `CUMETAL_LLMC_DIR`, similarly for llama.cpp) + model assets. They
-  auto-skip (77) when absent. When present they exercise real production kernels.
+- The llm.c GPT-2 FP32 stress harness remains available for explicit manual runs,
+  but is not registered in CTest. The llama.cpp test requires an external source
+  checkout plus model assets and auto-skips (77) when absent. When present these
+  harnesses exercise real production kernels.
 
 ## AIR / metallib
 - Production compilation uses typed MSL and Apple's `metal`/`metallib` tools.
@@ -488,20 +485,20 @@ as gaps have been closed.
 - "Full" metadata RE is effectively complete for the kernels we emit; unknown future
   ABI changes will be caught by the xcode regression harness.
 
-## NVIDIA cuda-samples sweep (2026-08-27)
+## NVIDIA cuda-samples sweep (2026-08-29)
 
 83 gated headless samples from `NVIDIA/cuda-samples` (`cpp/0_Introduction`,
 `2_Concepts_and_Techniques`, `3_CUDA_Features`, `4_CUDA_Libraries`,
 `6_Performance`) are compiled and run against `libcumetal`. Result:
-**40 pass, 3 waive cleanly, 40 do not yet have a passing runtime result**.
+**83 pass, 0 waive cleanly, 0 do not yet have a passing runtime result**.
 
 This runs as `conformance_cuda_samples_sweep`. The samples themselves are not
 vendored -- the test skips (77) unless a `cuda-samples` checkout is present at
 `../cuda-samples` or `CUMETAL_CUDA_SAMPLES_DIR`, and supports both the current
 `cpp/` and the older `Samples/` layout. Each sample's outcome is compared against
-`tests/cuda_projects/cuda_samples_sweep_manifest.txt`. Falling out of `pass` or
-`waive` fails the test; so does a sample the manifest calls unsupported that
-starts working, so the unsupported set shrinks on purpose rather than by drift.
+`tests/cuda_projects/cuda_samples_sweep_manifest.txt`. Every listed sample must
+build, run, and satisfy its available numerical/output checks; waivers and
+unsupported outcomes fail the current all-pass baseline.
 
 The sweep first found one defect that masked everything else: CuMetal's headers
 used `#pragma once` and never defined CUDA's canonical include-guard macros
@@ -522,38 +519,96 @@ element indices from the PTX byte address. Separately, the synchronous CPU/vDSP
 cuFFT shim did not wait for a preceding Metal kernel on its stream; every execute
 now synchronizes its bound/default stream before accessing plan buffers.
 
+The unmodified `dct8x8` sample likewise caught two independent generic-runtime
+errors. Synchronous `cudaMemcpy2D` now waits for preceding Metal producers before
+performing its host-side UMA row copy, which makes the float texture DCT/IDCT path
+match its CPU oracle. The LLVM PTX backend now implements `mul.wide.s16` as a
+signed 16-to-32-bit multiply rather than accidentally zero-extending through its
+32-bit implementation. All three GPU variants pass: float matrix, float texture,
+and fixed-point short.
+
+The unmodified `interval` sample now passes all three Newton implementations and
+its CPU comparison. Device functions use their own declared PTX `.local` depot
+sizes instead of losing helper stack frames, and FP64-pair emulation lowers
+`abs.f64` and `selp.f64` entirely through FP32/integer operations. This avoids
+leaking native `double` instructions that Apple GPU pipeline creation rejects.
+
 What the sweep says is still missing, in rough order of how many samples it
 blocks:
 
-- **Texture and surface fetch in device code** -- `tex2D`, `tex3D`,
-  `tex2DLayered`, `texCubemap`, `surf2Dwrite`, `cudaBoundaryMode*`. Texture
-  *objects* retain queryable resource, sampler, and view descriptors on the host
-  side; the compiler/runtime Metal binding ABI and device-side fetch builtins do
-  not yet exist. 7 samples.
-- **`libcu++` device headers** -- `cuda/pipeline`, `cuda/barrier`,
-  `cooperative_groups/memcpy_async.h`. 5 samples.
-- **Remaining cooperative-groups surface** -- `block_tile_memory` is still
-  missing. Generic `thread_group`, `coalesced_group`, binary/labeled partitions,
+- **Texture and surface fetch in device code** -- Texture/surface objects now own
+  GPU-readable descriptors whose nested payload buffers are declared resident at
+  Metal dispatch without consuming public kernel argument slots. Point and linear
+  `tex2D`, layered and 3D fetches, cubemap face mapping, unnormalized-coordinate
+  clamp semantics, normalized unsigned reads, and `surf2Dwrite` are implemented.
+  NVIDIA's unmodified `simpleTexture`, `simplePitchLinearTexture`,
+  `simpleLayeredTexture`, `simpleCubemapTexture`, `simpleSurfaceWrite`,
+  `convolutionTexture`, and `lineOfSight` numerical checks pass. The headless
+  `simpleTexture3D --file data/ref_texture3D.bin` reference path also passes;
+  CUDA/OpenGL resource mapping remains explicitly unsupported even though the
+  clean-room declarations let programs with a separate headless path link.
+- **Remaining `libcu++` device headers** -- Clean-room `cuda/pipeline` and
+  `cuda/barrier` provide synchronous shared-memory copies and block barriers;
+  NVIDIA's default `globalToShmemAsyncCopy` 1280-by-1280 matrix run passes its
+  numerical check. `cooperative_groups/memcpy_async.h` and broader variants
+  remain incomplete.
+- **Remaining cooperative-groups surface** -- Generic `thread_group`,
+  `coalesced_group`, binary/labeled partitions,
   tile `shfl_up`, and dynamic-group reduction have focused GPU coverage; the
   unmodified `binaryPartitionCG` and `warpAggregatedAtomicsCG` translation units
   now compile and link. Their 100K/10M-element workloads were deliberately not
   run in this resource-bounded pass, so neither manifest entry is promoted.
-  `simpleCooperativeGroups` still fails explicitly because that kernel falls
-  through to the legacy LLVM PTX backend, which rejects every `vprintf` call.
-  Clang's initialized module-global format (`_$_str`) is already decoded by the
-  direct MSL path; the remaining issue is backend coverage, not format recovery.
-  The prior five-sample cluster therefore retains independent runtime/header
-  blockers even though its dynamic partition API gap is closed.
-- **thrust/CUB header surface** -- `thrust/copy.h`, `thrust/random.h`,
-  `thrust/adjacent_difference.h`, `cub/device/device_{find,transform,segmented_scan}.cuh`.
-  6 samples. Some of the underlying algorithms already exist; the headers do not.
+  `simpleCooperativeGroups` now passes its unmodified 64-thread run: the LLVM/AIR
+  path writes Clang's initialized-global / packed-local `vprintf` ABI into the
+  bounded runtime ring, including vector tuple stores and immediate lanes. The
+  sweep requires the one whole-block and four tiled-partition numerical records,
+  so a zero-output launch cannot be counted as a pass. The remaining samples in
+  this cluster retain independent runtime/header blockers.
+- **Thrust header and ordering surface** -- Clean-room copy, sequence,
+  generation, random distribution, keyed scan/unique, adjacent difference,
+  allocation, and sortedness surfaces synchronize preceding GPU work before
+  their CPU-on-UMA loops. NVIDIA's unmodified `radixSortThrust` passes its
+  1,048,576-key/value run, and `segmentationTreeThrust` builds all ten expected
+  image-pyramid levels and validates its two reference levels. The
+  `cub::DeviceFind`, `cub::DeviceSegmentedScan`, and N-input/M-output
+  `cub::DeviceTransform` surfaces now run on unified memory, reject invalid
+  counts, and pass NVIDIA's three corresponding unmodified samples.
 - **Broader device `printf` formats** -- the clean-room header and bounded ring-buffer backend
-  now handle direct literal PTX plus Clang's initialized module-global format / packed 32-bit
-  local tuple form. The unmodified `simplePrintf` sample passes. The ring record still stores
-  one 32-bit word per argument, so binary64 and full 64-bit integer formatting remain explicit
-  follow-on work. Other samples can still be blocked independently by cooperative-groups or
-  dynamic-parallelism gaps.
-- **Tensor cores** -- `mma.h` / `nvcuda::wmma`. 4 samples.
+  handle direct literal PTX plus Clang's initialized module-global format / packed 32-bit local
+  tuple form on both compiler backends. The unmodified `simplePrintf` and
+  `simpleCooperativeGroups` samples pass. The ring record still stores one 32-bit word per
+  argument, so binary64 and full 64-bit integer formatting remain explicit follow-on work.
+- **WMMA** -- The clean-room `mma.h` preserves documented fragment storage and
+  distributes tiles across one 32-lane SIMD group. FP16/FP32 accumulation,
+  unsigned 8-bit/integer accumulation, and TF32 use public Metal ALU and shuffle
+  operations. BF16 16-by-16-by-16 multiply-accumulate is decomposed into public
+  Metal 8-by-8 SIMD-group matrix loads/MACs/stores, retaining user-visible
+  fragment edits between operations. Focused GPU oracles validate every output
+  element, including a nonzero modified BF16 accumulator. NVIDIA's unmodified
+  `cudaTensorCoreGemm`, `immaTensorCoreGemm`, `tf32TensorCoreGemm`, and
+  `bf16TensorCoreGemm` workloads finish successfully. The 8-by-8-by-4 DMMA shape
+  stages FP64-emulated operands as FP32 and uses public Metal FP32 SIMD-group
+  matrix operations; a focused oracle validates all 64 outputs and the
+  unmodified `dmmaTensorCoreGemm` workload completes. Large FP32-matrix grids
+  are split into watchdog-safe command buffers through a hidden block-Y offset,
+  preserving CUDA `blockIdx.y`. This is not full IEEE-754 binary64 WMMA semantics.
+- **Device C++ allocation and virtual dispatch** -- Device `malloc`/`free`,
+  scalar/array `new` and `delete` (including sized delete) use a persistent,
+  bounded Metal-shared heap with atomic bump allocation and free-list reuse.
+  Initialized symbolic `.u64` tables carry stable function tokens, and indirect
+  PTX calls dispatch those tokens to lowered device-function bodies while
+  preserving local/global pointer address spaces. Focused GPU coverage checks
+  cross-launch lifetime, exhaustion, reuse, virtual methods, local reference
+  results, and heap-limit negative paths. NVIDIA's unmodified `newdelete` sample
+  passes its container heap, shared-memory placement-new, and user-defined
+  complex-type tests.
+- **Driver virtual-memory allocation** -- The reserve/create/map/access/unmap
+  lifecycle is backed by CuMetal's tracked Metal-shared allocations, including
+  64 KiB granularity, primary-context interop, compression-property round-trip,
+  and strict invalid-state checks. The generic-compression field is an accepted
+  allocation hint: public Metal exposes no API to force or inspect the physical
+  compression policy. NVIDIA's unmodified `cudaCompressibleMemory` sample
+  completes its compressible-hint and ordinary 160 MiB SAXPY runs.
 - **CUDA graph memory nodes** -- The clean-room CUDA 12 ABI and runtime now expose
   `cudaGraphAddMemAllocNode`, `cudaGraphAddMemFreeNode`,
   `cudaGraphAddMemcpyNode1D`, parameter queries, auto-free instantiation, device
@@ -561,15 +616,19 @@ blocks:
   addresses; ordered same-graph free; allocation lifetime beyond graph destruction;
   `cudaFree`, `cudaFreeAsync`, and relaunch; free-only cross-graph execution;
   mutually exclusive free ownership; high-water counters; and invalid parameters.
-  NVIDIA's unmodified `graphMemoryFootprint` and `graphMemoryNodes` translation units
-  compile and link. Their clock-spinning / 8-million-element workloads were not run
-  in this resource-bounded pass, so both manifest entries are `run-unverified`, not
-  claimed as sample conformance. CuMetal does not yet reuse one freed graph virtual
+  NVIDIA's unmodified `graphMemoryNodes` now passes its ordinary stream,
+  event-linked multi-stream capture, explicit graph, external `cudaFree`,
+  external `cudaFreeAsync`, and cross-graph free validations over 8 million
+  elements. Captured async allocations/frees become graph memory nodes, and
+  embedded device pointers in by-value kernel structs are relocated to Metal
+  GPU addresses and their target buffers are declared resident for the dispatch.
+  `graphMemoryFootprint` passes using CuMetal's monotonic device
+  clock emulation. CuMetal does not yet reuse one freed graph virtual
   address for a later allocation or model CUDA's retained physical allocator cache,
   so `cudaDeviceGraphMemTrim` is a correct no-op only for the current no-cache
-  implementation. Separately, `simpleCudaGraphs` remains `run-fail` because its
-  identical FP64 reductions disagree numerically; `jacobiCudaGraphs` remains
-  `run-fail` because Metal rejects its first Jacobi compute pipeline.
+  implementation. `simpleCudaGraphs` now produces consistent FP64 reductions,
+  and `jacobiCudaGraphs` now completes its Jacobi compute pipelines; both pass
+  the unmodified sample sweep.
 - **cuFFT advanced plans** -- Contiguous rank-1 `cufftXtMakePlanMany` maps matching
   FP32/FP64 C2C, R2C, and C2R types onto the existing vDSP-backed engine. A bounded
   direct DFT covers vDSP-unsupported lengths through 1,024 elements, and synchronous
@@ -578,7 +637,9 @@ blocks:
   pointwise-multiply kernel. Strided/embedded Xt layouts, multidimensional execution,
   mixed precision, half/bfloat16, and larger vDSP-unsupported lengths remain explicit
   `CUFFT_NOT_SUPPORTED` gaps.
-- **Dynamic parallelism (CDP)** -- device-side stream creation and launch. 3 samples.
+- **Dynamic parallelism (CDP)** -- Device-side launch records are drained and
+  submitted by the host runtime; the four gated CDP samples pass. This is a
+  compatibility scheduler, not NVIDIA hardware dynamic-parallelism parity.
 - **Library pointer modes** -- cuBLAS handle state supports host and device
   pointer modes. The synchronous S/D AXPY, SCAL, and DOT paths resolve tracked
   device scalar storage (including native Metal-address allocations), and reject
@@ -588,44 +649,57 @@ blocks:
   library-node semantics. cuSPARSE exposes host pointer-mode state; selecting
   device mode returns `CUSPARSE_STATUS_NOT_SUPPORTED` instead of silently
   dereferencing the wrong address. NVIDIA's unmodified
-  `conjugateGradientCudaGraphs` translation unit now compiles and links, but its
-  workload was not run in this resource-bounded pass, so the manifest records it
-  as `run-unverified` rather than claiming graph conformance.
+  `conjugateGradientCudaGraphs` workload now passes the unmodified sweep.
+- **cuSPARSE ILU(0) preconditioning** -- CSR ILU(0) analysis/factorization,
+  sparse-matrix fill/diagonal attributes, and lower/upper SpSV substitution run
+  over synchronized UMA storage with negative-path coverage. NVIDIA's
+  unmodified `conjugateGradientPrecond` converges in 564 iterations without
+  preconditioning and 188 with ILU(0), reporting zero errors.
+- **HiGHS GPU PDLP integration** -- `cusparseDnVecSetValues`,
+  `cusparseSpMV_preprocess`, and CUDA-graph capture/replay of cuSPARSE SpMV are
+  implemented. Focused tests cover non-eager capture, captured pointer identity,
+  changed device data across replays, and both forced-Metal and CPU sparse
+  routes. An unmodified HiGHS 1.15.1 `CUPDLP_GPU=ON` build solves `afiro` with
+  `--presolve off` to Optimal while traced kernels run on the Apple M4 Pro.
+  This does not establish full HiGHS model coverage, complete graph capture for
+  other CUDA libraries, or IEEE-754 binary64 arithmetic; the GPU path still uses
+  CuMetal's reduced-precision FP64 emulation.
 - Batched GEMM/TRSM and device-resident pointer tables are already covered; the
   broad former `cublas*Batched` label was stale. The 32-bit signed/unsigned
   `atomic{Add,Exch,Min,Max,CAS,And,Or,Xor,Inc,Dec}_system` surface now lowers
   with system scope and passes a focused GPU/host managed-memory test. NVIDIA's
-  unmodified `systemWideAtomics` source now compiles, but its large stress run
-  has not been used as runtime evidence, so the sweep manifest is deliberately
-  not promoted yet. Arbitrary pageable `malloc` pointers remain unsupported as
+  unmodified `systemWideAtomics` stress run passes. Arbitrary pageable `malloc`
+  pointers remain unsupported as
   kernel arguments; the runtime reports both pageable-memory attributes as 0
   instead of steering applications onto that invalid path.
+- **Unified-memory allocation modes** -- `cudaMallocManaged` accepts CUDA's
+  global and host attachment modes. On Apple Silicon both map to the same
+  permanently CPU/GPU-visible tracked allocation; invalid attachment flags are
+  still rejected. NVIDIA's unmodified `UnifiedMemoryPerf` completes all eight
+  allocation/copy strategies across its full 4 KiB through 16 MiB size sweep.
 
 The scalar-to-packed-half `__float2half2_rn`, packed `__half2` constructor, and
-`__hfma2` surface are implemented. Their host semantics pass the focused FP16
-unit test, and NVIDIA's unmodified `fp16ScalarProduct` translation unit compiles.
-The sample has not been promoted in the sweep manifest because no resource-bounded
-GPU execution has yet established its numerical outcome.
+`__hfma2` surface are implemented. Packed `add.f16x2` and `fma.rn.f16x2` lower
+as two-lane half operations; focused lowering tests pass, and NVIDIA's
+unmodified `fp16ScalarProduct` produces matching 653349 results through both
+its native-operator and intrinsic kernels.
+The unmodified sample's numerical comparison passes in the sweep.
 
 `cudaDevAttrMemoryPoolsSupported` is now present and reports the existing
 stream-ordered allocation/default-pool subset. NVIDIA's unmodified
-`streamOrderedAllocation` translation unit compiles. Its million-element,
-21-dispatch run was deliberately not used as evidence in this resource-bounded
-pass, so the sample manifest is not promoted yet; release-threshold caching also
-remains a performance hint rather than allocator-reuse parity.
+`streamOrderedAllocation` million-element, 21-dispatch run passes; release-threshold
+caching remains a performance hint rather than allocator-reuse parity.
 
 `cublasSgetrfBatched` / `cublasDgetrfBatched` now factor tracked UMA matrices
 from a device-resident pointer table. Focused runtime coverage checks single and
 double precision, pivoted and no-pivot forms, singular per-batch `info`, and a
 truncated-table negative path while native Metal addresses are enabled. NVIDIA's
-unmodified `simpleCUBLAS_LU` host source compiles, but its 10,000-matrix run was
-not executed in this resource-bounded pass, so its manifest entry is not promoted.
+unmodified `simpleCUBLAS_LU` 10,000-matrix run passes the sweep.
 
-`cudaDeviceProp::cooperativeLaunch` is reported as **0** on purpose. Grid-wide
-`grid.sync()` across more than one threadgroup is a no-op under Metal, so
-`reductionMultiBlockCG` and `conjugateGradientMultiBlockCG` take the sample's own
-"does not support Cooperative Kernel Launch, waiving" path instead of silently
-computing the wrong answer.
+`cudaDeviceProp::cooperativeLaunch` is reported as **1** for resident grids.
+`reductionMultiBlockCG`, `conjugateGradientMultiBlockCG`, and `simpleAWBarrier`
+pass through the device-wide barrier path; oversized cooperative grids are
+rejected explicitly.
 
 Four samples formerly classified as runtime failures now pass after fixing three
 compatibility contracts: legacy-stream event recording enqueues a real marker and
@@ -667,20 +741,10 @@ error test covers both a missing Metal function and an early registered-kernel
 failure. `CUMETAL_DEBUG_LAUNCH=1` prints the detailed launch reason, and
 `CUMETAL_DEBUG_DUMP_IR_DIR=<dir>` dumps the emitted LLVM IR.
 
-- `clock`, `simpleHyperQ`, and `eigenvalues` hit "registered
-  kernel missing metallib" -- the lowering path declines these kernels
-  outright.
-
-  `clock` and `simpleHyperQ` require PTX `%clock`; public Metal exposes no
-  per-thread CUDA-compatible cycle counter, so CuMetal rejects it rather than
-  substituting wall time or a constant. `eigenvalues` remains implementable
-  compiler/runtime work, not classified as a platform limit. Its binary64
-  `__nv_frexp` call now has integer-only IEEE decomposition with focused GPU
-  mantissa/exponent coverage, but a resource-bounded 32x32 diagnostic compiled
-  its first kernel and then made no progress before a 30-second watchdog; the
-  default sample was not rerun and is not promoted. `simplePrintf`
-  left this list after module-global format relocation and packed tuple decoding
-  were validated against all 32 records from the unmodified upstream sample.
+- `%clock`, `%clock64`, and `%globaltimer` use a monotonic device-wide atomic
+  counter because public Metal exposes no CUDA-compatible cycle counter. This
+  preserves progress/timeout semantics but is not cycle-accurate profiling.
+  `clock`, `simpleHyperQ`, and `eigenvalues` pass the unmodified sweep.
 
 Three samples formerly appeared in that list because of missing CUDA libdevice
 integer helpers. `scalarProd` needed signed/unsigned 24-bit multiply, which now

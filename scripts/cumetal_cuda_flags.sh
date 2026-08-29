@@ -41,6 +41,13 @@ cumetal_cuda_device_flags() {
     arch="$(cumetal_cuda_arch)"
     CUMETAL_CUDA_DEVICE_FLAGS=(
         --cuda-gpu-arch="${arch}"
+        # CUDA warp idioms commonly shuffle a value initialized only by the
+        # leader lane. Clang otherwise treats the inactive lanes' source value
+        # as C++ undefined behavior at -O2 and can erase the lane guard, turning
+        # one atomic per warp into one atomic per lane. NVCC preserves the SIMT
+        # idiom; deterministic device-only initialization gives Clang the same
+        # observable behavior without changing ordinary host compilation.
+        -Xarch_device -ftrivial-auto-var-init=zero
     )
     local ptx_flags
     ptx_flags="$(cumetal_cuda_ptx_feature_flags "${arch}")"

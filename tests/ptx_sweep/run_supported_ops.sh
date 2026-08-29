@@ -72,6 +72,8 @@ run_case "sweep_bar_sync" "bar.sync 0;"
 run_case "sweep_setp_eq_s32" "setp.eq.s32 %p1, %r1, %r2;"
 run_case "sweep_bra_label" $'bra L_done;\nL_done:'
 run_case "sweep_atom_global_add_f32" "atom.global.add.f32 %f1, [%rd1], %f2;"
+run_case "sweep_vprintf" \
+    "call.uni (%r0), vprintf, (\"tid=%u\", %r1);"
 
 # Warp / SIMD-group primitives
 run_case "sweep_shfl_sync_idx"    "shfl.sync.idx.b32 %r1, %r2, %r3, 0x1f, 0xffffffff;"

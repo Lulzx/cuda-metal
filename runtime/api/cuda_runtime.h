@@ -42,6 +42,7 @@
 // declare malloc/free/exit. cumetalc force-includes this header, so pull those
 // declarations in here for source compatibility.
 #include <stdlib.h>
+#include <math.h>
 
 #include "cuda.h"
 
@@ -152,6 +153,11 @@ extern "C" {
 // lowers to PTX vprintf for CuMetal's bounded ring-buffer backend.
 #if defined(__clang__) && defined(__CUDA__)
 __device__ int printf(const char* format, ...);
+// Clang's CUDA <new> wrapper implements device new/delete in terms of these
+// C allocation entry points. The definitions are supplied by CuMetal's device
+// heap lowering rather than the host libc symbols with the same signatures.
+__device__ void* malloc(size_t size);
+__device__ void free(void* pointer);
 #endif
 
 typedef enum cudaError {
@@ -168,6 +174,7 @@ typedef enum cudaError {
     cudaErrorIllegalAddress = 700,
     cudaErrorLaunchOutOfResources = 701,
     cudaErrorLaunchFailure = 719,
+    cudaErrorCooperativeLaunchTooLarge = 720,
     cudaErrorNotPermitted = 800,
     cudaErrorNotSupported = 801,
     cudaErrorUnknown = 999,
@@ -323,15 +330,15 @@ typedef struct cudaDeviceProp {
     int kernelExecTimeoutEnabled;   // 0 (Metal does not enforce GPU timeout by default)
     int pageableMemoryAccess;       // 0 (arbitrary malloc pointers are not Metal-bound)
     int pageableMemoryAccessUsesHostPageTables; // 0 (CuMetal requires tracked allocations)
-    int cooperativeLaunch;          // 0 -- see cuda_runtime.cpp for why
+    int cooperativeLaunch;          // 1 for resident-grid barrier emulation
     int cooperativeMultiDeviceLaunch; // 0 (single device)
     // Growing this struct breaks any consumer binary built against an older
     // header: callers stack-allocate a cudaDeviceProp and cudaGetDeviceProperties
     // writes past the end of the smaller frame. Real CUDA absorbs new fields into
     // fixed-size reserved space; do the same so the next addition is free. Take a
     // slot from here rather than appending, and rebuild consumers if you cannot.
-    int persistingL2CacheMaxSize;    // 0 (public Metal has no persisting-L2 policy)
-    int accessPolicyMaxWindowSize;   // 0 (stream access-policy windows unsupported)
+    int persistingL2CacheMaxSize;    // accepted performance-hint budget
+    int accessPolicyMaxWindowSize;   // accepted stream access-window budget
     int cumetalReserved[60];
 } cudaDeviceProp;
 
@@ -429,6 +436,14 @@ typedef struct cudaPointerAttributes {
 typedef struct CUstream_st* cudaStream_t;
 #endif  // CUMETAL_CUDA_STREAM_T_DEFINED
 typedef struct CUevent_st* cudaEvent_t;
+#if defined(__clang__) && defined(__CUDA__)
+// Clang resolves device-side `<<<...>>>` syntax through this declaration when
+// relocatable device code is enabled. CuMetal lowers the resulting PTX call to
+// its device-launch queue rather than linking NVIDIA's cudadevrt.
+__device__ void* cudaGetParameterBuffer(size_t alignment, size_t size);
+__device__ cudaError_t cudaLaunchDevice(void*, void**, dim3, dim3,
+                                        unsigned int, cudaStream_t);
+#endif
 typedef void (*cudaStreamCallback_t)(cudaStream_t stream, cudaError_t status, void* user_data);
 
 typedef enum cudaAccessProperty {
@@ -633,6 +648,19 @@ typedef struct cudaChannelFormatDesc {
     cudaChannelFormatKind f;
 } cudaChannelFormatDesc;
 
+enum {
+    cudaArrayDefault = 0,
+    cudaArrayLayered = 0x01,
+    cudaArraySurfaceLoadStore = 0x02,
+    cudaArrayCubemap = 0x04,
+};
+
+typedef enum cudaSurfaceBoundaryMode {
+    cudaBoundaryModeZero = 0,
+    cudaBoundaryModeClamp = 1,
+    cudaBoundaryModeTrap = 2,
+} cudaSurfaceBoundaryMode;
+
 typedef enum cudaTextureAddressMode {
     cudaAddressModeWrap = 0,
     cudaAddressModeClamp = 1,
@@ -750,7 +778,7 @@ cudaError_t cudaHostGetFlags(unsigned int* flags, void* host_ptr);
 cudaError_t cudaFreeHost(void* ptr);
 cudaError_t cudaFree(void* dev_ptr);
 cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind);
-cudaError_t cudaMemcpyAsync(void* dst,
+__host__ __device__ cudaError_t cudaMemcpyAsync(void* dst,
                             const void* src,
                             size_t count,
                             cudaMemcpyKind kind,
@@ -820,9 +848,11 @@ cudaError_t cudaMemPrefetchAsync(const void* devPtr, size_t count, int dstDevice
 cudaError_t cudaMemAdvise(const void* devPtr, size_t count, cudaMemoryAdvise advice, int device);
 cudaError_t cudaMemRangeGetAttribute(void* data, size_t dataSize, cudaMemRangeAttribute attribute,
                                      const void* devPtr, size_t count);
+cudaError_t cudaStreamAttachMemAsync(cudaStream_t stream, void* devPtr, size_t length,
+                                     unsigned int flags);
 cudaError_t cudaDeviceReset(void);
 cudaError_t cudaStreamCreate(cudaStream_t* stream);
-cudaError_t cudaStreamCreateWithFlags(cudaStream_t* stream, unsigned int flags);
+__host__ __device__ cudaError_t cudaStreamCreateWithFlags(cudaStream_t* stream, unsigned int flags);
 cudaError_t cudaStreamCreateWithPriority(cudaStream_t* stream, unsigned int flags, int priority);
 cudaError_t cudaStreamGetFlags(cudaStream_t stream, unsigned int* flags);
 cudaError_t cudaStreamSetAttribute(cudaStream_t stream, cudaStreamAttrID attr,
@@ -831,7 +861,7 @@ cudaError_t cudaStreamGetAttribute(cudaStream_t stream, cudaStreamAttrID attr,
                                    cudaStreamAttrValue* value);
 cudaError_t cudaCtxResetPersistingL2Cache(void);
 cudaError_t cudaDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPriority);
-cudaError_t cudaStreamDestroy(cudaStream_t stream);
+__host__ __device__ cudaError_t cudaStreamDestroy(cudaStream_t stream);
 cudaError_t cudaStreamSynchronize(cudaStream_t stream);
 cudaError_t cudaStreamQuery(cudaStream_t stream);
 cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode mode);
@@ -865,7 +895,7 @@ cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream);
 cudaError_t cudaEventSynchronize(cudaEvent_t event);
 cudaError_t cudaEventQuery(cudaEvent_t event);
 cudaError_t cudaEventElapsedTime(float* ms, cudaEvent_t start, cudaEvent_t end);
-cudaError_t cudaDeviceSynchronize(void);
+__host__ __device__ cudaError_t cudaDeviceSynchronize(void);
 cudaError_t cudaLaunchKernel(const void* func,
                              dim3 grid_dim,
                              dim3 block_dim,
@@ -883,10 +913,10 @@ cudaError_t cudaConfigureCall(dim3 grid_dim,
 #endif
 cudaError_t cudaSetupArgument(const void* arg, size_t size, size_t offset);
 cudaError_t cudaLaunch(const void* func);
-cudaError_t cudaGetLastError(void);
-cudaError_t cudaPeekAtLastError(void);
+__host__ __device__ cudaError_t cudaGetLastError(void);
+__host__ __device__ cudaError_t cudaPeekAtLastError(void);
 const char* cudaGetErrorName(cudaError_t error);
-const char* cudaGetErrorString(cudaError_t error);
+__host__ __device__ const char* cudaGetErrorString(cudaError_t error);
 cudaError_t cudaProfilerStart(void);
 cudaError_t cudaProfilerStop(void);
 cudaError_t cudaFuncGetAttributes(cudaFuncAttributes* attr, const void* func);
@@ -961,6 +991,8 @@ cudaError_t cudaLaunchCooperativeKernel(const void* func,
 // ── Texture / Surface API ────────────────────────────────────────────────────
 cudaError_t cudaMallocArray(cudaArray_t* array, const cudaChannelFormatDesc* desc,
                              size_t width, size_t height, unsigned int flags);
+cudaError_t cudaMalloc3DArray(cudaArray_t* array, const cudaChannelFormatDesc* desc,
+                              cudaExtent extent, unsigned int flags);
 cudaError_t cudaFreeArray(cudaArray_t array);
 cudaError_t cudaMemcpy2DToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
                                  const void* src, size_t spitch, size_t width,
@@ -1152,6 +1184,222 @@ cudaError_t cudaThreadSetCacheConfig(cudaFuncCache cacheConfig);
 // CUDA headers provide C++ overloads for kernel-function pointers on several
 // runtime APIs. CuMetal's core C ABI uses `const void *`; these wrappers keep
 // source compatibility with code that passes typed kernel pointers directly.
+#include <type_traits>
+
+struct __cumetal_texture_descriptor {
+    unsigned long long data;
+    unsigned long long width;
+    unsigned long long height;
+    unsigned long long depth;
+    unsigned long long pitch_bytes;
+    unsigned int element_bytes;
+    unsigned int channel_kind;
+    unsigned int read_mode;
+    unsigned int filter_mode;
+    unsigned int normalized_coords;
+    unsigned int address_mode[3];
+};
+
+template <typename T>
+static inline cudaChannelFormatDesc cudaCreateChannelDesc() {
+    cudaChannelFormatDesc desc{};
+    desc.x = static_cast<int>(sizeof(T) * 8);
+    desc.f = std::is_floating_point<T>::value
+                 ? cudaChannelFormatKindFloat
+                 : (std::is_signed<T>::value ? cudaChannelFormatKindSigned
+                                             : cudaChannelFormatKindUnsigned);
+    return desc;
+}
+
+static inline cudaError_t cudaMallocArray(cudaArray_t* array,
+                                          const cudaChannelFormatDesc* desc,
+                                          size_t width, size_t height = 0) {
+    return ::cudaMallocArray(array, desc, width, height, cudaArrayDefault);
+}
+
+static inline cudaError_t cudaMalloc3DArray(cudaArray_t* array,
+                                            const cudaChannelFormatDesc* desc,
+                                            cudaExtent extent) {
+    return ::cudaMalloc3DArray(array, desc, extent, cudaArrayDefault);
+}
+
+__device__ __forceinline__ int __cumetal_texture_index(float coordinate,
+                                                        unsigned long long size,
+                                                        unsigned int normalized,
+                                                        unsigned int address_mode) {
+    float scaled = normalized ? coordinate * static_cast<float>(size) : coordinate;
+    int index = static_cast<int>(scaled);
+    if (static_cast<float>(index) > scaled) --index;
+    const int extent = static_cast<int>(size);
+    if (address_mode == cudaAddressModeWrap && extent > 0) {
+        index %= extent;
+        if (index < 0) index += extent;
+    } else if (address_mode == cudaAddressModeMirror && extent > 0) {
+        const int period = extent * 2;
+        index %= period;
+        if (index < 0) index += period;
+        if (index >= extent) index = period - 1 - index;
+    } else {
+        if (index < 0) index = 0;
+        if (index >= extent) index = extent - 1;
+    }
+    return index;
+}
+
+template <typename T>
+__device__ __forceinline__ T __cumetal_texture_load(
+    const __cumetal_texture_descriptor* descriptor, int x, int y, int z) {
+    const unsigned long long offset =
+        static_cast<unsigned long long>(z) * descriptor->pitch_bytes * descriptor->height +
+        static_cast<unsigned long long>(y) * descriptor->pitch_bytes +
+        static_cast<unsigned long long>(x) * descriptor->element_bytes;
+    const unsigned char* bytes =
+        reinterpret_cast<const unsigned char*>(descriptor->data + offset);
+    if (descriptor->read_mode == cudaReadModeNormalizedFloat &&
+        descriptor->channel_kind == cudaChannelFormatKindUnsigned &&
+        descriptor->element_bytes == 1) {
+        return static_cast<T>(static_cast<float>(*bytes) / 255.0f);
+    }
+    return *reinterpret_cast<const T*>(bytes);
+}
+
+template <typename T>
+__device__ __forceinline__ T tex2D(cudaTextureObject_t texture, float x, float y) {
+    const auto* descriptor = reinterpret_cast<const __cumetal_texture_descriptor*>(texture);
+    if (descriptor->filter_mode == cudaFilterModeLinear) {
+        const float sx = (descriptor->normalized_coords
+                              ? x * static_cast<float>(descriptor->width) : x) - 0.5f;
+        const float sy = (descriptor->normalized_coords
+                              ? y * static_cast<float>(descriptor->height) : y) - 0.5f;
+        int x0 = static_cast<int>(sx); if (static_cast<float>(x0) > sx) --x0;
+        int y0 = static_cast<int>(sy); if (static_cast<float>(y0) > sy) --y0;
+        const float fx = sx - static_cast<float>(x0);
+        const float fy = sy - static_cast<float>(y0);
+        const unsigned int address_x = descriptor->normalized_coords
+                                           ? descriptor->address_mode[0]
+                                           : cudaAddressModeClamp;
+        const unsigned int address_y = descriptor->normalized_coords
+                                           ? descriptor->address_mode[1]
+                                           : cudaAddressModeClamp;
+        const int ix0 = __cumetal_texture_index(static_cast<float>(x0), descriptor->width,
+                                                0, address_x);
+        const int ix1 = __cumetal_texture_index(static_cast<float>(x0 + 1), descriptor->width,
+                                                0, address_x);
+        const int iy0 = __cumetal_texture_index(static_cast<float>(y0), descriptor->height,
+                                                0, address_y);
+        const int iy1 = __cumetal_texture_index(static_cast<float>(y0 + 1), descriptor->height,
+                                                0, address_y);
+        const T p00 = __cumetal_texture_load<T>(descriptor, ix0, iy0, 0);
+        const T p10 = __cumetal_texture_load<T>(descriptor, ix1, iy0, 0);
+        const T p01 = __cumetal_texture_load<T>(descriptor, ix0, iy1, 0);
+        const T p11 = __cumetal_texture_load<T>(descriptor, ix1, iy1, 0);
+        return static_cast<T>((1.0f - fy) * ((1.0f - fx) * p00 + fx * p10) +
+                              fy * ((1.0f - fx) * p01 + fx * p11));
+    }
+    const int ix = __cumetal_texture_index(x, descriptor->width,
+                                           descriptor->normalized_coords,
+                                           descriptor->normalized_coords
+                                               ? descriptor->address_mode[0]
+                                               : cudaAddressModeClamp);
+    const int iy = __cumetal_texture_index(y, descriptor->height,
+                                           descriptor->normalized_coords,
+                                           descriptor->normalized_coords
+                                               ? descriptor->address_mode[1]
+                                               : cudaAddressModeClamp);
+    return __cumetal_texture_load<T>(descriptor, ix, iy, 0);
+}
+
+template <typename T>
+__device__ __forceinline__ T tex2DLayered(cudaTextureObject_t texture,
+                                          float x, float y, int layer) {
+    const auto* descriptor = reinterpret_cast<const __cumetal_texture_descriptor*>(texture);
+    const int ix = __cumetal_texture_index(x, descriptor->width,
+                                           descriptor->normalized_coords,
+                                           descriptor->address_mode[0]);
+    const int iy = __cumetal_texture_index(y, descriptor->height,
+                                           descriptor->normalized_coords,
+                                           descriptor->address_mode[1]);
+    const int iz = layer < 0 ? 0 : (layer >= static_cast<int>(descriptor->depth)
+                                        ? static_cast<int>(descriptor->depth) - 1 : layer);
+    return __cumetal_texture_load<T>(descriptor, ix, iy, iz);
+}
+
+template <typename T>
+__device__ __forceinline__ T tex3D(cudaTextureObject_t texture,
+                                   float x, float y, float z) {
+    const auto* descriptor = reinterpret_cast<const __cumetal_texture_descriptor*>(texture);
+    const int ix = __cumetal_texture_index(x, descriptor->width,
+                                           descriptor->normalized_coords,
+                                           descriptor->address_mode[0]);
+    const int iy = __cumetal_texture_index(y, descriptor->height,
+                                           descriptor->normalized_coords,
+                                           descriptor->address_mode[1]);
+    const int iz = __cumetal_texture_index(z, descriptor->depth,
+                                           descriptor->normalized_coords,
+                                           descriptor->address_mode[2]);
+    return __cumetal_texture_load<T>(descriptor, ix, iy, iz);
+}
+
+template <typename T>
+__device__ __forceinline__ T texCubemap(cudaTextureObject_t texture,
+                                        float x, float y, float z) {
+    const float ax = x < 0.0f ? -x : x;
+    const float ay = y < 0.0f ? -y : y;
+    const float az = z < 0.0f ? -z : z;
+    int face = 0;
+    float sc = 0.0f;
+    float tc = 0.0f;
+    float major = 1.0f;
+    if (ax >= ay && ax >= az) {
+        major = ax;
+        if (x >= 0.0f) {
+            face = 0;
+            sc = -z;
+            tc = -y;
+        } else {
+            face = 1;
+            sc = z;
+            tc = -y;
+        }
+    } else if (ay >= az) {
+        major = ay;
+        if (y >= 0.0f) {
+            face = 2;
+            sc = x;
+            tc = z;
+        } else {
+            face = 3;
+            sc = x;
+            tc = -z;
+        }
+    } else {
+        major = az;
+        if (z >= 0.0f) {
+            face = 4;
+            sc = x;
+            tc = -y;
+        } else {
+            face = 5;
+            sc = -x;
+            tc = -y;
+        }
+    }
+    const float u = 0.5f * (sc / major + 1.0f);
+    const float v = 0.5f * (tc / major + 1.0f);
+    return tex2DLayered<T>(texture, u, v, face);
+}
+
+template <typename T>
+__device__ __forceinline__ void surf2Dwrite(T value, cudaSurfaceObject_t surface,
+                                            int x_byte, int y,
+                                            cudaSurfaceBoundaryMode = cudaBoundaryModeTrap) {
+    const auto* descriptor = reinterpret_cast<const __cumetal_texture_descriptor*>(surface);
+    unsigned char* destination = reinterpret_cast<unsigned char*>(
+        descriptor->data + static_cast<unsigned long long>(y) * descriptor->pitch_bytes +
+        static_cast<unsigned int>(x_byte));
+    *reinterpret_cast<T*>(destination) = value;
+}
+
 template <typename KernelFn>
 static inline cudaError_t cudaFuncGetAttributes(cudaFuncAttributes* attr, KernelFn* func) {
     return ::cudaFuncGetAttributes(attr, reinterpret_cast<const void*>(func));
@@ -1221,6 +1469,27 @@ static inline cudaError_t cudaMallocHost(T** ptr, size_t size, unsigned int flag
 template <typename T>
 static inline cudaError_t cudaHostAlloc(T** ptr, size_t size, unsigned int flags) {
     return ::cudaHostAlloc(reinterpret_cast<void**>(ptr), size, flags);
+}
+
+template <typename T>
+static inline cudaError_t cudaHostGetDevicePointer(T** dev_ptr, void* host_ptr,
+                                                    unsigned int flags) {
+    return ::cudaHostGetDevicePointer(reinterpret_cast<void**>(dev_ptr), host_ptr, flags);
+}
+
+// CUDA 13 accepts a typed memory location plus flags and an optional stream.
+// CuMetal maps both host and device locations onto the same UMA allocation.
+static inline cudaError_t cudaMemPrefetchAsync(const void* dev_ptr, size_t count,
+                                                cudaMemLocation location,
+                                                unsigned int flags = 0,
+                                                cudaStream_t stream = nullptr) {
+    if (flags != 0 ||
+        (location.type != cudaMemLocationTypeHost &&
+         location.type != cudaMemLocationTypeDevice)) {
+        return cudaErrorInvalidValue;
+    }
+    const int destination = location.type == cudaMemLocationTypeHost ? -1 : location.id;
+    return ::cudaMemPrefetchAsync(dev_ptr, count, destination, stream);
 }
 
 template <typename T>
@@ -2141,6 +2410,7 @@ static __device__ __forceinline__ float __sinf(float x)  { return __builtin_sinf
 static __device__ __forceinline__ float __cosf(float x)  { return __builtin_cosf(x); }
 static __device__ __forceinline__ float __tanf(float x)  { return __builtin_tanf(x); }
 static __device__ __forceinline__ float __expf(float x)  { return __builtin_expf(x); }
+
 static __device__ __forceinline__ float __exp2f(float x) { return __builtin_exp2f(x); }
 static __device__ __forceinline__ float __logf(float x)  { return __builtin_logf(x); }
 static __device__ __forceinline__ float __log2f(float x) { return __builtin_log2f(x); }
@@ -2153,6 +2423,17 @@ static __device__ __forceinline__ float __frcp_rn(float x){ return 1.0f / x; }
 static __device__ __forceinline__ float __fsqrt_rn(float x){ return __builtin_sqrtf(x); }
 
 #endif  // !__CLANG_CUDA_DEVICE_FUNCTIONS_H__
+
+// CUDA's math headers make nan() callable from device code, but Clang's
+// -nocudainc wrapper leaves libc's declaration host-only. Keep this outside
+// __CLANG_CUDA_DEVICE_FUNCTIONS_H__: recent Clang defines that guard without
+// supplying nan().
+#if defined(__CUDA_ARCH__)
+static __device__ __forceinline__ double __cumetal_nan(const char*) {
+    return __builtin_nan("");
+}
+#define nan __cumetal_nan
+#endif
 
 // Integer dot-product intrinsic (4x int8 -> int32 accumulate). Clang's CUDA
 // headers may not provide __dp4a in CUDA mode without NVIDIA headers.

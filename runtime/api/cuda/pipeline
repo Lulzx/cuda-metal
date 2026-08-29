@@ -1,0 +1,64 @@
+#pragma once
+
+#include "cuda_runtime.h"
+
+#include <stddef.h>
+
+namespace cuda {
+
+enum thread_scope {
+    thread_scope_thread,
+    thread_scope_block,
+    thread_scope_device,
+    thread_scope_system,
+};
+
+enum class pipeline_role { producer, consumer };
+
+template <size_t Alignment>
+class aligned_size_t {
+public:
+    explicit constexpr aligned_size_t(size_t size) : size_(size) {}
+    constexpr operator size_t() const { return size_; }
+private:
+    size_t size_;
+};
+
+template <thread_scope Scope, size_t Stages>
+struct pipeline_shared_state {};
+
+template <thread_scope Scope>
+class pipeline {
+public:
+    __device__ __forceinline__ void producer_acquire() const {}
+    __device__ __forceinline__ void producer_commit() const {}
+    __device__ __forceinline__ void consumer_wait() const {}
+    __device__ __forceinline__ void consumer_release() const {}
+};
+
+__device__ __forceinline__ pipeline<thread_scope_thread> make_pipeline() {
+    return {};
+}
+
+template <typename Group, thread_scope Scope, size_t Stages>
+__device__ __forceinline__ pipeline<Scope>
+make_pipeline(const Group&, pipeline_shared_state<Scope, Stages>*, pipeline_role) {
+    return {};
+}
+
+template <typename Destination, typename Source, size_t Alignment, thread_scope Scope>
+__device__ __forceinline__ void memcpy_async(Destination* destination,
+                                              const Source* source,
+                                              aligned_size_t<Alignment> size,
+                                              pipeline<Scope>&) {
+    __builtin_memcpy(destination, source, static_cast<size_t>(size));
+}
+
+template <size_t Prior, thread_scope Scope>
+__device__ __forceinline__ void pipeline_consumer_wait_prior(
+    pipeline<Scope>& value) {
+    (void)Prior;
+    value.consumer_wait();
+}
+
+} // namespace cuda

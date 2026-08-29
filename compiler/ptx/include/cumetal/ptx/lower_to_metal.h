@@ -43,6 +43,7 @@ struct LowerToMetalResult {
     // printf metadata: if the kernel uses device printf, the compiler injects a hidden
     // ring-buffer argument (spec §5.3).  printf_formats[i] is the format string for id i.
     std::vector<std::string> printf_formats;
+    bool uses_device_heap = false;
     std::vector<std::string> warnings;
     std::string error;
 };

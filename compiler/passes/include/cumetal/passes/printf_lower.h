@@ -22,6 +22,9 @@ struct PrintfLoweredCall {
     std::uint32_t format_id = 0;
     std::string format_token;
     std::vector<std::string> arguments;
+    // Width of each packed CUDA ABI argument. Clang uses 64-bit slots for
+    // pointers (notably `%s`) and 32-bit slots for the common scalar cases.
+    std::vector<int> argument_bits;
     // PTX instructions used only to construct Clang's vprintf ABI arguments
     // (module-global format pointer plus packed local argument tuple).  The
     // direct Metal emitter consumes the decoded values and skips these lines.

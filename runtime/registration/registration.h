@@ -4,6 +4,7 @@
 #include "metal_backend.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -24,12 +25,15 @@ struct RegisteredGlobalSymbol {
 };
 
 struct RegisteredKernel {
+    void* module_handle = nullptr;
     std::string metallib_path;
     std::string kernel_name;
     std::vector<cumetalKernelArgInfo_t> arg_info;
     // Device printf format table (spec §5.3): non-empty iff kernel uses printf.
     // printf_formats[i] is the format string for format id i.
     std::vector<std::string> printf_formats;
+    bool uses_device_heap = false;
+    bool uses_device_launch_queue = false;
     // Total bytes of static __shared__ memory (non-extern .shared declarations).
     // Used to call setThreadgroupMemoryLength when no dynamic shared memory is specified.
     std::size_t static_shared_bytes = 0;
@@ -64,6 +68,12 @@ bool find_arg_info_for_ptx_entry(const std::string& ptx_source,
                                  std::vector<cumetalKernelArgInfo_t>* out);
 
 bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out);
+// Resolve a device-side kernel token emitted by the PTX lowering into a normal
+// host launch alias backed by the same registration module.
+bool lookup_device_kernel_alias(void* module_handle,
+                                std::uint64_t token,
+                                const void** out_host_function,
+                                RegisteredKernel* out_kernel = nullptr);
 bool lookup_registered_symbol(const void* host_symbol,
                               const void** out_device_symbol,
                               std::size_t* out_size);
@@ -76,6 +86,10 @@ extern "C" {
 void** __cudaRegisterFatBinary(const void* fat_cubin);
 void** __cudaRegisterFatBinary2(const void* fat_cubin, ...);
 void** __cudaRegisterFatBinary3(const void* fat_cubin, ...);
+void __cudaRegisterLinkedBinary(void (*register_globals)(void**),
+                                void* fatbin_wrapper,
+                                void* module_id,
+                                void (*callback)(void));
 void __cudaRegisterFatBinaryEnd(void** fat_cubin_handle);
 void __cudaUnregisterFatBinary(void** fat_cubin_handle);
 void __cudaRegisterFunction(void** fat_cubin_handle,

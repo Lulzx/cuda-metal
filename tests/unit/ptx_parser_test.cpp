@@ -117,6 +117,62 @@ L_done:
         return 1;
     }
 
+    const std::string debug_metadata_ptx = R"PTX(
+.version 8.0
+.target sm_90
+.file 1 "debug_metadata.cu"
+.visible .entry debug_metadata()
+{
+    .reg .b64 %rd1;
+    .loc 1 7 5
+    mov.u64 %rd1, 42;
+    .pragma "nounroll"
+    add.u64 %rd1, %rd1, 1;
+    ret;
+}
+)PTX";
+    const auto debug_metadata = cumetal::ptx::parse_ptx(debug_metadata_ptx);
+    if (!expect(debug_metadata.ok, "parse debug metadata PTX") ||
+        !expect(debug_metadata.module.entries[0].instructions.size() == 3,
+                "single-line metadata does not consume following instruction") ||
+        !expect(debug_metadata.module.entries[0].instructions[0].opcode == "mov.u64",
+                "instruction after .loc is retained") ||
+        !expect(debug_metadata.module.entries[0].instructions[1].opcode == "add.u64",
+                "instruction after .pragma is retained")) {
+        return 1;
+    }
+
+    const std::string indexed_branch_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry indexed_branch()
+{
+    .reg .b32 %r1;
+    $L_table: .branchtargets
+        $L_zero,
+        $L_one;
+    brx.idx %r1, $L_table;
+$L_zero:
+    ret;
+$L_one:
+    ret;
+}
+)PTX";
+    const auto indexed_branch = cumetal::ptx::parse_ptx(indexed_branch_ptx);
+    if (!expect(indexed_branch.ok, "parse indexed branch target table") ||
+        !expect(indexed_branch.module.entries[0].instructions.size() == 6,
+                "indexed branch instruction count") ||
+        !expect(indexed_branch.module.entries[0].instructions[0].opcode ==
+                    "ptx.branchtargets",
+                "branch-target table pseudo opcode") ||
+        !expect(indexed_branch.module.entries[0].instructions[0].operands.size() == 3,
+                "branch-target table operands") ||
+        !expect(indexed_branch.module.entries[0].instructions[1].opcode == "brx.idx" &&
+                    indexed_branch.module.entries[0].instructions[1].supported,
+                "indexed branch opcode supported")) {
+        return 1;
+    }
+
     const std::string unsupported_ptx = R"PTX(
 .version 8.0
 .target sm_90
@@ -304,6 +360,43 @@ L_done:
                     tma_parse.warnings[0].find("Tensor Memory") != std::string::npos,
                 "TMA warning identifies TMA opcode"))
         return 1;
+
+    const std::string extern_before_entry_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.weak .entry allocation_kernel(
+    .param .u64 output
+);
+.extern .func (.param .b64 retval) _Znam(
+    .param .b64 size
+);
+.visible .entry allocation_kernel(
+    .param .u64 output
+)
+{
+    mov.u32 %r1, %tid.x;
+    ret;
+}
+.func (.param .b32 retval) helper(
+    .param .b32 value
+)
+{
+    ld.param.b32 %r1, [value];
+    st.param.b32 [retval], %r1;
+    ret;
+}
+)PTX";
+    const auto extern_before_entry = cumetal::ptx::parse_ptx(extern_before_entry_ptx);
+    if (!expect(extern_before_entry.ok, "extern function before entry parses") ||
+        !expect(extern_before_entry.module.entries.size() == 1 &&
+                    extern_before_entry.module.entries[0].params.size() == 1,
+                "forward entry declaration does not absorb later ABI parameters") ||
+        !expect(extern_before_entry.module.functions.size() == 1,
+                "extern function declaration is not mistaken for a definition") ||
+        !expect(extern_before_entry.module.functions[0].name == "helper",
+                "real device function definition remains visible")) {
+        return 1;
+    }
 
     std::printf("PASS: ptx parser unit tests\n");
     return 0;

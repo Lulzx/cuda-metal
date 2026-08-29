@@ -44,6 +44,19 @@ struct LowerToLlvmResult {
     bool uses_atomic_lock_bank = false;
     std::string entry_name;
     std::string llvm_ir;
+    // Device printf uses two hidden kernel arguments (ring buffer and capacity).
+    // The runtime drains records using this format-id table.
+    std::vector<std::string> printf_formats;
+    // Device malloc/free use one persistent hidden global-memory heap buffer.
+    bool uses_device_heap = false;
+    // CUDA dynamic parallelism uses a hidden launch queue drained by the host
+    // runtime after each parent dispatch.
+    bool uses_device_launch_queue = false;
+    // PTX clock/globaltimer reads use a hidden device-wide 32-bit atomic
+    // counter. Public Metal exposes no shader cycle counter, so this preserves
+    // monotonic/wraparound control-flow semantics without claiming timing
+    // accuracy.
+    bool uses_device_clock = false;
     std::vector<std::string> warnings;
     std::string error;
 };
@@ -64,6 +77,9 @@ struct ExternalConstantSymbol {
 // bindings, so a metallib is self-describing and no separate flag can drift.
 inline constexpr std::size_t kAtomicLockBankBindingIndex = 29;
 inline constexpr std::size_t kAtomicLockBankSlots = 4096;
+inline constexpr std::size_t kDeviceClockBindingIndex = 28;
+inline constexpr std::size_t kGridBarrierBindingIndex = 27;
+inline constexpr std::size_t kGridYOffsetBindingIndex = 26;
 
 std::vector<ExternalConstantSymbol> find_referenced_external_constant_symbols(
     std::string_view ptx,

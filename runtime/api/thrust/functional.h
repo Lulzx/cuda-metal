@@ -79,6 +79,16 @@ struct greater {
     bool operator()(const T& a, const T& b) const { return a > b; }
 };
 
+template <typename T = void>
+struct greater_equal {
+    bool operator()(const T& a, const T& b) const { return a >= b; }
+};
+
+template <typename T = void>
+struct not_equal_to {
+    bool operator()(const T& a, const T& b) const { return a != b; }
+};
+
 // Placeholder types used by thrust::transform with binary operations
 struct placeholders {
     struct _1_t {} static constexpr _1{};

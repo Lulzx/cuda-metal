@@ -1,4 +1,5 @@
 #include "cuda_runtime.h"
+#include "cuda_gl_interop.h"
 
 #include "allocation_table.h"
 #include "cumetal_diag.h"
@@ -37,6 +38,8 @@ struct CUstream_st {};
 // to root-cause which offloaded op silently corrupts output (e.g. llama.cpp at
 // NGL=0). Disabled by default; no cost when off.
 namespace {
+
+extern "C" int cumetalDriverRuntimeActivatePrimaryContext(int device);
 bool trace_enabled() {
     static int v = -1;
     if (v < 0) v = cumetal::diag_env_truthy("CUMETAL_TRACE") ? 1 : 0;
@@ -213,7 +216,20 @@ struct CUevent_st {
     std::shared_ptr<cumetal::metal_backend::Stream> stream;
     std::uint64_t ticket = 0;
     std::chrono::steady_clock::time_point timestamp{};
+    // During stream capture an event carries the graph frontier to a stream
+    // that waits on it. CUDA uses this to join event-linked streams into the
+    // same capture. The graph owns the event-independent node lifetime.
+    cudaGraph_t capture_graph = nullptr;
     std::mutex mutex;
+};
+
+struct CuMetalArray {
+    void* data = nullptr;
+    size_t width = 0;
+    size_t height = 0;
+    size_t depth = 1;
+    unsigned int flags = cudaArrayDefault;
+    cudaChannelFormatDesc desc{};
 };
 
 namespace {
@@ -241,8 +257,14 @@ struct RuntimeState {
     struct StreamRecord {
         std::shared_ptr<cumetal::metal_backend::Stream> backend;
         unsigned int flags = cudaStreamDefault;
+        cudaStreamAttrValue access_policy{};
     };
     std::unordered_map<cudaStream_t, StreamRecord> streams;
+    cudaStreamAttrValue default_stream_access_policy{};
+    std::mutex device_heap_mutex;
+    std::size_t device_heap_size = 8u * 1024u * 1024u;
+    std::shared_ptr<cumetal::metal_backend::Buffer> device_heap;
+    std::size_t persisting_l2_limit = 0;
 };
 
 RuntimeState& runtime_state() {
@@ -445,8 +467,9 @@ cudaError_t take_pending_launch_error() {
 // ── Device printf drain (spec §5.3) ─────────────────────────────────────────
 // Ring-buffer layout (all words are uint32):
 //   buf[0]          = atomic write-word-count (total words written after index 0)
-//   buf[1..]        = packed records: [fmt_id, n_args, arg0, ..., argN-1]
-// Float args are stored as as_type<uint>(f); integers as uint casts.
+//   buf[1..]        = packed records: [fmt_id, payload_words, arg words...]
+// Float args are stored as as_type<uint>(f); 64-bit ABI slots occupy low/high
+// words so a following 32-bit argument keeps its proper position.
 
 void drain_one_printf_record(const std::string& fmt,
                              const std::uint32_t* args,
@@ -482,10 +505,16 @@ void drain_one_printf_record(const std::string& fmt,
                 spec += fmt[i++];
             }
         }
-        // Skip length modifiers (all device args are stored as 32-bit)
+        // Track length modifiers so packed 64-bit scalar slots do not shift
+        // every following argument. String pointers are also 64-bit in Clang's
+        // CUDA ABI, although string materialization remains a separate gap.
+        bool wide_modifier = false;
         while (i < fmt.size() &&
                (fmt[i] == 'l' || fmt[i] == 'h' || fmt[i] == 'z' ||
                 fmt[i] == 'j' || fmt[i] == 't')) {
+            if (fmt[i] == 'l' || fmt[i] == 'z' || fmt[i] == 'j' || fmt[i] == 't') {
+                wide_modifier = true;
+            }
             ++i;
         }
         if (i >= fmt.size()) { break; }
@@ -494,6 +523,16 @@ void drain_one_printf_record(const std::string& fmt,
 
         if (arg_idx >= n_args) {
             std::fputs(spec.c_str(), stderr);
+            continue;
+        }
+        if (conv == 's') {
+            arg_idx += std::min<std::uint32_t>(2u, n_args - arg_idx);
+            std::fputs("[string]", stderr);
+            continue;
+        }
+        if (wide_modifier && arg_idx + 1u < n_args) {
+            arg_idx += 2u;
+            std::fputs("[64-bit]", stderr);
             continue;
         }
         const std::uint32_t raw = args[arg_idx++];
@@ -508,8 +547,6 @@ void drain_one_printf_record(const std::string& fmt,
             std::fprintf(stderr, spec.c_str(), raw);
         } else if (conv == 'c') {
             std::fprintf(stderr, spec.c_str(), static_cast<int>(raw));
-        } else if (conv == 's') {
-            std::fputs("[string]", stderr);
         } else {
             std::fputs(spec.c_str(), stderr);
         }
@@ -757,11 +794,70 @@ bool is_device_pointer(const void* ptr) {
     return state.allocations.resolve(ptr, &resolved);
 }
 
+void relocate_embedded_device_pointers(
+    std::vector<std::uint8_t>* bytes,
+    std::vector<std::shared_ptr<cumetal::metal_backend::Buffer>>* resident_buffers = nullptr) {
+    if (bytes == nullptr || bytes->size() < sizeof(std::uintptr_t)) return;
+    RuntimeState& state = runtime_state();
+    // CUDA permits aggregates passed by value to contain device pointers. The
+    // public CuMetal pointer is normally the CPU mapping of a shared MTLBuffer,
+    // while a pointer dereferenced inside Metal must be its GPU virtual address.
+    // Pointer fields follow the platform ABI's natural pointer alignment.
+    for (std::size_t offset = 0; offset + sizeof(std::uintptr_t) <= bytes->size();
+         offset += alignof(std::uintptr_t)) {
+        std::uintptr_t candidate = 0;
+        std::memcpy(&candidate, bytes->data() + offset, sizeof(candidate));
+        if (candidate == 0) continue;
+        cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+        if (!state.allocations.resolve(reinterpret_cast<void*>(candidate), &resolved) ||
+            resolved.buffer == nullptr) {
+            continue;
+        }
+        const std::uintptr_t gpu_base = resolved.buffer->device_address();
+        if (gpu_base == 0 ||
+            gpu_base > std::numeric_limits<std::uintptr_t>::max() - resolved.offset) {
+            continue;
+        }
+        const std::uintptr_t relocated = gpu_base + resolved.offset;
+        std::memcpy(bytes->data() + offset, &relocated, sizeof(relocated));
+        if (resident_buffers != nullptr) {
+            resident_buffers->push_back(resolved.buffer);
+        }
+    }
+}
+
+void restore_embedded_host_pointers(std::vector<std::uint8_t>* bytes) {
+    if (bytes == nullptr || bytes->size() < sizeof(std::uintptr_t)) return;
+    RuntimeState& state = runtime_state();
+    for (std::size_t offset = 0; offset + sizeof(std::uintptr_t) <= bytes->size();
+         offset += alignof(std::uintptr_t)) {
+        std::uintptr_t candidate = 0;
+        std::memcpy(&candidate, bytes->data() + offset, sizeof(candidate));
+        if (candidate == 0) continue;
+        cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+        if (!state.allocations.resolve(reinterpret_cast<void*>(candidate), &resolved) ||
+            resolved.buffer == nullptr || resolved.buffer->contents() == nullptr) {
+            continue;
+        }
+        const std::uintptr_t host_base =
+            reinterpret_cast<std::uintptr_t>(resolved.buffer->contents());
+        if (host_base > std::numeric_limits<std::uintptr_t>::max() - resolved.offset) {
+            continue;
+        }
+        const std::uintptr_t restored = host_base + resolved.offset;
+        std::memcpy(bytes->data() + offset, &restored, sizeof(restored));
+    }
+}
+
 bool use_metal_device_addresses() {
     const char* value = std::getenv("CUMETAL_USE_METAL_DEVICE_ADDRESSES");
     return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0 &&
            std::strcmp(value, "false") != 0 && std::strcmp(value, "FALSE") != 0;
 }
+
+void collect_texture_resource_residency(
+    std::uintptr_t handle,
+    std::vector<std::shared_ptr<cumetal::metal_backend::Buffer>>* buffers);
 
 cudaError_t activate_graph_allocation(
     const std::shared_ptr<GraphAllocationState>& allocation) {
@@ -2172,6 +2268,9 @@ cudaError_t cudaSetDevice(int device) {
     if (device != 0) {
         return fail(cudaErrorInvalidValue);
     }
+    if (cumetalDriverRuntimeActivatePrimaryContext(device) == 0) {
+        return fail(cudaErrorMemoryAllocation);
+    }
 
     RuntimeState& state = runtime_state();
     state.current_device = device;
@@ -2237,8 +2336,9 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     prop->totalGlobalMem = backend_props.total_global_mem;
     prop->warpSize = 32;
     prop->multiProcessorCount = backend_props.multi_processor_count;
-    prop->maxThreadsPerBlock =
-        backend_props.max_threads_per_block > 0 ? backend_props.max_threads_per_block : 1024;
+    prop->maxThreadsPerBlock = backend_props.max_threads_per_block > 0
+                                   ? std::min(backend_props.max_threads_per_block, 1024)
+                                   : 1024;
     prop->maxThreadsDim[0] = prop->maxThreadsPerBlock;
     prop->maxThreadsDim[1] = prop->maxThreadsPerBlock;
     prop->maxThreadsDim[2] = prop->maxThreadsPerBlock;
@@ -2293,15 +2393,16 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     // select a path the launch code rejects.
     prop->pageableMemoryAccess = 0;
     prop->pageableMemoryAccessUsesHostPageTables = 0;
-    // Reported as unsupported on purpose. cudaLaunchCooperativeKernel exists, but
-    // grid-wide sync across more than one threadgroup is a no-op under Metal (see
-    // the warn_once in the cooperative launch path). Code that probes this flag
-    // before using grid.sync() must take the fallback path, not silently get
-    // wrong answers.
-    prop->cooperativeLaunch = 0;
+    // Cooperative grids are bounded to one resident threadgroup per reported
+    // processor and use the compiler-injected device-wide barrier state.
+    prop->cooperativeLaunch = 1;
     prop->cooperativeMultiDeviceLaunch = 0;
-    prop->persistingL2CacheMaxSize = 0;
-    prop->accessPolicyMaxWindowSize = 0;
+    // Metal owns physical cache residency, but CUDA access-policy windows are
+    // correctness-neutral performance hints. Accept and round-trip a
+    // conservative quarter-L2 window so portable callers need no alternate
+    // control path.
+    prop->persistingL2CacheMaxSize = prop->l2CacheSize / 4;
+    prop->accessPolicyMaxWindowSize = prop->l2CacheSize / 4;
     for (size_t i = 0; i < sizeof(prop->cumetalReserved) / sizeof(prop->cumetalReserved[0]); ++i) {
         prop->cumetalReserved[i] = 0;
     }
@@ -2386,7 +2487,7 @@ cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device) {
             *value = 0;
             break;
         case cudaDevAttrCooperativeLaunch:
-            *value = 0;
+            *value = 1;
             break;
         case cudaDevAttrMemoryBusWidth:
             *value = 128;
@@ -2507,9 +2608,11 @@ cudaError_t cudaMalloc(void** dev_ptr, size_t size) {
 cudaError_t cudaMallocManaged(void** dev_ptr, size_t size, unsigned int flags) {
     // CUDA's C++ overload defaults to cudaMemAttachGlobal. Zero was accepted
     // by older CuMetal headers, so retain it as a compatibility spelling.
-    // Host/single-stream attachment needs migration/stream-attachment state
-    // that CuMetal does not yet model and must not be silently accepted.
-    if (flags != 0 && flags != cudaMemAttachGlobal) {
+    // cudaMemAttachHost makes an allocation initially host-accessible. Shared
+    // storage on Apple Silicon already has that property, and later stream
+    // attachment is an ordering hint rather than a migration. SINGLE still
+    // needs per-stream accessibility state and remains unsupported.
+    if (flags != 0 && flags != cudaMemAttachGlobal && flags != cudaMemAttachHost) {
         return fail(cudaErrorInvalidValue);
     }
     return cudaMalloc(dev_ptr, size);
@@ -2733,8 +2836,6 @@ cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind 
     if (kind_status != cudaSuccess) {
         return fail(kind_status);
     }
-    (void)resolved_kind;
-
     std::string error;
     const cudaError_t sync_status = cumetal::metal_backend::synchronize(&error);
     if (sync_status != cudaSuccess) {
@@ -2747,7 +2848,19 @@ cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind 
         if (host_dst == nullptr || host_src == nullptr) {
             return fail(cudaErrorInvalidValue);
         }
-        std::memcpy(host_dst, host_src, count);
+        if (resolved_kind == cudaMemcpyHostToDevice) {
+            std::vector<std::uint8_t> staged(count);
+            std::memcpy(staged.data(), host_src, count);
+            relocate_embedded_device_pointers(&staged);
+            std::memcpy(host_dst, staged.data(), count);
+        } else if (resolved_kind == cudaMemcpyDeviceToHost) {
+            std::vector<std::uint8_t> staged(count);
+            std::memcpy(staged.data(), host_src, count);
+            restore_embedded_host_pointers(&staged);
+            std::memcpy(host_dst, staged.data(), count);
+        } else {
+            std::memcpy(host_dst, host_src, count);
+        }
     }
 
     if (trace_enabled()) {
@@ -2790,8 +2903,6 @@ cudaError_t cudaMemcpyAsync(void* dst,
     if (kind_status != cudaSuccess) {
         return fail(kind_status);
     }
-    (void)resolved_kind;
-
     // When both ends are tracked allocations this is a Metal blit in the
     // stream's own command buffer -- a real stream-ordered GPU copy.
     //
@@ -2832,9 +2943,25 @@ cudaError_t cudaMemcpyAsync(void* dst,
     if ((host_dst == nullptr || host_src == nullptr) && count > 0) {
         return fail(cudaErrorInvalidValue);
     }
+    std::shared_ptr<std::vector<std::uint8_t>> staged_h2d;
+    if (count > 0 && resolved_kind == cudaMemcpyHostToDevice) {
+        staged_h2d = std::make_shared<std::vector<std::uint8_t>>(count);
+        std::memcpy(staged_h2d->data(), host_src, count);
+        relocate_embedded_device_pointers(staged_h2d.get());
+    }
     const cudaError_t enqueue_status = enqueue_stream_host_op(
-        stream, [host_dst, host_src, count]() {
-            if (count > 0) std::memcpy(host_dst, host_src, count);
+        stream, [host_dst, host_src, count, resolved_kind, staged_h2d]() {
+            if (count == 0) return;
+            if (staged_h2d != nullptr) {
+                std::memcpy(host_dst, staged_h2d->data(), count);
+            } else if (resolved_kind == cudaMemcpyDeviceToHost) {
+                std::vector<std::uint8_t> staged(count);
+                std::memcpy(staged.data(), host_src, count);
+                restore_embedded_host_pointers(&staged);
+                std::memcpy(host_dst, staged.data(), count);
+            } else {
+                std::memcpy(host_dst, host_src, count);
+            }
         });
     if (enqueue_status != cudaSuccess) return fail(enqueue_status);
 
@@ -3073,7 +3200,7 @@ cudaError_t cudaMemsetAsync(void* dev_ptr, int value, size_t count, cudaStream_t
 cudaError_t cudaMemcpy2D(void* dst, size_t dpitch,
                           const void* src, size_t spitch,
                           size_t width, size_t height,
-                          cudaMemcpyKind /*kind*/) {
+                          cudaMemcpyKind kind) {
     if ((dst == nullptr || src == nullptr) && (width > 0 && height > 0)) {
         return fail(cudaErrorInvalidValue);
     }
@@ -3081,6 +3208,24 @@ cudaError_t cudaMemcpy2D(void* dst, size_t dpitch,
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {
         return fail(init_status);
+    }
+
+    if (width > 0 && height > 0) {
+        cudaMemcpyKind resolved_kind = cudaMemcpyDefault;
+        const cudaError_t kind_status = resolve_memcpy_kind(dst, src, kind, &resolved_kind);
+        if (kind_status != cudaSuccess) {
+            return fail(kind_status);
+        }
+    }
+
+    // This is a synchronous API. The row copy is performed by the host over
+    // unified memory, so all preceding Metal work must be visible first just
+    // as it is for cudaMemcpy. In particular, device-to-device copies into a
+    // cudaArray are commonly used between a producer kernel and texture fetch.
+    std::string sync_error;
+    const cudaError_t sync_status = cumetal::metal_backend::synchronize(&sync_error);
+    if (sync_status != cudaSuccess) {
+        return fail(sync_status);
     }
 
     auto* d = static_cast<uint8_t*>(host_accessible_pointer(
@@ -3208,9 +3353,62 @@ cudaError_t cudaMemcpy3D(const cudaMemcpy3DParms* p) {
     if (p == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    // Array-backed 3D copies are not supported on this implementation.
     if (p->srcArray != nullptr || p->dstArray != nullptr) {
-        return fail(cudaErrorInvalidValue);
+        const auto* source_array = reinterpret_cast<const CuMetalArray*>(p->srcArray);
+        auto* destination_array = reinterpret_cast<CuMetalArray*>(p->dstArray);
+        const CuMetalArray* shape_array = source_array != nullptr ? source_array : destination_array;
+        if (shape_array == nullptr || (source_array == nullptr && p->srcPtr.ptr == nullptr) ||
+            (destination_array == nullptr && p->dstPtr.ptr == nullptr)) {
+            return fail(cudaErrorInvalidValue);
+        }
+        const size_t element_size = static_cast<size_t>(
+            (shape_array->desc.x + shape_array->desc.y + shape_array->desc.z +
+             shape_array->desc.w + 7) / 8);
+        if (element_size == 0) return fail(cudaErrorInvalidValue);
+        if (source_array != nullptr && destination_array != nullptr) {
+            const size_t destination_element_size = static_cast<size_t>(
+                (destination_array->desc.x + destination_array->desc.y +
+                 destination_array->desc.z + destination_array->desc.w + 7) / 8);
+            if (destination_element_size != element_size) return fail(cudaErrorInvalidValue);
+        }
+        const size_t width_bytes = p->extent.width * element_size;
+        const size_t source_pitch = source_array != nullptr
+                                        ? source_array->width * element_size
+                                        : (p->srcPtr.pitch ? p->srcPtr.pitch : width_bytes);
+        const size_t destination_pitch = destination_array != nullptr
+                                             ? destination_array->width * element_size
+                                             : (p->dstPtr.pitch ? p->dstPtr.pitch : width_bytes);
+        const size_t source_height = source_array != nullptr
+                                         ? source_array->height
+                                         : (p->srcPtr.ysize ? p->srcPtr.ysize : p->extent.height);
+        const size_t destination_height = destination_array != nullptr
+                                              ? destination_array->height
+                                              : (p->dstPtr.ysize ? p->dstPtr.ysize : p->extent.height);
+        const char* source = source_array != nullptr
+                                 ? static_cast<const char*>(source_array->data)
+                                 : static_cast<const char*>(host_accessible_pointer(
+                                       p->srcPtr.ptr, source_pitch * source_height * p->extent.depth));
+        char* destination = destination_array != nullptr
+                                ? static_cast<char*>(destination_array->data)
+                                : static_cast<char*>(host_accessible_pointer(
+                                      p->dstPtr.ptr,
+                                      destination_pitch * destination_height * p->extent.depth));
+        if (source == nullptr || destination == nullptr) return fail(cudaErrorInvalidValue);
+        const size_t source_x = p->srcPos.x * (source_array != nullptr ? element_size : 1);
+        const size_t destination_x =
+            p->dstPos.x * (destination_array != nullptr ? element_size : 1);
+        for (size_t z = 0; z < p->extent.depth; ++z) {
+            for (size_t y = 0; y < p->extent.height; ++y) {
+                const char* source_row = source +
+                    (p->srcPos.z + z) * source_pitch * source_height +
+                    (p->srcPos.y + y) * source_pitch + source_x;
+                char* destination_row = destination +
+                    (p->dstPos.z + z) * destination_pitch * destination_height +
+                    (p->dstPos.y + y) * destination_pitch + destination_x;
+                std::memcpy(destination_row, source_row, width_bytes);
+            }
+        }
+        return fail(cudaSuccess);
     }
 
     const cudaError_t init_status = ensure_initialized();
@@ -3256,8 +3454,13 @@ cudaError_t cudaMemcpy3D(const cudaMemcpy3DParms* p) {
 }
 
 cudaError_t cudaMemcpy3DAsync(const cudaMemcpy3DParms* p, cudaStream_t stream) {
-    if (p == nullptr || p->srcArray != nullptr || p->dstArray != nullptr)
+    if (p == nullptr)
         return fail(cudaErrorInvalidValue);
+    if (p->srcArray != nullptr || p->dstArray != nullptr) {
+        // The array storage is UMA and the synchronous copy already preserves
+        // all data semantics. Completing eagerly is valid for an async API.
+        return cudaMemcpy3D(p);
+    }
     const cudaMemcpy3DParms params = *p;
     const size_t src_pitch = params.srcPtr.pitch ? params.srcPtr.pitch : params.extent.width;
     const size_t dst_pitch = params.dstPtr.pitch ? params.dstPtr.pitch : params.extent.width;
@@ -3352,6 +3555,12 @@ cudaError_t cudaDeviceReset(void) {
 
     reset_graph_allocation_state();
     state.allocations.clear();
+    {
+        std::lock_guard<std::mutex> lock(state.device_heap_mutex);
+        state.device_heap.reset();
+        state.device_heap_size = 8u * 1024u * 1024u;
+        state.persisting_l2_limit = 0;
+    }
     cumetal::native_registration::clear();
     cumetal::registration::clear();
     clear_pending_launch_state();
@@ -3410,7 +3619,7 @@ cudaError_t cudaStreamCreateWithFlags(cudaStream_t* stream, unsigned int flags) 
     {
         std::lock_guard<std::mutex> lock(state.stream_mutex);
         state.streams.emplace(
-            handle, RuntimeState::StreamRecord{std::move(backend_stream), flags});
+            handle, RuntimeState::StreamRecord{std::move(backend_stream), flags, {}});
     }
 
     *stream = handle;
@@ -3449,8 +3658,32 @@ cudaError_t cudaStreamSetAttribute(cudaStream_t stream, cudaStreamAttrID attr,
     if (resolve_status != cudaSuccess || backend_stream == nullptr) {
         return fail(resolve_status == cudaSuccess ? cudaErrorInvalidValue : resolve_status);
     }
-    // Public Metal has no API for CUDA's persisting-L2 access-policy window.
-    return fail(cudaErrorNotSupported);
+    const cudaAccessPolicyWindow& window = value->accessPolicyWindow;
+    if (window.hitRatio < 0.0f || window.hitRatio > 1.0f ||
+        (window.hitProp != cudaAccessPropertyNormal &&
+         window.hitProp != cudaAccessPropertyStreaming &&
+         window.hitProp != cudaAccessPropertyPersisting) ||
+        (window.missProp != cudaAccessPropertyNormal &&
+         window.missProp != cudaAccessPropertyStreaming &&
+         window.missProp != cudaAccessPropertyPersisting)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    cudaDeviceProp prop{};
+    if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess ||
+        window.num_bytes > static_cast<std::size_t>(prop.accessPolicyMaxWindowSize)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    RuntimeState& state = runtime_state();
+    std::lock_guard<std::mutex> lock(state.stream_mutex);
+    if (stream == nullptr || stream == cudaStreamLegacy ||
+        stream == cudaStreamPerThread) {
+        state.default_stream_access_policy = *value;
+        return fail(cudaSuccess);
+    }
+    const auto found = state.streams.find(stream);
+    if (found == state.streams.end()) return fail(cudaErrorInvalidValue);
+    found->second.access_policy = *value;
+    return fail(cudaSuccess);
 }
 
 cudaError_t cudaStreamGetAttribute(cudaStream_t stream, cudaStreamAttrID attr,
@@ -3471,7 +3704,17 @@ cudaError_t cudaStreamGetAttribute(cudaStream_t stream, cudaStreamAttrID attr,
     if (resolve_status != cudaSuccess || backend_stream == nullptr) {
         return fail(resolve_status == cudaSuccess ? cudaErrorInvalidValue : resolve_status);
     }
-    return fail(cudaErrorNotSupported);
+    RuntimeState& state = runtime_state();
+    std::lock_guard<std::mutex> lock(state.stream_mutex);
+    if (stream == nullptr || stream == cudaStreamLegacy ||
+        stream == cudaStreamPerThread) {
+        *value = state.default_stream_access_policy;
+        return fail(cudaSuccess);
+    }
+    const auto found = state.streams.find(stream);
+    if (found == state.streams.end()) return fail(cudaErrorInvalidValue);
+    *value = found->second.access_policy;
+    return fail(cudaSuccess);
 }
 
 cudaError_t cudaCtxResetPersistingL2Cache(void) {
@@ -3479,7 +3722,8 @@ cudaError_t cudaCtxResetPersistingL2Cache(void) {
     if (init_status != cudaSuccess) {
         return fail(init_status);
     }
-    return fail(cudaErrorNotSupported);
+    // Accepted performance hint; Metal selects actual cache residency.
+    return fail(cudaSuccess);
 }
 
 cudaError_t cudaStreamDestroy(cudaStream_t stream) {
@@ -3585,9 +3829,14 @@ cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t* pGraph) {
         return fail(cudaErrorInvalidValue);
     }
     *pGraph = it->second.graph;
-    it->second.capturing = false;
-    it->second.graph = nullptr;
-    g_captures.erase(it);
+    cudaGraph_t completed_graph = it->second.graph;
+    for (auto capture = g_captures.begin(); capture != g_captures.end();) {
+        if (capture->second.capturing && capture->second.graph == completed_graph) {
+            capture = g_captures.erase(capture);
+        } else {
+            ++capture;
+        }
+    }
     return fail(cudaSuccess);
 }
 
@@ -4395,6 +4644,37 @@ cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned
         return fail(cudaErrorInvalidValue);
     }
 
+    cudaGraph_t event_capture_graph = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(event->mutex);
+        event_capture_graph = event->capture_graph;
+    }
+    if (event_capture_graph != nullptr) {
+        std::lock_guard<std::mutex> lock(g_capture_mutex);
+        const bool capture_still_active = std::any_of(
+            g_captures.begin(), g_captures.end(),
+            [event_capture_graph](const auto& entry) {
+                return entry.second.capturing &&
+                       entry.second.graph == event_capture_graph;
+            });
+        if (!capture_still_active) {
+            // A captured event only links streams while its originating graph
+            // is actively being captured.  Once EndCapture has removed every
+            // participant, waiting on the event must not resurrect that graph.
+            event_capture_graph = nullptr;
+        }
+    }
+    if (event_capture_graph != nullptr) {
+        std::lock_guard<std::mutex> lock(g_capture_mutex);
+        auto& capture = g_captures[stream];
+        if (capture.capturing && capture.graph != event_capture_graph) {
+            return fail(cudaErrorInvalidValue);
+        }
+        capture.capturing = true;
+        capture.graph = event_capture_graph;
+        return fail(cudaSuccess);
+    }
+
     if (!is_legacy_stream_handle(stream)) {
         std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
         const cudaError_t resolve_status = resolve_runtime_stream(stream, &backend_stream, nullptr);
@@ -4455,6 +4735,15 @@ cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
         return fail(init_status);
     }
 
+    if (cudaGraph_t capture_graph = get_capture_graph(stream)) {
+        std::lock_guard<std::mutex> lock(event->mutex);
+        event->capture_graph = capture_graph;
+        event->recorded_once = true;
+        event->complete = true;
+        event->timing_valid = false;
+        return fail(cudaSuccess);
+    }
+
     std::shared_ptr<cumetal::metal_backend::Stream> backend_stream;
     bool legacy_stream = false;
     const cudaError_t resolve_status =
@@ -4479,6 +4768,7 @@ cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
         event->recorded_once = true;
         event->complete = false;
         event->timing_valid = !event->disable_timing;
+        event->capture_graph = nullptr;
         if (!event->disable_timing) {
             event->timestamp = std::chrono::steady_clock::now();
         }
@@ -4907,11 +5197,21 @@ cudaError_t cudaLaunchKernel(const void* func,
         return words > 0 ? words : kDefault;
     }();
     const bool needs_printf = use_registered_kernel && !registered_kernel.printf_formats.empty();
+    const bool needs_device_heap =
+        use_registered_kernel && registered_kernel.uses_device_heap;
+    const bool needs_device_launch_queue =
+        use_registered_kernel && registered_kernel.uses_device_launch_queue;
+    constexpr std::uint32_t kDeviceLaunchQueueBytes = 1024u * 1024u;
+    constexpr std::uint32_t kDeviceLaunchRecordAreaBytes = 64u * 1024u;
+    constexpr std::uint32_t kDeviceLaunchRecordWords = 16u;
+    constexpr std::uint32_t kDeviceLaunchMaxRecords = 1023u;
 
     std::vector<cumetal::metal_backend::KernelArg> launch_args;
+    std::vector<std::shared_ptr<cumetal::metal_backend::Buffer>> resident_buffers;
     launch_args.reserve(static_cast<std::size_t>(arg_count) +
                         registered_kernel.global_symbols.size() +
                         (registered_kernel.constant_symbols.empty() ? 0u : 1u) +
+                        (needs_device_heap ? 1u : 0u) +
                         (needs_printf ? 2u : 0u));
 
     for (std::uint32_t i = 0; i < arg_count; ++i) {
@@ -4984,6 +5284,9 @@ cudaError_t cudaLaunchKernel(const void* func,
                 return launch_fail(cudaErrorInvalidDevicePointer, "buffer arg resolve");
             }
 
+            collect_texture_resource_residency(
+                reinterpret_cast<std::uintptr_t>(device_ptr), &resident_buffers);
+
             cumetal::metal_backend::KernelArg arg;
             arg.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer;
             arg.buffer = std::move(resolved.buffer);
@@ -5001,6 +5304,7 @@ cudaError_t cudaLaunchKernel(const void* func,
             arg.kind = cumetal::metal_backend::KernelArg::Kind::kBytes;
             arg.bytes.resize(info.size_bytes);
             std::memcpy(arg.bytes.data(), args[i], info.size_bytes);
+            relocate_embedded_device_pointers(&arg.bytes, &resident_buffers);
             launch_args.push_back(std::move(arg));
         }
     }
@@ -5064,6 +5368,48 @@ cudaError_t cudaLaunchKernel(const void* func,
         launch_args.push_back(std::move(constant_arg));
     }
 
+    // Device malloc/free share one context-lifetime heap across every kernel.
+    // The first 16 bytes hold bump, free-list head, capacity, and reserved state;
+    // allocations start at offset 16 and remain valid across launches.
+    if (needs_device_heap) {
+        std::shared_ptr<cumetal::metal_backend::Buffer> heap;
+        {
+            std::lock_guard<std::mutex> lock(state.device_heap_mutex);
+            if (state.device_heap == nullptr) {
+                if (state.device_heap_size < 32u ||
+                    state.device_heap_size > std::numeric_limits<std::uint32_t>::max()) {
+                    return launch_fail(cudaErrorInvalidValue,
+                                       "device heap size is outside 32-bit allocator range");
+                }
+                std::string alloc_error;
+                const cudaError_t alloc_status =
+                    cumetal::metal_backend::allocate_buffer(
+                        state.device_heap_size, &state.device_heap, &alloc_error);
+                if (alloc_status != cudaSuccess || state.device_heap == nullptr ||
+                    state.device_heap->contents() == nullptr) {
+                    state.device_heap.reset();
+                    return launch_fail(alloc_status == cudaSuccess
+                                           ? cudaErrorMemoryAllocation
+                                           : alloc_status,
+                                       "device heap allocation failed");
+                }
+                std::memset(state.device_heap->contents(), 0,
+                            state.device_heap_size);
+                auto* header = static_cast<std::uint32_t*>(
+                    state.device_heap->contents());
+                header[0] = 16u;
+                header[1] = 0u;
+                header[2] = static_cast<std::uint32_t>(state.device_heap_size);
+            }
+            heap = state.device_heap;
+        }
+        cumetal::metal_backend::KernelArg heap_arg;
+        heap_arg.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer;
+        heap_arg.buffer = std::move(heap);
+        heap_arg.offset = 0;
+        launch_args.push_back(std::move(heap_arg));
+    }
+
     // Append hidden printf ring-buffer args if the kernel uses device printf (spec §5.3).
     std::shared_ptr<cumetal::metal_backend::Buffer> printf_buffer;
     if (needs_printf) {
@@ -5093,6 +5439,39 @@ cudaError_t cudaLaunchKernel(const void* func,
         }
     }
 
+    std::shared_ptr<cumetal::metal_backend::Buffer> device_launch_queue;
+    if (needs_device_launch_queue) {
+        std::string alloc_error;
+        const cudaError_t alloc_status = cumetal::metal_backend::allocate_buffer(
+            kDeviceLaunchQueueBytes, &device_launch_queue, &alloc_error);
+        if (alloc_status != cudaSuccess || device_launch_queue == nullptr ||
+            device_launch_queue->contents() == nullptr) {
+            return launch_fail(alloc_status != cudaSuccess ? alloc_status
+                                                            : cudaErrorMemoryAllocation,
+                               "device launch queue alloc");
+        }
+        std::memset(device_launch_queue->contents(), 0, kDeviceLaunchQueueBytes);
+        auto* queue_words =
+            static_cast<std::uint32_t*>(device_launch_queue->contents());
+        queue_words[0] = kDeviceLaunchRecordAreaBytes;
+        queue_words[1] = 0;
+        {
+            cumetal::metal_backend::KernelArg queue_arg;
+            queue_arg.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer;
+            queue_arg.buffer = device_launch_queue;
+            queue_arg.offset = 0;
+            launch_args.push_back(std::move(queue_arg));
+        }
+        {
+            cumetal::metal_backend::KernelArg capacity_arg;
+            capacity_arg.kind = cumetal::metal_backend::KernelArg::Kind::kBytes;
+            capacity_arg.bytes.resize(sizeof(std::uint32_t));
+            std::memcpy(capacity_arg.bytes.data(), &kDeviceLaunchQueueBytes,
+                        sizeof(kDeviceLaunchQueueBytes));
+            launch_args.push_back(std::move(capacity_arg));
+        }
+    }
+
     // Use the user-specified dynamic shared memory size; fall back to the static
     // shared memory size computed from the PTX .shared declarations (for kernels
     // that use static __shared__ arrays without any dynamic shared memory).
@@ -5109,6 +5488,7 @@ cudaError_t cudaLaunchKernel(const void* func,
             use_registered_kernel ? registered_kernel.provenance : "precompiled_metallib",
         .semantic_quality =
             use_registered_kernel ? registered_kernel.semantic_quality : "exact",
+        .resident_buffers = std::move(resident_buffers),
     };
 
     const char* metallib_path =
@@ -5363,6 +5743,174 @@ cudaError_t cudaLaunchKernel(const void* func,
                             registered_kernel.printf_formats);
     }
 
+    // CUDA dynamic parallelism is represented by a device-written launch queue.
+    // Synchronize the parent, then dispatch every recorded child through the
+    // ordinary registered-kernel path. Child kernels receive fresh queues, so
+    // recursive launches preserve parent-before-child completion semantics.
+    if (needs_device_launch_queue && device_launch_queue != nullptr &&
+        status == cudaSuccess) {
+        if (backend_stream != nullptr) {
+            std::string sync_error;
+            const cudaError_t sync_status =
+                cumetal::metal_backend::stream_synchronize(backend_stream, &sync_error);
+            if (sync_status != cudaSuccess) {
+                return launch_fail(sync_status, "device launch parent sync");
+            }
+        }
+
+        const auto* queue_words = static_cast<const std::uint32_t*>(
+            device_launch_queue->contents());
+        const auto* queue_bytes = static_cast<const std::uint8_t*>(
+            device_launch_queue->contents());
+        const std::uint32_t recorded = queue_words[1];
+        if (recorded > kDeviceLaunchMaxRecords) {
+            return launch_fail(cudaErrorLaunchOutOfResources,
+                               "device launch queue overflow");
+        }
+        for (std::uint32_t record_index = 0; record_index < recorded;
+             ++record_index) {
+            const std::uint32_t* record =
+                queue_words + 4u + record_index * kDeviceLaunchRecordWords;
+            const std::uint32_t record_kind = record[15];
+            if (record_kind == 1u) {
+                const std::uint64_t destination_bits =
+                    static_cast<std::uint64_t>(record[0]) |
+                    (static_cast<std::uint64_t>(record[1]) << 32u);
+                const std::uint64_t source_bits =
+                    static_cast<std::uint64_t>(record[2]) |
+                    (static_cast<std::uint64_t>(record[3]) << 32u);
+                const std::uint64_t count_bits =
+                    static_cast<std::uint64_t>(record[4]) |
+                    (static_cast<std::uint64_t>(record[5]) << 32u);
+                if (destination_bits == 0 || source_bits == 0 ||
+                    count_bits > std::numeric_limits<std::size_t>::max() ||
+                    record[6] > static_cast<std::uint32_t>(cudaMemcpyDefault)) {
+                    return launch_fail(cudaErrorInvalidValue,
+                                       "invalid device memcpy record");
+                }
+                if (const char* debug = std::getenv("CUMETAL_DEBUG_LAUNCH");
+                    debug != nullptr && debug[0] != '\0' && debug[0] != '0') {
+                    cumetal::rt::AllocationTable::ResolvedAllocation debug_dst;
+                    cumetal::rt::AllocationTable::ResolvedAllocation debug_src;
+                    const bool dst_found = resolve_allocation_for_pointer(
+                        reinterpret_cast<void*>(static_cast<std::uintptr_t>(destination_bits)),
+                        &debug_dst);
+                    const bool src_found = resolve_allocation_for_pointer(
+                        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(source_bits)),
+                        &debug_src);
+                    std::fprintf(stderr,
+                                 "CUMETAL_DEBUG_LAUNCH: device memcpy record dst=0x%llx(%d off=%zu rem=%zu) src=0x%llx(%d off=%zu rem=%zu) count=%llu kind=%u\n",
+                                 static_cast<unsigned long long>(destination_bits),
+                                 dst_found ? 1 : 0, debug_dst.offset, debug_dst.remaining_size,
+                                 static_cast<unsigned long long>(source_bits),
+                                 src_found ? 1 : 0, debug_src.offset, debug_src.remaining_size,
+                                 static_cast<unsigned long long>(count_bits), record[6]);
+                }
+                const cudaError_t copy_status = cudaMemcpyAsync(
+                    reinterpret_cast<void*>(static_cast<std::uintptr_t>(destination_bits)),
+                    reinterpret_cast<const void*>(static_cast<std::uintptr_t>(source_bits)),
+                    static_cast<std::size_t>(count_bits),
+                    static_cast<cudaMemcpyKind>(record[6]), stream);
+                if (copy_status != cudaSuccess) {
+                    return launch_fail(copy_status, "device memcpy enqueue");
+                }
+                continue;
+            }
+            if (record_kind != 0u) {
+                return launch_fail(cudaErrorInvalidValue,
+                                   "unknown device queue record kind");
+            }
+            const std::uint64_t token =
+                static_cast<std::uint64_t>(record[0]) |
+                (static_cast<std::uint64_t>(record[1]) << 32u);
+            const std::uint32_t parameter_offset = record[2];
+            const std::uint32_t parameter_size = record[3];
+            const dim3 child_grid(record[4], record[5], record[6]);
+            const dim3 child_block(record[7], record[8], record[9]);
+            const std::size_t child_shared = record[10];
+
+            if (parameter_offset < kDeviceLaunchRecordAreaBytes ||
+                parameter_offset > kDeviceLaunchQueueBytes ||
+                parameter_size > kDeviceLaunchQueueBytes - parameter_offset ||
+                child_grid.x == 0 || child_grid.y == 0 || child_grid.z == 0 ||
+                child_block.x == 0 || child_block.y == 0 || child_block.z == 0) {
+                return launch_fail(cudaErrorInvalidConfiguration,
+                                   "invalid device launch record");
+            }
+
+            const void* child_host_function = nullptr;
+            cumetal::registration::RegisteredKernel child_kernel;
+            if (!cumetal::registration::lookup_device_kernel_alias(
+                    registered_kernel.module_handle, token,
+                    &child_host_function, &child_kernel) ||
+                child_host_function == nullptr) {
+                return launch_fail(cudaErrorInvalidDeviceFunction,
+                                   "unknown device launch kernel token");
+            }
+
+            std::vector<void*> child_args;
+            child_args.reserve(child_kernel.arg_info.size());
+            std::size_t cursor = 0;
+            for (const auto& info : child_kernel.arg_info) {
+                const std::size_t alignment =
+                    std::max<std::size_t>(1, std::min<std::size_t>(8, info.size_bytes));
+                cursor = (cursor + alignment - 1u) & ~(alignment - 1u);
+                if (cursor > parameter_size ||
+                    info.size_bytes > parameter_size - cursor) {
+                    return launch_fail(cudaErrorInvalidValue,
+                                       "device launch parameter buffer is too small");
+                }
+                child_args.push_back(const_cast<std::uint8_t*>(
+                    queue_bytes + parameter_offset + cursor));
+                cursor += info.size_bytes;
+            }
+            child_args.push_back(nullptr);
+
+            if (const char* debug = std::getenv("CUMETAL_DEBUG_LAUNCH");
+                debug != nullptr && debug[0] != '\0' && debug[0] != '0') {
+                std::fprintf(stderr,
+                             "CUMETAL_DEBUG_LAUNCH: device child record kernel=%s grid=(%u,%u,%u) block=(%u,%u,%u) args=",
+                             child_kernel.kernel_name.c_str(), child_grid.x, child_grid.y,
+                             child_grid.z, child_block.x, child_block.y, child_block.z);
+                for (std::size_t i = 0; i < child_kernel.arg_info.size(); ++i) {
+                    std::uint64_t value = 0;
+                    const std::size_t bytes = std::min<std::size_t>(
+                        sizeof(value), child_kernel.arg_info[i].size_bytes);
+                    std::memcpy(&value, child_args[i], bytes);
+                    std::fprintf(stderr, "%s%zu:0x%llx/%u/k%d", i == 0 ? "" : ",",
+                                 i, static_cast<unsigned long long>(value),
+                                 child_kernel.arg_info[i].size_bytes,
+                                 static_cast<int>(child_kernel.arg_info[i].kind));
+                    if (child_kernel.arg_info[i].size_bytes > sizeof(value) &&
+                        child_kernel.arg_info[i].size_bytes % sizeof(std::uint32_t) == 0) {
+                        std::fprintf(stderr, "[");
+                        for (std::size_t word = 0;
+                             word < child_kernel.arg_info[i].size_bytes /
+                                        sizeof(std::uint32_t);
+                             ++word) {
+                            std::uint32_t word_value = 0;
+                            std::memcpy(&word_value,
+                                        static_cast<const std::uint8_t*>(child_args[i]) +
+                                            word * sizeof(word_value),
+                                        sizeof(word_value));
+                            std::fprintf(stderr, "%s0x%x", word == 0 ? "" : ",",
+                                         word_value);
+                        }
+                        std::fprintf(stderr, "]");
+                    }
+                }
+                std::fprintf(stderr, "\n");
+            }
+
+            const cudaError_t child_status = cudaLaunchKernel(
+                child_host_function, child_grid, child_block,
+                child_args.data(), child_shared, stream);
+            if (child_status != cudaSuccess) {
+                return launch_fail(child_status, "device child launch");
+            }
+        }
+    }
+
     // Metal-backend commands now encode per-buffer MTLSharedEvent dependencies,
     // including when several CUDA pointers alias suballocations of one buffer.
     // Registered launches can therefore remain asynchronous without losing
@@ -5568,6 +6116,8 @@ const char* cudaGetErrorName(cudaError_t error) {
             return "cudaErrorAssert";
         case cudaErrorLaunchFailure:
             return "cudaErrorLaunchFailure";
+        case cudaErrorCooperativeLaunchTooLarge:
+            return "cudaErrorCooperativeLaunchTooLarge";
         case cudaErrorNotPermitted:
             return "cudaErrorNotPermitted";
         case cudaErrorUnknown:
@@ -5620,6 +6170,8 @@ const char* cudaGetErrorString(cudaError_t error) {
             return "invalid resource handle";
         case cudaErrorLaunchOutOfResources:
             return "too many resources requested for launch";
+        case cudaErrorCooperativeLaunchTooLarge:
+            return "too many blocks in cooperative launch";
         case cudaErrorAssert:
             return "device-side assert triggered";
         case cudaErrorLaunchFailure:
@@ -5678,7 +6230,10 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int* numBlocks,
         total_shared == 0
             ? thread_bound
             : std::max(1, static_cast<int>(device.sharedMemPerBlock / total_shared));
-    *numBlocks = std::min(thread_bound, memory_bound);
+    // A conservative one-block residency guarantee makes the grid-wide
+    // software barrier safe: every block selected by CUDA's standard
+    // multiprocessorCount * occupancy launch formula can make progress.
+    *numBlocks = std::min(1, std::min(thread_bound, memory_bound));
     return fail(cudaSuccess);
 }
 
@@ -5873,6 +6428,21 @@ cudaError_t cudaMemRangeGetAttribute(void* data,
     return fail(cudaSuccess);
 }
 
+cudaError_t cudaStreamAttachMemAsync(cudaStream_t stream, void* dev_ptr,
+                                     size_t /*length*/, unsigned int flags) {
+    if (dev_ptr == nullptr ||
+        (flags != cudaMemAttachGlobal && flags != cudaMemAttachHost &&
+         flags != cudaMemAttachSingle)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    RuntimeState& state = runtime_state();
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!state.allocations.resolve(dev_ptr, &resolved)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    return fail(enqueue_stream_host_op(stream, []() {}));
+}
+
 // ── Async memory pool API ────────────────────────────────────────────────────
 // Allocation itself is host-side on UMA, but its lifetime still follows the
 // selected stream: allocation returns immediately and free is deferred until
@@ -5885,6 +6455,22 @@ struct cudaMemPool_st {
 static cudaMemPool_st g_default_mempool;
 
 cudaError_t cudaMallocAsync(void** dev_ptr, size_t size, cudaStream_t stream) {
+    if (dev_ptr == nullptr || size == 0) return fail(cudaErrorInvalidValue);
+    if (cudaGraph_t graph = get_capture_graph(stream)) {
+        cudaMemAllocNodeParams params{};
+        params.bytesize = size;
+        params.poolProps.allocType = cudaMemAllocationTypePinned;
+        params.poolProps.handleTypes = cudaMemHandleTypeNone;
+        params.poolProps.location.type = cudaMemLocationTypeDevice;
+        params.poolProps.location.id = 0;
+        cudaGraphNode_t dependency = graph->nodes.empty() ? nullptr : graph->nodes.back();
+        cudaGraphNode_t node = nullptr;
+        const cudaError_t status = cudaGraphAddMemAllocNode(
+            &node, graph, dependency == nullptr ? nullptr : &dependency,
+            dependency == nullptr ? 0 : 1, &params);
+        if (status == cudaSuccess) *dev_ptr = params.dptr;
+        return fail(status);
+    }
     const cudaError_t stream_status = enqueue_stream_host_op(stream, []() {});
     if (stream_status != cudaSuccess) return fail(stream_status);
     return cudaMalloc(dev_ptr, size);
@@ -5892,6 +6478,13 @@ cudaError_t cudaMallocAsync(void** dev_ptr, size_t size, cudaStream_t stream) {
 
 cudaError_t cudaFreeAsync(void* dev_ptr, cudaStream_t stream) {
     if (dev_ptr == nullptr) return fail(cudaSuccess);
+    if (cudaGraph_t graph = get_capture_graph(stream)) {
+        cudaGraphNode_t dependency = graph->nodes.empty() ? nullptr : graph->nodes.back();
+        cudaGraphNode_t node = nullptr;
+        return fail(cudaGraphAddMemFreeNode(
+            &node, graph, dependency == nullptr ? nullptr : &dependency,
+            dependency == nullptr ? 0 : 1, dev_ptr));
+    }
     RuntimeState& state = runtime_state();
     cumetal::rt::AllocationTable::ResolvedAllocation resolved;
     if (!state.allocations.resolve(dev_ptr, &resolved) || resolved.offset != 0) {
@@ -6044,15 +6637,33 @@ cudaError_t cudaDeviceGetStreamPriorityRange(int* leastPriority, int* greatestPr
     return fail(cudaSuccess);
 }
 
-// Device limits — Metal exposes no equivalent knobs; no-op where harmless and
-// reject requests that would otherwise claim unsupported cache policy.
+// Device limits — cache-policy values are retained as correctness-neutral
+// performance hints even though Metal controls physical cache residency.
 cudaError_t cudaDeviceSetLimit(cudaLimit limit, size_t value) {
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {
         return fail(init_status);
     }
-    if (limit == cudaLimitPersistingL2CacheSize && value != 0) {
-        return fail(cudaErrorNotSupported);
+    if (limit == cudaLimitPersistingL2CacheSize) {
+        cudaDeviceProp prop{};
+        if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess ||
+            value > static_cast<std::size_t>(prop.persistingL2CacheMaxSize)) {
+            return fail(cudaErrorInvalidValue);
+        }
+        RuntimeState& state = runtime_state();
+        std::lock_guard<std::mutex> lock(state.device_heap_mutex);
+        state.persisting_l2_limit = value;
+    }
+    if (limit == cudaLimitMallocHeapSize) {
+        if (value < 32u || value > std::numeric_limits<std::uint32_t>::max()) {
+            return fail(cudaErrorInvalidValue);
+        }
+        RuntimeState& state = runtime_state();
+        std::lock_guard<std::mutex> lock(state.device_heap_mutex);
+        if (state.device_heap != nullptr && value != state.device_heap_size) {
+            return fail(cudaErrorInvalidValue);
+        }
+        state.device_heap_size = value;
     }
     return fail(cudaSuccess);
 }
@@ -6073,10 +6684,18 @@ cudaError_t cudaDeviceGetLimit(size_t* pValue, cudaLimit limit) {
             *pValue = 1024u * 1024u;  // 1 MB (matches CUMETAL_PRINTF_BUFFER_SIZE default)
             break;
         case cudaLimitMallocHeapSize:
-            *pValue = 8u * 1024u * 1024u;  // 8 MB
+            {
+                RuntimeState& state = runtime_state();
+                std::lock_guard<std::mutex> lock(state.device_heap_mutex);
+                *pValue = state.device_heap_size;
+            }
             break;
         case cudaLimitPersistingL2CacheSize:
-            *pValue = 0;
+            {
+                RuntimeState& state = runtime_state();
+                std::lock_guard<std::mutex> lock(state.device_heap_mutex);
+                *pValue = state.persisting_l2_limit;
+            }
             break;
         default:
             *pValue = 0;
@@ -6138,16 +6757,24 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int* numBlock
                                                          dynamicSMemSize);
 }
 
-// Single-threadgroup cooperative launches are safe. Multi-threadgroup launches
-// are refused until grid-barrier kernel fission is implemented.
+// The compiler lowers cooperative_groups::grid_group::sync to a device-wide
+// sense-reversing barrier. Bound the grid to the conservative resident set used
+// by the occupancy queries so a waiting block cannot starve an undispatched one.
 cudaError_t cudaLaunchCooperativeKernel(const void* func,
                                          dim3 gridDim,
                                          dim3 blockDim,
                                          void** args,
                                          size_t sharedMem,
                                          cudaStream_t stream) {
-    if ((static_cast<std::uint64_t>(gridDim.x) * gridDim.y * gridDim.z) > 1) {
-        return fail(cudaErrorNotSupported);
+    cudaDeviceProp prop{};
+    if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) {
+        return fail(cudaErrorInitializationError);
+    }
+    const std::uint64_t block_count =
+        static_cast<std::uint64_t>(gridDim.x) * gridDim.y * gridDim.z;
+    if (block_count == 0 ||
+        block_count > static_cast<std::uint64_t>(prop.multiProcessorCount)) {
+        return fail(cudaErrorCooperativeLaunchTooLarge);
     }
     return cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
 }
@@ -6158,15 +6785,8 @@ cudaError_t cudaLaunchCooperativeKernel(const void* func,
 // Metal bindings. These host objects therefore retain lifecycle/copy state only;
 // there is deliberately no fake linear-load sampling fallback.
 
-struct CuMetalArray {
-    void* data = nullptr;
-    size_t width = 0;
-    size_t height = 0;
-    cudaChannelFormatDesc desc{};
-};
-
 cudaError_t cudaMallocArray(cudaArray_t* array, const cudaChannelFormatDesc* desc,
-                             size_t width, size_t height, unsigned int /*flags*/) {
+                             size_t width, size_t height, unsigned int flags) {
     if (array == nullptr || desc == nullptr || width == 0) {
         return fail(cudaErrorInvalidValue);
     }
@@ -6176,6 +6796,8 @@ cudaError_t cudaMallocArray(cudaArray_t* array, const cudaChannelFormatDesc* des
     auto* a = new CuMetalArray();
     a->width = width;
     a->height = height;
+    a->depth = 1;
+    a->flags = flags;
     a->desc = *desc;
     void* ptr = nullptr;
     const cudaError_t err = cudaMalloc(&ptr, width * height * elem_size);
@@ -6185,6 +6807,34 @@ cudaError_t cudaMallocArray(cudaArray_t* array, const cudaChannelFormatDesc* des
     }
     a->data = ptr;
     *array = reinterpret_cast<cudaArray_t>(a);
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaMalloc3DArray(cudaArray_t* array, const cudaChannelFormatDesc* desc,
+                              cudaExtent extent, unsigned int flags) {
+    if (array == nullptr || desc == nullptr || extent.width == 0 ||
+        extent.height == 0 || extent.depth == 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const size_t elem_size = static_cast<size_t>(
+        (desc->x + desc->y + desc->z + desc->w + 7) / 8);
+    if (elem_size == 0) return fail(cudaErrorInvalidValue);
+    auto* created = new (std::nothrow) CuMetalArray();
+    if (created == nullptr) return fail(cudaErrorMemoryAllocation);
+    created->width = extent.width;
+    created->height = extent.height;
+    created->depth = extent.depth;
+    created->flags = flags;
+    created->desc = *desc;
+    void* data = nullptr;
+    const cudaError_t status =
+        cudaMalloc(&data, extent.width * extent.height * extent.depth * elem_size);
+    if (status != cudaSuccess) {
+        delete created;
+        return fail(status);
+    }
+    created->data = data;
+    *array = reinterpret_cast<cudaArray_t>(created);
     return fail(cudaSuccess);
 }
 
@@ -6256,11 +6906,49 @@ struct TextureObjectRecord {
     cudaResourceDesc resource{};
     cudaTextureDesc texture{};
     cudaResourceViewDesc view{};
+    void* device_descriptor = nullptr;
 };
 std::unordered_map<cudaTextureObject_t, TextureObjectRecord> g_texture_objects;
-std::unordered_map<cudaSurfaceObject_t, cudaResourceDesc> g_surface_objects;
-cudaTextureObject_t g_next_tex_id = 1;
-cudaSurfaceObject_t g_next_surf_id = 1;
+struct SurfaceObjectRecord {
+    cudaResourceDesc resource{};
+    void* device_descriptor = nullptr;
+};
+std::unordered_map<cudaSurfaceObject_t, SurfaceObjectRecord> g_surface_objects;
+
+void collect_texture_resource_residency(
+    std::uintptr_t handle,
+    std::vector<std::shared_ptr<cumetal::metal_backend::Buffer>>* buffers) {
+    if (handle == 0 || buffers == nullptr) return;
+
+    const cudaResourceDesc* resource = nullptr;
+    std::lock_guard<std::mutex> lock(g_tex_mutex);
+    if (const auto texture = g_texture_objects.find(
+            static_cast<cudaTextureObject_t>(handle));
+        texture != g_texture_objects.end()) {
+        resource = &texture->second.resource;
+    } else if (const auto surface = g_surface_objects.find(
+                   static_cast<cudaSurfaceObject_t>(handle));
+               surface != g_surface_objects.end()) {
+        resource = &surface->second.resource;
+    }
+    if (resource == nullptr) return;
+
+    const void* data = nullptr;
+    if (resource->resType == cudaResourceTypeArray) {
+        const auto* array =
+            reinterpret_cast<const CuMetalArray*>(resource->res.array.array);
+        if (array != nullptr) data = array->data;
+    } else if (resource->resType == cudaResourceTypePitch2D) {
+        data = resource->res.pitch2D.devPtr;
+    } else if (resource->resType == cudaResourceTypeLinear) {
+        data = resource->res.linear.devPtr;
+    }
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (data != nullptr && runtime_state().allocations.resolve(data, &resolved) &&
+        resolved.buffer != nullptr) {
+        buffers->push_back(std::move(resolved.buffer));
+    }
+}
 
 bool valid_resource_desc(const cudaResourceDesc& desc) {
     switch (desc.resType) {
@@ -6275,6 +6963,64 @@ bool valid_resource_desc(const cudaResourceDesc& desc) {
             return false;
     }
 }
+
+bool build_texture_descriptor(const cudaResourceDesc& resource,
+                              const cudaTextureDesc* texture,
+                              __cumetal_texture_descriptor* descriptor) {
+    if (descriptor == nullptr) return false;
+    *descriptor = {};
+    const void* data = nullptr;
+    cudaChannelFormatDesc channel{};
+    if (resource.resType == cudaResourceTypeArray) {
+        const auto* array = reinterpret_cast<const CuMetalArray*>(resource.res.array.array);
+        if (array == nullptr) return false;
+        data = array->data;
+        channel = array->desc;
+        descriptor->width = array->width;
+        descriptor->height = array->height;
+        descriptor->depth = array->depth;
+        descriptor->element_bytes = static_cast<unsigned int>(
+            (channel.x + channel.y + channel.z + channel.w + 7) / 8);
+        descriptor->pitch_bytes = array->width * descriptor->element_bytes;
+    } else if (resource.resType == cudaResourceTypePitch2D) {
+        data = resource.res.pitch2D.devPtr;
+        channel = resource.res.pitch2D.desc;
+        descriptor->width = resource.res.pitch2D.width;
+        descriptor->height = resource.res.pitch2D.height;
+        descriptor->depth = 1;
+        descriptor->element_bytes = static_cast<unsigned int>(
+            (channel.x + channel.y + channel.z + channel.w + 7) / 8);
+        descriptor->pitch_bytes = resource.res.pitch2D.pitchInBytes;
+    } else if (resource.resType == cudaResourceTypeLinear) {
+        data = resource.res.linear.devPtr;
+        channel = resource.res.linear.desc;
+        descriptor->element_bytes = static_cast<unsigned int>(
+            (channel.x + channel.y + channel.z + channel.w + 7) / 8);
+        if (descriptor->element_bytes == 0) return false;
+        descriptor->width = resource.res.linear.sizeInBytes / descriptor->element_bytes;
+        descriptor->height = 1;
+        descriptor->depth = 1;
+        descriptor->pitch_bytes = resource.res.linear.sizeInBytes;
+    } else {
+        return false;
+    }
+    if (descriptor->element_bytes == 0) return false;
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!runtime_state().allocations.resolve(data, &resolved) || resolved.buffer == nullptr ||
+        resolved.buffer->device_address() == 0) {
+        return false;
+    }
+    descriptor->data = resolved.buffer->device_address() + resolved.offset;
+    descriptor->channel_kind = static_cast<unsigned int>(channel.f);
+    if (texture != nullptr) {
+        descriptor->read_mode = static_cast<unsigned int>(texture->readMode);
+        descriptor->filter_mode = static_cast<unsigned int>(texture->filterMode);
+        descriptor->normalized_coords = static_cast<unsigned int>(texture->normalizedCoords != 0);
+        for (int axis = 0; axis < 3; ++axis)
+            descriptor->address_mode[axis] = static_cast<unsigned int>(texture->addressMode[axis]);
+    }
+    return true;
+}
 }  // namespace
 
 cudaError_t cudaCreateTextureObject(cudaTextureObject_t* pTexObject,
@@ -6285,37 +7031,39 @@ cudaError_t cudaCreateTextureObject(cudaTextureObject_t* pTexObject,
         !valid_resource_desc(*pResDesc)) {
         return fail(cudaErrorInvalidValue);
     }
-    // Device-side tex.* sampling is not wired (see docs/known-gaps.md). Kernels
-    // that instead dereference the resource's devPtr only work when cudaMalloc
-    // hands out real Metal GPU addresses, which is not the default. Without it
-    // the loads read as zeros and nothing reports an error -- a silent wrong
-    // answer, so say so once.
-    if (!use_metal_device_addresses() &&
-        (pResDesc->resType == cudaResourceDesc::cudaResourceTypeLinear ||
-         pResDesc->resType == cudaResourceDesc::cudaResourceTypePitch2D)) {
-        cumetal::warn_once(
-            "texture_object_needs_device_addresses",
-            "cudaCreateTextureObject() on a linear/pitch2D resource while "
-            "CUMETAL_USE_METAL_DEVICE_ADDRESSES is off. Device code that "
-            "dereferences the resource pointer will read zeros instead of your "
-            "data, with no error. Set CUMETAL_USE_METAL_DEVICE_ADDRESSES=1.");
+    void* descriptor_allocation = nullptr;
+    if (cudaMalloc(&descriptor_allocation, sizeof(__cumetal_texture_descriptor)) != cudaSuccess)
+        return fail(cudaErrorMemoryAllocation);
+    auto* descriptor = static_cast<__cumetal_texture_descriptor*>(descriptor_allocation);
+    if (!build_texture_descriptor(*pResDesc, pTexDesc, descriptor)) {
+        cudaFree(descriptor_allocation);
+        return fail(cudaErrorInvalidValue);
     }
-    std::lock_guard<std::mutex> lock(g_tex_mutex);
-    *pTexObject = g_next_tex_id++;
+    const cudaTextureObject_t handle =
+        static_cast<cudaTextureObject_t>(reinterpret_cast<std::uintptr_t>(descriptor_allocation));
     TextureObjectRecord record;
     record.resource = *pResDesc;
     record.texture = *pTexDesc;
     if (pResViewDesc != nullptr) record.view = *pResViewDesc;
-    g_texture_objects[*pTexObject] = record;
+    record.device_descriptor = descriptor_allocation;
+    {
+        std::lock_guard<std::mutex> lock(g_tex_mutex);
+        g_texture_objects[handle] = record;
+    }
+    *pTexObject = handle;
     return fail(cudaSuccess);
 }
 
 cudaError_t cudaDestroyTextureObject(cudaTextureObject_t texObject) {
-    std::lock_guard<std::mutex> lock(g_tex_mutex);
-    if (g_texture_objects.erase(texObject) == 0) {
-        return fail(cudaErrorInvalidResourceHandle);
+    void* descriptor = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_tex_mutex);
+        const auto found = g_texture_objects.find(texObject);
+        if (found == g_texture_objects.end()) return fail(cudaErrorInvalidResourceHandle);
+        descriptor = found->second.device_descriptor;
+        g_texture_objects.erase(found);
     }
-    return fail(cudaSuccess);
+    return cudaFree(descriptor);
 }
 
 cudaError_t cudaGetTextureObjectResourceDesc(cudaResourceDesc* pResDesc,
@@ -6353,18 +7101,37 @@ cudaError_t cudaCreateSurfaceObject(cudaSurfaceObject_t* pSurfObject,
     if (pSurfObject == nullptr || pResDesc == nullptr || !valid_resource_desc(*pResDesc)) {
         return fail(cudaErrorInvalidValue);
     }
-    std::lock_guard<std::mutex> lock(g_tex_mutex);
-    *pSurfObject = g_next_surf_id++;
-    g_surface_objects[*pSurfObject] = *pResDesc;
+    cudaTextureDesc texture{};
+    void* descriptor_allocation = nullptr;
+    if (cudaMalloc(&descriptor_allocation, sizeof(__cumetal_texture_descriptor)) != cudaSuccess)
+        return fail(cudaErrorMemoryAllocation);
+    if (!build_texture_descriptor(*pResDesc, &texture,
+                                  static_cast<__cumetal_texture_descriptor*>(descriptor_allocation))) {
+        cudaFree(descriptor_allocation);
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaSurfaceObject_t handle =
+        static_cast<cudaSurfaceObject_t>(reinterpret_cast<std::uintptr_t>(descriptor_allocation));
+    SurfaceObjectRecord record{.resource = *pResDesc,
+                               .device_descriptor = descriptor_allocation};
+    {
+        std::lock_guard<std::mutex> lock(g_tex_mutex);
+        g_surface_objects[handle] = record;
+    }
+    *pSurfObject = handle;
     return fail(cudaSuccess);
 }
 
 cudaError_t cudaDestroySurfaceObject(cudaSurfaceObject_t surfObject) {
-    std::lock_guard<std::mutex> lock(g_tex_mutex);
-    if (g_surface_objects.erase(surfObject) == 0) {
-        return fail(cudaErrorInvalidResourceHandle);
+    void* descriptor = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_tex_mutex);
+        const auto found = g_surface_objects.find(surfObject);
+        if (found == g_surface_objects.end()) return fail(cudaErrorInvalidResourceHandle);
+        descriptor = found->second.device_descriptor;
+        g_surface_objects.erase(found);
     }
-    return fail(cudaSuccess);
+    return cudaFree(descriptor);
 }
 
 cudaError_t cudaGetSurfaceObjectResourceDesc(cudaResourceDesc* pResDesc,
@@ -6373,8 +7140,30 @@ cudaError_t cudaGetSurfaceObjectResourceDesc(cudaResourceDesc* pResDesc,
     std::lock_guard<std::mutex> lock(g_tex_mutex);
     const auto found = g_surface_objects.find(surfObject);
     if (found == g_surface_objects.end()) return fail(cudaErrorInvalidResourceHandle);
-    *pResDesc = found->second;
+    *pResDesc = found->second.resource;
     return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphicsGLRegisterBuffer(cudaGraphicsResource**,
+                                         unsigned int, unsigned int) {
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaGraphicsMapResources(int, cudaGraphicsResource**, cudaStream_t) {
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaGraphicsUnmapResources(int, cudaGraphicsResource**, cudaStream_t) {
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaGraphicsResourceGetMappedPointer(void**, size_t*,
+                                                 cudaGraphicsResource*) {
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaGraphicsUnregisterResource(cudaGraphicsResource*) {
+    return fail(cudaErrorNotSupported);
 }
 
 cudaChannelFormatDesc cudaCreateChannelDesc(int x, int y, int z, int w,

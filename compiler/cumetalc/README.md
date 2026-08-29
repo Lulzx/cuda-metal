@@ -30,8 +30,9 @@ emits PTX, then runs CuMetal's PTX lowering and AIR emitter. `-I`, `-D`,
 inlining of every viable call reachable from the selected kernel. It is useful for
 projects whose PTX contains helper `.func` definitions, which CuMetal does not yet
 lower independently. Recursion, indirect calls, and explicitly non-inlineable
-functions still fail during strict PTX lowering. Jump tables are disabled because
-CuMetal currently lowers structured PTX branches rather than `brx.idx` target tables.
+functions still fail during strict PTX lowering. The frontend continues to prefer
+structured branches with `-fno-jump-tables`; PTX inputs that contain
+`brx.idx`/`.branchtargets` tables are supported and lower to LLVM switches.
 
 When built from a CuMetal source checkout, this `.cu` frontend path automatically adds
 `runtime/api/` to the include path for clean-room CUDA headers.

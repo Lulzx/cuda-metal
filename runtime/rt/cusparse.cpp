@@ -53,6 +53,8 @@ struct cusparseSpMatDescr {
     cusparseIndexBase_t idxBase = CUSPARSE_INDEX_BASE_ZERO;
     cudaDataType valueType = CUDA_R_32F;
     SpMatFormat format = CUMETAL_SPMAT_CSR;
+    cusparseFillMode_t fill = CUSPARSE_FILL_MODE_LOWER;
+    cusparseDiagType_t diag = CUSPARSE_DIAG_TYPE_NON_UNIT;
     // Longest run in the offset array, computed once on first use. The gather
     // kernel gives one thread per compressed row, so this is the serial depth
     // every other thread waits on. -1 means not yet measured.
@@ -64,6 +66,8 @@ struct cusparseSpMatDescr {
     // will be made from a stale shape.
     std::int64_t longest_row = -1;
 };
+
+struct csrilu02Info {};
 
 struct cusparseDnVecDescr {
     int64_t size = 0;
@@ -308,6 +312,100 @@ cusparseStatus_t cusparseCreateCsc(cusparseSpMatDescr_t* spMatDescr,
 
 cusparseStatus_t cusparseDestroySpMat(cusparseSpMatDescr_t spMatDescr) {
     delete spMatDescr;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpMatSetAttribute(cusparseSpMatDescr_t spMatDescr,
+                                           cusparseSpMatAttribute_t attribute,
+                                           const void* data, size_t dataSize) {
+    if (spMatDescr == nullptr || data == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (attribute == CUSPARSE_SPMAT_FILL_MODE) {
+        if (dataSize != sizeof(cusparseFillMode_t)) return CUSPARSE_STATUS_INVALID_VALUE;
+        const auto value = *static_cast<const cusparseFillMode_t*>(data);
+        if (value != CUSPARSE_FILL_MODE_LOWER && value != CUSPARSE_FILL_MODE_UPPER)
+            return CUSPARSE_STATUS_INVALID_VALUE;
+        spMatDescr->fill = value;
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+    if (attribute == CUSPARSE_SPMAT_DIAG_TYPE) {
+        if (dataSize != sizeof(cusparseDiagType_t)) return CUSPARSE_STATUS_INVALID_VALUE;
+        const auto value = *static_cast<const cusparseDiagType_t*>(data);
+        if (value != CUSPARSE_DIAG_TYPE_NON_UNIT && value != CUSPARSE_DIAG_TYPE_UNIT)
+            return CUSPARSE_STATUS_INVALID_VALUE;
+        spMatDescr->diag = value;
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+    return CUSPARSE_STATUS_INVALID_VALUE;
+}
+
+cusparseStatus_t cusparseCreateCsrilu02Info(csrilu02Info_t* info) {
+    if (info == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *info = new csrilu02Info();
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDestroyCsrilu02Info(csrilu02Info_t info) {
+    delete info;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseScsrilu02_bufferSize(cusparseHandle_t handle, int m, int nnz,
+                                              const cusparseMatDescr_t,
+                                              float* csrValA, const int* csrRowPtrA,
+                                              const int* csrColIndA, csrilu02Info_t info,
+                                              int* bufferSize) {
+    if (!handle || m < 0 || nnz < 0 || !csrValA || !csrRowPtrA || !csrColIndA ||
+        !info || !bufferSize) return CUSPARSE_STATUS_INVALID_VALUE;
+    *bufferSize = 1;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseScsrilu02_analysis(cusparseHandle_t handle, int m, int nnz,
+                                            const cusparseMatDescr_t,
+                                            const float* csrValA, const int* csrRowPtrA,
+                                            const int* csrColIndA, csrilu02Info_t info,
+                                            cusparseSolvePolicy_t, void*) {
+    if (!handle || m < 0 || nnz < 0 || !csrValA || !csrRowPtrA || !csrColIndA || !info)
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    synchronize_handle_stream(handle);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseScsrilu02(cusparseHandle_t handle, int m, int nnz,
+                                   const cusparseMatDescr_t descrA,
+                                   float* csrValA, const int* csrRowPtrA,
+                                   const int* csrColIndA, csrilu02Info_t info,
+                                   cusparseSolvePolicy_t, void*) {
+    if (!handle || m < 0 || nnz < 0 || !csrValA || !csrRowPtrA || !csrColIndA || !info)
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    synchronize_handle_stream(handle);
+    const int base = descrA && descrA->base == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
+    auto find_in_row = [&](int row, int column) -> int {
+        for (int p = csrRowPtrA[row] - base; p < csrRowPtrA[row + 1] - base; ++p) {
+            const int current = csrColIndA[p] - base;
+            if (current == column) return p;
+            if (current > column) break;
+        }
+        return -1;
+    };
+    for (int row = 0; row < m; ++row) {
+        const int row_begin = csrRowPtrA[row] - base;
+        const int row_end = csrRowPtrA[row + 1] - base;
+        for (int p = row_begin; p < row_end; ++p) {
+            const int lower_column = csrColIndA[p] - base;
+            if (lower_column >= row) break;
+            const int diagonal = find_in_row(lower_column, lower_column);
+            if (diagonal < 0 || csrValA[diagonal] == 0.0f)
+                return CUSPARSE_STATUS_ZERO_PIVOT;
+            const float multiplier = csrValA[p] / csrValA[diagonal];
+            csrValA[p] = multiplier;
+            for (int q = diagonal + 1; q < csrRowPtrA[lower_column + 1] - base; ++q) {
+                const int upper_column = csrColIndA[q] - base;
+                const int destination = find_in_row(row, upper_column);
+                if (destination >= 0) csrValA[destination] -= multiplier * csrValA[q];
+            }
+        }
+    }
     return CUSPARSE_STATUS_SUCCESS;
 }
 
@@ -1239,7 +1337,7 @@ cusparseStatus_t cusparseSpSV_bufferSize(cusparseHandle_t, cusparseOperation_t,
                                           cusparseDnVecDescr_t, cusparseDnVecDescr_t,
                                           cudaDataType, cusparseSpSVAlg_t,
                                           cusparseSpSVDescr_t, size_t* bufferSize) {
-    if (bufferSize) *bufferSize = 0;
+    if (bufferSize) *bufferSize = 1;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
@@ -1272,6 +1370,9 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t handle,
     const int* colIdx = static_cast<const int*>(matA->colInd);
     const int base = (matA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
     const int64_t n = matA->rows;
+    const bool forward =
+        (matA->fill == CUSPARSE_FILL_MODE_LOWER) ==
+        (opA == CUSPARSE_OPERATION_NON_TRANSPOSE);
 
     // Forward substitution: solve L*y = alpha*x row by row
     if (computeType == CUDA_R_64F) {
@@ -1279,19 +1380,20 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t handle,
         const double* vals = static_cast<const double*>(matA->values);
         const double* x = static_cast<const double*>(vecX->values);
         double* y = static_cast<double*>(vecY->values);
-        for (int64_t i = 0; i < n; ++i) {
+        for (int64_t step = 0; step < n; ++step) {
+            const int64_t i = forward ? step : n - 1 - step;
             double rhs = a * x[i];
-            double diag = 1.0;
+            double diag = matA->diag == CUSPARSE_DIAG_TYPE_UNIT ? 1.0 : 0.0;
             const int rs = rowPtr[i] - base;
             const int re = rowPtr[i + 1] - base;
             for (int j = rs; j < re; ++j) {
                 const int c = colIdx[j] - base;
-                if (c == i) { diag = vals[j]; }
-                else if ((opA == CUSPARSE_OPERATION_NON_TRANSPOSE && c < i) ||
-                         (opA != CUSPARSE_OPERATION_NON_TRANSPOSE && c > i)) {
+                if (c == i && matA->diag != CUSPARSE_DIAG_TYPE_UNIT) { diag = vals[j]; }
+                else if ((forward && c < i) || (!forward && c > i)) {
                     rhs -= vals[j] * y[c];
                 }
             }
+            if (diag == 0.0) return CUSPARSE_STATUS_ZERO_PIVOT;
             y[i] = rhs / diag;
         }
     } else {
@@ -1299,19 +1401,20 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t handle,
         const float* vals = static_cast<const float*>(matA->values);
         const float* x = static_cast<const float*>(vecX->values);
         float* y = static_cast<float*>(vecY->values);
-        for (int64_t i = 0; i < n; ++i) {
+        for (int64_t step = 0; step < n; ++step) {
+            const int64_t i = forward ? step : n - 1 - step;
             float rhs = a * x[i];
-            float diag = 1.0f;
+            float diag = matA->diag == CUSPARSE_DIAG_TYPE_UNIT ? 1.0f : 0.0f;
             const int rs = rowPtr[i] - base;
             const int re = rowPtr[i + 1] - base;
             for (int j = rs; j < re; ++j) {
                 const int c = colIdx[j] - base;
-                if (c == i) { diag = vals[j]; }
-                else if ((opA == CUSPARSE_OPERATION_NON_TRANSPOSE && c < i) ||
-                         (opA != CUSPARSE_OPERATION_NON_TRANSPOSE && c > i)) {
+                if (c == i && matA->diag != CUSPARSE_DIAG_TYPE_UNIT) { diag = vals[j]; }
+                else if ((forward && c < i) || (!forward && c > i)) {
                     rhs -= vals[j] * y[c];
                 }
             }
+            if (diag == 0.0f) return CUSPARSE_STATUS_ZERO_PIVOT;
             y[i] = rhs / diag;
         }
     }

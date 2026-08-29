@@ -1,0 +1,38 @@
+#pragma once
+
+#include "cuda/pipeline"
+
+#include <utility>
+
+namespace cuda {
+
+template <thread_scope Scope>
+class barrier {
+public:
+    struct arrival_token {};
+
+    __device__ __forceinline__ arrival_token arrive() { return {}; }
+    __device__ __forceinline__ void wait(arrival_token) {
+        if constexpr (Scope == thread_scope_block) {
+            __syncthreads();
+        }
+    }
+    __device__ __forceinline__ void arrive_and_wait() {
+        if constexpr (Scope == thread_scope_block) {
+            __syncthreads();
+        }
+    }
+};
+
+template <thread_scope Scope>
+__device__ __forceinline__ void init(barrier<Scope>*, unsigned int) {}
+
+template <typename Destination, typename Source, thread_scope Scope>
+__device__ __forceinline__ void memcpy_async(Destination* destination,
+                                              const Source* source,
+                                              size_t size,
+                                              barrier<Scope>&) {
+    __builtin_memcpy(destination, source, size);
+}
+
+} // namespace cuda

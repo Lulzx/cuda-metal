@@ -23,6 +23,13 @@ int main() {
         std::fprintf(stderr, "FAIL: cudaHostGetDevicePointer should return host alias\n");
         return 1;
     }
+    auto* typed_host_ptr = static_cast<float*>(host_ptr);
+    float* typed_device_alias = nullptr;
+    if (cudaHostGetDevicePointer(&typed_device_alias, typed_host_ptr, 0) != cudaSuccess ||
+        typed_device_alias != typed_host_ptr) {
+        std::fprintf(stderr, "FAIL: typed cudaHostGetDevicePointer overload\n");
+        return 1;
+    }
 
     unsigned int host_flags = 0xdeadbeefu;
     if (cudaHostGetFlags(&host_flags, host_ptr) != cudaSuccess || host_flags != cudaHostAllocDefault) {
@@ -87,6 +94,40 @@ int main() {
         return 1;
     }
 
+    void* managed_ptr = nullptr;
+    void* host_attached_managed_ptr = nullptr;
+    cudaMemLocation host_location{cudaMemLocationTypeHost, 0};
+    cudaMemLocation invalid_location{cudaMemLocationTypeInvalid, 0};
+    if (cudaMallocManaged(&managed_ptr, kBytes) != cudaSuccess ||
+        cudaMallocManaged(&host_attached_managed_ptr, kBytes, cudaMemAttachHost) !=
+            cudaSuccess ||
+        cudaMemPrefetchAsync(managed_ptr, kBytes, host_location, 0) != cudaSuccess ||
+        cudaStreamAttachMemAsync(nullptr, managed_ptr, 0, cudaMemAttachGlobal) != cudaSuccess ||
+        cudaStreamAttachMemAsync(nullptr, managed_ptr, 0, cudaMemAttachHost) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: UMA prefetch/attach compatibility APIs\n");
+        return 1;
+    }
+    void* invalid_managed_ptr = nullptr;
+    if (cudaMallocManaged(&invalid_managed_ptr, kBytes, cudaMemAttachSingle) !=
+            cudaErrorInvalidValue ||
+        cudaMemPrefetchAsync(managed_ptr, kBytes, invalid_location, 0) !=
+            cudaErrorInvalidValue ||
+        cudaMemPrefetchAsync(managed_ptr, kBytes, host_location, 1) !=
+            cudaErrorInvalidValue ||
+        cudaStreamAttachMemAsync(nullptr, managed_ptr, 0, 0) != cudaErrorInvalidValue ||
+        cudaStreamAttachMemAsync(nullptr, nullptr, 0, cudaMemAttachGlobal) !=
+            cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: invalid UMA prefetch/attach arguments should fail\n");
+        return 1;
+    }
+    if (cudaFree(managed_ptr) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaFree(managed) failed\n");
+        return 1;
+    }
+    if (cudaFree(host_attached_managed_ptr) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaFree(host-attached managed) failed\n");
+        return 1;
+    }
     if (cudaFree(device_ptr) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaFree failed\n");
         return 1;

@@ -464,7 +464,8 @@ IntrinsicLowerResult lower_intrinsics(const cumetal::ptx::EntryFunction& entry,
         lowered.operands = instruction.operands;
         lowered.translated = false;
 
-        if (instruction.opcode == "ptx.label") {
+        if (instruction.opcode == "ptx.label" ||
+            instruction.opcode == "ptx.branchtargets") {
             lowered.translated = true;
             result.instructions.push_back(std::move(lowered));
             continue;
@@ -491,7 +492,8 @@ IntrinsicLowerResult lower_intrinsics(const cumetal::ptx::EntryFunction& entry,
         if (!translated) {
             if (instruction.opcode.rfind("ret", 0) == 0 || instruction.opcode.rfind("ld", 0) == 0 ||
                 instruction.opcode.rfind("st", 0) == 0 || instruction.opcode.rfind("setp", 0) == 0 ||
-                instruction.opcode.rfind("bra", 0) == 0 || instruction.opcode.rfind("cvt", 0) == 0 ||
+                (instruction.opcode.rfind("bra", 0) == 0 ||
+                 instruction.opcode.rfind("brx", 0) == 0) || instruction.opcode.rfind("cvt", 0) == 0 ||
                 instruction.opcode.rfind("cvta", 0) == 0 || instruction.opcode.rfind("mov", 0) == 0 ||
                 instruction.opcode.rfind("call", 0) == 0 || instruction.opcode.rfind("atom", 0) == 0 ||
                 instruction.opcode.rfind("selp", 0) == 0 || instruction.opcode.rfind("set.", 0) == 0) {

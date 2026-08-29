@@ -1,0 +1,31 @@
+#pragma once
+
+#include <cstddef>
+#include <cuda/std/functional>
+
+namespace cuda {
+
+template <typename T>
+class counting_iterator {
+public:
+    using difference_type = ::std::ptrdiff_t;
+    using value_type = T;
+
+    constexpr explicit counting_iterator(T value = T{}) : value_(value) {}
+    constexpr T operator*() const { return value_; }
+    constexpr T operator[](difference_type offset) const {
+        return static_cast<T>(value_ + static_cast<T>(offset));
+    }
+    constexpr counting_iterator& operator++() {
+        ++value_;
+        return *this;
+    }
+    constexpr counting_iterator operator+(difference_type offset) const {
+        return counting_iterator(static_cast<T>(value_ + static_cast<T>(offset)));
+    }
+
+private:
+    T value_;
+};
+
+}

@@ -41,7 +41,7 @@ int main() {
         return 1;
     }
 
-    // --- cudaDeviceSetLimit (no-op; just verify it doesn't error) ---
+    // --- cudaDeviceSetLimit ---
     if (cudaDeviceSetLimit(cudaLimitStackSize, 2048) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaDeviceSetLimit(cudaLimitStackSize) failed\n");
         return 1;
@@ -50,17 +50,35 @@ int main() {
         std::fprintf(stderr, "FAIL: cudaDeviceSetLimit(cudaLimitMallocHeapSize) failed\n");
         return 1;
     }
+    size_t configured_heap_size = 0;
+    if (cudaDeviceGetLimit(&configured_heap_size, cudaLimitMallocHeapSize) != cudaSuccess ||
+        configured_heap_size != 16 * 1024 * 1024) {
+        std::fprintf(stderr, "FAIL: cudaLimitMallocHeapSize did not persist\n");
+        return 1;
+    }
+    if (cudaDeviceSetLimit(cudaLimitMallocHeapSize, 0) != cudaErrorInvalidValue ||
+        cudaDeviceSetLimit(cudaLimitMallocHeapSize, 31) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: undersized device heaps should be rejected\n");
+        return 1;
+    }
 
     size_t persisting_l2_size = 1;
     if (cudaDeviceGetLimit(&persisting_l2_size, cudaLimitPersistingL2CacheSize) !=
             cudaSuccess ||
         persisting_l2_size != 0) {
-        std::fprintf(stderr, "FAIL: unsupported persisting-L2 limit must be 0\n");
+        std::fprintf(stderr, "FAIL: default persisting-L2 hint must be 0\n");
         return 1;
     }
-    if (cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, 1) !=
-        cudaErrorNotSupported) {
-        std::fprintf(stderr, "FAIL: nonzero persisting-L2 limit should be unsupported\n");
+    cudaDeviceProp cache_prop{};
+    if (cudaGetDeviceProperties(&cache_prop, 0) != cudaSuccess ||
+        cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, 1) != cudaSuccess ||
+        cudaDeviceGetLimit(&persisting_l2_size, cudaLimitPersistingL2CacheSize) !=
+            cudaSuccess ||
+        persisting_l2_size != 1 ||
+        cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize,
+                           static_cast<size_t>(cache_prop.persistingL2CacheMaxSize) + 1) !=
+            cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: persisting-L2 hint limit did not validate/round-trip\n");
         return 1;
     }
     if (cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, 0) != cudaSuccess) {
@@ -71,11 +89,12 @@ int main() {
     cudaStreamAttrValue attr{};
     attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
     if (cudaStreamSetAttribute(nullptr, cudaStreamAttributeAccessPolicyWindow,
-                               &attr) != cudaErrorNotSupported ||
+                               &attr) != cudaSuccess ||
         cudaStreamGetAttribute(nullptr, cudaStreamAttributeAccessPolicyWindow,
-                               &attr) != cudaErrorNotSupported ||
-        cudaCtxResetPersistingL2Cache() != cudaErrorNotSupported) {
-        std::fprintf(stderr, "FAIL: persisting-L2 APIs should report unsupported\n");
+                               &attr) != cudaSuccess ||
+        attr.accessPolicyWindow.hitProp != cudaAccessPropertyPersisting ||
+        cudaCtxResetPersistingL2Cache() != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: persisting-L2 hints should round-trip successfully\n");
         return 1;
     }
     if (cudaStreamSetAttribute(nullptr, cudaStreamAttributeAccessPolicyWindow,

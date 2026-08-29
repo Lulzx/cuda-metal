@@ -61,6 +61,15 @@ struct LaunchConfig {
     std::size_t shared_memory_bytes = 0;
     std::string provenance;
     std::string semantic_quality;
+    // Internal source-first ABI used when a large two-dimensional grid is
+    // split across command buffers to stay below macOS's GPU watchdog.
+    std::uint32_t grid_y_offset = 0;
+    bool disable_batching = false;
+    // Buffers reached indirectly through GPU pointers stored in another
+    // buffer are not regular Metal argument bindings. Declaring them as
+    // resident resources keeps pointer-chasing kernels valid without
+    // consuming an argument-table slot.
+    std::vector<std::shared_ptr<Buffer>> resident_buffers;
 };
 
 cudaError_t initialize(std::string* error_message);

@@ -1,10 +1,24 @@
 #pragma once
 
 #include "cuda_runtime.h"
+#include <type_traits>
 
 #if defined(__cplusplus)
 
 namespace cooperative_groups {
+
+#if !defined(__CUDACC__)
+
+// Ordinary host translation units may include cooperative_groups.h to size
+// CUDA scratch-storage types even though CUDA builtins such as threadIdx do
+// not exist in that language mode.
+template <unsigned int BlockSize>
+struct block_tile_memory {
+    static_assert(BlockSize > 0, "block tile memory requires a non-empty block");
+    unsigned int scratch[(BlockSize + 31u) / 32u];
+};
+
+#else
 
 struct thread_block {
     __device__ __forceinline__ unsigned int size() const {
@@ -66,25 +80,50 @@ struct thread_block_tile {
     template <typename T>
     __device__ __forceinline__ T shfl(T val, unsigned int src_rank) const {
         const int width = TileSize < 32 ? TileSize : 32;
-        return __shfl_sync(member_mask(), val, static_cast<int>(src_rank), width);
+        if constexpr (std::is_class<T>::value || sizeof(T) > sizeof(unsigned long long)) {
+            return shuffle_aggregate(val, [=](unsigned int word) {
+                return __shfl_sync(member_mask(), word, static_cast<int>(src_rank), width);
+            });
+        } else {
+            return __shfl_sync(member_mask(), val, static_cast<int>(src_rank), width);
+        }
     }
 
     template <typename T>
     __device__ __forceinline__ T shfl_down(T val, unsigned int delta) const {
         const int width = TileSize < 32 ? TileSize : 32;
-        return __shfl_down_sync(member_mask(), val, delta, width);
+        if constexpr (std::is_class<T>::value || sizeof(T) > sizeof(unsigned long long)) {
+            return shuffle_aggregate(val, [=](unsigned int word) {
+                return __shfl_down_sync(member_mask(), word, delta, width);
+            });
+        } else {
+            return __shfl_down_sync(member_mask(), val, delta, width);
+        }
     }
 
     template <typename T>
     __device__ __forceinline__ T shfl_up(T val, unsigned int delta) const {
         const int width = TileSize < 32 ? TileSize : 32;
-        return __shfl_up_sync(member_mask(), val, delta, width);
+        if constexpr (std::is_class<T>::value || sizeof(T) > sizeof(unsigned long long)) {
+            return shuffle_aggregate(val, [=](unsigned int word) {
+                return __shfl_up_sync(member_mask(), word, delta, width);
+            });
+        } else {
+            return __shfl_up_sync(member_mask(), val, delta, width);
+        }
     }
 
     template <typename T>
     __device__ __forceinline__ T shfl_xor(T val, unsigned int lane_mask) const {
         const int width = TileSize < 32 ? TileSize : 32;
-        return __shfl_xor_sync(member_mask(), val, static_cast<int>(lane_mask), width);
+        if constexpr (std::is_class<T>::value || sizeof(T) > sizeof(unsigned long long)) {
+            return shuffle_aggregate(val, [=](unsigned int word) {
+                return __shfl_xor_sync(member_mask(), word,
+                                       static_cast<int>(lane_mask), width);
+            });
+        } else {
+            return __shfl_xor_sync(member_mask(), val, static_cast<int>(lane_mask), width);
+        }
     }
 
     __device__ __forceinline__ int any(int predicate) const {
@@ -107,6 +146,30 @@ struct thread_block_tile {
     }
 
 private:
+    template <typename T, typename ShuffleWord>
+    __device__ __forceinline__ T shuffle_aggregate(T value, ShuffleWord shuffle_word) const {
+        static_assert(std::is_trivially_copyable<T>::value,
+                      "cooperative-groups shuffle values must be trivially copyable");
+        union Packed {
+            T value;
+            unsigned int words[(sizeof(T) + sizeof(unsigned int) - 1) /
+                               sizeof(unsigned int)];
+        } packed{};
+        packed.value = value;
+        constexpr unsigned int kWords =
+            (sizeof(T) + sizeof(unsigned int) - 1) / sizeof(unsigned int);
+        static_assert(kWords <= 8, "cooperative-groups shuffle value is too large");
+        if constexpr (kWords >= 1) packed.words[0] = shuffle_word(packed.words[0]);
+        if constexpr (kWords >= 2) packed.words[1] = shuffle_word(packed.words[1]);
+        if constexpr (kWords >= 3) packed.words[2] = shuffle_word(packed.words[2]);
+        if constexpr (kWords >= 4) packed.words[3] = shuffle_word(packed.words[3]);
+        if constexpr (kWords >= 5) packed.words[4] = shuffle_word(packed.words[4]);
+        if constexpr (kWords >= 6) packed.words[5] = shuffle_word(packed.words[5]);
+        if constexpr (kWords >= 7) packed.words[6] = shuffle_word(packed.words[6]);
+        if constexpr (kWords >= 8) packed.words[7] = shuffle_word(packed.words[7]);
+        return packed.value;
+    }
+
     __device__ __forceinline__ unsigned int linear_tid() const {
         return (threadIdx.z * (blockDim.y * blockDim.x)) + (threadIdx.y * blockDim.x) + threadIdx.x;
     }
@@ -152,6 +215,10 @@ struct coalesced_group {
 
     __device__ __forceinline__ int all(int predicate) const {
         return __all_sync(member_mask_, predicate);
+    }
+
+    __device__ __forceinline__ unsigned int ballot(int predicate) const {
+        return __ballot_sync(member_mask_, predicate) & member_mask_;
     }
 
     __device__ __forceinline__ unsigned int member_mask() const { return member_mask_; }
@@ -244,15 +311,33 @@ private:
 
 __device__ __forceinline__ thread_block this_thread_block() { return {}; }
 
+// CUDA 12.8 introduced an explicit shared-memory scratch object for static
+// partitions larger than a warp. CuMetal's current thread_block handle carries
+// no state, but accepting the storage-bearing overload is still semantically
+// exact for ordinary block operations and <=32-lane tiles. Multi-warp tile
+// collectives continue to use the block barrier path above.
+template <unsigned int BlockSize>
+struct block_tile_memory {
+    static_assert(BlockSize > 0, "block tile memory requires a non-empty block");
+    unsigned int scratch[(BlockSize + 31u) / 32u];
+};
+
+template <unsigned int BlockSize>
+__device__ __forceinline__ thread_block
+this_thread_block(block_tile_memory<BlockSize>&) {
+    return {};
+}
+
 template <int TileSize>
 __device__ __forceinline__ thread_block_tile<TileSize> tiled_partition(const thread_block&) {
     return {};
 }
 
-// grid_group — grid-wide collective group.
-// Metal has no cross-threadgroup barrier. CuMetal therefore accepts only a
-// single-threadgroup cooperative grid and rejects multi-block cooperative
-// launch at the Runtime/Driver API boundary.
+extern "C" __device__ void __cumetal_grid_sync();
+
+// grid_group — grid-wide collective group. CuMetal lowers this marker call to
+// a device-wide sense-reversing barrier for cooperatively launched grids whose
+// complete block set can be resident together.
 struct grid_group {
     __device__ __forceinline__ unsigned int size() const {
         return gridDim.x * gridDim.y * gridDim.z * blockDim.x * blockDim.y * blockDim.z;
@@ -267,9 +352,8 @@ struct grid_group {
         return blockRank * blockSize + threadInBlock;
     }
 
-    // A threadgroup barrier is grid-wide for the only admitted grid shape.
     __device__ __forceinline__ void sync() const {
-        __syncthreads();
+        __cumetal_grid_sync();
     }
 };
 
@@ -294,6 +378,7 @@ struct less {
     __device__ __forceinline__ T operator()(const T& a, const T& b) const { return a < b ? a : b; }
 };
 
+#endif  // defined(__CUDACC__)
 
 }  // namespace cooperative_groups
 

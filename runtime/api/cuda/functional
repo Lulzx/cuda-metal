@@ -1,0 +1,23 @@
+#pragma once
+
+#include <functional>
+
+namespace cuda {
+
+template <typename T = void>
+struct maximum {
+    constexpr T operator()(const T& lhs, const T& rhs) const {
+        return lhs < rhs ? rhs : lhs;
+    }
+};
+
+template <>
+struct maximum<void> {
+    template <typename T, typename U>
+    constexpr auto operator()(T&& lhs, U&& rhs) const
+        -> decltype(lhs < rhs ? rhs : lhs) {
+        return lhs < rhs ? rhs : lhs;
+    }
+};
+
+}

@@ -47,11 +47,30 @@ __global__ void cooperative_thread_group_probe(int* output) {
     const int in_first_tile = tid < 16u;
     output[261u + tid] = tile.any(in_first_tile);
     output[325u + tid] = tile.all(in_first_tile);
+
+    int prefix = 1;
+    for (unsigned int offset = 1u; offset < tile.size(); offset <<= 1u) {
+        const int previous = tile.shfl_up(prefix, offset);
+        if (tile.thread_rank() >= offset) {
+            prefix += previous;
+        }
+    }
+    output[389u + tid] = prefix;
+
+    cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(block);
+    int prefix32 = 1;
+    for (unsigned int offset = 1u; offset < tile32.size(); offset <<= 1u) {
+        const int previous = tile32.shfl_up(prefix32, offset);
+        if (tile32.thread_rank() >= offset) {
+            prefix32 += previous;
+        }
+    }
+    output[453u + tid] = prefix32;
 }
 
 int main() {
     constexpr unsigned int kThreads = 64u;
-    constexpr unsigned int kOutputs = 389u;
+    constexpr unsigned int kOutputs = 517u;
     int* device_output = nullptr;
     int host_output[kOutputs] = {};
 
@@ -106,6 +125,19 @@ int main() {
             host_output[325u + tid] != expected_vote) {
             fprintf(stderr, "FAIL: tile vote mismatch at thread %u: any=%d all=%d expected=%d\n",
                     tid, host_output[261u + tid], host_output[325u + tid], expected_vote);
+            return 1;
+        }
+        if (host_output[389u + tid] != static_cast<int>(rank + 1u)) {
+            fprintf(stderr,
+                    "FAIL: tile prefix scan mismatch at thread %u: got %d expected %u\n",
+                    tid, host_output[389u + tid], rank + 1u);
+            return 1;
+        }
+        const unsigned int rank32 = tid & 31u;
+        if (host_output[453u + tid] != static_cast<int>(rank32 + 1u)) {
+            fprintf(stderr,
+                    "FAIL: 32-lane prefix scan mismatch at thread %u: got %d expected %u\n",
+                    tid, host_output[453u + tid], rank32 + 1u);
             return 1;
         }
     }

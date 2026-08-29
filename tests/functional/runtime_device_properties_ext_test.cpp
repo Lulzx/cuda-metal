@@ -104,6 +104,12 @@ int main() {
         std::fprintf(stderr, "FAIL: concurrentKernels should be 1\n");
         return 1;
     }
+    if (prop.maxThreadsPerMultiProcessor <= 0 || prop.maxThreadsPerBlock > 1024) {
+        std::fprintf(stderr,
+                     "FAIL: invalid thread limits: per-SM=%d per-block=%d\n",
+                     prop.maxThreadsPerMultiProcessor, prop.maxThreadsPerBlock);
+        return 1;
+    }
     if (prop.computeMode != cudaComputeModeDefault) {
         std::fprintf(stderr, "FAIL: computeMode should be cudaComputeModeDefault (0), got %d\n", prop.computeMode);
         return 1;
@@ -116,8 +122,10 @@ int main() {
         std::fprintf(stderr, "FAIL: pageableMemoryAccessUsesHostPageTables must be 0\n");
         return 1;
     }
-    if (prop.persistingL2CacheMaxSize != 0 || prop.accessPolicyMaxWindowSize != 0) {
-        std::fprintf(stderr, "FAIL: unsupported persisting-L2 capabilities must be 0\n");
+    if (prop.persistingL2CacheMaxSize <= 0 || prop.accessPolicyMaxWindowSize <= 0 ||
+        prop.persistingL2CacheMaxSize > prop.l2CacheSize ||
+        prop.accessPolicyMaxWindowSize > prop.l2CacheSize) {
+        std::fprintf(stderr, "FAIL: invalid persisting-L2 hint limits\n");
         return 1;
     }
 

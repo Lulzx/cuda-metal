@@ -107,9 +107,80 @@ static void test_spsv_alpha_scaling() {
     cusparseDestroy(handle);
 }
 
+static void test_ilu0_and_upper_attributes() {
+    cusparseHandle_t handle = nullptr;
+    cusparseMatDescr_t legacy = nullptr;
+    csrilu02Info_t info = nullptr;
+    cusparseCreate(&handle);
+    cusparseCreateMatDescr(&legacy);
+    cusparseCreateCsrilu02Info(&info);
+
+    int rowPtr[] = {0, 2, 5, 7};
+    int colInd[] = {0, 1, 0, 1, 2, 1, 2};
+    float values[] = {4.0f, 1.0f, 2.0f, 3.0f, 1.0f, 1.0f, 2.0f};
+    int buffer_size = 0;
+    CHECK(cusparseScsrilu02_bufferSize(handle, 3, 7, legacy, values,
+                                      rowPtr, colInd, info, &buffer_size) ==
+              CUSPARSE_STATUS_SUCCESS && buffer_size > 0,
+          "ILU0 reports a usable workspace");
+    CHECK(cusparseScsrilu02_analysis(handle, 3, 7, legacy, values, rowPtr,
+                                    colInd, info, CUSPARSE_SOLVE_POLICY_USE_LEVEL,
+                                    nullptr) == CUSPARSE_STATUS_SUCCESS &&
+              cusparseScsrilu02(handle, 3, 7, legacy, values, rowPtr, colInd,
+                                info, CUSPARSE_SOLVE_POLICY_USE_LEVEL, nullptr) ==
+                  CUSPARSE_STATUS_SUCCESS,
+          "ILU0 analysis and factorization succeed");
+    const float expected[] = {4.0f, 1.0f, 0.5f, 2.5f, 1.0f, 0.4f, 1.6f};
+    for (int i = 0; i < 7; ++i) {
+        CHECK(std::fabs(values[i] - expected[i]) < 1e-5f,
+              "ILU0 preserves the CSR zero-fill pattern");
+    }
+
+    cusparseSpMatDescr_t upper = nullptr;
+    cusparseCreateCsr(&upper, 3, 3, 7, rowPtr, colInd, values,
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparseFillMode_t fill = CUSPARSE_FILL_MODE_UPPER;
+    cusparseDiagType_t diag = CUSPARSE_DIAG_TYPE_NON_UNIT;
+    CHECK(cusparseSpMatSetAttribute(upper, CUSPARSE_SPMAT_FILL_MODE,
+                                   &fill, sizeof(fill)) == CUSPARSE_STATUS_SUCCESS &&
+              cusparseSpMatSetAttribute(upper, CUSPARSE_SPMAT_DIAG_TYPE,
+                                        &diag, sizeof(diag)) == CUSPARSE_STATUS_SUCCESS,
+          "SpMat triangular attributes are accepted");
+    CHECK(cusparseSpMatSetAttribute(upper, CUSPARSE_SPMAT_FILL_MODE,
+                                   &fill, 1) == CUSPARSE_STATUS_INVALID_VALUE,
+          "SpMat attribute size is validated");
+
+    float rhs[] = {4.0f, 5.0f, 2.0f};
+    float solution[] = {0.0f, 0.0f, 0.0f};
+    float alpha = 1.0f;
+    cusparseDnVecDescr_t vec_rhs = nullptr, vec_solution = nullptr;
+    cusparseSpSVDescr_t solve = nullptr;
+    cusparseCreateDnVec(&vec_rhs, 3, rhs, CUDA_R_32F);
+    cusparseCreateDnVec(&vec_solution, 3, solution, CUDA_R_32F);
+    cusparseSpSV_createDescr(&solve);
+    CHECK(cusparseSpSV_solve(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
+                             upper, vec_rhs, vec_solution, CUDA_R_32F,
+                             CUSPARSE_SPSV_ALG_DEFAULT, solve) ==
+              CUSPARSE_STATUS_SUCCESS &&
+              std::fabs(solution[0] - 0.625f) < 1e-5f &&
+              std::fabs(solution[1] - 1.5f) < 1e-5f &&
+              std::fabs(solution[2] - 1.25f) < 1e-5f,
+          "SpSV honors upper-triangular backward substitution");
+
+    cusparseSpSV_destroyDescr(solve);
+    cusparseDestroyDnVec(vec_solution);
+    cusparseDestroyDnVec(vec_rhs);
+    cusparseDestroySpMat(upper);
+    cusparseDestroyCsrilu02Info(info);
+    cusparseDestroyMatDescr(legacy);
+    cusparseDestroy(handle);
+}
+
 int main() {
     test_spsv_lower_fp32();
     test_spsv_alpha_scaling();
+    test_ilu0_and_upper_attributes();
     printf("\n%s (%d failures)\n", g_fail ? "SOME TESTS FAILED" : "ALL TESTS PASSED", g_fail);
     return g_fail ? 1 : 0;
 }

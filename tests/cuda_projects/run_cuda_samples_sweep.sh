@@ -100,28 +100,74 @@ classify_sample() {
         return
     fi
 
-    for f in "${sources[@]}"; do
-        base="$(basename "${f}")"
-        obj="${out_dir}/${base}.o"
-        rm -f "${obj}"
-        local lang=()
-        if [[ "${base}" == *.cu ]]; then
-            lang=( -x cuda "${CUMETAL_CUDA_DEVICE_FLAGS[@]}" -nocudainc -nocudalib
-                   -D__CUDACC__=1 -D__NVCC__=1 )
-        fi
-        # -Wno-everything: upstream sample warnings are not this test's business.
-        # Compile failures still surface through the exit status.
-        if ! run_with_timeout 300 "${CLANG_BIN}" "${lang[@]}" \
-                -std=c++17 -O2 -DNDEBUG -Wno-everything -Wno-pass-failed \
-                -I"${ROOT_DIR}/runtime/api" -I"${COMMON_DIR}" -include cuda_runtime.h \
-                -c "${f}" -o "${obj}" >>"${log}" 2>&1; then
-            echo "compile-fail"
-            return
-        fi
-        objs+=( "${obj}" )
+    # First use the ordinary source-first compilation path. If Clang diagnoses
+    # a device-side kernel launch, retry the complete translation unit set with
+    # relocatable device code and the legacy offload driver (the new driver
+    # emits an invalid Mach-O section for RDC on macOS). This is capability-
+    # driven rather than sample-name-driven, so any CUDA source using dynamic
+    # parallelism follows the same path.
+    local compile_mode compile_ok=0
+    local llvm_objcopy="${CUMETAL_LLVM_OBJCOPY:-/opt/homebrew/opt/llvm/bin/llvm-objcopy}"
+    for compile_mode in ordinary rdc; do
+        objs=()
+        compile_ok=1
+        for f in "${sources[@]}"; do
+            base="$(basename "${f}")"
+            obj="${out_dir}/${base}.o"
+            rm -f "${obj}"
+            local lang=()
+            if [[ "${base}" == *.cu ]]; then
+                lang=( -x cuda "${CUMETAL_CUDA_DEVICE_FLAGS[@]}" -nocudainc -nocudalib
+                       -D__CUDACC__=1 -D__NVCC__=1
+                       -fgpu-inline-threshold=1000000
+                       -mllvm -inline-all-viable-calls )
+                if [[ "${compile_mode}" == rdc ]]; then
+                    lang+=( --no-offload-new-driver -fgpu-rdc )
+                fi
+            fi
+            # -Wno-everything: upstream sample warnings are not this test's business.
+            # Compile failures still surface through the exit status.
+            if ! run_with_timeout 300 "${CLANG_BIN}" "${lang[@]}" \
+                    -std=c++17 -O2 -DNDEBUG -Wno-everything -Wno-pass-failed \
+                    -I"${ROOT_DIR}/runtime/api" -I"${COMMON_DIR}" -I"${src_dir}" \
+                    -include cuda_runtime.h \
+                    -c "${f}" -o "${obj}" >>"${log}" 2>&1; then
+                compile_ok=0
+                break
+            fi
+            if [[ "${compile_mode}" == rdc && "${base}" == *.cu ]]; then
+                if [[ ! -x "${llvm_objcopy}" ]]; then
+                    echo "missing llvm-objcopy for CUDA RDC linked-binary registration" >>"${log}"
+                    compile_ok=0
+                    break
+                fi
+                local linked_symbol
+                linked_symbol="$(nm -u "${obj}" 2>/dev/null | sed -n \
+                    's/^[[:space:]]*\(___cudaRegisterLinkedBinary__nv_[[:alnum:]_]*\)$/\1/p' | head -1)"
+                if [[ -n "${linked_symbol}" ]]; then
+                    "${llvm_objcopy}" \
+                        --redefine-sym "${linked_symbol}=___cudaRegisterLinkedBinary" \
+                        "${obj}" >>"${log}" 2>&1 || {
+                            compile_ok=0
+                            break
+                        }
+                fi
+            fi
+            objs+=( "${obj}" )
+        done
+        (( compile_ok == 1 )) && break
+        echo "retrying all sources with CUDA relocatable device code" >>"${log}"
     done
+    if (( compile_ok == 0 )); then
+        echo "compile-fail"
+        return
+    fi
 
-    if ! xcrun clang++ "${objs[@]}" \
+    local link_extra=()
+    if [[ "${rel}" == "0_Introduction/simpleTexture3D" ]]; then
+        link_extra=( -framework OpenGL -framework GLUT )
+    fi
+    if ! xcrun clang++ "${objs[@]}" "${link_extra[@]}" \
             -L"${CUMETAL_LIB_DIR}" -lcumetal -Wl,-rpath,"${CUMETAL_LIB_DIR}" \
             -o "${out_dir}/${name}" >>"${log}" 2>&1; then
         echo "link-fail"
@@ -130,7 +176,11 @@ classify_sample() {
 
     # Several samples read data files relative to their source directory.
     local run_output status=0
-    run_output="$(cd "${src_dir}" && run_with_timeout 120 "${out_dir}/${name}" 2>&1)" || status=$?
+    local run_args=()
+    if [[ "${rel}" == "0_Introduction/simpleTexture3D" ]]; then
+        run_args=( --file data/ref_texture3D.bin )
+    fi
+    run_output="$(cd "${src_dir}" && run_with_timeout 120 "${out_dir}/${name}" "${run_args[@]}" 2>&1)" || status=$?
     printf '%s\n' "${run_output}" >>"${log}"
 
     if (( status == 124 )); then
@@ -161,6 +211,18 @@ classify_sample() {
             return
         fi
     fi
+    # This sample's only numerical oracle is device printf. It otherwise exits
+    # zero even when a cached kernel is launched without its hidden printf ABI,
+    # which previously let a no-op run look like conformance.
+    if [[ "${rel}" == "0_Introduction/simpleCooperativeGroups" ]]; then
+        local whole_group_lines tiled_group_lines
+        whole_group_lines="$(grep -c 'threadBlockGroup is 2016 (expected 2016)' <<<"${run_output}")"
+        tiled_group_lines="$(grep -c 'tiledPartition16 group is 120 (expected 120)' <<<"${run_output}")"
+        if [[ "${whole_group_lines}" != "1" || "${tiled_group_lines}" != "4" ]]; then
+            echo "run-fail"
+            return
+        fi
+    fi
     # EXIT_WAIVED. The sample itself decided a capability it needs is absent and
     # declined to run -- the intended outcome when CuMetal reports it unsupported.
     if (( status == 2 )); then
@@ -171,7 +233,7 @@ classify_sample() {
         echo "run-fail"
         return
     fi
-    if grep -Eq 'Test failed|Result = FAIL|FAILED|ERROR!' <<<"${run_output}"; then
+    if grep -Eq 'Test failed|Result = FAIL|FAILED|FAILURE|ERROR!' <<<"${run_output}"; then
         echo "run-fail"
         return
     fi

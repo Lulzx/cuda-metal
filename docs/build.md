@@ -129,8 +129,8 @@ export CUMETAL_XCODE15_DEVELOPER_DIR="/Applications/Xcode_15.app/Contents/Develo
 export CUMETAL_XCODE16_DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 ```
 
-llm.c conformance harness build
--------------------------------
+Optional manual llm.c stress-harness build
+-------------------------------------------
 
 ```bash
 export CUMETAL_LLMC_DIR="/path/to/llm.c"

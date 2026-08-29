@@ -1,5 +1,6 @@
 #include "cumetal/ptx/lower_to_llvm.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
@@ -25,6 +26,16 @@ std::size_t count_occurrences(const std::string& haystack, const std::string& ne
         offset += needle.size();
     }
     return count;
+}
+
+std::uint64_t stable_device_function_token(const std::string& symbol) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const unsigned char c : symbol) {
+        hash ^= c;
+        hash *= 1099511628211ull;
+    }
+    hash &= 0x7fffffffffffffffull;
+    return hash == 0 ? 1 : hash;
 }
 
 }  // namespace
@@ -247,12 +258,117 @@ int main() {
     printf_options.entry_name = "llvm_printf";
     const auto llvm_printf =
         cumetal::ptx::lower_ptx_to_llvm_ir(llvm_printf_ptx, printf_options);
-    if (!expect(!llvm_printf.ok,
-                "LLVM PTX backend refuses vprintf instead of deleting output")) {
+    if (!expect(llvm_printf.ok,
+                "LLVM PTX backend lowers vprintf to the runtime ring-buffer ABI")) {
         return 1;
     }
-    if (!expect(contains(llvm_printf.error, "vprintf is unsupported"),
-                "LLVM vprintf refusal carries an actionable diagnostic")) {
+    if (!expect(contains(llvm_printf.llvm_ir,
+                         "atomicrmw add i32 addrspace(1)* %__cumetal_printf_buffer") &&
+                    contains(llvm_printf.llvm_ir,
+                             "i32 addrspace(2)* %__cumetal_printf_capacity") &&
+                    contains(llvm_printf.llvm_ir, "store i32 0") &&
+                    llvm_printf.printf_formats.size() == 1 &&
+                    llvm_printf.printf_formats[0] == "value=%d",
+                "LLVM vprintf carries hidden args, record writer, and format metadata")) {
+        return 1;
+    }
+
+    // Clang commonly moves printf into a device helper and passes vprintf a
+    // module-global format pointer plus a packed local tuple. The printf ring
+    // ABI and format ids must be propagated through the helper call rather than
+    // being inferred only from the selected kernel entry.
+    const std::string helper_printf_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.global .align 1 .b8 helper_fmt[16] = {104, 101, 108, 112, 101, 114, 61, 37, 100, 44, 37, 100, 10, 0, 0, 0};
+.func helper_printf(.param .b32 helper_a, .param .b32 helper_b)
+{
+    .local .align 8 .b8 __local_depot_helper[8];
+    .reg .b32 %r<3>;
+    .reg .b64 %SP;
+    .reg .b64 %SPL;
+    .reg .b64 %rd<6>;
+    mov.b64 %SPL, __local_depot_helper;
+    cvta.local.u64 %SP, %SPL;
+    add.u64 %rd1, %SP, 0;
+    add.u64 %rd2, %SPL, 0;
+    ld.param.b32 %r1, [helper_a];
+    ld.param.b32 %r2, [helper_b];
+    st.local.v2.b32 [%rd2], {%r1, %r2};
+    {
+    .param .b64 format_arg;
+    .param .b64 tuple_arg;
+    .param .b32 retval0;
+    st.param.b64 [tuple_arg], %rd1;
+    mov.b64 %rd3, helper_fmt;
+    cvta.global.u64 %rd4, %rd3;
+    st.param.b64 [format_arg], %rd4;
+    call.uni (retval0), vprintf, (format_arg, tuple_arg);
+    }
+    ret;
+}
+.visible .entry calls_helper_printf(.param .u32 input_a, .param .u32 input_b)
+{
+    .reg .b32 %r<3>;
+    ld.param.u32 %r1, [input_a];
+    ld.param.u32 %r2, [input_b];
+    {
+    .param .b32 helper_a;
+    .param .b32 helper_b;
+    st.param.b32 [helper_a], %r1;
+    st.param.b32 [helper_b], %r2;
+    call.uni helper_printf, (helper_a, helper_b);
+    }
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions helper_printf_options;
+    helper_printf_options.entry_name = "calls_helper_printf";
+    helper_printf_options.strict = true;
+    const auto helper_printf =
+        cumetal::ptx::lower_ptx_to_llvm_ir(helper_printf_ptx, helper_printf_options);
+    if (!expect(helper_printf.ok,
+                "device-helper packed-tuple vprintf lowers")) {
+        std::fprintf(stderr, "  error: %s\n", helper_printf.error.c_str());
+        return 1;
+    }
+    if (!expect(helper_printf.printf_formats.size() == 1 &&
+                    helper_printf.printf_formats[0] == "helper=%d,%d\n" &&
+                    contains(helper_printf.llvm_ir,
+                             "call void @helper_printf(i32") &&
+                    contains(helper_printf.llvm_ir,
+                             "i32 addrspace(1)* %__cumetal_printf_buffer, i32 addrspace(2)* %__cumetal_printf_capacity") &&
+                    contains(helper_printf.llvm_ir,
+                             "define internal void @helper_printf") &&
+                    contains(helper_printf.llvm_ir,
+                             "atomicrmw add i32 addrspace(1)* %__cumetal_printf_buffer"),
+                "device-helper printf propagates hidden args, ring writes, and format metadata")) {
+        return 1;
+    }
+
+    const std::string mul_wide_s16_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry mul_wide_s16(.param .u64 output) {
+    .reg .b64 %rd<2>;
+    .reg .b32 %r<2>;
+    .reg .b16 %rs<2>;
+    ld.param.u64 %rd1, [output];
+    mov.b16 %rs1, 65535;
+    mul.wide.s16 %r1, %rs1, 4;
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions mul_wide_s16_options;
+    mul_wide_s16_options.entry_name = "mul_wide_s16";
+    const auto mul_wide_s16 =
+        cumetal::ptx::lower_ptx_to_llvm_ir(mul_wide_s16_ptx, mul_wide_s16_options);
+    if (!expect(mul_wide_s16.ok &&
+                    contains(mul_wide_s16.llvm_ir, "sext i16") &&
+                    contains(mul_wide_s16.llvm_ir, "mul i32"),
+                "mul.wide.s16 sign-extends 16-bit operands and produces i32")) {
         return 1;
     }
 
@@ -349,6 +465,54 @@ $L1:
         return 1;
     }
 
+    const std::string indexed_branch_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry indexed_branch(
+    .param .u32 indexed_branch_param_0,
+    .param .u64 indexed_branch_param_1
+)
+{
+    .reg .b32 %r<3>;
+    .reg .b64 %rd1;
+    ld.param.u32 %r1, [indexed_branch_param_0];
+    ld.param.u64 %rd1, [indexed_branch_param_1];
+    $L_table: .branchtargets
+        $L_zero,
+        $L_one;
+    brx.idx %r1, $L_table;
+$L_zero:
+    mov.u32 %r2, 10;
+    bra $L_done;
+$L_one:
+    mov.u32 %r2, 20;
+$L_done:
+    st.global.u32 [%rd1], %r2;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions indexed_branch_options;
+    indexed_branch_options.entry_name = "indexed_branch";
+    indexed_branch_options.strict = true;
+    indexed_branch_options.module_id = "unit.ptx.indexed_branch";
+    const auto indexed_branch_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(indexed_branch_ptx,
+                                            indexed_branch_options);
+    if (!indexed_branch_lowered.ok) {
+        std::fprintf(stderr, "indexed branch lowering error: %s\n",
+                     indexed_branch_lowered.error.c_str());
+    }
+    if (!expect(indexed_branch_lowered.ok, "brx.idx PTX lowering succeeds") ||
+        !expect(contains(indexed_branch_lowered.llvm_ir, "switch i32"),
+                "brx.idx lowers to LLVM switch") ||
+        !expect(contains(indexed_branch_lowered.llvm_ir, "i32 0, label %cm_bb_"),
+                "brx.idx emits first target") ||
+        !expect(contains(indexed_branch_lowered.llvm_ir, "i32 1, label %cm_bb_"),
+                "brx.idx emits second target")) {
+        return 1;
+    }
+
     // CUDA frontends use vectorized memory operations for ordinary struct
     // copies. Scalarize both v2 and v4 forms so large CUDA projects do not
     // require source changes merely to express the same contiguous accesses.
@@ -394,6 +558,7 @@ $L1:
     call.uni (call_ret), __nv_umin, (call_arg, call_arg2);
     call.uni (call_ret), __nv_umax, (call_arg, call_arg2);
     call.uni (call_ret64), __nv_fabs, (call_arg64);
+    call.uni (call_ret64), __nv_sqrt, (call_arg64);
     call.uni (call_ret), __nv_fast_fdividef, (call_arg, call_arg);
     st.param.b64 [sin_ptr_arg], %rd1;
     st.param.b64 [cos_ptr_arg], %rd2;
@@ -405,6 +570,7 @@ $L1:
     cumetal::ptx::LowerToLlvmOptions vector_memory_options;
     vector_memory_options.entry_name = "vector_memory_generic";
     vector_memory_options.strict = true;
+    vector_memory_options.fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
     const auto vector_memory_lowered =
         cumetal::ptx::lower_ptx_to_llvm_ir(vector_memory_ptx, vector_memory_options);
     if (!vector_memory_lowered.ok) {
@@ -420,6 +586,11 @@ $L1:
     }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sqrt.f32"),
                 "__nv_sqrtf lowers to Metal sqrt intrinsic")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "sqrt_pair_correction") &&
+                    contains(vector_memory_lowered.llvm_ir, "sqrt_pair_is_zero"),
+                "emulated __nv_sqrt applies FP32-pair Newton refinement")) {
         return 1;
     }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_acos.f32"),
@@ -769,13 +940,16 @@ $L1:
 .version 8.0
 .target sm_80
 .const .align 8 .b8 constant_table[16] = {1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0};
+.global .align 1 .b8 _$_str[4] = {79, 75, 10, 0};
 .shared .align 16 .b8 shared_scratch[16];
 .visible .entry mixed_shared_const()
 {
-    .reg .b64 %rd<3>;
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<4>;
     .reg .b32 %r<2>;
     mov.u64 %rd1, shared_scratch;
     mov.u64 %rd2, constant_table;
+    mov.u64 %rd3, _$_str;
     ld.const.u32 %r1, [%rd2];
     st.shared.u32 [%rd1], %r1;
     ret;
@@ -797,6 +971,8 @@ $L1:
     }
     if (!expect(contains(mixed_shared_const_lowered.llvm_ir,
                          "getelementptr inbounds [16 x i8], [16 x i8] addrspace(2)* @\"constant_table\"") &&
+                    contains(mixed_shared_const_lowered.llvm_ir,
+                             "getelementptr inbounds [4 x i8], [4 x i8] addrspace(2)* @\"_$_str\"") &&
                     contains(mixed_shared_const_lowered.llvm_ir,
                              "ptrtoint i8 addrspace(3)* %__air_tg0 to i64"),
                 "constant and shared symbols keep distinct address-space bases")) {
@@ -978,6 +1154,73 @@ $L1:
                     contains(extern_shared_lowered.llvm_ir,
                              "ptrtoint i8 addrspace(3)* %__air_tg0 to i64"),
                 "declared extern shared symbol resolves to dynamic threadgroup memory")) {
+        return 1;
+    }
+
+    const std::string spilled_shared_pointer_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.extern .shared .align 16 .b8 dynamic_smem[];
+.visible .entry use_spilled_shared_pointer()
+{
+    .local .align 8 .b8 __local_depot0[16];
+    .reg .b32 %r<2>;
+    .reg .b64 %SPL, %SP, %rd<4>;
+    mov.b64 %SPL, __local_depot0;
+    cvta.local.u64 %SP, %SPL;
+    mov.b64 %rd1, dynamic_smem;
+    cvta.shared.u64 %rd2, %rd1;
+    st.local.b64 [%SP], %rd2;
+    ld.local.b64 %rd3, [%SP];
+    ld.b32 %r1, [%rd3];
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions spilled_shared_pointer_options;
+    spilled_shared_pointer_options.entry_name = "use_spilled_shared_pointer";
+    spilled_shared_pointer_options.strict = true;
+    const auto spilled_shared_pointer_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(spilled_shared_pointer_ptx,
+                                           spilled_shared_pointer_options);
+    if (!expect(spilled_shared_pointer_lowered.ok &&
+                    contains(spilled_shared_pointer_lowered.llvm_ir,
+                             "load i32, i32 addrspace(3)*"),
+                "generic load through a locally spilled shared pointer stays in threadgroup memory")) {
+        return 1;
+    }
+
+    const std::string shared_staged_global_pointer_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.extern .shared .align 8 .b8 dynamic_smem[];
+.visible .entry use_shared_staged_global_pointer(
+    .param .u64 output
+)
+{
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<5>;
+    ld.param.u64 %rd1, [output];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.b64 %rd3, dynamic_smem;
+    st.shared.u64 [%rd3], %rd2;
+    ld.shared.u64 %rd4, [%rd3];
+    mov.u32 %r1, 7;
+    st.u32 [%rd4], %r1;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions shared_staged_global_pointer_options;
+    shared_staged_global_pointer_options.entry_name =
+        "use_shared_staged_global_pointer";
+    shared_staged_global_pointer_options.strict = true;
+    const auto shared_staged_global_pointer_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(
+            shared_staged_global_pointer_ptx,
+            shared_staged_global_pointer_options);
+    if (!expect(shared_staged_global_pointer_lowered.ok &&
+                    contains(shared_staged_global_pointer_lowered.llvm_ir,
+                             ", i32 addrspace(1)*"),
+                "global pointer staged in shared memory retains global pointee address space")) {
         return 1;
     }
 
@@ -1245,6 +1488,50 @@ $L1:
         return 1;
     }
 
+    // A device function owns a separate local frame. Its depot declaration is
+    // outside the selected entry body and must be associated with the helper,
+    // rather than discarded or confused with the kernel's frame.
+    const std::string helper_local_depot_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.func helper_with_frame(.param .b64 helper_arg)
+{
+    .local .align 8 .b8 __local_depot1[32];
+    .reg .b64 %SPL;
+    .reg .b64 %rd<3>;
+    mov.b64 %SPL, __local_depot1;
+    ld.param.b64 %rd1, [helper_arg];
+    st.local.b64 [%SPL+24], %rd1;
+    ret;
+}
+.visible .entry calls_helper(.param .b64 input)
+{
+    .reg .b64 %rd<2>;
+    ld.param.b64 %rd1, [input];
+    {
+    .param .b64 helper_arg;
+    st.param.b64 [helper_arg], %rd1;
+    call.uni helper_with_frame, (helper_arg);
+    }
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions helper_local_depot_options;
+    helper_local_depot_options.entry_name = "calls_helper";
+    helper_local_depot_options.strict = true;
+    const auto helper_local_depot_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(helper_local_depot_ptx,
+                                           helper_local_depot_options);
+    if (!expect(helper_local_depot_lowered.ok,
+                "device-function local depot lowers")) {
+        std::fprintf(stderr, "  error: %s\n", helper_local_depot_lowered.error.c_str());
+        return 1;
+    }
+    if (!expect(contains(helper_local_depot_lowered.llvm_ir, "alloca [32 x i8]"),
+                "device-function depot uses its declared frame size")) {
+        return 1;
+    }
+
     // Without a parseable depot declaration the frame size is unknown; refuse to
     // lower rather than emit an under-sized frame that reads zeros.
     const std::string undeclared_depot_ptx = R"PTX(
@@ -1284,15 +1571,24 @@ $L1:
 {
     .reg .f32 %f<3>;
     .reg .f64 %fd<8>;
+    .reg .s32 %r<3>;
+    .reg .pred %p<3>;
     mov.f32 %f1, 1.25;
     cvt.rn.f64.f32 %fd1, %f1;
+    mov.s32 %r1, -17;
+    cvt.rn.f64.s32 %fd1, %r1;
     mov.f64 %fd2, 0d4000000000000000;
     add.f64 %fd3, %fd1, %fd2;
     mul.f64 %fd4, %fd3, %fd2;
     div.f64 %fd5, %fd4, %fd2;
     fma.rn.f64 %fd6, %fd5, %fd2, %fd1;
     neg.f64 %fd7, %fd6;
+    abs.f64 %fd3, %fd7;
+    selp.f64 %fd4, %fd3, %fd2, %p1;
     cvt.rn.f32.f64 %f2, %fd7;
+    cvt.rzi.s32.f64 %r2, %fd7;
+    setp.num.f64 %p1, %fd1, %fd7;
+    setp.nan.f64 %p2, %fd1, %fd7;
     ret;
 }
 )PTX";
@@ -1313,6 +1609,57 @@ $L1:
     }
     if (!expect(contains(generic_fp64_lowered.llvm_ir, "fp64_pack"),
                 "fp64 emulation stores packed FP32 pairs")) {
+        return 1;
+    }
+    if (!expect(contains(generic_fp64_lowered.llvm_ir, "sitofp i32") &&
+                    contains(generic_fp64_lowered.llvm_ir, "fptosi float"),
+                "fp64 emulation converts signed 32-bit integers in both directions")) {
+        return 1;
+    }
+    if (!expect(contains(generic_fp64_lowered.llvm_ir, "fcmp ord float") &&
+                    contains(generic_fp64_lowered.llvm_ir, "fcmp uno float"),
+                "fp64 emulation lowers ordered and NaN predicates")) {
+        return 1;
+    }
+
+    const std::string directed_fp64_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry directed_fp64_calls()
+{
+    .reg .b64 %rd<5>;
+    .param .b64 arg0;
+    .param .b64 arg1;
+    .param .b64 retval;
+    mov.b64 %rd1, 0d3FF0000000000000;
+    mov.b64 %rd2, 0d4000000000000000;
+    st.param.b64 [arg0], %rd1;
+    st.param.b64 [arg1], %rd2;
+    call.uni (retval), __nv_dadd_ru, (arg0, arg1);
+    call.uni (retval), __nv_dmul_rd, (arg0, arg1);
+    call.uni (retval), __nv_ddiv_ru, (arg0, arg1);
+    call.uni (retval), __nv_longlong_as_double, (arg0);
+    ld.param.b64 %rd3, [retval];
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions directed_fp64_options;
+    directed_fp64_options.entry_name = "directed_fp64_calls";
+    directed_fp64_options.strict = true;
+    directed_fp64_options.fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
+    const auto directed_fp64_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(directed_fp64_ptx,
+                                            directed_fp64_options);
+    if (!expect(directed_fp64_lowered.ok,
+                "directed fp64 libdevice calls lower under pair emulation")) {
+        std::fprintf(stderr, "  error: %s\n", directed_fp64_lowered.error.c_str());
+        return 1;
+    }
+    if (!expect(contains(directed_fp64_lowered.llvm_ir,
+                         "directed_fp64_padding") &&
+                    contains(directed_fp64_lowered.llvm_ir,
+                             "directed_fp64_negative_padding"),
+                "directed fp64 calls widen results in the requested direction")) {
         return 1;
     }
 
@@ -1364,6 +1711,409 @@ $L1:
     }
     if (!expect(contains(fp64_memory_lowered.error, "fp64 memory load/store"),
                 "fp64 memory rejection identifies the unsupported boundary")) {
+        return 1;
+    }
+
+    const std::string packed_half_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry packed_half_arithmetic()
+{
+    .reg .b32 %r<5>;
+    mov.b32 %r1, 0x3c003c00;
+    mov.b32 %r2, 0x40004000;
+    add.f16x2 %r3, %r1, %r2;
+    fma.rn.f16x2 %r4, %r1, %r2, %r3;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions packed_half_options;
+    packed_half_options.entry_name = "packed_half_arithmetic";
+    packed_half_options.strict = true;
+    const auto packed_half_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(packed_half_ptx, packed_half_options);
+    if (!expect(packed_half_lowered.ok, "packed f16x2 add and fma lower")) {
+        std::fprintf(stderr, "  error: %s\n", packed_half_lowered.error.c_str());
+        return 1;
+    }
+    if (!expect(contains(packed_half_lowered.llvm_ir, "fadd <2 x half>") &&
+                contains(packed_half_lowered.llvm_ir, "fmul <2 x half>"),
+                "packed half arithmetic preserves both lanes")) {
+        return 1;
+    }
+
+    const std::string device_heap_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry device_heap_calls(.param .u64 output)
+{
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [output];
+    {
+    .param .b64 size_arg;
+    .param .b64 malloc_result;
+    st.param.b64 [size_arg], 64;
+    call.uni (malloc_result), malloc, (size_arg);
+    ld.param.b64 %rd2, [malloc_result];
+    }
+    st.global.b64 [%rd1], %rd2;
+    {
+    .param .b64 pointer_arg;
+    st.param.b64 [pointer_arg], %rd2;
+    call.uni free, (pointer_arg);
+    }
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions device_heap_options;
+    device_heap_options.entry_name = "device_heap_calls";
+    device_heap_options.strict = true;
+    const auto device_heap_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(device_heap_ptx, device_heap_options);
+    if (!expect(device_heap_lowered.ok, "device malloc/free calls lower")) {
+        std::fprintf(stderr, "  error: %s\n", device_heap_lowered.error.c_str());
+        return 1;
+    }
+    if (!expect(device_heap_lowered.uses_device_heap &&
+                    contains(device_heap_lowered.llvm_ir,
+                             "i32 addrspace(1)* %__cumetal_device_heap") &&
+                    contains(device_heap_lowered.llvm_ir, "atomicrmw add") &&
+                    contains(device_heap_lowered.llvm_ir, "cmpxchg"),
+                "device heap lowering exposes its hidden ABI and atomic allocator")) {
+        return 1;
+    }
+
+    const std::string device_vtable_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.weak .func target_fn(.param .b64 object);
+.weak .global .align 8 .u64 test_vtable[3] = {0, target_fn, 7};
+.visible .entry store_vtable_address(.param .u64 output)
+{
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [output];
+    mov.b64 %rd2, test_vtable;
+    st.global.b64 [%rd1], %rd2;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions device_vtable_options;
+    device_vtable_options.entry_name = "store_vtable_address";
+    device_vtable_options.strict = true;
+    const auto device_vtable_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(device_vtable_ptx, device_vtable_options);
+    if (!expect(device_vtable_lowered.ok,
+                "initialized symbolic u64 device tables lower")) {
+        std::fprintf(stderr, "  error: %s\n", device_vtable_lowered.error.c_str());
+        return 1;
+    }
+    if (!expect(contains(device_vtable_lowered.llvm_ir,
+                         "@\"test_vtable\" = internal addrspace(2) constant [24 x i8]") &&
+                    contains(device_vtable_lowered.llvm_ir, "const_p2i"),
+                "device vtables preserve addressable storage and symbolic identity")) {
+        return 1;
+    }
+
+    const std::string bf16_wmma_marker_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry bf16_wmma_marker(.param .u64 destination,
+                                 .param .u64 matrix_a,
+                                 .param .u64 matrix_b)
+{
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [destination];
+    ld.param.u64 %rd2, [matrix_a];
+    ld.param.u64 %rd3, [matrix_b];
+    {
+    .param .b64 destination_arg;
+    .param .b64 matrix_a_arg;
+    .param .b64 matrix_b_arg;
+    st.param.b64 [destination_arg], %rd1;
+    st.param.b64 [matrix_a_arg], %rd2;
+    st.param.b64 [matrix_b_arg], %rd3;
+    call.uni __cumetal_wmma_bf16_mma_8x8, (destination_arg, matrix_a_arg, matrix_b_arg);
+    }
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions bf16_wmma_marker_options;
+    bf16_wmma_marker_options.entry_name = "bf16_wmma_marker";
+    bf16_wmma_marker_options.strict = true;
+    const auto bf16_wmma_marker_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(bf16_wmma_marker_ptx,
+                                            bf16_wmma_marker_options);
+    if (!expect(bf16_wmma_marker_lowered.ok,
+                "BF16 WMMA marker lowers to public Metal matrix operations")) {
+        std::fprintf(stderr, "  error: %s\n", bf16_wmma_marker_lowered.error.c_str());
+        return 1;
+    }
+    if (!expect(contains(bf16_wmma_marker_lowered.llvm_ir,
+                         "air.simdgroup_matrix_8x8_load.v64bf16.p3bf16") &&
+                    contains(bf16_wmma_marker_lowered.llvm_ir,
+                             "air.simdgroup_matrix_8x8_multiply_accumulate") &&
+                    contains(bf16_wmma_marker_lowered.llvm_ir,
+                             "air.simdgroup_matrix_8x8_store.v64f32.p3f32"),
+                "BF16 WMMA marker emits load, multiply-accumulate, and store intrinsics")) {
+        return 1;
+    }
+
+    const std::string malformed_bf16_wmma_marker_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_bf16_wmma_marker(.param .u64 destination,
+                                           .param .u64 matrix_a)
+{
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [destination];
+    ld.param.u64 %rd2, [matrix_a];
+    {
+    .param .b64 destination_arg;
+    .param .b64 matrix_a_arg;
+    st.param.b64 [destination_arg], %rd1;
+    st.param.b64 [matrix_a_arg], %rd2;
+    call.uni __cumetal_wmma_bf16_mma_8x8, (destination_arg, matrix_a_arg);
+    }
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_bf16_wmma_marker_options;
+    malformed_bf16_wmma_marker_options.entry_name = "malformed_bf16_wmma_marker";
+    malformed_bf16_wmma_marker_options.strict = true;
+    const auto malformed_bf16_wmma_marker_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_bf16_wmma_marker_ptx,
+                                            malformed_bf16_wmma_marker_options);
+    if (!expect(!malformed_bf16_wmma_marker_lowered.ok &&
+                    contains(malformed_bf16_wmma_marker_lowered.error,
+                             "BF16 WMMA marker expects destination, A, B"),
+                "BF16 WMMA marker rejects the wrong argument count")) {
+        return 1;
+    }
+
+    const std::string f32_wmma_marker_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry f32_wmma_marker(.param .u64 destination,
+                                .param .u64 matrix_a,
+                                .param .u64 matrix_b)
+{
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [destination];
+    ld.param.u64 %rd2, [matrix_a];
+    ld.param.u64 %rd3, [matrix_b];
+    mov.u32 %r1, %ctaid.y;
+    st.global.u32 [%rd1], %r1;
+    {
+    .param .b64 destination_arg;
+    .param .b64 matrix_a_arg;
+    .param .b64 matrix_b_arg;
+    st.param.b64 [destination_arg], %rd1;
+    st.param.b64 [matrix_a_arg], %rd2;
+    st.param.b64 [matrix_b_arg], %rd3;
+    call.uni __cumetal_wmma_f32_mma_8x8, (destination_arg, matrix_a_arg, matrix_b_arg);
+    }
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions f32_wmma_marker_options;
+    f32_wmma_marker_options.entry_name = "f32_wmma_marker";
+    f32_wmma_marker_options.strict = true;
+    const auto f32_wmma_marker_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(f32_wmma_marker_ptx,
+                                           f32_wmma_marker_options);
+    if (!expect(f32_wmma_marker_lowered.ok &&
+                    contains(f32_wmma_marker_lowered.llvm_ir,
+                             "air.simdgroup_matrix_8x8_load.v64f32.p3f32") &&
+                    contains(f32_wmma_marker_lowered.llvm_ir,
+                             "v64f32.v64f32.v64f32.v64f32") &&
+                    contains(f32_wmma_marker_lowered.llvm_ir,
+                             "grid_y_adjusted") &&
+                    contains(f32_wmma_marker_lowered.llvm_ir,
+                             "!\"air.location_index\", i32 26"),
+                "FP32 WMMA marker lowers to public Metal matrix operations")) {
+        if (!f32_wmma_marker_lowered.ok) {
+            std::fprintf(stderr, "  error: %s\n",
+                         f32_wmma_marker_lowered.error.c_str());
+        }
+        return 1;
+    }
+
+    const std::string rdc_external_kernel_token_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.extern .func external_child(.param .b64 child_arg);
+.visible .entry launch_external_child(.param .u64 output)
+{
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [output];
+    mov.b64 %rd2, external_child;
+    st.global.u64 [%rd1], %rd2;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions rdc_external_kernel_token_options;
+    rdc_external_kernel_token_options.entry_name = "launch_external_child";
+    rdc_external_kernel_token_options.strict = true;
+    const auto rdc_external_kernel_token_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(rdc_external_kernel_token_ptx,
+                                            rdc_external_kernel_token_options);
+    if (!expect(rdc_external_kernel_token_lowered.ok,
+                "RDC external kernel symbols lower to stable device-launch tokens")) {
+        std::fprintf(stderr, "  error: %s\n",
+                     rdc_external_kernel_token_lowered.error.c_str());
+        return 1;
+    }
+    if (!expect(contains(rdc_external_kernel_token_lowered.llvm_ir,
+                         "store i64 " + std::to_string(
+                             stable_device_function_token("external_child"))),
+                "RDC external kernel address is materialized without a Metal function pointer")) {
+        return 1;
+    }
+
+    const std::string device_memcpy_async_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.extern .func (.param .b32 result) cudaMemcpyAsync(
+    .param .b64 destination, .param .b64 source, .param .b64 count,
+    .param .b32 kind, .param .b64 stream);
+.visible .entry enqueue_device_copy(.param .u64 destination,
+                                    .param .u64 source)
+{
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [destination];
+    ld.param.u64 %rd2, [source];
+    {
+    .param .b64 destination_arg;
+    .param .b64 source_arg;
+    .param .b64 count_arg;
+    .param .b32 kind_arg;
+    .param .b64 stream_arg;
+    .param .b32 result_arg;
+    st.param.b64 [destination_arg], %rd1;
+    st.param.b64 [source_arg], %rd2;
+    st.param.b64 [count_arg], 64;
+    st.param.b32 [kind_arg], 3;
+    st.param.b64 [stream_arg], 0;
+    call.uni (result_arg), cudaMemcpyAsync, (destination_arg, source_arg, count_arg, kind_arg, stream_arg);
+    }
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions device_memcpy_async_options;
+    device_memcpy_async_options.entry_name = "enqueue_device_copy";
+    device_memcpy_async_options.strict = true;
+    const auto device_memcpy_async_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(device_memcpy_async_ptx,
+                                            device_memcpy_async_options);
+    if (!expect(device_memcpy_async_lowered.ok &&
+                    device_memcpy_async_lowered.uses_device_launch_queue &&
+                    contains(device_memcpy_async_lowered.llvm_ir,
+                             "%__cumetal_device_launch_queue") &&
+                    contains(device_memcpy_async_lowered.llvm_ir,
+                             "cdp_copy_record_index") &&
+                    contains(device_memcpy_async_lowered.llvm_ir,
+                             "atomicrmw add"),
+                "device cudaMemcpyAsync emits an ordered queue record")) {
+        if (!device_memcpy_async_lowered.ok) {
+            std::fprintf(stderr, "  error: %s\n", device_memcpy_async_lowered.error.c_str());
+        }
+        return 1;
+    }
+
+    const std::string malformed_device_memcpy_async_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry malformed_device_copy()
+{
+    {
+    .param .b64 destination_arg;
+    .param .b64 source_arg;
+    .param .b64 count_arg;
+    .param .b32 kind_arg;
+    .param .b32 result_arg;
+    st.param.b64 [destination_arg], 0;
+    st.param.b64 [source_arg], 0;
+    st.param.b64 [count_arg], 4;
+    st.param.b32 [kind_arg], 3;
+    call.uni (result_arg), cudaMemcpyAsync, (destination_arg, source_arg, count_arg, kind_arg);
+    }
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions malformed_device_memcpy_async_options;
+    malformed_device_memcpy_async_options.entry_name = "malformed_device_copy";
+    malformed_device_memcpy_async_options.strict = true;
+    const auto malformed_device_memcpy_async_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(malformed_device_memcpy_async_ptx,
+                                            malformed_device_memcpy_async_options);
+    if (!expect(!malformed_device_memcpy_async_lowered.ok &&
+                    contains(malformed_device_memcpy_async_lowered.error,
+                             "requires five arguments"),
+                "device cudaMemcpyAsync rejects a malformed call ABI")) {
+        return 1;
+    }
+
+    const std::string device_clock_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry read_device_clock(.param .u64 output)
+{
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<2>;
+    ld.param.u64 %rd1, [output];
+    mov.u32 %r1, %clock;
+    mov.u32 %r2, %clock;
+    sub.u32 %r2, %r2, %r1;
+    st.global.u32 [%rd1], %r2;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions device_clock_options;
+    device_clock_options.entry_name = "read_device_clock";
+    device_clock_options.strict = true;
+    const auto device_clock_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(device_clock_ptx,
+                                            device_clock_options);
+    if (!expect(device_clock_lowered.ok && device_clock_lowered.uses_device_clock &&
+                    contains(device_clock_lowered.llvm_ir,
+                             "%__cumetal_device_clock") &&
+                    contains(device_clock_lowered.llvm_ir,
+                             "atomicrmw add i32 addrspace(1)") &&
+                    contains(device_clock_lowered.llvm_ir,
+                             "!\"air.location_index\", i32 28"),
+                "clock special register uses the reserved monotonic counter")) {
+        if (!device_clock_lowered.ok) {
+            std::fprintf(stderr, "  error: %s\n", device_clock_lowered.error.c_str());
+        }
+        return 1;
+    }
+
+    const std::string grid_sync_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry grid_sync_probe()
+{
+    call.uni __cumetal_grid_sync, ();
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions grid_sync_options;
+    grid_sync_options.entry_name = "grid_sync_probe";
+    grid_sync_options.strict = true;
+    const auto grid_sync_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(grid_sync_ptx, grid_sync_options);
+    if (!expect(grid_sync_lowered.ok &&
+                    contains(grid_sync_lowered.llvm_ir,
+                             "%__cumetal_grid_barrier") &&
+                    contains(grid_sync_lowered.llvm_ir,
+                             "atomicrmw add i32 addrspace(1)") &&
+                    contains(grid_sync_lowered.llvm_ir,
+                             "!\"air.location_index\", i32 27"),
+                "grid sync lowers to the reserved resident-grid barrier ABI")) {
+        if (!grid_sync_lowered.ok) {
+            std::fprintf(stderr, "  error: %s\n", grid_sync_lowered.error.c_str());
+        }
         return 1;
     }
 

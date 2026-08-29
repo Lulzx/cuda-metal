@@ -60,10 +60,14 @@ int main() {
         return 1;
     }
 
-    // HOST and SINGLE need migration and stream-attachment state CuMetal does
-    // not model, so they must be refused rather than quietly aliased to GLOBAL.
-    if (cuMemAllocManaged(&ptr, kBytes, CU_MEM_ATTACH_HOST) != CUDA_ERROR_INVALID_VALUE) {
-        std::fprintf(stderr, "FAIL: CU_MEM_ATTACH_HOST should be refused, not silently accepted\n");
+    // HOST is already the initial state of Apple shared storage. CuMetal accepts
+    // it without migration while still rejecting SINGLE's per-stream state.
+    if (cuMemAllocManaged(&ptr, kBytes, CU_MEM_ATTACH_HOST) != CUDA_SUCCESS || ptr == 0) {
+        std::fprintf(stderr, "FAIL: CU_MEM_ATTACH_HOST should be accepted on UMA\n");
+        return 1;
+    }
+    if (cuMemFree(ptr) != CUDA_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuMemFree after CU_MEM_ATTACH_HOST failed\n");
         return 1;
     }
 

@@ -23,10 +23,13 @@ if [[ ! -f "$METALLIB" ]]; then
     exit 1
 fi
 
+# The gate uses the fastest uncontended sample. Twenty iterations could all
+# land inside one macOS/Metal scheduling burst; 50 produced a clean sample in
+# 10/10 repeated full-gate runs while preserving the same 2x ceiling.
 exec "$BENCH_EXE" \
     --metallib "$METALLIB" \
     --all-kernels \
     --elements 262144 \
     --warmup 5 \
-    --iterations 20 \
+    --iterations 50 \
     --max-ratio 2.0

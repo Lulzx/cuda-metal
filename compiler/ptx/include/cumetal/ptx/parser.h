@@ -15,6 +15,9 @@ struct Parameter {
 struct EntryFunction {
     std::string name;
     std::vector<Parameter> params;
+    // `.func` definitions may return one or more values through PTX return
+    // parameters. Kernel entries leave this empty.
+    std::vector<Parameter> return_params;
     struct Instruction {
         std::string predicate;
         std::string opcode;
@@ -30,6 +33,7 @@ struct ModuleInfo {
     int version_minor = -1;
     std::string target;
     std::vector<EntryFunction> entries;
+    std::vector<EntryFunction> functions;
 };
 
 struct ParseOptions {

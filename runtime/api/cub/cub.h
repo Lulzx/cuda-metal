@@ -15,3 +15,6 @@
 #include "device/device_run_length_encode.h"
 #include "device/device_partition.h"
 #include "device/device_merge_sort.h"
+#include "device/device_find.cuh"
+#include "device/device_segmented_scan.cuh"
+#include "device/device_transform.cuh"

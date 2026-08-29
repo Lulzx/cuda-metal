@@ -1,0 +1,16 @@
+#pragma once
+
+// libcudacxx compatibility surface used by cuda-samples. Apple Clang's C++
+// tuple implementation is available in both CUDA host and device passes for
+// these value-only operations.
+#include <tuple>
+
+namespace cuda {
+namespace std {
+using ::std::get;
+using ::std::make_tuple;
+using ::std::tuple;
+using ::std::tuple_element;
+using ::std::tuple_size;
+}  // namespace std
+}  // namespace cuda

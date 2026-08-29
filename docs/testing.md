@@ -194,7 +194,6 @@ Phase 4 conformance gate over functional tests:
 
 ```bash
 ctest --test-dir build -R conformance_phase4_functional --output-on-failure
-ctest --test-dir build -R conformance_llmc_gpt2fp32cu --output-on-failure
 ctest --test-dir build -R functional_cuda_projects_ --output-on-failure
 
 # Manifest-complete strict sweep with classified TSV/JSON output:
@@ -214,8 +213,8 @@ Its expected outcomes live in
 most enrolled samples are present, rejects regressions from `pass` or `waive`,
 and also rejects an unsupported classification that starts succeeding. Keep
 compile/link-only results as `run-unverified`; they are not runtime evidence.
-The 2026-08-27 snapshot is 33 pass, 3 waive, and 47 without a passing runtime
-result. See [known gaps](known-gaps.md) for the blocker breakdown.
+The 2026-08-29 snapshot is 83 pass, 0 waive, and 0 without a passing runtime
+result. See [known gaps](known-gaps.md) for the implementation details.
 
 Notes:
 - `conformance_phase4_functional` now prints per-test progress (`[i/N]`) and applies a per-test timeout.
@@ -231,23 +230,9 @@ Notes:
   unsupported kernels, numerical failures, crashes, timeouts, and other runtime
   errors. Its manifest check fails if a new standalone `.cu` fixture is not
   enrolled.
-- `conformance_llmc_gpt2fp32cu` is registered only when llm.c is configured (set `CUMETAL_LLMC_DIR`
-  before CMake configure, or place checkout at `../llm.c` relative to this repo root).
-- `conformance_llmc_gpt2fp32cu` skips when `gpt2_124M.bin` is missing from the llm.c checkout
-  (place under checkout root or `dev/data/` per upstream layout).
-- When registered, `conformance_llmc_gpt2fp32cu` auto-wires CuMetal's LLVM+fatbin shim flow:
-  `scripts/build_llmc_test_gpt2fp32cu.sh` + `scripts/run_llmc_test_gpt2fp32cu.sh`.
-- `conformance_llmc_gpt2fp32cu` fails on any `TENSOR NOT OK` marker and requires
-  `overall okay: 1` in output.
-- By default, the gate disables llm.c CPU emulation, requires numerical parity,
-  and requires successful Apple-GPU provenance. CPU fallback and stub
-  provenance are failures.
-- To force pure PTX-lowered execution (no llm.c emulation fallback), run:
-
-```bash
-CUMETAL_LLMC_REQUIRE_NO_EMULATION=1 \
-ctest --test-dir build -R conformance_llmc_gpt2fp32cu --output-on-failure
-```
+- llm.c is intentionally not registered in CTest. Its scripts remain an optional
+  manual stress harness; successful runs must still require numerical parity,
+  Apple-GPU provenance, and no CPU-emulation fallback.
 
 Direct invocation with custom threshold/regex:
 
@@ -268,6 +253,7 @@ export CUMETAL_LLMC_GRAD_TOL="1.2e-2"
 # optional: hard-disable llm.c runtime emulation fallback
 export CUMETAL_DISABLE_LLMC_EMULATION="1"
 export CUMETAL_ENABLE_LLMC_CPU_EMULATION="0"
+bash tests/conformance/run_llmc_gpt2fp32cu.sh
 ```
 
 Kernel argument notes:

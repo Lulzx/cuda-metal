@@ -1,0 +1,23 @@
+#pragma once
+
+// Clean-room CCCL compatibility surface used by CUDA samples. Apple Silicon
+// unified memory lets the CuMetal algorithm shims execute these operations on
+// the host while preserving their public C++ interface.
+#include <functional>
+#include <tuple>
+
+namespace cuda::std {
+
+using ::std::get;
+using ::std::less;
+using ::std::make_tuple;
+using ::std::tuple;
+
+struct identity {
+    template <typename T>
+    constexpr T&& operator()(T&& value) const noexcept {
+        return static_cast<T&&>(value);
+    }
+};
+
+} // namespace cuda::std

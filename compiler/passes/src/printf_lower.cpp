@@ -36,8 +36,9 @@ std::string lowercase(std::string value) {
 }
 
 bool is_printf_symbol(const std::string& token) {
-    const std::string lowered = lowercase(token);
-    return lowered.find("vprintf") != std::string::npos || lowered.find("printf") != std::string::npos;
+    std::string lowered = lowercase(trim(token));
+    if (!lowered.empty() && lowered.front() == '@') lowered.erase(lowered.begin());
+    return lowered == "vprintf" || lowered == "printf";
 }
 
 std::size_t find_printf_callee_index(const std::vector<std::string>& operands) {
@@ -260,8 +261,21 @@ std::unordered_map<std::string, GlobalFormat> parse_initialized_b8_globals(
 struct PackedArgument {
     std::size_t offset = 0;
     std::string value;
+    int bits = 32;
     int source_line = 0;
 };
+
+bool format_uses_argument(std::string_view format) {
+    for (std::size_t i = 0; i < format.size(); ++i) {
+        if (format[i] != '%') continue;
+        if (i + 1 < format.size() && format[i + 1] == '%') {
+            ++i;
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
 
 // Decode the ABI emitted by Clang for CUDA device printf:
 //   vprintf(pointer-to-initialized-global-format, pointer-to-packed-local-values).
@@ -322,27 +336,46 @@ std::optional<PrintfLowerResult> lower_clang_vprintf_abi(
                 local_pointer[dest] = local_pointer.at(base) + *offset;
                 scaffold_lines.insert(instruction.line);
             }
-        } else if (op.rfind("st.local", 0) == 0 && operands.size() == 2) {
+        } else if (op.rfind("st.local", 0) == 0 && operands.size() >= 2) {
             const auto address = parse_address(operands[0]);
-            if (address && local_pointer.contains(address->reg) &&
-                op.find(".b32") == std::string::npos) {
-                // The current runtime record has one 32-bit word per argument.
-                // Refuse wider Clang tuples instead of dropping high bits or
-                // accidentally treating a partial tuple as complete.
-                return std::nullopt;
-            }
             if (address && local_pointer.contains(address->reg)) {
-                std::string values = trim(operands[1]);
+                const int lane_bits = op.find(".b64") != std::string::npos
+                                          ? 64
+                                          : (op.find(".b32") != std::string::npos ? 32 : 0);
+                // Clang may build a thread-local string (typically indentation
+                // passed to `%s`) in the same local depot as the packed scalar
+                // tuple. Byte stores are not tuple arguments; the pointer to
+                // that string is represented by a later b64 tuple store.
+                if (lane_bits == 0) continue;
+                // The PTX parser splits operands at commas even inside the
+                // brace tuple of st.local.v2/v4. Reassemble every value
+                // operand before decoding the packed vprintf ABI tuple.
+                std::string values;
+                for (std::size_t operand_index = 1;
+                     operand_index < operands.size(); ++operand_index) {
+                    if (!values.empty()) values += ",";
+                    values += operands[operand_index];
+                }
+                values = trim(values);
                 if (values.size() >= 2 && values.front() == '{' && values.back() == '}') {
                     values = values.substr(1, values.size() - 2);
                 }
                 const auto lanes = split_call_args(values);
                 if (lanes.empty()) return std::nullopt;
                 for (std::size_t lane = 0; lane < lanes.size(); ++lane) {
-                    const std::string value_reg = extract_register(lanes[lane]);
-                    if (value_reg.empty()) return std::nullopt;
-                    packed.push_back({local_pointer.at(address->reg) + address->offset + lane * 4,
-                                      value_reg,
+                    std::string value = extract_register(lanes[lane]);
+                    if (value.empty()) {
+                        value = trim(lanes[lane]);
+                        char* parse_end = nullptr;
+                        (void)std::strtoll(value.c_str(), &parse_end, 0);
+                        if (parse_end == value.c_str() || *parse_end != '\0') {
+                            return std::nullopt;
+                        }
+                    }
+                    packed.push_back({local_pointer.at(address->reg) + address->offset +
+                                          lane * static_cast<std::size_t>(lane_bits / 8),
+                                      value,
+                                      lane_bits,
                                       instruction.line});
                 }
                 scaffold_lines.insert(instruction.line);
@@ -369,23 +402,31 @@ std::optional<PrintfLowerResult> lower_clang_vprintf_abi(
         }
         const std::string format_reg = extract_register(format_value->second);
         const std::string tuple_reg = extract_register(tuple_value->second);
-        if (!global_pointer.contains(format_reg) || !local_pointer.contains(tuple_reg)) {
+        const bool null_tuple = trim(tuple_value->second) == "0";
+        if (!global_pointer.contains(format_reg) ||
+            (!null_tuple && !local_pointer.contains(tuple_reg))) {
             return std::nullopt;
         }
         const auto format_it = globals.find(global_pointer.at(format_reg));
         if (format_it == globals.end()) return std::nullopt;
 
         std::vector<PackedArgument> call_args;
-        const std::size_t tuple_base = local_pointer.at(tuple_reg);
-        for (const auto& arg : packed) {
-            if (arg.offset >= tuple_base) call_args.push_back(arg);
-        }
-        std::sort(call_args.begin(), call_args.end(), [](const auto& lhs, const auto& rhs) {
-            return lhs.offset < rhs.offset;
-        });
-        if (call_args.empty()) return std::nullopt;
-        for (std::size_t i = 0; i < call_args.size(); ++i) {
-            if (call_args[i].offset != tuple_base + i * 4) return std::nullopt;
+        if (null_tuple) {
+            if (format_uses_argument(format_it->second.bytes)) return std::nullopt;
+        } else {
+            const std::size_t tuple_base = local_pointer.at(tuple_reg);
+            for (const auto& arg : packed) {
+                if (arg.offset >= tuple_base) call_args.push_back(arg);
+            }
+            std::sort(call_args.begin(), call_args.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs.offset < rhs.offset;
+            });
+            if (call_args.empty()) return std::nullopt;
+            std::size_t expected_offset = tuple_base;
+            for (const auto& arg : call_args) {
+                if (arg.offset != expected_offset) return std::nullopt;
+                expected_offset += static_cast<std::size_t>(arg.bits / 8);
+            }
         }
 
         std::uint32_t format_id = 0;
@@ -411,7 +452,10 @@ std::optional<PrintfLowerResult> lower_clang_vprintf_abi(
         call.source_opcode = instruction.opcode;
         call.format_id = format_id;
         call.format_token = format_it->second.bytes;
-        for (const auto& arg : call_args) call.arguments.push_back(arg.value);
+        for (const auto& arg : call_args) {
+            call.arguments.push_back(arg.value);
+            call.argument_bits.push_back(arg.bits);
+        }
         call.abi_scaffold_lines.assign(scaffold_lines.begin(), scaffold_lines.end());
         result.calls.push_back(std::move(call));
         packed.clear();
@@ -508,6 +552,7 @@ PrintfLowerResult lower_printf_calls(const cumetal::ptx::EntryFunction& entry,
         call.format_id = format_id;
         call.format_token = canonical_token;
         call.arguments.assign(args.begin() + 1, args.end());
+        call.argument_bits.assign(call.arguments.size(), 32);
         result.calls.push_back(std::move(call));
     }
 

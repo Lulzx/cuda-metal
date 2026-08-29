@@ -6,8 +6,7 @@
 #include <string>
 #include <vector>
 
-// Verifies single-threadgroup cooperative launches work and unsafe
-// multi-threadgroup launches are refused.
+// Verifies cooperative launch validation and a basic launch.
 
 namespace {
 
@@ -71,10 +70,12 @@ int main(int argc, char** argv) {
     const dim3 block(kThreadsPerBlock, 1, 1);
     const dim3 grid((kElementCount + kThreadsPerBlock - 1) / kThreadsPerBlock, 1, 1);
 
-    if (cudaLaunchCooperativeKernel(
-            &kernel, dim3(2, 1, 1), block, args, 0, nullptr) !=
-        cudaErrorNotSupported) {
-        std::fprintf(stderr, "FAIL: unsafe multi-block cooperative launch was accepted\n");
+    cudaDeviceProp prop{};
+    if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess ||
+        cudaLaunchCooperativeKernel(
+            &kernel, dim3(static_cast<unsigned int>(prop.multiProcessorCount + 1), 1, 1),
+            block, args, 0, nullptr) != cudaErrorCooperativeLaunchTooLarge) {
+        std::fprintf(stderr, "FAIL: oversized cooperative launch was accepted\n");
         return 1;
     }
 
@@ -104,6 +105,6 @@ int main(int argc, char** argv) {
     cudaFree(dev_b);
     cudaFree(dev_c);
 
-    std::printf("PASS: cooperative launch accepts one block and rejects unsafe grids\n");
+    std::printf("PASS: cooperative launch accepts resident grids and rejects oversized grids\n");
     return 0;
 }

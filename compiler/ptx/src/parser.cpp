@@ -128,7 +128,7 @@ bool is_supported_opcode(const std::string& opcode) {
 
     static const std::unordered_set<std::string> kSupportedRoots = {
         "abs",       "activemask", "add",       "and",   "atom",  "bar",      "bfe",   "bfi",
-        "bfind",     "bra",        "brev",      "call",  "clz",   "cos",      "cp",    "cvt",
+        "bfind",     "bra",        "brev",      "brx",   "call",  "clz",      "cos",   "cp",    "cvt",
         "cvta",      "div",        "ex2",       "exit",  "fma",   "fns",      "isspacep",
         "ld",        "lg2",        "lop3",      "mad",   "match", "max",      "membar","min",
         "mov",       "mul",        "nanosleep", "neg",   "not",   "or",       "popc",  "prmt",
@@ -490,6 +490,7 @@ void parse_instructions(const std::string& body,
 
     int line = start_line;
     bool skipping_multiline_directive = false;
+    int branch_table_instruction = -1;
 
     std::istringstream stream(body);
     std::string raw_line;
@@ -497,6 +498,21 @@ void parse_instructions(const std::string& body,
         const int current_line = line++;
         std::string line_text = trim(raw_line);
         if (line_text.empty()) {
+            continue;
+        }
+
+        if (branch_table_instruction >= 0) {
+            const bool table_complete = line_text.find(';') != std::string::npos;
+            while (!line_text.empty() &&
+                   (line_text.back() == ',' || line_text.back() == ';')) {
+                line_text.pop_back();
+                line_text = trim(line_text);
+            }
+            if (!line_text.empty()) {
+                entry->instructions[static_cast<std::size_t>(branch_table_instruction)]
+                    .operands.push_back(line_text);
+            }
+            if (table_complete) branch_table_instruction = -1;
             continue;
         }
         // PTX allows lexical scope braces to appear on the same line as
@@ -534,6 +550,16 @@ void parse_instructions(const std::string& body,
             }
         }
 
+        // Debug-enabled Clang PTX emits source-location metadata without a
+        // terminating semicolon. These are complete, single-line directives;
+        // treating them like multiline declarations drops the next real
+        // instruction (for example the dynamic-shared-memory address move).
+        if (starts_with(line_text, ".loc ") || line_text == ".loc" ||
+            starts_with(line_text, ".file ") || line_text == ".file" ||
+            starts_with(line_text, ".pragma ") || line_text == ".pragma") {
+            continue;
+        }
+
         // PTX sometimes emits inline lexical declarations followed by a real
         // instruction on the same source line:
         //   { .reg .b16 tmp; mov.b32 {tmp, %rs35}, %r1; }
@@ -560,6 +586,22 @@ void parse_instructions(const std::string& body,
         // indirect device calls are refused.
         if (line_text.find(".callprototype") != std::string::npos ||
             line_text.find(".calltargets") != std::string::npos) {
+            continue;
+        }
+
+
+        if (const std::size_t table_marker = line_text.find(": .branchtargets");
+            table_marker != std::string::npos) {
+            EntryFunction::Instruction table;
+            table.line = current_line;
+            table.opcode = "ptx.branchtargets";
+            table.operands.push_back(trim(line_text.substr(0, table_marker)));
+            table.supported = true;
+            entry->instructions.push_back(std::move(table));
+            if (line_text.find(';', table_marker) == std::string::npos) {
+                branch_table_instruction =
+                    static_cast<int>(entry->instructions.size()) - 1;
+            }
             continue;
         }
 
@@ -640,8 +682,37 @@ ParseResult parse_ptx(std::string_view text, const ParseOptions& options) {
     }
 
     const std::regex entry_regex(
-        R"(\.entry\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\(([\s\S]*?)\)\s*(?:\.[^\n{}]*\s*)*\{)");
+        R"(\.entry\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\(([^;{}]*?)\)\s*(?:\.[^\n{};]*\s*)*\{)");
     const std::regex param_decl_regex(R"(\.param\s+([^,\n\)]+))");
+
+    const auto parse_parameters = [&](const std::string& params_blob) {
+        std::vector<Parameter> params;
+        std::sregex_iterator param_iter(params_blob.begin(), params_blob.end(),
+                                        param_decl_regex);
+        const std::sregex_iterator param_end;
+        for (; param_iter != param_end; ++param_iter) {
+            if (param_iter->size() < 2) continue;
+            const std::string decl = trim((*param_iter)[1].str());
+            if (decl.empty()) continue;
+            const std::vector<std::string> tokens = split_tokens_ws(decl);
+            if (tokens.empty()) continue;
+            std::string type = ".u32";
+            for (const std::string& token : tokens) {
+                if (is_ptx_type_token(token)) {
+                    type = token;
+                    break;
+                }
+            }
+            const bool is_pointer =
+                std::find(tokens.begin(), tokens.end(), ".ptr") != tokens.end();
+            std::string name = sanitize_param_name(tokens.back());
+            if (!name.empty()) {
+                params.push_back({.type = type, .name = std::move(name),
+                                  .is_pointer = is_pointer});
+            }
+        }
+        return params;
+    };
 
     std::sregex_iterator iter(source.begin(), source.end(), entry_regex);
     const std::sregex_iterator end;
@@ -654,40 +725,7 @@ ParseResult parse_ptx(std::string_view text, const ParseOptions& options) {
         EntryFunction entry;
         entry.name = (*iter)[1].str();
 
-        const std::string params_blob = (*iter)[2].str();
-        std::sregex_iterator param_iter(params_blob.begin(), params_blob.end(), param_decl_regex);
-        for (; param_iter != end; ++param_iter) {
-            if (param_iter->size() < 2) {
-                continue;
-            }
-
-            const std::string decl = trim((*param_iter)[1].str());
-            if (decl.empty()) {
-                continue;
-            }
-
-            const std::vector<std::string> tokens = split_tokens_ws(decl);
-            if (tokens.empty()) {
-                continue;
-            }
-
-            std::string type = ".u32";
-            for (const std::string& token : tokens) {
-                if (is_ptx_type_token(token)) {
-                    type = token;
-                    break;
-                }
-            }
-            const bool is_pointer =
-                std::find(tokens.begin(), tokens.end(), ".ptr") != tokens.end();
-
-            std::string name = sanitize_param_name(tokens.back());
-            if (name.empty()) {
-                continue;
-            }
-
-            entry.params.push_back({.type = type, .name = name, .is_pointer = is_pointer});
-        }
+        entry.params = parse_parameters((*iter)[2].str());
 
         const std::size_t open_brace = static_cast<std::size_t>(iter->position(0) + iter->length(0) - 1);
         std::string body;
@@ -702,6 +740,46 @@ ParseResult parse_ptx(std::string_view text, const ParseOptions& options) {
         infer_pointer_parameters(&entry);
 
         result.module.entries.push_back(std::move(entry));
+    }
+
+    // Device functions use the same instruction grammar as entries but may
+    // carry PTX return parameters before their symbol name. Ignore forward
+    // declarations: requiring the opening body brace keeps only definitions.
+    const std::regex function_regex(
+        R"(\.func\s+(?:\(\s*([^;{}]*?)\)\s+)?([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\(([^;{}]*?)\)\s*(?:\.[^\n{};]*\s*)*\{)");
+    std::sregex_iterator function_iter(source.begin(), source.end(), function_regex);
+    for (; function_iter != end; ++function_iter) {
+        if (function_iter->size() < 4) continue;
+        const std::size_t function_start =
+            static_cast<std::size_t>(function_iter->position(0));
+        const std::size_t open_brace = static_cast<std::size_t>(
+            function_iter->position(0) + function_iter->length(0) - 1);
+        // A declaration ends in `;` and has no body. The permissive multiline
+        // regex can otherwise begin at an `.extern .func` declaration and keep
+        // scanning until the opening brace of the next entry/function, making
+        // that unrelated body appear to define the extern symbol.
+        if (source.find(';', function_start) < open_brace) {
+            continue;
+        }
+        EntryFunction function;
+        function.name = (*function_iter)[2].str();
+        function.return_params = parse_parameters((*function_iter)[1].str());
+        function.params = parse_parameters((*function_iter)[3].str());
+        std::string body;
+        std::size_t body_start = 0;
+        std::size_t body_end = 0;
+        if (!extract_balanced_body(source, open_brace, &body, &body_start, &body_end)) {
+            result.error = "malformed device function body for '" + function.name + "'";
+            return result;
+        }
+        const int start_line = count_line_number_at_offset(source, body_start);
+        // Function-body coverage is consumed lazily by the selected kernel's
+        // call graph. Do not make an unrelated unsupported helper reject every
+        // entry in the module during the phase-1 kernel parse.
+        std::vector<std::string> function_warnings;
+        parse_instructions(body, start_line, &function, &function_warnings);
+        infer_pointer_parameters(&function);
+        result.module.functions.push_back(std::move(function));
     }
 
     if (result.module.entries.empty()) {
