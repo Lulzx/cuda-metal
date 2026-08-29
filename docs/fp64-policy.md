@@ -40,7 +40,7 @@ type-punning, `cudaMemcpy`, and CPU library boundaries interoperable without a
 private packed-pair format.
 
 For all three software modes, CuMetal statically links the pinned
-`third_party/f64-metal` support module into each generated metallib. `fast48`
+`third_party/VF64-metal` support module into each generated metallib. `fast48`
 uses it for operations outside the pair implementation, such as IEEE remainder
 and round-to-integer. The
 persistent JIT cache key includes the support source SHA-256, so a support
@@ -90,7 +90,7 @@ shuffle reduction, store/reload arithmetic, and `uint64_t` aliasing. This is a
 focused integration proof; it is not yet complete CUDA source coverage for all
 IEEE-754 operations.
 
-The standalone `f64-metal` repository owns the full virtual runtime's
+The standalone `VF64-metal` repository owns the full virtual runtime's
 conformance corpus, mode contracts, benchmarks, and ISA documentation. CuMetal
 pins that repository as a submodule so compiler claims can identify the exact
 runtime revision they execute.

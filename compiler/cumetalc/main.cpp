@@ -1263,7 +1263,7 @@ int main(int argc, char** argv) {
 
     if (needs_vf64_support) {
         options.additional_link_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "third_party" / "f64-metal" /
+            std::filesystem::path(CUMETAL_SOURCE_DIR) / "third_party" / "VF64-metal" /
             "Sources" / "F64Metal" / "Shaders" / "Interop" / "VF64Support.metal"
         );
     }
