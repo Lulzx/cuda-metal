@@ -24,7 +24,9 @@ expect_transition run-unverified no-lowering evidence-update
 expect_transition compile-fail run-fail unsupported-drift
 
 MANIFEST="${SCRIPT_DIR}/cuda_samples_sweep_manifest.txt"
-KNOWN_GAPS="${SCRIPT_DIR}/../../docs/known-gaps.md"
+KNOWN_GAPS="${SCRIPT_DIR}/../../docs/known-gaps/verification.md"
+README="${SCRIPT_DIR}/../../README.md"
+VERIFIED_RESULTS="${SCRIPT_DIR}/../../docs/verified-results.md"
 read -r pass_count waive_count total_count < <(
     awk '
         NF >= 2 && $1 !~ /^#/ {
@@ -36,11 +38,25 @@ read -r pass_count waive_count total_count < <(
     ' "${MANIFEST}"
 )
 nonpassing_count=$((total_count - pass_count - waive_count))
-headline="**${pass_count} pass, ${waive_count} waive cleanly, ${nonpassing_count} do not yet have a passing runtime result**."
+headline="all ${pass_count} pass"
 if ! grep -Fq "${headline}" "${KNOWN_GAPS}"; then
-    echo "FAIL: docs/known-gaps.md sweep headline does not match the manifest" >&2
-    echo "Expected: ${headline}" >&2
+    echo "FAIL: docs/known-gaps/verification.md sweep headline does not match the manifest" >&2
+    echo "Expected fragment: ${headline}" >&2
     exit 1
 fi
 
-echo "PASS: cuda-samples manifest transition policy"
+readme_headline="**${pass_count}/${total_count} pass**"
+if ! grep -Fq "${readme_headline}" "${README}"; then
+    echo "FAIL: README cuda-samples headline does not match the manifest" >&2
+    echo "Expected fragment: ${readme_headline}" >&2
+    exit 1
+fi
+
+verified_headline="classifies all ${total_count} enrolled"
+if ! grep -Fq "${verified_headline}" "${VERIFIED_RESULTS}"; then
+    echo "FAIL: docs/verified-results.md cuda-samples headline does not match the manifest" >&2
+    echo "Expected fragment: ${verified_headline}" >&2
+    exit 1
+fi
+
+echo "PASS: cuda-samples manifest transition and documentation policy"

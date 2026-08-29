@@ -78,16 +78,24 @@ cumetalc kernel.cu --emit=exe        -o kernel
 | `--fp64=fast48\|wide48\|ieee64\|native\|emulate\|warn` | Select the virtual FP64 policy; runtime/JIT defaults to `fast48` (`emulate` alias). |
 | `--save-temps` | Retain link intermediates. |
 
-The default follows measured coverage rather than treating either backend as
-universally complete:
+The default follows measured production-metallib compilation coverage rather
+than treating either backend as universally complete:
 
 | Input corpus | `legacy` | `cumetal-ir` |
 | --- | ---: | ---: |
-| direct `.cu` | 0/19 | **10/19** |
-| `.cu --cuda-device` / PTX | **17/19** | 6/19 |
+| direct `.cu` | 0/23 | **9/23** |
+| `.cu --cuda-device` / PTX | **23/23** | 6/23 |
 
 Direct `.cu` therefore defaults to `cumetal-ir`; PTX and `--cuda-device`
-default to `legacy`. Re-run the conformance gate before changing that policy.
+default to `legacy`. Reproduce the reviewed per-file baseline with:
+
+```bash
+ctest --test-dir build -R '^conformance_compiler_backend_matrix$' --output-on-failure
+```
+
+The matrix proves that a backend produced and validated a production metallib;
+it does not prove numerical correctness or GPU execution. Default-backend
+promotion additionally requires the runtime evidence in the gate below.
 
 ## Legality stages
 

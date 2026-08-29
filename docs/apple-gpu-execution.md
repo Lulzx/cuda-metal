@@ -188,10 +188,10 @@ ctest --test-dir build -R \
   --output-on-failure
 ```
 
-The unmodified upstream sample is also enrolled in the manifest-driven NVIDIA
-sample sweep described in [the testing guide](testing.md). Its numerical pass
-is runtime evidence; graph-memory samples that only compile and link remain
-explicitly `run-unverified`.
+The unmodified upstream samples are also enrolled in the manifest-driven NVIDIA
+sample sweep described in [the testing guide](testing.md). The current
+`graphMemoryNodes` and `graphMemoryFootprint` classifications are numerical
+runtime passes, not compile/link-only evidence.
 
 Run the verified llama.cpp smoke test:
 

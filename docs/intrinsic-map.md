@@ -21,7 +21,7 @@ Complete CUDA/PTX → AIR intrinsic mapping table for the CuMetal intrinsic lowe
 | `mov.u32 %r, %nctaid.y` | `air.threadgroups_per_grid.y` | |
 | `mov.u32 %r, %nctaid.z` | `air.threadgroups_per_grid.z` | |
 | `mov.u32 %r, %laneid` | `air.thread_position_in_simdgroup` | Lane index within warp/SIMD-group (0–31) |
-| `mov.u32 %r, %warpsize` | `air.constant.warp_size` | Architecturally fixed at 32 (spec §7) |
+| `mov.u32 %r, %warpsize` | `air.constant.warp_size` | Architecturally fixed at 32 ([semantic contract](../spec/04-semantics.md)) |
 | `mov.u32 %r, %lanemask_eq` | `air.simdgroup.lanemask_eq` | Bitmask: only current lane bit set |
 | `mov.u32 %r, %lanemask_lt` | `air.simdgroup.lanemask_lt` | Bitmask: lanes with index < laneid |
 | `mov.u32 %r, %lanemask_le` | `air.simdgroup.lanemask_le` | Bitmask: lanes with index ≤ laneid |
@@ -187,7 +187,7 @@ half-warp shared-memory ordering is covered by a production GPU test.
 |------------|----------|-------|
 | `ld.param.*` | Param load — handled structurally | Mapped to kernel argument index |
 | `ld.global.f32 dst, [addr]` | `device float* ptr; dst = ptr[gid]` | Direct Metal buffer access |
-| `ld.global.nc.* dst, [addr]` | plain load (same as `ld.global.*`) | `.nc` (non-coherent/read-only cache) hint; no-op on UMA — same as plain load (spec §8 `__ldg` policy) |
+| `ld.global.nc.* dst, [addr]` | plain load (same as `ld.global.*`) | `.nc` (non-coherent/read-only cache) hint; no-op on UMA — same as plain load ([semantic contract](../spec/04-semantics.md)) |
 | `ld.const.* dst, [addr]` | plain load (AIR AS 2) | CUDA constant memory; no read-only cache benefit on UMA |
 | `st.global.f32 [addr], src` | `device float* ptr; ptr[gid] = src` | Direct Metal buffer store |
 | `atom.global.add.f32 dst, [addr], src` | `atomic_fetch_add_explicit(...)` | Global atomic add |
@@ -215,6 +215,6 @@ The following PTX opcodes are passed through to subsequent pipeline stages uncha
 | `cp.async.bulk.tensor.*` (TMA) | Per-instruction compile-time error |
 | `cvt.rn.f8x2.*` (FP8) | Per-instruction compile-time error |
 | Direct PTX `wmma.*`, `mma.sync.*`, `ldmatrix.*` | Per-instruction compile-time error; source-level BF16 WMMA instead lowers a CuMetal marker to public Metal SIMD-group matrix intrinsics |
-| `tex.*`, `tld4.*`, `txq.*` | Per-instruction compile-time error (texture sampling — deferred to v2) |
-| `sust.*`, `suld.*`, `sured.*`, `suq.*` | Per-instruction compile-time error (surface ops — deferred to v2) |
-| Dynamic parallelism (`launch_cooperative_kernel`) | Compile-time error |
+| Direct PTX `tex.*`, `tld4.*`, `txq.*` | Per-instruction compile-time error; tested source-level helpers lower through software descriptors instead |
+| Direct PTX `sust.*`, `suld.*`, `sured.*`, `suq.*` | Per-instruction compile-time error; the tested source-level `surf2Dwrite` helper does not imply PTX surface-ISA coverage |
+| Dynamic parallelism (`cudaGetParameterBuffer` / `cudaLaunchDevice`) | Bounded launch-record queue drained by the host runtime; no unrestricted nesting or hardware-recursive parity |

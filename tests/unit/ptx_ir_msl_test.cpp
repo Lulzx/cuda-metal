@@ -103,6 +103,42 @@ int main() {
                      undefined.error.find("used before definition") != std::string::npos,
                  "undefined PTX registers fail before MSL emission");
 
+    const std::string loop_join_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry loop_join(
+    .param .u64 output,
+    .param .u32 count
+) {
+    .reg .pred %p<3>;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r1, [count];
+    setp.eq.u32 %p1, %r1, 0;
+    @%p1 bra DONE;
+    mov.u32 %r2, 0;
+LOOP:
+    add.u32 %r2, %r2, 1;
+    setp.lt.u32 %p2, %r2, %r1;
+    @%p2 bra LOOP;
+DONE:
+    st.global.u32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    metal::PtxToMslOptions loop_options;
+    loop_options.entry_name = "loop_join";
+    loop_options.source_name = "loop_join.ptx";
+    const metal::PtxToMslResult loop_join =
+        metal::compile_ptx_to_msl(loop_join_ptx, loop_options);
+    ok &= expect(loop_join.ok,
+                 "SSA construction carries dominating values through loop and exit joins");
+    if (!loop_join.ok) {
+        std::cerr << loop_join.error << "\n";
+    }
+
     const std::string signed_ptx = R"ptx(
 .version 7.0
 .target sm_80

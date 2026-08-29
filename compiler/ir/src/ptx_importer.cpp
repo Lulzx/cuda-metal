@@ -412,48 +412,71 @@ struct Importer {
         outgoing.resize(raw_blocks.size());
         block_arguments.resize(raw_blocks.size());
 
+        // Determine which registers must enter each block before assigning SSA
+        // values.  In particular, loop backedges cannot be discovered reliably
+        // by growing incoming maps from an initially empty fixed point: a
+        // speculative block argument can be created before a dominating value
+        // reaches every predecessor and then remain behind as an invalid phi.
+        std::vector<std::set<std::string>> live_in(raw_blocks.size());
+        std::vector<std::set<std::string>> live_out(raw_blocks.size());
+        bool liveness_changed = true;
+        while (liveness_changed) {
+            liveness_changed = false;
+            for (std::size_t reverse = raw_blocks.size(); reverse > 0; --reverse) {
+                const std::size_t block_index = reverse - 1;
+                const RawBlock& block = raw_blocks[block_index];
+                std::set<std::string> next_out;
+                for (std::size_t successor : block.successors) {
+                    next_out.insert(live_in[successor].begin(), live_in[successor].end());
+                }
+                std::set<std::string> next_in(block.uses_before_definition.begin(),
+                                              block.uses_before_definition.end());
+                for (const std::string& name : next_out) {
+                    if (!block.last_definitions.contains(name)) {
+                        next_in.insert(name);
+                    }
+                }
+                if (next_in != live_in[block_index] || next_out != live_out[block_index]) {
+                    live_in[block_index] = std::move(next_in);
+                    live_out[block_index] = std::move(next_out);
+                    liveness_changed = true;
+                }
+            }
+        }
+
+        // A live value entering a join needs a block argument.  Preallocating
+        // these arguments also breaks loop-header cycles: the backedge can
+        // immediately refer to the header argument while the preheader carries
+        // the dominating definition.  Redundant arguments where all incoming
+        // values happen to match are valid SSA and can be folded later.
+        for (std::size_t block_index = 0; block_index < raw_blocks.size(); ++block_index) {
+            if (raw_blocks[block_index].predecessors.size() < 2) continue;
+            for (const std::string& name : live_in[block_index]) {
+                const ValueId argument = builder.next_value();
+                block_arguments[block_index][name] = argument;
+                const auto type = register_types.find(name);
+                value_types[argument] =
+                    type == register_types.end() ? Type::integer(32) : type->second;
+            }
+        }
+
         bool changed = true;
-        for (int iteration = 0; iteration < 64 && changed; ++iteration) {
+        const std::size_t iteration_limit = std::max<std::size_t>(1, raw_blocks.size() + 1);
+        for (std::size_t iteration = 0; iteration < iteration_limit && changed; ++iteration) {
             changed = false;
             for (std::size_t block_index = 0; block_index < raw_blocks.size(); ++block_index) {
                 const RawBlock& block = raw_blocks[block_index];
                 std::unordered_map<std::string, ValueId> next_in;
-                if (!block.predecessors.empty()) {
-                    std::set<std::string> registers;
-                    for (std::size_t predecessor : block.predecessors) {
-                        for (const auto& [name, value] : outgoing[predecessor]) {
-                            (void)value;
-                            registers.insert(name);
-                        }
+                if (block.predecessors.size() >= 2) {
+                    for (const auto& [name, argument] : block_arguments[block_index]) {
+                        next_in[name] = argument;
                     }
-                    for (const std::string& name : registers) {
-                        ValueId common = kInvalidValue;
-                        bool all_present = true;
-                        bool all_equal = true;
-                        for (std::size_t predecessor : block.predecessors) {
-                            const auto value = outgoing[predecessor].find(name);
-                            if (value == outgoing[predecessor].end()) {
-                                all_present = false;
-                                continue;
-                            }
-                            if (common == kInvalidValue) {
-                                common = value->second;
-                            } else if (common != value->second) {
-                                all_equal = false;
-                            }
-                        }
-                        if (all_present && all_equal) {
-                            next_in[name] = common;
-                        } else if (block.uses_before_definition.contains(name) ||
-                                   block_arguments[block_index].contains(name)) {
-                            auto& argument = block_arguments[block_index][name];
-                            if (argument == kInvalidValue) {
-                                argument = builder.next_value();
-                                const auto type = register_types.find(name);
-                                value_types[argument] =
-                                    type == register_types.end() ? Type::integer(32) : type->second;
-                            }
-                            next_in[name] = argument;
+                } else if (block.predecessors.size() == 1) {
+                    const auto& predecessor_out = outgoing[block.predecessors.front()];
+                    for (const std::string& name : live_in[block_index]) {
+                        const auto value = predecessor_out.find(name);
+                        if (value != predecessor_out.end()) {
+                            next_in[name] = value->second;
                         }
                     }
                 }

@@ -1,0 +1,33 @@
+# Production metallib compilation baseline for the source-first samples and
+# in-tree CUDA project corpus. Columns are:
+#
+# source direct-legacy direct-cumetal-ir ptx-legacy ptx-cumetal-ir
+#
+# `pass` means cumetalc produced and validated a metallib. It does not mean the
+# resulting workload was executed or numerically correct. Changes in either
+# direction require review so compiler progress cannot silently change backend
+# policy or be mistaken for runtime conformance.
+
+samples/nativeLaunch/nativeLaunch.cu fail pass pass pass
+samples/vectorAdd/vectorAdd.cu fail pass pass pass
+tests/cuda_projects/async_memcpy/async_memcpy_hazard.cu fail pass pass pass
+tests/cuda_projects/constant_symbol/constant_symbol.cu fail fail pass fail
+tests/cuda_projects/cooperative_thread_group/cooperative_thread_group.cu fail pass pass fail
+tests/cuda_projects/device_printf_clang/device_printf_clang.cu fail fail pass fail
+tests/cuda_projects/device_sync_primitives/device_sync_primitives.cu fail fail pass fail
+tests/cuda_projects/dynamic_cooperative_groups/dynamic_cooperative_groups.cu fail fail pass fail
+tests/cuda_projects/flash_attn/flash_standalone.cu fail fail pass fail
+tests/cuda_projects/fp64/fp64_precision.cu fail fail pass fail
+tests/cuda_projects/ggml_output_ops/ggml_output_ops.cu fail pass pass pass
+tests/cuda_projects/libdevice/libdevice_math.cu fail fail pass fail
+tests/cuda_projects/libdevice_frexp/libdevice_frexp.cu fail fail pass fail
+tests/cuda_projects/raytracer/rtiow.cu fail fail pass fail
+tests/cuda_projects/reduction/reduction_standalone.cu fail fail pass fail
+tests/cuda_projects/sgemm/sgemm_2d.cu fail fail pass fail
+tests/cuda_projects/sgemm/sgemm_naive.cu fail pass pass fail
+tests/cuda_projects/sgemm/sgemm_shmem.cu fail pass pass fail
+tests/cuda_projects/softmax/softmax.cu fail fail pass fail
+tests/cuda_projects/system_atomics/system_atomics.cu fail fail pass fail
+tests/cuda_projects/transpose/transpose_standalone.cu fail pass pass pass
+tests/cuda_projects/vector_add/vector_add.cu fail pass pass pass
+tests/cuda_projects/wide_atomics/wide_atomics.cu fail fail pass fail

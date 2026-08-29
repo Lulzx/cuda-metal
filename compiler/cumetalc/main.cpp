@@ -803,12 +803,14 @@ int main(int argc, char** argv) {
 
     // Pick the backend that actually works for this input rather than one global default. The two
     // are complementary, not ranked, and the split follows the frontend feeding them. Measured
-    // over the 19-file in-tree .cu corpus (tests/ + samples/, see docs/compiler-architecture.md):
+    // over the manifest-controlled 23-file source/sample corpus (see
+    // tests/cuda_projects/backend_matrix_manifest.txt and docs/compiler-architecture.md):
     //
-    //   direct .cu           legacy 0/19   cumetal-ir 10/19
-    //   --cuda-device (PTX)  legacy 17/19  cumetal-ir  6/19
+    //   direct .cu           legacy 0/23   cumetal-ir  9/23
+    //   --cuda-device (PTX)  legacy 23/23  cumetal-ir  6/23
     //
-    // Legacy's direct-.cu mode is the qualifier-stripping prototype documented in
+    // These are production-metallib compilation counts, not runtime correctness
+    // counts. Legacy's direct-.cu mode is the qualifier-stripping prototype documented in
     // docs/known-gaps.md and lowers nothing in this corpus, so typed CuMetal IR is strictly
     // better there. Through the PTX frontend the ordering reverses and defaulting to typed IR
     // would regress the path llm.c, llama.cpp, and PhysX all depend on. --backend overrides.

@@ -93,4 +93,10 @@ IEEE-754 operations.
 The standalone `VF64-metal` repository owns the full virtual runtime's
 conformance corpus, mode contracts, benchmarks, and ISA documentation. CuMetal
 pins that repository as a submodule so compiler claims can identify the exact
-runtime revision they execute.
+runtime revision they execute. The current pin is `7290217` (2026-08-29).
+Upstream's `scripts/check-cumetal-integration.sh` passes `fast48`, `wide48`, and
+`ieee64` against this checkout on Apple M4 Pro. The linked
+`VF64Support.metal` content is unchanged from the former `66270a1` pin; the
+intervening commits add integration gates, release/support documentation,
+resource evidence, and scientific-workload experiments rather than changing
+CuMetal's support ABI.

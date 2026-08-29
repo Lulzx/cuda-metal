@@ -494,6 +494,9 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
     // field initialized in a constructor is visible to a method called later on
     // the same object without relying on source-level type names.
     std::unordered_map<std::string, std::size_t> pointer_memory_slots;
+    std::unordered_map<std::size_t, std::vector<std::size_t>>
+        pointer_memory_slot_address_nodes;
+    std::unordered_set<std::size_t> pointer_memory_slots_with_stores;
     for (ir::Function& function : module->functions) {
         auto slot_for = [&](const ir::Operand& address) -> std::optional<std::size_t> {
             if (address.kind != ir::OperandKind::kValue ||
@@ -518,10 +521,15 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                      : "layout:" + provenance->second.memory_layout) +
                 ":" + std::to_string(slot_offset);
             const auto existing = pointer_memory_slots.find(key);
-            if (existing != pointer_memory_slots.end()) return existing->second;
-            const std::size_t node = constraints.add_node();
-            constraints.mark_polymorphic(node);
-            pointer_memory_slots.emplace(key, node);
+            const std::size_t node = existing != pointer_memory_slots.end()
+                                         ? existing->second
+                                         : constraints.add_node();
+            if (existing == pointer_memory_slots.end()) {
+                constraints.mark_polymorphic(node);
+                pointer_memory_slots.emplace(key, node);
+            }
+            pointer_memory_slot_address_nodes[node].push_back(
+                value_nodes.at(address.value));
             return node;
         };
         for (const ir::BasicBlock& block : function.blocks) {
@@ -534,6 +542,9 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                         !constrain_operand(*slot, operation.operands[1])) {
                         return {false, "pointer field stores incompatible concrete address spaces in '" +
                                            function.name + "'"};
+                    }
+                    if (slot.has_value()) {
+                        pointer_memory_slots_with_stores.insert(*slot);
                     }
                 } else if (operation.opcode == ir::OpCode::kLoad &&
                            !operation.results.empty() &&
@@ -553,6 +564,34 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
     if (!constraints.solve()) {
         return {false,
                 "directional pointer flow reaches a conflicting concrete address space"};
+    }
+
+    // A pointer-valued field read from device storage, but never written by
+    // device code in the reachable module, comes from the host-populated kernel
+    // ABI. CUDA host launch arguments can only supply device pointers. This is
+    // the common array-descriptor shape used by Warp and similar runtimes.
+    // Keep fields with an observed device-side store polymorphic: their stored
+    // value remains the authoritative address-space constraint.
+    bool seeded_host_pointer_field = false;
+    for (const auto& [slot, address_nodes] : pointer_memory_slot_address_nodes) {
+        if (pointer_memory_slots_with_stores.contains(slot) || address_nodes.empty()) {
+            continue;
+        }
+        const bool device_backed = std::all_of(
+            address_nodes.begin(), address_nodes.end(), [&](std::size_t address_node) {
+                return constraints.space(address_node) == ir::AddressSpace::kDevice;
+            });
+        if (device_backed) {
+            if (!constraints.seed(slot, ir::AddressSpace::kDevice)) {
+                return {false,
+                        "host-populated pointer field conflicts with device address space"};
+            }
+            seeded_host_pointer_field = true;
+        }
+    }
+    if (seeded_host_pointer_field && !constraints.solve()) {
+        return {false,
+                "host-populated pointer field reaches a conflicting concrete address space"};
     }
 
     auto resolve_type = [&](ir::Function* function, ir::ValueId value, ir::Type* type,

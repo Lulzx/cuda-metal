@@ -65,18 +65,15 @@ boundaries live in [the Apple-GPU execution record](apple-gpu-execution.md),
 
 ## NVIDIA cuda-samples conformance snapshot
 
-The resource-bounded sweep recorded on 2026-08-27 classifies 83 headless
-samples: 33 pass, 3 waive cleanly, and 47 do not yet have a passing runtime
-result. The manifest is an executable compatibility boundary: a regression out
-of `pass` or `waive` fails, and a formerly unsupported sample that begins to
-work also fails until its classification and documentation are reviewed.
+The manifest snapshot recorded on 2026-08-29 classifies all 83 enrolled
+headless samples as runtime passes, with no waivers or nonpassing entries.
+Every entry must build, run, and satisfy its available numerical/output checks.
+The manifest is an executable compatibility boundary: any regression from
+`pass` fails, and classifications must be reviewed when the enrolled set changes.
 
-Two graph-memory samples, `graphMemoryNodes` and `graphMemoryFootprint`, compile
-and link unmodified. Their large or clock-spinning workloads were deliberately
-not executed during the resource-bounded pass, so they remain
-`run-unverified`; compilation is not reported as runtime conformance. The exact
-classification and remaining blockers are maintained in
-[known gaps](known-gaps.md).
+This is complete coverage of the enrolled snapshot only. It is not a percentage
+of the full CUDA API, all CUDA samples, or arbitrary CUDA applications. The
+exact implementation boundaries remain in [known gaps](known-gaps.md).
 
 ## Projects using CuMetal
 

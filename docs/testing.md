@@ -45,7 +45,8 @@ bash scripts/ci_report.sh build \
   --label-regex '^hosted$'
 ```
 
-`.github/workflows/gpu-ci.yml.disabled` defines the spec §10.7 hardware layer.
+`.github/workflows/gpu-ci.yml.disabled` defines the specification's Apple-GPU
+hardware layer, but the disabled file is not evidence of recurring CI.
 Its runner must have the standard self-hosted labels `self-hosted`, `macOS`,
 and `ARM64`, plus the custom label `ci-m1`. When enabled, it runs only on pushes
 to `main` and manual dispatch, never on pull requests. Set the repository Actions variable

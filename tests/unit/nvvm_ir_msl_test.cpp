@@ -266,6 +266,27 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmKernelDescriptorPointer = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%descriptor = type { ptr, i32 }
+
+define ptr @descriptor_element(ptr %descriptor, i64 %index) {
+entry:
+  %field = getelementptr %descriptor, ptr %descriptor, i64 0, i32 0
+  %data = load ptr, ptr %field, align 8
+  %element = getelementptr float, ptr %data, i64 %index
+  ret ptr %element
+}
+
+define ptx_kernel void @kernel_descriptor_pointer(ptr byval(%descriptor) %descriptor) {
+entry:
+  %element = call ptr @descriptor_element(ptr %descriptor, i64 0)
+  store float 1.0, ptr %element, align 4
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmStaticThreadgroupGlobal = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -893,6 +914,17 @@ int main() {
                          "reinterpret_cast<thread uchar*>(arg0)") ==
                          std::string::npos,
                  "generic helper pointers inherit concrete device address spaces from callers");
+
+    const metal::NvvmToMslResult kernel_descriptor_pointer =
+        metal::compile_nvvm_to_msl(kNvvmKernelDescriptorPointer,
+                                   "kernel-descriptor-pointer.ll",
+                                   "kernel_descriptor_pointer");
+    ok &= expect(kernel_descriptor_pointer.ok &&
+                     kernel_descriptor_pointer.source.find(
+                         "device uchar* descriptor_element(") != std::string::npos &&
+                     kernel_descriptor_pointer.source.find(
+                         "reinterpret_cast<device uchar*>") != std::string::npos,
+                 "host-populated pointer fields in kernel descriptors resolve as device pointers");
 
     const metal::NvvmToMslResult static_threadgroup_global =
         metal::compile_nvvm_to_msl(kNvvmStaticThreadgroupGlobal,
