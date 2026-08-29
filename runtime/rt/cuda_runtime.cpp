@@ -598,8 +598,49 @@ void drain_one_printf_record(const std::string& fmt,
             continue;
         }
         if (conv == 's') {
-            arg_idx += std::min<std::uint32_t>(2u, n_args - arg_idx);
-            std::fputs("[string]", stderr);
+            if (arg_idx + 1u >= n_args) {
+                arg_idx = n_args;
+                std::fputs("[string]", stderr);
+                continue;
+            }
+            const std::uint64_t raw = static_cast<std::uint64_t>(args[arg_idx]) |
+                (static_cast<std::uint64_t>(args[arg_idx + 1u]) << 32u);
+            arg_idx += 2u;
+            spec += 's';
+
+            // Only tracked allocations are safe to materialize on the host.
+            // AllocationTable contains both CPU and MTLBuffer GPU-address
+            // aliases, so a pointer written by Metal resolves to the shared
+            // backing buffer without dereferencing an arbitrary device value.
+            cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+            RuntimeState& state = runtime_state();
+            constexpr std::size_t kMaxDeviceStringBytes = 256u;
+            if (raw == 0 ||
+                !state.allocations.resolve(
+                    reinterpret_cast<const void*>(static_cast<std::uintptr_t>(raw)),
+                    &resolved) ||
+                resolved.buffer == nullptr || resolved.buffer->contents() == nullptr) {
+                emit_printf_value(spec, dynamic_width, width,
+                                  dynamic_precision, precision, "[string]");
+                continue;
+            }
+            const auto* begin =
+                static_cast<const char*>(resolved.buffer->contents()) + resolved.offset;
+            const std::size_t bounded_size =
+                std::min(resolved.remaining_size, kMaxDeviceStringBytes);
+            const void* terminator = std::memchr(begin, '\0', bounded_size);
+            if (terminator == nullptr) {
+                emit_printf_value(spec, dynamic_width, width,
+                                  dynamic_precision, precision,
+                                  "[unterminated-string]");
+                continue;
+            }
+            const std::size_t length =
+                static_cast<const char*>(terminator) - begin;
+            const std::string materialized(begin, length);
+            emit_printf_value(spec, dynamic_width, width,
+                              dynamic_precision, precision,
+                              materialized.c_str());
             continue;
         }
         if (conv == 'p' && arg_idx + 1u < n_args) {

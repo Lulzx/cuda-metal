@@ -68,4 +68,13 @@ if [[ "$(grep -Fxc 'DYNAMIC int=   -42 float=    3.12 left=7    ' "${OUTPUT_FILE
     exit 1
 fi
 
-echo "PASS: Clang device printf ABI emitted scalar and dynamic-width/precision GPU records (${PTX_BACKEND})"
+if [[ "$(grep -Fxc 'STRING value=CuMetal-device-string' "${OUTPUT_FILE}")" -ne 1 ]]; then
+    echo "FAIL: missing or malformed tracked device-string printf record"
+    exit 1
+fi
+if [[ "$(grep -Fxc 'STRING value=[unterminated-string]' "${OUTPUT_FILE}")" -ne 1 ]]; then
+    echo "FAIL: unterminated tracked string was not bounded explicitly"
+    exit 1
+fi
+
+echo "PASS: Clang device printf ABI emitted scalar, dynamic-field, and tracked-string GPU records (${PTX_BACKEND})"

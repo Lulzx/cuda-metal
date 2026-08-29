@@ -25,6 +25,10 @@ __global__ void print_dynamic_values() {
            6, -42, 8, 2, 3.125, 5, 7u);
 }
 
+__global__ void print_device_string(const char* value) {
+    printf("STRING value=%s\n", value);
+}
+
 int main() {
     print_coordinates<<<dim3(2, 2), dim3(2, 2, 2)>>>(37);
     if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess) {
@@ -50,6 +54,43 @@ int main() {
         cudaFree(pointer);
         return 1;
     }
+    constexpr char host_string[] = "CuMetal-device-string";
+    char* device_string = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&device_string), sizeof(host_string)) !=
+            cudaSuccess ||
+        cudaMemcpy(device_string, host_string, sizeof(host_string),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+        std::printf("FAIL: device string allocation/copy\n");
+        cudaFree(pointer);
+        return 1;
+    }
+    print_device_string<<<1, 1>>>(device_string);
+    if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess) {
+        std::printf("FAIL: string cudaDeviceSynchronize: %s\n",
+                    cudaGetErrorString(error));
+        cudaFree(device_string);
+        cudaFree(pointer);
+        return 1;
+    }
+    cudaFree(device_string);
+    constexpr size_t unterminated_size = 256;
+    char* unterminated = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&unterminated), unterminated_size) !=
+            cudaSuccess ||
+        cudaMemset(unterminated, 'A', unterminated_size) != cudaSuccess) {
+        std::printf("FAIL: unterminated string allocation/fill\n");
+        cudaFree(pointer);
+        return 1;
+    }
+    print_device_string<<<1, 1>>>(unterminated);
+    if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess) {
+        std::printf("FAIL: unterminated string cudaDeviceSynchronize: %s\n",
+                    cudaGetErrorString(error));
+        cudaFree(unterminated);
+        cudaFree(pointer);
+        return 1;
+    }
+    cudaFree(unterminated);
     cudaFree(pointer);
     std::printf("HOST_DONE\n");
     return 0;
