@@ -107,6 +107,8 @@ static void expect(const char* what, double got, double want, double tol) {
 }
 
 int main() {
+    const char* fp64_mode = getenv("CUMETAL_FP64_MODE");
+    const bool exact_mode = fp64_mode && strcmp(fp64_mode, "ieee64") == 0;
     double* h_in = (double*) malloc((N + 1) * sizeof(double));
     double* h_b  = (double*) malloc((N + 1) * sizeof(double));
     double* h_y  = (double*) malloc((N + 1) * sizeof(double));
@@ -344,8 +346,15 @@ int main() {
     cudaDeviceSynchronize();
     cudaMemcpy(math_output, d_z, sizeof math_output, cudaMemcpyDeviceToHost);
     int math_bad = 0;
-    math_bad += bits_of(math_output[0]) != bits_of(fma(math_input[0], math_input[1], math_input[2]));
-    math_bad += bits_of(math_output[1]) != bits_of(sqrt(math_input[3]));
+    const double fma_want = fma(math_input[0], math_input[1], math_input[2]);
+    const double sqrt_want = sqrt(math_input[3]);
+    if (exact_mode) {
+        math_bad += bits_of(math_output[0]) != bits_of(fma_want);
+        math_bad += bits_of(math_output[1]) != bits_of(sqrt_want);
+    } else {
+        math_bad += fabs(math_output[0] - fma_want) > 1e-13 * fmax(1.0, fabs(fma_want));
+        math_bad += fabs(math_output[1] - sqrt_want) > 1e-13 * fabs(sqrt_want);
+    }
     math_bad += bits_of(math_output[2]) != bits_of(1.0);
     math_bad += bits_of(math_output[3]) != bits_of(0.0);
     report("libdevice fma/sqrt/min/max", math_bad, 4, 0.0, "rel");

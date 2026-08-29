@@ -39,8 +39,10 @@ integer aliases carry raw binary64 bits. This keeps `mov.b64`, `uint64_t`
 type-punning, `cudaMemcpy`, and CPU library boundaries interoperable without a
 private packed-pair format.
 
-For `wide48` and `ieee64`, CuMetal statically links the pinned
-`third_party/f64-metal` support module into each generated metallib. The
+For all three software modes, CuMetal statically links the pinned
+`third_party/f64-metal` support module into each generated metallib. `fast48`
+uses it for operations outside the pair implementation, such as IEEE remainder
+and round-to-integer. The
 persistent JIT cache key includes the support source SHA-256, so a support
 runtime update cannot reuse an older metallib. Linked helper functions are not
 treated as kernel entry points by validation.

@@ -1284,8 +1284,7 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         }
         emit_options.kernel_name = lowered.entry_name.empty() ? kernel_name : lowered.entry_name;
         if (ptx_source.find(".f64") != std::string::npos &&
-            (lower_options.fp64_mode == cumetal::ptx::Fp64Mode::kWide48 ||
-             lower_options.fp64_mode == cumetal::ptx::Fp64Mode::kIEEE64)) {
+            cumetal::ptx::fp64_mode_links_vf64_support(lower_options.fp64_mode)) {
             emit_options.additional_link_inputs.push_back(
                 std::filesystem::path(CUMETAL_SOURCE_DIR) / "third_party" /
                 "f64-metal" / "Sources" / "F64Metal" / "Shaders" /

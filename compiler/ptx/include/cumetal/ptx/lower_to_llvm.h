@@ -42,6 +42,11 @@ inline std::string_view fp64_mode_name(Fp64Mode mode) {
     return "unknown";
 }
 
+inline bool fp64_mode_links_vf64_support(Fp64Mode mode) {
+    return mode == Fp64Mode::kEmulate || mode == Fp64Mode::kWide48 ||
+           mode == Fp64Mode::kIEEE64;
+}
+
 struct LowerToLlvmOptions {
     bool strict = false;
     std::string entry_name;

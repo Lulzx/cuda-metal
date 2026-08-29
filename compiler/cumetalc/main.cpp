@@ -1057,8 +1057,7 @@ int main(int argc, char** argv) {
                 temp_files.push_back(temp_stage_file);
                 needs_vf64_support =
                     ptx_source.find(".f64") != std::string::npos &&
-                    (ptx_fp64_mode == cumetal::ptx::Fp64Mode::kWide48 ||
-                     ptx_fp64_mode == cumetal::ptx::Fp64Mode::kIEEE64);
+                cumetal::ptx::fp64_mode_links_vf64_support(ptx_fp64_mode);
             }
         }
     } else if (input_ext == ".ll" || input_ext == ".llvm") {

@@ -3666,27 +3666,29 @@ class GenericLlvmEmitter {
         const bool converts_fp64 =
             (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64) ||
             (cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64);
+        const bool rounds_fp64_to_integer =
+            cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64 &&
+            cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64 &&
+            (instr.opcode.find(".rni.") != std::string::npos ||
+             instr.opcode.find(".rmi.") != std::string::npos ||
+             instr.opcode.find(".rpi.") != std::string::npos ||
+             instr.opcode.find(".rzi.") != std::string::npos);
+        if (rounds_fp64_to_integer &&
+            cumetal::ptx::fp64_mode_links_vf64_support(fp64_mode_)) {
+            auto raw = decode_fp64_raw_bits(os, src);
+            if (!raw) return fail(instr, "VF64 round-to-integer source unsupported");
+            declarations_.insert("declare i64 @vf64_round_to_int(i64, i32, i1)");
+            const std::string rounded = next_tmp("vf64_cvt_round_to_int");
+            os << "  " << rounded << " = call i64 @vf64_round_to_int(i64 " << *raw
+               << ", i32 " << vf64_rounding_mode(instr.opcode) << ", i1 true)\n";
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, rounded, 64);
+        }
         if (uses_vf64_support() && converts_fp64) {
             const int rounding = vf64_rounding_mode(instr.opcode);
             if (cvt.src.kind == PtxTypeSpec::Kind::kFloat && cvt.src.bits == 64 &&
                 cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64) {
                 auto raw = decode_fp64_raw_bits(os, src);
                 if (!raw) return fail(instr, "VF64 conversion source unsupported");
-                const bool rounds_to_integer =
-                    instr.opcode.find(".rni.") != std::string::npos ||
-                    instr.opcode.find(".rmi.") != std::string::npos ||
-                    instr.opcode.find(".rpi.") != std::string::npos ||
-                    instr.opcode.find(".rzi.") != std::string::npos;
-                if (rounds_to_integer) {
-                    declarations_.insert(
-                        "declare i64 @vf64_round_to_int(i64, i32, i1)");
-                    const std::string rounded = next_tmp("vf64_cvt_round_to_int");
-                    os << "  " << rounded
-                       << " = call i64 @vf64_round_to_int(i64 " << *raw
-                       << ", i32 " << rounding << ", i1 true)\n";
-                    return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits,
-                                               rounded, 64);
-                }
                 return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *raw, 64);
             }
             if (cvt.dst.kind == PtxTypeSpec::Kind::kFloat && cvt.dst.bits == 64 &&
@@ -6167,7 +6169,8 @@ class GenericLlvmEmitter {
             os << "  " << out << " = fdiv fast float " << *numerator << ", " << *denominator << "\n";
             return store_ret_f32(out);
         }
-        if (uses_vf64_support() && callee == "__nv_remainder") {
+        if (cumetal::ptx::fp64_mode_links_vf64_support(fp64_mode_) &&
+            callee == "__nv_remainder") {
             if (arg_names.size() < 2) return fail(instr, "__nv_remainder expects 2 args");
             auto x_bits = load_call_slot_value(os, arg_names[0], 64);
             auto y_bits = load_call_slot_value(os, arg_names[1], 64);
@@ -6178,7 +6181,7 @@ class GenericLlvmEmitter {
                << ", i64 " << *y_bits << ")\n";
             return store_ret_bits(result, 64);
         }
-        if (uses_vf64_support() &&
+        if (cumetal::ptx::fp64_mode_links_vf64_support(fp64_mode_) &&
             (callee == "__nv_floor" || callee == "__nv_ceil" ||
              callee == "__nv_trunc" || callee == "__nv_round" ||
              callee == "__nv_rint" || callee == "__nv_nearbyint")) {
