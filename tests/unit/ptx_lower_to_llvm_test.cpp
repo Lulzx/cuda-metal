@@ -1630,6 +1630,7 @@ $L_done:
     .reg .f32 %f<3>;
     .reg .f64 %fd<7>;
     .reg .s32 %r<3>;
+    .reg .pred %p<5>;
     mov.f32 %f1, 1.25;
     cvt.rn.f64.f32 %fd1, %f1;
     mov.s32 %r1, -17;
@@ -1640,6 +1641,10 @@ $L_done:
     fma.rm.f64 %fd6, %fd5, %fd1, %fd2;
     cvt.rn.f32.f64 %f2, %fd6;
     cvt.rzi.s32.f64 %r2, %fd6;
+    setp.eq.f64 %p1, %fd1, %fd2;
+    setp.lt.f64 %p2, %fd1, %fd2;
+    setp.num.f64 %p3, %fd1, %fd2;
+    setp.nan.f64 %p4, %fd1, %fd2;
     ret;
 }
 )PTX";
@@ -1662,7 +1667,10 @@ $L_done:
                     contains(ieee64_lowered.llvm_ir, "@vf64_div_round") &&
                     contains(ieee64_lowered.llvm_ir, "@vf64_fma_round") &&
                     contains(ieee64_lowered.llvm_ir, "@vf64_f64_to_f32") &&
-                    contains(ieee64_lowered.llvm_ir, "@vf64_f64_to_i32"),
+                    contains(ieee64_lowered.llvm_ir, "@vf64_f64_to_i32") &&
+                    contains(ieee64_lowered.llvm_ir, "@vf64_eq") &&
+                    contains(ieee64_lowered.llvm_ir, "@vf64_lt") &&
+                    contains(ieee64_lowered.llvm_ir, "vf64_is_nan"),
                 "ieee64 lowering contains only integer-bit VF64 calls")) {
         return 1;
     }

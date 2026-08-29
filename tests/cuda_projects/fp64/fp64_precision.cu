@@ -64,6 +64,17 @@ __global__ void alias(unsigned long long* out, const double* in) {
     double v = in[0] * in[1];
     out[0] = *reinterpret_cast<unsigned long long*>(&v);
 }
+__global__ void compare_fp64(int* out, const double* in) {
+    if (threadIdx.x != 0) return;
+    out[0] = in[0] == in[1];
+    out[1] = in[0] < in[2];
+    out[2] = in[2] > in[0];
+    out[3] = in[0] <= in[1];
+    out[4] = in[2] >= in[0];
+    out[5] = in[3] == in[4];
+    out[6] = in[3] < in[4];
+    out[7] = in[5] != in[0];
+}
 
 static uint64_t bits_of(double d) { uint64_t u; memcpy(&u, &d, sizeof u); return u; }
 
@@ -86,11 +97,13 @@ int main() {
     double* h_z  = (double*) malloc(N * sizeof(double));
     double *d_in, *d_b, *d_y, *d_z;
     unsigned long long* d_bits;
+    int* d_cmp;
     cudaMalloc(&d_in, (N + 1) * sizeof(double));
     cudaMalloc(&d_b,  (N + 1) * sizeof(double));
     cudaMalloc(&d_y,  (N + 1) * sizeof(double));
     cudaMalloc(&d_z,  N * sizeof(double));
     cudaMalloc(&d_bits, sizeof(unsigned long long));
+    cudaMalloc(&d_cmp, 8 * sizeof(int));
 
     int n = 0;
     double payload_nan;
@@ -288,6 +301,22 @@ int main() {
     cudaDeviceSynchronize();
     cudaMemcpy(&got, d_z, sizeof got, cudaMemcpyDeviceToHost);
     expect("2^24+1 through fp64 mul", got, rt[0], 0.0);
+
+    double cmp_input[6] = {1.0, 1.0, 2.0, -0.0, 0.0, NAN};
+    int cmp_output[8] = {};
+    cudaMemcpy(d_in, cmp_input, sizeof cmp_input, cudaMemcpyHostToDevice);
+    compare_fp64<<<1,1>>>(d_cmp, d_in);
+    cudaDeviceSynchronize();
+    cudaMemcpy(cmp_output, d_cmp, sizeof cmp_output, cudaMemcpyDeviceToHost);
+    const int cmp_want[8] = {1, 1, 1, 1, 1, 1, 0, 1};
+    int cmp_bad = 0;
+    for (int i = 0; i < 8; ++i) {
+        if (cmp_output[i] != cmp_want[i]) {
+            printf("    comparison[%d] got %d want %d\n", i, cmp_output[i], cmp_want[i]);
+            ++cmp_bad;
+        }
+    }
+    report("binary64 comparisons", cmp_bad, 8, 0.0, "rel");
 
     if (failures == 0) printf("PASS: fp64 emulation meets the ~48-bit significand contract\n");
     else printf("FAIL: %d fp64 contract violation(s)\n", failures);

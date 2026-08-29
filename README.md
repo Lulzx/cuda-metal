@@ -216,7 +216,7 @@ Durable platform/legal boundaries:
   CuMetal provides `fast48`, `wide48`, and correctly rounded `ieee64` software
   modes while preserving the ordinary binary64 storage ABI. Core arithmetic,
   FMA, square root, conversions, memory, and shuffle paths are integrated;
-  some IEEE comparison/status operations remain compiler-integration work.
+  remainder/round-to-integer and observable status remain compiler-integration work.
 - Public Metal exposes no CUDA persisting-L2/access-policy-window control;
   CuMetal reports those capabilities as zero and rejects nontrivial requests.
 

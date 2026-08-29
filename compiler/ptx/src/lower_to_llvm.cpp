@@ -2150,6 +2150,29 @@ class GenericLlvmEmitter {
         return 0;
     }
 
+    std::string emit_vf64_is_nan(std::ostringstream& os,
+                                 const std::string& raw_bits) {
+        const std::string magnitude = next_tmp("vf64_nan_magnitude");
+        const std::string exponent = next_tmp("vf64_nan_exponent");
+        const std::string fraction = next_tmp("vf64_nan_fraction");
+        const std::string exponent_all_ones = next_tmp("vf64_nan_exponent_all_ones");
+        const std::string fraction_nonzero = next_tmp("vf64_nan_fraction_nonzero");
+        const std::string is_nan = next_tmp("vf64_is_nan");
+        os << "  " << magnitude << " = and i64 " << raw_bits
+           << ", 9223372036854775807\n";
+        os << "  " << exponent << " = and i64 " << magnitude
+           << ", 9218868437227405312\n";
+        os << "  " << fraction << " = and i64 " << magnitude
+           << ", 4503599627370495\n";
+        os << "  " << exponent_all_ones << " = icmp eq i64 " << exponent
+           << ", 9218868437227405312\n";
+        os << "  " << fraction_nonzero << " = icmp ne i64 " << fraction
+           << ", 0\n";
+        os << "  " << is_nan << " = and i1 " << exponent_all_ones << ", "
+           << fraction_nonzero << "\n";
+        return is_nan;
+    }
+
     bool emit_vf64_binary_call(
         std::ostringstream& os,
         const cumetal::ptx::EntryFunction::Instruction& instr,
@@ -3909,6 +3932,50 @@ class GenericLlvmEmitter {
 
         std::string pred_value;
         if (ty.kind == PtxTypeSpec::Kind::kFloat) {
+            if (ty.bits == 64 && uses_vf64_support()) {
+                auto a = decode_fp64_raw_bits(os, instr.operands[1]);
+                auto b = decode_fp64_raw_bits(os, instr.operands[2]);
+                if (!a || !b) return fail(instr, "VF64 setp source unsupported");
+                const std::string a_nan = emit_vf64_is_nan(os, *a);
+                const std::string b_nan = emit_vf64_is_nan(os, *b);
+                const std::string either_nan = next_tmp("vf64_cmp_either_nan");
+                os << "  " << either_nan << " = or i1 " << a_nan << ", " << b_nan
+                   << "\n";
+                if (cmp == "num" || cmp == "nan") {
+                    if (cmp == "nan") {
+                        pred_value = either_nan;
+                    } else {
+                        const std::string ordered = next_tmp("vf64_cmp_ordered");
+                        os << "  " << ordered << " = xor i1 " << either_nan << ", true\n";
+                        pred_value = ordered;
+                    }
+                } else {
+                    std::string function;
+                    std::string lhs = *a;
+                    std::string rhs = *b;
+                    if (cmp == "eq" || cmp == "ne") {
+                        function = "vf64_eq";
+                    } else if (cmp == "lt" || cmp == "gt") {
+                        function = "vf64_lt";
+                        if (cmp == "gt") std::swap(lhs, rhs);
+                    } else {
+                        function = "vf64_le";
+                        if (cmp == "ge") std::swap(lhs, rhs);
+                    }
+                    declarations_.insert("declare i1 @" + function + "(i64, i64)");
+                    const std::string compared = next_tmp("vf64_cmp");
+                    os << "  " << compared << " = call i1 @" << function << "(i64 "
+                       << lhs << ", i64 " << rhs << ")\n";
+                    if (cmp == "ne") {
+                        const std::string not_equal = next_tmp("vf64_cmp_not_equal");
+                        os << "  " << not_equal << " = xor i1 " << compared << ", true\n";
+                        pred_value = not_equal;
+                    } else {
+                        pred_value = compared;
+                    }
+                }
+                return emit_store_reg_bits(os, dst, 1, pred_value, 1);
+            }
             if (ty.bits == 64 && fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
                 auto a = decode_fp64_pair(os, instr.operands[1]);
                 auto b = decode_fp64_pair(os, instr.operands[2]);
