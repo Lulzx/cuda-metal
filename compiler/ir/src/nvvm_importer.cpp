@@ -646,6 +646,22 @@ struct Importer {
             operation->memory_scope = MemoryScope::kSimdgroup;
             return true;
         }
+        if (name == "llvm.nvvm.membar.cta" ||
+            name == "llvm.nvvm.membar.gl" ||
+            name == "llvm.nvvm.membar.sys") {
+            operation->opcode = OpCode::kFence;
+            operation->memory_scope =
+                name.ends_with(".cta")
+                    ? MemoryScope::kThreadgroup
+                    : name.ends_with(".sys") ? MemoryScope::kSystem
+                                               : MemoryScope::kDevice;
+            operation->memory_ordering = MemoryOrdering::kRelaxed;
+            operation->attributes["cuda_membar"] = "true";
+            if (operation->memory_scope == MemoryScope::kSystem) {
+                operation->attributes["metal_uma_system_scope"] = "true";
+            }
+            return true;
+        }
         if (name == "__nv_float_as_int" || name == "__nv_float_as_uint" ||
             name == "__nv_int_as_float" || name == "__nv_uint_as_float" ||
             name == "__nv_double_as_longlong" || name == "__nv_longlong_as_double") {
@@ -1343,6 +1359,10 @@ struct Importer {
             operation.operands.push_back(import_operand(*atomic->getValOperand(), *state));
             operation.attributes["atomic_op"] =
                 llvm::AtomicRMWInst::getOperationName(atomic->getOperation()).str();
+            if (atomic->getOperation() == llvm::AtomicRMWInst::Max ||
+                atomic->getOperation() == llvm::AtomicRMWInst::Min) {
+                operation.attributes["signed"] = "true";
+            }
             operation.memory_scope = MemoryScope::kDevice;
             operation.memory_ordering = import_ordering(atomic->getOrdering());
             // LLVM's NVPTX frontend spells legacy CUDA atomic intrinsics as
@@ -1354,6 +1374,52 @@ struct Importer {
                 operation.memory_ordering = MemoryOrdering::kRelaxed;
                 operation.attributes["cuda_legacy_atomic"] = "true";
             }
+        } else if (const auto* compare_exchange =
+                       llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&instruction)) {
+            const Type value_type = import_type(compare_exchange->getCompareOperand()->getType());
+            if (value_type.kind != TypeKind::kInteger || value_type.bit_width != 32) {
+                return fail(&instruction,
+                            "typed Metal cmpxchg currently requires a 32-bit integer payload");
+            }
+            const ValueId old_value = builder.next_value();
+            state->value_types[old_value] = value_type;
+            operation.results = {old_value};
+            operation.result_types = {value_type};
+            operation.opcode = OpCode::kAtomic;
+            operation.operands = {
+                import_operand(*compare_exchange->getPointerOperand(), *state),
+                import_operand(*compare_exchange->getCompareOperand(), *state),
+                import_operand(*compare_exchange->getNewValOperand(), *state),
+            };
+            operation.attributes["atomic_op"] = "cas";
+            operation.memory_scope = MemoryScope::kDevice;
+            operation.memory_ordering =
+                import_ordering(compare_exchange->getSuccessOrdering());
+            if (operation.memory_ordering == MemoryOrdering::kSequentiallyConsistent &&
+                llvm::Triple(input->getTargetTriple()).isNVPTX()) {
+                operation.memory_ordering = MemoryOrdering::kRelaxed;
+                operation.attributes["cuda_legacy_atomic"] = "true";
+            }
+            output_block->operations.push_back(std::move(operation));
+
+            const ValueId succeeded = builder.next_value();
+            state->value_types[succeeded] = Type::predicate();
+            Operation comparison;
+            comparison.opcode = OpCode::kCompare;
+            comparison.results = {succeeded};
+            comparison.result_types = {Type::predicate()};
+            comparison.operands = {
+                Operand::value_ref(old_value, value_type),
+                import_operand(*compare_exchange->getCompareOperand(), *state),
+            };
+            comparison.attributes["predicate"] = "eq";
+            comparison.location = import_location(instruction, fallback_source);
+            output_block->operations.push_back(std::move(comparison));
+            state->aggregate_components[compare_exchange] = {
+                Operand::value_ref(old_value, value_type),
+                Operand::value_ref(succeeded, Type::predicate()),
+            };
+            return true;
         } else if (const auto* fence = llvm::dyn_cast<llvm::FenceInst>(&instruction)) {
             operation.opcode = OpCode::kFence;
             operation.memory_scope = MemoryScope::kDevice;

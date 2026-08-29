@@ -36,6 +36,50 @@ bool is_ptx_hex_float_literal(std::string_view spelling) {
     });
 }
 
+MslFunction make_atomic_cas_u32_helper(MslAddressSpace address_space) {
+    const std::string suffix =
+        address_space == MslAddressSpace::kThreadgroup ? "threadgroup" : "device";
+    const MslType atomic_uint = {
+        .kind = MslTypeKind::kStruct,
+        .struct_name = "atomic_uint",
+    };
+    const MslType atomic_pointer = MslType::pointer(atomic_uint, address_space);
+    const MslType memory_order = {
+        .kind = MslTypeKind::kStruct,
+        .struct_name = "memory_order",
+    };
+    const MslExpr pointer = MslExpression::identifier("pointer", atomic_pointer);
+    const MslExpr compare = MslExpression::identifier("compare", MslType::uint());
+    const MslExpr desired = MslExpression::identifier("desired", MslType::uint());
+    const MslExpr expected = MslExpression::identifier("expected", MslType::uint());
+    const MslExpr expected_pointer = MslExpression::unary(
+        "&", expected, MslType::pointer(MslType::uint(), MslAddressSpace::kThread));
+    const MslExpr relaxed =
+        MslExpression::identifier("memory_order_relaxed", memory_order);
+    const MslExpr exchanged = MslExpression::call(
+        "atomic_compare_exchange_weak_explicit",
+        {pointer, expected_pointer, desired, relaxed, relaxed},
+        MslType::boolean());
+    const MslExpr retry = MslExpression::binary(
+        "&&", MslExpression::unary("!", exchanged, MslType::boolean()),
+        MslExpression::binary("==", expected, compare, MslType::boolean()),
+        MslType::boolean());
+
+    MslFunction helper;
+    helper.name = "cm_atomic_cas_" + suffix + "_u32";
+    helper.return_type = MslType::uint();
+    helper.parameters = {
+        {.type = atomic_pointer, .name = "pointer"},
+        {.type = MslType::uint(), .name = "compare"},
+        {.type = MslType::uint(), .name = "desired"},
+    };
+    helper.statements.push_back(
+        MslStatement::variable(MslType::uint(), "expected", compare));
+    helper.statements.push_back(MslStatement::while_statement(retry, {}));
+    helper.statements.push_back(MslStatement::return_statement(expected));
+    return helper;
+}
+
 bool is_native_vector_aggregate(const ir::Type& type) {
     if (type.kind != ir::TypeKind::kAggregate ||
         (type.elements.size() != 2 && type.elements.size() != 4) ||
@@ -1684,13 +1728,37 @@ struct AstLowerer {
         }
 
         if (operation.opcode == ir::OpCode::kMetalFence) {
-            std::string flag = operation.memory_scope == ir::MemoryScope::kThreadgroup
-                                   ? "mem_flags::mem_threadgroup"
-                                   : "mem_flags::mem_device";
+            const bool threadgroup_scope =
+                operation.memory_scope == ir::MemoryScope::kThreadgroup;
+            const std::string flag = threadgroup_scope
+                                         ? "mem_flags::mem_threadgroup"
+                                         : "mem_flags::mem_device";
+            const std::string ordering =
+                operation.attributes.contains("cuda_membar")
+                    ? "memory_order_seq_cst"
+                    : operation.memory_ordering == ir::MemoryOrdering::kAcquire
+                          ? "memory_order_acquire"
+                          : operation.memory_ordering == ir::MemoryOrdering::kRelease
+                                ? "memory_order_release"
+                                : operation.memory_ordering ==
+                                          ir::MemoryOrdering::kAcquireRelease
+                                      ? "memory_order_acq_rel"
+                                      : "memory_order_relaxed";
+            const std::string scope = threadgroup_scope
+                                          ? "thread_scope_threadgroup"
+                                          : "thread_scope_device";
             return MslStatement::expression(
                 MslExpression::call(
-                    "threadgroup_barrier",
-                    {MslExpression::literal(flag, MslType::uint())},
+                    "atomic_thread_fence",
+                    {MslExpression::literal(flag, MslType::uint()),
+                     MslExpression::identifier(
+                         ordering,
+                         MslType{.kind = MslTypeKind::kStruct,
+                                 .struct_name = "memory_order"}),
+                     MslExpression::identifier(
+                         scope,
+                         MslType{.kind = MslTypeKind::kStruct,
+                                 .struct_name = "thread_scope"})},
                     MslType::void_type()));
         }
 
@@ -1847,7 +1915,6 @@ struct AstLowerer {
 
         if (operation.opcode == ir::OpCode::kMetalAtomic) {
             if (operation.results.size() != 1 || operation.result_types.size() != 1 ||
-                operation.operands.size() != 2 ||
                 operation.result_types.front().kind != ir::TypeKind::kInteger ||
                 operation.result_types.front().bit_width != 32) {
                 fail(&operation,
@@ -1855,18 +1922,34 @@ struct AstLowerer {
                 return std::nullopt;
             }
             const auto atomic_op = operation.attributes.find("atomic_op");
+            const std::string operation_name =
+                atomic_op == operation.attributes.end() ? std::string{} : atomic_op->second;
+            static const std::unordered_map<std::string, std::string> kAtomicCallees = {
+                {"add", "atomic_fetch_add_explicit"},
+                {"sub", "atomic_fetch_sub_explicit"},
+                {"and", "atomic_fetch_and_explicit"},
+                {"or", "atomic_fetch_or_explicit"},
+                {"xor", "atomic_fetch_xor_explicit"},
+                {"min", "atomic_fetch_min_explicit"},
+                {"max", "atomic_fetch_max_explicit"},
+                {"exch", "atomic_exchange_explicit"},
+                {"xchg", "atomic_exchange_explicit"},
+            };
+            const auto mapped = kAtomicCallees.find(operation_name);
+            const bool is_cas = operation_name == "cas";
             const std::string callee =
-                atomic_op != operation.attributes.end() && atomic_op->second == "add"
-                    ? "atomic_fetch_add_explicit"
-                    : atomic_op != operation.attributes.end() && atomic_op->second == "or"
-                          ? "atomic_fetch_or_explicit"
-                          : std::string{};
-            if (callee.empty()) {
+                mapped == kAtomicCallees.end() ? std::string{} : mapped->second;
+            if (callee.empty() && !is_cas) {
                 fail(&operation, "unsupported Metal atomic operation '" +
-                                     (atomic_op == operation.attributes.end()
-                                          ? std::string("<missing>")
-                                          : atomic_op->second) +
+                                     (operation_name.empty() ? std::string("<missing>")
+                                                             : operation_name) +
                                      "'");
+                return std::nullopt;
+            }
+            const std::size_t expected_operands = is_cas ? 3 : 2;
+            if (operation.operands.size() != expected_operands) {
+                fail(&operation, "Metal atomic '" + operation_name + "' requires " +
+                                     std::to_string(expected_operands) + " operands");
                 return std::nullopt;
             }
             if (operation.memory_ordering != ir::MemoryOrdering::kRelaxed) {
@@ -1879,12 +1962,21 @@ struct AstLowerer {
                 raw_pointer->type.kind == MslTypeKind::kPointer
                     ? raw_pointer->type.address_space
                     : lower_address_space(operation.operands.front().type.address_space);
-            const MslType atomic_uint = {
+            if (address_space != MslAddressSpace::kDevice &&
+                address_space != MslAddressSpace::kThreadgroup) {
+                fail(&operation, "Metal atomics require device or threadgroup storage");
+                return std::nullopt;
+            }
+            const bool is_signed =
+                operation.attributes.contains("signed") &&
+                operation.attributes.at("signed") == "true" &&
+                (operation_name == "min" || operation_name == "max");
+            const MslType atomic_integer = {
                 .kind = MslTypeKind::kStruct,
-                .struct_name = "atomic_uint",
+                .struct_name = is_signed ? "atomic_int" : "atomic_uint",
             };
             const MslType atomic_pointer =
-                MslType::pointer(atomic_uint, address_space);
+                MslType::pointer(atomic_integer, address_space);
             const MslExpr pointer =
                 MslExpression::cast(atomic_pointer, raw_pointer, true);
             const MslExpr ordering = MslExpression::identifier(
@@ -1892,12 +1984,31 @@ struct AstLowerer {
                                             .kind = MslTypeKind::kStruct,
                                             .struct_name = "memory_order",
                                         });
-            return declare_result(
-                operation,
-                MslExpression::call(callee,
-                                    {pointer, expression_for(operation.operands[1]),
-                                     ordering},
-                                    lower_result_type(operation)));
+            if (is_cas) {
+                const std::string helper =
+                    address_space == MslAddressSpace::kThreadgroup
+                        ? "cm_atomic_cas_threadgroup_u32"
+                        : "cm_atomic_cas_device_u32";
+                return declare_result(
+                    operation,
+                    MslExpression::call(
+                        helper,
+                        {pointer, expression_for(operation.operands[1]),
+                         expression_for(operation.operands[2])},
+                        lower_result_type(operation)));
+            }
+            const MslType value_type = is_signed ? MslType::sint() : MslType::uint();
+            MslExpr call = MslExpression::call(
+                callee,
+                {pointer,
+                 MslExpression::cast(value_type,
+                                     expression_for(operation.operands[1])),
+                 ordering},
+                value_type);
+            if (is_signed) {
+                call = MslExpression::cast(lower_result_type(operation), call);
+            }
+            return declare_result(operation, std::move(call));
         }
 
         if (operation.opcode == ir::OpCode::kMetalReduction) {
@@ -3206,13 +3317,17 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
                         operation.opcode = ir::OpCode::kMetalBarrier;
                         break;
                     case ir::OpCode::kFence:
-                        if (operation.memory_scope == ir::MemoryScope::kSystem) {
+                        if (operation.memory_scope == ir::MemoryScope::kSystem &&
+                            (!operation.attributes.contains("metal_uma_system_scope") ||
+                             operation.attributes.at("metal_uma_system_scope") != "true")) {
                             result.error = operation.location.str() +
                                            ": system-scope fences are unsupported";
                             return result;
                         }
                         if (operation.memory_ordering ==
-                            ir::MemoryOrdering::kSequentiallyConsistent) {
+                                ir::MemoryOrdering::kSequentiallyConsistent &&
+                            (!operation.attributes.contains("cuda_membar") ||
+                             operation.attributes.at("cuda_membar") != "true")) {
                             result.error = operation.location.str() +
                                            ": sequentially-consistent fences are unsupported";
                             return result;
@@ -3220,7 +3335,9 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
                         operation.opcode = ir::OpCode::kMetalFence;
                         break;
                     case ir::OpCode::kAtomic:
-                        if (operation.memory_scope == ir::MemoryScope::kSystem ||
+                        if ((operation.memory_scope == ir::MemoryScope::kSystem &&
+                             (!operation.attributes.contains("metal_uma_system_scope") ||
+                              operation.attributes.at("metal_uma_system_scope") != "true")) ||
                             operation.memory_ordering ==
                                 ir::MemoryOrdering::kSequentiallyConsistent) {
                             result.error = operation.location.str() +
@@ -3329,6 +3446,31 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
             .name = global.name,
             .bytes = global.bytes,
         });
+    }
+    bool needs_device_cas = false;
+    bool needs_threadgroup_cas = false;
+    for (const ir::Function& function : metal_module.functions) {
+        for (const ir::BasicBlock& block : function.blocks) {
+            for (const ir::Operation& operation : block.operations) {
+                if (operation.opcode != ir::OpCode::kMetalAtomic ||
+                    !operation.attributes.contains("atomic_op") ||
+                    operation.attributes.at("atomic_op") != "cas" ||
+                    operation.operands.empty()) {
+                    continue;
+                }
+                const ir::AddressSpace space = operation.operands.front().type.address_space;
+                needs_threadgroup_cas |= space == ir::AddressSpace::kThreadgroup;
+                needs_device_cas |= space == ir::AddressSpace::kDevice;
+            }
+        }
+    }
+    if (needs_device_cas) {
+        result.ast.functions.push_back(
+            make_atomic_cas_u32_helper(MslAddressSpace::kDevice));
+    }
+    if (needs_threadgroup_cas) {
+        result.ast.functions.push_back(
+            make_atomic_cas_u32_helper(MslAddressSpace::kThreadgroup));
     }
     const BuiltinUsageMap builtin_usage = analyze_builtin_usage(metal_module);
     const SharedUsageMap shared_usage = analyze_shared_usage(metal_module);

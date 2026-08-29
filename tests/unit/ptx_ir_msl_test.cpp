@@ -394,6 +394,90 @@ BODY:
     ok &= expect(reciprocal.ok && reciprocal.source.find(" / ") != std::string::npos,
                  "PTX reciprocal lowers to a typed floating division");
 
+    const std::string atomic32_ptx = R"ptx(
+.version 8.8
+.target sm_80
+.address_size 64
+.visible .entry atomic32(.param .u64 output) {
+    .reg .b32 %r<12>;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    atom.relaxed.sys.global.add.u32 %r1, [%rd1], 1;
+    atom.relaxed.sys.global.and.b32 %r2, [%rd1+4], 255;
+    atom.relaxed.sys.global.or.b32 %r3, [%rd1+8], 2;
+    atom.relaxed.sys.global.xor.b32 %r4, [%rd1+12], 4;
+    atom.relaxed.sys.global.exch.b32 %r5, [%rd1+16], 7;
+    atom.relaxed.sys.global.max.s32 %r6, [%rd1+20], 8;
+    atom.relaxed.sys.global.min.s32 %r7, [%rd1+24], -1;
+    atom.relaxed.sys.global.cas.b32 %r8, [%rd1+28], 0, 9;
+    membar.gl;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult atomic32 =
+        metal::compile_ptx_to_msl(atomic32_ptx);
+    ok &= expect(atomic32.ok &&
+                     atomic32.source.find("atomic_fetch_add_explicit") !=
+                         std::string::npos &&
+                     atomic32.source.find("atomic_fetch_and_explicit") !=
+                         std::string::npos &&
+                     atomic32.source.find("atomic_fetch_or_explicit") !=
+                         std::string::npos &&
+                     atomic32.source.find("atomic_fetch_xor_explicit") !=
+                         std::string::npos &&
+                     atomic32.source.find("atomic_exchange_explicit") !=
+                         std::string::npos &&
+                     atomic32.source.find("atomic_fetch_max_explicit") !=
+                         std::string::npos &&
+                     atomic32.source.find("atomic_fetch_min_explicit") !=
+                         std::string::npos &&
+                     atomic32.source.find("cm_atomic_cas_device_u32") !=
+                         std::string::npos &&
+                     atomic32.source.find("atomic_compare_exchange_weak_explicit") !=
+                         std::string::npos,
+                 "typed PTX lowers the complete 32-bit CUDA atomic family with explicit UMA policy");
+    ok &= expect(atomic32.ok &&
+                     atomic32.source.find(" + 28;") != std::string::npos,
+                 "PTX atomic memory operands retain literal byte displacements");
+    if (!atomic32.ok) std::cerr << atomic32.error << "\n";
+
+    const std::string unfenced_acquire_atomic_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry unfenced_acquire(.param .u64 output) {
+    .reg .b32 %r1;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    atom.acquire.global.cas.b32 %r1, [%rd1], 0, 1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult unfenced_acquire_atomic =
+        metal::compile_ptx_to_msl(unfenced_acquire_atomic_ptx);
+    ok &= expect(!unfenced_acquire_atomic.ok &&
+                     unfenced_acquire_atomic.error.find(
+                         "requires relaxed CUDA ordering") != std::string::npos,
+                 "an acquire atomic without Clang's preceding system fence is not silently weakened");
+
+    const std::string wide_atomic_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry wide_atomic(.param .u64 output) {
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [output];
+    atom.relaxed.sys.global.add.u64 %rd2, [%rd1], 1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult wide_atomic =
+        metal::compile_ptx_to_msl(wide_atomic_ptx);
+    ok &= expect(!wide_atomic.ok &&
+                     wide_atomic.error.find("requires one 32-bit integer result") !=
+                         std::string::npos,
+                 "typed PTX keeps wide atomics explicit until the lock-bank ABI is implemented");
+
     if (!ok) return 1;
     std::cout << "PTX -> CuMetal IR -> typed MSL tests passed\n";
     return 0;

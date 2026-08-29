@@ -11,6 +11,14 @@ warp operations, streams, events, and selected CUDA library calls have numerical
 GPU tests. The suite includes negative cases because accepting a program is not
 the same as implementing it correctly.
 
+On 2026-08-29, `functional_typed_{direct,ptx}_{device,system}_atomics` and
+`functional_typed_{direct,ptx}_fence` passed on Apple GPU. The device test
+checks add/sub/min/max/CAS/inc/dec/and/or/xor across 16,384 contending threads;
+the system test checks GPU atomics plus a host atomic on the same managed-memory
+word; the fence test checks all payload words and the completion counter. These
+tests execute the independently produced direct-NVVM and PTX typed metallibs,
+not the legacy backend.
+
 ## Performance gate
 
 The Phase 5 gate compares CuMetal with hand-written Metal for three memory-bound

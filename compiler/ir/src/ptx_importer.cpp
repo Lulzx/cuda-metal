@@ -450,6 +450,19 @@ MemoryOrdering memory_ordering_from_opcode(std::string_view opcode) {
     return MemoryOrdering::kRelaxed;
 }
 
+std::string atomic_operation_from_opcode(std::string_view opcode) {
+    static constexpr std::string_view kOperations[] = {
+        "add", "sub", "and", "or", "xor", "cas", "min", "max", "exch",
+    };
+    for (std::string_view operation : kOperations) {
+        const std::string token = "." + std::string(operation) + ".";
+        if (opcode.find(token) != std::string_view::npos) {
+            return std::string(operation);
+        }
+    }
+    return {};
+}
+
 struct Importer {
     Builder builder;
     PtxImportResult result;
@@ -851,6 +864,30 @@ struct Importer {
             block->operations.push_back(std::move(conversion));
             return Operand::value_ref(converted, expected);
         };
+        const auto memory_address_operand = [&](std::size_t index,
+                                                const Type& fallback_pointer) {
+            Operand base = source_operand(index, fallback_pointer);
+            if (index >= instruction.operands.size()) return base;
+            const std::int64_t byte_offset =
+                memory_operand_offset(instruction.operands[index]);
+            if (byte_offset == 0) return base;
+            if (!base.type.is_pointer()) {
+                base.type = fallback_pointer;
+            }
+            Operation offset;
+            offset.opcode = OpCode::kPointerOffset;
+            offset.location = operation.location;
+            offset.operands = {
+                base,
+                Operand::immediate(std::to_string(byte_offset), Type::integer(64)),
+            };
+            const ValueId pointer = builder.next_value();
+            offset.results = {pointer};
+            offset.result_types = {base.type};
+            value_types[pointer] = base.type;
+            block->operations.push_back(std::move(offset));
+            return Operand::value_ref(pointer, base.type);
+        };
 
         if (starts_with(instruction.opcode, "st.param")) {
             if (instruction.operands.size() < 2) {
@@ -981,7 +1018,7 @@ struct Importer {
                     operation.operands.push_back(Operand::value_ref(pointer, pointer_type));
                 }
             } else {
-                operation.operands.push_back(source_operand(
+                operation.operands.push_back(memory_address_operand(
                     1, Type::pointer(operation.result_types.front(),
                                      AddressSpace::kDevice)));
             }
@@ -994,9 +1031,9 @@ struct Importer {
                    starts_with(instruction.opcode, "st.local")) {
             operation.opcode = OpCode::kStore;
             if (instruction.operands.size() < 2) return fail(&instruction, "malformed store");
-            operation.operands.push_back(
-                source_operand(0, Type::pointer(ptx_scalar_type(instruction.opcode),
-                                                AddressSpace::kDevice)));
+            operation.operands.push_back(memory_address_operand(
+                0, Type::pointer(ptx_scalar_type(instruction.opcode),
+                                 AddressSpace::kDevice)));
             operation.operands.push_back(
                 bit_container_operand(1, ptx_scalar_type(instruction.opcode)));
             operation.attributes["address"] = instruction.operands[0];
@@ -1027,12 +1064,61 @@ struct Importer {
             operation.opcode = OpCode::kFence;
             operation.memory_scope = memory_scope_from_opcode(instruction.opcode);
             operation.memory_ordering = memory_ordering_from_opcode(instruction.opcode);
+            operation.attributes["cuda_membar"] = "true";
+            if (operation.memory_scope == MemoryScope::kSystem) {
+                operation.attributes["metal_uma_system_scope"] = "true";
+            }
         } else if (root == "atom") {
             operation.opcode = OpCode::kAtomic;
             operation.memory_scope = memory_scope_from_opcode(instruction.opcode);
             operation.memory_ordering = memory_ordering_from_opcode(instruction.opcode);
-            for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
-                operation.operands.push_back(source_operand(i, ptx_scalar_type(instruction.opcode)));
+            const std::string atomic_operation =
+                atomic_operation_from_opcode(instruction.opcode);
+            if (atomic_operation.empty()) {
+                return fail(&instruction, "unsupported PTX atomic operation '" +
+                                              instruction.opcode + "'");
+            }
+            operation.attributes["atomic_op"] = atomic_operation;
+            if (has_signed_integer_type(instruction.opcode)) {
+                operation.attributes["signed"] = "true";
+            }
+            // CUDA Clang 23 emits relaxed `.sys` atomics for the ordinary
+            // source-level atomic family. On Apple Silicon, tracked CUDA
+            // allocations use Metal shared storage, so this form has an
+            // explicit coherent-UMA lowering policy rather than being silently
+            // weakened by generic legalization.
+            if (operation.memory_scope == MemoryScope::kSystem) {
+                operation.attributes["metal_uma_system_scope"] = "true";
+            }
+            if (operation.memory_ordering == MemoryOrdering::kAcquire &&
+                !block->operations.empty()) {
+                const Operation& previous = block->operations.back();
+                if (previous.opcode == OpCode::kFence &&
+                    previous.attributes.contains("cuda_membar") &&
+                    previous.attributes.at("cuda_membar") == "true" &&
+                    previous.memory_ordering ==
+                        MemoryOrdering::kSequentiallyConsistent) {
+                    // CUDA Clang 21 spells legacy source atomics as a
+                    // seq_cst system fence followed immediately by an acquire
+                    // CAS. Metal atomics themselves are relaxed-only; retain
+                    // the explicit fence and normalize only this proven pair.
+                    operation.memory_ordering = MemoryOrdering::kRelaxed;
+                    operation.attributes["cuda_fenced_acquire_atomic"] = "true";
+                }
+            }
+            if (instruction.operands.size() < 3) {
+                return fail(&instruction, "malformed PTX atomic instruction");
+            }
+            const AddressSpace atomic_address_space =
+                instruction.opcode.find(".shared.") != std::string::npos
+                    ? AddressSpace::kThreadgroup
+                    : AddressSpace::kDevice;
+            operation.operands.push_back(memory_address_operand(
+                1, Type::pointer(ptx_scalar_type(instruction.opcode),
+                                 atomic_address_space)));
+            for (std::size_t i = 2; i < instruction.operands.size(); ++i) {
+                operation.operands.push_back(
+                    source_operand(i, ptx_scalar_type(instruction.opcode)));
             }
         } else if (root == "shfl") {
             operation.opcode = OpCode::kShuffle;

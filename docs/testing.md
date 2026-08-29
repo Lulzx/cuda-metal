@@ -128,6 +128,7 @@ ctest --test-dir build -R functional_driver_stream_wait_event --output-on-failur
 ctest --test-dir build -R functional_runtime_axpy_offset --output-on-failure
 ctest --test-dir build -R functional_runtime_atomic --output-on-failure
 ctest --test-dir build -R functional_runtime_atomic_shared --output-on-failure
+ctest --test-dir build -R '^functional_typed_(direct|ptx)_(device_atomics|system_atomics|fence)$' --output-on-failure
 ctest --test-dir build -R functional_runtime_warp_shuffle --output-on-failure
 ctest --test-dir build -R functional_runtime_warp_vote --output-on-failure
 ctest --test-dir build -R functional_runtime_warp_size_lane --output-on-failure

@@ -517,9 +517,11 @@ VerifyResult verify(const Module& module) {
                         add_diagnostic(&result, operation.location,
                                        "atomic operation requires typed memory ordering and scope");
                     }
-                    if (operation.memory_scope == MemoryScope::kSystem) {
+                    if (operation.memory_scope == MemoryScope::kSystem &&
+                        (!operation.attributes.contains("metal_uma_system_scope") ||
+                         operation.attributes.at("metal_uma_system_scope") != "true")) {
                         add_diagnostic(&result, operation.location,
-                                       "system-scope atomics are unsupported by the Metal backend");
+                                       "system-scope atomics require an explicit backend policy");
                     }
                     if (operation.memory_ordering == MemoryOrdering::kSequentiallyConsistent) {
                         add_diagnostic(&result, operation.location,

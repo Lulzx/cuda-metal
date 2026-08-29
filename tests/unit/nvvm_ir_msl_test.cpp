@@ -659,6 +659,21 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmCudaCmpXchg = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @cuda_cmpxchg(ptr %counter, ptr %old_out, ptr %success_out) {
+entry:
+  %pair = cmpxchg ptr %counter, i32 7, i32 9 seq_cst monotonic, align 4
+  %old = extractvalue { i32, i1 } %pair, 0
+  %success = extractvalue { i32, i1 } %pair, 1
+  store i32 %old, ptr %old_out, align 4
+  store i1 %success, ptr %success_out, align 1
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmPointerAlignment = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1285,15 +1300,26 @@ int main() {
                          std::string::npos,
                  "legacy CUDA seq_cst atomicrmw spelling lowers with CUDA-relaxed Metal semantics");
 
-    const metal::NvvmToMslResult unsupported_atomic =
+    const metal::NvvmToMslResult xor_atomic =
         metal::compile_nvvm_to_msl(kNvvmUnsupportedAtomic,
                                    "unsupported-atomic.ll",
                                    "unsupported_atomic");
-    ok &= expect(!unsupported_atomic.ok &&
-                     unsupported_atomic.error.find(
-                         "unsupported Metal atomic operation 'xor'") !=
+    ok &= expect(xor_atomic.ok &&
+                     xor_atomic.source.find("atomic_fetch_xor_explicit") !=
                          std::string::npos,
-                 "unsupported atomic operations fail with an explicit Metal diagnostic");
+                 "typed NVVM lowering supports 32-bit atomic xor");
+
+    const metal::NvvmToMslResult cuda_cmpxchg =
+        metal::compile_nvvm_to_msl(kNvvmCudaCmpXchg,
+                                   "cuda-cmpxchg.ll", "cuda_cmpxchg");
+    ok &= expect(cuda_cmpxchg.ok &&
+                     cuda_cmpxchg.source.find("cm_atomic_cas_device_u32") !=
+                         std::string::npos &&
+                     cuda_cmpxchg.source.find(
+                         "atomic_compare_exchange_weak_explicit") !=
+                         std::string::npos,
+                 "CUDA cmpxchg imports its old-value and success tuple through a retrying Metal CAS");
+    if (!cuda_cmpxchg.ok) std::cerr << cuda_cmpxchg.error << "\n";
 
     const metal::NvvmToMslResult pointer_alignment = metal::compile_nvvm_to_msl(
         kNvvmPointerAlignment, "pointer-alignment.ll", "align_pointer");

@@ -352,6 +352,10 @@ add_executable(cumetal_runtime_atomic_test
     runtime_atomic_test.cpp
 )
 
+add_executable(cumetal_runtime_typed_atomic_family_test
+    runtime_typed_atomic_family_test.cpp
+)
+
 add_executable(cumetal_runtime_atomic_shared_test
     runtime_atomic_shared_test.cpp
 )
@@ -959,6 +963,11 @@ target_link_libraries(cumetal_runtime_axpy_offset_test
 )
 
 target_link_libraries(cumetal_runtime_atomic_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_typed_atomic_family_test
     PRIVATE
         cumetal_runtime
 )
@@ -1782,6 +1791,13 @@ target_compile_options(cumetal_runtime_axpy_offset_test
 )
 
 target_compile_options(cumetal_runtime_atomic_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_runtime_typed_atomic_family_test
     PRIVATE
         -Wall
         -Wextra
@@ -2665,6 +2681,50 @@ add_test(
 )
 
 set_tests_properties(functional_runtime_atomic PROPERTIES SKIP_RETURN_CODE 77)
+
+foreach(frontend IN ITEMS direct ptx)
+    foreach(mode IN ITEMS device system)
+        if(mode STREQUAL "device")
+            set(atomic_source
+                ${CMAKE_SOURCE_DIR}/tests/cuda_projects/device_sync_primitives/device_sync_primitives.cu)
+        else()
+            set(atomic_source
+                ${CMAKE_SOURCE_DIR}/tests/cuda_projects/system_atomics/system_atomics.cu)
+        endif()
+        add_test(
+            NAME functional_typed_${frontend}_${mode}_atomics
+            COMMAND bash
+                    ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_typed_atomic_runtime.sh
+                    $<TARGET_FILE:cumetalc>
+                    $<TARGET_FILE:cumetal_runtime_typed_atomic_family_test>
+                    ${atomic_source}
+                    ${CMAKE_CURRENT_BINARY_DIR}/typed-${frontend}-${mode}-atomics.metallib
+                    ${frontend}
+                    ${mode}
+        )
+        set_tests_properties(
+            functional_typed_${frontend}_${mode}_atomics
+            PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+    endforeach()
+endforeach()
+
+foreach(frontend IN ITEMS direct ptx)
+    add_test(
+        NAME functional_typed_${frontend}_fence
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_typed_atomic_runtime.sh
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_runtime_typed_atomic_family_test>
+                ${CMAKE_SOURCE_DIR}/tests/cuda_projects/device_sync_primitives/device_sync_primitives.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/typed-${frontend}-fence.metallib
+                ${frontend}
+                fence
+                _Z18threadfence_kernelPi
+    )
+    set_tests_properties(
+        functional_typed_${frontend}_fence
+        PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+endforeach()
 
 add_test(
     NAME functional_runtime_atomic_shared
