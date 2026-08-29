@@ -130,7 +130,7 @@ classify_sample() {
             if ! run_with_timeout 300 "${CLANG_BIN}" "${lang[@]}" \
                     -std=c++17 -O2 -DNDEBUG -Wno-everything -Wno-pass-failed \
                     -I"${ROOT_DIR}/runtime/api" -I"${COMMON_DIR}" -I"${src_dir}" \
-                    -include cuda_runtime.h \
+                    -include cuda_runtime.h -include new \
                     -c "${f}" -o "${obj}" >>"${log}" 2>&1; then
                 compile_ok=0
                 break
@@ -147,6 +147,21 @@ classify_sample() {
                 if [[ -n "${linked_symbol}" ]]; then
                     "${llvm_objcopy}" \
                         --redefine-sym "${linked_symbol}=___cudaRegisterLinkedBinary" \
+                        "${obj}" >>"${log}" 2>&1 || {
+                            compile_ok=0
+                            break
+                        }
+                fi
+                # Clang 23 may give every RDC translation unit the same defined
+                # fatbin wrapper symbol. The wrappers are TU-local registration
+                # objects, so make each definition unique before the host link.
+                local fatbin_wrapper unique_wrapper
+                fatbin_wrapper="$(nm -g "${obj}" 2>/dev/null | sed -n \
+                    's/^[[:xdigit:]]*[[:space:]][[:alpha:]][[:space:]]\(___fatbinwrap__nv_[[:alnum:]_]*\)$/\1/p' | head -1)"
+                if [[ -n "${fatbin_wrapper}" ]]; then
+                    unique_wrapper="${fatbin_wrapper}_$(printf '%s' "${base}" | tr -c '[:alnum:]_' '_')"
+                    "${llvm_objcopy}" \
+                        --redefine-sym "${fatbin_wrapper}=${unique_wrapper}" \
                         "${obj}" >>"${log}" 2>&1 || {
                             compile_ok=0
                             break

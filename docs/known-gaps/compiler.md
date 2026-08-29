@@ -4,31 +4,30 @@
 
 ## Typed CuMetal IR migration
 
-With CUDA Clang 21/22, the reviewed production-metallib matrix is:
+With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/23 | **9/23** |
+| direct `.cu` | 0/23 | **13/23** |
 | PTX / `--cuda-device` | **23/23** | **7/23** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
-not runtime correctness. CUDA Clang 23.1.0 currently produces 6/23 in the typed
-PTX cell because `sgemm_naive` reaches generated MSL with duplicate SSA
-declarations. CuMetal still needs to declare a supported CUDA Clang range and
-run a versioned frontend matrix instead of presenting one compiler's result as
-toolchain-independent.
+not runtime correctness. `conformance_compiler_backend_matrix_versions` records
+and checks the CUDA Clang 21, 22, and 23 identities separately.
 
 Remaining typed-path blockers include combinations of:
 
 - CFG structurization for residual loops, joins, exits, and barrier-containing
   regions;
-- static/dynamic threadgroup declarations and shared-memory ABI;
+- compound shared-memory layouts beyond the proven static arrays and single
+  runtime-sized `extern __shared__` binding;
 - generic pointer provenance through calls, aggregates, memory, and merges;
 - LLVM atomics including `cmpxchg`, system-scope forms, and wide operations;
 - PTX parameter stores/device calls and `vprintf` normalization;
 - heterogeneous aggregate/vector insertion and extraction;
-- broader libdevice and FP64 legality;
+- FP64 legality and libdevice forms beyond the numerically proven 42-function
+  float surface;
 - constant/global address-space emission and Apple MSL legality.
 
 The old direct legacy `.cu` path is textual qualifier stripping and fails this

@@ -306,6 +306,7 @@ struct GlobalThreadgroup {
     std::string name;
     std::uint64_t byte_size = 0;
     std::uint32_t alignment = 1;
+    bool is_dynamic = false;
 };
 
 struct Module {

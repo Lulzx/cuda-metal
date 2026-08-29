@@ -5,7 +5,8 @@
 ## Supported build contract
 
 - macOS 14+ on Apple Silicon.
-- CMake 3.28+, C++20, a CUDA-capable LLVM/Clang, and Apple's public Metal tools.
+- CMake 3.28+, C++20, LLVM 18+ libraries, a CUDA-capable Clang 21, 22, or 23
+  frontend, and Apple's public Metal tools.
 - Release builds keep source registration enabled and the binary alias disabled
   unless `CUMETAL_ENABLE_BINARY_SHIM=ON` is explicitly selected.
 - A shim-off build must compile and pass its applicable tests.
@@ -30,6 +31,7 @@ unsupported classifications are reported independently from passes.
 - Unit tests for parsers, IR verification, transformations, ABI layout, runtime
   state, and every negative path introduced by a behavior change.
 - Production compiler corpus tests for each frontend/backend cell.
+- The production compiler corpus across every supported CUDA Clang major.
 - Functional numerical tests on Apple GPU for accepted compiler/runtime paths.
 - Conformance manifests with explicit denominator, expected outcome, and reason.
 - Malformed input, stale handle, invalid pointer, overflow, ordering, and

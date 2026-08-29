@@ -666,20 +666,39 @@ struct Importer {
             {"__nv_expf", "exp"},
             {"__nv_fast_expf", "exp"},
             {"__nv_exp2f", "exp2"},
+            {"__nv_exp10f", "exp10"},
+            {"__nv_expm1f", "expm1"},
             {"__nv_logf", "log"},
             {"__nv_log2f", "log2"},
+            {"__nv_log10f", "log10"},
+            {"__nv_log1pf", "log1p"},
             {"__nv_sinf", "sin"},
             {"__nv_cosf", "cos"},
             {"__nv_tanf", "tan"},
+            {"__nv_sinhf", "sinh"},
+            {"__nv_coshf", "cosh"},
             {"__nv_tanhf", "tanh"},
             {"__nv_asinf", "asin"},
             {"__nv_atanf", "atan"},
             {"__nv_atan2f", "atan2"},
+            {"__nv_asinhf", "asinh"},
+            {"__nv_acoshf", "acosh"},
+            {"__nv_atanhf", "atanh"},
+            {"__nv_cbrtf", "cbrt"},
+            {"__nv_erff", "erf"},
+            {"__nv_erfcf", "erfc"},
             {"__nv_floorf", "floor"},
             {"__nv_ceilf", "ceil"},
             {"__nv_truncf", "trunc"},
             {"__nv_roundf", "round"},
+            {"__nv_rintf", "rint"},
             {"__nv_powf", "pow"},
+            {"__nv_hypotf", "hypot"},
+            {"__nv_fmodf", "fmod"},
+            {"__nv_copysignf", "copysign"},
+            {"__nv_fdimf", "fdim"},
+            {"__nv_remainderf", "remainder"},
+            {"__nv_fmaf", "fma"},
             {"__nv_popc", "popcount"},
             {"__nv_clz", "clz"},
             {"__nv_abs", "__cumetal_signed_abs"},
@@ -690,6 +709,22 @@ struct Importer {
             operation->opcode = OpCode::kCall;
             operation->attributes["callee"] = cuda_builtin->second;
             operation->attributes["builtin"] = "true";
+            static const std::unordered_set<std::string> kExpandedMath = {
+                "__nv_expm1f", "__nv_log1pf", "__nv_cbrtf", "__nv_erff",
+                "__nv_erfcf", "__nv_hypotf", "__nv_remainderf",
+            };
+            if (kExpandedMath.contains(name)) {
+                if (result.module.semantic_quality == SemanticQuality::kExact) {
+                    result.module.semantic_quality = SemanticQuality::kToleranceBounded;
+                }
+                const std::string caveat =
+                    "Metal-missing float math functions use numerically tested typed expansions";
+                if (std::find(result.module.semantic_caveats.begin(),
+                              result.module.semantic_caveats.end(), caveat) ==
+                    result.module.semantic_caveats.end()) {
+                    result.module.semantic_caveats.push_back(caveat);
+                }
+            }
         } else if (name.find("llvm.nvvm.shfl") == 0) {
             operation->opcode = OpCode::kShuffle;
             operation->attributes["kind"] =
@@ -711,7 +746,7 @@ struct Importer {
         else if (name.find("llvm.sqrt.") == 0 || name.find("llvm.sin.") == 0 ||
                  name.find("llvm.cos.") == 0 || name.find("llvm.exp.") == 0 ||
                  name.find("llvm.log.") == 0 || name.find("llvm.fabs.") == 0 ||
-                 name.find("llvm.acos.") == 0) {
+                 name.find("llvm.acos.") == 0 || name.find("llvm.rint.") == 0) {
             operation->opcode = OpCode::kCall;
             operation->attributes["callee"] =
                 name.substr(name.find('.') + 1, name.find('.', 5) - name.find('.') - 1);
@@ -860,6 +895,59 @@ struct Importer {
                             const llvm::BasicBlock& source_block,
                             FunctionState* state, BasicBlock* output_block) {
         if (llvm::isa<llvm::PHINode>(instruction)) return true;
+        auto float_frexp_truncation = [](const llvm::CallBase& call)
+            -> const llvm::FPTruncInst* {
+            const llvm::Function* callee = call.getCalledFunction();
+            if (callee == nullptr || callee->getName() != "__nv_frexp" ||
+                call.arg_size() != 2 || !call.hasOneUse()) {
+                return nullptr;
+            }
+            const auto* extension =
+                llvm::dyn_cast<llvm::FPExtInst>(call.getArgOperand(0));
+            const auto* truncation =
+                llvm::dyn_cast<llvm::FPTruncInst>(*call.user_begin());
+            if (extension == nullptr || !extension->getSrcTy()->isFloatTy() ||
+                !extension->getDestTy()->isDoubleTy() || truncation == nullptr ||
+                !truncation->getDestTy()->isFloatTy() ||
+                !llvm::isa<llvm::AllocaInst>(call.getArgOperand(1))) {
+                return nullptr;
+            }
+            return truncation;
+        };
+        if (const auto* extension = llvm::dyn_cast<llvm::FPExtInst>(&instruction);
+            extension != nullptr && extension->hasOneUse()) {
+            const auto* call =
+                llvm::dyn_cast<llvm::CallBase>(*extension->user_begin());
+            if (call != nullptr && float_frexp_truncation(*call) != nullptr) {
+                return true;
+            }
+        }
+        if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+            if (const llvm::FPTruncInst* truncation = float_frexp_truncation(*call)) {
+                Operation frexp;
+                frexp.opcode = OpCode::kCall;
+                frexp.results = {state->values.at(truncation)};
+                frexp.result_types = {Type::floating(32)};
+                const auto* extension =
+                    llvm::cast<llvm::FPExtInst>(call->getArgOperand(0));
+                frexp.operands = {
+                    import_operand(*extension->getOperand(0), *state),
+                    import_operand(*call->getArgOperand(1), *state),
+                };
+                frexp.attributes["callee"] = "frexp";
+                frexp.attributes["builtin"] = "true";
+                frexp.location = import_location(instruction, fallback_source);
+                output_block->operations.push_back(std::move(frexp));
+                state->value_types[state->values.at(truncation)] = Type::floating(32);
+                return true;
+            }
+        }
+        if (const auto* truncation = llvm::dyn_cast<llvm::FPTruncInst>(&instruction)) {
+            const auto* call = llvm::dyn_cast<llvm::CallBase>(truncation->getOperand(0));
+            if (call != nullptr && float_frexp_truncation(*call) == truncation) {
+                return true;
+            }
+        }
         if (const auto demoted = match_demotable_float_multiply(instruction)) {
             llvm::APFloat constant = demoted->constant->getValueAPF();
             bool loses_info = false;
@@ -1353,16 +1441,22 @@ struct Importer {
             llvm::Triple(module->getTargetTriple()).str();
 
         for (const llvm::GlobalVariable& global : module->globals()) {
-            if (global.getAddressSpace() == 3 && global.hasInitializer() &&
+            const std::uint64_t global_size =
+                module->getDataLayout().getTypeAllocSize(global.getValueType());
+            const bool is_dynamic_threadgroup =
+                global.getAddressSpace() == 3 && global.isDeclaration() &&
+                global_size == 0;
+            if (global.getAddressSpace() == 3 &&
+                (global.hasInitializer() || is_dynamic_threadgroup) &&
                 !global.getName().starts_with("llvm.")) {
                 result.module.global_threadgroups.push_back({
                     .name = global.getName().str(),
-                    .byte_size = module->getDataLayout().getTypeAllocSize(
-                        global.getValueType()),
+                    .byte_size = global_size,
                     .alignment = static_cast<std::uint32_t>(
                         global.getAlign().has_value()
                             ? global.getAlign()->value()
                             : 1),
+                    .is_dynamic = is_dynamic_threadgroup,
                 });
                 continue;
             }
@@ -1371,8 +1465,7 @@ struct Importer {
                 global.getName().starts_with("llvm.")) {
                 continue;
             }
-            const std::uint64_t size =
-                module->getDataLayout().getTypeAllocSize(global.getValueType());
+            const std::uint64_t size = global_size;
             GlobalConstant imported;
             imported.name = global.getName().str();
             imported.bytes.assign(size, 0);

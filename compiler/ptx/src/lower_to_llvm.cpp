@@ -3375,7 +3375,7 @@ class GenericLlvmEmitter {
         }
         const PtxTypeSpec ty = parse_primary_type_from_opcode(instr.opcode);
         if (opcode_uses_float_math(instr.opcode)) {
-            const int bits = (ty.bits == 64) ? 64 : 32;
+            const int bits = ty.bits == 64 ? 64 : (ty.bits == 16 ? 16 : 32);
             if (bits == 64 && uses_vf64_support()) {
                 auto a = decode_fp64_raw_bits(os, instr.operands[1]);
                 auto b = decode_fp64_raw_bits(os, instr.operands[2]);

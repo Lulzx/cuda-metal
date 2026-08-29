@@ -14,16 +14,13 @@ compatibility claim. Implemented surfaces and detailed limitations remain in
   `conformance_cuda_samples_sweep`. This proves only that enrolled snapshot and
   does not establish general CUDA compatibility or the spec's undefined "full
   conformance suite" denominator.
-- The typed shared-IR migration gate is not closed. With CUDA Clang 21/22, the
-  reviewed 23-file production-metallib matrix is 9/23 for direct `.cu` through
+- The typed shared-IR migration gate is not closed. With CUDA Clang 21-23, the
+  reviewed 23-file production-metallib matrix is 13/23 for direct `.cu` through
   `cumetal-ir` and 7/23 for PTX/`--cuda-device`, versus 23/23 for the legacy PTX
-  backend. With the currently installed CUDA Clang 23.1.0, the typed PTX cell is
-  6/23: `sgemm_naive` reaches generated MSL with duplicate SSA declarations.
-  The authoritative reviewed manifest and gate are
+  backend. The authoritative reviewed manifest and gates are
   `tests/cuda_projects/backend_matrix_manifest.txt` and
-  `conformance_compiler_backend_matrix`. The matrix is compile evidence only;
-  promotion still requires numerical GPU tests, and the supported CUDA Clang
-  range needs an explicit versioned matrix.
+  `conformance_compiler_backend_matrix{,_versions}`. The matrix is compile
+  evidence only; promotion still requires numerical GPU tests.
 - The three-kernel Phase 5 benchmark gate has measured Apple-GPU results below
   2x native Metal on the recorded Apple M4 Pro system. The reproducible gate is
   `bench_phase5_all_kernels`. It does not yet cover the broader release set
@@ -47,7 +44,7 @@ coexist.
 | Normative chapter | Current disposition | Accountable evidence or roadmap row |
 | --- | --- | --- |
 | [Scope and principles](../spec/01-scope.md) | Durable platform, source-first, public-API, clean-room, fixed-warp, and explicit-failure boundaries remain release guardrails. Bounded compatibility areas remain subsets. | README architecture/limits, `known-gaps/platform.md`, P0 documentation integrity, and the relevant P2 subset rows. |
-| [Compiler](../spec/02-compiler.md) | Typed IR/MSL is canonical but has not reached legacy coverage. The native source AOT ABI surface exists, but the executable path still uses CUDA registration and first-launch PTX lowering. Cache identity has focused tests and remains a regression invariant. Frontend compiler-version sensitivity is not yet a declared support matrix. | `conformance_compiler_backend_matrix`, `unit_cumetal_ir`, `unit_native_registration`, `unit_module_cache`, and P1 canonical compiler path. |
+| [Compiler](../spec/02-compiler.md) | Typed IR/MSL is canonical but has not reached legacy coverage. The native source AOT ABI surface exists, but the executable path still uses CUDA registration and first-launch PTX lowering. Cache identity has focused tests and remains a regression invariant. | `conformance_compiler_backend_matrix_versions`, `unit_cumetal_ir`, `unit_native_registration`, `unit_module_cache`, and P1 canonical compiler path. |
 | [Runtime](../spec/03-runtime.md) | Core allocation, pointer resolution, launch, stream/event, provenance, and per-thread error subsets are implemented and tested; advanced interactions remain bounded. | Runtime functional/unit tests, `status/runtime.md`, and P2 runtime semantic subsets/binary shim. |
 | [CUDA semantics](../spec/04-semantics.md) | Fixed-width warp, memory, synchronization, atomic, FP64, graph, dynamic-launch, texture/surface, and `printf` behavior is form-specific rather than blanket compatible. | `known-gaps/runtime.md`, `fp64-policy.md`, P2 runtime semantic subsets, and P2 library rows. |
 | [Verification](../spec/05-verification.md) | Evidence classes are separated, but the Phase 4 denominator, recurring CI, full Xcode matrix, and broader Phase 5 release set are open. | P1 Phase 4 correctness, P1 AIR ABI, and P3 Phase 5 performance. |
@@ -62,7 +59,7 @@ is a regression even if it improves a compatibility count.
 | Priority | Spec area | Remaining work | Closure evidence |
 | --- | --- | --- | --- |
 | P0 | Documentation integrity | Keep `spec.md`, README, status, known gaps, intrinsic map, legal/tooling notes, and verified results consistent with executable manifests and source behavior. Remove historical statements once superseded instead of leaving contradictory snapshots. | `unit_documentation_consistency` derives sample/backend totals and checks high-risk boundaries. Release review also reconciles prose that cannot be derived mechanically. |
-| P1 | Canonical compiler path | Close typed-IR gaps in dynamic shared memory, atomics/reductions, FP64, generic pointers, device calls, residual CFGs, and CUDA Clang 23 output until it meets the legacy generic-correctness gate with no fallback. Define the supported CUDA Clang range and record frontend/toolchain identity in the matrix. Wire the versioned native registration/launch-stub AOT path that the spec describes; the current complete executable flow still uses CUDA registration and first-launch PTX lowering. Preserve cache identity/corruption rejection throughout the migration. | A versioned `conformance_compiler_backend_matrix` plus numerical Apple-GPU tests show typed IR at least matches the legacy pass count across every supported frontend compiler; a source executable uses the native ABI with no first-launch PTX JIT; `unit_module_cache` remains green. Only then change remaining backend defaults. |
+| P1 | Canonical compiler path | Close typed-IR gaps in dynamic shared memory, atomics/reductions, FP64, generic pointers, device calls, and residual CFGs until it meets the legacy generic-correctness gate with no fallback. Wire the versioned native registration/launch-stub AOT path that the spec describes; the current complete executable flow still uses CUDA registration and first-launch PTX lowering. Preserve cache identity/corruption rejection throughout the migration. | `conformance_compiler_backend_matrix_versions` plus numerical Apple-GPU tests show typed IR at least matches the legacy pass count across CUDA Clang 21-23; a source executable uses the native ABI with no first-launch PTX JIT; `unit_module_cache` remains green. Only then change remaining backend defaults. |
 | P1 | Phase 4 correctness | Define the conformance denominator behind the 90% requirement; enable the hosted and self-hosted workflows; retain negative-path, numerical, and GPU-provenance gates. | Enabled Release/shim-off and Debug/shim-on workflows complete; the commissioned M-series lane reports pass/skip/fail separately; the named Phase 4 manifest reaches at least 90% without counting skips or waivers as passes. |
 | P1 | AIR ABI | Exercise genuinely distinct Xcode 15.0, 15.4, 16.0, and 16.2+ toolchains. Current local matrix logic can detect duplicate toolchains but cannot supply the missing installations. | `air_abi_xcode_matrix_regression` records attributable validation and runtime-load results for every required toolchain, with no duplicate compiler identity counted as cross-version coverage. |
 | P2 | Runtime semantic subsets | Expand graph node/cross-stream/allocator semantics; direct PTX texture/surface instructions; nested/overflow/error behavior for the host-drained dynamic-launch queue; irregular cooperative-group masks; wider device `printf`; and observable `ieee64` exception status. Preserve allocation/pointer, stream/event, launch ABI, provenance, and per-thread error invariants while doing so. | Focused positive and negative tests plus numerical Apple-GPU execution and unmodified workloads where available; every unsupported branch fails explicitly. |

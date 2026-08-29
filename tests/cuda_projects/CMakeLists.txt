@@ -76,6 +76,23 @@ set_tests_properties(
 )
 
 add_test(
+    NAME conformance_compiler_backend_matrix_versions
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_backend_matrix_versions.sh
+        ${CMAKE_SOURCE_DIR}
+        $<TARGET_FILE:cumetalc>
+        ${CMAKE_CURRENT_SOURCE_DIR}/backend_matrix_manifest.txt
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_backend_matrix.sh
+)
+set_tests_properties(
+    conformance_compiler_backend_matrix_versions
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        TIMEOUT 1200
+)
+
+add_test(
     NAME conformance_cuda_samples_vectoradd_gpu
     COMMAND bash
         ${CMAKE_CURRENT_SOURCE_DIR}/run_cuda_samples_vectoradd_gpu.sh

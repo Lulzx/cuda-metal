@@ -2,7 +2,9 @@
 #include "cumetal/metal/lower_to_msl.h"
 
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <unordered_set>
 
 namespace {
 
@@ -12,6 +14,21 @@ bool expect(bool condition, const std::string& message) {
         return false;
     }
     return true;
+}
+
+bool has_duplicate_ssa_declaration(const std::string& source) {
+    std::istringstream lines(source);
+    std::unordered_set<std::string> declarations;
+    std::string line;
+    while (std::getline(lines, line)) {
+        const bool top_level_statement = line.starts_with("    ") &&
+                                         !line.starts_with("        ");
+        const bool ssa_declaration = top_level_statement && line.ends_with(';') &&
+                                     line.find(" v") != std::string::npos &&
+                                     line.find('=') == std::string::npos;
+        if (ssa_declaration && !declarations.insert(line).second) return true;
+    }
+    return false;
 }
 
 constexpr const char* kNvvm = R"llvm(
@@ -249,6 +266,27 @@ cycle:
 }
 )llvm";
 
+constexpr const char* kNvvmIrreducibleDispatcher = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @irreducible_dispatcher(ptr %out, i1 %first, i1 %next) {
+entry:
+  %seed = add i32 1, 2
+  br i1 %first, label %left, label %right
+left:
+  %left.value = add i32 %seed, 3
+  br label %cycle
+right:
+  %right.value = add i32 %seed, 4
+  br label %cycle
+cycle:
+  %value = phi i32 [ %left.value, %left ], [ %right.value, %right ]
+  store i32 %value, ptr %out, align 4
+  br i1 %next, label %left, label %right
+}
+)llvm";
+
 constexpr const char* kNvvmGenericDevicePointer = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -304,6 +342,61 @@ define ptx_kernel void @static_threadgroup_global(i32 %value) {
 entry:
   call void @shared_helper(i32 %value)
   ret void
+}
+)llvm";
+
+constexpr const char* kNvvmDynamicThreadgroupGlobal = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+@dynamic_bytes = external addrspace(3) global [0 x i8], align 16
+
+define void @dynamic_helper(i32 %value) {
+entry:
+  %slot = getelementptr [0 x i8], ptr addrspacecast (ptr addrspace(3) @dynamic_bytes to ptr), i64 0, i64 4
+  store i32 %value, ptr %slot, align 4
+  ret void
+}
+
+define ptx_kernel void @dynamic_threadgroup_global(i32 %value) {
+entry:
+  call void @dynamic_helper(i32 %value)
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmMultipleDynamicThreadgroupGlobals = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+@dynamic_a = external addrspace(3) global [0 x i8], align 4
+@dynamic_b = external addrspace(3) global [0 x i8], align 4
+
+define ptx_kernel void @multiple_dynamic_threadgroup_globals() {
+entry:
+  %a = getelementptr [0 x i8], ptr addrspacecast (ptr addrspace(3) @dynamic_a to ptr), i64 0, i64 0
+  %b = getelementptr [0 x i8], ptr addrspacecast (ptr addrspace(3) @dynamic_b to ptr), i64 0, i64 0
+  store i8 1, ptr %a, align 1
+  store i8 2, ptr %b, align 1
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmHelperDefinedAfterKernel = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @kernel_before_helper(ptr %output) {
+entry:
+  %value = call i32 @later_helper(i32 41)
+  store i32 %value, ptr %output, align 4
+  ret void
+}
+
+define i32 @later_helper(i32 %value) {
+entry:
+  %result = add i32 %value, 1
+  ret i32 %result
 }
 )llvm";
 
@@ -498,6 +591,25 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmFloatFrexpViaDoubleAbi = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+declare double @__nv_frexp(double, ptr)
+
+define ptx_kernel void @float_frexp_via_double_abi(ptr %out, ptr %exponent_out, float %value) {
+entry:
+  %exponent = alloca i32, align 4
+  %wide = fpext float %value to double
+  %mantissa.wide = call double @__nv_frexp(double %wide, ptr %exponent)
+  %mantissa = fptrunc double %mantissa.wide to float
+  %exponent.value = load i32, ptr %exponent, align 4
+  store float %mantissa, ptr %out, align 4
+  store i32 %exponent.value, ptr %exponent_out, align 4
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmDynamicMemcpy = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -598,6 +710,8 @@ declare float @__nv_rsqrtf(float)
 declare float @__nv_expf(float)
 declare float @__nv_fast_expf(float)
 declare float @__nv_exp2f(float)
+declare float @__nv_exp10f(float)
+declare float @__nv_expm1f(float)
 declare float @__nv_logf(float)
 declare float @__nv_log2f(float)
 declare float @__nv_sinf(float)
@@ -626,7 +740,9 @@ entry:
   %exponential = call float @__nv_expf(float %angle)
   %fast_exponential = call float @__nv_fast_expf(float %exponential)
   %binary_exponential = call float @__nv_exp2f(float %fast_exponential)
-  %logarithm = call float @__nv_logf(float %binary_exponential)
+  %decimal_exponential = call float @__nv_exp10f(float %binary_exponential)
+  %unit_exponential = call float @__nv_expm1f(float %decimal_exponential)
+  %logarithm = call float @__nv_logf(float %unit_exponential)
   %binary_logarithm = call float @__nv_log2f(float %binary_exponential)
   %sine = call float @__nv_sinf(float %binary_logarithm)
   %cosine = call float @__nv_cosf(float %sine)
@@ -902,6 +1018,23 @@ int main() {
                          std::string::npos,
                  "irreducible barrier CFGs fail instead of using a per-lane dispatcher");
 
+    const metal::NvvmToMslResult irreducible_dispatcher =
+        metal::compile_nvvm_to_msl(kNvvmIrreducibleDispatcher,
+                                   "irreducible-dispatcher.ll",
+                                   "irreducible_dispatcher");
+    ok &= expect(irreducible_dispatcher.ok,
+                 "barrier-free irreducible CFG lowers through dispatcher: " +
+                     irreducible_dispatcher.error);
+    if (irreducible_dispatcher.ok) {
+        ok &= expect(
+            irreducible_dispatcher.source.find("switch (cm_block_state)") !=
+                std::string::npos,
+            "irreducible CFG selects dispatcher fallback");
+        ok &= expect(!has_duplicate_ssa_declaration(
+                         irreducible_dispatcher.source),
+                     "dispatcher predeclares each SSA local exactly once");
+    }
+
     const metal::NvvmToMslResult generic_device_pointer =
         metal::compile_nvvm_to_msl(kNvvmGenericDevicePointer,
                                    "generic-device-pointer.ll",
@@ -941,6 +1074,45 @@ int main() {
                          "shared_helper(value, cm_shared_shared_bytes)") !=
                          std::string::npos,
                  "static CUDA shared globals become kernel-local arrays threaded through helpers");
+
+    const metal::NvvmToMslResult dynamic_threadgroup_global =
+        metal::compile_nvvm_to_msl(kNvvmDynamicThreadgroupGlobal,
+                                   "dynamic-threadgroup-global.ll",
+                                   "dynamic_threadgroup_global");
+    ok &= expect(dynamic_threadgroup_global.ok &&
+                     dynamic_threadgroup_global.source.find(
+                         "threadgroup uchar* cm_shared_dynamic_bytes [[threadgroup(0)]]") !=
+                         std::string::npos &&
+                     dynamic_threadgroup_global.source.find(
+                         "dynamic_helper(value, cm_shared_dynamic_bytes)") !=
+                         std::string::npos &&
+                     dynamic_threadgroup_global.source.find(
+                         "threadgroup uchar cm_shared_dynamic_bytes[") ==
+                         std::string::npos,
+                 "extern CUDA shared globals use runtime-sized Metal threadgroup binding 0");
+
+    const metal::NvvmToMslResult multiple_dynamic_threadgroup_globals =
+        metal::compile_nvvm_to_msl(kNvvmMultipleDynamicThreadgroupGlobals,
+                                   "multiple-dynamic-threadgroup-globals.ll",
+                                   "multiple_dynamic_threadgroup_globals");
+    ok &= expect(!multiple_dynamic_threadgroup_globals.ok &&
+                     multiple_dynamic_threadgroup_globals.error.find(
+                         "multiple dynamic threadgroup globals") != std::string::npos,
+                 "multiple dynamic shared symbols fail instead of aliasing silently");
+
+    const metal::NvvmToMslResult helper_defined_after_kernel =
+        metal::compile_nvvm_to_msl(kNvvmHelperDefinedAfterKernel,
+                                   "helper-defined-after-kernel.ll",
+                                   "kernel_before_helper");
+    const std::size_t helper_declaration =
+        helper_defined_after_kernel.source.find("uint later_helper(uint value);");
+    const std::size_t kernel_definition =
+        helper_defined_after_kernel.source.find("kernel void kernel_before_helper(");
+    ok &= expect(helper_defined_after_kernel.ok &&
+                     helper_declaration != std::string::npos &&
+                     kernel_definition != std::string::npos &&
+                     helper_declaration < kernel_definition,
+                 "device helpers are declared before kernels regardless of LLVM order");
 
     const metal::NvvmToMslResult mixed_device_threadgroup_phi =
         metal::compile_nvvm_to_msl(kNvvmMixedDeviceThreadgroupPhi,
@@ -1053,6 +1225,18 @@ int main() {
                          std::string::npos,
                  "general FP64 arithmetic remains an explicit diagnostic");
 
+    const metal::NvvmToMslResult float_frexp_via_double_abi =
+        metal::compile_nvvm_to_msl(kNvvmFloatFrexpViaDoubleAbi,
+                                   "float-frexp-via-double-abi.ll",
+                                   "float_frexp_via_double_abi");
+    ok &= expect(float_frexp_via_double_abi.ok &&
+                     float_frexp_via_double_abi.source.find("double v") ==
+                     std::string::npos &&
+                     float_frexp_via_double_abi.source.find(
+                         "frexp(value, *reinterpret_cast<thread int*>(&v") !=
+                         std::string::npos,
+                 "float frexp round-trips through CUDA's double ABI without FP64 arithmetic");
+
     const metal::NvvmToMslResult dynamic_memcpy = metal::compile_nvvm_to_msl(
         kNvvmDynamicMemcpy, "dynamic-memcpy.ll", "dynamic_memcpy");
     ok &= expect(!dynamic_memcpy.ok &&
@@ -1112,6 +1296,10 @@ int main() {
     ok &= expect(cuda_math.ok && cuda_math.source.find("fmin(") != std::string::npos &&
                      cuda_math.source.find("rsqrt(") != std::string::npos &&
                      cuda_math.source.find("exp2(") != std::string::npos &&
+                     cuda_math.source.find("exp10(") != std::string::npos &&
+                     cuda_math.source.find(
+                         "cumetal-semantic-quality: tolerance_bounded") !=
+                         std::string::npos &&
                      cuda_math.source.find("log2(") != std::string::npos &&
                      cuda_math.source.find("tanh(") != std::string::npos &&
                      cuda_math.source.find("round(") != std::string::npos &&

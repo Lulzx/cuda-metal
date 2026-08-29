@@ -11,19 +11,17 @@
   production libraries.
 - Direct AIR generation remains tooling/research only.
 
-With CUDA Clang 21/22, the reviewed manifest-controlled 23-file
+With CUDA Clang 21-23, the reviewed manifest-controlled 23-file
 production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/23 | **9/23** |
+| direct `.cu` | 0/23 | **13/23** |
 | PTX / `--cuda-device` | **23/23** | **7/23** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
-Matrix results prove compilation only. With CUDA Clang 23.1.0, direct typed IR
-remains 9/23 and legacy PTX remains 23/23, but typed PTX is 6/23 because
-`sgemm_naive` reaches generated MSL with duplicate SSA declarations. The
-supported frontend compiler range and versioned matrix are not yet closed.
+Matrix results prove compilation only. The versioned gate records each compiler
+identity and requires the same manifest with CUDA Clang 21, 22, and 23.
 
 ## Typed representation
 
@@ -35,7 +33,14 @@ Recent typed coverage includes common FP32 libdevice calls, CFG/SSA loop joins,
 source-level pointer flow, and host-populated device-pointer fields loaded from
 device-backed descriptors. The descriptor rule applies only when no reachable
 device-side store initializes the field; stored polymorphic pointers retain
-their observed constraints.
+their observed constraints. Runtime-sized `extern __shared__` storage is emitted
+as Metal threadgroup binding 0; the reduction and softmax corpus cases have
+numerical Apple-GPU proof. The direct typed libdevice surface passes its 42/42
+per-function numerical harness, including explicit typed expansions for Metal
+functions without direct equivalents.
+CUDA's double-signature `frexp` call is narrowed only for the proven
+float-to-double-call-to-float pattern, preserving the integer exponent output
+without admitting general FP64 arithmetic.
 
 ## PTX compatibility
 

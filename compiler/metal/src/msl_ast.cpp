@@ -97,6 +97,28 @@ public:
             out_ << "};\n\n";
         }
 
+        // LLVM commonly places linkonce device helpers after kernels that call
+        // them. MSL requires a declaration before such a call, so declare every
+        // non-kernel function before emitting definitions in source order.
+        for (const MslFunction& function : module.functions) {
+            if (function.is_kernel) continue;
+            out_ << function.return_type.str() << " "
+                 << sanitize_identifier(function.name) << "(";
+            for (std::size_t i = 0; i < function.parameters.size(); ++i) {
+                if (i != 0) out_ << ", ";
+                const MslParameter& parameter = function.parameters[i];
+                out_ << parameter.type.str() << " "
+                     << sanitize_identifier(parameter.name);
+            }
+            out_ << ");\n";
+        }
+        if (std::any_of(module.functions.begin(), module.functions.end(),
+                        [](const MslFunction& function) {
+                            return !function.is_kernel;
+                        })) {
+            out_ << "\n";
+        }
+
         for (const MslFunction& function : module.functions) {
             const std::string name = sanitize_identifier(function.name);
             if (!names.insert(name).second) {

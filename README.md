@@ -26,8 +26,9 @@ build/cumetalc samples/vectorAdd/vectorAdd.cu -o vectorAdd
 ./vectorAdd
 ```
 
-Requirements are macOS 14 or newer on Apple Silicon, CMake, a CUDA-capable LLVM
-Clang, and Apple's public `metal` and `metallib` tools. See the
+Requirements are macOS 14 or newer on Apple Silicon, CMake, LLVM 18+ libraries,
+a CUDA-capable Clang 21-23 frontend, and Apple's public `metal` and `metallib`
+tools. See the
 [build and installation guide](docs/build.md) before packaging or installing.
 
 For a staged GPU demonstration:
@@ -66,10 +67,10 @@ compiler paths and their selection policy are in
 
 - The enrolled headless NVIDIA `cuda-samples` snapshot is **83/83 pass**, with
   zero waivers and zero nonpassing manifest entries.
-- With CUDA Clang 21/22, the reviewed 23-file production-metallib matrix is
-  **9/23** for direct `.cu` through typed CuMetal IR, **7/23** for typed PTX,
-  and **23/23** for the legacy PTX backend. CUDA Clang 23 currently reduces the
-  typed PTX cell to 6/23. These are compile results, not numerical runtime proof.
+- With CUDA Clang 21-23, the reviewed 23-file production-metallib matrix is
+  **13/23** for direct `.cu` through typed CuMetal IR, **7/23** for typed PTX,
+  and **23/23** for the legacy PTX backend. These are compile results, not
+  numerical runtime proof.
 - Vector add, SAXPY, reduction, selected matrix/library operations, atomics,
   shared memory, warp operations, streams, and events have focused numerical
   Apple-GPU tests.

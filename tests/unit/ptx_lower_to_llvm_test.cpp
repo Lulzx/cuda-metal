@@ -1780,10 +1780,14 @@ $L_done:
 .visible .entry packed_half_arithmetic()
 {
     .reg .b32 %r<5>;
+    .reg .b16 %rs<5>;
     mov.b32 %r1, 0x3c003c00;
     mov.b32 %r2, 0x40004000;
     add.f16x2 %r3, %r1, %r2;
     fma.rn.f16x2 %r4, %r1, %r2, %r3;
+    mov.b16 %rs1, 0x3c00;
+    mov.b16 %rs2, 0x4000;
+    fma.rn.f16 %rs3, %rs1, %rs2, %rs1;
     ret;
 }
 )PTX";
@@ -1797,8 +1801,10 @@ $L_done:
         return 1;
     }
     if (!expect(contains(packed_half_lowered.llvm_ir, "fadd <2 x half>") &&
-                contains(packed_half_lowered.llvm_ir, "fmul <2 x half>"),
-                "packed half arithmetic preserves both lanes")) {
+                contains(packed_half_lowered.llvm_ir, "fmul <2 x half>") &&
+                contains(packed_half_lowered.llvm_ir, "fmul half") &&
+                contains(packed_half_lowered.llvm_ir, "fadd half"),
+                "packed and scalar half arithmetic preserve their lanes")) {
         return 1;
     }
 

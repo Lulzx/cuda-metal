@@ -82,10 +82,10 @@ for file in \
     docs/compiler-architecture.md \
     docs/spec-closure-roadmap.md
 do
-    expect_fragment "${file}" "CUDA Clang 21/22"
+    expect_fragment "${file}" "CUDA Clang 21-23"
 done
-expect_fragment docs/spec-closure-roadmap.md "CUDA Clang 23.1.0"
-expect_fragment docs/known-gaps/compiler.md "CUDA Clang 23.1.0"
+expect_fragment docs/spec-closure-roadmap.md "conformance_compiler_backend_matrix{,_versions}"
+expect_fragment docs/known-gaps/compiler.md "conformance_compiler_backend_matrix_versions"
 
 # High-risk boundaries must remain visible in the current indexes and roadmap.
 expect_fragment README.md "SIMD/warp width is fixed at 32"

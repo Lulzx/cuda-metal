@@ -1234,6 +1234,98 @@ struct AstLowerer {
             for (const ir::Operand& operand : operation.operands) {
                 arguments.push_back(expression_for(operand));
             }
+            const MslType return_type = operation.result_types.empty()
+                                            ? MslType::void_type()
+                                            : lower_result_type(operation);
+            auto unary_call = [&](std::string name, MslExpr value) {
+                return MslExpression::call(std::move(name), {std::move(value)},
+                                           return_type);
+            };
+            auto literal = [&](std::string spelling) {
+                return MslExpression::literal(std::move(spelling), return_type);
+            };
+            auto binary = [&](std::string op, MslExpr left, MslExpr right) {
+                return MslExpression::binary(std::move(op), std::move(left),
+                                             std::move(right), return_type);
+            };
+            auto erf_expression = [&](MslExpr input) {
+                // Abramowitz-Stegun 7.1.26, max absolute error about 1.5e-7.
+                const MslExpr magnitude = unary_call("fabs", input);
+                const MslExpr t = binary(
+                    "/", literal("1.0f"),
+                    binary("+", literal("1.0f"),
+                           binary("*", literal("0.3275911f"), magnitude)));
+                MslExpr polynomial = literal("1.061405429f");
+                polynomial = binary("+", literal("-1.453152027f"),
+                                    binary("*", t, polynomial));
+                polynomial = binary("+", literal("1.421413741f"),
+                                    binary("*", t, polynomial));
+                polynomial = binary("+", literal("-0.284496736f"),
+                                    binary("*", t, polynomial));
+                polynomial = binary("+", literal("0.254829592f"),
+                                    binary("*", t, polynomial));
+                const MslExpr decay = unary_call(
+                    "exp", MslExpression::unary(
+                               "-", binary("*", magnitude, magnitude), return_type));
+                const MslExpr positive = binary(
+                    "-", literal("1.0f"),
+                    binary("*", binary("*", polynomial, t), decay));
+                return MslExpression::call("copysign", {positive, input}, return_type);
+            };
+            if (callee->second == "expm1" && arguments.size() == 1) {
+                return declare_result(
+                    operation,
+                    binary("-", unary_call("exp", arguments[0]), literal("1.0f")));
+            }
+            if (callee->second == "log1p" && arguments.size() == 1) {
+                return declare_result(
+                    operation,
+                    unary_call("log", binary("+", literal("1.0f"), arguments[0])));
+            }
+            if (callee->second == "cbrt" && arguments.size() == 1) {
+                const MslExpr magnitude = unary_call("fabs", arguments[0]);
+                const MslExpr root = MslExpression::call(
+                    "pow", {magnitude, literal("0.3333333333333333f")}, return_type);
+                return declare_result(
+                    operation,
+                    MslExpression::call("copysign", {root, arguments[0]}, return_type));
+            }
+            if ((callee->second == "erf" || callee->second == "erfc") &&
+                arguments.size() == 1) {
+                MslExpr value = erf_expression(arguments[0]);
+                if (callee->second == "erfc") {
+                    value = binary("-", literal("1.0f"), std::move(value));
+                }
+                return declare_result(operation, std::move(value));
+            }
+            if (callee->second == "hypot" && arguments.size() == 2) {
+                return declare_result(
+                    operation,
+                    unary_call("sqrt", binary(
+                        "+", binary("*", arguments[0], arguments[0]),
+                        binary("*", arguments[1], arguments[1]))));
+            }
+            if (callee->second == "remainder" && arguments.size() == 2) {
+                const MslExpr quotient = binary("/", arguments[0], arguments[1]);
+                return declare_result(
+                    operation,
+                    binary("-", arguments[0],
+                           binary("*", unary_call("rint", quotient), arguments[1])));
+            }
+            if (callee->second == "frexp" && arguments.size() == 2) {
+                const MslType exponent_pointer_type =
+                    MslType::pointer(MslType::sint(32), MslAddressSpace::kThread);
+                const MslExpr exponent_pointer = MslExpression::cast(
+                    exponent_pointer_type, arguments[1], true);
+                return declare_result(
+                    operation,
+                    MslExpression::call(
+                        "frexp",
+                        {arguments[0], MslExpression::unary(
+                                           "*", exponent_pointer,
+                                           MslType::sint(32))},
+                        return_type));
+            }
             const auto callee_function = std::find_if(
                 module.functions.begin(), module.functions.end(),
                 [&](const ir::Function& candidate) {
@@ -1290,9 +1382,6 @@ struct AstLowerer {
                         "cm_lane_id", MslType::uint()));
                 }
             }
-            const MslType return_type = operation.result_types.empty()
-                                            ? MslType::void_type()
-                                            : lower_result_type(operation);
             const bool polymorphic_callee =
                 callee_function != module.functions.end() &&
                 !callee_function->mixed_pointer_address_spaces.empty();
@@ -2586,42 +2675,6 @@ struct AstLowerer {
 
     bool emit_cfg_dispatcher(std::vector<MslStmt>* statements) {
         cfg_dispatcher_mode = true;
-        for (const ir::BasicBlock& block : function.blocks) {
-            for (const ir::BlockArgument& argument : block.arguments) {
-                declare_block_argument(argument, statements);
-            }
-            for (const ir::Operation& operation : block.operations) {
-                if (operation.opcode == ir::OpCode::kParameter ||
-                    operation.results.empty()) {
-                    continue;
-                }
-                if (operation.opcode == ir::OpCode::kAlloca) {
-                    if (operation.result_types.empty() ||
-                        !operation.result_types.front().is_pointer() ||
-                        operation.result_types.front().pointee() == nullptr) {
-                        return fail(&operation, "malformed thread-local allocation");
-                    }
-                    const ir::ValueId value = operation.results.front();
-                    const MslType storage_type =
-                        lower_type(*operation.result_types.front().pointee());
-                    const std::string storage_name = value_name(value) + "_storage";
-                    statements->push_back(
-                        MslStatement::variable(storage_type, storage_name));
-                    values[value] = MslExpression::unary(
-                        "&", MslExpression::identifier(storage_name, storage_type),
-                        lower_result_type(operation));
-                    continue;
-                }
-                for (std::size_t i = 0; i < operation.results.size(); ++i) {
-                    const ir::ValueId value = operation.results[i];
-                    const MslType type = lower_result_type(operation, i);
-                    const std::string name = value_name(value);
-                    values[value] = MslExpression::identifier(name, type);
-                    statements->push_back(MslStatement::variable(type, name));
-                }
-            }
-        }
-
         const MslExpr state = MslExpression::identifier("cm_block_state", MslType::uint());
         statements->push_back(MslStatement::variable(
             MslType::uint(), "cm_block_state",
@@ -2845,6 +2898,7 @@ struct AstLowerer {
 
         const auto required_shared = shared_usage.find(function.name);
         if (required_shared != shared_usage.end()) {
+            std::size_t dynamic_shared_count = 0;
             for (const std::string& global : required_shared->second) {
                 const std::string name = shared_parameter_name(global);
                 if (function.is_kernel) {
@@ -2854,16 +2908,40 @@ struct AstLowerer {
                         [&](const ir::GlobalThreadgroup& candidate) {
                             return candidate.name == global;
                         });
-                    if (declaration == module.global_threadgroups.end() ||
-                        declaration->byte_size == 0) {
+                    if (declaration == module.global_threadgroups.end()) {
                         return LowerToMslResult{
-                            .error = "missing static threadgroup declaration for '" +
+                            .error = "missing threadgroup declaration for '" +
                                      global + "'",
                         };
                     }
-                    output.statements.push_back(
-                        MslStatement::threadgroup_byte_array(name,
-                                                             declaration->byte_size));
+                    if (declaration->is_dynamic) {
+                        ++dynamic_shared_count;
+                        if (dynamic_shared_count > 1) {
+                            return LowerToMslResult{
+                                .error = "multiple dynamic threadgroup globals are "
+                                         "ambiguous for Metal threadgroup binding 0",
+                            };
+                        }
+                        output.parameters.push_back({
+                            .type = MslType::pointer(MslType::uint(8),
+                                                     MslAddressSpace::kThreadgroup),
+                            .name = name,
+                            .attributes = {MslAttribute{
+                                .name = "threadgroup",
+                                .index = 0,
+                            }},
+                        });
+                    } else {
+                        if (declaration->byte_size == 0) {
+                            return LowerToMslResult{
+                                .error = "static threadgroup declaration for '" +
+                                         global + "' has zero size",
+                            };
+                        }
+                        output.statements.push_back(
+                            MslStatement::threadgroup_byte_array(name,
+                                                                 declaration->byte_size));
+                    }
                 } else {
                     output.parameters.push_back({
                         .type = MslType::pointer(MslType::uint(8),
