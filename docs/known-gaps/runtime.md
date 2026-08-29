@@ -6,8 +6,11 @@
 
 - Cooperative-grid synchronization is limited to a conservatively resident
   grid capped at one block per reported GPU core. Oversubscription is rejected.
-- Dynamic launch uses a bounded device queue and host scheduling drain.
-  Unrestricted nesting, queue growth, and hardware-recursive parity are absent.
+- Dynamic launch uses a fixed 1 MiB device queue with at most 1,023 child
+  records per parent dispatch and a host scheduling drain. Nested parent-child-
+  grandchild execution, invalid child configurations, and record overflow have
+  focused Apple-GPU tests. Queue growth and hardware-recursive scheduling parity
+  remain absent.
 - Irregular cooperative-group masks and interaction coverage remain narrower
   than CUDA's complete surface.
 - Stream priorities are reported as zero and are not Metal priority queues.

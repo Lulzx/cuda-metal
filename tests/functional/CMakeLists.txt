@@ -3292,6 +3292,19 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
     set_tests_properties(functional_device_heap PROPERTIES SKIP_RETURN_CODE 77)
 
+    # Dynamic parallelism uses Clang's RDC host registration plus a bounded
+    # device-written queue. Prove recursive draining and exact negative errors.
+    add_test(
+        NAME functional_device_launch_queue
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_device_launch_queue.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_launch_queue_probe.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/device_launch_queue_probe
+    )
+    set_tests_properties(functional_device_launch_queue
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+
     add_test(
         NAME functional_installed_cumetalc_link_executable
         COMMAND bash

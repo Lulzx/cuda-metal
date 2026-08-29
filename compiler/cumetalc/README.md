@@ -36,3 +36,9 @@ structured branches with `-fno-jump-tables`; PTX inputs that contain
 
 When built from a CuMetal source checkout, this `.cu` frontend path automatically adds
 `runtime/api/` to the include path for clean-room CUDA headers.
+
+For an explicitly selected legacy executable backend, `cumetalc` retries source
+that contains device-side kernel launches with Clang relocatable-device-code
+mode and normalizes the translation-unit-specific linked-binary registration
+symbol. This is the bounded dynamic-parallelism compatibility path; it does not
+change the native-AOT source default.

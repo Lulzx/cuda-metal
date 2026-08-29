@@ -470,7 +470,7 @@ int run_legacy_executable_driver(const ExecutableDriverOptions& options,
     const char* existing_path = std::getenv("PATH");
     const std::string path = layout.toolchain_dir.string() + ":" +
         (existing_path != nullptr ? existing_path : "/usr/bin:/bin");
-    std::string compile = "PATH=" + quote_shell(path) + " " +
+    std::string compile_prefix = "PATH=" + quote_shell(path) + " " +
         quote_shell(compiler.string()) + " -x cuda -std=c++17 -O2 --cuda-gpu-arch=" +
         quote_shell(options.cuda_arch) +
         (ptx_feature_for_arch(options.cuda_arch).empty()
@@ -479,20 +479,68 @@ int run_legacy_executable_driver(const ExecutableDriverOptions& options,
         " -nocudainc -nocudalib -Wno-unknown-cuda-version -Wno-pass-failed"
         " -D__CUDACC__=1 -D__NVCC__=1 -I " +
         quote_shell(layout.include_dir.string()) + " -include cuda_runtime.h";
-    compile += cuda_inline_flags(compiler, options.cuda_inline_threshold);
-    for (const auto& dir : options.include_dirs) compile += " -I " + quote_shell(dir.string());
-    for (const auto& define : options.defines) compile += " -D " + quote_shell(define);
-    for (const auto& forced : options.forced_includes) {
-        compile += " -include " + quote_shell(forced.string());
+    compile_prefix += cuda_inline_flags(compiler, options.cuda_inline_threshold);
+    for (const auto& dir : options.include_dirs) {
+        compile_prefix += " -I " + quote_shell(dir.string());
     }
-    compile += " -c " + quote_shell(options.input.string()) + " -o " +
-               quote_shell(object.string()) + " 2>&1";
-    const CommandResult compiled = run_command_capture(compile);
+    for (const auto& define : options.defines) {
+        compile_prefix += " -D " + quote_shell(define);
+    }
+    for (const auto& forced : options.forced_includes) {
+        compile_prefix += " -include " + quote_shell(forced.string());
+    }
+    const std::string compile_suffix = " -c " + quote_shell(options.input.string()) +
+        " -o " + quote_shell(object.string()) + " 2>&1";
+    CommandResult compiled = run_command_capture(compile_prefix + compile_suffix);
+    bool used_rdc = false;
+    if ((!compiled.started || compiled.exit_code != 0) &&
+        compiled.output.find("requires relocatable device code") != std::string::npos) {
+        std::error_code ec;
+        std::filesystem::remove(object, ec);
+        std::cerr << "cumetalc: retrying CUDA source with relocatable device code\n";
+        compiled = run_command_capture(
+            compile_prefix + " --no-offload-new-driver -fgpu-rdc" + compile_suffix);
+        used_rdc = true;
+    }
     if (!compiled.output.empty()) std::cerr << compiled.output;
     if (!compiled.started || compiled.exit_code != 0 || !std::filesystem::exists(object)) {
         std::error_code ec;
         std::filesystem::remove(object, ec);
         return 1;
+    }
+    if (used_rdc) {
+        const CommandResult undefined = run_command_capture(
+            "nm -u " + quote_shell(object.string()) + " 2>/dev/null");
+        const std::regex linked_binary_symbol(
+            R"((___cudaRegisterLinkedBinary__nv_[[:alnum:]_]+))");
+        std::smatch match;
+        if (!undefined.started || undefined.exit_code != 0 ||
+            !std::regex_search(undefined.output, match, linked_binary_symbol)) {
+            std::error_code ec;
+            std::filesystem::remove(object, ec);
+            std::cerr << "cumetalc failed: CUDA RDC object has no linked-binary registration symbol\n";
+            return 1;
+        }
+        const std::filesystem::path llvm_objcopy =
+            compiler.parent_path() / "llvm-objcopy";
+        if (!std::filesystem::exists(llvm_objcopy)) {
+            std::error_code ec;
+            std::filesystem::remove(object, ec);
+            std::cerr << "cumetalc failed: llvm-objcopy is required for CUDA RDC registration\n";
+            return 1;
+        }
+        const std::string rename = quote_shell(llvm_objcopy.string()) +
+            " --redefine-sym " + quote_shell(match[1].str() +
+                "=___cudaRegisterLinkedBinary") + " " + quote_shell(object.string()) +
+            " 2>&1";
+        const CommandResult renamed = run_command_capture(rename);
+        if (!renamed.output.empty()) std::cerr << renamed.output;
+        if (!renamed.started || renamed.exit_code != 0) {
+            std::error_code ec;
+            std::filesystem::remove(object, ec);
+            std::cerr << "cumetalc failed: could not normalize CUDA RDC registration symbol\n";
+            return 1;
+        }
     }
     const std::string link = quote_shell(compiler.string()) + " " +
         quote_shell(object.string()) + " -L " + quote_shell(layout.lib_dir.string()) +

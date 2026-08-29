@@ -39,7 +39,9 @@ launch success. CPU or approximate paths must identify themselves.
   PTX forms, and checked little-endian ELF32/ELF64 PTX sections.
 - CUDA graph coverage includes tested kernel, linear memcpy/memset, host,
   clone/update, and graph-memory node behavior.
-- Dynamic launch uses a bounded device record queue and host drain.
+- Dynamic launch uses a bounded device record queue and recursive host drain;
+  focused tests cover parent-child-grandchild ordering, invalid child
+  configurations, and the 1,023-record overflow boundary.
 - Texture/surface objects, arrays, memcpy, and source descriptor helpers cover a
   tested subset.
 - Cooperative launch supports resident multi-block grids up to a conservative

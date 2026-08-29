@@ -132,6 +132,7 @@ ctest --test-dir build -R functional_cufft_c2c --output-on-failure
 ctest --test-dir build -R functional_runtime_ptx_lowering_regression --output-on-failure
 ctest --test-dir build -R functional_runtime_matrix_mul_tiled --output-on-failure
 ctest --test-dir build -R functional_runtime_dynamic_shared --output-on-failure
+ctest --test-dir build -R functional_device_launch_queue --output-on-failure
 ctest --test-dir build -R functional_runtime_registration_printf --output-on-failure
 ctest --test-dir build -R functional_cuda_graph_api --output-on-failure
 ctest --test-dir build -R functional_async_mempool_api --output-on-failure
