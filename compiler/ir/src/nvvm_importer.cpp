@@ -614,10 +614,11 @@ struct Importer {
         for (const auto& [offset, value] : packed_arguments) {
             llvm::Type* type = value->getType();
             const std::uint64_t bits = input->getDataLayout().getTypeSizeInBits(type);
-            if ((!type->isIntegerTy() && !type->isFloatingPointTy()) ||
+            if ((!type->isIntegerTy() && !type->isFloatingPointTy() &&
+                 !type->isPointerTy()) ||
                 (bits != 32 && bits != 64) || offset != expected_offset) {
                 return fail(&call,
-                            "typed vprintf supports tightly packed 32/64-bit scalar arguments");
+                            "typed vprintf supports tightly packed 32/64-bit scalar and pointer arguments");
             }
             if (!first) widths << ',';
             widths << bits;

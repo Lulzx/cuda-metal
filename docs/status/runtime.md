@@ -46,7 +46,9 @@ launch success. CPU or approximate paths must identify themselves.
   tested subset.
 - Cooperative launch supports resident multi-block grids up to a conservative
   one-block-per-reported-core cap.
-- Device `printf` uses a bounded runtime buffer and 256-byte format limit.
+- Device `printf` uses a bounded runtime buffer and 256-byte format limit;
+  tested scalar formatting includes 32/64-bit integers, pointer, promoted
+  binary64 floating, character, flags, fixed precision, and `%%` forms.
 
 ## Installed headers
 

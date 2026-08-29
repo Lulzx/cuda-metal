@@ -1535,11 +1535,15 @@ bool is_printf_call(const std::vector<std::string>& operands) {
 void emit_printf_record(std::ostringstream& metal,
                         std::uint32_t fmt_id,
                         const std::vector<std::pair<std::string, std::string>>& args_and_types,
+                        const std::vector<int>& argument_bits,
                         int call_index) {
-    const std::uint32_t n_args = static_cast<std::uint32_t>(args_and_types.size());
+    std::uint32_t payload_words = 0;
+    for (std::size_t i = 0; i < args_and_types.size(); ++i) {
+        payload_words += i < argument_bits.size() && argument_bits[i] == 64 ? 2u : 1u;
+    }
     const std::string suffix = std::to_string(call_index);
     metal << "    {\n";
-    metal << "        const uint __pfw" << suffix << " = " << (2 + n_args) << "u;\n";
+    metal << "        const uint __pfw" << suffix << " = " << (2 + payload_words) << "u;\n";
     metal << "        uint __ppos" << suffix << " = atomic_fetch_add_explicit(__printf_buf, "
           << "__pfw" << suffix << ", memory_order_relaxed);\n";
     metal << "        if (__ppos" << suffix << " + __pfw" << suffix << " < __printf_cap) {\n";
@@ -1547,10 +1551,25 @@ void emit_printf_record(std::ostringstream& metal,
     metal << "            __pw" << suffix << "[__ppos" << suffix << " + 1] = "
           << fmt_id << "u;\n";
     metal << "            __pw" << suffix << "[__ppos" << suffix << " + 2] = "
-          << n_args << "u;\n";
-    for (std::uint32_t i = 0; i < n_args; ++i) {
+          << payload_words << "u;\n";
+    std::uint32_t payload_offset = 0;
+    for (std::size_t i = 0; i < args_and_types.size(); ++i) {
         const std::string& expr = args_and_types[i].first;
         const std::string& type = args_and_types[i].second;
+        const int bits = i < argument_bits.size() ? argument_bits[i] : 32;
+        if (bits == 64) {
+            const std::string raw = type == "device_ptr" || type.find('*') != std::string::npos
+                ? "reinterpret_cast<ulong>(" + expr + ")"
+                : "(ulong)(" + expr + ")";
+            metal << "            __pw" << suffix << "[__ppos" << suffix << " + "
+                  << (3 + payload_offset) << "] = (uint)(" << raw
+                  << " & 0xFFFFFFFFul);\n";
+            metal << "            __pw" << suffix << "[__ppos" << suffix << " + "
+                  << (4 + payload_offset) << "] = (uint)(" << raw
+                  << " >> 32u);\n";
+            payload_offset += 2u;
+            continue;
+        }
         std::string cast_expr;
         if (type == "float") {
             cast_expr = "as_type<uint>(" + expr + ")";
@@ -1564,8 +1583,10 @@ void emit_printf_record(std::ostringstream& metal,
         } else {
             cast_expr = "(uint)(" + expr + ")";
         }
-        metal << "            __pw" << suffix << "[__ppos" << suffix << " + " << (3 + i) << "] = "
+        metal << "            __pw" << suffix << "[__ppos" << suffix << " + "
+              << (3 + payload_offset) << "] = "
               << cast_expr << ";\n";
+        ++payload_offset;
     }
     metal << "        }\n";
     metal << "    }\n";
@@ -2434,7 +2455,10 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         const auto& op = instr.opcode;
         const auto& ops = instr.operands;
 
-        if (printf_scaffold_lines.count(instr.line)) continue;
+        if (printf_scaffold_lines.count(instr.line) &&
+            instr.opcode.rfind("ld.param", 0) != 0) {
+            continue;
+        }
 
         // ── Structural: parameter loads, labels, ret ────────────────────────
         if (op.size() >= 8 && op.substr(0, 8) == "ld.param") continue;
@@ -2924,8 +2948,15 @@ std::string emit_metal_source_generic(const std::string& entry_name,
                 std::vector<std::pair<std::string, std::string>> args_and_types;
                 for (const auto& arg_token : pc.arguments) {
                     const std::string r = get_reg(arg_token);
-                    const std::string expr = r.empty() ? arg_token : resolve(arg_token);
-                    const std::string type = r.empty() ? "uint" : reg_type(r);
+                    const auto info = reg.find(r);
+                    const bool parameter_pointer =
+                        info != reg.end() && info->second.kind == RegKind::ParamPtr;
+                    const std::string expr = parameter_pointer
+                        ? info->second.param_name
+                        : (r.empty() ? arg_token : resolve(arg_token));
+                    const std::string type = parameter_pointer
+                        ? "device_ptr"
+                        : (r.empty() ? "uint" : reg_type(r));
                     args_and_types.emplace_back(expr, type);
                 }
                 // Mark any destination register as defined (usually return value = 0).
@@ -2943,6 +2974,7 @@ std::string emit_metal_source_generic(const std::string& entry_name,
                     }
                 }
                 emit_printf_record(metal, pc.format_id, args_and_types,
+                                   pc.argument_bits,
                                    static_cast<int>(std::distance(entry->instructions.data(), &instr)));
                 continue;
             }

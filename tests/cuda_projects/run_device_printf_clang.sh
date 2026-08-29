@@ -58,4 +58,9 @@ for block in 0 1 2 3; do
     done
 done
 
-echo "PASS: Clang device printf ABI emitted all expected GPU records (${PTX_BACKEND})"
+if [[ "$(grep -Ec '^WIDE signed=-1234567890123 unsigned=1234605616436508552 hex=0x1122334455667788 size=8589934599 ptr=0x[0-9a-f]+ float=3\.125 char=Q percent=%$' "${OUTPUT_FILE}")" -ne 1 ]]; then
+    echo "FAIL: missing or malformed wide device printf record"
+    exit 1
+fi
+
+echo "PASS: Clang device printf ABI emitted integer, wide, pointer, floating, character, and escaped-percent GPU records (${PTX_BACKEND})"

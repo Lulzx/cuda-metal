@@ -40,8 +40,11 @@ update cases remain incomplete.
 Texture/surface object lifecycle, arrays, copies, and selected source descriptor
 helpers exist. Direct PTX texture/surface instructions, native Metal texture ABI,
 and remaining addressing/filtering modes do not. Device `printf` has a bounded
-buffer and 256-byte format limit; broad format/argument and overflow parity are
-not complete.
+buffer and 256-byte format limit. Focused Clang-ABI tests cover 32/64-bit
+signed/unsigned integers, hex flags, `size_t`, pointers, promoted binary64
+floating values, characters, fixed precision, and escaped percent signs
+on both PTX backends. Device-string materialization, dynamic `*` width/precision,
+and complete overflow-return parity remain gaps.
 
 ## FP64 and atomics
 

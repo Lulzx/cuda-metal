@@ -2787,7 +2787,9 @@ struct AstLowerer {
                         ++payload_offset;
                         continue;
                     }
-                    raw = MslExpression::bitcast(MslType::uint(64), raw);
+                    raw = raw->type.kind == MslTypeKind::kPointer
+                        ? MslExpression::cast(MslType::uint(64), raw, true)
+                        : MslExpression::bitcast(MslType::uint(64), raw);
                     write_word(
                         3 + payload_offset,
                         MslExpression::cast(

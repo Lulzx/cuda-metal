@@ -471,6 +471,29 @@ cudaError_t take_pending_launch_error() {
 // Float args are stored as as_type<uint>(f); 64-bit ABI slots occupy low/high
 // words so a following 32-bit argument keeps its proper position.
 
+std::uint32_t minimum_printf_words(std::string_view fmt) {
+    std::uint32_t words = 0;
+    for (std::size_t i = 0; i < fmt.size(); ++i) {
+        if (fmt[i] != '%') continue;
+        if (++i >= fmt.size()) break;
+        if (fmt[i] == '%') continue;
+        while (i < fmt.size() && std::strchr("-+ #0", fmt[i]) != nullptr) ++i;
+        while (i < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[i]))) ++i;
+        if (i < fmt.size() && fmt[i] == '.') {
+            ++i;
+            while (i < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[i]))) ++i;
+        }
+        bool wide = false;
+        while (i < fmt.size() && std::strchr("lhzjt", fmt[i]) != nullptr) {
+            wide |= fmt[i] == 'l' || fmt[i] == 'z' || fmt[i] == 'j' || fmt[i] == 't';
+            ++i;
+        }
+        if (i >= fmt.size()) break;
+        words += wide || fmt[i] == 'p' || fmt[i] == 's' ? 2u : 1u;
+    }
+    return words;
+}
+
 void drain_one_printf_record(const std::string& fmt,
                              const std::uint32_t* args,
                              std::uint32_t n_args) {
@@ -519,9 +542,9 @@ void drain_one_printf_record(const std::string& fmt,
         }
         if (i >= fmt.size()) { break; }
         const char conv = fmt[i];
-        spec += conv;
 
         if (arg_idx >= n_args) {
+            spec += conv;
             std::fputs(spec.c_str(), stderr);
             continue;
         }
@@ -530,24 +553,63 @@ void drain_one_printf_record(const std::string& fmt,
             std::fputs("[string]", stderr);
             continue;
         }
-        if (wide_modifier && arg_idx + 1u < n_args) {
+        if (conv == 'p' && arg_idx + 1u < n_args) {
+            const std::uint64_t raw = static_cast<std::uint64_t>(args[arg_idx]) |
+                (static_cast<std::uint64_t>(args[arg_idx + 1u]) << 32u);
             arg_idx += 2u;
-            std::fputs("[64-bit]", stderr);
+            spec += 'p';
+            std::fprintf(stderr, spec.c_str(),
+                         reinterpret_cast<void*>(static_cast<std::uintptr_t>(raw)));
+            continue;
+        }
+        if (wide_modifier && arg_idx + 1u < n_args) {
+            const std::uint64_t raw = static_cast<std::uint64_t>(args[arg_idx]) |
+                (static_cast<std::uint64_t>(args[arg_idx + 1u]) << 32u);
+            arg_idx += 2u;
+            spec += "ll";
+            spec += conv;
+            if (conv == 'd' || conv == 'i') {
+                std::fprintf(stderr, spec.c_str(), static_cast<long long>(raw));
+            } else if (conv == 'u' || conv == 'o' || conv == 'x' || conv == 'X') {
+                std::fprintf(stderr, spec.c_str(), static_cast<unsigned long long>(raw));
+            } else {
+                std::fputs(spec.c_str(), stderr);
+            }
             continue;
         }
         const std::uint32_t raw = args[arg_idx++];
         if (conv == 'f' || conv == 'e' || conv == 'g' ||
-            conv == 'F' || conv == 'E' || conv == 'G') {
-            float fval;
-            std::memcpy(&fval, &raw, sizeof(fval));
-            std::fprintf(stderr, spec.c_str(), fval);
+            conv == 'F' || conv == 'E' || conv == 'G' ||
+            conv == 'a' || conv == 'A') {
+            spec += conv;
+            // CUDA C varargs promote floating arguments to binary64. Retain a
+            // one-word fallback for hand-written PTX fixtures that predate the
+            // Clang ABI decoder.
+            const std::uint32_t remaining_minimum =
+                minimum_printf_words(std::string_view(fmt).substr(i + 1u));
+            if (arg_idx < n_args &&
+                n_args - (arg_idx + 1u) >= remaining_minimum) {
+                const std::uint64_t bits = static_cast<std::uint64_t>(raw) |
+                    (static_cast<std::uint64_t>(args[arg_idx++]) << 32u);
+                double value = 0.0;
+                std::memcpy(&value, &bits, sizeof(value));
+                std::fprintf(stderr, spec.c_str(), value);
+            } else {
+                float value = 0.0f;
+                std::memcpy(&value, &raw, sizeof(value));
+                std::fprintf(stderr, spec.c_str(), static_cast<double>(value));
+            }
         } else if (conv == 'd' || conv == 'i') {
+            spec += conv;
             std::fprintf(stderr, spec.c_str(), static_cast<int>(raw));
         } else if (conv == 'u' || conv == 'o' || conv == 'x' || conv == 'X') {
+            spec += conv;
             std::fprintf(stderr, spec.c_str(), raw);
         } else if (conv == 'c') {
+            spec += conv;
             std::fprintf(stderr, spec.c_str(), static_cast<int>(raw));
         } else {
+            spec += conv;
             std::fputs(spec.c_str(), stderr);
         }
     }
