@@ -124,7 +124,10 @@ MslType lower_type(const ir::Type& type) {
         case ir::TypeKind::kInteger:
             return type.bit_width == 1 ? MslType::boolean() : MslType::uint(type.bit_width);
         case ir::TypeKind::kFloat:
-            return MslType::floating(type.bit_width);
+            // Metal has no double ALU/type. FP64 stays as raw IEEE binary64
+            // storage and is passed to linkable software arithmetic helpers.
+            return type.bit_width == 64 ? MslType::uint(64)
+                                        : MslType::floating(type.bit_width);
         case ir::TypeKind::kVector:
             return MslType::vector(
                 type.elements.empty() ? MslType::uint() : lower_type(type.elements.front()),
@@ -1072,11 +1075,24 @@ struct AstLowerer {
             return MslExpression::identifier(operand.text, lower_type(operand.type));
         }
         std::string spelling = operand.text == "null" ? "nullptr" : operand.text;
+        if (operand.type.kind == ir::TypeKind::kFloat &&
+            operand.type.bit_width == 64 && spelling.starts_with("0d")) {
+            spelling = "0x" + spelling.substr(2) + "ul";
+        }
         if (operand.type.kind == ir::TypeKind::kFloat && operand.type.bit_width == 32 &&
             is_ptx_hex_float_literal(spelling)) {
             spelling = "as_type<float>(0x" + spelling.substr(2) + "u)";
         }
         return MslExpression::literal(std::move(spelling), lower_type(operand.type));
+    }
+
+    MslExpr branch_condition(const ir::Operation& terminator) {
+        MslExpr condition = expression_for(terminator.operands.front());
+        if (terminator.attributes.contains("inverted") &&
+            terminator.attributes.at("inverted") == "true") {
+            condition = MslExpression::unary("!", condition, MslType::boolean());
+        }
+        return condition;
     }
 
     MslStmt declare_result(const ir::Operation& operation, MslExpr initializer) {
@@ -1150,6 +1166,32 @@ struct AstLowerer {
             MslExpr left = expression_for(operation.operands[0]);
             MslExpr right = expression_for(operation.operands[1]);
             MslType expression_type = lower_result_type(operation);
+            if (operation.attributes.contains("fp64_mode")) {
+                const std::string& mode = operation.attributes.at("fp64_mode");
+                const std::string op =
+                    operation.opcode == ir::OpCode::kAdd ? "add" :
+                    operation.opcode == ir::OpCode::kSub ? "sub" :
+                    operation.opcode == ir::OpCode::kMul ? "mul" :
+                    operation.opcode == ir::OpCode::kDiv ? "div" :
+                    operation.opcode == ir::OpCode::kRemainder ? "remainder" : "";
+                if (op.empty()) {
+                    fail(&operation, "unsupported software FP64 binary operation");
+                    return std::nullopt;
+                }
+                std::string callee;
+                if (mode == "fast48") {
+                    callee = "cm_fp64_fast_" + op;
+                } else if (mode == "wide48" && op != "remainder") {
+                    callee = "vf64_wide_" + op;
+                } else if (mode == "ieee64" && op != "remainder") {
+                    callee = "vf64_" + op + "_rne";
+                } else {
+                    callee = "vf64_remainder";
+                }
+                return declare_result(
+                    operation, MslExpression::call(
+                                   callee, {left, right}, expression_type));
+            }
             if (operation.attributes.contains("signed") &&
                 operation.attributes.at("signed") == "true" &&
                 operation.operands[0].type.kind == ir::TypeKind::kInteger) {
@@ -1199,10 +1241,18 @@ struct AstLowerer {
             for (const ir::Operand& operand : operation.operands) {
                 arguments.push_back(expression_for(operand));
             }
+            const std::string callee =
+                operation.attributes.contains("fp64_mode")
+                    ? (operation.attributes.at("fp64_mode") == "fast48"
+                           ? "cm_fp64_fast_fma"
+                           : operation.attributes.at("fp64_mode") == "wide48"
+                                 ? "vf64_wide_fma"
+                                 : "vf64_fma_rne")
+                    : "fma";
             return declare_result(
-                operation,
-                MslExpression::call("fma", std::move(arguments),
-                                    lower_result_type(operation)));
+                operation, MslExpression::call(
+                               callee, std::move(arguments),
+                               lower_result_type(operation)));
         }
 
         if (operation.opcode == ir::OpCode::kAggregateExtract) {
@@ -1259,6 +1309,55 @@ struct AstLowerer {
             if (callee == operation.attributes.end()) {
                 fail(&operation, "direct call is missing a callee");
                 return std::nullopt;
+            }
+            if (operation.attributes.contains("fp64_mode")) {
+                std::vector<MslExpr> arguments;
+                for (const ir::Operand& operand : operation.operands) {
+                    arguments.push_back(expression_for(operand));
+                }
+                const std::string& mode = operation.attributes.at("fp64_mode");
+                std::string target;
+                if (callee->second == "fma") {
+                    target = mode == "fast48" ? "cm_fp64_fast_fma"
+                             : mode == "wide48" ? "vf64_wide_fma"
+                                                : "vf64_fma_rne";
+                } else if (callee->second == "sqrt") {
+                    target = mode == "fast48" ? "cm_fp64_fast_sqrt"
+                             : mode == "wide48" ? "vf64_wide_sqrt"
+                                                : "vf64_sqrt_rne";
+                } else if (callee->second == "fmin" || callee->second == "fmax") {
+                    target = mode == "fast48"
+                                 ? "cm_fp64_fast_" +
+                                       std::string(callee->second == "fmin" ? "min" : "max")
+                                 : "vf64_" +
+                                       std::string(callee->second == "fmin" ? "min" : "max");
+                } else if (callee->second == "remainder") {
+                    target = mode == "fast48" ? "cm_fp64_fast_remainder"
+                                               : "vf64_remainder";
+                } else if (callee->second == "floor" || callee->second == "ceil" ||
+                           callee->second == "trunc" || callee->second == "round" ||
+                           callee->second == "rint") {
+                    target = mode == "fast48" ? "cm_fp64_fast_round_int"
+                                               : "vf64_round_to_int";
+                    const std::string rounding =
+                        callee->second == "floor" ? "2u" :
+                        callee->second == "ceil" ? "3u" :
+                        callee->second == "trunc" ? "1u" :
+                        callee->second == "round" ? "4u" : "0u";
+                    arguments.push_back(
+                        MslExpression::literal(rounding, MslType::uint()));
+                    if (mode != "fast48") {
+                        arguments.push_back(MslExpression::literal(
+                            "false", MslType::boolean()));
+                    }
+                } else {
+                    fail(&operation, "unsupported software FP64 call '" +
+                                         callee->second + "'");
+                    return std::nullopt;
+                }
+                return declare_result(
+                    operation, MslExpression::call(
+                                   target, std::move(arguments), MslType::uint(64)));
             }
             if (callee->second == "__cumetal_signed_abs") {
                 if (operation.results.empty() || operation.operands.size() != 1) {
@@ -1571,6 +1670,15 @@ struct AstLowerer {
         }
 
         if (operation.opcode == ir::OpCode::kNegate) {
+            if (operation.attributes.contains("fp64_mode")) {
+                return declare_result(
+                    operation,
+                    MslExpression::binary(
+                        "^", expression_for(operation.operands.front()),
+                        MslExpression::literal("0x8000000000000000ul",
+                                               MslType::uint(64)),
+                        MslType::uint(64)));
+            }
             return declare_result(
                 operation,
                 MslExpression::unary("-", expression_for(operation.operands.front()),
@@ -1580,6 +1688,27 @@ struct AstLowerer {
         if (operation.opcode == ir::OpCode::kCompare) {
             MslExpr left = expression_for(operation.operands[0]);
             MslExpr right = expression_for(operation.operands[1]);
+            if (operation.attributes.contains("fp64_mode")) {
+                const std::string predicate = operation.attributes.contains("predicate")
+                                                  ? operation.attributes.at("predicate")
+                                                  : "eq";
+                const std::string prefix =
+                    operation.attributes.at("fp64_mode") == "fast48"
+                        ? "cm_fp64_fast_"
+                        : "vf64_";
+                bool invert = predicate == "ne" || predicate == "neu";
+                std::string relation = "eq";
+                if (predicate == "lt" || predicate == "gt") relation = "lt";
+                if (predicate == "le" || predicate == "ge") relation = "le";
+                if (predicate == "gt" || predicate == "ge") std::swap(left, right);
+                MslExpr compared = MslExpression::call(
+                    prefix + relation, {left, right}, MslType::boolean());
+                if (invert) {
+                    compared = MslExpression::unary(
+                        "!", compared, MslType::boolean());
+                }
+                return declare_result(operation, compared);
+            }
             if (operation.attributes.contains("signed") &&
                 operation.attributes.at("signed") == "true" &&
                 operation.operands[0].type.kind == ir::TypeKind::kInteger) {
@@ -1620,12 +1749,38 @@ struct AstLowerer {
                     operation,
                     MslExpression::literal("nullptr", lower_result_type(operation)));
             }
+            if (operation.attributes.contains("fp64_conversion") &&
+                operation.attributes.at("fp64_conversion") == "round_int") {
+                const std::string mode = operation.attributes.contains("fp64_mode")
+                                             ? operation.attributes.at("fp64_mode")
+                                             : "fast48";
+                const std::string target = mode == "fast48"
+                                               ? "cm_fp64_fast_round_int"
+                                               : "vf64_round_to_int";
+                std::vector<MslExpr> arguments = {
+                    expression_for(operation.operands.front()),
+                    MslExpression::literal(
+                        operation.attributes.at("rounding_mode"), MslType::uint()),
+                };
+                if (mode != "fast48") {
+                    arguments.push_back(MslExpression::literal(
+                        "false", MslType::boolean()));
+                }
+                return declare_result(
+                    operation, MslExpression::call(
+                                   target, std::move(arguments), MslType::uint(64)));
+            }
             if (operation.operands.front().type == operation.result_types.front()) {
                 return declare_result(operation,
                                       expression_for(operation.operands.front()));
             }
             if (operation.attributes.contains("bitcast") &&
                 operation.attributes.at("bitcast") == "true") {
+                if (lower_result_type(operation) ==
+                    expression_for(operation.operands.front())->type) {
+                    return declare_result(
+                        operation, expression_for(operation.operands.front()));
+                }
                 return declare_result(
                     operation,
                     MslExpression::bitcast(lower_result_type(operation),
@@ -1637,6 +1792,50 @@ struct AstLowerer {
                     operation,
                     MslExpression::cast(lower_result_type(operation),
                                         expression_for(operation.operands.front()), true));
+            }
+            if (operation.attributes.contains("fp64_conversion")) {
+                const std::string& conversion =
+                    operation.attributes.at("fp64_conversion");
+                const MslExpr input = expression_for(operation.operands.front());
+                if (conversion == "f32_to_f64") {
+                    return declare_result(
+                        operation, MslExpression::call(
+                                       "cm_fp64_fast_f32_to_f64",
+                                       {MslExpression::bitcast(MslType::uint(), input)},
+                                       MslType::uint(64)));
+                }
+                if (conversion == "f64_to_f32") {
+                    const MslExpr raw = MslExpression::call(
+                        "vf64_f64_to_f32",
+                        {input, MslExpression::literal("0u", MslType::uint())},
+                        MslType::uint());
+                    return declare_result(
+                        operation, MslExpression::bitcast(MslType::floating(), raw));
+                }
+                const bool input64 = operation.operands.front().type.bit_width == 64;
+                if (conversion == "signed_to_f64" ||
+                    conversion == "unsigned_to_f64") {
+                    const std::string callee =
+                        "vf64_" + std::string(conversion == "signed_to_f64" ? "i" : "ui") +
+                        (input64 ? "64" : "32") + "_to_f64";
+                    return declare_result(
+                        operation, MslExpression::call(
+                                       callee,
+                                       {input, MslExpression::literal(
+                                                   "0u", MslType::uint())},
+                                       MslType::uint(64)));
+                }
+                const bool output64 = operation.result_types.front().bit_width == 64;
+                const std::string callee =
+                    "vf64_f64_to_" +
+                    std::string(conversion == "f64_to_signed" ? "i" : "ui") +
+                    (output64 ? "64" : "32");
+                return declare_result(
+                    operation, MslExpression::call(
+                                   callee,
+                                   {input, MslExpression::literal("1u", MslType::uint()),
+                                    MslExpression::literal("true", MslType::boolean())},
+                                   lower_result_type(operation)));
             }
             return declare_result(
                 operation,
@@ -1776,12 +1975,14 @@ struct AstLowerer {
             MslExpr shuffle_index = expression_for(operation.operands[1]);
             if (operation.attributes.contains("kind")) {
                 const std::string& kind = operation.attributes.at("kind");
-                if ((kind == "index" || kind == "down" || kind == "up") &&
+                if ((kind == "index" || kind == "down" || kind == "up" ||
+                     kind == "xor") &&
                     operation.operands.size() < 3) {
                     fail(&operation, "PTX SIMD shuffle is missing its clamp/control operand");
                     return std::nullopt;
                 }
-                if (kind == "index" || kind == "down" || kind == "up") {
+                if (kind == "index" || kind == "down" || kind == "up" ||
+                    kind == "xor") {
                     needs_lane_id = true;
                     const MslType uint_type = MslType::uint();
                     const MslExpr lane = MslExpression::identifier(
@@ -1826,13 +2027,25 @@ struct AstLowerer {
                         valid_lane = MslExpression::binary(
                             "<=", requested_lane, maximum_lane,
                             MslType::boolean());
-                    } else {
+                    } else if (kind == "up") {
                         requested_lane = MslExpression::binary(
                             "-", lane, source_or_delta, uint_type);
                         valid_lane = MslExpression::binary(
                             ">=", lane,
                             MslExpression::binary(
                                 "+", minimum_lane, source_or_delta, uint_type),
+                            MslType::boolean());
+                    } else {
+                        requested_lane = MslExpression::binary(
+                            "^", lane, source_or_delta, uint_type);
+                        valid_lane = MslExpression::binary(
+                            "&&",
+                            MslExpression::binary(
+                                ">=", requested_lane, minimum_lane,
+                                MslType::boolean()),
+                            MslExpression::binary(
+                                "<=", requested_lane, maximum_lane,
+                                MslType::boolean()),
                             MslType::boolean());
                     }
                     shuffle_index = MslExpression::conditional(
@@ -2633,14 +2846,14 @@ struct AstLowerer {
         if (first_returns || second_returns) {
             if (first_returns && second_returns) {
                 statements->push_back(MslStatement::if_statement(
-                    expression_for(terminator.operands.front()),
+                    branch_condition(terminator),
                     {lower_return(function.blocks[first].operations.front())},
                     {lower_return(function.blocks[second].operations.front())}));
                 return true;
             }
             const std::size_t return_index = first_returns ? first : second;
             const std::size_t continuation_index = first_returns ? second : first;
-            MslExpr condition = expression_for(terminator.operands.front());
+            MslExpr condition = branch_condition(terminator);
             if (second_returns) {
                 condition = MslExpression::unary("!", condition, MslType::boolean());
             }
@@ -2691,7 +2904,7 @@ struct AstLowerer {
                 }
             }
             exit_statements.push_back(MslStatement::break_statement());
-            MslExpr exit_condition = expression_for(terminator.operands.front());
+            MslExpr exit_condition = branch_condition(terminator);
             if (exit_successor_index == 1) {
                 exit_condition = MslExpression::unary(
                     "!", exit_condition, MslType::boolean());
@@ -2726,7 +2939,7 @@ struct AstLowerer {
             return false;
         }
         statements->push_back(MslStatement::if_statement(
-            expression_for(terminator.operands.front()),
+            branch_condition(terminator),
             std::move(first_statements), std::move(second_statements)));
         if (*join == stop_index) return true;
         return emit_loop_region(*join, stop_index, active_loop_header_index,
@@ -2862,7 +3075,7 @@ struct AstLowerer {
                 return false;
             }
             loop_statements.push_back(MslStatement::if_statement(
-                expression_for(terminator.operands.front()),
+                branch_condition(terminator),
                 std::move(first_statements), std::move(second_statements)));
             if (!emit_loop_region(*join, header_index, header_index, nullptr,
                                   &loop_statements)) {
@@ -2890,7 +3103,7 @@ struct AstLowerer {
         const std::size_t body_successor_index =
             block_indices.at(terminator.successors[0].block) == body_index ? 0 : 1;
         const std::size_t exit_successor_index = 1 - body_successor_index;
-        MslExpr continue_condition = expression_for(terminator.operands.front());
+        MslExpr continue_condition = branch_condition(terminator);
         if (body_successor_index == 1) {
             continue_condition =
                 MslExpression::unary("!", continue_condition, MslType::boolean());
@@ -3042,12 +3255,7 @@ struct AstLowerer {
                     !emit_dispatch_transition(terminator.successors[1], state, &second)) {
                     return false;
                 }
-                MslExpr condition = expression_for(terminator.operands.front());
-                if (terminator.attributes.contains("inverted") &&
-                    terminator.attributes.at("inverted") == "true") {
-                    condition =
-                        MslExpression::unary("!", condition, MslType::boolean());
-                }
+                MslExpr condition = branch_condition(terminator);
                 body.push_back(MslStatement::if_statement(
                     condition, std::move(first), std::move(second)));
                 body.push_back(MslStatement::break_statement());
@@ -3122,7 +3330,7 @@ struct AstLowerer {
             if (first_returns == second_returns) {
                 if (first_returns) {
                     statements->push_back(MslStatement::if_statement(
-                        expression_for(terminator.operands.front()),
+                        branch_condition(terminator),
                         {lower_return(function.blocks[first].operations.front())},
                         {lower_return(function.blocks[second].operations.front())}));
                     return true;
@@ -3146,17 +3354,11 @@ struct AstLowerer {
                     return false;
                 }
                 statements->push_back(MslStatement::if_statement(
-                    expression_for(terminator.operands.front()),
+                    branch_condition(terminator),
                     std::move(first_statements), std::move(second_statements)));
                 return emit_from(*join, statements);
             }
-            MslExpr condition = expression_for(terminator.operands.front());
-            const bool inverted =
-                terminator.attributes.contains("inverted") &&
-                terminator.attributes.at("inverted") == "true";
-            if (inverted) {
-                condition = MslExpression::unary("!", condition, MslType::boolean());
-            }
+            MslExpr condition = branch_condition(terminator);
             if (second_returns) {
                 condition = MslExpression::unary("!", condition, MslType::boolean());
             }
@@ -3589,9 +3791,11 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     }
     bool needs_device_cas = false;
     bool needs_threadgroup_cas = false;
+    bool needs_fp64_support = false;
     for (const ir::Function& function : metal_module.functions) {
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::Operation& operation : block.operations) {
+                needs_fp64_support |= operation.attributes.contains("fp64_mode");
                 if (operation.opcode != ir::OpCode::kMetalAtomic ||
                     !operation.attributes.contains("atomic_op") ||
                     operation.attributes.at("atomic_op") != "cas" ||
@@ -3693,6 +3897,60 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         return result;
     }
     result.source = printed.source;
+    if (needs_fp64_support) {
+        static constexpr std::string_view kFp64Declarations = R"msl(
+ulong cm_fp64_fast_add(ulong, ulong);
+ulong cm_fp64_fast_sub(ulong, ulong);
+ulong cm_fp64_fast_mul(ulong, ulong);
+ulong cm_fp64_fast_div(ulong, ulong);
+ulong cm_fp64_fast_sqrt(ulong);
+ulong cm_fp64_fast_fma(ulong, ulong, ulong);
+bool cm_fp64_fast_eq(ulong, ulong);
+bool cm_fp64_fast_lt(ulong, ulong);
+bool cm_fp64_fast_le(ulong, ulong);
+ulong cm_fp64_fast_min(ulong, ulong);
+ulong cm_fp64_fast_max(ulong, ulong);
+ulong cm_fp64_fast_remainder(ulong, ulong);
+ulong cm_fp64_fast_round_int(ulong, uint);
+ulong cm_fp64_fast_f32_to_f64(uint);
+ulong vf64_add_rne(ulong, ulong);
+ulong vf64_sub_rne(ulong, ulong);
+ulong vf64_mul_rne(ulong, ulong);
+ulong vf64_div_rne(ulong, ulong);
+ulong vf64_sqrt_rne(ulong);
+ulong vf64_fma_rne(ulong, ulong, ulong);
+ulong vf64_remainder(ulong, ulong);
+ulong vf64_round_to_int(ulong, uint, bool);
+bool vf64_eq(ulong, ulong);
+bool vf64_lt(ulong, ulong);
+bool vf64_le(ulong, ulong);
+ulong vf64_min(ulong, ulong);
+ulong vf64_max(ulong, ulong);
+ulong vf64_wide_add(ulong, ulong);
+ulong vf64_wide_sub(ulong, ulong);
+ulong vf64_wide_mul(ulong, ulong);
+ulong vf64_wide_div(ulong, ulong);
+ulong vf64_wide_sqrt(ulong);
+ulong vf64_wide_fma(ulong, ulong, ulong);
+uint vf64_f64_to_f32(ulong, uint);
+ulong vf64_f32_to_f64(uint);
+ulong vf64_ui32_to_f64(uint, uint);
+ulong vf64_ui64_to_f64(ulong, uint);
+ulong vf64_i32_to_f64(int, uint);
+ulong vf64_i64_to_f64(long, uint);
+uint vf64_f64_to_ui32(ulong, uint, bool);
+ulong vf64_f64_to_ui64(ulong, uint, bool);
+int vf64_f64_to_i32(ulong, uint, bool);
+long vf64_f64_to_i64(ulong, uint, bool);
+)msl";
+        const std::string anchor = "using namespace metal;\n";
+        const std::size_t insertion = result.source.find(anchor);
+        if (insertion == std::string::npos) {
+            result.error = "typed MSL FP64 support declaration anchor is missing";
+            return result;
+        }
+        result.source.insert(insertion + anchor.size(), kFp64Declarations);
+    }
     result.ok = true;
     return result;
 }
@@ -3703,6 +3961,7 @@ PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& o
     import_options.strict = options.strict;
     import_options.entry_name = options.entry_name;
     import_options.source_name = options.source_name;
+    import_options.fp64_mode = options.fp64_mode;
     ir::PtxImportResult imported = ir::import_ptx(ptx, import_options);
     result.warnings = imported.warnings;
     result.printf_formats = imported.printf_formats;
@@ -3733,11 +3992,13 @@ PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& o
 
 NvvmToMslResult compile_nvvm_to_msl(std::string_view llvm_ir,
                                      std::string_view source_name,
-                                     std::string_view entry_name) {
+                                     std::string_view entry_name,
+                                     std::string_view fp64_mode) {
     NvvmToMslResult result;
     ir::NvvmImportOptions options;
     options.source_name = std::string(source_name);
     options.entry_name = std::string(entry_name);
+    options.fp64_mode = std::string(fp64_mode);
     ir::NvvmImportResult imported = ir::import_nvvm_llvm_ir(llvm_ir, options);
     result.warnings = imported.warnings;
     result.printf_formats = imported.printf_formats;

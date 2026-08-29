@@ -76,7 +76,7 @@ cumetalc kernel.cu --emit=exe        -o kernel
 | `--cuda-device` | Ask a CUDA-capable Clang to produce PTX before CuMetal lowering. |
 | `--entry NAME` | Compile one kernel and its reachable device-call closure. |
 | `--ptx-strict` | Reject unsupported PTX rather than tolerating it. |
-| `--fp64=fast48\|wide48\|ieee64\|native\|emulate\|warn` | Select the virtual FP64 policy; runtime/JIT defaults to `fast48` (`emulate` alias). |
+| `--fp64=fast48\|wide48\|ieee64\|native\|emulate\|warn` | Select the virtual FP64 policy; direct typed `.cu` compilation and runtime/JIT default to `fast48` (`emulate` alias), while offline PTX compatibility retains `native`. |
 | `--save-temps` | Retain link intermediates. |
 
 The default follows measured production-metallib compilation coverage rather
@@ -85,8 +85,8 @@ uses CUDA Clang 21-23:
 
 | Input corpus | `legacy` | `cumetal-ir` |
 | --- | ---: | ---: |
-| direct `.cu` | 0/23 | **21/23** |
-| `.cu --cuda-device` / PTX | **23/23** | 21/23 |
+| direct `.cu` | 0/23 | **22/23** |
+| `.cu --cuda-device` / PTX | **23/23** | 22/23 |
 
 Direct `.cu` therefore defaults to `cumetal-ir`; PTX and `--cuda-device`
 default to `legacy`. Reproduce the reviewed per-file baseline with:

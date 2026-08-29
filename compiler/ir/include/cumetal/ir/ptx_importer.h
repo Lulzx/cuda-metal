@@ -12,6 +12,7 @@ struct PtxImportOptions {
     bool strict = true;
     std::string entry_name;
     std::string source_name;
+    std::string fp64_mode = "fast48";
 };
 
 struct PtxImportResult {

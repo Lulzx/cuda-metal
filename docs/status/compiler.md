@@ -16,8 +16,8 @@ production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/23 | **21/23** |
-| PTX / `--cuda-device` | **23/23** | **21/23** |
+| direct `.cu` | 0/23 | **22/23** |
+| PTX / `--cuda-device` | **23/23** | **22/23** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler
@@ -48,6 +48,13 @@ bounded atomic ring-record ABI. Focused Apple-GPU tests validate every record
 from a 32-lane multidimensional launch and prove a capacity-boundary record is
 rejected without payload writes; unresolved formats and unsupported tuple
 widths fail explicitly.
+Both typed frontends lower FP64 values as raw binary64 storage and call private
+software-ALU helpers in the kernel translation unit. The `fp64_precision`
+corpus passes independently produced direct-NVVM and typed-PTX metallibs on
+Apple GPU, covering the documented `fast48` precision/range contract, special
+values, chained arithmetic, shared memory, 32-lane shuffles, store/reload,
+`uint64_t` aliasing, comparisons, libdevice calls, and rounding. This does not
+change the binary32 exponent-range limitation or make Metal FP64 native.
 Externally initialized direct-NVVM `__constant__` and writable `__device__`
 symbols use explicit hidden Metal buffers instead of embedded zero initializers.
 The constant buffer has checked aligned offsets and a 64 KiB limit; the writable
@@ -65,8 +72,7 @@ Referenced PTX module constants use the reserved constant-symbol buffer at
 binding 30 with checked byte offsets, and the proven float `frexp` pattern
 normalizes Clang's double-width call-slot ABI without admitting general FP64.
 CUDA's double-signature `frexp` call is narrowed only for the proven
-float-to-double-call-to-float pattern, preserving the integer exponent output
-without admitting general FP64 arithmetic.
+float-to-double-call-to-float pattern, preserving the integer exponent output.
 PTX memory operands retain literal byte displacements before typed load, store,
 and atomic lowering. Relaxed CUDA system atomics use an explicit coherent-UMA
 policy over tracked shared allocations; CAS retries spurious weak failures, and

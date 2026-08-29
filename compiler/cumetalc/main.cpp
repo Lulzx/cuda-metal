@@ -598,6 +598,7 @@ int main(int argc, char** argv) {
     std::string ptx_entry_name;
     bool ptx_strict = false;
     cumetal::ptx::Fp64Mode ptx_fp64_mode = cumetal::ptx::Fp64Mode::kNative;
+    bool fp64_mode_set_explicitly = false;
     bool needs_vf64_support = false;
     bool cuda_device_frontend = false;
     std::string cuda_arch = "sm_80";
@@ -771,6 +772,7 @@ int main(int argc, char** argv) {
                           << " (valid: fast48, wide48, ieee64, native, emulate, warn)\n";
                 return 2;
             }
+            fp64_mode_set_explicitly = true;
         } else if (arg == "--link") {
             link_executable = true;
             link_requested_explicitly = true;
@@ -807,8 +809,8 @@ int main(int argc, char** argv) {
     // over the manifest-controlled 23-file source/sample corpus (see
     // tests/cuda_projects/backend_matrix_manifest.txt and docs/compiler-architecture.md):
     //
-    //   direct .cu           legacy 0/23   cumetal-ir 20/23
-    //   --cuda-device (PTX)  legacy 23/23  cumetal-ir 20/23
+    //   direct .cu           legacy 0/23   cumetal-ir 22/23
+    //   --cuda-device (PTX)  legacy 23/23  cumetal-ir 22/23
     //
     // These are production-metallib compilation counts, not runtime correctness
     // counts. Legacy's direct-.cu mode is the qualifier-stripping prototype documented in
@@ -817,6 +819,14 @@ int main(int argc, char** argv) {
     // would regress the path llm.c, llama.cpp, and PhysX all depend on. --backend overrides.
     if (!backend_set_explicitly && lower_ext(options.input) == ".cu" && !cuda_device_frontend) {
         backend = BackendKind::kCumetalIr;
+    }
+    // Direct source compilation selects the typed backend by default, so give
+    // it the same usable software-FP64 default as runtime/JIT registration.
+    // PTX/offline compatibility retains the historical native default, and an
+    // explicit --fp64 policy always wins.
+    if (!fp64_mode_set_explicitly && backend == BackendKind::kCumetalIr &&
+        lower_ext(options.input) == ".cu" && !cuda_device_frontend) {
+        ptx_fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
     }
 
     // `cumetalc foo.cu -o foo` builds an executable. Infer that from the shape of the request --
@@ -961,6 +971,8 @@ int main(int argc, char** argv) {
             compile_options.strict = true;
             compile_options.entry_name = ptx_entry_name;
             compile_options.source_name = options.input.string();
+            compile_options.fp64_mode =
+                std::string(cumetal::ptx::fp64_mode_name(ptx_fp64_mode));
             const auto compiled =
                 cumetal::metal::compile_ptx_to_msl(ptx_source, compile_options);
             for (const std::string& warning : compiled.warnings) {
@@ -988,6 +1000,7 @@ int main(int argc, char** argv) {
             options.input = temp_stage_file;
             options.kernel_name = compiled.gpu_ir.functions.front().name;
             temp_files.push_back(temp_stage_file);
+            needs_vf64_support = ptx_source.find(".f64") != std::string::npos;
         } else {
             if (emit_stage == EmitStage::kCumetalIr ||
                 emit_stage == EmitStage::kMetalIr) {
@@ -1075,7 +1088,7 @@ int main(int argc, char** argv) {
             const std::string llvm_ir(bytes.begin(), bytes.end());
             const auto compiled =
                 cumetal::metal::compile_nvvm_to_msl(llvm_ir, options.input.string(),
-                                                    ptx_entry_name);
+                    ptx_entry_name, cumetal::ptx::fp64_mode_name(ptx_fp64_mode));
             if (!compiled.ok) {
                 std::cerr << "cumetalc failed: " << compiled.error << "\n";
                 return 1;
@@ -1103,6 +1116,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             options.input = temp_stage_file;
+            needs_vf64_support = llvm_ir.find("double") != std::string::npos;
             options.kernel_name = compiled.gpu_ir.functions.front().name;
         } else if (emit_stage != EmitStage::kMetallib) {
             std::cerr << "cumetalc failed: LLVM inspection stages require "
@@ -1198,7 +1212,8 @@ int main(int argc, char** argv) {
                 return 0;
             }
             const auto compiled = cumetal::metal::compile_nvvm_to_msl(
-                llvm_ir, original_input.string(), ptx_entry_name);
+                llvm_ir, original_input.string(), ptx_entry_name,
+                cumetal::ptx::fp64_mode_name(ptx_fp64_mode));
             if (!compiled.ok) {
                 std::cerr << "cumetalc failed: " << compiled.error << "\n";
                 return 1;
@@ -1226,6 +1241,7 @@ int main(int argc, char** argv) {
             std::filesystem::remove(device_ll, ec);
             options.input = temp_stage_file;
             options.kernel_name = compiled.gpu_ir.functions.front().name;
+            needs_vf64_support = llvm_ir.find("double") != std::string::npos;
         } else {
         if (!command_exists("xcrun")) {
             std::cerr << "cumetalc failed: xcrun is required for .cu frontend compilation\n";
@@ -1265,10 +1281,13 @@ int main(int argc, char** argv) {
     }
 
     if (needs_vf64_support) {
-        options.additional_link_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "third_party" / "VF64-metal" /
-            "Sources" / "VF64Metal" / "Shaders" / "Interop" / "VF64Support.metal"
-        );
+        const bool typed_msl = options.input.extension() == ".metal";
+        auto& support_inputs = typed_msl ? options.textual_include_inputs
+                                         : options.additional_link_inputs;
+        support_inputs.push_back(
+            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
+            "support" / (typed_msl ? "cumetal_fp64_inline_support.metal"
+                                     : "cumetal_fp64_support.metal"));
     }
     const auto result = cumetal::air_emitter::emit_metallib(options);
     for (const auto& temp_file : temp_files) {

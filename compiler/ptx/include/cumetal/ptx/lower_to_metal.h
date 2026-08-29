@@ -18,6 +18,7 @@ struct LowerToMetalOptions {
     bool allow_workload_specializations = false;
     std::string entry_name;
     PtxMetalBackend backend = PtxMetalBackend::kLegacy;
+    std::string fp64_mode = "fast48";
 };
 
 enum class MetalLoweringKind {

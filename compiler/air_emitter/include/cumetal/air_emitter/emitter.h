@@ -23,6 +23,10 @@ struct EmitOptions {
     // Additional AIR modules or Metal sources to compile and statically link
     // into the result. Used by software ISA backends such as VF64.
     std::vector<std::filesystem::path> additional_link_inputs;
+    // Metal sources included textually ahead of a .metal input. This is used
+    // for private inline support code that must be part of the kernel's own
+    // translation unit rather than an MTL visible-function library.
+    std::vector<std::filesystem::path> textual_include_inputs;
 };
 
 struct EmitResult {

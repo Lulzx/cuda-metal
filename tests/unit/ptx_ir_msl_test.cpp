@@ -154,6 +154,55 @@ DONE:
         std::cerr << loop_join.error << "\n";
     }
 
+    const std::string inverted_loop_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .entry inverted_loop(.param .u32 count) {
+    .reg .pred %p1;
+    .reg .b32 %r<3>;
+    ld.param.u32 %r1, [count];
+    mov.u32 %r2, 0;
+LOOP:
+    add.u32 %r2, %r2, 1;
+    setp.eq.u32 %p1, %r2, %r1;
+    @!%p1 bra LOOP;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult inverted_loop =
+        metal::compile_ptx_to_msl(inverted_loop_ptx);
+    ok &= expect(inverted_loop.ok &&
+                     inverted_loop.source.find("if (!!") != std::string::npos,
+                 "inverted PTX loop predicates preserve the back-edge condition");
+
+    const std::string b64_shuffle_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry b64_shuffle(.param .u64 input, .param .u64 output) {
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<5>;
+    ld.param.u64 %rd1, [input];
+    ld.param.u64 %rd2, [output];
+    ld.global.b64 %rd3, [%rd1];
+    cvt.u32.u64 %r1, %rd3;
+    { .reg .b32 tmp; mov.b64 {tmp, %r2}, %rd3; }
+    shfl.sync.down.b32 %r3, %r2, 1, 31, -1;
+    cvt.u64.u32 %rd4, %r3;
+    st.global.b64 [%rd2], %rd4;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult b64_shuffle =
+        metal::compile_ptx_to_msl(b64_shuffle_ptx);
+    const std::string b64_shuffle_ir = ir::print(b64_shuffle.gpu_ir);
+    ok &= expect(b64_shuffle.ok &&
+                     b64_shuffle_ir.find("shr") != std::string::npos &&
+                     b64_shuffle_ir.find("-> i64") != std::string::npos &&
+                     b64_shuffle.source.find("cm_lane_id +") != std::string::npos &&
+                     b64_shuffle.source.find("simd_shuffle(") != std::string::npos,
+                 "partial mov.b64 tuples and cvt.u64 preserve 32-bit shuffle halves");
+
     const std::string barrier_self_loop_ptx = R"ptx(
 .version 7.0
 .target sm_80

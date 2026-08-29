@@ -15,6 +15,7 @@ struct NvvmImportOptions {
     // device functions it calls. This keeps source-AOT artifacts scoped to the
     // selected entry without requiring whole-kernel inlining.
     std::string entry_name;
+    std::string fp64_mode = "fast48";
 };
 
 struct NvvmImportResult {

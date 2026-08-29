@@ -87,7 +87,10 @@ std::vector<std::string> destination_registers(const Instruction& instruction) {
         return {};
     }
     std::vector<std::string> destinations = registers_in(instruction.operands.front());
-    if (root != "setp" && root != "shfl" && destinations.size() > 1) {
+    const bool tuple_move = root == "mov" &&
+                            instruction.opcode.find(".b64") != std::string::npos;
+    if (root != "setp" && root != "shfl" && !tuple_move &&
+        destinations.size() > 1) {
         destinations.resize(1);
     }
     return destinations;
@@ -137,6 +140,29 @@ Type ptx_scalar_type(std::string_view spelling) {
         return Type::floating(bits);
     }
     return Type::integer(bits);
+}
+
+Type ptx_cvt_result_type(std::string_view opcode) {
+    std::size_t cursor = opcode.find('.');
+    while (cursor != std::string_view::npos && cursor + 1 < opcode.size()) {
+        const std::size_t begin = cursor + 1;
+        const std::size_t end = opcode.find('.', begin);
+        const std::string_view token = opcode.substr(
+            begin, (end == std::string_view::npos ? opcode.size() : end) - begin);
+        if (token.size() >= 2 &&
+            (token.front() == 'u' || token.front() == 's' ||
+             token.front() == 'b' || token.front() == 'f') &&
+            std::all_of(token.begin() + 1, token.end(), [](char c) {
+                return c >= '0' && c <= '9';
+            })) {
+            const std::uint32_t bits = static_cast<std::uint32_t>(
+                std::stoul(std::string(token.substr(1))));
+            return token.front() == 'f' ? Type::floating(bits)
+                                        : Type::integer(bits);
+        }
+        cursor = end;
+    }
+    return ptx_scalar_type(opcode);
 }
 
 Type parameter_type(const cumetal::ptx::Parameter& parameter) {
@@ -192,6 +218,24 @@ struct BuiltinSignature {
 };
 
 std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
+    static const std::unordered_map<std::string, std::string> kDoubleBuiltins = {
+        {"__nv_fma", "fma"}, {"__nv_sqrt", "sqrt"},
+        {"__nv_fmin", "fmin"}, {"__nv_fmax", "fmax"},
+        {"__nv_remainder", "remainder"}, {"__nv_floor", "floor"},
+        {"__nv_ceil", "ceil"}, {"__nv_trunc", "trunc"},
+        {"__nv_round", "round"}, {"__nv_rint", "rint"},
+    };
+    const auto double_builtin = kDoubleBuiltins.find(std::string(name));
+    if (double_builtin != kDoubleBuiltins.end()) {
+        const std::size_t arity = name == "__nv_fma" ? 3 :
+                                  (name == "__nv_fmin" || name == "__nv_fmax" ||
+                                   name == "__nv_remainder" ? 2 : 1);
+        return BuiltinSignature{
+            .metal_name = double_builtin->second,
+            .return_type = Type::floating(64),
+            .argument_types = std::vector<Type>(arity, Type::floating(64)),
+        };
+    }
     static const std::unordered_map<std::string, std::string> kFloatBuiltins = {
         {"__nv_fminf", "fmin"}, {"__nv_fmaxf", "fmax"},
         {"__nv_sqrtf", "sqrt"}, {"__nv_rsqrtf", "rsqrt"},
@@ -838,9 +882,27 @@ struct Importer {
         operation.location = {.file = result.module.source_name,
                               .line = static_cast<std::uint32_t>(std::max(0, instruction.line))};
         operation.attributes["ptx_opcode"] = instruction.opcode;
+        if (instruction.opcode.find(".f64") != std::string::npos) {
+            operation.attributes["fp64_mode"] =
+                result.module.attributes.at("fp64_mode");
+            result.module.semantic_quality = SemanticQuality::kSemanticEmulation;
+            const std::string caveat =
+                "FP64 uses raw binary64 storage with the selected software ALU mode";
+            if (std::find(result.module.semantic_caveats.begin(),
+                          result.module.semantic_caveats.end(), caveat) ==
+                result.module.semantic_caveats.end()) {
+                result.module.semantic_caveats.push_back(caveat);
+            }
+        }
         operation.results = instruction_results[&instruction];
         for (ValueId value : operation.results) {
             operation.result_types.push_back(value_types[value]);
+        }
+        if (instruction.opcode.find(".f64") != std::string::npos) {
+            for (std::size_t i = 0; i < operation.results.size(); ++i) {
+                operation.result_types[i] = Type::floating(64);
+                value_types[operation.results[i]] = Type::floating(64);
+            }
         }
 
         const std::vector<std::string> destinations = destination_registers(instruction);
@@ -894,6 +956,127 @@ struct Importer {
             block->operations.push_back(std::move(offset));
             return Operand::value_ref(pointer, base.type);
         };
+
+        if (root == "mov" && instruction.opcode.find(".b64") != std::string::npos &&
+            destinations.size() == 2 && instruction.operands.size() >= 2) {
+            if (!instruction.predicate.empty()) {
+                return fail(&instruction, "predicated b64 tuple unpack is unsupported");
+            }
+            const Operand packed = source_operand(1, Type::integer(64));
+            operation.opcode = OpCode::kConvert;
+            operation.results = {instruction_results[&instruction][0]};
+            operation.result_types = {Type::integer(32)};
+            operation.operands = {packed};
+            value_types[operation.results.front()] = Type::integer(32);
+            block->operations.push_back(std::move(operation));
+
+            Operation shift;
+            shift.opcode = OpCode::kShiftRight;
+            shift.location = {.file = result.module.source_name,
+                              .line = static_cast<std::uint32_t>(
+                                  std::max(0, instruction.line))};
+            const ValueId shifted = builder.next_value();
+            shift.results = {shifted};
+            shift.result_types = {Type::integer(64)};
+            shift.operands = {packed, Operand::immediate("32", Type::integer(64))};
+            value_types[shifted] = Type::integer(64);
+            block->operations.push_back(std::move(shift));
+
+            Operation high;
+            high.opcode = OpCode::kConvert;
+            high.location = {.file = result.module.source_name,
+                             .line = static_cast<std::uint32_t>(
+                                 std::max(0, instruction.line))};
+            high.results = {instruction_results[&instruction][1]};
+            high.result_types = {Type::integer(32)};
+            high.operands = {Operand::value_ref(shifted, Type::integer(64))};
+            value_types[high.results.front()] = Type::integer(32);
+            block->operations.push_back(std::move(high));
+            (*environment)[destinations[0]] = instruction_results[&instruction][0];
+            (*environment)[destinations[1]] = instruction_results[&instruction][1];
+            return true;
+        }
+        if (root == "mov" && instruction.opcode.find(".b64") != std::string::npos &&
+            destinations.size() == 1 && instruction.operands.size() >= 2 &&
+            instruction.operands.front().find('{') != std::string::npos &&
+            instruction.operands.front().find(',') != std::string::npos) {
+            // Clang uses an anonymous inline-assembly temporary for one half of
+            // a tuple, for example `{tmp, %r7}`. The parser intentionally only
+            // assigns SSA values to `%` registers, so recover whether the sole
+            // named destination is the low or high 32-bit half here.
+            if (!instruction.predicate.empty()) {
+                return fail(&instruction, "predicated partial b64 tuple unpack is unsupported");
+            }
+            const std::string& tuple = instruction.operands.front();
+            const std::size_t comma = tuple.find(',');
+            const bool named_high = tuple.find('%') > comma;
+            const Operand packed = source_operand(1, Type::integer(64));
+            Operand selected = packed;
+            if (named_high) {
+                Operation shift;
+                shift.opcode = OpCode::kShiftRight;
+                shift.location = operation.location;
+                shift.operands = {packed,
+                                  Operand::immediate("32", Type::integer(64))};
+                const ValueId shifted = builder.next_value();
+                shift.results = {shifted};
+                shift.result_types = {Type::integer(64)};
+                value_types[shifted] = Type::integer(64);
+                block->operations.push_back(std::move(shift));
+                selected = Operand::value_ref(shifted, Type::integer(64));
+            }
+            operation.opcode = OpCode::kConvert;
+            operation.result_types = {Type::integer(32)};
+            operation.operands = {selected};
+            value_types[operation.results.front()] = Type::integer(32);
+            block->operations.push_back(std::move(operation));
+            (*environment)[destinations.front()] =
+                instruction_results[&instruction].front();
+            return true;
+        }
+        if (root == "mov" && instruction.opcode.find(".b64") != std::string::npos &&
+            destinations.size() == 1 && instruction.operands.size() >= 2) {
+            const std::vector<std::string> parts = registers_in(instruction.operands[1]);
+            if (parts.size() == 2) {
+                if (!instruction.predicate.empty()) {
+                    return fail(&instruction, "predicated b64 tuple pack is unsupported");
+                }
+                const Operand low = operand_for(parts[0], *environment, Type::integer(32));
+                const Operand high = operand_for(parts[1], *environment, Type::integer(32));
+                const auto widen = [&](const Operand& input) {
+                    Operation conversion;
+                    conversion.opcode = OpCode::kConvert;
+                    conversion.location = operation.location;
+                    conversion.operands = {input};
+                    const ValueId value = builder.next_value();
+                    conversion.results = {value};
+                    conversion.result_types = {Type::integer(64)};
+                    value_types[value] = Type::integer(64);
+                    block->operations.push_back(std::move(conversion));
+                    return Operand::value_ref(value, Type::integer(64));
+                };
+                const Operand low64 = widen(low);
+                const Operand high64 = widen(high);
+                Operation shift;
+                shift.opcode = OpCode::kShiftLeft;
+                shift.location = operation.location;
+                shift.operands = {high64,
+                                  Operand::immediate("32", Type::integer(64))};
+                const ValueId shifted = builder.next_value();
+                shift.results = {shifted};
+                shift.result_types = {Type::integer(64)};
+                value_types[shifted] = Type::integer(64);
+                block->operations.push_back(std::move(shift));
+                operation.opcode = OpCode::kBitOr;
+                operation.result_types = {Type::integer(64)};
+                value_types[operation.results.front()] = Type::integer(64);
+                operation.operands = {
+                    low64, Operand::value_ref(shifted, Type::integer(64))};
+                block->operations.push_back(std::move(operation));
+                (*environment)[destinations[0]] = instruction_results[&instruction][0];
+                return true;
+            }
+        }
 
         if (starts_with(instruction.opcode, "st.param")) {
             if (instruction.operands.size() < 2) {
@@ -1128,6 +1311,15 @@ struct Importer {
             }
         } else if (root == "shfl") {
             operation.opcode = OpCode::kShuffle;
+            if (instruction.opcode.find(".down.") != std::string::npos) {
+                operation.attributes["kind"] = "down";
+            } else if (instruction.opcode.find(".up.") != std::string::npos) {
+                operation.attributes["kind"] = "up";
+            } else if (instruction.opcode.find(".bfly.") != std::string::npos) {
+                operation.attributes["kind"] = "xor";
+            } else {
+                operation.attributes["kind"] = "index";
+            }
             for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
                 operation.operands.push_back(source_operand(i, ptx_scalar_type(instruction.opcode)));
             }
@@ -1144,20 +1336,27 @@ struct Importer {
             }
         } else if (root == "cvt") {
             operation.opcode = OpCode::kConvert;
-            if (instruction.opcode.find(".f64.f32") != std::string::npos ||
-                instruction.opcode.find(".f32.f64") != std::string::npos) {
+            operation.result_types.front() = ptx_cvt_result_type(instruction.opcode);
+            value_types[operation.results.front()] = operation.result_types.front();
+            if (instruction.opcode.find(".rni.f64.f64") != std::string::npos) {
+                operation.result_types.front() = Type::floating(64);
+                value_types[operation.results.front()] = Type::floating(64);
+                operation.operands.push_back(
+                    bit_container_operand(1, Type::floating(64)));
+                operation.attributes["fp64_conversion"] = "round_int";
+                operation.attributes["rounding_mode"] = "0u";
+            } else if (instruction.opcode.find(".f64.f32") != std::string::npos) {
+                operation.result_types.front() = Type::floating(64);
+                value_types[operation.results.front()] = Type::floating(64);
+                operation.operands.push_back(
+                    bit_container_operand(1, Type::floating(32)));
+                operation.attributes["fp64_conversion"] = "f32_to_f64";
+            } else if (instruction.opcode.find(".f32.f64") != std::string::npos) {
                 operation.result_types.front() = Type::floating(32);
                 value_types[operation.results.front()] = Type::floating(32);
                 operation.operands.push_back(
-                    bit_container_operand(1, Type::floating(32)));
-                result.module.semantic_quality = SemanticQuality::kToleranceBounded;
-                const std::string caveat =
-                    "CUDA float-frexp double ABI is normalized at its float boundary";
-                if (std::find(result.module.semantic_caveats.begin(),
-                              result.module.semantic_caveats.end(), caveat) ==
-                    result.module.semantic_caveats.end()) {
-                    result.module.semantic_caveats.push_back(caveat);
-                }
+                    bit_container_operand(1, Type::floating(64)));
+                operation.attributes["fp64_conversion"] = "f64_to_f32";
             } else {
                 operation.operands.push_back(
                     source_operand(1, operation.result_types.front()));
@@ -1251,6 +1450,10 @@ struct Importer {
             operation.opcode = OpCode::kCall;
             operation.attributes["callee"] = signature->metal_name;
             operation.attributes["builtin"] = "true";
+            if (signature->return_type == Type::floating(64)) {
+                operation.attributes["fp64_mode"] =
+                    result.module.attributes.at("fp64_mode");
+            }
             for (std::size_t i = 0; i < argument_names.size(); ++i) {
                 const auto slot = call_parameter_slots.find(argument_names[i]);
                 if (slot == call_parameter_slots.end()) {
@@ -1258,6 +1461,27 @@ struct Importer {
                                                   "' was not initialized");
                 }
                 Operand argument = slot->second;
+                if (callee == "__nv_frexp" && i == 0 &&
+                    argument.type == Type::floating(64) &&
+                    signature->argument_types[i] == Type::floating(32) &&
+                    argument.kind == OperandKind::kValue) {
+                    // Clang widens float to the ABI's double slot before the
+                    // call. This builtin is intentionally the proven float
+                    // normalization: recover the exact f32 producer instead
+                    // of bitcasting the now-correct 64-bit software value.
+                    for (auto prior = block->operations.rbegin();
+                         prior != block->operations.rend(); ++prior) {
+                        if (prior->results.size() == 1 &&
+                            prior->results.front() == argument.value &&
+                            prior->attributes.contains("fp64_conversion") &&
+                            prior->attributes.at("fp64_conversion") ==
+                                "f32_to_f64" &&
+                            prior->operands.size() == 1) {
+                            argument = prior->operands.front();
+                            break;
+                        }
+                    }
+                }
                 if (!(argument.type == signature->argument_types[i])) {
                     Operation conversion;
                     conversion.opcode = OpCode::kConvert;
@@ -1638,6 +1862,14 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     importer.result.module.stage = IrStage::kGpuSemantic;
     importer.result.module.attributes["frontend"] = "ptx";
     importer.result.module.attributes["ir_schema"] = "1";
+    if (ptx.find(".f64") != std::string_view::npos &&
+        options.fp64_mode != "fast48" && options.fp64_mode != "wide48" &&
+        options.fp64_mode != "ieee64") {
+        importer.result.error =
+            "typed PTX FP64 mode must be fast48, wide48, or ieee64";
+        return importer.result;
+    }
+    importer.result.module.attributes["fp64_mode"] = options.fp64_mode;
     importer.result.module.global_threadgroups = scan_threadgroup_globals(ptx);
     for (const GlobalThreadgroup& global : importer.result.module.global_threadgroups) {
         importer.threadgroup_symbols.insert(global.name);

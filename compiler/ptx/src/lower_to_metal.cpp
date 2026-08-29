@@ -3024,6 +3024,7 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
         cumetal::metal::PtxToMslOptions compile_options;
         compile_options.strict = true;
         compile_options.entry_name = options.entry_name;
+        compile_options.fp64_mode = options.fp64_mode;
         const auto compiled = cumetal::metal::compile_ptx_to_msl(ptx, compile_options);
         result.warnings = compiled.warnings;
         if (!compiled.ok) {

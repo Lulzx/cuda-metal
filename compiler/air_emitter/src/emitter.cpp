@@ -537,7 +537,41 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
     } else if (extension == ".metal") {
         const std::string xcrun_for_metal = find_tool("xcrun");
         const std::string xcrun_metal_bin = xcrun_for_metal.empty() ? "xcrun" : xcrun_for_metal;
-        const std::string command = xcrun_metal_bin + " metal -c " + quote_shell(options.input.string()) +
+        std::filesystem::path metal_input = options.input;
+        if (!options.textual_include_inputs.empty()) {
+            std::string combined;
+            for (const auto& include : options.textual_include_inputs) {
+                if (!std::filesystem::exists(include) || lower_ext(include) != ".metal") {
+                    result.error = "textual include input must be an existing .metal file: " +
+                                   include.string();
+                    std::filesystem::remove_all(temp_dir);
+                    return result;
+                }
+                const std::string path = std::filesystem::absolute(include).string();
+                if (path.find_first_of("\"\r\n") != std::string::npos) {
+                    result.error = "textual include input has an unsupported path: " + path;
+                    std::filesystem::remove_all(temp_dir);
+                    return result;
+                }
+                combined += "#include \"" + path + "\"\n";
+            }
+            const std::string source_path = std::filesystem::absolute(options.input).string();
+            if (source_path.find_first_of("\"\r\n") != std::string::npos) {
+                result.error = "Metal input has an unsupported path: " + source_path;
+                std::filesystem::remove_all(temp_dir);
+                return result;
+            }
+            combined += "#include \"" + source_path + "\"\n";
+            metal_input = temp_dir / "combined.metal";
+            std::string write_error;
+            const std::vector<std::uint8_t> bytes(combined.begin(), combined.end());
+            if (!cumetal::common::write_file_bytes(metal_input, bytes, &write_error)) {
+                result.error = "failed to stage combined Metal source: " + write_error;
+                std::filesystem::remove_all(temp_dir);
+                return result;
+            }
+        }
+        const std::string command = xcrun_metal_bin + " metal -c " + quote_shell(metal_input.string()) +
                                     " -o " + quote_shell(temp_air.string()) + " 2>&1";
         const CommandResult cmd = run_command_capture(command);
         result.logs.push_back("$ " + command);

@@ -1364,13 +1364,16 @@ int main() {
                          std::string::npos,
                  "isolated float-to-double multiply chains demote explicitly for Metal");
 
-    const metal::NvvmToMslResult unsupported_fp64 =
+    const metal::NvvmToMslResult general_fp64 =
         metal::compile_nvvm_to_msl(kNvvmUnsupportedFp64,
                                    "unsupported-fp64.ll", "unsupported_fp64");
-    ok &= expect(!unsupported_fp64.ok &&
-                     unsupported_fp64.error.find("Metal does not support FP64") !=
-                         std::string::npos,
-                 "general FP64 arithmetic remains an explicit diagnostic");
+    ok &= expect(general_fp64.ok &&
+                     general_fp64.source.find("cm_fp64_fast_add(") !=
+                         std::string::npos &&
+                     general_fp64.source.find("vf64_f64_to_f32(") !=
+                         std::string::npos &&
+                     general_fp64.source.find("double v") == std::string::npos,
+                 "general FP64 arithmetic uses raw binary64 software ALU helpers");
 
     const metal::NvvmToMslResult float_frexp_via_double_abi =
         metal::compile_nvvm_to_msl(kNvvmFloatFrexpViaDoubleAbi,

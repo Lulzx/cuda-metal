@@ -44,6 +44,16 @@ exactly once, and verifies that an exactly-full record is rejected without any
 payload write. This is record-level numerical/ABI evidence; the existing
 registered-runtime test separately covers host formatting and drain behavior.
 
+On 2026-08-29, the `fp64_precision` contract probe passed twice on Apple GPU:
+once with an 11-kernel metallib compiled directly from Clang NVVM through typed
+CuMetal IR, and once with each kernel compiled from PTX through the typed
+frontend at registration time. Both runs reported zero violations for the
+`fast48` 2^-48 relative bound, idempotent raw-binary64 packing, signed
+zero/infinity/NaN, a five-operation chain, float-pair joining, shared-memory and
+32-lane shuffle reductions, store/reload, `uint64_t` aliasing, comparisons,
+fma/sqrt/min/max, remainder, and rounding. Values outside binary32's exponent
+envelope remain explicitly excluded by the documented mode contract.
+
 ## Performance gate
 
 The Phase 5 gate compares CuMetal with hand-written Metal for three memory-bound

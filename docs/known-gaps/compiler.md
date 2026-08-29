@@ -8,8 +8,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/23 | **21/23** |
-| PTX / `--cuda-device` | **23/23** | **21/23** |
+| direct `.cu` | 0/23 | **22/23** |
+| PTX / `--cuda-device` | **23/23** | **22/23** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
@@ -30,8 +30,9 @@ Remaining typed-path blockers include combinations of:
   double-signature calls;
 - nested or partially initialized aggregate insertion and extraction beyond
   the proven flat typed-struct path;
-- FP64 legality and libdevice forms beyond the numerically proven 42-function
-  float surface;
+- FP64 modes and operations beyond the numerically proven `fast48`
+  arithmetic/storage/comparison/rounding corpus, including observable IEEE
+  exception status;
 - externally initialized constant/global symbols referenced through device
   helpers, plus native-AOT metadata that lets the runtime populate those hidden
   bindings without the current CUDA registration path.

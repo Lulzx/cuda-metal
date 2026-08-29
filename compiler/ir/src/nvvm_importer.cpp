@@ -28,6 +28,7 @@
 #include <llvm/TargetParser/Triple.h>
 
 #include <algorithm>
+#include <iomanip>
 #include <map>
 #include <sstream>
 #include <unordered_map>
@@ -439,6 +440,14 @@ struct Importer {
                     global->getName().str(),
                     Type::pointer(Type::integer(8),
                                   import_address_space(global->getAddressSpace(), false)));
+            }
+            if (const auto* floating = llvm::dyn_cast<llvm::ConstantFP>(constant);
+                floating != nullptr && floating->getType()->isDoubleTy()) {
+                std::ostringstream bits;
+                bits << "0x" << std::hex << std::setw(16) << std::setfill('0')
+                     << floating->getValueAPF().bitcastToAPInt().getZExtValue()
+                     << "ul";
+                return Operand::immediate(bits.str(), Type::floating(64));
             }
             return Operand::immediate(constant_spelling(*constant), import_type(value.getType()));
         }
@@ -1091,6 +1100,16 @@ struct Importer {
             {"__nv_fdimf", "fdim"},
             {"__nv_remainderf", "remainder"},
             {"__nv_fmaf", "fma"},
+            {"__nv_fma", "fma"},
+            {"__nv_sqrt", "sqrt"},
+            {"__nv_fmin", "fmin"},
+            {"__nv_fmax", "fmax"},
+            {"__nv_remainder", "remainder"},
+            {"__nv_floor", "floor"},
+            {"__nv_ceil", "ceil"},
+            {"__nv_trunc", "trunc"},
+            {"__nv_round", "round"},
+            {"__nv_rint", "rint"},
             {"__nv_popc", "popcount"},
             {"__nv_clz", "clz"},
             {"__nv_abs", "__cumetal_signed_abs"},
@@ -1399,16 +1418,25 @@ struct Importer {
                 return true;
             }
         }
-        if (contains_fp64(instruction.getType()) ||
+        const bool uses_fp64 = contains_fp64(instruction.getType()) ||
             std::any_of(instruction.op_begin(), instruction.op_end(),
                         [](const llvm::Use& operand) {
                             return contains_fp64(operand->getType());
-                        })) {
-            return fail(&instruction,
-                        "Metal does not support FP64 outside the isolated float multiply demotion");
-        }
+                        });
         Operation operation;
         operation.location = import_location(instruction, fallback_source);
+        if (uses_fp64) {
+            operation.attributes["fp64_mode"] =
+                result.module.attributes.at("fp64_mode");
+            result.module.semantic_quality = SemanticQuality::kSemanticEmulation;
+            const std::string caveat =
+                "FP64 uses raw binary64 storage with the selected software ALU mode";
+            if (std::find(result.module.semantic_caveats.begin(),
+                          result.module.semantic_caveats.end(), caveat) ==
+                result.module.semantic_caveats.end()) {
+                result.module.semantic_caveats.push_back(caveat);
+            }
+        }
         if (!instruction.getType()->isVoidTy()) {
             operation.results.push_back(state->values.at(&instruction));
             operation.result_types.push_back(state->value_types.at(operation.results.front()));
@@ -1597,6 +1625,22 @@ struct Importer {
                                        : OpCode::kConvert;
                 if (llvm::isa<llvm::BitCastInst>(cast)) {
                     operation.attributes["bitcast"] = "true";
+                } else if (cast->getOperand(0)->getType()->isFloatTy() &&
+                           cast->getType()->isDoubleTy()) {
+                    operation.attributes["fp64_conversion"] = "f32_to_f64";
+                } else if (cast->getOperand(0)->getType()->isDoubleTy() &&
+                           cast->getType()->isFloatTy()) {
+                    operation.attributes["fp64_conversion"] = "f64_to_f32";
+                } else if (cast->getType()->isDoubleTy() &&
+                           cast->getOperand(0)->getType()->isIntegerTy()) {
+                    operation.attributes["fp64_conversion"] =
+                        llvm::isa<llvm::SIToFPInst>(cast) ? "signed_to_f64"
+                                                        : "unsigned_to_f64";
+                } else if (cast->getOperand(0)->getType()->isDoubleTy() &&
+                           cast->getType()->isIntegerTy()) {
+                    operation.attributes["fp64_conversion"] =
+                        llvm::isa<llvm::FPToSIInst>(cast) ? "f64_to_signed"
+                                                        : "f64_to_unsigned";
                 }
             }
         } else if (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&instruction)) {
@@ -1870,14 +1914,6 @@ struct Importer {
     }
 
     bool import_function(const llvm::Function& function) {
-        if (contains_fp64(function.getReturnType()) ||
-            std::any_of(function.arg_begin(), function.arg_end(),
-                        [](const llvm::Argument& argument) {
-                            return contains_fp64(argument.getType());
-                        })) {
-            return fail(nullptr, "Metal does not support FP64 function signatures in '" +
-                                     function.getName().str() + "'");
-        }
         FunctionState state;
         if (!allocate_function(function, &state)) return false;
         std::size_t block_index = 0;
@@ -1900,6 +1936,17 @@ struct Importer {
         result.module.stage = IrStage::kGpuSemantic;
         result.module.attributes["frontend"] = "nvvm";
         result.module.attributes["ir_schema"] = "1";
+        std::string rendered_module;
+        llvm::raw_string_ostream rendered_stream(rendered_module);
+        module->print(rendered_stream, nullptr);
+        rendered_stream.flush();
+        const bool uses_fp64 = rendered_module.find("double") != std::string::npos;
+        if (uses_fp64 && options.fp64_mode != "fast48" &&
+            options.fp64_mode != "wide48" && options.fp64_mode != "ieee64") {
+            result.error = "typed NVVM FP64 mode must be fast48, wide48, or ieee64";
+            return std::move(result);
+        }
+        result.module.attributes["fp64_mode"] = options.fp64_mode;
         result.module.attributes["target_triple"] =
             llvm::Triple(module->getTargetTriple()).str();
 

@@ -1134,6 +1134,8 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     // processes take the fast path above.
     cumetal::ptx::LowerToMetalOptions lower_to_metal_options;
     lower_to_metal_options.entry_name = kernel_name;
+    lower_to_metal_options.fp64_mode = std::string(cumetal::ptx::fp64_mode_name(
+        cumetal::ptx::fp64_mode_from_env()));
     lower_to_metal_options.allow_workload_specializations =
         cumetal::diag_env_truthy("CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS");
     if (const char* backend = std::getenv("CUMETAL_PTX_BACKEND");
@@ -1213,6 +1215,8 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     }
 
     std::filesystem::path staged_input = ll_path;
+    const bool typed_msl_needs_fp64_support =
+        use_direct_msl && ptx_source.find(".f64") != std::string::npos;
     if (use_direct_msl) {
         REG_DEBUG("using direct Metal lowering path for '%s'", kernel_name.c_str());
         const std::vector<std::uint8_t> metal_bytes(lowered_metal.metal_source.begin(),
@@ -1224,28 +1228,33 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         staged_input = metal_path;
         emit_options.kernel_name =
             lowered_metal.entry_name.empty() ? kernel_name : lowered_metal.entry_name;
-        // Short-circuit: deliver the .metal source directly. The Metal backend will
-        // compile it at runtime with newLibraryWithSource (no offline metal tools needed).
-        // Store under a .metal path (derived from cache key if persistent).
-        std::filesystem::path msl_final = metal_path;
-        if (!cached_metallib.empty()) {
-            msl_final = cached_metallib;
-            msl_final.replace_extension(".metal");
-            std::error_code ec;
-            std::filesystem::copy_file(metal_path, msl_final, std::filesystem::copy_options::overwrite_existing, ec);
+        if (!typed_msl_needs_fp64_support) {
+            // Short-circuit non-linked MSL through newLibraryWithSource. FP64
+            // needs private inline support in the same translation unit and
+            // therefore takes the offline compile path below.
+            std::filesystem::path msl_final = metal_path;
+            if (!cached_metallib.empty()) {
+                msl_final = cached_metallib;
+                msl_final.replace_extension(".metal");
+                std::error_code ec;
+                std::filesystem::copy_file(
+                    metal_path, msl_final,
+                    std::filesystem::copy_options::overwrite_existing, ec);
+            }
+            *out_path = msl_final.string();
+            if (out_is_persistent != nullptr) {
+                *out_is_persistent = !cached_metallib.empty();
+            }
+            if (out_provenance != nullptr) *out_provenance = "";
+            publish_metadata(metadata);
+            if (!cached_metallib.empty()) {
+                (void)write_registration_metadata(msl_final, metadata);
+            }
+            return true;
         }
-        *out_path = msl_final.string();
-        if (out_is_persistent != nullptr) *out_is_persistent = !cached_metallib.empty();
-        if (out_provenance != nullptr) {
-            // The emitted MSL already carries a provenance comment; the backend
-            // parses it. Nothing to override.
-            *out_provenance = "";
-        }
-        publish_metadata(metadata);
-        if (!cached_metallib.empty()) {
-            (void)write_registration_metadata(msl_final, metadata);
-        }
-        return true;
+        emit_options.textual_include_inputs.push_back(
+            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
+            "support" / "cumetal_fp64_inline_support.metal");
     } else {
         REG_DEBUG("using LLVM IR lowering path for '%s'", kernel_name.c_str());
         maybe_dump_ptx_for_llvm_debug(kernel_name, ptx_source);
@@ -1286,9 +1295,8 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         if (ptx_source.find(".f64") != std::string::npos &&
             cumetal::ptx::fp64_mode_links_vf64_support(lower_options.fp64_mode)) {
             emit_options.additional_link_inputs.push_back(
-                std::filesystem::path(CUMETAL_SOURCE_DIR) / "third_party" /
-                "VF64-metal" / "Sources" / "VF64Metal" / "Shaders" /
-                "Interop" / "VF64Support.metal"
+                std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
+                "metal" / "support" / "cumetal_fp64_support.metal"
             );
         }
     }
