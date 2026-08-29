@@ -242,7 +242,7 @@ add_library(cumetal_runtime SHARED
 )
 
 file(SHA256
-    "${CMAKE_SOURCE_DIR}/third_party/VF64-metal/Sources/F64Metal/Shaders/Interop/VF64Support.metal"
+    "${CMAKE_SOURCE_DIR}/third_party/VF64-metal/Sources/VF64Metal/Shaders/Interop/VF64Support.metal"
     CUMETAL_VF64_SUPPORT_SHA256
 )
 
