@@ -267,6 +267,7 @@ std::string_view opcode_name(OpCode opcode) {
         case OpCode::kLoad: return "load";
         case OpCode::kStore: return "store";
         case OpCode::kCall: return "call";
+        case OpCode::kPrintf: return "gpu.printf";
         case OpCode::kThreadId: return "gpu.thread_id";
         case OpCode::kThreadgroupId: return "gpu.threadgroup_id";
         case OpCode::kThreadgroupSize: return "gpu.threadgroup_size";

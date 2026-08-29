@@ -1702,17 +1702,22 @@ struct AstLowerer {
                 return std::nullopt;
             }
             const MslExpr stored_value = expression_for(operation.operands[1]);
+            const MslType stored_type =
+                stored_value->type.kind == MslTypeKind::kReference &&
+                        stored_value->type.element != nullptr
+                    ? *stored_value->type.element
+                    : stored_value->type;
             const MslExpr destination_pointer = expression_for(operation.operands.front());
             const MslAddressSpace address_space =
                 destination_pointer->type.kind == MslTypeKind::kPointer
                     ? destination_pointer->type.address_space
                     : lower_address_space(operation.operands.front().type.address_space);
             const MslType pointer_type =
-                MslType::pointer(stored_value->type, address_space);
+                MslType::pointer(stored_type, address_space);
             const MslExpr pointer =
                 MslExpression::cast(pointer_type, destination_pointer, true);
             return MslStatement::assignment(
-                MslExpression::unary("*", pointer, stored_value->type), stored_value);
+                MslExpression::unary("*", pointer, stored_type), stored_value);
         }
 
         if (operation.opcode == ir::OpCode::kMetalBarrier) {
@@ -2026,6 +2031,131 @@ struct AstLowerer {
     bool emit_operations(const ir::BasicBlock& block, std::vector<MslStmt>* statements) {
         for (const ir::Operation& operation : block.operations) {
             if (operation.is_terminator()) continue;
+            if (operation.opcode == ir::OpCode::kPrintf) {
+                if (operation.operands.size() < 2 ||
+                    operation.attributes.contains("guard_operand") ||
+                    !operation.attributes.contains("format_id") ||
+                    !operation.attributes.contains("argument_bits")) {
+                    return fail(&operation, "malformed typed printf record");
+                }
+                std::vector<unsigned> argument_bits;
+                std::istringstream widths(operation.attributes.at("argument_bits"));
+                std::string width;
+                try {
+                    while (std::getline(widths, width, ',')) {
+                        if (width.empty()) continue;
+                        std::size_t consumed = 0;
+                        const unsigned bits = static_cast<unsigned>(
+                            std::stoul(width, &consumed));
+                        if (consumed != width.size() || (bits != 32 && bits != 64)) {
+                            return fail(&operation,
+                                        "typed printf arguments must be 32 or 64 bits");
+                        }
+                        argument_bits.push_back(bits);
+                    }
+                } catch (const std::exception&) {
+                    return fail(&operation,
+                                "typed printf arguments must be 32 or 64 bits");
+                }
+                if (argument_bits.size() + 2 != operation.operands.size()) {
+                    return fail(&operation,
+                                "typed printf width table does not match its operands");
+                }
+                unsigned payload_words = 0;
+                for (unsigned bits : argument_bits) payload_words += bits / 32;
+                const unsigned record_words = 2 + payload_words;
+                const std::string suffix = std::to_string(edge_temporary_index++);
+                const std::string position_name = "cm_printf_position_" + suffix;
+                const MslType atomic_uint = {
+                    .kind = MslTypeKind::kStruct,
+                    .struct_name = "atomic_uint",
+                };
+                const MslExpr raw_buffer = expression_for(operation.operands[0]);
+                const MslExpr atomic_buffer = MslExpression::cast(
+                    MslType::pointer(atomic_uint, MslAddressSpace::kDevice),
+                    raw_buffer, true);
+                const MslExpr ordering = MslExpression::identifier(
+                    "memory_order_relaxed",
+                    MslType{.kind = MslTypeKind::kStruct,
+                            .struct_name = "memory_order"});
+                statements->push_back(MslStatement::variable(
+                    MslType::uint(), position_name,
+                    MslExpression::call(
+                        "atomic_fetch_add_explicit",
+                        {atomic_buffer,
+                         MslExpression::literal(std::to_string(record_words) + "u",
+                                                MslType::uint()),
+                         ordering},
+                        MslType::uint()),
+                    true));
+                const MslExpr position =
+                    MslExpression::identifier(position_name, MslType::uint());
+                const MslExpr end = MslExpression::binary(
+                    "+", position,
+                    MslExpression::literal(std::to_string(record_words) + "u",
+                                           MslType::uint()),
+                    MslType::uint());
+                const MslExpr fits = MslExpression::binary(
+                    "<", end, expression_for(operation.operands[1]),
+                    MslType::boolean());
+                const MslExpr word_buffer = MslExpression::cast(
+                    MslType::pointer(MslType::uint(), MslAddressSpace::kDevice),
+                    raw_buffer, true);
+                std::vector<MslStmt> writes;
+                const auto write_word = [&](unsigned relative, MslExpr value) {
+                    const MslExpr index = MslExpression::binary(
+                        "+", position,
+                        MslExpression::literal(std::to_string(relative) + "u",
+                                               MslType::uint()),
+                        MslType::uint());
+                    writes.push_back(MslStatement::assignment(
+                        MslExpression::subscript(word_buffer, index, MslType::uint()),
+                        std::move(value)));
+                };
+                write_word(1, MslExpression::literal(
+                                  operation.attributes.at("format_id") + "u",
+                                  MslType::uint()));
+                write_word(2, MslExpression::literal(
+                                  std::to_string(payload_words) + "u",
+                                  MslType::uint()));
+                unsigned payload_offset = 0;
+                for (std::size_t i = 0; i < argument_bits.size(); ++i) {
+                    MslExpr raw = expression_for(operation.operands[i + 2]);
+                    if (argument_bits[i] == 32) {
+                        write_word(3 + payload_offset,
+                                   MslExpression::bitcast(MslType::uint(), raw));
+                        ++payload_offset;
+                        continue;
+                    }
+                    raw = MslExpression::bitcast(MslType::uint(64), raw);
+                    write_word(
+                        3 + payload_offset,
+                        MslExpression::cast(
+                            MslType::uint(),
+                            MslExpression::binary(
+                                "&", raw,
+                                MslExpression::literal("0xfffffffful",
+                                                       MslType::uint(64)),
+                                MslType::uint(64))));
+                    write_word(
+                        4 + payload_offset,
+                        MslExpression::cast(
+                            MslType::uint(),
+                            MslExpression::binary(
+                                ">>", raw,
+                                MslExpression::literal("32u", MslType::uint()),
+                                MslType::uint(64))));
+                    payload_offset += 2;
+                }
+                statements->push_back(MslStatement::if_statement(
+                    fits, std::move(writes)));
+                if (!operation.results.empty()) {
+                    const MslType result_type = lower_result_type(operation);
+                    statements->push_back(declare_result(
+                        operation, MslExpression::literal("0", result_type)));
+                }
+                continue;
+            }
             const std::optional<MslStmt> lowered = lower_operation(operation);
             if (!result.error.empty()) return false;
             if (lowered.has_value()) statements->push_back(*lowered);
@@ -3575,6 +3705,7 @@ PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& o
     import_options.source_name = options.source_name;
     ir::PtxImportResult imported = ir::import_ptx(ptx, import_options);
     result.warnings = imported.warnings;
+    result.printf_formats = imported.printf_formats;
     if (!imported.ok) {
         result.error = imported.error;
         return result;
@@ -3609,6 +3740,7 @@ NvvmToMslResult compile_nvvm_to_msl(std::string_view llvm_ir,
     options.entry_name = std::string(entry_name);
     ir::NvvmImportResult imported = ir::import_nvvm_llvm_ir(llvm_ir, options);
     result.warnings = imported.warnings;
+    result.printf_formats = imported.printf_formats;
     if (!imported.ok) {
         result.error = imported.error;
         return result;

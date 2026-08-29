@@ -478,6 +478,60 @@ BODY:
                          std::string::npos,
                  "typed PTX keeps wide atomics explicit until the lock-bank ABI is implemented");
 
+    const std::string clang_printf_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.extern .func (.param .b32 func_retval0) vprintf(
+    .param .b64 vprintf_param_0, .param .b64 vprintf_param_1);
+.global .align 1 .b8 format[18] = {80, 82, 73, 78, 84, 70, 91, 37, 100, 44, 37, 100, 93, 61, 37, 100, 10};
+.visible .entry typed_printf(.param .u32 value) {
+    .local .align 8 .b8 __local_depot0[16];
+    .reg .b32 %r<4>;
+    .reg .b64 %rd<5>;
+    mov.b64 %rd1, __local_depot0;
+    cvta.local.u64 %rd2, %rd1;
+    ld.param.u32 %r1, [value];
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %tid.x;
+    st.local.v2.b32 [%rd1], {%r2, %r3};
+    st.local.b32 [%rd1+8], %r1;
+    .param .b64 param0;
+    .param .b64 param1;
+    .param .b32 retval0;
+    st.param.b64 [param1], %rd2;
+    mov.b64 %rd3, format;
+    cvta.global.u64 %rd4, %rd3;
+    st.param.b64 [param0], %rd4;
+    call.uni (retval0), vprintf, (param0, param1);
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult clang_printf =
+        metal::compile_ptx_to_msl(clang_printf_ptx);
+    ok &= expect(clang_printf.ok && clang_printf.printf_formats.size() == 1 &&
+                     clang_printf.printf_formats.front() == "PRINTF[%d,%d]=%d\n" &&
+                     clang_printf.source.find("atomic_fetch_add_explicit") !=
+                         std::string::npos &&
+                     clang_printf.source.find("vprintf(") == std::string::npos,
+                 "typed PTX decodes Clang vprintf scaffolding into the shared bounded ring ABI");
+    if (!clang_printf.ok) std::cerr << clang_printf.error << "\n";
+
+    const std::string symbolic_printf_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .entry symbolic_printf() {
+    call.uni vprintf, (format_symbol, 7);
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult symbolic_printf =
+        metal::compile_ptx_to_msl(symbolic_printf_ptx);
+    ok &= expect(!symbolic_printf.ok &&
+                     symbolic_printf.error.find("literal format") !=
+                         std::string::npos,
+                 "typed PTX rejects unresolved printf formats instead of emitting a fallback");
+
     if (!ok) return 1;
     std::cout << "PTX -> CuMetal IR -> typed MSL tests passed\n";
     return 0;

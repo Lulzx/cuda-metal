@@ -96,6 +96,27 @@ target_compile_options(cumetal_ptx
         -Wpedantic
 )
 
+add_library(cumetal_printf_pass STATIC
+    compiler/passes/src/printf_lower.cpp
+)
+
+target_include_directories(cumetal_printf_pass
+    PUBLIC
+        compiler/passes/include
+)
+
+target_link_libraries(cumetal_printf_pass
+    PUBLIC
+        cumetal_ptx
+)
+
+target_compile_options(cumetal_printf_pass
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
 add_library(cumetal_ir STATIC
     compiler/ir/src/ir.cpp
     compiler/ir/src/nvvm_importer.cpp
@@ -110,6 +131,7 @@ target_include_directories(cumetal_ir
 target_link_libraries(cumetal_ir
     PUBLIC
         cumetal_ptx
+        cumetal_printf_pass
 )
 
 find_package(LLVM CONFIG QUIET
@@ -167,7 +189,6 @@ add_library(cumetal_passes STATIC
     compiler/passes/src/intrinsic_lower.cpp
     compiler/passes/src/metadata.cpp
     compiler/passes/src/phase1_pipeline.cpp
-    compiler/passes/src/printf_lower.cpp
     compiler/passes/src/threadgroup_tiling.cpp
 )
 
@@ -179,6 +200,7 @@ target_include_directories(cumetal_passes
 target_link_libraries(cumetal_passes
     PUBLIC
         cumetal_ptx
+        cumetal_printf_pass
 )
 
 target_compile_options(cumetal_passes

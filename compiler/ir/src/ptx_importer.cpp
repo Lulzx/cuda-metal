@@ -1,5 +1,6 @@
 #include "cumetal/ir/ptx_importer.h"
 
+#include "cumetal/passes/printf_lower.h"
 #include "cumetal/ptx/parser.h"
 
 #include <algorithm>
@@ -487,6 +488,10 @@ struct Importer {
     std::unordered_map<std::string, ModuleConstantSymbol> module_constant_symbols;
     std::uint64_t module_constant_buffer_size = 0;
     std::optional<Operand> module_constant_buffer;
+    std::unordered_map<int, cumetal::passes::PrintfLoweredCall> printf_calls;
+    std::unordered_set<int> printf_scaffold_lines;
+    std::optional<Operand> printf_buffer;
+    std::optional<Operand> printf_capacity;
 
     bool fail(const Instruction* instruction, std::string message) {
         if (instruction != nullptr && instruction->line != 0) {
@@ -824,6 +829,7 @@ struct Importer {
         if (root == "bra" || root == "ret" || root == "exit" || root == "trap") {
             return true;
         }
+        if (printf_scaffold_lines.contains(instruction.line)) return true;
         if (!instruction.supported) {
             return fail(&instruction, "unsupported PTX opcode '" + instruction.opcode + "'");
         }
@@ -1194,6 +1200,43 @@ struct Importer {
             const std::size_t callee_index = has_return ? 1 : 0;
             const std::size_t arguments_index = has_return ? 2 : 1;
             const std::string callee = trim(instruction.operands[callee_index]);
+            if (callee == "vprintf" || callee == "printf") {
+                const auto decoded = printf_calls.find(instruction.line);
+                if (decoded == printf_calls.end() || !printf_buffer.has_value() ||
+                    !printf_capacity.has_value()) {
+                    return fail(&instruction,
+                                "typed printf is missing its decoded ring-buffer ABI");
+                }
+                operation.opcode = OpCode::kPrintf;
+                operation.operands = {*printf_buffer, *printf_capacity};
+                operation.attributes["format_id"] =
+                    std::to_string(decoded->second.format_id);
+                std::ostringstream widths;
+                for (std::size_t i = 0; i < decoded->second.arguments.size(); ++i) {
+                    const int bits = decoded->second.argument_bits[i];
+                    if (bits != 32 && bits != 64) {
+                        return fail(&instruction,
+                                    "typed printf argument is not 32 or 64 bits");
+                    }
+                    if (i != 0) widths << ',';
+                    widths << bits;
+                    operation.operands.push_back(operand_for(
+                        decoded->second.arguments[i], *environment,
+                        Type::integer(static_cast<std::uint32_t>(bits))));
+                }
+                operation.attributes["argument_bits"] = widths.str();
+                if (has_return) {
+                    const ValueId result_value = builder.next_value();
+                    operation.results.push_back(result_value);
+                    operation.result_types.push_back(Type::integer(32));
+                    value_types[result_value] = Type::integer(32);
+                    call_return_slots[grouped_names(instruction.operands[0]).front()] =
+                        Operand::value_ref(result_value, Type::integer(32));
+                }
+                if (!append_guard(&operation, instruction, *environment)) return false;
+                block->operations.push_back(std::move(operation));
+                return true;
+            }
             const auto signature = cuda_builtin_signature(callee);
             if (!signature.has_value()) {
                 return fail(&instruction, "device call target '" + callee +
@@ -1341,6 +1384,82 @@ struct Importer {
                 .type = type,
                 .size = size,
                 .alignment = std::min<std::uint32_t>(size, 8),
+            });
+        }
+
+        if (!printf_calls.empty()) {
+            std::uint32_t binding_index =
+                static_cast<std::uint32_t>(entry->params.size());
+            if (binding_index + 1 >= 29u) {
+                return fail(nullptr,
+                            "typed printf hidden arguments conflict with reserved Metal bindings");
+            }
+            const Type buffer_type =
+                Type::pointer(Type::integer(32), AddressSpace::kDevice);
+            const Type capacity_type = Type::integer(32);
+            const ValueId buffer = builder.next_value();
+            const ValueId capacity = builder.next_value();
+            value_types[buffer] = buffer_type;
+            value_types[capacity] = capacity_type;
+            printf_buffer = Operand::value_ref(buffer, buffer_type);
+            printf_capacity = Operand::value_ref(capacity, capacity_type);
+            function.arguments.push_back({
+                .value = buffer,
+                .name = "__cumetal_printf_buffer",
+                .type = buffer_type,
+            });
+            function.arguments.push_back({
+                .value = capacity,
+                .name = "__cumetal_printf_capacity",
+                .type = capacity_type,
+            });
+            function.pointer_provenance[buffer] = {
+                .base_kind = PointerBaseKind::kAllocation,
+                .base_name = "__cumetal_printf_buffer",
+                .known_byte_offset = 0,
+                .alignment = 4,
+            };
+            const std::uint32_t buffer_logical =
+                static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
+            function.kernel_abi->arguments.push_back({
+                .name = "__cumetal_printf_buffer",
+                .kind = ArgumentKind::kPointer,
+                .type = buffer_type,
+                .size = 8,
+                .alignment = 8,
+                .address_space = AddressSpace::kDevice,
+                .binding_indices = {binding_index},
+                .hidden_role = "printf_buffer",
+            });
+            function.kernel_abi->bindings.push_back({
+                .kind = BindingKind::kBuffer,
+                .binding_index = binding_index++,
+                .logical_argument_index = buffer_logical,
+                .type = buffer_type,
+                .size = 0,
+                .alignment = 4,
+                .hidden_role = "printf_buffer",
+            });
+            const std::uint32_t capacity_logical =
+                static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
+            function.kernel_abi->arguments.push_back({
+                .name = "__cumetal_printf_capacity",
+                .kind = ArgumentKind::kScalar,
+                .type = capacity_type,
+                .size = 4,
+                .alignment = 4,
+                .address_space = AddressSpace::kConstant,
+                .binding_indices = {binding_index},
+                .hidden_role = "printf_capacity",
+            });
+            function.kernel_abi->bindings.push_back({
+                .kind = BindingKind::kBytes,
+                .binding_index = binding_index,
+                .logical_argument_index = capacity_logical,
+                .type = capacity_type,
+                .size = 4,
+                .alignment = 4,
+                .hidden_role = "printf_capacity",
             });
         }
 
@@ -1537,6 +1656,31 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     }
     importer.result.warnings = parsed.warnings;
     if (!importer.select_entry(parsed, options)) return importer.result;
+    const cumetal::passes::PrintfLowerResult printf_lowered =
+        cumetal::passes::lower_printf_calls(
+            *importer.entry,
+            {.strict = options.strict, .ptx_source = ptx});
+    importer.result.warnings.insert(importer.result.warnings.end(),
+                                    printf_lowered.warnings.begin(),
+                                    printf_lowered.warnings.end());
+    if (!printf_lowered.ok) {
+        importer.result.error = printf_lowered.error;
+        return importer.result;
+    }
+    for (const auto& format : printf_lowered.formats) {
+        if (!format.literal) {
+            importer.result.error =
+                "typed printf requires a decoded literal format string";
+            return importer.result;
+        }
+        importer.result.printf_formats.push_back(format.token);
+    }
+    for (const auto& call : printf_lowered.calls) {
+        importer.printf_calls.emplace(call.source_line, call);
+        importer.printf_scaffold_lines.insert(call.abi_scaffold_lines.begin(),
+                                              call.abi_scaffold_lines.end());
+        importer.printf_scaffold_lines.erase(call.source_line);
+    }
     for (const ModuleConstantSymbol& symbol : scan_module_constant_symbols(ptx)) {
         importer.module_constant_buffer_size =
             std::max(importer.module_constant_buffer_size,

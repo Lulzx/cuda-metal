@@ -65,6 +65,44 @@ declare i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
 declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()
 )llvm";
 
+constexpr const char* kNvvmPrintf = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%printf_args = type { i32, i32, i32 }
+@.str = private unnamed_addr constant [18 x i8] c"PRINTF[%d,%d]=%d\0A\00"
+
+define ptx_kernel void @typed_printf(i32 %value) {
+entry:
+  %args = alloca %printf_args, align 8
+  %a = getelementptr %printf_args, ptr %args, i32 0, i32 0
+  store i32 2, ptr %a, align 8
+  %b = getelementptr %printf_args, ptr %args, i32 0, i32 1
+  store i32 7, ptr %b, align 4
+  %c = getelementptr %printf_args, ptr %args, i32 0, i32 2
+  store i32 %value, ptr %c, align 8
+  %result = call i32 @vprintf(ptr @.str, ptr %args)
+  ret void
+}
+
+declare i32 @vprintf(ptr, ptr)
+)llvm";
+
+constexpr const char* kNvvmMalformedPrintf = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+@.str = private unnamed_addr constant [10 x i8] c"value=%d\0A\00"
+
+define ptx_kernel void @bad_printf() {
+entry:
+  %args = alloca i16, align 2
+  store i16 7, ptr %args, align 2
+  %result = call i32 @vprintf(ptr @.str, ptr %args)
+  ret void
+}
+
+declare i32 @vprintf(ptr, ptr)
+)llvm";
+
 constexpr const char* kNvvmSelectedCall = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1523,6 +1561,27 @@ int main() {
     ok &= expect(!oversized_constant.ok &&
                      oversized_constant.error.find("exceeds 64 KiB") != std::string::npos,
                  "typed NVVM rejects constant symbol storage beyond Metal's 64 KiB limit");
+
+    const metal::NvvmToMslResult typed_printf = metal::compile_nvvm_to_msl(
+        kNvvmPrintf, "typed-printf.ll", "typed_printf");
+    ok &= expect(typed_printf.ok && typed_printf.printf_formats.size() == 1 &&
+                     typed_printf.printf_formats.front() == "PRINTF[%d,%d]=%d\n" &&
+                     typed_printf.source.find("atomic_fetch_add_explicit") !=
+                         std::string::npos &&
+                     typed_printf.source.find("[[buffer(1)]]") !=
+                         std::string::npos &&
+                     typed_printf.source.find("[[buffer(2)]]") !=
+                         std::string::npos &&
+                     typed_printf.source.find("vprintf(") == std::string::npos,
+                 "typed NVVM lowers constant-format vprintf to a bounded hidden ring ABI");
+    if (!typed_printf.ok) std::cerr << typed_printf.error << "\n";
+
+    const metal::NvvmToMslResult malformed_printf = metal::compile_nvvm_to_msl(
+        kNvvmMalformedPrintf, "bad-printf.ll", "bad_printf");
+    ok &= expect(!malformed_printf.ok &&
+                     malformed_printf.error.find("32/64-bit scalar") !=
+                         std::string::npos,
+                 "typed NVVM rejects unrepresentable printf tuples explicitly");
 
     if (!ok) return 1;
     std::cout << "NVVM -> CuMetal IR -> typed MSL tests passed\n";

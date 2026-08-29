@@ -190,6 +190,10 @@ enum class OpCode : std::uint16_t {
     kLoad,
     kStore,
     kCall,
+    // Device printf is an explicit bounded ring-buffer record. Operands are
+    // the hidden buffer, capacity, then raw payload values; attributes carry
+    // the format id and per-argument ABI widths.
+    kPrintf,
     kThreadId,
     kThreadgroupId,
     kThreadgroupSize,

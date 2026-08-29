@@ -8,8 +8,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/23 | **20/23** |
-| PTX / `--cuda-device` | **23/23** | **20/23** |
+| direct `.cu` | 0/23 | **21/23** |
+| PTX / `--cuda-device` | **23/23** | **21/23** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
@@ -25,8 +25,9 @@ Remaining typed-path blockers include combinations of:
 - generic pointer provenance through calls, aggregates, memory, and merges;
 - wide atomics and atomic scope/order/address-space combinations beyond the
   numerically proven 32-bit direct/PTX family;
-- PTX call forms beyond the proven FP32 libdevice parameter-slot ABI, including
-  `vprintf`, device helpers, and pointer-bearing/double-signature calls;
+- PTX call forms beyond the proven FP32 libdevice and constant-format `vprintf`
+  parameter-slot ABIs, including device helpers and pointer-bearing or general
+  double-signature calls;
 - nested or partially initialized aggregate insertion and extraction beyond
   the proven flat typed-struct path;
 - FP64 legality and libdevice forms beyond the numerically proven 42-function

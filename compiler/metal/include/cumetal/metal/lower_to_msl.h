@@ -42,6 +42,7 @@ struct PtxToMslResult {
     MslModule ast;
     std::string source;
     std::vector<std::string> warnings;
+    std::vector<std::string> printf_formats;
     std::string error;
 };
 

@@ -15,8 +15,8 @@ compatibility claim. Implemented surfaces and detailed limitations remain in
   does not establish general CUDA compatibility or the spec's undefined "full
   conformance suite" denominator.
 - The typed shared-IR migration gate is not closed. With CUDA Clang 21-23, the
-  reviewed 23-file production-metallib matrix is 20/23 for direct `.cu` through
-  `cumetal-ir` and 20/23 for PTX/`--cuda-device`, versus 23/23 for the legacy PTX
+  reviewed 23-file production-metallib matrix is 21/23 for direct `.cu` through
+  `cumetal-ir` and 21/23 for PTX/`--cuda-device`, versus 23/23 for the legacy PTX
   backend. The authoritative reviewed manifest and gates are
   `tests/cuda_projects/backend_matrix_manifest.txt` and
   `conformance_compiler_backend_matrix{,_versions}`. The matrix is compile

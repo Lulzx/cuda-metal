@@ -125,6 +125,23 @@ set_tests_properties(
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
 )
 
+add_test(
+    NAME functional_cuda_projects_device_printf_clang_typed_ptx
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_device_printf_clang.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        cumetal-ir
+)
+set_tests_properties(
+    functional_cuda_projects_device_printf_clang_typed_ptx
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        TIMEOUT 60
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
 # Regression: LLVM `fence` crashed Apple's AIR backend at pipeline creation (so every
 # atomicCAS-bearing kernel silently did nothing), and scalar __shared__ objects were
 # counted as zero bytes when sizing threadgroup memory.

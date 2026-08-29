@@ -67,6 +67,10 @@ add_executable(cumetal_typed_flash_attention_test
     typed_flash_attention_test.cpp
 )
 
+add_executable(cumetal_typed_printf_test
+    typed_printf_test.cpp
+)
+
 add_executable(cumetal_runtime_null_stream_sync_test
     runtime_null_stream_sync_test.cpp
 )
@@ -628,6 +632,17 @@ target_link_libraries(cumetal_typed_sgemm_2d_test
 target_link_libraries(cumetal_typed_flash_attention_test
     PRIVATE
         cumetal_runtime
+)
+
+target_link_libraries(cumetal_typed_printf_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_include_directories(cumetal_typed_printf_test
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/runtime/metal_backend
+        ${CMAKE_SOURCE_DIR}/runtime/api
 )
 
 target_link_libraries(cumetal_runtime_null_stream_sync_test
@@ -2776,6 +2791,21 @@ add_test(
 )
 set_tests_properties(functional_typed_direct_flash_attention
     PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+
+foreach(frontend IN ITEMS direct ptx)
+    add_test(
+        NAME functional_typed_${frontend}_device_printf
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_typed_printf.sh
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_typed_printf_test>
+                ${CMAKE_SOURCE_DIR}/tests/cuda_projects/device_printf_clang/device_printf_clang.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/typed-${frontend}-device-printf.metallib
+                ${frontend}
+    )
+    set_tests_properties(functional_typed_${frontend}_device_printf
+        PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+endforeach()
 
 foreach(frontend IN ITEMS direct ptx)
     add_test(

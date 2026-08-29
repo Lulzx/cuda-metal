@@ -21,6 +21,7 @@ struct NvvmImportResult {
     bool ok = false;
     Module module;
     std::vector<std::string> warnings;
+    std::vector<std::string> printf_formats;
     std::string error;
 };
 

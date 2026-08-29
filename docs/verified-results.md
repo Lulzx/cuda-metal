@@ -36,6 +36,14 @@ typed direct FlashAttention kernel against scaled dot-product attention on the
 CPU for every element of a 32x16 query tile. It covers the same sequential-loop
 fix with dynamic shared SRAM and exp/online-softmax arithmetic.
 
+`functional_typed_{direct,ptx}_device_printf` independently compiles Clang's
+device `printf` corpus through both typed frontends and launches a 2x2 grid of
+2x2x2 threadgroups on Apple GPU. Each gate parses all 32 atomic ring records,
+checks the format id and three payload words, requires every block/thread pair
+exactly once, and verifies that an exactly-full record is rejected without any
+payload write. This is record-level numerical/ABI evidence; the existing
+registered-runtime test separately covers host formatting and drain behavior.
+
 ## Performance gate
 
 The Phase 5 gate compares CuMetal with hand-written Metal for three memory-bound

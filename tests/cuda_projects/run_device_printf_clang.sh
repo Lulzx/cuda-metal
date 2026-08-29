@@ -4,6 +4,11 @@ set -euo pipefail
 
 ROOT_DIR="${1:?}"
 BUILD_DIR="${2:?}"
+PTX_BACKEND="${3:-legacy}"
+if [[ "${PTX_BACKEND}" != legacy && "${PTX_BACKEND}" != cumetal-ir ]]; then
+    echo "FAIL: invalid PTX backend '${PTX_BACKEND}'" >&2
+    exit 2
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/cuda_projects/_common.sh
 source "${SCRIPT_DIR}/_common.sh"
@@ -13,7 +18,7 @@ if ! cumetal_cuda_projects_check_prereqs "${ROOT_DIR}"; then
 fi
 
 SOURCE_DIR="${ROOT_DIR}/tests/cuda_projects/device_printf_clang"
-OUTPUT_DIR="${BUILD_DIR}/device_printf_clang"
+OUTPUT_DIR="${BUILD_DIR}/device_printf_clang-${PTX_BACKEND}"
 mkdir -p "${OUTPUT_DIR}"
 cumetal_cuda_projects_compile_link \
     "${ROOT_DIR}" "${SOURCE_DIR}" "${OUTPUT_DIR}" \
@@ -25,6 +30,7 @@ trap 'rm -f "$OUTPUT_FILE"; rm -rf "$CACHE_DIR"' EXIT
 
 run_status=0
 CUMETAL_CACHE_DIR="${CACHE_DIR}" CUMETAL_TRACE_GPU=1 \
+    CUMETAL_PTX_BACKEND="${PTX_BACKEND}" \
     "${OUTPUT_DIR}/device_printf_clang" >"${OUTPUT_FILE}" 2>&1 || run_status=$?
 cat "${OUTPUT_FILE}"
 if (( run_status != 0 )); then
@@ -52,4 +58,4 @@ for block in 0 1 2 3; do
     done
 done
 
-echo "PASS: Clang device printf ABI emitted all expected GPU records"
+echo "PASS: Clang device printf ABI emitted all expected GPU records (${PTX_BACKEND})"

@@ -3038,6 +3038,7 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
         result.matched = true;
         result.entry_name = compiled.gpu_ir.functions.front().name;
         result.lowering_kind = MetalLoweringKind::kGenericCumetalIr;
+        result.printf_formats = compiled.printf_formats;
         result.metal_source =
             "// cumetal-provenance: generic_ptx_lowering\n"
             "// cumetal-lowering: generic_ptx\n" +

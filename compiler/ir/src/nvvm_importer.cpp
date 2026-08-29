@@ -396,6 +396,8 @@ struct FunctionState {
     };
     std::unordered_map<const llvm::GlobalVariable*, ExternalGlobalBinding>
         external_globals;
+    std::optional<Operand> printf_buffer;
+    std::optional<Operand> printf_capacity;
 };
 
 struct Importer {
@@ -478,6 +480,131 @@ struct Importer {
             }
         }
         return false;
+    }
+
+    static bool function_uses_vprintf(const llvm::Function& function) {
+        for (const llvm::BasicBlock& block : function) {
+            for (const llvm::Instruction& instruction : block) {
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                const llvm::Function* callee =
+                    call == nullptr ? nullptr : call->getCalledFunction();
+                if (callee != nullptr && callee->getName() == "vprintf") return true;
+            }
+        }
+        return false;
+    }
+
+    bool constant_pointer_base_and_offset(const llvm::Value& value,
+                                          const llvm::Value** base,
+                                          std::int64_t* byte_offset) const {
+        if (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(&value)) {
+            llvm::APInt offset(64, 0, true);
+            if (!gep->accumulateConstantOffset(input->getDataLayout(), offset) ||
+                !constant_pointer_base_and_offset(*gep->getPointerOperand(), base,
+                                                  byte_offset)) {
+                return false;
+            }
+            *byte_offset += offset.getSExtValue();
+            return true;
+        }
+        if (const auto* expression = llvm::dyn_cast<llvm::ConstantExpr>(&value);
+            expression != nullptr && expression->isCast()) {
+            return constant_pointer_base_and_offset(*expression->getOperand(0), base,
+                                                    byte_offset);
+        }
+        if (const auto* cast = llvm::dyn_cast<llvm::CastInst>(&value)) {
+            return constant_pointer_base_and_offset(*cast->getOperand(0), base,
+                                                    byte_offset);
+        }
+        *base = &value;
+        return true;
+    }
+
+    std::optional<std::uint32_t> printf_format_id(const llvm::Value& value) {
+        const llvm::GlobalVariable* global = referenced_global(value);
+        if (global == nullptr || !global->hasInitializer()) return std::nullopt;
+        const auto* data = llvm::dyn_cast<llvm::ConstantDataArray>(global->getInitializer());
+        if (data == nullptr || !data->isString()) return std::nullopt;
+        std::string format = data->getAsString().str();
+        if (!format.empty() && format.back() == '\0') format.pop_back();
+        const auto found = std::find(result.printf_formats.begin(),
+                                     result.printf_formats.end(), format);
+        if (found != result.printf_formats.end()) {
+            return static_cast<std::uint32_t>(
+                std::distance(result.printf_formats.begin(), found));
+        }
+        result.printf_formats.push_back(std::move(format));
+        return static_cast<std::uint32_t>(result.printf_formats.size() - 1);
+    }
+
+    bool import_vprintf(const llvm::CallBase& call, FunctionState* state,
+                        Operation* operation) {
+        if (!state->printf_buffer.has_value() ||
+            !state->printf_capacity.has_value() || call.arg_size() != 2) {
+            return fail(&call, "typed vprintf is missing its ring-buffer ABI");
+        }
+        const std::optional<std::uint32_t> format_id =
+            printf_format_id(*call.getArgOperand(0));
+        if (!format_id.has_value()) {
+            return fail(&call, "typed vprintf requires a constant format string");
+        }
+
+        const llvm::Value* argument_base = nullptr;
+        std::int64_t ignored_offset = 0;
+        if (!constant_pointer_base_and_offset(*call.getArgOperand(1),
+                                              &argument_base, &ignored_offset) ||
+            ignored_offset != 0 ||
+            !llvm::isa<llvm::AllocaInst>(argument_base)) {
+            return fail(&call,
+                        "typed vprintf requires a statically packed argument tuple");
+        }
+
+        std::map<std::int64_t, const llvm::Value*> packed_arguments;
+        for (const llvm::BasicBlock& block : *call.getFunction()) {
+            for (const llvm::Instruction& instruction : block) {
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction);
+                if (store == nullptr) continue;
+                const llvm::Value* store_base = nullptr;
+                std::int64_t store_offset = 0;
+                if (!constant_pointer_base_and_offset(*store->getPointerOperand(),
+                                                      &store_base, &store_offset) ||
+                    store_base != argument_base) {
+                    continue;
+                }
+                if (store_offset < 0 ||
+                    !packed_arguments.emplace(store_offset,
+                                              store->getValueOperand()).second) {
+                    return fail(&call,
+                                "typed vprintf argument tuple has overlapping or negative fields");
+                }
+            }
+        }
+        if (packed_arguments.empty()) {
+            return fail(&call, "typed vprintf argument tuple is empty");
+        }
+
+        operation->opcode = OpCode::kPrintf;
+        operation->operands = {*state->printf_buffer, *state->printf_capacity};
+        operation->attributes["format_id"] = std::to_string(*format_id);
+        std::ostringstream widths;
+        std::int64_t expected_offset = 0;
+        bool first = true;
+        for (const auto& [offset, value] : packed_arguments) {
+            llvm::Type* type = value->getType();
+            const std::uint64_t bits = input->getDataLayout().getTypeSizeInBits(type);
+            if ((!type->isIntegerTy() && !type->isFloatingPointTy()) ||
+                (bits != 32 && bits != 64) || offset != expected_offset) {
+                return fail(&call,
+                            "typed vprintf supports tightly packed 32/64-bit scalar arguments");
+            }
+            if (!first) widths << ',';
+            widths << bits;
+            first = false;
+            operation->operands.push_back(import_operand(*value, *state));
+            expected_offset += static_cast<std::int64_t>(bits / 8);
+        }
+        operation->attributes["argument_bits"] = widths.str();
+        return true;
     }
 
     std::optional<Operand> import_external_pointer(
@@ -659,6 +786,78 @@ struct Importer {
                 .base = base, .byte_offset = info.constant ? info.constant_offset : 0};
         }
 
+        if (function_uses_vprintf(function)) {
+            if (!state->output.is_kernel) {
+                return fail(nullptr,
+                            "typed vprintf in device helpers is not yet supported");
+            }
+            if (argument_index + 1 >= 29u) {
+                return fail(nullptr,
+                            "typed vprintf hidden arguments conflict with reserved Metal bindings");
+            }
+            const Type buffer_type =
+                Type::pointer(Type::integer(32), AddressSpace::kDevice);
+            const Type capacity_type = Type::integer(32);
+            const ValueId buffer = builder.next_value();
+            const ValueId capacity = builder.next_value();
+            state->value_types[buffer] = buffer_type;
+            state->value_types[capacity] = capacity_type;
+            state->printf_buffer = Operand::value_ref(buffer, buffer_type);
+            state->printf_capacity = Operand::value_ref(capacity, capacity_type);
+            state->output.arguments.push_back({
+                .value = buffer, .name = "__cumetal_printf_buffer", .type = buffer_type});
+            state->output.arguments.push_back({
+                .value = capacity, .name = "__cumetal_printf_capacity", .type = capacity_type});
+            state->output.pointer_provenance[buffer] = {
+                .base_kind = PointerBaseKind::kAllocation,
+                .base_name = "__cumetal_printf_buffer",
+                .known_byte_offset = 0,
+                .alignment = 4,
+            };
+            const std::uint32_t buffer_logical =
+                static_cast<std::uint32_t>(state->output.kernel_abi->arguments.size());
+            state->output.kernel_abi->arguments.push_back({
+                .name = "__cumetal_printf_buffer",
+                .kind = ArgumentKind::kPointer,
+                .type = buffer_type,
+                .size = 8,
+                .alignment = 8,
+                .address_space = AddressSpace::kDevice,
+                .binding_indices = {argument_index},
+                .hidden_role = "printf_buffer",
+            });
+            state->output.kernel_abi->bindings.push_back({
+                .kind = BindingKind::kBuffer,
+                .binding_index = argument_index++,
+                .logical_argument_index = buffer_logical,
+                .type = buffer_type,
+                .size = 0,
+                .alignment = 4,
+                .hidden_role = "printf_buffer",
+            });
+            const std::uint32_t capacity_logical =
+                static_cast<std::uint32_t>(state->output.kernel_abi->arguments.size());
+            state->output.kernel_abi->arguments.push_back({
+                .name = "__cumetal_printf_capacity",
+                .kind = ArgumentKind::kScalar,
+                .type = capacity_type,
+                .size = 4,
+                .alignment = 4,
+                .address_space = AddressSpace::kConstant,
+                .binding_indices = {argument_index},
+                .hidden_role = "printf_capacity",
+            });
+            state->output.kernel_abi->bindings.push_back({
+                .kind = BindingKind::kBytes,
+                .binding_index = argument_index++,
+                .logical_argument_index = capacity_logical,
+                .type = capacity_type,
+                .size = 4,
+                .alignment = 4,
+                .hidden_role = "printf_capacity",
+            });
+        }
+
         std::uint32_t unnamed_block = 0;
         for (const llvm::BasicBlock& block : function) {
             BasicBlock output_block;
@@ -792,6 +991,8 @@ struct Importer {
         if (callee == nullptr) return fail(&call, "indirect device calls are unsupported");
         const std::string name = callee->getName().str();
         operation->attributes["llvm_intrinsic"] = name;
+
+        if (name == "vprintf") return import_vprintf(call, state, operation);
 
         auto dimension = [&](std::string_view prefix, OpCode opcode) {
             if (!name.starts_with(prefix)) return false;
