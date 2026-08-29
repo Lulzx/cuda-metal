@@ -3205,8 +3205,8 @@ add_test(
     COMMAND cumetal_cusolver_sparse_test
 )
 
-# spec.md Phase 2/3 exit criterion: `cumetalc foo.cu -o foo` produces a runnable executable.
-# Gated on the registration ABI because the linked binary registers its own fatbinary at startup.
+# Native-AOT source exit criterion: `cumetalc foo.cu -o foo` embeds a typed
+# metallib and registers host launch stubs through the versioned CuMetal ABI.
 if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     add_test(
         NAME functional_cumetalc_link_executable
@@ -3217,6 +3217,28 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_link_executable
     )
     set_tests_properties(functional_cumetalc_link_executable PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_cumetalc_native_aot_multi_kernel
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_SOURCE_DIR}/tests/cuda_projects/device_sync_primitives/device_sync_primitives.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_native_aot_multi_kernel
+    )
+    set_tests_properties(functional_cumetalc_native_aot_multi_kernel
+        PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_cumetalc_native_aot_globals_negative
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_native_aot_negative.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_SOURCE_DIR}/tests/cuda_projects/constant_symbol/constant_symbol.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_native_aot_globals_negative
+    )
+    set_tests_properties(functional_cumetalc_native_aot_globals_negative
+        PROPERTIES SKIP_RETURN_CODE 77)
 
     # Real samples often omit <stdlib.h>/<math.h>; nvcc's headers expose malloc/free/exit.
     # cuda_runtime.h must transitively provide them under cumetalc's -include path.
@@ -3230,8 +3252,8 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
     set_tests_properties(functional_cumetalc_host_stdlib_implicit PROPERTIES SKIP_RETURN_CODE 77)
 
-    # Source-path double kernels: registration JIT must default to FP64 emulate
-    # (native AIR double fails Metal pipeline creation on Apple Silicon).
+    # Source-path double kernels: native AOT defaults to FP64 emulation because
+    # native AIR double fails Metal pipeline creation on Apple Silicon.
     add_test(
         NAME functional_cumetalc_double_vector_add
         COMMAND bash
@@ -3252,6 +3274,7 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 $<TARGET_FILE:cumetalc>
                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/wmma_numeric_probe.cu
                 ${CMAKE_CURRENT_BINARY_DIR}/wmma_numeric_probe
+                --backend=legacy
     )
     set_tests_properties(functional_wmma_numeric PROPERTIES SKIP_RETURN_CODE 77)
 
@@ -3265,6 +3288,7 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 $<TARGET_FILE:cumetalc>
                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_heap_probe.cu
                 ${CMAKE_CURRENT_BINARY_DIR}/device_heap_probe
+                --backend=legacy
     )
     set_tests_properties(functional_device_heap PROPERTIES SKIP_RETURN_CODE 77)
 

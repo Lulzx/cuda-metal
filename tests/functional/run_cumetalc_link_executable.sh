@@ -11,6 +11,14 @@ set -euo pipefail
 CUMETALC="${1:?usage: run_cumetalc_link_executable.sh <cumetalc> <source.cu> <workdir>}"
 SOURCE_CU="${2:?}"
 WORK_DIR="${3:?}"
+shift 3
+COMPILER_ARGS=("$@")
+EXPECT_NATIVE=1
+for arg in "${COMPILER_ARGS[@]}"; do
+    if [[ "${arg}" == "--backend=legacy" ]]; then
+        EXPECT_NATIVE=0
+    fi
+done
 
 if ! command -v xcrun >/dev/null 2>&1; then
     echo "SKIP: xcrun not installed"
@@ -40,7 +48,8 @@ BUILD_STATUS=0
 PATH_WITH_SPACES="${WORK_DIR}/toolbox scripts"
 mkdir -p "${PATH_WITH_SPACES}"
 PATH="${PATH_WITH_SPACES}:${PATH}" \
-  "${CUMETALC}" "${SOURCE_CU}" -o "${OUT_BIN}" >"${BUILD_LOG}" 2>&1 || BUILD_STATUS=$?
+  "${CUMETALC}" "${SOURCE_CU}" "${COMPILER_ARGS[@]}" -o "${OUT_BIN}" \
+  >"${BUILD_LOG}" 2>&1 || BUILD_STATUS=$?
 
 cat "${BUILD_LOG}"
 
@@ -56,12 +65,20 @@ if [[ ! -x "${OUT_BIN}" ]]; then
     echo "FAIL: cumetalc reported success but produced no executable at ${OUT_BIN}"
     exit 1
 fi
+if [[ ${EXPECT_NATIVE} -eq 1 ]] &&
+   nm -u "${OUT_BIN}" 2>/dev/null | grep -q '__cudaRegister'; then
+    echo "FAIL: native source executable still depends on NVIDIA registration symbols"
+    exit 1
+fi
 
 # The whole point of the driver is that the binary is self-contained: no metallib argument, no
 # DYLD_LIBRARY_PATH from the caller. Run it exactly as a user would.
 echo "Running ${OUT_BIN}"
 RUN_STATUS=0
-RUN_OUTPUT="$(CUMETAL_TRACE_GPU=1 "${OUT_BIN}" 2>&1)" || RUN_STATUS=$?
+RUNTIME_CACHE="${WORK_DIR}/native-runtime-cache"
+rm -rf "${RUNTIME_CACHE}"
+RUN_OUTPUT="$(CUMETAL_CACHE_DIR="${RUNTIME_CACHE}" CUMETAL_TRACE_GPU=1 \
+  CUMETAL_DEBUG_REGISTRATION=1 "${OUT_BIN}" 2>&1)" || RUN_STATUS=$?
 echo "${RUN_OUTPUT}"
 
 if [[ ${RUN_STATUS} -ne 0 ]]; then
@@ -83,5 +100,19 @@ if ! grep -q "launch_success=true" <<<"${RUN_OUTPUT}"; then
     echo "FAIL: provenance does not report a successful launch"
     exit 1
 fi
+if [[ ${EXPECT_NATIVE} -eq 1 ]] &&
+   { grep -q -E 'JIT compiling|registration-jit' <<<"${RUN_OUTPUT}" ||
+     [[ -d "${RUNTIME_CACHE}/registration-jit" ]]; }; then
+    echo "FAIL: native source executable performed first-launch PTX JIT"
+    exit 1
+fi
+if [[ ${EXPECT_NATIVE} -eq 1 && ! -d "${RUNTIME_CACHE}/native-aot" ]]; then
+    echo "FAIL: native module was not materialized through the native-AOT cache"
+    exit 1
+fi
 
-echo "PASS: cumetalc built and ran a linked CUDA executable on the Apple GPU"
+if [[ ${EXPECT_NATIVE} -eq 1 ]]; then
+    echo "PASS: cumetalc built and ran a native-AOT CUDA executable on the Apple GPU without PTX JIT"
+else
+    echo "PASS: cumetalc built and ran an explicit legacy-compatibility CUDA executable on the Apple GPU"
+fi

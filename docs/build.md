@@ -41,7 +41,7 @@ Two independent switches
 
 | Option | Default | Controls |
 |--------|---------|----------|
-| `CUMETAL_ENABLE_CUDA_REGISTRATION` | `ON` everywhere | The host CUDA registration ABI (`__cudaRegister*`) that Clang emits when compiling *your own* `.cu`. The source path needs it; it is not a binary shim. |
+| `CUMETAL_ENABLE_CUDA_REGISTRATION` | `ON` everywhere | The compatibility host CUDA registration ABI (`__cudaRegister*`) used by Clang-built objects and PTX/fatbinary paths. `cumetalc` native-AOT executables do not depend on it. |
 | `CUMETAL_ENABLE_BINARY_SHIM` | `ON` except Release | The `libcuda.dylib` alias only — the drop-in for binaries pre-linked against NVIDIA's libcuda. |
 
 These used to be a single flag, so a Release build silently replaced the registration ABI with a

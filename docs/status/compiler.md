@@ -4,7 +4,9 @@
 
 ## Production paths
 
-- `cumetalc file.cu -o program` builds a source-recompiled executable.
+- `cumetalc file.cu -o program` builds a native-AOT source executable with an
+  embedded metallib and versioned CuMetal registration descriptor; it has no
+  `__cudaRegister*` or first-launch PTX-JIT dependency.
 - Direct `.cu` defaults to typed CuMetal IR.
 - PTX and `.cu --cuda-device` default to the broader legacy PTX backend.
 - Both paths emit MSL and use Apple's public `metal`/`metallib` tools for

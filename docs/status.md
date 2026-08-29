@@ -20,8 +20,8 @@ is split by subsystem.
   **24/24**, typed PTX **24/24**, legacy PTX **24/24**.
 - Phase 5 measured kernels: vector add, SAXPY, and reduction meet the recorded
   2x native-Metal ceiling on Apple M4 Pro.
-- Backend defaults remain frontend-dependent while numerical coverage and the
-  native-AOT executable path continue migrating; equal compile counts do not
+- Backend defaults remain frontend-dependent while numerical coverage continues
+  migrating; equal compile counts do not
   establish equal general compatibility.
 
 These numbers describe bounded gates, not a general CUDA compatibility

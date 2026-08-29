@@ -33,8 +33,8 @@ Remaining typed-path blockers include combinations of:
 - FP64 modes and operations beyond the numerically proven `fast48`
   arithmetic/storage/comparison/rounding corpus, including observable IEEE
   exception status;
-- native-AOT metadata that lets the runtime populate hidden constant/global
-  bindings without the current CUDA registration path, plus unproven symbol
+- native-AOT metadata that lets the runtime populate hidden writable and
+  zero-initialized global bindings, plus unproven symbol
   combinations beyond the directly and transitively referenced buffers covered
   by typed NVVM tests.
 
@@ -43,10 +43,10 @@ corpus. It is not a correctness fallback.
 
 ## Source AOT architecture
 
-The complete executable flow still uses CUDA-compatible source registration and
-first-launch PTX lowering. The spec requires a versioned native registration and
-launch-stub AOT path. Do not describe the current executable as having closed
-that architectural requirement.
+The linked source flow uses the versioned native registration and launch-stub
+ABI with an embedded metallib and no first-launch PTX lowering. CUDA module
+globals that require hidden runtime-populated bindings are not yet representable
+in the native descriptor and must fail rather than silently launch unbound.
 
 ## PTX and fatbinary coverage
 

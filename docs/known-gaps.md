@@ -13,9 +13,9 @@ current status must be backed by tests and evidence.
 
 ## Highest-priority open work
 
-1. Bring typed CuMetal IR to legacy PTX production and numerical coverage.
-2. Replace source AOT's remaining CUDA registration/first-launch PTX dependence
-   with the versioned native ABI required by the spec.
+1. Expand typed CuMetal IR beyond the now-matched reviewed compile corpus and
+   broaden numerical coverage.
+2. Extend native-AOT descriptors to writable/zero-initialized CUDA globals.
 3. Define the Phase 4 conformance denominator and enable real hosted/self-hosted
    CI without turning skips into passes.
 4. Validate genuinely distinct supported Xcode toolchains.

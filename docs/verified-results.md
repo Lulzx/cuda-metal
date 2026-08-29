@@ -11,6 +11,16 @@ warp operations, streams, events, and selected CUDA library calls have numerical
 GPU tests. The suite includes negative cases because accepting a program is not
 the same as implementing it correctly.
 
+On 2026-08-29, `functional_cumetalc_link_executable` compiled the unmodified
+`samples/vectorAdd/vectorAdd.cu` translation unit into a native-AOT executable
+and passed all 16,384 numerical outputs on Apple M4 Pro. The gate checks that
+the linked binary has no unresolved `__cudaRegister*` symbols, starts from an
+empty cache, creates only a native-AOT materialization (not a registration-JIT
+entry), and reports `device=apple_gpu` with `launch_success=true`.
+`functional_cumetalc_native_aot_multi_kernel` separately launches four kernels
+from one embedded native module and checks atomics, thread fences, and static
+shared-memory results.
+
 On 2026-08-29, `functional_typed_{direct,ptx}_{device,system}_atomics` and
 `functional_typed_{direct,ptx}_fence` passed on Apple GPU. The device test
 checks add/sub/min/max/CAS/inc/dec/and/or/xor across 16,384 contending threads;

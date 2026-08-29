@@ -144,19 +144,23 @@ Generated MSL contains controlled metadata comments, and completed runtime
 dispatch traces report both fields. Workload substitution and CPU fallback do
 not count as generic compiler coverage.
 
-## Source-native registration target
+## Source-native registration
 
-The versioned `CuMetalModuleDescriptor` ABI is implemented and unit-tested as a
-target surface. Logical CUDA arguments and concrete Metal bindings are separate
-tables. It can embed metallib bytes and map host stubs directly to kernel
+The versioned `CuMetalModuleDescriptor` ABI is implemented and used by linked
+source executables. Logical CUDA arguments and concrete Metal bindings are separate
+tables. It embeds metallib bytes and maps host stubs directly to kernel
 descriptors through `cumetalRegisterModule` and `cumetalUnregisterModule`.
 
 The runtime validates descriptor versions, argument/binding ranges, SIMD width,
-and host-stub uniqueness before registration. The current `cumetalc file.cu -o
-program` flow does not yet emit/use this descriptor; it still uses CUDA source
-registration and first-launch PTX lowering. Closing that integration is required
-before `__cudaRegister*` and fatbinary parsing become compatibility-only in the
-actual source executable path.
+and host-stub uniqueness before registration. `cumetalc file.cu -o program`
+compiles host-only Clang launch stubs, embeds the typed direct-path metallib in a
+generated native descriptor, and links both against `libcumetal`. Its executable
+has no `__cudaRegister*` dependency and creates no registration-JIT cache on a
+cold launch. CUDA registration and fatbinary parsing remain compatibility paths.
+
+Native descriptors do not yet describe writable or zero-initialized CUDA module
+globals. Translation units needing those hidden bindings remain an explicit
+native-AOT gap even though non-zero read-only tables can be embedded in MSL.
 
 ## Default-backend gate
 
