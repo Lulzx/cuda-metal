@@ -71,11 +71,16 @@ def main():
     ap.add_argument("--metric", default="highs", choices=[m[0] for m in METRICS],
                     help="which timing drives the summary (default: highs)")
     ap.add_argument("--out", default=str(HERE / "results/report.md"))
+    ap.add_argument("--baseline", default=None,
+                    help="a second runs.jsonl to diff against, e.g. the run "
+                         "recorded before a change. Adds a per-instance delta "
+                         "column and a summary of what moved.")
     a = ap.parse_args()
 
     runs = load(a.runs)
     if not runs:
         sys.exit("no runs recorded yet")
+    base = load(a.baseline) if a.baseline else {}
     metric_field = dict(METRICS)[a.metric]
 
     tracks = sorted({k[1] for k in runs})
@@ -89,9 +94,11 @@ def main():
                   f"({'presolve default' if track == 'A' else 'presolve off'})", "",
                   "| instance | rows | cols | nnz | status cpu/gpu | obj rel diff |"
                   " iters cpu/gpu | wall c/g (s) | highs c/g (s) | solve c/g (s) |"
-                  " speedup | ok |",
-                  "|---|---:|---:|---:|---|---:|---|---|---|---|---:|---|"]
+                  " speedup |" + (" gpu vs base |" if base else "") + " ok |",
+                  "|---|---:|---:|---:|---|---:|---|---|---|---|---:|"
+                  + ("---:|" if base else "") + "---|"]
         agg = {"cpu": [], "gpu": []}
+        baseline_ratios = []
         wins = {"gpu": 0, "cpu": 0, "tie": 0}
         solved = {"cpu": 0, "gpu": 0}
         rows_out = []
@@ -141,14 +148,34 @@ def main():
                 f = lambda v: "-" if v is None else f"{v:.2f}"
                 return f"{f(x)} / {f(y)}"
 
+            # The GPU build's own before/after. The CPU column is the control:
+            # if it moved too, the machine changed, not the code.
+            delta = ""
+            if base:
+                b_gpu = base.get((name, track, "gpu"))
+                b_cpu = base.get((name, track, "cpu"))
+                bg = median_of(b_gpu, metric_field) if b_gpu else None
+                bc = median_of(b_cpu, metric_field) if b_cpu else None
+                now = median_of(rg, metric_field)
+                if bg and now:
+                    drift = ""
+                    nc = median_of(rc, metric_field)
+                    if bc and nc and abs(nc - bc) / bc > 0.10:
+                        drift = f" (cpu {(bc / nc):.2f}x too)"
+                    delta = f" {bg:.2f}->{now:.2f} = {bg / now:.2f}x{drift} |"
+                    baseline_ratios.append((name, bg / now))
+                else:
+                    delta = " - |"
+
             rows_out.append(
                 f"| {name} | {meta['rows']:,} | {meta['cols']:,} | {meta['nnz']:,} "
                 f"| {sc} / {sg} | {'-' if rel is None else f'{rel:.1e}'} "
                 f"| {median_of(rc,'iterations'):.0f} / {median_of(rg,'iterations'):.0f} "
                 f"| {pair('wall')} | {pair('highs_run_time')} "
                 f"| {pair('solve_presolved_s')} "
-                f"| {'-' if sp is None else f'{sp:.2f}x'} "
-                f"| {'ok' if ok else '**FAIL**'} |")
+                f"| {'-' if sp is None else f'{sp:.2f}x'} |"
+                f"{delta}"
+                f" {'ok' if ok else '**FAIL**'} |")
         lines += rows_out + [""]
 
         n = len(agg["cpu"])
@@ -165,6 +192,19 @@ def main():
                   f"gpu faster: {wins['gpu']}   cpu faster: {wins['cpu']}"
                   f"   within 5%: {wins['tie']}",
                   "```", ""]
+        if baseline_ratios:
+            faster = [n for n, r in baseline_ratios if r > 1.05]
+            slower = [n for n, r in baseline_ratios if r < 0.95]
+            same = len(baseline_ratios) - len(faster) - len(slower)
+            gm = math.exp(sum(math.log(r) for _, r in baseline_ratios) /
+                          len(baseline_ratios))
+            lines += [f"**vs baseline (track {track})**", "", "```text",
+                      f"gpu build, geometric mean: {gm:.3f}x",
+                      f"faster: {len(faster)}   slower: {len(slower)}"
+                      f"   within 5%: {same}",
+                      f"  improved: {', '.join(faster) if faster else '-'}",
+                      f"  regressed: {', '.join(slower) if slower else '-'}",
+                      "```", ""]
 
     text = "\n".join(lines)
     Path(a.out).write_text(text)

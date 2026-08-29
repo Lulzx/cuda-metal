@@ -965,6 +965,13 @@ bool try_spmv_gather_metal(cudaStream_t stream,
     cumetal::metal_backend::LaunchConfig config{};
     config.block = dim3(kBlock, 1, 1);
     config.shared_memory_bytes = 0;
+    // The FP64 library kernels use the same FP32-pair arithmetic as generic
+    // translated FP64.  `library_substitution` alone defaults to exact in the
+    // backend because many library kernels really are exact; override it for
+    // this typed call so provenance does not claim IEEE binary64 arithmetic.
+    config.semantic_quality = compute_type == CUDA_R_64F
+                                  ? "reduced_precision_fp64"
+                                  : "exact";
     const char* kernel = nullptr;
     if (variant == GatherKernel::kScalar) {
         // One thread per compressed row.

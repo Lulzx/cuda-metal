@@ -5,11 +5,14 @@ CPU build.
 
 ```bash
 bash demos/highs/run.sh          # from a built CuMetal tree
+bash demos/highs/run_highs.sh    # unmodified HiGHS CUPDLP_GPU integration
 ```
 
 Nothing from cuPDLP-C or HiGHS lives here. `run.sh` calls
 `scripts/build_cupdlp_cumetal.sh`, which clones cuPDLP-C outside the tree and
 downloads the LPs into `out/`. HiGHS comes from `brew install highs`.
+That Homebrew library is only for the standalone harness; `run_highs.sh`
+clones its own HiGHS source and builds both comparison binaries from it.
 
 [cuPDLP-C](https://github.com/COPT-Public/cuPDLP-C) is the PDLP solver HiGHS
 vendors as its GPU path; `libhighs` exports ~104 `cupdlp_*` symbols of its own.
@@ -17,6 +20,10 @@ The `run.sh` comparison builds standalone cuPDLP-C so it can isolate that
 solver's CPU and GPU behavior. Separately, `scripts/build_highs_cumetal.sh`
 builds unmodified HiGHS itself with `CUPDLP_GPU=ON`; the focused HiGHS run
 described below exercises that integration layer on the Apple GPU.
+`run_highs.sh` makes that check reproducible: by default it builds CPU and GPU
+HiGHS from the same v1.15.1 source, solves `afiro` with presolve disabled,
+forces the captured cuSPARSE SpMV nodes onto Metal, and applies the same
+status/objective/residual and provenance gates as the standalone comparison.
 
 Built with `cupdlp_float = double`, the upstream default, not the reduced
 `SFLOAT` config. Storage is IEEE-754 binary64; arithmetic is not. Values decode
@@ -66,12 +73,13 @@ fallback produced it.
 the extra 126 being `cumetal_spmv_gather_f64` for `Ax` and `A'y`. Those report:
 
 ```text
-provenance=generic_ptx_lowering_fp64_emulated semantic_quality=reduced_precision_fp64
+source=specialized_msl provenance=library_substitution
+semantic_quality=reduced_precision_fp64 math_mode=safe
 ```
 
-The lowering translates that kernel's own PTX with no substitution, so the
-provenance is honest; the numerical contract is what differs, which is why the
-fields are separate.
+This is an explicit cuSPARSE library substitution, not generic PTX lowering.
+The source/provenance fields say so, while `semantic_quality` records that its
+Dekker-pair arithmetic is not IEEE binary64.
 
 `stair` hits the iteration limit on both builds, with better Metal residuals
 than the CPU run: gap 9.05e-03 against 1.41e-02.
@@ -161,7 +169,8 @@ capture is non-eager, replay uses the captured descriptors, and later device
 data is observed on both the forced-Metal and CPU sparse routes. An unmodified
 HiGHS 1.15.1 `CUPDLP_GPU=ON` build from `scripts/build_highs_cumetal.sh` also
 solves `afiro` with `--presolve off` to Optimal in 360 iterations while CuMetal
-traces successful kernel launches on the Apple M4 Pro. This is focused
+traces successful kernel launches on the Apple M4 Pro. Run that focused gate
+with `bash demos/highs/run_highs.sh`. This is focused
 integration evidence, not a claim that every HiGHS model or CUDA-library graph
 operation is supported. See `docs/known-gaps.md`.
 

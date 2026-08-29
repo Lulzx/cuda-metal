@@ -2970,10 +2970,9 @@ add_test(
 # force it on: left on auto it would silently test the CPU path twice.
 add_test(
     NAME functional_cusparse_spmv_conformance
-    COMMAND cumetal_cusparse_spmv_conformance_test
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_cusparse_spmv_metal.sh
+            $<TARGET_FILE:cumetal_cusparse_spmv_conformance_test> scalar
 )
-set_tests_properties(functional_cusparse_spmv_conformance
-    PROPERTIES ENVIRONMENT "CUMETAL_SPARSE_METAL=1")
 
 add_test(
     NAME functional_cusparse_spmv_conformance_cpu
@@ -2987,10 +2986,9 @@ set_tests_properties(functional_cusparse_spmv_conformance_cpu
 # suite would report the simdgroup path green without ever running it.
 add_test(
     NAME functional_cusparse_spmv_conformance_simd
-    COMMAND cumetal_cusparse_spmv_conformance_test
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_cusparse_spmv_metal.sh
+            $<TARGET_FILE:cumetal_cusparse_spmv_conformance_test> simd
 )
-set_tests_properties(functional_cusparse_spmv_conformance_simd
-    PROPERTIES ENVIRONMENT "CUMETAL_SPARSE_METAL=1;CUMETAL_SPARSE_METAL_KERNEL=simd")
 
 # Forced onto the Metal path: the matrix is far too small for auto mode, and
 # capturing the CPU path would prove nothing about the GPU one.

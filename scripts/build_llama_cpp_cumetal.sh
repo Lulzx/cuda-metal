@@ -3,6 +3,7 @@
 #
 # Usage:
 #   bash scripts/build_llama_cpp_cumetal.sh [llama-cpp-dir]
+#   bash scripts/build_llama_cpp_cumetal.sh --toolkit-only
 #
 # Environment overrides:
 #   CUMETAL_LLAMA_DIR    path to llama.cpp checkout (default: ../llama.cpp)
@@ -22,6 +23,11 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/cumetal_cuda_flags.sh"
 
 # ── configuration ─────────────────────────────────────────────────────────────
+TOOLKIT_ONLY=0
+if [[ "${1:-}" == "--toolkit-only" ]]; then
+    TOOLKIT_ONLY=1
+    shift
+fi
 LLAMA_DIR="${CUMETAL_LLAMA_DIR:-${1:-${ROOT_DIR}/../llama.cpp}}"
 LLAMA_REPO="${CUMETAL_LLAMA_REPO:-https://github.com/ggml-org/llama.cpp}"
 LLAMA_TAG="${CUMETAL_LLAMA_TAG:-}"        # empty = latest main
@@ -46,17 +52,6 @@ if [[ -z "${CLANG_BIN}" ]]; then
     exit 2
 fi
 echo "clang++: ${CLANG_BIN}"
-
-# ── clone llama.cpp if needed ─────────────────────────────────────────────────
-if [[ ! -d "${LLAMA_DIR}" ]]; then
-    echo "Cloning llama.cpp → ${LLAMA_DIR} ..."
-    if [[ -n "${LLAMA_TAG}" ]]; then
-        git clone --depth 1 --branch "${LLAMA_TAG}" "${LLAMA_REPO}" "${LLAMA_DIR}"
-    else
-        git clone --depth 1 "${LLAMA_REPO}" "${LLAMA_DIR}"
-    fi
-fi
-echo "llama.cpp source: ${LLAMA_DIR}"
 
 # ── create fake CUDA toolkit that CMake will accept ───────────────────────────
 # cmake's CMakeCUDAFindToolkit.cmake probes nvcc in three ways:
@@ -312,6 +307,21 @@ NVCC
 chmod +x "${FAKE_CUDA}/bin/nvcc"
 
 echo "Fake CUDA toolkit ready: ${FAKE_CUDA}"
+
+if [[ ${TOOLKIT_ONLY} -eq 1 ]]; then
+    exit 0
+fi
+
+# ── clone llama.cpp if needed ─────────────────────────────────────────────────
+if [[ ! -d "${LLAMA_DIR}" ]]; then
+    echo "Cloning llama.cpp → ${LLAMA_DIR} ..."
+    if [[ -n "${LLAMA_TAG}" ]]; then
+        git clone --depth 1 --branch "${LLAMA_TAG}" "${LLAMA_REPO}" "${LLAMA_DIR}"
+    else
+        git clone --depth 1 "${LLAMA_REPO}" "${LLAMA_DIR}"
+    fi
+fi
+echo "llama.cpp source: ${LLAMA_DIR}"
 
 # ── configure llama.cpp ───────────────────────────────────────────────────────
 LLAMA_BUILD="${LLAMA_DIR}/build-cumetal"

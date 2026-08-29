@@ -14,7 +14,8 @@ mkdir -p "${LOG_DIR}"
 trap 'rm -rf "${LOG_DIR}"' EXIT
 
 echo "=== forced GPU path (CUMETAL_BLAS_METAL=1) ==="
-CUMETAL_BLAS_METAL=1 CUMETAL_DEBUG_CUBLAS_BLAS1=1 "${BIN}" > "${LOG_DIR}/gpu.log" 2>&1 || {
+CUMETAL_BLAS_METAL=1 CUMETAL_DEBUG_CUBLAS_BLAS1=1 CUMETAL_TRACE_GPU=1 \
+    "${BIN}" > "${LOG_DIR}/gpu.log" 2>&1 || {
     echo "FAIL: test failed with the GPU path forced"; cat "${LOG_DIR}/gpu.log"; exit 1; }
 grep -E "^PASS" "${LOG_DIR}/gpu.log"
 
@@ -27,6 +28,19 @@ for kernel in cumetal_daxpy_f64 cumetal_dscal_f64 cumetal_dreduce_f64; do
         fails=$((fails + 1))
     else
         echo "  ${kernel}: ${count} launch(es) on the Apple GPU"
+    fi
+done
+
+if grep -E 'kernel="cumetal_d(axpy|scal|reduce)_f64" .*semantic_quality=exact' \
+        "${LOG_DIR}/gpu.log" >/dev/null; then
+    echo "  FAIL: an FP64 cuBLAS Metal kernel claimed exact arithmetic"
+    fails=$((fails + 1))
+fi
+for kernel in cumetal_daxpy_f64 cumetal_dscal_f64 cumetal_dreduce_f64; do
+    if ! grep -E "kernel=\"${kernel}\" .*semantic_quality=reduced_precision_fp64 .*device=apple_gpu .*launch_success=true" \
+            "${LOG_DIR}/gpu.log" >/dev/null; then
+        echo "  FAIL: ${kernel} has no honest successful GPU provenance"
+        fails=$((fails + 1))
     fi
 done
 

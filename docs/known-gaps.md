@@ -661,6 +661,9 @@ blocks:
   changed device data across replays, and both forced-Metal and CPU sparse
   routes. An unmodified HiGHS 1.15.1 `CUPDLP_GPU=ON` build solves `afiro` with
   `--presolve off` to Optimal while traced kernels run on the Apple M4 Pro.
+  `demos/highs/run_highs.sh` reproduces this against the matching CPU build,
+  forces HiGHS's captured cuSPARSE SpMV nodes onto Metal, and rejects missing
+  GPU provenance or an FP64 library kernel mislabeled as exact.
   This does not establish full HiGHS model coverage, complete graph capture for
   other CUDA libraries, or IEEE-754 binary64 arithmetic; the GPU path still uses
   CuMetal's reduced-precision FP64 emulation.

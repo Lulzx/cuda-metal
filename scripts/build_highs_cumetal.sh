@@ -10,6 +10,7 @@
 #
 # Usage:
 #   bash scripts/build_highs_cumetal.sh [--jobs=N] [--ref=v1.15.1]
+#                                      [--build-dir=path/to/cumetal-build]
 #
 # Environment:
 #   HIGHS_SRC     checkout path (default ~/work/cumetal-bench-ext/HiGHS)
@@ -19,23 +20,30 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HIGHS_SRC="${HIGHS_SRC:-${HOME}/work/cumetal-bench-ext/HiGHS}"
+BUILD_DIR="${ROOT_DIR}/build"
 JOBS="${CUMETAL_JOBS:-6}"
 REF="v1.15.1"
 for arg in "$@"; do
   case "$arg" in
     --jobs=*) JOBS="${arg#--jobs=}" ;;
     --ref=*)  REF="${arg#--ref=}" ;;
+    --build-dir=*) BUILD_DIR="${arg#--build-dir=}" ;;
     -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
   esac
 done
 
-FAKE_CUDA="${ROOT_DIR}/build/cumetal-cuda-toolkit"
-[[ -x "${FAKE_CUDA}/bin/nvcc" ]] || {
-  echo "ERROR: ${FAKE_CUDA}/bin/nvcc missing." >&2
-  echo "       Run scripts/build_llama_cpp_cumetal.sh once to generate the toolkit." >&2
-  exit 2; }
-[[ -f "${ROOT_DIR}/build/libcumetal.dylib" ]] || {
-  echo "ERROR: build/libcumetal.dylib missing; build CuMetal first." >&2; exit 2; }
+FAKE_CUDA="${BUILD_DIR}/cumetal-cuda-toolkit"
+[[ -f "${BUILD_DIR}/libcumetal.dylib" ]] || {
+  echo "ERROR: ${BUILD_DIR}/libcumetal.dylib missing; build CuMetal first." >&2; exit 2; }
+if [[ ! -x "${FAKE_CUDA}/bin/nvcc" ]]; then
+  if [[ "${BUILD_DIR}" != "${ROOT_DIR}/build" ]]; then
+    echo "ERROR: ${FAKE_CUDA}/bin/nvcc missing." >&2
+    echo "       Generate the toolkit in that build directory first." >&2
+    exit 2
+  fi
+  echo "Generating the CuMetal CUDA toolkit ..."
+  bash "${ROOT_DIR}/scripts/build_llama_cpp_cumetal.sh" --toolkit-only
+fi
 
 if [[ ! -d "${HIGHS_SRC}/.git" ]]; then
   mkdir -p "$(dirname "${HIGHS_SRC}")"

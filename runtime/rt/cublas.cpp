@@ -296,6 +296,7 @@ bool blas1_launch_elementwise(const char* op,
     config.grid = dim3(static_cast<unsigned>((static_cast<long long>(n) + kBlas1Block - 1) /
                                              kBlas1Block), 1, 1);
     config.shared_memory_bytes = 0;
+    config.semantic_quality = "reduced_precision_fp64";
 
     std::string error;
     if (cumetal::metal_backend::launch_kernel(*source, kernel, config, args, stream,
@@ -387,6 +388,7 @@ bool blas1_reduce(const char* op,
     // generous wastes a few hundred bytes, being short would corrupt the
     // reduction.
     config.shared_memory_bytes = (kBlas1Block / 8) * sizeof(float) * 2;
+    config.semantic_quality = "reduced_precision_fp64";
 
     std::string error;
     if (cumetal::metal_backend::launch_kernel(*source, "cumetal_dreduce_f64", config, args,
