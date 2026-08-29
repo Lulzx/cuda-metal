@@ -4,17 +4,19 @@
 
 ## Conformance denominator
 
-The current NVIDIA `cuda-samples` manifest has 83 enrolled headless samples and
-all 83 pass. This is an all-pass bounded snapshot, not the spec's undefined
-"full conformance suite" denominator and not a general compatibility percentage.
-Samples outside the enrollment are unclassified.
+The Phase 4 denominator is the reviewed 185-test manifest at
+`tests/conformance/phase4_functional_manifest.txt`. Every entry has expected
+outcome `pass`; skips and waivers are not removed from the denominator. The
+separate NVIDIA `cuda-samples` manifest has 83 enrolled headless samples; all 83 pass.
+Both are bounded snapshots, not general CUDA compatibility percentages;
+tests and samples outside the enrollments are unclassified.
 
 ## CI
 
-Layered GitHub Actions workflows exist but are disabled. Therefore the repository
-does not currently have proven recurring hosted or self-hosted CI. The Apple-GPU
-lane also requires a commissioned trusted runner and repository variable. Local
-passes do not substitute for observing those remote schedules.
+Layered GitHub Actions workflows are enabled. The repository still needs observed
+successful hosted runs before recurring hosted CI is proven. The Apple-GPU lane
+also requires a commissioned trusted runner and repository variable; workflow
+source and local passes do not substitute for observing those remote runs.
 
 ## Toolchain matrix
 

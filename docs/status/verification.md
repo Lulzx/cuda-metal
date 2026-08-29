@@ -17,9 +17,11 @@ High-value executable gates include:
 - Release/shim-off and Debug/shim-on configuration contracts;
 - AIR toolchain identity and metallib load/validation checks.
 
-GitHub Actions definitions currently remain disabled. Their presence does not
-prove hosted or recurring CI execution. A self-hosted Apple-GPU lane also needs
-explicit commissioning and repository configuration.
+GitHub Actions definitions are enabled for the hosted Release/shim-off and
+Debug/shim-on matrix. Their source presence does not prove a successful remote
+run. The Apple-GPU workflow is also enabled, but push execution still requires
+a commissioned runner and `CUMETAL_GPU_CI_ENABLED=true`; manual dispatch only
+attempts the job.
 
 ## Performance
 

@@ -16,11 +16,7 @@ executed on any machine.
 CI layers
 ---------
 
-The workflow definitions are temporarily disabled by their `.yml.disabled`
-suffixes, so GitHub does not discover or run them. Rename them back to `.yml`
-to re-enable the gates described below.
-
-`.github/workflows/ci.yml.disabled` defines the hosted gate for pushes and pull
+`.github/workflows/ci.yml` defines the hosted gate for pushes and pull
 requests. It uses the `macos-15` Apple Silicon image and covers both supported
 build policies:
 
@@ -45,8 +41,8 @@ bash scripts/ci_report.sh build \
   --label-regex '^hosted$'
 ```
 
-`.github/workflows/gpu-ci.yml.disabled` defines the specification's Apple-GPU
-hardware layer, but the disabled file is not evidence of recurring CI.
+`.github/workflows/gpu-ci.yml` defines the specification's Apple-GPU hardware
+layer. An enabled workflow definition is not evidence of recurring success.
 Its runner must have the standard self-hosted labels `self-hosted`, `macOS`,
 and `ARM64`, plus the custom label `ci-m1`. When enabled, it runs only on pushes
 to `main` and manual dispatch, never on pull requests. Set the repository Actions variable
@@ -192,7 +188,7 @@ ctest --test-dir build -R unit_install_uninstall_scripts --output-on-failure
 Conformance suite
 -----------------
 
-Phase 4 conformance gate over functional tests:
+Phase 4 conformance gate over the reviewed 185-test functional manifest:
 
 ```bash
 ctest --test-dir build -R conformance_phase4_functional --output-on-failure
@@ -201,6 +197,12 @@ ctest --test-dir build -R functional_cuda_projects_ --output-on-failure
 # Manifest-complete strict sweep with classified TSV/JSON output:
 python3 tests/cuda_projects/sweep_cuda_projects.py
 ```
+
+`tests/conformance/phase4_functional_manifest.txt` is the fixed denominator.
+Every enrolled test is expected to pass; failures, timeouts, missing
+registrations, disabled tests, and prerequisite skips remain non-passing
+denominator entries. The 90% threshold therefore cannot be met by excluding
+skips from the calculation.
 
 The separate NVIDIA sample gate requires a full `cuda-samples` checkout. It is
 intentionally run serially because several upstream workloads are large:
@@ -236,10 +238,11 @@ Notes:
   manual stress harness; successful runs must still require numerical parity,
   Apple-GPU provenance, and no CPU-emulation fallback.
 
-Direct invocation with custom threshold/regex:
+Direct invocation with a custom threshold/manifest:
 
 ```bash
-./tests/conformance/run_conformance_suite.sh build 90 '^functional_'
+./tests/conformance/run_conformance_suite.sh build 90 \
+  tests/conformance/phase4_functional_manifest.txt
 ```
 
 Optional llm.c stress harness setup:

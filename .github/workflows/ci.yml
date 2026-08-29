@@ -36,10 +36,15 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Select LLVM 18 toolchain
+      - name: Select supported LLVM toolchain
         shell: bash
         run: |
-          llvm_root="$(brew --prefix llvm@18)"
+          llvm_root="$(brew --prefix llvm)"
+          clang_major="$("${llvm_root}/bin/clang++" --version | sed -nE '1s/.*version ([0-9]+).*/\1/p')"
+          case "${clang_major}" in
+            21|22|23) ;;
+            *) echo "unsupported CUDA Clang major: ${clang_major}"; exit 1 ;;
+          esac
           echo "${llvm_root}/bin" >> "${GITHUB_PATH}"
           echo "CMAKE_PREFIX_PATH=${llvm_root}" >> "${GITHUB_ENV}"
           echo "CUMETAL_CUDA_CLANG=${llvm_root}/bin/clang++" >> "${GITHUB_ENV}"

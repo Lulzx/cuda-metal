@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 3 ]]; then
-    echo "usage: $0 <build_dir> [min_pass_rate_percent] [ctest_regex]"
+    echo "usage: $0 <build_dir> [min_pass_rate_percent] [manifest]"
     exit 2
 fi
 
 BUILD_DIR="$1"
 MIN_PASS_RATE="${2:-90}"
-TEST_REGEX="${3:-^functional_}"
+MANIFEST="${3:-$(dirname "$0")/phase4_functional_manifest.txt}"
 SINGLE_TEST_TIMEOUT="${CUMETAL_CONFORMANCE_SINGLE_TEST_TIMEOUT:-120}"
 
 if ! command -v ctest >/dev/null 2>&1; then
@@ -21,6 +21,11 @@ if [[ ! -d "$BUILD_DIR" ]]; then
     exit 1
 fi
 
+if [[ ! -f "$MANIFEST" ]]; then
+    echo "FAIL: Phase 4 manifest not found: $MANIFEST"
+    exit 1
+fi
+
 if ! [[ "$SINGLE_TEST_TIMEOUT" =~ ^[0-9]+$ ]] || [[ "$SINGLE_TEST_TIMEOUT" -eq 0 ]]; then
     echo "FAIL: CUMETAL_CONFORMANCE_SINGLE_TEST_TIMEOUT must be a positive integer"
     exit 1
@@ -28,15 +33,17 @@ fi
 
 TEST_NAMES=()
 while IFS= read -r name; do
-    if [ -n "$name" ]; then
-        TEST_NAMES+=("$name")
+    [[ -z "$name" || "$name" == \#* ]] && continue
+    if [[ ! "$name" =~ ^[A-Za-z0-9_.+-]+$ ]]; then
+        echo "FAIL: invalid Phase 4 manifest entry: $name"
+        exit 1
     fi
-done < <(ctest --test-dir "$BUILD_DIR" -N -R "$TEST_REGEX" |
-    /usr/bin/sed -nE 's/^[[:space:]]*Test +#[0-9]+: (.*)$/\1/p')
+    TEST_NAMES+=("$name")
+done < "$MANIFEST"
 
 if [[ ${#TEST_NAMES[@]} -eq 0 ]]; then
-    echo "SKIP: no tests matched regex '${TEST_REGEX}'"
-    exit 77
+    echo "FAIL: Phase 4 manifest is empty: $MANIFEST"
+    exit 1
 fi
 
 passed=0
@@ -45,7 +52,8 @@ skipped=0
 total="${#TEST_NAMES[@]}"
 index=0
 
-echo "Conformance run: matched ${total} tests (timeout=${SINGLE_TEST_TIMEOUT}s each)"
+echo "Phase 4 manifest: ${MANIFEST}"
+echo "Conformance denominator: ${total} required-pass tests (timeout=${SINGLE_TEST_TIMEOUT}s each)"
 
 for test_name in "${TEST_NAMES[@]}"; do
     index=$((index + 1))
@@ -67,21 +75,16 @@ for test_name in "${TEST_NAMES[@]}"; do
 done
 
 executed=$((passed + failed))
-if [[ $executed -eq 0 ]]; then
-    echo "SKIP: all matched tests were skipped"
-    exit 77
-fi
-
-pass_rate="$(awk -v passed="$passed" -v executed="$executed" \
-    'BEGIN { printf "%.2f", 100.0 * passed / executed }')"
+pass_rate="$(awk -v passed="$passed" -v total="$total" \
+    'BEGIN { printf "%.2f", 100.0 * passed / total }')"
 
 echo "Conformance summary:"
-echo "  matched:  ${#TEST_NAMES[@]}"
+echo "  denominator: ${total}"
 echo "  executed: ${executed}"
 echo "  passed:   ${passed}"
 echo "  failed:   ${failed}"
 echo "  skipped:  ${skipped}"
-echo "  pass_rate(executed): ${pass_rate}%"
+echo "  pass_rate(required): ${pass_rate}%"
 echo "  threshold:           ${MIN_PASS_RATE}%"
 
 if awk -v pass_rate="$pass_rate" -v threshold="$MIN_PASS_RATE" \

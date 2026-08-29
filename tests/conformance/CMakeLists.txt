@@ -73,7 +73,7 @@ add_test(
             ${CMAKE_CURRENT_SOURCE_DIR}/run_conformance_suite.sh
             ${CMAKE_BINARY_DIR}
             90
-            ^functional_
+            ${CMAKE_CURRENT_SOURCE_DIR}/phase4_functional_manifest.txt
 )
 
 add_test(
@@ -86,6 +86,14 @@ set_tests_properties(conformance_phase4_functional PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 1800
 )
+
+add_test(
+    NAME unit_phase4_gate_policy
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/check_phase4_gate_policy.sh
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_conformance_suite.sh
+)
+set_tests_properties(unit_phase4_gate_policy PROPERTIES LABELS "hosted;unit")
 
 # ── llama.cpp conformance ─────────────────────────────────────────────────────
 # Auto-discover an existing llama.cpp checkout or build directory.
