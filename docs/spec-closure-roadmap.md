@@ -25,6 +25,16 @@ compatibility claim. Implemented surfaces and detailed limitations remain in
   `tests/cuda_projects/backend_matrix_manifest.txt` and
   `conformance_compiler_backend_matrix{,_versions}`. The matrix is compile
   evidence only; promotion still requires numerical GPU tests.
+- The exact 22-project in-tree corpus now passes 22/22 through typed PTX and
+  22/22 through direct native AOT on Apple M4 Pro with workload
+  specializations disabled. Native ABI v3 carries kernel, symbol, and device
+  `printf` metadata and performs no first-launch PTX JIT. This closes the
+  reviewed numerical corpus, not the residual language combinations in P1.
+- The manifest target still contains 83 enrolled headless samples and requires
+  83/83 pass. A 2026-08-30 rerun reached 82/83 because
+  `conjugateGradientMultiBlockCG` exceeded the macOS GPU watchdog; three PhysX
+  comparisons also failed. Repository-wide readiness remains open until those
+  runtime regressions are fixed and the complete suite is green again.
 - The named five-kernel Phase 5 release set—vector add, SAXPY, STREAM copy,
   STREAM triad, and FP32 reduction—has measured Apple-GPU results below 2x
   native Metal on the recorded Apple M4 Pro system. The reproducible gate is

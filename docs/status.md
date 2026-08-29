@@ -14,10 +14,14 @@ is split by subsystem.
 
 ## Snapshot
 
-- Enrolled headless `cuda-samples`: **83/83 pass**, zero waivers, zero
-  nonpassing manifest entries.
+- Enrolled headless `cuda-samples` manifest target: **83/83 pass**, zero
+  waivers and zero nonpassing entries. The latest 2026-08-30 execution is
+  82/83 because `conjugateGradientMultiBlockCG` times out at the macOS GPU
+  watchdog; this is an open regression.
 - Production-metallib source corpus with CUDA Clang 21-23: direct typed IR
   **24/24**, typed PTX **24/24**, legacy PTX **24/24**.
+- Exact in-tree numerical corpus: typed PTX **22/22** and direct native AOT
+  **22/22** on Apple M4 Pro with workload specializations disabled.
 - The named five-kernel Phase 5 release set—vector add, SAXPY, STREAM copy,
   STREAM triad, and reduction—meets the recorded 2x native-Metal ceiling on
   Apple M4 Pro.

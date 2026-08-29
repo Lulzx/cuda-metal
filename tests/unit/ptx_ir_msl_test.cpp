@@ -203,6 +203,83 @@ LOOP:
                      b64_shuffle.source.find("simd_shuffle(") != std::string::npos,
                  "partial mov.b64 tuples and cvt.u64 preserve 32-bit shuffle halves");
 
+    const std::string float_shuffle_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry float_shuffle(.param .u64 output) {
+    .reg .f32 %f1;
+    .reg .b32 %r1;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    mov.f32 %f1, 0f3f800000;
+    shfl.sync.down.b32 %r1, %f1, 1, 31, -1;
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult float_shuffle =
+        metal::compile_ptx_to_msl(float_shuffle_ptx);
+    ok &= expect(float_shuffle.ok &&
+                     float_shuffle.source.find("as_type<uint>(") !=
+                         std::string::npos &&
+                     float_shuffle.source.find("simd_shuffle(") !=
+                         std::string::npos,
+                 "PTX b32 shuffle preserves float register bits before typed SIMD exchange");
+    if (!float_shuffle.ok) std::cerr << float_shuffle.error << "\n";
+
+    const std::string masked_vote_mul_hi_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry masked_vote_mul_hi(.param .u64 output) {
+    .reg .pred %p<4>;
+    .reg .b32 %r<8>;
+    .reg .b64 %rd<2>;
+    ld.param.u64 %rd1, [output];
+    mov.u32 %r1, %laneid;
+    mul.hi.u32 %r2, %r1, 1431655766;
+    setp.eq.u32 %p1, %r2, 0;
+    vote.sync.any.pred %p2, %p1, 255;
+    vote.sync.all.pred %p3, %p1, 255;
+    vote.sync.ballot.b32 %r3, %p1, 255;
+    selp.u32 %r4, 1, 0, %p2;
+    selp.u32 %r5, 1, 0, %p3;
+    add.u32 %r6, %r4, %r5;
+    add.u32 %r7, %r6, %r3;
+    st.global.u32 [%rd1], %r7;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult masked_vote_mul_hi =
+        metal::compile_ptx_to_msl(masked_vote_mul_hi_ptx);
+    const std::string masked_vote_mul_hi_ir =
+        ir::print(masked_vote_mul_hi.gpu_ir);
+    const bool masked_vote_mul_hi_valid = masked_vote_mul_hi.ok &&
+                     masked_vote_mul_hi_ir.find("high_half=\"true\"") !=
+                         std::string::npos &&
+                     masked_vote_mul_hi_ir.find("kind=\"all\"") !=
+                         std::string::npos &&
+                     masked_vote_mul_hi.source.find("ulong(") !=
+                         std::string::npos &&
+                     masked_vote_mul_hi.source.find(">> 32u") !=
+                         std::string::npos &&
+                     masked_vote_mul_hi.source.find("simd_ballot(") !=
+                         std::string::npos &&
+                     masked_vote_mul_hi.source.find(
+                         "simd_active_threads_mask()") != std::string::npos &&
+                     masked_vote_mul_hi.source.find("simd_any(") ==
+                         std::string::npos &&
+                     masked_vote_mul_hi.source.find("simd_all(") ==
+                         std::string::npos;
+    ok &= expect(masked_vote_mul_hi_valid,
+                 "PTX mul.hi and masked vote operands retain CUDA semantics");
+    if (!masked_vote_mul_hi_valid) {
+        std::cerr << masked_vote_mul_hi.error << "\n"
+                  << masked_vote_mul_hi_ir << "\n"
+                  << masked_vote_mul_hi.source << "\n";
+    }
+
     const std::string barrier_self_loop_ptx = R"ptx(
 .version 7.0
 .target sm_80
@@ -304,6 +381,64 @@ BODY:
                  "PTX module constants use reserved binding 30 and byte offsets");
     if (!module_constant.ok) std::cerr << module_constant.error << "\n";
 
+    const std::string module_global_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .global .align 4 .b8 state[32];
+.visible .entry module_global(.param .u64 output) {
+    .reg .b64 %rd1;
+    .reg .b32 %r1;
+    ld.param.u64 %rd1, [output];
+    ld.global.b32 %r1, [state+28];
+    add.u32 %r1, %r1, 3;
+    st.global.b32 [state+28], %r1;
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult module_global =
+        metal::compile_ptx_to_msl(module_global_ptx);
+    const bool module_global_valid = module_global.ok &&
+                     module_global.source.find(
+                         "device uchar* cm___cumetal_global_state [[buffer(1)]]") !=
+                         std::string::npos &&
+                     module_global.source.find(
+                         "cm___cumetal_global_state + 28") !=
+                         std::string::npos &&
+                     module_global.source.find("[state+28]") == std::string::npos;
+    ok &= expect(module_global_valid,
+                 "PTX writable module globals use ordered hidden persistent buffers");
+    if (!module_global_valid) {
+        std::cerr << module_global.error << "\n" << module_global.source << "\n";
+    }
+
+    const std::string aggregate_param_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry aggregate_param(
+    .param .align 4 .b8 packed[12],
+    .param .u64 output
+) {
+    .reg .b32 %r1;
+    .reg .b64 %rd1;
+    ld.param.b32 %r1, [packed+8];
+    ld.param.u64 %rd1, [output];
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult aggregate_param =
+        metal::compile_ptx_to_msl(aggregate_param_ptx);
+    ok &= expect(aggregate_param.ok &&
+                     aggregate_param.source.find(
+                         "struct CuMetalPackedParam12") != std::string::npos &&
+                     aggregate_param.source.find("packed.field2") !=
+                         std::string::npos,
+                 "typed PTX reads aligned fields from by-value aggregate arguments");
+    if (!aggregate_param.ok) std::cerr << aggregate_param.error << "\n";
+
     const std::string frexp_abi_ptx = R"ptx(
 .version 7.0
 .target sm_80
@@ -341,6 +476,30 @@ BODY:
                frexp_abi.source.find("\n    double") != std::string::npos) {
         std::cerr << frexp_abi.source << "\n";
     }
+
+    const std::string rint_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry rint_probe(.param .f32 input, .param .u64 output) {
+    .reg .f32 %f<3>;
+    .reg .b64 %rd1;
+    ld.param.f32 %f1, [input];
+    ld.param.u64 %rd1, [output];
+    cvt.rni.f32.f32 %f2, %f1;
+    st.global.f32 [%rd1], %f2;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult rint_probe =
+        metal::compile_ptx_to_msl(rint_ptx);
+    ok &= expect(rint_probe.ok &&
+                     rint_probe.source.find("floor(") != std::string::npos &&
+                     rint_probe.source.find("fmod(") != std::string::npos &&
+                     rint_probe.source.find("copysign(") != std::string::npos &&
+                     rint_probe.source.find("rint(") == std::string::npos,
+                 "PTX rintf spells deterministic round-to-nearest-even MSL");
+    if (!rint_probe.ok) std::cerr << rint_probe.error << "\n";
 
     const std::string hex_float_ptx = R"ptx(
 .version 7.0
@@ -579,6 +738,235 @@ BODY:
                      clang_printf.source.find("vprintf(") == std::string::npos,
                  "typed PTX decodes Clang vprintf scaffolding into the shared bounded ring ABI");
     if (!clang_printf.ok) std::cerr << clang_printf.error << "\n";
+
+    const std::string clang_null_cvta_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry clang_null_cvta(.param .u64 output) {
+    .reg .pred %p<2>;
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [output];
+    mov.b64 %rd2, 0;
+    cvta.to.global.u64 %rd3, %rd2;
+    setp.eq.b64 %p1, %rd1, %rd3;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult clang_null_cvta =
+        metal::compile_ptx_to_msl(clang_null_cvta_ptx);
+    ok &= expect(clang_null_cvta.ok &&
+                     clang_null_cvta.source.find("nullptr") != std::string::npos,
+                 "typed PTX preserves Clang mov-zero plus cvta null pointers");
+    if (!clang_null_cvta.ok) std::cerr << clang_null_cvta.error << "\n";
+
+    const std::string clang_call_slot_rcp_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry clang_call_slot_rcp(.param .u64 output) {
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<2>;
+    ld.param.u64 %rd1, [output];
+    mov.b32 %r1, 0f40000000;
+    rcp.rn.f32 %r2, %r1;
+    st.global.b32 [%rd1], %r2;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult clang_call_slot_rcp =
+        metal::compile_ptx_to_msl(clang_call_slot_rcp_ptx);
+    ok &= expect(clang_call_slot_rcp.ok &&
+                     clang_call_slot_rcp.source.find("as_type<float>") !=
+                         std::string::npos &&
+                     clang_call_slot_rcp.source.find("1.0 /") != std::string::npos,
+                 "typed PTX reciprocal reinterprets b32 call-slot containers as f32");
+    if (!clang_call_slot_rcp.ok) std::cerr << clang_call_slot_rcp.error << "\n";
+
+    const std::string pointer_select_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry pointer_select(
+    .param .u64 lhs, .param .u64 rhs, .param .u64 output, .param .u32 pick_lhs) {
+    .reg .pred %p<2>;
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<7>;
+    ld.param.u64 %rd1, [lhs];
+    ld.param.u64 %rd2, [rhs];
+    ld.param.u64 %rd3, [output];
+    ld.param.u32 %r1, [pick_lhs];
+    setp.ne.u32 %p1, %r1, 0;
+    selp.b64 %rd4, %rd1, %rd2, %p1;
+    mov.u64 %rd6, 1;
+    mad.lo.s64 %rd5, %rd6, 4, %rd4;
+    ld.global.b32 %r2, [%rd5];
+    st.global.b32 [%rd3], %r2;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult pointer_select =
+        metal::compile_ptx_to_msl(pointer_select_ptx);
+    ok &= expect(pointer_select.ok &&
+                     pointer_select.source.find("device uchar*") !=
+                         std::string::npos &&
+                     pointer_select.source.find("reinterpret_cast<device uint*>") !=
+                         std::string::npos,
+                 "typed PTX propagates device pointers through selp and pointer arithmetic");
+    if (!pointer_select.ok) std::cerr << pointer_select.error << "\n";
+
+    const std::string signed_narrow_load_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry signed_narrow_load(.param .u64 input, .param .u64 output) {
+    .reg .b16 %rs<3>;
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [input];
+    ld.param.u64 %rd2, [output];
+    ld.global.s8 %rs1, [%rd1];
+    cvt.rn.f16.s16 %rs2, %rs1;
+    st.global.b16 [%rd2], %rs2;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult signed_narrow_load =
+        metal::compile_ptx_to_msl(signed_narrow_load_ptx);
+    ok &= expect(signed_narrow_load.ok &&
+                     signed_narrow_load.source.find(
+                         "reinterpret_cast<device char*>") != std::string::npos &&
+                     signed_narrow_load.source.find("short(") != std::string::npos,
+                 "typed PTX sign-extends narrow signed loads before numeric conversion");
+    if (!signed_narrow_load.ok) std::cerr << signed_narrow_load.error << "\n";
+
+    const std::string float_bit_container_cvt_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry float_bit_container_cvt(.param .u64 input, .param .u64 output) {
+    .reg .b16 %rs<2>;
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [input];
+    ld.param.u64 %rd2, [output];
+    ld.global.b32 %r1, [%rd1];
+    cvt.rn.f16.f32 %rs1, %r1;
+    st.global.b16 [%rd2], %rs1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult float_bit_container_cvt =
+        metal::compile_ptx_to_msl(float_bit_container_cvt_ptx);
+    ok &= expect(float_bit_container_cvt.ok &&
+                     float_bit_container_cvt.source.find("as_type<float>") !=
+                         std::string::npos &&
+                     float_bit_container_cvt.source.find("half(") !=
+                         std::string::npos,
+                 "typed PTX reinterprets b32 containers before f32-to-f16 conversion");
+    if (!float_bit_container_cvt.ok) std::cerr << float_bit_container_cvt.error << "\n";
+
+    const std::string immediate_bfe_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry immediate_bfe(.param .u64 output, .param .u32 input) {
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<2>;
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r1, [input];
+    bfe.u32 %r2, %r1, 4, 1;
+    st.global.u32 [%rd1], %r2;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult immediate_bfe =
+        metal::compile_ptx_to_msl(immediate_bfe_ptx);
+    ok &= expect(immediate_bfe.ok &&
+                     immediate_bfe.source.find(">> 4") != std::string::npos &&
+                     immediate_bfe.source.find("& 1") != std::string::npos,
+                 "typed PTX lowers bounded unsigned immediate bfe exactly");
+    if (!immediate_bfe.ok) std::cerr << immediate_bfe.error << "\n";
+
+    const std::string predicate_not_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry predicate_not(.param .u64 output, .param .u32 input) {
+    .reg .pred %p<3>;
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<2>;
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r1, [input];
+    setp.ne.u32 %p1, %r1, 0;
+    not.pred %p2, %p1;
+    @!%p2 bra done;
+    st.global.u32 [%rd1], 1;
+done:
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult predicate_not =
+        metal::compile_ptx_to_msl(predicate_not_ptx);
+    ok &= expect(predicate_not.ok &&
+                     predicate_not.source.find("4294967295") == std::string::npos,
+                 "typed PTX lowers not.pred as boolean negation");
+    if (!predicate_not.ok) std::cerr << predicate_not.error << "\n";
+
+    const std::string mov_bit_container_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry mov_bit_container(.param .u64 output) {
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<2>;
+    ld.param.u64 %rd1, [output];
+    add.f32 %r1, 0f3F800000, 0f3F800000;
+    mov.b32 %r2, %r1;
+    st.global.b32 [%rd1], %r2;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult mov_bit_container =
+        metal::compile_ptx_to_msl(mov_bit_container_ptx);
+    ok &= expect(mov_bit_container.ok &&
+                     mov_bit_container.source.find("as_type<uint>") !=
+                         std::string::npos,
+                 "typed PTX mov.b32 preserves float register bit containers");
+    if (!mov_bit_container.ok) std::cerr << mov_bit_container.error << "\n";
+
+    const std::string indirect_aggregate_param_ptx = R"ptx(
+.version 7.0
+.target sm_70
+.address_size 64
+.visible .entry indirect_aggregate_param(
+    .param .u64 output,
+    .param .align 4 .b8 dims[12]
+) {
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<3>;
+    .reg .pred %p<2>;
+    ld.param.u64 %rd1, [output];
+    ld.b32 %r1, [%rd1];
+    st.b32 [%rd1], %r1;
+    mov.b64 %rd2, dims;
+    mov.pred %p1, 1;
+    @%p1 bra indirect_join;
+    mov.u32 %r1, 0;
+indirect_join:
+    ld.param.b32 %r1, [%rd2+8];
+    st.global.u32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult indirect_aggregate_param =
+        metal::compile_ptx_to_msl(indirect_aggregate_param_ptx);
+    ok &= expect(indirect_aggregate_param.ok &&
+                     indirect_aggregate_param.source.find(".field2") !=
+                         std::string::npos,
+                 "typed PTX resolves CUDA Clang 21 generic memory and indirect ld.param addresses");
+    if (!indirect_aggregate_param.ok) {
+        std::cerr << indirect_aggregate_param.error << "\n";
+    }
 
     const std::string symbolic_printf_ptx = R"ptx(
 .version 7.0

@@ -335,3 +335,69 @@ set_tests_properties(
         RUN_SERIAL TRUE
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=1"
 )
+
+# Canonical typed-PTX numerical closure gate. The manifest is exact over every
+# in-tree CUDA project, each project gets a fresh runtime cache, unsupported
+# lowering is a hard failure, and name-selected workload specializations stay
+# disabled so this measures the compiler rather than compatibility shortcuts.
+find_program(CUMETAL_CUDA_PROJECTS_PYTHON3 python3)
+if(CUMETAL_CUDA_PROJECTS_PYTHON3)
+    add_test(
+        NAME conformance_cuda_projects_typed_ptx_corpus
+        COMMAND ${CUMETAL_CUDA_PROJECTS_PYTHON3}
+            ${CMAKE_CURRENT_SOURCE_DIR}/sweep_cuda_projects.py
+            --manifest ${CMAKE_CURRENT_SOURCE_DIR}/coverage_manifest.json
+            --build-dir ${CMAKE_CURRENT_BINARY_DIR}/typed-ptx-corpus
+            --output-dir ${CMAKE_CURRENT_BINARY_DIR}/typed-ptx-results
+            --backend cumetal-ir
+            --require-all-pass
+            --timeout 300
+    )
+    set_tests_properties(
+        conformance_cuda_projects_typed_ptx_corpus
+        PROPERTIES
+            RUN_SERIAL TRUE
+            TIMEOUT 3600
+            ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=0"
+    )
+
+    if(CUMETAL_ENABLE_CUDA_REGISTRATION)
+        # Canonical direct-source proof: every reviewed fixture is compiled to
+        # a self-contained native executable, executes its CPU oracle on Apple
+        # GPU, and is rejected if it falls back to first-launch PTX JIT.
+        add_test(
+            NAME conformance_cuda_projects_native_aot_corpus
+            COMMAND ${CUMETAL_CUDA_PROJECTS_PYTHON3}
+                ${CMAKE_CURRENT_SOURCE_DIR}/sweep_cuda_projects.py
+                --manifest ${CMAKE_CURRENT_SOURCE_DIR}/coverage_manifest.json
+                --build-dir ${CMAKE_CURRENT_BINARY_DIR}/native-aot-corpus
+                --output-dir ${CMAKE_CURRENT_BINARY_DIR}/native-aot-results
+                --backend native-aot
+                --cumetalc $<TARGET_FILE:cumetalc>
+                --require-all-pass
+                --timeout 300
+        )
+        set_tests_properties(
+            conformance_cuda_projects_native_aot_corpus
+            PROPERTIES
+                RUN_SERIAL TRUE
+                TIMEOUT 3600
+                ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=0"
+        )
+
+        add_test(
+            NAME functional_cumetalc_native_aot_device_printf
+            COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/functional/run_cumetalc_native_device_printf.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/device_printf_clang/device_printf_clang.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/native-aot-device-printf
+        )
+        set_tests_properties(
+            functional_cumetalc_native_aot_device_printf
+            PROPERTIES
+                RUN_SERIAL TRUE
+                TIMEOUT 120
+        )
+    endif()
+endif()

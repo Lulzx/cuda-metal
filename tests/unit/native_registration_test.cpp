@@ -45,6 +45,7 @@ int main() {
         .alignment = 8,
     }};
     const std::uint32_t kernel_symbol_indices[] = {0, 1};
+    const char* const printf_formats[] = {"value=%d\n"};
     const CuMetalKernelDescriptor kernels[] = {{
         .cuda_name = "vector_add",
         .metal_name = "vector_add",
@@ -55,6 +56,8 @@ int main() {
         .required_simd_width = 32,
         .symbol_count = 2,
         .symbol_indices = kernel_symbol_indices,
+        .printf_format_count = 1,
+        .printf_formats = printf_formats,
     }};
     const CuMetalSymbolDescriptor symbols[] = {
         {
@@ -100,6 +103,8 @@ int main() {
         registered.static_shared_bytes != 64 ||
         registered.provenance != "generic_nvvm_lowering" ||
         registered.semantic_quality != "exact" ||
+        registered.printf_formats.size() != 1 ||
+        registered.printf_formats.front() != "value=%d\n" ||
         registered.arg_info.size() != 1 ||
         registered.arg_info.front().kind != CUMETAL_ARG_BUFFER) {
         return fail("registered kernel metadata did not round-trip");
@@ -126,6 +131,13 @@ int main() {
     invalid_descriptor.symbols = invalid_symbols;
     if (cumetalRegisterModule(&invalid_descriptor) != nullptr) {
         return fail("invalid native symbol kind was accepted");
+    }
+    CuMetalKernelDescriptor invalid_kernel = kernels[0];
+    invalid_kernel.printf_formats = nullptr;
+    invalid_descriptor = descriptor;
+    invalid_descriptor.kernels = &invalid_kernel;
+    if (cumetalRegisterModule(&invalid_descriptor) != nullptr) {
+        return fail("missing native printf format table was accepted");
     }
 
     cumetalUnregisterModule(module);

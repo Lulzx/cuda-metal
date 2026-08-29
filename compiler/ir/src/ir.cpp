@@ -473,7 +473,10 @@ VerifyResult verify(const Module& module) {
                     }
                     if (!(operand.type == definition->second.type)) {
                         add_diagnostic(&result, operation.location,
-                                       "operand type does not match value %" + std::to_string(operand.value));
+                                       "operand type " + operand.type.str() +
+                                           " does not match value %" +
+                                           std::to_string(operand.value) + " type " +
+                                           definition->second.type.str());
                     }
                     if (definition->second.function_argument) {
                         continue;

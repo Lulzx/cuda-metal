@@ -1672,6 +1672,13 @@ struct Importer {
                                        : OpCode::kConvert;
                 if (llvm::isa<llvm::BitCastInst>(cast)) {
                     operation.attributes["bitcast"] = "true";
+                } else if (llvm::isa<llvm::SIToFPInst>(cast) &&
+                           !cast->getType()->isDoubleTy()) {
+                    // CuMetal integer types are signless bit containers.  LLVM
+                    // carries the signed interpretation on sitofp itself, so
+                    // retain it for MSL instead of numerically converting an
+                    // i8/i16 payload through uchar/ushort.
+                    operation.attributes["signed_input"] = "true";
                 } else if (cast->getOperand(0)->getType()->isFloatTy() &&
                            cast->getType()->isDoubleTy()) {
                     operation.attributes["fp64_conversion"] = "f32_to_f64";

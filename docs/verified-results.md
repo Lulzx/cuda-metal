@@ -20,10 +20,19 @@ entry), and reports `device=apple_gpu` with `launch_success=true`.
 `functional_cumetalc_native_aot_multi_kernel` separately launches four kernels
 from one embedded native module and checks atomics, thread fences, and static
 shared-memory results.
-`functional_cumetalc_native_aot_symbols` verifies ABI-v2 constant and writable
+`functional_cumetalc_native_aot_symbols` verifies ABI-v3 constant and writable
 device symbols end to end: bounded host-to/from-symbol copies, a 27,904-byte
 constant buffer, symbol address/size queries, and persistent GPU updates across
 two launches.
+
+On 2026-08-30, the exact manifest-controlled 22-project corpus passed twice on
+Apple M4 Pro with workload specializations disabled: 22/22 through typed PTX
+and 22/22 through direct native AOT. The GGML probe checks its complete output
+operator set; the raytracer performs a 47-value differential preflight and a
+full CPU-reference image comparison. The native-AOT device-`printf` gate also
+checks all 32 coordinate records, dynamic width, a wide scalar, tracked string
+materialization, and a bounded unterminated string. These are numerical/runtime
+results, separate from the 24-file cross-Clang compile matrix.
 
 The reviewed Phase 4 manifest ran 185/185 required functional tests on
 2026-08-29 with zero failures and zero skips. This includes native-AOT numerical

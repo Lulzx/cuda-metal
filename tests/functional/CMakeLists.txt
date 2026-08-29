@@ -2683,6 +2683,7 @@ add_test(
             ${CMAKE_CURRENT_SOURCE_DIR}/run_driver_module_load_data_ptx.sh
             $<TARGET_FILE:cumetal_driver_module_load_data_ptx_test>
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx
+            1
 )
 
 set_tests_properties(functional_driver_module_load_data_ptx PROPERTIES SKIP_RETURN_CODE 77)
@@ -2989,6 +2990,7 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 $<TARGET_FILE:cumetal_runtime_registration_fatbin_ptx_test>
                 ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx
                 ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
+                1
     )
 
     set_tests_properties(functional_runtime_registration_fatbin_ptx PROPERTIES SKIP_RETURN_CODE 77)

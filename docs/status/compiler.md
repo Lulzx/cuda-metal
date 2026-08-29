@@ -25,6 +25,14 @@ The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler
 identity and requires the same manifest with CUDA Clang 21, 22, and 23.
 
+The separate exact `coverage_manifest.json` numerical corpus passes all 22
+projects through both typed PTX and direct native AOT on Apple M4 Pro. Both
+gates disable workload specializations and require every enrolled project to
+pass. The native-AOT gate launches embedded metallibs without registration JIT
+or first-launch PTX compilation. Device `printf` uses native ABI version 3 so
+its format table is embedded with each kernel descriptor and drained by the
+ordinary runtime ring-record path.
+
 ## Typed representation
 
 CuMetal IR provides typed SSA/CFG, block arguments, explicit address spaces,

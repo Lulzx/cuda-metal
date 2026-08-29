@@ -563,6 +563,7 @@ struct NativeHostKernel {
     std::vector<bool> pointer_arguments;
     std::vector<std::uint32_t> argument_sizes;
     std::vector<std::uint32_t> symbol_indices;
+    std::vector<std::string> printf_formats;
 };
 
 struct NativeSourceSymbol {
@@ -591,6 +592,41 @@ std::vector<NativeSourceSymbol> parse_native_source_symbols(
         });
     }
     return symbols;
+}
+
+std::vector<std::string> parse_native_printf_formats(
+    std::string_view metal_source) {
+    constexpr std::string_view kPrefix = "// cumetal-printf-format-hex: ";
+    const auto nibble = [](char value) -> int {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return -1;
+    };
+    std::vector<std::string> formats;
+    std::size_t begin = 0;
+    while (begin < metal_source.size()) {
+        const std::size_t end = metal_source.find('\n', begin);
+        const std::string_view line = metal_source.substr(
+            begin, end == std::string_view::npos ? metal_source.size() - begin
+                                                 : end - begin);
+        if (line.starts_with(kPrefix)) {
+            const std::string_view encoded = line.substr(kPrefix.size());
+            if (encoded.size() % 2 != 0) return {};
+            std::string decoded;
+            decoded.reserve(encoded.size() / 2);
+            for (std::size_t i = 0; i < encoded.size(); i += 2) {
+                const int high = nibble(encoded[i]);
+                const int low = nibble(encoded[i + 1]);
+                if (high < 0 || low < 0) return {};
+                decoded.push_back(static_cast<char>((high << 4) | low));
+            }
+            formats.push_back(std::move(decoded));
+        }
+        if (end == std::string_view::npos) break;
+        begin = end + 1;
+    }
+    return formats;
 }
 
 std::string device_symbol_from_stub(std::string symbol) {
@@ -754,6 +790,21 @@ std::string native_registration_source(
             out << "};\n";
         }
     }
+    for (std::size_t i = 0; i < kernels.size(); ++i) {
+        if (kernels[i].printf_formats.empty()) continue;
+        for (std::size_t f = 0; f < kernels[i].printf_formats.size(); ++f) {
+            out << "static const char cm_printf_" << i << '_' << f << "[] = {";
+            for (const unsigned char byte : kernels[i].printf_formats[f]) {
+                out << static_cast<unsigned>(byte) << ',';
+            }
+            out << "0};\n";
+        }
+        out << "static const char* const cm_printf_formats_" << i << "[] = {";
+        for (std::size_t f = 0; f < kernels[i].printf_formats.size(); ++f) {
+            out << "cm_printf_" << i << '_' << f << ',';
+        }
+        out << "};\n";
+    }
     out << "static const CuMetalKernelDescriptor cm_kernels[] = {\n";
     for (std::size_t i = 0; i < kernels.size(); ++i) {
         out << "  {\"" << kernels[i].metal_name << "\",\""
@@ -764,6 +815,10 @@ std::string native_registration_source(
             << (kernels[i].symbol_indices.empty()
                     ? "nullptr"
                     : "cm_kernel_symbols_" + std::to_string(i))
+            << ',' << kernels[i].printf_formats.size() << ','
+            << (kernels[i].printf_formats.empty()
+                    ? "nullptr"
+                    : "cm_printf_formats_" + std::to_string(i))
             << "},\n";
     }
     out << "};\n";
@@ -949,6 +1004,8 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     const std::string metal_text(metal_bytes.begin(), metal_bytes.end());
     const std::vector<NativeSourceSymbol> symbols =
         parse_native_source_symbols(metal_text);
+    const std::vector<std::string> printf_formats =
+        parse_native_printf_formats(metal_text);
     for (NativeHostKernel& kernel : kernels) {
         const std::string kernel_prefix = "kernel void " + kernel.metal_name + "(";
         const std::size_t signature_begin = metal_text.find(kernel_prefix);
@@ -968,6 +1025,17 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         }
         const std::string_view signature(
             metal_text.data() + signature_begin, signature_end - signature_begin);
+        if (signature.find("cm___cumetal_printf_buffer") !=
+            std::string_view::npos) {
+            if (printf_formats.empty()) {
+                cleanup();
+                std::cerr << "cumetalc failed: typed Metal kernel '"
+                          << kernel.metal_name
+                          << "' uses device printf without a format table\n";
+                return 1;
+            }
+            kernel.printf_formats = printf_formats;
+        }
         const bool uses_constants =
             signature.find("cm___cumetal_constant_symbols") != std::string_view::npos;
         for (std::size_t i = 0; i < symbols.size(); ++i) {

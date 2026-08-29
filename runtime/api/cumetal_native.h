@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define CUMETAL_NATIVE_ABI_VERSION 2u
+#define CUMETAL_NATIVE_ABI_VERSION 3u
 
 /* CuMetal release version. Distinct from CUMETAL_NATIVE_ABI_VERSION above, which versions the
  * native registration struct layout and moves only on an ABI break.
@@ -76,6 +76,9 @@ typedef struct CuMetalKernelDescriptor {
     uint32_t required_simd_width;
     uint32_t symbol_count;
     const uint32_t* symbol_indices;
+    /* Module-wide format ids used by this kernel's hidden device-printf ring. */
+    uint32_t printf_format_count;
+    const char* const* printf_formats;
 } CuMetalKernelDescriptor;
 
 typedef enum CuMetalSymbolKind {

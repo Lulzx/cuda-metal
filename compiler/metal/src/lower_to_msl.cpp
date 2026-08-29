@@ -1337,6 +1337,7 @@ struct AstLowerer {
     bool cfg_dispatcher_mode = false;
     bool predeclared_ssa_storage = false;
     bool force_cfg_dispatcher = false;
+    bool barrier_in_call_graph = false;
     std::size_t edge_temporary_index = 0;
     std::size_t loop_escape_index = 0;
     std::optional<ir::AddressSpace> pointer_specialization;
@@ -1346,13 +1347,15 @@ struct AstLowerer {
                const SharedUsageMap& input_shared_usage,
                const WideAtomicUsageMap& input_wide_atomic_usage,
                bool force_dispatcher = false,
-               std::optional<ir::AddressSpace> specialization = std::nullopt)
+               std::optional<ir::AddressSpace> specialization = std::nullopt,
+               bool has_barrier = false)
         : module(input_module),
           function(input_function),
           builtin_usage(input_builtin_usage),
           shared_usage(input_shared_usage),
           wide_atomic_usage(input_wide_atomic_usage),
           force_cfg_dispatcher(force_dispatcher),
+          barrier_in_call_graph(has_barrier),
           pointer_specialization(specialization) {
         const BuiltinUsage& required = builtin_usage.at(function.name);
         needs_thread_position = required.thread_position;
@@ -1411,7 +1414,23 @@ struct AstLowerer {
     MslExpr expression_for(const ir::Operand& operand) {
         if (operand.kind == ir::OperandKind::kValue) {
             const auto value = values.find(operand.value);
-            if (value != values.end()) return value->second;
+            if (value != values.end()) {
+                const MslType expected =
+                    lower_value_type(operand.value, operand.type);
+                // LLVM opaque pointers may acquire a more precise pointee on a
+                // GEP definition than on a PHI/block argument which carries the
+                // same address.  Metal C++ does distinguish those pointee types,
+                // so make the otherwise implicit LLVM pointer reinterpretation
+                // explicit at the use rather than emitting an ill-typed loop
+                // initializer or comparison.
+                if (!(value->second->type == expected) &&
+                    value->second->type.kind == MslTypeKind::kPointer &&
+                    expected.kind == MslTypeKind::kPointer &&
+                    value->second->type.address_space == expected.address_space) {
+                    return MslExpression::cast(expected, value->second, true);
+                }
+                return value->second;
+            }
             return MslExpression::identifier(
                 value_name(operand.value),
                 lower_value_type(operand.value, operand.type));
@@ -1516,6 +1535,37 @@ struct AstLowerer {
             MslExpr left = expression_for(operation.operands[0]);
             MslExpr right = expression_for(operation.operands[1]);
             MslType expression_type = lower_result_type(operation);
+            if (operation.opcode == ir::OpCode::kMul &&
+                operation.attributes.contains("high_half") &&
+                operation.attributes.at("high_half") == "true") {
+                const std::uint32_t operand_bits =
+                    operation.operands[0].type.bit_width;
+                if (operation.operands[0].type.kind != ir::TypeKind::kInteger ||
+                    operation.operands[1].type.kind != ir::TypeKind::kInteger ||
+                    operand_bits == 0 || operand_bits > 32 ||
+                    operation.operands[1].type.bit_width != operand_bits) {
+                    fail(&operation,
+                         "typed Metal mul.hi requires matching 8-, 16-, or 32-bit integer operands");
+                    return std::nullopt;
+                }
+                const bool is_signed =
+                    operation.attributes.contains("signed") &&
+                    operation.attributes.at("signed") == "true";
+                const MslType wide_type = is_signed
+                                              ? MslType::sint(operand_bits * 2)
+                                              : MslType::uint(operand_bits * 2);
+                const MslExpr product = MslExpression::binary(
+                    "*", MslExpression::cast(wide_type, left),
+                    MslExpression::cast(wide_type, right), wide_type);
+                const MslExpr high = MslExpression::binary(
+                    ">>", product,
+                    MslExpression::literal(std::to_string(operand_bits) + "u",
+                                           MslType::uint()),
+                    wide_type);
+                return declare_result(
+                    operation,
+                    MslExpression::cast(lower_result_type(operation), high));
+            }
             if (operation.attributes.contains("fp64_mode")) {
                 const std::string& mode = operation.attributes.at("fp64_mode");
                 const std::string op =
@@ -1799,6 +1849,33 @@ struct AstLowerer {
                 return MslExpression::binary(std::move(op), std::move(left),
                                              std::move(right), return_type);
             };
+            auto round_even = [&](MslExpr input) {
+                // The Apple Metal compiler accepts `rint(float)` but has
+                // produced identity-like results on the exercised GPU path.
+                // Spell IEEE round-to-nearest-even from stable primitives so
+                // CUDA rintf and remainderf do not inherit that miscompile.
+                const MslExpr base = unary_call("floor", input);
+                const MslExpr fraction = binary("-", input, base);
+                const MslExpr lower = MslExpression::binary(
+                    "<", fraction, literal("0.5f"), MslType::boolean());
+                const MslExpr upper = MslExpression::binary(
+                    ">", fraction, literal("0.5f"), MslType::boolean());
+                const MslExpr next = binary("+", base, literal("1.0f"));
+                const MslExpr even = MslExpression::binary(
+                    "==",
+                    MslExpression::call(
+                        "fmod", {unary_call("fabs", base), literal("2.0f")},
+                        return_type),
+                    literal("0.0f"), MslType::boolean());
+                const MslExpr tied = MslExpression::conditional(
+                    even, base, next, return_type);
+                const MslExpr rounded = MslExpression::conditional(
+                    lower, base,
+                    MslExpression::conditional(upper, next, tied, return_type),
+                    return_type);
+                return MslExpression::call(
+                    "copysign", {rounded, input}, return_type);
+            };
             auto erf_expression = [&](MslExpr input) {
                 // Abramowitz-Stegun 7.1.26, max absolute error about 1.5e-7.
                 const MslExpr magnitude = unary_call("fabs", input);
@@ -1856,12 +1933,15 @@ struct AstLowerer {
                         "+", binary("*", arguments[0], arguments[0]),
                         binary("*", arguments[1], arguments[1]))));
             }
+            if (callee->second == "rint" && arguments.size() == 1) {
+                return declare_result(operation, round_even(arguments[0]));
+            }
             if (callee->second == "remainder" && arguments.size() == 2) {
                 const MslExpr quotient = binary("/", arguments[0], arguments[1]);
                 return declare_result(
                     operation,
                     binary("-", arguments[0],
-                           binary("*", unary_call("rint", quotient), arguments[1])));
+                           binary("*", round_even(quotient), arguments[1])));
             }
             if (callee->second == "frexp" && arguments.size() == 2) {
                 const MslType exponent_pointer_type =
@@ -2088,6 +2168,19 @@ struct AstLowerer {
         if (operation.opcode == ir::OpCode::kCompare) {
             MslExpr left = expression_for(operation.operands[0]);
             MslExpr right = expression_for(operation.operands[1]);
+            if (left->type.kind == MslTypeKind::kPointer &&
+                right->type.kind == MslTypeKind::kPointer &&
+                left->type.address_space == right->type.address_space &&
+                !(left->type == right->type)) {
+                // Opaque LLVM pointers can reach the same comparison through
+                // differently inferred GEP pointees.  CUDA compares addresses,
+                // not pointee types; normalize both operands to byte pointers
+                // so Metal C++ accepts that address comparison.
+                const MslType byte_pointer = MslType::pointer(
+                    MslType::uint(8), left->type.address_space);
+                left = MslExpression::cast(byte_pointer, left, true);
+                right = MslExpression::cast(byte_pointer, right, true);
+            }
             if (operation.attributes.contains("fp64_mode")) {
                 const std::string predicate = operation.attributes.contains("predicate")
                                                   ? operation.attributes.at("predicate")
@@ -2237,10 +2330,16 @@ struct AstLowerer {
                                     MslExpression::literal("true", MslType::boolean())},
                                    lower_result_type(operation)));
             }
+            MslExpr input = expression_for(operation.operands.front());
+            if (operation.attributes.contains("signed_input") &&
+                operation.attributes.at("signed_input") == "true" &&
+                operation.operands.front().type.kind == ir::TypeKind::kInteger) {
+                input = MslExpression::cast(
+                    MslType::sint(operation.operands.front().type.bit_width), input);
+            }
             return declare_result(
                 operation,
-                MslExpression::cast(lower_result_type(operation),
-                                    expression_for(operation.operands.front()), reinterpret));
+                MslExpression::cast(lower_result_type(operation), input, reinterpret));
         }
 
         if (operation.opcode == ir::OpCode::kAlloca) {
@@ -2282,17 +2381,36 @@ struct AstLowerer {
                 return std::nullopt;
             }
             const MslType value_type = lower_result_type(operation);
+            MslType memory_type = value_type;
+            if (operation.attributes.contains("memory_bit_width")) {
+                const std::uint32_t bits = static_cast<std::uint32_t>(
+                    std::stoul(operation.attributes.at("memory_bit_width")));
+                const bool is_signed = operation.attributes.contains("signed") &&
+                                       operation.attributes.at("signed") == "true";
+                memory_type = is_signed ? MslType::sint(bits) : MslType::uint(bits);
+            }
             const MslExpr source_pointer = expression_for(operation.operands.front());
             const MslAddressSpace address_space =
                 source_pointer->type.kind == MslTypeKind::kPointer
                     ? source_pointer->type.address_space
                     : lower_address_space(operation.operands.front().type.address_space);
-            const MslType pointer_type = MslType::pointer(value_type, address_space);
+            const MslType pointer_type = MslType::pointer(memory_type, address_space);
             const MslExpr pointer =
                 MslExpression::cast(pointer_type, source_pointer, true);
+            MslExpr loaded = MslExpression::unary("*", pointer, memory_type);
+            if (!(memory_type == value_type)) {
+                const bool bit_container =
+                    operation.result_types.front().kind == ir::TypeKind::kFloat &&
+                    memory_type.kind == MslTypeKind::kUInt &&
+                    operation.result_types.front().bit_width ==
+                        static_cast<std::uint32_t>(
+                            std::stoul(operation.attributes.at("memory_bit_width")));
+                loaded = bit_container
+                             ? MslExpression::bitcast(value_type, loaded)
+                             : MslExpression::cast(value_type, loaded);
+            }
             return declare_result(
-                operation,
-                MslExpression::unary("*", pointer, value_type));
+                operation, loaded);
         }
 
         if (operation.opcode == ir::OpCode::kStore) {
@@ -2469,32 +2587,30 @@ struct AstLowerer {
             }
             const bool active_mask = operation.attributes.contains("kind") &&
                                      operation.attributes.at("kind") == "active_mask";
-            MslExpr vote;
+            const MslType vote_type{
+                .kind = MslTypeKind::kStruct, .struct_name = "simd_vote"};
             if (active_mask) {
-                vote = MslExpression::call("simd_active_threads_mask", {}, MslType{
-                    .kind = MslTypeKind::kStruct, .struct_name = "simd_vote"});
-            } else {
-                if (operation.operands.size() < 2) {
-                    fail(&operation, "SIMD ballot requires mask and predicate operands");
-                    return std::nullopt;
-                }
-                const MslExpr lane = MslExpression::identifier("cm_lane_id", MslType::uint());
-                const MslExpr lane_bit = MslExpression::binary(
-                    "<<", MslExpression::literal("1u", MslType::uint()), lane,
-                    MslType::uint());
-                const MslExpr selected = MslExpression::binary(
-                    "&", expression_for(operation.operands[0]), lane_bit,
-                    MslType::uint());
-                const MslExpr participates = MslExpression::binary(
-                    "!=", selected, MslExpression::literal("0u", MslType::uint()),
-                    MslType::boolean());
-                const MslExpr predicate = MslExpression::binary(
-                    "&&", participates, expression_for(operation.operands[1]),
-                    MslType::boolean());
-                vote = MslExpression::call("simd_ballot", {predicate}, MslType{
-                    .kind = MslTypeKind::kStruct, .struct_name = "simd_vote"});
+                return declare_result(
+                    operation,
+                    MslExpression::vote_mask(MslExpression::call(
+                        "simd_active_threads_mask", {}, vote_type)));
             }
-            return declare_result(operation, MslExpression::vote_mask(vote));
+            if (operation.operands.size() < 2) {
+                fail(&operation, "SIMD ballot requires mask and predicate operands");
+                return std::nullopt;
+            }
+            // A member mask may differ per lane (tiled/binary/labeled
+            // cooperative groups). First ballot the predicate across the
+            // physical SIMD group, then intersect the uniform result with each
+            // caller's logical-group mask. Masking the predicate before the
+            // ballot incorrectly mixes independent logical groups.
+            const MslExpr ballot = MslExpression::vote_mask(MslExpression::call(
+                "simd_ballot", {expression_for(operation.operands[1])}, vote_type));
+            return declare_result(
+                operation,
+                MslExpression::binary(
+                    "&", ballot, expression_for(operation.operands[0]),
+                    MslType::uint()));
         }
 
         if (operation.opcode == ir::OpCode::kMetalVote) {
@@ -2502,30 +2618,29 @@ struct AstLowerer {
                 fail(&operation, "malformed SIMD vote");
                 return std::nullopt;
             }
-            const MslExpr lane = MslExpression::identifier("cm_lane_id", MslType::uint());
-            const MslExpr lane_bit = MslExpression::binary(
-                "<<", MslExpression::literal("1u", MslType::uint()), lane,
-                MslType::uint());
-            const MslExpr selected = MslExpression::binary(
-                "&", expression_for(operation.operands[0]), lane_bit, MslType::uint());
-            const MslExpr participates = MslExpression::binary(
-                "!=", selected, MslExpression::literal("0u", MslType::uint()),
-                MslType::boolean());
+            const MslType vote_type{
+                .kind = MslTypeKind::kStruct, .struct_name = "simd_vote"};
+            const MslExpr member_mask = expression_for(operation.operands[0]);
+            const MslExpr ballot = MslExpression::vote_mask(MslExpression::call(
+                "simd_ballot", {expression_for(operation.operands[1])}, vote_type));
+            const MslExpr masked_ballot = MslExpression::binary(
+                "&", ballot, member_mask, MslType::uint());
             const bool all = operation.attributes.contains("kind") &&
                              operation.attributes.at("kind") == "all";
-            const MslExpr predicate = all
-                                          ? MslExpression::binary(
-                                                "||",
-                                                MslExpression::unary(
-                                                    "!", participates, MslType::boolean()),
-                                                expression_for(operation.operands[1]),
-                                                MslType::boolean())
-                                          : MslExpression::binary(
-                                                "&&", participates,
-                                                expression_for(operation.operands[1]),
-                                                MslType::boolean());
-            const MslExpr voted = MslExpression::call(
-                all ? "simd_all" : "simd_any", {predicate}, MslType::boolean());
+            MslExpr voted;
+            if (all) {
+                const MslExpr active = MslExpression::vote_mask(
+                    MslExpression::call("simd_active_threads_mask", {}, vote_type));
+                const MslExpr expected = MslExpression::binary(
+                    "&", active, member_mask, MslType::uint());
+                voted = MslExpression::binary(
+                    "==", masked_ballot, expected, MslType::boolean());
+            } else {
+                voted = MslExpression::binary(
+                    "!=", masked_ballot,
+                    MslExpression::literal("0u", MslType::uint()),
+                    MslType::boolean());
+            }
             return declare_result(
                 operation,
                 MslExpression::cast(lower_result_type(operation), voted));
@@ -3598,6 +3713,30 @@ struct AstLowerer {
     }
 
     bool requires_cfg_dispatcher() const {
+        // A canonical loop header can have its ordinary exhausted edge while a
+        // nested branch exits through a separate return/join block.  Treating
+        // that external postdominator as an in-iteration reconvergence emits an
+        // unconditional early return.  A per-lane state dispatcher represents
+        // these multi-target exits exactly.  Barrier call graphs must remain
+        // structured so every active lane reaches the synchronization point.
+        if (!barrier_in_call_graph) {
+            for (std::size_t header = 0; header < function.blocks.size(); ++header) {
+                const std::unordered_set<std::size_t> loop =
+                    natural_loop_nodes(header);
+                if (loop.size() <= 1) continue;
+                std::unordered_set<std::size_t> exits;
+                for (const std::size_t source : loop) {
+                    const ir::Operation& terminator =
+                        function.blocks[source].operations.back();
+                    for (const ir::Successor& successor : terminator.successors) {
+                        const std::size_t target =
+                            block_indices.at(successor.block);
+                        if (!loop.contains(target)) exits.insert(target);
+                    }
+                }
+                if (exits.size() > 1) return true;
+            }
+        }
         for (std::size_t source = 0; source < function.blocks.size(); ++source) {
             const ir::Operation& terminator = function.blocks[source].operations.back();
             for (const ir::Successor& successor : terminator.successors) {
@@ -4396,7 +4535,8 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         }
         for (const std::optional<ir::AddressSpace> specialization : specializations) {
             AstLowerer lowerer(metal_module, function, builtin_usage, shared_usage,
-                               wide_atomic_usage, false, specialization);
+                               wide_atomic_usage, false, specialization,
+                               barrier_usage.at(function.name));
             LowerToMslResult function_result = lowerer.run();
             const bool structurization_failure =
                 !function_result.ok &&
@@ -4418,7 +4558,8 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                 }
                 AstLowerer dispatcher_lowerer(metal_module, function, builtin_usage,
                                               shared_usage, wide_atomic_usage, true,
-                                              specialization);
+                                              specialization,
+                                              barrier_usage.at(function.name));
                 function_result = dispatcher_lowerer.run();
                 if (!function_result.ok) {
                     function_result.error =
@@ -4535,6 +4676,18 @@ PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& o
     }
     result.ast = std::move(lowered.ast);
     result.source = std::move(lowered.source);
+    for (auto format = result.printf_formats.rbegin();
+         format != result.printf_formats.rend(); ++format) {
+        static constexpr char kHex[] = "0123456789abcdef";
+        std::string metadata = "// cumetal-printf-format-hex: ";
+        metadata.reserve(metadata.size() + format->size() * 2 + 1);
+        for (const unsigned char byte : *format) {
+            metadata.push_back(kHex[byte >> 4]);
+            metadata.push_back(kHex[byte & 0x0f]);
+        }
+        metadata.push_back('\n');
+        result.source.insert(0, metadata);
+    }
     result.ok = true;
     return result;
 }
@@ -4572,6 +4725,18 @@ NvvmToMslResult compile_nvvm_to_msl(std::string_view llvm_ir,
     }
     result.ast = std::move(lowered.ast);
     result.source = std::move(lowered.source);
+    for (auto format = result.printf_formats.rbegin();
+         format != result.printf_formats.rend(); ++format) {
+        static constexpr char kHex[] = "0123456789abcdef";
+        std::string metadata = "// cumetal-printf-format-hex: ";
+        metadata.reserve(metadata.size() + format->size() * 2 + 1);
+        for (const unsigned char byte : *format) {
+            metadata.push_back(kHex[byte >> 4]);
+            metadata.push_back(kHex[byte & 0x0f]);
+        }
+        metadata.push_back('\n');
+        result.source.insert(0, metadata);
+    }
     result.ok = true;
     return result;
 }

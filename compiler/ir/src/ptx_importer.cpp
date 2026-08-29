@@ -165,16 +165,58 @@ Type ptx_cvt_result_type(std::string_view opcode) {
     return ptx_scalar_type(opcode);
 }
 
+Type ptx_cvt_source_type(std::string_view opcode) {
+    Type source = ptx_scalar_type(opcode);
+    std::size_t cursor = opcode.find('.');
+    while (cursor != std::string_view::npos && cursor + 1 < opcode.size()) {
+        const std::size_t begin = cursor + 1;
+        const std::size_t end = opcode.find('.', begin);
+        const std::string_view token = opcode.substr(
+            begin, (end == std::string_view::npos ? opcode.size() : end) - begin);
+        if (token.size() >= 2 &&
+            (token.front() == 'u' || token.front() == 's' ||
+             token.front() == 'b' || token.front() == 'f') &&
+            std::all_of(token.begin() + 1, token.end(), [](char c) {
+                return c >= '0' && c <= '9';
+            })) {
+            const std::uint32_t bits = static_cast<std::uint32_t>(
+                std::stoul(std::string(token.substr(1))));
+            source = token.front() == 'f' ? Type::floating(bits)
+                                          : Type::integer(bits);
+        }
+        cursor = end;
+    }
+    return source;
+}
+
 Type parameter_type(const cumetal::ptx::Parameter& parameter) {
     if (parameter.is_pointer) {
         return Type::pointer(Type::integer(8), AddressSpace::kDevice);
     }
-    return ptx_scalar_type(parameter.type);
+    const Type scalar = ptx_scalar_type(parameter.type);
+    const std::uint32_t scalar_size =
+        std::max<std::uint32_t>(1, scalar.bit_width / 8);
+    if (parameter.byte_size <= scalar_size) return scalar;
+
+    std::vector<Type> fields;
+    if (parameter.byte_size % 4 == 0 && parameter.alignment >= 4) {
+        fields.assign(parameter.byte_size / 4, Type::integer(32));
+    } else {
+        fields.assign(parameter.byte_size, Type::integer(8));
+    }
+    return Type::aggregate(
+        std::move(fields),
+        "CuMetalPackedParam" + std::to_string(parameter.byte_size));
 }
 
 std::uint32_t type_size(const Type& type) {
     if (type.is_pointer()) return 8;
     if (type.kind == TypeKind::kPredicate) return 1;
+    if (type.kind == TypeKind::kAggregate) {
+        std::uint32_t total = 0;
+        for (const Type& element : type.elements) total += type_size(element);
+        return total;
+    }
     return std::max<std::uint32_t>(1, type.bit_width / 8);
 }
 
@@ -407,6 +449,25 @@ std::vector<ModuleConstantSymbol> scan_module_constant_symbols(std::string_view 
     return symbols;
 }
 
+std::vector<ModuleConstantSymbol> scan_module_global_symbols(std::string_view ptx) {
+    const std::string source(ptx);
+    const std::regex declaration(
+        R"((?:\.visible\s+|\.extern\s+)?\.global\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*;)"
+    );
+    std::vector<ModuleConstantSymbol> symbols;
+    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
+         iterator != end; ++iterator) {
+        symbols.push_back({
+            .name = (*iterator)[2].str(),
+            .offset = 0,
+            .byte_size = std::stoull((*iterator)[3].str()),
+            .alignment = static_cast<std::uint32_t>(
+                std::stoul((*iterator)[1].str())),
+        });
+    }
+    return symbols;
+}
+
 std::int64_t memory_operand_offset(std::string_view operand) {
     const std::size_t open = operand.find('[');
     const std::size_t close = operand.find(']');
@@ -474,6 +535,18 @@ bool has_signed_integer_type(std::string_view opcode) {
            opcode.find(".s64") != std::string_view::npos;
 }
 
+std::uint32_t ptx_register_container_bits(std::string_view name) {
+    if (starts_with(name, "%rd") || starts_with(name, "%fd")) return 64;
+    if (starts_with(name, "%rs") || starts_with(name, "%h")) return 16;
+    if (starts_with(name, "%r") || starts_with(name, "%f")) return 32;
+    return 0;
+}
+
+bool cvt_has_signed_source(std::string_view opcode) {
+    return opcode.ends_with(".s8") || opcode.ends_with(".s16") ||
+           opcode.ends_with(".s32") || opcode.ends_with(".s64");
+}
+
 std::pair<std::string, bool> normalized_predicate(std::string_view predicate) {
     const bool inverted = predicate.find('!') != std::string_view::npos;
     return {first_register(predicate), inverted};
@@ -520,9 +593,20 @@ struct Importer {
     const cumetal::ptx::EntryFunction* entry = nullptr;
     std::unordered_map<std::string, Type> parameter_types;
     std::unordered_map<std::string, ValueId> parameter_values;
+    // Older CUDA Clang releases materialize the address of a by-value
+    // aggregate parameter with `mov.b64 %rd, param` and subsequently issue
+    // `ld.param [%rd+offset]`.  CuMetal models the parameter as an SSA
+    // aggregate, so retain which SSA aliases denote that address.
+    std::unordered_map<ValueId, std::string> aggregate_parameter_addresses;
+    // PTX virtual registers are SSA-like, but CuMetal's CFG construction can
+    // replace a value with a block argument at a join.  Retain the symbolic
+    // register alias as well so an aggregate parameter address survives that
+    // representation change.
+    std::unordered_map<std::string, std::string> aggregate_parameter_registers;
     std::unordered_map<std::string, Type> register_types;
     std::unordered_map<const Instruction*, std::vector<ValueId>> instruction_results;
     std::unordered_map<ValueId, Type> value_types;
+    std::unordered_set<ValueId> integer_zero_values;
     std::vector<RawBlock> raw_blocks;
     std::unordered_map<std::string, std::size_t> label_blocks;
     std::vector<std::unordered_map<std::string, ValueId>> incoming;
@@ -538,6 +622,8 @@ struct Importer {
     std::unordered_map<std::string, ModuleConstantSymbol> module_constant_symbols;
     std::uint64_t module_constant_buffer_size = 0;
     std::optional<Operand> module_constant_buffer;
+    std::vector<ModuleConstantSymbol> module_global_symbols;
+    std::unordered_map<std::string, Operand> module_global_values;
     std::unordered_map<int, cumetal::passes::PrintfLoweredCall> printf_calls;
     std::unordered_set<int> printf_scaffold_lines;
     std::optional<Operand> printf_buffer;
@@ -644,14 +730,38 @@ struct Importer {
                 const std::string root = root_opcode(instruction.opcode);
                 if (root == "setp") {
                     inferred = Type::predicate();
+                } else if (starts_with(instruction.opcode, "ld.") &&
+                           has_signed_integer_type(instruction.opcode) &&
+                           !destinations.empty()) {
+                    const std::uint32_t container_bits =
+                        ptx_register_container_bits(destinations.front());
+                    if (container_bits > inferred.bit_width) {
+                        inferred = Type::integer(container_bits);
+                    }
                 } else if (root == "mov" && instruction.operands.size() >= 2 &&
                            starts_with(trim(instruction.operands[1]), "0f")) {
                     inferred = Type::floating(32);
+                } else if (root == "mov" && instruction.operands.size() >= 2 &&
+                           parameter_types.contains(parameter_name_from_operand(
+                               instruction.operands[1])) &&
+                           parameter_types.at(parameter_name_from_operand(
+                               instruction.operands[1])).kind == TypeKind::kAggregate) {
+                    inferred = parameter_types.at(parameter_name_from_operand(
+                        instruction.operands[1]));
+                } else if (root == "mov" && instruction.operands.size() >= 2 &&
+                           register_types.contains(
+                               first_register(instruction.operands[1]))) {
+                    const std::string source =
+                        first_register(instruction.operands[1]);
+                    inferred = register_types.at(source);
                 } else if (starts_with(instruction.opcode, "ld.param") &&
                            instruction.operands.size() >= 2) {
                     const auto parameter = parameter_types.find(
                         parameter_name_from_operand(instruction.operands[1]));
-                    if (parameter != parameter_types.end()) inferred = parameter->second;
+                    if (parameter != parameter_types.end() &&
+                        parameter->second.kind != TypeKind::kAggregate) {
+                        inferred = parameter->second;
+                    }
                 } else if (root == "cvta") {
                     const AddressSpace space =
                         instruction.opcode.find(".shared") != std::string::npos
@@ -660,12 +770,31 @@ struct Importer {
                             ? AddressSpace::kPrivate
                             : AddressSpace::kDevice;
                     inferred = Type::pointer(Type::integer(8), space);
-                } else if ((root == "add" || root == "mov") && instruction.operands.size() >= 2) {
+                } else if (root == "selp" && instruction.operands.size() >= 3) {
+                    for (std::size_t source_index : {1U, 2U}) {
+                        const std::string source =
+                            first_register(instruction.operands[source_index]);
+                        const auto type = register_types.find(source);
+                        if (type != register_types.end() && type->second.is_pointer()) {
+                            inferred = type->second;
+                            break;
+                        }
+                    }
+                } else if ((root == "add" || root == "mov" || root == "mad") &&
+                           instruction.operands.size() >= 2) {
                     const std::string source_symbol =
                         parameter_name_from_operand(instruction.operands[1]);
                     if (threadgroup_symbols.contains(source_symbol)) {
                         inferred = Type::pointer(Type::integer(8),
                                                  AddressSpace::kThreadgroup);
+                    } else if (std::any_of(
+                                   module_global_symbols.begin(),
+                                   module_global_symbols.end(),
+                                   [&](const auto& global) {
+                                       return global.name == source_symbol;
+                                   })) {
+                        inferred = Type::pointer(Type::integer(8),
+                                                 AddressSpace::kDevice);
                     } else if (local_depots.contains(source_symbol)) {
                         inferred = Type::pointer(Type::integer(8),
                                                  AddressSpace::kPrivate);
@@ -840,6 +969,10 @@ struct Importer {
             }
         }
         const std::string symbol = parameter_name_from_operand(token);
+        if (const auto global = module_global_values.find(symbol);
+            global != module_global_values.end()) {
+            return global->second;
+        }
         if (threadgroup_symbols.contains(symbol)) {
             return Operand::symbol(
                 symbol, Type::pointer(Type::integer(8), AddressSpace::kThreadgroup));
@@ -962,6 +1095,46 @@ struct Importer {
             block->operations.push_back(std::move(offset));
             return Operand::value_ref(pointer, base.type);
         };
+
+        if (root == "mov" && destinations.size() == 1 &&
+            instruction.operands.size() >= 2) {
+            std::string parameter =
+                parameter_name_from_operand(instruction.operands[1]);
+            const std::string source_register =
+                first_register(instruction.operands[1]);
+            if (!source_register.empty()) {
+                const auto source_value = environment->find(source_register);
+                if (source_value != environment->end()) {
+                    const auto alias = aggregate_parameter_addresses.find(
+                        source_value->second);
+                    if (alias != aggregate_parameter_addresses.end()) {
+                        parameter = alias->second;
+                    }
+                }
+            }
+            const auto parameter_value = parameter_values.find(parameter);
+            const auto parameter_type = parameter_types.find(parameter);
+            if (parameter_value != parameter_values.end() &&
+                parameter_type != parameter_types.end() &&
+                parameter_type->second.kind == TypeKind::kAggregate) {
+                if (!instruction.predicate.empty()) {
+                    return fail(&instruction,
+                                "predicated aggregate parameter address moves are unsupported");
+                }
+                operation.opcode = OpCode::kParameter;
+                operation.operands = {Operand::value_ref(
+                    parameter_value->second, parameter_type->second)};
+                operation.result_types = {parameter_type->second};
+                value_types[operation.results.front()] = parameter_type->second;
+                aggregate_parameter_addresses[operation.results.front()] =
+                    parameter;
+                aggregate_parameter_registers[destinations.front()] = parameter;
+                block->operations.push_back(std::move(operation));
+                (*environment)[destinations.front()] =
+                    instruction_results[&instruction].front();
+                return true;
+            }
+        }
 
         if (root == "mov" && instruction.opcode.find(".b64") != std::string::npos &&
             destinations.size() == 2 && instruction.operands.size() >= 2) {
@@ -1097,7 +1270,24 @@ struct Importer {
             if (instruction.operands.size() < 2 || operation.results.empty()) {
                 return fail(&instruction, "malformed ld.param instruction");
             }
-            const std::string name = parameter_name_from_operand(instruction.operands[1]);
+            std::string name = parameter_name_from_operand(instruction.operands[1]);
+            const std::string base_register =
+                first_register(instruction.operands[1]);
+            if (!base_register.empty()) {
+                const auto base_value = environment->find(base_register);
+                if (base_value != environment->end()) {
+                    const auto parameter_address =
+                        aggregate_parameter_addresses.find(base_value->second);
+                    if (parameter_address != aggregate_parameter_addresses.end()) {
+                        name = parameter_address->second;
+                    }
+                }
+                const auto symbolic_address =
+                    aggregate_parameter_registers.find(base_register);
+                if (symbolic_address != aggregate_parameter_registers.end()) {
+                    name = symbolic_address->second;
+                }
+            }
             const auto argument = parameter_values.find(name);
             if (argument == parameter_values.end()) {
                 const auto returned = call_return_slots.find(name);
@@ -1114,10 +1304,33 @@ struct Importer {
                     operation.attributes["bitcast"] = "true";
                 }
             } else {
-                operation.opcode = OpCode::kParameter;
-                operation.operands.push_back(
-                    Operand::value_ref(argument->second, parameter_types[name]));
-                operation.attributes["parameter"] = name;
+                const Type& argument_type = parameter_types[name];
+                if (argument_type.kind == TypeKind::kAggregate) {
+                    const std::int64_t byte_offset =
+                        memory_operand_offset(instruction.operands[1]);
+                    const std::uint32_t loaded_size =
+                        type_size(operation.result_types.front());
+                    if (byte_offset < 0 || loaded_size == 0 ||
+                        argument_type.elements.empty() ||
+                        type_size(argument_type.elements.front()) != loaded_size ||
+                        byte_offset % loaded_size != 0 ||
+                        static_cast<std::uint64_t>(byte_offset / loaded_size) >=
+                            argument_type.elements.size()) {
+                        return fail(&instruction,
+                                    "aggregate PTX parameter load is not an aligned field");
+                    }
+                    operation.opcode = OpCode::kAggregateExtract;
+                    operation.operands.push_back(
+                        Operand::value_ref(argument->second, argument_type));
+                    operation.operands.push_back(Operand::immediate(
+                        std::to_string(byte_offset / loaded_size),
+                        Type::integer(32)));
+                } else {
+                    operation.opcode = OpCode::kParameter;
+                    operation.operands.push_back(
+                        Operand::value_ref(argument->second, argument_type));
+                    operation.attributes["parameter"] = name;
+                }
                 if (operation.result_types.front().is_pointer()) {
                     function->pointer_provenance[operation.results.front()] =
                         function->pointer_provenance[argument->second];
@@ -1159,17 +1372,23 @@ struct Importer {
             operation.opcode = OpCode::kBallot;
             operation.attributes["kind"] = "active_mask";
         } else if (root == "mov") {
-            if (starts_with(trim(instruction.operands[1]), "0f")) {
-                for (std::size_t i = 0; i < operation.results.size(); ++i) {
-                    operation.result_types[i] = Type::floating(32);
-                    value_types[operation.results[i]] = Type::floating(32);
-                }
-            }
             operation.opcode = OpCode::kConvert;
-            operation.operands.push_back(source_operand(1, operation.result_types.front()));
+            operation.operands.push_back(
+                bit_container_operand(1, operation.result_types.front()));
+            if (trim(instruction.operands[1]) == "0") {
+                integer_zero_values.insert(operation.results.begin(), operation.results.end());
+            }
         } else if (root == "cvta") {
             operation.opcode = OpCode::kAddressSpaceCast;
-            operation.operands.push_back(source_operand(1, operation.result_types.front()));
+            Operand source = source_operand(1, operation.result_types.front());
+            if (source.kind == OperandKind::kValue &&
+                integer_zero_values.contains(source.value)) {
+                // Clang commonly spells a null generic address as `mov.b64 0`
+                // followed by `cvta.to.global`. Preserve that provenance instead
+                // of presenting an untyped integer to the address-space cast.
+                source = Operand::immediate("null", operation.result_types.front());
+            }
+            operation.operands.push_back(std::move(source));
             if (!operation.results.empty() && operation.operands.front().kind == OperandKind::kValue) {
                 const auto provenance =
                     function->pointer_provenance.find(operation.operands.front().value);
@@ -1177,10 +1396,7 @@ struct Importer {
                     function->pointer_provenance[operation.results.front()] = provenance->second;
                 }
             }
-        } else if (starts_with(instruction.opcode, "ld.global") ||
-                   starts_with(instruction.opcode, "ld.const") ||
-                   starts_with(instruction.opcode, "ld.shared") ||
-                   starts_with(instruction.opcode, "ld.local")) {
+        } else if (root == "ld") {
             operation.opcode = OpCode::kLoad;
             if (instruction.operands.size() < 2) return fail(&instruction, "malformed load");
             const std::string referenced_symbol =
@@ -1226,12 +1442,15 @@ struct Importer {
                                      load_address_space)));
             }
             operation.attributes["address"] = instruction.operands[1];
+            const Type memory_type = ptx_scalar_type(instruction.opcode);
+            operation.attributes["memory_bit_width"] =
+                std::to_string(memory_type.bit_width);
+            if (has_signed_integer_type(instruction.opcode)) {
+                operation.attributes["signed"] = "true";
+            }
             operation.attributes["alignment"] =
-                std::to_string(type_size(operation.result_types.front()));
-        } else if (starts_with(instruction.opcode, "st.global") ||
-                   starts_with(instruction.opcode, "st.const") ||
-                   starts_with(instruction.opcode, "st.shared") ||
-                   starts_with(instruction.opcode, "st.local")) {
+                std::to_string(type_size(memory_type));
+        } else if (root == "st") {
             operation.opcode = OpCode::kStore;
             if (instruction.operands.size() < 2) return fail(&instruction, "malformed store");
             const AddressSpace store_address_space =
@@ -1342,15 +1561,47 @@ struct Importer {
             } else {
                 operation.attributes["kind"] = "index";
             }
-            for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
-                operation.operands.push_back(source_operand(i, ptx_scalar_type(instruction.opcode)));
+            if (instruction.operands.size() < 4) {
+                return fail(&instruction, "malformed PTX shuffle instruction");
+            }
+            // PTX shfl is a bit-container operation. A float-valued register
+            // named as the `.b32` source must be bitcast before Metal's typed
+            // simd_shuffle; numeric float-to-uint conversion followed by an
+            // as_type<float> turns ordinary values into denormals and makes
+            // warp reductions appear to do nothing.
+            operation.operands.push_back(
+                bit_container_operand(1, ptx_scalar_type(instruction.opcode)));
+            for (std::size_t i = 2; i < instruction.operands.size(); ++i) {
+                operation.operands.push_back(
+                    source_operand(i, Type::integer(32)));
             }
         } else if (root == "vote") {
-            operation.opcode =
-                instruction.opcode.find(".ballot.") != std::string::npos ? OpCode::kBallot : OpCode::kVote;
-            for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
-                operation.operands.push_back(source_operand(i, Type::predicate()));
+            const bool ballot =
+                instruction.opcode.find(".ballot.") != std::string::npos;
+            const bool sync =
+                instruction.opcode.find(".sync.") != std::string::npos;
+            if (instruction.operands.size() < 2 ||
+                (sync && instruction.operands.size() < 3)) {
+                return fail(&instruction, "malformed PTX vote instruction");
             }
+            if (instruction.opcode.find(".uni.") != std::string::npos) {
+                return fail(&instruction,
+                            "vote.uni is not supported by the typed Metal backend");
+            }
+            operation.opcode = ballot ? OpCode::kBallot : OpCode::kVote;
+            operation.attributes["kind"] =
+                ballot ? "ballot"
+                       : (instruction.opcode.find(".all.") != std::string::npos
+                              ? "all"
+                              : "any");
+            // The canonical GPU IR operand order is member-mask, predicate,
+            // matching LLVM's nvvm.vote.*.sync intrinsics. PTX spells these as
+            // destination, predicate, member-mask, so reorder rather than
+            // importing the 32-bit mask as a predicate.
+            operation.operands.push_back(
+                sync ? source_operand(2, Type::integer(32))
+                     : Operand::immediate("4294967295", Type::integer(32)));
+            operation.operands.push_back(source_operand(1, Type::predicate()));
         } else if (root == "redux") {
             operation.opcode = OpCode::kReduction;
             for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
@@ -1360,7 +1611,29 @@ struct Importer {
             operation.opcode = OpCode::kConvert;
             operation.result_types.front() = ptx_cvt_result_type(instruction.opcode);
             value_types[operation.results.front()] = operation.result_types.front();
-            if (instruction.opcode.find(".rni.f64.f64") != std::string::npos) {
+            if (cvt_has_signed_source(instruction.opcode)) {
+                operation.attributes["signed_input"] = "true";
+            }
+            if (instruction.opcode.find(".f32.f32") != std::string::npos &&
+                (instruction.opcode.find(".rni.") != std::string::npos ||
+                 instruction.opcode.find(".rmi.") != std::string::npos ||
+                 instruction.opcode.find(".rpi.") != std::string::npos ||
+                 instruction.opcode.find(".rzi.") != std::string::npos)) {
+                operation.opcode = OpCode::kCall;
+                operation.result_types.front() = Type::floating(32);
+                value_types[operation.results.front()] = Type::floating(32);
+                operation.operands.push_back(
+                    bit_container_operand(1, Type::floating(32)));
+                operation.attributes["builtin"] = "true";
+                operation.attributes["callee"] =
+                    instruction.opcode.find(".rni.") != std::string::npos
+                        ? "rint"
+                    : instruction.opcode.find(".rmi.") != std::string::npos
+                        ? "floor"
+                    : instruction.opcode.find(".rpi.") != std::string::npos
+                        ? "ceil"
+                        : "trunc";
+            } else if (instruction.opcode.find(".rni.f64.f64") != std::string::npos) {
                 operation.result_types.front() = Type::floating(64);
                 value_types[operation.results.front()] = Type::floating(64);
                 operation.operands.push_back(
@@ -1381,21 +1654,79 @@ struct Importer {
                 operation.attributes["fp64_conversion"] = "f64_to_f32";
             } else {
                 operation.operands.push_back(
-                    source_operand(1, operation.result_types.front()));
+                    bit_container_operand(1, ptx_cvt_source_type(instruction.opcode)));
             }
         } else if (root == "rcp") {
             operation.opcode = OpCode::kDiv;
             operation.operands.push_back(
                 Operand::immediate("1.0", operation.result_types.front()));
-            operation.operands.push_back(source_operand(1, operation.result_types.front()));
+            operation.operands.push_back(
+                bit_container_operand(1, operation.result_types.front()));
         } else if (root == "not") {
             const Type type = ptx_scalar_type(instruction.opcode);
-            operation.opcode = OpCode::kBitXor;
-            operation.operands.push_back(bit_container_operand(1, type));
-            operation.operands.push_back(Operand::immediate(
-                type.bit_width == 64 ? "18446744073709551615" :
-                type.bit_width == 16 ? "65535" : "4294967295",
-                type));
+            const bool predicate_not =
+                type.kind == TypeKind::kPredicate ||
+                (!destinations.empty() && starts_with(destinations.front(), "%p"));
+            if (predicate_not) {
+                operation.opcode = OpCode::kCompare;
+                operation.operands.push_back(source_operand(1, Type::predicate()));
+                operation.operands.push_back(
+                    Operand::immediate("0", Type::predicate()));
+                operation.attributes["predicate"] = "eq";
+            } else {
+                operation.opcode = OpCode::kBitXor;
+                operation.operands.push_back(bit_container_operand(1, type));
+                operation.operands.push_back(Operand::immediate(
+                    type.bit_width == 64 ? "18446744073709551615" :
+                    type.bit_width == 16 ? "65535" : "4294967295",
+                    type));
+            }
+        } else if (root == "bfe") {
+            if (instruction.operands.size() != 4 ||
+                has_signed_integer_type(instruction.opcode)) {
+                return fail(&instruction,
+                            "typed PTX bfe currently requires an unsigned source");
+            }
+            const std::string position_spelling = trim(instruction.operands[2]);
+            const std::string width_spelling = trim(instruction.operands[3]);
+            const auto is_decimal = [](const std::string& spelling) {
+                return !spelling.empty() &&
+                       std::all_of(spelling.begin(), spelling.end(), [](char c) {
+                           return c >= '0' && c <= '9';
+                       });
+            };
+            if (!is_decimal(position_spelling) || !is_decimal(width_spelling)) {
+                return fail(&instruction,
+                            "typed PTX bfe requires immediate position and width");
+            }
+            const Type type = ptx_scalar_type(instruction.opcode);
+            const std::uint32_t position = static_cast<std::uint32_t>(
+                std::stoul(position_spelling));
+            const std::uint32_t width = static_cast<std::uint32_t>(
+                std::stoul(width_spelling));
+            if (position >= type.bit_width || width > type.bit_width - position) {
+                return fail(&instruction, "typed PTX bfe range exceeds its source width");
+            }
+            Operation shift;
+            shift.opcode = OpCode::kShiftRight;
+            shift.location = operation.location;
+            shift.operands = {
+                bit_container_operand(1, type),
+                Operand::immediate(position_spelling, type),
+            };
+            const ValueId shifted = builder.next_value();
+            shift.results = {shifted};
+            shift.result_types = {type};
+            value_types[shifted] = type;
+            block->operations.push_back(std::move(shift));
+            const std::uint64_t mask =
+                width == 64 ? ~std::uint64_t{0}
+                            : (width == 0 ? 0 : ((std::uint64_t{1} << width) - 1));
+            operation.opcode = OpCode::kBitAnd;
+            operation.operands = {
+                Operand::value_ref(shifted, type),
+                Operand::immediate(std::to_string(mask), type),
+            };
         } else if (root == "abs" || root == "min" || root == "max") {
             const Type type = ptx_scalar_type(instruction.opcode);
             for (std::size_t i = 0; i < operation.results.size(); ++i) {
@@ -1549,7 +1880,29 @@ struct Importer {
                 operation.operands.push_back(bit_container_operand(i, arithmetic_type));
             }
             if (!operation.result_types.empty() && operation.result_types.front().is_pointer()) {
-                operation.opcode = OpCode::kPointerOffset;
+                if (root == "mad") {
+                    if (operation.operands.size() != 3 ||
+                        !operation.operands[2].type.is_pointer()) {
+                        return fail(&instruction,
+                                    "pointer mad requires the base pointer as its addend");
+                    }
+                    Operation product;
+                    product.opcode = OpCode::kMul;
+                    product.location = operation.location;
+                    product.operands = {operation.operands[0], operation.operands[1]};
+                    const ValueId product_value = builder.next_value();
+                    product.results = {product_value};
+                    product.result_types = {arithmetic_type};
+                    value_types[product_value] = arithmetic_type;
+                    block->operations.push_back(std::move(product));
+                    const Operand base = operation.operands[2];
+                    operation.opcode = OpCode::kPointerOffset;
+                    operation.operands = {
+                        base, Operand::value_ref(product_value, arithmetic_type)};
+                    operation.attributes["offset_unit"] = "bytes";
+                } else {
+                    operation.opcode = OpCode::kPointerOffset;
+                }
                 for (const Operand& operand : operation.operands) {
                     if (operand.kind != OperandKind::kValue) continue;
                     const auto provenance = function->pointer_provenance.find(operand.value);
@@ -1558,8 +1911,16 @@ struct Importer {
                         break;
                     }
                 }
+            } else if (root == "mad") {
+                operation.attributes["combined"] = "mul_add";
             }
-            if (root == "mad") operation.attributes["combined"] = "mul_add";
+            if (root == "mul" &&
+                instruction.opcode.find(".hi.") != std::string::npos) {
+                operation.attributes["high_half"] = "true";
+                if (has_signed_integer_type(instruction.opcode)) {
+                    operation.attributes["signed"] = "true";
+                }
+            }
             if (has_signed_integer_type(instruction.opcode) &&
                 (root == "div" || root == "rem" || root == "shr")) {
                 operation.attributes["signed"] = "true";
@@ -1633,9 +1994,61 @@ struct Importer {
             });
         }
 
+        // Registration appends referenced writable globals immediately after
+        // the explicit CUDA arguments. Mirror that declaration order in the
+        // typed ABI so every kernel sees the persistent registered buffer.
+        for (const auto& symbol : module_global_symbols) {
+            const std::uint32_t binding_index =
+                static_cast<std::uint32_t>(function.arguments.size());
+            if (binding_index >= 29u) {
+                return fail(nullptr,
+                            "CUDA device global conflicts with reserved Metal bindings");
+            }
+            const Type pointer_type =
+                Type::pointer(Type::integer(8), AddressSpace::kDevice);
+            const ValueId value = builder.next_value();
+            value_types[value] = pointer_type;
+            const std::string argument_name = "__cumetal_global_" + symbol.name;
+            module_global_values.emplace(
+                symbol.name, Operand::value_ref(value, pointer_type));
+            function.arguments.push_back({
+                .value = value,
+                .name = argument_name,
+                .type = pointer_type,
+            });
+            function.pointer_provenance[value] = {
+                .base_kind = PointerBaseKind::kAllocation,
+                .base_name = argument_name,
+                .known_byte_offset = 0,
+                .alignment = symbol.alignment,
+            };
+            const std::uint32_t logical_index =
+                static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
+            const std::string hidden_role = "global_symbol:" + symbol.name;
+            function.kernel_abi->arguments.push_back({
+                .name = argument_name,
+                .kind = ArgumentKind::kPointer,
+                .type = pointer_type,
+                .size = 8,
+                .alignment = 8,
+                .address_space = AddressSpace::kDevice,
+                .binding_indices = {binding_index},
+                .hidden_role = hidden_role,
+            });
+            function.kernel_abi->bindings.push_back({
+                .kind = BindingKind::kBuffer,
+                .binding_index = binding_index,
+                .logical_argument_index = logical_index,
+                .type = pointer_type,
+                .size = static_cast<std::uint32_t>(symbol.byte_size),
+                .alignment = symbol.alignment,
+                .hidden_role = hidden_role,
+            });
+        }
+
         if (!printf_calls.empty()) {
             std::uint32_t binding_index =
-                static_cast<std::uint32_t>(entry->params.size());
+                static_cast<std::uint32_t>(function.arguments.size());
             if (binding_index + 1 >= 29u) {
                 return fail(nullptr,
                             "typed printf hidden arguments conflict with reserved Metal bindings");
@@ -1956,6 +2369,18 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         importer.module_constant_buffer_size > 64u * 1024u) {
         importer.result.error = "external PTX constant buffer exceeds CUDA's 64 KB module limit";
         return importer.result;
+    }
+    for (const ModuleConstantSymbol& symbol : scan_module_global_symbols(ptx)) {
+        const bool referenced = std::any_of(
+            importer.entry->instructions.begin(), importer.entry->instructions.end(),
+            [&](const Instruction& instruction) {
+                return std::any_of(
+                    instruction.operands.begin(), instruction.operands.end(),
+                    [&](const std::string& operand) {
+                        return parameter_name_from_operand(operand) == symbol.name;
+                    });
+            });
+        if (referenced) importer.module_global_symbols.push_back(symbol);
     }
     importer.infer_register_types();
     importer.build_cfg();

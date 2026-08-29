@@ -4,6 +4,7 @@ set -euo pipefail
 TEST_BINARY="$1"
 PTX_PATH="$2"
 FALLBACK_METALLIB="${3:-}"
+REQUIRE_COMPRESSED_MARKERS="${4:-0}"
 
 # This exercises the real fatbin PTX -> direct MSL -> Metal compute path.  Direct
 # MSL is compiled by MTLDevice::newLibraryWithSource, so modern Xcode installs do
@@ -29,18 +30,20 @@ if ! grep -q 'CUMETAL_PROVENANCE .*source=generic_ptx provenance=generic_ptx_low
   echo "FAIL: correct output was produced without evidence of a Metal GPU dispatch"
   exit 1
 fi
-for name in \
-  "LZ4 fatbin" \
-  "Zstd fatbin" \
-  "ELF LZ4 fatbin" \
-  "ELF Zstd fatbin"
-do
-  if ! grep -Fqx "COMPRESSED_REGISTRATION_OK ${name}" "$OUTPUT_FILE"; then
-    echo "FAIL: missing compressed registration execution marker for ${name}"
-    exit 1
-  fi
-done
-if [[ -n "$FALLBACK_METALLIB" ]] &&
+if [[ "$REQUIRE_COMPRESSED_MARKERS" == "1" ]]; then
+  for name in \
+    "LZ4 fatbin" \
+    "Zstd fatbin" \
+    "ELF LZ4 fatbin" \
+    "ELF Zstd fatbin"
+  do
+    if ! grep -Fqx "COMPRESSED_REGISTRATION_OK ${name}" "$OUTPUT_FILE"; then
+      echo "FAIL: missing compressed registration execution marker for ${name}"
+      exit 1
+    fi
+  done
+fi
+if [[ "$REQUIRE_COMPRESSED_MARKERS" == "1" && -n "$FALLBACK_METALLIB" ]] &&
    ! grep -Fqx "UNSUPPORTED_FATBIN_FALLBACK_REFUSED" "$OUTPUT_FILE"; then
   echo "FAIL: unsupported fatbin environment-fallback refusal was not proved"
   exit 1

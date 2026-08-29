@@ -39,12 +39,18 @@ Remaining typed-path blockers include combinations of:
 The old direct legacy `.cu` path is textual qualifier stripping and fails this
 corpus. It is not a correctness fallback.
 
+The exact 22-project in-tree numerical corpus passes both typed PTX and direct
+native AOT on Apple M4 Pro with workload specializations disabled. This closes
+the reviewed corpus, not the residual combinations listed above.
+
 ## Source AOT architecture
 
-The linked source flow uses native ABI version 2 with an embedded metallib and
+The linked source flow uses native ABI version 3 with an embedded metallib and
 no first-launch PTX lowering. Its descriptor carries per-kernel constant and
-writable-global bindings; focused tests cover host symbol copies, constant
-offsets, and persistent GPU writes across launches.
+writable-global bindings plus the device-`printf` format table; focused tests
+cover host symbol copies, constant offsets, persistent GPU writes across
+launches, and exact 32-lane formatted output. ABI versions other than 3 are
+rejected explicitly.
 
 ## PTX and fatbinary coverage
 

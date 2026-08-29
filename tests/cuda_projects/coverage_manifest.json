@@ -8,6 +8,48 @@
       "harness": "standard"
     },
     {
+      "name": "async_memcpy_hazard",
+      "subdir": "async_memcpy",
+      "source": "async_memcpy_hazard.cu",
+      "binary": "async_memcpy_hazard",
+      "harness": "standard"
+    },
+    {
+      "name": "constant_symbol",
+      "subdir": "constant_symbol",
+      "source": "constant_symbol.cu",
+      "binary": "constant_symbol",
+      "harness": "standard"
+    },
+    {
+      "name": "cooperative_thread_group",
+      "subdir": "cooperative_thread_group",
+      "source": "cooperative_thread_group.cu",
+      "binary": "cooperative_thread_group",
+      "harness": "standard"
+    },
+    {
+      "name": "device_printf_clang",
+      "subdir": "device_printf_clang",
+      "source": "device_printf_clang.cu",
+      "binary": "device_printf_clang",
+      "harness": "standard"
+    },
+    {
+      "name": "device_sync_primitives",
+      "subdir": "device_sync_primitives",
+      "source": "device_sync_primitives.cu",
+      "binary": "device_sync_primitives",
+      "harness": "standard"
+    },
+    {
+      "name": "dynamic_cooperative_groups",
+      "subdir": "dynamic_cooperative_groups",
+      "source": "dynamic_cooperative_groups.cu",
+      "binary": "dynamic_cooperative_groups",
+      "harness": "standard"
+    },
+    {
       "name": "sgemm_naive",
       "subdir": "sgemm",
       "source": "sgemm_naive.cu",
@@ -72,6 +114,20 @@
       "expect_pattern": "PASS: libdevice float surface probe"
     },
     {
+      "name": "libdevice_frexp",
+      "subdir": "libdevice_frexp",
+      "source": "libdevice_frexp.cu",
+      "binary": "libdevice_frexp",
+      "harness": "standard"
+    },
+    {
+      "name": "partial_lane_shuffle_guard",
+      "subdir": "partial_lane_shuffle_guard",
+      "source": "partial_lane_shuffle_guard.cu",
+      "binary": "partial_lane_shuffle_guard",
+      "harness": "standard"
+    },
+    {
       "name": "raytracer",
       "subdir": "raytracer",
       "source": "rtiow.cu",
@@ -86,6 +142,20 @@
       "binary": "fp64_precision",
       "harness": "strict",
       "expect_pattern": "PASS: fp64 emulation meets the ~48-bit significand contract"
+    },
+    {
+      "name": "system_atomics",
+      "subdir": "system_atomics",
+      "source": "system_atomics.cu",
+      "binary": "system_atomics",
+      "harness": "standard"
+    },
+    {
+      "name": "wide_atomics",
+      "subdir": "wide_atomics",
+      "source": "wide_atomics.cu",
+      "binary": "wide_atomics",
+      "harness": "standard"
     }
   ]
 }

@@ -93,8 +93,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--build-dir", type=Path)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--cumetalc",
+        type=Path,
+        help="cumetalc executable (required for the native-aot backend)",
+    )
     parser.add_argument("--project", action="append", default=[])
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--backend", choices=("legacy", "cumetal-ir", "native-aot"), default="legacy"
+    )
+    parser.add_argument(
+        "--require-all-pass",
+        action="store_true",
+        help="fail unless every selected project executes and passes",
+    )
     parser.add_argument(
         "--fail-on",
         action="append",
@@ -177,6 +190,11 @@ def main() -> int:
     if args.timeout <= 0:
         print("timeout must be positive", file=sys.stderr)
         return 2
+    if args.backend == "native-aot" and (
+        args.cumetalc is None or not args.cumetalc.resolve().is_file()
+    ):
+        print("--cumetalc must name an executable for native-aot", file=sys.stderr)
+        return 2
 
     root = Path(__file__).resolve().parents[2]
     fixtures_root = root / "tests/cuda_projects"
@@ -207,22 +225,39 @@ def main() -> int:
     env.setdefault("CUMETAL_BUILD_DIR", str(root / "build"))
     env["CUMETAL_CUDA_PROJECT_STRICT_CLASSIFICATION"] = "1"
     for project in projects:
-        harness_name = (
-            "run_strict_standalone_cu.sh"
-            if project["harness"] == "strict"
-            else "run_standalone_cu.sh"
-        )
-        command = [
-            "bash",
-            str(fixtures_root / harness_name),
-            str(root),
-            str(build_dir),
-            project["subdir"],
-            project["source"],
-            project["binary"],
-        ]
-        if project["harness"] == "strict" and project.get("expect_pattern"):
-            command.append(project["expect_pattern"])
+        typed_ptx = args.backend == "cumetal-ir"
+        native_aot = args.backend == "native-aot"
+        if native_aot:
+            expected = project.get("expect_pattern", "PASS:")
+            if project["name"] == "device_printf_clang":
+                expected = "HOST_DONE"
+            command = [
+                "bash",
+                str(root / "tests/functional/run_cumetalc_link_executable.sh"),
+                str(args.cumetalc.resolve()),
+                str(fixtures_root / project["subdir"] / project["source"]),
+                str(output_dir / "native-work" / project["name"]),
+                f"--expect-output={expected}",
+            ]
+        else:
+            harness_name = (
+                "run_standalone_cu.sh"
+                if typed_ptx or project["harness"] == "standard"
+                else "run_strict_standalone_cu.sh"
+            )
+            command = [
+                "bash",
+                str(fixtures_root / harness_name),
+                str(root),
+                str(build_dir),
+                project["subdir"],
+                project["source"],
+                project["binary"],
+            ]
+            if typed_ptx:
+                command.append("cumetal-ir")
+            elif project["harness"] == "strict" and project.get("expect_pattern"):
+                command.append(project["expect_pattern"])
         # A sweep is a correctness measurement of the compiler under test, not
         # of an arbitrary metallib left by an earlier build. Give each fixture a
         # fresh cache so neither cross-build nor cross-project reuse can conceal
@@ -231,8 +266,10 @@ def main() -> int:
         project_cache.mkdir()
         project_env = env.copy()
         project_env["CUMETAL_CACHE_DIR"] = str(project_cache)
-        if project["name"] == "ggml_output_ops":
+        if project["name"] == "ggml_output_ops" and args.backend == "legacy":
             project_env["CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS"] = "1"
+        elif project["name"] == "ggml_output_ops":
+            project_env["CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS"] = "0"
         started = time.monotonic()
         returncode, output, timed_out = run_command(
             command, root, project_env, args.timeout
@@ -243,6 +280,7 @@ def main() -> int:
         log_path.write_text(output, encoding="utf-8")
         row = {
             **project,
+            "backend": args.backend,
             "classification": classification,
             "return_code": "timeout" if timed_out else returncode,
             "elapsed_seconds": round(elapsed, 3),
@@ -275,6 +313,8 @@ def main() -> int:
     )
     print(f"Summary: {summary_path}")
     print("Classifications: " + ", ".join(f"{key}={counts[key]}" for key in sorted(counts)))
+    if args.require_all_pass and counts["pass"] != len(rows):
+        return 1
     return 1 if any(counts[status] for status in args.fail_on) else 0
 
 

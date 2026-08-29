@@ -8,44 +8,260 @@
 #include <cstring>
 #include <vector>
 
-extern "C" __global__ void rms_norm_f32_probe(
-    const float*, float*, int, int64_t, int64_t, int64_t, float,
-    const float*, int64_t, int64_t, int64_t, uint3, uint3, uint3, uint3,
-    const float*, int64_t, int64_t, int64_t, uint3, uint3, uint3, uint3) {}
-
-extern "C" __global__ void rms_norm_f32_plain_probe(
-    const float*, float*, int, int64_t, int64_t, int64_t, float) {}
-
-extern "C" __global__ void k_bin_bcast_op_addff_probe(
-    const float*, const float*, float*, int, int, int, uint3, uint3, uint3,
-    uint3, uint3, int, int, int, int, int, int, int, int, int, int, int,
-    const float*) {}
-
-extern "C" __global__ void dequantize_block_q8_0_f16_probe(
-    const void*, __half*, int64_t) {}
-
-extern "C" __global__ void dequantize_block_q6_KIDF16_E_probe(
-    const void*, __half*) {}
-
-extern "C" __global__ void unary_gated_op_kernel_op_silu_EEfEv_probe(
-    const float*, const float*, float*, int64_t, int64_t, int64_t, int64_t) {}
-
 struct RopeCorrDims {
     float v[2];
 };
 
+extern "C" __global__ void rms_norm_f32_probe(
+    const float* x, float* dst, int ncols, int64_t stride_row,
+    int64_t stride_channel, int64_t stride_sample, float eps,
+    const float* mul, int64_t mul_stride_row, int64_t mul_stride_channel,
+    int64_t mul_stride_sample, uint3 mul_ncols, uint3 mul_nrows,
+    uint3 mul_nchannels, uint3 mul_nsamples, const float* add,
+    int64_t add_stride_row, int64_t add_stride_channel,
+    int64_t add_stride_sample, uint3 add_ncols, uint3 add_nrows,
+    uint3 add_nchannels, uint3 add_nsamples) {
+    __shared__ float partials[256];
+    const unsigned tid = threadIdx.x;
+    const unsigned row = blockIdx.x;
+    const unsigned channel = blockIdx.y;
+    const unsigned sample = blockIdx.z;
+    const float* row_x = x + static_cast<int64_t>(sample) * stride_sample +
+                         static_cast<int64_t>(channel) * stride_channel +
+                         static_cast<int64_t>(row) * stride_row;
+    float* row_dst = dst +
+        ((static_cast<int64_t>(sample) * gridDim.y + channel) * gridDim.x + row) * ncols;
+    float sum = 0.0f;
+    for (int col = static_cast<int>(tid); col < ncols; col += blockDim.x) {
+        const float value = row_x[col];
+        sum += value * value;
+    }
+    partials[tid] = sum;
+    __syncthreads();
+    for (unsigned span = blockDim.x / 2; span > 0; span >>= 1) {
+        if (tid < span) partials[tid] += partials[tid + span];
+        __syncthreads();
+    }
+    const float scale = 1.0f / sqrtf(partials[0] / ncols + eps);
+    const float* row_mul = mul;
+    if (row_mul != nullptr) {
+        const unsigned mr = mul_nrows.z ? row % mul_nrows.z : 0;
+        const unsigned mc = mul_nchannels.z ? channel % mul_nchannels.z : 0;
+        const unsigned ms = mul_nsamples.z ? sample % mul_nsamples.z : 0;
+        row_mul += static_cast<int64_t>(ms) * mul_stride_sample +
+                   static_cast<int64_t>(mc) * mul_stride_channel +
+                   static_cast<int64_t>(mr) * mul_stride_row;
+    }
+    const float* row_add = add;
+    if (row_add != nullptr) {
+        const unsigned ar = add_nrows.z ? row % add_nrows.z : 0;
+        const unsigned ac = add_nchannels.z ? channel % add_nchannels.z : 0;
+        const unsigned as = add_nsamples.z ? sample % add_nsamples.z : 0;
+        row_add += static_cast<int64_t>(as) * add_stride_sample +
+                   static_cast<int64_t>(ac) * add_stride_channel +
+                   static_cast<int64_t>(ar) * add_stride_row;
+    }
+    for (int col = static_cast<int>(tid); col < ncols; col += blockDim.x) {
+        float value = row_x[col] * scale;
+        if (row_mul != nullptr) value *= row_mul[mul_ncols.z ? col % mul_ncols.z : 0];
+        if (row_add != nullptr) value += row_add[add_ncols.z ? col % add_ncols.z : 0];
+        row_dst[col] = value;
+    }
+}
+
+extern "C" __global__ void rms_norm_f32_plain_probe(
+    const float* x, float* dst, int ncols, int64_t stride_row,
+    int64_t stride_channel, int64_t stride_sample, float eps) {
+    __shared__ float partials[256];
+    const unsigned tid = threadIdx.x;
+    const unsigned row = blockIdx.x;
+    const unsigned channel = blockIdx.y;
+    const unsigned sample = blockIdx.z;
+    const float* row_x = x + static_cast<int64_t>(sample) * stride_sample +
+                         static_cast<int64_t>(channel) * stride_channel +
+                         static_cast<int64_t>(row) * stride_row;
+    float* row_dst = dst +
+        ((static_cast<int64_t>(sample) * gridDim.y + channel) * gridDim.x + row) * ncols;
+    float sum = 0.0f;
+    for (int col = static_cast<int>(tid); col < ncols; col += blockDim.x) {
+        const float value = row_x[col];
+        sum += value * value;
+    }
+    partials[tid] = sum;
+    __syncthreads();
+    for (unsigned span = blockDim.x / 2; span > 0; span >>= 1) {
+        if (tid < span) partials[tid] += partials[tid + span];
+        __syncthreads();
+    }
+    const float scale = 1.0f / sqrtf(partials[0] / ncols + eps);
+    for (int col = static_cast<int>(tid); col < ncols; col += blockDim.x) {
+        row_dst[col] = row_x[col] * scale;
+    }
+}
+
+extern "C" __global__ void k_bin_bcast_op_addff_probe(
+    const float* src0, const float* src1, float* dst, int ne0, int ne1,
+    int ne2, uint3 ne3, uint3 ne10, uint3 ne11, uint3 ne12, uint3 ne13,
+    int s1, int s2, int s3, int s00, int s01, int s02, int s03, int s10,
+    int s11, int s12, int s13, const float* extra_src1) {
+    const unsigned i0_start = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned i1 = blockIdx.y * blockDim.y + threadIdx.y;
+    const unsigned z = blockIdx.z * blockDim.z + threadIdx.z;
+    const unsigned i2 = ne3.z ? z / ne3.z : 0;
+    const unsigned i3 = z - i2 * ne3.z;
+    if (i0_start >= static_cast<unsigned>(ne0) || i1 >= static_cast<unsigned>(ne1) ||
+        i2 >= static_cast<unsigned>(ne2) || i3 >= ne3.z) return;
+    const unsigned i11 = ne11.z ? i1 % ne11.z : i1;
+    const unsigned i12 = ne12.z ? i2 % ne12.z : i2;
+    const unsigned i13 = ne13.z ? i3 % ne13.z : i3;
+    const int64_t base0 = static_cast<int64_t>(i3) * s03 +
+                          static_cast<int64_t>(i2) * s02 +
+                          static_cast<int64_t>(i1) * s01;
+    const int64_t base1 = static_cast<int64_t>(i13) * s13 +
+                          static_cast<int64_t>(i12) * s12 +
+                          static_cast<int64_t>(i11) * s11;
+    const int64_t base_dst = static_cast<int64_t>(i3) * s3 +
+                             static_cast<int64_t>(i2) * s2 +
+                             static_cast<int64_t>(i1) * s1;
+    const unsigned stride = gridDim.x * blockDim.x;
+    for (unsigned i0 = i0_start; i0 < static_cast<unsigned>(ne0); i0 += stride) {
+        const unsigned i10 = ne10.z ? i0 % ne10.z : i0;
+        const float rhs = extra_src1 ? extra_src1[base1 + i10 * s10]
+                                     : src1[base1 + i10 * s10];
+        dst[base_dst + i0] = src0[base0 + i0 * s00] + rhs;
+    }
+}
+
+extern "C" __global__ void dequantize_block_q8_0_f16_probe(
+    const void* source, __half* dst, int64_t count) {
+    const unsigned char* packed = static_cast<const unsigned char*>(source);
+    const int64_t group_base = static_cast<int64_t>(blockIdx.x) * 2048;
+    for (int64_t local = threadIdx.x; local < 2048; local += blockDim.x) {
+        const int64_t out = group_base + local;
+        if (out >= count) return;
+        const int64_t block = out / 32;
+        const int lane = static_cast<int>(out % 32);
+        const unsigned char* record = packed + block * 34;
+        const __half scale = *reinterpret_cast<const __half*>(record);
+        const signed char quant = *reinterpret_cast<const signed char*>(record + 2 + lane);
+        dst[out] = __float2half_rn(__half2float(scale) * static_cast<float>(quant));
+    }
+}
+
+extern "C" __global__ void dequantize_block_q6_KIDF16_E_probe(
+    const void* source, __half* dst) {
+    if (threadIdx.x >= 64) return;
+    const unsigned char* record = static_cast<const unsigned char*>(source) +
+                                  static_cast<int64_t>(blockIdx.x) * 210;
+    const unsigned ip = threadIdx.x >> 5;
+    const unsigned il = threadIdx.x & 31;
+    const unsigned scale_index = 8 * ip + (il >> 4);
+    const unsigned ql_index = 64 * ip + il;
+    const unsigned char qh = record[128 + 32 * ip + il];
+    const unsigned char ql0 = record[ql_index];
+    const unsigned char ql32 = record[ql_index + 32];
+    const int q[4] = {
+        static_cast<int>((ql0 & 15) | (((qh >> 0) & 3) << 4)) - 32,
+        static_cast<int>((ql32 & 15) | (((qh >> 2) & 3) << 4)) - 32,
+        static_cast<int>((ql0 >> 4) | (((qh >> 4) & 3) << 4)) - 32,
+        static_cast<int>((ql32 >> 4) | (((qh >> 6) & 3) << 4)) - 32,
+    };
+    const signed char* scales = reinterpret_cast<const signed char*>(record + 192);
+    const float delta = __half2float(*reinterpret_cast<const __half*>(record + 208));
+    const int64_t out = static_cast<int64_t>(blockIdx.x) * 256 + 128 * ip + il;
+    for (int segment = 0; segment < 4; ++segment) {
+        dst[out + 32 * segment] = __float2half_rn(
+            delta * static_cast<float>(scales[scale_index + 2 * segment]) * q[segment]);
+    }
+}
+
+extern "C" __global__ void unary_gated_op_kernel_op_silu_EEfEv_probe(
+    const float* x, const float* gate, float* dst, int64_t count,
+    int64_t width, int64_t x_stride, int64_t gate_stride) {
+    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= count || width <= 0) return;
+    const int64_t row = i / width;
+    const int64_t col = i - row * width;
+    const float value = x[row * x_stride + col];
+    dst[i] = value / (1.0f + expf(-value)) * gate[row * gate_stride + col];
+}
+
 extern "C" __global__ void rope_normILb1ELb0EfDF16_Ev_probe(
-    const float*, __half*, int, int, int, int, int, int, int, int, int, int,
-    const int32_t*, float, float, float, RopeCorrDims, float, const float*,
-    const int64_t*, int) {}
+    const float* src, __half* dst, int ne00, int ne01, int ne02, int s01,
+    int s02, int s03, int s1, int s2, int s3, int n_dims,
+    const int32_t* positions, float freq_scale, float ext_factor,
+    float attn_factor, RopeCorrDims corr, float theta_scale,
+    const float* freq_factors, const int64_t* row_indices,
+    int set_rows_stride) {
+    (void)freq_factors;
+    const int i0 = 2 * (static_cast<int>(blockDim.y) * blockIdx.y + threadIdx.y);
+    if (i0 >= ne00) return;
+    const int row = static_cast<int>(blockDim.x) * blockIdx.x + threadIdx.x;
+    const int rows12 = ne01 * ne02;
+    const int i3 = row / rows12;
+    const int rem = row - i3 * rows12;
+    const int i2 = rem / ne01;
+    const int i1 = rem - i2 * ne01;
+    int out = i0 + i1 * s1 + i2 * s2 + i3 * s3;
+    const int in = i0 + i1 * s01 + i2 * s02 + i3 * s03;
+    if (set_rows_stride != 0) out = i1 * s1 + i0 + row_indices[i2] * set_rows_stride;
+    const float x0 = src[in];
+    const float x1 = src[in + 1];
+    if (i0 >= n_dims) {
+        dst[out] = __float2half_rn(x0);
+        dst[out + 1] = __float2half_rn(x1);
+        return;
+    }
+    const float extrap = positions[i2] * powf(theta_scale, 0.5f * i0);
+    const float interp = freq_scale * extrap;
+    float theta = interp;
+    float scale = attn_factor;
+    if (ext_factor != 0.0f) {
+        const float denominator = fmaxf(0.001f, corr.v[1] - corr.v[0]);
+        const float ramp = 1.0f - fminf(1.0f, fmaxf(0.0f, (0.5f * i0 - corr.v[0]) / denominator));
+        const float mix = ramp * ext_factor;
+        theta = interp * (1.0f - mix) + extrap * mix;
+        scale *= 1.0f + 0.1f * logf(1.0f / freq_scale);
+    }
+    const float cosine = cosf(theta) * scale;
+    const float sine = sinf(theta) * scale;
+    dst[out] = __float2half_rn(x0 * cosine - x1 * sine);
+    dst[out + 1] = __float2half_rn(x0 * sine + x1 * cosine);
+}
 
 extern "C" __global__ void convert_unaryIfDF16_E_probe(
-    const void*, __half*, int64_t, int64_t, int64_t, uint3, int64_t,
-    int64_t, int64_t) {}
+    const void* source, __half* dst, int64_t ne00, int64_t ne01,
+    int64_t ne0203, uint3 ne02_fd, int64_t s01, int64_t s02,
+    int64_t s03) {
+    const int64_t i00 = static_cast<int64_t>(blockDim.x) * blockIdx.x + threadIdx.x;
+    if (i00 >= ne00 || ne02_fd.z == 0) return;
+    const int64_t i01 = blockIdx.y;
+    const float* src = static_cast<const float*>(source);
+    for (int64_t i0203 = blockIdx.z; i0203 < ne0203; i0203 += gridDim.z) {
+        const int64_t i02 = i0203 % ne02_fd.z;
+        const int64_t i03 = i0203 / ne02_fd.z;
+        const int64_t in = i03 * s03 + i02 * s02 + i01 * s01 + i00;
+        const int64_t out = (i0203 * ne01 + i01) * ne00 + i00;
+        dst[out] = __float2half_rn(src[in]);
+    }
+}
 
 extern "C" __global__ void convert_unaryIDF16_fE_probe(
-    const void*, float*, int64_t, int64_t, int64_t, uint3, int64_t,
-    int64_t, int64_t) {}
+    const void* source, float* dst, int64_t ne00, int64_t ne01,
+    int64_t ne0203, uint3 ne02_fd, int64_t s01, int64_t s02,
+    int64_t s03) {
+    const int64_t i00 = static_cast<int64_t>(blockDim.x) * blockIdx.x + threadIdx.x;
+    if (i00 >= ne00 || ne02_fd.z == 0) return;
+    const int64_t i01 = blockIdx.y;
+    const __half* src = static_cast<const __half*>(source);
+    for (int64_t i0203 = blockIdx.z; i0203 < ne0203; i0203 += gridDim.z) {
+        const int64_t i02 = i0203 % ne02_fd.z;
+        const int64_t i03 = i0203 / ne02_fd.z;
+        const int64_t in = i03 * s03 + i02 * s02 + i01 * s01 + i00;
+        const int64_t out = (i0203 * ne01 + i01) * ne00 + i00;
+        dst[out] = __half2float(src[in]);
+    }
+}
 
 namespace {
 

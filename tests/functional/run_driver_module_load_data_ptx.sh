@@ -3,6 +3,7 @@ set -euo pipefail
 
 TEST_BINARY="$1"
 PTX_PATH="$2"
+REQUIRE_COMPRESSED_MARKERS="${3:-0}"
 
 # Tests cuModuleLoadData with PTX text + fatbin variants, plus launch of the loaded kernel.
 # The launch verification requires being able to produce a usable metallib for the kernel;
@@ -35,17 +36,19 @@ cat "$OUTPUT_FILE"
 if [[ $STATUS -ne 0 ]]; then
   exit "$STATUS"
 fi
-for name in \
-  "LZ4 fatbin" \
-  "Zstd fatbin" \
-  "ELF LZ4 fatbin" \
-  "ELF Zstd fatbin"
-do
-  if ! grep -Fqx "COMPRESSED_DRIVER_OK ${name}" "$OUTPUT_FILE"; then
-    echo "FAIL: missing compressed Driver API execution marker for ${name}"
-    exit 1
-  fi
-done
+if [[ "$REQUIRE_COMPRESSED_MARKERS" == "1" ]]; then
+  for name in \
+    "LZ4 fatbin" \
+    "Zstd fatbin" \
+    "ELF LZ4 fatbin" \
+    "ELF Zstd fatbin"
+  do
+    if ! grep -Fqx "COMPRESSED_DRIVER_OK ${name}" "$OUTPUT_FILE"; then
+      echo "FAIL: missing compressed Driver API execution marker for ${name}"
+      exit 1
+    fi
+  done
+fi
 if ! grep -q 'CUMETAL_PROVENANCE .*device=apple_gpu .*launch_success=true' \
     "$OUTPUT_FILE"; then
   echo "FAIL: compressed Driver API output lacks Apple-GPU provenance"

@@ -253,6 +253,9 @@ std::string sanitize_param_name(std::string name) {
     while (!name.empty() && (name.back() == ',' || name.back() == ';' || name.back() == ')')) {
         name.pop_back();
     }
+    if (const std::size_t array = name.find('['); array != std::string::npos) {
+        name.resize(array);
+    }
     return name;
 }
 
@@ -705,10 +708,49 @@ ParseResult parse_ptx(std::string_view text, const ParseOptions& options) {
             }
             const bool is_pointer =
                 std::find(tokens.begin(), tokens.end(), ".ptr") != tokens.end();
+            std::size_t alignment = 1;
+            for (std::size_t i = 0; i + 1 < tokens.size(); ++i) {
+                if (tokens[i] == ".align") {
+                    try {
+                        alignment = std::max<std::size_t>(
+                            1, static_cast<std::size_t>(std::stoull(tokens[i + 1])));
+                    } catch (...) {
+                        alignment = 1;
+                    }
+                }
+            }
+            std::size_t scalar_bytes = 4;
+            if (type.size() >= 3) {
+                try {
+                    scalar_bytes = std::max<std::size_t>(
+                        1, static_cast<std::size_t>(
+                               std::stoul(type.substr(2))) /
+                               8);
+                } catch (...) {
+                    scalar_bytes = 4;
+                }
+            }
+            std::size_t byte_size = is_pointer ? 8 : scalar_bytes;
+            const std::string raw_name = tokens.back();
+            if (const std::size_t open = raw_name.find('[');
+                open != std::string::npos) {
+                const std::size_t close = raw_name.find(']', open + 1);
+                if (close != std::string::npos) {
+                    try {
+                        byte_size = scalar_bytes * static_cast<std::size_t>(
+                            std::stoull(raw_name.substr(open + 1,
+                                                        close - open - 1)));
+                    } catch (...) {
+                        byte_size = scalar_bytes;
+                    }
+                }
+            }
             std::string name = sanitize_param_name(tokens.back());
             if (!name.empty()) {
                 params.push_back({.type = type, .name = std::move(name),
-                                  .is_pointer = is_pointer});
+                                  .is_pointer = is_pointer,
+                                  .byte_size = byte_size,
+                                  .alignment = alignment});
             }
         }
         return params;

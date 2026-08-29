@@ -896,6 +896,19 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmSignedNarrowToFloat = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @signed_narrow_to_float(ptr %input, ptr %out) {
+entry:
+  %raw = load i8, ptr %input, align 1
+  %value = sitofp i8 %raw to float
+  store float %value, ptr %out, align 4
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmNaturalLoop = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -924,6 +937,63 @@ store:
   %next = add i32 %index, 1
   br label %header
 exit:
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmOpaquePointerLoop = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%Storage = type { [32 x i8] }
+
+define ptx_kernel void @opaque_pointer_loop(ptr %out) {
+entry:
+  %storage = alloca %Storage, align 4
+  %begin = getelementptr inbounds i8, ptr %storage, i64 0
+  %end = getelementptr inbounds i8, ptr %storage, i64 32
+  br label %loop
+loop:
+  %cursor = phi ptr [ %begin, %entry ], [ %next, %body ]
+  %done = icmp eq ptr %cursor, %end
+  br i1 %done, label %exit, label %body
+body:
+  store i8 0, ptr %cursor, align 1
+  %next = getelementptr inbounds i8, ptr %cursor, i64 1
+  br label %loop
+exit:
+  store i32 32, ptr %out, align 4
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmMultiTargetExitLoop = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define i32 @multi_target_exit(i32 %count) {
+entry:
+  br label %loop
+loop:
+  %index = phi i32 [ 0, %entry ], [ %next, %latch ]
+  %active = icmp ult i32 %index, %count
+  br i1 %active, label %body, label %exhausted
+body:
+  %early = icmp eq i32 %index, 2
+  br i1 %early, label %done, label %latch
+latch:
+  %next = add i32 %index, 1
+  br label %loop
+exhausted:
+  br label %done
+done:
+  %result = phi i32 [ 7, %body ], [ 9, %exhausted ]
+  ret i32 %result
+}
+
+define ptx_kernel void @multi_target_exit_loop(ptr %out, i32 %count) {
+entry:
+  %value = call i32 @multi_target_exit(i32 %count)
+  store i32 %value, ptr %out, align 4
   ret void
 }
 )llvm";
@@ -1578,6 +1648,18 @@ int main() {
                          std::string::npos,
                  "LLVM aggregate allocas apply byte offsets after byte-pointer casts");
 
+    const metal::NvvmToMslResult signed_narrow_to_float =
+        metal::compile_nvvm_to_msl(kNvvmSignedNarrowToFloat,
+                                   "signed-narrow-to-float.ll",
+                                   "signed_narrow_to_float");
+    ok &= expect(signed_narrow_to_float.ok &&
+                     signed_narrow_to_float.source.find("char(v") !=
+                         std::string::npos,
+                 "LLVM sitofp preserves the signed interpretation of narrow integer bit containers");
+    if (!signed_narrow_to_float.ok) {
+        std::cerr << signed_narrow_to_float.error << "\n";
+    }
+
     const metal::NvvmToMslResult natural_loop = metal::compile_nvvm_to_msl(
         kNvvmNaturalLoop, "natural-loop.ll", "natural_loop");
     ok &= expect(natural_loop.ok &&
@@ -1585,6 +1667,32 @@ int main() {
                      natural_loop.source.find("break;") != std::string::npos &&
                      natural_loop.source.find("_next") != std::string::npos,
                  "natural loops preserve loop-carried PHIs through explicit Metal updates");
+
+    const metal::NvvmToMslResult opaque_pointer_loop =
+        metal::compile_nvvm_to_msl(kNvvmOpaquePointerLoop,
+                                   "opaque-pointer-loop.ll",
+                                   "opaque_pointer_loop");
+    ok &= expect(opaque_pointer_loop.ok &&
+                     opaque_pointer_loop.source.find("while (true)") !=
+                         std::string::npos &&
+                     opaque_pointer_loop.source.find(
+                         "reinterpret_cast<thread uchar*>") != std::string::npos,
+                 "opaque-pointer loop PHIs normalize inferred aggregate pointees to byte pointers");
+    if (!opaque_pointer_loop.ok) std::cerr << opaque_pointer_loop.error << "\n";
+
+    const metal::NvvmToMslResult multi_target_exit_loop =
+        metal::compile_nvvm_to_msl(kNvvmMultiTargetExitLoop,
+                                   "multi-target-exit-loop.ll",
+                                   "multi_target_exit_loop");
+    ok &= expect(multi_target_exit_loop.ok &&
+                     multi_target_exit_loop.source.find(
+                         "int multi_target_exit(") != std::string::npos &&
+                     multi_target_exit_loop.source.find(
+                         "switch (cm_block_state)") != std::string::npos,
+                 "barrier-free loops with distinct exhausted and early-return exits use an exact CFG dispatcher");
+    if (!multi_target_exit_loop.ok) {
+        std::cerr << multi_target_exit_loop.error << "\n";
+    }
 
     const metal::NvvmToMslResult sequential_loops = metal::compile_nvvm_to_msl(
         kNvvmSequentialLoops, "sequential-loops.ll", "sequential_loops");
@@ -1603,11 +1711,13 @@ int main() {
     ok &= expect(warp_votes.ok &&
                      warp_votes.source.find("simd_ballot(") != std::string::npos &&
                      warp_votes.source.find("simd_vote::vote_t(") != std::string::npos &&
-                     warp_votes.source.find("simd_any(") != std::string::npos &&
-                     warp_votes.source.find("simd_all(") != std::string::npos &&
+                     warp_votes.source.find("simd_active_threads_mask()") !=
+                         std::string::npos &&
+                     warp_votes.source.find("simd_any(") == std::string::npos &&
+                     warp_votes.source.find("simd_all(") == std::string::npos &&
                      warp_votes.source.find("thread_index_in_simdgroup") !=
                          std::string::npos,
-                 "masked CUDA warp votes lower to Metal SIMD vote semantics");
+                 "masked CUDA warp votes use per-lane logical-group ballot masks");
 
     const metal::NvvmToMslResult inline_active_mask =
         metal::compile_nvvm_to_msl(

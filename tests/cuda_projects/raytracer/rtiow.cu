@@ -267,6 +267,128 @@ __global__ void render_kernel(float *out, int w, int h, int spp) {
     out[i + 2] = c.z;
 }
 
+__global__ void ray_probe_kernel(float *out, unsigned *states) {
+    unsigned seed = pcg_hash(1u);
+    states[0] = seed;
+    const float ju = rnd(&seed);
+    states[1] = seed;
+    const float jv = rnd(&seed);
+    states[2] = seed;
+    Vec3 ro, rd;
+    camera_ray(0, 0, ju, jv, 1, 1, &ro, &rd);
+    Sphere sp[NUM_SPHERES];
+    build_scene(sp);
+    Hit hit{};
+    const bool any = hit_world(sp, ro, rd, &hit);
+    unsigned scatter_seed = seed;
+    const Vec3 color = trace(ro, rd, sp, &seed);
+    float values[47] = {
+        ju, jv, ro.x, ro.y, ro.z, rd.x, rd.y, rd.z,
+        any ? 1.0f : 0.0f, hit.t, hit.p.x, hit.p.y, hit.p.z,
+        hit.n.x, hit.n.y, hit.n.z, static_cast<float>(hit.idx),
+        color.x, color.y, color.z,
+    };
+    for (int i = 0; i < NUM_SPHERES; ++i) {
+        values[20 + i] = sp[i].radius;
+        values[25 + i] = sp[i].center.x;
+        const Vec3 oc = sub(ro, sp[i].center);
+        const float a = dot(rd, rd);
+        const float b = dot(oc, rd);
+        const float c = dot(oc, oc) - sp[i].radius * sp[i].radius;
+        values[30 + i] = b * b - a * c;
+        Hit one{};
+        values[35 + i] = hit_sphere(&sp[i], ro, rd, 0.001f, 1.0e20f, &one)
+                             ? 1.0f : 0.0f;
+    }
+    const Vec3 scatter = rnd_in_sphere(&scatter_seed);
+    const Vec3 next_rd = add(hit.n, scatter);
+    Hit next_hit{};
+    values[40] = scatter.x;
+    values[41] = scatter.y;
+    values[42] = scatter.z;
+    values[43] = next_rd.x;
+    values[44] = next_rd.y;
+    values[45] = next_rd.z;
+    values[46] = hit_world(sp, hit.p, next_rd, &next_hit) ? 1.0f : 0.0f;
+    for (int i = 0; i < 47; ++i) out[i] = values[i];
+}
+
+static int run_ray_probe() {
+    float *d_values = nullptr;
+    unsigned *d_states = nullptr;
+    CHECK(cudaMalloc(reinterpret_cast<void **>(&d_values), 47 * sizeof(float)));
+    CHECK(cudaMalloc(reinterpret_cast<void **>(&d_states), 3 * sizeof(unsigned)));
+    ray_probe_kernel<<<1, 1>>>(d_values, d_states);
+    CHECK(cudaGetLastError());
+    CHECK(cudaDeviceSynchronize());
+    float gpu[47] = {};
+    unsigned gpu_states[3] = {};
+    CHECK(cudaMemcpy(gpu, d_values, sizeof(gpu), cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(gpu_states, d_states, sizeof(gpu_states), cudaMemcpyDeviceToHost));
+    CHECK(cudaFree(d_values));
+    CHECK(cudaFree(d_states));
+
+    unsigned seed = pcg_hash(1u);
+    const unsigned ref_state0 = seed;
+    const float ju = rnd(&seed);
+    const unsigned ref_state1 = seed;
+    const float jv = rnd(&seed);
+    const unsigned ref_state2 = seed;
+    Vec3 ro, rd;
+    camera_ray(0, 0, ju, jv, 1, 1, &ro, &rd);
+    Sphere sp[NUM_SPHERES];
+    build_scene(sp);
+    Hit hit{};
+    const bool any = hit_world(sp, ro, rd, &hit);
+    unsigned scatter_seed = seed;
+    const Vec3 color = trace(ro, rd, sp, &seed);
+    float ref[47] = {
+        ju, jv, ro.x, ro.y, ro.z, rd.x, rd.y, rd.z,
+        any ? 1.0f : 0.0f, hit.t, hit.p.x, hit.p.y, hit.p.z,
+        hit.n.x, hit.n.y, hit.n.z, static_cast<float>(hit.idx),
+        color.x, color.y, color.z,
+    };
+    for (int i = 0; i < NUM_SPHERES; ++i) {
+        ref[20 + i] = sp[i].radius;
+        ref[25 + i] = sp[i].center.x;
+        const Vec3 oc = sub(ro, sp[i].center);
+        const float a = dot(rd, rd);
+        const float b = dot(oc, rd);
+        const float c = dot(oc, oc) - sp[i].radius * sp[i].radius;
+        ref[30 + i] = b * b - a * c;
+        Hit one{};
+        ref[35 + i] = hit_sphere(&sp[i], ro, rd, 0.001f, 1.0e20f, &one)
+                          ? 1.0f : 0.0f;
+    }
+    const Vec3 scatter = rnd_in_sphere(&scatter_seed);
+    const Vec3 next_rd = add(hit.n, scatter);
+    Hit next_hit{};
+    ref[40] = scatter.x;
+    ref[41] = scatter.y;
+    ref[42] = scatter.z;
+    ref[43] = next_rd.x;
+    ref[44] = next_rd.y;
+    ref[45] = next_rd.z;
+    ref[46] = hit_world(sp, hit.p, next_rd, &next_hit) ? 1.0f : 0.0f;
+    const unsigned ref_states[3] = {ref_state0, ref_state1, ref_state2};
+    for (int i = 0; i < 3; ++i) {
+        if (gpu_states[i] != ref_states[i]) {
+            printf("FAIL: ray probe state[%d] gpu=%u ref=%u\n",
+                   i, gpu_states[i], ref_states[i]);
+            return 1;
+        }
+    }
+    bool values_ok = true;
+    for (int i = 0; i < 47; ++i) {
+        const float tolerance = 2.0e-4f * fmaxf(1.0f, fabsf(ref[i]));
+        if (fabsf(gpu[i] - ref[i]) > tolerance) {
+            printf("FAIL: ray probe value[%d] gpu=%g ref=%g\n", i, gpu[i], ref[i]);
+            values_ok = false;
+        }
+    }
+    return values_ok ? 0 : 1;
+}
+
 // -------------------------------------------------------------- main
 
 int main(int argc, char **argv) {
@@ -278,6 +400,8 @@ int main(int argc, char **argv) {
     const size_t n = (size_t)w * h * 3;
     const size_t bytes = n * sizeof(float);
     printf("rtiow: %dx%d, %d spp, %d bounces max\n", w, h, spp, MAX_BOUNCE);
+
+    if (run_ray_probe() != 0) return 1;
 
     float *d_out = nullptr;
     CHECK(cudaMalloc((void **)&d_out, bytes));

@@ -71,13 +71,20 @@ compiler paths and their selection policy are in
 
 - The fixed Phase 4 functional denominator is **185/185 pass** with zero skips
   on the recorded Apple M4 Pro run. Default source executables embed native-AOT
-  metallibs and ABI-v2 kernel/symbol metadata without first-launch PTX JIT.
-- The enrolled headless NVIDIA `cuda-samples` snapshot is **83/83 pass**, with
-  zero waivers and zero nonpassing manifest entries.
+  metallibs and ABI-v3 kernel/symbol/`printf` metadata without first-launch PTX
+  JIT.
+- The enrolled headless NVIDIA `cuda-samples` manifest target is **83/83 pass**,
+  with zero waivers and zero nonpassing entries. A 2026-08-30 rerun currently
+  reaches 82/83: `conjugateGradientMultiBlockCG` hits the macOS GPU watchdog,
+  so the target is not a current all-green claim.
 - With CUDA Clang 21-23, the reviewed 24-file production-metallib matrix is
   **24/24** for direct `.cu` through typed CuMetal IR, **24/24** for typed PTX,
   and **24/24** for the legacy PTX backend. These are compile results, not
   numerical runtime proof.
+- The exact in-tree 22-project corpus passes numerical Apple-GPU execution both
+  through typed PTX and through direct native AOT, with workload
+  specializations disabled. The native path embeds metallibs and performs no
+  first-launch PTX JIT.
 - Vector add, SAXPY, reduction, selected matrix/library operations, typed
   direct/PTX FP64, 32-bit atomics, lock-backed 64-bit typed-PTX atomics, fences,
   and bounded device `printf`, typed direct

@@ -12,9 +12,15 @@ CUMETALC="${1:?usage: run_cumetalc_link_executable.sh <cumetalc> <source.cu> <wo
 SOURCE_CU="${2:?}"
 WORK_DIR="${3:?}"
 shift 3
-COMPILER_ARGS=("$@")
+COMPILER_ARGS=()
+EXPECT_OUTPUT="PASS:"
 EXPECT_NATIVE=1
-for arg in "${COMPILER_ARGS[@]}"; do
+for arg in "$@"; do
+    if [[ "${arg}" == --expect-output=* ]]; then
+        EXPECT_OUTPUT="${arg#--expect-output=}"
+        continue
+    fi
+    COMPILER_ARGS+=("${arg}")
     if [[ "${arg}" == "--backend=legacy" ]]; then
         EXPECT_NATIVE=0
     fi
@@ -85,8 +91,8 @@ if [[ ${RUN_STATUS} -ne 0 ]]; then
     echo "FAIL: linked executable exited ${RUN_STATUS}"
     exit 1
 fi
-if ! grep -q "PASS:" <<<"${RUN_OUTPUT}"; then
-    echo "FAIL: linked executable did not report a numerical PASS"
+if ! grep -Fq "${EXPECT_OUTPUT}" <<<"${RUN_OUTPUT}"; then
+    echo "FAIL: linked executable did not report expected output: ${EXPECT_OUTPUT}"
     exit 1
 fi
 

@@ -398,6 +398,29 @@ $L_one:
         return 1;
     }
 
+    const std::string aggregate_param_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry aggregate_param(
+    .param .align 4 .b8 aggregate_param_0[12]
+) {
+    .reg .b32 %r1;
+    ld.param.b32 %r1, [aggregate_param_0+8];
+    ret;
+}
+)PTX";
+    const auto aggregate_param = cumetal::ptx::parse_ptx(aggregate_param_ptx);
+    if (!expect(aggregate_param.ok &&
+                    aggregate_param.module.entries.size() == 1 &&
+                    aggregate_param.module.entries[0].params.size() == 1 &&
+                    aggregate_param.module.entries[0].params[0].name ==
+                        "aggregate_param_0" &&
+                    aggregate_param.module.entries[0].params[0].byte_size == 12 &&
+                    aggregate_param.module.entries[0].params[0].alignment == 4,
+                "aggregate PTX parameters retain base name, byte size, and alignment")) {
+        return 1;
+    }
+
     std::printf("PASS: ptx parser unit tests\n");
     return 0;
 }

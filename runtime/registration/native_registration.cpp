@@ -132,6 +132,16 @@ bool validate_descriptor(const CuMetalModuleDescriptor* descriptor,
             if (error != nullptr) *error = "native kernel symbol index table is missing";
             return false;
         }
+        if (kernel.printf_format_count > 0 && kernel.printf_formats == nullptr) {
+            if (error != nullptr) *error = "native kernel printf format table is missing";
+            return false;
+        }
+        for (std::uint32_t format = 0; format < kernel.printf_format_count; ++format) {
+            if (kernel.printf_formats[format] == nullptr) {
+                if (error != nullptr) *error = "native kernel printf format is null";
+                return false;
+            }
+        }
         for (std::uint32_t symbol = 0; symbol < kernel.symbol_count; ++symbol) {
             if (kernel.symbol_indices[symbol] >= descriptor->symbol_count) {
                 if (error != nullptr) *error = "native kernel symbol index is out of range";
@@ -274,6 +284,11 @@ CuMetalModuleHandle cumetalRegisterModule(
         record.semantic_quality = descriptor->semantic_quality != nullptr
                                       ? descriptor->semantic_quality
                                       : "exact";
+        record.printf_formats.reserve(kernel.printf_format_count);
+        for (std::uint32_t format = 0; format < kernel.printf_format_count;
+             ++format) {
+            record.printf_formats.emplace_back(kernel.printf_formats[format]);
+        }
         for (std::uint32_t symbol_offset = 0;
              symbol_offset < kernel.symbol_count; ++symbol_offset) {
             const std::uint32_t symbol_index = kernel.symbol_indices[symbol_offset];
