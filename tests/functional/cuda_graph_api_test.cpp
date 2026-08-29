@@ -111,9 +111,18 @@ static bool test_event_linked_capture_lifetime() {
     cudaStreamCreate(&joined);
     cudaEventCreate(&event);
 
+    std::uint32_t* device_value = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&device_value), sizeof(*device_value)) !=
+        cudaSuccess) {
+        std::fprintf(stderr, "FAIL: event-linked capture allocation failed\n");
+        return false;
+    }
+
     if (cudaStreamBeginCapture(origin, cudaStreamCaptureModeGlobal) != cudaSuccess ||
+        cudaMemsetAsync(device_value, 0x11, sizeof(*device_value), origin) != cudaSuccess ||
         cudaEventRecord(event, origin) != cudaSuccess ||
-        cudaStreamWaitEvent(joined, event, 0) != cudaSuccess) {
+        cudaStreamWaitEvent(joined, event, 0) != cudaSuccess ||
+        cudaMemsetAsync(device_value, 0x22, sizeof(*device_value), joined) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: event-linked stream capture setup failed\n");
         return false;
     }
@@ -133,6 +142,23 @@ static bool test_event_linked_capture_lifetime() {
         return false;
     }
 
+    size_t node_count = 0;
+    cudaGraphExec_t exec = nullptr;
+    std::uint32_t value = 0;
+    if (cudaGraphGetNodes(graph, nullptr, &node_count) != cudaSuccess ||
+        node_count != 2 ||
+        cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0) != cudaSuccess ||
+        cudaGraphLaunch(exec, origin) != cudaSuccess ||
+        cudaStreamSynchronize(origin) != cudaSuccess ||
+        cudaMemcpy(&value, device_value, sizeof(value), cudaMemcpyDeviceToHost) !=
+            cudaSuccess ||
+        value != 0x22222222u) {
+        std::fprintf(stderr,
+                     "FAIL: event-linked cross-stream replay nodes=%zu value=0x%08x\n",
+                     node_count, value);
+        return false;
+    }
+
     if (cudaStreamWaitEvent(joined, event, 0) != cudaSuccess ||
         cudaStreamIsCapturing(joined, &status) != cudaSuccess ||
         status != cudaStreamCaptureStatusNone) {
@@ -140,7 +166,23 @@ static bool test_event_linked_capture_lifetime() {
         return false;
     }
 
+    cudaGraph_t origin_graph = nullptr;
+    cudaGraph_t joined_graph = nullptr;
+    if (cudaStreamBeginCapture(origin, cudaStreamCaptureModeGlobal) != cudaSuccess ||
+        cudaStreamBeginCapture(joined, cudaStreamCaptureModeGlobal) != cudaSuccess ||
+        cudaEventRecord(event, origin) != cudaSuccess ||
+        cudaStreamWaitEvent(joined, event, 0) != cudaErrorInvalidValue ||
+        cudaStreamEndCapture(origin, &origin_graph) != cudaSuccess ||
+        cudaStreamEndCapture(joined, &joined_graph) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: conflicting event-linked captures were not rejected\n");
+        return false;
+    }
+
+    cudaGraphDestroy(joined_graph);
+    cudaGraphDestroy(origin_graph);
+    cudaGraphExecDestroy(exec);
     cudaGraphDestroy(graph);
+    cudaFree(device_value);
     cudaEventDestroy(event);
     cudaStreamDestroy(joined);
     cudaStreamDestroy(origin);

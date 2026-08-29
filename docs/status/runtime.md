@@ -38,7 +38,8 @@ launch success. CPU or approximate paths must identify themselves.
 - The opt-in binary path accepts bounded raw PTX, CuMetal envelopes, CUDA fatbin
   PTX forms, and checked little-endian ELF32/ELF64 PTX sections.
 - CUDA graph coverage includes tested kernel, linear memcpy/memset, host,
-  clone/update, and graph-memory node behavior.
+  clone/update, graph-memory node behavior, and event-linked two-stream ordered
+  replay with capture-conflict rejection.
 - Dynamic launch uses a bounded device record queue and recursive host drain;
   focused tests cover parent-child-grandchild ordering, invalid child
   configurations, and the 1,023-record overflow boundary.

@@ -22,10 +22,12 @@
 
 ## Graphs and allocators
 
-Tested graph capture/replay, clone/update, and memory-node lifetimes do not cover
-all node types or topology. Broader cross-stream event capture, virtual/physical
-allocation reuse, allocator caching/release-threshold behavior, and advanced
-update cases remain incomplete.
+Tested graph capture/replay includes an event-linked two-stream dependency with
+ordered numerical replay, stale-event lifetime rejection, and conflicting-
+capture rejection. Clone/update and memory-node lifetimes still do not cover all
+node types or multi-stream topologies. Virtual/physical allocation reuse,
+allocator caching/release-threshold behavior, and advanced update cases remain
+incomplete.
 
 ## Memory and pointers
 
