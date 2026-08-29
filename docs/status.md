@@ -18,8 +18,9 @@ is split by subsystem.
   nonpassing manifest entries.
 - Production-metallib source corpus with CUDA Clang 21-23: direct typed IR
   **24/24**, typed PTX **24/24**, legacy PTX **24/24**.
-- Phase 5 measured kernels: vector add, SAXPY, and reduction meet the recorded
-  2x native-Metal ceiling on Apple M4 Pro.
+- The named five-kernel Phase 5 release set—vector add, SAXPY, STREAM copy,
+  STREAM triad, and reduction—meets the recorded 2x native-Metal ceiling on
+  Apple M4 Pro.
 - Backend defaults remain frontend-dependent while numerical coverage continues
   migrating; equal compile counts do not
   establish equal general compatibility.

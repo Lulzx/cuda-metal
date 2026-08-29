@@ -25,10 +25,11 @@ compatibility claim. Implemented surfaces and detailed limitations remain in
   `tests/cuda_projects/backend_matrix_manifest.txt` and
   `conformance_compiler_backend_matrix{,_versions}`. The matrix is compile
   evidence only; promotion still requires numerical GPU tests.
-- The three-kernel Phase 5 benchmark gate has measured Apple-GPU results below
-  2x native Metal on the recorded Apple M4 Pro system. The reproducible gate is
-  `bench_phase5_all_kernels`. It does not yet cover the broader release set
-  required by [the verification specification](../spec/05-verification.md).
+- The named five-kernel Phase 5 release set—vector add, SAXPY, STREAM copy,
+  STREAM triad, and FP32 reduction—has measured Apple-GPU results below 2x
+  native Metal on the recorded Apple M4 Pro system. The reproducible gate is
+  `bench_phase5_all_kernels`; this closes the selected-set Phase 5 criterion,
+  not a whole-suite performance bound.
 - llm.c, llama.cpp, PhysX, HiGHS, and multi-Xcode checks depend on external
   checkouts, assets, hardware, or toolchains. Their focused results are not a
   continuously enforced general-compatibility gate.
@@ -51,7 +52,7 @@ coexist.
 | [Compiler](../spec/02-compiler.md) | Typed IR/MSL matches the reviewed legacy compile corpus. The source executable path embeds its metallib and registers host launch stubs through the versioned native ABI without first-launch PTX JIT; broader compiler combinations and default promotion remain gated. Cache identity remains a regression invariant. | `conformance_compiler_backend_matrix_versions`, `functional_cumetalc_link_executable`, `unit_native_registration`, `unit_module_cache`, and P1 canonical compiler path. |
 | [Runtime](../spec/03-runtime.md) | Core allocation, pointer resolution, launch, stream/event, provenance, and per-thread error subsets are implemented and tested; advanced interactions remain bounded. | Runtime functional/unit tests, `status/runtime.md`, and P2 runtime semantic subsets/binary shim. |
 | [CUDA semantics](../spec/04-semantics.md) | Fixed-width warp, memory, synchronization, atomic, FP64, graph, dynamic-launch, texture/surface, and `printf` behavior is form-specific rather than blanket compatible. | `known-gaps/runtime.md`, `fp64-policy.md`, P2 runtime semantic subsets, and P2 library rows. |
-| [Verification](../spec/05-verification.md) | Evidence classes are separated and the Phase 4 denominator is fixed, but observed recurring CI, the full Xcode matrix, and the broader Phase 5 release set remain open. | P1 Phase 4 correctness, P1 AIR ABI, and P3 Phase 5 performance. |
+| [Verification](../spec/05-verification.md) | Evidence classes are separated, the Phase 4 denominator is fixed, and the named five-kernel Phase 5 release set passes; observed recurring verification and the full Xcode matrix remain open. | P1 Phase 4 correctness, P1 AIR ABI, and the Phase 5 closure record below. |
 | [Roadmap](../spec/06-roadmap.md) | Priorities and closure criteria are instantiated by the table below. | This document and `unit_documentation_consistency`. |
 | [Legal and clean room](../spec/07-legal.md) | No new compatibility work is authorized by the roadmap. Source-first packaging, public Apple APIs, clean-room headers, no SASS translation, attribution, and bounded opt-in binary language remain mandatory gates. The detailed legal/tooling notice still needs P0 reconciliation with the MSL production path and the spec's non-advice boundary. | `known-gaps/platform.md`, Release shim-off configuration, and P0 documentation integrity. |
 
@@ -69,7 +70,15 @@ is a regression even if it improves a compatibility count.
 | P2 | Runtime semantic subsets | Expand graph node/cross-stream/allocator semantics; direct PTX texture/surface instructions; nested/overflow/error behavior for the host-drained dynamic-launch queue; irregular cooperative-group masks; wider device `printf`; and observable `ieee64` exception status. Preserve allocation/pointer, stream/event, launch ABI, provenance, and per-thread error invariants while doing so. | Focused positive and negative tests plus numerical Apple-GPU execution and unmodified workloads where available; every unsupported branch fails explicitly. |
 | P2 | Phase 4.5 libraries | Audit pointer modes, stream ordering, graph capture, datatype/layout variants, and unsupported returns across cuBLAS, cuRAND, cuFFT, cuSPARSE, cuSOLVER, and cuDNN. | Per-library support tables generated from tested API cases; no CPU/UMA fallback is reported as GPU execution. |
 | P2 | Binary shim | Add compressed PTX payloads and remaining bounded fatbinary variants without weakening range validation or the source-first default. Big-endian and SASS-only inputs remain explicit non-goals unless the spec changes. | Registration and Driver API parity tests for every accepted container plus malformed/truncated negative cases in Debug/shim-on and Release/shim-off builds. Release packaging must still omit the `libcuda.dylib` alias by default. |
-| P3 | Phase 5 performance | Extend native-Metal comparisons beyond vector add, SAXPY, and reduction and decide which memory-bound kernels form the release gate. Implement allocator reuse/heap work only against measured bottlenecks. | Reproducible benchmark artifacts with device/toolchain provenance; selected memory-bound release set remains at or below 2x native Metal. |
+
+## Closed during this reconciliation
+
+- **P3 Phase 5 performance:** the release set is explicitly vector add, SAXPY,
+  STREAM copy, STREAM triad, and FP32 reduction. The reproducible
+  `bench_phase5_all_kernels` gate passed all five below 2x native Metal on Apple
+  M4 Pro with Metal 4, Xcode 26.6, and Apple Metal compiler 32023.883 on
+  2026-08-29. Allocator/heap work remains measurement-driven rather than an
+  unqualified compatibility requirement.
 
 ## Reconciliation record
 

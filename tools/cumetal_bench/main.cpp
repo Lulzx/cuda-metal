@@ -13,7 +13,7 @@
 //
 // --metallib       Path to the compiled bench_kernels.metallib.
 // --kernel         Single kernel name to benchmark (default: vector_add).
-// --all-kernels    Benchmark all kernels: vector_add, saxpy, reduce_f32.
+// --all-kernels    Benchmark the Phase 5 release set.
 // --elements       Number of float elements (default: 2^18 = 262144).
 // --warmup         Warmup iterations (default: 5).
 // --iterations     Measurement iterations (default: 50).
@@ -234,6 +234,163 @@ std::vector<float> make_ramp(std::size_t n, float scale, unsigned seed) {
         v[i] = static_cast<float>((i * seed + 1u) % 97u) * scale;
     }
     return v;
+}
+
+bool verify_elementwise(const char* kernel_name,
+                        const std::vector<float>& expected,
+                        const std::vector<float>& actual) {
+    constexpr float kTol = 1e-4f;
+    if (expected.size() != actual.size()) return false;
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        if (std::fabs(actual[i] - expected[i]) > kTol) {
+            std::fprintf(stderr, "%s mismatch at %zu: got=%f expected=%f\n",
+                         kernel_name, i, static_cast<double>(actual[i]),
+                         static_cast<double>(expected[i]));
+            return false;
+        }
+    }
+    return true;
+}
+
+// Common benchmark path for output-only elementwise kernels. host_buffers[0]
+// is the output; remaining buffers are immutable inputs. A one-element input
+// is useful for scalar parameters such as STREAM triad's alpha.
+BenchResult bench_elementwise_native(
+    const Options& opts,
+    const char* kernel_name,
+    const std::vector<std::vector<float>>& host_buffers,
+    const std::vector<float>& expected) {
+    std::string err;
+    std::vector<std::shared_ptr<cumetal::metal_backend::Buffer>> buffers(host_buffers.size());
+    std::vector<cumetal::metal_backend::KernelArg> args(host_buffers.size());
+    for (std::size_t i = 0; i < host_buffers.size(); ++i) {
+        const std::size_t bytes = host_buffers[i].size() * sizeof(float);
+        if (cumetal::metal_backend::allocate_buffer(bytes, &buffers[i], &err) != cudaSuccess) {
+            std::fprintf(stderr, "%s native: alloc failed: %s\n", kernel_name, err.c_str());
+            return {};
+        }
+        std::memcpy(buffers[i]->contents(), host_buffers[i].data(), bytes);
+        args[i] = {.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer,
+                   .buffer = buffers[i], .offset = 0};
+    }
+
+    const cumetal::metal_backend::LaunchConfig cfg{
+        .grid = dim3(static_cast<unsigned>((opts.element_count + kThreadsPerBlock - 1) /
+                                           kThreadsPerBlock), 1, 1),
+        .block = dim3(static_cast<unsigned>(kThreadsPerBlock), 1, 1),
+        .shared_memory_bytes = 0,
+    };
+    for (int i = 0; i < opts.warmup_iterations; ++i) {
+        if (cumetal::metal_backend::launch_kernel(opts.metallib_path, kernel_name, cfg, args,
+                                                   nullptr, &err) != cudaSuccess ||
+            cumetal::metal_backend::synchronize(&err) != cudaSuccess) {
+            std::fprintf(stderr, "%s native warmup failed: %s\n", kernel_name, err.c_str());
+            return {};
+        }
+    }
+
+    BenchResult result;
+    std::vector<double> gpu_samples;
+    std::vector<double> wall_samples;
+    gpu_samples.reserve(static_cast<std::size_t>(opts.measure_iterations));
+    wall_samples.reserve(static_cast<std::size_t>(opts.measure_iterations));
+    for (int i = 0; i < opts.measure_iterations; ++i) {
+        const auto start = std::chrono::steady_clock::now();
+        cumetal::metal_backend::GpuTimingResult timing;
+        if (cumetal::metal_backend::launch_kernel_timed(
+                opts.metallib_path, kernel_name, cfg, args, &timing, &err) != cudaSuccess) {
+            std::fprintf(stderr, "%s native measure failed: %s\n", kernel_name, err.c_str());
+            return {};
+        }
+        gpu_samples.push_back(timing.duration_ms());
+        wall_samples.push_back(wall_ms(std::chrono::steady_clock::now() - start));
+    }
+    result.wall_rel_iqr = relative_iqr(wall_samples);
+    result.wall_avg_ms = min_ms(wall_samples);
+    result.gpu_avg_ms = min_ms(gpu_samples);
+
+    std::vector<float> actual(opts.element_count);
+    std::memcpy(actual.data(), buffers[0]->contents(), actual.size() * sizeof(float));
+    if (!verify_elementwise(kernel_name, expected, actual)) return {};
+    result.valid = true;
+    return result;
+}
+
+BenchResult bench_elementwise_runtime(
+    const Options& opts,
+    const char* kernel_name,
+    const std::vector<std::vector<float>>& host_buffers,
+    const std::vector<float>& expected) {
+    if (cudaInit(0) != cudaSuccess) return {};
+
+    std::vector<void*> device_buffers(host_buffers.size(), nullptr);
+    auto cleanup = [&]() {
+        for (void* buffer : device_buffers) {
+            if (buffer != nullptr) cudaFree(buffer);
+        }
+    };
+    for (std::size_t i = 0; i < host_buffers.size(); ++i) {
+        const std::size_t bytes = host_buffers[i].size() * sizeof(float);
+        if (cudaMalloc(&device_buffers[i], bytes) != cudaSuccess ||
+            cudaMemcpy(device_buffers[i], host_buffers[i].data(), bytes,
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+            std::fprintf(stderr, "%s runtime: buffer setup failed\n", kernel_name);
+            cleanup();
+            return {};
+        }
+    }
+
+    std::vector<cumetalKernelArgInfo_t> arg_info(
+        host_buffers.size(), {CUMETAL_ARG_BUFFER, 0});
+    const cumetalKernel_t kernel{
+        .metallib_path = opts.metallib_path.c_str(),
+        .kernel_name = kernel_name,
+        .arg_count = static_cast<std::uint32_t>(arg_info.size()),
+        .arg_info = arg_info.data(),
+    };
+    std::vector<void*> launch_args(host_buffers.size());
+    for (std::size_t i = 0; i < device_buffers.size(); ++i) {
+        launch_args[i] = &device_buffers[i];
+    }
+    const dim3 grid(static_cast<unsigned>((opts.element_count + kThreadsPerBlock - 1) /
+                                          kThreadsPerBlock), 1, 1);
+    const dim3 block(static_cast<unsigned>(kThreadsPerBlock), 1, 1);
+    for (int i = 0; i < opts.warmup_iterations; ++i) {
+        if (cudaLaunchKernel(&kernel, grid, block, launch_args.data(), 0, nullptr) != cudaSuccess ||
+            cudaDeviceSynchronize() != cudaSuccess) {
+            std::fprintf(stderr, "%s runtime warmup failed\n", kernel_name);
+            cleanup();
+            return {};
+        }
+    }
+
+    BenchResult result;
+    std::vector<double> wall_samples;
+    wall_samples.reserve(static_cast<std::size_t>(opts.measure_iterations));
+    for (int i = 0; i < opts.measure_iterations; ++i) {
+        const auto start = std::chrono::steady_clock::now();
+        if (cudaLaunchKernel(&kernel, grid, block, launch_args.data(), 0, nullptr) != cudaSuccess ||
+            cudaDeviceSynchronize() != cudaSuccess) {
+            std::fprintf(stderr, "%s runtime measure failed\n", kernel_name);
+            cleanup();
+            return {};
+        }
+        wall_samples.push_back(wall_ms(std::chrono::steady_clock::now() - start));
+    }
+    result.wall_rel_iqr = relative_iqr(wall_samples);
+    result.wall_avg_ms = min_ms(wall_samples);
+    result.gpu_avg_ms = -1.0;
+
+    std::vector<float> actual(opts.element_count);
+    if (cudaMemcpy(actual.data(), device_buffers[0], actual.size() * sizeof(float),
+                   cudaMemcpyDeviceToHost) != cudaSuccess) {
+        cleanup();
+        return {};
+    }
+    cleanup();
+    if (!verify_elementwise(kernel_name, expected, actual)) return {};
+    result.valid = true;
+    return result;
 }
 
 // ─── vector_add ──────────────────────────────────────────────────────────────
@@ -773,6 +930,8 @@ struct KernelBenchmark {
 static const KernelBenchmark kAllKernels[] = {
     {"vector_add", true},
     {"saxpy",      true},
+    {"copy_f32",   true},
+    {"triad_f32",  true},
     {"reduce_f32", true},
 };
 
@@ -805,6 +964,24 @@ RunResult run_kernel(const Options& opts, const char* kernel_name) {
         const float alpha = 2.5f;
         r.native  = bench_saxpy_native(opts, hx, hy, alpha);
         r.runtime = bench_saxpy_runtime(opts, hx, hy, alpha);
+    } else if (kn == "copy_f32") {
+        const auto input = make_ramp(opts.element_count, 0.5f, 17u);
+        const std::vector<std::vector<float>> buffers{
+            std::vector<float>(opts.element_count, 0.0f), input};
+        r.native = bench_elementwise_native(opts, kernel_name, buffers, input);
+        r.runtime = bench_elementwise_runtime(opts, kernel_name, buffers, input);
+    } else if (kn == "triad_f32") {
+        const auto a = make_ramp(opts.element_count, 0.25f, 19u);
+        const auto b = make_ramp(opts.element_count, 0.125f, 23u);
+        constexpr float kAlpha = 1.75f;
+        std::vector<float> expected(opts.element_count);
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            expected[i] = a[i] + kAlpha * b[i];
+        }
+        const std::vector<std::vector<float>> buffers{
+            std::vector<float>(opts.element_count, 0.0f), a, b, {kAlpha}};
+        r.native = bench_elementwise_native(opts, kernel_name, buffers, expected);
+        r.runtime = bench_elementwise_runtime(opts, kernel_name, buffers, expected);
     } else if (kn == "reduce_f32") {
         const auto hin = make_ramp(opts.element_count, 1.0f, 5u);
         r.native  = bench_reduce_native(opts, hin);

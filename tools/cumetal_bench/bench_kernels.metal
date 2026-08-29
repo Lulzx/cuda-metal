@@ -20,6 +20,22 @@ kernel void saxpy(device float* y [[buffer(0)]],
     y[id] = alpha[0] * x[id] + y[id];
 }
 
+// STREAM copy: one read stream and one write stream.
+kernel void copy_f32(device float* output [[buffer(0)]],
+                     device const float* input [[buffer(1)]],
+                     uint id [[thread_position_in_grid]]) {
+    output[id] = input[id];
+}
+
+// STREAM triad: output[i] = a[i] + alpha[0] * b[i].
+kernel void triad_f32(device float* output [[buffer(0)]],
+                      device const float* a [[buffer(1)]],
+                      device const float* b [[buffer(2)]],
+                      device const float* alpha [[buffer(3)]],
+                      uint id [[thread_position_in_grid]]) {
+    output[id] = a[id] + alpha[0] * b[id];
+}
+
 // Memory-bound + shared memory: tree reduction.
 // Each threadgroup writes its partial sum to partial_sums[group_id].
 kernel void reduce_f32(device const float* input [[buffer(0)]],

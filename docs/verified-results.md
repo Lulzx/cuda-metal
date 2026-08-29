@@ -77,16 +77,19 @@ envelope remain explicitly excluded by the documented mode contract.
 
 ## Performance gate
 
-The Phase 5 gate compares CuMetal with hand-written Metal for three memory-bound
-kernels. On an Apple M4 Pro, rebuilt and measured on 2026-07-27:
+The Phase 5 gate compares CuMetal with hand-written Metal for the selected
+five-kernel memory-bound release set. On an Apple M4 Pro with Metal 4, Xcode
+26.6, and Apple Metal compiler 32023.883, rebuilt and measured on 2026-08-29:
 
 | Kernel | Elements | CuMetal / native Metal |
 | --- | ---: | ---: |
-| vector add | 262,144 | 1.063x |
-| SAXPY | 262,144 | 1.036x |
-| FP32 reduction | 262,144 | 1.008x |
+| vector add | 262,144 | 1.103x |
+| SAXPY | 262,144 | 1.202x |
+| STREAM copy | 262,144 | 1.154x |
+| STREAM triad | 262,144 | 1.031x |
+| FP32 reduction | 262,144 | 1.070x |
 
-The gate uses the fastest of 20 synchronized wall-clock iterations. These
+The gate uses the fastest of 50 synchronized wall-clock iterations. These
 kernels take roughly 0.2 ms, so averages mostly measure scheduler interference.
 The target is at most 2x native Metal, not a claim that translated code beats
 the baseline.

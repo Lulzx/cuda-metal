@@ -3,11 +3,12 @@
 `cumetal_bench` compares direct Metal-backend kernel launch timing against launch timing
 through the CuMetal CUDA runtime shim.
 
-Current scope:
+The `--all-kernels` release set is:
 
+- vector add, SAXPY, STREAM copy, STREAM triad, and FP32 reduction
 - Single-kernel benchmark (`vector_add` by default)
 - Validates output correctness in both paths
-- Prints average milliseconds and runtime/native ratio
+- Prints fastest synchronized milliseconds, sample spread, and runtime/native ratio
 - Optional perf gate via `--max-ratio` (non-zero exit on regression)
 
 Usage:

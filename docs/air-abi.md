@@ -65,12 +65,13 @@ Tags parsed (NAME, TYPE, HASH, MDSZ, OFFT, VERS, ENDT etc.):
 
 ## Multi-kernel / bench layout (fresh from build/bench_phase5/bench_kernels.metallib)
 
-3 kernels (vector_add, saxpy, reduce_f32):
+5 kernels (vector_add, saxpy, copy_f32, triad_f32, reduce_f32):
 
-- Function count: 3
-- Varying OFFT for kernels >0 (e.g. saxpy: public=8,private=8,bitcode=3520; reduce: 16/16/7040)
+- Function count: 5
+- Varying OFFT for kernels >0 (saxpy: public=8,private=8,bitcode=3520;
+  copy: 16/16/7024; triad: 24/24/10400; reduce: 32/32/14048)
 - All report air.version=2.8 , language 4.0 , type=2 kernel
-- Bitcode sizes vary (0xdc0, 0xdc0, 0xf70)
+- Bitcode sizes vary (0xdc0, 0xdb0, 0xd30, 0xe40, 0xf70)
 - Confirms parser handles multiple entries + relative bitcode offsets correctly.
 
 Practical notes:

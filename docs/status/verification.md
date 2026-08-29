@@ -26,16 +26,21 @@ is no recurring hosted or self-hosted automation to claim.
 ## Performance
 
 `cumetal_bench` compares equivalent CuMetal and native Metal kernels using GPU
-and wall timing. The recorded Apple M4 Pro fastest-of-20 results are:
+and wall timing. The selected release set is vector add, SAXPY, STREAM copy,
+STREAM triad, and FP32 reduction. The recorded Apple M4 Pro fastest-of-50
+results from 2026-08-29 are:
 
 | Kernel | CuMetal/native wall ratio |
 | --- | ---: |
-| vector add | 1.063x |
-| SAXPY | 1.036x |
-| reduction | 1.008x |
+| vector add | 1.103x |
+| SAXPY | 1.202x |
+| STREAM copy | 1.154x |
+| STREAM triad | 1.031x |
+| reduction | 1.070x |
 
-All three meet the current 2x gate. They do not prove a whole-suite performance
-bound; expanding the selected memory-bound release set remains work.
+All five meet the current 2x gate. This closes the specification's named,
+reproducible selected-set requirement; it is not a whole-suite performance
+bound.
 
 ## Evidence records
 

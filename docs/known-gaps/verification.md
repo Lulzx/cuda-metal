@@ -41,7 +41,7 @@ cuSPARSE FP64 SpMV path reports reduced precision.
 
 ## Performance
 
-Only vector add, SAXPY, and reduction currently form the measured native-Metal
-comparison. The spec's every-functional-kernel language is not closed, and the
-release set of memory-bound kernels needs an explicit decision before the 2x
-target becomes a broad performance claim.
+The named Phase 5 release set is vector add, SAXPY, STREAM copy, STREAM triad,
+and FP32 reduction. All five pass the reproducible 2x native-Metal gate on the
+recorded Apple M4 Pro system. This selected set satisfies the specification's
+Phase 5 criterion; it does not establish a whole-suite performance bound.
