@@ -25,6 +25,17 @@ writable `__device__` location retains GPU updates across two launches. The test
 also checks that hidden symbol buffers do not leak into the caller-visible CUDA
 kernel ABI.
 
+`functional_typed_direct_sgemm_2d` independently compiles the reviewed 2D
+block-tiled SGEMM through direct NVVM and compares every element of a
+64x64x16 result on Apple GPU, including nontrivial alpha and beta scaling. This
+exercises sequential and nested natural loops, static shared tiles, and private
+register arrays without the legacy PTX backend.
+
+`functional_typed_direct_flash_attention` checks the independently compiled
+typed direct FlashAttention kernel against scaled dot-product attention on the
+CPU for every element of a 32x16 query tile. It covers the same sequential-loop
+fix with dynamic shared SRAM and exp/online-softmax arithmetic.
+
 ## Performance gate
 
 The Phase 5 gate compares CuMetal with hand-written Metal for three memory-bound

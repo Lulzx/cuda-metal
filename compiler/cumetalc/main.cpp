@@ -807,7 +807,7 @@ int main(int argc, char** argv) {
     // over the manifest-controlled 23-file source/sample corpus (see
     // tests/cuda_projects/backend_matrix_manifest.txt and docs/compiler-architecture.md):
     //
-    //   direct .cu           legacy 0/23   cumetal-ir 18/23
+    //   direct .cu           legacy 0/23   cumetal-ir 20/23
     //   --cuda-device (PTX)  legacy 23/23  cumetal-ir 20/23
     //
     // These are production-metallib compilation counts, not runtime correctness

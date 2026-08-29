@@ -459,6 +459,15 @@ struct Importer {
         return nullptr;
     }
 
+    static bool is_empty_device_assert(const llvm::Function* function) {
+        return function != nullptr &&
+               (function->getName() == "_Z12__assert_rtnPKcS0_iS0_" ||
+                function->getName() == "__assert_fail") &&
+               !function->isDeclaration() && function->size() == 1 &&
+               function->front().size() == 1 &&
+               llvm::isa<llvm::ReturnInst>(function->front().front());
+    }
+
     bool function_references_global(const llvm::Function& function,
                                     const llvm::GlobalVariable& global) const {
         for (const llvm::BasicBlock& block : function) {
@@ -1108,6 +1117,13 @@ struct Importer {
             }
         }
         if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+            if (is_empty_device_assert(call->getCalledFunction())) {
+                // runtime/api/cuda_runtime.h deliberately supplies an empty
+                // device assert overload because Metal has no trap-and-report
+                // ABI. Erase that proven no-op before its diagnostic string
+                // globals can leak into the generated MSL call expression.
+                return true;
+            }
             if (const llvm::FPTruncInst* truncation = float_frexp_truncation(*call)) {
                 Operation frexp;
                 frexp.opcode = OpCode::kCall;
@@ -1756,7 +1772,9 @@ struct Importer {
         std::vector<const llvm::Function*> functions_to_import;
         if (options.entry_name.empty()) {
             for (const llvm::Function& function : *module) {
-                if (!function.isDeclaration()) functions_to_import.push_back(&function);
+                if (!function.isDeclaration() && !is_empty_device_assert(&function)) {
+                    functions_to_import.push_back(&function);
+                }
             }
         } else {
             const llvm::Function* root = module->getFunction(options.entry_name);
@@ -1778,7 +1796,8 @@ struct Importer {
                         const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
                         if (call == nullptr) continue;
                         const llvm::Function* callee = call->getCalledFunction();
-                        if (callee != nullptr && !callee->isDeclaration()) {
+                        if (callee != nullptr && !callee->isDeclaration() &&
+                            !is_empty_device_assert(callee)) {
                             self(self, callee);
                         }
                     }

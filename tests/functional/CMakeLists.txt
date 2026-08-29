@@ -59,6 +59,14 @@ add_executable(cumetal_typed_constant_symbol_test
     typed_constant_symbol_test.cpp
 )
 
+add_executable(cumetal_typed_sgemm_2d_test
+    typed_sgemm_2d_test.cpp
+)
+
+add_executable(cumetal_typed_flash_attention_test
+    typed_flash_attention_test.cpp
+)
+
 add_executable(cumetal_runtime_null_stream_sync_test
     runtime_null_stream_sync_test.cpp
 )
@@ -610,6 +618,16 @@ target_include_directories(cumetal_typed_constant_symbol_test
     PRIVATE
         ${CMAKE_SOURCE_DIR}/runtime/metal_backend
         ${CMAKE_SOURCE_DIR}/runtime/api
+)
+
+target_link_libraries(cumetal_typed_sgemm_2d_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_typed_flash_attention_test
+    PRIVATE
+        cumetal_runtime
 )
 
 target_link_libraries(cumetal_runtime_null_stream_sync_test
@@ -2733,6 +2751,30 @@ add_test(
             ${CMAKE_CURRENT_BINARY_DIR}/typed-direct-constant-symbol.metallib
 )
 set_tests_properties(functional_typed_direct_constant_symbol
+    PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+
+add_test(
+    NAME functional_typed_direct_sgemm_2d
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_typed_sgemm_2d.sh
+            $<TARGET_FILE:cumetalc>
+            $<TARGET_FILE:cumetal_typed_sgemm_2d_test>
+            ${CMAKE_SOURCE_DIR}/tests/cuda_projects/sgemm/sgemm_2d.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/typed-direct-sgemm-2d.metallib
+)
+set_tests_properties(functional_typed_direct_sgemm_2d
+    PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+
+add_test(
+    NAME functional_typed_direct_flash_attention
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_typed_flash_attention.sh
+            $<TARGET_FILE:cumetalc>
+            $<TARGET_FILE:cumetal_typed_flash_attention_test>
+            ${CMAKE_SOURCE_DIR}/tests/cuda_projects/flash_attn/flash_standalone.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/typed-direct-flash-attention.metallib
+)
+set_tests_properties(functional_typed_direct_flash_attention
     PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
 
 foreach(frontend IN ITEMS direct ptx)

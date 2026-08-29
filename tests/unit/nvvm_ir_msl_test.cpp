@@ -871,6 +871,42 @@ exit:
 }
 )llvm";
 
+constexpr const char* kNvvmSequentialLoops = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define void @_Z12__assert_rtnPKcS0_iS0_(ptr %function, ptr %file, i32 %line, ptr %expression) {
+entry:
+  ret void
+}
+
+define ptx_kernel void @sequential_loops(ptr %out, i32 %count) {
+entry:
+  %invalid = icmp slt i32 %count, 0
+  br i1 %invalid, label %assert, label %loop1
+assert:
+  call void @_Z12__assert_rtnPKcS0_iS0_(ptr null, ptr null, i32 1, ptr null)
+  br label %loop1
+loop1:
+  %i = phi i32 [ 0, %entry ], [ 0, %assert ], [ %next_i, %body1 ]
+  %more_i = icmp slt i32 %i, 2
+  br i1 %more_i, label %body1, label %loop2
+body1:
+  %next_i = add i32 %i, 1
+  br label %loop1
+loop2:
+  %j = phi i32 [ 0, %loop1 ], [ %next_j, %body2 ]
+  %more_j = icmp slt i32 %j, 3
+  br i1 %more_j, label %body2, label %done
+body2:
+  %next_j = add i32 %j, 1
+  br label %loop2
+done:
+  store i32 %j, ptr %out, align 4
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmWarpVotes = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1432,6 +1468,18 @@ int main() {
                      natural_loop.source.find("break;") != std::string::npos &&
                      natural_loop.source.find("_next") != std::string::npos,
                  "natural loops preserve loop-carried PHIs through explicit Metal updates");
+
+    const metal::NvvmToMslResult sequential_loops = metal::compile_nvvm_to_msl(
+        kNvvmSequentialLoops, "sequential-loops.ll", "sequential_loops");
+    const std::size_t first_loop = sequential_loops.source.find("while (true)");
+    const std::size_t second_loop = first_loop == std::string::npos
+                                        ? std::string::npos
+                                        : sequential_loops.source.find("while (true)", first_loop + 1);
+    ok &= expect(sequential_loops.ok && first_loop != std::string::npos &&
+                     second_loop != std::string::npos &&
+                     sequential_loops.source.find("_Z12__assert_rtn") == std::string::npos,
+                 "sequential natural loops accept pre-bound PHIs and erase the empty device assert shim");
+    if (!sequential_loops.ok) std::cerr << sequential_loops.error << "\n";
 
     const metal::NvvmToMslResult warp_votes =
         metal::compile_nvvm_to_msl(kNvvmWarpVotes, "warp-votes.ll", "warp_votes");

@@ -2611,12 +2611,22 @@ struct AstLowerer {
         const ir::BasicBlock& header = function.blocks[header_index];
         const auto body_and_exit = loop_body_and_exit(header_index);
         const auto loop_exit = natural_loop_exit_index(header_index);
-        if (!loop_exit || incoming == nullptr ||
-            incoming->arguments.size() != header.arguments.size()) {
+        const bool has_prebound_arguments = incoming == nullptr &&
+            std::all_of(header.arguments.begin(), header.arguments.end(),
+                        [&](const ir::BlockArgument& argument) {
+                            return declared_block_arguments.contains(argument.value);
+                        });
+        if (!loop_exit ||
+            (incoming == nullptr && !has_prebound_arguments) ||
+            (incoming != nullptr &&
+             incoming->arguments.size() != header.arguments.size())) {
             return fail(nullptr, "malformed natural loop header '" + header.name + "'");
         }
 
-        if (!assign_loop_arguments(header, *incoming, statements)) return false;
+        if (incoming != nullptr &&
+            !assign_loop_arguments(header, *incoming, statements)) {
+            return false;
+        }
 
         const std::size_t exit_index = *loop_exit;
         const ir::BasicBlock& exit_block = function.blocks[exit_index];

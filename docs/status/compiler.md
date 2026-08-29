@@ -16,7 +16,7 @@ production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/23 | **18/23** |
+| direct `.cu` | 0/23 | **20/23** |
 | PTX / `--cuda-device` | **23/23** | **20/23** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
@@ -52,6 +52,10 @@ It also recognizes compiler-marked implicit definitions, bounded private local
 depots, static/dynamic shared symbols, and canonical one-block or
 unconditional-header natural loops without routing barrier code through the CFG
 dispatcher.
+Sequential natural loops now retain PHI values assigned by the preceding loop,
+including the nested loop sequences in the reviewed 2D block-tiled SGEMM and
+FlashAttention. Their typed direct metallibs have focused numerical Apple-GPU
+comparisons.
 Referenced PTX module constants use the reserved constant-symbol buffer at
 binding 30 with checked byte offsets, and the proven float `frexp` pattern
 normalizes Clang's double-width call-slot ABI without admitting general FP64.
