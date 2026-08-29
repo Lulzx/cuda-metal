@@ -233,6 +233,66 @@ BODY:
                  "PTX local depots retain bounded private byte-array storage");
     if (!local_depot.ok) std::cerr << local_depot.error << "\n";
 
+    const std::string module_constant_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .const .align 16 .b8 table[32];
+.visible .entry module_constant(.param .u64 output) {
+    .reg .b64 %rd1;
+    .reg .b32 %r1;
+    ld.param.u64 %rd1, [output];
+    ld.const.b32 %r1, [table+16];
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult module_constant =
+        metal::compile_ptx_to_msl(module_constant_ptx);
+    ok &= expect(module_constant.ok &&
+                     module_constant.source.find("[[buffer(30)]]") != std::string::npos &&
+                     module_constant.source.find(" + 16") != std::string::npos,
+                 "PTX module constants use reserved binding 30 and byte offsets");
+    if (!module_constant.ok) std::cerr << module_constant.error << "\n";
+
+    const std::string frexp_abi_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.extern .func (.param .b64 result) __nv_frexp(
+    .param .b64 value,
+    .param .b64 exponent
+);
+.visible .entry frexp_abi(.param .f32 input) {
+    .local .align 4 .b8 exponent_slot[4];
+    .reg .b32 %r1;
+    .reg .b64 %rd<4>;
+    ld.param.f32 %r1, [input];
+    mov.b64 %rd1, exponent_slot;
+    cvt.f64.f32 %rd2, %r1;
+    .param .b64 param0;
+    .param .b64 param1;
+    .param .b64 retval0;
+    st.param.b64 [param0], %rd2;
+    st.param.b64 [param1], %rd1;
+    call.uni (retval0), __nv_frexp, (param0, param1);
+    ld.param.b64 %rd3, [retval0];
+    cvt.rn.f32.f64 %r1, %rd3;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult frexp_abi =
+        metal::compile_ptx_to_msl(frexp_abi_ptx);
+    ok &= expect(frexp_abi.ok && frexp_abi.source.find("frexp(") != std::string::npos &&
+                     frexp_abi.source.find("\n    double") == std::string::npos,
+                 "proven float frexp pattern normalizes its PTX double ABI boundary");
+    if (!frexp_abi.ok) {
+        std::cerr << frexp_abi.error << "\n";
+    } else if (frexp_abi.source.find("frexp(") == std::string::npos ||
+               frexp_abi.source.find("\n    double") != std::string::npos) {
+        std::cerr << frexp_abi.source << "\n";
+    }
+
     const std::string hex_float_ptx = R"ptx(
 .version 7.0
 .target sm_80

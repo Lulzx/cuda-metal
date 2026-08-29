@@ -259,6 +259,16 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
             .argument_types = {Type::integer(32)},
         };
     }
+    if (name == "__nv_frexp") {
+        return BuiltinSignature{
+            .metal_name = "frexp",
+            .return_type = Type::floating(32),
+            .argument_types = {
+                Type::floating(32),
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate),
+            },
+        };
+    }
     return std::nullopt;
 }
 
@@ -313,6 +323,54 @@ std::unordered_set<std::string> scan_implicit_definitions(std::string_view ptx) 
         definitions.insert((*iterator)[1].str());
     }
     return definitions;
+}
+
+struct ModuleConstantSymbol {
+    std::string name;
+    std::uint64_t offset = 0;
+    std::uint64_t byte_size = 0;
+    std::uint32_t alignment = 1;
+};
+
+std::vector<ModuleConstantSymbol> scan_module_constant_symbols(std::string_view ptx) {
+    const std::string source(ptx);
+    const std::regex declaration(
+        R"((?:\.visible\s+|\.extern\s+)?\.const\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*;)"
+    );
+    std::vector<ModuleConstantSymbol> symbols;
+    std::uint64_t cursor = 0;
+    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
+         iterator != end; ++iterator) {
+        const std::uint32_t alignment =
+            static_cast<std::uint32_t>(std::stoul((*iterator)[1].str()));
+        cursor = (cursor + alignment - 1) / alignment * alignment;
+        const std::uint64_t size = std::stoull((*iterator)[3].str());
+        symbols.push_back({
+            .name = (*iterator)[2].str(),
+            .offset = cursor,
+            .byte_size = size,
+            .alignment = alignment,
+        });
+        cursor += size;
+    }
+    return symbols;
+}
+
+std::int64_t memory_operand_offset(std::string_view operand) {
+    const std::size_t open = operand.find('[');
+    const std::size_t close = operand.find(']');
+    if (open == std::string_view::npos || close == std::string_view::npos || close <= open) {
+        return 0;
+    }
+    const std::string inside = trim(operand.substr(open + 1, close - open - 1));
+    const std::size_t sign = inside.find_first_of("+-");
+    if (sign == std::string::npos) return 0;
+    try {
+        const std::int64_t magnitude = std::stoll(trim(std::string_view(inside).substr(sign + 1)));
+        return inside[sign] == '-' ? -magnitude : magnitude;
+    } catch (...) {
+        return 0;
+    }
 }
 
 std::string branch_target(const Instruction& instruction) {
@@ -413,6 +471,9 @@ struct Importer {
     std::unordered_map<std::string, Operand> local_depot_values;
     std::unordered_set<std::string> implicit_definitions;
     std::unordered_map<std::string, ValueId> implicit_values;
+    std::unordered_map<std::string, ModuleConstantSymbol> module_constant_symbols;
+    std::uint64_t module_constant_buffer_size = 0;
+    std::optional<Operand> module_constant_buffer;
 
     bool fail(const Instruction* instruction, std::string message) {
         if (instruction != nullptr && instruction->line != 0) {
@@ -524,11 +585,13 @@ struct Importer {
                         parameter_name_from_operand(instruction.operands[1]));
                     if (parameter != parameter_types.end()) inferred = parameter->second;
                 } else if (root == "cvta") {
-                    inferred = Type::pointer(
-                        Type::integer(8),
+                    const AddressSpace space =
                         instruction.opcode.find(".shared") != std::string::npos
                             ? AddressSpace::kThreadgroup
-                            : AddressSpace::kDevice);
+                        : instruction.opcode.find(".local") != std::string::npos
+                            ? AddressSpace::kPrivate
+                            : AddressSpace::kDevice;
+                    inferred = Type::pointer(Type::integer(8), space);
                 } else if ((root == "add" || root == "mov") && instruction.operands.size() >= 2) {
                     const std::string source_symbol =
                         parameter_name_from_operand(instruction.operands[1]);
@@ -811,7 +874,11 @@ struct Importer {
                 }
                 operation.opcode = OpCode::kConvert;
                 operation.operands.push_back(returned->second);
-                if (!(returned->second.type == operation.result_types.front())) {
+                if (starts_with(instruction.opcode, "ld.param.b64") &&
+                    returned->second.type == Type::floating(32)) {
+                    operation.result_types.front() = Type::floating(32);
+                    value_types[operation.results.front()] = Type::floating(32);
+                } else if (!(returned->second.type == operation.result_types.front())) {
                     operation.attributes["bitcast"] = "true";
                 }
             } else {
@@ -884,9 +951,40 @@ struct Importer {
                    starts_with(instruction.opcode, "ld.local")) {
             operation.opcode = OpCode::kLoad;
             if (instruction.operands.size() < 2) return fail(&instruction, "malformed load");
-            operation.operands.push_back(source_operand(1, Type::pointer(
-                                                               operation.result_types.front(),
-                                                               AddressSpace::kDevice)));
+            const std::string referenced_symbol =
+                parameter_name_from_operand(instruction.operands[1]);
+            const auto module_constant = module_constant_symbols.find(referenced_symbol);
+            if (module_constant != module_constant_symbols.end()) {
+                if (!module_constant_buffer.has_value()) {
+                    return fail(&instruction, "module constant buffer is unavailable");
+                }
+                const std::int64_t byte_offset =
+                    static_cast<std::int64_t>(module_constant->second.offset) +
+                    memory_operand_offset(instruction.operands[1]);
+                if (byte_offset == 0) {
+                    operation.operands.push_back(*module_constant_buffer);
+                } else {
+                    Operation offset;
+                    offset.opcode = OpCode::kPointerOffset;
+                    offset.location = operation.location;
+                    offset.operands = {
+                        *module_constant_buffer,
+                        Operand::immediate(std::to_string(byte_offset), Type::integer(64)),
+                    };
+                    const ValueId pointer = builder.next_value();
+                    const Type pointer_type = Type::pointer(
+                        Type::integer(8), AddressSpace::kConstant);
+                    offset.results = {pointer};
+                    offset.result_types = {pointer_type};
+                    value_types[pointer] = pointer_type;
+                    block->operations.push_back(std::move(offset));
+                    operation.operands.push_back(Operand::value_ref(pointer, pointer_type));
+                }
+            } else {
+                operation.operands.push_back(source_operand(
+                    1, Type::pointer(operation.result_types.front(),
+                                     AddressSpace::kDevice)));
+            }
             operation.attributes["address"] = instruction.operands[1];
             operation.attributes["alignment"] =
                 std::to_string(type_size(operation.result_types.front()));
@@ -954,7 +1052,24 @@ struct Importer {
             }
         } else if (root == "cvt") {
             operation.opcode = OpCode::kConvert;
-            operation.operands.push_back(source_operand(1, operation.result_types.front()));
+            if (instruction.opcode.find(".f64.f32") != std::string::npos ||
+                instruction.opcode.find(".f32.f64") != std::string::npos) {
+                operation.result_types.front() = Type::floating(32);
+                value_types[operation.results.front()] = Type::floating(32);
+                operation.operands.push_back(
+                    bit_container_operand(1, Type::floating(32)));
+                result.module.semantic_quality = SemanticQuality::kToleranceBounded;
+                const std::string caveat =
+                    "CUDA float-frexp double ABI is normalized at its float boundary";
+                if (std::find(result.module.semantic_caveats.begin(),
+                              result.module.semantic_caveats.end(), caveat) ==
+                    result.module.semantic_caveats.end()) {
+                    result.module.semantic_caveats.push_back(caveat);
+                }
+            } else {
+                operation.operands.push_back(
+                    source_operand(1, operation.result_types.front()));
+            }
         } else if (root == "rcp") {
             operation.opcode = OpCode::kDiv;
             operation.operands.push_back(
@@ -1143,6 +1258,49 @@ struct Importer {
             });
         }
 
+        if (!module_constant_symbols.empty()) {
+            if (function.arguments.size() > 30) {
+                return fail(nullptr,
+                            "kernel argument ABI conflicts with reserved constant buffer index 30");
+            }
+            const Type pointer_type =
+                Type::pointer(Type::integer(8), AddressSpace::kConstant);
+            const ValueId value = builder.next_value();
+            value_types[value] = pointer_type;
+            module_constant_buffer = Operand::value_ref(value, pointer_type);
+            function.arguments.push_back({
+                .value = value,
+                .name = "__cumetal_constant_buffer",
+                .type = pointer_type,
+            });
+            function.pointer_provenance[value] = {
+                .base_kind = PointerBaseKind::kAllocation,
+                .base_name = "__cumetal_constant_buffer",
+                .known_byte_offset = 0,
+                .alignment = 1,
+            };
+            const std::uint32_t logical_index =
+                static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
+            function.kernel_abi->arguments.push_back({
+                .name = "__cumetal_constant_buffer",
+                .kind = ArgumentKind::kPointer,
+                .type = pointer_type,
+                .size = 8,
+                .alignment = 8,
+                .address_space = AddressSpace::kConstant,
+                .binding_indices = {30},
+            });
+            function.kernel_abi->bindings.push_back({
+                .kind = BindingKind::kBuffer,
+                .binding_index = 30,
+                .logical_argument_index = logical_index,
+                .type = pointer_type,
+                .size = static_cast<std::uint32_t>(module_constant_buffer_size),
+                .alignment = 1,
+                .hidden_role = "constant_symbols",
+            });
+        }
+
         for (std::size_t i = 0; i < raw_blocks.size(); ++i) {
             BasicBlock block;
             block.id = raw_blocks[i].id;
@@ -1293,6 +1451,28 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     }
     importer.result.warnings = parsed.warnings;
     if (!importer.select_entry(parsed, options)) return importer.result;
+    for (const ModuleConstantSymbol& symbol : scan_module_constant_symbols(ptx)) {
+        importer.module_constant_buffer_size =
+            std::max(importer.module_constant_buffer_size,
+                     symbol.offset + symbol.byte_size);
+        bool referenced = false;
+        for (const Instruction& instruction : importer.entry->instructions) {
+            referenced = std::any_of(
+                instruction.operands.begin(), instruction.operands.end(),
+                [&](const std::string& operand) {
+                    return parameter_name_from_operand(operand) == symbol.name;
+                });
+            if (referenced) break;
+        }
+        if (referenced) {
+            importer.module_constant_symbols.emplace(symbol.name, symbol);
+        }
+    }
+    if (!importer.module_constant_symbols.empty() &&
+        importer.module_constant_buffer_size > 64u * 1024u) {
+        importer.result.error = "external PTX constant buffer exceeds CUDA's 64 KB module limit";
+        return importer.result;
+    }
     importer.infer_register_types();
     importer.build_cfg();
     importer.allocate_values();

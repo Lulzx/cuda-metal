@@ -17,7 +17,7 @@ production-metallib matrix records:
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
 | direct `.cu` | 0/23 | **15/23** |
-| PTX / `--cuda-device` | **23/23** | **16/23** |
+| PTX / `--cuda-device` | **23/23** | **18/23** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler
@@ -46,6 +46,9 @@ It also recognizes compiler-marked implicit definitions, bounded private local
 depots, static/dynamic shared symbols, and canonical one-block or
 unconditional-header natural loops without routing barrier code through the CFG
 dispatcher.
+Referenced PTX module constants use the reserved constant-symbol buffer at
+binding 30 with checked byte offsets, and the proven float `frexp` pattern
+normalizes Clang's double-width call-slot ABI without admitting general FP64.
 CUDA's double-signature `frexp` call is narrowed only for the proven
 float-to-double-call-to-float pattern, preserving the integer exponent output
 without admitting general FP64 arithmetic.

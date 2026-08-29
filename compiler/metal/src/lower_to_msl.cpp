@@ -2952,9 +2952,16 @@ struct AstLowerer {
                 type = MslType::reference(lower_type(argument.type), MslAddressSpace::kConstant);
             }
             if (function.is_kernel) {
+                std::uint32_t binding_index = static_cast<std::uint32_t>(i);
+                if (function.kernel_abi.has_value() &&
+                    i < function.kernel_abi->arguments.size() &&
+                    !function.kernel_abi->arguments[i].binding_indices.empty()) {
+                    binding_index =
+                        function.kernel_abi->arguments[i].binding_indices.front();
+                }
                 attributes.push_back(MslAttribute{
                     .name = "buffer",
-                    .index = static_cast<std::uint32_t>(i),
+                    .index = binding_index,
                 });
             }
             output.parameters.push_back({
