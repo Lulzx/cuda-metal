@@ -212,9 +212,11 @@ Durable platform/legal boundaries:
 - No OpenGL, Vulkan, or DirectX interop.
 - Metal has no single-dispatch cross-threadgroup barrier. Multi-block cooperative
   launch/grid sync is rejected; single-block cooperative launch is supported.
-- Current public Metal compilation rejects native AIR `double`. FP64 register
-  emulation provides about a 44-bit mantissa, and unsupported binary64
-  memory/conversion boundaries fail compilation.
+- Current public Metal compilation rejects native AIR `double` arithmetic.
+  CuMetal provides `fast48`, `wide48`, and correctly rounded `ieee64` software
+  modes while preserving the ordinary binary64 storage ABI. Core arithmetic,
+  FMA, square root, conversions, memory, and shuffle paths are integrated;
+  some IEEE comparison/status operations remain compiler-integration work.
 - Public Metal exposes no CUDA persisting-L2/access-policy-window control;
   CuMetal reports those capabilities as zero and rejects nontrivial requests.
 

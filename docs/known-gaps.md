@@ -71,9 +71,11 @@ as gaps have been closed.
   block per GPU core and larger grids fail with
   `cudaErrorCooperativeLaunchTooLarge`; arbitrary oversubscribed cooperative grids
   remain unsupported because Metal does not guarantee simultaneous residency.
-- FP64: driver and registration JIT default to `--fp64=emulate` / `CUMETAL_FP64_MODE=emulate`.
-  Entry names have no semantic effect. ALU uses Dekker FP32 pairs without native AIR `double`
-  (which Metal rejects at pipeline creation).
+- FP64: driver and registration JIT default to `--fp64=fast48` (the historical
+  `CUMETAL_FP64_MODE=emulate` spelling remains an alias). `wide48` extends the
+  reduced-precision pair across binary64's exponent range, while `ieee64`
+  statically links the correctly rounded integer-based virtual runtime. Entry
+  names have no semantic effect.
 
   **Storage is always IEEE-754 binary64.** Register slots, `.local` spills, global memory and
   libdevice call slots all hold the ordinary CUDA-visible bit pattern; the FP32 pair exists only
@@ -91,17 +93,20 @@ as gaps have been closed.
   - Round-tripping is idempotent: a value the packer produced re-splits to the same pair, so
     error does not compound across a chain of instructions.
 
-  **Accuracy: relative error <= 2^-48 (~48-bit significand), plus an absolute floor at binary32's
+  **`fast48` accuracy: relative error <= 2^-48 (~48-bit significand), plus an absolute floor at binary32's
   minimum normal.** The low limb is itself a binary32, so a residual below `FLT_MIN` cannot be
   represented; precision degrades smoothly from 48 bits toward 24 as `|x|` approaches `FLT_MIN`,
   and the whole representation inherits binary32's exponent range (values above `FLT_MAX`
   overflow to infinity, and intermediates below `FLT_MIN` flush to zero). Binary64 subnormal
   inputs flush to signed zero. Signed zero, infinity and NaN are preserved.
 
-  Explicit `ld.global.f64` / `st.global.f64` and rounded FP64 integer conversions
-  (`cvt.rzi.s32.f64` and friends) still fail lowering explicitly rather than computing something
-  wrong. A one-time `CUMETAL WARNING` notes the reduced precision; `CUMETAL_FP64_MODE=native`
-  compiles true doubles (fails at launch on current hardware).
+  The CUDA-visible storage ABI is now supported on explicit global/shared/local
+  loads and stores, shuffles, spills, and raw integer aliases. `ieee64` lowering
+  covers add/subtract/multiply/divide, true fused FMA, square root, and
+  binary16/binary32/signed-or-unsigned 32/64-bit conversions with PTX rounding
+  modes. Comparisons, remainder/round-to-integer, and observable exception flags
+  exist in the linked VF64 runtime but are not all wired into source-level PTX
+  lowering yet. See `docs/fp64-policy.md` for the exact boundary.
 - **Legacy default-stream ordering is complete.** Every blocking user stream publishes a
   monotonically increasing `MTLSharedEvent` value and waits on the latest legacy-default value;
   each legacy-default submission waits on the latest value from every blocking stream. The

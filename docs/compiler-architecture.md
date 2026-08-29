@@ -75,7 +75,7 @@ cumetalc kernel.cu --emit=exe        -o kernel
 | `--cuda-device` | Ask a CUDA-capable Clang to produce PTX before CuMetal lowering. |
 | `--entry NAME` | Compile one kernel and its reachable device-call closure. |
 | `--ptx-strict` | Reject unsupported PTX rather than tolerating it. |
-| `--fp64=native\|emulate\|warn` | Select FP64 policy; runtime/JIT default is `emulate`. |
+| `--fp64=fast48\|wide48\|ieee64\|native\|emulate\|warn` | Select the virtual FP64 policy; runtime/JIT defaults to `fast48` (`emulate` alias). |
 | `--save-temps` | Retain link intermediates. |
 
 The default follows measured coverage rather than treating either backend as

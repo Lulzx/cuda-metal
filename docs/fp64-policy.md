@@ -1,102 +1,92 @@
-# FP64 Policy
+# FP64 policy
 
-CuMetal's handling of double-precision floating-point (`double`, `f64`) on Apple Silicon.
+CuMetal can lower CUDA `double` operations to software arithmetic that runs on
+Apple GPUs. The CUDA-visible representation remains the ordinary eight-byte
+IEEE-754 binary64 bit pattern; only arithmetic is virtualized.
 
----
+## Why software FP64 is required
 
-## Hardware Reality
+The public Apple GPU toolchain accepts some LLVM/AIR `double` instructions, but
+pipelines containing native binary64 arithmetic fail during Metal pipeline
+creation on the Apple Silicon generations tested by this project. `native` is
+therefore a compiler-diagnostic mode, not a usable GPU arithmetic path on those
+devices.
 
-Apple Silicon GPUs have highly limited FP64 support. While `fpext`/`fptrunc` type-conversion
-instructions (float↔double) are accepted at runtime, double-precision arithmetic operations
-(`fmul double`, `fadd double`, `@llvm.fma.f64`) cause Metal compute pipeline-state creation to
-fail at runtime on M1–M4 hardware. `xcrun metal` compiles LLVM IR containing `fmul double`
-without error, but the GPU driver rejects such pipelines when they are instantiated. This
-means `--fp64=native` is effectively broken for arithmetic on current hardware.
+## Modes
 
-As a result, **`--fp64=emulate` is the runtime default** (see `CUMETAL_FP64_MODE` env var
-below). Emulation via Dekker's FP32-pair algorithm avoids double-precision ALU ops entirely.
+`cumetalc --fp64=MODE` selects an offline mode. Runtime-registered CUDA code uses
+the same names through `CUMETAL_FP64_MODE=MODE`.
 
-This is not a CuMetal limitation; it reflects the hardware. NVIDIA A100 GPUs provide
-1:2 FP64:FP32 throughput. Apple Silicon GPUs do not have a high-throughput FP64 path.
+| Mode | Contract | Range | Current role |
+| --- | --- | --- | --- |
+| `fast48` | FP32-pair arithmetic, approximately 48 significand bits | binary32 exponent envelope | Runtime default; `emulate` is a compatibility alias |
+| `wide48` | Scaled FP32-pair arithmetic, approximately 48 significand bits | binary64 range, including subnormals and specials | Reduced-precision wide-range mode |
+| `ieee64` | Correctly rounded binary64 core arithmetic and conversions | Full binary64 | Exact software mode |
+| `native` | Native AIR binary64 operations | Full binary64 if supported | Expected to fail pipeline creation on current Apple GPUs |
+| `warn` | Same code generation as `native`, with FP64 diagnostics | Same as `native` | Audit mode |
 
----
+Examples:
 
-## Compilation Modes
+```bash
+cumetalc kernel.ptx --fp64=ieee64 --emit=metallib -o kernel.metallib
+CUMETAL_FP64_MODE=wide48 ./cuda-program
+```
 
-CuMetal provides three FP64 compilation modes, selected via the `--fp64` flag:
+## Storage and linking ABI
 
-| Mode | Flag | Runtime default | Behavior | Precision |
-|------|------|-----------------|----------|-----------|
-| **Native** | `--fp64=native` | No | Emit AIR FP64 instructions directly; fails at launch on Apple Silicon | IEEE 754 double (64-bit) |
-| **Emulate** | `--fp64=emulate` | **Yes** (default) | Decompose to FP32 pairs via Dekker's algorithm | ~44 bits mantissa |
-| **Warn** | `--fp64=warn` | No | Same as native + per-instruction compile warning | IEEE 754 double (64-bit) |
+Registers, local spills, shared/global memory, kernel arguments, shuffles, and
+integer aliases carry raw binary64 bits. This keeps `mov.b64`, `uint64_t`
+type-punning, `cudaMemcpy`, and CPU library boundaries interoperable without a
+private packed-pair format.
 
-Set `CUMETAL_FP64_MODE=native` (or `warn`) to override the runtime default.
+For `wide48` and `ieee64`, CuMetal statically links the pinned
+`third_party/f64-metal` support module into each generated metallib. The
+persistent JIT cache key includes the support source SHA-256, so a support
+runtime update cannot reuse an older metallib. Linked helper functions are not
+treated as kernel entry points by validation.
 
----
+## Compiler coverage
 
-## Usage Guidance
+The generic PTX-to-AIR path currently routes these source-level operations
+through the virtual FP64 support ABI:
 
-**`--fp64=native` (default)**
+- add, subtract, multiply, divide, square root, and true fused FMA;
+- negation, absolute value, raw moves, loads/stores, shared memory, and shuffles;
+- binary16/binary32 and signed/unsigned 32/64-bit integer conversions.
 
-Use this when:
-- Your CUDA kernel uses `double` for occasional accumulation or reduction
-- FP64 operations are less than ~5% of total GPU instructions
-- IEEE 754 double precision is required
+Round-to-nearest-even and PTX's directed arithmetic modes are preserved in
+`ieee64`. `wide48` intentionally accepts round-to-nearest-even arithmetic only.
+The support runtime itself also exports comparisons, remainder,
+round-to-integer, classification, exception-status, and flag operations, but
+not all of those operations are wired into CUDA/PTX lowering yet. In
+particular, source-level IEEE exception flags are not currently observable
+through the CUDA runtime. These are compiler-integration gaps, not claims that
+the underlying virtual runtime is absent.
 
-The throughput penalty is per FP64 instruction. For kernels where doubles are rare,
-the overall impact on wall-clock time is tolerable.
+## Provenance and cache behavior
 
-**`--fp64=emulate`**
+GPU launch records distinguish the numerical contract:
 
-Use this when:
-- ~48-bit significand precision, with binary32's exponent range, is acceptable
-- FP64 throughput matters more than full IEEE precision
-- Example use cases: some ML training loops, iterative solvers with loose tolerance
+| Mode | Provenance | Semantic quality |
+| --- | --- | --- |
+| `fast48` / `emulate` | `generic_ptx_lowering_fp64_emulated` | `reduced_precision_fp64` |
+| `wide48` | `generic_ptx_lowering_fp64_wide48` | `reduced_precision_fp64` |
+| `ieee64` | `generic_ptx_lowering_fp64_ieee64` | `exact` |
 
-Emulation uses Dekker's algorithm to simulate double precision via pairs of `float` values.
-This has roughly 4× overhead per FP64 operation vs. native FP32.
+The mode and support-runtime hash are part of the persistent registration-JIT
+cache identity. A warm-cache launch therefore retains the same provenance and
+numerical implementation as a cold launch.
 
-**`--fp64=warn`**
+## Verified boundary
 
-Use this when:
-- You want to audit FP64 usage in a codebase
-- You're unsure how much FP64 is in a kernel
-- Debugging unexpected slowness that may be FP64-related
+On the recorded Apple M4 Pro path, a CUDA source probe compiled and executed in
+`ieee64` mode with zero violations across binary64 bit preservation, special
+values, float-to-double widening, chained arithmetic, shared-memory reduction,
+shuffle reduction, store/reload arithmetic, and `uint64_t` aliasing. This is a
+focused integration proof; it is not yet complete CUDA source coverage for all
+IEEE-754 operations.
 
----
-
-## Programs Dominated by FP64
-
-Scientific simulation, CFD, climate modeling, and similar workloads that use `double`
-throughout are **out of scope for GPU execution on Apple Silicon**. The hardware simply
-does not provide competitive FP64 throughput.
-
-**Recommended alternative**: Apple's AMX (Accelerate Matrix eXtensions) coprocessor
-provides full-speed FP64 SIMD on the CPU. Workloads requiring competitive FP64 throughput
-on Apple hardware should target AMX via the Accelerate framework or BLAS routines. A
-Metal↔AMX bridge is out of scope for CuMetal but trivial to build on top of this runtime.
-
----
-
-## Precision Notes
-
-| Operation | Native Mode | Emulate Mode |
-|-----------|------------|--------------|
-| Addition, subtraction | IEEE 754 double | ~44 bits (Dekker) |
-| Multiplication | IEEE 754 double | ~44 bits (Dekker) |
-| `sqrt.rn.f64` | IEEE 754 double | ~44 bits |
-| `fma.rn.f64` | IEEE 754 double | ~44 bits |
-| `ex2.approx.f64` | Same as Metal `exp2` (double) | ~44 bits |
-| Transcendentals (`sin`, `cos`, `lg2`) | May differ from NVIDIA by ≤1 ULP | ~44 bits |
-
----
-
-## Known FP64 Gaps
-
-- `atom.global.add.f64` (Ampere atomic): supported via LLVM atomic IR; requires AIR
-  backend to emit the correct instruction. Verified on M1/M2.
-- `fma.rn.f64`: translated via `llvm.fma.f64`; precision depends on Apple GPU FP64
-  hardware (see §13 open question #2 in spec.md).
-- No FP64 shuffle primitives: `shfl.sync.idx.f64` would require two 32-bit shuffles.
-  Emitted as two `shfl.b32` operations on the high and low halves.
+The standalone `f64-metal` repository owns the full virtual runtime's
+conformance corpus, mode contracts, benchmarks, and ISA documentation. CuMetal
+pins that repository as a submodule so compiler claims can identify the exact
+runtime revision they execute.
