@@ -648,6 +648,104 @@ BODY:
         std::cerr << inferred_pointer_device_call.error << "\n";
     }
 
+    const std::string aggregate_device_call_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .func (.param .align 4 .b8 make_ret[12]) make_record(
+    .param .b32 make_first,
+    .param .b32 make_second,
+    .param .b32 make_third
+) {
+    .reg .b32 %r<4>;
+    ld.param.b32 %r1, [make_first];
+    ld.param.b32 %r2, [make_second];
+    ld.param.b32 %r3, [make_third];
+    st.param.b32 [make_ret], %r1;
+    st.param.b32 [make_ret+4], %r2;
+    st.param.b32 [make_ret+8], %r3;
+    ret;
+}
+.visible .func (.param .b32 consume_ret) consume_record(
+    .param .align 4 .b8 consume_value[12]
+) {
+    .reg .b32 %r<6>;
+    ld.param.b32 %r1, [consume_value];
+    ld.param.b32 %r2, [consume_value+4];
+    ld.param.b32 %r3, [consume_value+8];
+    add.u32 %r4, %r1, %r2;
+    add.u32 %r5, %r4, %r3;
+    st.param.b32 [consume_ret], %r5;
+    ret;
+}
+.visible .entry aggregate_device_call(
+    .param .u64 .ptr .align 1 output
+) {
+    .reg .b32 %r<8>;
+    .reg .b64 %rd<2>;
+    ld.param.b64 %rd1, [output];
+    .param .b32 make_arg0;
+    .param .b32 make_arg1;
+    .param .b32 make_arg2;
+    st.param.b32 [make_arg0], 3;
+    st.param.b32 [make_arg1], 7;
+    st.param.b32 [make_arg2], 11;
+    .param .align 4 .b8 make_result[12];
+    call.uni (make_result), make_record, (make_arg0, make_arg1, make_arg2);
+    ld.param.b32 %r1, [make_result];
+    ld.param.b32 %r2, [make_result+4];
+    ld.param.b32 %r3, [make_result+8];
+    .param .align 4 .b8 consume_arg[12];
+    st.param.b32 [consume_arg], %r1;
+    st.param.b32 [consume_arg+4], %r2;
+    st.param.b32 [consume_arg+8], %r3;
+    .param .b32 consume_result;
+    call.uni (consume_result), consume_record, (consume_arg);
+    ld.param.b32 %r4, [consume_result];
+    st.global.b32 [%rd1], %r4;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult aggregate_device_call =
+        metal::compile_ptx_to_msl(aggregate_device_call_ptx);
+    ok &= expect(aggregate_device_call.ok &&
+                     aggregate_device_call.source.find(
+                         "CuMetalPackedParam12 make_record(") !=
+                         std::string::npos &&
+                     aggregate_device_call.source.find(
+                         "consume_record(CuMetalPackedParam12") !=
+                         std::string::npos,
+                 "typed PTX materializes aggregate device arguments and returns");
+    if (!aggregate_device_call.ok) {
+        std::cerr << aggregate_device_call.error << "\n";
+    }
+
+    const std::string incomplete_aggregate_device_call_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .func consume_incomplete(
+    .param .align 4 .b8 consume_value[12]
+) {
+    ret;
+}
+.visible .entry incomplete_aggregate_device_call() {
+    .reg .b32 %r<2>;
+    mov.u32 %r1, 1;
+    .param .align 4 .b8 consume_arg[12];
+    st.param.b32 [consume_arg], %r1;
+    st.param.b32 [consume_arg+8], %r1;
+    call.uni consume_incomplete, (consume_arg);
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult incomplete_aggregate_device_call =
+        metal::compile_ptx_to_msl(incomplete_aggregate_device_call_ptx);
+    ok &= expect(!incomplete_aggregate_device_call.ok &&
+                     incomplete_aggregate_device_call.error.find(
+                         "missing, partial, or overlapping fields") !=
+                         std::string::npos,
+                 "incomplete aggregate PTX device-call slots fail explicitly");
+
     const std::string recursive_device_call_ptx = R"ptx(
 .version 7.0
 .target sm_80

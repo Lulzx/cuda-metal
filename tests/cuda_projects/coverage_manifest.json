@@ -8,6 +8,13 @@
       "harness": "standard"
     },
     {
+      "name": "aggregate_device_calls",
+      "subdir": "aggregate_device_calls",
+      "source": "aggregate_device_calls.cu",
+      "binary": "aggregate_device_calls",
+      "harness": "standard"
+    },
+    {
       "name": "async_memcpy_hazard",
       "subdir": "async_memcpy",
       "source": "async_memcpy_hazard.cu",

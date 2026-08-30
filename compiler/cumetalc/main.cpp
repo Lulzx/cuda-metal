@@ -1382,17 +1382,18 @@ int main(int argc, char** argv) {
 
     // Pick the backend that actually works for this input rather than one global default. The two
     // are complementary, not ranked, and the split follows the frontend feeding them. Measured
-    // over the manifest-controlled 25-file source/sample corpus (see
+    // over the manifest-controlled 26-file source/sample corpus (see
     // tests/cuda_projects/backend_matrix_manifest.txt and docs/compiler-architecture.md):
     //
-    //   direct .cu           legacy 0/25   cumetal-ir 25/25
-    //   --cuda-device (PTX)  legacy 25/25  cumetal-ir 25/25
+    //   direct .cu           legacy 0/26   cumetal-ir 26/26
+    //   --cuda-device (PTX)  legacy 25/26  cumetal-ir 26/26
     //
     // These are production-metallib compilation counts, not runtime correctness
     // counts. Legacy's direct-.cu mode is the qualifier-stripping prototype documented in
     // docs/known-gaps.md and lowers nothing in this corpus, so typed CuMetal IR is strictly
-    // better there. Through the PTX frontend the ordering reverses and defaulting to typed IR
-    // would regress the path llm.c, llama.cpp, and PhysX all depend on. --backend overrides.
+    // better there. Typed PTX now exceeds the reviewed legacy count by one aggregate-call
+    // case, but the broader external compatibility workloads still use legacy by default.
+    // --backend overrides.
     if (!backend_set_explicitly && lower_ext(options.input) == ".cu" && !cuda_device_frontend) {
         backend = BackendKind::kCumetalIr;
     }

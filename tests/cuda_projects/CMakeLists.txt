@@ -165,6 +165,28 @@ set_tests_properties(
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=0"
 )
 
+# Aggregate `.func` arguments and returns are represented as PTX call slots.
+# Prove all fields survive the typed call boundary numerically on Apple GPU.
+add_test(
+    NAME functional_cuda_projects_aggregate_device_calls_typed_ptx
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        aggregate_device_calls
+        aggregate_device_calls.cu
+        aggregate_device_calls_typed_ptx
+        cumetal-ir
+)
+set_tests_properties(
+    functional_cuda_projects_aggregate_device_calls_typed_ptx
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        TIMEOUT 60
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=0"
+)
+
 # Regression: LLVM `fence` crashed Apple's AIR backend at pipeline creation (so every
 # atomicCAS-bearing kernel silently did nothing), and scalar __shared__ objects were
 # counted as zero bytes when sizing threadgroup memory.

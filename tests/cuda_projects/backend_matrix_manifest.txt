@@ -10,6 +10,7 @@
 
 samples/nativeLaunch/nativeLaunch.cu fail pass pass pass
 samples/vectorAdd/vectorAdd.cu fail pass pass pass
+tests/cuda_projects/aggregate_device_calls/aggregate_device_calls.cu fail pass fail pass
 tests/cuda_projects/async_memcpy/async_memcpy_hazard.cu fail pass pass pass
 tests/cuda_projects/constant_symbol/constant_symbol.cu fail pass pass pass
 tests/cuda_projects/cooperative_thread_group/cooperative_thread_group.cu fail pass pass pass

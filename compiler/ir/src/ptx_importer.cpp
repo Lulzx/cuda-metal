@@ -627,6 +627,8 @@ struct Importer {
     std::vector<std::unordered_map<std::string, ValueId>> outgoing;
     std::vector<std::map<std::string, ValueId>> block_arguments;
     std::unordered_map<std::string, Operand> call_parameter_slots;
+    std::unordered_map<std::string, std::map<std::int64_t, Operand>>
+        call_parameter_slot_fields;
     std::unordered_map<std::string, Operand> call_return_slots;
     std::unordered_set<std::string> threadgroup_symbols;
     std::unordered_map<std::string, LocalDepot> local_depots;
@@ -643,6 +645,7 @@ struct Importer {
     std::optional<Operand> printf_buffer;
     std::optional<Operand> printf_capacity;
     std::optional<Operand> function_return;
+    std::map<std::int64_t, Operand> function_return_fields;
 
     bool fail(const Instruction* instruction, std::string message) {
         if (instruction != nullptr && instruction->line != 0) {
@@ -650,6 +653,74 @@ struct Importer {
         }
         result.error = std::move(message);
         return false;
+    }
+
+    std::optional<Operand> materialize_aggregate(
+        BasicBlock* block, const Instruction* instruction, const Type& type,
+        const std::map<std::int64_t, Operand>& fields,
+        std::string_view description) {
+        if (type.kind != TypeKind::kAggregate || type.elements.empty()) {
+            fail(instruction,
+                 std::string(description) + " does not have an aggregate type");
+            return std::nullopt;
+        }
+        if (fields.size() != type.elements.size()) {
+            fail(instruction, std::string(description) +
+                                  " has missing, partial, or overlapping fields");
+            return std::nullopt;
+        }
+        Operation construct;
+        construct.opcode = OpCode::kAggregateConstruct;
+        construct.attributes["aggregate_init"] = "true";
+        construct.location = {
+            .file = result.module.source_name,
+            .line = static_cast<std::uint32_t>(
+                std::max(0, instruction == nullptr ? 0 : instruction->line)),
+        };
+        std::int64_t byte_offset = 0;
+        for (const Type& element_type : type.elements) {
+            const auto field = fields.find(byte_offset);
+            if (field == fields.end()) {
+                fail(instruction, std::string(description) +
+                                      " is missing field at byte offset " +
+                                      std::to_string(byte_offset));
+                return std::nullopt;
+            }
+            const std::uint32_t element_size = type_size(element_type);
+            if (type_size(field->second.type) != element_size) {
+                fail(instruction, std::string(description) +
+                                      " has a partial or overlapping field at byte offset " +
+                                      std::to_string(byte_offset));
+                return std::nullopt;
+            }
+            Operand value = field->second;
+            if (!(value.type == element_type)) {
+                Operation conversion;
+                conversion.opcode = OpCode::kConvert;
+                conversion.location = construct.location;
+                conversion.operands = {value};
+                conversion.attributes["bitcast"] = "true";
+                const ValueId converted = builder.next_value();
+                conversion.results = {converted};
+                conversion.result_types = {element_type};
+                value_types[converted] = element_type;
+                block->operations.push_back(std::move(conversion));
+                value = Operand::value_ref(converted, element_type);
+            }
+            construct.operands.push_back(std::move(value));
+            byte_offset += element_size;
+        }
+        if (byte_offset != static_cast<std::int64_t>(type_size(type))) {
+            fail(instruction,
+                 std::string(description) + " has an inconsistent aggregate layout");
+            return std::nullopt;
+        }
+        const ValueId value = builder.next_value();
+        construct.results = {value};
+        construct.result_types = {type};
+        value_types[value] = type;
+        block->operations.push_back(std::move(construct));
+        return Operand::value_ref(value, type);
     }
 
     bool select_entry(const cumetal::ptx::ParseResult& parsed, const PtxImportOptions& options) {
@@ -1351,6 +1422,12 @@ struct Importer {
             if (name.empty()) return fail(&instruction, "call parameter slot has no name");
             const Operand stored =
                 source_operand(1, ptx_scalar_type(instruction.opcode));
+            const std::int64_t byte_offset =
+                memory_operand_offset(instruction.operands[0]);
+            if (byte_offset < 0) {
+                return fail(&instruction,
+                            "PTX call parameter slot has a negative byte offset");
+            }
             const bool is_return_slot = std::any_of(
                 entry->return_params.begin(), entry->return_params.end(),
                 [&](const cumetal::ptx::Parameter& parameter) {
@@ -1361,9 +1438,20 @@ struct Importer {
                     return fail(&instruction,
                                 "typed PTX device calls support at most one return value");
                 }
-                function_return = stored;
+                const Type return_type =
+                    parameter_type(entry->return_params.front());
+                if (return_type.kind == TypeKind::kAggregate) {
+                    function_return_fields[byte_offset] = stored;
+                } else {
+                    if (byte_offset != 0) {
+                        return fail(&instruction,
+                                    "scalar PTX device return has a nonzero byte offset");
+                    }
+                    function_return = stored;
+                }
             } else {
-                call_parameter_slots[name] = stored;
+                call_parameter_slot_fields[name][byte_offset] = stored;
+                if (byte_offset == 0) call_parameter_slots[name] = stored;
             }
             return true;
         } else if (starts_with(instruction.opcode, "ld.param")) {
@@ -1416,14 +1504,39 @@ struct Importer {
                             provenance->second;
                     }
                 } else {
-                    operation.opcode = OpCode::kConvert;
-                    operation.operands.push_back(returned->second);
-                    if (starts_with(instruction.opcode, "ld.param.b64") &&
-                        returned->second.type == Type::floating(32)) {
-                        operation.result_types.front() = Type::floating(32);
-                        value_types[operation.results.front()] = Type::floating(32);
-                    } else if (!(returned->second.type == operation.result_types.front())) {
-                        operation.attributes["bitcast"] = "true";
+                    if (returned->second.type.kind == TypeKind::kAggregate) {
+                        const Type& aggregate_type = returned->second.type;
+                        const std::int64_t byte_offset =
+                            memory_operand_offset(instruction.operands[1]);
+                        const std::uint32_t loaded_size =
+                            type_size(operation.result_types.front());
+                        if (byte_offset < 0 || loaded_size == 0 ||
+                            aggregate_type.elements.empty() ||
+                            type_size(aggregate_type.elements.front()) != loaded_size ||
+                            byte_offset % loaded_size != 0 ||
+                            static_cast<std::uint64_t>(byte_offset / loaded_size) >=
+                                aggregate_type.elements.size()) {
+                            return fail(
+                                &instruction,
+                                "aggregate PTX call return load is not an aligned field");
+                        }
+                        operation.opcode = OpCode::kAggregateExtract;
+                        operation.operands.push_back(returned->second);
+                        operation.operands.push_back(Operand::immediate(
+                            std::to_string(byte_offset / loaded_size),
+                            Type::integer(32)));
+                    } else {
+                        operation.opcode = OpCode::kConvert;
+                        operation.operands.push_back(returned->second);
+                        if (starts_with(instruction.opcode, "ld.param.b64") &&
+                            returned->second.type == Type::floating(32)) {
+                            operation.result_types.front() = Type::floating(32);
+                            value_types[operation.results.front()] =
+                                Type::floating(32);
+                        } else if (!(returned->second.type ==
+                                     operation.result_types.front())) {
+                            operation.attributes["bitcast"] = "true";
+                        }
                     }
                 }
             } else {
@@ -1968,12 +2081,33 @@ struct Importer {
                     result.module.attributes.at("fp64_mode");
             }
             for (std::size_t i = 0; i < argument_names.size(); ++i) {
-                const auto slot = call_parameter_slots.find(argument_names[i]);
-                if (slot == call_parameter_slots.end()) {
-                    return fail(&instruction, "call parameter slot '" + argument_names[i] +
-                                                  "' was not initialized");
+                const std::string& argument_name = argument_names[i];
+                Operand argument;
+                if (signature->argument_types[i].kind == TypeKind::kAggregate) {
+                    const auto fields =
+                        call_parameter_slot_fields.find(argument_name);
+                    if (fields == call_parameter_slot_fields.end()) {
+                        return fail(&instruction,
+                                    "aggregate call parameter slot '" +
+                                        argument_name + "' was not initialized");
+                    }
+                    const std::optional<Operand> aggregate =
+                        materialize_aggregate(
+                            block, &instruction, signature->argument_types[i],
+                            fields->second,
+                            "aggregate call parameter slot '" + argument_name +
+                                "'");
+                    if (!aggregate.has_value()) return false;
+                    argument = *aggregate;
+                } else {
+                    const auto slot = call_parameter_slots.find(argument_name);
+                    if (slot == call_parameter_slots.end()) {
+                        return fail(&instruction, "call parameter slot '" +
+                                                      argument_name +
+                                                      "' was not initialized");
+                    }
+                    argument = slot->second;
                 }
-                Operand argument = slot->second;
                 if (callee == "__nv_frexp" && i == 0 &&
                     argument.type == Type::floating(64) &&
                     signature->argument_types[i] == Type::floating(32) &&
@@ -2009,6 +2143,8 @@ struct Importer {
                     argument = Operand::value_ref(converted, signature->argument_types[i]);
                 }
                 operation.operands.push_back(std::move(argument));
+                call_parameter_slots.erase(argument_name);
+                call_parameter_slot_fields.erase(argument_name);
             }
             if (!builtin_call && printf_functions.contains(callee)) {
                 if (!printf_buffer.has_value() || !printf_capacity.has_value()) {
@@ -2413,6 +2549,7 @@ struct Importer {
             BasicBlock& block = function.blocks[block_index];
             std::unordered_map<std::string, ValueId> environment = incoming[block_index];
             function_return.reset();
+            function_return_fields.clear();
             for (const Instruction* instruction : raw_blocks[block_index].instructions) {
                 if (!translate_instruction(&function, &block, *instruction, &environment)) {
                     return false;
@@ -2461,11 +2598,22 @@ struct Importer {
                         root_opcode(last->opcode) == "exit")) {
                 terminator.opcode = OpCode::kReturn;
                 if (!is_kernel && function.return_type.kind != TypeKind::kVoid) {
-                    if (!function_return.has_value()) {
-                        return fail(last,
-                                    "non-void PTX device function has no return value");
+                    if (function.return_type.kind == TypeKind::kAggregate) {
+                        const std::optional<Operand> aggregate =
+                            materialize_aggregate(
+                                &block, last, function.return_type,
+                                function_return_fields,
+                                "aggregate PTX device return");
+                        if (!aggregate.has_value()) return false;
+                        terminator.operands.push_back(*aggregate);
+                    } else {
+                        if (!function_return.has_value()) {
+                            return fail(
+                                last,
+                                "non-void PTX device function has no return value");
+                        }
+                        terminator.operands.push_back(*function_return);
                     }
-                    terminator.operands.push_back(*function_return);
                 }
                 terminator.location = {
                     .file = result.module.source_name,

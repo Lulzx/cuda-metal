@@ -27,10 +27,11 @@ Homebrew LLVM `clang++` (or `--cuda-clang`/`CUMETAL_CUDA_CLANG`) in device-only 
 emits PTX, then runs CuMetal's PTX lowering and AIR emitter. `-I`, `-D`,
 `--cuda-include`, and `--cuda-arch` are available for project builds.
 `--cuda-inline-threshold <n>` forwards Clang's GPU inlining threshold and requests
-inlining of every viable call reachable from the selected kernel. It is useful for
-projects whose PTX contains helper `.func` definitions, which CuMetal does not yet
-lower independently. Recursion, indirect calls, and explicitly non-inlineable
-functions still fail during strict PTX lowering. The frontend continues to prefer
+inlining of every viable call reachable from the selected kernel. Typed PTX also
+materializes reachable direct `.func` definitions with scalar/pointer arguments,
+single scalar or flat aggregate returns, and flat by-value aggregate arguments.
+Recursion, indirect calls, multi-result ABI forms, and other unsupported signatures
+still fail during strict PTX lowering. The frontend continues to prefer
 structured branches with `-fno-jump-tables`; PTX inputs that contain
 `brx.idx`/`.branchtargets` tables are supported and lower to LLVM switches.
 
