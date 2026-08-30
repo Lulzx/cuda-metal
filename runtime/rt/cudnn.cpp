@@ -258,6 +258,18 @@ bool filter_pointer_valid(const void* pointer, const cudnnFilterStruct* filter) 
     return filter_bytes(filter, &bytes) && tracked_bytes_valid(pointer, bytes);
 }
 
+bool batchnorm_parameter_bytes(const cudnnTensorStruct* tensor, cudnnBatchNormMode_t mode,
+                               size_t* bytes) {
+    if (!valid_tensor(tensor) || !bytes) return false;
+    size_t count = static_cast<size_t>(tensor->c);
+    if (mode == CUDNN_BATCHNORM_PER_ACTIVATION &&
+        (!checked_mul(count, static_cast<size_t>(tensor->h), &count) ||
+         !checked_mul(count, static_cast<size_t>(tensor->w), &count))) {
+        return false;
+    }
+    return checked_mul(count, sizeof(float), bytes);
+}
+
 void compute_strides(cudnnTensorStruct* t) {
     if (t->format == CUDNN_TENSOR_NCHW) {
         t->wStride = 1;
@@ -1096,6 +1108,11 @@ cudnnStatus_t cudnnActivationForward(cudnnHandle_t handle,
     if (!supported_f32_nchw(xDesc) || !supported_f32_nchw(yDesc))
         return CUDNN_STATUS_NOT_SUPPORTED;
     if (!same_shape(xDesc, yDesc)) return CUDNN_STATUS_BAD_PARAM;
+    if (!tensor_pointer_valid(x, xDesc) || !tensor_pointer_valid(y, yDesc) ||
+        !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -1145,6 +1162,11 @@ cudnnStatus_t cudnnAddTensor(cudnnHandle_t handle,
     const bool channel_bias = aDesc->n == 1 && aDesc->c == cDesc->c &&
                               aDesc->h == 1 && aDesc->w == 1;
     if (!same && !channel_bias) return CUDNN_STATUS_BAD_PARAM;
+    if (!tensor_pointer_valid(A, aDesc) || !tensor_pointer_valid(C, cDesc) ||
+        !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
     float a = *static_cast<const float*>(alpha);
@@ -1179,6 +1201,11 @@ cudnnStatus_t cudnnTransformTensor(cudnnHandle_t handle,
     if (!supported_f32_nchw(xDesc) || !supported_f32_nchw(yDesc))
         return CUDNN_STATUS_NOT_SUPPORTED;
     if (!same_shape(xDesc, yDesc)) return CUDNN_STATUS_BAD_PARAM;
+    if (!tensor_pointer_valid(x, xDesc) || !tensor_pointer_valid(y, yDesc) ||
+        !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
     float a = *static_cast<const float*>(alpha);
@@ -1199,6 +1226,8 @@ cudnnStatus_t cudnnSetTensor(cudnnHandle_t handle,
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!yDesc || !y || !valuePtr) return CUDNN_STATUS_BAD_PARAM;
     if (!supported_f32_nchw(yDesc)) return CUDNN_STATUS_NOT_SUPPORTED;
+    if (!tensor_pointer_valid(y, yDesc) || !tracked_bytes_valid(valuePtr, sizeof(float)))
+        return CUDNN_STATUS_BAD_PARAM;
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
     float val = *static_cast<const float*>(valuePtr);
@@ -1216,6 +1245,8 @@ cudnnStatus_t cudnnScaleTensor(cudnnHandle_t handle,
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!yDesc || !y || !alpha) return CUDNN_STATUS_BAD_PARAM;
     if (!supported_f32_nchw(yDesc)) return CUDNN_STATUS_NOT_SUPPORTED;
+    if (!tensor_pointer_valid(y, yDesc) || !tracked_bytes_valid(alpha, sizeof(float)))
+        return CUDNN_STATUS_BAD_PARAM;
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
     float a = *static_cast<const float*>(alpha);
@@ -1244,6 +1275,11 @@ cudnnStatus_t cudnnSoftmaxForward(cudnnHandle_t handle,
         algo != CUDNN_SOFTMAX_LOG) return CUDNN_STATUS_BAD_PARAM;
     if (mode != CUDNN_SOFTMAX_MODE_INSTANCE && mode != CUDNN_SOFTMAX_MODE_CHANNEL)
         return CUDNN_STATUS_BAD_PARAM;
+    if (!tensor_pointer_valid(x, xDesc) || !tensor_pointer_valid(y, yDesc) ||
+        !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
     float a = *static_cast<const float*>(alpha);
@@ -1320,6 +1356,23 @@ cudnnStatus_t cudnnBatchNormalizationForwardInference(
         (mode != CUDNN_BATCHNORM_PER_ACTIVATION && mode != CUDNN_BATCHNORM_SPATIAL &&
          mode != CUDNN_BATCHNORM_SPATIAL_PERSISTENT))
         return CUDNN_STATUS_BAD_PARAM;
+    size_t parameter_count = static_cast<size_t>(xDesc->c);
+    if (mode == CUDNN_BATCHNORM_PER_ACTIVATION &&
+        (!checked_mul(parameter_count, static_cast<size_t>(xDesc->h), &parameter_count) ||
+         !checked_mul(parameter_count, static_cast<size_t>(xDesc->w), &parameter_count))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    size_t parameter_bytes = 0;
+    if (!checked_mul(parameter_count, sizeof(float), &parameter_bytes) ||
+        !tensor_pointer_valid(x, xDesc) || !tensor_pointer_valid(y, yDesc) ||
+        !tracked_bytes_valid(bnScale, parameter_bytes) ||
+        !tracked_bytes_valid(bnBias, parameter_bytes) ||
+        !tracked_bytes_valid(estimatedMean, parameter_bytes) ||
+        !tracked_bytes_valid(estimatedVariance, parameter_bytes) ||
+        !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -1378,6 +1431,14 @@ cudnnStatus_t cudnnConvolutionBiasActivationForward(
         !alpha2 || !yDesc || !y)
         return CUDNN_STATUS_BAD_PARAM;
 
+    if (!tracked_bytes_valid(alpha2, sizeof(float)) ||
+        ((zDesc != nullptr || z != nullptr) &&
+         (!zDesc || !z || !supported_f32_nchw(zDesc) || !same_shape(zDesc, yDesc) ||
+          !tensor_pointer_valid(z, zDesc))) ||
+        ((biasDesc != nullptr || bias != nullptr) && (!biasDesc || !bias))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+
     // Step 1: y = conv(x, w) with alpha1
     float zero = 0.0f;
     cudnnStatus_t st = cudnnConvolutionForward(handle, alpha1, xDesc, x, wDesc, w,
@@ -1432,6 +1493,12 @@ cudnnStatus_t cudnnActivationBackward(cudnnHandle_t handle,
         return CUDNN_STATUS_NOT_SUPPORTED;
     if (!same_shape(xDesc, yDesc) || !same_shape(xDesc, dyDesc) ||
         !same_shape(xDesc, dxDesc)) return CUDNN_STATUS_BAD_PARAM;
+    if (!tensor_pointer_valid(y, yDesc) || !tensor_pointer_valid(dy, dyDesc) ||
+        !tensor_pointer_valid(x, xDesc) || !tensor_pointer_valid(dx, dxDesc) ||
+        !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -1521,11 +1588,26 @@ cudnnStatus_t cudnnSetPooling2dDescriptor(cudnnPoolingDescriptor_t poolingDesc,
 cudnnStatus_t cudnnGetPooling2dForwardOutputDim(cudnnPoolingDescriptor_t poolingDesc,
                                                  cudnnTensorDescriptor_t inputTensorDesc,
                                                  int* n, int* c, int* h, int* w) {
-    if (!poolingDesc || !inputTensorDesc) return CUDNN_STATUS_BAD_PARAM;
+    if (!poolingDesc || !valid_tensor(inputTensorDesc) || poolingDesc->windowH <= 0 ||
+        poolingDesc->windowW <= 0 || poolingDesc->strideH <= 0 ||
+        poolingDesc->strideW <= 0) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    const long long numerator_h = static_cast<long long>(inputTensorDesc->h) +
+                                  2LL * poolingDesc->padH - poolingDesc->windowH;
+    const long long numerator_w = static_cast<long long>(inputTensorDesc->w) +
+                                  2LL * poolingDesc->padW - poolingDesc->windowW;
+    if (numerator_h < 0 || numerator_w < 0) return CUDNN_STATUS_BAD_PARAM;
+    const long long output_h = numerator_h / poolingDesc->strideH + 1;
+    const long long output_w = numerator_w / poolingDesc->strideW + 1;
+    if (output_h <= 0 || output_w <= 0 || output_h > std::numeric_limits<int>::max() ||
+        output_w > std::numeric_limits<int>::max()) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     if (n) *n = inputTensorDesc->n;
     if (c) *c = inputTensorDesc->c;
-    if (h) *h = (inputTensorDesc->h + 2 * poolingDesc->padH - poolingDesc->windowH) / poolingDesc->strideH + 1;
-    if (w) *w = (inputTensorDesc->w + 2 * poolingDesc->padW - poolingDesc->windowW) / poolingDesc->strideW + 1;
+    if (h) *h = static_cast<int>(output_h);
+    if (w) *w = static_cast<int>(output_w);
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -1546,6 +1628,11 @@ cudnnStatus_t cudnnPoolingForward(cudnnHandle_t handle,
         yDesc->n != expectedN || yDesc->c != expectedC ||
         yDesc->h != expectedH || yDesc->w != expectedW)
         return CUDNN_STATUS_BAD_PARAM;
+    if (!tensor_pointer_valid(x, xDesc) || !tensor_pointer_valid(y, yDesc) ||
+        !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -1618,6 +1705,12 @@ cudnnStatus_t cudnnPoolingBackward(cudnnHandle_t handle,
         yDesc->n != expectedN || yDesc->c != expectedC ||
         yDesc->h != expectedH || yDesc->w != expectedW)
         return CUDNN_STATUS_BAD_PARAM;
+    if (!tensor_pointer_valid(y, yDesc) || !tensor_pointer_valid(dy, dyDesc) ||
+        !tensor_pointer_valid(x, xDesc) || !tensor_pointer_valid(dx, dxDesc) ||
+        !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -1741,6 +1834,11 @@ cudnnStatus_t cudnnDropoutForward(cudnnHandle_t handle,
     if (dropoutDesc->dropout > 0.0f &&
         (!reserveSpace || reserveSpaceSizeInBytes < static_cast<size_t>(count)))
         return CUDNN_STATUS_BAD_PARAM;
+    if (!tensor_pointer_valid(x, xdesc) || !tensor_pointer_valid(y, ydesc) ||
+        (reserveSpace &&
+         !tracked_bytes_valid(reserveSpace, static_cast<size_t>(count)))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -1787,6 +1885,11 @@ cudnnStatus_t cudnnDropoutBackward(cudnnHandle_t handle,
     if (dropoutDesc->dropout > 0.0f &&
         (!reserveSpace || reserveSpaceSizeInBytes < static_cast<size_t>(count)))
         return CUDNN_STATUS_BAD_PARAM;
+    if (!tensor_pointer_valid(dy, dydesc) || !tensor_pointer_valid(dx, dxdesc) ||
+        (reserveSpace &&
+         !tracked_bytes_valid(reserveSpace, static_cast<size_t>(count)))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -1877,6 +1980,21 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
         (mode != CUDNN_BATCHNORM_PER_ACTIVATION && mode != CUDNN_BATCHNORM_SPATIAL &&
          mode != CUDNN_BATCHNORM_SPATIAL_PERSISTENT))
         return CUDNN_STATUS_BAD_PARAM;
+    size_t parameter_bytes = 0;
+    if (!batchnorm_parameter_bytes(xDesc, mode, &parameter_bytes) ||
+        !tensor_pointer_valid(x, xDesc) || !tensor_pointer_valid(y, yDesc) ||
+        !tracked_bytes_valid(bnScale, parameter_bytes) ||
+        !tracked_bytes_valid(bnBias, parameter_bytes) ||
+        (resultRunningMean && !tracked_bytes_valid(resultRunningMean, parameter_bytes)) ||
+        (resultRunningVariance &&
+         !tracked_bytes_valid(resultRunningVariance, parameter_bytes)) ||
+        (resultSaveMean && !tracked_bytes_valid(resultSaveMean, parameter_bytes)) ||
+        (resultSaveInvVariance &&
+         !tracked_bytes_valid(resultSaveInvVariance, parameter_bytes)) ||
+        !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -1990,6 +2108,21 @@ cudnnStatus_t cudnnBatchNormalizationBackward(
         (mode != CUDNN_BATCHNORM_PER_ACTIVATION && mode != CUDNN_BATCHNORM_SPATIAL &&
          mode != CUDNN_BATCHNORM_SPATIAL_PERSISTENT))
         return CUDNN_STATUS_BAD_PARAM;
+    size_t parameter_bytes = 0;
+    if (!batchnorm_parameter_bytes(xDesc, mode, &parameter_bytes) ||
+        !tensor_pointer_valid(x, xDesc) || !tensor_pointer_valid(dy, dyDesc) ||
+        !tensor_pointer_valid(dx, dxDesc) ||
+        !tracked_bytes_valid(bnScale, parameter_bytes) ||
+        (dBnScaleResult && !tracked_bytes_valid(dBnScaleResult, parameter_bytes)) ||
+        (dBnBiasResult && !tracked_bytes_valid(dBnBiasResult, parameter_bytes)) ||
+        (savedMean && !tracked_bytes_valid(savedMean, parameter_bytes)) ||
+        (savedInvVariance && !tracked_bytes_valid(savedInvVariance, parameter_bytes)) ||
+        !tracked_bytes_valid(alphaDataDiff, sizeof(float)) ||
+        !tracked_bytes_valid(betaDataDiff, sizeof(float)) ||
+        !tracked_bytes_valid(alphaParamDiff, sizeof(float)) ||
+        !tracked_bytes_valid(betaParamDiff, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -2087,6 +2220,11 @@ cudnnStatus_t cudnnSoftmaxBackward(cudnnHandle_t handle,
          algo != CUDNN_SOFTMAX_LOG) ||
         (mode != CUDNN_SOFTMAX_MODE_INSTANCE && mode != CUDNN_SOFTMAX_MODE_CHANNEL))
         return CUDNN_STATUS_BAD_PARAM;
+    if (!tensor_pointer_valid(y, yDesc) || !tensor_pointer_valid(dy, dyDesc) ||
+        !tensor_pointer_valid(dx, dxDesc) || !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -2194,6 +2332,12 @@ cudnnStatus_t cudnnOpTensor(cudnnHandle_t handle,
     // Reject general cuDNN broadcasting rather than applying incorrect flat modulo indexing.
     if (!same_shape(aDesc, cDesc) || !same_shape(bDesc, cDesc))
         return CUDNN_STATUS_NOT_SUPPORTED;
+    if (!tensor_pointer_valid(A, aDesc) || !tensor_pointer_valid(B, bDesc) ||
+        !tensor_pointer_valid(C, cDesc) || !tracked_bytes_valid(alpha1, sizeof(float)) ||
+        !tracked_bytes_valid(alpha2, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -2291,6 +2435,11 @@ cudnnStatus_t cudnnReduceTensor(cudnnHandle_t handle,
     const bool channel_output = cDesc->n == 1 && cDesc->c == aDesc->c &&
                                 cDesc->h == 1 && cDesc->w == 1;
     if (!scalar_output && !channel_output) return CUDNN_STATUS_NOT_SUPPORTED;
+    if (!tensor_pointer_valid(A, aDesc) || !tensor_pointer_valid(C, cDesc) ||
+        !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 

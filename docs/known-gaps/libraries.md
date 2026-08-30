@@ -66,7 +66,9 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   before reading UMA operands and rejects unsupported types/layouts/shapes for
   the covered calls. Convolution is the tested implicit-GEMM cross-correlation
   path; its tracked operands and workspaces are range-checked, and custom Nd
-  strides are rejected because the implementation is contiguous. General
+  strides are rejected because the implementation is contiguous. Other
+  implemented tensor-operation families also range-check tracked operands;
+  ordinary host buffers remain supported by the explicit CPU fallback. General
   algorithm selection, convolution-mode filter reversal, general
   OpTensor broadcasting, fusion, training/backward breadth, graph integration,
   datatype, and layout coverage remain incomplete. RNN and attention are

@@ -275,6 +275,15 @@ static bool test_activation_relu() {
         }
     }
 
+    float* deviceShort = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&deviceShort), 4 * sizeof(float)) != cudaSuccess ||
+        cudnnActivationForward(handle, act, &alpha, desc, deviceShort, &beta, desc,
+                               output) != CUDNN_STATUS_BAD_PARAM) {
+        std::fprintf(stderr, "FAIL: undersized tracked activation input was accepted\n");
+        return false;
+    }
+    cudaFree(deviceShort);
+
     cudnnDestroyActivationDescriptor(act);
     cudnnDestroyTensorDescriptor(desc);
     cudnnDestroy(handle);

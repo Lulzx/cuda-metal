@@ -71,7 +71,9 @@ full NVIDIA library implementations.
   workspaces, and stream-ordered input. The convolution family accepts only the
   contiguous NCHW layout it actually computes, uses overflow-checked
   forward/backward workspace geometry, and validates complete tracked
-  tensor/filter/workspace spans before CPU access.
+  tensor/filter/workspace spans before CPU access. Implemented activation,
+  tensor, softmax, pooling, dropout, normalization, OpTensor, and reduction
+  paths likewise validate tracked tensor, scalar, parameter, and reserve spans.
 - **NCCL / NVML:** single-device compatibility/query subsets. NCCL's one-rank
   collectives are stream-ordered identity copies with validated communicators,
   roots, reduction operations, datatypes, byte-count overflow, group state,
