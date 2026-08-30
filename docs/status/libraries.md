@@ -27,7 +27,9 @@ full NVIDIA library implementations.
   `CURAND_STATUS_TYPE_ERROR`. Normal/log-normal calls enforce finite parameters
   and even lengths. Device generation validates the complete typed output span,
   including interior pointers and multiplication-overflow-sized requests,
-  before enqueueing any write.
+  before enqueueing any write. Pseudo-only seed, pseudo/quasi ordering, and
+  quasi-dimension setters reject generator-type mismatches with CUDA-compatible
+  statuses.
 - **cuFFT:** rank-1 to rank-3 planning and execution for C2C/R2C/C2R and the
   double forms, with cuFFT's advanced data layout (`inembed`/`onembed`, stride,
   batch distance). The single-precision transforms run on the Apple GPU

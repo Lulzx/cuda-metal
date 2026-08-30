@@ -304,6 +304,12 @@ static void test_curand_generator_props() {
     // Invalid ordering.
     curandStatus_t r5 = curandSetGeneratorOrdering(gen, static_cast<curandOrdering_t>(999));
     CHECK(r5 == CURAND_STATUS_OUT_OF_RANGE, "curandSetGeneratorOrdering bad value error");
+    CHECK(curandSetGeneratorOrdering(gen, CURAND_ORDERING_QUASI_DEFAULT) ==
+              CURAND_STATUS_OUT_OF_RANGE,
+          "pseudo generator rejects quasi ordering");
+    CHECK(curandSetQuasiRandomGeneratorDimensions(gen, 7) ==
+              CURAND_STATUS_TYPE_ERROR,
+          "pseudo generator rejects quasi dimensions");
 
     float* device_probe = nullptr;
     CHECK(cudaMalloc(reinterpret_cast<void**>(&device_probe), sizeof(float)) == cudaSuccess,
@@ -324,6 +330,15 @@ static void test_curand_generator_props() {
 
     curandStatus_t r7 = curandSetQuasiRandomGeneratorDimensions(qgen, 7);
     CHECK(r7 == CURAND_STATUS_SUCCESS, "curandSetQuasiRandomGeneratorDimensions(7) success");
+    CHECK(curandSetGeneratorOrdering(qgen, CURAND_ORDERING_QUASI_DEFAULT) ==
+              CURAND_STATUS_SUCCESS,
+          "quasi generator accepts quasi ordering");
+    CHECK(curandSetGeneratorOrdering(qgen, CURAND_ORDERING_PSEUDO_DEFAULT) ==
+              CURAND_STATUS_OUT_OF_RANGE,
+          "quasi generator rejects pseudo ordering");
+    CHECK(curandSetPseudoRandomGeneratorSeed(qgen, 1234) ==
+              CURAND_STATUS_TYPE_ERROR,
+          "quasi generator rejects pseudo seed");
 
     curandStatus_t r8 = curandSetQuasiRandomGeneratorDimensions(qgen, 0);
     CHECK(r8 == CURAND_STATUS_OUT_OF_RANGE, "curandSetQuasiRandomGeneratorDimensions(0) error");
@@ -338,9 +353,10 @@ static void test_curand_generator_props() {
     cudaFree(device_probe);
 
     // Unknown RNG type still rejected.
-    curandGenerator_t bad;
+    curandGenerator_t bad = reinterpret_cast<curandGenerator_t>(1);
     curandStatus_t r10 = curandCreateGenerator(&bad, static_cast<curandRngType_t>(999));
     CHECK(r10 == CURAND_STATUS_TYPE_ERROR, "curandCreateGenerator unknown type error");
+    CHECK(bad == nullptr, "curandCreateGenerator clears output on failure");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

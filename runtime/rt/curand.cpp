@@ -34,24 +34,31 @@ bool supports_generation(curandRngType_t rng_type) {
            rng_type == CURAND_RNG_PSEUDO_MTGP32;
 }
 
+bool is_pseudorandom(curandRngType_t rng_type) {
+    return rng_type == CURAND_RNG_PSEUDO_DEFAULT ||
+           rng_type == CURAND_RNG_PSEUDO_XORWOW ||
+           rng_type == CURAND_RNG_PSEUDO_MRG32K3A ||
+           rng_type == CURAND_RNG_PSEUDO_MTGP32 ||
+           rng_type == CURAND_RNG_PSEUDO_MT19937 ||
+           rng_type == CURAND_RNG_PSEUDO_PHILOX4_32_10;
+}
+
+bool is_quasirandom(curandRngType_t rng_type) {
+    return rng_type == CURAND_RNG_QUASI_DEFAULT ||
+           rng_type == CURAND_RNG_QUASI_SOBOL32 ||
+           rng_type == CURAND_RNG_QUASI_SCRAMBLED_SOBOL32 ||
+           rng_type == CURAND_RNG_QUASI_SOBOL64 ||
+           rng_type == CURAND_RNG_QUASI_SCRAMBLED_SOBOL64;
+}
+
 curandStatus_t create_generator(curandGenerator_t* generator,
                                 curandRngType_t rng_type,
                                 bool host_generator) {
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
-    const bool pseudo = (rng_type == CURAND_RNG_PSEUDO_DEFAULT   ||
-                         rng_type == CURAND_RNG_PSEUDO_XORWOW    ||
-                         rng_type == CURAND_RNG_PSEUDO_MRG32K3A  ||
-                         rng_type == CURAND_RNG_PSEUDO_MTGP32    ||
-                         rng_type == CURAND_RNG_PSEUDO_MT19937   ||
-                         rng_type == CURAND_RNG_PSEUDO_PHILOX4_32_10);
-    const bool quasi  = (rng_type == CURAND_RNG_QUASI_DEFAULT    ||
-                         rng_type == CURAND_RNG_QUASI_SOBOL32    ||
-                         rng_type == CURAND_RNG_QUASI_SCRAMBLED_SOBOL32 ||
-                         rng_type == CURAND_RNG_QUASI_SOBOL64    ||
-                         rng_type == CURAND_RNG_QUASI_SCRAMBLED_SOBOL64);
-    if (!pseudo && !quasi) {
+    *generator = nullptr;
+    if (!is_pseudorandom(rng_type) && !is_quasirandom(rng_type)) {
         return CURAND_STATUS_TYPE_ERROR;
     }
 
@@ -171,6 +178,7 @@ curandStatus_t curandSetPseudoRandomGeneratorSeed(curandGenerator_t generator,
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
+    if (!is_pseudorandom(generator->rng_type)) return CURAND_STATUS_TYPE_ERROR;
 
     cudaStream_t stream = nullptr;
     {
@@ -510,6 +518,12 @@ curandStatus_t curandSetGeneratorOrdering(curandGenerator_t generator, curandOrd
         order != CURAND_ORDERING_QUASI_DEFAULT) {
         return CURAND_STATUS_OUT_OF_RANGE;
     }
+    if ((is_pseudorandom(generator->rng_type) &&
+         order == CURAND_ORDERING_QUASI_DEFAULT) ||
+        (is_quasirandom(generator->rng_type) &&
+         order != CURAND_ORDERING_QUASI_DEFAULT)) {
+        return CURAND_STATUS_OUT_OF_RANGE;
+    }
     std::lock_guard<std::mutex> lock(generator->mutex);
     generator->ordering = order;
     return CURAND_STATUS_SUCCESS;
@@ -520,6 +534,7 @@ curandStatus_t curandSetQuasiRandomGeneratorDimensions(curandGenerator_t generat
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
+    if (!is_quasirandom(generator->rng_type)) return CURAND_STATUS_TYPE_ERROR;
     if (num_dimensions == 0 || num_dimensions > 20000) {
         return CURAND_STATUS_OUT_OF_RANGE;
     }
