@@ -1251,6 +1251,57 @@ $L__BB0_2:
                     contains(clang_printf.metal_source, "vr12"),
                 "decoded printf values are written to the ring buffer")) return 1;
 
+    // A struct passed to a kernel by value arrives as `.b8 name[N]` and its
+    // fields are read at `[name+offset]`. Lowering that to a single scalar made
+    // every field alias to the same four bytes, and reading a float field
+    // through a `uint` declaration reinterpreted its bit pattern -- 1.001f
+    // became 1.07e9. GROMACS's barostat hit exactly this and blew coordinates
+    // up to 1e8 nm at the first pressure-coupling step.
+    const char* struct_param_ptx = R"PTX(
+.visible .entry scale_by_struct(
+    .param .u32 scale_by_struct_param_0,
+    .param .u64 .ptr .global .align 4 scale_by_struct_param_1,
+    .param .align 4 .b8 scale_by_struct_param_2[24]
+)
+{
+    ld.param.u64 %rd1, [scale_by_struct_param_1];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.s32 %r4, %r1, %r2, %r3;
+    mul.wide.s32 %rd3, %r4, 4;
+    add.s64 %rd4, %rd2, %rd3;
+    ld.global.f32 %f1, [%rd4];
+    ld.param.b32 %r5, [scale_by_struct_param_2];
+    ld.param.b32 %r6, [scale_by_struct_param_2+12];
+    mov.b32 %f2, %r5;
+    mov.b32 %f3, %r6;
+    fma.rn.f32 %f4, %f1, %f2, %f3;
+    st.global.f32 [%rd4], %f4;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions struct_param_options;
+    struct_param_options.entry_name = "scale_by_struct";
+    const auto struct_param =
+        cumetal::ptx::lower_ptx_to_metal_source(struct_param_ptx, struct_param_options);
+    if (!expect(struct_param.ok && struct_param.matched,
+                "by-value struct parameter lowers through direct Metal")) return 1;
+    if (!expect(contains(struct_param.metal_source, "constant uint* scale_by_struct_param_2"),
+                "by-value struct binds its whole payload, not one scalar")) return 1;
+    if (!expect(contains(struct_param.metal_source,
+                         "as_type<float>(scale_by_struct_param_2[0])") &&
+                    contains(struct_param.metal_source,
+                             "as_type<float>(scale_by_struct_param_2[3])"),
+                "each struct field is read at its own offset, as a float")) return 1;
+    // The offset is what distinguishes the fields; if it were dropped both
+    // reads would land on word 0 and the kernel would silently use one value
+    // for every member.
+    if (!expect(!contains(struct_param.metal_source, "scale_by_struct_param_2[1]") &&
+                    !contains(struct_param.metal_source, "constant uint& scale_by_struct_param_2"),
+                "no field aliases onto the wrong word")) return 1;
+
     std::printf("PASS: ptx lower-to-metal unit tests\n");
     return 0;
 }

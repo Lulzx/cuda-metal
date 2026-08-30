@@ -1746,6 +1746,24 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         param_is_ptr[p.name] = p.is_pointer;
     }
 
+    // A struct passed to a kernel by value arrives as a byte array
+    // (`.param .align 4 .b8 name[24]`), and PTX reads its fields with
+    // `ld.param.<type> [name+offset]`. Declaring such a parameter as one
+    // scalar loses both the declared size and every field offset, so all
+    // fields alias to the same four bytes -- and a float field read through a
+    // `uint` declaration is reinterpreted as its integer bit pattern, turning
+    // 1.001f into 1.07e9. GROMACS hits this with the barostat's ScalingMatrix.
+    // Bind the whole blob as words instead and index it per field.
+    std::unordered_map<std::string, std::size_t> aggregate_param_bytes;
+    for (const auto& p : entry->params) {
+        if (!p.is_pointer && p.type == ".b8" && p.byte_size >= 4) {
+            aggregate_param_bytes[p.name] = p.byte_size;
+        }
+    }
+    // Set when a by-value struct is used in a way this lowering cannot express;
+    // the kernel is then refused rather than silently miscomputed.
+    std::string aggregate_error;
+
     for (std::size_t instr_index = 0; instr_index < entry->instructions.size(); ++instr_index) {
         const auto& instr = entry->instructions[instr_index];
         const auto& op = instr.opcode;
@@ -1773,15 +1791,25 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         if (op.size() >= 8 && op.substr(0, 8) == "ld.param" && ops.size() >= 2) {
             const std::string dest = get_reg(ops[0]);
             std::string pname;
+            std::size_t poffset = 0;
             if (!ops[1].empty() && ops[1].front() == '[') {
                 pname = ops[1].substr(1);
-                const auto plus = pname.find('+');
-                if (plus != std::string::npos) {
-                    pname = pname.substr(0, plus);
-                }
                 const auto br = pname.find(']');
                 if (br != std::string::npos) {
                     pname = pname.substr(0, br);
+                }
+                // `[name+offset]` selects a field of a by-value struct. The
+                // offset is part of the address, not decoration: dropping it
+                // makes every field read the same bytes.
+                const auto plus = pname.find('+');
+                if (plus != std::string::npos) {
+                    try {
+                        poffset = static_cast<std::size_t>(
+                            std::stoull(pname.substr(plus + 1)));
+                    } catch (...) {
+                        poffset = 0;
+                    }
+                    pname = pname.substr(0, plus);
                 }
                 while (!pname.empty() &&
                        std::isspace(static_cast<unsigned char>(pname.back()))) {
@@ -1789,6 +1817,82 @@ std::string emit_metal_source_generic(const std::string& entry_name,
                 }
             }
             if (!dest.empty() && !pname.empty()) {
+                if (const auto agg = aggregate_param_bytes.find(pname);
+                    agg != aggregate_param_bytes.end()) {
+                    // Word-indexed read out of the byte blob. The PTX type
+                    // suffix -- not the register spelling -- says how to
+                    // interpret the word.
+                    const bool is_float = op.find(".f32") != std::string::npos;
+                    const bool is_word = is_float || op.find(".u32") != std::string::npos ||
+                                         op.find(".s32") != std::string::npos ||
+                                         op.find(".b32") != std::string::npos;
+                    if (!is_word || poffset % 4 != 0 || poffset + 4 > agg->second) {
+                        if (aggregate_error.empty()) {
+                            aggregate_error =
+                                "by-value struct parameter '" + pname +
+                                "' is read by '" + op + "' at offset " +
+                                std::to_string(poffset) +
+                                ", which this lowering cannot express";
+                        }
+                        continue;
+                    }
+                    // Optimised NVPTX keeps floats in .b32 registers, so the
+                    // load's own suffix usually does not say whether the field
+                    // is a float -- `ld.param.b32 %r, [m+12]` feeding an
+                    // `fma.rn.f32` is the common shape. Ask the uses instead:
+                    // reading the word as an integer and letting it convert
+                    // into float arithmetic would turn 1.001f into its bit
+                    // pattern, 1.07e9, which is the whole bug being fixed here.
+                    bool used_as_float = is_float;
+                    bool used_as_integer = false;
+                    // A `mov.b32 %f, %r` between the load and the arithmetic is
+                    // how clang gets a .b32 register into a float one, so the
+                    // type has to be followed through the move chain rather
+                    // than read off the first use.
+                    std::vector<std::string> tracked{ops[0]};
+                    for (std::size_t u = instr_index + 1;
+                         u < entry->instructions.size(); ++u) {
+                        const auto& use = entry->instructions[u];
+                        if (use.operands.size() < 2) {
+                            continue;
+                        }
+                        bool reads_tracked = false;
+                        for (std::size_t o = 1; o < use.operands.size(); ++o) {
+                            if (std::find(tracked.begin(), tracked.end(), use.operands[o]) !=
+                                tracked.end()) {
+                                reads_tracked = true;
+                                break;
+                            }
+                        }
+                        if (!reads_tracked) {
+                            continue;
+                        }
+                        if (use.opcode.rfind("mov", 0) == 0) {
+                            tracked.push_back(use.operands[0]);
+                            continue;
+                        }
+                        if (use.opcode.find(".f32") != std::string::npos) {
+                            used_as_float = true;
+                        } else if (use.opcode.rfind("st.param", 0) != 0) {
+                            used_as_integer = true;
+                        }
+                    }
+                    if (used_as_float && used_as_integer) {
+                        if (aggregate_error.empty()) {
+                            aggregate_error =
+                                "by-value struct parameter '" + pname + "' field at offset " +
+                                std::to_string(poffset) +
+                                " is used as both float and integer";
+                        }
+                        continue;
+                    }
+                    const std::string word =
+                        pname + "[" + std::to_string(poffset / 4) + "]";
+                    reg[dest] = {.kind = RegKind::ParamScalar,
+                                 .param_name =
+                                     used_as_float ? "as_type<float>(" + word + ")" : word};
+                    continue;
+                }
                 const auto it = param_is_ptr.find(pname);
                 if (it != param_is_ptr.end()) {
                     reg[dest] = {.kind = it->second ? RegKind::ParamPtr : RegKind::ParamScalar,
@@ -2192,6 +2296,13 @@ std::string emit_metal_source_generic(const std::string& entry_name,
         }
     }
 
+    // A by-value struct read in a way the word-indexed model cannot express is
+    // declined rather than guessed at: the LLVM path may still lower it, and a
+    // wrong field read here would be silent.
+    if (!aggregate_error.empty()) {
+        return {};
+    }
+
     // ── Pass 2: emit Metal source ─────────────────────────────────────────────
 
     std::ostringstream metal;
@@ -2209,6 +2320,11 @@ std::string emit_metal_source_generic(const std::string& entry_name,
             const std::string etype =
                 param_etype.count(p.name) ? param_etype.at(p.name) : "float";
             metal << "    device " << etype << "* " << p.name
+                  << " [[buffer(" << buf_idx << ")]]";
+        } else if (aggregate_param_bytes.count(p.name) != 0) {
+            // The host already binds the whole struct (setBytes with its real
+            // size); only the declared shape here was too small.
+            metal << "    constant uint* " << p.name
                   << " [[buffer(" << buf_idx << ")]]";
         } else {
             std::string mtype = "uint";

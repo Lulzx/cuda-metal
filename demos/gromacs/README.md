@@ -105,7 +105,7 @@ ADH (134,177 atoms) is wired into `--all` and uses the same gate, but has no
 recorded number here — run it and read the table `run.sh` prints rather than
 trusting a figure copied into a README.
 
-208 kernel launches are traced with `device=apple_gpu` over a two-step
+88 kernel launches are traced with `device=apple_gpu` over a two-step
 provenance run, against 28 before the FFT moved to Metal.
 
 Moving the FFT to Metal took the 20-step villin run from 0.63 s to 0.46 s and
@@ -171,6 +171,21 @@ unsigned and casting straight to it turned every negative result into 0. Both
 mistakes were caught by `tests/cuda_projects/libdevice`, which now probes
 `rsqrt` and all four `__float2int_*` modes over inputs that straddle zero.
 
+**A by-value struct kernel parameter had all of its fields aliased onto one
+word.** A struct passed to a kernel by value arrives as `.param .align 4 .b8
+name[24]`, and PTX reads its fields with `ld.param.<type> [name+offset]`. The
+PTX->MSL path declared the whole thing as a single `constant uint&` and parsed
+the offset off the parameter name and discarded it, so all six members of
+GROMACS's barostat `ScalingMatrix` read the same four bytes -- and a float field
+read through a `uint` declaration is its *bit pattern*, so 1.001f became 1.07e9.
+Coordinates left the box at the first pressure-coupling step and the potential
+went NaN. Nothing warned: the kernel lowered, compiled and launched. The fields
+are now bound as words and read at their own offsets, and because optimised
+NVPTX keeps floats in `.b32` registers (`ld.param.b32` feeding an `fma.rn.f32`),
+the field's type is taken from its uses through the move chain rather than from
+the load's own suffix. A struct access the model cannot express is declined
+rather than guessed at. This is what `pcoupl` being unexercised was hiding.
+
 **cuFFT was rank-1 only**, so `cufftPlanMany` with `rank = 3` returned
 `CUFFT_NOT_SUPPORTED` and `-pme gpu` could not be used at all. It now executes
 ranks 1 to 3 for every transform type, together with cuFFT's advanced data
@@ -211,9 +226,19 @@ Apple's `-lto_library`), `CUDA::cudart_static`, and directory symlinks for
 - **Single rank, single GPU.** `GMX_MPI=OFF`, no domain decomposition, no
   halo exchange, no PME/PP split across ranks.
 - **Mixed precision only.** GROMACS's double-precision build is untested here.
-- **Coverage is these three systems.** They are all AMBER/CHARMM-style
-  biomolecular systems with PME electrostatics. Reaction-field (`rf.mdp`),
-  virtual sites, free-energy perturbation, and pressure coupling are unexercised.
+- **`run.sh` covers three systems; `sweep.sh` covers the whole set.**
+  `bash demos/gromacs/sweep.sh` runs every case in every archive of the
+  benchmark collection through the same gate -- 82 cases up to 1.07M atoms,
+  including the reaction-field, virtual-site, CHARMM force-switch and
+  pressure-coupled variants `run.sh` never touches, and the pure-water systems
+  that have no bonded interactions at all. `fetch.sh` downloads the archives;
+  the origin throttles per connection, so it fetches byte ranges concurrently
+  (~8x). Free-energy perturbation remains unexercised.
+- **One case is still outside its noise floor.** Pure water at 768k atoms
+  differs from the CPU build by 2.1e-03 at step 0 against a 1.6e-03 floor. It is
+  the nonbonded/PME path, not the update: taking the update off the GPU does not
+  move it. The same shape shows up as STMV's `Coul. recip.`, which is 2.3x its
+  floor and unchanged by either FFT backend but drops 90x with PME on the CPU.
 - **This is a correctness demo, not a performance one.** The build is Debug-side
   CuMetal with fftpack for the CPU mesh, and `nstcalcenergy = 1` forces an
   energy reduction every step. No ns/day number here is worth quoting.
