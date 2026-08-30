@@ -27,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <sstream>
+#include <sys/stat.h>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -55,12 +56,10 @@ void trace_op(const char* tag, const char* detail) {
     std::fflush(stderr);
 }
 
-bool load_inline_static_shared_bytes(const char* metallib_path,
-                                     const char* expected_kernel,
-                                     std::size_t* out_bytes) {
-    if (metallib_path == nullptr || expected_kernel == nullptr || out_bytes == nullptr) {
-        return false;
-    }
+// Uncached parse; callers should go through load_inline_static_shared_bytes below.
+bool load_inline_static_shared_bytes_uncached(const char* metallib_path,
+                                              const char* expected_kernel,
+                                              std::size_t* out_bytes) {
     *out_bytes = 0;
     std::ifstream abi(std::string(metallib_path) + ".cumetal-abi");
     if (!abi) {
@@ -118,6 +117,51 @@ bool load_inline_static_shared_bytes(const char* metallib_path,
         return false;
     }
     return true;
+}
+
+struct InlineAbiCacheEntry {
+    bool valid = false;
+    std::size_t shared_bytes = 0;
+    bool file_present = false;
+    struct timespec mtime {};
+    off_t size = 0;
+};
+
+// Caches the sidecar parse per metallib+kernel, revalidated via stat() so an on-disk change is still picked up.
+bool load_inline_static_shared_bytes(const char* metallib_path,
+                                     const char* expected_kernel,
+                                     std::size_t* out_bytes) {
+    if (metallib_path == nullptr || expected_kernel == nullptr || out_bytes == nullptr) {
+        return false;
+    }
+    const std::string sidecar_path = std::string(metallib_path) + ".cumetal-abi";
+    struct stat st {};
+    const bool file_present = ::stat(sidecar_path.c_str(), &st) == 0;
+
+    static std::mutex cache_mutex;
+    static std::unordered_map<std::string, InlineAbiCacheEntry> cache;
+    const std::string cache_key = std::string(metallib_path) + "::" + expected_kernel;
+
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    const auto found = cache.find(cache_key);
+    if (found != cache.end() && found->second.file_present == file_present &&
+        (!file_present ||
+         (found->second.mtime.tv_sec == st.st_mtimespec.tv_sec &&
+          found->second.mtime.tv_nsec == st.st_mtimespec.tv_nsec &&
+          found->second.size == st.st_size))) {
+        *out_bytes = found->second.shared_bytes;
+        return found->second.valid;
+    }
+
+    InlineAbiCacheEntry entry;
+    entry.file_present = file_present;
+    entry.mtime = st.st_mtimespec;
+    entry.size = st.st_size;
+    entry.valid =
+        load_inline_static_shared_bytes_uncached(metallib_path, expected_kernel, &entry.shared_bytes);
+    *out_bytes = entry.shared_bytes;
+    cache[cache_key] = entry;
+    return entry.valid;
 }
 }  // namespace
 
