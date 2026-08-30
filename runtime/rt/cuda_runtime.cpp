@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <cfloat>
 #include <chrono>
@@ -238,6 +239,7 @@ struct CuMetalArray {
 namespace {
 
 constexpr int kCudaCompatVersion = 12000;
+constexpr std::size_t kDefaultPrintfFifoSize = 1024u * 1024u;
 
 struct RuntimeState {
     std::once_flag init_once;
@@ -268,6 +270,7 @@ struct RuntimeState {
     std::size_t device_heap_size = 8u * 1024u * 1024u;
     std::shared_ptr<cumetal::metal_backend::Buffer> device_heap;
     std::size_t persisting_l2_limit = 0;
+    std::size_t printf_fifo_size = kDefaultPrintfFifoSize;
 };
 
 RuntimeState& runtime_state() {
@@ -774,15 +777,20 @@ void drain_printf_buffer(const void* buf_bytes,
     }
     const std::uint32_t* buf = static_cast<const std::uint32_t*>(buf_bytes);
     const std::uint32_t total_words = buf[0];
-    if (total_words == 0 || total_words > cap_words - 1u) {
-        return;
-    }
+    if (total_words == 0) return;
+    // Reservations are monotonic. If the cursor exceeds capacity, every
+    // complete record before the first rejected reservation is still a valid
+    // prefix and must be drained; later reservations cannot create holes in
+    // that prefix because their positions only increase.
+    const std::uint32_t available_words =
+        std::min(total_words, cap_words - 1u);
     // Walk records starting at index 1
     std::uint32_t i = 1u;
-    while (i + 1u <= total_words) {
+    while (i + 1u <= available_words) {
         const std::uint32_t fmt_id = buf[i];
         const std::uint32_t n_args = buf[i + 1u];
-        if (n_args > total_words || i + 2u + n_args > total_words + 1u) {
+        if (n_args > available_words ||
+            i + 2u + n_args > available_words + 1u) {
             break;
         }
         if (fmt_id < static_cast<std::uint32_t>(formats.size())) {
@@ -3782,6 +3790,7 @@ cudaError_t cudaDeviceReset(void) {
         state.device_heap.reset();
         state.device_heap_size = 8u * 1024u * 1024u;
         state.persisting_l2_limit = 0;
+        state.printf_fifo_size = kDefaultPrintfFifoSize;
     }
     cumetal::native_registration::clear();
     cumetal::registration::clear();
@@ -5408,15 +5417,28 @@ cudaError_t cudaLaunchKernel(const void* func,
         return launch_fail(cudaSuccess, "k_compute_batched_ptrs runtime helper");
     }
 
-    // Printf ring buffer size: 1 MB default, overridable via CUMETAL_PRINTF_BUFFER_SIZE (bytes).
+    // Printf ring buffer size: cudaDeviceSetLimit controls the process value;
+    // CUMETAL_PRINTF_BUFFER_SIZE remains an explicit per-process override.
     const std::uint32_t kPrintfCapWords = [&]() -> std::uint32_t {
-        constexpr std::uint32_t kDefault = 256u * 1024u;  // 1 MB
+        RuntimeState& state = runtime_state();
+        std::size_t configured_bytes = 0;
+        {
+            std::lock_guard<std::mutex> lock(state.device_heap_mutex);
+            configured_bytes = state.printf_fifo_size;
+        }
         const char* env = std::getenv("CUMETAL_PRINTF_BUFFER_SIZE");
-        if (env == nullptr || env[0] == '\0') return kDefault;
-        const long val = std::strtol(env, nullptr, 10);
-        if (val <= 0) return kDefault;
-        const std::uint32_t words = static_cast<std::uint32_t>(val) / sizeof(std::uint32_t);
-        return words > 0 ? words : kDefault;
+        if (env != nullptr && env[0] != '\0') {
+            char* end = nullptr;
+            errno = 0;
+            const unsigned long long value = std::strtoull(env, &end, 10);
+            if (errno == 0 && end != env && *end == '\0' && value > 0 &&
+                value <= std::numeric_limits<std::size_t>::max()) {
+                configured_bytes = static_cast<std::size_t>(value);
+            }
+        }
+        const std::size_t words = configured_bytes / sizeof(std::uint32_t);
+        return static_cast<std::uint32_t>(std::clamp<std::size_t>(
+            words, 1u, std::numeric_limits<std::uint32_t>::max()));
     }();
     const bool needs_printf = use_registered_kernel && !registered_kernel.printf_formats.empty();
     const bool needs_device_heap =
@@ -6894,6 +6916,20 @@ cudaError_t cudaDeviceSetLimit(cudaLimit limit, size_t value) {
         }
         state.device_heap_size = value;
     }
+    if (limit == cudaLimitPrintfFifoSize) {
+        if (value == 0 ||
+            value > static_cast<std::size_t>(
+                        std::numeric_limits<std::uint32_t>::max()) *
+                        sizeof(std::uint32_t)) {
+            return fail(cudaErrorInvalidValue);
+        }
+        const std::size_t rounded =
+            (value + sizeof(std::uint32_t) - 1u) &
+            ~(sizeof(std::uint32_t) - 1u);
+        RuntimeState& state = runtime_state();
+        std::lock_guard<std::mutex> lock(state.device_heap_mutex);
+        state.printf_fifo_size = rounded;
+    }
     return fail(cudaSuccess);
 }
 
@@ -6910,7 +6946,11 @@ cudaError_t cudaDeviceGetLimit(size_t* pValue, cudaLimit limit) {
             *pValue = 1024;
             break;
         case cudaLimitPrintfFifoSize:
-            *pValue = 1024u * 1024u;  // 1 MB (matches CUMETAL_PRINTF_BUFFER_SIZE default)
+            {
+                RuntimeState& state = runtime_state();
+                std::lock_guard<std::mutex> lock(state.device_heap_mutex);
+                *pValue = state.printf_fifo_size;
+            }
             break;
         case cudaLimitMallocHeapSize:
             {

@@ -51,8 +51,11 @@ on both PTX backends. Dynamic `*` width/precision and bounded `%s` reads from
 tracked allocations are also tested on both paths. Registration-backed writable
 module strings are materialized on legacy PTX, typed PTX, and native AOT;
 arbitrary untracked addresses are rejected safely as `[string]`. Embedded
-read-only module-constant strings and complete overflow-return parity remain
-gaps.
+read-only module-constant strings remain a gap. `cudaLimitPrintfFifoSize`
+configures the bounded ring; format-only and multi-argument calls return their
+CUDA parsed-argument counts even when capacity rejects a record, and a complete
+retained prefix is drained. CUDA's circular overwrite policy, null-format
+return, and internal-error return remain outside the proved subset.
 
 ## FP64 and atomics
 

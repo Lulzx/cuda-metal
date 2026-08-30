@@ -5648,7 +5648,7 @@ class GenericLlvmEmitter {
             }
             os << "  br label %" << done_label << "\n\n";
             os << done_label << ":\n";
-            return store_ret_bits("0", 32);
+            return store_ret_bits(std::to_string(call.arguments.size()), 32);
         }
 
         if (callee == "__nv_frexp") {

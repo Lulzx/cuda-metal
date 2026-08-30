@@ -1797,8 +1797,9 @@ int main() {
                          std::string::npos &&
                      typed_printf.source.find("[[buffer(2)]]") !=
                          std::string::npos &&
+                     typed_printf.source.find(" = 3;") != std::string::npos &&
                      typed_printf.source.find("vprintf(") == std::string::npos,
-                 "typed NVVM lowers constant-format vprintf to a bounded hidden ring ABI");
+                 "typed NVVM lowers vprintf with a parsed-count return to a bounded hidden ring ABI");
     if (!typed_printf.ok) std::cerr << typed_printf.error << "\n";
 
     const metal::NvvmToMslResult malformed_printf = metal::compile_nvvm_to_msl(

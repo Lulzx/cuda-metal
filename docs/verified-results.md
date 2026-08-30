@@ -46,9 +46,14 @@ checks all 32 coordinate records, dynamic width, a wide scalar, tracked string
 materialization, a bounded unterminated string, a registration-backed writable
 module string, and safe rejection of an arbitrary untracked address. Matching
 legacy-PTX and typed-PTX gates exercise the same string cases on the Apple GPU.
+All three paths also set the FIFO to three words, retain and drain a format-only
+record, reject the following two-argument record, and observe device return
+values `0` and `2`; this separates CUDA parsed-argument returns from CuMetal's
+bounded record acceptance. `functional_runtime_device_limits` independently
+checks byte-to-word rounding, querying, invalid zero rejection, and reset.
 These are numerical/runtime results, separate from the 28-file cross-Clang
 compile matrix. Embedded read-only module-constant strings remain outside this
-proved subset.
+proved subset, as does CUDA's circular overwrite policy.
 
 The reviewed Phase 4 manifest ran 185/185 required functional tests on
 2026-08-29 with zero failures and zero skips. This includes native-AOT numerical

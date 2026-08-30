@@ -50,6 +50,11 @@ __global__ void print_untracked_string() {
            reinterpret_cast<const char*>(0x12345678ULL));
 }
 
+__global__ void capture_printf_returns(int* values) {
+    values[0] = printf("RETURN zero\n");
+    values[1] = printf("RETURN args=%d,%d\n", 11, 22);
+}
+
 int main() {
     print_coordinates<<<dim3(2, 2), dim3(2, 2, 2)>>>(37);
     if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess) {
@@ -126,6 +131,36 @@ int main() {
         return 1;
     }
     cudaFree(unterminated);
+    int* return_values = nullptr;
+    int host_return_values[2] = {-99, -99};
+    if (cudaMalloc(reinterpret_cast<void**>(&return_values),
+                   sizeof(host_return_values)) != cudaSuccess ||
+        cudaMemset(return_values, 0xff, sizeof(host_return_values)) != cudaSuccess ||
+        cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 12) != cudaSuccess) {
+        std::printf("FAIL: printf return setup\n");
+        cudaFree(return_values);
+        cudaFree(pointer);
+        return 1;
+    }
+    capture_printf_returns<<<1, 1>>>(return_values);
+    if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess ||
+        cudaMemcpy(host_return_values, return_values, sizeof(host_return_values),
+                   cudaMemcpyDeviceToHost) != cudaSuccess) {
+        std::printf("FAIL: printf return launch/copy: %s\n",
+                    cudaGetErrorString(error));
+        cudaFree(return_values);
+        cudaFree(pointer);
+        return 1;
+    }
+    cudaFree(return_values);
+    if (host_return_values[0] != 0 || host_return_values[1] != 2) {
+        std::printf("FAIL: printf returns zero=%d args=%d\n",
+                    host_return_values[0], host_return_values[1]);
+        cudaFree(pointer);
+        return 1;
+    }
+    std::printf("RETURN_VALUES zero=%d args=%d\n",
+                host_return_values[0], host_return_values[1]);
     cudaFree(pointer);
     std::printf("HOST_DONE\n");
     return 0;

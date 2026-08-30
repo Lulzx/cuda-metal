@@ -84,5 +84,11 @@ if [[ "$(grep -Fxc 'STRING value=[unterminated-string]' "${OUTPUT_FILE}")" -ne 1
     echo "FAIL: unterminated tracked string was not bounded explicitly"
     exit 1
 fi
+if [[ "$(grep -Fxc 'RETURN zero' "${OUTPUT_FILE}")" -ne 1 ]] ||
+   grep -q '^RETURN args=' "${OUTPUT_FILE}" ||
+   [[ "$(grep -Fxc 'RETURN_VALUES zero=0 args=2' "${OUTPUT_FILE}")" -ne 1 ]]; then
+    echo "FAIL: printf return/overflow behavior is incomplete"
+    exit 1
+fi
 
-echo "PASS: Clang device printf ABI emitted scalar, dynamic-field, and tracked-string GPU records (${PTX_BACKEND})"
+echo "PASS: Clang device printf ABI emitted bounded records and CUDA return counts (${PTX_BACKEND})"

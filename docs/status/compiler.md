@@ -56,8 +56,9 @@ the broader libdevice numerical proof remains attributed to the direct path.
 Both typed frontends also decode constant-format Clang `vprintf` into the same
 bounded atomic ring-record ABI. Focused Apple-GPU tests validate every record
 from a 32-lane multidimensional launch and prove a capacity-boundary record is
-rejected without payload writes; unresolved formats and unsupported tuple
-widths fail explicitly.
+rejected without payload writes while its call still returns the CUDA
+parsed-argument count. Format-only calls return zero. Unresolved formats and
+unsupported tuple widths fail explicitly.
 The typed PTX frontend also materializes the selected kernel's reachable direct
 `.func` graph. The numerical device-call projects cover scalar returns, pointer
 arguments and offsets, loops, pointer merges, early exits, a flat 12-byte

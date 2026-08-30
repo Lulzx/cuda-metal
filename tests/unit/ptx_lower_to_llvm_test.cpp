@@ -266,10 +266,10 @@ int main() {
                          "atomicrmw add i32 addrspace(1)* %__cumetal_printf_buffer") &&
                     contains(llvm_printf.llvm_ir,
                              "i32 addrspace(2)* %__cumetal_printf_capacity") &&
-                    contains(llvm_printf.llvm_ir, "store i32 0") &&
+                    contains(llvm_printf.llvm_ir, "store i32 1") &&
                     llvm_printf.printf_formats.size() == 1 &&
                     llvm_printf.printf_formats[0] == "value=%d",
-                "LLVM vprintf carries hidden args, record writer, and format metadata")) {
+                "LLVM vprintf carries hidden args, parsed-count return, record writer, and format metadata")) {
         return 1;
     }
 

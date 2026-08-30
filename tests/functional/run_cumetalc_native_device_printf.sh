@@ -52,5 +52,11 @@ if [[ "$(grep -Fxc 'UNTRACKED value=[string]' "${OUTPUT_FILE}")" -ne 1 ]]; then
     echo "FAIL: native-AOT untracked device string was not rejected safely"
     exit 1
 fi
+if [[ "$(grep -Fxc 'RETURN zero' "${OUTPUT_FILE}")" -ne 1 ]] ||
+   grep -q '^RETURN args=' "${OUTPUT_FILE}" ||
+   [[ "$(grep -Fxc 'RETURN_VALUES zero=0 args=2' "${OUTPUT_FILE}")" -ne 1 ]]; then
+    echo "FAIL: native-AOT printf return/overflow behavior is incomplete"
+    exit 1
+fi
 
 echo "PASS: native-AOT device printf metadata and GPU records match the CUDA source ABI"

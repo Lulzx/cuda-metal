@@ -58,7 +58,10 @@ launch success. CPU or approximate paths must identify themselves.
   binary64 floating, character, flags, fixed and dynamic width/precision, and
   `%%` forms. Bounded `%s` formatting materializes tracked allocations and
   registration-backed writable module strings; untracked addresses produce the
-  safe `[string]` placeholder instead of being dereferenced.
+  safe `[string]` placeholder instead of being dereferenced. The FIFO size
+  round-trips through `cudaDeviceSetLimit`/`cudaDeviceGetLimit`; complete
+  retained records drain on overflow, and device calls return their parsed
+  argument count independently of record acceptance.
 
 ## Installed headers
 

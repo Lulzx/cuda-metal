@@ -2937,7 +2937,9 @@ struct AstLowerer {
                 if (!operation.results.empty()) {
                     const MslType result_type = lower_result_type(operation);
                     statements->push_back(declare_result(
-                        operation, MslExpression::literal("0", result_type)));
+                        operation,
+                        MslExpression::literal(
+                            std::to_string(argument_bits.size()), result_type)));
                 }
                 continue;
             }

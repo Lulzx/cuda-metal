@@ -46,6 +46,23 @@ int main() {
         std::fprintf(stderr, "FAIL: cudaDeviceSetLimit(cudaLimitStackSize) failed\n");
         return 1;
     }
+    if (cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 11) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaDeviceSetLimit(cudaLimitPrintfFifoSize) failed\n");
+        return 1;
+    }
+    size_t configured_printf_size = 0;
+    if (cudaDeviceGetLimit(&configured_printf_size, cudaLimitPrintfFifoSize) !=
+            cudaSuccess ||
+        configured_printf_size != 12) {
+        std::fprintf(stderr,
+                     "FAIL: printf FIFO limit did not round to a word boundary\n");
+        return 1;
+    }
+    if (cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 0) != cudaErrorInvalidValue ||
+        cudaDeviceSetLimit(cudaLimitPrintfFifoSize, printf_size) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: printf FIFO limit validation/reset failed\n");
+        return 1;
+    }
     if (cudaDeviceSetLimit(cudaLimitMallocHeapSize, 16 * 1024 * 1024) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaDeviceSetLimit(cudaLimitMallocHeapSize) failed\n");
         return 1;

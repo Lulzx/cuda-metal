@@ -1090,8 +1090,9 @@ BODY:
                      clang_printf.printf_formats.front() == "PRINTF[%d,%d]=%d\n" &&
                      clang_printf.source.find("atomic_fetch_add_explicit") !=
                          std::string::npos &&
+                     clang_printf.source.find(" = 3;") != std::string::npos &&
                      clang_printf.source.find("vprintf(") == std::string::npos,
-                 "typed PTX decodes Clang vprintf scaffolding into the shared bounded ring ABI");
+                 "typed PTX decodes Clang vprintf into the bounded ring and parsed-count return ABI");
     if (!clang_printf.ok) std::cerr << clang_printf.error << "\n";
 
     const std::string clang_null_cvta_ptx = R"ptx(

@@ -91,8 +91,8 @@ compiler paths and their selection policy are in
 - Vector add, SAXPY, reduction, selected matrix/library operations, typed
   direct/PTX FP64, 32-bit atomics, lock-backed 64-bit typed-PTX atomics, fences,
   and bounded device `printf` including registered writable module strings and
-  safe untracked-pointer rejection, typed direct
-  constant/device symbols,
+  parsed-argument returns across capacity rejection plus safe untracked-pointer
+  handling, typed direct constant/device symbols,
   shared memory, warp operations, streams, and events have focused numerical
   Apple-GPU tests.
 - `VF64-metal` is pinned and its `fast48`, `wide48`, and `ieee64` integration

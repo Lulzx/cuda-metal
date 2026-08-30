@@ -580,14 +580,20 @@ struct Importer {
             return fail(&call, "typed vprintf requires a constant format string");
         }
 
+        const bool no_arguments =
+            llvm::isa<llvm::ConstantPointerNull>(call.getArgOperand(1));
         const llvm::Value* argument_base = nullptr;
-        std::int64_t ignored_offset = 0;
-        if (!constant_pointer_base_and_offset(*call.getArgOperand(1),
-                                              &argument_base, &ignored_offset) ||
-            ignored_offset != 0 ||
-            !llvm::isa<llvm::AllocaInst>(argument_base)) {
-            return fail(&call,
-                        "typed vprintf requires a statically packed argument tuple");
+        if (!no_arguments) {
+            std::int64_t ignored_offset = 0;
+            if (!constant_pointer_base_and_offset(*call.getArgOperand(1),
+                                                  &argument_base,
+                                                  &ignored_offset) ||
+                ignored_offset != 0 ||
+                !llvm::isa<llvm::AllocaInst>(argument_base)) {
+                return fail(
+                    &call,
+                    "typed vprintf requires a null or statically packed argument tuple");
+            }
         }
 
         std::map<std::int64_t, const llvm::Value*> packed_arguments;
@@ -610,7 +616,7 @@ struct Importer {
                 }
             }
         }
-        if (packed_arguments.empty()) {
+        if (!no_arguments && packed_arguments.empty()) {
             return fail(&call, "typed vprintf argument tuple is empty");
         }
 
