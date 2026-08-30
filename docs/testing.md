@@ -27,6 +27,12 @@ Both supported build policies remain required:
 | Release + binary shim off | Shipping, source-first configuration |
 | Debug + binary shim on | Development and opt-in alias coverage |
 
+The Phase 5 `bench_phase5_all_kernels` performance gate is registered only in
+Release builds. It measures synchronized host launch overhead as well as GPU
+execution, so an unoptimized Debug runtime is not a comparable performance
+configuration. The test carries the `benchmark`, `gpu`, and `performance`
+labels; Debug inventories contain correctness tests only.
+
 The host selection covers parser, CFG/SSA, typed IR/MSL, PTX lowering, AIR
 container, negative-path, headers, CLI, cache, ABI registration, and packaging
 checks. It does not prove GPU execution:

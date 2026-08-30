@@ -601,10 +601,13 @@ if(CUMETAL_BUILD_TESTS)
     add_subdirectory(tests/ptx_sweep)
     add_subdirectory(tests/unit)
 
-    # Phase 5 performance benchmark tests (skipped if xcrun is unavailable).
+    # Phase 5 performance benchmark test (skipped if xcrun is unavailable).
+    # The gate measures host launch overhead as well as GPU execution and is a
+    # release criterion; an unoptimized Debug runtime is not a comparable
+    # performance configuration. Keep it out of Debug correctness inventories.
     # Uses --max-ratio=2.0 to enforce the spec §5.7 / §10.6 gate: CuMetal GPU time must
     # be within 2x of native Metal GPU time for all memory-bound kernels.
-    if(APPLE)
+    if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release")
         add_test(
             NAME bench_phase5_all_kernels
             COMMAND bash
@@ -613,7 +616,12 @@ if(CUMETAL_BUILD_TESTS)
                 ${CMAKE_SOURCE_DIR}/scripts/generate_bench_metallib.sh
                 ${CMAKE_CURRENT_BINARY_DIR}/bench_phase5
         )
-        set_tests_properties(bench_phase5_all_kernels PROPERTIES SKIP_RETURN_CODE 77)
+        set_tests_properties(
+            bench_phase5_all_kernels
+            PROPERTIES
+                SKIP_RETURN_CODE 77
+                LABELS "benchmark;gpu;performance"
+        )
     endif()
 
     cumetal_apply_metal_toolchain_to_tests(

@@ -155,10 +155,12 @@ kernels take roughly 0.2 ms, so averages mostly measure scheduler interference.
 The target is at most 2x native Metal, not a claim that translated code beats
 the baseline.
 
-Reproduce it with:
+Reproduce it from a Release build with:
 
 ```bash
-ctest --test-dir build -R bench_phase5_all_kernels --output-on-failure
+cmake -B build-release -DCMAKE_BUILD_TYPE=Release
+cmake --build build-release --target cumetal_bench
+ctest --test-dir build-release -R bench_phase5_all_kernels --output-on-failure
 ```
 
 ## cuFFT backend comparison
