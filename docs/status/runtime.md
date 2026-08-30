@@ -16,7 +16,8 @@ Covered families include:
 - stream-ordered allocation/free and a conservative memory-pool subset;
 - streams, priorities-as-zero, callbacks/host functions, waits, and events;
 - kernel launch through Runtime, Driver, and source registration APIs;
-- symbols/constants/globals, occupancy queries, attributes, and error strings;
+- symbols/constants/globals, occupancy queries, attributes, and error strings,
+  including distinct Runtime/Driver graph-executable update failures;
 - 2D pitched allocation/copy and conservative UMA advice/prefetch behavior.
 
 Exact symbols are defined by the clean-room headers and focused API tests. API

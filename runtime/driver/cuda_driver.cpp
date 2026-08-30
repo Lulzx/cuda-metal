@@ -159,6 +159,8 @@ CUresult map_cuda_error(cudaError_t error) {
             return CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED;
         case cudaErrorPeerAccessNotEnabled:
             return CUDA_ERROR_PEER_ACCESS_NOT_ENABLED;
+        case cudaErrorGraphExecUpdateFailure:
+            return CUDA_ERROR_GRAPH_EXEC_UPDATE_FAILURE;
         case cudaErrorUnknown:
             return CUDA_ERROR_UNKNOWN;
     }
@@ -2134,6 +2136,9 @@ CUresult cuGetErrorName(CUresult error, const char** pStr) {
         case CUDA_ERROR_INVALID_CONTEXT:
             *pStr = "CUDA_ERROR_INVALID_CONTEXT";
             break;
+        case CUDA_ERROR_NO_BINARY_FOR_GPU:
+            *pStr = "CUDA_ERROR_NO_BINARY_FOR_GPU";
+            break;
         case CUDA_ERROR_NOT_FOUND:
             *pStr = "CUDA_ERROR_NOT_FOUND";
             break;
@@ -2151,6 +2156,33 @@ CUresult cuGetErrorName(CUresult error, const char** pStr) {
             break;
         case CUDA_ERROR_PEER_ACCESS_NOT_ENABLED:
             *pStr = "CUDA_ERROR_PEER_ACCESS_NOT_ENABLED";
+            break;
+        case CUDA_ERROR_DEINITIALIZED:
+            *pStr = "CUDA_ERROR_DEINITIALIZED";
+            break;
+        case CUDA_ERROR_NO_DEVICE:
+            *pStr = "CUDA_ERROR_NO_DEVICE";
+            break;
+        case CUDA_ERROR_INVALID_HANDLE:
+            *pStr = "CUDA_ERROR_INVALID_HANDLE";
+            break;
+        case CUDA_ERROR_LAUNCH_FAILED:
+            *pStr = "CUDA_ERROR_LAUNCH_FAILED";
+            break;
+        case CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES:
+            *pStr = "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES";
+            break;
+        case CUDA_ERROR_ASSERT:
+            *pStr = "CUDA_ERROR_ASSERT";
+            break;
+        case CUDA_ERROR_NOT_PERMITTED:
+            *pStr = "CUDA_ERROR_NOT_PERMITTED";
+            break;
+        case CUDA_ERROR_NOT_SUPPORTED:
+            *pStr = "CUDA_ERROR_NOT_SUPPORTED";
+            break;
+        case CUDA_ERROR_GRAPH_EXEC_UPDATE_FAILURE:
+            *pStr = "CUDA_ERROR_GRAPH_EXEC_UPDATE_FAILURE";
             break;
         case CUDA_ERROR_UNKNOWN:
             *pStr = "CUDA_ERROR_UNKNOWN";

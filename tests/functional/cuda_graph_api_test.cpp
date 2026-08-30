@@ -275,6 +275,14 @@ static bool test_graph_dependencies_and_updates() {
         std::fprintf(stderr, "FAIL: topology-changing graph update was not rejected\n");
         return false;
     }
+    cudaGraphExecUpdateResultInfo update_info{};
+    if (cudaGraphExecUpdate(exec, cloned, &update_info) !=
+            cudaErrorGraphExecUpdateFailure ||
+        update_info.result != cudaGraphExecUpdateErrorTopologyChanged) {
+        std::fprintf(stderr,
+                     "FAIL: CUDA 12 graph update did not return the update-failure error\n");
+        return false;
+    }
 
     cudaGraphExecDestroy(exec);
     cudaGraphDestroy(cloned);

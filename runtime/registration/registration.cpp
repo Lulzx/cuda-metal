@@ -370,7 +370,8 @@ bool read_registration_metadata(const std::filesystem::path& artifact_path,
 #define REG_DEBUG(fmt, ...)                                                       \
     do {                                                                          \
         if (is_debug_registration()) {                                            \
-            std::fprintf(stderr, "[cumetal-reg] " fmt "\n", ##__VA_ARGS__);      \
+            std::fprintf(stderr, "[cumetal-reg] " fmt "\n"                    \
+                                 __VA_OPT__(,) __VA_ARGS__);                     \
         }                                                                         \
     } while (0)
 
@@ -1938,7 +1939,8 @@ void __cudaRegisterFatBinaryEnd(void** fat_cubin_handle) {
 }
 
 void __cudaUnregisterFatBinary(void** fat_cubin_handle) {
-    REG_DEBUG("__cudaUnregisterFatBinary handle=%p", fat_cubin_handle);
+    REG_DEBUG("__cudaUnregisterFatBinary handle=%p",
+              static_cast<void*>(fat_cubin_handle));
     if (fat_cubin_handle == nullptr) {
         return;
     }

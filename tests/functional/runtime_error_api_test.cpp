@@ -146,6 +146,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (std::strcmp(cudaGetErrorName(cudaErrorGraphExecUpdateFailure),
+                    "cudaErrorGraphExecUpdateFailure") != 0 ||
+        std::strcmp(cudaGetErrorString(cudaErrorGraphExecUpdateFailure),
+                    "graph executable update failure") != 0) {
+        std::fprintf(stderr, "FAIL: graph-update error name/string mismatch\n");
+        return 1;
+    }
+
     // Use a real metallib but request a function that cannot exist.  This
     // reaches Metal pipeline lookup and models a generated <<<>>> host stub,
     // whose cudaLaunchKernel return value is not available to the caller.

@@ -35,6 +35,7 @@ int main() {
         std::fprintf(stderr, "FAIL: cuGetErrorName/String failed for unknown code\n");
         return 1;
     }
+
     if (name == nullptr || description == nullptr) {
         std::fprintf(stderr, "FAIL: unknown cuGetErrorName/String returned null\n");
         return 1;
@@ -42,6 +43,16 @@ int main() {
     if (std::strcmp(name, "CUDA_ERROR_UNKNOWN") != 0 ||
         std::strcmp(description, "CUDA_ERROR_UNKNOWN") != 0) {
         std::fprintf(stderr, "FAIL: unknown driver error should map to CUDA_ERROR_UNKNOWN\n");
+        return 1;
+    }
+
+    if (cuGetErrorName(CUDA_ERROR_GRAPH_EXEC_UPDATE_FAILURE, &name) !=
+            CUDA_SUCCESS ||
+        std::strcmp(name, "CUDA_ERROR_GRAPH_EXEC_UPDATE_FAILURE") != 0 ||
+        cuGetErrorString(CUDA_ERROR_NOT_SUPPORTED, &description) !=
+            CUDA_SUCCESS ||
+        std::strcmp(description, "CUDA_ERROR_NOT_SUPPORTED") != 0) {
+        std::fprintf(stderr, "FAIL: extended driver error mappings mismatch\n");
         return 1;
     }
 

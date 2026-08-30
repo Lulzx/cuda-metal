@@ -6472,6 +6472,8 @@ const char* cudaGetErrorName(cudaError_t error) {
             return "cudaErrorCooperativeLaunchTooLarge";
         case cudaErrorNotPermitted:
             return "cudaErrorNotPermitted";
+        case cudaErrorGraphExecUpdateFailure:
+            return "cudaErrorGraphExecUpdateFailure";
         case cudaErrorUnknown:
             return "cudaErrorUnknown";
     }
@@ -6530,6 +6532,8 @@ const char* cudaGetErrorString(cudaError_t error) {
             return "unspecified launch failure";
         case cudaErrorNotPermitted:
             return "operation not permitted";
+        case cudaErrorGraphExecUpdateFailure:
+            return "graph executable update failure";
         case cudaErrorUnknown:
             return "cudaErrorUnknown";
     }
