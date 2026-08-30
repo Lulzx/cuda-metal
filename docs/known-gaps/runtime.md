@@ -48,8 +48,11 @@ buffer and 256-byte format limit. Focused Clang-ABI tests cover 32/64-bit
 signed/unsigned integers, hex flags, `size_t`, pointers, promoted binary64
 floating values, characters, fixed precision, and escaped percent signs
 on both PTX backends. Dynamic `*` width/precision and bounded `%s` reads from
-tracked allocations are also tested on both paths. Module-constant/untracked
-device strings and complete overflow-return parity remain gaps.
+tracked allocations are also tested on both paths. Registration-backed writable
+module strings are materialized on legacy PTX, typed PTX, and native AOT;
+arbitrary untracked addresses are rejected safely as `[string]`. Embedded
+read-only module-constant strings and complete overflow-return parity remain
+gaps.
 
 ## FP64 and atomics
 

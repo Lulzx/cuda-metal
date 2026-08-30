@@ -214,11 +214,20 @@ int main() {
     }
 
     std::string wide_clang_ptx = clang_abi_ptx;
+    const std::size_t global_declaration = wide_clang_ptx.find(
+        ".global .align 1 .b8 _$_str[8]");
+    if (!expect(global_declaration != std::string::npos,
+                "find Clang global declaration fixture")) return 1;
+    wide_clang_ptx.insert(
+        wide_clang_ptx.find('\n', global_declaration) + 1,
+        ".visible .global .align 1 .b8 module_string[4] = {79, 75, 0, 0};\n");
     const std::size_t wide_store = wide_clang_ptx.find("st.local.v2.b32 [%rd2], {%r1, %r2};");
     if (!expect(wide_store != std::string::npos, "find Clang tuple store fixture")) return 1;
     wide_clang_ptx.replace(wide_store,
                            std::string("st.local.v2.b32 [%rd2], {%r1, %r2};").size(),
-                           "st.local.b64 [%rd2], %rd5;");
+                           "mov.b64 %rd6, module_string;\n"
+                           "    cvta.global.u64 %rd7, %rd6;\n"
+                           "    st.local.b64 [%rd2], %rd7;");
     const auto wide_parsed = cumetal::ptx::parse_ptx(wide_clang_ptx);
     if (!expect(wide_parsed.ok, "parse 64-bit Clang tuple")) return 1;
     clang_options.ptx_source = wide_clang_ptx;
@@ -228,10 +237,10 @@ int main() {
                     wide_lowered.formats[0].literal &&
                     wide_lowered.calls.size() == 1 &&
                     wide_lowered.calls[0].arguments.size() == 1 &&
-                    wide_lowered.calls[0].arguments[0] == "%rd5" &&
+                    wide_lowered.calls[0].arguments[0] == "module_string" &&
                     wide_lowered.calls[0].argument_bits.size() == 1 &&
                     wide_lowered.calls[0].argument_bits[0] == 64,
-                "64-bit Clang tuple is preserved as two runtime words")) return 1;
+                "registered module-string pointers survive Clang tuple decoding")) return 1;
 
     std::printf("PASS: printf lower unit tests\n");
     return 0;

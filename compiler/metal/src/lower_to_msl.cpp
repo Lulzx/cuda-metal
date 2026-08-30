@@ -2904,9 +2904,15 @@ struct AstLowerer {
                         ++payload_offset;
                         continue;
                     }
-                    raw = raw->type.kind == MslTypeKind::kPointer
-                        ? MslExpression::cast(MslType::uint(64), raw, true)
-                        : MslExpression::bitcast(MslType::uint(64), raw);
+                    if (raw->type.kind == MslTypeKind::kPointer) {
+                        raw = MslExpression::cast(MslType::uint(64), raw, true);
+                    } else {
+                        // The IR already represents 64-bit floating payloads as their
+                        // raw uint64 bits. A numeric cast therefore preserves every
+                        // supported 64-bit payload while also widening unsuffixed
+                        // integer literals that Metal parses as 32-bit values.
+                        raw = MslExpression::cast(MslType::uint(64), raw);
+                    }
                     write_word(
                         3 + payload_offset,
                         MslExpression::cast(

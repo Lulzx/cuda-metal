@@ -453,7 +453,10 @@ std::optional<PrintfLowerResult> lower_clang_vprintf_abi(
         call.format_id = format_id;
         call.format_token = format_it->second.bytes;
         for (const auto& arg : call_args) {
-            call.arguments.push_back(arg.value);
+            const auto global = global_pointer.find(arg.value);
+            call.arguments.push_back(global == global_pointer.end()
+                                         ? arg.value
+                                         : global->second);
             call.argument_bits.push_back(arg.bits);
         }
         call.abi_scaffold_lines.assign(scaffold_lines.begin(), scaffold_lines.end());

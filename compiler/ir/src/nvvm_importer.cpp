@@ -397,6 +397,7 @@ struct FunctionState {
     };
     std::unordered_map<const llvm::GlobalVariable*, ExternalGlobalBinding>
         external_globals;
+    std::unordered_set<const llvm::AllocaInst*> printf_argument_allocas;
     std::optional<Operand> printf_buffer;
     std::optional<Operand> printf_capacity;
 };
@@ -631,6 +632,43 @@ struct Importer {
             if (!first) widths << ',';
             widths << bits;
             first = false;
+            if (type->isPointerTy()) {
+                const llvm::GlobalVariable* global = referenced_global(*value);
+                const auto external = global == nullptr
+                    ? state->external_globals.end()
+                    : state->external_globals.find(global);
+                if (external != state->external_globals.end()) {
+                    const llvm::Value* pointer_base = nullptr;
+                    std::int64_t pointer_offset = 0;
+                    if (!constant_pointer_base_and_offset(
+                            *value, &pointer_base, &pointer_offset) ||
+                        pointer_base != global || pointer_offset != 0 ||
+                        external->second.byte_offset != 0) {
+                        return fail(
+                            &call,
+                            "typed vprintf module-string pointers require zero offset");
+                    }
+                    operation->operands.push_back(external->second.base);
+                    expected_offset += static_cast<std::int64_t>(bits / 8);
+                    continue;
+                }
+                if (const auto* expression =
+                        llvm::dyn_cast<llvm::ConstantExpr>(value);
+                    expression != nullptr &&
+                    expression->getOpcode() == llvm::Instruction::IntToPtr) {
+                    const auto* address = llvm::dyn_cast<llvm::ConstantInt>(
+                        expression->getOperand(0));
+                    if (address == nullptr) {
+                        return fail(
+                            &call,
+                            "typed vprintf inttoptr arguments require a constant integer address");
+                    }
+                    operation->operands.push_back(Operand::immediate(
+                        constant_spelling(*address), Type::integer(64)));
+                    expected_offset += static_cast<std::int64_t>(bits / 8);
+                    continue;
+                }
+            }
             operation->operands.push_back(import_operand(*value, *state));
             expected_offset += static_cast<std::int64_t>(bits / 8);
         }
@@ -1836,6 +1874,18 @@ struct Importer {
                 *load->getPointerOperand(), state, output_block, operation.location));
             operation.attributes["alignment"] = std::to_string(load->getAlign().value());
         } else if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction)) {
+            const llvm::Value* store_base = nullptr;
+            std::int64_t store_offset = 0;
+            if (constant_pointer_base_and_offset(*store->getPointerOperand(),
+                                                 &store_base, &store_offset) &&
+                state->printf_argument_allocas.contains(
+                    llvm::dyn_cast_or_null<llvm::AllocaInst>(store_base))) {
+                // import_vprintf serializes this tuple directly into the
+                // CuMetal ring. Retaining the original private-memory store is
+                // redundant and can leave module-symbol operands referring to
+                // their pre-import LLVM spelling.
+                return true;
+            }
             operation.opcode = OpCode::kStore;
             operation.operands.push_back(import_pointer_operand(
                 *store->getPointerOperand(), state, output_block, operation.location));
@@ -1986,6 +2036,28 @@ struct Importer {
     bool import_function(const llvm::Function& function) {
         FunctionState state;
         if (!allocate_function(function, &state)) return false;
+        for (const llvm::BasicBlock& block : function) {
+            for (const llvm::Instruction& instruction : block) {
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                const llvm::Function* callee =
+                    call == nullptr ? nullptr : call->getCalledFunction();
+                if (callee == nullptr || callee->getName() != "vprintf" ||
+                    call->arg_size() != 2) {
+                    continue;
+                }
+                const llvm::Value* argument_base = nullptr;
+                std::int64_t argument_offset = 0;
+                if (constant_pointer_base_and_offset(*call->getArgOperand(1),
+                                                     &argument_base,
+                                                     &argument_offset) &&
+                    argument_offset == 0) {
+                    if (const auto* alloca =
+                            llvm::dyn_cast<llvm::AllocaInst>(argument_base)) {
+                        state.printf_argument_allocas.insert(alloca);
+                    }
+                }
+            }
+        }
         std::size_t block_index = 0;
         for (const llvm::BasicBlock& block : function) {
             BasicBlock& output_block = state.output.blocks[block_index++];

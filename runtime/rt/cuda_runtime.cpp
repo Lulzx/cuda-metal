@@ -525,9 +525,58 @@ void emit_printf_value(const std::string& spec,
     }
 }
 
+bool resolve_printf_string_pointer(
+    std::uint64_t raw,
+    const std::vector<std::shared_ptr<cumetal::metal_backend::Buffer>>&
+        registered_buffers,
+    const char** begin,
+    std::size_t* remaining) {
+    if (raw == 0 || begin == nullptr || remaining == nullptr) return false;
+
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    RuntimeState& state = runtime_state();
+    const void* pointer = reinterpret_cast<const void*>(
+        static_cast<std::uintptr_t>(raw));
+    if (state.allocations.resolve(pointer, &resolved) &&
+        resolved.buffer != nullptr && resolved.buffer->contents() != nullptr) {
+        *begin = static_cast<const char*>(resolved.buffer->contents()) +
+                 resolved.offset;
+        *remaining = resolved.remaining_size;
+        return true;
+    }
+
+    // Module constant/global buffers are safe runtime-owned storage, but they
+    // are not ordinary cudaMalloc allocations and therefore intentionally do
+    // not live in AllocationTable. Match both their Metal GPU address and UMA
+    // host mapping without ever dereferencing an arbitrary device value.
+    for (const auto& buffer : registered_buffers) {
+        if (buffer == nullptr || buffer->contents() == nullptr ||
+            buffer->length() == 0) {
+            continue;
+        }
+        const std::uintptr_t raw_address = static_cast<std::uintptr_t>(raw);
+        const std::uintptr_t bases[] = {
+            buffer->device_address(),
+            reinterpret_cast<std::uintptr_t>(buffer->contents()),
+        };
+        for (const std::uintptr_t base : bases) {
+            if (base == 0 || raw_address < base) continue;
+            const std::uintptr_t offset = raw_address - base;
+            if (offset >= buffer->length()) continue;
+            *begin = static_cast<const char*>(buffer->contents()) + offset;
+            *remaining = buffer->length() - offset;
+            return true;
+        }
+    }
+    return false;
+}
+
 void drain_one_printf_record(const std::string& fmt,
                              const std::uint32_t* args,
-                             std::uint32_t n_args) {
+                             std::uint32_t n_args,
+                             const std::vector<std::shared_ptr<
+                                 cumetal::metal_backend::Buffer>>&
+                                 registered_string_buffers) {
     std::uint32_t arg_idx = 0;
     for (std::size_t i = 0; i < fmt.size(); ++i) {
         if (fmt[i] != '%') {
@@ -611,26 +660,19 @@ void drain_one_printf_record(const std::string& fmt,
             arg_idx += 2u;
             spec += 's';
 
-            // Only tracked allocations are safe to materialize on the host.
-            // AllocationTable contains both CPU and MTLBuffer GPU-address
-            // aliases, so a pointer written by Metal resolves to the shared
-            // backing buffer without dereferencing an arbitrary device value.
-            cumetal::rt::AllocationTable::ResolvedAllocation resolved;
-            RuntimeState& state = runtime_state();
+            // Only tracked allocations and the registered module buffers bound
+            // for this launch are safe to materialize on the host.
             constexpr std::size_t kMaxDeviceStringBytes = 256u;
-            if (raw == 0 ||
-                !state.allocations.resolve(
-                    reinterpret_cast<const void*>(static_cast<std::uintptr_t>(raw)),
-                    &resolved) ||
-                resolved.buffer == nullptr || resolved.buffer->contents() == nullptr) {
+            const char* begin = nullptr;
+            std::size_t remaining = 0;
+            if (!resolve_printf_string_pointer(
+                    raw, registered_string_buffers, &begin, &remaining)) {
                 emit_printf_value(spec, dynamic_width, width,
                                   dynamic_precision, precision, "[string]");
                 continue;
             }
-            const auto* begin =
-                static_cast<const char*>(resolved.buffer->contents()) + resolved.offset;
             const std::size_t bounded_size =
-                std::min(resolved.remaining_size, kMaxDeviceStringBytes);
+                std::min(remaining, kMaxDeviceStringBytes);
             const void* terminator = std::memchr(begin, '\0', bounded_size);
             if (terminator == nullptr) {
                 emit_printf_value(spec, dynamic_width, width,
@@ -723,7 +765,10 @@ void drain_one_printf_record(const std::string& fmt,
 
 void drain_printf_buffer(const void* buf_bytes,
                          std::uint32_t cap_words,
-                         const std::vector<std::string>& formats) {
+                         const std::vector<std::string>& formats,
+                         const std::vector<std::shared_ptr<
+                             cumetal::metal_backend::Buffer>>&
+                             registered_string_buffers) {
     if (buf_bytes == nullptr || cap_words == 0 || formats.empty()) {
         return;
     }
@@ -741,7 +786,8 @@ void drain_printf_buffer(const void* buf_bytes,
             break;
         }
         if (fmt_id < static_cast<std::uint32_t>(formats.size())) {
-            drain_one_printf_record(formats[fmt_id], buf + i + 2u, n_args);
+            drain_one_printf_record(formats[fmt_id], buf + i + 2u, n_args,
+                                    registered_string_buffers);
         }
         i += 2u + n_args;
     }
@@ -5384,6 +5430,8 @@ cudaError_t cudaLaunchKernel(const void* func,
 
     std::vector<cumetal::metal_backend::KernelArg> launch_args;
     std::vector<std::shared_ptr<cumetal::metal_backend::Buffer>> resident_buffers;
+    std::vector<std::shared_ptr<cumetal::metal_backend::Buffer>>
+        registered_printf_string_buffers;
     launch_args.reserve(static_cast<std::size_t>(arg_count) +
                         registered_kernel.global_symbols.size() +
                         (registered_kernel.constant_symbols.empty() ? 0u : 1u) +
@@ -5499,6 +5547,7 @@ cudaError_t cudaLaunchKernel(const void* func,
         global_arg.buffer = symbol.buffer;
         global_arg.offset = 0;
         launch_args.push_back(std::move(global_arg));
+        registered_printf_string_buffers.push_back(symbol.buffer);
     }
 
     // Clang emits module-scope __constant__ storage as external PTX symbols,
@@ -5538,10 +5587,11 @@ cudaError_t cudaLaunchKernel(const void* func,
 
         cumetal::metal_backend::KernelArg constant_arg;
         constant_arg.kind = cumetal::metal_backend::KernelArg::Kind::kBuffer;
-        constant_arg.buffer = std::move(constant_buffer);
+        constant_arg.buffer = constant_buffer;
         constant_arg.offset = 0;
         constant_arg.binding_index = 30;
         launch_args.push_back(std::move(constant_arg));
+        registered_printf_string_buffers.push_back(std::move(constant_buffer));
     }
 
     // Device malloc/free share one context-lifetime heap across every kernel.
@@ -5916,7 +5966,8 @@ cudaError_t cudaLaunchKernel(const void* func,
             cumetal::metal_backend::stream_synchronize(backend_stream, &sync_error);
         }
         drain_printf_buffer(printf_buffer->contents(), kPrintfCapWords,
-                            registered_kernel.printf_formats);
+                            registered_kernel.printf_formats,
+                            registered_printf_string_buffers);
     }
 
     // CUDA dynamic parallelism is represented by a device-written launch queue.

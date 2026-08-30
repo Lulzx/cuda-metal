@@ -56,7 +56,9 @@ launch success. CPU or approximate paths must identify themselves.
 - Device `printf` uses a bounded runtime buffer and 256-byte format limit;
   tested scalar formatting includes 32/64-bit integers, pointer, promoted
   binary64 floating, character, flags, fixed and dynamic width/precision, and
-  `%%` forms. Bounded `%s` formatting materializes only tracked allocations.
+  `%%` forms. Bounded `%s` formatting materializes tracked allocations and
+  registration-backed writable module strings; untracked addresses produce the
+  safe `[string]` placeholder instead of being dereferenced.
 
 ## Installed headers
 

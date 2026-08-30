@@ -20,7 +20,9 @@ current status must be backed by tests and evidence.
    is now defined.
 3. Validate genuinely distinct supported Xcode toolchains.
 4. Finish runtime/library semantic matrices and bounded binary-container forms.
-5. Expand the performance release set beyond three kernels.
+
+The named five-kernel Phase 5 release set is closed for its selected-set
+criterion; broader performance claims remain explicitly out of scope.
 
 The executable priority/evidence table is in
 [the specification closure roadmap](spec-closure-roadmap.md).

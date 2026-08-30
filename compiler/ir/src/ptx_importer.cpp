@@ -2929,9 +2929,13 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     };
     collect_printf_scaffold(*selected_entry);
     for (const auto* helper : reachable_helpers) collect_printf_scaffold(*helper);
-    const auto symbol_is_referenced = [&](std::string_view symbol) {
+    const auto symbol_is_referenced = [&](std::string_view symbol,
+                                          bool include_printf_scaffold) {
         const auto instruction_references_symbol = [&](const Instruction& instruction) {
-            if (decoded_printf_scaffold_lines.contains(instruction.line)) return false;
+            if (!include_printf_scaffold &&
+                decoded_printf_scaffold_lines.contains(instruction.line)) {
+                return false;
+            }
             return std::any_of(
                 instruction.operands.begin(), instruction.operands.end(),
                 [&](const std::string& operand) {
@@ -2952,7 +2956,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
             });
     };
     for (const InitializedByteArray& array : initialized_arrays.arrays) {
-        if (!symbol_is_referenced(array.name)) continue;
+        if (!symbol_is_referenced(array.name, !array.module_private)) continue;
         const bool clang_promoted_literal =
             array.module_private && starts_with(array.name, "__const_$");
         if (!array.constant_space && !clang_promoted_literal) {

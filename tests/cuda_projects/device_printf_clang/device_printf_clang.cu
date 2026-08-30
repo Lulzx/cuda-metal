@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+__device__ char module_global_string[] = "CuMetal-global-string";
+
 __device__ __noinline__ void print_coordinate_record(int block, int thread,
                                                       int value) {
     printf("PRINTF[%d,%d]=%d\n", block, thread, value);
@@ -37,6 +39,15 @@ __global__ void print_dynamic_values() {
 
 __global__ void print_device_string(const char* value) {
     printf("STRING value=%s\n", value);
+}
+
+__global__ void print_module_string() {
+    printf("MODULE global=%s\n", module_global_string);
+}
+
+__global__ void print_untracked_string() {
+    printf("UNTRACKED value=%s\n",
+           reinterpret_cast<const char*>(0x12345678ULL));
 }
 
 int main() {
@@ -83,6 +94,20 @@ int main() {
         return 1;
     }
     cudaFree(device_string);
+    print_module_string<<<1, 1>>>();
+    if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess) {
+        std::printf("FAIL: module string cudaDeviceSynchronize: %s\n",
+                    cudaGetErrorString(error));
+        cudaFree(pointer);
+        return 1;
+    }
+    print_untracked_string<<<1, 1>>>();
+    if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess) {
+        std::printf("FAIL: untracked string cudaDeviceSynchronize: %s\n",
+                    cudaGetErrorString(error));
+        cudaFree(pointer);
+        return 1;
+    }
     constexpr size_t unterminated_size = 256;
     char* unterminated = nullptr;
     if (cudaMalloc(reinterpret_cast<void**>(&unterminated), unterminated_size) !=

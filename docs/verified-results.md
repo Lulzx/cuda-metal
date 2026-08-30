@@ -43,8 +43,12 @@ The GGML probe checks its complete output
 operator set; the raytracer performs a 47-value differential preflight and a
 full CPU-reference image comparison. The native-AOT device-`printf` gate also
 checks all 32 coordinate records, dynamic width, a wide scalar, tracked string
-materialization, and a bounded unterminated string. These are numerical/runtime
-results, separate from the 28-file cross-Clang compile matrix.
+materialization, a bounded unterminated string, a registration-backed writable
+module string, and safe rejection of an arbitrary untracked address. Matching
+legacy-PTX and typed-PTX gates exercise the same string cases on the Apple GPU.
+These are numerical/runtime results, separate from the 28-file cross-Clang
+compile matrix. Embedded read-only module-constant strings remain outside this
+proved subset.
 
 The reviewed Phase 4 manifest ran 185/185 required functional tests on
 2026-08-29 with zero failures and zero skips. This includes native-AOT numerical

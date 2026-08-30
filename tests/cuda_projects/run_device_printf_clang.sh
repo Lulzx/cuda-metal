@@ -72,6 +72,14 @@ if [[ "$(grep -Fxc 'STRING value=CuMetal-device-string' "${OUTPUT_FILE}")" -ne 1
     echo "FAIL: missing or malformed tracked device-string printf record"
     exit 1
 fi
+if [[ "$(grep -Fxc 'MODULE global=CuMetal-global-string' "${OUTPUT_FILE}")" -ne 1 ]]; then
+    echo "FAIL: missing or malformed registered module-string printf record"
+    exit 1
+fi
+if [[ "$(grep -Fxc 'UNTRACKED value=[string]' "${OUTPUT_FILE}")" -ne 1 ]]; then
+    echo "FAIL: untracked device string was not rejected safely"
+    exit 1
+fi
 if [[ "$(grep -Fxc 'STRING value=[unterminated-string]' "${OUTPUT_FILE}")" -ne 1 ]]; then
     echo "FAIL: unterminated tracked string was not bounded explicitly"
     exit 1

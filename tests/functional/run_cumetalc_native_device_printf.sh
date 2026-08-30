@@ -44,5 +44,13 @@ if [[ "$(grep -Fxc 'STRING value=CuMetal-device-string' "${OUTPUT_FILE}")" -ne 1
     echo "FAIL: native-AOT tracked-string printf records are incomplete"
     exit 1
 fi
+if [[ "$(grep -Fxc 'MODULE global=CuMetal-global-string' "${OUTPUT_FILE}")" -ne 1 ]]; then
+    echo "FAIL: native-AOT registered module-string printf record is incomplete"
+    exit 1
+fi
+if [[ "$(grep -Fxc 'UNTRACKED value=[string]' "${OUTPUT_FILE}")" -ne 1 ]]; then
+    echo "FAIL: native-AOT untracked device string was not rejected safely"
+    exit 1
+fi
 
 echo "PASS: native-AOT device printf metadata and GPU records match the CUDA source ABI"
