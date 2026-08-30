@@ -25,6 +25,7 @@ tests/cuda_projects/ggml_output_ops/ggml_output_ops.cu fail pass pass pass
 tests/cuda_projects/initialized_global/initialized_global.cu fail pass pass pass
 tests/cuda_projects/libdevice/libdevice_math.cu fail pass pass pass
 tests/cuda_projects/libdevice_frexp/libdevice_frexp.cu fail pass pass pass
+tests/cuda_projects/nested_aggregate_device_calls/nested_aggregate_device_calls.cu fail pass fail pass
 tests/cuda_projects/partial_lane_shuffle_guard/partial_lane_shuffle_guard.cu fail pass pass pass
 tests/cuda_projects/raytracer/rtiow.cu fail pass pass pass
 tests/cuda_projects/reduction/reduction_standalone.cu fail pass pass pass

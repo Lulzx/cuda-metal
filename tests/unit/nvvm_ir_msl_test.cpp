@@ -861,6 +861,64 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmNestedAggregate = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%Inner = type { i32, float }
+%Outer = type { %Inner, i32 }
+
+define %Outer @make_nested(i32 %integer, float %real, i32 %tail) {
+entry:
+  %v0 = insertvalue %Outer poison, i32 %integer, 0, 0
+  %v1 = insertvalue %Outer %v0, float %real, 0, 1
+  %v2 = insertvalue %Outer %v1, i32 %tail, 1
+  ret %Outer %v2
+}
+
+define ptx_kernel void @nested_aggregate(ptr %out, i32 %integer, float %real) {
+entry:
+  %value = call %Outer @make_nested(i32 %integer, float %real, i32 5)
+  %nested_real = extractvalue %Outer %value, 0, 1
+  %updated = insertvalue %Outer %value, i32 9, 0, 0
+  %nested_integer = extractvalue %Outer %updated, 0, 0
+  %tail = extractvalue %Outer %updated, 1
+  %sum = add i32 %nested_integer, %tail
+  store i32 %sum, ptr %out, align 4
+  %real_out = getelementptr i32, ptr %out, i64 1
+  store float %nested_real, ptr %real_out, align 4
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmIncompleteNestedAggregate = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%Inner = type { i32, float }
+%Outer = type { %Inner, i32 }
+
+define ptx_kernel void @incomplete_nested_aggregate(ptr %out, i32 %integer) {
+entry:
+  %partial = insertvalue %Outer poison, i32 %integer, 0, 0
+  %missing = extractvalue %Outer %partial, 1
+  store i32 %missing, ptr %out, align 4
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmOversizedAggregate = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%Wide = type { i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32 }
+
+define ptx_kernel void @oversized_aggregate(ptr %out, i32 %integer) {
+entry:
+  %wide = insertvalue %Wide poison, i32 %integer, 0
+  %field = extractvalue %Wide %wide, 0
+  store i32 %field, ptr %out, align 4
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmNoaliasScope = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1629,6 +1687,40 @@ int main() {
                      heterogeneous_aggregate.source.find(".field1") !=
                          std::string::npos,
                  "flat heterogeneous LLVM aggregates use typed MSL brace initialization");
+
+    const metal::NvvmToMslResult nested_aggregate =
+        metal::compile_nvvm_to_msl(kNvvmNestedAggregate,
+                                   "nested-aggregate.ll",
+                                   "nested_aggregate");
+    ok &= expect(nested_aggregate.ok &&
+                     nested_aggregate.source.find("struct Inner") !=
+                         std::string::npos &&
+                     nested_aggregate.source.find("struct Outer") !=
+                         std::string::npos &&
+                     nested_aggregate.source.find("Inner{") !=
+                         std::string::npos &&
+                     nested_aggregate.source.find("Outer{") !=
+                         std::string::npos,
+                 "nested LLVM insertvalue/extractvalue paths lower as typed nested aggregates");
+    if (!nested_aggregate.ok) std::cerr << nested_aggregate.error << "\n";
+
+    const metal::NvvmToMslResult incomplete_nested_aggregate =
+        metal::compile_nvvm_to_msl(kNvvmIncompleteNestedAggregate,
+                                   "incomplete-nested-aggregate.ll",
+                                   "incomplete_nested_aggregate");
+    ok &= expect(!incomplete_nested_aggregate.ok &&
+                     incomplete_nested_aggregate.error.find(
+                         "uninitialized aggregate element") != std::string::npos,
+                 "nested aggregate reads reject uninitialized leaves explicitly");
+
+    const metal::NvvmToMslResult oversized_aggregate =
+        metal::compile_nvvm_to_msl(kNvvmOversizedAggregate,
+                                   "oversized-aggregate.ll",
+                                   "oversized_aggregate");
+    ok &= expect(!oversized_aggregate.ok &&
+                     oversized_aggregate.error.find("bounded aggregate") !=
+                         std::string::npos,
+                 "aggregate import rejects structures beyond its documented bounds");
 
     const metal::NvvmToMslResult noalias_scope = metal::compile_nvvm_to_msl(
         kNvvmNoaliasScope, "noalias-scope.ll", "noalias_scope");

@@ -13,19 +13,19 @@
   production libraries.
 - Direct AIR generation remains tooling/research only.
 
-With CUDA Clang 21-23, the reviewed manifest-controlled 28-file
+With CUDA Clang 21-23, the reviewed manifest-controlled 29-file
 production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/28 | **28/28** |
-| PTX / `--cuda-device` | **27/28** | **28/28** |
+| direct `.cu` | 0/29 | **29/29** |
+| PTX / `--cuda-device` | **27/29** | **29/29** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler
 identity and requires the same manifest with CUDA Clang 21, 22, and 23.
 
-The separate exact `coverage_manifest.json` numerical corpus passes all 26
+The separate exact `coverage_manifest.json` numerical corpus passes all 27
 projects through both typed PTX and direct native AOT on Apple M4 Pro. Both
 gates disable workload specializations and require every enrolled project to
 pass. The native-AOT gate launches embedded metallibs without registration JIT
@@ -61,8 +61,11 @@ parsed-argument count. Format-only calls return zero. Unresolved formats and
 unsupported tuple widths fail explicitly.
 The typed PTX frontend also materializes the selected kernel's reachable direct
 `.func` graph. The numerical device-call projects cover scalar returns, pointer
-arguments and offsets, loops, pointer merges, early exits, a flat 12-byte
-by-value aggregate, and a single flat aggregate return. Nested noinline `printf`
+arguments and offsets, loops, pointer merges, early exits, flat and depth-two
+nested 12-byte by-value aggregates, and corresponding single aggregate returns.
+The NVVM importer reconstructs bounded nested insert/extract/update paths into
+typed MSL structs; oversized and partially initialized forms fail explicitly.
+Nested noinline `printf`
 helpers receive the bounded ring state transitively. Incomplete aggregate call
 slots, undefined targets, and recursive call graphs fail explicitly rather than
 falling back.

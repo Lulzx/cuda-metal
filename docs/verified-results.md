@@ -25,12 +25,14 @@ device symbols end to end: bounded host-to/from-symbol copies, a 27,904-byte
 constant buffer, symbol address/size queries, and persistent GPU updates across
 two launches.
 
-On 2026-08-30, the exact manifest-controlled 26-project corpus passed on Apple
-M4 Pro with workload specializations disabled: 26/26 through typed PTX and
-26/26 through direct native AOT. The device-call probes pass pointer
+On 2026-08-31, the exact manifest-controlled 27-project corpus passed on Apple
+M4 Pro with workload specializations disabled: 27/27 through typed PTX and
+27/27 through direct native AOT. The device-call probes pass pointer
 arguments and offsets through a scalar-returning noinline helper with a loop,
-pointer merge, and early exit, and preserve every field through a flat 12-byte
-aggregate return followed by a by-value aggregate argument. The same probe
+pointer merge, and early exit, and preserve every field through flat and
+depth-two nested 12-byte aggregate returns followed by by-value aggregate
+arguments. The nested probe also replaces an inner field of a materialized
+return before consuming it. The flat probe
 numerically consumes a CUDA Clang 21-23 module-private promoted aggregate
 literal whose exact initializer and trailing zero bytes are embedded in the
 metallib. The barrier-CFG probe specializes an unqualified helper pointer to
@@ -51,7 +53,7 @@ record, reject the following two-argument record, and observe device return
 values `0` and `2`; this separates CUDA parsed-argument returns from CuMetal's
 bounded record acceptance. `functional_runtime_device_limits` independently
 checks byte-to-word rounding, querying, invalid zero rejection, and reset.
-These are numerical/runtime results, separate from the 28-file cross-Clang
+These are numerical/runtime results, separate from the 29-file cross-Clang
 compile matrix. Embedded read-only module-constant strings remain outside this
 proved subset, as does CUDA's circular overwrite policy.
 
@@ -71,11 +73,12 @@ printed error was `0.000000` and residual was `1.596402e-6`. This also covers a
 warp-tile reduction invoked from only one warp of a larger block and a
 guaranteed-progress occupancy-derived cooperative grid.
 
-The complete Debug/shim-on test inventory then passed 276/276 serially, and a
-clean Debug build with `CUMETAL_ENABLE_BINARY_SHIM=OFF` passed 273/273. Both
-runs included Phase 4, the 83-sample gate, all six PhysX comparisons, the
-Clang-version/backend matrices, and the typed-PTX and native-AOT numerical
-corpora. These are local Apple M4 Pro results, not recurring CI evidence.
+On 2026-08-31, the complete Debug/shim-on non-benchmark inventory passed
+278/278 serially, and the complete Release/shim-off inventory passed 275/275.
+Both runs had zero skips and included Phase 4, the 83-sample gate, all six
+PhysX comparisons, the 29-file Clang-version/backend matrices, and the 27-project
+typed-PTX and native-AOT numerical corpora. These are local Apple M4 Pro results,
+not recurring CI evidence.
 
 On 2026-08-29, `functional_typed_{direct,ptx}_{device,system}_atomics` and
 `functional_typed_{direct,ptx}_fence` passed on Apple GPU. The device test

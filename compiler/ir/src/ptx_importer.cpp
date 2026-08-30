@@ -1402,6 +1402,22 @@ struct Importer {
                                                 const Type& fallback_pointer) {
             Operand base = source_operand(index, fallback_pointer);
             if (index >= instruction.operands.size()) return base;
+            if (base.type.is_pointer() && fallback_pointer.is_pointer() &&
+                base.type.address_space != AddressSpace::kNone &&
+                !(base.type == fallback_pointer)) {
+                Type pointer_type = fallback_pointer;
+                pointer_type.address_space = base.type.address_space;
+                Operation cast;
+                cast.opcode = OpCode::kAddressSpaceCast;
+                cast.location = operation.location;
+                cast.operands = {base};
+                const ValueId pointer = builder.next_value();
+                cast.results = {pointer};
+                cast.result_types = {pointer_type};
+                value_types[pointer] = pointer_type;
+                block->operations.push_back(std::move(cast));
+                base = Operand::value_ref(pointer, pointer_type);
+            }
             const std::int64_t byte_offset =
                 memory_operand_offset(instruction.operands[index]);
             if (byte_offset == 0) return base;
@@ -1415,6 +1431,7 @@ struct Importer {
                 base,
                 Operand::immediate(std::to_string(byte_offset), Type::integer(64)),
             };
+            offset.attributes["offset_unit"] = "bytes";
             const ValueId pointer = builder.next_value();
             offset.results = {pointer};
             offset.result_types = {base.type};
@@ -1448,17 +1465,79 @@ struct Importer {
                     return fail(&instruction,
                                 "predicated aggregate parameter address moves are unsupported");
                 }
-                operation.opcode = OpCode::kParameter;
-                operation.operands = {Operand::value_ref(
-                    parameter_value->second, parameter_type->second)};
-                operation.result_types = {parameter_type->second};
-                value_types[operation.results.front()] = parameter_type->second;
-                aggregate_parameter_addresses[operation.results.front()] =
-                    parameter;
-                aggregate_parameter_registers[destinations.front()] = parameter;
+                const bool used_as_local_address = std::any_of(
+                    entry->instructions.begin(), entry->instructions.end(),
+                    [&](const Instruction& candidate) {
+                        const std::string candidate_root =
+                            root_opcode(candidate.opcode);
+                        if ((candidate_root != "ld" && candidate_root != "st") ||
+                            candidate.opcode.find(".local") == std::string::npos) {
+                            return false;
+                        }
+                        const std::size_t memory_index =
+                            candidate_root == "st" ? 0 : 1;
+                        return candidate.operands.size() > memory_index &&
+                               first_register(candidate.operands[memory_index]) ==
+                                   destinations.front();
+                    });
+                // Most aggregate parameter-address idioms only feed ld.param;
+                // those retain the aggregate SSA value so CFG block arguments
+                // keep their established type. Clang uses ld/st.local when a
+                // by-value parameter is mutated, which requires an addressable
+                // private copy instead.
+                if (!used_as_local_address) {
+                    operation.opcode = OpCode::kParameter;
+                    operation.operands = {Operand::value_ref(
+                        parameter_value->second, parameter_type->second)};
+                    operation.result_types = {parameter_type->second};
+                    value_types[operation.results.front()] = parameter_type->second;
+                    aggregate_parameter_addresses[operation.results.front()] =
+                        parameter;
+                    aggregate_parameter_registers[destinations.front()] = parameter;
+                    block->operations.push_back(std::move(operation));
+                    (*environment)[destinations.front()] =
+                        instruction_results[&instruction].front();
+                    return true;
+                }
+
+                const Type pointer_type = Type::pointer(
+                    parameter_type->second, AddressSpace::kPrivate);
+                operation.opcode = OpCode::kAlloca;
+                operation.result_types = {pointer_type};
+                value_types[operation.results.front()] = pointer_type;
+                std::size_t alignment = 1;
+                for (const auto& candidate : entry->params) {
+                    if (candidate.name == parameter) {
+                        alignment = candidate.alignment;
+                        break;
+                    }
+                }
+                operation.attributes["alignment"] = std::to_string(alignment);
+                const ValueId address = operation.results.front();
                 block->operations.push_back(std::move(operation));
-                (*environment)[destinations.front()] =
-                    instruction_results[&instruction].front();
+
+                Operation initialize;
+                initialize.opcode = OpCode::kStore;
+                initialize.operands = {
+                    Operand::value_ref(address, pointer_type),
+                    Operand::value_ref(parameter_value->second,
+                                       parameter_type->second),
+                };
+                initialize.attributes["alignment"] = std::to_string(alignment);
+                initialize.location = {
+                    .file = result.module.source_name,
+                    .line = static_cast<std::uint32_t>(std::max(0, instruction.line)),
+                };
+                block->operations.push_back(std::move(initialize));
+                function->pointer_provenance[address] = {
+                    .base_kind = PointerBaseKind::kAllocation,
+                    .base_name = parameter,
+                    .known_byte_offset = 0,
+                    .alignment = static_cast<std::uint32_t>(alignment),
+                };
+                aggregate_parameter_addresses[address] = parameter;
+                aggregate_parameter_registers[destinations.front()] = parameter;
+                (*environment)[destinations.front()] = address;
                 return true;
             }
             if (parameter_value != parameter_values.end() &&

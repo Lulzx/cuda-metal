@@ -187,6 +187,28 @@ set_tests_properties(
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=0"
 )
 
+# Nested aggregate construction, extraction, update, arguments, and returns
+# must survive the canonical typed path rather than relying on flat ABI slots.
+add_test(
+    NAME functional_cuda_projects_nested_aggregate_device_calls_typed_ptx
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        nested_aggregate_device_calls
+        nested_aggregate_device_calls.cu
+        nested_aggregate_device_calls_typed_ptx
+        cumetal-ir
+)
+set_tests_properties(
+    functional_cuda_projects_nested_aggregate_device_calls_typed_ptx
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        TIMEOUT 60
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=0"
+)
+
 # Clang 21-23 emit an unqualified generic pointer for a helper called with
 # shared memory. Prove call-site address-space specialization plus uniform
 # multi-exit barrier control flow numerically across all 32 lanes.

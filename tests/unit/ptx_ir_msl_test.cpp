@@ -464,8 +464,9 @@ BODY:
                          "device uchar* cm___cumetal_global_state [[buffer(1)]]") !=
                          std::string::npos &&
                      module_global.source.find(
-                         "cm___cumetal_global_state + 28") !=
+                         "reinterpret_cast<device uchar*>") !=
                          std::string::npos &&
+                     module_global.source.find(" + 28)") != std::string::npos &&
                      module_global.source.find("[state+28]") == std::string::npos;
     ok &= expect(module_global_valid,
                  "PTX writable module globals use ordered hidden persistent buffers");
@@ -1000,7 +1001,10 @@ BODY:
                          std::string::npos,
                  "typed PTX lowers the complete 32-bit CUDA atomic family with explicit UMA policy");
     ok &= expect(atomic32.ok &&
-                     atomic32.source.find(" + 28;") != std::string::npos,
+                     atomic32.source.find(
+                         "reinterpret_cast<device uchar*>") !=
+                         std::string::npos &&
+                     atomic32.source.find(" + 28)") != std::string::npos,
                  "PTX atomic memory operands retain literal byte displacements");
     if (!atomic32.ok) std::cerr << atomic32.error << "\n";
 

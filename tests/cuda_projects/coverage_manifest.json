@@ -22,6 +22,13 @@
       "harness": "standard"
     },
     {
+      "name": "nested_aggregate_device_calls",
+      "subdir": "nested_aggregate_device_calls",
+      "source": "nested_aggregate_device_calls.cu",
+      "binary": "nested_aggregate_device_calls",
+      "harness": "standard"
+    },
+    {
       "name": "initialized_global",
       "subdir": "initialized_global",
       "source": "initialized_global.cu",

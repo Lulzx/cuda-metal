@@ -389,8 +389,11 @@ struct FunctionState {
     std::unordered_map<ValueId, Type> value_types;
     std::unordered_map<ValueId, AddressSpace> integer_pointer_address_spaces;
     std::unordered_map<ValueId, ValueId> integer_pointer_sources;
-    std::unordered_map<const llvm::Value*, std::vector<std::optional<Operand>>>
-        aggregate_components;
+    struct AggregateState {
+        Type type;
+        std::map<std::vector<unsigned>, Operand> leaves;
+    };
+    std::unordered_map<const llvm::Value*, AggregateState> aggregate_components;
     struct ExternalGlobalBinding {
         Operand base;
         std::uint64_t byte_offset = 0;
@@ -738,6 +741,143 @@ struct Importer {
             return *external;
         }
         return import_operand(value, *state);
+    }
+
+    bool validate_aggregate_shape(const Type& type, std::size_t depth,
+                                  std::size_t* leaf_count) const {
+        if (type.kind != TypeKind::kAggregate) {
+            ++*leaf_count;
+            return *leaf_count <= 64;
+        }
+        if (type.elements.empty() || type.elements.size() > 16 || depth >= 8) {
+            return false;
+        }
+        for (const Type& element : type.elements) {
+            if (!validate_aggregate_shape(element, depth + 1, leaf_count)) return false;
+        }
+        return true;
+    }
+
+    static void collect_leaf_paths(const Type& type, std::vector<unsigned>* prefix,
+                                   std::vector<std::vector<unsigned>>* paths) {
+        if (type.kind != TypeKind::kAggregate) {
+            paths->push_back(*prefix);
+            return;
+        }
+        for (unsigned index = 0; index < type.elements.size(); ++index) {
+            prefix->push_back(index);
+            collect_leaf_paths(type.elements[index], prefix, paths);
+            prefix->pop_back();
+        }
+    }
+
+    static const Type* type_at_path(const Type& root,
+                                    const std::vector<unsigned>& path) {
+        const Type* current = &root;
+        for (unsigned index : path) {
+            if (current->kind != TypeKind::kAggregate ||
+                index >= current->elements.size()) {
+                return nullptr;
+            }
+            current = &current->elements[index];
+        }
+        return current;
+    }
+
+    std::optional<Operand> emit_aggregate_extract(
+        Operand aggregate, const Type& aggregate_type,
+        const std::vector<unsigned>& path, std::optional<ValueId> final_result,
+        FunctionState* state, BasicBlock* output_block,
+        const SourceLocation& location) {
+        Operand current = std::move(aggregate);
+        const Type* current_type = &aggregate_type;
+        for (std::size_t depth = 0; depth < path.size(); ++depth) {
+            const unsigned index = path[depth];
+            if (current_type->kind != TypeKind::kAggregate ||
+                index >= current_type->elements.size()) {
+                return std::nullopt;
+            }
+            const Type next_type = current_type->elements[index];
+            const bool last = depth + 1 == path.size();
+            const ValueId result_value =
+                last && final_result.has_value() ? *final_result : builder.next_value();
+            state->value_types[result_value] = next_type;
+
+            Operation extract;
+            extract.opcode = OpCode::kAggregateExtract;
+            extract.results = {result_value};
+            extract.result_types = {next_type};
+            extract.operands = {
+                current,
+                Operand::immediate(std::to_string(index), Type::integer(32)),
+            };
+            extract.location = location;
+            output_block->operations.push_back(std::move(extract));
+            current = Operand::value_ref(result_value, next_type);
+            current_type = &current_type->elements[index];
+        }
+        return current;
+    }
+
+    bool decompose_aggregate_operand(
+        const Operand& aggregate, const Type& aggregate_type,
+        const std::vector<unsigned>& destination_prefix,
+        std::map<std::vector<unsigned>, Operand>* leaves, FunctionState* state,
+        BasicBlock* output_block, const SourceLocation& location) {
+        std::vector<std::vector<unsigned>> relative_paths;
+        std::vector<unsigned> prefix;
+        collect_leaf_paths(aggregate_type, &prefix, &relative_paths);
+        for (const std::vector<unsigned>& relative_path : relative_paths) {
+            const auto extracted = emit_aggregate_extract(
+                aggregate, aggregate_type, relative_path, std::nullopt,
+                state, output_block, location);
+            if (!extracted.has_value()) return false;
+            std::vector<unsigned> destination = destination_prefix;
+            destination.insert(destination.end(), relative_path.begin(),
+                               relative_path.end());
+            (*leaves)[std::move(destination)] = *extracted;
+        }
+        return true;
+    }
+
+    std::optional<Operand> materialize_aggregate(
+        const Type& type, const std::vector<unsigned>& prefix,
+        const std::map<std::vector<unsigned>, Operand>& leaves,
+        std::optional<ValueId> result_value, FunctionState* state,
+        BasicBlock* output_block, const SourceLocation& location) {
+        if (type.kind != TypeKind::kAggregate) {
+            const auto found = leaves.find(prefix);
+            return found == leaves.end() ? std::nullopt
+                                         : std::optional<Operand>(found->second);
+        }
+
+        std::vector<Operand> elements;
+        elements.reserve(type.elements.size());
+        for (unsigned index = 0; index < type.elements.size(); ++index) {
+            std::vector<unsigned> child_prefix = prefix;
+            child_prefix.push_back(index);
+            const auto child = materialize_aggregate(
+                type.elements[index], child_prefix, leaves, std::nullopt,
+                state, output_block, location);
+            if (!child.has_value()) return std::nullopt;
+            elements.push_back(*child);
+        }
+
+        const ValueId value = result_value.value_or(builder.next_value());
+        state->value_types[value] = type;
+        Operation construct;
+        construct.opcode = OpCode::kAggregateConstruct;
+        construct.results = {value};
+        construct.result_types = {type};
+        construct.operands = std::move(elements);
+        if (const auto constructor = homogeneous_aggregate_constructor(type)) {
+            construct.attributes["constructor"] = *constructor;
+        } else {
+            construct.attributes["aggregate_init"] = "true";
+        }
+        construct.location = location;
+        output_block->operations.push_back(std::move(construct));
+        return Operand::value_ref(value, type);
     }
 
     bool allocate_function(const llvm::Function& function, FunctionState* state) {
@@ -1655,66 +1795,117 @@ struct Importer {
             operation.operands.push_back(import_operand(*select->getTrueValue(), *state));
             operation.operands.push_back(import_operand(*select->getFalseValue(), *state));
         } else if (const auto* insert = llvm::dyn_cast<llvm::InsertValueInst>(&instruction)) {
-            if (insert->getNumIndices() != 1) {
-                return fail(&instruction, "nested LLVM insertvalue is unsupported");
-            }
             const Type aggregate_type = import_type(insert->getType());
-            const auto constructor = homogeneous_aggregate_constructor(aggregate_type);
+            std::size_t leaf_count = 0;
             if (aggregate_type.kind != TypeKind::kAggregate ||
-                aggregate_type.elements.empty() ||
-                aggregate_type.elements.size() > 16) {
+                !validate_aggregate_shape(aggregate_type, 0, &leaf_count)) {
                 return fail(&instruction,
-                            "LLVM insertvalue requires a flat 1-16 element aggregate");
+                            "LLVM insertvalue requires a bounded aggregate "
+                            "(depth <= 8, width <= 16, leaves <= 64)");
             }
-            std::vector<std::optional<Operand>> components(aggregate_type.elements.size());
+            const std::vector<unsigned> path(insert->idx_begin(), insert->idx_end());
+            const Type* inserted_type = type_at_path(aggregate_type, path);
+            if (path.empty() || inserted_type == nullptr ||
+                *inserted_type != import_type(insert->getInsertedValueOperand()->getType())) {
+                return fail(&instruction, "LLVM insertvalue path is invalid for its aggregate");
+            }
+
+            FunctionState::AggregateState aggregate_state{.type = aggregate_type};
             const llvm::Value* aggregate = insert->getAggregateOperand();
             const auto previous = state->aggregate_components.find(aggregate);
             if (previous != state->aggregate_components.end()) {
-                components = previous->second;
+                if (previous->second.type != aggregate_type) {
+                    return fail(&instruction,
+                                "LLVM insertvalue base aggregate type changed");
+                }
+                aggregate_state = previous->second;
             } else if (!llvm::isa<llvm::PoisonValue>(aggregate) &&
                        !llvm::isa<llvm::UndefValue>(aggregate)) {
+                if (!decompose_aggregate_operand(
+                        import_operand(*aggregate, *state), aggregate_type, {},
+                        &aggregate_state.leaves, state, output_block,
+                        operation.location)) {
+                    return fail(&instruction,
+                                "LLVM insertvalue base aggregate cannot be decomposed");
+                }
+            }
+
+            const llvm::Value* inserted = insert->getInsertedValueOperand();
+            if (llvm::isa<llvm::PoisonValue>(inserted) ||
+                llvm::isa<llvm::UndefValue>(inserted)) {
                 return fail(&instruction,
-                            "inserting into an already-materialized aggregate is unsupported");
+                            "LLVM insertvalue cannot materialize poison or undef fields");
             }
-            const unsigned index = *insert->idx_begin();
-            if (index >= components.size()) {
-                return fail(&instruction, "LLVM insertvalue index is out of bounds");
+            if (inserted_type->kind == TypeKind::kAggregate) {
+                if (!decompose_aggregate_operand(
+                        import_operand(*inserted, *state), *inserted_type, path,
+                        &aggregate_state.leaves, state, output_block,
+                        operation.location)) {
+                    return fail(&instruction,
+                                "LLVM insertvalue aggregate field cannot be decomposed");
+                }
+            } else {
+                aggregate_state.leaves[path] = import_operand(*inserted, *state);
             }
-            components[index] = import_operand(*insert->getInsertedValueOperand(), *state);
-            state->aggregate_components[insert] = components;
-            if (!std::all_of(components.begin(), components.end(),
-                             [](const auto& component) { return component.has_value(); })) {
+            state->aggregate_components[insert] = aggregate_state;
+            if (aggregate_state.leaves.size() != leaf_count) {
                 return true;
             }
-            operation.opcode = OpCode::kAggregateConstruct;
-            if (constructor.has_value()) {
-                operation.attributes["constructor"] = *constructor;
-            } else {
-                operation.attributes["aggregate_init"] = "true";
+
+            if (!materialize_aggregate(
+                    aggregate_type, {}, aggregate_state.leaves,
+                    operation.results.front(), state, output_block,
+                    operation.location)) {
+                return fail(&instruction,
+                            "LLVM insertvalue leaves an aggregate field uninitialized");
             }
-            for (const auto& component : components) {
-                operation.operands.push_back(*component);
-            }
+            return true;
         } else if (const auto* extract = llvm::dyn_cast<llvm::ExtractValueInst>(&instruction)) {
-            if (extract->getNumIndices() != 1) {
-                return fail(&instruction, "nested LLVM extractvalue is unsupported");
+            const Type aggregate_type = import_type(extract->getAggregateOperand()->getType());
+            std::size_t leaf_count = 0;
+            if (aggregate_type.kind != TypeKind::kAggregate ||
+                !validate_aggregate_shape(aggregate_type, 0, &leaf_count)) {
+                return fail(&instruction,
+                            "LLVM extractvalue requires a bounded aggregate "
+                            "(depth <= 8, width <= 16, leaves <= 64)");
             }
-            const unsigned index = *extract->idx_begin();
+            const std::vector<unsigned> path(extract->idx_begin(), extract->idx_end());
+            const Type* extracted_type = type_at_path(aggregate_type, path);
+            if (path.empty() || extracted_type == nullptr ||
+                *extracted_type != import_type(extract->getType())) {
+                return fail(&instruction, "LLVM extractvalue path is invalid for its aggregate");
+            }
             const auto components =
                 state->aggregate_components.find(extract->getAggregateOperand());
             if (components != state->aggregate_components.end()) {
-                if (index >= components->second.size() || !components->second[index]) {
-                    return fail(&instruction,
-                                "LLVM extractvalue reads an uninitialized aggregate element");
+                if (extracted_type->kind == TypeKind::kAggregate) {
+                    if (!materialize_aggregate(
+                            *extracted_type, path, components->second.leaves,
+                            operation.results.front(), state, output_block,
+                            operation.location)) {
+                        return fail(
+                            &instruction,
+                            "LLVM extractvalue reads an uninitialized aggregate element");
+                    }
+                    return true;
+                }
+                const auto component = components->second.leaves.find(path);
+                if (component == components->second.leaves.end()) {
+                    return fail(
+                        &instruction,
+                        "LLVM extractvalue reads an uninitialized aggregate element");
                 }
                 operation.opcode = OpCode::kConvert;
-                operation.operands.push_back(*components->second[index]);
+                operation.operands.push_back(component->second);
             } else {
-                operation.opcode = OpCode::kAggregateExtract;
-                operation.operands.push_back(
-                    import_operand(*extract->getAggregateOperand(), *state));
-                operation.operands.push_back(
-                    Operand::immediate(std::to_string(index), Type::integer(32)));
+                if (!emit_aggregate_extract(
+                        import_operand(*extract->getAggregateOperand(), *state),
+                        aggregate_type, path, operation.results.front(), state,
+                        output_block, operation.location)) {
+                    return fail(&instruction,
+                                "LLVM extractvalue path cannot be lowered");
+                }
+                return true;
             }
         } else if (const auto* cast = llvm::dyn_cast<llvm::CastInst>(&instruction)) {
             operation.operands.push_back(import_operand(*cast->getOperand(0), *state));
@@ -2017,10 +2208,14 @@ struct Importer {
             comparison.attributes["predicate"] = "eq";
             comparison.location = import_location(instruction, fallback_source);
             output_block->operations.push_back(std::move(comparison));
-            state->aggregate_components[compare_exchange] = {
-                Operand::value_ref(old_value, value_type),
-                Operand::value_ref(succeeded, Type::predicate()),
-            };
+            FunctionState::AggregateState compare_exchange_state;
+            compare_exchange_state.type = import_type(compare_exchange->getType());
+            compare_exchange_state.leaves[{0}] =
+                Operand::value_ref(old_value, value_type);
+            compare_exchange_state.leaves[{1}] =
+                Operand::value_ref(succeeded, Type::predicate());
+            state->aggregate_components[compare_exchange] =
+                std::move(compare_exchange_state);
             return true;
         } else if (const auto* fence = llvm::dyn_cast<llvm::FenceInst>(&instruction)) {
             operation.opcode = OpCode::kFence;

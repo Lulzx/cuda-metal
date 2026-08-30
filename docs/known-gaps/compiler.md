@@ -8,8 +8,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/28 | **28/28** |
-| PTX / `--cuda-device` | **27/28** | **28/28** |
+| direct `.cu` | 0/29 | **29/29** |
+| PTX / `--cuda-device` | **27/29** | **29/29** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
@@ -30,8 +30,9 @@ Remaining typed-path blockers include combinations of:
   direct scalar-return/pointer-argument helpers, and flat 12-byte by-value/single
   aggregate-return ABI, including nested/irregular aggregates, multi-result
   signatures, indirect calls, and general double-signature calls;
-- nested or partially initialized aggregate insertion and extraction beyond
-  the proven flat typed-struct path;
+- aggregate insertion/extraction beyond the bounded NVVM reconstruction limit
+  (depth 8, width 16, and 64 scalar leaves), plus irregularly padded nested
+  device-call ABIs beyond the proven depth-two 12-byte fixture;
 - initialized writable PTX `.global` forms beyond the proven visible numeric
   byte-array registration path; module-private CUDA Clang `__const_$` aggregate
   literals are embedded read-only, while module-private initialized writable
@@ -45,7 +46,7 @@ Remaining typed-path blockers include combinations of:
 The old direct legacy `.cu` path is textual qualifier stripping and fails this
 corpus. It is not a correctness fallback.
 
-The exact 26-project in-tree numerical corpus passes both typed PTX and direct
+The exact 27-project in-tree numerical corpus passes both typed PTX and direct
 native AOT on Apple M4 Pro with workload specializations disabled. This closes
 the reviewed corpus, not the residual combinations listed above.
 
