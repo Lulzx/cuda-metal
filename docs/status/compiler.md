@@ -65,6 +65,12 @@ by-value aggregate, and a single flat aggregate return. Nested noinline `printf`
 helpers receive the bounded ring state transitively. Incomplete aggregate call
 slots, undefined targets, and recursive call graphs fail explicitly rather than
 falling back.
+CUDA Clang 21-23 module-private `__const_$` byte arrays used for promoted
+aggregate literals are embedded as immutable MSL module data. Their declared
+size, alignment, initializer bytes, and implicit trailing zero bytes are
+preserved; they do not consume or masquerade as a registration-backed writable
+global binding. Referenced ordinary initialized `.global` arrays fail explicitly
+until writable registration semantics are implemented.
 Both typed frontends lower FP64 values as raw binary64 storage and call private
 software-ALU helpers in the kernel translation unit. The `fp64_precision`
 corpus passes independently produced direct-NVVM and typed-PTX metallibs on

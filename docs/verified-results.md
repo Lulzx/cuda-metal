@@ -30,7 +30,10 @@ Apple M4 Pro with workload specializations disabled: 24/24 through typed PTX
 and 24/24 through direct native AOT. The device-call probes pass pointer
 arguments and offsets through a scalar-returning noinline helper with a loop,
 pointer merge, and early exit, and preserve every field through a flat 12-byte
-aggregate return followed by a by-value aggregate argument. The GGML probe checks its complete output
+aggregate return followed by a by-value aggregate argument. The same probe
+numerically consumes a CUDA Clang 21-23 module-private promoted aggregate
+literal whose exact initializer and trailing zero bytes are embedded in the
+metallib. The GGML probe checks its complete output
 operator set; the raytracer performs a 47-value differential preflight and a
 full CPU-reference image comparison. The native-AOT device-`printf` gate also
 checks all 32 coordinate records, dynamic width, a wide scalar, tracked string

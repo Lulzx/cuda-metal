@@ -30,6 +30,8 @@ emits PTX, then runs CuMetal's PTX lowering and AIR emitter. `-I`, `-D`,
 inlining of every viable call reachable from the selected kernel. Typed PTX also
 materializes reachable direct `.func` definitions with scalar/pointer arguments,
 single scalar or flat aggregate returns, and flat by-value aggregate arguments.
+Module-private `__const_$` byte arrays emitted by CUDA Clang for promoted
+aggregate literals are embedded as immutable MSL data with exact zero-fill.
 Recursion, indirect calls, multi-result ABI forms, and other unsupported signatures
 still fail during strict PTX lowering. The frontend continues to prefer
 structured branches with `-fno-jump-tables`; PTX inputs that contain

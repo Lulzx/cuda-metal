@@ -413,6 +413,62 @@ BODY:
         std::cerr << module_global.error << "\n" << module_global.source << "\n";
     }
 
+    const std::string promoted_aggregate_literal_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.global .align 4 .b8 __const_$record[12] = {3, 0, 0, 0, 0, 0, 32, 64, 4};
+.visible .entry promoted_aggregate_literal(.param .u64 output) {
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<2>;
+    ld.param.u64 %rd1, [output];
+    ld.global.b32 %r1, [__const_$record];
+    ld.global.b32 %r2, [__const_$record+4];
+    ld.global.b32 %r3, [__const_$record+8];
+    add.u32 %r4, %r1, %r2;
+    add.u32 %r4, %r4, %r3;
+    st.global.b32 [%rd1], %r4;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult promoted_aggregate_literal =
+        metal::compile_ptx_to_msl(promoted_aggregate_literal_ptx);
+    ok &= expect(
+        promoted_aggregate_literal.ok &&
+            promoted_aggregate_literal.source.find(
+                "constant uchar cm___const__record[12]") != std::string::npos &&
+            promoted_aggregate_literal.source.find(
+                "0x00, 0x00, 0x20, 0x40, 0x04, 0x00, 0x00, 0x00") !=
+                std::string::npos &&
+            promoted_aggregate_literal.source.find("global_symbol:") ==
+                std::string::npos,
+        "Clang-promoted aggregate literals embed exact zero-filled bytes without a runtime global binding");
+    if (!promoted_aggregate_literal.ok) {
+        std::cerr << promoted_aggregate_literal.error << "\n";
+    }
+
+    const std::string initialized_writable_global_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.global .align 4 .b8 mutable_state[4] = {1};
+.visible .entry initialized_writable_global(.param .u64 output) {
+    .reg .b32 %r1;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    ld.global.b32 %r1, [mutable_state];
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult initialized_writable_global =
+        metal::compile_ptx_to_msl(initialized_writable_global_ptx);
+    ok &= expect(
+        !initialized_writable_global.ok &&
+            initialized_writable_global.error.find(
+                "requires registration-backed semantics") != std::string::npos,
+        "initialized writable PTX globals fail explicitly instead of becoming immutable literals");
+
     const std::string aggregate_param_ptx = R"ptx(
 .version 8.0
 .target sm_80

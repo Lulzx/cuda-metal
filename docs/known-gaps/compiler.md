@@ -31,8 +31,10 @@ Remaining typed-path blockers include combinations of:
   signatures, indirect calls, and general double-signature calls;
 - nested or partially initialized aggregate insertion and extraction beyond
   the proven flat typed-struct path;
-- compiler-promoted PTX module-global aggregate literals that are not registered
-  as host-visible constant or writable symbols;
+- initialized writable PTX `.global` arrays beyond the proven uninitialized
+  registration-backed symbols; module-private CUDA Clang `__const_$` aggregate
+  literals are embedded read-only, while ordinary initialized writable globals
+  fail explicitly instead of being reclassified as constants;
 - FP64 modes and operations beyond the numerically proven `fast48`
   arithmetic/storage/comparison/rounding corpus, including observable IEEE
   exception status;

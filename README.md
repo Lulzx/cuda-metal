@@ -84,7 +84,8 @@ compiler paths and their selection policy are in
 - The exact in-tree 24-project corpus passes numerical Apple-GPU execution both
   through typed PTX and through direct native AOT, with workload
   specializations disabled. The native path embeds metallibs and performs no
-  first-launch PTX JIT.
+  first-launch PTX JIT. The aggregate-call probe also covers CUDA Clang 21-23
+  promoted module-private aggregate literals with exact embedded bytes.
 - Vector add, SAXPY, reduction, selected matrix/library operations, typed
   direct/PTX FP64, 32-bit atomics, lock-backed 64-bit typed-PTX atomics, fences,
   and bounded device `printf`, typed direct

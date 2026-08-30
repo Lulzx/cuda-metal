@@ -425,6 +425,111 @@ struct ModuleConstantSymbol {
     std::uint32_t alignment = 1;
 };
 
+struct InitializedByteArray {
+    std::string name;
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t alignment = 1;
+    bool constant_space = false;
+    bool module_private = false;
+};
+
+struct InitializedByteArrayScan {
+    std::vector<InitializedByteArray> arrays;
+    std::string error;
+};
+
+InitializedByteArrayScan scan_initialized_byte_arrays(std::string_view ptx) {
+    InitializedByteArrayScan result;
+    std::istringstream lines{std::string(ptx)};
+    std::string line;
+    const std::regex declaration(
+        R"(^\s*(?:(?:\.visible|\.extern|\.weak)\s+)?\.(const|global)\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*=\s*\{([^}]*)\}\s*;\s*$)"
+    );
+    while (std::getline(lines, line)) {
+        const std::size_t comment = line.find("//");
+        if (comment != std::string::npos) line.resize(comment);
+        if (line.find('=') == std::string::npos ||
+            line.find(".b8") == std::string::npos ||
+            (line.find(".global") == std::string::npos &&
+             line.find(".const") == std::string::npos)) {
+            continue;
+        }
+
+        std::smatch match;
+        if (!std::regex_match(line, match, declaration)) {
+            result.error = "unsupported initialized PTX byte-array declaration: " +
+                           trim(line);
+            return result;
+        }
+
+        std::uint64_t declared_count = 0;
+        std::uint64_t alignment = 0;
+        try {
+            alignment = std::stoull(match[2].str());
+            declared_count = std::stoull(match[4].str());
+        } catch (...) {
+            result.error = "invalid initialized PTX byte-array size or alignment";
+            return result;
+        }
+        constexpr std::uint64_t kMaxEmbeddedByteArray = 64u * 1024u * 1024u;
+        if (alignment == 0 || alignment > UINT32_MAX || declared_count == 0 ||
+            declared_count > kMaxEmbeddedByteArray) {
+            result.error = "initialized PTX byte array has invalid or excessive size/alignment";
+            return result;
+        }
+
+        std::vector<std::uint8_t> bytes;
+        std::string initializer = trim(match[5].str());
+        std::size_t begin = 0;
+        while (begin < initializer.size()) {
+            const std::size_t comma = initializer.find(',', begin);
+            const std::size_t end =
+                comma == std::string::npos ? initializer.size() : comma;
+            const std::string item =
+                trim(std::string_view(initializer).substr(begin, end - begin));
+            if (item.empty()) {
+                result.error = "initialized PTX byte array contains an empty element";
+                return result;
+            }
+            try {
+                std::size_t consumed = 0;
+                const long long value = std::stoll(item, &consumed, 0);
+                if (consumed != item.size() || value < -128 || value > 255) {
+                    result.error =
+                        "initialized PTX byte array contains a non-byte element '" +
+                        item + "'";
+                    return result;
+                }
+                bytes.push_back(static_cast<std::uint8_t>(value & 0xff));
+            } catch (...) {
+                result.error =
+                    "initialized PTX byte array contains an invalid element '" +
+                    item + "'";
+                return result;
+            }
+            if (bytes.size() > declared_count) {
+                result.error =
+                    "initialized PTX byte array has more elements than its declaration";
+                return result;
+            }
+            if (comma == std::string::npos) break;
+            begin = comma + 1;
+        }
+        bytes.resize(static_cast<std::size_t>(declared_count), 0);
+        result.arrays.push_back({
+            .name = match[3].str(),
+            .bytes = std::move(bytes),
+            .alignment = static_cast<std::uint32_t>(alignment),
+            .constant_space = match[1].str() == "const",
+            .module_private =
+                !starts_with(trim(line), ".visible") &&
+                !starts_with(trim(line), ".extern") &&
+                !starts_with(trim(line), ".weak"),
+        });
+    }
+    return result;
+}
+
 std::vector<ModuleConstantSymbol> scan_module_constant_symbols(std::string_view ptx) {
     const std::string source(ptx);
     const std::regex declaration(
@@ -640,6 +745,8 @@ struct Importer {
     std::optional<Operand> module_constant_buffer;
     std::vector<ModuleConstantSymbol> module_global_symbols;
     std::unordered_map<std::string, Operand> module_global_values;
+    std::unordered_map<std::string, ModuleConstantSymbol>
+        module_initialized_symbols;
     std::unordered_map<int, cumetal::passes::PrintfLoweredCall> printf_calls;
     std::unordered_set<int> printf_scaffold_lines;
     std::optional<Operand> printf_buffer;
@@ -944,6 +1051,9 @@ struct Importer {
                     if (threadgroup_symbols.contains(source_symbol)) {
                         inferred = Type::pointer(Type::integer(8),
                                                  AddressSpace::kThreadgroup);
+                    } else if (module_initialized_symbols.contains(source_symbol)) {
+                        inferred = Type::pointer(Type::integer(8),
+                                                 AddressSpace::kConstant);
                     } else if (std::any_of(
                                    module_global_symbols.begin(),
                                    module_global_symbols.end(),
@@ -1129,6 +1239,11 @@ struct Importer {
         if (const auto global = module_global_values.find(symbol);
             global != module_global_values.end()) {
             return global->second;
+        }
+        if (module_initialized_symbols.contains(symbol)) {
+            return Operand::symbol(
+                symbol,
+                Type::pointer(Type::integer(8), AddressSpace::kConstant));
         }
         if (threadgroup_symbols.contains(symbol)) {
             return Operand::symbol(
@@ -2664,6 +2779,13 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     }
     importer.implicit_definitions = scan_implicit_definitions(ptx);
 
+    const InitializedByteArrayScan initialized_arrays =
+        scan_initialized_byte_arrays(ptx);
+    if (!initialized_arrays.error.empty()) {
+        importer.result.error = initialized_arrays.error;
+        return importer.result;
+    }
+
     cumetal::ptx::ParseOptions parse_options;
     parse_options.strict = options.strict;
     const auto parsed = cumetal::ptx::parse_ptx(ptx, parse_options);
@@ -2718,6 +2840,66 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     };
     if (!visit_call_graph(visit_call_graph, *selected_entry).has_value()) {
         return importer.result;
+    }
+    std::unordered_set<int> decoded_printf_scaffold_lines;
+    const auto collect_printf_scaffold = [&](
+        const cumetal::ptx::EntryFunction& function) {
+        const cumetal::passes::PrintfLowerResult lowered =
+            cumetal::passes::lower_printf_calls(
+                function, {.strict = options.strict, .ptx_source = ptx});
+        if (!lowered.ok) return;
+        for (const auto& call : lowered.calls) {
+            decoded_printf_scaffold_lines.insert(call.abi_scaffold_lines.begin(),
+                                                  call.abi_scaffold_lines.end());
+        }
+    };
+    collect_printf_scaffold(*selected_entry);
+    for (const auto* helper : reachable_helpers) collect_printf_scaffold(*helper);
+    const auto symbol_is_referenced = [&](std::string_view symbol) {
+        const auto instruction_references_symbol = [&](const Instruction& instruction) {
+            if (decoded_printf_scaffold_lines.contains(instruction.line)) return false;
+            return std::any_of(
+                instruction.operands.begin(), instruction.operands.end(),
+                [&](const std::string& operand) {
+                    return parameter_name_from_operand(operand) == symbol;
+                });
+        };
+        if (std::any_of(selected_entry->instructions.begin(),
+                        selected_entry->instructions.end(),
+                        instruction_references_symbol)) {
+            return true;
+        }
+        return std::any_of(
+            reachable_helpers.begin(), reachable_helpers.end(),
+            [&](const cumetal::ptx::EntryFunction* helper) {
+                return std::any_of(helper->instructions.begin(),
+                                   helper->instructions.end(),
+                                   instruction_references_symbol);
+            });
+    };
+    for (const InitializedByteArray& array : initialized_arrays.arrays) {
+        if (!symbol_is_referenced(array.name)) continue;
+        const bool clang_promoted_literal =
+            array.module_private && starts_with(array.name, "__const_$");
+        if (!array.constant_space && !clang_promoted_literal) {
+            importer.result.error =
+                "referenced initialized writable PTX global '" + array.name +
+                "' requires registration-backed semantics";
+            return importer.result;
+        }
+        importer.result.module.global_constants.push_back({
+            .name = array.name,
+            .bytes = array.bytes,
+            .alignment = array.alignment,
+        });
+        importer.module_initialized_symbols.emplace(
+            array.name,
+            ModuleConstantSymbol{
+                .name = array.name,
+                .offset = 0,
+                .byte_size = array.bytes.size(),
+                .alignment = array.alignment,
+            });
     }
     for (const ModuleConstantSymbol& symbol : scan_module_constant_symbols(ptx)) {
         importer.module_constant_buffer_size =
@@ -2785,6 +2967,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         next.module_constant_symbols = importer.module_constant_symbols;
         next.module_constant_buffer_size = importer.module_constant_buffer_size;
         next.module_global_symbols = importer.module_global_symbols;
+        next.module_initialized_symbols = importer.module_initialized_symbols;
 
         const cumetal::passes::PrintfLowerResult printf_lowered =
             cumetal::passes::lower_printf_calls(

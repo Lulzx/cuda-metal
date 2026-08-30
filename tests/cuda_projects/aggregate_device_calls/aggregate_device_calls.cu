@@ -24,11 +24,12 @@ __global__ void aggregate_device_call_probe(int* output) {
         const Record second = make_record(7, 1.5f, 2);
         output[0] = consume_record(first, 6);
         output[1] = consume_record(second, 4);
+        output[2] = consume_record(Record{5, 3.0f, 1}, 4);
     }
 }
 
 int main() {
-    constexpr int expected[2] = {22, 15};
+    constexpr int expected[3] = {22, 15, 18};
     int* device_output = nullptr;
     if (cudaMalloc(reinterpret_cast<void**>(&device_output), sizeof(expected)) !=
         cudaSuccess) {
@@ -57,6 +58,6 @@ int main() {
         }
     }
     std::printf(
-        "PASS: aggregate device arguments and returns preserve all fields\n");
+        "PASS: aggregate device arguments, returns, and promoted literals preserve all fields\n");
     return 0;
 }
