@@ -65,7 +65,9 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   surface is primarily contiguous FP32/NCHW; it synchronizes the handle stream
   before reading UMA operands and rejects unsupported types/layouts/shapes for
   the covered calls. Convolution is the tested implicit-GEMM cross-correlation
-  path; general algorithm selection, convolution-mode filter reversal, general
+  path; its tracked operands and workspaces are range-checked, and custom Nd
+  strides are rejected because the implementation is contiguous. General
+  algorithm selection, convolution-mode filter reversal, general
   OpTensor broadcasting, fusion, training/backward breadth, graph integration,
   datatype, and layout coverage remain incomplete. RNN and attention are
   bounded compatibility paths rather than full cuDNN implementations.

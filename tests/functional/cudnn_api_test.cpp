@@ -148,6 +148,27 @@ static bool test_convolution_workspace_and_backward_beta() {
         return false;
     }
 
+    float* deviceShort = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&deviceShort), sizeof(float)) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cuDNN short allocation setup\n");
+        return false;
+    }
+    y[0] = y[1] = -9.0f;
+    st = cudnnConvolutionForward(handle, &alpha, xDesc, deviceShort, wDesc, kernel,
+                                 convDesc, CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+                                 nullptr, 0, &beta, yDesc, y);
+    if (st != CUDNN_STATUS_BAD_PARAM || y[0] != -9.0f || y[1] != -9.0f) {
+        std::fprintf(stderr, "FAIL: undersized tracked convolution input was accepted\n");
+        return false;
+    }
+    st = cudnnConvolutionForward(handle, &alpha, xDesc, x, wDesc, kernel,
+                                 convDesc, CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+                                 deviceShort, 2 * sizeof(float), &beta, yDesc, y);
+    if (st != CUDNN_STATUS_BAD_PARAM) {
+        std::fprintf(stderr, "FAIL: undersized tracked convolution workspace was accepted\n");
+        return false;
+    }
+
     float dy[] = {1.0f, 2.0f};
     float dx[] = {10.0f, 20.0f};
     st = cudnnConvolutionBackwardData(handle, &alpha, wDesc, kernel, yDesc, dy,
@@ -159,6 +180,61 @@ static bool test_convolution_workspace_and_backward_beta() {
                      dx[0], dx[1], st);
         return false;
     }
+    st = cudnnConvolutionBackwardData(handle, &alpha, wDesc, kernel, yDesc, dy,
+                                      convDesc, CUDNN_CONVOLUTION_BWD_DATA_ALGO_0,
+                                      nullptr, 0, &beta, xDesc, deviceShort);
+    if (st != CUDNN_STATUS_BAD_PARAM) {
+        std::fprintf(stderr, "FAIL: undersized tracked convolution gradient was accepted\n");
+        return false;
+    }
+
+    cudnnTensorDescriptor_t stridedDesc = nullptr;
+    cudnnCreateTensorDescriptor(&stridedDesc);
+    int stridedDims[4] = {1, 1, 1, 2};
+    int unsupportedStrides[4] = {4, 4, 4, 2};
+    cudnnSetTensorNdDescriptor(stridedDesc, CUDNN_DATA_FLOAT, 4, stridedDims,
+                               unsupportedStrides);
+    st = cudnnConvolutionForward(handle, &alpha, stridedDesc, x, wDesc, kernel,
+                                 convDesc, CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+                                 nullptr, 0, &beta, yDesc, y);
+    if (st != CUDNN_STATUS_NOT_SUPPORTED) {
+        std::fprintf(stderr, "FAIL: non-contiguous convolution descriptor was accepted\n");
+        return false;
+    }
+    cudnnDestroyTensorDescriptor(stridedDesc);
+    cudaFree(deviceShort);
+
+    cudnnTensorDescriptor_t groupedX = nullptr, groupedY = nullptr;
+    cudnnFilterDescriptor_t groupedW = nullptr;
+    cudnnConvolutionDescriptor_t groupedConv = nullptr;
+    cudnnCreateTensorDescriptor(&groupedX);
+    cudnnCreateTensorDescriptor(&groupedY);
+    cudnnCreateFilterDescriptor(&groupedW);
+    cudnnCreateConvolutionDescriptor(&groupedConv);
+    cudnnSetTensor4dDescriptor(groupedX, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 2, 1, 1);
+    cudnnSetTensor4dDescriptor(groupedY, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 2, 1, 1);
+    cudnnSetFilter4dDescriptor(groupedW, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, 2, 1, 1, 1);
+    cudnnSetConvolution2dDescriptor(groupedConv, 0, 0, 1, 1, 1, 1,
+                                    CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
+    cudnnSetConvolutionGroupCount(groupedConv, 2);
+    float groupedWeights[] = {2.0f, 3.0f};
+    float groupedDy[] = {5.0f, 7.0f};
+    float groupedDx[] = {-1.0f, -1.0f};
+    float zero = 0.0f;
+    st = cudnnConvolutionBackwardData(handle, &alpha, groupedW, groupedWeights,
+                                      groupedY, groupedDy, groupedConv,
+                                      CUDNN_CONVOLUTION_BWD_DATA_ALGO_0, nullptr, 0,
+                                      &zero, groupedX, groupedDx);
+    if (st != CUDNN_STATUS_SUCCESS || std::fabs(groupedDx[0] - 10.0f) > 1e-5f ||
+        std::fabs(groupedDx[1] - 21.0f) > 1e-5f) {
+        std::fprintf(stderr, "FAIL: grouped backward data result=[%f,%f] status=%d\n",
+                     groupedDx[0], groupedDx[1], st);
+        return false;
+    }
+    cudnnDestroyConvolutionDescriptor(groupedConv);
+    cudnnDestroyFilterDescriptor(groupedW);
+    cudnnDestroyTensorDescriptor(groupedY);
+    cudnnDestroyTensorDescriptor(groupedX);
 
     if (cudnnSetConvolutionGroupCount(convDesc, 0) != CUDNN_STATUS_BAD_PARAM) {
         std::fprintf(stderr, "FAIL: invalid convolution group count was accepted\n");

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <utility>
 #include <vector>
 
 // cuDNN shim: CPU-backed convolution and tensor ops via im2col + GEMM (Accelerate).
@@ -117,8 +118,18 @@ bool valid_tensor(const cudnnTensorStruct* t) {
 }
 
 bool supported_f32_nchw(const cudnnTensorStruct* t) {
-    return valid_tensor(t) && t->dataType == CUDNN_DATA_FLOAT &&
-           t->format == CUDNN_TENSOR_NCHW;
+    if (!valid_tensor(t) || t->dataType != CUDNN_DATA_FLOAT ||
+        t->format != CUDNN_TENSOR_NCHW || t->wStride != 1) {
+        return false;
+    }
+    const long long h_stride = t->w;
+    const long long c_stride = static_cast<long long>(t->h) * t->w;
+    const long long n_stride = static_cast<long long>(t->c) * t->h * t->w;
+    return h_stride <= std::numeric_limits<int>::max() &&
+           c_stride <= std::numeric_limits<int>::max() &&
+           n_stride <= std::numeric_limits<int>::max() &&
+           t->hStride == h_stride && t->cStride == c_stride &&
+           t->nStride == n_stride;
 }
 
 bool supported_f32_nchw(const cudnnFilterStruct* f) {
@@ -189,6 +200,62 @@ size_t dtype_size(cudnnDataType_t dt) {
         case CUDNN_DATA_INT64: return 8;
         default: return 4;
     }
+}
+
+bool checked_add(size_t a, size_t b, size_t* out) {
+    if (!out || a > std::numeric_limits<size_t>::max() - b) return false;
+    *out = a + b;
+    return true;
+}
+
+bool tensor_bytes(const cudnnTensorStruct* tensor, size_t* bytes) {
+    if (!valid_tensor(tensor) || !bytes || tensor->nStride <= 0 || tensor->cStride <= 0 ||
+        tensor->hStride <= 0 || tensor->wStride <= 0) {
+        return false;
+    }
+    size_t last = 0;
+    for (const auto [extent, stride] :
+         {std::pair{tensor->n, tensor->nStride}, std::pair{tensor->c, tensor->cStride},
+          std::pair{tensor->h, tensor->hStride}, std::pair{tensor->w, tensor->wStride}}) {
+        size_t term = 0;
+        if (!checked_mul(static_cast<size_t>(extent - 1), static_cast<size_t>(stride),
+                         &term) ||
+            !checked_add(last, term, &last)) {
+            return false;
+        }
+    }
+    return checked_add(last, 1, &last) && checked_mul(last, dtype_size(tensor->dataType), bytes);
+}
+
+bool filter_bytes(const cudnnFilterStruct* filter, size_t* bytes) {
+    if (!filter || filter->k <= 0 || filter->c <= 0 || filter->h <= 0 || filter->w <= 0 ||
+        !bytes) {
+        return false;
+    }
+    size_t elements = static_cast<size_t>(filter->k);
+    return checked_mul(elements, static_cast<size_t>(filter->c), &elements) &&
+           checked_mul(elements, static_cast<size_t>(filter->h), &elements) &&
+           checked_mul(elements, static_cast<size_t>(filter->w), &elements) &&
+           checked_mul(elements, dtype_size(filter->dataType), bytes);
+}
+
+bool tracked_bytes_valid(const void* pointer, size_t required_bytes) {
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!cumetal::rt::resolve_allocation_for_pointer(pointer, &resolved)) {
+        // CPU compatibility paths intentionally accept ordinary host buffers.
+        return true;
+    }
+    return required_bytes <= resolved.remaining_size;
+}
+
+bool tensor_pointer_valid(const void* pointer, const cudnnTensorStruct* tensor) {
+    size_t bytes = 0;
+    return tensor_bytes(tensor, &bytes) && tracked_bytes_valid(pointer, bytes);
+}
+
+bool filter_pointer_valid(const void* pointer, const cudnnFilterStruct* filter) {
+    size_t bytes = 0;
+    return filter_bytes(filter, &bytes) && tracked_bytes_valid(pointer, bytes);
 }
 
 void compute_strides(cudnnTensorStruct* t) {
@@ -548,7 +615,13 @@ cudnnStatus_t cudnnConvolutionForward(cudnnHandle_t handle,
     cudnnStatus_t workspace_status = cudnnGetConvolutionForwardWorkspaceSize(
         handle, xDesc, wDesc, convDesc, yDesc, algo, &required_workspace);
     if (workspace_status != CUDNN_STATUS_SUCCESS) return workspace_status;
-    if (workSpace && workSpaceSizeInBytes < required_workspace) return CUDNN_STATUS_BAD_PARAM;
+    if ((workSpace && (workSpaceSizeInBytes < required_workspace ||
+                       !tracked_bytes_valid(workSpace, required_workspace))) ||
+        !tensor_pointer_valid(x, xDesc) || !filter_pointer_valid(w, wDesc) ||
+        !tensor_pointer_valid(y, yDesc) || !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -630,18 +703,36 @@ cudnnStatus_t cudnnGetConvolutionForwardAlgorithm_v7(cudnnHandle_t handle,
 
 // ── Backward convolution (data) ──
 
-cudnnStatus_t cudnnGetConvolutionBackwardDataWorkspaceSize(cudnnHandle_t /*handle*/,
+cudnnStatus_t cudnnGetConvolutionBackwardDataWorkspaceSize(cudnnHandle_t handle,
                                                             cudnnFilterDescriptor_t wDesc,
                                                             cudnnTensorDescriptor_t dyDesc,
                                                             cudnnConvolutionDescriptor_t convDesc,
-                                                            cudnnTensorDescriptor_t /*dxDesc*/,
-                                                            cudnnConvolutionBwdDataAlgo_t /*algo*/,
+                                                            cudnnTensorDescriptor_t dxDesc,
+                                                            cudnnConvolutionBwdDataAlgo_t algo,
                                                             size_t* sizeInBytes) {
-    if (!sizeInBytes || !wDesc || !dyDesc || !convDesc) return CUDNN_STATUS_BAD_PARAM;
-    int C = wDesc->c;
-    int kH = wDesc->h, kW = wDesc->w;
-    int outH = dyDesc->h, outW = dyDesc->w;
-    *sizeInBytes = (size_t)C * kH * kW * outH * outW * sizeof(float);
+    if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
+    if (!sizeInBytes || !supported_f32_nchw(wDesc) || !supported_f32_nchw(dyDesc) ||
+        !supported_f32_nchw(dxDesc) || !valid_convolution(convDesc)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    if (algo != CUDNN_CONVOLUTION_BWD_DATA_ALGO_0) return CUDNN_STATUS_NOT_SUPPORTED;
+    int outH = 0, outW = 0;
+    if (dxDesc->c % convDesc->groupCount != 0 ||
+        wDesc->k % convDesc->groupCount != 0 ||
+        wDesc->c != dxDesc->c / convDesc->groupCount || dyDesc->n != dxDesc->n ||
+        dyDesc->c != wDesc->k ||
+        !convolution_output_dims(dxDesc, wDesc, convDesc, &outH, &outW) ||
+        dyDesc->h != outH || dyDesc->w != outW) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    size_t elements = static_cast<size_t>(wDesc->c);
+    if (!checked_mul(elements, static_cast<size_t>(wDesc->h), &elements) ||
+        !checked_mul(elements, static_cast<size_t>(wDesc->w), &elements) ||
+        !checked_mul(elements, static_cast<size_t>(outH), &elements) ||
+        !checked_mul(elements, static_cast<size_t>(outW), &elements) ||
+        !checked_mul(elements, sizeof(float), sizeInBytes)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -669,8 +760,8 @@ cudnnStatus_t cudnnConvolutionBackwardData(cudnnHandle_t handle,
                                             cudnnFilterDescriptor_t wDesc, const void* w,
                                             cudnnTensorDescriptor_t dyDesc, const void* dy,
                                             cudnnConvolutionDescriptor_t convDesc,
-                                            cudnnConvolutionBwdDataAlgo_t /*algo*/,
-                                            void* workSpace, size_t /*workSpaceSizeInBytes*/,
+                                            cudnnConvolutionBwdDataAlgo_t algo,
+                                            void* workSpace, size_t workSpaceSizeInBytes,
                                             const void* beta,
                                             cudnnTensorDescriptor_t dxDesc, void* dx) {
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
@@ -680,6 +771,7 @@ cudnnStatus_t cudnnConvolutionBackwardData(cudnnHandle_t handle,
         !supported_f32_nchw(dxDesc) || !valid_convolution(convDesc) ||
         convDesc->mode != CUDNN_CROSS_CORRELATION)
         return CUDNN_STATUS_NOT_SUPPORTED;
+    if (algo != CUDNN_CONVOLUTION_BWD_DATA_ALGO_0) return CUDNN_STATUS_NOT_SUPPORTED;
     if (dxDesc->c % convDesc->groupCount != 0 ||
         wDesc->k % convDesc->groupCount != 0 || wDesc->c != dxDesc->c / convDesc->groupCount ||
         dyDesc->n != dxDesc->n || dyDesc->c != wDesc->k)
@@ -688,6 +780,17 @@ cudnnStatus_t cudnnConvolutionBackwardData(cudnnHandle_t handle,
     if (!convolution_output_dims(dxDesc, wDesc, convDesc, &expectedH, &expectedW) ||
         dyDesc->h != expectedH || dyDesc->w != expectedW)
         return CUDNN_STATUS_BAD_PARAM;
+    size_t required_workspace = 0;
+    cudnnStatus_t workspace_status = cudnnGetConvolutionBackwardDataWorkspaceSize(
+        handle, wDesc, dyDesc, convDesc, dxDesc, algo, &required_workspace);
+    if (workspace_status != CUDNN_STATUS_SUCCESS) return workspace_status;
+    if ((workSpace && (workSpaceSizeInBytes < required_workspace ||
+                       !tracked_bytes_valid(workSpace, required_workspace))) ||
+        !filter_pointer_valid(w, wDesc) || !tensor_pointer_valid(dy, dyDesc) ||
+        !tensor_pointer_valid(dx, dxDesc) || !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -699,7 +802,7 @@ cudnnStatus_t cudnnConvolutionBackwardData(cudnnHandle_t handle,
 
     int N = dyDesc->n;
     int K = wDesc->k;
-    int C_in = wDesc->c;
+    int C_in = dxDesc->c;
     int H = dxDesc->h, W = dxDesc->w;
     int kH = wDesc->h, kW = wDesc->w;
     int groups = convDesc->groupCount;
@@ -752,22 +855,36 @@ cudnnStatus_t cudnnConvolutionBackwardData(cudnnHandle_t handle,
 
 // ── Backward convolution (filter) ──
 
-cudnnStatus_t cudnnGetConvolutionBackwardFilterWorkspaceSize(cudnnHandle_t /*handle*/,
+cudnnStatus_t cudnnGetConvolutionBackwardFilterWorkspaceSize(cudnnHandle_t handle,
                                                               cudnnTensorDescriptor_t xDesc,
-                                                              cudnnTensorDescriptor_t /*dyDesc*/,
+                                                              cudnnTensorDescriptor_t dyDesc,
                                                               cudnnConvolutionDescriptor_t convDesc,
                                                               cudnnFilterDescriptor_t dwDesc,
-                                                              cudnnConvolutionBwdFilterAlgo_t /*algo*/,
+                                                              cudnnConvolutionBwdFilterAlgo_t algo,
                                                               size_t* sizeInBytes) {
-    if (!sizeInBytes || !xDesc || !convDesc || !dwDesc) return CUDNN_STATUS_BAD_PARAM;
-    int C = xDesc->c / convDesc->groupCount;
-    int kH = dwDesc->h, kW = dwDesc->w;
-    int pH = convDesc->pad_h, pW = convDesc->pad_w;
-    int sH = convDesc->stride_h, sW = convDesc->stride_w;
-    int dH = convDesc->dilation_h, dW = convDesc->dilation_w;
-    int outH = (xDesc->h + 2 * pH - (dH * (kH - 1) + 1)) / sH + 1;
-    int outW = (xDesc->w + 2 * pW - (dW * (kW - 1) + 1)) / sW + 1;
-    *sizeInBytes = (size_t)C * kH * kW * outH * outW * sizeof(float);
+    if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
+    if (!sizeInBytes || !supported_f32_nchw(xDesc) || !supported_f32_nchw(dyDesc) ||
+        !supported_f32_nchw(dwDesc) || !valid_convolution(convDesc)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    if (algo != CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0) return CUDNN_STATUS_NOT_SUPPORTED;
+    int outH = 0, outW = 0;
+    if (xDesc->c % convDesc->groupCount != 0 ||
+        dwDesc->k % convDesc->groupCount != 0 ||
+        dwDesc->c != xDesc->c / convDesc->groupCount || dyDesc->n != xDesc->n ||
+        dyDesc->c != dwDesc->k ||
+        !convolution_output_dims(xDesc, dwDesc, convDesc, &outH, &outW) ||
+        dyDesc->h != outH || dyDesc->w != outW) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    size_t elements = static_cast<size_t>(dwDesc->c);
+    if (!checked_mul(elements, static_cast<size_t>(dwDesc->h), &elements) ||
+        !checked_mul(elements, static_cast<size_t>(dwDesc->w), &elements) ||
+        !checked_mul(elements, static_cast<size_t>(outH), &elements) ||
+        !checked_mul(elements, static_cast<size_t>(outW), &elements) ||
+        !checked_mul(elements, sizeof(float), sizeInBytes)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -795,8 +912,8 @@ cudnnStatus_t cudnnConvolutionBackwardFilter(cudnnHandle_t handle,
                                               cudnnTensorDescriptor_t xDesc, const void* x,
                                               cudnnTensorDescriptor_t dyDesc, const void* dy,
                                               cudnnConvolutionDescriptor_t convDesc,
-                                              cudnnConvolutionBwdFilterAlgo_t /*algo*/,
-                                              void* workSpace, size_t /*workSpaceSizeInBytes*/,
+                                              cudnnConvolutionBwdFilterAlgo_t algo,
+                                              void* workSpace, size_t workSpaceSizeInBytes,
                                               const void* beta,
                                               cudnnFilterDescriptor_t dwDesc, void* dw) {
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
@@ -806,6 +923,7 @@ cudnnStatus_t cudnnConvolutionBackwardFilter(cudnnHandle_t handle,
         !supported_f32_nchw(dwDesc) || !valid_convolution(convDesc) ||
         convDesc->mode != CUDNN_CROSS_CORRELATION)
         return CUDNN_STATUS_NOT_SUPPORTED;
+    if (algo != CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0) return CUDNN_STATUS_NOT_SUPPORTED;
     if (xDesc->c % convDesc->groupCount != 0 ||
         dwDesc->k % convDesc->groupCount != 0 || dwDesc->c != xDesc->c / convDesc->groupCount ||
         dyDesc->n != xDesc->n || dyDesc->c != dwDesc->k)
@@ -814,6 +932,17 @@ cudnnStatus_t cudnnConvolutionBackwardFilter(cudnnHandle_t handle,
     if (!convolution_output_dims(xDesc, dwDesc, convDesc, &expectedH, &expectedW) ||
         dyDesc->h != expectedH || dyDesc->w != expectedW)
         return CUDNN_STATUS_BAD_PARAM;
+    size_t required_workspace = 0;
+    cudnnStatus_t workspace_status = cudnnGetConvolutionBackwardFilterWorkspaceSize(
+        handle, xDesc, dyDesc, convDesc, dwDesc, algo, &required_workspace);
+    if (workspace_status != CUDNN_STATUS_SUCCESS) return workspace_status;
+    if ((workSpace && (workSpaceSizeInBytes < required_workspace ||
+                       !tracked_bytes_valid(workSpace, required_workspace))) ||
+        !tensor_pointer_valid(x, xDesc) || !tensor_pointer_valid(dy, dyDesc) ||
+        !filter_pointer_valid(dw, dwDesc) || !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
@@ -889,6 +1018,11 @@ cudnnStatus_t cudnnConvolutionBackwardBias(cudnnHandle_t handle,
         return CUDNN_STATUS_NOT_SUPPORTED;
     if (dbDesc->n != 1 || dbDesc->c != dyDesc->c || dbDesc->h != 1 || dbDesc->w != 1)
         return CUDNN_STATUS_BAD_PARAM;
+    if (!tensor_pointer_valid(dy, dyDesc) || !tensor_pointer_valid(db, dbDesc) ||
+        !tracked_bytes_valid(alpha, sizeof(float)) ||
+        !tracked_bytes_valid(beta, sizeof(float))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     cudnnStatus_t sync_status = sync_handle(handle);
     if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 

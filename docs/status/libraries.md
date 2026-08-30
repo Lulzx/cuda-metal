@@ -68,7 +68,10 @@ full NVIDIA library implementations.
   tensor shapes are checked before output mutation; unsupported combinations
   fail explicitly. Regression coverage includes nonzero-`beta` instance
   softmax, backward-convolution accumulation, invalid descriptors, undersized
-  workspaces, and stream-ordered input.
+  workspaces, and stream-ordered input. The convolution family accepts only the
+  contiguous NCHW layout it actually computes, uses overflow-checked
+  forward/backward workspace geometry, and validates complete tracked
+  tensor/filter/workspace spans before CPU access.
 - **NCCL / NVML:** single-device compatibility/query subsets. NCCL's one-rank
   collectives are stream-ordered identity copies with validated communicators,
   roots, reduction operations, datatypes, byte-count overflow, group state,
