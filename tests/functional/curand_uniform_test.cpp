@@ -534,6 +534,22 @@ int main() {
         return 1;
     }
 
+    float* undersized_output = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&undersized_output), 2 * sizeof(float)) !=
+            cudaSuccess ||
+        curandGenerateUniform(generator, undersized_output, 3) !=
+            CURAND_STATUS_OUT_OF_RANGE ||
+        curandGenerateUniform(generator, undersized_output + 1, 2) !=
+            CURAND_STATUS_OUT_OF_RANGE ||
+        curandGenerateUniform(generator, undersized_output,
+                              static_cast<std::size_t>(-1)) !=
+            CURAND_STATUS_OUT_OF_RANGE ||
+        cudaFree(undersized_output) != cudaSuccess) {
+        std::fprintf(stderr,
+                     "FAIL: cuRAND accepted an output extent beyond tracked allocation bounds\n");
+        return 1;
+    }
+
     if (curandCreateGenerator(nullptr, CURAND_RNG_PSEUDO_DEFAULT) != CURAND_STATUS_NOT_INITIALIZED) {
         std::fprintf(stderr, "FAIL: expected CURAND_STATUS_NOT_INITIALIZED for null generator out ptr\n");
         return 1;

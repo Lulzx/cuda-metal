@@ -31,7 +31,9 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   MT19937, Philox, Sobol, and scrambled Sobol descriptors can be created and
   queried, but generation is rejected explicitly until the named algorithm is
   implemented. Ordering modes and quasi dimensions are descriptor state, not
-  proof of their sequence semantics; complete distributions, state
+  proof of their sequence semantics. Implemented device generation rejects
+  output counts that exceed the tracked allocation remainder before enqueue;
+  complete distributions, state
   serialization, and device API parity remain open.
 - **cuFFT:** ranks 1 to 3 execute for every transform type, including cuFFT's
   advanced data layout (`inembed`/`onembed`/stride/dist), which is what a padded

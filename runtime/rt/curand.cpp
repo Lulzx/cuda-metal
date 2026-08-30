@@ -80,10 +80,20 @@ curandStatus_t enqueue_generation(curandGenerator_t generator, Operation operati
 template <typename Output, typename Operation>
 curandStatus_t dispatch_generation(curandGenerator_t generator,
                                    Output* output_ptr,
+                                   std::size_t count,
                                    Operation operation) {
     if (!supports_generation(generator->rng_type)) return CURAND_STATUS_TYPE_ERROR;
     if (!generator->host_generator && cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
         return CURAND_STATUS_TYPE_ERROR;
+    }
+    if (!generator->host_generator) {
+        cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+        if (!cumetal::rt::resolve_allocation_for_pointer(output_ptr, &resolved)) {
+            return CURAND_STATUS_TYPE_ERROR;
+        }
+        if (count > resolved.remaining_size / sizeof(Output)) {
+            return CURAND_STATUS_OUT_OF_RANGE;
+        }
     }
     if (generator->host_generator) {
         operation();
@@ -207,7 +217,7 @@ curandStatus_t curandGenerateUniform(curandGenerator_t generator, float* output_
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    return dispatch_generation(generator, output_ptr, [=]() {
+    return dispatch_generation(generator, output_ptr, num, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
             output_ptr[i] = generator->uniform(generator->engine);
@@ -228,7 +238,7 @@ curandStatus_t curandGenerateUniformDouble(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    return dispatch_generation(generator, output_ptr, [=]() {
+    return dispatch_generation(generator, output_ptr, num, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
             output_ptr[i] = generator->uniform_double(generator->engine);
@@ -255,7 +265,7 @@ curandStatus_t curandGenerateNormal(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    return dispatch_generation(generator, output_ptr, [=]() {
+    return dispatch_generation(generator, output_ptr, num, [=]() {
         std::normal_distribution<float> distribution(mean, stddev);
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
@@ -283,7 +293,7 @@ curandStatus_t curandGenerateNormalDouble(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    return dispatch_generation(generator, output_ptr, [=]() {
+    return dispatch_generation(generator, output_ptr, num, [=]() {
         std::normal_distribution<double> distribution(mean, stddev);
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
@@ -311,7 +321,7 @@ curandStatus_t curandGenerateLogNormal(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    return dispatch_generation(generator, output_ptr, [=]() {
+    return dispatch_generation(generator, output_ptr, num, [=]() {
         std::lognormal_distribution<float> distribution(mean, stddev);
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
@@ -339,7 +349,7 @@ curandStatus_t curandGenerateLogNormalDouble(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    return dispatch_generation(generator, output_ptr, [=]() {
+    return dispatch_generation(generator, output_ptr, num, [=]() {
         std::lognormal_distribution<double> distribution(mean, stddev);
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
@@ -359,7 +369,7 @@ curandStatus_t curandGenerate(curandGenerator_t generator, unsigned int* output_
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    return dispatch_generation(generator, output_ptr, [=]() {
+    return dispatch_generation(generator, output_ptr, num, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
             output_ptr[i] = static_cast<unsigned int>(generator->engine());
@@ -380,7 +390,7 @@ curandStatus_t curandGenerateLongLong(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    return dispatch_generation(generator, output_ptr, [=]() {
+    return dispatch_generation(generator, output_ptr, num, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
             output_ptr[i] = generator->engine();
@@ -405,7 +415,7 @@ curandStatus_t curandGeneratePoisson(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    return dispatch_generation(generator, output_ptr, [=]() {
+    return dispatch_generation(generator, output_ptr, num, [=]() {
         std::poisson_distribution<unsigned int> distribution(lambda);
         std::lock_guard<std::mutex> lock(generator->mutex);
         for (size_t i = 0; i < num; ++i) {
@@ -427,7 +437,7 @@ curandStatus_t curandGenerateExponential(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    return dispatch_generation(generator, output_ptr, [=]() {
+    return dispatch_generation(generator, output_ptr, num, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         std::uniform_real_distribution<float> u(0.0f, 1.0f);
         for (size_t i = 0; i < num; ++i) {
@@ -451,7 +461,7 @@ curandStatus_t curandGenerateExponentialDouble(curandGenerator_t generator,
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
-    return dispatch_generation(generator, output_ptr, [=]() {
+    return dispatch_generation(generator, output_ptr, num, [=]() {
         std::lock_guard<std::mutex> lock(generator->mutex);
         std::uniform_real_distribution<double> u(0.0, 1.0);
         for (size_t i = 0; i < num; ++i) {
