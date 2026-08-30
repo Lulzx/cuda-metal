@@ -41,17 +41,15 @@ CUDA driver:         12.0
 | Listed (bonded) forces | **Apple GPU** | `bonded_kernel_gpu<calcVir, calcEner>` |
 | Constrained update (LINCS + SETTLE) | **Apple GPU** | `lincs_kernel`, `settle_kernel`, `updateMDLeapfrogSimple` |
 | PME spread / solve / gather | **Apple GPU** | `pme_spline_and_spread_kernel`, `pme_solve_kernel`, `pme_gather_kernel` |
+| PME 3D FFT | **Apple GPU** | CuMetal `cumetal_fft_stockham_f32` and friends |
 | Exclusive scan over the sci histogram | host UMA (CUB shim) | `cub::DeviceScan::ExclusiveSum` |
-| PME 3D FFT | host UMA (cuFFT shim) | `cufftExecR2C` / `cufftExecC2R` |
 
-`-nb gpu -pme gpu -bonded gpu -update gpu`: everything GROMACS can offload.
-
-Be precise about PME. Its three CUDA kernels -- spreading charges onto the mesh,
-the reciprocal-space convolution, and gathering forces back -- run on the Apple
-GPU. The 3D FFT between them does not: CuMetal's cuFFT is a CPU implementation
-over unified memory, so that step is Accelerate, not Metal. GROMACS's log line
-"PME tasks will do all aspects on the GPU" describes GROMACS's task assignment,
-not where every instruction retires.
+`-nb gpu -pme gpu -bonded gpu -update gpu`: everything GROMACS can offload, and
+the whole PME step is now GPU-resident. The 3D FFT is CuMetal's own Metal
+implementation — Stockham autosort passes, with Bluestein for the axes that are
+not a power of two (villin's slowest axis is 40). A 40x32x32 R2C is 30
+dispatches, and 42 of those transforms run per 20-step trajectory. The one thing
+still on the host is the CUB scan of the pair-list histogram.
 
 ---
 
@@ -101,11 +99,14 @@ From one `bash demos/gromacs/run.sh`, GROMACS 2025.4, `-nb gpu -pme gpu
 | System | Atoms | Max relative energy difference, 20 steps |
 | --- | --- | --- |
 | villin | 5,006 | 2.66e-05 |
-| rnase_cubic | 24,040 | 6.40e-05 |
+| rnase_cubic | 24,040 | 6.80e-05 |
 
 ADH (134,177 atoms) is wired into `--all` and uses the same gate, but has no
 recorded number here — run it and read the table `run.sh` prints rather than
 trusting a figure copied into a README.
+
+208 kernel launches are traced with `device=apple_gpu` over a two-step
+provenance run, against 28 before the FFT moved to Metal.
 
 Step-0 forces were also compared directly, atom by atom, out of the `.trr`, with
 the nonbonded kernel on the GPU: **max relative difference 5.1e-05 over 5,006
@@ -172,6 +173,17 @@ vDSP cannot factor — a PME grid with a factor of 7 on some axis — go through
 Bluestein's chirp-z algorithm instead of being rejected, which also removes the
 1024-element ceiling the old direct-sum fallback carried.
 
+**Then the FFT itself moved to Metal.** Offloading PME left one host excursion
+in the middle of an otherwise GPU-resident step, so the single-precision
+transforms are now Metal kernels: Stockham autosort, radix 2, one dispatch per
+pass. Autosort is what avoids a bit-reversal kernel — the permutation folds into
+the movement each pass already performs, so every dispatch is regular and
+divergence-free. Non-power-of-two axes run Bluestein on the same kernels, which
+matters because a PME grid is 2-3-5-7 smooth and 40 is an ordinary axis length.
+The scratch arena is reused across calls and the transforms are asynchronous, so
+it tracks the stream it was last used on and synchronizes before handing the same
+memory to a different one.
+
 The `nvcc` shim also gained `-ccbin`, `-diag-suppress`, `-Xcompiler` quote
 stripping, a two-phase compile-and-link (clang's CUDA-mode link mis-parses
 Apple's `-lto_library`), `CUDA::cudart_static`, and directory symlinks for
@@ -181,10 +193,11 @@ Apple's `-lto_library`), `CUDA::cudart_static`, and directory symlinks for
 
 ## Known limits
 
-- **The PME FFT is not on the GPU.** CuMetal's cuFFT computes the transform on
-  the CPU over unified memory. PME's own kernels are offloaded; the FFT between
-  them is not, and a Metal FFT is the obvious next step. See
-  [`docs/known-gaps/libraries.md`](../../docs/known-gaps/libraries.md).
+- **Only single precision is on the GPU.** Metal has no FP64, so the double
+  cuFFT entry points keep the CPU implementation. GROMACS's mixed-precision
+  build only uses the single ones. Small grids also stay on the CPU, where the
+  dispatch cost would exceed the transform; `CUMETAL_FFT_METAL=1` overrides that
+  and `CUMETAL_DEBUG_FFT=1` reports which path each transform took.
 - **Single rank, single GPU.** `GMX_MPI=OFF`, no domain decomposition, no
   halo exchange, no PME/PP split across ranks.
 - **Mixed precision only.** GROMACS's double-precision build is untested here.

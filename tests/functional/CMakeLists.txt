@@ -2414,6 +2414,19 @@ add_test(
     COMMAND cumetal_cufft_nd_test
 )
 
+# The same checks with every transform forced onto Metal. Without this the
+# routing threshold decides which implementation the test covers, so most of the
+# cases would only ever exercise the CPU one and a broken GPU kernel would show
+# up first in GROMACS rather than here.
+add_test(
+    NAME functional_cufft_nd_metal
+    COMMAND cumetal_cufft_nd_test
+)
+set_tests_properties(
+    functional_cufft_nd_metal
+    PROPERTIES ENVIRONMENT "CUMETAL_FFT_METAL=1"
+)
+
 add_test(
     NAME functional_runtime_occupancy
     COMMAND cumetal_runtime_occupancy_test

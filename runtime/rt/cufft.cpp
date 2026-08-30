@@ -17,6 +17,8 @@
 
 #include "cufftXt.h"
 
+#include "cufft_metal.h"
+
 #include <Accelerate/Accelerate.h>
 
 #include <algorithm>
@@ -127,41 +129,10 @@ vDSP_DFT_SetupD vdsp_setup(vDSP_Length n, vDSP_DFT_Direction dir, double) {
     return setup;
 }
 
-// In-place radix-2 DFT over a power-of-two length, in double regardless of the
-// caller's precision. Only Bluestein uses it, and its accuracy sets the accuracy
-// of every unsupported length.
-void fft_pow2(std::vector<double>& re, std::vector<double>& im, bool inverse) {
-    const std::size_t m = re.size();
-    for (std::size_t i = 1, j = 0; i < m; ++i) {
-        std::size_t bit = m >> 1;
-        for (; (j & bit) != 0; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) {
-            std::swap(re[i], re[j]);
-            std::swap(im[i], im[j]);
-        }
-    }
-    for (std::size_t len = 2; len <= m; len <<= 1) {
-        const double step = 2.0 * std::numbers::pi / static_cast<double>(len) *
-                            (inverse ? 1.0 : -1.0);
-        const std::size_t half = len / 2;
-        for (std::size_t base = 0; base < m; base += len) {
-            for (std::size_t k = 0; k < half; ++k) {
-                const double angle = step * static_cast<double>(k);
-                const double wr = std::cos(angle);
-                const double wi = std::sin(angle);
-                const double lo_re = re[base + k];
-                const double lo_im = im[base + k];
-                const double hi_re = re[base + k + half] * wr - im[base + k + half] * wi;
-                const double hi_im = re[base + k + half] * wi + im[base + k + half] * wr;
-                re[base + k] = lo_re + hi_re;
-                im[base + k] = lo_im + hi_im;
-                re[base + k + half] = lo_re - hi_re;
-                im[base + k + half] = lo_im - hi_im;
-            }
-        }
-    }
-}
+// Bluestein's inner power-of-two transforms come from the Metal path's shared
+// implementation so the CPU and GPU chirp convolutions fold identically.
+namespace fft_metal = cumetal::rt::fft_metal;
+using fft_metal::fft_pow2;
 
 template <typename Scalar>
 void bluestein(Scalar* re, Scalar* im, std::size_t n, bool inverse) {
@@ -534,6 +505,38 @@ cufftResult synchronize_plan_stream(const CufftPlanEntry& plan) {
                                                               : CUFFT_EXEC_FAILED;
 }
 
+// ── Metal dispatch ───────────────────────────────────────────────────────────
+//
+// Single precision only. Metal has no FP64, and running the double entry points
+// through the emulated pair would cost more than the host transform they would
+// replace, so those keep the CPU implementation below.
+//
+// Declining here is always safe: the CPU path computes the same transform, and
+// nothing has been written to the output when this returns false.
+fft_metal::Layout to_metal_layout(const FftLayout& layout) {
+    fft_metal::Layout out;
+    for (int a = 0; a < 3; ++a) out.embed[a] = layout.embed[a];
+    out.stride = layout.stride;
+    out.dist = layout.dist;
+    return out;
+}
+
+bool try_exec_metal(const CufftPlanEntry& p, fft_metal::Kind kind, const void* idata,
+                    void* odata, bool inverse) {
+    fft_metal::Request request;
+    request.kind = kind;
+    request.rank = p.rank;
+    for (int a = 0; a < p.rank; ++a) request.n[a] = p.n[a];
+    request.batch = p.batch;
+    request.input = to_metal_layout(p.input);
+    request.output = to_metal_layout(p.output);
+    request.inverse = inverse;
+    request.stream = p.stream;
+    request.idata = idata;
+    request.odata = odata;
+    return fft_metal::execute(request);
+}
+
 }  // namespace
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -767,6 +770,10 @@ cufftResult cufftExecC2C(cufftHandle plan, cufftComplex* idata, cufftComplex* od
     if (p->type != CUFFT_C2C) {
         return CUFFT_INVALID_TYPE;
     }
+    if (try_exec_metal(*p, fft_metal::Kind::kC2C, idata, odata,
+                       direction == CUFFT_INVERSE)) {
+        return CUFFT_SUCCESS;
+    }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
     return exec_c2c_nd<float, cufftComplex>(*p, idata, odata, direction);
@@ -782,6 +789,9 @@ cufftResult cufftExecR2C(cufftHandle plan, cufftReal* idata, cufftComplex* odata
     if (p->type != CUFFT_R2C) {
         return CUFFT_INVALID_TYPE;
     }
+    if (try_exec_metal(*p, fft_metal::Kind::kR2C, idata, odata, false)) {
+        return CUFFT_SUCCESS;
+    }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
     return exec_r2c_nd<float, cufftReal, cufftComplex>(*p, idata, odata);
@@ -796,6 +806,9 @@ cufftResult cufftExecC2R(cufftHandle plan, cufftComplex* idata, cufftReal* odata
     }
     if (p->type != CUFFT_C2R) {
         return CUFFT_INVALID_TYPE;
+    }
+    if (try_exec_metal(*p, fft_metal::Kind::kC2R, idata, odata, true)) {
+        return CUFFT_SUCCESS;
     }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;

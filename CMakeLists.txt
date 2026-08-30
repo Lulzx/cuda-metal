@@ -257,6 +257,7 @@ add_library(cumetal_runtime SHARED
     runtime/rt/library_kernel_source.cpp
     runtime/rt/cublas.cpp
     runtime/rt/cufft.cpp
+    runtime/rt/cufft_metal.cpp
     runtime/rt/curand.cpp
     runtime/rt/cusparse.cpp
     runtime/rt/cusolver.cpp

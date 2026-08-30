@@ -15,9 +15,10 @@ full NVIDIA library implementations.
   log-normal families with seed, offset, generator lifetime, and stream ordering.
 - **cuFFT:** rank-1 to rank-3 planning and execution for C2C/R2C/C2R and the
   double forms, with cuFFT's advanced data layout (`inembed`/`onembed`, stride,
-  batch distance). Accelerate backs the lengths vDSP can factor; Bluestein's
-  algorithm covers the rest, so no length is rejected. Execution is on the CPU
-  over unified memory, not on the GPU.
+  batch distance). The single-precision transforms run on the Apple GPU
+  (Stockham autosort, Bluestein for non-power-of-two lengths); `CUMETAL_FFT_METAL`
+  selects auto/always/never and `CUMETAL_DEBUG_FFT` reports the routing. Small
+  grids and the double-precision forms use the Accelerate/Bluestein CPU path.
 - **cuSPARSE:** selected dense/sparse descriptors and operations, including GPU
   paths used by the HiGHS/cuPDLP-C integration.
 - **cuSOLVER:** a bounded dense/sparse solver API subset.

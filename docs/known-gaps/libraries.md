@@ -25,11 +25,12 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   quasi-random, state-serialization, or device API parity.
 - **cuFFT:** ranks 1 to 3 execute for every transform type, including cuFFT's
   advanced data layout (`inembed`/`onembed`/stride/dist), which is what a padded
-  grid such as GROMACS's PME mesh needs. Lengths vDSP cannot factor go through
-  Bluestein's algorithm rather than being rejected, so there is no unsupported
-  length and no size ceiling. Still absent: callbacks, multi-GPU and the rest of
-  the Xt surface, and any execution on the GPU -- the transform runs on the CPU
-  over unified memory, so offloading an FFT here buys correctness, not Metal.
+  grid such as GROMACS's PME mesh needs. The single-precision transforms
+  (`C2C`/`R2C`/`C2R`) run on the Apple GPU as Stockham autosort passes, with
+  Bluestein on the same kernels for lengths that are not a power of two; grids
+  below a dispatch-cost threshold and every double-precision entry point stay on
+  the CPU, since Metal has no FP64. Still absent: callbacks, multi-GPU, the rest
+  of the Xt surface, and a GPU path for the double transforms.
 - **cuSPARSE/cuSOLVER:** selected operations only; descriptor, format, solver,
   analysis/reuse, and datatype matrices remain incomplete.
 - **cuDNN:** selected descriptors/operations only; algorithm, fusion, training,
