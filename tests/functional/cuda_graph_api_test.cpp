@@ -160,6 +160,127 @@ static bool test_graph_pitched_copy_and_typed_memset() {
     return true;
 }
 
+static bool test_graph_array_copy_geometry() {
+    constexpr std::size_t width = 4;
+    constexpr std::size_t height = 3;
+    constexpr std::size_t depth = 2;
+    std::uint16_t source[width * height * depth]{};
+    std::uint16_t zero[width * height * depth]{};
+    std::uint16_t result[width * height * depth]{};
+    for (std::size_t index = 0; index < width * height * depth; ++index) {
+        source[index] = static_cast<std::uint16_t>(100 + index);
+    }
+
+    const cudaChannelFormatDesc desc =
+        cudaCreateChannelDesc(16, 0, 0, 0, cudaChannelFormatKindUnsigned);
+    cudaArray_t source_array = nullptr;
+    cudaArray_t destination_array = nullptr;
+    if (cudaMalloc3DArray(&source_array, &desc,
+                          make_cudaExtent(width, height, depth), 0) != cudaSuccess ||
+        cudaMalloc3DArray(&destination_array, &desc,
+                          make_cudaExtent(width, height, depth), 0) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: graph array allocation failed\n");
+        return false;
+    }
+
+    cudaMemcpy3DParms initialize{};
+    initialize.srcPtr = make_cudaPitchedPtr(
+        zero, width * sizeof(std::uint16_t), width, height);
+    initialize.dstArray = destination_array;
+    initialize.extent = make_cudaExtent(width, height, depth);
+    initialize.kind = cudaMemcpyHostToDevice;
+    if (cudaMemcpy3D(&initialize) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: graph destination-array initialization failed\n");
+        return false;
+    }
+
+    cudaGraph_t graph = nullptr;
+    cudaGraphNode_t upload = nullptr;
+    cudaGraphNode_t array_copy = nullptr;
+    cudaGraphNode_t download = nullptr;
+    cudaMemcpy3DParms upload_params{};
+    upload_params.srcPtr = make_cudaPitchedPtr(
+        source, width * sizeof(std::uint16_t), width, height);
+    upload_params.dstArray = source_array;
+    upload_params.extent = make_cudaExtent(width, height, depth);
+    upload_params.kind = cudaMemcpyHostToDevice;
+
+    cudaMemcpy3DParms array_params{};
+    array_params.srcArray = source_array;
+    array_params.srcPos = make_cudaPos(1, 1, 0);
+    array_params.dstArray = destination_array;
+    array_params.dstPos = make_cudaPos(0, 0, 0);
+    array_params.extent = make_cudaExtent(3, 2, 2);
+    array_params.kind = cudaMemcpyDeviceToDevice;
+    cudaMemcpy3DParms invalid_array = array_params;
+    invalid_array.srcPos.x = width - 1;
+
+    cudaMemcpy3DParms download_params{};
+    download_params.srcArray = destination_array;
+    download_params.dstPtr = make_cudaPitchedPtr(
+        result, width * sizeof(std::uint16_t), width, height);
+    download_params.extent = make_cudaExtent(width, height, depth);
+    download_params.kind = cudaMemcpyDeviceToHost;
+
+    if (cudaGraphCreate(&graph, 0) != cudaSuccess ||
+        cudaGraphAddMemcpyNode(&array_copy, graph, nullptr, 0,
+                               &invalid_array) != cudaErrorInvalidValue ||
+        cudaMemcpy3D(&invalid_array) != cudaErrorInvalidValue ||
+        cudaGraphAddMemcpyNode(&upload, graph, nullptr, 0, &upload_params) !=
+            cudaSuccess ||
+        cudaGraphAddMemcpyNode(&array_copy, graph, &upload, 1, &array_params) !=
+            cudaSuccess ||
+        cudaGraphAddMemcpyNode(&download, graph, &array_copy, 1,
+                               &download_params) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: graph array-copy node construction failed\n");
+        return false;
+    }
+
+    cudaGraphExec_t exec = nullptr;
+    if (cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0) != cudaSuccess ||
+        cudaGraphLaunch(exec, nullptr) != cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: graph array-copy replay failed\n");
+        return false;
+    }
+    for (std::size_t z = 0; z < depth; ++z) {
+        for (std::size_t y = 0; y < height; ++y) {
+            for (std::size_t x = 0; x < width; ++x) {
+                const std::size_t destination_index = z * width * height + y * width + x;
+                const std::uint16_t expected = x < 3 && y < 2
+                    ? source[z * width * height + (y + 1) * width + (x + 1)]
+                    : 0;
+                if (result[destination_index] != expected) {
+                    std::fprintf(stderr,
+                                 "FAIL: graph array-copy mismatch at (%zu,%zu,%zu)\n",
+                                 x, y, z);
+                    return false;
+                }
+            }
+        }
+    }
+
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    cudaFreeArray(destination_array);
+    cudaFreeArray(source_array);
+
+    cudaArray_t invalid_allocation = reinterpret_cast<cudaArray_t>(1);
+    const cudaChannelFormatDesc empty_desc =
+        cudaCreateChannelDesc(0, 0, 0, 0, cudaChannelFormatKindUnsigned);
+    if (cudaMallocArray(&invalid_allocation, &empty_desc, 1, 1, 0) !=
+            cudaErrorInvalidValue ||
+        invalid_allocation != nullptr ||
+        cudaMalloc3DArray(&invalid_allocation, &desc,
+                          make_cudaExtent(static_cast<std::size_t>(-1), 2, 2),
+                          0) != cudaErrorInvalidValue ||
+        invalid_allocation != nullptr) {
+        std::fprintf(stderr, "FAIL: invalid or overflowing array allocation accepted\n");
+        return false;
+    }
+    return true;
+}
+
 static bool test_graph_instantiate_launch() {
     cudaGraph_t graph = nullptr;
     cudaGraphCreate(&graph, 0);
@@ -850,6 +971,7 @@ int main() {
     if (!test_graph_null_args()) return 1;
     if (!test_graph_dependencies_and_updates()) return 1;
     if (!test_graph_pitched_copy_and_typed_memset()) return 1;
+    if (!test_graph_array_copy_geometry()) return 1;
     if (!test_capture_memcpy_replay()) return 1;
     if (!test_capture_memset_replay()) return 1;
     if (!test_capture_host_replay()) return 1;

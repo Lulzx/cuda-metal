@@ -22,6 +22,20 @@ static bool test_malloc_free_array() {
         std::fprintf(stderr, "FAIL: cudaFreeArray returned %d\n", err);
         return false;
     }
+    if (cudaFreeArray(arr) != cudaErrorInvalidResourceHandle) {
+        std::fprintf(stderr, "FAIL: cudaFreeArray accepted a stale array handle\n");
+        return false;
+    }
+    cudaResourceDesc stale_resource{};
+    stale_resource.resType = cudaResourceTypeArray;
+    stale_resource.res.array.array = arr;
+    cudaTextureDesc texture{};
+    cudaTextureObject_t object = 0;
+    if (cudaCreateTextureObject(&object, &stale_resource, &texture, nullptr) !=
+        cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: texture creation accepted a stale array handle\n");
+        return false;
+    }
     return true;
 }
 
@@ -172,6 +186,20 @@ static bool test_memcpy_to_from_array() {
                          i, dst[i], src[i]);
             return false;
         }
+    }
+
+    if (cudaMemcpyToArray(arr, sizeof(src) - 1, 0, src, 2,
+                          cudaMemcpyHostToDevice) != cudaErrorInvalidValue ||
+        cudaMemcpyFromArray(dst, arr, 0, h, sizeof(float),
+                            cudaMemcpyDeviceToHost) != cudaErrorInvalidValue ||
+        cudaMemcpy2DToArray(arr, 0, h - 1, src, w * sizeof(float),
+                            w * sizeof(float), 2,
+                            cudaMemcpyHostToDevice) != cudaErrorInvalidValue ||
+        cudaMemcpy2DFromArray(dst, w * sizeof(float), arr, 0, 0,
+                              w * sizeof(float) + 1, 1,
+                              cudaMemcpyDeviceToHost) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: out-of-bounds array copy was accepted\n");
+        return false;
     }
 
     cudaFreeArray(arr);

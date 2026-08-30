@@ -334,6 +334,8 @@ struct RuntimeState {
     std::uint64_t graph_used_high = 0;
     std::uint64_t graph_reserved_current = 0;
     std::uint64_t graph_reserved_high = 0;
+    std::mutex array_mutex;
+    std::unordered_set<CuMetalArray*> arrays;
     std::mutex stream_mutex;
     struct StreamRecord {
         std::shared_ptr<cumetal::metal_backend::Stream> backend;
@@ -1039,6 +1041,121 @@ cudaError_t validate_memcpy_kind(cudaMemcpyKind kind) {
         default:
             return cudaErrorInvalidValue;
     }
+}
+
+CuMetalArray* resolve_array_handle(cudaArray_t handle) {
+    if (handle == nullptr) return nullptr;
+    auto* array = reinterpret_cast<CuMetalArray*>(handle);
+    RuntimeState& state = runtime_state();
+    std::lock_guard<std::mutex> lock(state.array_mutex);
+    return state.arrays.contains(array) ? array : nullptr;
+}
+
+const CuMetalArray* resolve_array_handle(cudaArray_const_t handle) {
+    return resolve_array_handle(const_cast<cudaArray_t>(handle));
+}
+
+std::optional<std::size_t> array_element_size(const CuMetalArray& array) {
+    if (array.desc.x < 0 || array.desc.y < 0 || array.desc.z < 0 ||
+        array.desc.w < 0) {
+        return std::nullopt;
+    }
+    const std::uint64_t bits = static_cast<std::uint64_t>(array.desc.x) +
+                               static_cast<std::uint64_t>(array.desc.y) +
+                               static_cast<std::uint64_t>(array.desc.z) +
+                               static_cast<std::uint64_t>(array.desc.w);
+    if (bits == 0 || bits > 128 || bits % 8 != 0) return std::nullopt;
+    return static_cast<std::size_t>(bits / 8);
+}
+
+bool checked_multiply(std::size_t lhs, std::size_t rhs, std::size_t* result) {
+    if (result == nullptr ||
+        (lhs != 0 && rhs > std::numeric_limits<std::size_t>::max() / lhs)) {
+        return false;
+    }
+    *result = lhs * rhs;
+    return true;
+}
+
+bool valid_array_region(const CuMetalArray& array, const cudaPos& position,
+                        const cudaExtent& extent) {
+    return position.x <= array.width && extent.width <= array.width - position.x &&
+           position.y <= array.height && extent.height <= array.height - position.y &&
+           position.z <= array.depth && extent.depth <= array.depth - position.z;
+}
+
+bool linear_3d_span(const cudaPitchedPtr& pointer, const cudaPos& position,
+                    std::size_t width_bytes, std::size_t height,
+                    std::size_t depth, std::size_t* span) {
+    if (pointer.ptr == nullptr || span == nullptr) return false;
+    const std::size_t pitch = pointer.pitch == 0 ? width_bytes : pointer.pitch;
+    const std::size_t plane_height = pointer.ysize == 0 ? height : pointer.ysize;
+    if (position.x > pitch || width_bytes > pitch - position.x ||
+        position.y > plane_height || height > plane_height - position.y) {
+        return false;
+    }
+    std::size_t plane_size = 0;
+    if (!checked_multiply(pitch, plane_height, &plane_size)) return false;
+    const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+    if (position.z > maximum - (depth - 1) ||
+        position.y > maximum - (height - 1)) {
+        return false;
+    }
+    const std::size_t last_plane = position.z + depth - 1;
+    const std::size_t last_row = position.y + height - 1;
+    std::size_t plane_offset = 0;
+    std::size_t row_offset = 0;
+    if (!checked_multiply(last_plane, plane_size, &plane_offset) ||
+        !checked_multiply(last_row, pitch, &row_offset) ||
+        plane_offset > maximum - row_offset ||
+        plane_offset + row_offset > maximum - position.x ||
+        plane_offset + row_offset + position.x > maximum - width_bytes) {
+        return false;
+    }
+    *span = plane_offset + row_offset + position.x + width_bytes;
+    return true;
+}
+
+cudaError_t validate_array_memcpy_3d(const cudaMemcpy3DParms& params,
+                                     std::size_t* width_bytes,
+                                     std::size_t* source_span,
+                                     std::size_t* destination_span) {
+    const auto* source_array = resolve_array_handle(
+        static_cast<cudaArray_const_t>(params.srcArray));
+    const auto* destination_array = resolve_array_handle(
+        static_cast<cudaArray_const_t>(params.dstArray));
+    if ((params.srcArray != nullptr && source_array == nullptr) ||
+        (params.dstArray != nullptr && destination_array == nullptr)) {
+        return cudaErrorInvalidResourceHandle;
+    }
+    if (source_array == nullptr && destination_array == nullptr) return cudaSuccess;
+    const CuMetalArray* shape = source_array != nullptr ? source_array : destination_array;
+    const auto element_size = array_element_size(*shape);
+    if (!element_size.has_value() ||
+        !checked_multiply(params.extent.width, *element_size, width_bytes)) {
+        return cudaErrorInvalidValue;
+    }
+    if (source_array != nullptr) {
+        if (!valid_array_region(*source_array, params.srcPos, params.extent) ||
+            array_element_size(*source_array) != element_size) {
+            return cudaErrorInvalidValue;
+        }
+    } else if (!linear_3d_span(params.srcPtr, params.srcPos, *width_bytes,
+                               params.extent.height, params.extent.depth,
+                               source_span)) {
+        return cudaErrorInvalidValue;
+    }
+    if (destination_array != nullptr) {
+        if (!valid_array_region(*destination_array, params.dstPos, params.extent) ||
+            array_element_size(*destination_array) != element_size) {
+            return cudaErrorInvalidValue;
+        }
+    } else if (!linear_3d_span(params.dstPtr, params.dstPos, *width_bytes,
+                               params.extent.height, params.extent.depth,
+                               destination_span)) {
+        return cudaErrorInvalidValue;
+    }
+    return cudaSuccess;
 }
 
 cudaError_t validate_host_alloc_flags(unsigned int flags) {
@@ -3659,28 +3776,25 @@ cudaError_t cudaMemset3DAsync(cudaPitchedPtr pitchedDevPtr, int value, cudaExten
 }
 
 cudaError_t cudaMemcpy3D(const cudaMemcpy3DParms* p) {
-    if (p == nullptr) {
+    if (p == nullptr || validate_memcpy_kind(p->kind) != cudaSuccess ||
+        ((p->srcArray == nullptr) == (p->srcPtr.ptr == nullptr)) ||
+        ((p->dstArray == nullptr) == (p->dstPtr.ptr == nullptr))) {
         return fail(cudaErrorInvalidValue);
     }
+    if (p->extent.width == 0 || p->extent.height == 0 || p->extent.depth == 0) {
+        return fail(cudaSuccess);
+    }
     if (p->srcArray != nullptr || p->dstArray != nullptr) {
-        const auto* source_array = reinterpret_cast<const CuMetalArray*>(p->srcArray);
-        auto* destination_array = reinterpret_cast<CuMetalArray*>(p->dstArray);
-        const CuMetalArray* shape_array = source_array != nullptr ? source_array : destination_array;
-        if (shape_array == nullptr || (source_array == nullptr && p->srcPtr.ptr == nullptr) ||
-            (destination_array == nullptr && p->dstPtr.ptr == nullptr)) {
-            return fail(cudaErrorInvalidValue);
-        }
-        const size_t element_size = static_cast<size_t>(
-            (shape_array->desc.x + shape_array->desc.y + shape_array->desc.z +
-             shape_array->desc.w + 7) / 8);
-        if (element_size == 0) return fail(cudaErrorInvalidValue);
-        if (source_array != nullptr && destination_array != nullptr) {
-            const size_t destination_element_size = static_cast<size_t>(
-                (destination_array->desc.x + destination_array->desc.y +
-                 destination_array->desc.z + destination_array->desc.w + 7) / 8);
-            if (destination_element_size != element_size) return fail(cudaErrorInvalidValue);
-        }
-        const size_t width_bytes = p->extent.width * element_size;
+        const auto* source_array = resolve_array_handle(
+            static_cast<cudaArray_const_t>(p->srcArray));
+        auto* destination_array = resolve_array_handle(p->dstArray);
+        std::size_t width_bytes = 0;
+        std::size_t source_span = 0;
+        std::size_t destination_span = 0;
+        const cudaError_t validation = validate_array_memcpy_3d(
+            *p, &width_bytes, &source_span, &destination_span);
+        if (validation != cudaSuccess) return fail(validation);
+        const std::size_t element_size = width_bytes / p->extent.width;
         const size_t source_pitch = source_array != nullptr
                                         ? source_array->width * element_size
                                         : (p->srcPtr.pitch ? p->srcPtr.pitch : width_bytes);
@@ -3696,12 +3810,11 @@ cudaError_t cudaMemcpy3D(const cudaMemcpy3DParms* p) {
         const char* source = source_array != nullptr
                                  ? static_cast<const char*>(source_array->data)
                                  : static_cast<const char*>(host_accessible_pointer(
-                                       p->srcPtr.ptr, source_pitch * source_height * p->extent.depth));
+                                       p->srcPtr.ptr, source_span));
         char* destination = destination_array != nullptr
                                 ? static_cast<char*>(destination_array->data)
                                 : static_cast<char*>(host_accessible_pointer(
-                                      p->dstPtr.ptr,
-                                      destination_pitch * destination_height * p->extent.depth));
+                                      p->dstPtr.ptr, destination_span));
         if (source == nullptr || destination == nullptr) return fail(cudaErrorInvalidValue);
         const size_t source_x = p->srcPos.x * (source_array != nullptr ? element_size : 1);
         const size_t destination_x =
@@ -4585,10 +4698,16 @@ cudaError_t cudaGraphAddMemcpyNode(cudaGraphNode_t* pGraphNode, cudaGraph_t grap
         return plane_offset <= maximum - row_offset &&
                plane_offset + row_offset <= maximum - row_end;
     };
-    if ((pCopyParams->srcArray == nullptr &&
-         !valid_pointer_span(pCopyParams->srcPtr, pCopyParams->srcPos)) ||
-        (pCopyParams->dstArray == nullptr &&
-         !valid_pointer_span(pCopyParams->dstPtr, pCopyParams->dstPos))) {
+    std::size_t array_width_bytes = 0;
+    std::size_t array_source_span = 0;
+    std::size_t array_destination_span = 0;
+    if ((pCopyParams->srcArray == nullptr && pCopyParams->dstArray == nullptr &&
+         (!valid_pointer_span(pCopyParams->srcPtr, pCopyParams->srcPos) ||
+          !valid_pointer_span(pCopyParams->dstPtr, pCopyParams->dstPos))) ||
+        ((pCopyParams->srcArray != nullptr || pCopyParams->dstArray != nullptr) &&
+         validate_array_memcpy_3d(*pCopyParams, &array_width_bytes,
+                                  &array_source_span,
+                                  &array_destination_span) != cudaSuccess)) {
         return fail(cudaErrorInvalidValue);
     }
     auto* node = new cudaGraphNode_st();
@@ -7249,38 +7368,60 @@ cudaError_t cudaLaunchCooperativeKernel(const void* func,
 
 cudaError_t cudaMallocArray(cudaArray_t* array, const cudaChannelFormatDesc* desc,
                              size_t width, size_t height, unsigned int flags) {
-    if (array == nullptr || desc == nullptr || width == 0) {
+    if (array == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    const size_t elem_size = static_cast<size_t>(
-        (desc->x + desc->y + desc->z + desc->w + 7) / 8);
+    *array = nullptr;
+    if (desc == nullptr || width == 0) return fail(cudaErrorInvalidValue);
+    const CuMetalArray shape{.desc = *desc};
+    const auto elem_size = array_element_size(shape);
+    std::size_t allocation_size = 0;
+    if (!elem_size.has_value()) return fail(cudaErrorInvalidValue);
     if (height == 0) { height = 1; }
-    auto* a = new CuMetalArray();
+    if (!checked_multiply(width, height, &allocation_size) ||
+        !checked_multiply(allocation_size, *elem_size, &allocation_size)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    auto* a = new (std::nothrow) CuMetalArray();
+    if (a == nullptr) return fail(cudaErrorMemoryAllocation);
     a->width = width;
     a->height = height;
     a->depth = 1;
     a->flags = flags;
     a->desc = *desc;
     void* ptr = nullptr;
-    const cudaError_t err = cudaMalloc(&ptr, width * height * elem_size);
+    const cudaError_t err = cudaMalloc(&ptr, allocation_size);
     if (err != cudaSuccess) {
         delete a;
         return fail(err);
     }
     a->data = ptr;
+    {
+        RuntimeState& state = runtime_state();
+        std::lock_guard<std::mutex> lock(state.array_mutex);
+        state.arrays.insert(a);
+    }
     *array = reinterpret_cast<cudaArray_t>(a);
     return fail(cudaSuccess);
 }
 
 cudaError_t cudaMalloc3DArray(cudaArray_t* array, const cudaChannelFormatDesc* desc,
                               cudaExtent extent, unsigned int flags) {
-    if (array == nullptr || desc == nullptr || extent.width == 0 ||
-        extent.height == 0 || extent.depth == 0) {
+    if (array == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    const size_t elem_size = static_cast<size_t>(
-        (desc->x + desc->y + desc->z + desc->w + 7) / 8);
-    if (elem_size == 0) return fail(cudaErrorInvalidValue);
+    *array = nullptr;
+    if (desc == nullptr || extent.width == 0 || extent.height == 0 ||
+        extent.depth == 0) return fail(cudaErrorInvalidValue);
+    const CuMetalArray shape{.desc = *desc};
+    const auto elem_size = array_element_size(shape);
+    std::size_t allocation_size = 0;
+    if (!elem_size.has_value() ||
+        !checked_multiply(extent.width, extent.height, &allocation_size) ||
+        !checked_multiply(allocation_size, extent.depth, &allocation_size) ||
+        !checked_multiply(allocation_size, *elem_size, &allocation_size)) {
+        return fail(cudaErrorInvalidValue);
+    }
     auto* created = new (std::nothrow) CuMetalArray();
     if (created == nullptr) return fail(cudaErrorMemoryAllocation);
     created->width = extent.width;
@@ -7290,12 +7431,17 @@ cudaError_t cudaMalloc3DArray(cudaArray_t* array, const cudaChannelFormatDesc* d
     created->desc = *desc;
     void* data = nullptr;
     const cudaError_t status =
-        cudaMalloc(&data, extent.width * extent.height * extent.depth * elem_size);
+        cudaMalloc(&data, allocation_size);
     if (status != cudaSuccess) {
         delete created;
         return fail(status);
     }
     created->data = data;
+    {
+        RuntimeState& state = runtime_state();
+        std::lock_guard<std::mutex> lock(state.array_mutex);
+        state.arrays.insert(created);
+    }
     *array = reinterpret_cast<cudaArray_t>(created);
     return fail(cudaSuccess);
 }
@@ -7305,6 +7451,13 @@ cudaError_t cudaFreeArray(cudaArray_t array) {
         return fail(cudaErrorInvalidValue);
     }
     auto* a = reinterpret_cast<CuMetalArray*>(array);
+    {
+        RuntimeState& state = runtime_state();
+        std::lock_guard<std::mutex> lock(state.array_mutex);
+        if (state.arrays.erase(a) == 0) {
+            return fail(cudaErrorInvalidResourceHandle);
+        }
+    }
     cudaFree(a->data);
     delete a;
     return fail(cudaSuccess);
@@ -7316,10 +7469,16 @@ cudaError_t cudaMemcpy2DToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
     if (dst == nullptr || src == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    auto* a = reinterpret_cast<CuMetalArray*>(dst);
+    auto* a = resolve_array_handle(dst);
+    if (a == nullptr) return fail(cudaErrorInvalidResourceHandle);
     const size_t elem_size = static_cast<size_t>(
         (a->desc.x + a->desc.y + a->desc.z + a->desc.w + 7) / 8);
     const size_t dpitch = a->width * elem_size;
+    if (wOffset > dpitch || width > dpitch - wOffset ||
+        hOffset > a->height || height > a->height - hOffset ||
+        spitch < width) {
+        return fail(cudaErrorInvalidValue);
+    }
     auto* dst_base = static_cast<char*>(a->data) + hOffset * dpitch + wOffset;
     return cudaMemcpy2D(dst_base, dpitch, src, spitch, width, height, kind);
 }
@@ -7330,10 +7489,16 @@ cudaError_t cudaMemcpy2DFromArray(void* dst, size_t dpitch, cudaArray_const_t sr
     if (dst == nullptr || src == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    auto* a = reinterpret_cast<const CuMetalArray*>(src);
+    const auto* a = resolve_array_handle(src);
+    if (a == nullptr) return fail(cudaErrorInvalidResourceHandle);
     const size_t elem_size = static_cast<size_t>(
         (a->desc.x + a->desc.y + a->desc.z + a->desc.w + 7) / 8);
     const size_t spitch = a->width * elem_size;
+    if (wOffset > spitch || width > spitch - wOffset ||
+        hOffset > a->height || height > a->height - hOffset ||
+        dpitch < width) {
+        return fail(cudaErrorInvalidValue);
+    }
     const auto* src_base = static_cast<const char*>(a->data) + hOffset * spitch + wOffset;
     return cudaMemcpy2D(dst, dpitch, src_base, spitch, width, height, kind);
 }
@@ -7343,10 +7508,19 @@ cudaError_t cudaMemcpyToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
     if (dst == nullptr || src == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    auto* a = reinterpret_cast<CuMetalArray*>(dst);
+    auto* a = resolve_array_handle(dst);
+    if (a == nullptr) return fail(cudaErrorInvalidResourceHandle);
     const size_t elem_size = static_cast<size_t>(
         (a->desc.x + a->desc.y + a->desc.z + a->desc.w + 7) / 8);
-    auto* dst_ptr = static_cast<char*>(a->data) + hOffset * a->width * elem_size + wOffset;
+    const std::size_t row_bytes = a->width * elem_size;
+    const std::size_t total_bytes = row_bytes * a->height * a->depth;
+    if (hOffset >= a->height || wOffset > row_bytes ||
+        hOffset > std::numeric_limits<std::size_t>::max() / row_bytes ||
+        hOffset * row_bytes > total_bytes - wOffset ||
+        count > total_bytes - (hOffset * row_bytes + wOffset)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    auto* dst_ptr = static_cast<char*>(a->data) + hOffset * row_bytes + wOffset;
     return cudaMemcpy(dst_ptr, src, count, kind);
 }
 
@@ -7355,10 +7529,19 @@ cudaError_t cudaMemcpyFromArray(void* dst, cudaArray_const_t src, size_t wOffset
     if (dst == nullptr || src == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    auto* a = reinterpret_cast<const CuMetalArray*>(src);
+    const auto* a = resolve_array_handle(src);
+    if (a == nullptr) return fail(cudaErrorInvalidResourceHandle);
     const size_t elem_size = static_cast<size_t>(
         (a->desc.x + a->desc.y + a->desc.z + a->desc.w + 7) / 8);
-    const auto* src_ptr = static_cast<const char*>(a->data) + hOffset * a->width * elem_size + wOffset;
+    const std::size_t row_bytes = a->width * elem_size;
+    const std::size_t total_bytes = row_bytes * a->height * a->depth;
+    if (hOffset >= a->height || wOffset > row_bytes ||
+        hOffset > std::numeric_limits<std::size_t>::max() / row_bytes ||
+        hOffset * row_bytes > total_bytes - wOffset ||
+        count > total_bytes - (hOffset * row_bytes + wOffset)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const auto* src_ptr = static_cast<const char*>(a->data) + hOffset * row_bytes + wOffset;
     return cudaMemcpy(dst, src_ptr, count, kind);
 }
 
@@ -7397,8 +7580,8 @@ void collect_texture_resource_residency(
 
     const void* data = nullptr;
     if (resource->resType == cudaResourceTypeArray) {
-        const auto* array =
-            reinterpret_cast<const CuMetalArray*>(resource->res.array.array);
+        const auto* array = resolve_array_handle(
+            static_cast<cudaArray_const_t>(resource->res.array.array));
         if (array != nullptr) data = array->data;
     } else if (resource->resType == cudaResourceTypePitch2D) {
         data = resource->res.pitch2D.devPtr;
@@ -7415,7 +7598,8 @@ void collect_texture_resource_residency(
 bool valid_resource_desc(const cudaResourceDesc& desc) {
     switch (desc.resType) {
         case cudaResourceDesc::cudaResourceTypeArray:
-            return desc.res.array.array != nullptr;
+            return resolve_array_handle(
+                       static_cast<cudaArray_const_t>(desc.res.array.array)) != nullptr;
         case cudaResourceDesc::cudaResourceTypeLinear:
             return desc.res.linear.devPtr != nullptr && desc.res.linear.sizeInBytes > 0;
         case cudaResourceDesc::cudaResourceTypePitch2D:
@@ -7434,7 +7618,8 @@ bool build_texture_descriptor(const cudaResourceDesc& resource,
     const void* data = nullptr;
     cudaChannelFormatDesc channel{};
     if (resource.resType == cudaResourceTypeArray) {
-        const auto* array = reinterpret_cast<const CuMetalArray*>(resource.res.array.array);
+        const auto* array = resolve_array_handle(
+            static_cast<cudaArray_const_t>(resource.res.array.array));
         if (array == nullptr) return false;
         data = array->data;
         channel = array->desc;

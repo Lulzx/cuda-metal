@@ -39,8 +39,9 @@ launch success. CPU or approximate paths must identify themselves.
 - The opt-in binary path accepts bounded raw PTX, CuMetal envelopes, CUDA fatbin
   PTX forms including version-`0x0101` LZ4/Zstd entries, and checked
   little-endian ELF32/ELF64 PTX sections. Decompression is capped at 64 MiB.
-- CUDA graph coverage includes tested kernel, linear and pointer-backed pitched
-  3D memcpy, byte and pitched 1/2/4-byte memset, host, clone/update,
+- CUDA graph coverage includes tested kernel, linear, pointer-backed pitched,
+  and channel-aware array-backed 3D memcpy, byte and pitched 1/2/4-byte memset,
+  host, clone/update,
   graph-memory node behavior, and event-linked two-stream ordered replay with
   capture-conflict rejection. Graph creation rejects unsupported flags instead
   of silently accepting them.
