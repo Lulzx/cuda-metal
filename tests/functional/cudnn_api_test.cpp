@@ -1084,6 +1084,118 @@ static bool test_rnn_lstm_basic() {
     return true;
 }
 
+static bool test_rnn_geometry_and_bounds() {
+    cudnnHandle_t handle = nullptr;
+    cudnnRNNDescriptor_t rnnDesc = nullptr;
+    cudnnTensorDescriptor_t xDesc = nullptr, yDesc = nullptr, stateDesc = nullptr;
+    cudnnFilterDescriptor_t wDesc = nullptr;
+    cudnnCreate(&handle);
+    cudnnCreateRNNDescriptor(&rnnDesc);
+    cudnnCreateTensorDescriptor(&xDesc);
+    cudnnCreateTensorDescriptor(&yDesc);
+    cudnnCreateTensorDescriptor(&stateDesc);
+    cudnnCreateFilterDescriptor(&wDesc);
+
+    if (cudnnSetRNNDescriptor_v6(handle, rnnDesc, 1, 1, nullptr,
+                                  CUDNN_LINEAR_INPUT, CUDNN_UNIDIRECTIONAL,
+                                  CUDNN_RNN_TANH, CUDNN_RNN_ALGO_STANDARD,
+                                  CUDNN_DATA_FLOAT) != CUDNN_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: bounded RNN descriptor setup\n");
+        return false;
+    }
+    cudnnSetTensor4dDescriptor(xDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 3, 1, 1);
+    cudnnSetTensor4dDescriptor(yDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 1, 1);
+    cudnnSetTensor4dDescriptor(stateDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 1, 1);
+    cudnnTensorDescriptor_t xDescs[] = {xDesc};
+    cudnnTensorDescriptor_t yDescs[] = {yDesc};
+
+    size_t paramsSize = 0, workspaceSize = 0;
+    if (cudnnGetRNNParamsSize(handle, rnnDesc, xDesc, &paramsSize,
+                              CUDNN_DATA_FLOAT) != CUDNN_STATUS_SUCCESS ||
+        paramsSize != 6 * sizeof(float) ||
+        cudnnGetRNNWorkspaceSize(handle, rnnDesc, 1, xDescs, &workspaceSize) !=
+            CUDNN_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: bounded RNN size queries\n");
+        return false;
+    }
+
+    // W_ih = [0, 0, 1] proves the C dimension is consumed as inputSize.
+    float x[] = {0.0f, 0.0f, 0.5f};
+    float weights[] = {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+    float output = -3.0f, hidden = -3.0f;
+    std::vector<char> workspace(workspaceSize);
+    cudnnStatus_t st = cudnnRNNForwardInference(
+        handle, rnnDesc, 1, xDescs, x, stateDesc, nullptr, stateDesc, nullptr,
+        wDesc, weights, yDescs, &output, stateDesc, &hidden, stateDesc, nullptr,
+        workspace.data(), workspace.size());
+    const float expected = std::tanh(0.5f);
+    if (st != CUDNN_STATUS_SUCCESS || std::fabs(output - expected) > 1e-6f ||
+        std::fabs(hidden - expected) > 1e-6f) {
+        std::fprintf(stderr, "FAIL: RNN feature geometry output=%f hidden=%f status=%d\n",
+                     output, hidden, st);
+        return false;
+    }
+
+    float* shortDevice = nullptr;
+    void* shortWorkspace = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&shortDevice), sizeof(float)) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: RNN short allocation setup\n");
+        return false;
+    }
+    if (cudaMalloc(&shortWorkspace, 1) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: RNN short workspace setup\n");
+        return false;
+    }
+    output = -5.0f;
+    st = cudnnRNNForwardInference(
+        handle, rnnDesc, 1, xDescs, shortDevice, stateDesc, nullptr, stateDesc, nullptr,
+        wDesc, weights, yDescs, &output, stateDesc, nullptr, stateDesc, nullptr,
+        workspace.data(), workspace.size());
+    if (st != CUDNN_STATUS_BAD_PARAM || output != -5.0f) {
+        std::fprintf(stderr, "FAIL: undersized tracked RNN input was accepted\n");
+        return false;
+    }
+    st = cudnnRNNForwardInference(
+        handle, rnnDesc, 1, xDescs, x, stateDesc, nullptr, stateDesc, nullptr,
+        wDesc, shortDevice, yDescs, &output, stateDesc, nullptr, stateDesc, nullptr,
+        workspace.data(), workspace.size());
+    if (st != CUDNN_STATUS_BAD_PARAM) {
+        std::fprintf(stderr, "FAIL: undersized tracked RNN weights were accepted\n");
+        return false;
+    }
+    st = cudnnRNNForwardInference(
+        handle, rnnDesc, 1, xDescs, x, stateDesc, nullptr, stateDesc, nullptr,
+        wDesc, weights, yDescs, &output, stateDesc, nullptr, stateDesc, nullptr,
+        shortWorkspace, workspace.size());
+    if (st != CUDNN_STATUS_BAD_PARAM) {
+        std::fprintf(stderr, "FAIL: undersized tracked RNN workspace was accepted\n");
+        return false;
+    }
+    cudaFree(shortWorkspace);
+    cudaFree(shortDevice);
+
+    if (cudnnSetRNNDescriptor_v6(handle, rnnDesc, 0, 1, nullptr,
+                                  CUDNN_LINEAR_INPUT, CUDNN_UNIDIRECTIONAL,
+                                  CUDNN_RNN_TANH, CUDNN_RNN_ALGO_STANDARD,
+                                  CUDNN_DATA_FLOAT) != CUDNN_STATUS_BAD_PARAM ||
+        cudnnSetRNNDescriptor_v6(handle, rnnDesc, 1, 1, nullptr,
+                                  CUDNN_SKIP_INPUT, CUDNN_UNIDIRECTIONAL,
+                                  CUDNN_RNN_TANH, CUDNN_RNN_ALGO_STANDARD,
+                                  CUDNN_DATA_FLOAT) != CUDNN_STATUS_NOT_SUPPORTED) {
+        std::fprintf(stderr, "FAIL: unsupported RNN descriptor configuration accepted\n");
+        return false;
+    }
+
+    cudnnDestroyFilterDescriptor(wDesc);
+    cudnnDestroyTensorDescriptor(stateDesc);
+    cudnnDestroyTensorDescriptor(yDesc);
+    cudnnDestroyTensorDescriptor(xDesc);
+    cudnnDestroyRNNDescriptor(rnnDesc);
+    cudnnDestroy(handle);
+    std::printf("  test_rnn_geometry_and_bounds: PASS\n");
+    return true;
+}
+
 static bool test_rnn_descriptor_lifecycle() {
     cudnnHandle_t handle; cudnnCreate(&handle);
     cudnnRNNDescriptor_t rnnDesc;
@@ -1133,6 +1245,7 @@ int main() {
     if (!test_fused_conv_bias_activation()) return 1;
     if (!test_rnn_descriptor_lifecycle()) return 1;
     if (!test_rnn_lstm_basic()) return 1;
+    if (!test_rnn_geometry_and_bounds()) return 1;
 
     std::printf("PASS: cuDNN API tests\n");
     return 0;

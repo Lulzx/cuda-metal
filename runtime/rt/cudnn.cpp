@@ -270,6 +270,76 @@ bool batchnorm_parameter_bytes(const cudnnTensorStruct* tensor, cudnnBatchNormMo
     return checked_mul(count, sizeof(float), bytes);
 }
 
+bool valid_rnn(const cudnnRNNStruct* rnn) {
+    return rnn && rnn->hiddenSize > 0 && rnn->numLayers > 0 &&
+           rnn->inputMode == CUDNN_LINEAR_INPUT &&
+           (rnn->direction == CUDNN_UNIDIRECTIONAL ||
+            rnn->direction == CUDNN_BIDIRECTIONAL) &&
+           (rnn->cellMode == CUDNN_RNN_RELU || rnn->cellMode == CUDNN_RNN_TANH ||
+            rnn->cellMode == CUDNN_LSTM || rnn->cellMode == CUDNN_GRU) &&
+           rnn->algo == CUDNN_RNN_ALGO_STANDARD && rnn->mathPrec == CUDNN_DATA_FLOAT &&
+           (!rnn->dropoutDesc || rnn->dropoutDesc->dropout == 0.0f);
+}
+
+int rnn_input_size(const cudnnTensorStruct* x) {
+    if (!supported_f32_nchw(x)) return 0;
+    return (x->h == 1 && x->w == 1) ? x->c : x->w;
+}
+
+bool rnn_parameter_bytes(const cudnnRNNStruct* rnn, int input_size, size_t* bytes) {
+    if (!valid_rnn(rnn) || input_size <= 0 || !bytes) return false;
+    const size_t directions = rnn->direction == CUDNN_BIDIRECTIONAL ? 2 : 1;
+    const size_t gates = rnn->cellMode == CUDNN_LSTM ? 4 :
+                         rnn->cellMode == CUDNN_GRU ? 3 : 1;
+    size_t total = 0;
+    for (int layer = 0; layer < rnn->numLayers; ++layer) {
+        size_t layer_input = layer == 0 ? static_cast<size_t>(input_size)
+                                        : static_cast<size_t>(rnn->hiddenSize) * directions;
+        size_t gate_hidden = 0, input_weights = 0, recurrent_weights = 0, biases = 0;
+        if (!checked_mul(gates, static_cast<size_t>(rnn->hiddenSize), &gate_hidden) ||
+            !checked_mul(gate_hidden, layer_input, &input_weights) ||
+            !checked_mul(gate_hidden, static_cast<size_t>(rnn->hiddenSize),
+                         &recurrent_weights) ||
+            !checked_mul(gate_hidden, 2, &biases)) {
+            return false;
+        }
+        size_t per_direction = 0;
+        if (!checked_add(input_weights, recurrent_weights, &per_direction) ||
+            !checked_add(per_direction, biases, &per_direction) ||
+            !checked_mul(per_direction, directions, &per_direction) ||
+            !checked_add(total, per_direction, &total)) {
+            return false;
+        }
+    }
+    return checked_mul(total, sizeof(float), bytes);
+}
+
+bool rnn_scratch_bytes(const cudnnRNNStruct* rnn, int seq_length, bool reserve,
+                       size_t* bytes) {
+    if (!valid_rnn(rnn) || seq_length <= 0 || !bytes) return false;
+    const size_t directions = rnn->direction == CUDNN_BIDIRECTIONAL ? 2 : 1;
+    const size_t gates = rnn->cellMode == CUDNN_LSTM ? 4 :
+                         rnn->cellMode == CUDNN_GRU ? 3 : 1;
+    size_t elements = static_cast<size_t>(seq_length);
+    if (reserve &&
+        !checked_mul(elements, static_cast<size_t>(rnn->numLayers), &elements)) {
+        return false;
+    }
+    return checked_mul(elements, directions, &elements) &&
+           checked_mul(elements, reserve ? gates + 1 : gates, &elements) &&
+           checked_mul(elements, static_cast<size_t>(rnn->hiddenSize), &elements) &&
+           checked_mul(elements, sizeof(float), bytes);
+}
+
+bool valid_rnn_state_descriptor(const cudnnTensorStruct* state,
+                                const cudnnRNNStruct* rnn, int batch_size) {
+    const int directions = rnn->direction == CUDNN_BIDIRECTIONAL ? 2 : 1;
+    return supported_f32_nchw(state) &&
+           rnn->numLayers <= std::numeric_limits<int>::max() / directions &&
+           state->n == rnn->numLayers * directions && state->c == batch_size &&
+           state->h == rnn->hiddenSize && state->w == 1;
+}
+
 void compute_strides(cudnnTensorStruct* t) {
     if (t->format == CUDNN_TENSOR_NCHW) {
         t->wStride = 1;
@@ -2545,7 +2615,7 @@ cudnnStatus_t cudnnDestroyRNNDescriptor(cudnnRNNDescriptor_t rnnDesc) {
     return CUDNN_STATUS_SUCCESS;
 }
 
-cudnnStatus_t cudnnSetRNNDescriptor_v6(cudnnHandle_t, cudnnRNNDescriptor_t rnnDesc,
+cudnnStatus_t cudnnSetRNNDescriptor_v6(cudnnHandle_t handle, cudnnRNNDescriptor_t rnnDesc,
                                         int hiddenSize, int numLayers,
                                         cudnnDropoutDescriptor_t dropoutDesc,
                                         cudnnRNNInputMode_t inputMode,
@@ -2553,7 +2623,19 @@ cudnnStatus_t cudnnSetRNNDescriptor_v6(cudnnHandle_t, cudnnRNNDescriptor_t rnnDe
                                         cudnnRNNMode_t cellMode,
                                         cudnnRNNAlgo_t algo,
                                         cudnnDataType_t mathPrec) {
-    if (!rnnDesc) return CUDNN_STATUS_BAD_PARAM;
+    if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
+    if (!rnnDesc || hiddenSize <= 0 || numLayers <= 0 ||
+        hiddenSize > std::numeric_limits<int>::max() / 8) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    if (inputMode != CUDNN_LINEAR_INPUT ||
+        (direction != CUDNN_UNIDIRECTIONAL && direction != CUDNN_BIDIRECTIONAL) ||
+        (cellMode != CUDNN_RNN_RELU && cellMode != CUDNN_RNN_TANH &&
+         cellMode != CUDNN_LSTM && cellMode != CUDNN_GRU) ||
+        algo != CUDNN_RNN_ALGO_STANDARD || mathPrec != CUDNN_DATA_FLOAT ||
+        (dropoutDesc && dropoutDesc->dropout != 0.0f)) {
+        return CUDNN_STATUS_NOT_SUPPORTED;
+    }
     rnnDesc->hiddenSize = hiddenSize;
     rnnDesc->numLayers = numLayers;
     rnnDesc->dropoutDesc = dropoutDesc;
@@ -2565,59 +2647,43 @@ cudnnStatus_t cudnnSetRNNDescriptor_v6(cudnnHandle_t, cudnnRNNDescriptor_t rnnDe
     return CUDNN_STATUS_SUCCESS;
 }
 
-cudnnStatus_t cudnnGetRNNParamsSize(cudnnHandle_t, cudnnRNNDescriptor_t rnnDesc,
+cudnnStatus_t cudnnGetRNNParamsSize(cudnnHandle_t handle, cudnnRNNDescriptor_t rnnDesc,
                                      cudnnTensorDescriptor_t xDesc,
-                                     size_t* sizeInBytes, cudnnDataType_t) {
+                                     size_t* sizeInBytes, cudnnDataType_t dataType) {
+    if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!rnnDesc || !xDesc || !sizeInBytes) return CUDNN_STATUS_BAD_PARAM;
-    int H = rnnDesc->hiddenSize;
-    int inputSize = (xDesc->h == 1 && xDesc->w == 1) ? xDesc->c :
-                    (xDesc->w > 0 ? xDesc->w : xDesc->c);
-    int numDirs = (rnnDesc->direction == CUDNN_BIDIRECTIONAL) ? 2 : 1;
-    int numLayers = rnnDesc->numLayers;
-    int gateCount = 1;
-    switch (rnnDesc->cellMode) {
-        case CUDNN_LSTM: gateCount = 4; break;
-        case CUDNN_GRU:  gateCount = 3; break;
-        default:         gateCount = 1; break;
-    }
-    // Layer 0: W_ih(gateCount*H, inputSize) + W_hh(gateCount*H, H) + biases
-    // Layer L>0: W_ih(gateCount*H, H*numDirs) + W_hh(gateCount*H, H) + biases
-    size_t params = 0;
-    for (int l = 0; l < numLayers; l++) {
-        for (int d = 0; d < numDirs; d++) {
-            int inSz = (l == 0) ? inputSize : H * numDirs;
-            params += (size_t)gateCount * H * inSz;  // W_ih
-            params += (size_t)gateCount * H * H;      // W_hh
-            params += (size_t)gateCount * H * 2;       // bias_ih + bias_hh
-        }
-    }
-    *sizeInBytes = params * sizeof(float);
+    if (dataType != CUDNN_DATA_FLOAT || !valid_rnn(rnnDesc))
+        return CUDNN_STATUS_NOT_SUPPORTED;
+    if (!rnn_parameter_bytes(rnnDesc, rnn_input_size(xDesc), sizeInBytes))
+        return CUDNN_STATUS_BAD_PARAM;
     return CUDNN_STATUS_SUCCESS;
 }
 
-cudnnStatus_t cudnnGetRNNWorkspaceSize(cudnnHandle_t, cudnnRNNDescriptor_t rnnDesc,
-                                        int seqLength, const cudnnTensorDescriptor_t*,
+cudnnStatus_t cudnnGetRNNWorkspaceSize(cudnnHandle_t handle, cudnnRNNDescriptor_t rnnDesc,
+                                        int seqLength, const cudnnTensorDescriptor_t* xDesc,
                                         size_t* sizeInBytes) {
-    if (!rnnDesc || !sizeInBytes) return CUDNN_STATUS_BAD_PARAM;
-    int H = rnnDesc->hiddenSize;
-    int numDirs = (rnnDesc->direction == CUDNN_BIDIRECTIONAL) ? 2 : 1;
-    int gateCount = (rnnDesc->cellMode == CUDNN_LSTM) ? 4 :
-                    (rnnDesc->cellMode == CUDNN_GRU) ? 3 : 1;
-    // Workspace for intermediate gate activations
-    *sizeInBytes = (size_t)seqLength * numDirs * gateCount * H * sizeof(float);
+    if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
+    if (!rnnDesc || !sizeInBytes || !xDesc || seqLength <= 0)
+        return CUDNN_STATUS_BAD_PARAM;
+    if (!valid_rnn(rnnDesc)) return CUDNN_STATUS_NOT_SUPPORTED;
+    if (!rnn_scratch_bytes(rnnDesc, seqLength, false, sizeInBytes)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     return CUDNN_STATUS_SUCCESS;
 }
 
-cudnnStatus_t cudnnGetRNNTrainingReserveSize(cudnnHandle_t, cudnnRNNDescriptor_t rnnDesc,
-                                              int seqLength, const cudnnTensorDescriptor_t*,
+cudnnStatus_t cudnnGetRNNTrainingReserveSize(cudnnHandle_t handle,
+                                              cudnnRNNDescriptor_t rnnDesc,
+                                              int seqLength,
+                                              const cudnnTensorDescriptor_t* xDesc,
                                               size_t* sizeInBytes) {
-    if (!rnnDesc || !sizeInBytes) return CUDNN_STATUS_BAD_PARAM;
-    int H = rnnDesc->hiddenSize;
-    int numDirs = (rnnDesc->direction == CUDNN_BIDIRECTIONAL) ? 2 : 1;
-    int gateCount = (rnnDesc->cellMode == CUDNN_LSTM) ? 4 :
-                    (rnnDesc->cellMode == CUDNN_GRU) ? 3 : 1;
-    // Reserve space stores pre-activation gate values + hidden states for backward
-    *sizeInBytes = (size_t)seqLength * rnnDesc->numLayers * numDirs * (gateCount + 1) * H * sizeof(float);
+    if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
+    if (!rnnDesc || !sizeInBytes || !xDesc || seqLength <= 0)
+        return CUDNN_STATUS_BAD_PARAM;
+    if (!valid_rnn(rnnDesc)) return CUDNN_STATUS_NOT_SUPPORTED;
+    if (!rnn_scratch_bytes(rnnDesc, seqLength, true, sizeInBytes)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -2712,20 +2778,41 @@ static void gru_step(int inputSize, int H,
 // Core RNN forward implementation (shared by inference and training)
 static cudnnStatus_t rnn_forward_impl(cudnnHandle_t handle, cudnnRNNDescriptor_t rnnDesc,
                                        int seqLength, const cudnnTensorDescriptor_t* xDesc,
-                                       const float* x, const float* hx, const float* cx,
-                                       const float* w, float* y, float* hy, float* cy) {
+                                       const float* x,
+                                       cudnnTensorDescriptor_t hxDesc, const float* hx,
+                                       cudnnTensorDescriptor_t cxDesc, const float* cx,
+                                       const float* w,
+                                       const cudnnTensorDescriptor_t* yDesc,
+                                       float* y,
+                                       cudnnTensorDescriptor_t hyDesc, float* hy,
+                                       cudnnTensorDescriptor_t cyDesc, float* cy) {
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
-    if (!rnnDesc || !xDesc || !x || !w || !y || seqLength <= 0)
+    if (!valid_rnn(rnnDesc)) return CUDNN_STATUS_NOT_SUPPORTED;
+    if (!xDesc || !yDesc || !x || !w || !y || seqLength <= 0)
         return CUDNN_STATUS_BAD_PARAM;
-    cudnnStatus_t sync_status = sync_handle(handle);
-    if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
     int H = rnnDesc->hiddenSize;
     int numLayers = rnnDesc->numLayers;
     int numDirs = (rnnDesc->direction == CUDNN_BIDIRECTIONAL) ? 2 : 1;
     int batchSize = xDesc[0] ? xDesc[0]->n : 0;
-    int inputSize = xDesc[0] ? (xDesc[0]->w > 0 ? xDesc[0]->w : xDesc[0]->c) : 0;
+    int inputSize = xDesc[0] ? rnn_input_size(xDesc[0]) : 0;
     if (batchSize <= 0 || inputSize <= 0) return CUDNN_STATUS_BAD_PARAM;
+    if ((hx && !valid_rnn_state_descriptor(hxDesc, rnnDesc, batchSize)) ||
+        (hy && !valid_rnn_state_descriptor(hyDesc, rnnDesc, batchSize)) ||
+        (rnnDesc->cellMode == CUDNN_LSTM &&
+         ((cx && !valid_rnn_state_descriptor(cxDesc, rnnDesc, batchSize)) ||
+          (cy && !valid_rnn_state_descriptor(cyDesc, rnnDesc, batchSize))))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    for (int timestep = 0; timestep < seqLength; ++timestep) {
+        if (!xDesc[timestep] || !yDesc[timestep] ||
+            rnn_input_size(xDesc[timestep]) != inputSize ||
+            xDesc[timestep]->n != batchSize || !supported_f32_nchw(yDesc[timestep]) ||
+            yDesc[timestep]->n != batchSize || yDesc[timestep]->c != H * numDirs ||
+            yDesc[timestep]->h != 1 || yDesc[timestep]->w != 1) {
+            return CUDNN_STATUS_BAD_PARAM;
+        }
+    }
 
     int gateCount = 1;
     switch (rnnDesc->cellMode) {
@@ -2734,23 +2821,57 @@ static cudnnStatus_t rnn_forward_impl(cudnnHandle_t handle, cudnnRNNDescriptor_t
         default:         gateCount = 1; break;
     }
 
+    size_t input_elements = 0, output_elements = 0, state_elements = 0;
+    size_t weight_bytes = 0;
+    if (!checked_mul(static_cast<size_t>(seqLength), static_cast<size_t>(batchSize),
+                     &input_elements) ||
+        !checked_mul(input_elements, static_cast<size_t>(inputSize), &input_elements) ||
+        !checked_mul(static_cast<size_t>(seqLength), static_cast<size_t>(batchSize),
+                     &output_elements) ||
+        !checked_mul(output_elements, static_cast<size_t>(H) * numDirs,
+                     &output_elements) ||
+        !checked_mul(static_cast<size_t>(numLayers), static_cast<size_t>(numDirs),
+                     &state_elements) ||
+        !checked_mul(state_elements, static_cast<size_t>(batchSize), &state_elements) ||
+        !checked_mul(state_elements, static_cast<size_t>(H), &state_elements) ||
+        input_elements > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        output_elements > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        state_elements > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        !rnn_parameter_bytes(rnnDesc, inputSize, &weight_bytes)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    const size_t input_bytes = input_elements * sizeof(float);
+    const size_t output_bytes = output_elements * sizeof(float);
+    const size_t state_bytes = state_elements * sizeof(float);
+    if (!tracked_bytes_valid(x, input_bytes) || !tracked_bytes_valid(w, weight_bytes) ||
+        !tracked_bytes_valid(y, output_bytes) ||
+        (hx && !tracked_bytes_valid(hx, state_bytes)) ||
+        (hy && !tracked_bytes_valid(hy, state_bytes)) ||
+        (rnnDesc->cellMode == CUDNN_LSTM &&
+         ((cx && !tracked_bytes_valid(cx, state_bytes)) ||
+          (cy && !tracked_bytes_valid(cy, state_bytes))))) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    cudnnStatus_t sync_status = sync_handle(handle);
+    if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
+
     // Temp buffers
     int maxGateBuf = gateCount * H * 2; // enough for GRU's double-buffer
     std::vector<float> gates_buf(maxGateBuf);
-    std::vector<float> h_cur(numLayers * numDirs * batchSize * H, 0.0f);
-    std::vector<float> h_next(numLayers * numDirs * batchSize * H, 0.0f);
+    std::vector<float> h_cur(state_elements, 0.0f);
+    std::vector<float> h_next(state_elements, 0.0f);
     std::vector<float> c_cur, c_next;
     if (rnnDesc->cellMode == CUDNN_LSTM) {
-        c_cur.resize(numLayers * numDirs * batchSize * H, 0.0f);
-        c_next.resize(numLayers * numDirs * batchSize * H, 0.0f);
+        c_cur.resize(state_elements, 0.0f);
+        c_next.resize(state_elements, 0.0f);
     }
 
     // Initialize hidden state from hx
     if (hx) {
-        std::memcpy(h_cur.data(), hx, numLayers * numDirs * batchSize * H * sizeof(float));
+        std::memcpy(h_cur.data(), hx, state_bytes);
     }
     if (cx && rnnDesc->cellMode == CUDNN_LSTM) {
-        std::memcpy(c_cur.data(), cx, numLayers * numDirs * batchSize * H * sizeof(float));
+        std::memcpy(c_cur.data(), cx, state_bytes);
     }
 
     // Input buffer: starts as x, then becomes y from previous layer
@@ -2817,10 +2938,10 @@ static cudnnStatus_t rnn_forward_impl(cudnnHandle_t handle, cudnnRNNDescriptor_t
 
     // Copy final hidden states
     if (hy) {
-        std::memcpy(hy, h_cur.data(), numLayers * numDirs * batchSize * H * sizeof(float));
+        std::memcpy(hy, h_cur.data(), state_bytes);
     }
     if (cy && rnnDesc->cellMode == CUDNN_LSTM) {
-        std::memcpy(cy, c_cur.data(), numLayers * numDirs * batchSize * H * sizeof(float));
+        std::memcpy(cy, c_cur.data(), state_bytes);
     }
 
     return CUDNN_STATUS_SUCCESS;
@@ -2831,18 +2952,25 @@ cudnnStatus_t cudnnRNNForwardInference(cudnnHandle_t handle,
                                         int seqLength,
                                         const cudnnTensorDescriptor_t* xDesc,
                                         const void* x,
-                                        cudnnTensorDescriptor_t, const void* hx,
-                                        cudnnTensorDescriptor_t, const void* cx,
+                                        cudnnTensorDescriptor_t hxDesc, const void* hx,
+                                        cudnnTensorDescriptor_t cxDesc, const void* cx,
                                         cudnnFilterDescriptor_t, const void* w,
                                         const cudnnTensorDescriptor_t* yDesc, void* y,
-                                        cudnnTensorDescriptor_t, void* hy,
-                                        cudnnTensorDescriptor_t, void* cy,
-                                        void*, size_t) {
-    (void)yDesc;
+                                        cudnnTensorDescriptor_t hyDesc, void* hy,
+                                        cudnnTensorDescriptor_t cyDesc, void* cy,
+                                        void* workspace, size_t workSpaceSizeInBytes) {
     try {
+        if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
+        size_t required_workspace = 0;
+        if (!rnn_scratch_bytes(rnnDesc, seqLength, false, &required_workspace) ||
+            !workspace || workSpaceSizeInBytes < required_workspace ||
+            !tracked_bytes_valid(workspace, required_workspace)) {
+            return CUDNN_STATUS_BAD_PARAM;
+        }
         return rnn_forward_impl(handle, rnnDesc, seqLength, xDesc,
-                                (const float*)x, (const float*)hx, (const float*)cx,
-                                (const float*)w, (float*)y, (float*)hy, (float*)cy);
+                                (const float*)x, hxDesc, (const float*)hx,
+                                cxDesc, (const float*)cx, (const float*)w, yDesc,
+                                (float*)y, hyDesc, (float*)hy, cyDesc, (float*)cy);
     } catch (const std::bad_alloc&) {
         return CUDNN_STATUS_ALLOC_FAILED;
     } catch (...) {
@@ -2855,20 +2983,30 @@ cudnnStatus_t cudnnRNNForwardTraining(cudnnHandle_t handle,
                                        int seqLength,
                                        const cudnnTensorDescriptor_t* xDesc,
                                        const void* x,
-                                       cudnnTensorDescriptor_t, const void* hx,
-                                       cudnnTensorDescriptor_t, const void* cx,
+                                       cudnnTensorDescriptor_t hxDesc, const void* hx,
+                                       cudnnTensorDescriptor_t cxDesc, const void* cx,
                                        cudnnFilterDescriptor_t, const void* w,
                                        const cudnnTensorDescriptor_t* yDesc, void* y,
-                                       cudnnTensorDescriptor_t, void* hy,
-                                       cudnnTensorDescriptor_t, void* cy,
-                                       void*, size_t,
-                                       void*, size_t) {
-    (void)yDesc;
+                                       cudnnTensorDescriptor_t hyDesc, void* hy,
+                                       cudnnTensorDescriptor_t cyDesc, void* cy,
+                                       void* workspace, size_t workSpaceSizeInBytes,
+                                       void* reserveSpace, size_t reserveSpaceSizeInBytes) {
     // Training forward is identical to inference for outputs; reserveSpace is for backward
     try {
+        if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
+        size_t required_workspace = 0, required_reserve = 0;
+        if (!rnn_scratch_bytes(rnnDesc, seqLength, false, &required_workspace) ||
+            !rnn_scratch_bytes(rnnDesc, seqLength, true, &required_reserve) ||
+            !workspace || workSpaceSizeInBytes < required_workspace ||
+            !tracked_bytes_valid(workspace, required_workspace) ||
+            !reserveSpace || reserveSpaceSizeInBytes < required_reserve ||
+            !tracked_bytes_valid(reserveSpace, required_reserve)) {
+            return CUDNN_STATUS_BAD_PARAM;
+        }
         return rnn_forward_impl(handle, rnnDesc, seqLength, xDesc,
-                                (const float*)x, (const float*)hx, (const float*)cx,
-                                (const float*)w, (float*)y, (float*)hy, (float*)cy);
+                                (const float*)x, hxDesc, (const float*)hx,
+                                cxDesc, (const float*)cx, (const float*)w, yDesc,
+                                (float*)y, hyDesc, (float*)hy, cyDesc, (float*)cy);
     } catch (const std::bad_alloc&) {
         return CUDNN_STATUS_ALLOC_FAILED;
     } catch (...) {

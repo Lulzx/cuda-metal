@@ -71,8 +71,13 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   ordinary host buffers remain supported by the explicit CPU fallback. General
   algorithm selection, convolution-mode filter reversal, general
   OpTensor broadcasting, fusion, training/backward breadth, graph integration,
-  datatype, and layout coverage remain incomplete. RNN and attention are
-  bounded compatibility paths rather than full cuDNN implementations.
+  datatype, and layout coverage remain incomplete. Forward RNN/GRU/LSTM is a
+  bounded, CPU-backed FP32/NCHW path: standard algorithm, linear input, and
+  zero dropout only. Its timestep/state geometry, parameter sizes, scratch
+  sizes, and tracked allocation spans are checked, but backward RNN, packed or
+  variable sequences, nonzero dropout, persistent algorithms, and broader
+  descriptor formats are absent. Attention is likewise a bounded compatibility
+  path rather than a full cuDNN implementation.
 - **NCCL:** single-device compatibility cannot provide collective multi-GPU
   semantics. The implemented one-rank collectives are identity copies, not a
   transport; only device zero and rank zero are accepted, point-to-point calls

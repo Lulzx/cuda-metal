@@ -74,6 +74,13 @@ full NVIDIA library implementations.
   tensor/filter/workspace spans before CPU access. Implemented activation,
   tensor, softmax, pooling, dropout, normalization, OpTensor, and reduction
   paths likewise validate tracked tensor, scalar, parameter, and reserve spans.
+  The bounded forward RNN path consistently interprets contiguous
+  `N x C x 1 x 1` timestep descriptors with `C` as the input feature count,
+  validates every timestep and state descriptor, uses overflow-checked
+  parameter/workspace/reserve geometry, and rejects short tracked input,
+  weight, output, state, or scratch allocations before CPU access. Only
+  zero-dropout, standard-algorithm FP32 linear-input RNN/GRU/LSTM modes are
+  accepted.
 - **NCCL / NVML:** single-device compatibility/query subsets. NCCL's one-rank
   collectives are stream-ordered identity copies with validated communicators,
   roots, reduction operations, datatypes, byte-count overflow, group state,
