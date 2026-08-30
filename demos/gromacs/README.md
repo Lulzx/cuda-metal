@@ -88,19 +88,22 @@ Two more things must hold or the run fails:
 
 ## Results (M4 Pro, Debug, shim ON)
 
+From one `bash demos/gromacs/run.sh`, GROMACS 2025.4, `-nb gpu -pme cpu
+-bonded gpu -update gpu`:
+
 | System | Atoms | Max relative energy difference, 20 steps |
 | --- | --- | --- |
-| villin | 5,006 | 1.5e-05 |
+| villin | 5,006 | 2.37e-05 |
+| rnase_cubic | 24,040 | 6.40e-05 |
 
-Only villin has a recorded number. rnase (24,040 atoms) and ADH (134,177) are
-wired into `run.sh` and use the same gate, but their results are not transcribed
-here — run them and read the table `run.sh` prints rather than trusting a figure
-copied into a README.
+ADH (134,177 atoms) is wired into `--all` and uses the same gate, but has no
+recorded number here — run it and read the table `run.sh` prints rather than
+trusting a figure copied into a README.
 
-Step 0 forces were also compared directly, atom by atom, out of the `.trr`:
-**max relative difference 5.1e-05 over 5,006 atoms, none above 1e-3.** That is
-the level you get from summing the same interactions in a different order in
-binary32.
+Step-0 forces were also compared directly, atom by atom, out of the `.trr`, with
+the nonbonded kernel on the GPU: **max relative difference 5.1e-05 over 5,006
+atoms, none above 1e-3.** That is the level you get from summing the same
+interactions in a different order in binary32.
 
 ---
 

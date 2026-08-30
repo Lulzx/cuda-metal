@@ -20,8 +20,12 @@ demos/apollo/out/
 # Diffusion demo artifacts (weights, check tensors, generated images)
 demos/diffusion/out/
 demos/highs/out/
+# GROMACS demo artifacts (fetched benchmark inputs, .tpr, per-run logs)
+demos/gromacs/out/
 __pycache__/
 demos/highs/lpfeas/lps/
 demos/highs/lpfeas/results/
 Highs.log
 demos/highs/lpfeas/*.log
+# Stray default output name from ad-hoc nvcc-shim compiles
+a.out

@@ -95,7 +95,8 @@ run on the Apple GPU; the PME mesh stays on the CPU because CuMetal's cuFFT is
 rank-1 only. The gate compares every energy term GROMACS prints at every step of
 a deterministic 20-step trajectory, and additionally requires that GROMACS's log
 shows all three tasks offloaded and that CuMetal traced `device=apple_gpu`. The
-recorded villin result is a maximum relative energy difference of `1.5e-05`.
+recorded results are a maximum relative energy difference of `2.37e-05` for
+villin (5,006 atoms) and `6.40e-05` for rnase_cubic (24,040).
 
 Building it exposed five CuMetal defects, all silent or fatal rather than
 warned: `cudaDeviceReset` erasing the fatbin kernel registry, every host-backed
