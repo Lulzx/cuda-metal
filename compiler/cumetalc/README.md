@@ -30,6 +30,8 @@ emits PTX, then runs CuMetal's PTX lowering and AIR emitter. `-I`, `-D`,
 inlining of every viable call reachable from the selected kernel. Typed PTX also
 materializes reachable direct `.func` definitions with scalar/pointer arguments,
 single scalar or flat aggregate returns, and flat by-value aggregate arguments.
+Unqualified helper pointers are specialized from direct call sites, including
+Clang 21-23 shared-memory arguments; predicated barriers fail explicitly.
 Module-private `__const_$` byte arrays emitted by CUDA Clang for promoted
 aggregate literals are embedded as immutable MSL data with exact zero-fill.
 Recursion, indirect calls, multi-result ABI forms, and other unsupported signatures

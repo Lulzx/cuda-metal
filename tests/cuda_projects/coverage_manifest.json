@@ -15,6 +15,13 @@
       "harness": "standard"
     },
     {
+      "name": "barrier_cfg",
+      "subdir": "barrier_cfg",
+      "source": "barrier_cfg.cu",
+      "binary": "barrier_cfg",
+      "harness": "standard"
+    },
+    {
       "name": "async_memcpy_hazard",
       "subdir": "async_memcpy",
       "source": "async_memcpy_hazard.cu",

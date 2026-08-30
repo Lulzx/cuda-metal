@@ -1382,11 +1382,11 @@ int main(int argc, char** argv) {
 
     // Pick the backend that actually works for this input rather than one global default. The two
     // are complementary, not ranked, and the split follows the frontend feeding them. Measured
-    // over the manifest-controlled 26-file source/sample corpus (see
+    // over the manifest-controlled 27-file source/sample corpus (see
     // tests/cuda_projects/backend_matrix_manifest.txt and docs/compiler-architecture.md):
     //
-    //   direct .cu           legacy 0/26   cumetal-ir 26/26
-    //   --cuda-device (PTX)  legacy 25/26  cumetal-ir 26/26
+    //   direct .cu           legacy 0/27   cumetal-ir 27/27
+    //   --cuda-device (PTX)  legacy 26/27  cumetal-ir 27/27
     //
     // These are production-metallib compilation counts, not runtime correctness
     // counts. Legacy's direct-.cu mode is the qualifier-stripping prototype documented in

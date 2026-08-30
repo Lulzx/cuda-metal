@@ -698,7 +698,8 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                         concrete_value_spaces.contains(operation.results.front()) ||
                         (operation.opcode != ir::OpCode::kPointerOffset &&
                          operation.opcode != ir::OpCode::kConvert &&
-                         operation.opcode != ir::OpCode::kAddressSpaceCast) ||
+                         operation.opcode != ir::OpCode::kAddressSpaceCast &&
+                         operation.opcode != ir::OpCode::kParameter) ||
                         operation.operands.empty()) {
                         continue;
                     }
@@ -741,7 +742,8 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                         value_nodes.at(operation.results.front());
                     if ((operation.opcode == ir::OpCode::kPointerOffset ||
                          operation.opcode == ir::OpCode::kConvert ||
-                         operation.opcode == ir::OpCode::kAddressSpaceCast) &&
+                         operation.opcode == ir::OpCode::kAddressSpaceCast ||
+                         operation.opcode == ir::OpCode::kParameter) &&
                         !operation.operands.empty() &&
                         operation.operands.front().type.is_pointer() &&
                         !constrain_operand(result_node, operation.operands.front())) {

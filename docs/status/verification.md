@@ -13,7 +13,7 @@ High-value executable gates include:
 - 185/185 required Phase 4 functional tests with zero skips on the recorded
   2026-08-29 Apple M4 Pro run;
 - 83-entry `cuda-samples` coverage manifest and sweep classifier;
-- 26-file four-cell frontend/backend production-metallib matrix;
+- 27-file four-cell frontend/backend production-metallib matrix;
 - numerical PTX instruction sweep with hand-derived oracles;
 - runtime/API negative paths and GPU provenance checks;
 - Release/shim-off and Debug/shim-on configuration contracts;

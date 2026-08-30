@@ -13,19 +13,19 @@
   production libraries.
 - Direct AIR generation remains tooling/research only.
 
-With CUDA Clang 21-23, the reviewed manifest-controlled 26-file
+With CUDA Clang 21-23, the reviewed manifest-controlled 27-file
 production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/26 | **26/26** |
-| PTX / `--cuda-device` | **25/26** | **26/26** |
+| direct `.cu` | 0/27 | **27/27** |
+| PTX / `--cuda-device` | **26/27** | **27/27** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler
 identity and requires the same manifest with CUDA Clang 21, 22, and 23.
 
-The separate exact `coverage_manifest.json` numerical corpus passes all 24
+The separate exact `coverage_manifest.json` numerical corpus passes all 25
 projects through both typed PTX and direct native AOT on Apple M4 Pro. Both
 gates disable workload specializations and require every enrolled project to
 pass. The native-AOT gate launches embedded metallibs without registration JIT
@@ -65,6 +65,11 @@ by-value aggregate, and a single flat aggregate return. Nested noinline `printf`
 helpers receive the bounded ring state transitively. Incomplete aggregate call
 slots, undefined targets, and recursive call graphs fail explicitly rather than
 falling back.
+Unqualified PTX pointer parameters on ordinary device helpers remain CUDA
+generic until direct call sites specialize their complete alias chain. The
+barrier project proves a Clang 21-23 shared-memory argument, a helper call, and
+uniform multi-exit barrier paths numerically across all 32 lanes; predicated
+barriers remain an explicit compile-time error.
 CUDA Clang 21-23 module-private `__const_$` byte arrays used for promoted
 aggregate literals are embedded as immutable MSL module data. Their declared
 size, alignment, initializer bytes, and implicit trailing zero bytes are

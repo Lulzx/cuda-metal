@@ -85,8 +85,8 @@ uses CUDA Clang 21-23:
 
 | Input corpus | `legacy` | `cumetal-ir` |
 | --- | ---: | ---: |
-| direct `.cu` | 0/26 | **26/26** |
-| `.cu --cuda-device` / PTX | **25/26** | **26/26** |
+| direct `.cu` | 0/27 | **27/27** |
+| `.cu --cuda-device` / PTX | **26/27** | **27/27** |
 
 Direct `.cu` therefore defaults to `cumetal-ir`; PTX and `--cuda-device`
 default to `legacy`. Reproduce the reviewed per-file baseline with:
@@ -109,9 +109,10 @@ operations. The verifier rejects any `gpu.*` operation surviving that stage,
 and the typed MSL backend rejects anything it cannot represent faithfully.
 
 The structurizer accepts tested straight-line, conditional, and natural-loop
-shapes and has a dispatcher fallback for selected barrier-free CFGs. Residual
-loops, barrier-containing regions, and irreducible/general CFGs that cannot be
-represented safely are rejected.
+shapes, including a uniform multi-exit helper containing barriers, and has a
+dispatcher fallback for selected barrier-free CFGs. Predicated barriers and
+residual irreducible/general barrier CFGs that cannot be represented safely are
+rejected.
 
 ## Provenance and semantic quality
 

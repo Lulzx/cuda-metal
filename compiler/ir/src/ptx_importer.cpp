@@ -978,6 +978,20 @@ struct Importer {
             }
         }
 
+        // A CUDA kernel pointer parameter is a launch-time device pointer, but
+        // an ordinary device function receives a CUDA generic pointer. Clang
+        // 21-23 commonly drops `.ptr` entirely from the latter's PTX signature,
+        // so the dataflow recovery above can prove pointer-ness but cannot pick
+        // a concrete address space. Leave helpers generic and let the typed
+        // interprocedural solver specialize them from direct call sites (for
+        // example, a shared-memory argument passed through `cvta.shared`).
+        if (!is_kernel) {
+            for (const auto& parameter : entry->params) {
+                Type& type = parameter_types[parameter.name];
+                if (type.is_pointer()) type.address_space = AddressSpace::kNone;
+            }
+        }
+
         bool changed = true;
         for (int iteration = 0; iteration < 12 && changed; ++iteration) {
             changed = false;
@@ -1401,6 +1415,36 @@ struct Importer {
                 aggregate_parameter_addresses[operation.results.front()] =
                     parameter;
                 aggregate_parameter_registers[destinations.front()] = parameter;
+                block->operations.push_back(std::move(operation));
+                (*environment)[destinations.front()] =
+                    instruction_results[&instruction].front();
+                return true;
+            }
+            if (parameter_value != parameter_values.end() &&
+                parameter_type != parameter_types.end() &&
+                parameter_type->second.is_pointer()) {
+                if (!instruction.predicate.empty()) {
+                    return fail(&instruction,
+                                "predicated pointer parameter moves are unsupported");
+                }
+                // Clang represents the address of a pointer-valued PTX
+                // parameter with `mov`, then may select between those addresses
+                // before an indirect `ld.param`. CuMetal arguments already hold
+                // the loaded pointer value, so retain the SSA relationship to
+                // the argument rather than lowering the parameter name to a
+                // disconnected symbolic pointer.
+                operation.opcode = OpCode::kParameter;
+                operation.operands = {Operand::value_ref(
+                    parameter_value->second, parameter_type->second)};
+                operation.result_types = {parameter_type->second};
+                operation.attributes["parameter"] = parameter;
+                value_types[operation.results.front()] = parameter_type->second;
+                const auto provenance =
+                    function->pointer_provenance.find(parameter_value->second);
+                if (provenance != function->pointer_provenance.end()) {
+                    function->pointer_provenance[operation.results.front()] =
+                        provenance->second;
+                }
                 block->operations.push_back(std::move(operation));
                 (*environment)[destinations.front()] =
                     instruction_results[&instruction].front();
@@ -2748,6 +2792,36 @@ struct Importer {
             block.operations.push_back(std::move(terminator));
         }
 
+        // Generic PTX helper pointers participate in Metal address-space
+        // resolution exactly like addrspace(0) NVVM pointers. Mark every value
+        // whose recovered type is still generic; call-site constraints will
+        // resolve the complete def-use chain before MSL emission.
+        for (const FunctionArgument& argument : function.arguments) {
+            if (argument.type.is_pointer() &&
+                argument.type.address_space == AddressSpace::kNone) {
+                function.generic_pointer_values.insert(argument.value);
+            }
+        }
+        for (const BasicBlock& block : function.blocks) {
+            for (const BlockArgument& argument : block.arguments) {
+                if (argument.type.is_pointer() &&
+                    argument.type.address_space == AddressSpace::kNone) {
+                    function.generic_pointer_values.insert(argument.value);
+                }
+            }
+            for (const Operation& operation : block.operations) {
+                for (std::size_t index = 0;
+                     index < operation.results.size() &&
+                     index < operation.result_types.size(); ++index) {
+                    if (operation.result_types[index].is_pointer() &&
+                        operation.result_types[index].address_space ==
+                            AddressSpace::kNone) {
+                        function.generic_pointer_values.insert(
+                            operation.results[index]);
+                    }
+                }
+            }
+        }
         result.module.functions.push_back(std::move(function));
         return true;
     }

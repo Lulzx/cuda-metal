@@ -338,6 +338,66 @@ BODY:
         std::cerr << unconditional_loop_header.error << "\n";
     }
 
+    const std::string generic_shared_helper_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .func shared_barrier_helper(.param .b64 ptr) {
+    .reg .b64 %rd1;
+    ld.param.b64 %rd1, [ptr];
+    st.b32 [%rd1], 7;
+    bar.sync 0;
+    ret;
+}
+.visible .entry shared_barrier_call(.param .u64 output) {
+    .shared .align 4 .b8 tile[4];
+    .reg .b32 %r1;
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [output];
+    mov.b64 %rd2, tile;
+    cvta.shared.u64 %rd3, %rd2;
+    .param .b64 param0;
+    st.param.b64 [param0], %rd3;
+    call.uni shared_barrier_helper, (param0);
+    ld.shared.b32 %r1, [tile];
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult generic_shared_helper =
+        metal::compile_ptx_to_msl(generic_shared_helper_ptx);
+    const bool generic_shared_helper_valid =
+        generic_shared_helper.ok &&
+        generic_shared_helper.source.find(
+            "shared_barrier_helper(threadgroup uchar*") != std::string::npos &&
+        generic_shared_helper.source.find("threadgroup_barrier") !=
+            std::string::npos;
+    ok &= expect(generic_shared_helper_valid,
+                 "generic PTX helper pointers specialize to shared memory at call sites");
+    if (!generic_shared_helper_valid) {
+        std::cerr << generic_shared_helper.error << "\n"
+                  << generic_shared_helper.source << "\n";
+    }
+
+    const std::string predicated_barrier_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .entry predicated_barrier(.param .u32 enabled) {
+    .reg .pred %p1;
+    .reg .b32 %r1;
+    ld.param.u32 %r1, [enabled];
+    setp.ne.u32 %p1, %r1, 0;
+    @%p1 bar.sync 0;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult predicated_barrier =
+        metal::compile_ptx_to_msl(predicated_barrier_ptx);
+    ok &= expect(!predicated_barrier.ok &&
+                     predicated_barrier.error.find("predicated barriers") !=
+                         std::string::npos,
+                 "predicated PTX barriers fail with an explicit diagnostic");
+
     const std::string local_depot_ptx = R"ptx(
 .version 7.0
 .target sm_80
