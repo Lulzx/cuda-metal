@@ -172,6 +172,14 @@ class Arena {
         return p;
     }
 
+    // Bluestein's work buffers live only for the duration of one axis, so each
+    // axis hands its allocation back rather than stacking another on top. Without
+    // this the reservation would have to cover every axis at once, and a grid
+    // whose axes all need Bluestein -- 56x56x56, which is rnase's PME mesh --
+    // exhausts the arena and silently takes the CPU path instead.
+    std::size_t mark() const { return cursor_; }
+    void release(std::size_t marked) { cursor_ = marked; }
+
   private:
     float* base_ = nullptr;
     std::size_t capacity_ = 0;
@@ -353,6 +361,12 @@ bool transform_axis_bluestein(Context& ctx, Field& field, int axis, bool inverse
     const std::size_t m = filter->padded;
     const std::size_t lines = outer * inner;
     const std::size_t padded_elements = lines * m;
+
+    const std::size_t marked = arena().mark();
+    struct ReleaseOnReturn {
+        std::size_t marked;
+        ~ReleaseOnReturn() { arena().release(marked); }
+    } release_on_return{marked};
 
     void* work = arena().take(padded_elements);
     void* work_alt = arena().take(padded_elements);
@@ -594,6 +608,11 @@ bool execute(const Request& request) {
     // Worst case: a full field and its spare, a half field and its spare, and
     // two Bluestein work buffers for the longest axis. Reserving once means a
     // later take() cannot fail part-way through a transform.
+    // Only one axis holds Bluestein scratch at a time, so the reservation needs
+    // the largest single axis rather than their sum. The fastest axis is
+    // transformed on the full field and the others on the half field, which have
+    // different line counts; taking the larger of the two keeps this an upper
+    // bound without tracking which field each axis lands on.
     std::size_t longest_padded = 0;
     for (int a = 0; a < rank; ++a) {
         const std::size_t length = static_cast<std::size_t>(real_dims[a]);

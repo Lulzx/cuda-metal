@@ -548,6 +548,22 @@ target_compile_options(cumetal_bench
         -Wpedantic
 )
 
+add_executable(cumetal_fft_bench
+    tools/cumetal_fft_bench/main.cpp
+)
+
+target_link_libraries(cumetal_fft_bench
+    PRIVATE
+        cumetal_runtime
+)
+
+target_compile_options(cumetal_fft_bench
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
 if(APPLE)
     foreach(cumetal_tool_target IN ITEMS
             cumetal_ptxas_shim

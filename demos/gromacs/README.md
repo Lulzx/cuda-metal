@@ -108,6 +108,16 @@ trusting a figure copied into a README.
 208 kernel launches are traced with `device=apple_gpu` over a two-step
 provenance run, against 28 before the FFT moved to Metal.
 
+Moving the FFT to Metal took the 20-step villin run from 58.17 s to 0.51 s and
+rnase_cubic from 14.13 s to 0.59 s. Almost none of villin's saving is transform
+arithmetic — its FFT is about 8 ms per step. The CPU backend had to synchronize
+the stream before it could read the grid, which drained CuMetal's batched command
+buffers twice per step and made every other launch expensive; GROMACS charged
+52 s of it to `Launch PP GPU ops`. Running villin with `-pme cpu`, so cuFFT is
+never called, takes 0.42 s, which is what pins the cost on the synchronize rather
+than the FFT. The backend comparison is in
+[`docs/verified-results.md`](../../docs/verified-results.md).
+
 Step-0 forces were also compared directly, atom by atom, out of the `.trr`, with
 the nonbonded kernel on the GPU: **max relative difference 5.1e-05 over 5,006
 atoms, none above 1e-3.** That is the level you get from summing the same
