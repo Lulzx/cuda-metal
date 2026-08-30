@@ -52,8 +52,9 @@ module string, and safe rejection of an arbitrary untracked address. Matching
 legacy-PTX and typed-PTX gates exercise the same string cases on the Apple GPU.
 All three paths also set the FIFO to three words, retain and drain a format-only
 record, reject the following two-argument record, and observe device return
-values `0` and `2`; this separates CUDA parsed-argument returns from CuMetal's
-bounded record acceptance. `functional_runtime_device_limits` independently
+values `0` and `2`; a third statically null-format call returns `-1` without adding a ring
+record. This separates CUDA return semantics from CuMetal's bounded record
+acceptance. `functional_runtime_device_limits` independently
 checks byte-to-word rounding, querying, invalid zero rejection, and reset.
 These are numerical/runtime results, separate from the 29-file cross-Clang
 compile matrix. Embedded read-only module-constant strings remain outside this

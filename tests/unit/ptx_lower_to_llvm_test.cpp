@@ -273,6 +273,34 @@ int main() {
         return 1;
     }
 
+    const std::string llvm_null_printf_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry llvm_null_printf(.param .u64 output)
+{
+    .reg .b32 %r1;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    call.uni (%r1), vprintf, (0, 0);
+    st.global.u32 [%rd1], %r1;
+    ret;
+}
+)PTX";
+    printf_options.entry_name = "llvm_null_printf";
+    const auto llvm_null_printf = cumetal::ptx::lower_ptx_to_llvm_ir(
+        llvm_null_printf_ptx, printf_options);
+    if (!expect(llvm_null_printf.ok &&
+                    llvm_null_printf.printf_formats.size() == 1 &&
+                    llvm_null_printf.printf_formats.front().empty() &&
+                    contains(llvm_null_printf.llvm_ir, "store i32 -1") &&
+                    !contains(llvm_null_printf.llvm_ir, "atomicrmw add"),
+                "LLVM vprintf returns -1 for a null format without reserving a record")) {
+        if (!llvm_null_printf.ok) {
+            std::fprintf(stderr, "  error: %s\n", llvm_null_printf.error.c_str());
+        }
+        return 1;
+    }
+
     // Clang commonly moves printf into a device helper and passes vprintf a
     // module-global format pointer plus a packed local tuple. The printf ring
     // ABI and format ids must be propagated through the helper call rather than

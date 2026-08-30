@@ -5607,6 +5607,9 @@ class GenericLlvmEmitter {
                 return fail(instr, "vprintf ABI was not decoded by printf lowering");
             }
             const auto& call = *printf_it->second;
+            if (call.null_format) {
+                return store_ret_bits("-1", 32);
+            }
             if (call.arguments.size() > 1024) {
                 return fail(instr, "vprintf argument tuple is unreasonably large");
             }

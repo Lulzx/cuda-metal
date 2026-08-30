@@ -53,6 +53,7 @@ __global__ void print_untracked_string() {
 __global__ void capture_printf_returns(int* values) {
     values[0] = printf("RETURN zero\n");
     values[1] = printf("RETURN args=%d,%d\n", 11, 22);
+    values[2] = printf(static_cast<const char*>(nullptr));
 }
 
 int main() {
@@ -132,7 +133,7 @@ int main() {
     }
     cudaFree(unterminated);
     int* return_values = nullptr;
-    int host_return_values[2] = {-99, -99};
+    int host_return_values[3] = {-99, -99, -99};
     if (cudaMalloc(reinterpret_cast<void**>(&return_values),
                    sizeof(host_return_values)) != cudaSuccess ||
         cudaMemset(return_values, 0xff, sizeof(host_return_values)) != cudaSuccess ||
@@ -153,14 +154,17 @@ int main() {
         return 1;
     }
     cudaFree(return_values);
-    if (host_return_values[0] != 0 || host_return_values[1] != 2) {
-        std::printf("FAIL: printf returns zero=%d args=%d\n",
-                    host_return_values[0], host_return_values[1]);
+    if (host_return_values[0] != 0 || host_return_values[1] != 2 ||
+        host_return_values[2] != -1) {
+        std::printf("FAIL: printf returns zero=%d args=%d null=%d\n",
+                    host_return_values[0], host_return_values[1],
+                    host_return_values[2]);
         cudaFree(pointer);
         return 1;
     }
-    std::printf("RETURN_VALUES zero=%d args=%d\n",
-                host_return_values[0], host_return_values[1]);
+    std::printf("RETURN_VALUES zero=%d args=%d null=%d\n",
+                host_return_values[0], host_return_values[1],
+                host_return_values[2]);
     cudaFree(pointer);
     std::printf("HOST_DONE\n");
     return 0;

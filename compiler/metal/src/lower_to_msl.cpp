@@ -2878,6 +2878,21 @@ struct AstLowerer {
         for (const ir::Operation& operation : block.operations) {
             if (operation.is_terminator()) continue;
             if (operation.opcode == ir::OpCode::kPrintf) {
+                if (operation.attributes.contains("null_format") &&
+                    operation.attributes.at("null_format") == "true") {
+                    if (operation.operands.size() != 2 ||
+                        operation.attributes.contains("guard_operand")) {
+                        return fail(&operation,
+                                    "malformed typed null-format printf record");
+                    }
+                    if (!operation.results.empty()) {
+                        const MslType result_type = lower_result_type(operation);
+                        statements->push_back(declare_result(
+                            operation,
+                            MslExpression::literal("-1", result_type)));
+                    }
+                    continue;
+                }
                 if (operation.operands.size() < 2 ||
                     operation.attributes.contains("guard_operand") ||
                     !operation.attributes.contains("format_id") ||

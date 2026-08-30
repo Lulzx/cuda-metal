@@ -2319,6 +2319,9 @@ struct Importer {
                 operation.operands = {*printf_buffer, *printf_capacity};
                 operation.attributes["format_id"] =
                     std::to_string(decoded->second.format_id);
+                if (decoded->second.null_format) {
+                    operation.attributes["null_format"] = "true";
+                }
                 std::ostringstream widths;
                 for (std::size_t i = 0; i < decoded->second.arguments.size(); ++i) {
                     const int bits = decoded->second.argument_bits[i];

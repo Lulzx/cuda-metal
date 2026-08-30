@@ -37,6 +37,7 @@ int main() {
     call.uni (%r0), vprintf, ("tid=%d", %r1);
     call.uni (%r2), printf, ("tid=%d", %r2);
     call.uni (%r3), vprintf, ("%f", %f1);
+    call.uni (%r5), vprintf, (0, 0);
     call.uni (%r4), foo, (%r4);
     ret;
 }
@@ -51,10 +52,10 @@ int main() {
     if (!expect(lowered.ok, "printf lowering succeeds")) {
         return 1;
     }
-    if (!expect(lowered.calls.size() == 3, "three printf/vprintf calls lowered")) {
+    if (!expect(lowered.calls.size() == 4, "four printf/vprintf calls lowered")) {
         return 1;
     }
-    if (!expect(lowered.formats.size() == 2, "deduplicated format table has two entries")) {
+    if (!expect(lowered.formats.size() == 3, "format table includes the null sentinel")) {
         return 1;
     }
     if (!expect(lowered.calls[0].format_id == lowered.calls[1].format_id,
@@ -70,6 +71,12 @@ int main() {
         return 1;
     }
     if (!expect(!lowered.formats[0].truncated, "first format not truncated")) {
+        return 1;
+    }
+    if (!expect(lowered.calls[3].null_format &&
+                    lowered.calls[3].arguments.empty() &&
+                    lowered.formats[lowered.calls[3].format_id].token.empty(),
+                "null format is preserved without payload arguments")) {
         return 1;
     }
 

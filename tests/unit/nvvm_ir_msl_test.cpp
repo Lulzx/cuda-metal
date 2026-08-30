@@ -103,6 +103,20 @@ entry:
 declare i32 @vprintf(ptr, ptr)
 )llvm";
 
+constexpr const char* kNvvmNullPrintf = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @null_printf(ptr %out) {
+entry:
+  %result = call i32 @vprintf(ptr null, ptr null)
+  store i32 %result, ptr %out, align 4
+  ret void
+}
+
+declare i32 @vprintf(ptr, ptr)
+)llvm";
+
 constexpr const char* kNvvmSelectedCall = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1912,6 +1926,16 @@ int main() {
                      typed_printf.source.find("vprintf(") == std::string::npos,
                  "typed NVVM lowers vprintf with a parsed-count return to a bounded hidden ring ABI");
     if (!typed_printf.ok) std::cerr << typed_printf.error << "\n";
+
+    const metal::NvvmToMslResult null_printf = metal::compile_nvvm_to_msl(
+        kNvvmNullPrintf, "null-printf.ll", "null_printf");
+    ok &= expect(null_printf.ok && null_printf.printf_formats.size() == 1 &&
+                     null_printf.printf_formats.front().empty() &&
+                     null_printf.source.find(" = -1;") != std::string::npos &&
+                     null_printf.source.find("atomic_fetch_add_explicit") ==
+                         std::string::npos,
+                 "typed NVVM returns -1 for null-format vprintf without a ring reservation");
+    if (!null_printf.ok) std::cerr << null_printf.error << "\n";
 
     const metal::NvvmToMslResult malformed_printf = metal::compile_nvvm_to_msl(
         kNvvmMalformedPrintf, "bad-printf.ll", "bad_printf");

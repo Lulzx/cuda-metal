@@ -58,8 +58,10 @@ arbitrary untracked addresses are rejected safely as `[string]`. Embedded
 read-only module-constant strings remain a gap. `cudaLimitPrintfFifoSize`
 configures the bounded ring; format-only and multi-argument calls return their
 CUDA parsed-argument counts even when capacity rejects a record, and a complete
-retained prefix is drained. CUDA's circular overwrite policy, null-format
-return, and internal-error return remain outside the proved subset.
+retained prefix is drained. A statically null format returns CUDA's specified
+`-1` without reserving or writing a record on legacy PTX, typed PTX, and native
+AOT. Dynamically selected formats remain unsupported. CUDA's circular overwrite
+policy and the `-2` internal-error return remain outside the proved subset.
 
 ## FP64 and atomics
 

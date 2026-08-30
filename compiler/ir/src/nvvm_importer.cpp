@@ -577,8 +577,23 @@ struct Importer {
             !state->printf_capacity.has_value() || call.arg_size() != 2) {
             return fail(&call, "typed vprintf is missing its ring-buffer ABI");
         }
-        const std::optional<std::uint32_t> format_id =
-            printf_format_id(*call.getArgOperand(0));
+        const bool null_format = llvm::isa<llvm::ConstantPointerNull>(
+            call.getArgOperand(0));
+        std::optional<std::uint32_t> format_id;
+        if (null_format) {
+            const auto found = std::find(result.printf_formats.begin(),
+                                         result.printf_formats.end(), "");
+            if (found == result.printf_formats.end()) {
+                result.printf_formats.emplace_back();
+                format_id = static_cast<std::uint32_t>(
+                    result.printf_formats.size() - 1);
+            } else {
+                format_id = static_cast<std::uint32_t>(
+                    std::distance(result.printf_formats.begin(), found));
+            }
+        } else {
+            format_id = printf_format_id(*call.getArgOperand(0));
+        }
         if (!format_id.has_value()) {
             return fail(&call, "typed vprintf requires a constant format string");
         }
@@ -626,6 +641,7 @@ struct Importer {
         operation->opcode = OpCode::kPrintf;
         operation->operands = {*state->printf_buffer, *state->printf_capacity};
         operation->attributes["format_id"] = std::to_string(*format_id);
+        if (null_format) operation->attributes["null_format"] = "true";
         std::ostringstream widths;
         std::int64_t expected_offset = 0;
         bool first = true;

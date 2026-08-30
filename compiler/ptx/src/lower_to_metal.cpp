@@ -3075,7 +3075,8 @@ std::string emit_metal_source_generic(const std::string& entry_name,
                         : (r.empty() ? "uint" : reg_type(r));
                     args_and_types.emplace_back(expr, type);
                 }
-                // Mark any destination register as defined (usually return value = 0).
+                // Mark any destination register as defined with CUDA's parsed
+                // argument count, or -1 for a null format pointer.
                 if (!ops.empty()) {
                     const std::string dest_raw = ops[0];
                     // Destination might be "(  %r0  )" style; strip parens and spaces.
@@ -3085,10 +3086,12 @@ std::string emit_metal_source_generic(const std::string& entry_name,
                     }
                     const std::string dest = get_reg(dest_clean);
                     if (!dest.empty() && !defined_regs.count(dest)) {
-                        metal << "    " << reg_type(dest) << " " << mvar(dest) << " = 0;\n";
+                        metal << "    " << reg_type(dest) << " " << mvar(dest)
+                              << " = " << (pc.null_format ? "-1" : "0") << ";\n";
                         defined_regs.insert(dest);
                     }
                 }
+                if (pc.null_format) continue;
                 emit_printf_record(metal, pc.format_id, args_and_types,
                                    pc.argument_bits,
                                    static_cast<int>(std::distance(entry->instructions.data(), &instr)));

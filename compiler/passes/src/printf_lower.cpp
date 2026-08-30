@@ -400,6 +400,30 @@ std::optional<PrintfLowerResult> lower_clang_vprintf_abi(
         if (format_value == call_param_value.end() || tuple_value == call_param_value.end()) {
             return std::nullopt;
         }
+        if (trim(format_value->second) == "0") {
+            std::uint32_t format_id = 0;
+            const auto existing = format_ids.find("");
+            if (existing == format_ids.end()) {
+                format_id = static_cast<std::uint32_t>(result.formats.size());
+                format_ids.emplace("", format_id);
+                result.formats.push_back({.id = format_id,
+                                          .token = "",
+                                          .literal = true,
+                                          .truncated = false});
+            } else {
+                format_id = existing->second;
+            }
+            PrintfLoweredCall call;
+            call.source_line = instruction.line;
+            call.source_opcode = instruction.opcode;
+            call.format_id = format_id;
+            call.null_format = true;
+            call.abi_scaffold_lines.assign(scaffold_lines.begin(),
+                                           scaffold_lines.end());
+            result.calls.push_back(std::move(call));
+            packed.clear();
+            continue;
+        }
         const std::string format_reg = extract_register(format_value->second);
         const std::string tuple_reg = extract_register(tuple_value->second);
         const bool null_tuple = trim(tuple_value->second) == "0";
@@ -522,7 +546,11 @@ PrintfLowerResult lower_printf_calls(const cumetal::ptx::EntryFunction& entry,
         bool literal = false;
         bool truncated = false;
         std::string canonical_token = format_token_raw;
-        if (is_quoted_string(format_token_raw)) {
+        const bool null_format = format_token_raw == "0";
+        if (null_format) {
+            literal = true;
+            canonical_token.clear();
+        } else if (is_quoted_string(format_token_raw)) {
             literal = true;
             canonical_token = unescape_string_literal(format_token_raw);
             if (canonical_token.size() > options.max_format_length) {
@@ -554,7 +582,8 @@ PrintfLowerResult lower_printf_calls(const cumetal::ptx::EntryFunction& entry,
         call.source_opcode = instruction.opcode;
         call.format_id = format_id;
         call.format_token = canonical_token;
-        call.arguments.assign(args.begin() + 1, args.end());
+        call.null_format = null_format;
+        if (!null_format) call.arguments.assign(args.begin() + 1, args.end());
         call.argument_bits.assign(call.arguments.size(), 32);
         result.calls.push_back(std::move(call));
     }
