@@ -23,11 +23,13 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   batched, complex, tensor, or capture combinations are covered.
 - **cuRAND:** bounded generator families and ordering; no complete distribution,
   quasi-random, state-serialization, or device API parity.
-- **cuFFT:** principally bounded rank-1 execution. Multidimensional transforms,
-  large unsupported lengths, advanced layouts, callbacks, and full Xt behavior
-  are absent or explicitly rejected. Concretely, `cufftPlanMany` with `rank = 3`
-  returns `CUFFT_NOT_SUPPORTED`, so GROMACS's PME mesh cannot be offloaded and
-  `demos/gromacs` keeps it on the CPU.
+- **cuFFT:** ranks 1 to 3 execute for every transform type, including cuFFT's
+  advanced data layout (`inembed`/`onembed`/stride/dist), which is what a padded
+  grid such as GROMACS's PME mesh needs. Lengths vDSP cannot factor go through
+  Bluestein's algorithm rather than being rejected, so there is no unsupported
+  length and no size ceiling. Still absent: callbacks, multi-GPU and the rest of
+  the Xt surface, and any execution on the GPU -- the transform runs on the CPU
+  over unified memory, so offloading an FFT here buys correctness, not Metal.
 - **cuSPARSE/cuSOLVER:** selected operations only; descriptor, format, solver,
   analysis/reuse, and datatype matrices remain incomplete.
 - **cuDNN:** selected descriptors/operations only; algorithm, fusion, training,

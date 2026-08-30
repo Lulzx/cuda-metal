@@ -13,9 +13,11 @@ full NVIDIA library implementations.
   epilogues. Metal/MPS paths exist for selected FP16, FP32, and FP64 behavior.
 - **cuRAND:** pseudorandom generation for integer, uniform, normal, and
   log-normal families with seed, offset, generator lifetime, and stream ordering.
-- **cuFFT:** rank-1 planning/execution for selected C2C/R2C/C2R and double forms;
-  Accelerate backs supported lengths and a bounded direct DFT covers small
-  fallback lengths.
+- **cuFFT:** rank-1 to rank-3 planning and execution for C2C/R2C/C2R and the
+  double forms, with cuFFT's advanced data layout (`inembed`/`onembed`, stride,
+  batch distance). Accelerate backs the lengths vDSP can factor; Bluestein's
+  algorithm covers the rest, so no length is rejected. Execution is on the CPU
+  over unified memory, not on the GPU.
 - **cuSPARSE:** selected dense/sparse descriptors and operations, including GPU
   paths used by the HiGHS/cuPDLP-C integration.
 - **cuSOLVER:** a bounded dense/sparse solver API subset.

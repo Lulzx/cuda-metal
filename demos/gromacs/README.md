@@ -40,11 +40,18 @@ CUDA driver:         12.0
 | Pair-list pruning + bucket sci sort | **Apple GPU** | `nbnxn_kernel_prune_cuda`, `nbnxnKernelBucketSciSort` |
 | Listed (bonded) forces | **Apple GPU** | `bonded_kernel_gpu<calcVir, calcEner>` |
 | Constrained update (LINCS + SETTLE) | **Apple GPU** | `lincs_kernel`, `settle_kernel`, `updateMDLeapfrogSimple` |
+| PME spread / solve / gather | **Apple GPU** | `pme_spline_and_spread_kernel`, `pme_solve_kernel`, `pme_gather_kernel` |
 | Exclusive scan over the sci histogram | host UMA (CUB shim) | `cub::DeviceScan::ExclusiveSum` |
-| PME mesh (3D FFT) | **CPU** | see [Known limits](#known-limits) |
+| PME 3D FFT | host UMA (cuFFT shim) | `cufftExecR2C` / `cufftExecC2R` |
 
-`-nb gpu -bonded gpu -update gpu -pme cpu`. That is a normal GROMACS task split,
-not a contrivance: PME is routinely assigned to separate ranks or to the CPU.
+`-nb gpu -pme gpu -bonded gpu -update gpu`: everything GROMACS can offload.
+
+Be precise about PME. Its three CUDA kernels -- spreading charges onto the mesh,
+the reciprocal-space convolution, and gathering forces back -- run on the Apple
+GPU. The 3D FFT between them does not: CuMetal's cuFFT is a CPU implementation
+over unified memory, so that step is Accelerate, not Metal. GROMACS's log line
+"PME tasks will do all aspects on the GPU" describes GROMACS's task assignment,
+not where every instruction retires.
 
 ---
 
@@ -88,12 +95,12 @@ Two more things must hold or the run fails:
 
 ## Results (M4 Pro, Debug, shim ON)
 
-From one `bash demos/gromacs/run.sh`, GROMACS 2025.4, `-nb gpu -pme cpu
+From one `bash demos/gromacs/run.sh`, GROMACS 2025.4, `-nb gpu -pme gpu
 -bonded gpu -update gpu`:
 
 | System | Atoms | Max relative energy difference, 20 steps |
 | --- | --- | --- |
-| villin | 5,006 | 2.37e-05 |
+| villin | 5,006 | 2.66e-05 |
 | rnase_cubic | 24,040 | 6.40e-05 |
 
 ADH (134,177 atoms) is wired into `--all` and uses the same gate, but has no
@@ -153,6 +160,18 @@ unsigned and casting straight to it turned every negative result into 0. Both
 mistakes were caught by `tests/cuda_projects/libdevice`, which now probes
 `rsqrt` and all four `__float2int_*` modes over inputs that straddle zero.
 
+**cuFFT was rank-1 only**, so `cufftPlanMany` with `rank = 3` returned
+`CUFFT_NOT_SUPPORTED` and `-pme gpu` could not be used at all. It now executes
+ranks 1 to 3 for every transform type, together with cuFFT's advanced data
+layout — without `inembed`/`onembed` a padded grid cannot even be described, and
+GROMACS's real-space mesh is padded on its fastest axis. Multidimensional
+transforms are separable, so each runs as a sequence of 1-D transforms one axis
+at a time; the previous code multiplied the dimensions together and did a single
+flattened transform, which computes a different function entirely. Lengths that
+vDSP cannot factor — a PME grid with a factor of 7 on some axis — go through
+Bluestein's chirp-z algorithm instead of being rejected, which also removes the
+1024-element ceiling the old direct-sum fallback carried.
+
 The `nvcc` shim also gained `-ccbin`, `-diag-suppress`, `-Xcompiler` quote
 stripping, a two-phase compile-and-link (clang's CUDA-mode link mis-parses
 Apple's `-lto_library`), `CUDA::cudart_static`, and directory symlinks for
@@ -162,9 +181,9 @@ Apple's `-lto_library`), `CUDA::cudart_static`, and directory symlinks for
 
 ## Known limits
 
-- **PME mesh runs on the CPU.** `-pme gpu` fails at `cufftPlanMany`: CuMetal's
-  cuFFT is rank-1 only and GROMACS's PME needs a padded 3D R2C/C2R pair. This is
-  a real gap, not a configuration choice — see
+- **The PME FFT is not on the GPU.** CuMetal's cuFFT computes the transform on
+  the CPU over unified memory. PME's own kernels are offloaded; the FFT between
+  them is not, and a Metal FFT is the obvious next step. See
   [`docs/known-gaps/libraries.md`](../../docs/known-gaps/libraries.md).
 - **Single rank, single GPU.** `GMX_MPI=OFF`, no domain decomposition, no
   halo exchange, no PME/PP split across ranks.

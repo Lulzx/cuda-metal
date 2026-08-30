@@ -123,11 +123,10 @@ for entry in "${SYSTEMS[@]}"; do
         if [[ "${which}" == cpu ]]; then
             binary="${GMX_CPU}"; tasks=(-nb cpu -pme cpu)
         else
-            # PME stays on the CPU: CuMetal's cuFFT covers rank-1 transforms only,
-            # and GROMACS's PME mesh needs a padded 3D R2C/C2R pair. Everything
-            # else -- short-range nonbonded, listed forces, and the LINCS/SETTLE
-            # constrained update -- runs on the Apple GPU.
-            binary="${GMX_GPU}"; tasks=(-nb gpu -pme cpu -bonded gpu -update gpu)
+            # Everything GROMACS can offload goes to the GPU. PME included: its
+            # spread, solve and gather kernels run on the Apple GPU, while the 3D
+            # FFT between them is served by CuMetal's cuFFT shim on the CPU.
+            binary="${GMX_GPU}"; tasks=(-nb gpu -pme gpu -bonded gpu -update gpu)
         fi
         ( cd "${rundir}" && "${binary}" mdrun -s "${OUT_DIR}/${label}.tpr" -deffnm "${which}" \
             -ntmpi 1 -ntomp 4 "${tasks[@]}" -notunepme ) > "${rundir}/mdrun.log" 2>&1 || {
@@ -147,13 +146,14 @@ for entry in "${SYSTEMS[@]}"; do
     largest="$(sed -n 's/.*rel=\([0-9.e+-]*\).*/\1/p' <<< "${summary}")"
 
     # A number that matches is not by itself evidence the GPU produced it.
-    # GROMACS names each offloaded task in its log; require all three. Nonbonded
+    # GROMACS names each offloaded task in its log; require all four. Nonbonded
     # and bonded share one line ("short-ranged and most bonded interactions on
     # the GPU") when both are offloaded, and it degrades to "short-ranged
     # interactions on the GPU" when only nonbonded is.
     assigned=""
     if grep -q "short-ranged.*interactions on the GPU" "${gpu_log}"; then assigned+="nb "; fi
     if grep -q "bonded interactions on the GPU" "${gpu_log}"; then assigned+="bonded "; fi
+    if grep -q "PME tasks will do all aspects on the GPU" "${gpu_log}"; then assigned+="pme "; fi
     if grep -q "update and constrain coordinates on the GPU" "${gpu_log}"; then assigned+="update"; fi
 
     printf "%-10s %-8s | %-38s | %s\n" "${label}" "${atoms}" \
@@ -164,8 +164,9 @@ for entry in "${SYSTEMS[@]}"; do
         sed -n '/^FAIL/p' "${OUT_DIR}/${label}.gate.log" | head -5 | sed 's/^/    /'
         fails=$((fails+1))
     fi
-    if [[ "${assigned}" != *nb* || "${assigned}" != *bonded* || "${assigned}" != *update* ]]; then
-        echo "  FAIL: GROMACS did not offload all three tasks; the match may be a CPU result"
+    if [[ "${assigned}" != *nb* || "${assigned}" != *bonded* || "${assigned}" != *pme* ||
+          "${assigned}" != *update* ]]; then
+        echo "  FAIL: GROMACS did not offload all four tasks; the match may be a CPU result"
         fails=$((fails+1))
     fi
 done
@@ -179,7 +180,7 @@ prov_label="$(basename "${SYSTEMS[0]##*:}")"
 prov_dir="${OUT_DIR}/${prov_label}.provenance"
 rm -rf "${prov_dir}"; mkdir -p "${prov_dir}"
 ( cd "${prov_dir}" && CUMETAL_TRACE_GPU=1 "${GMX_GPU}" mdrun -s "${OUT_DIR}/${prov_label}.tpr" \
-    -deffnm p -ntmpi 1 -ntomp 4 -nb gpu -pme cpu -bonded gpu -update gpu -notunepme -nsteps 2 ) \
+    -deffnm p -ntmpi 1 -ntomp 4 -nb gpu -pme gpu -bonded gpu -update gpu -notunepme -nsteps 2 ) \
     > "${prov_dir}/provenance.log" 2>&1 || true
 launches="$(grep -c 'device=apple_gpu' "${prov_dir}/provenance.log" || true)"
 if [[ "${launches}" -gt 0 ]]; then

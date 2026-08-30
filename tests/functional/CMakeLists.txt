@@ -208,6 +208,10 @@ add_executable(cumetal_cufft_c2c_test
     cufft_c2c_test.cpp
 )
 
+add_executable(cumetal_cufft_nd_test
+    cufft_nd_test.cpp
+)
+
 add_executable(cumetal_runtime_occupancy_test
     runtime_occupancy_test.cpp
 )
@@ -806,6 +810,11 @@ target_link_libraries(cumetal_extended_api_v5_test
 )
 
 target_link_libraries(cumetal_extended_api_v6_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cufft_nd_test
     PRIVATE
         cumetal_runtime
 )
@@ -1578,6 +1587,13 @@ target_compile_options(cumetal_extended_api_v6_test
 )
 
 target_compile_options(cumetal_cufft_c2c_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_cufft_nd_test
     PRIVATE
         -Wall
         -Wextra
@@ -2391,6 +2407,11 @@ add_test(
 add_test(
     NAME functional_cufft_c2c
     COMMAND cumetal_cufft_c2c_test
+)
+
+add_test(
+    NAME functional_cufft_nd
+    COMMAND cumetal_cufft_nd_test
 )
 
 add_test(

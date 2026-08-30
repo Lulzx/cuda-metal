@@ -53,10 +53,12 @@ int main() {
     long long xt_n[1] = {N};
     long long xt_embed[1] = {N};
     size_t work_size = 1;
+    // An explicit inembed describing the contiguous layout is accepted; a
+    // mismatched input/execution datatype pair still is not.
     if (cufftCreate(&xt_plan) != CUFFT_SUCCESS ||
         cufftXtMakePlanMany(xt_plan, 1, xt_n, xt_embed, 1, N, CUDA_C_32F,
                             nullptr, 1, N, CUDA_C_32F, 1, &work_size,
-                            CUDA_C_32F) != CUFFT_NOT_SUPPORTED ||
+                            CUDA_C_32F) != CUFFT_SUCCESS ||
         cufftXtMakePlanMany(xt_plan, 1, xt_n, nullptr, 1, N, CUDA_R_32F,
                             nullptr, 1, N, CUDA_C_32F, 1, &work_size,
                             CUDA_R_32F) != CUFFT_NOT_SUPPORTED ||
@@ -87,14 +89,19 @@ int main() {
         return 1;
     }
 
-    cufftHandle unsupported_2d = 0;
-    if (cufftPlan2d(&unsupported_2d, 2, 2, CUFFT_C2C) != CUFFT_SUCCESS ||
-        cufftExecC2C(unsupported_2d, d_in, d_out, CUFFT_FORWARD) !=
-            CUFFT_NOT_SUPPORTED ||
-        cufftDestroy(unsupported_2d) != CUFFT_SUCCESS) {
-        std::fprintf(stderr, "FAIL: multidimensional cuFFT did not fail explicitly\n");
+    // Rank 2 and rank 3 now execute rather than being rejected; the numerical
+    // contract for them lives in functional_cufft_nd, which checks the output
+    // against the transform's definition. Here it is enough that a rank-2 plan
+    // runs and leaves the caller's rank-1 data untouched.
+    cufftHandle plan_2d = 0;
+    if (cufftPlan2d(&plan_2d, 2, 2, CUFFT_C2C) != CUFFT_SUCCESS ||
+        cufftExecC2C(plan_2d, d_in, d_out, CUFFT_FORWARD) != CUFFT_SUCCESS ||
+        cufftDestroy(plan_2d) != CUFFT_SUCCESS) {
+        std::fprintf(stderr, "FAIL: rank-2 cuFFT plan did not execute\n");
         return 1;
     }
+    // That transform reads d_in and writes d_out, so the rank-1 round-trip result
+    // still sitting in d_in is intact for the value check below.
 
     if (cudaMemcpy(h_out.data(), d_in, N * sizeof(cufftComplex), cudaMemcpyDeviceToHost) !=
         cudaSuccess) {

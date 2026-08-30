@@ -90,19 +90,22 @@ bash demos/gromacs/run.sh --quick    # villin, 5k atoms
 bash demos/gromacs/run.sh            # adds rnase, 24k atoms
 ```
 
-Short-range nonbonded, listed forces, and the LINCS/SETTLE constrained update
-run on the Apple GPU; the PME mesh stays on the CPU because CuMetal's cuFFT is
-rank-1 only. The gate compares every energy term GROMACS prints at every step of
-a deterministic 20-step trajectory, and additionally requires that GROMACS's log
-shows all three tasks offloaded and that CuMetal traced `device=apple_gpu`. The
-recorded results are a maximum relative energy difference of `2.37e-05` for
-villin (5,006 atoms) and `6.40e-05` for rnase_cubic (24,040).
+Short-range nonbonded, listed forces, PME spread/solve/gather, and the
+LINCS/SETTLE constrained update all run on the Apple GPU. The 3D FFT inside PME
+does not: CuMetal's cuFFT computes it on the CPU over unified memory. The gate
+compares every energy term GROMACS prints at every step of a deterministic
+20-step trajectory, and additionally requires that GROMACS's log shows all four
+tasks offloaded and that CuMetal traced `device=apple_gpu`. The recorded results
+are a maximum relative energy difference of `2.66e-05` for villin (5,006 atoms)
+and `6.40e-05` for rnase_cubic (24,040).
 
 Building it exposed five CuMetal defects, all silent or fatal rather than
 warned: `cudaDeviceReset` erasing the fatbin kernel registry, every host-backed
 `cub::Device*` shim ignoring stream order, `cudaDestroyTextureObject(0)`
 returning an error instead of a no-op, zero-parameter kernels rejecting a null
-argument vector, and three missing libdevice entry points. See
+argument vector, and missing libdevice entry points. Offloading PME then
+required cuFFT to grow rank-2 and rank-3 transforms and the advanced data layout
+that describes a padded grid. See
 [the GROMACS guide](../demos/gromacs/README.md).
 
 ## Run one sample

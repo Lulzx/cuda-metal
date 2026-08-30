@@ -1,12 +1,19 @@
 // cuFFT shim backed by Apple Accelerate vDSP (spec §11 Phase 4.5).
 //
-// Uses vDSP_DFT_Execute for arbitrary-length transforms (any N ≥ 1).
-// The DFT convention matches cuFFT:
-//   FORWARD:  X[k] = Σ x[n] · e^{-2πi k n/N}  (no normalization)
-//   INVERSE:  x[n] = Σ X[k] · e^{+2πi k n/N}  (no normalization — caller divides by N)
+// The DFT convention matches cuFFT and is unnormalized in both directions:
+//   FORWARD:  X[k] = Σ x[n] · e^{-2πi k n/N}
+//   INVERSE:  x[n] = Σ X[k] · e^{+2πi k n/N}   (caller divides by N)
 //
-// Split-complex ↔ interleaved conversion is performed in temporary scratch buffers.
-// Batched transforms loop over batch count.
+// Ranks 1 to 3 are supported for every transform type, together with cuFFT's
+// advanced data layout (inembed/onembed/stride/dist). Multidimensional
+// transforms are separable, so each is executed as a sequence of 1-D transforms,
+// one axis at a time, over a contiguous split-complex working copy of the grid.
+// Real transforms carry the half-spectrum on the fastest axis, n/2 + 1 as cuFFT
+// defines it.
+//
+// This runs on the CPU over unified memory; it is not a Metal kernel. A caller
+// that offloads an FFT here gets the right answer, not GPU execution, and the
+// stream is synchronized first so it reads what earlier kernels wrote.
 
 #include "cufftXt.h"
 
@@ -19,6 +26,8 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <type_traits>
+#include <utility>
 #include <mutex>
 #include <new>
 #include <numbers>
@@ -28,26 +37,35 @@ namespace {
 
 // ── Plan storage ─────────────────────────────────────────────────────────────
 
-enum class FftPrecision { kSingle, kDouble };
+// cuFFT's "advanced data layout". Element (x0 … x_{rank-1}) of batch b sits at
+//   b*dist + stride * (((x0 * embed[1]) + x1) * embed[2] + x2)
+// embed[0] never participates in addressing, matching cuFFT. The layout is what
+// makes a padded grid describable: GROMACS's PME real grid is padded on the
+// fastest axis, so embed[rank-1] exceeds n[rank-1] and the rows are strided.
+struct FftLayout {
+    int embed[3] = {1, 1, 1};
+    int stride = 1;
+    long long dist = 0;
+};
+
+long long layout_offset(const FftLayout& layout, int rank, const int* index) {
+    long long offset = index[0];
+    for (int axis = 1; axis < rank; ++axis) {
+        offset = offset * layout.embed[axis] + index[axis];
+    }
+    return offset * layout.stride;
+}
 
 struct CufftPlanEntry {
     cufftType type = CUFFT_C2C;
     int rank = 1;
-    // Logical dimensions (n[0]…n[rank-1]).  For R2C/C2R rank-1: n[0] is the real length;
-    // complex half-spectrum has n[0]/2 + 1 elements.
+    // Logical dimensions, slowest axis first. For R2C/C2R these are the *real*
+    // dimensions; the complex side is n[rank-1]/2 + 1 on the fastest axis.
     std::vector<int> n;
     int batch = 1;
-    // Stride/distance (currently only batch-contiguous layout is accelerated).
+    FftLayout input;
+    FftLayout output;
     cudaStream_t stream = nullptr;
-
-    // Cached vDSP DFT setups, one per direction (index 0=forward, 1=inverse).
-    // Built lazily when Exec* is first called.
-    // Single-precision (float):
-    vDSP_DFT_Setup dft_fwd_f = nullptr;
-    vDSP_DFT_Setup dft_inv_f = nullptr;
-    // Double-precision:
-    vDSP_DFT_SetupD dft_fwd_d = nullptr;
-    vDSP_DFT_SetupD dft_inv_d = nullptr;
 };
 
 struct CufftState {
@@ -72,380 +90,390 @@ CufftState& state() {
     return *s;
 }
 
-// ── vDSP setup helpers ───────────────────────────────────────────────────────
+// ── 1-D transform engine ─────────────────────────────────────────────────────
+//
+// Every transform here is built from unnormalized 1-D complex DFTs, which is
+// cuFFT's convention in both directions: an inverse transform of a forward one
+// returns N times the input, and the caller divides.
+//
+// vDSP accepts only lengths of the form f * 2^k with f in {1, 3, 5, 15}. PME
+// grids are 2-3-5-7 smooth, so a factor of 7 on any axis falls outside that set.
+// Those lengths go through Bluestein's chirp-z algorithm, which expresses a DFT
+// of arbitrary length as a power-of-two convolution. That is O(n log n), so
+// unlike the bounded direct sum it replaces there is no size ceiling and no
+// length that has to be rejected.
 
-vDSP_DFT_Setup get_dft_setup_f(CufftPlanEntry& p, vDSP_DFT_Direction dir) {
-    vDSP_DFT_Setup& slot = (dir == vDSP_DFT_FORWARD) ? p.dft_fwd_f : p.dft_inv_f;
-    if (slot == nullptr) {
-        vDSP_Length n = 1;
-        for (int d : p.n) {
-            n *= static_cast<vDSP_Length>(d);
-        }
-        // Use complex (interleaved ↔ split) DFT (zop = out-of-place split).
-        if (p.type == CUFFT_R2C || p.type == CUFFT_C2R) {
-            // Half-spectrum real DFT (zrop).
-            slot = vDSP_DFT_zrop_CreateSetup(nullptr, n, dir);
-        } else {
-            slot = vDSP_DFT_zop_CreateSetup(nullptr, n, dir);
+// Setup cache keyed by length and direction. Every caller already holds
+// CufftState::mutex, so no additional lock is needed. Setups are process-lifetime
+// and deliberately never destroyed: they are shared across plans, so a plan's
+// destruction cannot know whether another plan still needs one.
+vDSP_DFT_Setup vdsp_setup(vDSP_Length n, vDSP_DFT_Direction dir, float) {
+    static std::map<std::pair<vDSP_Length, int>, vDSP_DFT_Setup> cache;
+    const auto key = std::make_pair(n, static_cast<int>(dir));
+    const auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    vDSP_DFT_Setup setup = vDSP_DFT_zop_CreateSetup(nullptr, n, dir);
+    cache.emplace(key, setup);
+    return setup;
+}
+
+vDSP_DFT_SetupD vdsp_setup(vDSP_Length n, vDSP_DFT_Direction dir, double) {
+    static std::map<std::pair<vDSP_Length, int>, vDSP_DFT_SetupD> cache;
+    const auto key = std::make_pair(n, static_cast<int>(dir));
+    const auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    vDSP_DFT_SetupD setup = vDSP_DFT_zop_CreateSetupD(nullptr, n, dir);
+    cache.emplace(key, setup);
+    return setup;
+}
+
+// In-place radix-2 DFT over a power-of-two length, in double regardless of the
+// caller's precision. Only Bluestein uses it, and its accuracy sets the accuracy
+// of every unsupported length.
+void fft_pow2(std::vector<double>& re, std::vector<double>& im, bool inverse) {
+    const std::size_t m = re.size();
+    for (std::size_t i = 1, j = 0; i < m; ++i) {
+        std::size_t bit = m >> 1;
+        for (; (j & bit) != 0; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            std::swap(re[i], re[j]);
+            std::swap(im[i], im[j]);
         }
     }
-    return slot;
-}
-
-vDSP_DFT_SetupD get_dft_setup_d(CufftPlanEntry& p, vDSP_DFT_Direction dir) {
-    vDSP_DFT_SetupD& slot = (dir == vDSP_DFT_FORWARD) ? p.dft_fwd_d : p.dft_inv_d;
-    if (slot == nullptr) {
-        vDSP_Length n = 1;
-        for (int d : p.n) {
-            n *= static_cast<vDSP_Length>(d);
-        }
-        if (p.type == CUFFT_D2Z || p.type == CUFFT_Z2D) {
-            slot = vDSP_DFT_zrop_CreateSetupD(nullptr, n, dir);
-        } else {
-            slot = vDSP_DFT_zop_CreateSetupD(nullptr, n, dir);
+    for (std::size_t len = 2; len <= m; len <<= 1) {
+        const double step = 2.0 * std::numbers::pi / static_cast<double>(len) *
+                            (inverse ? 1.0 : -1.0);
+        const std::size_t half = len / 2;
+        for (std::size_t base = 0; base < m; base += len) {
+            for (std::size_t k = 0; k < half; ++k) {
+                const double angle = step * static_cast<double>(k);
+                const double wr = std::cos(angle);
+                const double wi = std::sin(angle);
+                const double lo_re = re[base + k];
+                const double lo_im = im[base + k];
+                const double hi_re = re[base + k + half] * wr - im[base + k + half] * wi;
+                const double hi_im = re[base + k + half] * wi + im[base + k + half] * wr;
+                re[base + k] = lo_re + hi_re;
+                im[base + k] = lo_im + hi_im;
+                re[base + k + half] = lo_re - hi_re;
+                im[base + k + half] = lo_im - hi_im;
+            }
         }
     }
-    return slot;
 }
-
-// ── Interleaved ↔ split-complex conversion ───────────────────────────────────
-
-// Deinterleave {re0,im0,re1,im1,...} → re[], im[]
-static void deinterleave_f(const cufftComplex* src, float* re, float* im, vDSP_Length n) {
-    DSPSplitComplex sc{re, im};
-    vDSP_ctoz(reinterpret_cast<const DSPComplex*>(src), 2, &sc, 1, n);
-}
-static void interleave_f(const float* re, const float* im, cufftComplex* dst, vDSP_Length n) {
-    DSPSplitComplex sc{const_cast<float*>(re), const_cast<float*>(im)};
-    vDSP_ztoc(&sc, 1, reinterpret_cast<DSPComplex*>(dst), 2, n);
-}
-static void deinterleave_d(const cufftDoubleComplex* src, double* re, double* im,
-                            vDSP_Length n) {
-    DSPDoubleSplitComplex sc{re, im};
-    vDSP_ctozD(reinterpret_cast<const DSPDoubleComplex*>(src), 2, &sc, 1, n);
-}
-static void interleave_d(const double* re, const double* im, cufftDoubleComplex* dst,
-                          vDSP_Length n) {
-    DSPDoubleSplitComplex sc{const_cast<double*>(re), const_cast<double*>(im)};
-    vDSP_ztocD(&sc, 1, reinterpret_cast<DSPDoubleComplex*>(dst), 2, n);
-}
-
-// vDSP supports only selected factorizations. Keep uncommon small sizes correct
-// with a bounded direct DFT; reject larger unsupported sizes rather than starting
-// an unexpectedly expensive O(N^2) operation.
-constexpr std::size_t kDirectDftMaxElements = 1024;
 
 template <typename Scalar>
-bool direct_dft(const Scalar* re_in,
-                const Scalar* im_in,
-                Scalar* re_out,
-                Scalar* im_out,
-                std::size_t n,
-                bool inverse) {
-    if (re_in == nullptr || im_in == nullptr || re_out == nullptr || im_out == nullptr ||
-        n == 0 || n > kDirectDftMaxElements) {
-        return false;
+void bluestein(Scalar* re, Scalar* im, std::size_t n, bool inverse) {
+    std::size_t m = 1;
+    while (m < 2 * n - 1) m <<= 1;
+
+    // chirp[j] = exp(sign * i * pi * j^2 / n). j^2 is reduced modulo 2n first:
+    // the exponent is periodic there, and for a long axis j*j would otherwise
+    // lose precision long before the cosine is evaluated.
+    const double sign = inverse ? 1.0 : -1.0;
+    std::vector<double> chirp_re(n), chirp_im(n);
+    for (std::size_t j = 0; j < n; ++j) {
+        const std::size_t reduced = (j % (2 * n)) * (j % (2 * n)) % (2 * n);
+        const double angle =
+            sign * std::numbers::pi * static_cast<double>(reduced) / static_cast<double>(n);
+        chirp_re[j] = std::cos(angle);
+        chirp_im[j] = std::sin(angle);
     }
-    std::vector<long double> twiddle_re(n);
-    std::vector<long double> twiddle_im(n);
-    const long double direction = inverse ? 1.0L : -1.0L;
-    for (std::size_t phase = 0; phase < n; ++phase) {
-        const long double angle =
-            2.0L * std::numbers::pi_v<long double> * static_cast<long double>(phase) /
-            static_cast<long double>(n);
-        twiddle_re[phase] = std::cos(angle);
-        twiddle_im[phase] = direction * std::sin(angle);
+
+    std::vector<double> ar(m, 0.0), ai(m, 0.0), br(m, 0.0), bi(m, 0.0);
+    for (std::size_t j = 0; j < n; ++j) {
+        const double xr = static_cast<double>(re[j]);
+        const double xi = static_cast<double>(im[j]);
+        ar[j] = xr * chirp_re[j] - xi * chirp_im[j];
+        ai[j] = xr * chirp_im[j] + xi * chirp_re[j];
     }
+    br[0] = chirp_re[0];
+    bi[0] = -chirp_im[0];
+    for (std::size_t j = 1; j < n; ++j) {
+        br[j] = chirp_re[j];
+        bi[j] = -chirp_im[j];
+        br[m - j] = chirp_re[j];
+        bi[m - j] = -chirp_im[j];
+    }
+
+    fft_pow2(ar, ai, false);
+    fft_pow2(br, bi, false);
+    for (std::size_t k = 0; k < m; ++k) {
+        const double pr = ar[k] * br[k] - ai[k] * bi[k];
+        const double pi_ = ar[k] * bi[k] + ai[k] * br[k];
+        ar[k] = pr;
+        ai[k] = pi_;
+    }
+    fft_pow2(ar, ai, true);
+
+    const double scale = 1.0 / static_cast<double>(m);
     for (std::size_t k = 0; k < n; ++k) {
-        long double sum_re = 0.0L;
-        long double sum_im = 0.0L;
-        for (std::size_t sample = 0; sample < n; ++sample) {
-            const std::size_t phase = (k * sample) % n;
-            const long double c = twiddle_re[phase];
-            const long double s = twiddle_im[phase];
-            const long double in_re = static_cast<long double>(re_in[sample]);
-            const long double in_im = static_cast<long double>(im_in[sample]);
-            sum_re += in_re * c - in_im * s;
-            sum_im += in_re * s + in_im * c;
-        }
-        re_out[k] = static_cast<Scalar>(sum_re);
-        im_out[k] = static_cast<Scalar>(sum_im);
+        const double vr = ar[k] * scale;
+        const double vi = ai[k] * scale;
+        re[k] = static_cast<Scalar>(vr * chirp_re[k] - vi * chirp_im[k]);
+        im[k] = static_cast<Scalar>(vr * chirp_im[k] + vi * chirp_re[k]);
     }
-    return true;
 }
 
-// ── C2C execution (single) ───────────────────────────────────────────────────
+// In-place unnormalized DFT of a contiguous split-complex line.
+template <typename Scalar>
+void fft_1d(Scalar* re, Scalar* im, std::size_t n, bool inverse) {
+    if (n <= 1) return;
+    const vDSP_DFT_Direction dir = inverse ? vDSP_DFT_INVERSE : vDSP_DFT_FORWARD;
+    auto setup = vdsp_setup(static_cast<vDSP_Length>(n), dir, Scalar{});
+    if (setup == nullptr) {
+        bluestein(re, im, n, inverse);
+        return;
+    }
+    std::vector<Scalar> out_re(n), out_im(n);
+    if constexpr (std::is_same_v<Scalar, float>) {
+        vDSP_DFT_Execute(setup, re, im, out_re.data(), out_im.data());
+    } else {
+        vDSP_DFT_ExecuteD(setup, re, im, out_re.data(), out_im.data());
+    }
+    std::copy(out_re.begin(), out_re.end(), re);
+    std::copy(out_im.begin(), out_im.end(), im);
+}
 
-static cufftResult exec_c2c(CufftPlanEntry& p, cufftComplex* idata, cufftComplex* odata,
-                             int direction) {
-    if (idata == nullptr || odata == nullptr) {
-        return CUFFT_INVALID_VALUE;
+// ── N-D field ────────────────────────────────────────────────────────────────
+//
+// A contiguous split-complex array, slowest axis first. Multidimensional
+// transforms are separable, so each axis is a batch of independent 1-D
+// transforms; doing them one axis at a time is what makes any rank correct
+// rather than the single flattened transform this replaces, which computed a
+// different function entirely.
+template <typename Scalar>
+struct ComplexField {
+    int dims[3] = {1, 1, 1};
+    int rank = 1;
+    std::vector<Scalar> re;
+    std::vector<Scalar> im;
+
+    std::size_t count() const {
+        std::size_t total = 1;
+        for (int axis = 0; axis < rank; ++axis) total *= static_cast<std::size_t>(dims[axis]);
+        return total;
     }
-    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
-    const vDSP_DFT_Direction vdir =
-        (direction == CUFFT_FORWARD) ? vDSP_DFT_FORWARD : vDSP_DFT_INVERSE;
-    vDSP_DFT_Setup setup = get_dft_setup_f(p, vdir);
-    vDSP_Length n = 1;
-    for (int d : p.n) {
-        n *= static_cast<vDSP_Length>(d);
+    void resize(int r, const int* d) {
+        rank = r;
+        for (int axis = 0; axis < r; ++axis) dims[axis] = d[axis];
+        re.assign(count(), Scalar{});
+        im.assign(count(), Scalar{});
     }
-    std::vector<float> re_in(n), im_in(n), re_out(n), im_out(n);
-    for (int b = 0; b < p.batch; ++b) {
-        const cufftComplex* in = idata + b * static_cast<ptrdiff_t>(n);
-        cufftComplex* out = odata + b * static_cast<ptrdiff_t>(n);
-        deinterleave_f(in, re_in.data(), im_in.data(), n);
-        if (setup != nullptr) {
-            vDSP_DFT_Execute(setup, re_in.data(), im_in.data(), re_out.data(),
-                             im_out.data());
-        } else if (!direct_dft(re_in.data(), im_in.data(), re_out.data(),
-                               im_out.data(), n, direction == CUFFT_INVERSE)) {
-            return CUFFT_NOT_SUPPORTED;
+};
+
+template <typename Scalar>
+void transform_axis(ComplexField<Scalar>& field, int axis, bool inverse) {
+    const std::size_t length = static_cast<std::size_t>(field.dims[axis]);
+    if (length <= 1) return;
+    std::size_t inner = 1;
+    for (int a = axis + 1; a < field.rank; ++a) inner *= static_cast<std::size_t>(field.dims[a]);
+    std::size_t outer = 1;
+    for (int a = 0; a < axis; ++a) outer *= static_cast<std::size_t>(field.dims[a]);
+
+    std::vector<Scalar> line_re(length), line_im(length);
+    for (std::size_t o = 0; o < outer; ++o) {
+        for (std::size_t i = 0; i < inner; ++i) {
+            const std::size_t base = o * length * inner + i;
+            for (std::size_t j = 0; j < length; ++j) {
+                line_re[j] = field.re[base + j * inner];
+                line_im[j] = field.im[base + j * inner];
+            }
+            fft_1d(line_re.data(), line_im.data(), length, inverse);
+            for (std::size_t j = 0; j < length; ++j) {
+                field.re[base + j * inner] = line_re[j];
+                field.im[base + j * inner] = line_im[j];
+            }
         }
-        interleave_f(re_out.data(), im_out.data(), out, n);
+    }
+}
+
+// Walks every logical index of `dims` in row-major order, calling
+// visit(contiguous_index, index[]).
+template <typename Visit>
+void for_each_index(int rank, const int* dims, Visit visit) {
+    int index[3] = {0, 0, 0};
+    std::size_t linear = 0;
+    const int d0 = dims[0];
+    const int d1 = rank > 1 ? dims[1] : 1;
+    const int d2 = rank > 2 ? dims[2] : 1;
+    for (index[0] = 0; index[0] < d0; ++index[0]) {
+        for (index[1] = 0; index[1] < d1; ++index[1]) {
+            for (index[2] = 0; index[2] < d2; ++index[2]) {
+                visit(linear++, index);
+            }
+        }
+    }
+}
+
+// ── Execution ────────────────────────────────────────────────────────────────
+
+template <typename Scalar, typename Complex>
+cufftResult exec_c2c_nd(const CufftPlanEntry& p, Complex* idata, Complex* odata,
+                        int direction) {
+    if (idata == nullptr || odata == nullptr) return CUFFT_INVALID_VALUE;
+    const bool inverse = (direction == CUFFT_INVERSE);
+    const int rank = p.rank;
+    int dims[3] = {1, 1, 1};
+    for (int a = 0; a < rank; ++a) dims[a] = p.n[a];
+
+    ComplexField<Scalar> field;
+    field.resize(rank, dims);
+    for (int b = 0; b < p.batch; ++b) {
+        const long long in_base = static_cast<long long>(b) * p.input.dist;
+        const long long out_base = static_cast<long long>(b) * p.output.dist;
+        for_each_index(rank, dims, [&](std::size_t linear, const int* index) {
+            const Complex& v = idata[in_base + layout_offset(p.input, rank, index)];
+            field.re[linear] = static_cast<Scalar>(v.x);
+            field.im[linear] = static_cast<Scalar>(v.y);
+        });
+        for (int a = 0; a < rank; ++a) transform_axis(field, a, inverse);
+        for_each_index(rank, dims, [&](std::size_t linear, const int* index) {
+            Complex& v = odata[out_base + layout_offset(p.output, rank, index)];
+            v.x = field.re[linear];
+            v.y = field.im[linear];
+        });
     }
     return CUFFT_SUCCESS;
 }
 
-// ── Z2Z execution (double) ───────────────────────────────────────────────────
+template <typename Scalar, typename Real, typename Complex>
+cufftResult exec_r2c_nd(const CufftPlanEntry& p, Real* idata, Complex* odata) {
+    if (idata == nullptr || odata == nullptr) return CUFFT_INVALID_VALUE;
+    const int rank = p.rank;
+    int real_dims[3] = {1, 1, 1};
+    for (int a = 0; a < rank; ++a) real_dims[a] = p.n[a];
+    int complex_dims[3] = {1, 1, 1};
+    for (int a = 0; a < rank; ++a) complex_dims[a] = real_dims[a];
+    complex_dims[rank - 1] = real_dims[rank - 1] / 2 + 1;
 
-static cufftResult exec_z2z(CufftPlanEntry& p, cufftDoubleComplex* idata,
-                             cufftDoubleComplex* odata, int direction) {
-    if (idata == nullptr || odata == nullptr) {
-        return CUFFT_INVALID_VALUE;
-    }
-    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
-    const vDSP_DFT_Direction vdir =
-        (direction == CUFFT_FORWARD) ? vDSP_DFT_FORWARD : vDSP_DFT_INVERSE;
-    vDSP_DFT_SetupD setup = get_dft_setup_d(p, vdir);
-    vDSP_Length n = 1;
-    for (int d : p.n) {
-        n *= static_cast<vDSP_Length>(d);
-    }
-    std::vector<double> re_in(n), im_in(n), re_out(n), im_out(n);
+    ComplexField<Scalar> full;
+    full.resize(rank, real_dims);
+    ComplexField<Scalar> half;
+    half.resize(rank, complex_dims);
+
     for (int b = 0; b < p.batch; ++b) {
-        const cufftDoubleComplex* in = idata + b * static_cast<ptrdiff_t>(n);
-        cufftDoubleComplex* out = odata + b * static_cast<ptrdiff_t>(n);
-        deinterleave_d(in, re_in.data(), im_in.data(), n);
-        if (setup != nullptr) {
-            vDSP_DFT_ExecuteD(setup, re_in.data(), im_in.data(), re_out.data(),
-                              im_out.data());
-        } else if (!direct_dft(re_in.data(), im_in.data(), re_out.data(),
-                               im_out.data(), n, direction == CUFFT_INVERSE)) {
-            return CUFFT_NOT_SUPPORTED;
-        }
-        interleave_d(re_out.data(), im_out.data(), out, n);
+        const long long in_base = static_cast<long long>(b) * p.input.dist;
+        const long long out_base = static_cast<long long>(b) * p.output.dist;
+
+        // Load the real grid as a complex field with zero imaginary part and
+        // transform the fastest axis. Running a full complex DFT there rather
+        // than a packed real one costs about 2x on that axis alone and keeps the
+        // half-spectrum unpacking out of the picture entirely.
+        std::fill(full.im.begin(), full.im.end(), Scalar{});
+        for_each_index(rank, real_dims, [&](std::size_t linear, const int* index) {
+            full.re[linear] =
+                static_cast<Scalar>(idata[in_base + layout_offset(p.input, rank, index)]);
+        });
+        transform_axis(full, rank - 1, false);
+
+        // Keep the non-redundant half, then transform the remaining axes on it.
+        for_each_index(rank, complex_dims, [&](std::size_t linear, const int* index) {
+            std::size_t source = index[0];
+            for (int a = 1; a < rank; ++a) source = source * real_dims[a] + index[a];
+            half.re[linear] = full.re[source];
+            half.im[linear] = full.im[source];
+        });
+        for (int a = 0; a < rank - 1; ++a) transform_axis(half, a, false);
+
+        for_each_index(rank, complex_dims, [&](std::size_t linear, const int* index) {
+            Complex& v = odata[out_base + layout_offset(p.output, rank, index)];
+            v.x = half.re[linear];
+            v.y = half.im[linear];
+        });
     }
     return CUFFT_SUCCESS;
 }
 
-// ── R2C execution (single) ───────────────────────────────────────────────────
+template <typename Scalar, typename Real, typename Complex>
+cufftResult exec_c2r_nd(const CufftPlanEntry& p, Complex* idata, Real* odata) {
+    if (idata == nullptr || odata == nullptr) return CUFFT_INVALID_VALUE;
+    const int rank = p.rank;
+    int real_dims[3] = {1, 1, 1};
+    for (int a = 0; a < rank; ++a) real_dims[a] = p.n[a];
+    int complex_dims[3] = {1, 1, 1};
+    for (int a = 0; a < rank; ++a) complex_dims[a] = real_dims[a];
+    const int fast_real = real_dims[rank - 1];
+    const int fast_complex = fast_real / 2 + 1;
+    complex_dims[rank - 1] = fast_complex;
 
-static cufftResult exec_r2c(CufftPlanEntry& p, cufftReal* idata, cufftComplex* odata) {
-    if (idata == nullptr || odata == nullptr) {
-        return CUFFT_INVALID_VALUE;
-    }
-    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
-    vDSP_DFT_Setup setup = get_dft_setup_f(p, vDSP_DFT_FORWARD);
-    // For zrop: n real input samples → n/2+1 complex output (half-spectrum convention).
-    // vDSP packs the half-spectrum as n/2 complex + (dc, nyquist) in first slot.
-    vDSP_Length n = 1;
-    for (int d : p.n) {
-        n *= static_cast<vDSP_Length>(d);
-    }
-    const vDSP_Length nc = n / 2;  // vDSP half-spectrum count
-    std::vector<float> re_in(nc + 1), im_in(nc + 1), re_out(nc + 1), im_out(nc + 1);
+    ComplexField<Scalar> half;
+    half.resize(rank, complex_dims);
+    ComplexField<Scalar> full;
+    full.resize(rank, real_dims);
+
     for (int b = 0; b < p.batch; ++b) {
-        const cufftReal* in = idata + b * static_cast<ptrdiff_t>(n);
-        cufftComplex* out = odata + b * static_cast<ptrdiff_t>(nc + 1);
-        if (setup == nullptr) {
-            std::vector<float> full_re_in(n), full_im_in(n, 0.0f);
-            std::vector<float> full_re_out(n), full_im_out(n);
-            std::copy_n(in, n, full_re_in.data());
-            if (!direct_dft(full_re_in.data(), full_im_in.data(), full_re_out.data(),
-                            full_im_out.data(), n, false)) {
-                return CUFFT_NOT_SUPPORTED;
-            }
-            for (vDSP_Length k = 0; k <= nc; ++k) {
-                out[k].x = full_re_out[k];
-                out[k].y = full_im_out[k];
-            }
-            continue;
-        }
-        // Pack real input into split complex (imaginary = 0).
-        for (vDSP_Length i = 0; i < nc; ++i) {
-            re_in[i] = in[2 * i];
-            im_in[i] = in[2 * i + 1];
-        }
-        vDSP_DFT_Execute(setup, re_in.data(), im_in.data(), re_out.data(), im_out.data());
-        // vDSP zrop packs DC in re[0], Nyquist in im[0]; unpack to standard half-spectrum.
-        out[0].x = re_out[0];
-        out[0].y = 0.0f;
-        for (vDSP_Length k = 1; k < nc; ++k) {
-            out[k].x = re_out[k];
-            out[k].y = im_out[k];
-        }
-        out[nc].x = im_out[0];
-        out[nc].y = 0.0f;
-    }
-    return CUFFT_SUCCESS;
-}
+        const long long in_base = static_cast<long long>(b) * p.input.dist;
+        const long long out_base = static_cast<long long>(b) * p.output.dist;
 
-// ── C2R execution (single) ───────────────────────────────────────────────────
+        for_each_index(rank, complex_dims, [&](std::size_t linear, const int* index) {
+            const Complex& v = idata[in_base + layout_offset(p.input, rank, index)];
+            half.re[linear] = static_cast<Scalar>(v.x);
+            half.im[linear] = static_cast<Scalar>(v.y);
+        });
 
-static cufftResult exec_c2r(CufftPlanEntry& p, cufftComplex* idata, cufftReal* odata) {
-    if (idata == nullptr || odata == nullptr) {
-        return CUFFT_INVALID_VALUE;
-    }
-    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
-    vDSP_DFT_Setup setup = get_dft_setup_f(p, vDSP_DFT_INVERSE);
-    vDSP_Length n = 1;
-    for (int d : p.n) {
-        n *= static_cast<vDSP_Length>(d);
-    }
-    const vDSP_Length nc = n / 2;
-    std::vector<float> re_in(nc + 1), im_in(nc + 1), re_out(nc + 1), im_out(nc + 1);
-    for (int b = 0; b < p.batch; ++b) {
-        const cufftComplex* in = idata + b * static_cast<ptrdiff_t>(nc + 1);
-        cufftReal* out = odata + b * static_cast<ptrdiff_t>(n);
-        if (setup == nullptr) {
-            std::vector<float> full_re_in(n), full_im_in(n);
-            std::vector<float> full_re_out(n), full_im_out(n);
-            for (vDSP_Length k = 0; k <= nc; ++k) {
-                full_re_in[k] = in[k].x;
-                full_im_in[k] = in[k].y;
-            }
-            for (vDSP_Length k = nc + 1; k < n; ++k) {
-                const vDSP_Length mirrored = n - k;
-                full_re_in[k] = in[mirrored].x;
-                full_im_in[k] = -in[mirrored].y;
-            }
-            if (!direct_dft(full_re_in.data(), full_im_in.data(), full_re_out.data(),
-                            full_im_out.data(), n, true)) {
-                return CUFFT_NOT_SUPPORTED;
-            }
-            std::copy_n(full_re_out.data(), n, out);
-            continue;
-        }
-        // Pack half-spectrum into vDSP zrop format (DC in re[0], Nyquist in im[0]).
-        re_in[0] = in[0].x;
-        im_in[0] = in[nc].x;
-        for (vDSP_Length k = 1; k < nc; ++k) {
-            re_in[k] = in[k].x;
-            im_in[k] = in[k].y;
-        }
-        vDSP_DFT_Execute(setup, re_in.data(), im_in.data(), re_out.data(), im_out.data());
-        // Unpack split output to interleaved real.
-        for (vDSP_Length i = 0; i < nc; ++i) {
-            out[2 * i] = re_out[i];
-            out[2 * i + 1] = im_out[i];
-        }
-    }
-    return CUFFT_SUCCESS;
-}
+        // Inverting the slower axes first is what makes the Hermitian
+        // reconstruction below a per-line mirror. The 3-D symmetry of a real
+        // grid's spectrum couples (k0, k1, k2) to (-k0, -k1, -k2); once axes 0
+        // and 1 are back in real space, each remaining line is the spectrum of a
+        // real sequence on its own and mirrors within itself.
+        for (int a = 0; a < rank - 1; ++a) transform_axis(half, a, true);
 
-// ── D2Z / Z2D execution (double) ─────────────────────────────────────────────
+        for_each_index(rank, real_dims, [&](std::size_t linear, const int* index) {
+            const int k = index[rank - 1];
+            const bool mirrored = k >= fast_complex;
+            const int source_k = mirrored ? fast_real - k : k;
+            std::size_t source = index[0];
+            for (int a = 1; a < rank - 1; ++a) source = source * complex_dims[a] + index[a];
+            source = source * static_cast<std::size_t>(fast_complex) +
+                     static_cast<std::size_t>(source_k);
+            full.re[linear] = half.re[source];
+            full.im[linear] = mirrored ? -half.im[source] : half.im[source];
+        });
+        transform_axis(full, rank - 1, true);
 
-static cufftResult exec_d2z(CufftPlanEntry& p, cufftDoubleReal* idata,
-                             cufftDoubleComplex* odata) {
-    if (idata == nullptr || odata == nullptr) {
-        return CUFFT_INVALID_VALUE;
-    }
-    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
-    vDSP_DFT_SetupD setup = get_dft_setup_d(p, vDSP_DFT_FORWARD);
-    vDSP_Length n = 1;
-    for (int d : p.n) {
-        n *= static_cast<vDSP_Length>(d);
-    }
-    const vDSP_Length nc = n / 2;
-    std::vector<double> re_in(nc + 1), im_in(nc + 1), re_out(nc + 1), im_out(nc + 1);
-    for (int b = 0; b < p.batch; ++b) {
-        const cufftDoubleReal* in = idata + b * static_cast<ptrdiff_t>(n);
-        cufftDoubleComplex* out = odata + b * static_cast<ptrdiff_t>(nc + 1);
-        if (setup == nullptr) {
-            std::vector<double> full_re_in(n), full_im_in(n, 0.0);
-            std::vector<double> full_re_out(n), full_im_out(n);
-            std::copy_n(in, n, full_re_in.data());
-            if (!direct_dft(full_re_in.data(), full_im_in.data(), full_re_out.data(),
-                            full_im_out.data(), n, false)) {
-                return CUFFT_NOT_SUPPORTED;
-            }
-            for (vDSP_Length k = 0; k <= nc; ++k) {
-                out[k].x = full_re_out[k];
-                out[k].y = full_im_out[k];
-            }
-            continue;
-        }
-        for (vDSP_Length i = 0; i < nc; ++i) {
-            re_in[i] = in[2 * i];
-            im_in[i] = in[2 * i + 1];
-        }
-        vDSP_DFT_ExecuteD(setup, re_in.data(), im_in.data(), re_out.data(), im_out.data());
-        out[0].x = re_out[0];
-        out[0].y = 0.0;
-        for (vDSP_Length k = 1; k < nc; ++k) {
-            out[k].x = re_out[k];
-            out[k].y = im_out[k];
-        }
-        out[nc].x = im_out[0];
-        out[nc].y = 0.0;
-    }
-    return CUFFT_SUCCESS;
-}
-
-static cufftResult exec_z2d(CufftPlanEntry& p, cufftDoubleComplex* idata,
-                             cufftDoubleReal* odata) {
-    if (idata == nullptr || odata == nullptr) {
-        return CUFFT_INVALID_VALUE;
-    }
-    if (p.rank != 1) return CUFFT_NOT_SUPPORTED;
-    vDSP_DFT_SetupD setup = get_dft_setup_d(p, vDSP_DFT_INVERSE);
-    vDSP_Length n = 1;
-    for (int d : p.n) {
-        n *= static_cast<vDSP_Length>(d);
-    }
-    const vDSP_Length nc = n / 2;
-    std::vector<double> re_in(nc + 1), im_in(nc + 1), re_out(nc + 1), im_out(nc + 1);
-    for (int b = 0; b < p.batch; ++b) {
-        const cufftDoubleComplex* in = idata + b * static_cast<ptrdiff_t>(nc + 1);
-        cufftDoubleReal* out = odata + b * static_cast<ptrdiff_t>(n);
-        if (setup == nullptr) {
-            std::vector<double> full_re_in(n), full_im_in(n);
-            std::vector<double> full_re_out(n), full_im_out(n);
-            for (vDSP_Length k = 0; k <= nc; ++k) {
-                full_re_in[k] = in[k].x;
-                full_im_in[k] = in[k].y;
-            }
-            for (vDSP_Length k = nc + 1; k < n; ++k) {
-                const vDSP_Length mirrored = n - k;
-                full_re_in[k] = in[mirrored].x;
-                full_im_in[k] = -in[mirrored].y;
-            }
-            if (!direct_dft(full_re_in.data(), full_im_in.data(), full_re_out.data(),
-                            full_im_out.data(), n, true)) {
-                return CUFFT_NOT_SUPPORTED;
-            }
-            std::copy_n(full_re_out.data(), n, out);
-            continue;
-        }
-        re_in[0] = in[0].x;
-        im_in[0] = in[nc].x;
-        for (vDSP_Length k = 1; k < nc; ++k) {
-            re_in[k] = in[k].x;
-            im_in[k] = in[k].y;
-        }
-        vDSP_DFT_ExecuteD(setup, re_in.data(), im_in.data(), re_out.data(), im_out.data());
-        for (vDSP_Length i = 0; i < nc; ++i) {
-            out[2 * i] = re_out[i];
-            out[2 * i + 1] = im_out[i];
-        }
+        for_each_index(rank, real_dims, [&](std::size_t linear, const int* index) {
+            odata[out_base + layout_offset(p.output, rank, index)] =
+                static_cast<Real>(full.re[linear]);
+        });
     }
     return CUFFT_SUCCESS;
 }
 
 // ── Plan factory helper ───────────────────────────────────────────────────────
 
-static cufftResult make_plan(cufftHandle h, int rank, int* n, cufftType type, int batch,
-                              size_t* workSize) {
+// Complex-side dimensions for a real transform; identical to `n` otherwise.
+void complex_dims_for(cufftType type, int rank, const int* n, int* out) {
+    for (int a = 0; a < rank; ++a) out[a] = n[a];
+    if (type == CUFFT_R2C || type == CUFFT_C2R || type == CUFFT_D2Z || type == CUFFT_Z2D) {
+        out[rank - 1] = n[rank - 1] / 2 + 1;
+    }
+}
+
+bool layout_from_embed(FftLayout& layout, int rank, const int* embed, int stride, int dist,
+                       const int* default_dims) {
+    if (stride < 1) return false;
+    for (int a = 0; a < rank; ++a) {
+        layout.embed[a] = (embed != nullptr) ? embed[a] : default_dims[a];
+        // embed[0] is not used for addressing, so cuFFT does not constrain it.
+        if (a > 0 && layout.embed[a] < default_dims[a]) return false;
+    }
+    layout.stride = stride;
+    if (dist > 0) {
+        layout.dist = dist;
+    } else {
+        long long span = 1;
+        for (int a = 0; a < rank; ++a) span *= layout.embed[a];
+        layout.dist = span * stride;
+    }
+    return true;
+}
+
+static cufftResult make_plan(cufftHandle h, int rank, const int* n, cufftType type, int batch,
+                             const int* inembed, int istride, int idist,
+                             const int* onembed, int ostride, int odist,
+                             size_t* workSize) {
     CufftState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     CufftPlanEntry* p = s.get(h);
@@ -472,10 +500,29 @@ static cufftResult make_plan(cufftHandle h, int rank, int* n, cufftType type, in
         }
         total_elements *= static_cast<std::size_t>(n[i]);
     }
+
+    // The two sides of a real transform have different fastest-axis extents, so
+    // each layout is validated against the domain it actually describes.
+    int complex_dims[3] = {1, 1, 1};
+    complex_dims_for(type, rank, n, complex_dims);
+    const bool input_is_real = (type == CUFFT_R2C || type == CUFFT_D2Z);
+    const bool output_is_real = (type == CUFFT_C2R || type == CUFFT_Z2D);
+    const int* input_dims = input_is_real ? n : complex_dims;
+    const int* output_dims = output_is_real ? n : complex_dims;
+
+    FftLayout input;
+    FftLayout output;
+    if (!layout_from_embed(input, rank, inembed, istride, idist, input_dims) ||
+        !layout_from_embed(output, rank, onembed, ostride, odist, output_dims)) {
+        return CUFFT_INVALID_VALUE;
+    }
+
     p->type = type;
     p->rank = rank;
     p->n.assign(n, n + rank);
     p->batch = batch;
+    p->input = input;
+    p->output = output;
     if (workSize != nullptr) {
         *workSize = 0;
     }
@@ -520,19 +567,8 @@ cufftResult cufftDestroy(cufftHandle plan) {
     if (it == s.plans.end()) {
         return CUFFT_INVALID_PLAN;
     }
-    CufftPlanEntry& p = it->second;
-    if (p.dft_fwd_f) {
-        vDSP_DFT_DestroySetup(p.dft_fwd_f);
-    }
-    if (p.dft_inv_f) {
-        vDSP_DFT_DestroySetup(p.dft_inv_f);
-    }
-    if (p.dft_fwd_d) {
-        vDSP_DFT_DestroySetupD(p.dft_fwd_d);
-    }
-    if (p.dft_inv_d) {
-        vDSP_DFT_DestroySetupD(p.dft_inv_d);
-    }
+    // vDSP setups are cached by length across plans, not owned by one, so there
+    // is nothing here to destroy.
     s.plans.erase(it);
     return CUFFT_SUCCESS;
 }
@@ -564,7 +600,7 @@ cufftResult cufftPlan1d(cufftHandle* plan, int nx, cufftType type, int batch) {
         return r;
     }
     int n[1] = {nx};
-    return make_plan(*plan, 1, n, type, batch, nullptr);
+    return make_plan(*plan, 1, n, type, batch, nullptr, 1, 0, nullptr, 1, 0, nullptr);
 }
 
 cufftResult cufftPlan2d(cufftHandle* plan, int nx, int ny, cufftType type) {
@@ -573,7 +609,7 @@ cufftResult cufftPlan2d(cufftHandle* plan, int nx, int ny, cufftType type) {
         return r;
     }
     int n[2] = {nx, ny};
-    return make_plan(*plan, 2, n, type, 1, nullptr);
+    return make_plan(*plan, 2, n, type, 1, nullptr, 1, 0, nullptr, 1, 0, nullptr);
 }
 
 cufftResult cufftPlan3d(cufftHandle* plan, int nx, int ny, int nz, cufftType type) {
@@ -582,85 +618,78 @@ cufftResult cufftPlan3d(cufftHandle* plan, int nx, int ny, int nz, cufftType typ
         return r;
     }
     int n[3] = {nx, ny, nz};
-    return make_plan(*plan, 3, n, type, 1, nullptr);
+    return make_plan(*plan, 3, n, type, 1, nullptr, 1, 0, nullptr, 1, 0, nullptr);
 }
 
 cufftResult cufftPlanMany(cufftHandle* plan,
                            int rank,
                            int* n,
-                           int* /*inembed*/,
-                           int /*istride*/,
-                           int /*idist*/,
-                           int* /*onembed*/,
-                           int /*ostride*/,
-                           int /*odist*/,
+                           int* inembed,
+                           int istride,
+                           int idist,
+                           int* onembed,
+                           int ostride,
+                           int odist,
                            cufftType type,
                            int batch) {
     cufftResult r = cufftCreate(plan);
     if (r != CUFFT_SUCCESS) {
         return r;
     }
-    return make_plan(*plan, rank, n, type, batch, nullptr);
+    return make_plan(*plan, rank, n, type, batch, inembed, istride, idist, onembed,
+                     ostride, odist, nullptr);
 }
 
 cufftResult cufftMakePlan1d(cufftHandle plan, int nx, cufftType type, int batch,
                               size_t* workSize) {
     int n[1] = {nx};
-    return make_plan(plan, 1, n, type, batch, workSize);
+    return make_plan(plan, 1, n, type, batch, nullptr, 1, 0, nullptr, 1, 0, workSize);
 }
 
 cufftResult cufftMakePlan2d(cufftHandle plan, int nx, int ny, cufftType type,
                               size_t* workSize) {
     int n[2] = {nx, ny};
-    return make_plan(plan, 2, n, type, 1, workSize);
+    return make_plan(plan, 2, n, type, 1, nullptr, 1, 0, nullptr, 1, 0, workSize);
 }
 
 cufftResult cufftMakePlan3d(cufftHandle plan, int nx, int ny, int nz, cufftType type,
                               size_t* workSize) {
     int n[3] = {nx, ny, nz};
-    return make_plan(plan, 3, n, type, 1, workSize);
+    return make_plan(plan, 3, n, type, 1, nullptr, 1, 0, nullptr, 1, 0, workSize);
 }
 
 cufftResult cufftMakePlanMany(cufftHandle plan,
                                int rank,
                                int* n,
-                               int* /*inembed*/,
-                               int /*istride*/,
-                               int /*idist*/,
-                               int* /*onembed*/,
-                               int /*ostride*/,
-                               int /*odist*/,
+                               int* inembed,
+                               int istride,
+                               int idist,
+                               int* onembed,
+                               int ostride,
+                               int odist,
                                cufftType type,
                                int batch,
                                size_t* workSize) {
-    return make_plan(plan, rank, n, type, batch, workSize);
+    return make_plan(plan, rank, n, type, batch, inembed, istride, idist, onembed,
+                     ostride, odist, workSize);
 }
 
 cufftResult cufftXtMakePlanMany(cufftHandle plan,
                                  int rank,
                                  long long int* n,
                                  long long int* inembed,
-                                 long long int /*istride*/,
-                                 long long int /*idist*/,
+                                 long long int istride,
+                                 long long int idist,
                                  cudaDataType inputtype,
                                  long long int* onembed,
-                                 long long int /*ostride*/,
-                                 long long int /*odist*/,
+                                 long long int ostride,
+                                 long long int odist,
                                  cudaDataType outputtype,
                                  long long int batch,
                                  size_t* workSize,
                                  cudaDataType executiontype) {
     if (n == nullptr || workSize == nullptr || rank < 1 || rank > 3 || batch < 1) {
         return CUFFT_INVALID_VALUE;
-    }
-    if (rank != 1) {
-        // Multidimensional transforms require per-axis passes; flattening the
-        // dimensions into one 1D transform would be numerically wrong.
-        return CUFFT_NOT_SUPPORTED;
-    }
-    if (inembed != nullptr || onembed != nullptr) {
-        // The vDSP-backed plan currently implements contiguous batches only.
-        return CUFFT_NOT_SUPPORTED;
     }
 
     cufftType type = CUFFT_C2C;
@@ -695,8 +724,34 @@ cufftResult cufftXtMakePlanMany(cufftHandle plan,
         }
         dimensions.push_back(static_cast<int>(n[i]));
     }
-    return make_plan(plan, rank, dimensions.data(), type,
-                     static_cast<int>(batch), workSize);
+
+    // The Xt entry point takes 64-bit extents; the plan stores 32-bit ones, so a
+    // layout that does not fit is rejected rather than silently truncated.
+    int in_embed[3] = {0, 0, 0};
+    int out_embed[3] = {0, 0, 0};
+    auto narrow_embed = [&](const long long* wide, int* narrow) -> bool {
+        if (wide == nullptr) return true;
+        for (int i = 0; i < rank; ++i) {
+            if (wide[i] < 1 || wide[i] > std::numeric_limits<int>::max()) return false;
+            narrow[i] = static_cast<int>(wide[i]);
+        }
+        return true;
+    };
+    if (!narrow_embed(inembed, in_embed) || !narrow_embed(onembed, out_embed)) {
+        return CUFFT_INVALID_SIZE;
+    }
+    if (istride < 1 || istride > std::numeric_limits<int>::max() || idist < 0 ||
+        idist > std::numeric_limits<int>::max() || ostride < 1 ||
+        ostride > std::numeric_limits<int>::max() || odist < 0 ||
+        odist > std::numeric_limits<int>::max()) {
+        return CUFFT_INVALID_SIZE;
+    }
+
+    return make_plan(plan, rank, dimensions.data(), type, static_cast<int>(batch),
+                     inembed != nullptr ? in_embed : nullptr, static_cast<int>(istride),
+                     static_cast<int>(idist),
+                     onembed != nullptr ? out_embed : nullptr, static_cast<int>(ostride),
+                     static_cast<int>(odist), workSize);
 }
 
 // ── Execute ───────────────────────────────────────────────────────────────────
@@ -714,7 +769,7 @@ cufftResult cufftExecC2C(cufftHandle plan, cufftComplex* idata, cufftComplex* od
     }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_c2c(*p, idata, odata, direction);
+    return exec_c2c_nd<float, cufftComplex>(*p, idata, odata, direction);
 }
 
 cufftResult cufftExecR2C(cufftHandle plan, cufftReal* idata, cufftComplex* odata) {
@@ -729,7 +784,7 @@ cufftResult cufftExecR2C(cufftHandle plan, cufftReal* idata, cufftComplex* odata
     }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_r2c(*p, idata, odata);
+    return exec_r2c_nd<float, cufftReal, cufftComplex>(*p, idata, odata);
 }
 
 cufftResult cufftExecC2R(cufftHandle plan, cufftComplex* idata, cufftReal* odata) {
@@ -744,7 +799,7 @@ cufftResult cufftExecC2R(cufftHandle plan, cufftComplex* idata, cufftReal* odata
     }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_c2r(*p, idata, odata);
+    return exec_c2r_nd<float, cufftReal, cufftComplex>(*p, idata, odata);
 }
 
 cufftResult cufftExecZ2Z(cufftHandle plan, cufftDoubleComplex* idata,
@@ -760,7 +815,7 @@ cufftResult cufftExecZ2Z(cufftHandle plan, cufftDoubleComplex* idata,
     }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_z2z(*p, idata, odata, direction);
+    return exec_c2c_nd<double, cufftDoubleComplex>(*p, idata, odata, direction);
 }
 
 cufftResult cufftExecD2Z(cufftHandle plan, cufftDoubleReal* idata,
@@ -776,7 +831,7 @@ cufftResult cufftExecD2Z(cufftHandle plan, cufftDoubleReal* idata,
     }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_d2z(*p, idata, odata);
+    return exec_r2c_nd<double, cufftDoubleReal, cufftDoubleComplex>(*p, idata, odata);
 }
 
 cufftResult cufftExecZ2D(cufftHandle plan, cufftDoubleComplex* idata,
@@ -792,7 +847,7 @@ cufftResult cufftExecZ2D(cufftHandle plan, cufftDoubleComplex* idata,
     }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_z2d(*p, idata, odata);
+    return exec_c2r_nd<double, cufftDoubleReal, cufftDoubleComplex>(*p, idata, odata);
 }
 
 // SetWorkArea — on UMA, vDSP manages its own scratch; no external workspace is used.
