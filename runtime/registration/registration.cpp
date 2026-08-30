@@ -1654,13 +1654,14 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
         // the requested entry rather than allocating an ABI index for thousands
         // of unused GGML kernels in the same module.
         if (!found->second.arg_info_resolved) {
+            bool arg_info_resolved = false;
             const auto module_it = s.modules.find(found->second.module_handle);
             if (module_it != s.modules.end() && module_it->second != nullptr &&
                 module_it->second->ptx_source != nullptr) {
                 RegistrationModule& module = *module_it->second;
-                (void)find_arg_info_for_ptx_entry(*module.ptx_source,
-                                                  found->second.kernel_name,
-                                                  &found->second.arg_info);
+                arg_info_resolved = find_arg_info_for_ptx_entry(
+                    *module.ptx_source, found->second.kernel_name,
+                    &found->second.arg_info);
                 found->second.external_constant_symbols =
                     cumetal::ptx::find_referenced_external_constant_symbols(
                         *module.ptx_source, found->second.kernel_name);
@@ -1671,7 +1672,11 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
                     cumetal::ptx::find_referenced_external_global_symbols(
                         *module.ptx_source, found->second.kernel_name);
             }
-            found->second.arg_info_resolved = true;
+            // A metallib-only registration has no ABI metadata to resolve.
+            // Keep it unresolved so the compatibility path may infer its
+            // null-terminated launch argv. Only a PTX entry that was actually
+            // found can establish that an empty argument list is authoritative.
+            found->second.arg_info_resolved = arg_info_resolved;
         }
         record = found->second;
     }
