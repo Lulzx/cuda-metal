@@ -277,12 +277,9 @@ static void test_cublas_dsyr2k() {
 // ── driver: cuFuncSetAttribute / cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags ──
 
 static void test_driver_func_set_attribute() {
-    // cuFuncSetAttribute is a no-op; should return CUDA_SUCCESS even with null func.
     CHECK(cuInit(0) == CUDA_SUCCESS, "cuInit for func_set_attribute test");
-    // Passing nullptr function — spec says CUDA_ERROR_INVALID_VALUE is acceptable,
-    // but CuMetal always returns SUCCESS as a no-op.
     const CUresult r = cuFuncSetAttribute(nullptr, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, 256);
-    CHECK(r == CUDA_SUCCESS, "cuFuncSetAttribute no-op returns CUDA_SUCCESS");
+    CHECK(r == CUDA_ERROR_INVALID_VALUE, "cuFuncSetAttribute rejects null function");
 }
 
 static void test_driver_occupancy_with_flags() {
@@ -294,6 +291,9 @@ static void test_driver_occupancy_with_flags() {
         &nb2, nullptr, 256, 0, 0);
     CHECK(r1 == r2, "cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags same result");
     CHECK(nb1 == nb2, "cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags same count");
+    CHECK(cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+              &nb2, nullptr, 256, 0, 1) == CUDA_ERROR_INVALID_VALUE,
+          "driver occupancy rejects unsupported flags");
 }
 
 // ── runtime: cudaMemcpyPeer ───────────────────────────────────────────────────
@@ -392,6 +392,9 @@ static void test_runtime_occupancy_with_flags() {
         &nb2, nullptr, 256, 0, 0);
     CHECK(r1 == r2, "cudaOccupancyWithFlags same error code as base");
     CHECK(nb1 == nb2, "cudaOccupancyWithFlags same count as base");
+    CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+              &nb2, nullptr, 256, 0, 1) == cudaErrorInvalidValue,
+          "runtime occupancy rejects unsupported flags");
 }
 
 // ── driver: context push/pop ──────────────────────────────────────────────────

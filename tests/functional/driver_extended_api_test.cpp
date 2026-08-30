@@ -91,9 +91,9 @@ int main() {
         return 1;
     }
 
-    // --- cuFuncSetCacheConfig (no-op, should succeed) ---
-    if (cuFuncSetCacheConfig(dummy_func, CU_FUNC_CACHE_PREFER_L1) != CUDA_SUCCESS) {
-        std::fprintf(stderr, "FAIL: cuFuncSetCacheConfig failed\n");
+    if (cuFuncSetCacheConfig(dummy_func, CU_FUNC_CACHE_PREFER_L1) !=
+        CUDA_ERROR_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: cuFuncSetCacheConfig accepted invalid function\n");
         return 1;
     }
 

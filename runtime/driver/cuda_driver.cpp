@@ -2605,13 +2605,39 @@ CUresult cuFuncGetAttribute(int* pi, CUfunc_attribute attrib, CUfunction hfunc) 
     return CUDA_SUCCESS;
 }
 
-// No-op — Metal has no L1/shared-memory cache configuration.
-CUresult cuFuncSetCacheConfig(CUfunction /*hfunc*/, CUfunc_cache /*config*/) {
+// Advisory only — Metal has no L1/shared-memory cache configuration.
+CUresult cuFuncSetCacheConfig(CUfunction hfunc, CUfunc_cache config) {
+    if (config < CU_FUNC_CACHE_PREFER_NONE || config > CU_FUNC_CACHE_PREFER_EQUAL)
+        return CUDA_ERROR_INVALID_VALUE;
+    cumetal::metal_backend::KernelProperties kernel{};
+    const CUresult query = query_function_properties(hfunc, &kernel);
+    if (query != CUDA_SUCCESS) return query;
     return CUDA_SUCCESS;
 }
 
-// No-op — Metal manages thread occupancy automatically.
-CUresult cuFuncSetAttribute(CUfunction /*hfunc*/, CUfunc_attribute /*attrib*/, int /*value*/) {
+// Validated advisory only — Metal manages the corresponding tuning automatically.
+CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunc_attribute attrib, int value) {
+    if (attrib != CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES &&
+        attrib != CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    cumetal::metal_backend::KernelProperties kernel{};
+    const CUresult query = query_function_properties(hfunc, &kernel);
+    if (query != CUDA_SUCCESS) return query;
+    cudaDeviceProp device{};
+    if (cudaGetDeviceProperties(&device, 0) != cudaSuccess)
+        return CUDA_ERROR_INVALID_VALUE;
+    const size_t max_dynamic = kernel.static_threadgroup_memory_bytes >=
+                                       static_cast<size_t>(device.sharedMemPerBlock)
+                                   ? 0
+                                   : static_cast<size_t>(device.sharedMemPerBlock) -
+                                         kernel.static_threadgroup_memory_bytes;
+    if ((attrib == CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES &&
+         (value < 0 || static_cast<size_t>(value) > max_dynamic)) ||
+        (attrib == CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT &&
+         (value < -1 || value > 100))) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
     return CUDA_SUCCESS;
 }
 
@@ -2620,7 +2646,8 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int* numBlocks,
                                                               CUfunction func,
                                                               int blockSize,
                                                               size_t dynamicSMemSize,
-                                                              unsigned int /*flags*/) {
+                                                              unsigned int flags) {
+    if (flags != 0) return CUDA_ERROR_INVALID_VALUE;
     return cuOccupancyMaxActiveBlocksPerMultiprocessor(numBlocks, func, blockSize, dynamicSMemSize);
 }
 

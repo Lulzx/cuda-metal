@@ -32,15 +32,23 @@ int main() {
         return 1;
     }
 
-    // --- cudaFuncSetCacheConfig (no-op, should succeed) ---
-    if (cudaFuncSetCacheConfig(dummy_func, cudaFuncCachePreferL1) != cudaSuccess) {
-        std::fprintf(stderr, "FAIL: cudaFuncSetCacheConfig failed\n");
+    // Advisory setters must still reject invalid function handles and enums.
+    if (cudaFuncSetCacheConfig(dummy_func, cudaFuncCachePreferL1) !=
+        cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: cudaFuncSetCacheConfig accepted invalid function\n");
         return 1;
     }
 
-    // --- cudaFuncSetSharedMemConfig (no-op, should succeed) ---
-    if (cudaFuncSetSharedMemConfig(dummy_func, cudaSharedMemBankSizeEightByte) != cudaSuccess) {
-        std::fprintf(stderr, "FAIL: cudaFuncSetSharedMemConfig failed\n");
+    if (cudaFuncSetSharedMemConfig(dummy_func, cudaSharedMemBankSizeEightByte) !=
+        cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: cudaFuncSetSharedMemConfig accepted invalid function\n");
+        return 1;
+    }
+    if (cudaDeviceSetCacheConfig(static_cast<cudaFuncCache>(99)) !=
+            cudaErrorInvalidValue ||
+        cudaDeviceSetSharedMemConfig(static_cast<cudaSharedMemConfig>(99)) !=
+            cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: device cache config accepted invalid enum\n");
         return 1;
     }
 

@@ -17,7 +17,10 @@ Covered families include:
 - streams, priorities-as-zero, callbacks/host functions, waits, and events;
 - kernel launch through Runtime, Driver, and source registration APIs;
 - symbols/constants/globals, occupancy queries, attributes, and error strings,
-  including distinct Runtime/Driver graph-executable update failures;
+  including distinct Runtime/Driver graph-executable update failures; advisory
+  cache/shared-memory setters validate function handles, enums, attribute
+  ranges, and occupancy flags even though Metal supplies no matching tuning
+  knob;
 - 2D pitched allocation/copy and conservative UMA advice/prefetch behavior;
   advisory, prefetch, range-query, and stream-attach calls validate tracked
   allocation remainders, enum/device arguments, and stream handles even though

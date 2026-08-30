@@ -44,6 +44,9 @@ update cases remain incomplete.
   physical placement or reproduce NVIDIA residency state on unified memory.
 - Persisting-L2/access-policy APIs preserve a conservative validated hint state,
   but public Metal offers no cache-residency control.
+- Function/device cache preferences, shared-memory bank preferences, and
+  carveout attributes are validated advisory calls only; they cannot change a
+  Metal pipeline's cache or bank organization.
 - Memory-pool attributes exceed the allocator's current reuse behavior.
 
 ## Textures, surfaces, and printf

@@ -6867,27 +6867,63 @@ cudaError_t cudaFuncGetAttributes(cudaFuncAttributes* attr, const void* func) {
     return fail(cudaSuccess);
 }
 
-// No-ops — Metal has no L1/shared-memory configuration knobs.
-cudaError_t cudaFuncSetCacheConfig(const void* /*func*/, cudaFuncCache /*cacheConfig*/) {
+// Advisory only — Metal has no L1/shared-memory configuration knobs.
+cudaError_t cudaFuncSetCacheConfig(const void* func, cudaFuncCache cacheConfig) {
+    if (func == nullptr || cacheConfig < cudaFuncCachePreferNone ||
+        cacheConfig > cudaFuncCachePreferEqual) {
+        return fail(cudaErrorInvalidValue);
+    }
+    cumetal::metal_backend::KernelProperties kernel{};
+    const cudaError_t query = query_runtime_kernel_properties(func, &kernel);
+    if (query != cudaSuccess) return fail(query);
     return fail(cudaSuccess);
 }
 
-cudaError_t cudaFuncSetSharedMemConfig(const void* /*func*/, cudaSharedMemConfig /*config*/) {
+cudaError_t cudaFuncSetSharedMemConfig(const void* func, cudaSharedMemConfig config) {
+    if (func == nullptr || config < cudaSharedMemBankSizeDefault ||
+        config > cudaSharedMemBankSizeEightByte) {
+        return fail(cudaErrorInvalidValue);
+    }
+    cumetal::metal_backend::KernelProperties kernel{};
+    const cudaError_t query = query_runtime_kernel_properties(func, &kernel);
+    if (query != cudaSuccess) return fail(query);
     return fail(cudaSuccess);
 }
 
 // No-op: Metal has no per-function attribute knobs corresponding to CUDA's.
 // cudaFuncAttributeMaxDynamicSharedMemorySize is validated at launch time instead.
-cudaError_t cudaFuncSetAttribute(const void* /*func*/, cudaFuncAttribute attr, int /*value*/) {
+cudaError_t cudaFuncSetAttribute(const void* func, cudaFuncAttribute attr, int value) {
+    if (func == nullptr) return fail(cudaErrorInvalidValue);
     if (attr != cudaFuncAttributeMaxDynamicSharedMemorySize &&
         attr != cudaFuncAttributePreferredSharedMemoryCarveout) {
+        return fail(cudaErrorInvalidValue);
+    }
+    cumetal::metal_backend::KernelProperties kernel{};
+    const cudaError_t query = query_runtime_kernel_properties(func, &kernel);
+    if (query != cudaSuccess) return fail(query);
+    cudaDeviceProp device{};
+    if (cudaGetDeviceProperties(&device, 0) != cudaSuccess)
+        return fail(cudaErrorInvalidValue);
+    const size_t max_dynamic = kernel.static_threadgroup_memory_bytes >=
+                                       static_cast<size_t>(device.sharedMemPerBlock)
+                                   ? 0
+                                   : static_cast<size_t>(device.sharedMemPerBlock) -
+                                         kernel.static_threadgroup_memory_bytes;
+    if ((attr == cudaFuncAttributeMaxDynamicSharedMemorySize &&
+         (value < 0 || static_cast<size_t>(value) > max_dynamic)) ||
+        (attr == cudaFuncAttributePreferredSharedMemoryCarveout &&
+         (value < -1 || value > 100))) {
         return fail(cudaErrorInvalidValue);
     }
     return fail(cudaSuccess);
 }
 
-// Device-level L1/shared-memory config — no-ops on Metal.
-cudaError_t cudaDeviceSetCacheConfig(cudaFuncCache /*cacheConfig*/) {
+// Device-level L1/shared-memory config — validated advisory state on Metal.
+cudaError_t cudaDeviceSetCacheConfig(cudaFuncCache cacheConfig) {
+    if (cacheConfig < cudaFuncCachePreferNone || cacheConfig > cudaFuncCachePreferEqual)
+        return fail(cudaErrorInvalidValue);
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) return fail(init_status);
     return fail(cudaSuccess);
 }
 
@@ -6899,7 +6935,11 @@ cudaError_t cudaDeviceGetCacheConfig(cudaFuncCache* pCacheConfig) {
     return fail(cudaSuccess);
 }
 
-cudaError_t cudaDeviceSetSharedMemConfig(cudaSharedMemConfig /*config*/) {
+cudaError_t cudaDeviceSetSharedMemConfig(cudaSharedMemConfig config) {
+    if (config < cudaSharedMemBankSizeDefault || config > cudaSharedMemBankSizeEightByte)
+        return fail(cudaErrorInvalidValue);
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) return fail(init_status);
     return fail(cudaSuccess);
 }
 
@@ -7364,7 +7404,8 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int* numBlock
                                                                     const void* func,
                                                                     int blockSize,
                                                                     size_t dynamicSMemSize,
-                                                                    unsigned int /*flags*/) {
+                                                                    unsigned int flags) {
+    if (flags != 0) return fail(cudaErrorInvalidValue);
     return cudaOccupancyMaxActiveBlocksPerMultiprocessor(numBlocks, func, blockSize,
                                                          dynamicSMemSize);
 }
