@@ -81,10 +81,11 @@ preserved; they do not consume or masquerade as a registration-backed writable
 global binding. Visible initialized writable `.global` arrays instead use the
 ordinary persistent symbol buffer. PTX registration recovers the initializer
 from device PTX because Clang's host shadow is zero-filled; native AOT carries
-the same bytes in generated registration metadata. The numerical project checks
-initial state, two-launch persistence, and `cudaMemcpyFromSymbol` visibility.
-Module-private initialized writable globals without a host registration symbol
-remain explicit errors.
+the same bytes in generated registration metadata. Translation-unit-private
+writable byte arrays and integer scalars use module-owned buffers shared by
+every referencing kernel. The numerical project checks initial state and
+two-launch persistence for both storage classes, plus `cudaMemcpyFromSymbol`
+visibility for the public symbol.
 Both typed frontends lower FP64 values as raw binary64 storage and call private
 software-ALU helpers in the kernel translation unit. The `fp64_precision`
 corpus passes independently produced direct-NVVM and typed-PTX metallibs on

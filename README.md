@@ -87,7 +87,8 @@ compiler paths and their selection policy are in
   first-launch PTX JIT. The aggregate-call probe also covers CUDA Clang 21-23
   promoted module-private aggregate literals with exact embedded bytes; the
   barrier probe covers a generic helper pointer specialized to shared memory,
-  and initialized writable globals preserve their source bytes and mutations.
+  and visible plus translation-unit-private initialized writable integer globals
+  preserve their source bytes and mutations.
 - Vector add, SAXPY, reduction, selected matrix/library operations, typed
   direct/PTX FP64, 32-bit atomics, lock-backed 64-bit typed-PTX atomics, fences,
   and bounded device `printf` including registered writable module strings and

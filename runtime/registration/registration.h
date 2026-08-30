@@ -29,6 +29,7 @@ struct RegisteredKernel {
     std::string metallib_path;
     std::string kernel_name;
     std::vector<cumetalKernelArgInfo_t> arg_info;
+    bool arg_info_resolved = false;
     // Device printf format table (spec §5.3): non-empty iff kernel uses printf.
     // printf_formats[i] is the format string for format id i.
     std::vector<std::string> printf_formats;

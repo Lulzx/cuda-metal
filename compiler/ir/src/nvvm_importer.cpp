@@ -2359,13 +2359,21 @@ struct Importer {
             // has no registration record from which to populate a hidden
             // symbol buffer, so preserve non-zero read-only initializers as
             // embedded MSL constants. Zero-initialized __constant__ storage
-            // and writable __device__ globals remain registration-backed.
+            // and externally visible writable __device__ globals remain
+            // registration-backed. Translation-unit-private writable globals
+            // use the same persistent hidden-buffer ABI, with generated native
+            // registration metadata owning their initializer and storage.
             const bool registration_backed_constant =
                 global.getAddressSpace() == 4 &&
                 global.getInitializer() != nullptr &&
                 global.getInitializer()->isNullValue();
-            if (global.isExternallyInitialized() && global.hasInitializer() &&
-                (global.getAddressSpace() == 1 || registration_backed_constant) &&
+            const bool module_private_writable =
+                global.getAddressSpace() == 1 && global.hasInitializer() &&
+                !global.isConstant() && global.hasLocalLinkage();
+            if (global.hasInitializer() &&
+                ((global.isExternallyInitialized() &&
+                  (global.getAddressSpace() == 1 || registration_backed_constant)) ||
+                 module_private_writable) &&
                 !global.getName().starts_with("llvm.")) {
                 const std::uint32_t alignment = static_cast<std::uint32_t>(
                     global.getAlign().has_value() ? global.getAlign()->value() : 1);
@@ -2394,6 +2402,7 @@ struct Importer {
                     .alignment = alignment,
                     .constant_offset = constant_offset,
                     .constant = global.getAddressSpace() == 4,
+                    .module_private = module_private_writable,
                 };
                 if (!global.getInitializer()->isNullValue()) {
                     external_symbol.initializer.assign(global_size, 0);

@@ -288,6 +288,7 @@ CuMetalModuleHandle cumetalRegisterModule(
         cumetal::registration::RegisteredKernel record;
         record.metallib_path = module->metallib_path;
         record.kernel_name = kernel.metal_name;
+        record.arg_info_resolved = true;
         record.static_shared_bytes = kernel.static_threadgroup_memory;
         record.provenance = descriptor->provenance != nullptr
                                 ? descriptor->provenance

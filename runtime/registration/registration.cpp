@@ -418,6 +418,12 @@ struct RegistrationModule {
     std::unordered_map<std::string, std::string> emitted_kernel_provenance;
     std::unordered_map<std::uint64_t, std::unique_ptr<unsigned char>>
         device_kernel_aliases;
+    // CUDA emits no __cudaRegisterVar record for translation-unit-private
+    // initialized `.global` definitions. These buffers are therefore owned by
+    // the module itself and shared by every kernel that references the symbol.
+    std::unordered_map<std::string,
+                       std::shared_ptr<cumetal::metal_backend::Buffer>>
+        private_global_buffers;
     std::vector<std::string> owned_metallibs;
 };
 
@@ -1574,6 +1580,56 @@ bool ensure_registered_global_symbol_buffer(
     return *out_buffer != nullptr;
 }
 
+bool ensure_private_global_symbol_buffer(
+    void* module_handle,
+    const cumetal::ptx::ExternalGlobalSymbol& symbol,
+    std::shared_ptr<cumetal::metal_backend::Buffer>* out_buffer) {
+    if (module_handle == nullptr || out_buffer == nullptr || symbol.name.empty() ||
+        symbol.size_bytes == 0 || !symbol.module_private_initialized) {
+        return false;
+    }
+
+    std::shared_ptr<const std::string> ptx_source;
+    {
+        RegistrationState& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        const auto module = s.modules.find(module_handle);
+        if (module == s.modules.end() || module->second == nullptr) return false;
+        const auto existing =
+            module->second->private_global_buffers.find(symbol.name);
+        if (existing != module->second->private_global_buffers.end()) {
+            *out_buffer = existing->second;
+            return *out_buffer != nullptr;
+        }
+        ptx_source = module->second->ptx_source;
+    }
+    if (ptx_source == nullptr) return false;
+    const auto initializer =
+        cumetal::ptx::find_initialized_global_bytes(*ptx_source, symbol.name);
+    if (!initializer.has_value() || initializer->size() != symbol.size_bytes) {
+        return false;
+    }
+
+    std::shared_ptr<cumetal::metal_backend::Buffer> candidate;
+    std::string allocation_error;
+    if (cumetal::metal_backend::allocate_buffer(
+            symbol.size_bytes, &candidate, &allocation_error) != cudaSuccess ||
+        candidate == nullptr || candidate->contents() == nullptr) {
+        return false;
+    }
+    std::memcpy(candidate->contents(), initializer->data(), initializer->size());
+
+    RegistrationState& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    const auto module = s.modules.find(module_handle);
+    if (module == s.modules.end() || module->second == nullptr) return false;
+    auto [stored, inserted] =
+        module->second->private_global_buffers.emplace(symbol.name, candidate);
+    (void)inserted;
+    *out_buffer = stored->second;
+    return *out_buffer != nullptr;
+}
+
 bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) {
     if (host_function == nullptr || out == nullptr) {
         return false;
@@ -1659,6 +1715,7 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
     out->kernel_name = record.kernel_name;
     out->provenance = record.provenance;
     out->arg_info = record.arg_info;
+    out->arg_info_resolved = record.arg_info_resolved;
     out->printf_formats = record.printf_formats;
     out->uses_device_heap = record.uses_device_heap;
     out->uses_device_launch_queue = record.uses_device_launch_queue;
@@ -1712,6 +1769,10 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
         if (host_symbol != nullptr) {
             (void)ensure_registered_global_symbol_buffer(
                 host_symbol, &binding.buffer, &actual_size);
+        } else if (expected.module_private_initialized &&
+                   ensure_private_global_symbol_buffer(
+                       record.module_handle, expected, &binding.buffer)) {
+            actual_size = expected.size_bytes;
         }
         if (actual_size != expected.size_bytes) {
             binding.buffer.reset();
@@ -1851,6 +1912,10 @@ void reset_device_state() {
     for (auto& [host_symbol, record] : s.symbols) {
         (void)host_symbol;
         record.global_buffer.reset();
+    }
+    for (auto& [module_handle, module] : s.modules) {
+        (void)module_handle;
+        if (module != nullptr) module->private_global_buffers.clear();
     }
     tls_launch_stack.clear();
 }

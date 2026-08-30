@@ -1140,6 +1140,7 @@ target triple = "nvptx64-nvidia-cuda"
 
 @constants = dso_local addrspace(4) externally_initialized constant [8 x i32] zeroinitializer, align 4
 @writable = dso_local addrspace(1) externally_initialized global [8 x i32] [i32 7, i32 -3, i32 11, i32 5, i32 0, i32 0, i32 0, i32 0], align 4
+@private_writable = internal addrspace(1) global [2 x i32] [i32 13, i32 -2], align 4
 @embedded = dso_local addrspace(4) externally_initialized constant [2 x i32] [i32 287454020, i32 1432778632], align 4
 
 define ptx_kernel void @read_constants(ptr %out) {
@@ -1154,6 +1155,15 @@ entry:
   %value = load i32, ptr getelementptr (i8, ptr addrspacecast (ptr addrspace(1) @writable to ptr), i64 12), align 4
   %next = add i32 %value, 1
   store i32 %next, ptr getelementptr (i8, ptr addrspacecast (ptr addrspace(1) @writable to ptr), i64 12), align 4
+  store i32 %next, ptr %out, align 4
+  ret void
+}
+
+define ptx_kernel void @write_private_global(ptr %out) {
+entry:
+  %value = load i32, ptr addrspacecast (ptr addrspace(1) @private_writable to ptr), align 4
+  %next = add i32 %value, 4
+  store i32 %next, ptr addrspacecast (ptr addrspace(1) @private_writable to ptr), align 4
   store i32 %next, ptr %out, align 4
   ret void
 }
@@ -1843,8 +1853,17 @@ int main() {
                          std::string::npos &&
                      external_symbols.source.find(
                          "cumetal-native-symbol-initializer: writable 07000000fdffffff0b00000005000000") !=
+                         std::string::npos &&
+                     external_symbols.source.find(
+                         "cm___cumetal_global_private_writable [[buffer(1)]]") !=
+                         std::string::npos &&
+                     external_symbols.source.find(
+                         "cumetal-native-symbol: private-global private_writable 8 4 0") !=
+                         std::string::npos &&
+                     external_symbols.source.find(
+                         "cumetal-native-symbol-initializer: private_writable 0d000000feffffff") !=
                          std::string::npos,
-                 "runtime CUDA symbols stay hidden while initialized read-only tables embed their bytes");
+                 "registered and module-private CUDA symbols use persistent hidden buffers while read-only tables embed their bytes");
     if (!external_symbols.ok) std::cerr << external_symbols.error << "\n";
 
     const metal::NvvmToMslResult clock_grid = metal::compile_nvvm_to_msl(

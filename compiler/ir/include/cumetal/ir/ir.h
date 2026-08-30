@@ -322,6 +322,7 @@ struct ExternalSymbol {
     std::uint32_t alignment = 1;
     std::uint64_t constant_offset = 0;
     bool constant = false;
+    bool module_private = false;
     std::vector<std::uint8_t> initializer;
 };
 

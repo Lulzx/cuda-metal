@@ -5341,6 +5341,11 @@ cudaError_t cudaLaunchKernel(const void* func,
             }
             arg_count = clipped;
             arg_info = registered_kernel.arg_info.data();
+        } else if (registered_kernel.arg_info_resolved) {
+            // An empty, resolved ABI is a genuine zero-parameter kernel. Clang
+            // may still pass a non-null argv containing only a sentinel; do not
+            // misclassify that as missing metadata and invoke inference.
+            arg_count = 0;
         } else {
             // No PTX ABI info for this kernel, so the argument count has to be inferred from the
             // caller's null-terminated argv.

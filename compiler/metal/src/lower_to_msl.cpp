@@ -4494,7 +4494,10 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     for (const ir::ExternalSymbol& symbol : metal_module.external_symbols) {
         result.ast.comments.push_back(
             "cumetal-native-symbol: " +
-            std::string(symbol.constant ? "constant " : "global ") + symbol.name +
+            std::string(symbol.constant ? "constant "
+                                        : symbol.module_private ? "private-global "
+                                                                : "global ") +
+            symbol.name +
             " " + std::to_string(symbol.byte_size) + " " +
             std::to_string(symbol.alignment) + " " +
             std::to_string(symbol.constant_offset));

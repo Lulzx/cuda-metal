@@ -402,8 +402,7 @@ std::vector<ParsedConstB8Array> parse_ptx_initialized_b8_arrays(std::string_view
         const std::string t = trim(line);
         const bool read_only_initializer =
             t.find(".const") != std::string::npos || t.find(".global") != std::string::npos;
-        if (!read_only_initializer || t.find(".b8") == std::string::npos ||
-            t.find('{') == std::string::npos || t.find('}') == std::string::npos) {
+        if (!read_only_initializer) {
             continue;
         }
 
@@ -423,7 +422,50 @@ std::vector<ParsedConstB8Array> parse_ptx_initialized_b8_arrays(std::string_view
         }
 
         const std::size_t b8_pos = t.find(".b8");
-        if (b8_pos == std::string::npos) {
+        const bool byte_array = b8_pos != std::string::npos &&
+                                t.find('{') != std::string::npos &&
+                                t.find('}') != std::string::npos;
+        if (!byte_array) {
+            const std::vector<std::pair<std::string_view, std::size_t>> scalar_types = {
+                {".b64", 8}, {".u64", 8}, {".s64", 8},
+                {".b32", 4}, {".u32", 4}, {".s32", 4},
+                {".b16", 2}, {".u16", 2}, {".s16", 2},
+                {".b8", 1},  {".u8", 1},  {".s8", 1},
+            };
+            std::size_t type_position = std::string::npos;
+            std::size_t type_length = 0;
+            std::size_t byte_count = 0;
+            for (const auto& [type, bytes] : scalar_types) {
+                type_position = t.find(type);
+                if (type_position != std::string::npos) {
+                    type_length = type.size();
+                    byte_count = bytes;
+                    break;
+                }
+            }
+            const std::size_t equals = t.find('=');
+            const std::size_t semicolon = t.find(';', equals);
+            if (type_position == std::string::npos || equals == std::string::npos ||
+                semicolon == std::string::npos) {
+                continue;
+            }
+            const std::string symbol =
+                trim(t.substr(type_position + type_length,
+                              equals - type_position - type_length));
+            const auto value =
+                parse_signed_immediate(trim(t.substr(equals + 1, semicolon - equals - 1)));
+            if (symbol.empty() || !value.has_value()) continue;
+            std::vector<std::uint8_t> bytes(byte_count);
+            const std::uint64_t bits = static_cast<std::uint64_t>(*value);
+            for (std::size_t index = 0; index < byte_count; ++index) {
+                bytes[index] = static_cast<std::uint8_t>(bits >> (index * 8));
+            }
+            out.push_back(ParsedConstB8Array{
+                .symbol = symbol,
+                .bytes = std::move(bytes),
+                .align = align,
+                .global = t.find(".global") != std::string::npos,
+            });
             continue;
         }
         std::size_t sym_begin = b8_pos + 3;
@@ -8574,6 +8616,24 @@ static std::vector<ExternalConstantSymbol> find_referenced_external_symbols(
         }
         return false;
     };
+    const auto body_writes = [&](const std::string& symbol) {
+        std::size_t begin = 0;
+        while (begin < ptx.size()) {
+            const std::size_t end = ptx.find(';', begin);
+            const std::string_view statement(
+                ptx.data() + begin,
+                (end == std::string::npos ? ptx.size() : end) - begin);
+            if (statement.find(symbol) != std::string_view::npos &&
+                (statement.find("st.global") != std::string_view::npos ||
+                 statement.find("atom.global") != std::string_view::npos ||
+                 statement.find("red.global") != std::string_view::npos)) {
+                return true;
+            }
+            if (end == std::string::npos) break;
+            begin = end + 1;
+        }
+        return false;
+    };
 
     const std::vector<std::pair<std::string_view, std::size_t>> types = {
         {".b64", 8}, {".u64", 8}, {".s64", 8}, {".f64", 8},
@@ -8652,8 +8712,12 @@ static std::vector<ExternalConstantSymbol> find_referenced_external_symbols(
         const std::string symbol = declaration.substr(name_begin, name_end - name_begin);
         const bool externally_registered_initializer =
             initialized && starts_with(declaration, ".visible");
+        const bool module_private_initialized =
+            initialized && state_space == ".global" &&
+            !externally_registered_initializer && body_writes(symbol);
         if (symbol.empty() ||
-            (initialized && !externally_registered_initializer)) {
+            (initialized && !externally_registered_initializer &&
+             (!module_private_initialized || starts_with(symbol, "__const_$")))) {
             continue;
         }
 
@@ -8690,7 +8754,9 @@ static std::vector<ExternalConstantSymbol> find_referenced_external_symbols(
         if (include_all || body_references(symbol)) {
             out.push_back({.name = symbol,
                            .offset_bytes = symbol_offset,
-                           .size_bytes = size_bytes});
+                           .size_bytes = size_bytes,
+                           .module_private_initialized =
+                               module_private_initialized});
         }
     }
     return out;

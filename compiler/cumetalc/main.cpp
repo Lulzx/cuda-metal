@@ -577,13 +577,14 @@ struct NativeSourceSymbol {
     std::uint32_t alignment = 1;
     std::uint32_t constant_offset = 0;
     bool constant = false;
+    bool module_private = false;
     std::vector<std::uint8_t> initializer;
 };
 
 std::vector<NativeSourceSymbol> parse_native_source_symbols(
     std::string_view metal_source) {
     const std::regex record(
-        R"(// cumetal-native-symbol: (constant|global) ([^ ]+) ([0-9]+) ([0-9]+) ([0-9]+))"
+        R"(// cumetal-native-symbol: (constant|global|private-global) ([^ ]+) ([0-9]+) ([0-9]+) ([0-9]+))"
     );
     const std::string source(metal_source);
     std::vector<NativeSourceSymbol> symbols;
@@ -595,6 +596,7 @@ std::vector<NativeSourceSymbol> parse_native_source_symbols(
             .alignment = static_cast<std::uint32_t>(std::stoul((*it)[4].str())),
             .constant_offset = static_cast<std::uint32_t>(std::stoul((*it)[5].str())),
             .constant = (*it)[1].str() == "constant",
+            .module_private = (*it)[1].str() == "private-global",
         });
     }
     const std::regex initializer_record(
@@ -777,8 +779,14 @@ std::string native_registration_source(
             << '_' << kernels[i].stub_symbol << "\");\n";
     }
     for (std::size_t i = 0; i < symbols.size(); ++i) {
-        out << "extern \"C\" unsigned char cm_symbol_" << i << "[] asm(\"_"
-            << symbols[i].name << "\");\n";
+        if (symbols[i].module_private) {
+            out << "alignas(" << symbols[i].alignment
+                << ") static unsigned char cm_symbol_" << i << '['
+                << symbols[i].size << "];\n";
+        } else {
+            out << "extern \"C\" unsigned char cm_symbol_" << i << "[] asm(\"_"
+                << symbols[i].name << "\");\n";
+        }
     }
     out << "\nstatic const unsigned char cm_metallib[] = {";
     for (std::size_t i = 0; i < metallib.size(); ++i) {
@@ -1103,6 +1111,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     if (!symbols.empty()) {
         std::string rewritten_host(host_llvm_bytes.begin(), host_llvm_bytes.end());
         for (const NativeSourceSymbol& symbol : symbols) {
+            if (symbol.module_private) continue;
             const std::string internal = "@" + symbol.name + " = internal global";
             const std::size_t at = rewritten_host.find(internal);
             if (at == std::string::npos) {

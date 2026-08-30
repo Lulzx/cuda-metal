@@ -486,19 +486,60 @@ InitializedByteArrayScan scan_initialized_byte_arrays(std::string_view ptx) {
     const std::regex declaration(
         R"(^\s*(?:(?:\.visible|\.extern|\.weak)\s+)?\.(const|global)\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*=\s*\{([^}]*)\}\s*;\s*$)"
     );
+    const std::regex scalar_declaration(
+        R"(^\s*(?:(?:\.visible|\.extern|\.weak)\s+)?\.(const|global)\s+\.align\s+([0-9]+)\s+\.[bus](8|16|32|64)\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*=\s*([^;]+)\s*;\s*$)"
+    );
     while (std::getline(lines, line)) {
         const std::size_t comment = line.find("//");
         if (comment != std::string::npos) line.resize(comment);
         if (line.find('=') == std::string::npos ||
-            line.find(".b8") == std::string::npos ||
             (line.find(".global") == std::string::npos &&
              line.find(".const") == std::string::npos)) {
             continue;
         }
 
         std::smatch match;
+        if (line.find('{') == std::string::npos &&
+            std::regex_match(line, match, scalar_declaration)) {
+            std::uint64_t alignment = 0;
+            std::uint64_t bits = 0;
+            try {
+                alignment = std::stoull(match[2].str());
+                std::size_t consumed = 0;
+                const long long value =
+                    std::stoll(trim(match[5].str()), &consumed, 0);
+                if (consumed != trim(match[5].str()).size()) {
+                    throw std::invalid_argument("trailing scalar initializer text");
+                }
+                bits = static_cast<std::uint64_t>(value);
+            } catch (...) {
+                result.error = "invalid initialized PTX scalar declaration: " +
+                               trim(line);
+                return result;
+            }
+            const std::uint64_t byte_count = std::stoull(match[3].str()) / 8;
+            if (alignment == 0 || alignment > UINT32_MAX || byte_count == 0) {
+                result.error = "initialized PTX scalar has invalid size/alignment";
+                return result;
+            }
+            std::vector<std::uint8_t> bytes(static_cast<std::size_t>(byte_count));
+            for (std::size_t index = 0; index < bytes.size(); ++index) {
+                bytes[index] = static_cast<std::uint8_t>(bits >> (index * 8));
+            }
+            result.arrays.push_back({
+                .name = match[4].str(),
+                .bytes = std::move(bytes),
+                .alignment = static_cast<std::uint32_t>(alignment),
+                .constant_space = match[1].str() == "const",
+                .module_private =
+                    !starts_with(trim(line), ".visible") &&
+                    !starts_with(trim(line), ".extern") &&
+                    !starts_with(trim(line), ".weak"),
+            });
+            continue;
+        }
         if (!std::regex_match(line, match, declaration)) {
-            result.error = "unsupported initialized PTX byte-array declaration: " +
+            result.error = "unsupported initialized PTX declaration: " +
                            trim(line);
             return result;
         }
@@ -3075,16 +3116,46 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
                                    instruction_references_symbol);
             });
     };
+    const auto symbol_is_written = [&](std::string_view symbol) {
+        const auto writes_symbol = [&](const Instruction& instruction) {
+            const std::string root = root_opcode(instruction.opcode);
+            if (root != "st" && root != "atom" && root != "red") return false;
+            return std::any_of(
+                instruction.operands.begin(), instruction.operands.end(),
+                [&](const std::string& operand) {
+                    return parameter_name_from_operand(operand) == symbol;
+                });
+        };
+        const auto function_writes = [&](const cumetal::ptx::EntryFunction& function) {
+            return std::any_of(function.instructions.begin(),
+                               function.instructions.end(), writes_symbol);
+        };
+        return std::any_of(parsed.module.entries.begin(), parsed.module.entries.end(),
+                           function_writes) ||
+               std::any_of(parsed.module.functions.begin(), parsed.module.functions.end(),
+                           function_writes);
+    };
     for (const InitializedByteArray& array : initialized_arrays.arrays) {
         if (!symbol_is_referenced(array.name, !array.module_private)) continue;
         const bool clang_promoted_literal =
             array.module_private && starts_with(array.name, "__const_$");
-        if (!array.constant_space && !clang_promoted_literal) {
+        const bool private_read_only =
+            array.module_private && !symbol_is_written(array.name);
+        if (!array.constant_space && !clang_promoted_literal && !private_read_only) {
             if (array.module_private) {
-                importer.result.error =
-                    "module-private initialized writable PTX global '" +
-                    array.name + "' has no registration-backed host symbol";
-                return importer.result;
+                // CUDA does not emit __cudaRegisterVar for translation-unit
+                // private device storage. Keep the same hidden-buffer ABI as
+                // visible globals, but describe its initializer so native AOT
+                // and the registration JIT can create module-owned persistent
+                // storage without inventing a public host symbol.
+                importer.result.module.external_symbols.push_back({
+                    .name = array.name,
+                    .byte_size = array.bytes.size(),
+                    .alignment = array.alignment,
+                    .constant = false,
+                    .module_private = true,
+                    .initializer = array.bytes,
+                });
             }
             // Ordinary initialized `.global` storage is mutable and must not
             // be embedded as a Metal constant. Give it the same hidden buffer

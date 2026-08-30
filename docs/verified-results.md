@@ -37,10 +37,12 @@ numerically consumes a CUDA Clang 21-23 module-private promoted aggregate
 literal whose exact initializer and trailing zero bytes are embedded in the
 metallib. The barrier-CFG probe specializes an unqualified helper pointer to
 shared memory and checks uniform multi-exit barrier paths for all 32 lanes. The
-initialized-global probe verifies exact nonzero/negative source bytes, mutations
-persisting across two launches, and symbol-copy visibility. Native AOT performs
-that initialization before ABI registration without PTX JIT; PTX registration
-recovers the bytes from the device image rather than its zero-filled host shadow.
+initialized-global probe verifies exact nonzero/negative source bytes and
+mutations persisting across two launches for both a visible array and
+Clang-scalarized translation-unit-private integers, plus public symbol-copy
+visibility. Native AOT performs that initialization before ABI registration
+without PTX JIT; PTX registration recovers the bytes from the device image
+rather than its zero-filled host shadow.
 The GGML probe checks its complete output
 operator set; the raytracer performs a 47-value differential preflight and a
 full CPU-reference image comparison. The native-AOT device-`printf` gate also

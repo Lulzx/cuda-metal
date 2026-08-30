@@ -34,9 +34,10 @@ Remaining typed-path blockers include combinations of:
   (depth 8, width 16, and 64 scalar leaves), plus irregularly padded nested
   device-call ABIs beyond the proven depth-two 12-byte fixture;
 - initialized writable PTX `.global` forms beyond the proven visible numeric
-  byte-array registration path; module-private CUDA Clang `__const_$` aggregate
-  literals are embedded read-only, while module-private initialized writable
-  globals without a host registration symbol fail explicitly;
+  byte-array and translation-unit-private integer-scalar paths; module-private
+  CUDA Clang `__const_$` aggregate literals and other write-free initialized
+  byte arrays are embedded read-only, while unsupported initializer types fail
+  explicitly;
 - FP64 modes and operations beyond the numerically proven `fast48`
   arithmetic/storage/comparison/rounding corpus, including observable IEEE
   exception status;

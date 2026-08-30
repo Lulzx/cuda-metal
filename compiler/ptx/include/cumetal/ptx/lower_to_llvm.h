@@ -92,6 +92,9 @@ struct ExternalConstantSymbol {
     std::string name;
     std::size_t offset_bytes = 0;
     std::size_t size_bytes = 0;
+    // Writable `.global` definitions with no CUDA host registration symbol
+    // need module-owned persistent storage. Unused for `.const` records.
+    bool module_private_initialized = false;
 };
 
 // Reserved Metal buffer index of the 64-bit atomic lock bank, and the number of

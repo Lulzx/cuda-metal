@@ -539,6 +539,45 @@ BODY:
                   << initialized_writable_global.source << "\n";
     }
 
+    const std::string private_initialized_global_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.global .align 4 .b8 private_state[8] = {13, 0, 0, 0, 254, 255, 255, 255};
+.visible .entry private_initialized_global(.param .u64 output) {
+    .reg .b32 %r1;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    ld.global.b32 %r1, [private_state];
+    add.u32 %r1, %r1, 4;
+    st.global.b32 [private_state], %r1;
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult private_initialized_global =
+        metal::compile_ptx_to_msl(private_initialized_global_ptx);
+    const bool private_initialized_global_valid =
+        private_initialized_global.ok &&
+        private_initialized_global.source.find(
+            "device uchar* cm___cumetal_global_private_state [[buffer(1)]]") !=
+            std::string::npos &&
+        private_initialized_global.source.find(
+            "cumetal-native-symbol: private-global private_state 8 4 0") !=
+            std::string::npos &&
+        private_initialized_global.source.find(
+            "cumetal-native-symbol-initializer: private_state 0d000000feffffff") !=
+            std::string::npos &&
+        private_initialized_global.source.find(
+            "constant uchar cm_private_state") == std::string::npos;
+    ok &= expect(
+        private_initialized_global_valid,
+        "module-private initialized PTX globals use persistent module-owned storage");
+    if (!private_initialized_global_valid) {
+        std::cerr << private_initialized_global.error << "\n"
+                  << private_initialized_global.source << "\n";
+    }
+
     const std::string oversized_writable_initializer_ptx = R"ptx(
 .version 7.0
 .target sm_80

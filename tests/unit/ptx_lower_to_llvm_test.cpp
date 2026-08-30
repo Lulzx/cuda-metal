@@ -969,12 +969,17 @@ $L_done:
                 "mixed static shared and constant symbols lower")) {
         return 1;
     }
-    if (!expect(contains(mixed_shared_const_lowered.llvm_ir,
+    const bool mixed_address_spaces =
+        contains(mixed_shared_const_lowered.llvm_ir,
                          "getelementptr inbounds [16 x i8], [16 x i8] addrspace(2)* @\"constant_table\"") &&
                     contains(mixed_shared_const_lowered.llvm_ir,
                              "getelementptr inbounds [4 x i8], [4 x i8] addrspace(2)* @\"_$_str\"") &&
                     contains(mixed_shared_const_lowered.llvm_ir,
-                             "ptrtoint i8 addrspace(3)* %__air_tg0 to i64"),
+                             "ptrtoint i8 addrspace(3)* %__air_tg0 to i64");
+    if (!mixed_address_spaces) {
+        std::fprintf(stderr, "%s\n", mixed_shared_const_lowered.llvm_ir.c_str());
+    }
+    if (!expect(mixed_address_spaces,
                 "constant and shared symbols keep distinct address-space bases")) {
         return 1;
     }
@@ -1140,6 +1145,41 @@ $L_done:
                     !cumetal::ptx::find_initialized_global_bytes(
                          initialized_global_ptx, "missing_state").has_value(),
                 "initialized external globals retain exact zero-filled PTX bytes")) {
+        return 1;
+    }
+    const std::string private_scalar_global_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.global .align 4 .u32 private_seed = -2;
+.visible .entry read_private_seed(.param .u64 output) {
+    .reg .b32 %r1;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    ld.global.u32 %r1, [private_seed];
+    st.global.u32 [%rd1], %r1;
+    ret;
+}
+.visible .entry mutate_private_seed() {
+    .reg .b32 %r1;
+    ld.global.u32 %r1, [private_seed];
+    add.u32 %r1, %r1, 1;
+    st.global.u32 [private_seed], %r1;
+    ret;
+}
+)PTX";
+    const auto private_globals =
+        cumetal::ptx::find_referenced_external_global_symbols(
+            private_scalar_global_ptx, "read_private_seed");
+    const auto private_bytes = cumetal::ptx::find_initialized_global_bytes(
+        private_scalar_global_ptx, "private_seed");
+    if (!expect(private_globals.size() == 1 &&
+                    private_globals.front().name == "private_seed" &&
+                    private_globals.front().size_bytes == 4 &&
+                    private_globals.front().module_private_initialized &&
+                    private_bytes.has_value() &&
+                    *private_bytes ==
+                        std::vector<std::uint8_t>({0xfe, 0xff, 0xff, 0xff}),
+                "private initialized scalar globals retain signed little-endian bytes")) {
         return 1;
     }
     cumetal::ptx::LowerToLlvmOptions external_global_options;
