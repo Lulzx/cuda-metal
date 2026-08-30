@@ -1,5 +1,6 @@
 #include "cublasLt.h"
 #include "cublas_v2.h"
+#include "runtime_internal.h"
 
 #include <Accelerate/Accelerate.h>
 
@@ -124,13 +125,19 @@ cublasStatus_t validate_matmul(cublasLtMatmulDesc_t computeDesc,
         Adesc->batch_count != Ddesc->batch_count)
         return CUBLAS_STATUS_NOT_SUPPORTED;
     auto validate_batch_span = [](const cublasLtMatrixLayoutOpaque* layout) {
-        if (layout->batch_count <= 1) return CUBLAS_STATUS_SUCCESS;
         const uint64_t span = static_cast<uint64_t>(layout->ld) * layout->cols;
+        if (span > static_cast<uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()))
+            return CUBLAS_STATUS_INVALID_VALUE;
+        if (layout->batch_count <= 1) return CUBLAS_STATUS_SUCCESS;
         const uint64_t offset = static_cast<uint64_t>(layout->strided_batch_offset);
         if (offset < span) return CUBLAS_STATUS_NOT_SUPPORTED;
         const uint64_t batches_after_first = static_cast<uint64_t>(layout->batch_count - 1);
         if (offset > static_cast<uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()) /
                          batches_after_first)
+            return CUBLAS_STATUS_INVALID_VALUE;
+        const uint64_t last_batch = offset * batches_after_first;
+        if (span > static_cast<uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()) -
+                       last_batch)
             return CUBLAS_STATUS_INVALID_VALUE;
         return CUBLAS_STATUS_SUCCESS;
     };
@@ -139,6 +146,28 @@ cublasStatus_t validate_matmul(cublasLtMatmulDesc_t computeDesc,
         if (batch_status != CUBLAS_STATUS_SUCCESS) return batch_status;
     }
     return CUBLAS_STATUS_SUCCESS;
+}
+
+bool tracked_span_is_valid(const void* pointer, const cublasLtMatrixLayoutOpaque* layout,
+                           std::size_t element_size) {
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!cumetal::rt::resolve_allocation_for_pointer(pointer, &resolved)) {
+        // This bounded CPU fallback intentionally accepts ordinary host buffers.
+        return true;
+    }
+    const std::size_t matrix_elements =
+        static_cast<std::size_t>(layout->ld) * static_cast<std::size_t>(layout->cols);
+    const std::size_t batch_base = static_cast<std::size_t>(layout->batch_count - 1) *
+                                   static_cast<std::size_t>(layout->strided_batch_offset);
+    const std::size_t required_elements = batch_base + matrix_elements;
+    return required_elements <= resolved.remaining_size / element_size;
+}
+
+bool tracked_vector_span_is_valid(const void* pointer, std::size_t elements,
+                                  std::size_t element_size) {
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!cumetal::rt::resolve_allocation_for_pointer(pointer, &resolved)) return true;
+    return elements <= resolved.remaining_size / element_size;
 }
 
 void apply_epilogue(float* D, int m, int n, int ldd,
@@ -530,6 +559,18 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
     if (algo) return CUBLAS_STATUS_NOT_SUPPORTED;
     cublasStatus_t validation = validate_matmul(computeDesc, Adesc, Bdesc, Cdesc, Ddesc);
     if (validation != CUBLAS_STATUS_SUCCESS) return validation;
+    const std::size_t element_size =
+        Adesc->type == CUDA_R_64F ? sizeof(double) : sizeof(float);
+    if (!tracked_span_is_valid(A, Adesc, element_size) ||
+        !tracked_span_is_valid(B, Bdesc, element_size) ||
+        !tracked_span_is_valid(C, Cdesc, element_size) ||
+        !tracked_span_is_valid(D, Ddesc, element_size) ||
+        (has_bias(computeDesc->epilogue) &&
+         !tracked_vector_span_is_valid(computeDesc->bias_pointer,
+                                       static_cast<std::size_t>(Ddesc->rows),
+                                       element_size))) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
     if (cudaStreamSynchronize(stream) != cudaSuccess) return CUBLAS_STATUS_EXECUTION_FAILED;
 
     int m = static_cast<int>(Ddesc->rows);

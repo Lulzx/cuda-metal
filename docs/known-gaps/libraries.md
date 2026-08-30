@@ -24,7 +24,9 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   cuBLASLt CPU fallback is a bounded FP32/FP64 column-major, exact-shape,
   non-overlapping strided-batch path; row-major/special layouts, mixed
   datatypes, FP16/TF32 Lt compute, broadcast batches, general algorithm objects,
-  and FP64 epilogues are rejected rather than emulated.
+  and FP64 epilogues are rejected rather than emulated. Tracked allocations are
+  range-checked across their full strided-batch footprints; untracked host
+  buffers remain accepted specifically for the CPU fallback.
 - **cuRAND:** the default and MTGP32 compatibility generators are not claimed
   as NVIDIA bitstream parity; MTGP32 is proven only for host/device
   self-consistency in the enrolled NVIDIA sample. Named XORWOW, MRG32k3a,

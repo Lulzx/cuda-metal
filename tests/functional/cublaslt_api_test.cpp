@@ -316,6 +316,28 @@ static bool test_validation_and_stream_ordering() {
         }
     }
 
+    float* deviceShort = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&deviceShort), 3 * sizeof(float)) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cuBLASLt short allocation setup\n");
+        return false;
+    }
+    D[0] = -13.0f;
+    st = cublasLtMatmul(handle, desc, &alpha, deviceA + 1, Adesc, deviceB, Bdesc,
+                        &beta, C, Cdesc, D, Ddesc,
+                        nullptr, nullptr, 0, nullptr);
+    if (st != CUBLAS_STATUS_INVALID_VALUE || D[0] != -13.0f) {
+        std::fprintf(stderr, "FAIL: interior-short cuBLASLt input was accepted\n");
+        return false;
+    }
+    st = cublasLtMatmul(handle, desc, &alpha, deviceA, Adesc, deviceB, Bdesc,
+                        &beta, C, Cdesc, deviceShort, Ddesc,
+                        nullptr, nullptr, 0, nullptr);
+    if (st != CUBLAS_STATUS_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: undersized cuBLASLt output was accepted\n");
+        return false;
+    }
+    cudaFree(deviceShort);
+
     int32_t twoBatches = 2;
     for (cublasLtMatrixLayout_t layout : {Adesc, Bdesc, Cdesc, Ddesc}) {
         cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,

@@ -16,7 +16,9 @@ full NVIDIA library implementations.
   compute/scale type, dimensions, leading dimensions, matrix geometry, batch
   counts/strides, and integer bounds before writing output. Unsupported layout
   orders, mixed datatypes, overlapping batch strides, FP64 epilogues, and
-  opaque algorithms fail explicitly.
+  opaque algorithms fail explicitly. Tracked unified-memory operands and bias
+  vectors must cover their complete matrix, stride, and batch footprints;
+  ordinary host buffers remain supported by this explicit CPU fallback.
 - **cuRAND:** the default and MTGP32 compatibility generators provide integer,
   uniform, normal, log-normal, Poisson, and exponential output with seed,
   offset, generator lifetime, and stream ordering. MTGP32 has exact host/device
