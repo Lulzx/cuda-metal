@@ -1,8 +1,10 @@
 #include "cumetal/common/metallib.h"
 
+#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace {
@@ -14,7 +16,8 @@ void print_usage(const char* argv0) {
 std::string json_escape(const std::string& value) {
     std::string out;
     out.reserve(value.size() + 8);
-    for (char c : value) {
+    constexpr char hex[] = "0123456789abcdef";
+    for (unsigned char c : value) {
         switch (c) {
             case '\\':
                 out += "\\\\";
@@ -25,8 +28,26 @@ std::string json_escape(const std::string& value) {
             case '\n':
                 out += "\\n";
                 break;
+            case '\b':
+                out += "\\b";
+                break;
+            case '\f':
+                out += "\\f";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
             default:
-                out.push_back(c);
+                if (c < 0x20) {
+                    out += "\\u00";
+                    out.push_back(hex[c >> 4]);
+                    out.push_back(hex[c & 0x0f]);
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
                 break;
         }
     }
@@ -54,7 +75,16 @@ int main(int argc, char** argv) {
                 std::cerr << "--max-strings expects an integer\n";
                 return 2;
             }
-            max_strings = std::strtoull(argv[++i], nullptr, 10);
+            const char* value = argv[++i];
+            char* end = nullptr;
+            errno = 0;
+            const unsigned long long parsed = std::strtoull(value, &end, 10);
+            if (value[0] == '\0' || value[0] == '-' || end == value || *end != '\0' ||
+                errno == ERANGE || parsed > std::numeric_limits<std::size_t>::max()) {
+                std::cerr << "--max-strings expects a non-negative integer\n";
+                return 2;
+            }
+            max_strings = static_cast<std::size_t>(parsed);
         } else if (!arg.empty() && arg[0] == '-') {
             std::cerr << "Unknown option: " << arg << "\n";
             return 2;

@@ -16,7 +16,8 @@ void print_usage(const char* argv0) {
 std::string json_escape(const std::string& value) {
     std::string out;
     out.reserve(value.size() + 8);
-    for (char c : value) {
+    constexpr char hex[] = "0123456789abcdef";
+    for (unsigned char c : value) {
         switch (c) {
             case '\\':
                 out += "\\\\";
@@ -27,8 +28,26 @@ std::string json_escape(const std::string& value) {
             case '\n':
                 out += "\\n";
                 break;
+            case '\b':
+                out += "\\b";
+                break;
+            case '\f':
+                out += "\\f";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
             default:
-                out.push_back(c);
+                if (c < 0x20) {
+                    out += "\\u00";
+                    out.push_back(hex[c >> 4]);
+                    out.push_back(hex[c & 0x0f]);
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
                 break;
         }
     }

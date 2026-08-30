@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "usage: $0 <air-validate-binary> <work-dir>" >&2
+if [[ $# -ne 3 ]]; then
+  echo "usage: $0 <air-validate-binary> <air-inspect-binary> <work-dir>" >&2
   exit 2
 fi
 
 AIR_VALIDATE="$1"
-WORK_DIR="$2"
+AIR_INSPECT="$2"
+WORK_DIR="$3"
 
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR"
@@ -42,5 +43,20 @@ run_expect_failure require_function_list "$AIR_VALIDATE" \
 # Missing metadata requirement should fail for malformed input.
 run_expect_failure require_metadata "$AIR_VALIDATE" \
   "$WORK_DIR/bad_magic.metallib" --require-metadata
+
+# Numeric options must reject malformed values instead of silently becoming 0.
+run_expect_failure inspect_bad_count "$AIR_INSPECT" \
+  "$WORK_DIR/bad_magic.metallib" --max-strings not-a-number
+
+# Both JSON modes must escape every control byte in user-controlled paths.
+CONTROL_PATH="${WORK_DIR}/control"$'\t'"path.metallib"
+cp "$WORK_DIR/bad_magic.metallib" "$CONTROL_PATH"
+"$AIR_INSPECT" "$CONTROL_PATH" --json >"$WORK_DIR/inspect-control.json"
+python3 -c 'import json,sys; json.load(sys.stdin)' <"$WORK_DIR/inspect-control.json"
+if "$AIR_VALIDATE" "$CONTROL_PATH" --json >"$WORK_DIR/validate-control.json"; then
+  echo "FAIL: malformed control-path input unexpectedly validated" >&2
+  exit 1
+fi
+python3 -c 'import json,sys; json.load(sys.stdin)' <"$WORK_DIR/validate-control.json"
 
 echo "PASS: air_validate rejects malformed inputs as expected"

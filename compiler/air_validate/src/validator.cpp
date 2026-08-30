@@ -1,8 +1,9 @@
 #include "cumetal/air_validate/validator.h"
 
-#include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
+#include <optional>
 #include <sstream>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -93,14 +94,13 @@ bool kernel_has_metadata(const cumetal::common::KernelRecord& kernel, const std:
     return false;
 }
 
-std::filesystem::path make_temp_dir() {
-    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    const auto pid = static_cast<long long>(::getpid());
-    const std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                      ("cumetal-air-validate-" + std::to_string(pid) + "-" +
-                                       std::to_string(now));
-    std::filesystem::create_directories(dir);
-    return dir;
+std::optional<std::filesystem::path> make_temp_dir() {
+    std::error_code error;
+    const std::filesystem::path root = std::filesystem::temp_directory_path(error);
+    if (error) return std::nullopt;
+    std::string pattern = (root / "cumetal-air-validate-XXXXXX").string();
+    if (::mkdtemp(pattern.data()) == nullptr) return std::nullopt;
+    return std::filesystem::path(pattern);
 }
 
 void validate_kernel_bitcode(const std::filesystem::path& input_path,
@@ -141,8 +141,14 @@ void validate_kernel_bitcode(const std::filesystem::path& input_path,
         return;
     }
 
-    const std::filesystem::path temp_dir = make_temp_dir();
-    const std::filesystem::path bitcode_file = temp_dir / "kernel.bc";
+    const auto temp_dir = make_temp_dir();
+    if (!temp_dir.has_value()) {
+        diagnostics->push_back({.severity = Severity::kError,
+                                .message = "failed to create secure temporary directory for " +
+                                           kernel.name});
+        return;
+    }
+    const std::filesystem::path bitcode_file = *temp_dir / "kernel.bc";
 
     const std::vector<std::uint8_t> slice(bytes.begin() + static_cast<std::ptrdiff_t>(kernel.bitcode_offset),
                                           bytes.begin() + static_cast<std::ptrdiff_t>(kernel.bitcode_offset +
@@ -152,14 +158,14 @@ void validate_kernel_bitcode(const std::filesystem::path& input_path,
         diagnostics->push_back({.severity = Severity::kError,
                                 .message = "failed to write temporary bitcode for " + kernel.name +
                                            ": " + io_error});
-        std::filesystem::remove_all(temp_dir);
+        std::filesystem::remove_all(*temp_dir);
         return;
     }
 
     const std::string command =
         "llvm-dis " + quote_shell(bitcode_file.string()) + " -o /dev/null 2>&1";
     const CommandResult cmd = run_command_capture(command);
-    std::filesystem::remove_all(temp_dir);
+    std::filesystem::remove_all(*temp_dir);
 
     if (!cmd.started || cmd.exit_code != 0) {
         diagnostics->push_back({.severity = Severity::kError,

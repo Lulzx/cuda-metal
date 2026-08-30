@@ -114,6 +114,7 @@ add_test(
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_negative_validation.sh
             $<TARGET_FILE:air_validate>
+            $<TARGET_FILE:air_inspect>
             ${CMAKE_CURRENT_BINARY_DIR}/negative
 )
 

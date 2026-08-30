@@ -25,6 +25,11 @@ Phase 0.5 harness. The focus is structural acceptance, not kernel execution.
   - MetalLibraryArchive bridge command (`tools/metal_library_archive_bridge`)
 - `cumetal_metal_load_test`: checks `MTLDevice.newLibraryWithData:` acceptance.
 
+Both inspection tools emit standards-compliant JSON for control characters in
+user-controlled paths and parsed strings. `air_inspect` rejects malformed
+`--max-strings` values, and optional `llvm-dis` validation uses a securely
+created private scratch directory rather than a predictable path.
+
 ## Reference layout snapshot
 
 Reference artifact (`tests/air_abi/reference/reference.metallib`) from xcrun (or emitter fallback):
