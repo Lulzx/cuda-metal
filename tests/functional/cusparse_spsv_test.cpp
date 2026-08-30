@@ -92,9 +92,20 @@ static void test_spsv_alpha_scaling() {
     cusparseSpSV_createDescr(&spsvDescr);
 
     float alpha = 3.0f;
-    cusparseSpSV_solve(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                        &alpha, matA, vecX, vecY,
-                        CUDA_R_32F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescr);
+    float* device_alpha = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&device_alpha), sizeof(float));
+    cudaMemcpy(device_alpha, &alpha, sizeof(alpha), cudaMemcpyHostToDevice);
+    cusparseSetPointerMode(handle, CUSPARSE_POINTER_MODE_DEVICE);
+    CHECK(cusparseSpSV_solve(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                             device_alpha, matA, vecX, vecY,
+                             CUDA_R_32F, CUSPARSE_SPSV_ALG_DEFAULT,
+                             spsvDescr) == CUSPARSE_STATUS_SUCCESS,
+          "SpSV accepts a tracked device alpha in device pointer mode");
+    CHECK(cusparseSpSV_solve(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                             &alpha, matA, vecX, vecY,
+                             CUDA_R_32F, CUSPARSE_SPSV_ALG_DEFAULT,
+                             spsvDescr) == CUSPARSE_STATUS_INVALID_VALUE,
+          "SpSV rejects a host alpha in device pointer mode");
 
     CHECK(std::fabs(y[0] - 6.0f) < 1e-5f, "SpSV alpha=3 y[0]=6");
     CHECK(std::fabs(y[1] - 9.0f) < 1e-5f, "SpSV alpha=3 y[1]=9");
@@ -104,6 +115,7 @@ static void test_spsv_alpha_scaling() {
     cusparseDestroySpMat(matA);
     cusparseDestroyDnVec(vecX);
     cusparseDestroyDnVec(vecY);
+    cudaFree(device_alpha);
     cusparseDestroy(handle);
 }
 

@@ -20,9 +20,19 @@ datatype, layout, pointer location, stream, capture, and error behavior.
 ## Library-specific boundaries
 
 - **cuBLAS/cublasLt:** incomplete routine/type/epilogue/algorithm surface; not all
-  batched, complex, tensor, or capture combinations are covered.
-- **cuRAND:** bounded generator families and ordering; no complete distribution,
-  quasi-random, state-serialization, or device API parity.
+  batched, complex, tensor, or capture combinations are covered. The hardened
+  cuBLASLt CPU fallback is a bounded FP32/FP64 column-major, exact-shape,
+  non-overlapping strided-batch path; row-major/special layouts, mixed
+  datatypes, FP16/TF32 Lt compute, broadcast batches, general algorithm objects,
+  and FP64 epilogues are rejected rather than emulated.
+- **cuRAND:** the default and MTGP32 compatibility generators are not claimed
+  as NVIDIA bitstream parity; MTGP32 is proven only for host/device
+  self-consistency in the enrolled NVIDIA sample. Named XORWOW, MRG32k3a,
+  MT19937, Philox, Sobol, and scrambled Sobol descriptors can be created and
+  queried, but generation is rejected explicitly until the named algorithm is
+  implemented. Ordering modes and quasi dimensions are descriptor state, not
+  proof of their sequence semantics; complete distributions, state
+  serialization, and device API parity remain open.
 - **cuFFT:** ranks 1 to 3 execute for every transform type, including cuFFT's
   advanced data layout (`inembed`/`onembed`/stride/dist), which is what a padded
   grid such as GROMACS's PME mesh needs. The single-precision transforms
@@ -32,12 +42,34 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   the CPU, since Metal has no FP64. Still absent: callbacks, multi-GPU, the rest
   of the Xt surface, and a GPU path for the double transforms.
 - **cuSPARSE/cuSOLVER:** selected operations only; descriptor, format, solver,
-  analysis/reuse, and datatype matrices remain incomplete.
-- **cuDNN:** selected descriptors/operations only; algorithm, fusion, training,
-  graph, datatype, and layout coverage is far from full.
+  analysis/reuse, and datatype matrices remain incomplete. cuSPARSE host/device
+  scalar pointer mode is covered for the implemented SpMV, SpMM, legacy CSR
+  SpMV, and SpSV paths, including replay-time device scalar reads for captured
+  SpMV. Generic SpMV/SpMM validate operation, algorithm, layout, and homogeneous
+  FP32/FP64 descriptor types; other mixed-type combinations return an explicit
+  unsupported status. This does not establish coverage for absent routines or
+  additional datatype combinations. The implemented cuSOLVER dense query and
+  execution entry points validate their current argument/workspace surface;
+  sparse Cholesky/QR additionally validate CSR structure and singularity
+  tolerance. Sparse reordering is not implemented and nonzero `reorder` is
+  rejected instead of being silently ignored. Broader dense/sparse routine,
+  datatype, batched, analysis/reuse, and GPU execution coverage remains open.
+- **cuDNN:** selected descriptors/operations only. The hardened CPU-backed
+  surface is primarily contiguous FP32/NCHW; it synchronizes the handle stream
+  before reading UMA operands and rejects unsupported types/layouts/shapes for
+  the covered calls. Convolution is the tested implicit-GEMM cross-correlation
+  path; general algorithm selection, convolution-mode filter reversal, general
+  OpTensor broadcasting, fusion, training/backward breadth, graph integration,
+  datatype, and layout coverage remain incomplete. RNN and attention are
+  bounded compatibility paths rather than full cuDNN implementations.
 - **NCCL:** single-device compatibility cannot provide collective multi-GPU
-  semantics.
-- **NVML:** compatibility queries cannot expose NVIDIA device management.
+  semantics. The implemented one-rank collectives are identity copies, not a
+  transport; only device zero and rank zero are accepted, point-to-point calls
+  fail, and multi-device initialization is rejected atomically.
+- **NVML:** compatibility queries cannot expose NVIDIA device management. The
+  single synthetic device reports Apple unified system-memory information, not
+  dedicated VRAM; utilization, temperature, power, and clock telemetry are
+  explicitly unsupported through the public-API-only boundary.
 - **Thrust/CUB:** several algorithms are sequential/CPU over UMA; device-wide
   performance and full template/API compatibility are not claimed. Those
   host-backed `cub::Device*` entry points do now synchronize their stream before

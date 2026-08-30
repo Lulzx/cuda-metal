@@ -100,6 +100,44 @@ static bool test_uninitialized_guard() {
     return true;
 }
 
+static bool test_validation_and_init_refcount() {
+    if (nvmlInit() != NVML_SUCCESS || nvmlInit_v2() != NVML_SUCCESS) return false;
+    if (nvmlShutdown() != NVML_SUCCESS) return false;
+
+    unsigned int count = 0;
+    if (nvmlDeviceGetCount(&count) != NVML_SUCCESS || count != 1) {
+        std::fprintf(stderr, "FAIL: nested NVML init was not reference counted\n");
+        return false;
+    }
+
+    nvmlDevice_t device = nullptr;
+    if (nvmlDeviceGetHandleByIndex(0, &device) != NVML_SUCCESS) return false;
+    char tiny[2] = {'x', 'x'};
+    if (nvmlDeviceGetName(device, tiny, sizeof(tiny)) != NVML_ERROR_INSUFFICIENT_SIZE ||
+        tiny[0] != '\0') {
+        std::fprintf(stderr, "FAIL: undersized NVML name buffer was silently truncated\n");
+        return false;
+    }
+    nvmlDevice_t bogus = reinterpret_cast<nvmlDevice_t>(2);
+    nvmlMemory_t memory = {};
+    if (nvmlDeviceGetMemoryInfo(bogus, &memory) != NVML_ERROR_INVALID_ARGUMENT) {
+        std::fprintf(stderr, "FAIL: invalid NVML device handle was accepted\n");
+        return false;
+    }
+    nvmlUtilization_t utilization = {77, 88};
+    if (nvmlDeviceGetUtilizationRates(device, &utilization) != NVML_ERROR_NOT_SUPPORTED ||
+        utilization.gpu != 77 || utilization.memory != 88) {
+        std::fprintf(stderr, "FAIL: unavailable NVML utilization was reported as measured\n");
+        return false;
+    }
+
+    if (nvmlShutdown() != NVML_SUCCESS || nvmlShutdown() != NVML_ERROR_UNINITIALIZED) {
+        std::fprintf(stderr, "FAIL: NVML shutdown reference-count validation\n");
+        return false;
+    }
+    return true;
+}
+
 int main() {
     if (!test_uninitialized_guard()) return 1;
     if (!test_init_shutdown()) return 1;
@@ -108,6 +146,7 @@ int main() {
     if (!test_memory_info()) return 1;
     if (!test_driver_version()) return 1;
     if (!test_error_string()) return 1;
+    if (!test_validation_and_init_refcount()) return 1;
 
     std::printf("PASS: NVML API tests\n");
     return 0;

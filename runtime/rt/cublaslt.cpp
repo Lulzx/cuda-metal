@@ -3,9 +3,12 @@
 
 #include <Accelerate/Accelerate.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
+#include <limits>
 #include <new>
 
 struct cublasLtContext {
@@ -29,6 +32,7 @@ struct cublasLtMatrixLayoutOpaque {
     int64_t ld = 0;
     int32_t batch_count = 1;
     int64_t strided_batch_offset = 0;
+    int32_t order = 0; // CUBLASLT_ORDER_COL
 };
 
 struct cublasLtMatmulPreferenceOpaque {
@@ -49,20 +53,92 @@ bool debug_cublaslt() {
 #define LT_DEBUG(fmt, ...)                                                    \
     do {                                                                       \
         if (debug_cublaslt())                                                  \
-            std::fprintf(stderr, "[cublasLt] " fmt "\n", ##__VA_ARGS__);       \
+            std::fprintf(stderr, "[cublasLt] " fmt "\n" __VA_OPT__(,) __VA_ARGS__); \
     } while (0)
 
-size_t element_size(cudaDataType_t dt) {
-    switch (dt) {
-        case CUDA_R_16F:
-        case CUDA_R_16BF: return 2;
-        case CUDA_R_32F:
-        case CUDA_R_32I: return 4;
-        case CUDA_R_64F: return 8;
-        case CUDA_R_8I:
-        case CUDA_R_8U: return 1;
-        default: return 4;
+bool valid_operation(cublasOperation_t op) {
+    return op == CUBLAS_OP_N || op == CUBLAS_OP_T || op == CUBLAS_OP_C;
+}
+
+bool valid_epilogue(cublasLtEpilogue_t epilogue) {
+    return epilogue == CUBLASLT_EPILOGUE_DEFAULT ||
+           epilogue == CUBLASLT_EPILOGUE_RELU ||
+           epilogue == CUBLASLT_EPILOGUE_BIAS ||
+           epilogue == CUBLASLT_EPILOGUE_RELU_BIAS ||
+           epilogue == CUBLASLT_EPILOGUE_GELU ||
+           epilogue == CUBLASLT_EPILOGUE_GELU_BIAS;
+}
+
+bool valid_layout(const cublasLtMatrixLayoutOpaque* layout) {
+    return layout && (layout->type == CUDA_R_32F || layout->type == CUDA_R_64F) &&
+           layout->order == 0 && layout->rows > 0 && layout->cols > 0 &&
+           layout->rows <= static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
+           layout->cols <= static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
+           layout->ld >= static_cast<int64_t>(layout->rows) &&
+           layout->ld <= std::numeric_limits<int>::max() &&
+           layout->batch_count > 0 && layout->strided_batch_offset >= 0;
+}
+
+bool has_bias(cublasLtEpilogue_t epilogue) {
+    return epilogue == CUBLASLT_EPILOGUE_BIAS ||
+           epilogue == CUBLASLT_EPILOGUE_RELU_BIAS ||
+           epilogue == CUBLASLT_EPILOGUE_GELU_BIAS;
+}
+
+cublasStatus_t validate_matmul(cublasLtMatmulDesc_t computeDesc,
+                               cublasLtMatrixLayout_t Adesc,
+                               cublasLtMatrixLayout_t Bdesc,
+                               cublasLtMatrixLayout_t Cdesc,
+                               cublasLtMatrixLayout_t Ddesc) {
+    if (!computeDesc || !valid_layout(Adesc) || !valid_layout(Bdesc) ||
+        !valid_layout(Cdesc) || !valid_layout(Ddesc))
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (!valid_operation(computeDesc->transa) || !valid_operation(computeDesc->transb) ||
+        !valid_epilogue(computeDesc->epilogue))
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+    const cudaDataType_t type = Adesc->type;
+    if (Bdesc->type != type || Cdesc->type != type || Ddesc->type != type)
+        return CUBLAS_STATUS_NOT_SUPPORTED;
+    if ((type == CUDA_R_32F &&
+         (computeDesc->compute_type != CUBLAS_COMPUTE_32F ||
+          computeDesc->scale_type != CUDA_R_32F)) ||
+        (type == CUDA_R_64F &&
+         (computeDesc->compute_type != CUBLAS_COMPUTE_64F ||
+          computeDesc->scale_type != CUDA_R_64F)))
+        return CUBLAS_STATUS_NOT_SUPPORTED;
+    if (type == CUDA_R_64F && computeDesc->epilogue != CUBLASLT_EPILOGUE_DEFAULT)
+        return CUBLAS_STATUS_NOT_SUPPORTED;
+    if (has_bias(computeDesc->epilogue) && !computeDesc->bias_pointer)
+        return CUBLAS_STATUS_INVALID_VALUE;
+
+    const uint64_t a_m = computeDesc->transa == CUBLAS_OP_N ? Adesc->rows : Adesc->cols;
+    const uint64_t a_k = computeDesc->transa == CUBLAS_OP_N ? Adesc->cols : Adesc->rows;
+    const uint64_t b_k = computeDesc->transb == CUBLAS_OP_N ? Bdesc->rows : Bdesc->cols;
+    const uint64_t b_n = computeDesc->transb == CUBLAS_OP_N ? Bdesc->cols : Bdesc->rows;
+    if (a_k != b_k || Ddesc->rows != a_m || Ddesc->cols != b_n ||
+        Cdesc->rows != a_m || Cdesc->cols != b_n)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    if (Adesc->batch_count != Bdesc->batch_count ||
+        Adesc->batch_count != Cdesc->batch_count ||
+        Adesc->batch_count != Ddesc->batch_count)
+        return CUBLAS_STATUS_NOT_SUPPORTED;
+    auto validate_batch_span = [](const cublasLtMatrixLayoutOpaque* layout) {
+        if (layout->batch_count <= 1) return CUBLAS_STATUS_SUCCESS;
+        const uint64_t span = static_cast<uint64_t>(layout->ld) * layout->cols;
+        const uint64_t offset = static_cast<uint64_t>(layout->strided_batch_offset);
+        if (offset < span) return CUBLAS_STATUS_NOT_SUPPORTED;
+        const uint64_t batches_after_first = static_cast<uint64_t>(layout->batch_count - 1);
+        if (offset > static_cast<uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()) /
+                         batches_after_first)
+            return CUBLAS_STATUS_INVALID_VALUE;
+        return CUBLAS_STATUS_SUCCESS;
+    };
+    for (const auto* layout : {Adesc, Bdesc, Cdesc, Ddesc}) {
+        cublasStatus_t batch_status = validate_batch_span(layout);
+        if (batch_status != CUBLAS_STATUS_SUCCESS) return batch_status;
     }
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 void apply_epilogue(float* D, int m, int n, int ldd,
@@ -129,6 +205,9 @@ cublasStatus_t cublasLtMatmulDescCreate(cublasLtMatmulDesc_t* matmulDesc,
                                          cublasComputeType_t computeType,
                                          cudaDataType_t scaleType) {
     if (!matmulDesc) return CUBLAS_STATUS_INVALID_VALUE;
+    if (!((computeType == CUBLAS_COMPUTE_32F && scaleType == CUDA_R_32F) ||
+          (computeType == CUBLAS_COMPUTE_64F && scaleType == CUDA_R_64F)))
+        return CUBLAS_STATUS_NOT_SUPPORTED;
     auto* d = new (std::nothrow) cublasLtMatmulDescOpaque;
     if (!d) return CUBLAS_STATUS_ALLOC_FAILED;
     d->compute_type = computeType;
@@ -150,15 +229,30 @@ cublasStatus_t cublasLtMatmulDescSetAttribute(cublasLtMatmulDesc_t matmulDesc,
     switch (attr) {
         case CUBLASLT_MATMUL_DESC_TRANSA:
             if (sizeInBytes < sizeof(cublasOperation_t)) return CUBLAS_STATUS_INVALID_VALUE;
-            std::memcpy(&matmulDesc->transa, buf, sizeof(cublasOperation_t));
+            {
+                cublasOperation_t value;
+                std::memcpy(&value, buf, sizeof(value));
+                if (!valid_operation(value)) return CUBLAS_STATUS_INVALID_VALUE;
+                matmulDesc->transa = value;
+            }
             break;
         case CUBLASLT_MATMUL_DESC_TRANSB:
             if (sizeInBytes < sizeof(cublasOperation_t)) return CUBLAS_STATUS_INVALID_VALUE;
-            std::memcpy(&matmulDesc->transb, buf, sizeof(cublasOperation_t));
+            {
+                cublasOperation_t value;
+                std::memcpy(&value, buf, sizeof(value));
+                if (!valid_operation(value)) return CUBLAS_STATUS_INVALID_VALUE;
+                matmulDesc->transb = value;
+            }
             break;
         case CUBLASLT_MATMUL_DESC_EPILOGUE:
             if (sizeInBytes < sizeof(cublasLtEpilogue_t)) return CUBLAS_STATUS_INVALID_VALUE;
-            std::memcpy(&matmulDesc->epilogue, buf, sizeof(cublasLtEpilogue_t));
+            {
+                cublasLtEpilogue_t value;
+                std::memcpy(&value, buf, sizeof(value));
+                if (!valid_epilogue(value)) return CUBLAS_STATUS_INVALID_VALUE;
+                matmulDesc->epilogue = value;
+            }
             break;
         case CUBLASLT_MATMUL_DESC_BIAS_POINTER:
             if (sizeInBytes < sizeof(void*)) return CUBLAS_STATUS_INVALID_VALUE;
@@ -207,6 +301,11 @@ cublasStatus_t cublasLtMatrixLayoutCreate(cublasLtMatrixLayout_t* matLayout,
                                            cudaDataType_t type,
                                            uint64_t rows, uint64_t cols, int64_t ld) {
     if (!matLayout) return CUBLAS_STATUS_INVALID_VALUE;
+    if (type != CUDA_R_32F && type != CUDA_R_64F) return CUBLAS_STATUS_NOT_SUPPORTED;
+    if (rows == 0 || cols == 0 || rows > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+        cols > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+        ld < static_cast<int64_t>(rows) || ld > std::numeric_limits<int>::max())
+        return CUBLAS_STATUS_INVALID_VALUE;
     auto* l = new (std::nothrow) cublasLtMatrixLayoutOpaque;
     if (!l) return CUBLAS_STATUS_ALLOC_FAILED;
     l->type = type;
@@ -230,31 +329,72 @@ cublasStatus_t cublasLtMatrixLayoutSetAttribute(cublasLtMatrixLayout_t matLayout
     switch (attr) {
         case CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT:
             if (sizeInBytes < sizeof(int32_t)) return CUBLAS_STATUS_INVALID_VALUE;
-            std::memcpy(&matLayout->batch_count, buf, sizeof(int32_t));
+            {
+                int32_t value;
+                std::memcpy(&value, buf, sizeof(value));
+                if (value <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+                matLayout->batch_count = value;
+            }
             break;
         case CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET:
             if (sizeInBytes < sizeof(int64_t)) return CUBLAS_STATUS_INVALID_VALUE;
-            std::memcpy(&matLayout->strided_batch_offset, buf, sizeof(int64_t));
+            {
+                int64_t value;
+                std::memcpy(&value, buf, sizeof(value));
+                if (value < 0) return CUBLAS_STATUS_INVALID_VALUE;
+                matLayout->strided_batch_offset = value;
+            }
             break;
         case CUBLASLT_MATRIX_LAYOUT_ROWS:
             if (sizeInBytes < sizeof(uint64_t)) return CUBLAS_STATUS_INVALID_VALUE;
-            std::memcpy(&matLayout->rows, buf, sizeof(uint64_t));
+            {
+                uint64_t value;
+                std::memcpy(&value, buf, sizeof(value));
+                if (value == 0 || value > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+                    matLayout->ld < static_cast<int64_t>(value))
+                    return CUBLAS_STATUS_INVALID_VALUE;
+                matLayout->rows = value;
+            }
             break;
         case CUBLASLT_MATRIX_LAYOUT_COLS:
             if (sizeInBytes < sizeof(uint64_t)) return CUBLAS_STATUS_INVALID_VALUE;
-            std::memcpy(&matLayout->cols, buf, sizeof(uint64_t));
+            {
+                uint64_t value;
+                std::memcpy(&value, buf, sizeof(value));
+                if (value == 0 || value > static_cast<uint64_t>(std::numeric_limits<int>::max()))
+                    return CUBLAS_STATUS_INVALID_VALUE;
+                matLayout->cols = value;
+            }
             break;
         case CUBLASLT_MATRIX_LAYOUT_LD:
             if (sizeInBytes < sizeof(int64_t)) return CUBLAS_STATUS_INVALID_VALUE;
-            std::memcpy(&matLayout->ld, buf, sizeof(int64_t));
+            {
+                int64_t value;
+                std::memcpy(&value, buf, sizeof(value));
+                if (value < static_cast<int64_t>(matLayout->rows) ||
+                    value > std::numeric_limits<int>::max())
+                    return CUBLAS_STATUS_INVALID_VALUE;
+                matLayout->ld = value;
+            }
             break;
         case CUBLASLT_MATRIX_LAYOUT_TYPE:
             if (sizeInBytes < sizeof(cudaDataType_t)) return CUBLAS_STATUS_INVALID_VALUE;
-            std::memcpy(&matLayout->type, buf, sizeof(cudaDataType_t));
+            {
+                cudaDataType_t value;
+                std::memcpy(&value, buf, sizeof(value));
+                if (value != CUDA_R_32F && value != CUDA_R_64F)
+                    return CUBLAS_STATUS_NOT_SUPPORTED;
+                matLayout->type = value;
+            }
             break;
-        case CUBLASLT_MATRIX_LAYOUT_ORDER:
-            // Accept but ignore — we only support column-major
+        case CUBLASLT_MATRIX_LAYOUT_ORDER: {
+            if (sizeInBytes < sizeof(int32_t)) return CUBLAS_STATUS_INVALID_VALUE;
+            int32_t value;
+            std::memcpy(&value, buf, sizeof(value));
+            if (value != 0) return CUBLAS_STATUS_NOT_SUPPORTED;
+            matLayout->order = value;
             break;
+        }
         default:
             return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -298,9 +438,8 @@ cublasStatus_t cublasLtMatrixLayoutGetAttribute(cublasLtMatrixLayout_t matLayout
             if (sizeWritten) *sizeWritten = sizeof(int64_t);
             break;
         case CUBLASLT_MATRIX_LAYOUT_ORDER: {
-            int32_t order = 0; // CUBLASLT_ORDER_COL
             if (sizeInBytes < sizeof(int32_t)) return CUBLAS_STATUS_INVALID_VALUE;
-            std::memcpy(buf, &order, sizeof(int32_t));
+            std::memcpy(buf, &matLayout->order, sizeof(int32_t));
             if (sizeWritten) *sizeWritten = sizeof(int32_t);
             break;
         }
@@ -340,17 +479,23 @@ cublasStatus_t cublasLtMatmulPreferenceSetAttribute(cublasLtMatmulPreference_t p
 
 // --- Algorithm selection ---
 
-cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t /*lightHandle*/,
-                                               cublasLtMatmulDesc_t /*operationDesc*/,
-                                               cublasLtMatrixLayout_t /*Adesc*/,
-                                               cublasLtMatrixLayout_t /*Bdesc*/,
-                                               cublasLtMatrixLayout_t /*Cdesc*/,
-                                               cublasLtMatrixLayout_t /*Ddesc*/,
-                                               cublasLtMatmulPreference_t /*preference*/,
+cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t lightHandle,
+                                               cublasLtMatmulDesc_t operationDesc,
+                                               cublasLtMatrixLayout_t Adesc,
+                                               cublasLtMatrixLayout_t Bdesc,
+                                               cublasLtMatrixLayout_t Cdesc,
+                                               cublasLtMatrixLayout_t Ddesc,
+                                               cublasLtMatmulPreference_t preference,
                                                int requestedAlgoCount,
                                                cublasLtMatmulHeuristicResult_t heuristicResultsArray[],
                                                int* returnAlgoCount) {
-    if (!returnAlgoCount) return CUBLAS_STATUS_INVALID_VALUE;
+    if (!lightHandle || !preference || !returnAlgoCount || requestedAlgoCount < 0)
+        return CUBLAS_STATUS_INVALID_VALUE;
+    cublasStatus_t validation = validate_matmul(operationDesc, Adesc, Bdesc, Cdesc, Ddesc);
+    if (validation != CUBLAS_STATUS_SUCCESS) {
+        *returnAlgoCount = 0;
+        return validation;
+    }
     // We always return exactly one algorithm (Accelerate BLAS)
     if (requestedAlgoCount < 1 || !heuristicResultsArray) {
         *returnAlgoCount = 0;
@@ -375,13 +520,17 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
                                const void* beta,
                                const void* C, cublasLtMatrixLayout_t Cdesc,
                                void* D, cublasLtMatrixLayout_t Ddesc,
-                               const void* /*algo*/,
+                               const void* algo,
                                void* /*workspace*/, size_t /*workspaceSizeInBytes*/,
-                               cudaStream_t /*stream*/) {
+                               cudaStream_t stream) {
     if (!lightHandle || !computeDesc || !alpha || !A || !Adesc ||
         !B || !Bdesc || !beta || !C || !Cdesc || !D || !Ddesc) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
+    if (algo) return CUBLAS_STATUS_NOT_SUPPORTED;
+    cublasStatus_t validation = validate_matmul(computeDesc, Adesc, Bdesc, Cdesc, Ddesc);
+    if (validation != CUBLAS_STATUS_SUCCESS) return validation;
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return CUBLAS_STATUS_EXECUTION_FAILED;
 
     int m = static_cast<int>(Ddesc->rows);
     int n = static_cast<int>(Ddesc->cols);
@@ -403,7 +552,6 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
     CBLAS_TRANSPOSE transB = (computeDesc->transb == CUBLAS_OP_N) ? CblasNoTrans : CblasTrans;
 
     int batch_count = Adesc->batch_count;
-    if (batch_count < 1) batch_count = 1;
 
     LT_DEBUG("cublasLtMatmul m=%d n=%d k=%d batch=%d epilogue=%d",
              m, n, k, batch_count, (int)computeDesc->epilogue);

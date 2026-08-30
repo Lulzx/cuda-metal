@@ -1,4 +1,5 @@
 #include "cudnn.h"
+#include "cuda_runtime.h"
 
 #include <cmath>
 #include <cstdio>
@@ -118,6 +119,60 @@ static bool test_conv_forward_identity() {
     return true;
 }
 
+static bool test_convolution_workspace_and_backward_beta() {
+    cudnnHandle_t handle = nullptr;
+    cudnnTensorDescriptor_t xDesc = nullptr, yDesc = nullptr;
+    cudnnFilterDescriptor_t wDesc = nullptr;
+    cudnnConvolutionDescriptor_t convDesc = nullptr;
+    cudnnCreate(&handle);
+    cudnnCreateTensorDescriptor(&xDesc);
+    cudnnCreateTensorDescriptor(&yDesc);
+    cudnnCreateFilterDescriptor(&wDesc);
+    cudnnCreateConvolutionDescriptor(&convDesc);
+    cudnnSetTensor4dDescriptor(xDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 1, 2);
+    cudnnSetTensor4dDescriptor(yDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, 1, 2);
+    cudnnSetFilter4dDescriptor(wDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, 1, 1, 1, 1);
+    cudnnSetConvolution2dDescriptor(convDesc, 0, 0, 1, 1, 1, 1,
+                                    CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
+
+    float alpha = 1.0f, beta = 0.5f;
+    float x[] = {3.0f, 4.0f}, kernel[] = {1.0f}, y[] = {-7.0f, -7.0f};
+    float undersizedWorkspace = 0.0f;
+    cudnnStatus_t st = cudnnConvolutionForward(handle, &alpha, xDesc, x, wDesc, kernel,
+                                                convDesc,
+                                                CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+                                                &undersizedWorkspace, sizeof(float),
+                                                &beta, yDesc, y);
+    if (st != CUDNN_STATUS_BAD_PARAM || y[0] != -7.0f || y[1] != -7.0f) {
+        std::fprintf(stderr, "FAIL: undersized convolution workspace was accepted or wrote output\n");
+        return false;
+    }
+
+    float dy[] = {1.0f, 2.0f};
+    float dx[] = {10.0f, 20.0f};
+    st = cudnnConvolutionBackwardData(handle, &alpha, wDesc, kernel, yDesc, dy,
+                                      convDesc, CUDNN_CONVOLUTION_BWD_DATA_ALGO_0,
+                                      nullptr, 0, &beta, xDesc, dx);
+    if (st != CUDNN_STATUS_SUCCESS || std::fabs(dx[0] - 6.0f) > 1e-5f ||
+        std::fabs(dx[1] - 12.0f) > 1e-5f) {
+        std::fprintf(stderr, "FAIL: backward data beta result=[%f,%f] status=%d\n",
+                     dx[0], dx[1], st);
+        return false;
+    }
+
+    if (cudnnSetConvolutionGroupCount(convDesc, 0) != CUDNN_STATUS_BAD_PARAM) {
+        std::fprintf(stderr, "FAIL: invalid convolution group count was accepted\n");
+        return false;
+    }
+
+    cudnnDestroyConvolutionDescriptor(convDesc);
+    cudnnDestroyFilterDescriptor(wDesc);
+    cudnnDestroyTensorDescriptor(yDesc);
+    cudnnDestroyTensorDescriptor(xDesc);
+    cudnnDestroy(handle);
+    return true;
+}
+
 static bool test_activation_relu() {
     float input[] = {-2, -1, 0, 1, 2};
     float output[5] = {};
@@ -177,6 +232,118 @@ static bool test_softmax() {
         return false;
     }
 
+    cudnnDestroyTensorDescriptor(desc);
+    cudnnDestroy(handle);
+    return true;
+}
+
+static bool test_softmax_instance_beta() {
+    float input[] = {1.0f, 2.0f};
+    float output[] = {10.0f, 20.0f};
+    float alpha = 1.0f, beta = 0.5f;
+
+    cudnnHandle_t handle = nullptr;
+    cudnnTensorDescriptor_t desc = nullptr;
+    if (cudnnCreate(&handle) != CUDNN_STATUS_SUCCESS ||
+        cudnnCreateTensorDescriptor(&desc) != CUDNN_STATUS_SUCCESS ||
+        cudnnSetTensor4dDescriptor(desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
+                                   1, 1, 1, 2) != CUDNN_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: softmax beta setup\n");
+        return false;
+    }
+
+    cudnnStatus_t st = cudnnSoftmaxForward(handle, CUDNN_SOFTMAX_ACCURATE,
+                                            CUDNN_SOFTMAX_MODE_INSTANCE,
+                                            &alpha, desc, input, &beta, desc, output);
+    const float p0 = std::exp(1.0f) / (std::exp(1.0f) + std::exp(2.0f));
+    const float p1 = 1.0f - p0;
+    if (st != CUDNN_STATUS_SUCCESS || std::fabs(output[0] - (p0 + 5.0f)) > 1e-5f ||
+        std::fabs(output[1] - (p1 + 10.0f)) > 1e-5f) {
+        std::fprintf(stderr, "FAIL: instance softmax beta result=[%f,%f] status=%d\n",
+                     output[0], output[1], st);
+        return false;
+    }
+
+    cudnnDestroyTensorDescriptor(desc);
+    cudnnDestroy(handle);
+    return true;
+}
+
+static bool test_validation_and_stream_ordering() {
+    cudnnHandle_t handle = nullptr;
+    cudnnTensorDescriptor_t desc = nullptr, int8Desc = nullptr;
+    cudnnActivationDescriptor_t act = nullptr;
+    if (cudnnCreate(&handle) != CUDNN_STATUS_SUCCESS ||
+        cudnnCreateTensorDescriptor(&desc) != CUDNN_STATUS_SUCCESS ||
+        cudnnCreateTensorDescriptor(&int8Desc) != CUDNN_STATUS_SUCCESS ||
+        cudnnCreateActivationDescriptor(&act) != CUDNN_STATUS_SUCCESS)
+        return false;
+
+    if (cudnnSetTensor4dDescriptor(desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
+                                   1, 1, 1, 5) != CUDNN_STATUS_SUCCESS ||
+        cudnnSetTensor4dDescriptor(desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
+                                   1, 1, 0, 5) != CUDNN_STATUS_BAD_PARAM) {
+        std::fprintf(stderr, "FAIL: invalid tensor geometry was accepted\n");
+        return false;
+    }
+    int n = 0, c = 0, h = 0, w = 0;
+    cudnnGetTensor4dDescriptor(desc, nullptr, &n, &c, &h, &w,
+                               nullptr, nullptr, nullptr, nullptr);
+    if (n != 1 || c != 1 || h != 1 || w != 5) {
+        std::fprintf(stderr, "FAIL: rejected tensor update mutated descriptor\n");
+        return false;
+    }
+
+    cudnnSetActivationDescriptor(act, CUDNN_ACTIVATION_RELU,
+                                 CUDNN_NOT_PROPAGATE_NAN, 0.0);
+    float alpha = 1.0f, beta = 0.0f;
+    float hostInput[] = {-4.0f, -1.0f, 0.0f, 2.0f, 7.0f};
+    float output[5] = {-9.0f, -9.0f, -9.0f, -9.0f, -9.0f};
+    float* deviceInput = nullptr;
+    cudaStream_t stream = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&deviceInput), sizeof(hostInput)) != cudaSuccess ||
+        cudaStreamCreate(&stream) != cudaSuccess ||
+        cudaMemcpyAsync(deviceInput, hostInput, sizeof(hostInput), cudaMemcpyHostToDevice,
+                        stream) != cudaSuccess ||
+        cudnnSetStream(handle, stream) != CUDNN_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: stream ordering setup\n");
+        return false;
+    }
+    cudnnStatus_t st = cudnnActivationForward(handle, act, &alpha, desc, deviceInput,
+                                               &beta, desc, output);
+    const float expected[] = {0.0f, 0.0f, 0.0f, 2.0f, 7.0f};
+    for (int i = 0; i < 5; ++i) {
+        if (st != CUDNN_STATUS_SUCCESS || std::fabs(output[i] - expected[i]) > 1e-5f) {
+            std::fprintf(stderr, "FAIL: cuDNN stream ordering output[%d]=%f status=%d\n",
+                         i, output[i], st);
+            return false;
+        }
+    }
+
+    if (cudnnActivationForward(nullptr, act, &alpha, desc, hostInput, &beta, desc,
+                               output) != CUDNN_STATUS_NOT_INITIALIZED) {
+        std::fprintf(stderr, "FAIL: null cuDNN handle was not rejected\n");
+        return false;
+    }
+    cudnnSetTensor4dDescriptor(int8Desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_INT8,
+                               1, 1, 1, 5);
+    if (cudnnActivationForward(handle, act, &alpha, int8Desc, hostInput, &beta,
+                               int8Desc, output) != CUDNN_STATUS_NOT_SUPPORTED) {
+        std::fprintf(stderr, "FAIL: unsupported activation dtype was accepted\n");
+        return false;
+    }
+    if (cudnnSoftmaxForward(handle, static_cast<cudnnSoftmaxAlgorithm_t>(999),
+                            CUDNN_SOFTMAX_MODE_INSTANCE, &alpha, desc, hostInput,
+                            &beta, desc, output) != CUDNN_STATUS_BAD_PARAM) {
+        std::fprintf(stderr, "FAIL: invalid softmax algorithm was accepted\n");
+        return false;
+    }
+
+    cudaStreamSynchronize(stream);
+    cudaFree(deviceInput);
+    cudaStreamDestroy(stream);
+    cudnnDestroyActivationDescriptor(act);
+    cudnnDestroyTensorDescriptor(int8Desc);
     cudnnDestroyTensorDescriptor(desc);
     cudnnDestroy(handle);
     return true;
@@ -858,8 +1025,11 @@ int main() {
     if (!test_tensor_descriptor()) return 1;
     if (!test_conv_output_dim()) return 1;
     if (!test_conv_forward_identity()) return 1;
+    if (!test_convolution_workspace_and_backward_beta()) return 1;
     if (!test_activation_relu()) return 1;
     if (!test_softmax()) return 1;
+    if (!test_softmax_instance_beta()) return 1;
+    if (!test_validation_and_stream_ordering()) return 1;
     if (!test_backward_bias()) return 1;
     if (!test_find_algo_v7()) return 1;
     if (!test_batch_norm_inference()) return 1;

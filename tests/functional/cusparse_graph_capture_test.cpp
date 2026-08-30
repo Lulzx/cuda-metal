@@ -64,12 +64,15 @@ int main() {
     }
     cusparseSetStream(handle, stream);
 
-    void *d_off = nullptr, *d_idx = nullptr, *d_val = nullptr, *d_x = nullptr, *d_y = nullptr;
+    void *d_off = nullptr, *d_idx = nullptr, *d_val = nullptr, *d_x = nullptr,
+         *d_y = nullptr, *d_alpha = nullptr, *d_beta = nullptr;
     cudaMalloc(&d_off, offsets.size() * sizeof(int));
     cudaMalloc(&d_idx, indices.size() * sizeof(int));
     cudaMalloc(&d_val, values.size() * sizeof(double));
     cudaMalloc(&d_x, cols * sizeof(double));
     cudaMalloc(&d_y, rows * sizeof(double));
+    cudaMalloc(&d_alpha, sizeof(double));
+    cudaMalloc(&d_beta, sizeof(double));
     cudaMemcpy(d_off, offsets.data(), offsets.size() * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_idx, indices.data(), indices.size() * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_val, values.data(), values.size() * sizeof(double), cudaMemcpyHostToDevice);
@@ -87,6 +90,13 @@ int main() {
                                 vy, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT,
                                 nullptr) != CUSPARSE_STATUS_SUCCESS) {
         std::fprintf(stderr, "FAIL: cusparseSpMV_preprocess returned an error\n");
+        ++failures;
+    }
+    cudaMemcpy(d_alpha, &alpha, sizeof(alpha), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_beta, &beta, sizeof(beta), cudaMemcpyHostToDevice);
+    if (cusparseSetPointerMode(handle, CUSPARSE_POINTER_MODE_DEVICE) !=
+        CUSPARSE_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: device pointer mode was rejected\n");
         ++failures;
     }
 
@@ -113,7 +123,7 @@ int main() {
         std::fprintf(stderr, "FAIL: cudaStreamBeginCapture\n");
         return 1;
     }
-    if (cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, mat, vx, &beta, vy,
+    if (cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, d_alpha, mat, vx, d_beta, vy,
                      CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, nullptr) !=
         CUSPARSE_STATUS_SUCCESS) {
         std::fprintf(stderr, "FAIL: cusparseSpMV during capture returned an error\n");
@@ -148,16 +158,21 @@ int main() {
 
     // ── 3. replay reads device memory as it stands at launch ────────────────
     std::vector<double> x_later{-1.0, 0.5, 7.0, 2.0, -3.0};
+    const double alpha_later = -1.5;
     cudaMemcpy(d_x, x_later.data(), cols * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alpha, &alpha_later, sizeof(alpha_later), cudaMemcpyHostToDevice);
     for (int replay = 0; replay < 3; ++replay) {
+        cudaMemcpy(d_y, y_zero.data(), rows * sizeof(double), cudaMemcpyHostToDevice);
         if (cudaGraphLaunch(exec, stream) != cudaSuccess) {
             std::fprintf(stderr, "FAIL: cudaGraphLaunch (replay %d)\n", replay);
             return 1;
         }
         cudaStreamSynchronize(stream);
         cudaMemcpy(got.data(), d_y, rows * sizeof(double), cudaMemcpyDeviceToHost);
-        want = reference(x_later, alpha, beta, y_zero);
-        for (int i = 0; i < rows; ++i) check("replay with new x", got[i], want[i]);
+        want = reference(x_later, alpha_later, beta, y_zero);
+        for (int i = 0; i < rows; ++i) {
+            check("replay with new x and device alpha", got[i], want[i]);
+        }
     }
 
     cudaGraphExecDestroy(exec);
@@ -165,6 +180,7 @@ int main() {
     cusparseDestroyDnVec(vy);
     cusparseDestroySpMat(mat);
     cudaFree(d_off); cudaFree(d_idx); cudaFree(d_val); cudaFree(d_x); cudaFree(d_y);
+    cudaFree(d_alpha); cudaFree(d_beta);
     cudaStreamDestroy(stream);
     cusparseDestroy(handle);
 

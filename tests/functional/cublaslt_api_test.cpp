@@ -1,8 +1,10 @@
 #include "cublasLt.h"
+#include "cuda_runtime.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 
 static bool test_handle_lifecycle() {
     cublasLtHandle_t handle = nullptr;
@@ -223,6 +225,149 @@ static bool test_null_args() {
     return true;
 }
 
+static bool test_validation_and_stream_ordering() {
+    cublasLtMatrixLayout_t invalid = nullptr;
+    cublasLtMatmulDesc_t unsupportedDesc = nullptr;
+    if (cublasLtMatrixLayoutCreate(&invalid, CUDA_R_32F, 0, 2, 2) !=
+            CUBLAS_STATUS_INVALID_VALUE ||
+        cublasLtMatrixLayoutCreate(&invalid, CUDA_R_8I, 2, 2, 2) !=
+            CUBLAS_STATUS_NOT_SUPPORTED ||
+        cublasLtMatrixLayoutCreate(&invalid, CUDA_R_32F, 2, 2, 1) !=
+            CUBLAS_STATUS_INVALID_VALUE ||
+        cublasLtMatmulDescCreate(&unsupportedDesc, CUBLAS_COMPUTE_16F, CUDA_R_16F) !=
+            CUBLAS_STATUS_NOT_SUPPORTED || unsupportedDesc != nullptr) {
+        std::fprintf(stderr, "FAIL: cuBLASLt creation validation\n");
+        return false;
+    }
+
+    cublasLtHandle_t handle = nullptr;
+    cublasLtMatmulDesc_t desc = nullptr;
+    cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
+    cublasLtCreate(&handle);
+    cublasLtMatmulDescCreate(&desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_32F, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_32F, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_32F, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Ddesc, CUDA_R_32F, 2, 2, 2);
+
+    int32_t zeroBatch = 0;
+    if (cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                         &zeroBatch, sizeof(zeroBatch)) !=
+        CUBLAS_STATUS_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: zero cuBLASLt batch count was accepted\n");
+        return false;
+    }
+    int32_t batch = 0;
+    size_t written = 0;
+    cublasLtMatrixLayoutGetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                     &batch, sizeof(batch), &written);
+    if (batch != 1) {
+        std::fprintf(stderr, "FAIL: rejected batch count mutated layout\n");
+        return false;
+    }
+    int32_t rowMajor = 1;
+    if (cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_ORDER,
+                                         &rowMajor, sizeof(rowMajor)) !=
+        CUBLAS_STATUS_NOT_SUPPORTED) {
+        std::fprintf(stderr, "FAIL: unsupported row-major layout was accepted\n");
+        return false;
+    }
+    cublasOperation_t invalidOp = static_cast<cublasOperation_t>(99);
+    if (cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_TRANSA,
+                                       &invalidOp, sizeof(invalidOp)) !=
+        CUBLAS_STATUS_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: invalid cuBLASLt transpose was accepted\n");
+        return false;
+    }
+    cublasOperation_t currentOp = CUBLAS_OP_T;
+    cublasLtMatmulDescGetAttribute(desc, CUBLASLT_MATMUL_DESC_TRANSA,
+                                   &currentOp, sizeof(currentOp), &written);
+    if (currentOp != CUBLAS_OP_N) {
+        std::fprintf(stderr, "FAIL: rejected transpose mutated descriptor\n");
+        return false;
+    }
+
+    float hostA[] = {1, 2, 3, 4};
+    float hostB[] = {5, 6, 7, 8};
+    float C[] = {0, 0, 0, 0};
+    float D[] = {-1, -1, -1, -1};
+    float alpha = 1.0f, beta = 0.0f;
+    float *deviceA = nullptr, *deviceB = nullptr;
+    cudaStream_t stream = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&deviceA), sizeof(hostA)) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&deviceB), sizeof(hostB)) != cudaSuccess ||
+        cudaStreamCreate(&stream) != cudaSuccess ||
+        cudaMemcpyAsync(deviceA, hostA, sizeof(hostA), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+        cudaMemcpyAsync(deviceB, hostB, sizeof(hostB), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cuBLASLt stream test setup\n");
+        return false;
+    }
+
+    cublasStatus_t st = cublasLtMatmul(handle, desc, &alpha,
+                                        deviceA, Adesc, deviceB, Bdesc,
+                                        &beta, C, Cdesc, D, Ddesc,
+                                        nullptr, nullptr, 0, stream);
+    const float expected[] = {23, 34, 31, 46};
+    for (int i = 0; i < 4; ++i) {
+        if (st != CUBLAS_STATUS_SUCCESS || std::fabs(D[i] - expected[i]) > 1e-5f) {
+            std::fprintf(stderr, "FAIL: stream-ordered cuBLASLt D[%d]=%f status=%d\n",
+                         i, D[i], st);
+            return false;
+        }
+    }
+
+    int32_t twoBatches = 2;
+    for (cublasLtMatrixLayout_t layout : {Adesc, Bdesc, Cdesc, Ddesc}) {
+        cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                         &twoBatches, sizeof(twoBatches));
+    }
+    D[0] = -11.0f;
+    st = cublasLtMatmul(handle, desc, &alpha, hostA, Adesc, hostB, Bdesc,
+                        &beta, C, Cdesc, D, Ddesc,
+                        nullptr, nullptr, 0, nullptr);
+    if (st != CUBLAS_STATUS_NOT_SUPPORTED || D[0] != -11.0f) {
+        std::fprintf(stderr, "FAIL: overlapping batched cuBLASLt layout was accepted\n");
+        return false;
+    }
+    int32_t oneBatch = 1;
+    for (cublasLtMatrixLayout_t layout : {Adesc, Bdesc, Cdesc, Ddesc}) {
+        cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                         &oneBatch, sizeof(oneBatch));
+    }
+
+    cublasLtMatrixLayout_t badD = nullptr;
+    cublasLtMatrixLayoutCreate(&badD, CUDA_R_32F, 3, 2, 3);
+    float sentinel[] = {-7, -7, -7, -7, -7, -7};
+    st = cublasLtMatmul(handle, desc, &alpha, hostA, Adesc, hostB, Bdesc,
+                        &beta, sentinel, badD, sentinel, badD,
+                        nullptr, nullptr, 0, nullptr);
+    if (st != CUBLAS_STATUS_INVALID_VALUE || sentinel[0] != -7.0f) {
+        std::fprintf(stderr, "FAIL: invalid cuBLASLt geometry wrote output or returned %d\n", st);
+        return false;
+    }
+    int fakeAlgo = 0;
+    st = cublasLtMatmul(handle, desc, &alpha, hostA, Adesc, hostB, Bdesc,
+                        &beta, C, Cdesc, D, Ddesc,
+                        &fakeAlgo, nullptr, 0, nullptr);
+    if (st != CUBLAS_STATUS_NOT_SUPPORTED) {
+        std::fprintf(stderr, "FAIL: unsupported cuBLASLt algorithm was accepted\n");
+        return false;
+    }
+
+    cudaStreamSynchronize(stream);
+    cudaStreamDestroy(stream);
+    cudaFree(deviceB);
+    cudaFree(deviceA);
+    cublasLtMatrixLayoutDestroy(badD);
+    cublasLtMatrixLayoutDestroy(Ddesc);
+    cublasLtMatrixLayoutDestroy(Cdesc);
+    cublasLtMatrixLayoutDestroy(Bdesc);
+    cublasLtMatrixLayoutDestroy(Adesc);
+    cublasLtMatmulDescDestroy(desc);
+    cublasLtDestroy(handle);
+    return true;
+}
+
 int main() {
     if (!test_handle_lifecycle()) return 1;
     if (!test_matmul_desc()) return 1;
@@ -231,6 +376,7 @@ int main() {
     if (!test_sgemm_via_lt()) return 1;
     if (!test_epilogue_bias()) return 1;
     if (!test_null_args()) return 1;
+    if (!test_validation_and_stream_ordering()) return 1;
 
     std::printf("PASS: cublasLt API tests\n");
     return 0;

@@ -1,7 +1,9 @@
 #include <cusolverSp.h>
 #include <cusparse.h>
+#include <cuda_runtime.h>
 #include <cstdio>
 #include <cmath>
+#include <limits>
 
 static int g_fail = 0;
 #define CHECK(cond, msg) do { \
@@ -91,8 +93,113 @@ static void test_handle_lifecycle() {
     CHECK(st == CUSOLVER_STATUS_SUCCESS, "cusolverSp destroy");
 }
 
+static void test_validation_and_singularity() {
+    cusolverSpHandle_t handle = nullptr;
+    CHECK(cusolverSpCreate(&handle) == CUSOLVER_STATUS_SUCCESS,
+          "validation handle create");
+    cusparseMatDescr_t descrA = nullptr;
+    cusparseCreateMatDescr(&descrA);
+
+    int rowPtr[] = {0, 2, 4};
+    int badRowPtr[] = {0, 3, 2};
+    int colInd[] = {0, 1, 0, 1};
+    int badColInd[] = {0, 2, 0, 1};
+    float values[] = {3.0f, 1.0f, 1.0f, 2.0f};
+    float b[] = {5.0f, 5.0f};
+    float x[] = {91.0f, 92.0f};
+    int singularity = 77;
+
+    CHECK(cusolverSpScsrlsvqr(nullptr, 2, 4, descrA, values, rowPtr,
+                               colInd, b, 0.0f, 0, x, &singularity) ==
+              CUSOLVER_STATUS_NOT_INITIALIZED,
+          "sparse null handle rejected");
+    CHECK(cusolverSpScsrlsvqr(handle, -1, 4, descrA, values, rowPtr,
+                               colInd, b, 0.0f, 0, x, &singularity) ==
+              CUSOLVER_STATUS_INVALID_VALUE,
+          "sparse negative dimension rejected");
+    CHECK(cusolverSpScsrlsvqr(handle, 2, 3, descrA, values, rowPtr,
+                               colInd, b, 0.0f, 0, x, &singularity) ==
+              CUSOLVER_STATUS_INVALID_VALUE,
+          "sparse nnz mismatch rejected");
+    CHECK(cusolverSpScsrlsvqr(handle, 2, 4, descrA, values, badRowPtr,
+                               colInd, b, 0.0f, 0, x, &singularity) ==
+              CUSOLVER_STATUS_INVALID_VALUE,
+          "sparse nonmonotonic row offsets rejected");
+    CHECK(cusolverSpScsrlsvqr(handle, 2, 4, descrA, values, rowPtr,
+                               badColInd, b, 0.0f, 0, x, &singularity) ==
+              CUSOLVER_STATUS_INVALID_VALUE,
+          "sparse out-of-range column rejected");
+    CHECK(cusolverSpScsrlsvqr(handle, 2, 4, descrA, values, rowPtr,
+                               colInd, b,
+                               std::numeric_limits<float>::quiet_NaN(), 0,
+                               x, &singularity) == CUSOLVER_STATUS_INVALID_VALUE,
+          "sparse nonfinite tolerance rejected");
+    CHECK(cusolverSpScsrlsvqr(handle, 2, 4, descrA, values, rowPtr,
+                               colInd, b, 0.0f, 1, x, &singularity) ==
+              CUSOLVER_STATUS_INVALID_VALUE,
+          "unsupported sparse reordering rejected");
+    CHECK(x[0] == 91.0f && x[1] == 92.0f && singularity == 77,
+          "invalid sparse calls leave outputs unchanged");
+
+    float nearSingular[] = {1.0f, 0.0f, 0.0f, 1.0e-8f};
+    CHECK(cusolverSpScsrlsvchol(handle, 2, 4, descrA, nearSingular, rowPtr,
+                                 colInd, b, 1.0e-3f, 0, x,
+                                 &singularity) == CUSOLVER_STATUS_SUCCESS &&
+              singularity == 1,
+          "sparse Cholesky honors singularity tolerance");
+
+    cusparseDestroyMatDescr(descrA);
+    cusolverSpDestroy(handle);
+}
+
+static void test_default_stream_ordering() {
+    cusolverSpHandle_t handle = nullptr;
+    cusolverSpCreate(&handle);
+    cusparseMatDescr_t descrA = nullptr;
+    cusparseCreateMatDescr(&descrA);
+
+    int *rowPtr = nullptr, *colInd = nullptr;
+    float *values = nullptr, *b = nullptr, *x = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&rowPtr), 3 * sizeof(int));
+    cudaMalloc(reinterpret_cast<void**>(&colInd), 4 * sizeof(int));
+    cudaMalloc(reinterpret_cast<void**>(&values), 4 * sizeof(float));
+    cudaMalloc(reinterpret_cast<void**>(&b), 2 * sizeof(float));
+    cudaMalloc(reinterpret_cast<void**>(&x), 2 * sizeof(float));
+    const int hostRowPtr[] = {0, 2, 4};
+    const int hostColInd[] = {0, 1, 0, 1};
+    const float hostValues[] = {3.0f, 1.0f, 1.0f, 2.0f};
+    const float hostB[] = {5.0f, 5.0f};
+    cudaMemcpyAsync(rowPtr, hostRowPtr, sizeof(hostRowPtr),
+                    cudaMemcpyHostToDevice, nullptr);
+    cudaMemcpyAsync(colInd, hostColInd, sizeof(hostColInd),
+                    cudaMemcpyHostToDevice, nullptr);
+    cudaMemcpyAsync(values, hostValues, sizeof(hostValues),
+                    cudaMemcpyHostToDevice, nullptr);
+    cudaMemcpyAsync(b, hostB, sizeof(hostB), cudaMemcpyHostToDevice, nullptr);
+    int singularity = 99;
+    const cusolverStatus_t status = cusolverSpScsrlsvqr(
+        handle, 2, 4, descrA, values, rowPtr, colInd, b, 0.0f, 0, x,
+        &singularity);
+    float result[2] = {};
+    cudaMemcpy(result, x, sizeof(result), cudaMemcpyDeviceToHost);
+    CHECK(status == CUSOLVER_STATUS_SUCCESS && singularity == -1 &&
+              std::fabs(result[0] - 1.0f) < 1e-4f &&
+              std::fabs(result[1] - 2.0f) < 1e-4f,
+          "sparse solver orders default-stream inputs");
+
+    cudaFree(x);
+    cudaFree(b);
+    cudaFree(values);
+    cudaFree(colInd);
+    cudaFree(rowPtr);
+    cusparseDestroyMatDescr(descrA);
+    cusolverSpDestroy(handle);
+}
+
 int main() {
     test_handle_lifecycle();
+    test_validation_and_singularity();
+    test_default_stream_ordering();
     test_cholesky_solve();
     test_qr_solve();
     printf("\n%s (%d failures)\n", g_fail ? "SOME TESTS FAILED" : "ALL TESTS PASSED", g_fail);

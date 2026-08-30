@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -294,6 +295,17 @@ int main() {
         std::fprintf(stderr, "FAIL: expected CURAND_STATUS_OUT_OF_RANGE for zero stddev\n");
         return 1;
     }
+    if (curandGenerateNormal(generator, device_output_normal, 1, kNormalMean, kNormalStddev) !=
+        CURAND_STATUS_LENGTH_NOT_MULTIPLE) {
+        std::fprintf(stderr, "FAIL: expected CURAND_STATUS_LENGTH_NOT_MULTIPLE for odd normal count\n");
+        return 1;
+    }
+    if (curandGenerateNormal(generator, device_output_normal, kCount,
+                             std::numeric_limits<float>::quiet_NaN(), kNormalStddev) !=
+        CURAND_STATUS_OUT_OF_RANGE) {
+        std::fprintf(stderr, "FAIL: expected CURAND_STATUS_OUT_OF_RANGE for NaN normal mean\n");
+        return 1;
+    }
 
     double* device_output_normal_double = nullptr;
     if (cudaMalloc(reinterpret_cast<void**>(&device_output_normal_double), kCount * sizeof(double)) !=
@@ -386,6 +398,11 @@ int main() {
     if (curandGenerateLogNormal(generator, device_output_lognormal, kCount, 0.1f, 0.0f) !=
         CURAND_STATUS_OUT_OF_RANGE) {
         std::fprintf(stderr, "FAIL: expected CURAND_STATUS_OUT_OF_RANGE for zero lognormal stddev\n");
+        return 1;
+    }
+    if (curandGenerateLogNormal(generator, device_output_lognormal, 1, 0.1f, 0.6f) !=
+        CURAND_STATUS_LENGTH_NOT_MULTIPLE) {
+        std::fprintf(stderr, "FAIL: expected CURAND_STATUS_LENGTH_NOT_MULTIPLE for odd lognormal count\n");
         return 1;
     }
 

@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 static bool test_version() {
     int ver = 0;
@@ -109,6 +110,57 @@ static bool test_multi_rank_rejected() {
     return true;
 }
 
+static bool test_single_rank_validation() {
+    ncclComm_t comm = nullptr;
+    ncclUniqueId id = 0;
+    ncclGetUniqueId(&id);
+    if (ncclCommInitRank(&comm, 1, id, 0) != ncclSuccess) return false;
+
+    float send = 3.0f, recv = -7.0f;
+    if (ncclAllReduce(&send, &recv, 1, static_cast<ncclDataType_t>(999),
+                      ncclSum, comm, nullptr) != ncclInvalidArgument || recv != -7.0f ||
+        ncclAllReduce(&send, &recv, 1, ncclFloat32,
+                      static_cast<ncclRedOp_t>(999), comm, nullptr) != ncclInvalidArgument ||
+        ncclBroadcast(&send, &recv, 1, ncclFloat32, 1, comm, nullptr) != ncclInvalidArgument ||
+        ncclAllReduce(&send, &recv, 1, ncclFloat32, ncclSum,
+                      nullptr, nullptr) != ncclInvalidArgument ||
+        ncclAllReduce(&send, &recv, std::numeric_limits<size_t>::max(),
+                      ncclFloat64, ncclSum, comm, nullptr) != ncclInvalidArgument) {
+        std::fprintf(stderr, "FAIL: NCCL single-rank argument validation\n");
+        return false;
+    }
+    if (ncclAllReduce(nullptr, nullptr, 0, ncclFloat32, ncclSum,
+                      comm, nullptr) != ncclSuccess) {
+        std::fprintf(stderr, "FAIL: zero-count NCCL collective should be a no-op\n");
+        return false;
+    }
+
+    ncclComm_t comms[2] = {nullptr, nullptr};
+    if (ncclCommInitAll(comms, 2, nullptr) != ncclInvalidArgument ||
+        comms[0] != nullptr || comms[1] != nullptr) {
+        std::fprintf(stderr, "FAIL: multi-device ncclCommInitAll partially initialized\n");
+        return false;
+    }
+    int badDevice = 1;
+    if (ncclCommInitAll(comms, 1, &badDevice) != ncclInvalidArgument || comms[0] != nullptr) {
+        std::fprintf(stderr, "FAIL: unsupported NCCL device was accepted\n");
+        return false;
+    }
+    if (ncclGroupEnd() != ncclInvalidUsage || ncclGroupStart() != ncclSuccess ||
+        ncclGroupStart() != ncclInvalidUsage || ncclGroupEnd() != ncclSuccess) {
+        std::fprintf(stderr, "FAIL: NCCL group state validation\n");
+        return false;
+    }
+    const char* last = ncclGetLastError(comm);
+    if (!last || std::strlen(last) == 0) {
+        std::fprintf(stderr, "FAIL: NCCL valid communicator has no last-error string\n");
+        return false;
+    }
+
+    ncclCommDestroy(comm);
+    return true;
+}
+
 int main() {
     if (!test_version()) return 1;
     if (!test_comm_lifecycle()) return 1;
@@ -116,6 +168,7 @@ int main() {
     if (!test_broadcast_identity()) return 1;
     if (!test_error_string()) return 1;
     if (!test_multi_rank_rejected()) return 1;
+    if (!test_single_rank_validation()) return 1;
 
     std::printf("PASS: NCCL API tests\n");
     return 0;

@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -101,9 +102,110 @@ static void synchronize_handle_stream(cusparseHandle_t handle) {
     cudaStreamSynchronize(handle->stream);
 }
 
+static const void* scalar_pointer_for_mode_size(cusparsePointerMode_t mode,
+                                                const void* pointer,
+                                                std::size_t size) {
+    if (pointer == nullptr) return nullptr;
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    const bool tracked =
+        cumetal::rt::resolve_allocation_for_pointer(pointer, &resolved);
+    const bool is_device =
+        tracked && resolved.kind == cumetal::rt::AllocationKind::kDevice;
+    if (mode == CUSPARSE_POINTER_MODE_HOST) {
+        return is_device ? nullptr : pointer;
+    }
+    if (mode != CUSPARSE_POINTER_MODE_DEVICE || !is_device ||
+        resolved.buffer == nullptr || resolved.buffer->contents() == nullptr ||
+        resolved.remaining_size < size) {
+        return nullptr;
+    }
+    return static_cast<const void*>(
+        static_cast<const unsigned char*>(resolved.buffer->contents()) +
+        resolved.offset);
+}
+
+static const void* scalar_pointer_for_mode(cusparsePointerMode_t mode,
+                                           const void* pointer,
+                                           cudaDataType type) {
+    if (type == CUDA_R_64F) {
+        return scalar_pointer_for_mode_size(mode, pointer, sizeof(double));
+    }
+    if (type == CUDA_R_32F) {
+        return scalar_pointer_for_mode_size(mode, pointer, sizeof(float));
+    }
+    return nullptr;
+}
+
+static bool valid_operation(cusparseOperation_t operation) {
+    return operation == CUSPARSE_OPERATION_NON_TRANSPOSE ||
+           operation == CUSPARSE_OPERATION_TRANSPOSE ||
+           operation == CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE;
+}
+
+static bool valid_spmv_algorithm(cusparseSpMVAlg_t algorithm) {
+    return algorithm == CUSPARSE_SPMV_ALG_DEFAULT ||
+           algorithm == CUSPARSE_SPMV_CSR_ALG1 ||
+           algorithm == CUSPARSE_SPMV_CSR_ALG2;
+}
+
+static bool valid_spmm_algorithm(cusparseSpMMAlg_t algorithm) {
+    return algorithm == CUSPARSE_SPMM_ALG_DEFAULT ||
+           algorithm == CUSPARSE_SPMM_CSR_ALG1 ||
+           algorithm == CUSPARSE_SPMM_CSR_ALG2 ||
+           algorithm == CUSPARSE_SPMM_CSR_ALG3;
+}
+
+static bool valid_index_type(cusparseIndexType_t type) {
+    return type == CUSPARSE_INDEX_16U || type == CUSPARSE_INDEX_32I ||
+           type == CUSPARSE_INDEX_64I;
+}
+
+static bool valid_index_base(cusparseIndexBase_t base) {
+    return base == CUSPARSE_INDEX_BASE_ZERO || base == CUSPARSE_INDEX_BASE_ONE;
+}
+
+static bool valid_data_type(cudaDataType type) {
+    switch (type) {
+        case CUDA_R_16F:
+        case CUDA_C_16F:
+        case CUDA_R_16BF:
+        case CUDA_C_16BF:
+        case CUDA_R_32F:
+        case CUDA_C_32F:
+        case CUDA_R_64F:
+        case CUDA_C_64F:
+        case CUDA_R_8I:
+        case CUDA_R_8U:
+        case CUDA_R_32I:
+            return true;
+    }
+    return false;
+}
+
+static bool valid_spmv_types(const cusparseSpMatDescr* matrix,
+                             const cusparseDnVecDescr* x,
+                             const cusparseDnVecDescr* y,
+                             cudaDataType compute_type) {
+    return matrix != nullptr && x != nullptr && y != nullptr &&
+           (compute_type == CUDA_R_32F || compute_type == CUDA_R_64F) &&
+           matrix->valueType == compute_type && x->valueType == compute_type &&
+           y->valueType == compute_type;
+}
+
+static bool valid_spmm_types(const cusparseSpMatDescr* matrix,
+                             const cusparseDnMatDescr* b,
+                             const cusparseDnMatDescr* c,
+                             cudaDataType compute_type) {
+    return matrix != nullptr && b != nullptr && c != nullptr &&
+           (compute_type == CUDA_R_32F || compute_type == CUDA_R_64F) &&
+           matrix->valueType == compute_type && b->valueType == compute_type &&
+           c->valueType == compute_type;
+}
+
 cusparseStatus_t cusparseCreate(cusparseHandle_t* handle) {
     if (handle == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
-    *handle = new cusparseContext();
+    *handle = new (std::nothrow) cusparseContext();
+    if (*handle == nullptr) return CUSPARSE_STATUS_ALLOC_FAILED;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
@@ -129,10 +231,6 @@ cusparseStatus_t cusparseSetPointerMode(cusparseHandle_t handle, cusparsePointer
     if (mode != CUSPARSE_POINTER_MODE_HOST && mode != CUSPARSE_POINTER_MODE_DEVICE) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
-    // The current CPU/UMA sparse paths dereference host alpha/beta values when
-    // the API call executes. Do not claim device-scalar mode until every
-    // implemented sparse operation resolves tracked device scalar storage.
-    if (mode == CUSPARSE_POINTER_MODE_DEVICE) return CUSPARSE_STATUS_NOT_SUPPORTED;
     handle->pointer_mode = mode;
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -191,7 +289,8 @@ const char* cusparseGetErrorString(cusparseStatus_t status) {
 
 cusparseStatus_t cusparseCreateMatDescr(cusparseMatDescr_t* descrA) {
     if (descrA == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
-    *descrA = new cusparseMatDescr();
+    *descrA = new (std::nothrow) cusparseMatDescr();
+    if (*descrA == nullptr) return CUSPARSE_STATUS_ALLOC_FAILED;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
@@ -202,6 +301,12 @@ cusparseStatus_t cusparseDestroyMatDescr(cusparseMatDescr_t descrA) {
 
 cusparseStatus_t cusparseSetMatType(cusparseMatDescr_t descrA, cusparseMatrixType_t type) {
     if (descrA == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (type != CUSPARSE_MATRIX_TYPE_GENERAL &&
+        type != CUSPARSE_MATRIX_TYPE_SYMMETRIC &&
+        type != CUSPARSE_MATRIX_TYPE_HERMITIAN &&
+        type != CUSPARSE_MATRIX_TYPE_TRIANGULAR) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
     descrA->type = type;
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -212,6 +317,7 @@ cusparseMatrixType_t cusparseGetMatType(const cusparseMatDescr_t descrA) {
 
 cusparseStatus_t cusparseSetMatIndexBase(cusparseMatDescr_t descrA, cusparseIndexBase_t base) {
     if (descrA == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (!valid_index_base(base)) return CUSPARSE_STATUS_INVALID_VALUE;
     descrA->base = base;
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -222,12 +328,20 @@ cusparseIndexBase_t cusparseGetMatIndexBase(const cusparseMatDescr_t descrA) {
 
 cusparseStatus_t cusparseSetMatFillMode(cusparseMatDescr_t descrA, cusparseFillMode_t fillMode) {
     if (descrA == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (fillMode != CUSPARSE_FILL_MODE_LOWER &&
+        fillMode != CUSPARSE_FILL_MODE_UPPER) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
     descrA->fill = fillMode;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
 cusparseStatus_t cusparseSetMatDiagType(cusparseMatDescr_t descrA, cusparseDiagType_t diagType) {
     if (descrA == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (diagType != CUSPARSE_DIAG_TYPE_NON_UNIT &&
+        diagType != CUSPARSE_DIAG_TYPE_UNIT) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
     descrA->diag = diagType;
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -243,7 +357,16 @@ cusparseStatus_t cusparseCreateCsr(cusparseSpMatDescr_t* spMatDescr,
                                     cusparseIndexBase_t idxBase,
                                     cudaDataType valueType) {
     if (spMatDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
-    auto* sp = new cusparseSpMatDescr();
+    *spMatDescr = nullptr;
+    if (rows < 0 || cols < 0 || nnz < 0 || csrRowOffsets == nullptr ||
+        (nnz > 0 && (csrColInd == nullptr || csrValues == nullptr)) ||
+        !valid_index_type(csrRowOffsetsType) ||
+        !valid_index_type(csrColIndType) || !valid_index_base(idxBase) ||
+        !valid_data_type(valueType)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    auto* sp = new (std::nothrow) cusparseSpMatDescr();
+    if (sp == nullptr) return CUSPARSE_STATUS_ALLOC_FAILED;
     sp->rows = rows;
     sp->cols = cols;
     sp->nnz = nnz;
@@ -266,7 +389,16 @@ cusparseStatus_t cusparseCreateCoo(cusparseSpMatDescr_t* spMatDescr,
                                     cusparseIndexBase_t idxBase,
                                     cudaDataType valueType) {
     if (spMatDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
-    auto* sp = new cusparseSpMatDescr();
+    *spMatDescr = nullptr;
+    if (rows < 0 || cols < 0 || nnz < 0 ||
+        (nnz > 0 &&
+         (cooRowInd == nullptr || cooColInd == nullptr || cooValues == nullptr)) ||
+        !valid_index_type(cooIdxType) || !valid_index_base(idxBase) ||
+        !valid_data_type(valueType)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    auto* sp = new (std::nothrow) cusparseSpMatDescr();
+    if (sp == nullptr) return CUSPARSE_STATUS_ALLOC_FAILED;
     sp->rows = rows;
     sp->cols = cols;
     sp->nnz = nnz;
@@ -291,7 +423,16 @@ cusparseStatus_t cusparseCreateCsc(cusparseSpMatDescr_t* spMatDescr,
                                     cusparseIndexBase_t idxBase,
                                     cudaDataType valueType) {
     if (spMatDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
-    auto* sp = new cusparseSpMatDescr();
+    *spMatDescr = nullptr;
+    if (rows < 0 || cols < 0 || nnz < 0 || cscColOffsets == nullptr ||
+        (nnz > 0 && (cscRowInd == nullptr || cscValues == nullptr)) ||
+        !valid_index_type(cscColOffsetsType) ||
+        !valid_index_type(cscRowIndType) || !valid_index_base(idxBase) ||
+        !valid_data_type(valueType)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    auto* sp = new (std::nothrow) cusparseSpMatDescr();
+    if (sp == nullptr) return CUSPARSE_STATUS_ALLOC_FAILED;
     // rows/cols stay the logical shape of A. The arrays are CSR-of-A-transpose:
     // the offset array is indexed by column and the index array holds row ids,
     // which is why the compressed axis below has `cols` entries.
@@ -340,7 +481,8 @@ cusparseStatus_t cusparseSpMatSetAttribute(cusparseSpMatDescr_t spMatDescr,
 
 cusparseStatus_t cusparseCreateCsrilu02Info(csrilu02Info_t* info) {
     if (info == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
-    *info = new csrilu02Info();
+    *info = new (std::nothrow) csrilu02Info();
+    if (*info == nullptr) return CUSPARSE_STATUS_ALLOC_FAILED;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
@@ -412,7 +554,13 @@ cusparseStatus_t cusparseScsrilu02(cusparseHandle_t handle, int m, int nnz,
 cusparseStatus_t cusparseCreateDnVec(cusparseDnVecDescr_t* dnVecDescr,
                                       int64_t size, void* values, cudaDataType valueType) {
     if (dnVecDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
-    auto* v = new cusparseDnVecDescr();
+    *dnVecDescr = nullptr;
+    if (size < 0 || (size > 0 && values == nullptr) ||
+        !valid_data_type(valueType)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    auto* v = new (std::nothrow) cusparseDnVecDescr();
+    if (v == nullptr) return CUSPARSE_STATUS_ALLOC_FAILED;
     v->size = size;
     v->values = values;
     v->valueType = valueType;
@@ -459,7 +607,18 @@ cusparseStatus_t cusparseCreateDnMat(cusparseDnMatDescr_t* dnMatDescr,
                                       void* values, cudaDataType valueType,
                                       cusparseOrder_t order) {
     if (dnMatDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
-    auto* m = new cusparseDnMatDescr();
+    *dnMatDescr = nullptr;
+    if (rows < 0 || cols < 0 || ld < 0 ||
+        (rows > 0 && cols > 0 && values == nullptr) ||
+        !valid_data_type(valueType) ||
+        (order != CUSPARSE_ORDER_COL && order != CUSPARSE_ORDER_ROW) ||
+        (rows > 0 && cols > 0 &&
+         ((order == CUSPARSE_ORDER_COL && ld < rows) ||
+          (order == CUSPARSE_ORDER_ROW && ld < cols)))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    auto* m = new (std::nothrow) cusparseDnMatDescr();
+    if (m == nullptr) return CUSPARSE_STATUS_ALLOC_FAILED;
     m->rows = rows;
     m->cols = cols;
     m->ld = ld;
@@ -477,20 +636,34 @@ cusparseStatus_t cusparseDestroyDnMat(cusparseDnMatDescr_t dnMatDescr) {
 
 // SpMV: y = alpha * op(A) * x + beta * y  (CSR, float)
 cusparseStatus_t cusparseSpMV_bufferSize(cusparseHandle_t handle,
-                                          cusparseOperation_t /*opA*/,
+                                          cusparseOperation_t opA,
                                           const void* alpha,
                                           cusparseSpMatDescr_t matA,
                                           cusparseDnVecDescr_t vecX,
                                           const void* beta,
                                           cusparseDnVecDescr_t vecY,
                                           cudaDataType computeType,
-                                          cusparseSpMVAlg_t /*alg*/,
+                                          cusparseSpMVAlg_t alg,
                                           size_t* bufferSize) {
     if (!handle || !alpha || !matA || !vecX || !beta || !vecY || !bufferSize) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F) {
         return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    }
+    if (!valid_spmv_types(matA, vecX, vecY, computeType)) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (!valid_operation(opA) || !valid_spmv_algorithm(alg)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (matA->format == CUMETAL_SPMAT_COO &&
+        alg != CUSPARSE_SPMV_ALG_DEFAULT) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (scalar_pointer_for_mode(handle->pointer_mode, alpha, computeType) == nullptr ||
+        scalar_pointer_for_mode(handle->pointer_mode, beta, computeType) == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
     }
     // The CPU/UMA implementation consumes no external workspace, but CUDA
     // callers commonly allocate the reported size unconditionally.
@@ -1031,13 +1204,27 @@ cusparseStatus_t cusparseSpMV_preprocess(cusparseHandle_t handle,
                                           const void* beta,
                                           cusparseDnVecDescr_t vecY,
                                           cudaDataType computeType,
-                                          cusparseSpMVAlg_t /*alg*/,
+                                          cusparseSpMVAlg_t alg,
                                           void* /*externalBuffer*/) {
     if (!handle || !matA || !vecX || !vecY || !alpha || !beta) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F) {
         return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    }
+    if (!valid_spmv_types(matA, vecX, vecY, computeType)) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (!valid_operation(opA) || !valid_spmv_algorithm(alg)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (matA->format == CUMETAL_SPMAT_COO &&
+        alg != CUSPARSE_SPMV_ALG_DEFAULT) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (scalar_pointer_for_mode(handle->pointer_mode, alpha, computeType) == nullptr ||
+        scalar_pointer_for_mode(handle->pointer_mode, beta, computeType) == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
     }
     if (matA->format != CUMETAL_SPMAT_COO && cumetal_sparse_indices_are_32bit(matA)) {
         bool transpose = false;
@@ -1049,6 +1236,7 @@ cusparseStatus_t cusparseSpMV_preprocess(cusparseHandle_t handle,
 }
 
 static cusparseStatus_t spmv_dispatch(cudaStream_t stream,
+                                      cusparsePointerMode_t pointer_mode,
                                       cusparseOperation_t opA,
                                       const void* alpha,
                                       cusparseSpMatDescr_t matA,
@@ -1065,7 +1253,7 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
                                const void* beta,
                                cusparseDnVecDescr_t vecY,
                                cudaDataType computeType,
-                               cusparseSpMVAlg_t /*alg*/,
+                               cusparseSpMVAlg_t alg,
                                void* /*externalBuffer*/) {
     if (!handle || !matA || !vecX || !vecY || !alpha || !beta) {
         return CUSPARSE_STATUS_INVALID_VALUE;
@@ -1073,8 +1261,27 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F) {
         return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
     }
+    if (!valid_spmv_types(matA, vecX, vecY, computeType)) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (!valid_operation(opA) || !valid_spmv_algorithm(alg)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (matA->format == CUMETAL_SPMAT_COO &&
+        alg != CUSPARSE_SPMV_ALG_DEFAULT) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
     if (!cumetal_sparse_indices_are_32bit(matA)) {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+
+    const std::size_t scalar_size = computeType == CUDA_R_64F ? 8u : 4u;
+    const void* resolved_alpha =
+        scalar_pointer_for_mode(handle->pointer_mode, alpha, computeType);
+    const void* resolved_beta =
+        scalar_pointer_for_mode(handle->pointer_mode, beta, computeType);
+    if (resolved_alpha == nullptr || resolved_beta == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
     }
 
     // op(A) is m-by-k, so y has m entries and x has k.
@@ -1096,15 +1303,26 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
     if (handle->stream != nullptr) {
         struct Scalar { unsigned char bytes[8]; };
         Scalar a{}, b{};
-        const std::size_t elem = computeType == CUDA_R_64F ? 8u : 4u;
-        std::memcpy(a.bytes, alpha, elem);
-        std::memcpy(b.bytes, beta, elem);
+        if (handle->pointer_mode == CUSPARSE_POINTER_MODE_HOST) {
+            std::memcpy(a.bytes, resolved_alpha, scalar_size);
+            std::memcpy(b.bytes, resolved_beta, scalar_size);
+        }
         void* x = vecX->values;
         void* y = vecY->values;
+        const cusparsePointerMode_t pointer_mode = handle->pointer_mode;
         if (cumetal::rt::capture_library_call(
                 handle->stream, [=](cudaStream_t replay_stream) {
-                    return spmv_dispatch(replay_stream, opA, a.bytes, matA, x, b.bytes, y,
-                                         computeType) == CUSPARSE_STATUS_SUCCESS
+                    const void* captured_alpha =
+                        pointer_mode == CUSPARSE_POINTER_MODE_HOST
+                            ? static_cast<const void*>(a.bytes)
+                            : alpha;
+                    const void* captured_beta =
+                        pointer_mode == CUSPARSE_POINTER_MODE_HOST
+                            ? static_cast<const void*>(b.bytes)
+                            : beta;
+                    return spmv_dispatch(replay_stream, pointer_mode, opA,
+                                         captured_alpha, matA, x, captured_beta,
+                                         y, computeType) == CUSPARSE_STATUS_SUCCESS
                                ? cudaSuccess
                                : cudaErrorInvalidValue;
                 })) {
@@ -1112,14 +1330,15 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
         }
     }
 
-    return spmv_dispatch(handle->stream, opA, alpha, matA, vecX->values, beta, vecY->values,
-                         computeType);
+    return spmv_dispatch(handle->stream, handle->pointer_mode, opA, alpha, matA,
+                         vecX->values, beta, vecY->values, computeType);
 }
 
 // Runs one SpMV over already-resolved operands. Split out from cusparseSpMV so
 // that a graph node can replay it on whatever stream the graph was launched on,
 // with the arguments it was captured with.
 static cusparseStatus_t spmv_dispatch(cudaStream_t stream,
+                                      cusparsePointerMode_t pointer_mode,
                                       cusparseOperation_t opA,
                                       const void* alpha,
                                       cusparseSpMatDescr_t matA,
@@ -1127,6 +1346,20 @@ static cusparseStatus_t spmv_dispatch(cudaStream_t stream,
                                       const void* beta,
                                       void* y_values,
                                       cudaDataType computeType) {
+    if (pointer_mode == CUSPARSE_POINTER_MODE_DEVICE) {
+        // Device scalars may be produced by earlier work in this stream. The
+        // current kernels pass them as inline bytes, so make that dependency
+        // visible before resolving their shared-memory contents.
+        if (cudaStreamSynchronize(stream) != cudaSuccess) {
+            return CUSPARSE_STATUS_EXECUTION_FAILED;
+        }
+    }
+    alpha = scalar_pointer_for_mode(pointer_mode, alpha, computeType);
+    beta = scalar_pointer_for_mode(pointer_mode, beta, computeType);
+    if (alpha == nullptr || beta == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+
     const bool op_t = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
     const int64_t ylen = op_t ? matA->cols : matA->rows;
     bool transpose = false;
@@ -1176,18 +1409,41 @@ static cusparseStatus_t spmv_dispatch(cudaStream_t stream,
 }
 
 // SpMM: C = alpha * op(A) * op(B) + beta * C
-cusparseStatus_t cusparseSpMM_bufferSize(cusparseHandle_t /*handle*/,
-                                          cusparseOperation_t /*opA*/,
-                                          cusparseOperation_t /*opB*/,
-                                          const void* /*alpha*/,
-                                          cusparseSpMatDescr_t /*matA*/,
-                                          cusparseDnMatDescr_t /*matB*/,
-                                          const void* /*beta*/,
-                                          cusparseDnMatDescr_t /*matC*/,
-                                          cudaDataType /*computeType*/,
-                                          cusparseSpMMAlg_t /*alg*/,
+cusparseStatus_t cusparseSpMM_bufferSize(cusparseHandle_t handle,
+                                          cusparseOperation_t opA,
+                                          cusparseOperation_t opB,
+                                          const void* alpha,
+                                          cusparseSpMatDescr_t matA,
+                                          cusparseDnMatDescr_t matB,
+                                          const void* beta,
+                                          cusparseDnMatDescr_t matC,
+                                          cudaDataType computeType,
+                                          cusparseSpMMAlg_t alg,
                                           size_t* bufferSize) {
-    if (bufferSize) *bufferSize = 0;
+    if (!handle || !alpha || !matA || !matB || !beta || !matC || !bufferSize) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (computeType != CUDA_R_32F && computeType != CUDA_R_64F) {
+        return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    }
+    if (!valid_spmm_types(matA, matB, matC, computeType)) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (!valid_operation(opA) || !valid_operation(opB) ||
+        !valid_spmm_algorithm(alg)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (opB != CUSPARSE_OPERATION_NON_TRANSPOSE ||
+        matB->order != CUSPARSE_ORDER_COL ||
+        matC->order != CUSPARSE_ORDER_COL ||
+        !cumetal_sparse_indices_are_32bit(matA)) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (scalar_pointer_for_mode(handle->pointer_mode, alpha, computeType) == nullptr ||
+        scalar_pointer_for_mode(handle->pointer_mode, beta, computeType) == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    *bufferSize = 0;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
@@ -1200,13 +1456,20 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t handle,
                                const void* beta,
                                cusparseDnMatDescr_t matC,
                                cudaDataType computeType,
-                               cusparseSpMMAlg_t /*alg*/,
+                               cusparseSpMMAlg_t alg,
                                void* /*externalBuffer*/) {
     if (!handle || !matA || !matB || !matC || !alpha || !beta) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F) {
         return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    }
+    if (!valid_spmm_types(matA, matB, matC, computeType)) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (!valid_operation(opA) || !valid_operation(opB) ||
+        !valid_spmm_algorithm(alg)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
     }
     if (!cumetal_sparse_indices_are_32bit(matA)) {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
@@ -1227,6 +1490,12 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t handle,
     }
 
     synchronize_handle_stream(handle);
+
+    alpha = scalar_pointer_for_mode(handle->pointer_mode, alpha, computeType);
+    beta = scalar_pointer_for_mode(handle->pointer_mode, beta, computeType);
+    if (alpha == nullptr || beta == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
 
     const int base = (matA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
     const int64_t ldb = matB->ld;
@@ -1264,8 +1533,8 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t handle,
 
 // Legacy CSR SpMV (float)
 cusparseStatus_t cusparseScsrmv(cusparseHandle_t handle,
-                                 cusparseOperation_t /*transA*/,
-                                 int m, int /*n*/, int /*nnz*/,
+                                 cusparseOperation_t transA,
+                                 int m, int n, int nnz,
                                  const float* alpha,
                                  const cusparseMatDescr_t descrA,
                                  const float* csrValA,
@@ -1277,25 +1546,65 @@ cusparseStatus_t cusparseScsrmv(cusparseHandle_t handle,
     if (!handle || !alpha || !beta || !csrValA || !csrRowPtrA || !csrColIndA || !x || !y) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
+    if (m < 0 || n < 0 || nnz < 0 ||
+        (transA != CUSPARSE_OPERATION_NON_TRANSPOSE &&
+         transA != CUSPARSE_OPERATION_TRANSPOSE &&
+         transA != CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
     synchronize_handle_stream(handle);
+    alpha = static_cast<const float*>(scalar_pointer_for_mode_size(
+        handle->pointer_mode, alpha, sizeof(float)));
+    beta = static_cast<const float*>(scalar_pointer_for_mode_size(
+        handle->pointer_mode, beta, sizeof(float)));
+    if (alpha == nullptr || beta == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
 
     const int base = descrA ? static_cast<int>(descrA->base) : 0;
-    for (int i = 0; i < m; ++i) {
-        float sum = 0.0f;
-        const int row_start = csrRowPtrA[i] - base;
-        const int row_end = csrRowPtrA[i + 1] - base;
-        for (int j = row_start; j < row_end; ++j) {
-            sum += csrValA[j] * x[csrColIndA[j] - base];
+    if (csrRowPtrA[0] - base != 0 || csrRowPtrA[m] - base != nnz) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    for (int row = 0; row < m; ++row) {
+        const int begin = csrRowPtrA[row] - base;
+        const int end = csrRowPtrA[row + 1] - base;
+        if (begin < 0 || end < begin || end > nnz) {
+            return CUSPARSE_STATUS_INVALID_VALUE;
         }
-        y[i] = (*alpha) * sum + (*beta) * y[i];
+    }
+    for (int j = 0; j < nnz; ++j) {
+        const int column = csrColIndA[j] - base;
+        if (column < 0 || column >= n) return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (transA == CUSPARSE_OPERATION_NON_TRANSPOSE) {
+        for (int i = 0; i < m; ++i) {
+            float sum = 0.0f;
+            const int row_start = csrRowPtrA[i] - base;
+            const int row_end = csrRowPtrA[i + 1] - base;
+            for (int j = row_start; j < row_end; ++j) {
+                sum += csrValA[j] * x[csrColIndA[j] - base];
+            }
+            y[i] = (*alpha) * sum + (*beta) * y[i];
+        }
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+
+    for (int column = 0; column < n; ++column) y[column] *= *beta;
+    for (int row = 0; row < m; ++row) {
+        const int row_start = csrRowPtrA[row] - base;
+        const int row_end = csrRowPtrA[row + 1] - base;
+        for (int j = row_start; j < row_end; ++j) {
+            const int column = csrColIndA[j] - base;
+            y[column] += (*alpha) * csrValA[j] * x[row];
+        }
     }
     return CUSPARSE_STATUS_SUCCESS;
 }
 
 // Legacy CSR SpMV (double)
 cusparseStatus_t cusparseDcsrmv(cusparseHandle_t handle,
-                                 cusparseOperation_t /*transA*/,
-                                 int m, int /*n*/, int /*nnz*/,
+                                 cusparseOperation_t transA,
+                                 int m, int n, int nnz,
                                  const double* alpha,
                                  const cusparseMatDescr_t descrA,
                                  const double* csrValA,
@@ -1307,17 +1616,57 @@ cusparseStatus_t cusparseDcsrmv(cusparseHandle_t handle,
     if (!handle || !alpha || !beta || !csrValA || !csrRowPtrA || !csrColIndA || !x || !y) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
+    if (m < 0 || n < 0 || nnz < 0 ||
+        (transA != CUSPARSE_OPERATION_NON_TRANSPOSE &&
+         transA != CUSPARSE_OPERATION_TRANSPOSE &&
+         transA != CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
     synchronize_handle_stream(handle);
+    alpha = static_cast<const double*>(scalar_pointer_for_mode_size(
+        handle->pointer_mode, alpha, sizeof(double)));
+    beta = static_cast<const double*>(scalar_pointer_for_mode_size(
+        handle->pointer_mode, beta, sizeof(double)));
+    if (alpha == nullptr || beta == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
 
     const int base = descrA ? static_cast<int>(descrA->base) : 0;
-    for (int i = 0; i < m; ++i) {
-        double sum = 0.0;
-        const int row_start = csrRowPtrA[i] - base;
-        const int row_end = csrRowPtrA[i + 1] - base;
-        for (int j = row_start; j < row_end; ++j) {
-            sum += csrValA[j] * x[csrColIndA[j] - base];
+    if (csrRowPtrA[0] - base != 0 || csrRowPtrA[m] - base != nnz) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    for (int row = 0; row < m; ++row) {
+        const int begin = csrRowPtrA[row] - base;
+        const int end = csrRowPtrA[row + 1] - base;
+        if (begin < 0 || end < begin || end > nnz) {
+            return CUSPARSE_STATUS_INVALID_VALUE;
         }
-        y[i] = (*alpha) * sum + (*beta) * y[i];
+    }
+    for (int j = 0; j < nnz; ++j) {
+        const int column = csrColIndA[j] - base;
+        if (column < 0 || column >= n) return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (transA == CUSPARSE_OPERATION_NON_TRANSPOSE) {
+        for (int i = 0; i < m; ++i) {
+            double sum = 0.0;
+            const int row_start = csrRowPtrA[i] - base;
+            const int row_end = csrRowPtrA[i + 1] - base;
+            for (int j = row_start; j < row_end; ++j) {
+                sum += csrValA[j] * x[csrColIndA[j] - base];
+            }
+            y[i] = (*alpha) * sum + (*beta) * y[i];
+        }
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+
+    for (int column = 0; column < n; ++column) y[column] *= *beta;
+    for (int row = 0; row < m; ++row) {
+        const int row_start = csrRowPtrA[row] - base;
+        const int row_end = csrRowPtrA[row + 1] - base;
+        for (int j = row_start; j < row_end; ++j) {
+            const int column = csrColIndA[j] - base;
+            y[column] += (*alpha) * csrValA[j] * x[row];
+        }
     }
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -1330,7 +1679,8 @@ struct cusparseSpSVDescr {
 
 cusparseStatus_t cusparseSpSV_createDescr(cusparseSpSVDescr_t* descr) {
     if (!descr) return CUSPARSE_STATUS_INVALID_VALUE;
-    *descr = new cusparseSpSVDescr();
+    *descr = new (std::nothrow) cusparseSpSVDescr();
+    if (*descr == nullptr) return CUSPARSE_STATUS_ALLOC_FAILED;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
@@ -1370,8 +1720,18 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t handle,
     if (matA->format != CUMETAL_SPMAT_CSR) return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F)
         return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    if (!valid_spmv_types(matA, vecX, vecY, computeType))
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    if (!valid_operation(opA)) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (matA->rows != matA->cols || vecX->size != matA->rows ||
+        vecY->size != matA->rows) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
 
     synchronize_handle_stream(handle);
+
+    alpha = scalar_pointer_for_mode(handle->pointer_mode, alpha, computeType);
+    if (alpha == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
 
     const int* rowPtr = static_cast<const int*>(matA->rowOffsets);
     const int* colIdx = static_cast<const int*>(matA->colInd);

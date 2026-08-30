@@ -305,6 +305,12 @@ static void test_curand_generator_props() {
     curandStatus_t r5 = curandSetGeneratorOrdering(gen, static_cast<curandOrdering_t>(999));
     CHECK(r5 == CURAND_STATUS_OUT_OF_RANGE, "curandSetGeneratorOrdering bad value error");
 
+    float* device_probe = nullptr;
+    CHECK(cudaMalloc(reinterpret_cast<void**>(&device_probe), sizeof(float)) == cudaSuccess,
+          "allocate unsupported generator probe");
+    CHECK(curandGenerateUniform(gen, device_probe, 1) == CURAND_STATUS_TYPE_ERROR,
+          "named MT19937 generation rejected instead of returning default bitstream");
+
     curandDestroyGenerator(gen);
 
     // Create a quasi generator and set dimensions.
@@ -325,7 +331,11 @@ static void test_curand_generator_props() {
     curandStatus_t r9 = curandSetQuasiRandomGeneratorDimensions(qgen, 20001);
     CHECK(r9 == CURAND_STATUS_OUT_OF_RANGE, "curandSetQuasiRandomGeneratorDimensions(20001) error");
 
+    CHECK(curandGenerateUniform(qgen, device_probe, 1) == CURAND_STATUS_TYPE_ERROR,
+          "unimplemented Sobol generation rejected explicitly");
+
     curandDestroyGenerator(qgen);
+    cudaFree(device_probe);
 
     // Unknown RNG type still rejected.
     curandGenerator_t bad;

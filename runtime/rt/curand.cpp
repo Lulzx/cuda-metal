@@ -3,6 +3,7 @@
 #include "cuda_runtime.h"
 #include "runtime_internal.h"
 
+#include <cmath>
 #include <mutex>
 #include <new>
 #include <random>
@@ -25,6 +26,13 @@ extern "C" int cumetalRuntimeIsDevicePointer(const void* ptr);
 
 namespace {
 constexpr int kCurandCompatVersion = 12000;
+
+bool supports_generation(curandRngType_t rng_type) {
+    // CURAND_RNG_PSEUDO_DEFAULT is CuMetal's documented compatibility stream.
+    // Named NVIDIA algorithms must not silently return a different bitstream.
+    return rng_type == CURAND_RNG_PSEUDO_DEFAULT ||
+           rng_type == CURAND_RNG_PSEUDO_MTGP32;
+}
 
 curandStatus_t create_generator(curandGenerator_t* generator,
                                 curandRngType_t rng_type,
@@ -73,6 +81,7 @@ template <typename Output, typename Operation>
 curandStatus_t dispatch_generation(curandGenerator_t generator,
                                    Output* output_ptr,
                                    Operation operation) {
+    if (!supports_generation(generator->rng_type)) return CURAND_STATUS_TYPE_ERROR;
     if (!generator->host_generator && cumetalRuntimeIsDevicePointer(output_ptr) == 0) {
         return CURAND_STATUS_TYPE_ERROR;
     }
@@ -239,9 +248,10 @@ curandStatus_t curandGenerateNormal(curandGenerator_t generator,
     if (output_ptr == nullptr && num > 0) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
-    if (stddev <= 0.0f) {
+    if (!std::isfinite(mean) || !std::isfinite(stddev) || stddev <= 0.0f) {
         return CURAND_STATUS_OUT_OF_RANGE;
     }
+    if ((num & 1U) != 0) return CURAND_STATUS_LENGTH_NOT_MULTIPLE;
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
@@ -266,9 +276,10 @@ curandStatus_t curandGenerateNormalDouble(curandGenerator_t generator,
     if (output_ptr == nullptr && num > 0) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
-    if (stddev <= 0.0) {
+    if (!std::isfinite(mean) || !std::isfinite(stddev) || stddev <= 0.0) {
         return CURAND_STATUS_OUT_OF_RANGE;
     }
+    if ((num & 1U) != 0) return CURAND_STATUS_LENGTH_NOT_MULTIPLE;
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
@@ -293,9 +304,10 @@ curandStatus_t curandGenerateLogNormal(curandGenerator_t generator,
     if (output_ptr == nullptr && num > 0) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
-    if (stddev <= 0.0f) {
+    if (!std::isfinite(mean) || !std::isfinite(stddev) || stddev <= 0.0f) {
         return CURAND_STATUS_OUT_OF_RANGE;
     }
+    if ((num & 1U) != 0) return CURAND_STATUS_LENGTH_NOT_MULTIPLE;
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
@@ -320,9 +332,10 @@ curandStatus_t curandGenerateLogNormalDouble(curandGenerator_t generator,
     if (output_ptr == nullptr && num > 0) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
-    if (stddev <= 0.0) {
+    if (!std::isfinite(mean) || !std::isfinite(stddev) || stddev <= 0.0) {
         return CURAND_STATUS_OUT_OF_RANGE;
     }
+    if ((num & 1U) != 0) return CURAND_STATUS_LENGTH_NOT_MULTIPLE;
     if (num == 0) {
         return CURAND_STATUS_SUCCESS;
     }
@@ -386,7 +399,7 @@ curandStatus_t curandGeneratePoisson(curandGenerator_t generator,
     if (output_ptr == nullptr && num > 0) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
-    if (lambda <= 0.0) {
+    if (!std::isfinite(lambda) || lambda <= 0.0) {
         return CURAND_STATUS_OUT_OF_RANGE;
     }
     if (num == 0) {
