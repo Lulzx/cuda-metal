@@ -18,6 +18,7 @@
 #include "cufftXt.h"
 
 #include "cufft_metal.h"
+#include "runtime_internal.h"
 
 #include <Accelerate/Accelerate.h>
 
@@ -67,6 +68,8 @@ struct CufftPlanEntry {
     int batch = 1;
     FftLayout input;
     FftLayout output;
+    std::size_t input_elements = 0;
+    std::size_t output_elements = 0;
     cudaStream_t stream = nullptr;
 };
 
@@ -434,10 +437,57 @@ bool layout_from_embed(FftLayout& layout, int rank, const int* embed, int stride
     if (dist > 0) {
         layout.dist = dist;
     } else {
-        long long span = 1;
-        for (int a = 0; a < rank; ++a) span *= layout.embed[a];
-        layout.dist = span * stride;
+        std::size_t span = 1;
+        for (int a = 0; a < rank; ++a) {
+            if (static_cast<std::size_t>(layout.embed[a]) >
+                std::numeric_limits<std::size_t>::max() / span) {
+                return false;
+            }
+            span *= static_cast<std::size_t>(layout.embed[a]);
+        }
+        if (static_cast<std::size_t>(stride) >
+            std::numeric_limits<std::size_t>::max() / span) {
+            return false;
+        }
+        span *= static_cast<std::size_t>(stride);
+        if (span > static_cast<std::size_t>(std::numeric_limits<long long>::max())) {
+            return false;
+        }
+        layout.dist = static_cast<long long>(span);
     }
+    return true;
+}
+
+bool layout_element_count(const FftLayout& layout, int rank, const int* dims, int batch,
+                          std::size_t* count) {
+    std::size_t offset = 0;
+    for (int axis = 0; axis < rank; ++axis) {
+        if (axis > 0) {
+            if (offset != 0 && static_cast<std::size_t>(layout.embed[axis]) >
+                                   std::numeric_limits<std::size_t>::max() / offset) {
+                return false;
+            }
+            offset *= static_cast<std::size_t>(layout.embed[axis]);
+        }
+        const std::size_t coordinate = static_cast<std::size_t>(dims[axis] - 1);
+        if (coordinate > std::numeric_limits<std::size_t>::max() - offset) return false;
+        offset += coordinate;
+    }
+    if (offset != 0 && static_cast<std::size_t>(layout.stride) >
+                           std::numeric_limits<std::size_t>::max() / offset) {
+        return false;
+    }
+    offset *= static_cast<std::size_t>(layout.stride);
+
+    const std::size_t batch_offset = static_cast<std::size_t>(batch - 1);
+    if (static_cast<std::size_t>(layout.dist) > 0 &&
+        batch_offset > std::numeric_limits<std::size_t>::max() /
+                           static_cast<std::size_t>(layout.dist)) {
+        return false;
+    }
+    const std::size_t batch_base = batch_offset * static_cast<std::size_t>(layout.dist);
+    if (offset >= std::numeric_limits<std::size_t>::max() - batch_base) return false;
+    *count = batch_base + offset + 1;
     return true;
 }
 
@@ -487,6 +537,12 @@ static cufftResult make_plan(cufftHandle h, int rank, const int* n, cufftType ty
         !layout_from_embed(output, rank, onembed, ostride, odist, output_dims)) {
         return CUFFT_INVALID_VALUE;
     }
+    std::size_t input_elements = 0;
+    std::size_t output_elements = 0;
+    if (!layout_element_count(input, rank, input_dims, batch, &input_elements) ||
+        !layout_element_count(output, rank, output_dims, batch, &output_elements)) {
+        return CUFFT_INVALID_SIZE;
+    }
 
     p->type = type;
     p->rank = rank;
@@ -494,6 +550,8 @@ static cufftResult make_plan(cufftHandle h, int rank, const int* n, cufftType ty
     p->batch = batch;
     p->input = input;
     p->output = output;
+    p->input_elements = input_elements;
+    p->output_elements = output_elements;
     if (workSize != nullptr) {
         *workSize = 0;
     }
@@ -503,6 +561,24 @@ static cufftResult make_plan(cufftHandle h, int rank, const int* n, cufftType ty
 cufftResult synchronize_plan_stream(const CufftPlanEntry& plan) {
     return cudaStreamSynchronize(plan.stream) == cudaSuccess ? CUFFT_SUCCESS
                                                               : CUFFT_EXEC_FAILED;
+}
+
+cufftResult validate_execution_buffers(const CufftPlanEntry& plan, const void* input,
+                                       std::size_t input_element_size, const void* output,
+                                       std::size_t output_element_size) {
+    cumetal::rt::AllocationTable::ResolvedAllocation input_allocation;
+    cumetal::rt::AllocationTable::ResolvedAllocation output_allocation;
+    if (!cumetal::rt::resolve_allocation_for_pointer(input, &input_allocation) ||
+        input_allocation.kind != cumetal::rt::AllocationKind::kDevice ||
+        !cumetal::rt::resolve_allocation_for_pointer(output, &output_allocation) ||
+        output_allocation.kind != cumetal::rt::AllocationKind::kDevice) {
+        return CUFFT_INVALID_VALUE;
+    }
+    if (plan.input_elements > input_allocation.remaining_size / input_element_size ||
+        plan.output_elements > output_allocation.remaining_size / output_element_size) {
+        return CUFFT_INVALID_VALUE;
+    }
+    return CUFFT_SUCCESS;
 }
 
 // ── Metal dispatch ───────────────────────────────────────────────────────────
@@ -587,10 +663,13 @@ cufftResult cufftSetStream(cufftHandle plan, cudaStream_t stream) {
     return CUFFT_SUCCESS;
 }
 
-cufftResult cufftGetSize(cufftHandle /*plan*/, size_t* workSize) {
+cufftResult cufftGetSize(cufftHandle plan, size_t* workSize) {
     if (workSize == nullptr) {
         return CUFFT_INVALID_VALUE;
     }
+    CufftState& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (s.get(plan) == nullptr) return CUFFT_INVALID_PLAN;
     *workSize = 0;
     return CUFFT_SUCCESS;
 }
@@ -603,7 +682,12 @@ cufftResult cufftPlan1d(cufftHandle* plan, int nx, cufftType type, int batch) {
         return r;
     }
     int n[1] = {nx};
-    return make_plan(*plan, 1, n, type, batch, nullptr, 1, 0, nullptr, 1, 0, nullptr);
+    r = make_plan(*plan, 1, n, type, batch, nullptr, 1, 0, nullptr, 1, 0, nullptr);
+    if (r != CUFFT_SUCCESS) {
+        cufftDestroy(*plan);
+        *plan = 0;
+    }
+    return r;
 }
 
 cufftResult cufftPlan2d(cufftHandle* plan, int nx, int ny, cufftType type) {
@@ -612,7 +696,12 @@ cufftResult cufftPlan2d(cufftHandle* plan, int nx, int ny, cufftType type) {
         return r;
     }
     int n[2] = {nx, ny};
-    return make_plan(*plan, 2, n, type, 1, nullptr, 1, 0, nullptr, 1, 0, nullptr);
+    r = make_plan(*plan, 2, n, type, 1, nullptr, 1, 0, nullptr, 1, 0, nullptr);
+    if (r != CUFFT_SUCCESS) {
+        cufftDestroy(*plan);
+        *plan = 0;
+    }
+    return r;
 }
 
 cufftResult cufftPlan3d(cufftHandle* plan, int nx, int ny, int nz, cufftType type) {
@@ -621,7 +710,12 @@ cufftResult cufftPlan3d(cufftHandle* plan, int nx, int ny, int nz, cufftType typ
         return r;
     }
     int n[3] = {nx, ny, nz};
-    return make_plan(*plan, 3, n, type, 1, nullptr, 1, 0, nullptr, 1, 0, nullptr);
+    r = make_plan(*plan, 3, n, type, 1, nullptr, 1, 0, nullptr, 1, 0, nullptr);
+    if (r != CUFFT_SUCCESS) {
+        cufftDestroy(*plan);
+        *plan = 0;
+    }
+    return r;
 }
 
 cufftResult cufftPlanMany(cufftHandle* plan,
@@ -639,8 +733,13 @@ cufftResult cufftPlanMany(cufftHandle* plan,
     if (r != CUFFT_SUCCESS) {
         return r;
     }
-    return make_plan(*plan, rank, n, type, batch, inembed, istride, idist, onembed,
-                     ostride, odist, nullptr);
+    r = make_plan(*plan, rank, n, type, batch, inembed, istride, idist, onembed,
+                  ostride, odist, nullptr);
+    if (r != CUFFT_SUCCESS) {
+        cufftDestroy(*plan);
+        *plan = 0;
+    }
+    return r;
 }
 
 cufftResult cufftMakePlan1d(cufftHandle plan, int nx, cufftType type, int batch,
@@ -770,6 +869,12 @@ cufftResult cufftExecC2C(cufftHandle plan, cufftComplex* idata, cufftComplex* od
     if (p->type != CUFFT_C2C) {
         return CUFFT_INVALID_TYPE;
     }
+    if (direction != CUFFT_FORWARD && direction != CUFFT_INVERSE) {
+        return CUFFT_INVALID_VALUE;
+    }
+    cufftResult validation = validate_execution_buffers(
+        *p, idata, sizeof(cufftComplex), odata, sizeof(cufftComplex));
+    if (validation != CUFFT_SUCCESS) return validation;
     if (try_exec_metal(*p, fft_metal::Kind::kC2C, idata, odata,
                        direction == CUFFT_INVERSE)) {
         return CUFFT_SUCCESS;
@@ -789,6 +894,9 @@ cufftResult cufftExecR2C(cufftHandle plan, cufftReal* idata, cufftComplex* odata
     if (p->type != CUFFT_R2C) {
         return CUFFT_INVALID_TYPE;
     }
+    cufftResult validation = validate_execution_buffers(
+        *p, idata, sizeof(cufftReal), odata, sizeof(cufftComplex));
+    if (validation != CUFFT_SUCCESS) return validation;
     if (try_exec_metal(*p, fft_metal::Kind::kR2C, idata, odata, false)) {
         return CUFFT_SUCCESS;
     }
@@ -807,6 +915,9 @@ cufftResult cufftExecC2R(cufftHandle plan, cufftComplex* idata, cufftReal* odata
     if (p->type != CUFFT_C2R) {
         return CUFFT_INVALID_TYPE;
     }
+    cufftResult validation = validate_execution_buffers(
+        *p, idata, sizeof(cufftComplex), odata, sizeof(cufftReal));
+    if (validation != CUFFT_SUCCESS) return validation;
     if (try_exec_metal(*p, fft_metal::Kind::kC2R, idata, odata, true)) {
         return CUFFT_SUCCESS;
     }
@@ -826,6 +937,12 @@ cufftResult cufftExecZ2Z(cufftHandle plan, cufftDoubleComplex* idata,
     if (p->type != CUFFT_Z2Z) {
         return CUFFT_INVALID_TYPE;
     }
+    if (direction != CUFFT_FORWARD && direction != CUFFT_INVERSE) {
+        return CUFFT_INVALID_VALUE;
+    }
+    cufftResult validation = validate_execution_buffers(
+        *p, idata, sizeof(cufftDoubleComplex), odata, sizeof(cufftDoubleComplex));
+    if (validation != CUFFT_SUCCESS) return validation;
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
     return exec_c2c_nd<double, cufftDoubleComplex>(*p, idata, odata, direction);
@@ -842,6 +959,9 @@ cufftResult cufftExecD2Z(cufftHandle plan, cufftDoubleReal* idata,
     if (p->type != CUFFT_D2Z) {
         return CUFFT_INVALID_TYPE;
     }
+    cufftResult validation = validate_execution_buffers(
+        *p, idata, sizeof(cufftDoubleReal), odata, sizeof(cufftDoubleComplex));
+    if (validation != CUFFT_SUCCESS) return validation;
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
     return exec_r2c_nd<double, cufftDoubleReal, cufftDoubleComplex>(*p, idata, odata);
@@ -858,13 +978,19 @@ cufftResult cufftExecZ2D(cufftHandle plan, cufftDoubleComplex* idata,
     if (p->type != CUFFT_Z2D) {
         return CUFFT_INVALID_TYPE;
     }
+    cufftResult validation = validate_execution_buffers(
+        *p, idata, sizeof(cufftDoubleComplex), odata, sizeof(cufftDoubleReal));
+    if (validation != CUFFT_SUCCESS) return validation;
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
     return exec_c2r_nd<double, cufftDoubleReal, cufftDoubleComplex>(*p, idata, odata);
 }
 
 // SetWorkArea — on UMA, vDSP manages its own scratch; no external workspace is used.
-cufftResult cufftSetWorkArea(cufftHandle /*plan*/, void* /*workArea*/) {
+cufftResult cufftSetWorkArea(cufftHandle plan, void* /*workArea*/) {
+    CufftState& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (s.get(plan) == nullptr) return CUFFT_INVALID_PLAN;
     return CUFFT_SUCCESS;
 }
 
@@ -873,20 +999,37 @@ cufftResult cufftSetWorkArea(cufftHandle /*plan*/, void* /*workArea*/) {
 // On this implementation vDSP manages scratch internally, so 0 is a valid answer,
 // but we return a small non-zero estimate to satisfy callers that test workSize > 0.
 
-static size_t estimate_work_bytes(size_t total_complex_elements, cufftType type) {
+static bool valid_transform_type(cufftType type) {
+    return type == CUFFT_R2C || type == CUFFT_C2R || type == CUFFT_C2C ||
+           type == CUFFT_D2Z || type == CUFFT_Z2D || type == CUFFT_Z2Z;
+}
+
+static bool estimate_work_bytes(size_t total_complex_elements, cufftType type,
+                                size_t* work_size) {
     // Two split-real buffers of float/double per element, plus vDSP setup overhead.
     size_t elem_bytes = (type == CUFFT_D2Z || type == CUFFT_Z2D || type == CUFFT_Z2Z)
                             ? sizeof(double)
                             : sizeof(float);
-    return total_complex_elements * elem_bytes * 2 + 4096;
+    const size_t bytes_per_element = elem_bytes * 2;
+    if (total_complex_elements >
+        (std::numeric_limits<size_t>::max() - 4096) / bytes_per_element) {
+        return false;
+    }
+    *work_size = total_complex_elements * bytes_per_element + 4096;
+    return true;
 }
 
 cufftResult cufftEstimate1d(int nx, cufftType type, int batch, size_t* workSize) {
     if (workSize == nullptr || nx <= 0 || batch <= 0) {
         return CUFFT_INVALID_VALUE;
     }
-    *workSize = estimate_work_bytes(static_cast<size_t>(nx) * static_cast<size_t>(batch),
-                                    type);
+    if (!valid_transform_type(type)) return CUFFT_INVALID_TYPE;
+    if (static_cast<size_t>(batch) >
+        std::numeric_limits<size_t>::max() / static_cast<size_t>(nx)) {
+        return CUFFT_INVALID_SIZE;
+    }
+    const size_t total = static_cast<size_t>(nx) * static_cast<size_t>(batch);
+    if (!estimate_work_bytes(total, type, workSize)) return CUFFT_INVALID_SIZE;
     return CUFFT_SUCCESS;
 }
 
@@ -894,7 +1037,14 @@ cufftResult cufftEstimate2d(int nx, int ny, cufftType type, size_t* workSize) {
     if (workSize == nullptr || nx <= 0 || ny <= 0) {
         return CUFFT_INVALID_VALUE;
     }
-    *workSize = estimate_work_bytes(static_cast<size_t>(nx) * static_cast<size_t>(ny), type);
+    if (!valid_transform_type(type)) return CUFFT_INVALID_TYPE;
+    const size_t x = static_cast<size_t>(nx);
+    if (static_cast<size_t>(ny) > std::numeric_limits<size_t>::max() / x) {
+        return CUFFT_INVALID_SIZE;
+    }
+    if (!estimate_work_bytes(x * static_cast<size_t>(ny), type, workSize)) {
+        return CUFFT_INVALID_SIZE;
+    }
     return CUFFT_SUCCESS;
 }
 
@@ -902,8 +1052,16 @@ cufftResult cufftEstimate3d(int nx, int ny, int nz, cufftType type, size_t* work
     if (workSize == nullptr || nx <= 0 || ny <= 0 || nz <= 0) {
         return CUFFT_INVALID_VALUE;
     }
-    *workSize = estimate_work_bytes(
-        static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(nz), type);
+    if (!valid_transform_type(type)) return CUFFT_INVALID_TYPE;
+    size_t total = static_cast<size_t>(nx);
+    for (int dimension : {ny, nz}) {
+        if (static_cast<size_t>(dimension) >
+            std::numeric_limits<size_t>::max() / total) {
+            return CUFFT_INVALID_SIZE;
+        }
+        total *= static_cast<size_t>(dimension);
+    }
+    if (!estimate_work_bytes(total, type, workSize)) return CUFFT_INVALID_SIZE;
     return CUFFT_SUCCESS;
 }
 
@@ -911,15 +1069,19 @@ cufftResult cufftEstimateMany(int rank, int* n,
                                int* /*inembed*/, int /*istride*/, int /*idist*/,
                                int* /*onembed*/, int /*ostride*/, int /*odist*/,
                                cufftType type, int batch, size_t* workSize) {
-    if (workSize == nullptr || n == nullptr || rank <= 0 || batch <= 0) {
+    if (workSize == nullptr || n == nullptr || rank < 1 || rank > 3 || batch <= 0) {
         return CUFFT_INVALID_VALUE;
     }
+    if (!valid_transform_type(type)) return CUFFT_INVALID_TYPE;
     size_t total = static_cast<size_t>(batch);
     for (int i = 0; i < rank; ++i) {
         if (n[i] <= 0) return CUFFT_INVALID_VALUE;
+        if (static_cast<size_t>(n[i]) > std::numeric_limits<size_t>::max() / total) {
+            return CUFFT_INVALID_SIZE;
+        }
         total *= static_cast<size_t>(n[i]);
     }
-    *workSize = estimate_work_bytes(total, type);
+    if (!estimate_work_bytes(total, type, workSize)) return CUFFT_INVALID_SIZE;
     return CUFFT_SUCCESS;
 }
 

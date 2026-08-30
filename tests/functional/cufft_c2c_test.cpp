@@ -49,6 +49,40 @@ int main() {
         return 1;
     }
 
+    cufftComplex* d_short = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&d_short), (N - 1) * sizeof(cufftComplex)) !=
+            cudaSuccess ||
+        cufftExecC2C(plan, d_short, d_out, CUFFT_FORWARD) != CUFFT_INVALID_VALUE ||
+        cufftExecC2C(plan, d_in + 1, d_out, CUFFT_FORWARD) != CUFFT_INVALID_VALUE ||
+        cufftExecC2C(plan, d_in, d_short, CUFFT_FORWARD) != CUFFT_INVALID_VALUE ||
+        cufftExecC2C(plan, h_in.data(), d_out, CUFFT_FORWARD) != CUFFT_INVALID_VALUE ||
+        cufftExecC2C(plan, d_in, d_out, 0) != CUFFT_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: cuFFT execution range validation\n");
+        return 1;
+    }
+    cudaFree(d_short);
+
+    int span_n[1] = {4};
+    cufftHandle span_plan = 0;
+    cufftComplex* d_span_short = nullptr;
+    if (cufftPlanMany(&span_plan, 1, span_n, nullptr, 2, 10, nullptr, 2, 10,
+                      CUFFT_C2C, 2) != CUFFT_SUCCESS ||
+        cudaMalloc(reinterpret_cast<void**>(&d_span_short), 16 * sizeof(cufftComplex)) !=
+            cudaSuccess ||
+        cufftExecC2C(span_plan, d_span_short, d_out, CUFFT_FORWARD) != CUFFT_INVALID_VALUE ||
+        cufftDestroy(span_plan) != CUFFT_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cuFFT strided batch span validation\n");
+        return 1;
+    }
+    cudaFree(d_span_short);
+
+    cufftHandle failed_plan = -1;
+    if (cufftPlan1d(&failed_plan, 0, CUFFT_C2C, 1) != CUFFT_INVALID_SIZE ||
+        failed_plan != 0 || cufftDestroy(failed_plan) != CUFFT_INVALID_PLAN) {
+        std::fprintf(stderr, "FAIL: failed cuFFT plan lifecycle\n");
+        return 1;
+    }
+
     cufftHandle xt_plan = 0;
     long long xt_n[1] = {N};
     long long xt_embed[1] = {N};

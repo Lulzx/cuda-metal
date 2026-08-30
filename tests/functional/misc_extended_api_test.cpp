@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <limits>
 
 static int g_failures = 0;
 
@@ -115,6 +116,12 @@ static void test_cufft_estimate_and_set_work_area() {
           "cufftEstimate1d invalid nx");
     CHECK(cufftEstimate1d(1024, CUFFT_C2C, 1, nullptr) == CUFFT_INVALID_VALUE,
           "cufftEstimate1d null workSize");
+    CHECK(cufftEstimate1d(1024, static_cast<cufftType>(-1), 1, &ws) == CUFFT_INVALID_TYPE,
+          "cufftEstimate1d invalid type");
+    const int max_int = std::numeric_limits<int>::max();
+    CHECK(cufftEstimate3d(max_int, max_int, max_int, CUFFT_Z2Z, &ws) ==
+              CUFFT_INVALID_SIZE,
+          "cufftEstimate3d overflow");
 
     // SetWorkArea: create a real plan and call it.
     cufftHandle plan = -1;
@@ -124,6 +131,9 @@ static void test_cufft_estimate_and_set_work_area() {
     static float dummy_buf[1];
     CHECK(cufftSetWorkArea(plan, static_cast<void*>(dummy_buf)) == CUFFT_SUCCESS,
           "cufftSetWorkArea");
+    CHECK(cufftSetWorkArea(-1, static_cast<void*>(dummy_buf)) == CUFFT_INVALID_PLAN,
+          "cufftSetWorkArea invalid plan");
+    CHECK(cufftGetSize(-1, &ws) == CUFFT_INVALID_PLAN, "cufftGetSize invalid plan");
     cufftDestroy(plan);
 }
 

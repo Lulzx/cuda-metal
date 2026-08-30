@@ -42,7 +42,10 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   Bluestein on the same kernels for lengths that are not a power of two; grids
   below a dispatch-cost threshold and every double-precision entry point stay on
   the CPU, since Metal has no FP64. Still absent: callbacks, multi-GPU, the rest
-  of the Xt surface, and a GPU path for the double transforms.
+  of the Xt surface, and a GPU path for the double transforms. Implemented
+  execution rejects untracked, host, interior-short, and otherwise undersized
+  input/output spans before dispatch; caller-supplied work areas are accepted
+  for API compatibility but unused because both backends manage scratch.
 - **cuSPARSE/cuSOLVER:** selected operations only; descriptor, format, solver,
   analysis/reuse, and datatype matrices remain incomplete. cuSPARSE host/device
   scalar pointer mode is covered for the implemented SpMV, SpMM, legacy CSR

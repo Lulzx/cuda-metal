@@ -36,6 +36,10 @@ full NVIDIA library implementations.
   (Stockham autosort, Bluestein for non-power-of-two lengths); `CUMETAL_FFT_METAL`
   selects auto/always/never and `CUMETAL_DEBUG_FFT` reports the routing. Small
   grids and the double-precision forms use the Accelerate/Bluestein CPU path.
+  Planning rejects overflowing advanced layouts without retaining a partial
+  handle, and execution validates the full typed input/output allocation spans
+  (including batch distances, padding, strides, and interior pointers) before
+  either backend reads or writes unified memory.
 - **cuSPARSE:** selected dense/sparse descriptors and operations, including GPU
   paths used by the HiGHS/cuPDLP-C integration. The implemented SpMV, SpMM,
   legacy CSR SpMV, and SpSV scalar inputs honor host/device pointer mode;
