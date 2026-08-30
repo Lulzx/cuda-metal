@@ -155,6 +155,56 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // The sidecar parse is cached and revalidated on (mtime, size), so the case above -- whose
+    // fixture happens to differ in length from the real sidecar -- only proves the size half of
+    // that check. Rewrite it in place at *identical* byte length and confirm the launch still sees
+    // the new contents; otherwise a stale cache entry would silently allocate the wrong amount of
+    // static threadgroup memory.
+    const cudaError_t restored_status =
+        cudaLaunchKernel(&kernel, dim3(1), dim3(kThreads), args, 0, nullptr);
+    if (restored_status != cudaSuccess) {
+        std::fprintf(stderr,
+                     "FAIL: restored ABI sidecar returned %d, expected cudaSuccess\n",
+                     static_cast<int>(restored_status));
+        return 1;
+    }
+    std::string same_length_corruption = saved_sidecar.str();
+    const std::string kVersionLine = "CUMETAL_ABI_V1";
+    if (same_length_corruption.compare(0, kVersionLine.size(), kVersionLine) != 0) {
+        std::fprintf(stderr, "FAIL: sidecar does not start with %s\n", kVersionLine.c_str());
+        return 1;
+    }
+    same_length_corruption[kVersionLine.size() - 1] = '9';  // CUMETAL_ABI_V1 -> CUMETAL_ABI_V9
+    if (same_length_corruption.size() != saved_sidecar.str().size()) {
+        std::fprintf(stderr, "FAIL: same-length fixture changed the sidecar size\n");
+        return 1;
+    }
+    {
+        std::ofstream corrupted(sidecar_path, std::ios::trunc);
+        corrupted << same_length_corruption;
+        if (!corrupted) {
+            std::fprintf(stderr, "FAIL: unable to write same-length sidecar fixture\n");
+            return 1;
+        }
+    }
+    const cudaError_t same_length_status =
+        cudaLaunchKernel(&kernel, dim3(1), dim3(kThreads), args, 0, nullptr);
+    {
+        std::ofstream restored(sidecar_path, std::ios::trunc);
+        restored << saved_sidecar.str();
+        if (!restored) {
+            std::fprintf(stderr, "FAIL: unable to restore source ABI sidecar\n");
+            return 1;
+        }
+    }
+    if (same_length_status != cudaErrorInvalidValue) {
+        std::fprintf(stderr,
+                     "FAIL: same-length malformed ABI sidecar returned %d, expected "
+                     "cudaErrorInvalidValue (stale sidecar cache?)\n",
+                     static_cast<int>(same_length_status));
+        return 1;
+    }
+
     if (cudaFree(device_output) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaFree\n");
         return 1;

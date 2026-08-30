@@ -22,6 +22,7 @@
 #include <dlfcn.h>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <new>
 #include <string>
@@ -31,6 +32,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 struct CUstream_st {};
@@ -127,7 +129,24 @@ struct InlineAbiCacheEntry {
     off_t size = 0;
 };
 
-// Caches the sidecar parse per metallib+kernel, revalidated via stat() so an on-disk change is still picked up.
+inline struct timespec sidecar_mtime(const struct stat& st) {
+#if defined(__APPLE__)
+    return st.st_mtimespec;
+#else
+    return st.st_mtim;
+#endif
+}
+
+// Caches the sidecar parse per (metallib, kernel), revalidated via stat() so an on-disk change is
+// still picked up -- an existing test rewrites a sidecar mid-run and must see the new contents.
+//
+// The revalidation key is (presence, mtime, size). That is exact on APFS, whose timestamps are
+// nanosecond-resolution: two back-to-back rewrites of the same file always land on distinct mtimes,
+// so a same-size in-place edit still invalidates. It would NOT be exact on a volume with coarse
+// (1s/2s) timestamps -- an SMB/NFS mount or a FAT/exFAT disk -- where a same-size rewrite inside one
+// tick would serve a stale shared-byte count, i.e. silently allocate the wrong amount of static
+// threadgroup memory. CuMetal is Apple-Silicon-only and metallibs live in APFS build trees, so this
+// is accepted rather than hashing the contents (which would defeat the point of the cache).
 bool load_inline_static_shared_bytes(const char* metallib_path,
                                      const char* expected_kernel,
                                      std::size_t* out_bytes) {
@@ -137,30 +156,39 @@ bool load_inline_static_shared_bytes(const char* metallib_path,
     const std::string sidecar_path = std::string(metallib_path) + ".cumetal-abi";
     struct stat st {};
     const bool file_present = ::stat(sidecar_path.c_str(), &st) == 0;
+    const struct timespec mtime = sidecar_mtime(st);
 
     static std::mutex cache_mutex;
-    static std::unordered_map<std::string, InlineAbiCacheEntry> cache;
-    const std::string cache_key = std::string(metallib_path) + "::" + expected_kernel;
+    // Keyed on the pair rather than a concatenation: no separator can collide with a path or a
+    // kernel name that happens to contain it.
+    static std::map<std::pair<std::string, std::string>, InlineAbiCacheEntry> cache;
+    const std::pair<std::string, std::string> cache_key(metallib_path, expected_kernel);
 
-    std::lock_guard<std::mutex> lock(cache_mutex);
-    const auto found = cache.find(cache_key);
-    if (found != cache.end() && found->second.file_present == file_present &&
-        (!file_present ||
-         (found->second.mtime.tv_sec == st.st_mtimespec.tv_sec &&
-          found->second.mtime.tv_nsec == st.st_mtimespec.tv_nsec &&
-          found->second.size == st.st_size))) {
-        *out_bytes = found->second.shared_bytes;
-        return found->second.valid;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        const auto found = cache.find(cache_key);
+        if (found != cache.end() && found->second.file_present == file_present &&
+            (!file_present ||
+             (found->second.mtime.tv_sec == mtime.tv_sec &&
+              found->second.mtime.tv_nsec == mtime.tv_nsec && found->second.size == st.st_size))) {
+            *out_bytes = found->second.shared_bytes;
+            return found->second.valid;
+        }
     }
 
+    // Parsed outside the lock: a cold miss on one kernel must not serialize launches of every other
+    // kernel. Two threads racing the same miss both parse and store the same result, which is fine.
     InlineAbiCacheEntry entry;
     entry.file_present = file_present;
-    entry.mtime = st.st_mtimespec;
+    entry.mtime = mtime;
     entry.size = st.st_size;
     entry.valid =
         load_inline_static_shared_bytes_uncached(metallib_path, expected_kernel, &entry.shared_bytes);
     *out_bytes = entry.shared_bytes;
-    cache[cache_key] = entry;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        cache[cache_key] = entry;
+    }
     return entry.valid;
 }
 }  // namespace
