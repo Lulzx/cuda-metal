@@ -24,10 +24,14 @@
 
 Tested graph capture/replay includes an event-linked two-stream dependency with
 ordered numerical replay, stale-event lifetime rejection, and conflicting-
-capture rejection. Clone/update and memory-node lifetimes still do not cover all
-node types or multi-stream topologies. Virtual/physical allocation reuse,
-allocator caching/release-threshold behavior, and advanced update cases remain
-incomplete.
+capture rejection. Explicit graph nodes also preserve pointer-backed pitched 3D
+copy geometry and pitched 1/2/4-byte memset values; malformed pitch, extent,
+element-size, overflow, dependency, and creation-flag inputs are rejected.
+Array-backed graph-copy replay is supported by the runtime path but lacks the
+same focused numerical graph test. Clone/update and memory-node lifetimes still
+do not cover all node types or multi-stream topologies. Virtual/physical
+allocation reuse, allocator caching/release-threshold behavior, and advanced
+update cases remain incomplete.
 
 ## Memory and pointers
 
