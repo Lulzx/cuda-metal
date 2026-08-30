@@ -4421,6 +4421,17 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
             " " + std::to_string(symbol.byte_size) + " " +
             std::to_string(symbol.alignment) + " " +
             std::to_string(symbol.constant_offset));
+        if (!symbol.initializer.empty()) {
+            static constexpr char kHex[] = "0123456789abcdef";
+            std::string initializer =
+                "cumetal-native-symbol-initializer: " + symbol.name + " ";
+            initializer.reserve(initializer.size() + symbol.initializer.size() * 2);
+            for (const std::uint8_t byte : symbol.initializer) {
+                initializer.push_back(kHex[byte >> 4]);
+                initializer.push_back(kHex[byte & 0x0f]);
+            }
+            result.ast.comments.push_back(std::move(initializer));
+        }
     }
     result.ast.structs = collect_msl_structs(metal_module);
     for (const ir::GlobalConstant& global : metal_module.global_constants) {

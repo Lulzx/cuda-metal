@@ -34,6 +34,8 @@ Unqualified helper pointers are specialized from direct call sites, including
 Clang 21-23 shared-memory arguments; predicated barriers fail explicitly.
 Module-private `__const_$` byte arrays emitted by CUDA Clang for promoted
 aggregate literals are embedded as immutable MSL data with exact zero-fill.
+Visible initialized writable PTX globals use registration-backed persistent
+buffers; native AOT and PTX registration seed their exact source bytes once.
 Recursion, indirect calls, multi-result ABI forms, and other unsupported signatures
 still fail during strict PTX lowering. The frontend continues to prefer
 structured branches with `-fno-jump-tables`; PTX inputs that contain

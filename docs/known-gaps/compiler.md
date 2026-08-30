@@ -8,8 +8,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/27 | **27/27** |
-| PTX / `--cuda-device` | **26/27** | **27/27** |
+| direct `.cu` | 0/28 | **28/28** |
+| PTX / `--cuda-device` | **27/28** | **28/28** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
@@ -32,10 +32,10 @@ Remaining typed-path blockers include combinations of:
   signatures, indirect calls, and general double-signature calls;
 - nested or partially initialized aggregate insertion and extraction beyond
   the proven flat typed-struct path;
-- initialized writable PTX `.global` arrays beyond the proven uninitialized
-  registration-backed symbols; module-private CUDA Clang `__const_$` aggregate
-  literals are embedded read-only, while ordinary initialized writable globals
-  fail explicitly instead of being reclassified as constants;
+- initialized writable PTX `.global` forms beyond the proven visible numeric
+  byte-array registration path; module-private CUDA Clang `__const_$` aggregate
+  literals are embedded read-only, while module-private initialized writable
+  globals without a host registration symbol fail explicitly;
 - FP64 modes and operations beyond the numerically proven `fast48`
   arithmetic/storage/comparison/rounding corpus, including observable IEEE
   exception status;
@@ -45,7 +45,7 @@ Remaining typed-path blockers include combinations of:
 The old direct legacy `.cu` path is textual qualifier stripping and fails this
 corpus. It is not a correctness fallback.
 
-The exact 25-project in-tree numerical corpus passes both typed PTX and direct
+The exact 26-project in-tree numerical corpus passes both typed PTX and direct
 native AOT on Apple M4 Pro with workload specializations disabled. This closes
 the reviewed corpus, not the residual combinations listed above.
 

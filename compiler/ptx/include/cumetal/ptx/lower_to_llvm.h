@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -113,6 +115,10 @@ using ExternalGlobalSymbol = ExternalConstantSymbol;
 std::vector<ExternalGlobalSymbol> find_referenced_external_global_symbols(
     std::string_view ptx,
     std::string_view entry_name);
+
+std::optional<std::vector<std::uint8_t>> find_initialized_global_bytes(
+    std::string_view ptx,
+    std::string_view symbol);
 
 LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx,
                                        const LowerToLlvmOptions& options = {});

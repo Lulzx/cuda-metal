@@ -2956,10 +2956,24 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         const bool clang_promoted_literal =
             array.module_private && starts_with(array.name, "__const_$");
         if (!array.constant_space && !clang_promoted_literal) {
-            importer.result.error =
-                "referenced initialized writable PTX global '" + array.name +
-                "' requires registration-backed semantics";
-            return importer.result;
+            if (array.module_private) {
+                importer.result.error =
+                    "module-private initialized writable PTX global '" +
+                    array.name + "' has no registration-backed host symbol";
+                return importer.result;
+            }
+            // Ordinary initialized `.global` storage is mutable and must not
+            // be embedded as a Metal constant. Give it the same hidden buffer
+            // ABI as an uninitialized CUDA device symbol; registration copies
+            // the host shadow's initializer into persistent Metal storage once
+            // when the module is registered.
+            importer.module_global_symbols.push_back({
+                .name = array.name,
+                .offset = 0,
+                .byte_size = array.bytes.size(),
+                .alignment = array.alignment,
+            });
+            continue;
         }
         importer.result.module.global_constants.push_back({
             .name = array.name,

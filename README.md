@@ -77,16 +77,17 @@ compiler paths and their selection policy are in
   waivers and zero nonpassing entries on the 2026-08-30 rerun. Its cooperative
   CG case now gates both device residual and the independent host equation
   error, so a partial-warp false positive cannot count as a pass.
-- With CUDA Clang 21-23, the reviewed 27-file production-metallib matrix is
-  **27/27** for direct `.cu` through typed CuMetal IR, **27/27** for typed PTX,
-  and **26/27** for the legacy PTX backend. These are compile results, not
+- With CUDA Clang 21-23, the reviewed 28-file production-metallib matrix is
+  **28/28** for direct `.cu` through typed CuMetal IR, **28/28** for typed PTX,
+  and **27/28** for the legacy PTX backend. These are compile results, not
   numerical runtime proof.
-- The exact in-tree 25-project corpus passes numerical Apple-GPU execution both
+- The exact in-tree 26-project corpus passes numerical Apple-GPU execution both
   through typed PTX and through direct native AOT, with workload
   specializations disabled. The native path embeds metallibs and performs no
   first-launch PTX JIT. The aggregate-call probe also covers CUDA Clang 21-23
   promoted module-private aggregate literals with exact embedded bytes; the
-  barrier probe covers a generic helper pointer specialized to shared memory.
+  barrier probe covers a generic helper pointer specialized to shared memory,
+  and initialized writable globals preserve their source bytes and mutations.
 - Vector add, SAXPY, reduction, selected matrix/library operations, typed
   direct/PTX FP64, 32-bit atomics, lock-backed 64-bit typed-PTX atomics, fences,
   and bounded device `printf`, typed direct

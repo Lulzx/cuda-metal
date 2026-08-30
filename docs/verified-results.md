@@ -25,9 +25,9 @@ device symbols end to end: bounded host-to/from-symbol copies, a 27,904-byte
 constant buffer, symbol address/size queries, and persistent GPU updates across
 two launches.
 
-On 2026-08-30, the exact manifest-controlled 25-project corpus passed on Apple
-M4 Pro with workload specializations disabled: 25/25 through typed PTX and
-25/25 through direct native AOT. The device-call probes pass pointer
+On 2026-08-30, the exact manifest-controlled 26-project corpus passed on Apple
+M4 Pro with workload specializations disabled: 26/26 through typed PTX and
+26/26 through direct native AOT. The device-call probes pass pointer
 arguments and offsets through a scalar-returning noinline helper with a loop,
 pointer merge, and early exit, and preserve every field through a flat 12-byte
 aggregate return followed by a by-value aggregate argument. The same probe
@@ -35,12 +35,16 @@ numerically consumes a CUDA Clang 21-23 module-private promoted aggregate
 literal whose exact initializer and trailing zero bytes are embedded in the
 metallib. The barrier-CFG probe specializes an unqualified helper pointer to
 shared memory and checks uniform multi-exit barrier paths for all 32 lanes. The
-GGML probe checks its complete output
+initialized-global probe verifies exact nonzero/negative source bytes, mutations
+persisting across two launches, and symbol-copy visibility. Native AOT performs
+that initialization before ABI registration without PTX JIT; PTX registration
+recovers the bytes from the device image rather than its zero-filled host shadow.
+The GGML probe checks its complete output
 operator set; the raytracer performs a 47-value differential preflight and a
 full CPU-reference image comparison. The native-AOT device-`printf` gate also
 checks all 32 coordinate records, dynamic width, a wide scalar, tracked string
 materialization, and a bounded unterminated string. These are numerical/runtime
-results, separate from the 27-file cross-Clang compile matrix.
+results, separate from the 28-file cross-Clang compile matrix.
 
 The reviewed Phase 4 manifest ran 185/185 required functional tests on
 2026-08-29 with zero failures and zero skips. This includes native-AOT numerical
@@ -58,8 +62,8 @@ printed error was `0.000000` and residual was `1.596402e-6`. This also covers a
 warp-tile reduction invoked from only one warp of a larger block and a
 guaranteed-progress occupancy-derived cooperative grid.
 
-The complete Debug/shim-on test inventory then passed 275/275 serially, and a
-clean Debug build with `CUMETAL_ENABLE_BINARY_SHIM=OFF` passed 272/272. Both
+The complete Debug/shim-on test inventory then passed 276/276 serially, and a
+clean Debug build with `CUMETAL_ENABLE_BINARY_SHIM=OFF` passed 273/273. Both
 runs included Phase 4, the 83-sample gate, all six PhysX comparisons, the
 Clang-version/backend matrices, and the typed-PTX and native-AOT numerical
 corpora. These are local Apple M4 Pro results, not recurring CI evidence.

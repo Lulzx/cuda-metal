@@ -577,6 +577,7 @@ struct NativeSourceSymbol {
     std::uint32_t alignment = 1;
     std::uint32_t constant_offset = 0;
     bool constant = false;
+    std::vector<std::uint8_t> initializer;
 };
 
 std::vector<NativeSourceSymbol> parse_native_source_symbols(
@@ -595,6 +596,37 @@ std::vector<NativeSourceSymbol> parse_native_source_symbols(
             .constant_offset = static_cast<std::uint32_t>(std::stoul((*it)[5].str())),
             .constant = (*it)[1].str() == "constant",
         });
+    }
+    const std::regex initializer_record(
+        R"(// cumetal-native-symbol-initializer: ([^ ]+) ([0-9a-fA-F]+))");
+    const auto nibble = [](char value) -> int {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return -1;
+    };
+    for (std::sregex_iterator it(source.begin(), source.end(), initializer_record), end;
+         it != end; ++it) {
+        const std::string name = (*it)[1].str();
+        const std::string hex = (*it)[2].str();
+        const auto symbol = std::find_if(
+            symbols.begin(), symbols.end(),
+            [&](const NativeSourceSymbol& candidate) {
+                return candidate.name == name;
+            });
+        if (symbol == symbols.end() || hex.size() != symbol->size * 2u) continue;
+        std::vector<std::uint8_t> bytes;
+        bytes.reserve(symbol->size);
+        for (std::size_t index = 0; index < hex.size(); index += 2) {
+            const int high = nibble(hex[index]);
+            const int low = nibble(hex[index + 1]);
+            if (high < 0 || low < 0) {
+                bytes.clear();
+                break;
+            }
+            bytes.push_back(static_cast<std::uint8_t>((high << 4) | low));
+        }
+        if (bytes.size() == symbol->size) symbol->initializer = std::move(bytes);
     }
     return symbols;
 }
@@ -739,7 +771,7 @@ std::string native_registration_source(
     std::string_view provenance,
     std::string_view semantic_quality) {
     std::ostringstream out;
-    out << "#include <cumetal_native.h>\n#include <cstdlib>\n\n";
+    out << "#include <cumetal_native.h>\n#include <cstdlib>\n#include <cstring>\n\n";
     for (std::size_t i = 0; i < kernels.size(); ++i) {
         out << "extern \"C\" void cm_stub_" << i << "() asm(\""
             << '_' << kernels[i].stub_symbol << "\");\n";
@@ -754,6 +786,16 @@ std::string native_registration_source(
         out << static_cast<unsigned>(metallib[i]) << ',';
     }
     out << "\n};\n";
+
+    for (std::size_t i = 0; i < symbols.size(); ++i) {
+        if (symbols[i].initializer.empty()) continue;
+        out << "static const unsigned char cm_symbol_initializer_" << i
+            << "[] = {";
+        for (const std::uint8_t byte : symbols[i].initializer) {
+            out << static_cast<unsigned>(byte) << ',';
+        }
+        out << "};\n";
+    }
 
     std::size_t binding_base = 0;
     for (std::size_t i = 0; i < kernels.size(); ++i) {
@@ -840,8 +882,14 @@ std::string native_registration_source(
         out << "};\n";
     }
     out << "static CuMetalModuleHandle cm_module;\n"
-           "__attribute__((constructor)) static void cm_register_module() {\n"
-           "  const CuMetalModuleDescriptor descriptor = {"
+           "__attribute__((constructor)) static void cm_register_module() {\n";
+    for (std::size_t i = 0; i < symbols.size(); ++i) {
+        if (!symbols[i].initializer.empty()) {
+            out << "  std::memcpy(cm_symbol_" << i << ",cm_symbol_initializer_"
+                << i << ',' << symbols[i].size << ");\n";
+        }
+    }
+    out << "  const CuMetalModuleDescriptor descriptor = {"
         << "CUMETAL_NATIVE_ABI_VERSION,cm_metallib,sizeof(cm_metallib),"
         << kernels.size() << ",cm_kernels," << binding_base << ','
         << (binding_base == 0 ? "nullptr" : "cm_bindings") << ",\""
@@ -1382,11 +1430,11 @@ int main(int argc, char** argv) {
 
     // Pick the backend that actually works for this input rather than one global default. The two
     // are complementary, not ranked, and the split follows the frontend feeding them. Measured
-    // over the manifest-controlled 27-file source/sample corpus (see
+    // over the manifest-controlled 28-file source/sample corpus (see
     // tests/cuda_projects/backend_matrix_manifest.txt and docs/compiler-architecture.md):
     //
-    //   direct .cu           legacy 0/27   cumetal-ir 27/27
-    //   --cuda-device (PTX)  legacy 26/27  cumetal-ir 27/27
+    //   direct .cu           legacy 0/28   cumetal-ir 28/28
+    //   --cuda-device (PTX)  legacy 27/28  cumetal-ir 28/28
     //
     // These are production-metallib compilation counts, not runtime correctness
     // counts. Legacy's direct-.cu mode is the qualifier-stripping prototype documented in

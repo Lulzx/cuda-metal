@@ -2074,13 +2074,26 @@ struct Importer {
                     .constant_offset = constant_offset,
                     .constant = global.getAddressSpace() == 4,
                 });
-                result.module.external_symbols.push_back({
+                ExternalSymbol external_symbol{
                     .name = global.getName().str(),
                     .byte_size = global_size,
                     .alignment = alignment,
                     .constant_offset = constant_offset,
                     .constant = global.getAddressSpace() == 4,
-                });
+                };
+                if (!global.getInitializer()->isNullValue()) {
+                    external_symbol.initializer.assign(global_size, 0);
+                    if (!write_constant_bytes(*global.getInitializer(), 0,
+                                              &external_symbol.initializer,
+                                              module->getDataLayout())) {
+                        result.error =
+                            "unsupported registration-backed global initializer: " +
+                            global.getName().str();
+                        return std::move(result);
+                    }
+                }
+                result.module.external_symbols.push_back(
+                    std::move(external_symbol));
                 continue;
             }
             if (!global.isConstant() || !global.hasInitializer() ||

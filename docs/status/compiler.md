@@ -13,19 +13,19 @@
   production libraries.
 - Direct AIR generation remains tooling/research only.
 
-With CUDA Clang 21-23, the reviewed manifest-controlled 27-file
+With CUDA Clang 21-23, the reviewed manifest-controlled 28-file
 production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/27 | **27/27** |
-| PTX / `--cuda-device` | **26/27** | **27/27** |
+| direct `.cu` | 0/28 | **28/28** |
+| PTX / `--cuda-device` | **27/28** | **28/28** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler
 identity and requires the same manifest with CUDA Clang 21, 22, and 23.
 
-The separate exact `coverage_manifest.json` numerical corpus passes all 25
+The separate exact `coverage_manifest.json` numerical corpus passes all 26
 projects through both typed PTX and direct native AOT on Apple M4 Pro. Both
 gates disable workload specializations and require every enrolled project to
 pass. The native-AOT gate launches embedded metallibs without registration JIT
@@ -74,8 +74,13 @@ CUDA Clang 21-23 module-private `__const_$` byte arrays used for promoted
 aggregate literals are embedded as immutable MSL module data. Their declared
 size, alignment, initializer bytes, and implicit trailing zero bytes are
 preserved; they do not consume or masquerade as a registration-backed writable
-global binding. Referenced ordinary initialized `.global` arrays fail explicitly
-until writable registration semantics are implemented.
+global binding. Visible initialized writable `.global` arrays instead use the
+ordinary persistent symbol buffer. PTX registration recovers the initializer
+from device PTX because Clang's host shadow is zero-filled; native AOT carries
+the same bytes in generated registration metadata. The numerical project checks
+initial state, two-launch persistence, and `cudaMemcpyFromSymbol` visibility.
+Module-private initialized writable globals without a host registration symbol
+remain explicit errors.
 Both typed frontends lower FP64 values as raw binary64 storage and call private
 software-ALU helpers in the kernel translation unit. The `fp64_precision`
 corpus passes independently produced direct-NVVM and typed-PTX metallibs on

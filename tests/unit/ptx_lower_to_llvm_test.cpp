@@ -1111,6 +1111,37 @@ $L_done:
                 "external global scan is entry-specific")) {
         return 1;
     }
+
+    const std::string initialized_global_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .global .align 4 .b8 seeded_state[8] = {1, 2, 3};
+.visible .entry read_seeded_state(.param .u64 output) {
+    .reg .b32 %r1;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    ld.global.b32 %r1, [seeded_state];
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)PTX";
+    const auto initialized_globals =
+        cumetal::ptx::find_referenced_external_global_symbols(
+            initialized_global_ptx, "read_seeded_state");
+    const auto initialized_bytes =
+        cumetal::ptx::find_initialized_global_bytes(
+            initialized_global_ptx, "seeded_state");
+    if (!expect(initialized_globals.size() == 1 &&
+                    initialized_globals.front().name == "seeded_state" &&
+                    initialized_globals.front().size_bytes == 8 &&
+                    initialized_bytes.has_value() &&
+                    *initialized_bytes ==
+                        std::vector<std::uint8_t>({1, 2, 3, 0, 0, 0, 0, 0}) &&
+                    !cumetal::ptx::find_initialized_global_bytes(
+                         initialized_global_ptx, "missing_state").has_value(),
+                "initialized external globals retain exact zero-filled PTX bytes")) {
+        return 1;
+    }
     cumetal::ptx::LowerToLlvmOptions external_global_options;
     external_global_options.entry_name = "increment_external_global";
     external_global_options.strict = true;

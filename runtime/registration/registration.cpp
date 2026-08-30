@@ -2053,6 +2053,30 @@ void __cudaRegisterVar(void** fat_cubin_handle,
                              : static_cast<const void*>(device_address);
     void* handle = fat_cubin_handle == nullptr ? nullptr : reinterpret_cast<void*>(fat_cubin_handle);
 
+    // CUDA Clang emits initialized `__device__` storage as exact bytes in PTX,
+    // but leaves its host registration shadow in zero-filled BSS. Recover the
+    // PTX-owned initializer before publishing the symbol so the ordinary
+    // registration-backed persistent buffer starts with the source value. A
+    // genuine distinct caller-supplied address remains authoritative.
+    std::shared_ptr<const std::string> module_ptx;
+    if (device_address_is_name || device_address == nullptr) {
+        cumetal::registration::RegistrationState& lookup_state =
+            cumetal::registration::state();
+        std::lock_guard<std::mutex> lookup_lock(lookup_state.mutex);
+        const auto module = lookup_state.modules.find(handle);
+        if (module != lookup_state.modules.end() && module->second != nullptr) {
+            module_ptx = module->second->ptx_source;
+        }
+    }
+    if (module_ptx != nullptr && device_name != nullptr) {
+        const auto initializer =
+            cumetal::ptx::find_initialized_global_bytes(*module_ptx, device_name);
+        if (initializer.has_value() && initializer->size() == size) {
+            std::memcpy(host_var, initializer->data(), size);
+            mapped = host_var;
+        }
+    }
+
     REG_DEBUG("__cudaRegisterVar: name='%s' host_var=%p mapped=%p size=%zu",
               device_name != nullptr ? device_name : "(null)", static_cast<void*>(host_var),
               mapped, size);

@@ -353,6 +353,7 @@ struct ParsedConstB8Array {
     std::string symbol;
     std::vector<std::uint8_t> bytes;
     int align = 1;
+    bool global = false;
 };
 
 struct ParsedConstU64Array {
@@ -474,6 +475,7 @@ std::vector<ParsedConstB8Array> parse_ptx_initialized_b8_arrays(std::string_view
             .symbol = symbol,
             .bytes = std::move(bytes),
             .align = align,
+            .global = t.find(".global") != std::string::npos,
         });
     }
 
@@ -8480,11 +8482,12 @@ static std::vector<ExternalConstantSymbol> find_referenced_external_symbols(
             comment != std::string::npos) {
             declaration = trim(declaration.substr(0, comment));
         }
+        const bool initialized = declaration.find('=') != std::string::npos ||
+                                 declaration.find('{') != std::string::npos;
         if (declaration.empty() || declaration.front() != '.' ||
             declaration.find(state_space) == std::string::npos ||
             declaration.find(';') == std::string::npos ||
-            declaration.find('=') != std::string::npos ||
-            declaration.find('{') != std::string::npos) {
+            (initialized && state_space != ".global")) {
             continue;
         }
 
@@ -8538,7 +8541,10 @@ static std::vector<ExternalConstantSymbol> find_referenced_external_symbols(
             ++name_end;
         }
         const std::string symbol = declaration.substr(name_begin, name_end - name_begin);
-        if (symbol.empty()) {
+        const bool externally_registered_initializer =
+            initialized && starts_with(declaration, ".visible");
+        if (symbol.empty() ||
+            (initialized && !externally_registered_initializer)) {
             continue;
         }
 
@@ -8603,6 +8609,16 @@ std::vector<ExternalGlobalSymbol> find_referenced_external_global_symbols(
     std::string_view ptx,
     std::string_view entry_name) {
     return find_referenced_external_symbols(ptx, entry_name, ".global");
+}
+
+std::optional<std::vector<std::uint8_t>> find_initialized_global_bytes(
+    std::string_view ptx,
+    std::string_view symbol) {
+    if (symbol.empty()) return std::nullopt;
+    for (const ParsedConstB8Array& array : parse_ptx_initialized_b8_arrays(ptx)) {
+        if (array.global && array.symbol == symbol) return array.bytes;
+    }
+    return std::nullopt;
 }
 
 LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOptions& options) {
@@ -8780,6 +8796,9 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     // the registration-backed global-buffer path below.
     for (const ParsedConstB8Array& array : parse_ptx_initialized_b8_arrays(ptx)) {
         if (array.symbol.empty() || array.bytes.empty()) {
+            continue;
+        }
+        if (global_symbols.contains(array.symbol)) {
             continue;
         }
         if (const_symbols.count(array.symbol) != 0) {

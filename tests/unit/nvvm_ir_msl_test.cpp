@@ -1081,7 +1081,7 @@ target datalayout = "e-p6:32:32-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
 
 @constants = dso_local addrspace(4) externally_initialized constant [8 x i32] zeroinitializer, align 4
-@writable = dso_local addrspace(1) externally_initialized global [8 x i32] zeroinitializer, align 4
+@writable = dso_local addrspace(1) externally_initialized global [8 x i32] [i32 7, i32 -3, i32 11, i32 5, i32 0, i32 0, i32 0, i32 0], align 4
 @embedded = dso_local addrspace(4) externally_initialized constant [2 x i32] [i32 287454020, i32 1432778632], align 4
 
 define ptx_kernel void @read_constants(ptr %out) {
@@ -1748,6 +1748,9 @@ int main() {
                          std::string::npos &&
                      external_symbols.source.find(
                          "read_symbols_helper(cm___cumetal_constant_symbols, cm___cumetal_global_writable)") !=
+                         std::string::npos &&
+                     external_symbols.source.find(
+                         "cumetal-native-symbol-initializer: writable 07000000fdffffff0b00000005000000") !=
                          std::string::npos,
                  "runtime CUDA symbols stay hidden while initialized read-only tables embed their bytes");
     if (!external_symbols.ok) std::cerr << external_symbols.error << "\n";

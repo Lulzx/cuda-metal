@@ -511,7 +511,7 @@ BODY:
 .version 7.0
 .target sm_80
 .address_size 64
-.global .align 4 .b8 mutable_state[4] = {1};
+.visible .global .align 4 .b8 mutable_state[4] = {1};
 .visible .entry initialized_writable_global(.param .u64 output) {
     .reg .b32 %r1;
     .reg .b64 %rd1;
@@ -523,11 +523,42 @@ BODY:
 )ptx";
     const metal::PtxToMslResult initialized_writable_global =
         metal::compile_ptx_to_msl(initialized_writable_global_ptx);
+    const bool initialized_writable_global_valid =
+        initialized_writable_global.ok &&
+        initialized_writable_global.source.find(
+            "device uchar* cm___cumetal_global_mutable_state [[buffer(1)]]") !=
+            std::string::npos &&
+        initialized_writable_global.source.find(
+            "constant uchar cm_mutable_state") == std::string::npos;
     ok &= expect(
-        !initialized_writable_global.ok &&
-            initialized_writable_global.error.find(
-                "requires registration-backed semantics") != std::string::npos,
-        "initialized writable PTX globals fail explicitly instead of becoming immutable literals");
+        initialized_writable_global_valid,
+        "initialized writable PTX globals retain registration-backed mutable storage");
+    if (!initialized_writable_global_valid) {
+        std::cerr << initialized_writable_global.error << "\n"
+                  << initialized_writable_global.source << "\n";
+    }
+
+    const std::string oversized_writable_initializer_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .global .align 4 .b8 bad_state[4] = {1, 2, 3, 4, 5};
+.visible .entry oversized_writable_initializer(.param .u64 output) {
+    .reg .b32 %r1;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    ld.global.b32 %r1, [bad_state];
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult oversized_writable_initializer =
+        metal::compile_ptx_to_msl(oversized_writable_initializer_ptx);
+    ok &= expect(
+        !oversized_writable_initializer.ok &&
+            oversized_writable_initializer.error.find(
+                "more elements than its declaration") != std::string::npos,
+        "oversized writable PTX global initializers fail explicitly");
 
     const std::string aggregate_param_ptx = R"ptx(
 .version 8.0

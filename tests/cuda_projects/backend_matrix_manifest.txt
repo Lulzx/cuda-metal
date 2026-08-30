@@ -22,6 +22,7 @@ tests/cuda_projects/dynamic_cooperative_groups/dynamic_cooperative_groups.cu fai
 tests/cuda_projects/flash_attn/flash_standalone.cu fail pass pass pass
 tests/cuda_projects/fp64/fp64_precision.cu fail pass pass pass
 tests/cuda_projects/ggml_output_ops/ggml_output_ops.cu fail pass pass pass
+tests/cuda_projects/initialized_global/initialized_global.cu fail pass pass pass
 tests/cuda_projects/libdevice/libdevice_math.cu fail pass pass pass
 tests/cuda_projects/libdevice_frexp/libdevice_frexp.cu fail pass pass pass
 tests/cuda_projects/partial_lane_shuffle_guard/partial_lane_shuffle_guard.cu fail pass pass pass
