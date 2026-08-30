@@ -446,12 +446,16 @@ int main(int argc, char** argv) {
     std::vector<std::uint8_t> unsupported_entry_version = lz4_fatbin;
     cumetal::test::write_value<std::uint16_t>(
         &unsupported_entry_version, 16u + 2u, 0x0102u);
+    std::vector<std::uint8_t> unsupported_entry_kind = lz4_fatbin;
+    cumetal::test::write_value<std::uint16_t>(
+        &unsupported_entry_kind, 16u, 3u);
     const std::vector<std::uint8_t>* invalid_compressed[] = {
         &malformed_compressed_size,
         &oversized_decompression,
         &ambiguous_compression,
         &truncated_compressed_entry,
         &unsupported_entry_version,
+        &unsupported_entry_kind,
     };
     for (const auto* invalid : invalid_compressed) {
         module = nullptr;

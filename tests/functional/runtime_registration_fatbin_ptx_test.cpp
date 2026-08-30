@@ -374,37 +374,45 @@ int main(int argc, char** argv) {
         std::vector<std::uint8_t> unsupported_entry_version = lz4_fatbin;
         cumetal::test::write_value<std::uint16_t>(
             &unsupported_entry_version, 16u + 2u, 0x0102u);
+        std::vector<std::uint8_t> unsupported_entry_kind = lz4_fatbin;
+        cumetal::test::write_value<std::uint16_t>(
+            &unsupported_entry_kind, 16u, 3u);
         if (setenv("CUMETAL_FATBIN_METALLIB",
                    fallback_metallib.c_str(), 1) != 0) {
             std::fprintf(stderr,
                          "FAIL: could not configure environment fallback test\n");
             return 1;
         }
-        FatbinWrapper unsupported_wrapper{};
-        unsupported_wrapper.data = unsupported_entry_version.data();
-        void** unsupported_handle =
-            __cudaRegisterFatBinary(&unsupported_wrapper);
-        __cudaRegisterFunction(
-            unsupported_handle,
-            reinterpret_cast<const void*>(&vector_add_host_stub),
-            device_function, nullptr, 0, nullptr, nullptr, nullptr, nullptr,
-            nullptr);
-        const cudaError_t unsupported_launch = cudaLaunchKernel(
-            reinterpret_cast<const void*>(&vector_add_host_stub), grid_dim,
-            block_dim, args, 0, nullptr);
-        const cudaError_t unsupported_sync = cudaDeviceSynchronize();
-        unsetenv("CUMETAL_FATBIN_METALLIB");
-        if (unsupported_launch != cudaErrorInvalidValue ||
-            unsupported_sync != cudaErrorInvalidValue) {
-            std::fprintf(stderr,
-                         "FAIL: unsupported fatbin version used the environment metallib fallback "
-                         "(launch=%d sync=%d)\n",
-                         static_cast<int>(unsupported_launch),
-                         static_cast<int>(unsupported_sync));
+        const std::vector<std::uint8_t>* unsupported_images[] = {
+            &unsupported_entry_version, &unsupported_entry_kind};
+        for (const auto* unsupported_image : unsupported_images) {
+            FatbinWrapper unsupported_wrapper{};
+            unsupported_wrapper.data = unsupported_image->data();
+            void** unsupported_handle =
+                __cudaRegisterFatBinary(&unsupported_wrapper);
+            __cudaRegisterFunction(
+                unsupported_handle,
+                reinterpret_cast<const void*>(&vector_add_host_stub),
+                device_function, nullptr, 0, nullptr, nullptr, nullptr, nullptr,
+                nullptr);
+            const cudaError_t unsupported_launch = cudaLaunchKernel(
+                reinterpret_cast<const void*>(&vector_add_host_stub), grid_dim,
+                block_dim, args, 0, nullptr);
+            const cudaError_t unsupported_sync = cudaDeviceSynchronize();
+            if (unsupported_launch != cudaErrorInvalidValue ||
+                unsupported_sync != cudaErrorInvalidValue) {
+                std::fprintf(stderr,
+                             "FAIL: unsupported fatbin entry used the environment metallib fallback "
+                             "(launch=%d sync=%d)\n",
+                             static_cast<int>(unsupported_launch),
+                             static_cast<int>(unsupported_sync));
+                __cudaUnregisterFatBinary(unsupported_handle);
+                unsetenv("CUMETAL_FATBIN_METALLIB");
+                return 1;
+            }
             __cudaUnregisterFatBinary(unsupported_handle);
-            return 1;
         }
-        __cudaUnregisterFatBinary(unsupported_handle);
+        unsetenv("CUMETAL_FATBIN_METALLIB");
         std::printf("UNSUPPORTED_FATBIN_FALLBACK_REFUSED\n");
     }
 

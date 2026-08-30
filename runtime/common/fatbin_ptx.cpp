@@ -157,8 +157,20 @@ PtxExtractStatus extract_fatbin_ptx(const void* image,
         data_size >= sizeof(std::uint16_t)
             ? read_value<std::uint16_t>(data, 0)
             : 0;
+    const std::size_t first_header_size =
+        data_size >= 8u ? read_value<std::uint32_t>(data, 4) : 0u;
+    // Do not let an unknown framed kind fall through to the legacy raw scan.
+    // Otherwise a syntactically valid PTX payload behind an unsupported entry
+    // header can be accepted merely because `.version` and `.entry` occur later
+    // in the byte range. Raw PTX begins as text and cannot carry a plausible
+    // bounded 64-byte entry header at these offsets.
+    const bool plausible_entry_header =
+        data_size >= kMinimumEntryHeaderSize &&
+        first_header_size >= kMinimumEntryHeaderSize &&
+        first_header_size <= data_size;
     const bool structured = data_size >= kMinimumEntryHeaderSize &&
-        (first_kind == kPtxEntryKind || first_kind == 2u);
+        (first_kind == kPtxEntryKind || first_kind == 2u ||
+         plausible_entry_header);
     if (!structured) {
         return extract_ptx_bytes(data, data_size, out_ptx)
                    ? PtxExtractStatus::kFound
