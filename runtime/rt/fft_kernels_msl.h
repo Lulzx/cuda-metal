@@ -92,6 +92,81 @@ kernel void cumetal_fft_stockham_f32(
     dst[base + out_hi * p.inner] = twiddled;
 }
 
+// Every pass of a transform, staged in threadgroup memory.
+//
+// The pass kernel above writes the whole grid back to device memory between
+// passes, so a length-L transform reads and writes it log2(L) times. When one
+// line fits in threadgroup memory that is all avoidable: a threadgroup loads its
+// line once, runs every pass against threadgroup memory with a barrier between
+// them, and stores once. For a 128-point axis that is 7 device round trips
+// replaced by 1.
+//
+// The line is the unit rather than the grid because a threadgroup barrier only
+// orders threads within a threadgroup; a transform staged across threadgroups
+// would need a device-wide barrier between passes, which is the dispatch
+// boundary the multi-pass kernel already is.
+//
+// Two threadgroup buffers of L complex values ping-pong, so the caller sizes
+// threadgroup memory at 2*L*sizeof(float2) and declines when that exceeds the
+// device budget.
+kernel void cumetal_fft_stockham_line_f32(
+    device const float2*  src [[buffer(0)]],
+    device float2*        dst [[buffer(1)]],
+    constant FftPassParams& p [[buffer(2)]],
+    threadgroup float2*   scratch [[threadgroup(0)]],
+    uint line   [[threadgroup_position_in_grid]],
+    uint lid    [[thread_position_in_threadgroup]],
+    uint stride [[threads_per_threadgroup]])
+{
+    const uint length = p.length;
+    if (line >= p.outer * p.inner) return;
+
+    const uint inner_index = line % p.inner;
+    const uint outer_index = line / p.inner;
+    const uint base = outer_index * length * p.inner + inner_index;
+
+    threadgroup float2* read = scratch;
+    threadgroup float2* write = scratch + length;
+
+    for (uint j = lid; j < length; j += stride) {
+        read[j] = src[base + j * p.inner];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint butterflies = length / 2u;
+    for (uint half_span = length / 2u, block_span = 1u; half_span >= 1u;
+         half_span /= 2u, block_span *= 2u) {
+        for (uint t = lid; t < butterflies; t += stride) {
+            const uint j = t / block_span;
+            const uint k = t % block_span;
+            const uint lo = k + j * block_span;
+            const uint hi = lo + half_span * block_span;
+            const float2 a = read[lo];
+            const float2 b = read[hi];
+            const float theta = p.sign * M_PI_F * float(j) / float(half_span);
+            const float wr = precise::cos(theta);
+            const float wi = precise::sin(theta);
+            const float2 diff = a - b;
+            const uint out_lo = k + 2u * j * block_span;
+            write[out_lo] = a + b;
+            write[out_lo + block_span] =
+                float2(diff.x * wr - diff.y * wi, diff.x * wi + diff.y * wr);
+        }
+        // Orders this pass's writes to `write` before it becomes the next pass's
+        // source, and equally this pass's reads of `read` before the next pass
+        // overwrites it.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup float2* swap = read;
+        read = write;
+        write = swap;
+        if (half_span == 1u) break;
+    }
+
+    for (uint j = lid; j < length; j += stride) {
+        dst[base + j * p.inner] = read[j];
+    }
+}
+
 // ── cuFFT advanced data layout ───────────────────────────────────────────────
 //
 // Element (x0, x1, x2) of batch b lives at b*dist + stride*((x0*embed1 + x1)*embed2 + x2).

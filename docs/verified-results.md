@@ -165,57 +165,60 @@ filter construction:
 
 | 3-D grid | Accelerate (ms) | Metal (ms) | ratio |
 | --- | ---: | ---: | ---: |
-| 32x32x32 | 6.63 | 0.40 | 16.7x |
-| 40x32x32 (villin PME) | 8.20 | 0.71 | 11.5x |
-| 56x56x56 (rnase PME) | 391.59 | 2.73 | 143x |
-| 64x64x64 | 44.86 | 0.98 | 45.8x |
-| 96x96x96 | 169.52 | 12.00 | 14.1x |
-| 128x128x128 | 317.04 | 4.69 | 67.6x |
+| 32x32x32 | 6.70 | 0.27 | 24.8x |
+| 40x32x32 (villin PME) | 8.29 | 0.42 | 19.9x |
+| 56x56x56 (rnase PME) | 393.59 | 1.52 | 258x |
+| 64x64x64 | 44.75 | 0.55 | 81.7x |
+| 96x96x96 | 169.48 | 6.69 | 25.3x |
+| 128x128x128 | 317.55 | 2.68 | 119x |
 
 The figure is one R2C plus one C2R with a single synchronize, which is the shape
 PME uses: forward transform, solve, inverse transform, all on one stream.
 
+Every pass of a transform is staged in threadgroup memory when one line fits
+there, so a length-L axis costs one device round trip instead of log2(L). That
+alone is worth about 1.75x over dispatching each pass separately (villin
+0.71 -> 0.51 ms, 128^3 4.69 -> 2.70 ms) and cuts a 40x32x32 R2C from 30
+dispatches to 10.
+
 Two things this table does **not** say. The CPU column is CuMetal's own
 implementation, which drives vDSP one line at a time and falls back to a scalar
-Bluestein for lengths vDSP cannot factor -- 56 and 96 both carry a factor of 3 or
-7 -- so the largest ratios are mostly a statement about that path, not about
-Accelerate. And the Metal column is not a tuned GPU FFT either: a 128^3 R2C in
-2.4 ms is about 92 GFLOP/s, roughly 2% of this device's FP32 peak, because every
-Stockham pass round-trips through device memory instead of staging several
-passes in threadgroup memory.
+Bluestein for lengths vDSP cannot factor -- 56 and 96 both carry a factor of 7 or
+3 -- so the largest ratios are mostly a statement about that path, not about
+Accelerate. And the Metal column is not a tuned GPU FFT: at these sizes it is
+bound by command-buffer submit-and-wait latency, which is why 32^3 and 64^3 land
+within a factor of two of each other despite an 8x difference in work.
 
 ```bash
 DYLD_LIBRARY_PATH=build build/cumetal_fft_bench --cpu
 DYLD_LIBRARY_PATH=build build/cumetal_fft_bench --metal
 ```
 
-### What it cost GROMACS to synchronize
+### End-to-end effect on GROMACS
 
-The end-to-end effect is much larger than the transform arithmetic, and for the
-smaller system almost none of it *is* the arithmetic. Same 20-step villin and
-rnase runs as `demos/gromacs`, `-nb gpu -pme gpu -bonded gpu -update gpu`:
+Same 20-step runs as `demos/gromacs`, `-nb gpu -pme gpu -bonded gpu -update gpu`,
+warm kernel cache, median of two interleaved runs per configuration:
 
 | Run | villin wall (s) | rnase_cubic wall (s) |
 | --- | ---: | ---: |
 | `-pme cpu`, cuFFT never called | 0.42 | -- |
-| `-pme gpu`, Accelerate cuFFT | 58.17 | 14.13 |
-| `-pme gpu`, Metal cuFFT | 0.51 | 0.59 |
+| `-pme gpu`, Accelerate cuFFT | 0.63 | 8.95 |
+| `-pme gpu`, Metal cuFFT | 0.46 | 0.57 |
 
-villin's FFT work is only about 8 ms per step, so the 58 s cannot be the
-transform. GROMACS attributes 52 s of it to `Launch PP GPU ops`, which is
-host-side launch time on the *nonbonded* stream. The cause is that the CPU
-backend must `cudaStreamSynchronize` before it can read the grid: that drains
-the batched command buffers CuMetal relies on to make launches cheap, twice per
-step, and every later launch pays full price. Running the same system with
-`-pme cpu` -- so cuFFT is never called at all -- takes 0.42 s, which is what
-isolates the synchronize as the cost rather than the FFT.
+Both differences are just the transform arithmetic. villin saves 0.17 s, and its
+FFT is 8.29 ms per step against 0.42 ms over 21 steps, which is 0.17 s. rnase
+saves 8.4 s against a predicted 8.2 s. Nothing else needs to be invoked to
+explain either.
 
-For rnase the transform genuinely is expensive (392 ms per step on the CPU
-backend), and there GROMACS attributes the time to `PME GPU mesh` instead.
-
-The general point is worth keeping: on this runtime the dominant cost of a
-CPU-backed library call is usually not its arithmetic but the stream
-synchronize it has to perform.
+**A correction.** An earlier revision of this section reported villin at 58.17 s
+with the Accelerate backend and attributed the difference to CuMetal's batched
+command buffers being drained by the CPU path's `cudaStreamSynchronize`. That
+measurement was taken on a cold kernel cache: the first run of a GROMACS binary
+JIT-compiles its kernels from a 5 MB PTX module, which takes about 56 s and which
+GROMACS charges to `Launch PP GPU ops` because that is where the first launch
+happens. Rerunning the same command warm gives 0.63 s. The synchronize is real
+and it is why the CPU path cannot overlap with other GPU work, but it is not
+worth 57 s, and the number that said so was measuring the JIT.
 
 ## Real programs
 

@@ -320,10 +320,69 @@ struct Field {
 
 bool is_pow2(std::size_t v) { return v != 0 && (v & (v - 1)) == 0; }
 
+// Threadgroup memory the device will give one threadgroup, read once. Anything
+// larger than this has to go through the multi-dispatch path.
+std::size_t threadgroup_memory_budget() {
+    static const std::size_t budget = [] {
+        cudaDeviceProp prop{};
+        if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) return std::size_t{0};
+        return static_cast<std::size_t>(prop.sharedMemPerBlock);
+    }();
+    return budget;
+}
+
+// One threadgroup runs every pass of one line against threadgroup memory,
+// replacing log2(L) device round trips with one. Returns false when the line
+// does not fit, leaving the caller to dispatch the passes individually.
+bool transform_axis_staged(Context& ctx, Field& field, bool inverse, std::size_t length,
+                           std::size_t outer, std::size_t inner) {
+    const std::size_t staged_bytes = 2 * length * 2 * sizeof(float);
+    if (staged_bytes > threadgroup_memory_budget()) return false;
+    const std::size_t lines = outer * inner;
+    if (lines == 0) return true;
+
+    // One thread per two elements, capped so a long axis strides instead of
+    // asking for a threadgroup the device will not schedule.
+    unsigned threads = static_cast<unsigned>(std::min<std::size_t>(length / 2, 256));
+    if (threads < 32) threads = 32;
+
+    PassParams params{};
+    params.outer = static_cast<std::uint32_t>(outer);
+    params.length = static_cast<std::uint32_t>(length);
+    params.inner = static_cast<std::uint32_t>(inner);
+    params.half_span = static_cast<std::uint32_t>(length / 2);
+    params.block_span = 1;
+    params.sign = inverse ? 1.0f : -1.0f;
+
+    std::vector<metal_backend::KernelArg> args(3);
+    if (!buffer_arg(field.cur, field.bytes(), &args[0]) ||
+        !buffer_arg(field.alt, field.bytes(), &args[1])) {
+        note("field scratch does not resolve to a Metal buffer");
+        return false;
+    }
+    args[2] = bytes_arg(params);
+
+    metal_backend::LaunchConfig config{};
+    config.block = dim3(threads, 1, 1);
+    config.grid = dim3(static_cast<unsigned>(lines), 1, 1);
+    config.shared_memory_bytes = staged_bytes;
+    config.semantic_quality = "exact";
+    std::string error;
+    if (metal_backend::launch_kernel(*ctx.source, "cumetal_fft_stockham_line_f32", config,
+                                     args, ctx.stream, &error) != cudaSuccess) {
+        note(error.empty() ? "staged launch failed" : error.c_str());
+        return false;
+    }
+    ++ctx.dispatches;
+    field.swap();
+    return true;
+}
+
 // log2(L) Stockham passes over one axis.
 bool transform_axis_pow2(Context& ctx, Field& field, int axis, bool inverse,
                          std::size_t outer, std::size_t inner) {
     const std::size_t length = static_cast<std::size_t>(field.dims[axis]);
+    if (transform_axis_staged(ctx, field, inverse, length, outer, inner)) return true;
     const std::size_t threads = outer * inner * (length / 2);
     PassParams params{};
     params.outer = static_cast<std::uint32_t>(outer);
@@ -398,19 +457,15 @@ bool transform_axis_bluestein(Context& ctx, Field& field, int axis, bool inverse
     }
 
     // The convolution runs on the padded contiguous work buffer: one line per
-    // row, so the pass kernel sees outer = lines and inner = 1.
+    // row, so the pass kernels see outer = lines and inner = 1. dims[0] is the
+    // whole buffer rather than one line so bytes() bounds the binding correctly.
     Field convolution;
     convolution.cur = work;
     convolution.alt = work_alt;
     convolution.rank = 1;
-    convolution.dims[0] = static_cast<int>(m);
-    Field padded_view = convolution;
-    padded_view.dims[0] = static_cast<int>(padded_elements);
-    // bytes() must cover the whole work buffer, not one line.
-    const auto pass_bytes = [&] { return work_bytes; };
-    (void)pass_bytes;
+    convolution.dims[0] = static_cast<int>(padded_elements);
 
-    {
+    if (!transform_axis_staged(ctx, convolution, false, m, lines, 1)) {
         PassParams pass{};
         pass.outer = static_cast<std::uint32_t>(lines);
         pass.length = static_cast<std::uint32_t>(m);
@@ -446,7 +501,7 @@ bool transform_axis_bluestein(Context& ctx, Field& field, int axis, bool inverse
             return false;
     }
 
-    {
+    if (!transform_axis_staged(ctx, convolution, true, m, lines, 1)) {
         PassParams pass{};
         pass.outer = static_cast<std::uint32_t>(lines);
         pass.length = static_cast<std::uint32_t>(m);
