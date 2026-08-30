@@ -39,7 +39,9 @@ update cases remain incomplete.
 - Arbitrary pageable `malloc` pointers are not kernel-bindable merely because
   Apple Silicon uses UMA; tracked Metal-backed allocations are required.
 - Managed-memory API compatibility does not imply CUDA concurrent managed access
-  or CPU/GPU atomics.
+  or CPU/GPU atomics. Prefetch/advice/range-query/attach calls validate tracked
+  spans and arguments and preserve prefetch stream ordering, but do not control
+  physical placement or reproduce NVIDIA residency state on unified memory.
 - Persisting-L2/access-policy APIs preserve a conservative validated hint state,
   but public Metal offers no cache-residency control.
 - Memory-pool attributes exceed the allocator's current reuse behavior.

@@ -107,6 +107,40 @@ int main() {
         std::fprintf(stderr, "FAIL: UMA prefetch/attach compatibility APIs\n");
         return 1;
     }
+    int range_value = -1;
+    if (::cudaMemPrefetchAsync(managed_ptr, kBytes, 0, nullptr) != cudaSuccess ||
+        cudaMemAdvise(managed_ptr, kBytes, cudaMemAdviseSetReadMostly, 0) != cudaSuccess ||
+        cudaMemRangeGetAttribute(&range_value, sizeof(range_value),
+                                 cudaMemRangeAttributeReadMostly,
+                                 managed_ptr, kBytes) != cudaSuccess ||
+        range_value != 1) {
+        std::fprintf(stderr, "FAIL: validated UMA advisory compatibility APIs\n");
+        return 1;
+    }
+    char* managed_bytes = static_cast<char*>(managed_ptr);
+    cudaStream_t invalid_stream = reinterpret_cast<cudaStream_t>(0x12345);
+    const cudaError_t invalid_results[] = {
+        ::cudaMemPrefetchAsync(nullptr, kBytes, 0, nullptr),
+        ::cudaMemPrefetchAsync(managed_ptr, 0, 0, nullptr),
+        ::cudaMemPrefetchAsync(managed_bytes + kBytes - 1, 2, 0, nullptr),
+        ::cudaMemPrefetchAsync(managed_ptr, kBytes, 1, nullptr),
+        ::cudaMemPrefetchAsync(managed_ptr, kBytes, 0, invalid_stream),
+        cudaMemAdvise(managed_ptr, kBytes, static_cast<cudaMemoryAdvise>(99), 0),
+        cudaMemAdvise(managed_bytes + kBytes - 1, 2, cudaMemAdviseSetReadMostly, 0),
+        cudaMemRangeGetAttribute(&range_value, sizeof(range_value),
+                                 static_cast<cudaMemRangeAttribute>(99),
+                                 managed_ptr, kBytes),
+        cudaMemRangeGetAttribute(&range_value, 1, cudaMemRangeAttributeReadMostly,
+                                 managed_ptr, kBytes),
+        cudaStreamAttachMemAsync(nullptr, managed_ptr, kBytes + 1,
+                                 cudaMemAttachGlobal),
+    };
+    for (size_t i = 0; i < sizeof(invalid_results) / sizeof(invalid_results[0]); ++i) {
+        if (invalid_results[i] == cudaErrorInvalidValue) continue;
+        std::fprintf(stderr, "FAIL: invalid UMA advisory case %zu returned %d\n",
+                     i, invalid_results[i]);
+        return 1;
+    }
     void* invalid_managed_ptr = nullptr;
     if (cudaMallocManaged(&invalid_managed_ptr, kBytes, cudaMemAttachSingle) !=
             cudaErrorInvalidValue ||

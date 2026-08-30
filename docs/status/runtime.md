@@ -18,7 +18,10 @@ Covered families include:
 - kernel launch through Runtime, Driver, and source registration APIs;
 - symbols/constants/globals, occupancy queries, attributes, and error strings,
   including distinct Runtime/Driver graph-executable update failures;
-- 2D pitched allocation/copy and conservative UMA advice/prefetch behavior.
+- 2D pitched allocation/copy and conservative UMA advice/prefetch behavior;
+  advisory, prefetch, range-query, and stream-attach calls validate tracked
+  allocation remainders, enum/device arguments, and stream handles even though
+  their cache-placement effect is necessarily a no-op on UMA.
 
 Exact symbols are defined by the clean-room headers and focused API tests. API
 presence does not imply every CUDA flag, datatype, or interaction is covered.
