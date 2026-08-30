@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include "../detail/host_backed.h"
 #include <cstddef>
 
 namespace cub {
@@ -9,7 +10,11 @@ struct DeviceFind {
     template <typename InputIt, typename OutputIt, typename Predicate>
     static cudaError_t FindIf(void* storage, std::size_t& bytes, InputIt input,
                               OutputIt output, Predicate predicate, int count,
-                              cudaStream_t = nullptr) {
+                              cudaStream_t stream = nullptr) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (count < 0) return cudaErrorInvalidValue;
         if (storage == nullptr) {
             bytes = 1;
@@ -30,7 +35,11 @@ struct DeviceFind {
     static cudaError_t LowerBound(void* storage, std::size_t& bytes, RangeIt range,
                                   int range_count, ValueIt values, int value_count,
                                   OutputIt output, Compare compare,
-                                  cudaStream_t = nullptr) {
+                                  cudaStream_t stream = nullptr) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         return bounds<false>(storage, bytes, range, range_count, values,
                              value_count, output, compare);
     }
@@ -39,7 +48,11 @@ struct DeviceFind {
     static cudaError_t UpperBound(void* storage, std::size_t& bytes, RangeIt range,
                                   int range_count, ValueIt values, int value_count,
                                   OutputIt output, Compare compare,
-                                  cudaStream_t = nullptr) {
+                                  cudaStream_t stream = nullptr) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         return bounds<true>(storage, bytes, range, range_count, values,
                             value_count, output, compare);
     }

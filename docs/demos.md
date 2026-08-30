@@ -79,6 +79,31 @@ Mittelmann feasibility corpus. See [the HiGHS guide](../demos/highs/README.md)
 for build pins, commands, FP64 semantics, and the current mixed cuSPARSE
 precision boundary.
 
+## GROMACS molecular dynamics
+
+The GROMACS demo builds the unmodified 2025.4 release twice from one source --
+`GMX_GPU=CUDA` against CuMetal and `GMX_GPU=OFF` as the reference -- and runs
+benchmark systems from the public GROMACS benchmark set through both:
+
+```bash
+bash demos/gromacs/run.sh --quick    # villin, 5k atoms
+bash demos/gromacs/run.sh            # adds rnase, 24k atoms
+```
+
+Short-range nonbonded, listed forces, and the LINCS/SETTLE constrained update
+run on the Apple GPU; the PME mesh stays on the CPU because CuMetal's cuFFT is
+rank-1 only. The gate compares every energy term GROMACS prints at every step of
+a deterministic 20-step trajectory, and additionally requires that GROMACS's log
+shows all three tasks offloaded and that CuMetal traced `device=apple_gpu`. The
+recorded villin result is a maximum relative energy difference of `1.5e-05`.
+
+Building it exposed five CuMetal defects, all silent or fatal rather than
+warned: `cudaDeviceReset` erasing the fatbin kernel registry, every host-backed
+`cub::Device*` shim ignoring stream order, `cudaDestroyTextureObject(0)`
+returning an error instead of a no-op, zero-parameter kernels rejecting a null
+argument vector, and three missing libdevice entry points. See
+[the GROMACS guide](../demos/gromacs/README.md).
+
 ## Run one sample
 
 ```bash

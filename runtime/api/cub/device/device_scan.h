@@ -2,6 +2,7 @@
 // CuMetal CUB shim: DeviceScan — host-side device prefix scan.
 
 #include <cuda_runtime.h>
+#include "../detail/host_backed.h"
 #include <type_traits>
 
 namespace cub {
@@ -11,7 +12,11 @@ struct DeviceScan {
     template <typename InputIteratorT, typename OutputIteratorT>
     static cudaError_t ExclusiveSum(void* d_temp_storage, size_t& temp_storage_bytes,
                                     InputIteratorT d_in, OutputIteratorT d_out, int num_items,
-                                    cudaStream_t = 0) {
+                                    cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
@@ -30,7 +35,11 @@ struct DeviceScan {
     template <typename InputIteratorT, typename OutputIteratorT>
     static cudaError_t InclusiveSum(void* d_temp_storage, size_t& temp_storage_bytes,
                                     InputIteratorT d_in, OutputIteratorT d_out, int num_items,
-                                    cudaStream_t = 0) {
+                                    cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
@@ -49,7 +58,11 @@ struct DeviceScan {
     static cudaError_t ExclusiveScan(void* d_temp_storage, size_t& temp_storage_bytes,
                                      InputIteratorT d_in, OutputIteratorT d_out,
                                      ScanOp op, InitValueT init, int num_items,
-                                     cudaStream_t = 0) {
+                                     cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
@@ -68,7 +81,11 @@ struct DeviceScan {
     static cudaError_t InclusiveScan(void* d_temp_storage, size_t& temp_storage_bytes,
                                      InputIteratorT d_in, OutputIteratorT d_out,
                                      ScanOp op, int num_items,
-                                     cudaStream_t = 0) {
+                                     cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;

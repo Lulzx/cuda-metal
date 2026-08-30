@@ -25,7 +25,9 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   quasi-random, state-serialization, or device API parity.
 - **cuFFT:** principally bounded rank-1 execution. Multidimensional transforms,
   large unsupported lengths, advanced layouts, callbacks, and full Xt behavior
-  are absent or explicitly rejected.
+  are absent or explicitly rejected. Concretely, `cufftPlanMany` with `rank = 3`
+  returns `CUFFT_NOT_SUPPORTED`, so GROMACS's PME mesh cannot be offloaded and
+  `demos/gromacs` keeps it on the CPU.
 - **cuSPARSE/cuSOLVER:** selected operations only; descriptor, format, solver,
   analysis/reuse, and datatype matrices remain incomplete.
 - **cuDNN:** selected descriptors/operations only; algorithm, fusion, training,
@@ -34,7 +36,11 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   semantics.
 - **NVML:** compatibility queries cannot expose NVIDIA device management.
 - **Thrust/CUB:** several algorithms are sequential/CPU over UMA; device-wide
-  performance and full template/API compatibility are not claimed.
+  performance and full template/API compatibility are not claimed. Those
+  host-backed `cub::Device*` entry points do now synchronize their stream before
+  reading the input, which is a correctness requirement rather than a
+  performance choice: without it a scan or reduction of a buffer a kernel is
+  still writing silently returns stale memory.
 - **NVTX:** annotations are no-ops.
 
 The closure target is a generated support table from actual positive and

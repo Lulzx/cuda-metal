@@ -1727,6 +1727,28 @@ struct AstLowerer {
                     target = mode == "fast48" ? "cm_fp64_fast_sqrt"
                              : mode == "wide48" ? "vf64_wide_sqrt"
                                                 : "vf64_sqrt_rne";
+                } else if (callee->second == "rsqrt") {
+                    // No FP64 rsqrt primitive exists in any of the three modes;
+                    // compose it as 1.0 / sqrt(x) using that mode's own sqrt and
+                    // divide rather than dropping to a float approximation.
+                    const std::string sqrt_target =
+                        mode == "fast48" ? "cm_fp64_fast_sqrt"
+                        : mode == "wide48" ? "vf64_wide_sqrt"
+                                           : "vf64_sqrt_rne";
+                    const std::string div_target =
+                        mode == "fast48" ? "cm_fp64_fast_div"
+                        : mode == "wide48" ? "vf64_wide_div"
+                                           : "vf64_div_rne";
+                    const MslExpr root = MslExpression::call(
+                        sqrt_target, std::move(arguments), MslType::uint(64));
+                    // 1.0 as an IEEE binary64 bit pattern; the FP64 helpers take
+                    // and return the encoded form, not a Metal double.
+                    const MslExpr one = MslExpression::literal(
+                        "0x3FF0000000000000ul", MslType::uint(64));
+                    return declare_result(
+                        operation,
+                        MslExpression::call(div_target, {one, root},
+                                            MslType::uint(64)));
                 } else if (callee->second == "fmin" || callee->second == "fmax") {
                     target = mode == "fast48"
                                  ? "cm_fp64_fast_" +
@@ -1794,6 +1816,53 @@ struct AstLowerer {
                 return declare_result(
                     operation,
                     MslExpression::conditional(is_zero, zero, one_based, result_type));
+            }
+            // Float -> integer with an explicit rounding mode. Two things have
+            // to be right and neither is the default. The mode must be a real
+            // rounding call before the cast, because MSL's cast truncates --
+            // dropping it would make __float2int_rn(-1.96) return -1. And the
+            // cast must go through a *signed* integer for the signed variants:
+            // the IR result type is unsigned, so casting straight to it turns
+            // every negative result into 0.
+            if (callee->second.rfind("__cumetal_float2int_", 0) == 0 ||
+                callee->second.rfind("__cumetal_float2uint_", 0) == 0) {
+                if (operation.results.empty() || operation.operands.size() != 1) {
+                    fail(&operation, "malformed CUDA float-to-int conversion builtin");
+                    return std::nullopt;
+                }
+                const bool to_signed =
+                    callee->second.rfind("__cumetal_float2int_", 0) == 0;
+                const std::string mode = callee->second.substr(
+                    to_signed ? sizeof("__cumetal_float2int_") - 1
+                              : sizeof("__cumetal_float2uint_") - 1);
+                const char* rounder = mode == "rne"   ? "rint"
+                                      : mode == "rtz" ? "trunc"
+                                      : mode == "rtp" ? "ceil"
+                                      : mode == "rtn" ? "floor"
+                                                      : nullptr;
+                if (rounder == nullptr) {
+                    fail(&operation, "unknown CUDA float-to-int rounding mode");
+                    return std::nullopt;
+                }
+                if (operation.result_types.empty()) {
+                    fail(&operation, "float-to-int conversion has no result type");
+                    return std::nullopt;
+                }
+                const std::uint32_t width =
+                    operation.result_types.front().bit_width;
+                const MslType result_type = lower_result_type(operation);
+                const MslExpr input = expression_for(operation.operands.front());
+                const MslExpr rounded =
+                    MslExpression::call(rounder, {input}, input->type);
+                const MslType integer_type = to_signed ? MslType::sint(width)
+                                                       : MslType::uint(width);
+                const MslExpr converted =
+                    MslExpression::cast(integer_type, rounded);
+                return declare_result(
+                    operation,
+                    integer_type == result_type
+                        ? converted
+                        : MslExpression::cast(result_type, converted));
             }
             if (callee->second == "__cumetal_float_as_uint" ||
                 callee->second == "__cumetal_uint_as_float") {

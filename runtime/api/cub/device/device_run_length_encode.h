@@ -2,6 +2,7 @@
 // CuMetal CUB shim: DeviceRunLengthEncode — device-level RLE.
 
 #include <cuda_runtime.h>
+#include "../detail/host_backed.h"
 
 namespace cub {
 
@@ -14,7 +15,11 @@ struct DeviceRunLengthEncode {
                               UniqueOutputIteratorT d_unique_out,
                               LengthsOutputIteratorT d_counts_out,
                               NumRunsOutputIteratorT d_num_runs_out,
-                              int num_items, cudaStream_t = 0) {
+                              int num_items, cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
@@ -52,7 +57,11 @@ struct DeviceRunLengthEncode {
                                        OffsetsOutputIteratorT d_offsets_out,
                                        LengthsOutputIteratorT d_lengths_out,
                                        NumRunsOutputIteratorT d_num_runs_out,
-                                       int num_items, cudaStream_t = 0) {
+                                       int num_items, cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;

@@ -2,6 +2,7 @@
 // CuMetal CUB shim: DeviceRadixSort — host-side radix sort.
 
 #include <cuda_runtime.h>
+#include "../detail/host_backed.h"
 #include <algorithm>
 #include <cstring>
 #include <numeric>
@@ -15,7 +16,11 @@ struct DeviceRadixSort {
     static cudaError_t SortKeys(void* d_temp_storage, size_t& temp_storage_bytes,
                                 const KeyT* d_keys_in, KeyT* d_keys_out, int num_items,
                                 int begin_bit = 0, int end_bit = sizeof(KeyT) * 8,
-                                cudaStream_t = 0) {
+                                cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         (void)begin_bit; (void)end_bit;
         if (!d_temp_storage) {
             temp_storage_bytes = num_items * sizeof(KeyT);
@@ -31,7 +36,11 @@ struct DeviceRadixSort {
     static cudaError_t SortKeysDescending(void* d_temp_storage, size_t& temp_storage_bytes,
                                           const KeyT* d_keys_in, KeyT* d_keys_out, int num_items,
                                           int begin_bit = 0, int end_bit = sizeof(KeyT) * 8,
-                                          cudaStream_t = 0) {
+                                          cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         (void)begin_bit; (void)end_bit;
         if (!d_temp_storage) {
             temp_storage_bytes = num_items * sizeof(KeyT);
@@ -49,7 +58,11 @@ struct DeviceRadixSort {
                                  const ValueT* d_values_in, ValueT* d_values_out,
                                  int num_items,
                                  int begin_bit = 0, int end_bit = sizeof(KeyT) * 8,
-                                 cudaStream_t = 0) {
+                                 cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         (void)begin_bit; (void)end_bit;
         if (!d_temp_storage) {
             temp_storage_bytes = num_items * (sizeof(KeyT) + sizeof(int));
@@ -73,7 +86,11 @@ struct DeviceRadixSort {
                                            const ValueT* d_values_in, ValueT* d_values_out,
                                            int num_items,
                                            int begin_bit = 0, int end_bit = sizeof(KeyT) * 8,
-                                           cudaStream_t = 0) {
+                                           cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         (void)begin_bit; (void)end_bit;
         if (!d_temp_storage) {
             temp_storage_bytes = num_items * (sizeof(KeyT) + sizeof(int));

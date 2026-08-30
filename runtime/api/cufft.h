@@ -55,6 +55,9 @@ typedef enum cufftResult {
     CUFFT_NVJITLINK_FAILURE = 0x13,
     CUFFT_NVSHMEM_FAILURE = 0x14,
 } cufftResult;
+// NVIDIA's header names the enum both ways. GROMACS's pme_gpu_3dfft.cu uses
+// the _t spelling.
+typedef cufftResult cufftResult_t;
 
 typedef enum cufftType {
     CUFFT_R2C = 0x2a,   // real → complex (single)
@@ -64,6 +67,7 @@ typedef enum cufftType {
     CUFFT_Z2D = 0x6c,   // complex → real (double)
     CUFFT_Z2Z = 0x69,   // complex ↔ complex (double)
 } cufftType;
+typedef cufftType cufftType_t;
 
 #define CUFFT_FORWARD (-1)
 #define CUFFT_INVERSE  (1)

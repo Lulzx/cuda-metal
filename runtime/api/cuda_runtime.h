@@ -177,6 +177,7 @@ typedef enum cudaError {
     cudaErrorCooperativeLaunchTooLarge = 720,
     cudaErrorNotPermitted = 800,
     cudaErrorNotSupported = 801,
+    cudaErrorGraphExecUpdateFailure = 910,
     cudaErrorUnknown = 999,
     // Deprecated numbering CUDA keeps for source compatibility. cudaErrorAssert
     // is what a device-side assert() reports; samples compare against it by name.
@@ -339,7 +340,8 @@ typedef struct cudaDeviceProp {
     // slot from here rather than appending, and rebuild consumers if you cannot.
     int persistingL2CacheMaxSize;    // accepted performance-hint budget
     int accessPolicyMaxWindowSize;   // accepted stream access-window budget
-    int cumetalReserved[60];
+    int ECCEnabled;                  // 0 (Apple Silicon unified memory has no ECC)
+    int cumetalReserved[59];
 } cudaDeviceProp;
 
 typedef enum cudaDeviceAttr {
@@ -478,6 +480,21 @@ enum {
     cudaEventInterprocess = 0x4,
 };
 
+// Flags for cudaEventRecordWithFlags / cudaStreamWaitEvent. The External
+// variants only mean anything inside a stream capture, where they mark an
+// event as crossing the captured graph's boundary. CuMetal records and waits
+// the same way either way; the names exist because GROMACS passes them
+// unconditionally.
+enum {
+    cudaEventRecordDefault = 0x0,
+    cudaEventRecordExternal = 0x1,
+};
+
+enum {
+    cudaEventWaitDefault = 0x0,
+    cudaEventWaitExternal = 0x1,
+};
+
 // cudaMallocManaged attachment flags.
 enum {
     cudaMemAttachGlobal = 0x01,
@@ -565,6 +582,15 @@ typedef enum cudaGraphExecUpdateResult {
     cudaGraphExecUpdateErrorUnsupportedFunctionChange = 7,
     cudaGraphExecUpdateErrorAttributesChanged = 8,
 } cudaGraphExecUpdateResult;
+
+// CUDA 12 replaced cudaGraphExecUpdate's out-parameter with this struct.
+// GROMACS's mdgraph_gpu_impl.cu reads .result to tell a topology change (which
+// it recovers from by re-instantiating) from a real failure.
+typedef struct cudaGraphExecUpdateResultInfo {
+    cudaGraphExecUpdateResult result;
+    cudaGraphNode_t errorNode;
+    cudaGraphNode_t errorFromNode;
+} cudaGraphExecUpdateResultInfo;
 
 enum {
     cudaDeviceScheduleAuto = 0x00,
@@ -892,6 +918,7 @@ cudaError_t cudaEventCreate(cudaEvent_t* event);
 cudaError_t cudaEventCreateWithFlags(cudaEvent_t* event, unsigned int flags);
 cudaError_t cudaEventDestroy(cudaEvent_t event);
 cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream);
+cudaError_t cudaEventRecordWithFlags(cudaEvent_t event, cudaStream_t stream, unsigned int flags);
 cudaError_t cudaEventSynchronize(cudaEvent_t event);
 cudaError_t cudaEventQuery(cudaEvent_t event);
 cudaError_t cudaEventElapsedTime(float* ms, cudaEvent_t start, cudaEvent_t end);
@@ -1185,6 +1212,43 @@ cudaError_t cudaThreadSetCacheConfig(cudaFuncCache cacheConfig);
 // runtime APIs. CuMetal's core C ABI uses `const void *`; these wrappers keep
 // source compatibility with code that passes typed kernel pointers directly.
 #include <type_traits>
+
+// Two-argument cudaEventCreate. In the real CUDA headers this is a C++-only
+// overload sitting outside the extern "C" block, not a separate entry point;
+// it forwards to cudaEventCreateWithFlags. GROMACS's gpuregiontimer.cuh calls
+// it to build timing events with cudaEventDefault.
+static inline cudaError_t cudaEventCreate(cudaEvent_t* event, unsigned int flags) {
+    return cudaEventCreateWithFlags(event, flags);
+}
+
+// CUDA 12 forms of the graph instantiate/update calls. The 5-argument
+// cudaGraphInstantiate and the cudaGraphExecUpdateResult* cudaGraphExecUpdate
+// above are the CUDA 11 spellings; both are still in use, so both are offered.
+static inline cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec,
+                                               cudaGraph_t graph,
+                                               unsigned long long flags) {
+    return cudaGraphInstantiateWithFlags(pGraphExec, graph, flags);
+}
+
+static inline cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec,
+                                              cudaGraph_t hGraph,
+                                              cudaGraphExecUpdateResultInfo* resultInfo_out) {
+    cudaGraphNode_t error_node = nullptr;
+    cudaGraphExecUpdateResult result = cudaGraphExecUpdateSuccess;
+    const cudaError_t status = cudaGraphExecUpdate(hGraphExec, hGraph, &error_node, &result);
+    if (resultInfo_out != nullptr) {
+        resultInfo_out->result = result;
+        resultInfo_out->errorNode = error_node;
+        resultInfo_out->errorFromNode = nullptr;
+    }
+    // CUDA 12 reports an unsuccessful update through the return code as well as
+    // the struct; the CUDA 11 entry point only sets the out-parameter. GROMACS
+    // keys its re-instantiate path on the return code, so translate.
+    if (status == cudaSuccess && result != cudaGraphExecUpdateSuccess) {
+        return cudaErrorGraphExecUpdateFailure;
+    }
+    return status;
+}
 
 struct __cumetal_texture_descriptor {
     unsigned long long data;

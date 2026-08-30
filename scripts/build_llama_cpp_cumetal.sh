@@ -68,16 +68,25 @@ mkdir -p \
     "${FAKE_CUDA}/nvvm/libdevice" \
     "${FAKE_CUDA}/lib/cmake/CUDAToolkit"
 
-# Symlink CuMetal API headers into the fake CUDA include tree
-for hdr in "${ROOT_DIR}/runtime/api/"*.h; do
-    ln -sf "${hdr}" "${FAKE_CUDA}/include/$(basename "${hdr}")" 2>/dev/null || true
+# Symlink CuMetal API headers into the fake CUDA include tree. The header
+# *directories* (cub/, thrust/, cuda/, cooperative_groups/, nvtx3/) matter too:
+# a project that only puts $CUDA_HOME/include on its include path -- rather than
+# relying on the nvcc shim's -I -- would otherwise fail on <cub/...> and
+# <nvtx3/...>.
+for hdr in "${ROOT_DIR}/runtime/api/"*; do
+    ln -sfn "${hdr}" "${FAKE_CUDA}/include/$(basename "${hdr}")" 2>/dev/null || true
 done
 
 # Symlink CuMetal dylibs as CUDA runtime libraries (both lib/ and lib64/ for cmake compat)
 for libdir in lib lib64; do
     ln -sf "${ROOT_DIR}/build/libcumetal.dylib" "${FAKE_CUDA}/${libdir}/libcudart.dylib"    2>/dev/null || true
     ln -sf "${ROOT_DIR}/build/libcumetal.dylib" "${FAKE_CUDA}/${libdir}/libcuda.dylib"      2>/dev/null || true
-    for lib in cublas cufft curand; do
+    # CMake's own FindCUDAToolkit runs in preference to the config file below and
+    # only defines CUDA::cudart_static if find_library(cudart_static) succeeds.
+    # GROMACS's nblib links that target. CuMetal is a single shared object, so
+    # the "static" name resolves to the same dylib.
+    ln -sf "${ROOT_DIR}/build/libcumetal.dylib" "${FAKE_CUDA}/${libdir}/libcudart_static.dylib" 2>/dev/null || true
+    for lib in cublas cublasLt cufft curand cusparse cusolver cudnn nccl; do
         src="${ROOT_DIR}/build/lib${lib}.dylib"
         [[ -f "${src}" ]] && ln -sf "${src}" "${FAKE_CUDA}/${libdir}/lib${lib}.dylib" 2>/dev/null || true
     done
@@ -103,20 +112,22 @@ set(CUDAToolkit_LIBRARY_DIR  "\${_ctk_root}/lib")
 set(CUDAToolkit_BIN_DIR      "\${_ctk_root}/bin")
 set(CUDA_TOOLKIT_ROOT_DIR    "\${_ctk_root}")
 set(CUDAToolkit_TARGET_DIR   "\${_ctk_root}")
-if(NOT TARGET CUDA::cudart)
-    add_library(CUDA::cudart SHARED IMPORTED)
-    set_target_properties(CUDA::cudart PROPERTIES
-        IMPORTED_LOCATION "\${_ctk_root}/lib/libcudart.dylib"
-        INTERFACE_INCLUDE_DIRECTORIES "\${_ctk_root}/include"
-    )
-endif()
-if(NOT TARGET CUDA::cublas)
-    add_library(CUDA::cublas SHARED IMPORTED)
-    set_target_properties(CUDA::cublas PROPERTIES
-        IMPORTED_LOCATION "\${_ctk_root}/lib/libcublas.dylib"
-        INTERFACE_INCLUDE_DIRECTORIES "\${_ctk_root}/include"
-    )
-endif()
+# Every CUDA::<name> target maps to the CuMetal dylib of the same name. The
+# _static variants have no separate library here -- CuMetal is one shared
+# object -- so they alias the shared one. GROMACS's nblib links
+# CUDA::cudart_static, which CMake's real FindCUDAToolkit would have defined.
+foreach(_lib cudart cudart_static cuda_driver cublas cublasLt cufft curand cusparse cusolver nvToolsExt)
+    string(REPLACE "_static" "" _base "\${_lib}")
+    string(REPLACE "cuda_driver" "cuda" _base "\${_base}")
+    set(_dylib "\${_ctk_root}/lib/lib\${_base}.dylib")
+    if(NOT TARGET CUDA::\${_lib} AND EXISTS "\${_dylib}")
+        add_library(CUDA::\${_lib} SHARED IMPORTED)
+        set_target_properties(CUDA::\${_lib} PROPERTIES
+            IMPORTED_LOCATION "\${_dylib}"
+            INTERFACE_INCLUDE_DIRECTORIES "\${_ctk_root}/include"
+        )
+    endif()
+endforeach()
 CMAKE
 
 # nvcc shim — handles three cmake probes and delegates real compilation to clang++.
@@ -181,6 +192,16 @@ if [[ \$DLINK -eq 1 ]]; then
 fi
 
 # ── real compilation: filter nvcc-only flags, delegate to clang++ ─────────────
+# GROMACS emits its host flags as -Xcompiler=\\"-include\\" -Xcompiler=\\"cstddef\\",
+# so each value reaches the shim wrapped in literal double quotes. Real nvcc
+# strips them before handing the flag to the host compiler; clang does not, and
+# reports the quoted string as a missing input file.
+unquote() {
+    local s="\$1"
+    [[ "\$s" == \\"*\\" ]] && s="\${s:1:\${#s}-2}"
+    printf '%s' "\$s"
+}
+
 ARGS=()
 SKIP_NEXT=0
 OPTIONS_FILE_NEXT=0
@@ -191,7 +212,7 @@ IS_CMAKE_PROBE=0
 for arg in "\$@"; do
     if [[ \$XCOMPILER_NEXT -eq 1 ]]; then
         OLDIFS="\$IFS"; IFS=','
-        for hostflag in \$arg; do ARGS+=("\$hostflag"); done
+        for hostflag in \$arg; do ARGS+=("\$(unquote "\$hostflag")"); done
         IFS="\$OLDIFS"
         XCOMPILER_NEXT=0
         continue
@@ -229,12 +250,20 @@ for arg in "\$@"; do
         -Xcompiler|--compiler-options)         XCOMPILER_NEXT=1; continue ;;
         -Xcompiler=*|--compiler-options=*)
             OLDIFS="\$IFS"; IFS=','
-            for hostflag in \${arg#*=}; do ARGS+=("\$hostflag"); done
+            for hostflag in \${arg#*=}; do ARGS+=("\$(unquote "\$hostflag")"); done
             IFS="\$OLDIFS"
             continue ;;
         # Flags for nvcc-internal sub-tools that clang has no equivalent for.
         -Xptxas|-Xcudafe|-Xnvlink|-Xarchive)   SKIP_NEXT=1; continue ;;
         -Xptxas=*|-Xcudafe=*|-Xnvlink=*|-Xarchive=*) continue ;;
+        # nvcc diagnostic suppression; clang has no equivalent numbering.
+        -diag-suppress|--diag-suppress)        SKIP_NEXT=1; continue ;;
+        -diag-suppress=*|--diag-suppress=*)    continue ;;
+        # nvcc host-compiler selection. This shim *is* the host compiler, so the
+        # value is dropped rather than honoured; GROMACS probes nvcc with
+        # "-ccbin \${CMAKE_CUDA_HOST_COMPILER}" and clang rejects the flag.
+        -ccbin|--compiler-bindir)              SKIP_NEXT=1; continue ;;
+        -ccbin=*|--compiler-bindir=*)          continue ;;
         # nvcc forwarding wrappers / language selectors (clang is invoked directly)
         -forward-unknown-to-host-compiler|--forward-unknown-to-host-compiler) continue ;;
         -forward-unknown-to-host-linker|--forward-unknown-to-host-linker) continue ;;
@@ -289,20 +318,57 @@ if [[ \${IS_CMAKE_PROBE} -eq 1 && \${COMPILE_ONLY} -eq 0 ]]; then
         "\${ARGS[@]}"
 fi
 
-exec "\${REAL_CLANG}" \\
-    -x cuda \\${CUDA_DEVICE_FLAGS_STR} \\
-    -nocudainc -nocudalib \\
-    -I"\${CUMETAL_API}" \\
-    -include cuda_runtime.h \\
-    -DCUMETAL_NO_DEVICE_PRINTF=1 \\
-    -DCUDA_VERSION=11060 \\
-    -DCUDART_VERSION=11060 \\
-    -D__CUDACC__=1 \\
-    -D__NVCC__=1 \\
-    -Wno-pass-failed \\
-    -Wno-unknown-cuda-version \\
-    -Wno-unused-command-line-argument \\
-    "\${ARGS[@]}"
+CUDA_MODE_FLAGS=(
+    -x cuda ${CUDA_DEVICE_FLAGS_STR}
+    -nocudainc -nocudalib
+    -I"\${CUMETAL_API}"
+    -include cuda_runtime.h
+    -DCUMETAL_NO_DEVICE_PRINTF=1
+    -DCUDA_VERSION=11060
+    -DCUDART_VERSION=11060
+    -D__CUDACC__=1
+    -D__NVCC__=1
+    -Wno-pass-failed
+    -Wno-unknown-cuda-version
+    -Wno-unused-command-line-argument
+)
+
+# ── compile-and-link in one invocation ───────────────────────────────────────
+# nvcc accepts "nvcc foo.cu -o foo"; clang in CUDA mode routes that link through
+# clang-linker-wrapper, which mis-parses Apple's injected "-lto_library <path>"
+# as "-l to_library" and fails. Split the step: device-compile each source to a
+# temporary object, then link the objects with clang in plain host mode. Each
+# object registers its own kernels with the CuMetal runtime at load time, so
+# there is no device image to fuse. GROMACS's configure-time probes
+# (cmake/TestCUDA.cu) take this path.
+if [[ \${COMPILE_ONLY} -eq 0 ]]; then
+    TMPD="\$(mktemp -d)"
+    trap 'rm -rf "\${TMPD}"' EXIT
+    SRCS=(); OBJS=(); OTHER=(); LINKONLY=(); OUT=""
+    WANT_O=0
+    for arg in "\${ARGS[@]}"; do
+        if [[ \${WANT_O} -eq 1 ]]; then OUT="\$arg"; WANT_O=0; continue; fi
+        case "\$arg" in
+            -o)   WANT_O=1 ;;
+            -o*)  OUT="\${arg#-o}" ;;
+            *.cu|*.cpp|*.cxx|*.cc|*.c)
+                  SRCS+=("\$arg"); OBJS+=("\${TMPD}/tu\${#SRCS[@]}.o") ;;
+            -l*|-L*|-Wl,*|*.o|*.a|*.dylib|*.so)
+                  LINKONLY+=("\$arg") ;;
+            *)    OTHER+=("\$arg") ;;
+        esac
+    done
+    [[ -z "\${OUT}" ]] && OUT="a.out"
+    for i in "\${!SRCS[@]}"; do
+        "\${REAL_CLANG}" "\${CUDA_MODE_FLAGS[@]}" -c "\${SRCS[\$i]}" \\
+            -o "\${OBJS[\$i]}" "\${OTHER[@]}" || exit \$?
+    done
+    exec "\${REAL_CLANG}" -Wno-unused-command-line-argument \\
+        "\${OBJS[@]}" -o "\${OUT}" "\${OTHER[@]}" "\${LINKONLY[@]}" \\
+        -L"\${FAKE_CUDA_ROOT}/lib" -lcudart
+fi
+
+exec "\${REAL_CLANG}" "\${CUDA_MODE_FLAGS[@]}" "\${ARGS[@]}"
 NVCC
 chmod +x "${FAKE_CUDA}/bin/nvcc"
 

@@ -3,6 +3,7 @@
 // On Apple Silicon UMA, device memory is host-accessible, so we run sequentially.
 
 #include <cuda_runtime.h>
+#include "../detail/host_backed.h"
 #include <algorithm>
 #include <cfloat>
 #include <climits>
@@ -15,7 +16,11 @@ struct DeviceReduce {
     template <typename InputIteratorT, typename OutputIteratorT>
     static cudaError_t Sum(void* d_temp_storage, size_t& temp_storage_bytes,
                            InputIteratorT d_in, OutputIteratorT d_out, int num_items,
-                           cudaStream_t = 0) {
+                           cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
@@ -32,7 +37,11 @@ struct DeviceReduce {
     template <typename InputIteratorT, typename OutputIteratorT>
     static cudaError_t Min(void* d_temp_storage, size_t& temp_storage_bytes,
                            InputIteratorT d_in, OutputIteratorT d_out, int num_items,
-                           cudaStream_t = 0) {
+                           cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
@@ -49,7 +58,11 @@ struct DeviceReduce {
     template <typename InputIteratorT, typename OutputIteratorT>
     static cudaError_t Max(void* d_temp_storage, size_t& temp_storage_bytes,
                            InputIteratorT d_in, OutputIteratorT d_out, int num_items,
-                           cudaStream_t = 0) {
+                           cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
@@ -66,7 +79,11 @@ struct DeviceReduce {
     template <typename InputIteratorT, typename OutputIteratorT, typename ReduceOp, typename T>
     static cudaError_t Reduce(void* d_temp_storage, size_t& temp_storage_bytes,
                               InputIteratorT d_in, OutputIteratorT d_out, int num_items,
-                              ReduceOp op, T init, cudaStream_t = 0) {
+                              ReduceOp op, T init, cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
@@ -82,7 +99,11 @@ struct DeviceReduce {
     template <typename InputIteratorT, typename OutputIteratorT>
     static cudaError_t ArgMin(void* d_temp_storage, size_t& temp_storage_bytes,
                               InputIteratorT d_in, OutputIteratorT d_out, int num_items,
-                              cudaStream_t = 0) {
+                              cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
@@ -102,7 +123,11 @@ struct DeviceReduce {
     template <typename InputIteratorT, typename OutputIteratorT>
     static cudaError_t ArgMax(void* d_temp_storage, size_t& temp_storage_bytes,
                               InputIteratorT d_in, OutputIteratorT d_out, int num_items,
-                              cudaStream_t = 0) {
+                              cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;

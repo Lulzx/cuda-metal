@@ -6247,10 +6247,17 @@ class GenericLlvmEmitter {
                << *input_bits << ", i32 " << rounding << ", i1 true)\n";
             return store_ret_bits(result, 64);
         }
-        if (callee == "__nv_sqrt") {
-            if (arg_names.empty()) return fail(instr, "__nv_sqrt expects 1 arg");
+        // rsqrt shares every sqrt path and only differs by a final reciprocal, so
+        // the two are lowered together rather than duplicating three FP64 modes.
+        // GROMACS's nbnxm kernels call __nv_rsqrt; before this it was an
+        // unsupported call target that made the whole kernel unlowerable.
+        if (callee == "__nv_sqrt" || callee == "__nv_rsqrt") {
+            const bool want_reciprocal = (callee == "__nv_rsqrt");
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
             auto input_bits = load_call_slot_value(os, arg_names[0], 64);
-            if (!input_bits) return fail(instr, "__nv_sqrt arg missing");
+            if (!input_bits) return fail(instr, callee + " arg missing");
+            // 1.0 as an IEEE binary64 bit pattern, for the reciprocal's numerator.
+            const std::string one_bits = "4607182418800017408";
             if (uses_vf64_support()) {
                 const std::string function =
                     fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48
@@ -6260,11 +6267,24 @@ class GenericLlvmEmitter {
                     fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48
                         ? "declare i64 @vf64_wide_sqrt(i64)"
                         : "declare i64 @vf64_sqrt_round(i64, i32)");
-                const std::string result = next_tmp("vf64_libdevice_sqrt");
+                std::string result = next_tmp("vf64_libdevice_sqrt");
                 os << "  " << result << " = call i64 @" << function << "(i64 "
                    << *input_bits;
                 if (fp64_mode_ == cumetal::ptx::Fp64Mode::kIEEE64) os << ", i32 0";
                 os << ")\n";
+                if (want_reciprocal) {
+                    const std::string reciprocal = next_tmp("vf64_libdevice_rsqrt");
+                    if (fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48) {
+                        declarations_.insert("declare i64 @vf64_wide_div(i64, i64)");
+                        os << "  " << reciprocal << " = call i64 @vf64_wide_div(i64 "
+                           << one_bits << ", i64 " << result << ")\n";
+                    } else {
+                        declarations_.insert("declare i64 @vf64_div_round(i64, i64, i32)");
+                        os << "  " << reciprocal << " = call i64 @vf64_div_round(i64 "
+                           << one_bits << ", i64 " << result << ", i32 0)\n";
+                    }
+                    result = reciprocal;
+                }
                 return store_ret_bits(result, 64);
             }
             if (fp64_mode_ != cumetal::ptx::Fp64Mode::kEmulate) {
@@ -6274,7 +6294,12 @@ class GenericLlvmEmitter {
                 const std::string bits = next_tmp("sqrt_f64_bits");
                 os << "  " << input << " = bitcast i64 " << *input_bits << " to double\n";
                 os << "  " << root << " = call double @llvm.sqrt.f64(double " << input << ")\n";
-                os << "  " << bits << " = bitcast double " << root << " to i64\n";
+                std::string value = root;
+                if (want_reciprocal) {
+                    value = next_tmp("rsqrt_f64");
+                    os << "  " << value << " = fdiv double 1.000000e+00, " << root << "\n";
+                }
+                os << "  " << bits << " = bitcast double " << value << " to i64\n";
                 return store_ret_bits(bits, 64);
             }
             declarations_.insert("declare float @air.fast_sqrt.f32(float)");
@@ -6301,8 +6326,13 @@ class GenericLlvmEmitter {
                << ", float 0.000000e+00, float " << correction.hi << "\n";
             os << "  " << correction_lo << " = select i1 " << is_zero
                << ", float 0.000000e+00, float " << correction.lo << "\n";
-            const Fp64Pair refined = emit_fp64_pair_add(
+            Fp64Pair refined = emit_fp64_pair_add(
                 os, initial, Fp64Pair{correction_hi, correction_lo});
+            if (want_reciprocal) {
+                const std::string one_hi = emit_float_constant(os, 1.0f, "rsqrt_pair_one_hi");
+                const std::string one_lo = emit_float_constant(os, 0.0f, "rsqrt_pair_one_lo");
+                refined = emit_fp64_pair_div(os, Fp64Pair{one_hi, one_lo}, refined);
+            }
             return store_ret_bits(fp64_ieee_bits_from_pair(os, refined), 64);
         }
         // ---- libdevice float surface ---------------------------------------
@@ -6374,6 +6404,85 @@ class GenericLlvmEmitter {
             }
             os << ")\n";
             return store_ret_f32(out);
+        }
+
+        // libdevice float <-> integer conversions. CUDA spells the rounding mode
+        // in the name (__nv_float2int_rn, _rz, _ru, _rd); the rounding is applied
+        // to the float and the cast itself truncates, so the mode has to be a
+        // real rounding call and not just dropped -- the same defect that made
+        // cvt.rni.f32.f32 truncate. GROMACS's bonded kernels call
+        // __nv_float2int_rn for its PBC image index.
+        {
+            struct ConvBuiltin {
+                const char* nv;
+                const char* round;   // nullptr = truncate toward zero
+                int bits;
+                bool is_signed;
+            };
+            static const ConvBuiltin kFloatToInt[] = {
+                {"__nv_float2int_rn", "llvm.rint.f32", 32, true},
+                {"__nv_float2int_rz", nullptr, 32, true},
+                {"__nv_float2int_ru", "llvm.ceil.f32", 32, true},
+                {"__nv_float2int_rd", "llvm.floor.f32", 32, true},
+                {"__nv_float2uint_rn", "llvm.rint.f32", 32, false},
+                {"__nv_float2uint_rz", nullptr, 32, false},
+                {"__nv_float2uint_ru", "llvm.ceil.f32", 32, false},
+                {"__nv_float2uint_rd", "llvm.floor.f32", 32, false},
+                {"__nv_float2ll_rn", "llvm.rint.f32", 64, true},
+                {"__nv_float2ll_rz", nullptr, 64, true},
+                {"__nv_float2ll_ru", "llvm.ceil.f32", 64, true},
+                {"__nv_float2ll_rd", "llvm.floor.f32", 64, true},
+                {"__nv_float2ull_rn", "llvm.rint.f32", 64, false},
+                {"__nv_float2ull_rz", nullptr, 64, false},
+                {"__nv_float2ull_ru", "llvm.ceil.f32", 64, false},
+                {"__nv_float2ull_rd", "llvm.floor.f32", 64, false},
+            };
+            for (const ConvBuiltin& cb : kFloatToInt) {
+                if (callee != cb.nv) continue;
+                if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+                auto x = load_call_slot_f32(arg_names[0]);
+                if (!x) return fail(instr, callee + " arg missing");
+                std::string rounded = *x;
+                if (cb.round != nullptr) {
+                    declarations_.insert(std::string("declare float @") + cb.round + "(float)");
+                    rounded = next_tmp("nvconv_round");
+                    os << "  " << rounded << " = call float @" << cb.round << "(float "
+                       << *x << ")\n";
+                }
+                const std::string out = next_tmp("nvconv");
+                os << "  " << out << " = " << (cb.is_signed ? "fptosi" : "fptoui")
+                   << " float " << rounded << " to " << llvm_int_type(cb.bits) << "\n";
+                return store_ret_bits(out, cb.bits);
+            }
+
+            // Integer -> float. Every rounding mode collapses to one binary32
+            // conversion here: sitofp/uitofp round to nearest even, and the
+            // directed variants are not separable without a software path.
+            struct IntToFloat {
+                const char* nv;
+                int bits;
+                bool is_signed;
+            };
+            static const IntToFloat kIntToFloat[] = {
+                {"__nv_int2float_rn", 32, true},   {"__nv_int2float_rz", 32, true},
+                {"__nv_int2float_ru", 32, true},   {"__nv_int2float_rd", 32, true},
+                {"__nv_uint2float_rn", 32, false}, {"__nv_uint2float_rz", 32, false},
+                {"__nv_uint2float_ru", 32, false}, {"__nv_uint2float_rd", 32, false},
+                {"__nv_ll2float_rn", 64, true},    {"__nv_ll2float_rz", 64, true},
+                {"__nv_ll2float_ru", 64, true},    {"__nv_ll2float_rd", 64, true},
+                {"__nv_ull2float_rn", 64, false},  {"__nv_ull2float_rz", 64, false},
+                {"__nv_ull2float_ru", 64, false},  {"__nv_ull2float_rd", 64, false},
+            };
+            for (const IntToFloat& cb : kIntToFloat) {
+                if (callee != cb.nv) continue;
+                if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+                auto bits = load_call_slot_value(os, arg_names[0], cb.bits);
+                if (!bits) return fail(instr, callee + " arg missing");
+                const std::string out = next_tmp("nvconv_f");
+                os << "  " << out << " = " << (cb.is_signed ? "sitofp" : "uitofp") << " "
+                   << llvm_int_type(cb.bits) << " " << *bits << " to float\n";
+                return store_ret_f32(out);
+            }
         }
 
         // Functions with no direct Metal builtin, expressed exactly in terms of

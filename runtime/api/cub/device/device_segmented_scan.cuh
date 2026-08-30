@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include "../detail/host_backed.h"
 #include <cstddef>
 #include <type_traits>
 
@@ -12,7 +13,11 @@ struct DeviceSegmentedScan {
     static cudaError_t ExclusiveSegmentedSum(
         void* storage, std::size_t& bytes, InputIt input, OutputIt output,
         BeginOffsetIt begins, EndOffsetIt ends, int segments,
-        cudaStream_t = nullptr) {
+        cudaStream_t stream = nullptr) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (segments < 0) return cudaErrorInvalidValue;
         if (storage == nullptr) {
             bytes = 1;
@@ -35,7 +40,11 @@ struct DeviceSegmentedScan {
     static cudaError_t InclusiveSegmentedScan(
         void* storage, std::size_t& bytes, InputIt input, OutputIt output,
         BeginOffsetIt begins, EndOffsetIt ends, int segments, ScanOp op,
-        cudaStream_t = nullptr) {
+        cudaStream_t stream = nullptr) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (segments < 0) return cudaErrorInvalidValue;
         if (storage == nullptr) {
             bytes = 1;

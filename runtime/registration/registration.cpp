@@ -1584,6 +1584,11 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
         std::lock_guard<std::mutex> lock(s.mutex);
         const auto found = s.kernels.find(host_function);
         if (found == s.kernels.end()) {
+            if (is_debug_registration()) {
+                std::fprintf(stderr,
+                             "[cumetal-reg] lookup MISS host_fn=%p (%zu kernels registered)\n",
+                             host_function, s.kernels.size());
+            }
             return false;
         }
 
@@ -1830,6 +1835,23 @@ bool lookup_registered_symbol(const void* host_symbol,
     }
     *out_device_symbol = buffer->contents();
     return true;
+}
+
+// Drop only the state that belongs to the device context: the Metal buffers
+// backing __device__ globals, which cudaDeviceReset is defined to destroy.
+// The kernel and module tables are NOT context state -- they come from
+// __cudaRegisterFatBinary when the image loads, and real CUDA keeps them across
+// a reset so the next launch re-creates a context and re-loads the modules.
+// Clearing them here made every launch after GROMACS's device-detection
+// cudaDeviceReset fail with "inline kernel descriptor invalid".
+void reset_device_state() {
+    RegistrationState& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    for (auto& [host_symbol, record] : s.symbols) {
+        (void)host_symbol;
+        record.global_buffer.reset();
+    }
+    tls_launch_stack.clear();
 }
 
 void clear() {

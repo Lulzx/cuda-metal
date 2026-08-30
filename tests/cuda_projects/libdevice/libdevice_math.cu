@@ -64,7 +64,25 @@
     X(ceilf,      ceilf(4.0f * x),  ceilf(4.0f * x),              0.0f)        \
     X(truncf,     truncf(4.0f * x), truncf(4.0f * x),             0.0f)        \
     X(roundf,     roundf(4.0f * x), roundf(4.0f * x),             0.0f)        \
-    X(rintf,      rintf(4.0f * x),  rintf(4.0f * x),              0.0f)
+    X(rintf,      rintf(4.0f * x),  rintf(4.0f * x),              0.0f)       \
+    /* Double rsqrt. GROMACS's nbnxm kernels call it, and until it was mapped   \
+       an unlisted libdevice name aborted the whole kernel rather than          \
+       degrading. Evaluated through the FP64 pair path, hence the fast-math     \
+       tolerance. */                                                           \
+    X(rsqrt_d,    (float)rsqrt((double)(x + 0.25f)),                            \
+                  (float)(1.0 / sqrt((double)(x + 0.25f))),       2e-3f)       \
+    /* Float->int conversions. The suffix names the rounding mode, which has to \
+       be applied to the float before the cast; dropping it is the same defect  \
+       class as cvt.rni silently truncating. The 4x-2 shift puts negatives in   \
+       range, where a dropped mode shows up worst. */                          \
+    X(f2i_rn,     (float)__float2int_rn(4.0f * x - 2.0f),                       \
+                  nearbyintf(4.0f * x - 2.0f),                    0.0f)        \
+    X(f2i_rz,     (float)__float2int_rz(4.0f * x - 2.0f),                       \
+                  truncf(4.0f * x - 2.0f),                        0.0f)        \
+    X(f2i_ru,     (float)__float2int_ru(4.0f * x - 2.0f),                       \
+                  ceilf(4.0f * x - 2.0f),                         0.0f)        \
+    X(f2i_rd,     (float)__float2int_rd(4.0f * x - 2.0f),                       \
+                  floorf(4.0f * x - 2.0f),                        0.0f)
 
 #define BINARY_LIST(X)                                                         \
     X(fmaxf,      fmaxf(x, y),      fmaxf(x, y),                  0.0f)        \

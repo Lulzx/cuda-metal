@@ -262,6 +262,7 @@ struct BuiltinSignature {
 std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
     static const std::unordered_map<std::string, std::string> kDoubleBuiltins = {
         {"__nv_fma", "fma"}, {"__nv_sqrt", "sqrt"},
+        {"__nv_rsqrt", "rsqrt"},
         {"__nv_fmin", "fmin"}, {"__nv_fmax", "fmax"},
         {"__nv_remainder", "remainder"}, {"__nv_floor", "floor"},
         {"__nv_ceil", "ceil"}, {"__nv_trunc", "trunc"},
@@ -319,6 +320,46 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
             .return_type = Type::floating(32),
             .argument_types = std::vector<Type>(arity, Type::floating(32)),
             .tolerance_bounded = kExpandedMath.contains(std::string(name)),
+        };
+    }
+    // Float <-> integer conversions. The rounding mode is part of the name and
+    // applies to the float before the cast, so float->int goes through a helper
+    // that lower_to_msl expands into round-then-cast rather than a bare cast.
+    // Int->float is a plain numeric conversion in every mode.
+    static const std::unordered_map<std::string, std::string> kFloatToIntBuiltins = {
+        {"__nv_float2int_rn", "__cumetal_float2int_rne"},
+        {"__nv_float2int_rz", "__cumetal_float2int_rtz"},
+        {"__nv_float2int_ru", "__cumetal_float2int_rtp"},
+        {"__nv_float2int_rd", "__cumetal_float2int_rtn"},
+        {"__nv_float2uint_rn", "__cumetal_float2uint_rne"},
+        {"__nv_float2uint_rz", "__cumetal_float2uint_rtz"},
+        {"__nv_float2uint_ru", "__cumetal_float2uint_rtp"},
+        {"__nv_float2uint_rd", "__cumetal_float2uint_rtn"},
+    };
+    const auto float_to_int = kFloatToIntBuiltins.find(std::string(name));
+    if (float_to_int != kFloatToIntBuiltins.end()) {
+        return BuiltinSignature{
+            .metal_name = float_to_int->second,
+            .return_type = Type::integer(32),
+            .argument_types = {Type::floating(32)},
+        };
+    }
+    static const std::unordered_map<std::string, std::string> kFloatToLongBuiltins = {
+        {"__nv_float2ll_rn", "__cumetal_float2int_rne"},
+        {"__nv_float2ll_rz", "__cumetal_float2int_rtz"},
+        {"__nv_float2ll_ru", "__cumetal_float2int_rtp"},
+        {"__nv_float2ll_rd", "__cumetal_float2int_rtn"},
+        {"__nv_float2ull_rn", "__cumetal_float2uint_rne"},
+        {"__nv_float2ull_rz", "__cumetal_float2uint_rtz"},
+        {"__nv_float2ull_ru", "__cumetal_float2uint_rtp"},
+        {"__nv_float2ull_rd", "__cumetal_float2uint_rtn"},
+    };
+    const auto float_to_long = kFloatToLongBuiltins.find(std::string(name));
+    if (float_to_long != kFloatToLongBuiltins.end()) {
+        return BuiltinSignature{
+            .metal_name = float_to_long->second,
+            .return_type = Type::integer(64),
+            .argument_types = {Type::floating(32)},
         };
     }
     if (name == "__nv_float_as_uint" || name == "__nv_float_as_int") {

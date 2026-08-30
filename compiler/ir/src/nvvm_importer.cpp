@@ -1141,6 +1141,25 @@ struct Importer {
             }
             return true;
         }
+        // Integer -> float conversions are a plain numeric cast in MSL; the
+        // rounding-mode suffix is not separable in binary32 anyway, so every
+        // variant lowers to the same conversion the IR already models.
+        static const std::unordered_set<std::string> kIntToFloatConversions = {
+            "__nv_int2float_rn",  "__nv_int2float_rz",  "__nv_int2float_ru",
+            "__nv_int2float_rd",  "__nv_uint2float_rn", "__nv_uint2float_rz",
+            "__nv_uint2float_ru", "__nv_uint2float_rd", "__nv_ll2float_rn",
+            "__nv_ll2float_rz",   "__nv_ll2float_ru",   "__nv_ll2float_rd",
+            "__nv_ull2float_rn",  "__nv_ull2float_rz",  "__nv_ull2float_ru",
+            "__nv_ull2float_rd",
+        };
+        if (kIntToFloatConversions.contains(name)) {
+            operation->opcode = OpCode::kConvert;
+            for (const llvm::Use& argument : call.args()) {
+                operation->operands.push_back(import_operand(*argument.get(), *state));
+            }
+            return true;
+        }
+
         static const std::unordered_map<std::string, std::string> kCudaBuiltins = {
             {"__nv_fminf", "fmin"},
             {"__nv_fmaxf", "fmax"},
@@ -1186,6 +1205,7 @@ struct Importer {
             {"__nv_fmaf", "fma"},
             {"__nv_fma", "fma"},
             {"__nv_sqrt", "sqrt"},
+            {"__nv_rsqrt", "rsqrt"},
             {"__nv_fmin", "fmin"},
             {"__nv_fmax", "fmax"},
             {"__nv_remainder", "remainder"},
@@ -1198,6 +1218,27 @@ struct Importer {
             {"__nv_clz", "clz"},
             {"__nv_abs", "__cumetal_signed_abs"},
             {"__nv_ffs", "__cumetal_ffs"},
+            // Float -> integer. The rounding mode in the name applies to the
+            // float *before* the cast, and the cast itself truncates; folding it
+            // to a bare cast would silently drop the rounding, which is how
+            // cvt.rni came to truncate. Each maps to a helper that lower_to_msl
+            // expands into the matching round-then-cast.
+            {"__nv_float2int_rn", "__cumetal_float2int_rne"},
+            {"__nv_float2int_rz", "__cumetal_float2int_rtz"},
+            {"__nv_float2int_ru", "__cumetal_float2int_rtp"},
+            {"__nv_float2int_rd", "__cumetal_float2int_rtn"},
+            {"__nv_float2uint_rn", "__cumetal_float2uint_rne"},
+            {"__nv_float2uint_rz", "__cumetal_float2uint_rtz"},
+            {"__nv_float2uint_ru", "__cumetal_float2uint_rtp"},
+            {"__nv_float2uint_rd", "__cumetal_float2uint_rtn"},
+            {"__nv_float2ll_rn", "__cumetal_float2int_rne"},
+            {"__nv_float2ll_rz", "__cumetal_float2int_rtz"},
+            {"__nv_float2ll_ru", "__cumetal_float2int_rtp"},
+            {"__nv_float2ll_rd", "__cumetal_float2int_rtn"},
+            {"__nv_float2ull_rn", "__cumetal_float2uint_rne"},
+            {"__nv_float2ull_rz", "__cumetal_float2uint_rtz"},
+            {"__nv_float2ull_ru", "__cumetal_float2uint_rtp"},
+            {"__nv_float2ull_rd", "__cumetal_float2uint_rtn"},
         };
         const auto cuda_builtin = kCudaBuiltins.find(name);
         if (cuda_builtin != kCudaBuiltins.end()) {

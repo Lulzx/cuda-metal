@@ -2633,6 +2633,9 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     // control path.
     prop->persistingL2CacheMaxSize = prop->l2CacheSize / 4;
     prop->accessPolicyMaxWindowSize = prop->l2CacheSize / 4;
+    // Apple Silicon unified memory is not ECC-protected. GROMACS prints this
+    // field in its hardware summary.
+    prop->ECCEnabled = 0;
     for (size_t i = 0; i < sizeof(prop->cumetalReserved) / sizeof(prop->cumetalReserved[0]); ++i) {
         prop->cumetalReserved[i] = 0;
     }
@@ -3792,8 +3795,12 @@ cudaError_t cudaDeviceReset(void) {
         state.persisting_l2_limit = 0;
         state.printf_fifo_size = kDefaultPrintfFifoSize;
     }
-    cumetal::native_registration::clear();
-    cumetal::registration::clear();
+    // Not clear(): cudaDeviceReset destroys the primary context, not the module
+    // registry that __cudaRegisterFatBinary built when the image loaded. GROMACS
+    // calls cudaDeviceReset at the end of device detection and then launches
+    // kernels for the rest of the run.
+    cumetal::native_registration::reset_device_state();
+    cumetal::registration::reset_device_state();
     clear_pending_launch_state();
     tls_pending_launch_error = cudaSuccess;
     state.current_device = 0;
@@ -4871,7 +4878,10 @@ cudaError_t cudaStreamAddCallback(cudaStream_t stream,
 }
 
 cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags) {
-    if (event == nullptr || flags != 0) {
+    // cudaEventWaitExternal only marks the wait as crossing a captured graph's
+    // boundary; the wait itself is unchanged. GROMACS passes it on every
+    // cross-stream dependency, so accepting it is required, not cosmetic.
+    if (event == nullptr || (flags & ~static_cast<unsigned int>(cudaEventWaitExternal)) != 0) {
         return fail(cudaErrorInvalidValue);
     }
 
@@ -5008,6 +5018,16 @@ cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
     return fail(cudaSuccess);
 }
 
+// cudaEventRecordExternal / cudaEventRecordDefault only distinguish how an
+// event participates in a stream capture. CuMetal records the marker the same
+// way for both, so the flag is validated and dropped.
+cudaError_t cudaEventRecordWithFlags(cudaEvent_t event, cudaStream_t stream, unsigned int flags) {
+    if ((flags & ~static_cast<unsigned int>(cudaEventRecordExternal)) != 0u) {
+        return fail(cudaErrorInvalidValue);
+    }
+    return cudaEventRecord(event, stream);
+}
+
 cudaError_t cudaEventSynchronize(cudaEvent_t event) {
     const cudaError_t status = update_event_completion(event, /*wait_for_completion=*/true);
     return fail(status);
@@ -5129,18 +5149,29 @@ cudaError_t cudaLaunchKernel(const void* func,
     const cumetalKernelArgInfo_t* arg_info = nullptr;
 
     if (use_registered_kernel) {
-        if (registered_kernel.metallib_path.empty() || registered_kernel.kernel_name.empty() ||
-            args == nullptr) {
+        if (registered_kernel.metallib_path.empty() || registered_kernel.kernel_name.empty()) {
             std::fprintf(stderr,
-                         "CUMETAL: registered kernel missing metallib/name/args: func=%p kernel='%s' metallib='%s' args=%p\n",
+                         "CUMETAL: registered kernel missing metallib/name: func=%p kernel='%s' metallib='%s'\n",
                          func,
                          registered_kernel.kernel_name.c_str(),
-                         registered_kernel.metallib_path.c_str(),
-                         static_cast<const void*>(args));
-            return launch_fail(cudaErrorInvalidValue, "registered kernel missing metallib/name/args");
+                         registered_kernel.metallib_path.c_str());
+            return launch_fail(cudaErrorInvalidValue, "registered kernel missing metallib/name");
         }
 
-        if (!registered_kernel.arg_info.empty()) {
+        // A kernel that takes no parameters may be launched with a null argv --
+        // CUDA permits it, and GROMACS's device sanity check does exactly that
+        // with `static __global__ void dummy_kernel() {}`. Only a kernel whose
+        // PTX ABI says it wants arguments makes a null argv an error.
+        if (args == nullptr) {
+            if (!registered_kernel.arg_info.empty()) {
+                std::fprintf(stderr,
+                             "CUMETAL: kernel '%s' expects %zu argument(s) but was launched with a null argv\n",
+                             registered_kernel.kernel_name.c_str(),
+                             registered_kernel.arg_info.size());
+                return launch_fail(cudaErrorInvalidValue, "registered kernel args null");
+            }
+            arg_count = 0;
+        } else if (!registered_kernel.arg_info.empty()) {
             const std::uint32_t ptx_arg_count =
                 static_cast<std::uint32_t>(registered_kernel.arg_info.size());
             // Clip to null-terminator: some callers pass nullptr as sentinel after real args
@@ -7319,6 +7350,13 @@ cudaError_t cudaCreateTextureObject(cudaTextureObject_t* pTexObject,
 }
 
 cudaError_t cudaDestroyTextureObject(cudaTextureObject_t texObject) {
+    // A zero handle is the null texture object and destroying it is a no-op, the
+    // same way freeing a null pointer is. GROMACS relies on this: a parameter
+    // lookup table with no entries never creates a texture, and the teardown
+    // path still calls destroy on the zero-initialized member.
+    if (texObject == 0) {
+        return fail(cudaSuccess);
+    }
     void* descriptor = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_tex_mutex);
@@ -7387,6 +7425,10 @@ cudaError_t cudaCreateSurfaceObject(cudaSurfaceObject_t* pSurfObject,
 }
 
 cudaError_t cudaDestroySurfaceObject(cudaSurfaceObject_t surfObject) {
+    // Null handle, no-op -- see cudaDestroyTextureObject.
+    if (surfObject == 0) {
+        return fail(cudaSuccess);
+    }
     void* descriptor = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_tex_mutex);

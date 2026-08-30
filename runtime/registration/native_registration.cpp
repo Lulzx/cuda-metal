@@ -206,6 +206,17 @@ bool lookup_symbol(const void* host_symbol, const void** out_device_symbol,
     return true;
 }
 
+// See the note on cumetal::registration::reset_device_state: a cudaDeviceReset
+// destroys the context's device allocations, not the module registry.
+void reset_device_state() {
+    State& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    for (auto& [host_symbol, symbol] : s.symbols) {
+        (void)host_symbol;
+        symbol.global_buffer.reset();
+    }
+}
+
 void clear() {
     State& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);

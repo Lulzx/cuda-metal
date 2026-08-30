@@ -77,6 +77,10 @@ bool lookup_device_kernel_alias(void* module_handle,
 bool lookup_registered_symbol(const void* host_symbol,
                               const void** out_device_symbol,
                               std::size_t* out_size);
+// Releases the Metal buffers behind registered __device__ globals but keeps the
+// kernel/module tables, which survive a cudaDeviceReset in CUDA.
+void reset_device_state();
+
 void clear();
 
 }  // namespace cumetal::registration

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include "../detail/host_backed.h"
 #include <cstddef>
 #include <tuple>
 #include <type_traits>
@@ -31,7 +32,11 @@ struct is_tuple<std::tuple<T...>> : std::true_type {};
 struct DeviceTransform {
     template <typename... Inputs, typename Output, typename Size, typename Op>
     static cudaError_t Transform(std::tuple<Inputs...> inputs, Output output,
-                                 Size count, Op op, cudaStream_t = nullptr) {
+                                 Size count, Op op, cudaStream_t stream = nullptr) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         for (Size i = 0; i < count; ++i) {
             auto result = detail::invoke_at(inputs, op, static_cast<std::size_t>(i),
                                             std::index_sequence_for<Inputs...>{});

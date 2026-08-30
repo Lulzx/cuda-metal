@@ -17,6 +17,8 @@ bool lookup_registered_symbol(const void* host_symbol,
     return false;
 }
 
+void reset_device_state() {}
+
 void clear() {}
 
 }  // namespace cumetal::registration

@@ -2,6 +2,7 @@
 // CuMetal CUB shim: DevicePartition — device-level partitioning.
 
 #include <cuda_runtime.h>
+#include "../detail/host_backed.h"
 
 namespace cub {
 
@@ -11,7 +12,11 @@ struct DevicePartition {
     static cudaError_t If(void* d_temp_storage, size_t& temp_storage_bytes,
                           InputIteratorT d_in, OutputIteratorT d_out,
                           NumSelectedIteratorT d_num_selected_out,
-                          int num_items, SelectOp select_op, cudaStream_t = 0) {
+                          int num_items, SelectOp select_op, cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
@@ -38,7 +43,11 @@ struct DevicePartition {
     static cudaError_t Flagged(void* d_temp_storage, size_t& temp_storage_bytes,
                                InputIteratorT d_in, FlagIterator d_flags,
                                OutputIteratorT d_out, NumSelectedIteratorT d_num_selected_out,
-                               int num_items, cudaStream_t = 0) {
+                               int num_items, cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
@@ -72,7 +81,11 @@ struct DevicePartition {
                           int num_items,
                           SelectFirstPartOp select_first_part_op,
                           SelectSecondPartOp select_second_part_op,
-                          cudaStream_t = 0) {
+                          cudaStream_t stream = 0) {
+        if (const cudaError_t sync = cub::detail::sync_host_backed(stream);
+            sync != cudaSuccess) {
+            return sync;
+        }
         if (!d_temp_storage) {
             temp_storage_bytes = 1;
             return cudaSuccess;
