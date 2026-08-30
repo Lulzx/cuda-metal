@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <new>
 #include <utility>
 #include <vector>
@@ -3038,6 +3039,70 @@ struct cudnnSeqDataStruct {
     std::vector<int> seqLengths;
 };
 
+static bool attn_projection_elements(const cudnnAttnStruct* attn,
+                                     cudnnMultiHeadAttnWeightKind_t kind,
+                                     size_t* offset, size_t* count,
+                                     size_t* total) {
+    if (!attn || !offset || !count || !total) return false;
+    const size_t heads = static_cast<size_t>(attn->nHeads);
+    const size_t input_sizes[] = {static_cast<size_t>(attn->qSize),
+                                  static_cast<size_t>(attn->kSize),
+                                  static_cast<size_t>(attn->vSize)};
+    const size_t projection_sizes[] = {static_cast<size_t>(attn->qProjSize),
+                                       static_cast<size_t>(attn->kProjSize),
+                                       static_cast<size_t>(attn->vProjSize)};
+    size_t regions[4] = {};
+    for (int i = 0; i < 3; ++i) {
+        if (!checked_mul(input_sizes[i], projection_sizes[i], &regions[i]) ||
+            !checked_mul(regions[i], heads, &regions[i])) {
+            return false;
+        }
+    }
+    if (!checked_mul(heads, static_cast<size_t>(attn->vProjSize), &regions[3]) ||
+        !checked_mul(regions[3], static_cast<size_t>(attn->oProjSize), &regions[3])) {
+        return false;
+    }
+    *total = 0;
+    for (size_t region : regions) {
+        if (!checked_add(*total, region, total)) return false;
+    }
+    const int index = static_cast<int>(kind);
+    if (index < static_cast<int>(CUDNN_MH_ATTN_Q_WEIGHTS) ||
+        index > static_cast<int>(CUDNN_MH_ATTN_O_WEIGHTS)) {
+        return false;
+    }
+    *offset = 0;
+    for (int i = 0; i < index; ++i) {
+        if (!checked_add(*offset, regions[i], offset)) return false;
+    }
+    *count = regions[index];
+    return true;
+}
+
+static bool seq_data_elements(const cudnnSeqDataStruct* desc, size_t* elements) {
+    if (!desc || desc->nbDims != CUDNN_SEQDATA_DIM_COUNT || !elements) return false;
+    *elements = 1;
+    for (int i = 0; i < CUDNN_SEQDATA_DIM_COUNT; ++i) {
+        if (desc->dims[i] <= 0 ||
+            !checked_mul(*elements, static_cast<size_t>(desc->dims[i]), elements)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool byte_ranges_overlap(const void* a, size_t a_size,
+                                const void* b, size_t b_size) {
+    if (!a || !b || a_size == 0 || b_size == 0) return false;
+    const uintptr_t a_begin = reinterpret_cast<uintptr_t>(a);
+    const uintptr_t b_begin = reinterpret_cast<uintptr_t>(b);
+    if (a_begin > std::numeric_limits<uintptr_t>::max() - a_size ||
+        b_begin > std::numeric_limits<uintptr_t>::max() - b_size) {
+        return true;
+    }
+    return a_begin < b_begin + b_size && b_begin < a_begin + a_size;
+}
+
 cudnnStatus_t cudnnCreateAttnDescriptor(cudnnAttnDescriptor_t* attnDesc) {
     if (!attnDesc) return CUDNN_STATUS_BAD_PARAM;
     *attnDesc = new (std::nothrow) cudnnAttnStruct();
@@ -3052,7 +3117,7 @@ cudnnStatus_t cudnnDestroyAttnDescriptor(cudnnAttnDescriptor_t attnDesc) {
 cudnnStatus_t cudnnSetAttnDescriptor(cudnnAttnDescriptor_t attnDesc,
                                       unsigned attnMode, int nHeads, double smScaler,
                                       cudnnDataType_t dataType, cudnnDataType_t computePrec,
-                                      cudnnMathType_t,
+                                      cudnnMathType_t mathType,
                                       cudnnDropoutDescriptor_t attnDropoutDesc,
                                       cudnnDropoutDescriptor_t postDropoutDesc,
                                       int qSize, int kSize, int vSize,
@@ -3060,9 +3125,16 @@ cudnnStatus_t cudnnSetAttnDescriptor(cudnnAttnDescriptor_t attnDesc,
                                       int qoMaxSeqLength, int kvMaxSeqLength,
                                       int maxBatchSize, int maxBeamSize) {
     if (!attnDesc || nHeads <= 0 || qSize <= 0 || kSize <= 0 || vSize <= 0 ||
+        !std::isfinite(smScaler) || qProjSize < 0 || kProjSize < 0 ||
+        vProjSize < 0 || oProjSize < 0 ||
         qoMaxSeqLength <= 0 || kvMaxSeqLength <= 0 ||
         maxBatchSize <= 0 || maxBeamSize <= 0) {
         return CUDNN_STATUS_BAD_PARAM;
+    }
+    if (attnMode != 0 || dataType != CUDNN_DATA_FLOAT ||
+        computePrec != CUDNN_DATA_FLOAT || mathType != CUDNN_DEFAULT_MATH ||
+        attnDropoutDesc || postDropoutDesc) {
+        return CUDNN_STATUS_NOT_SUPPORTED;
     }
     attnDesc->attnMode = attnMode;
     attnDesc->nHeads = nHeads;
@@ -3079,47 +3151,51 @@ cudnnStatus_t cudnnSetAttnDescriptor(cudnnAttnDescriptor_t attnDesc,
     return CUDNN_STATUS_SUCCESS;
 }
 
-cudnnStatus_t cudnnGetMultiHeadAttnBuffers(cudnnHandle_t,
+cudnnStatus_t cudnnGetMultiHeadAttnBuffers(cudnnHandle_t handle,
                                             const cudnnAttnDescriptor_t attnDesc,
                                             size_t* weightSizeInBytes,
                                             size_t* workSpaceSizeInBytes,
                                             size_t* reserveSpaceSizeInBytes) {
-    if (!attnDesc) return CUDNN_STATUS_BAD_PARAM;
-    const int h = attnDesc->nHeads;
-    const int qp = attnDesc->qProjSize;
-    const int kp = attnDesc->kProjSize;
-    const int vp = attnDesc->vProjSize;
-    const int op = attnDesc->oProjSize;
-    // Weight sizes: Wq(qSize*qp*h) + Wk(kSize*kp*h) + Wv(vSize*vp*h) + Wo(h*vp*op)
-    size_t ws = (size_t)(attnDesc->qSize * qp * h +
-                         attnDesc->kSize * kp * h +
-                         attnDesc->vSize * vp * h +
-                         h * vp * op) * dtype_size(attnDesc->dataType);
+    if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
+    if (!attnDesc || (!weightSizeInBytes && !workSpaceSizeInBytes &&
+                      !reserveSpaceSizeInBytes)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    size_t offset = 0, count = 0, total = 0, ws = 0;
+    if (!attn_projection_elements(attnDesc, CUDNN_MH_ATTN_Q_WEIGHTS,
+                                  &offset, &count, &total) ||
+        !checked_mul(total, dtype_size(attnDesc->dataType), &ws)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
     if (weightSizeInBytes) *weightSizeInBytes = ws;
     if (workSpaceSizeInBytes) *workSpaceSizeInBytes = 0;
     if (reserveSpaceSizeInBytes) *reserveSpaceSizeInBytes = 0;
     return CUDNN_STATUS_SUCCESS;
 }
 
-cudnnStatus_t cudnnGetMultiHeadAttnWeights(cudnnHandle_t,
+cudnnStatus_t cudnnGetMultiHeadAttnWeights(cudnnHandle_t handle,
                                             const cudnnAttnDescriptor_t attnDesc,
                                             cudnnMultiHeadAttnWeightKind_t wKind,
-                                            size_t, const void* weights,
+                                            size_t weightSizeInBytes, const void* weights,
                                             cudnnTensorDescriptor_t, void** wAddr) {
+    if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!attnDesc || !weights || !wAddr) return CUDNN_STATUS_BAD_PARAM;
-    const int h = attnDesc->nHeads;
-    const int qp = attnDesc->qProjSize > 0 ? attnDesc->qProjSize : attnDesc->qSize;
-    const int kp = attnDesc->kProjSize > 0 ? attnDesc->kProjSize : attnDesc->kSize;
-    const int vp = attnDesc->vProjSize > 0 ? attnDesc->vProjSize : attnDesc->vSize;
-    size_t offset = 0;
-    switch (wKind) {
-        case CUDNN_MH_ATTN_Q_WEIGHTS: offset = 0; break;
-        case CUDNN_MH_ATTN_K_WEIGHTS: offset = (size_t)attnDesc->qSize * qp * h; break;
-        case CUDNN_MH_ATTN_V_WEIGHTS: offset = (size_t)(attnDesc->qSize * qp + attnDesc->kSize * kp) * h; break;
-        case CUDNN_MH_ATTN_O_WEIGHTS: offset = (size_t)(attnDesc->qSize * qp + attnDesc->kSize * kp + attnDesc->vSize * vp) * h; break;
-        default: *wAddr = nullptr; return CUDNN_STATUS_BAD_PARAM;
+    *wAddr = nullptr;
+    size_t offset = 0, count = 0, total = 0;
+    if (!attn_projection_elements(attnDesc, wKind, &offset, &count, &total)) {
+        return static_cast<int>(wKind) >= static_cast<int>(CUDNN_MH_ATTN_Q_BIASES)
+                   ? CUDNN_STATUS_NOT_SUPPORTED
+                   : CUDNN_STATUS_BAD_PARAM;
     }
-    *wAddr = (void*)((const char*)weights + offset * sizeof(float));
+    size_t required_bytes = 0, offset_bytes = 0, count_bytes = 0;
+    if (!checked_mul(total, dtype_size(attnDesc->dataType), &required_bytes) ||
+        !checked_mul(offset, dtype_size(attnDesc->dataType), &offset_bytes) ||
+        !checked_mul(count, dtype_size(attnDesc->dataType), &count_bytes) ||
+        weightSizeInBytes < required_bytes || count_bytes == 0 ||
+        !tracked_bytes_valid(weights, required_bytes)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+    *wAddr = const_cast<char*>(static_cast<const char*>(weights)) + offset_bytes;
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -3138,11 +3214,12 @@ cudnnStatus_t cudnnSetSeqDataDescriptor(cudnnSeqDataDescriptor_t seqDataDesc,
                                          cudnnDataType_t dataType, int nbDims,
                                          const int dimA[], const cudnnSeqDataAxis_t axes[],
                                          size_t seqLengthArraySize,
-                                         const int seqLengthArray[], void*) {
+                                         const int seqLengthArray[], void* paddingFill) {
     if (!seqDataDesc || nbDims != CUDNN_SEQDATA_DIM_COUNT || !dimA || !axes ||
         (seqLengthArraySize > 0 && !seqLengthArray)) {
         return CUDNN_STATUS_BAD_PARAM;
     }
+    if (paddingFill) return CUDNN_STATUS_NOT_SUPPORTED;
     seqDataDesc->dataType = dataType;
     seqDataDesc->nbDims = nbDims;
     bool seen[CUDNN_SEQDATA_DIM_COUNT] = {};
@@ -3154,6 +3231,14 @@ cudnnStatus_t cudnnSetSeqDataDescriptor(cudnnSeqDataDescriptor_t seqDataDesc,
         seen[axes[i]] = true;
         seqDataDesc->dims[i] = dimA[i];
         seqDataDesc->axes[i] = axes[i];
+    }
+    int time_extent = 0;
+    for (int i = 0; i < nbDims; ++i) {
+        if (axes[i] == CUDNN_SEQDATA_TIME_DIM) time_extent = dimA[i];
+    }
+    for (size_t i = 0; i < seqLengthArraySize; ++i) {
+        if (seqLengthArray[i] <= 0 || seqLengthArray[i] > time_extent)
+            return CUDNN_STATUS_BAD_PARAM;
     }
     try {
         seqDataDesc->seqLengths.clear();
@@ -3175,7 +3260,7 @@ cudnnStatus_t cudnnMultiHeadAttnForward(cudnnHandle_t handle,
                                          const int devSeqLengthsQO[],
                                          const int devSeqLengthsKV[],
                                          const cudnnSeqDataDescriptor_t qDesc,
-                                         const void* queries, const void*,
+                                         const void* queries, const void* residuals,
                                          const cudnnSeqDataDescriptor_t kDesc,
                                          const void* keys,
                                          const cudnnSeqDataDescriptor_t vDesc,
@@ -3183,9 +3268,10 @@ cudnnStatus_t cudnnMultiHeadAttnForward(cudnnHandle_t handle,
                                          const cudnnSeqDataDescriptor_t oDesc,
                                          void* output,
                                          size_t weightSizeInBytes, const void* weights,
-                                         size_t, void*,
-                                         size_t, void*) {
-    if (!handle || !attnDesc || !qDesc || !kDesc || !vDesc || !oDesc ||
+                                         size_t workSpaceSizeInBytes, void* workSpace,
+                                         size_t reserveSpaceSizeInBytes, void* reserveSpace) {
+    if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
+    if (!attnDesc || !qDesc || !kDesc || !vDesc || !oDesc ||
         !queries || !keys || !values || !output) {
         return CUDNN_STATUS_BAD_PARAM;
     }
@@ -3217,12 +3303,11 @@ cudnnStatus_t cudnnMultiHeadAttnForward(cudnnHandle_t handle,
         attnDesc->attnMode != 0 || currIdx >= 0 ||
         loWinIdx != nullptr || hiWinIdx != nullptr ||
         devSeqLengthsQO != nullptr || devSeqLengthsKV != nullptr ||
-        weightSizeInBytes != 0 || weights != nullptr) {
+        residuals != nullptr || weightSizeInBytes != 0 || weights != nullptr ||
+        workSpaceSizeInBytes != 0 || workSpace != nullptr ||
+        reserveSpaceSizeInBytes != 0 || reserveSpace != nullptr) {
         return CUDNN_STATUS_NOT_SUPPORTED;
     }
-
-    cudnnStatus_t sync_status = sync_handle(handle);
-    if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
     const int tq = qDesc->dims[CUDNN_SEQDATA_TIME_DIM];
     const int tk = kDesc->dims[CUDNN_SEQDATA_TIME_DIM];
@@ -3244,9 +3329,38 @@ cudnnStatus_t cudnnMultiHeadAttnForward(cudnnHandle_t handle,
         kDesc->dims[CUDNN_SEQDATA_BEAM_DIM] != beam ||
         vDesc->dims[CUDNN_SEQDATA_BEAM_DIM] != beam ||
         oDesc->dims[CUDNN_SEQDATA_BEAM_DIM] != beam ||
-        oDesc->dims[CUDNN_SEQDATA_TIME_DIM] != tq) {
+        oDesc->dims[CUDNN_SEQDATA_TIME_DIM] != tq ||
+        tq > attnDesc->qoMaxSeqLength || tk > attnDesc->kvMaxSeqLength ||
+        batch > attnDesc->maxBatchSize || beam > attnDesc->maxBeamSize) {
         return CUDNN_STATUS_BAD_PARAM;
     }
+
+    size_t q_elements = 0, k_elements = 0, v_elements = 0, o_elements = 0;
+    size_t q_bytes = 0, k_bytes = 0, v_bytes = 0, o_bytes = 0;
+    if (!seq_data_elements(qDesc, &q_elements) ||
+        !seq_data_elements(kDesc, &k_elements) ||
+        !seq_data_elements(vDesc, &v_elements) ||
+        !seq_data_elements(oDesc, &o_elements) ||
+        q_elements > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        k_elements > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        v_elements > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        o_elements > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        !checked_mul(q_elements, sizeof(float), &q_bytes) ||
+        !checked_mul(k_elements, sizeof(float), &k_bytes) ||
+        !checked_mul(v_elements, sizeof(float), &v_bytes) ||
+        !checked_mul(o_elements, sizeof(float), &o_bytes) ||
+        !tracked_bytes_valid(queries, q_bytes) ||
+        !tracked_bytes_valid(keys, k_bytes) ||
+        !tracked_bytes_valid(values, v_bytes) ||
+        !tracked_bytes_valid(output, o_bytes) ||
+        byte_ranges_overlap(output, o_bytes, queries, q_bytes) ||
+        byte_ranges_overlap(output, o_bytes, keys, k_bytes) ||
+        byte_ranges_overlap(output, o_bytes, values, v_bytes)) {
+        return CUDNN_STATUS_BAD_PARAM;
+    }
+
+    cudnnStatus_t sync_status = sync_handle(handle);
+    if (sync_status != CUDNN_STATUS_SUCCESS) return sync_status;
 
     const float* q = static_cast<const float*>(queries);
     const float* k = static_cast<const float*>(keys);
@@ -3254,9 +3368,16 @@ cudnnStatus_t cudnnMultiHeadAttnForward(cudnnHandle_t handle,
     float* out = static_cast<float*>(output);
     const int width = qv / heads;
     const float scale = static_cast<float>(attnDesc->smScaler);
+    std::shared_ptr<std::vector<float>> scores;
+    try {
+        scores = std::make_shared<std::vector<float>>(static_cast<size_t>(tk));
+    } catch (const std::bad_alloc&) {
+        return CUDNN_STATUS_ALLOC_FAILED;
+    } catch (...) {
+        return CUDNN_STATUS_INTERNAL_ERROR;
+    }
     const cudaError_t enqueue_status = cumetal::rt::enqueue_host_operation(
         handle->stream, [=]() {
-            std::vector<float> scores(static_cast<size_t>(tk));
             auto offset = [batch, beam](int t, int b, int r, int c, int vec) {
                 return (((static_cast<size_t>(t) * batch + b) * beam + r) * vec + c);
             };
@@ -3272,11 +3393,12 @@ cudnnStatus_t cudnnMultiHeadAttnForward(cudnnHandle_t handle,
                                     dot += q[offset(t, b, r, hc, qv)] *
                                            k[offset(s, b, r, hc, kv)];
                                 }
-                                scores[static_cast<size_t>(s)] = scale * dot;
-                                max_score = std::max(max_score, scores[static_cast<size_t>(s)]);
+                                (*scores)[static_cast<size_t>(s)] = scale * dot;
+                                max_score = std::max(max_score,
+                                                     (*scores)[static_cast<size_t>(s)]);
                             }
                             float denominator = 0.0f;
-                            for (float& score : scores) {
+                            for (float& score : *scores) {
                                 score = std::exp(score - max_score);
                                 denominator += score;
                             }
@@ -3284,7 +3406,7 @@ cudnnStatus_t cudnnMultiHeadAttnForward(cudnnHandle_t handle,
                                 float sum = 0.0f;
                                 const int hc = h * width + c;
                                 for (int s = 0; s < tk; ++s) {
-                                    sum += (scores[static_cast<size_t>(s)] / denominator) *
+                                    sum += ((*scores)[static_cast<size_t>(s)] / denominator) *
                                            v[offset(s, b, r, hc, vv)];
                                 }
                                 out[offset(t, b, r, hc, ov)] = sum;

@@ -27,6 +27,25 @@ static void test_attn_descriptor_lifecycle() {
                                  128, 128,         // max seq lengths
                                  32, 1);           // max batch, beam
     CHECK(st == CUDNN_STATUS_SUCCESS, "set attn descriptor");
+    CHECK(cudnnSetAttnDescriptor(attnDesc, 0, 8,
+                                 std::numeric_limits<double>::quiet_NaN(),
+                                 CUDNN_DATA_FLOAT, CUDNN_DATA_FLOAT,
+                                 CUDNN_DEFAULT_MATH, nullptr, nullptr,
+                                 64, 64, 64, 0, 0, 0, 0, 128, 128, 32, 1) ==
+              CUDNN_STATUS_BAD_PARAM,
+          "reject non-finite attention scaler");
+    CHECK(cudnnSetAttnDescriptor(attnDesc, 0, 8, 1.0,
+                                 CUDNN_DATA_FLOAT, CUDNN_DATA_FLOAT,
+                                 CUDNN_DEFAULT_MATH, nullptr, nullptr,
+                                 64, 64, 64, -1, 0, 0, 0, 128, 128, 32, 1) ==
+              CUDNN_STATUS_BAD_PARAM,
+          "reject negative attention projection size");
+    CHECK(cudnnSetAttnDescriptor(attnDesc, 0, 8, 1.0,
+                                 CUDNN_DATA_HALF, CUDNN_DATA_FLOAT,
+                                 CUDNN_DEFAULT_MATH, nullptr, nullptr,
+                                 64, 64, 64, 0, 0, 0, 0, 128, 128, 32, 1) ==
+              CUDNN_STATUS_NOT_SUPPORTED,
+          "reject unsupported attention datatype");
 
     st = cudnnDestroyAttnDescriptor(attnDesc);
     CHECK(st == CUDNN_STATUS_SUCCESS, "destroy attn descriptor");
@@ -52,6 +71,20 @@ static void test_attn_buffer_sizes() {
     CHECK(st == CUDNN_STATUS_SUCCESS, "get attn buffers");
     CHECK(weightSize == 0, "projection-free attention requires no weights");
 
+    cudnnAttnDescriptor_t overflowDesc;
+    cudnnCreateAttnDescriptor(&overflowDesc);
+    CHECK(cudnnSetAttnDescriptor(overflowDesc, 0, std::numeric_limits<int>::max(), 1.0,
+                                 CUDNN_DATA_FLOAT, CUDNN_DATA_FLOAT,
+                                 CUDNN_DEFAULT_MATH, nullptr, nullptr,
+                                 std::numeric_limits<int>::max(), 1, 1,
+                                 std::numeric_limits<int>::max(), 0, 0, 0,
+                                 1, 1, 1, 1) == CUDNN_STATUS_SUCCESS,
+          "configure overflowing attention weights");
+    CHECK(cudnnGetMultiHeadAttnBuffers(handle, overflowDesc, &weightSize,
+                                       nullptr, nullptr) == CUDNN_STATUS_BAD_PARAM,
+          "reject overflowing attention weight geometry");
+    cudnnDestroyAttnDescriptor(overflowDesc);
+
     cudnnDestroyAttnDescriptor(attnDesc);
     cudnnDestroy(handle);
 }
@@ -67,6 +100,14 @@ static void test_seq_data_descriptor() {
     int seqLengths[] = {64};
     st = cudnnSetSeqDataDescriptor(seqDesc, CUDNN_DATA_FLOAT, 4, dims, axes, 1, seqLengths, nullptr);
     CHECK(st == CUDNN_STATUS_SUCCESS, "set seq data descriptor");
+    int invalidLength[] = {65};
+    CHECK(cudnnSetSeqDataDescriptor(seqDesc, CUDNN_DATA_FLOAT, 4, dims, axes, 1,
+                                    invalidLength, nullptr) == CUDNN_STATUS_BAD_PARAM,
+          "reject sequence length beyond time extent");
+    float padding = 0.0f;
+    CHECK(cudnnSetSeqDataDescriptor(seqDesc, CUDNN_DATA_FLOAT, 4, dims, axes, 1,
+                                    seqLengths, &padding) == CUDNN_STATUS_NOT_SUPPORTED,
+          "reject unsupported sequence padding fill");
 
     st = cudnnDestroySeqDataDescriptor(seqDesc);
     CHECK(st == CUDNN_STATUS_SUCCESS, "destroy seq data descriptor");
@@ -107,6 +148,18 @@ static void test_attn_weight_pointers() {
                                        nullptr, &kAddr);
     CHECK(st == CUDNN_STATUS_SUCCESS, "get K weights");
     CHECK(kAddr > qAddr, "K weights after Q weights");
+    void* invalidAddr = reinterpret_cast<void*>(1);
+    st = cudnnGetMultiHeadAttnWeights(handle, attnDesc,
+                                       CUDNN_MH_ATTN_O_WEIGHTS,
+                                       weightSize - sizeof(float), weights,
+                                       nullptr, &invalidAddr);
+    CHECK(st == CUDNN_STATUS_BAD_PARAM && invalidAddr == nullptr,
+          "reject undersized attention weight buffer");
+    st = cudnnGetMultiHeadAttnWeights(handle, attnDesc,
+                                       CUDNN_MH_ATTN_Q_BIASES,
+                                       weightSize, weights, nullptr, &invalidAddr);
+    CHECK(st == CUDNN_STATUS_NOT_SUPPORTED && invalidAddr == nullptr,
+          "reject unsupported attention bias query");
 
     delete[] weights;
     cudnnDestroyAttnDescriptor(attnDesc);
@@ -189,6 +242,31 @@ static void test_attn_forward_numerical_and_rejection() {
               sizeof(fakeWeight), &fakeWeight, 0, nullptr, 0, nullptr) ==
               CUDNN_STATUS_NOT_SUPPORTED,
           "projection weights are explicitly rejected");
+    CHECK(cudnnMultiHeadAttnForward(
+              handle, attnDesc, -1, nullptr, nullptr, nullptr, nullptr,
+              qDesc, q, q, kDesc, k, vDesc, v, oDesc, output,
+              0, nullptr, 0, nullptr, 0, nullptr) == CUDNN_STATUS_NOT_SUPPORTED,
+          "attention residual input is explicitly rejected");
+    CHECK(cudnnMultiHeadAttnForward(
+              handle, attnDesc, -1, nullptr, nullptr, nullptr, nullptr,
+              qDesc, q, nullptr, kDesc, k, vDesc, v, oDesc,
+              const_cast<float*>(q), 0, nullptr, 0, nullptr, 0, nullptr) ==
+              CUDNN_STATUS_BAD_PARAM,
+          "reject overlapping attention output");
+
+    float* shortDevice = nullptr;
+    CHECK(cudaMalloc(reinterpret_cast<void**>(&shortDevice), sizeof(float)) == cudaSuccess,
+          "allocate short tracked attention input");
+    for (float& x : output) x = -7.0f;
+    CHECK(cudnnMultiHeadAttnForward(
+              handle, attnDesc, -1, nullptr, nullptr, nullptr, nullptr,
+              qDesc, shortDevice, nullptr, kDesc, k, vDesc, v, oDesc, output,
+              0, nullptr, 0, nullptr, 0, nullptr) == CUDNN_STATUS_BAD_PARAM,
+          "reject undersized tracked attention input");
+    bool untouched = true;
+    for (float x : output) untouched &= x == -7.0f;
+    CHECK(untouched, "attention bounds failure leaves output untouched");
+    cudaFree(shortDevice);
 
     for (auto desc : {qDesc, kDesc, vDesc, oDesc}) cudnnDestroySeqDataDescriptor(desc);
     cudnnDestroyAttnDescriptor(attnDesc);

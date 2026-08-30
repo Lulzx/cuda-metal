@@ -76,8 +76,13 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   zero dropout only. Its timestep/state geometry, parameter sizes, scratch
   sizes, and tracked allocation spans are checked, but backward RNN, packed or
   variable sequences, nonzero dropout, persistent algorithms, and broader
-  descriptor formats are absent. Attention is likewise a bounded compatibility
-  path rather than a full cuDNN implementation.
+  descriptor formats are absent. Attention forward is limited to
+  projection-free, dropout-free FP32 canonical descriptors with fixed full
+  sequences and disjoint output. Learned projections, biases, residuals,
+  windows, incremental decoding, variable lengths, backward/training reserve,
+  and broader datatype/layout behavior are explicitly unsupported. Its covered
+  tensor spans, configured maxima, and projection-weight queries are checked;
+  this remains a bounded compatibility path rather than full cuDNN.
 - **NCCL:** single-device compatibility cannot provide collective multi-GPU
   semantics. The implemented one-rank collectives are identity copies, not a
   transport; only device zero and rank zero are accepted, point-to-point calls
