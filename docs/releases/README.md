@@ -2,6 +2,8 @@
 
 [Documentation index](../README.md)
 
+- [v0.4.0](v0.4.0.md) — source-first compiler closure, runtime and library
+  robustness, AIR tooling, and strict negative-path validation
 - [v0.3.0](v0.3.0.md) — CUDA-samples closure, virtual FP64 integration,
   compiler/runtime hardening, and modular documentation
 - [v0.2.1](https://github.com/Lulzx/cuda-metal/releases/tag/v0.2.1)
