@@ -7,6 +7,8 @@ cu=$3
 unsupported=$4
 switch_source=$5
 float_abs_source=$6
+float_math_source=$7
+nvcc=$8
 
 workdir=$(mktemp -d "${TMPDIR:-/tmp}/cumetalc-shared-ir.XXXXXX")
 trap 'rm -rf "$workdir"' EXIT
@@ -39,6 +41,24 @@ grep -q 'br i1' "$workdir/switch.ll"
     --overwrite -o "$workdir/float_abs.metal"
 grep -q 'kernel void cuda_float_abs' "$workdir/float_abs.metal"
 test "$(grep -o 'fabs(' "$workdir/float_abs.metal" | wc -l | tr -d ' ')" -ge 2
+
+# NVIDIA's C++ overlay selects binary32 for unsuffixed rsqrt/fma calls. A
+# missing overload silently inserts f32->f64->f32 conversions and the double
+# libdevice calls, which is especially expensive on Apple GPUs.
+"$nvcc" -S --cuda-device-only -std=c++17 "$float_math_source" \
+    -o "$workdir/float_math.ptx"
+grep -q '__nv_rsqrtf' "$workdir/float_math.ptx"
+grep -q '__nv_fmaf' "$workdir/float_math.ptx"
+grep -q 'atom.global.add.f32' "$workdir/float_math.ptx"
+if grep -q 'atom.*cas.b32' "$workdir/float_math.ptx"; then
+    echo "float atomicAdd regressed to a CAS loop" >&2
+    exit 1
+fi
+if grep -qE 'cvt\.f64\.f32|__nv_rsqrt([^fA-Za-z0-9_]|$)|__nv_fma([^fA-Za-z0-9_]|$)' \
+    "$workdir/float_math.ptx"; then
+    echo "FP32 CUDA math overloads promoted to FP64" >&2
+    exit 1
+fi
 
 if "$cumetalc" "$unsupported" --backend=cumetal-ir --emit=msl \
     --overwrite -o "$workdir/unsupported.metal" \

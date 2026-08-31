@@ -115,6 +115,14 @@ int main() {
         registered.global_symbols.front().buffer == nullptr) {
         return fail("native symbol metadata did not reach the registered kernel");
     }
+    // Advisory function controls must validate registration identity without
+    // trying to load this deliberately minimal fake metallib.
+    if (cudaFuncSetCacheConfig(reinterpret_cast<const void*>(&host_stub),
+                               cudaFuncCachePreferEqual) != cudaSuccess ||
+        cudaFuncSetSharedMemConfig(reinterpret_cast<const void*>(&host_stub),
+                                   cudaSharedMemBankSizeEightByte) != cudaSuccess) {
+        return fail("advisory function controls forced metallib loading");
+    }
     const void* resolved_symbol = nullptr;
     std::size_t resolved_size = 0;
     if (!cumetal::native_registration::lookup_symbol(

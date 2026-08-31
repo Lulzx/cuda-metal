@@ -294,6 +294,8 @@ static inline constexpr double2 make_double2(double x, double y) { return {x, y}
 static inline constexpr double4 make_double4(double x, double y, double z, double w) { return {x,y,z,w}; }
 #endif
 
+typedef struct cudaUUID_t { unsigned char bytes[16]; } cudaUUID_t;
+
 typedef struct cudaDeviceProp {
     char name[256];
     size_t totalGlobalMem;
@@ -341,7 +343,8 @@ typedef struct cudaDeviceProp {
     int persistingL2CacheMaxSize;    // accepted performance-hint budget
     int accessPolicyMaxWindowSize;   // accepted stream access-window budget
     int ECCEnabled;                  // 0 (Apple Silicon unified memory has no ECC)
-    int cumetalReserved[59];
+    cudaUUID_t uuid;                 // Stable CuMetal device identity
+    int cumetalReserved[55];
 } cudaDeviceProp;
 
 typedef enum cudaDeviceAttr {
@@ -1190,9 +1193,33 @@ cudaError_t cudaDeviceSetGraphMemAttribute(int device,
                                             cudaGraphMemAttributeType attr,
                                             void* value);
 cudaError_t cudaDeviceGraphMemTrim(int device);
+cudaError_t cudaGraphKernelNodeSetParams(cudaGraphNode_t node,
+                                          const cudaKernelNodeParams* nodeParams);
+cudaError_t cudaGraphMemcpyNodeSetParams(cudaGraphNode_t node,
+                                          const cudaMemcpy3DParms* params);
+cudaError_t cudaGraphMemcpyNodeSetParams1D(cudaGraphNode_t node, void* dst,
+                                            const void* src, size_t count,
+                                            cudaMemcpyKind kind);
+cudaError_t cudaGraphMemsetNodeSetParams(cudaGraphNode_t node,
+                                          const cudaMemsetParams* params);
+cudaError_t cudaGraphHostNodeSetParams(cudaGraphNode_t node,
+                                        const cudaHostNodeParams* params);
 cudaError_t cudaGraphExecKernelNodeSetParams(cudaGraphExec_t hGraphExec,
                                               cudaGraphNode_t hNode,
                                               const cudaKernelNodeParams* nodeParams);
+cudaError_t cudaGraphExecMemcpyNodeSetParams(cudaGraphExec_t graphExec,
+                                              cudaGraphNode_t node,
+                                              const cudaMemcpy3DParms* params);
+cudaError_t cudaGraphExecMemcpyNodeSetParams1D(cudaGraphExec_t graphExec,
+                                                cudaGraphNode_t node, void* dst,
+                                                const void* src, size_t count,
+                                                cudaMemcpyKind kind);
+cudaError_t cudaGraphExecMemsetNodeSetParams(cudaGraphExec_t graphExec,
+                                              cudaGraphNode_t node,
+                                              const cudaMemsetParams* params);
+cudaError_t cudaGraphExecHostNodeSetParams(cudaGraphExec_t graphExec,
+                                            cudaGraphNode_t node,
+                                            const cudaHostNodeParams* params);
 cudaError_t cudaGraphNodeGetType(cudaGraphNode_t node, cudaGraphNodeType* pType);
 cudaError_t cudaStreamGetCaptureInfo(cudaStream_t stream, cudaStreamCaptureStatus* pCaptureStatus,
                                       unsigned long long* pId);
@@ -1319,12 +1346,26 @@ __device__ __forceinline__ T __cumetal_texture_load(
         static_cast<unsigned long long>(x) * descriptor->element_bytes;
     const unsigned char* bytes =
         reinterpret_cast<const unsigned char*>(descriptor->data + offset);
-    if (descriptor->read_mode == cudaReadModeNormalizedFloat &&
-        descriptor->channel_kind == cudaChannelFormatKindUnsigned &&
-        descriptor->element_bytes == 1) {
-        return static_cast<T>(static_cast<float>(*bytes) / 255.0f);
+    if constexpr (std::is_arithmetic<T>::value) {
+        if (descriptor->read_mode == cudaReadModeNormalizedFloat &&
+            descriptor->channel_kind == cudaChannelFormatKindUnsigned &&
+            descriptor->element_bytes == 1) {
+            return static_cast<T>(static_cast<float>(*bytes) / 255.0f);
+        }
     }
     return *reinterpret_cast<const T*>(bytes);
+}
+
+template <typename T>
+__device__ __forceinline__ T tex1Dfetch(cudaTextureObject_t texture, int x) {
+    const auto* descriptor = reinterpret_cast<const __cumetal_texture_descriptor*>(texture);
+    const int extent = static_cast<int>(descriptor->width);
+    if (descriptor->address_mode[0] == cudaAddressModeBorder &&
+        (x < 0 || x >= extent)) {
+        return T{};
+    }
+    const int ix = x < 0 ? 0 : (x >= extent ? extent - 1 : x);
+    return __cumetal_texture_load<T>(descriptor, ix, 0, 0);
 }
 
 template <typename T>
@@ -1684,6 +1725,20 @@ static __device__ __forceinline__ float sqrt(float x) {
     return __builtin_sqrtf(x);
 }
 
+// NVIDIA's C++ math overlay also overloads the unsuffixed spellings for
+// binary32. Clang's standalone CUDA overlay exposes only rsqrt(double) and
+// fma(double,double,double), plus the C-style rsqrtf/fmaf functions. Without
+// these overloads an unqualified FP32 call silently promotes every operand to
+// software FP64 and converts the result back, which is both the wrong overload
+// contract and catastrophic in inner GPU loops.
+static __device__ __forceinline__ float rsqrt(float x) {
+    return rsqrtf(x);
+}
+
+static __device__ __forceinline__ float fma(float x, float y, float z) {
+    return fmaf(x, y, z);
+}
+
 static __device__ __forceinline__ float fabs(float x) {
     return __builtin_fabsf(x);
 }
@@ -1805,7 +1860,15 @@ static __device__ __forceinline__ T __ldg(const T* ptr) {
 // ── Atomic operations ────────────────────────────────────────────────────────
 
 static __device__ __forceinline__ float atomicAdd(float* ptr, float val) {
-    return __fAtomicAdd(ptr, val);
+    // Clang lowers its generic NVVM floating atomic to a system-scope CAS loop
+    // for this standalone CUDA overlay. That is correct but catastrophic for
+    // force accumulation: a native CUDA float atomic is directly representable
+    // in PTX and AIR. Spell it explicitly so the PTX-to-AIR path can select
+    // Metal's native atomic_float add instead of executing the retry loop.
+    float old;
+    asm volatile("atom.global.add.f32 %0, [%1], %2;"
+                 : "=f"(old) : "l"(ptr), "f"(val) : "memory");
+    return old;
 }
 static __device__ __forceinline__ int atomicAdd(int* ptr, int val) {
     return __iAtomicAdd(ptr, val);

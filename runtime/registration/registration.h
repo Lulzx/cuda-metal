@@ -69,6 +69,10 @@ bool find_arg_info_for_ptx_entry(const std::string& ptx_source,
                                  std::vector<cumetalKernelArgInfo_t>* out);
 
 bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out);
+// Validate a registered host stub without resolving its ABI or JIT-compiling
+// the associated PTX entry. Advisory Runtime APIs use this to avoid turning a
+// function-handle check into eager compilation of an entire kernel table.
+bool is_registered_kernel(const void* host_function);
 // Resolve a device-side kernel token emitted by the PTX lowering into a normal
 // host launch alias backed by the same registration module.
 bool lookup_device_kernel_alias(void* module_handle,

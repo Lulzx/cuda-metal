@@ -6,7 +6,17 @@
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic ignored "-Wsign-compare"
+#pragma clang diagnostic ignored "-Wunused-but-set-variable"
+#pragma clang diagnostic ignored "-Wunused-function"
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#include <vkFFT.h>
+#pragma clang diagnostic pop
+
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <condition_variable>
 #include <cstdlib>
@@ -14,9 +24,11 @@
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -38,6 +50,132 @@ constexpr std::size_t kDefaultHeapAutoThresholdBytes = 4ull * 1024ull * 1024ull;
 //   "1" / "true"    → heap always used
 //   "0" / "false"   → heap never used
 enum class HeapMode { kAuto, kAlways, kDisabled };
+
+struct VkFftPlanKey {
+    std::array<int, 3> n{};
+    std::array<int, 3> real_embed{};
+    std::array<int, 3> complex_embed{};
+    std::size_t real_offset = 0;
+    std::size_t complex_offset = 0;
+    std::uintptr_t queue = 0;
+
+    bool operator<(const VkFftPlanKey& other) const {
+        return std::tie(n, real_embed, complex_embed, real_offset, complex_offset, queue) <
+               std::tie(other.n, other.real_embed, other.complex_embed,
+                        other.real_offset, other.complex_offset, other.queue);
+    }
+};
+
+struct VkFftPlan {
+    VkFFTConfiguration configuration{};
+    VkFFTApplication application{};
+    std::uint64_t real_bytes = 0;
+    std::uint64_t complex_bytes = 0;
+    bool initialized = false;
+
+    ~VkFftPlan() {
+        if (initialized) deleteVkFFT(&application);
+    }
+};
+
+std::mutex& vkfft_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::map<VkFftPlanKey, std::unique_ptr<VkFftPlan>>& vkfft_plans() {
+    static std::map<VkFftPlanKey, std::unique_ptr<VkFftPlan>> plans;
+    return plans;
+}
+
+VkFftPlan* get_or_create_vkfft_plan_locked(const Fft3dR2CConfig& config,
+                                            std::size_t real_offset,
+                                            std::size_t complex_offset,
+                                            std::size_t real_span,
+                                            std::size_t complex_span,
+                                            id<MTLDevice> device,
+                                            id<MTLCommandQueue> queue,
+                                            std::string* error_message) {
+    VkFftPlanKey key;
+    for (int axis = 0; axis < 3; ++axis) {
+        key.n[axis] = config.n[axis];
+        key.real_embed[axis] = config.real_embed[axis];
+        key.complex_embed[axis] = config.complex_embed[axis];
+    }
+    key.real_offset = real_offset;
+    key.complex_offset = complex_offset;
+    // Metal pipeline states and VkFFT's generated plan are device objects, not
+    // command-queue objects. Dispatch receives its actual command buffer and
+    // encoder in VkFFTLaunchParams, so one plan is valid across CUDA streams.
+    key.queue = 0;
+
+    auto plan_it = vkfft_plans().find(key);
+    if (plan_it != vkfft_plans().end()) return plan_it->second.get();
+
+    auto created = std::make_unique<VkFftPlan>();
+    created->real_bytes = real_offset + real_span;
+    created->complex_bytes = complex_offset + complex_span;
+    auto& vk = created->configuration;
+    vk.FFTdim = 3;
+    vk.size[0] = static_cast<std::uint64_t>(config.n[2]);
+    vk.size[1] = static_cast<std::uint64_t>(config.n[1]);
+    vk.size[2] = static_cast<std::uint64_t>(config.n[0]);
+    vk.performR2C = 1;
+    vk.device = reinterpret_cast<MTL::Device*>((__bridge void*)device);
+    vk.queue = reinterpret_cast<MTL::CommandQueue*>((__bridge void*)queue);
+    vk.bufferSize = &created->complex_bytes;
+    vk.inputBufferSize = &created->real_bytes;
+    vk.bufferStride[0] = static_cast<std::uint64_t>(config.complex_embed[2]);
+    vk.bufferStride[1] = vk.bufferStride[0] * config.complex_embed[1];
+    vk.bufferStride[2] = vk.bufferStride[1] * config.complex_embed[0];
+    vk.isInputFormatted = 1;
+    vk.inverseReturnToInputBuffer = 1;
+    vk.inputBufferStride[0] = static_cast<std::uint64_t>(config.real_embed[2]);
+    vk.inputBufferStride[1] = vk.inputBufferStride[0] * config.real_embed[1];
+    vk.inputBufferStride[2] = vk.inputBufferStride[1] * config.real_embed[0];
+    vk.bufferOffset = complex_offset;
+    vk.inputBufferOffset = real_offset;
+
+    const VkFFTResult initialized = initializeVkFFT(&created->application, vk);
+    if (initialized != VKFFT_SUCCESS) {
+        if (error_message != nullptr) {
+            *error_message = std::string("VkFFT plan initialization failed: ") +
+                             getVkFFTErrorString(initialized);
+        }
+        return nullptr;
+    }
+    created->initialized = true;
+    VkFftPlan* plan = created.get();
+    vkfft_plans().emplace(key, std::move(created));
+    return plan;
+}
+
+bool validate_fft_r2c_config(const Fft3dR2CConfig& config,
+                             std::size_t* real_span,
+                             std::size_t* complex_span,
+                             std::string* error_message) {
+    for (int axis = 0; axis < 3; ++axis) {
+        if (config.n[axis] <= 0 || config.real_embed[axis] < config.n[axis]) {
+            if (error_message != nullptr) *error_message = "VkFFT received invalid real layout";
+            return false;
+        }
+    }
+    const int complex_fast = config.n[2] / 2 + 1;
+    if (config.complex_embed[0] < config.n[0] ||
+        config.complex_embed[1] < config.n[1] ||
+        config.complex_embed[2] < complex_fast) {
+        if (error_message != nullptr) *error_message = "VkFFT received invalid complex layout";
+        return false;
+    }
+    auto required_elements = [](const int* logical, const int* embed) -> std::size_t {
+        return (static_cast<std::size_t>(logical[0] - 1) * embed[1] +
+                static_cast<std::size_t>(logical[1] - 1)) * embed[2] + logical[2];
+    };
+    const int complex_n[3] = {config.n[0], config.n[1], complex_fast};
+    *real_span = required_elements(config.n, config.real_embed) * sizeof(float);
+    *complex_span = required_elements(complex_n, config.complex_embed) * 2 * sizeof(float);
+    return true;
+}
 
 bool env_truthy(const char* value) {
     if (value == nullptr) {
@@ -204,8 +342,18 @@ public:
         return latest_submission_value_;
     }
 
+    bool latest_submission_requires_wait() const {
+        return latest_submission_requires_wait_;
+    }
+
     void set_latest_submission_value(std::uint64_t value) {
         latest_submission_value_ = value;
+        latest_submission_requires_wait_ = false;
+    }
+
+    void set_latest_host_barrier_value(std::uint64_t value) {
+        latest_submission_value_ = value;
+        latest_submission_requires_wait_ = true;
     }
 
     std::mutex& submission_mutex() {
@@ -458,6 +606,7 @@ private:
     bool legacy_default_ = false;
     std::uint64_t next_access_value_ = 1;
     std::uint64_t latest_submission_value_ = 0;
+    bool latest_submission_requires_wait_ = false;
     std::mutex submission_mutex_;
     mutable std::mutex mutex_;
     std::uint64_t next_ticket_ = 1;
@@ -552,8 +701,15 @@ std::vector<ResourceFenceReservation> encode_submission_waits(
     const std::uint64_t signal_value = submission_stream->reserve_access_value();
     std::vector<ResourceFenceReservation> waits;
     auto add_wait = [&](id<MTLSharedEvent> event, std::uint64_t value) {
-        if (event == nil || value == 0 ||
-            (event == signal_event && value >= signal_value)) {
+        // Every StreamImpl owns exactly one command queue. Work committed to
+        // that queue is already ordered, which is the ordering native Metal
+        // clients (including VkFFT) rely on when they close one command buffer
+        // and immediately submit the next. Waiting on our own access event at
+        // every boundary only serializes the queue twice and is particularly
+        // costly for alternating kernel/FFT phases. Keep emitting the signal:
+        // another CUDA stream, backed by another queue, may need to wait on it
+        // later. Only the same-stream wait is redundant.
+        if (event == nil || value == 0 || event == signal_event) {
             return;
         }
         const bool duplicate = std::any_of(
@@ -565,12 +721,18 @@ std::vector<ResourceFenceReservation> encode_submission_waits(
         }
     };
 
-    // Make stream order explicit at the GPU timeline level. Metal command
-    // queues preserve commit order, but command buffers may overlap; CUDA
-    // stream semantics require each submission to observe all prior work in
-    // that same stream even when its resources are disjoint.
-    add_wait(submission_stream->access_event(),
-             submission_stream->latest_submission_value());
+    // GPU command buffers on one stream share one Metal command queue and are
+    // ordered by commit order. A CUDA host function is different: its timeline
+    // value is advanced by the CPU only after the callback returns, so the
+    // completion command buffer must explicitly wait for that self-event.
+    if (submission_stream->latest_submission_requires_wait()) {
+        const std::uint64_t host_barrier_value =
+            submission_stream->latest_submission_value();
+        if (host_barrier_value != 0) {
+            [command_buffer encodeWaitForEvent:submission_stream->access_event()
+                                         value:host_barrier_value];
+        }
+    }
 
     if (submission_stream->is_legacy_default()) {
         const auto live_streams = collect_live_streams_locked(backend);
@@ -719,7 +881,11 @@ unsigned max_batch_dispatches() {
             const long long parsed = std::atoll(v);
             if (parsed >= 0 && parsed <= 4096) return static_cast<unsigned>(parsed);
         }
-        return 64u;
+        // Real applications alternate hundreds of short PP/update kernels
+        // between synchronization points. A 64-dispatch cap forced extra
+        // command-buffer commits in GROMACS's 98k-water step; 256 amortizes
+        // those commits while retaining a finite progress/residency bound.
+        return 256u;
     }();
     return value;
 }
@@ -1717,7 +1883,7 @@ cudaError_t enqueue_host_function(const std::shared_ptr<Stream>& stream,
             BackendState& backend = state();
             std::scoped_lock lock(backend.mutex, backend.submission_fence_mutex);
             host_done_value = stream_impl->reserve_access_value();
-            stream_impl->set_latest_submission_value(host_done_value);
+            stream_impl->set_latest_host_barrier_value(host_done_value);
         }
 
         id<MTLCommandBuffer> completion = [queue commandBuffer];
@@ -1732,6 +1898,18 @@ cudaError_t enqueue_host_function(const std::shared_ptr<Stream>& stream,
         const auto completion_fences =
             encode_submission_waits(completion, stream_impl, {});
         encode_resource_signals(completion, completion_fences);
+        // encode_submission_waits reserves the completion command buffer's
+        // later GPU signal and normally publishes it as the stream tail. For a
+        // host function, however, cross-stream CUDA ordering is satisfied only
+        // when the CPU callback itself has returned. Re-publish that
+        // CPU-signalled value so a legacy-default submission waits on the host
+        // barrier directly instead of relying on a same-event wait/signal
+        // command buffer to relay it across queues.
+        {
+            BackendState& backend = state();
+            std::scoped_lock lock(backend.mutex, backend.submission_fence_mutex);
+            stream_impl->set_latest_host_barrier_value(host_done_value);
+        }
         stream_impl->add_pending(completion);
         [completion commit];
 
@@ -2916,6 +3094,170 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         return completion_status;
     }
 
+    return cudaSuccess;
+}
+
+cudaError_t prepare_fft_r2c_3d_f32(const Fft3dR2CConfig& config,
+                                   const std::shared_ptr<Stream>& stream,
+                                   std::string* error_message) {
+    if (!ensure_initialized(error_message)) return cudaErrorInitializationError;
+    std::size_t real_span = 0;
+    std::size_t complex_span = 0;
+    if (!validate_fft_r2c_config(config, &real_span, &complex_span, error_message)) {
+        return cudaErrorInvalidValue;
+    }
+    auto stream_impl = std::dynamic_pointer_cast<StreamImpl>(stream);
+    if (stream != nullptr && stream_impl == nullptr) {
+        if (error_message != nullptr) *error_message = "VkFFT received an unknown stream";
+        return cudaErrorInvalidValue;
+    }
+    BackendState& backend = state();
+    id<MTLCommandQueue> queue = nil;
+    id<MTLDevice> device = nil;
+    {
+        std::lock_guard<std::mutex> lock(backend.mutex);
+        if (stream_impl == nullptr) stream_impl = backend.default_stream;
+        queue = stream_impl != nullptr ? stream_impl->queue() : backend.queue;
+        device = backend.device;
+    }
+    if (queue == nil || device == nil) return cudaErrorInitializationError;
+
+    std::lock_guard<std::mutex> plan_lock(vkfft_mutex());
+    return get_or_create_vkfft_plan_locked(config, 0, 0, real_span, complex_span,
+                                           device, queue, error_message) != nullptr
+               ? cudaSuccess
+               : cudaErrorInvalidValue;
+}
+
+cudaError_t fft_r2c_3d_f32(const Fft3dR2CConfig& config,
+                           const std::shared_ptr<Buffer>& real_buffer,
+                           std::size_t real_offset,
+                           const std::shared_ptr<Buffer>& complex_buffer,
+                           std::size_t complex_offset,
+                           const std::shared_ptr<Stream>& stream,
+                           std::string* error_message) {
+    if (!ensure_initialized(error_message)) return cudaErrorInitializationError;
+    if (real_buffer == nullptr || complex_buffer == nullptr) {
+        if (error_message != nullptr) *error_message = "VkFFT requires real and complex buffers";
+        return cudaErrorInvalidValue;
+    }
+    std::size_t real_span = 0;
+    std::size_t complex_span = 0;
+    if (!validate_fft_r2c_config(config, &real_span, &complex_span, error_message)) {
+        return cudaErrorInvalidValue;
+    }
+    if (real_offset > real_buffer->length() ||
+        real_span > real_buffer->length() - real_offset ||
+        complex_offset > complex_buffer->length() ||
+        complex_span > complex_buffer->length() - complex_offset) {
+        if (error_message != nullptr) *error_message = "VkFFT layout exceeds buffer bounds";
+        return cudaErrorInvalidValue;
+    }
+
+    auto* real_impl = dynamic_cast<BufferImpl*>(real_buffer.get());
+    auto* complex_impl = dynamic_cast<BufferImpl*>(complex_buffer.get());
+    auto stream_impl = std::dynamic_pointer_cast<StreamImpl>(stream);
+    if (real_impl == nullptr || complex_impl == nullptr || (stream != nullptr && stream_impl == nullptr)) {
+        if (error_message != nullptr) *error_message = "VkFFT received an unknown backend object";
+        return cudaErrorInvalidValue;
+    }
+
+    BackendState& backend = state();
+    id<MTLCommandQueue> queue = nil;
+    id<MTLDevice> device = nil;
+    {
+        std::lock_guard<std::mutex> lock(backend.mutex);
+        if (stream_impl == nullptr) stream_impl = backend.default_stream;
+        queue = stream_impl != nullptr ? stream_impl->queue() : backend.queue;
+        device = backend.device;
+    }
+    if (stream_impl == nullptr || queue == nil || device == nil) {
+        if (error_message != nullptr) *error_message = "VkFFT has no Metal stream";
+        return cudaErrorInitializationError;
+    }
+
+    std::unique_lock<std::mutex> plan_lock(vkfft_mutex());
+    VkFftPlan* plan = get_or_create_vkfft_plan_locked(
+        config, real_offset, complex_offset, real_span, complex_span,
+        device, queue, error_message);
+    if (plan == nullptr) return cudaErrorInvalidValue;
+
+    std::unique_lock<std::mutex> batch_lock(backend.batch_mutex);
+    std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
+    @autoreleasepool {
+        (void)stream_impl->flush_open_batch_locked();
+        flush_other_open_batches(stream_impl);
+
+        id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+        if (command_buffer == nil) {
+            if (error_message != nullptr) *error_message = "VkFFT failed to create command buffer";
+            return cudaErrorUnknown;
+        }
+        std::vector<ResourceFenceReservation> fences =
+            encode_submission_waits(command_buffer, stream_impl, {real_impl, complex_impl});
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            if (error_message != nullptr) *error_message = "VkFFT failed to create compute encoder";
+            return cudaErrorUnknown;
+        }
+
+        MTL::Buffer* real_handle =
+            reinterpret_cast<MTL::Buffer*>((__bridge void*)real_impl->handle());
+        MTL::Buffer* complex_handle =
+            reinterpret_cast<MTL::Buffer*>((__bridge void*)complex_impl->handle());
+        VkFFTLaunchParams launch{};
+        launch.commandBuffer =
+            reinterpret_cast<MTL::CommandBuffer*>((__bridge void*)command_buffer);
+        launch.commandEncoder =
+            reinterpret_cast<MTL::ComputeCommandEncoder*>((__bridge void*)encoder);
+        launch.inputBuffer = &real_handle;
+        launch.buffer = &complex_handle;
+        launch.inputBufferOffset = real_offset;
+        launch.bufferOffset = complex_offset;
+
+        const VkFFTResult appended =
+            VkFFTAppend(&plan->application, config.inverse ? 1 : -1, &launch);
+        if (appended != VKFFT_SUCCESS) {
+            [encoder endEncoding];
+            encode_resource_signals(command_buffer, fences);
+            [command_buffer commit];
+            stream_impl->add_pending(command_buffer);
+            if (error_message != nullptr) {
+                *error_message = std::string("VkFFT dispatch failed: ") +
+                                 getVkFFTErrorString(appended);
+            }
+            return cudaErrorUnknown;
+        }
+        [encoder endEncoding];
+        encode_resource_signals(command_buffer, fences);
+        if (env_truthy(std::getenv("CUMETAL_TRACE_GPU"))) {
+            const bool inverse = config.inverse;
+            NSString* device_name = [[device name] description];
+            [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+              @autoreleasepool {
+                const double duration_seconds =
+                    [completed GPUEndTime] - [completed GPUStartTime];
+                const long long duration_ns =
+                    duration_seconds > 0.0
+                        ? static_cast<long long>(duration_seconds * 1000000000.0)
+                        : -1;
+                std::fprintf(stderr,
+                             "CUMETAL_PROVENANCE event=library_launch library=VkFFT "
+                             "operation=%s source=specialized_msl provenance=library_substitution "
+                             "semantic_quality=exact device=apple_gpu device_name=\"%s\" "
+                             "launch_success=%s duration_ns=%lld\n",
+                             inverse ? "c2r_3d_f32" : "r2c_3d_f32",
+                             [device_name UTF8String],
+                             check_command_buffer_status(completed, nullptr) == cudaSuccess
+                                 ? "true" : "false",
+                             duration_ns);
+                std::fflush(stderr);
+              }
+            }];
+        }
+        [command_buffer commit];
+        stream_impl->add_pending(command_buffer);
+    }
     return cudaSuccess;
 }
 

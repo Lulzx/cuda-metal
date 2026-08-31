@@ -121,6 +121,12 @@ int main() {
     if (!expect(contains(lowered.llvm_ir, "\"air.version\"=\"2.8\""), "air.version emitted")) {
         return 1;
     }
+    if (!expect(contains(lowered.llvm_ir, "!llvm.module.flags") &&
+                    contains(lowered.llvm_ir, "air.max_device_buffers") &&
+                    contains(lowered.llvm_ir, "air.max_samplers"),
+                "AIR resource-limit module flags emitted")) {
+        return 1;
+    }
     if (!expect(contains(lowered.llvm_ir, "!air.language_version = !{!"),
                 "air language version metadata emitted")) {
         return 1;
@@ -571,6 +577,7 @@ $L_done:
     st.b32 [%rd2], %r1;
     st.param.b32 [call_arg], %r1;
     call.uni (call_ret), __nv_sqrtf, (call_arg);
+    call.uni (call_ret), __nv_rsqrtf, (call_arg);
     call.uni (call_ret), __nv_acosf, (call_arg);
     ld.param.b32 %r1, [call_ret];
     call.uni (call_ret), __nv_float_as_int, (call_arg);
@@ -614,6 +621,11 @@ $L_done:
     }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sqrt.f32"),
                 "__nv_sqrtf lowers to Metal sqrt intrinsic")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_rsqrt.f32") &&
+                    !contains(vector_memory_lowered.llvm_ir, "rsqrtf_div"),
+                "__nv_rsqrtf lowers directly to Metal reciprocal-sqrt intrinsic")) {
         return 1;
     }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "sqrt_pair_correction") &&
@@ -1320,6 +1332,138 @@ $L_done:
                     contains(shared_staged_global_pointer_lowered.llvm_ir,
                              ", i32 addrspace(1)*"),
                 "global pointer staged in shared memory retains global pointee address space")) {
+        return 1;
+    }
+
+    const std::string shared_placement_object_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.shared .align 8 .b8 object_storage[32];
+.shared .align 8 .b8 data_storage[64];
+.shared .align 8 .u64 object_slot;
+.func shared_object_store(.param .b64 self)
+{
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<4>;
+    ld.param.b64 %rd1, [self];
+    ld.b64 %rd2, [%rd1+16];
+    atom.relaxed.sys.add.u32 %r1, [%rd1+24], 1;
+    mov.u32 %r1, 7;
+    st.b32 [%rd2], %r1;
+    ret;
+}
+.visible .entry use_shared_placement_object()
+{
+    .reg .b64 %rd<7>;
+    mov.b64 %rd1, data_storage;
+    cvta.shared.u64 %rd2, %rd1;
+    mov.b64 %rd3, object_storage;
+    cvta.shared.u64 %rd4, %rd3;
+    st.shared.b64 [object_storage+16], %rd2;
+    st.shared.b64 [object_slot], %rd4;
+    ld.shared.b64 %rd5, [object_slot];
+    .param .b64 self;
+    st.param.b64 [self], %rd5;
+    call.uni shared_object_store, (self);
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions shared_placement_object_options;
+    shared_placement_object_options.entry_name =
+        "use_shared_placement_object";
+    shared_placement_object_options.strict = true;
+    const auto shared_placement_object_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(
+            shared_placement_object_ptx,
+            shared_placement_object_options);
+    if (!expect(shared_placement_object_lowered.ok &&
+                    contains(shared_placement_object_lowered.llvm_ir,
+                             "define internal void @shared_object_store") &&
+                    contains(shared_placement_object_lowered.llvm_ir,
+                             "to i32 addrspace(3)*") &&
+                    contains(shared_placement_object_lowered.llvm_ir,
+                             "atomicrmw add i32 addrspace(3)*"),
+                "shared placement object and pointer fields retain threadgroup provenance through a device call")) {
+        std::fprintf(stderr, "  error: %s\n%s\n",
+                     shared_placement_object_lowered.error.c_str(),
+                     shared_placement_object_lowered.llvm_ir.c_str());
+        return 1;
+    }
+
+    const std::string aggregate_device_call_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.func push_value(
+    .param .b64 self,
+    .param .align 4 .b8 value[16]
+)
+{
+    .reg .b32 %r1;
+    .reg .b64 %rd<3>;
+    ld.param.b64 %rd1, [self];
+    mov.b64 %rd2, value;
+    ld.local.b32 %r1, [%rd2+12];
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+.visible .entry call_push_value(.param .u64 output)
+{
+    .reg .b32 %r1;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    .param .b64 self_arg;
+    .param .align 4 .b8 value_arg[16];
+    st.param.b64 [self_arg], %rd1;
+    st.param.b32 [value_arg], 1;
+    st.param.b32 [value_arg+4], 2;
+    st.param.b32 [value_arg+8], 3;
+    st.param.b32 [value_arg+12], 4;
+    call.uni push_value, (self_arg, value_arg);
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions aggregate_device_call_options;
+    aggregate_device_call_options.entry_name = "call_push_value";
+    aggregate_device_call_options.strict = true;
+    const auto aggregate_device_call_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(aggregate_device_call_ptx,
+                                           aggregate_device_call_options);
+    if (!expect(aggregate_device_call_lowered.ok &&
+                    contains(aggregate_device_call_lowered.llvm_ir,
+                             "alloca [16 x i8], align 4") &&
+                    contains(aggregate_device_call_lowered.llvm_ir,
+                             "define internal void @push_value(i64") &&
+                    contains(aggregate_device_call_lowered.llvm_ir,
+                             "load i32, i32*"),
+                "16-byte by-value device-call aggregates use a caller-owned local copy")) {
+        std::fprintf(stderr, "  error: %s\n%s\n",
+                     aggregate_device_call_lowered.error.c_str(),
+                     aggregate_device_call_lowered.llvm_ir.c_str());
+        return 1;
+    }
+
+    const std::string volatile_load_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry poll_host_latch(.param .u64 latch)
+{
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<2>;
+    ld.param.b64 %rd1, [latch];
+    ld.volatile.global.b32 %r1, [%rd1];
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions volatile_load_options;
+    volatile_load_options.entry_name = "poll_host_latch";
+    volatile_load_options.strict = true;
+    const auto volatile_load_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(volatile_load_ptx,
+                                           volatile_load_options);
+    if (!expect(volatile_load_lowered.ok &&
+                    contains(volatile_load_lowered.llvm_ir,
+                             "load volatile i32, i32 addrspace(1)*"),
+                "PTX volatile global loads remain volatile in LLVM IR")) {
         return 1;
     }
 

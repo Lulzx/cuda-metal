@@ -61,6 +61,12 @@ coalesced. Because aliases resolve to the same tracked `Buffer`, adjacent CUDA
 suballocations receive the same dependency chain, including transitions between
 typed kernels and MPS/cuBLAS commands.
 
+Command buffers belonging to the same stream share one `MTLCommandQueue` and
+are already ordered by commit order. CuMetal therefore does not encode a wait
+on that stream's own event at each command-buffer boundary; it still signals
+the value so work on another stream/queue can wait on it. Cross-stream resource
+and legacy-default-stream waits are unchanged.
+
 `CUMETAL_SYNC_REGISTERED_LAUNCH=1` restores the former host-side wait for
 diagnosis and A/B performance comparisons. The focused cross-queue regression
 is `functional_metal_backend_cross_queue_fence`.

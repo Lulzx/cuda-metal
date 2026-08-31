@@ -42,6 +42,11 @@ struct Request {
 // buffer is untouched.
 bool execute(const Request& request);
 
+// Eagerly creates the generated plan for an eligible request. No buffers are
+// touched; callers use this during cuFFT planning so compilation is not charged
+// to the first timed transform.
+bool prepare(const Request& request);
+
 // Unnormalized in-place radix-2 DFT over a power-of-two length, in double.
 // Shared with the CPU Bluestein path so both fold the chirp the same way.
 void fft_pow2(std::vector<double>& re, std::vector<double>& im, bool inverse);

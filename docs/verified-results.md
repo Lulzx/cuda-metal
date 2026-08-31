@@ -76,8 +76,19 @@ printed error was `0.000000` and residual was `1.596402e-6`. This also covers a
 warp-tile reduction invoked from only one warp of a larger block and a
 guaranteed-progress occupancy-derived cooperative grid.
 
+The 2026-08-31 rerun additionally checked the previously failing
+`newdelete` and `UnifiedMemoryPerf` entries from a fresh registration-JIT cache.
+`newdelete` reported 3/3, covering heap objects, placement-new in shared memory,
+virtual calls, and its 16-byte user datatype. `UnifiedMemoryPerf` ran all eight
+allocation modes at every upstream matrix size with `--kernel-iterations=1`;
+the reduced iteration count keeps this correctness gate below the Metal GPU
+watchdog and is not presented as a performance measurement. Volatile latch
+loads, shared-pointer provenance, and the bounded aggregate-call ABI have
+focused lowering regressions, and the JIT cache identity was advanced so older
+artifacts cannot be reused.
+
 On 2026-08-31, the complete Debug/shim-on non-benchmark inventory passed
-278/278 serially, and the complete Release/shim-off inventory passed 275/275.
+278/278 serially, and the complete Debug/shim-off inventory passed 275/275.
 Both runs had zero skips and included Phase 4, the 83-sample gate, all six
 PhysX comparisons, the 29-file Clang-version/backend matrices, and the 27-project
 typed-PTX and native-AOT numerical corpora. These are local Apple M4 Pro results,
@@ -166,10 +177,14 @@ ctest --test-dir build-release -R bench_phase5_all_kernels --output-on-failure
 ## cuFFT backend comparison
 
 Both cuFFT implementations sit behind the same `cufftExec*` entry points and are
-selected by `CUMETAL_FFT_METAL`. `cumetal_fft_bench` measures one backend per
-process; run it twice to compare. Apple M4 Pro, Debug build, 2026-08-30, median
-of 20-60 iterations after a warm-up that excludes MSL compilation and Bluestein
-filter construction:
+selected by `CUMETAL_FFT_METAL`. The dense, out-of-place, single-precision 3-D
+R2C/C2R production path now uses vendored VkFFT 1.3.4 through its public Metal
+backend; the project-owned Stockham/Bluestein implementation remains the
+fallback for other accepted layouts. The table below records the fallback
+Metal implementation before the VkFFT integration, rather than current VkFFT
+performance. `cumetal_fft_bench` measures one backend per process; run it twice
+to compare. Apple M4 Pro, Debug build, 2026-08-30, median of 20-60 iterations
+after a warm-up that excludes MSL compilation and Bluestein filter construction:
 
 | 3-D grid | Accelerate (ms) | Metal (ms) | ratio |
 | --- | ---: | ---: | ---: |
@@ -227,6 +242,28 @@ GROMACS charges to `Launch PP GPU ops` because that is where the first launch
 happens. Rerunning the same command warm gives 0.63 s. The synchronize is real
 and it is why the CPU path cannot overlap with other GPU work, but it is not
 worth 57 s, and the number that said so was measuring the JIT.
+
+### Matched GROMACS backend comparisons
+
+For a timestep of `dt` femtoseconds, GROMACS throughput is
+`ns/day = 86.4 * dt / (ms/step)`. Higher `ns/day` and lower `ms/step` therefore
+express the same result. On 2 fs water cases, the recorded matched warm medians
+are:
+
+| Placement and case | CuMetal | Comparator | Relative throughput |
+| --- | ---: | ---: | ---: |
+| Official 96k, GPU nonbonded only | 28.828 ns/day | AdaptiveCpp Metal, 3.142 ns/day | **9.175x** |
+| Official 96k, GPU nonbonded + PME | 63.392 ns/day | Native Metal, 57.797 ns/day | **1.097x** |
+| Reconstructed 98,319 atoms, full GPU | 46.853 ns/day | Native Metal, 41.183 ns/day | **1.138x** |
+| 1,005,375 atoms, full-GPU structural stress | 5.615 ns/day | Native Metal, 5.274 ns/day | **1.065x provisional** |
+
+Every row uses the same TPR and task placement within that row, and each has a
+separate deterministic energy check. Rows are not compared across placements.
+The large case is provisional because it was not equilibrated. The complete
+all-cases target is not yet verified: AdaptiveCpp generic/Metal lacks the GPU
+FFT/PME connection and the whole public corpus has not been run as paired warm
+series through all three backends. Full commands, samples, and provenance are
+in the [GROMACS guide](../demos/gromacs/README.md).
 
 ## Real programs
 

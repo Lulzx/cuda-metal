@@ -9,6 +9,9 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/StringRef.h>
+#include <llvm/Analysis/LoopInfo.h>
+#include <llvm/Analysis/ScalarEvolution.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
@@ -22,10 +25,17 @@
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/IRReader/IRReader.h>
+#include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/SourceMgr.h>
+#include <llvm/Support/Error.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/TargetParser/Triple.h>
+#include <llvm/Transforms/Scalar/LoopUnrollPass.h>
+#include <llvm/Transforms/Scalar/SimplifyCFG.h>
+#include <llvm/Transforms/Utils/LCSSA.h>
+#include <llvm/Transforms/Utils/LoopSimplify.h>
+#include <llvm/Transforms/Utils/LoopUtils.h>
 
 #include <algorithm>
 #include <iomanip>
@@ -36,6 +46,115 @@
 
 namespace cumetal::ir {
 namespace {
+
+class MarkSmallPrivateShuffleLoopsPass
+    : public llvm::PassInfoMixin<MarkSmallPrivateShuffleLoopsPass> {
+public:
+    llvm::PreservedAnalyses run(llvm::Function& function,
+                                llvm::FunctionAnalysisManager& analyses) {
+        llvm::LoopInfo& loop_info = analyses.getResult<llvm::LoopAnalysis>(function);
+        llvm::ScalarEvolution& scalar_evolution =
+            analyses.getResult<llvm::ScalarEvolutionAnalysis>(function);
+        bool changed = false;
+        std::function<void(llvm::Loop*)> visit = [&](llvm::Loop* loop) {
+            for (llvm::Loop* child : loop->getSubLoops()) visit(child);
+            unsigned trip_count = scalar_evolution.getSmallConstantTripCount(loop);
+            if (trip_count == 0) {
+                // CUDA Clang's header is already canonical enough for the
+                // unroller, but can reach us before LoopSimplify has made the
+                // count visible to ScalarEvolution. Recover the conservative
+                // zero-based `iv < constant` bound; LoopUnroll still validates
+                // the loop before transforming it.
+                for (llvm::Instruction& instruction : *loop->getHeader()) {
+                    const auto* compare = llvm::dyn_cast<llvm::ICmpInst>(&instruction);
+                    if (compare == nullptr ||
+                        (compare->getPredicate() != llvm::CmpInst::ICMP_ULT &&
+                         compare->getPredicate() != llvm::CmpInst::ICMP_SLT)) {
+                        continue;
+                    }
+                    const auto* bound =
+                        llvm::dyn_cast<llvm::ConstantInt>(compare->getOperand(1));
+                    const auto* induction =
+                        llvm::dyn_cast<llvm::PHINode>(compare->getOperand(0));
+                    if (bound != nullptr && induction != nullptr &&
+                        bound->getValue().isIntN(32)) {
+                        trip_count = static_cast<unsigned>(bound->getZExtValue());
+                        break;
+                    }
+                }
+            }
+            if (trip_count < 2 || trip_count > 16) return;
+
+            bool has_shuffle = false;
+            bool has_private_memory = false;
+            for (llvm::BasicBlock* block : loop->blocks()) {
+                for (llvm::Instruction& instruction : *block) {
+                    if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                        call != nullptr && call->isInlineAsm()) {
+                        const auto* assembly =
+                            llvm::dyn_cast<llvm::InlineAsm>(call->getCalledOperand());
+                        has_shuffle =
+                            has_shuffle ||
+                            (assembly != nullptr &&
+                             assembly->getAsmString().contains("shfl.sync."));
+                    }
+                    const llvm::Value* pointer = nullptr;
+                    if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction)) {
+                        pointer = load->getPointerOperand();
+                    } else if (const auto* store =
+                                   llvm::dyn_cast<llvm::StoreInst>(&instruction)) {
+                        pointer = store->getPointerOperand();
+                    }
+                    if (pointer != nullptr &&
+                        llvm::isa<llvm::AllocaInst>(
+                            llvm::getUnderlyingObject(pointer))) {
+                        has_private_memory = true;
+                    }
+                }
+            }
+            if (has_shuffle && has_private_memory) {
+                llvm::SmallVector<llvm::Metadata*, 8> metadata{nullptr};
+                if (llvm::MDNode* previous = loop->getLoopID()) {
+                    for (unsigned index = 1; index < previous->getNumOperands(); ++index) {
+                        metadata.push_back(previous->getOperand(index));
+                    }
+                }
+                metadata.push_back(llvm::MDNode::get(
+                    function.getContext(),
+                    llvm::MDString::get(function.getContext(),
+                                        "llvm.loop.unroll.full")));
+                llvm::MDNode* loop_id =
+                    llvm::MDNode::getDistinct(function.getContext(), metadata);
+                loop_id->replaceOperandWith(0, loop_id);
+                loop->setLoopID(loop_id);
+                function.addFnAttr("cumetal.private-shuffle-unroll");
+                changed = true;
+            }
+        };
+        for (llvm::Loop* loop : loop_info) visit(loop);
+        return changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+};
+
+template <typename Pass>
+class RunForMarkedPrivateShufflePass
+    : public llvm::PassInfoMixin<RunForMarkedPrivateShufflePass<Pass>> {
+public:
+    explicit RunForMarkedPrivateShufflePass(Pass pass = {})
+        : pass_(std::move(pass)) {}
+
+    llvm::PreservedAnalyses run(llvm::Function& function,
+                                llvm::FunctionAnalysisManager& analyses) {
+        if (!function.hasFnAttribute("cumetal.private-shuffle-unroll")) {
+            return llvm::PreservedAnalyses::all();
+        }
+        return pass_.run(function, analyses);
+    }
+
+private:
+    Pass pass_;
+};
 
 AddressSpace import_address_space(unsigned address_space, bool kernel_pointer) {
     switch (address_space) {
@@ -2541,6 +2660,43 @@ NvvmImportResult parse_module(std::unique_ptr<llvm::MemoryBuffer> buffer,
         result.error = "invalid LLVM/NVVM module: " + verification_message;
         return result;
     }
+
+    // Clang's CUDA headers implement aggregate warp shuffles as a fixed-trip
+    // loop over the object's 32-bit words. Keeping that loop through the typed
+    // import forces Metal to shuffle a dynamically indexed private-memory
+    // value. On Apple GPUs that construct can read the caller lane instead of
+    // the requested lane (a float4 ShuffleIndex(..., 7) exposed this). LLVM's
+    // loop unroller turns only provably bounded loops into the scalar register
+    // shuffles the CUDA source denotes. Dynamic loops remain loops.
+    llvm::LoopAnalysisManager loop_analyses;
+    llvm::FunctionAnalysisManager function_analyses;
+    llvm::CGSCCAnalysisManager cgscc_analyses;
+    llvm::ModuleAnalysisManager module_analyses;
+    llvm::PassBuilder pass_builder;
+    pass_builder.registerModuleAnalyses(module_analyses);
+    pass_builder.registerCGSCCAnalyses(cgscc_analyses);
+    pass_builder.registerFunctionAnalyses(function_analyses);
+    pass_builder.registerLoopAnalyses(loop_analyses);
+    pass_builder.crossRegisterProxies(loop_analyses, function_analyses,
+                                      cgscc_analyses, module_analyses);
+    llvm::FunctionPassManager function_passes;
+    function_passes.addPass(MarkSmallPrivateShuffleLoopsPass{});
+    function_passes.addPass(
+        RunForMarkedPrivateShufflePass<llvm::LoopSimplifyPass>{});
+    function_passes.addPass(
+        RunForMarkedPrivateShufflePass<llvm::LCSSAPass>{});
+    llvm::LoopUnrollOptions unroll_options(2, true);
+    unroll_options.setPartial(false).setRuntime(false).setPeeling(false);
+    function_passes.addPass(
+        RunForMarkedPrivateShufflePass<llvm::LoopUnrollPass>{
+            llvm::LoopUnrollPass(unroll_options)});
+    function_passes.addPass(
+        RunForMarkedPrivateShufflePass<llvm::SimplifyCFGPass>{});
+    llvm::ModulePassManager passes;
+    passes.addPass(llvm::createModuleToFunctionPassAdaptor(
+        std::move(function_passes)));
+    passes.run(*module, module_analyses);
+
     return Importer{}.run(module.get(), options);
 }
 

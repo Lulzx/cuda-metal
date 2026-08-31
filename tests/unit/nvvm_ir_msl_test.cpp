@@ -1013,6 +1013,35 @@ exit:
 }
 )llvm";
 
+constexpr const char* kNvvmDynamicPrivateShuffleLoop = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @dynamic_private_shuffle(ptr %out, i32 %count, i32 %source) {
+entry:
+  %words = alloca [16 x i32], align 4
+  br label %header
+header:
+  %index = phi i32 [ 0, %entry ], [ %next, %body ]
+  %active = icmp ult i32 %index, %count
+  br i1 %active, label %body, label %exit
+body:
+  %wide = zext i32 %index to i64
+  %slot = getelementptr [16 x i32], ptr %words, i64 0, i64 %wide
+  store i32 %source, ptr %slot, align 4
+  %value = load i32, ptr %slot, align 4
+  %shuffled = call i32 asm sideeffect "shfl.sync.idx.b32 $0, $1, $2, $3, $4;", "=r,r,r,r,r"(i32 %value, i32 7, i32 31, i32 -1)
+  store i32 %shuffled, ptr %slot, align 4
+  %next = add i32 %index, 1
+  br label %header
+exit:
+  %first = getelementptr [16 x i32], ptr %words, i64 0, i64 0
+  %result = load i32, ptr %first, align 4
+  store i32 %result, ptr %out, align 4
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmOpaquePointerLoop = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1347,6 +1376,18 @@ int main() {
                      noncanonical_loop.source.find("while (true)") !=
                          std::string::npos,
                  "noncanonical loop exits lower as structured control flow");
+
+    const metal::NvvmToMslResult dynamic_private_shuffle =
+        metal::compile_nvvm_to_msl(kNvvmDynamicPrivateShuffleLoop,
+                                   "dynamic-private-shuffle.ll",
+                                   "dynamic_private_shuffle");
+    ok &= expect(dynamic_private_shuffle.ok &&
+                     dynamic_private_shuffle.source.find("while (true)") !=
+                         std::string::npos &&
+                     dynamic_private_shuffle.source.find("simd_shuffle") !=
+                         std::string::npos,
+                 "runtime-bounded private shuffle loops remain dynamic instead of "
+                 "being guessed into a fixed aggregate width");
 
     const metal::NvvmToMslResult nested_multi_exit_loop =
         metal::compile_nvvm_to_msl(kNvvmNestedMultiExitLoop,

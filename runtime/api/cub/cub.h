@@ -7,6 +7,7 @@
 #include "block/block_store.h"
 #include "warp/warp_reduce.h"
 #include "warp/warp_scan.h"
+#include "warp/warp_shuffle.h"
 #include "device/device_reduce.h"
 #include "device/device_scan.h"
 #include "device/device_radix_sort.h"

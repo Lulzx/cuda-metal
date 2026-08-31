@@ -1158,6 +1158,48 @@ cudaError_t validate_array_memcpy_3d(const cudaMemcpy3DParms& params,
     return cudaSuccess;
 }
 
+bool validate_graph_memcpy_3d_params(const cudaMemcpy3DParms* params) {
+    if (params == nullptr || validate_memcpy_kind(params->kind) != cudaSuccess ||
+        params->extent.width == 0 || params->extent.height == 0 ||
+        params->extent.depth == 0 ||
+        ((params->srcArray == nullptr) == (params->srcPtr.ptr == nullptr)) ||
+        ((params->dstArray == nullptr) == (params->dstPtr.ptr == nullptr))) {
+        return false;
+    }
+    const auto valid_pointer_span = [&](const cudaPitchedPtr& pointer,
+                                        const cudaPos& position) {
+        std::size_t span = 0;
+        return linear_3d_span(pointer, position, params->extent.width,
+                              params->extent.height, params->extent.depth, &span);
+    };
+    std::size_t array_width_bytes = 0;
+    std::size_t array_source_span = 0;
+    std::size_t array_destination_span = 0;
+    return ((params->srcArray != nullptr || params->dstArray != nullptr)
+                ? validate_array_memcpy_3d(*params, &array_width_bytes,
+                                           &array_source_span,
+                                           &array_destination_span) == cudaSuccess
+                : valid_pointer_span(params->srcPtr, params->srcPos) &&
+                      valid_pointer_span(params->dstPtr, params->dstPos));
+}
+
+bool validate_graph_memset_params(const cudaMemsetParams* params) {
+    if (params == nullptr || params->dst == nullptr || params->width == 0 ||
+        params->height == 0 ||
+        (params->elementSize != 1 && params->elementSize != 2 &&
+         params->elementSize != 4) ||
+        params->width >
+            std::numeric_limits<std::size_t>::max() / params->elementSize) {
+        return false;
+    }
+    const std::size_t row_bytes =
+        params->width * static_cast<std::size_t>(params->elementSize);
+    const std::size_t pitch = params->pitch == 0 ? row_bytes : params->pitch;
+    return pitch >= row_bytes &&
+           (params->height - 1) <=
+               (std::numeric_limits<std::size_t>::max() - row_bytes) / pitch;
+}
+
 cudaError_t validate_host_alloc_flags(unsigned int flags) {
     constexpr unsigned int kSupportedHostAllocFlags =
         cudaHostAllocPortable | cudaHostAllocMapped | cudaHostAllocWriteCombined;
@@ -1408,6 +1450,13 @@ cudaError_t query_runtime_kernel_properties(
     std::string error;
     return cumetal::metal_backend::query_kernel_properties(
         kernel.metallib_path, kernel.kernel_name, properties, &error);
+}
+
+bool is_runtime_kernel_handle(const void* function) {
+    if (function == nullptr) return false;
+    cumetal::registration::RegisteredKernel kernel;
+    return cumetal::native_registration::lookup_kernel(function, &kernel) ||
+           cumetal::registration::is_registered_kernel(function);
 }
 
 cudaError_t resolve_memcpy_kind(void* dst, const void* src, cudaMemcpyKind kind, cudaMemcpyKind* resolved_kind) {
@@ -2829,6 +2878,14 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     // Apple Silicon unified memory is not ECC-protected. GROMACS prints this
     // field in its hardware summary.
     prop->ECCEnabled = 0;
+    // Match the deterministic identity returned by the Driver API. The UUID is
+    // intentionally a CuMetal logical-device identifier rather than private
+    // Apple hardware information.
+    static constexpr unsigned char kCuMetalUuid[16] = {
+        0x43, 0x75, 0x4d, 0x65, 0x74, 0x61, 0x6c, 0x31,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    };
+    std::memcpy(prop->uuid.bytes, kCuMetalUuid, sizeof(kCuMetalUuid));
     for (size_t i = 0; i < sizeof(prop->cumetalReserved) / sizeof(prop->cumetalReserved[0]); ++i) {
         prop->cumetalReserved[i] = 0;
     }
@@ -4664,50 +4721,7 @@ cudaError_t cudaGraphAddKernelNode(cudaGraphNode_t* pGraphNode, cudaGraph_t grap
 cudaError_t cudaGraphAddMemcpyNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
                                     const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                     const cudaMemcpy3DParms* pCopyParams) {
-    if (!pGraphNode || !graph || !pCopyParams ||
-        validate_memcpy_kind(pCopyParams->kind) != cudaSuccess ||
-        pCopyParams->extent.width == 0 || pCopyParams->extent.height == 0 ||
-        pCopyParams->extent.depth == 0 ||
-        ((pCopyParams->srcArray == nullptr) == (pCopyParams->srcPtr.ptr == nullptr)) ||
-        ((pCopyParams->dstArray == nullptr) == (pCopyParams->dstPtr.ptr == nullptr))) {
-        return fail(cudaErrorInvalidValue);
-    }
-    const auto valid_pointer_span = [&](const cudaPitchedPtr& pointer,
-                                        const cudaPos& position) {
-        const std::size_t pitch =
-            pointer.pitch == 0 ? pCopyParams->extent.width : pointer.pitch;
-        const std::size_t height =
-            pointer.ysize == 0 ? pCopyParams->extent.height : pointer.ysize;
-        const std::size_t maximum = std::numeric_limits<std::size_t>::max();
-        if (position.x > pitch || pCopyParams->extent.width > pitch - position.x ||
-            position.y > height || pCopyParams->extent.height > height - position.y ||
-            (pitch != 0 && height > maximum / pitch) ||
-            position.z > maximum - (pCopyParams->extent.depth - 1) ||
-            position.y > maximum - (pCopyParams->extent.height - 1) ||
-            position.x > maximum - pCopyParams->extent.width) {
-            return false;
-        }
-        const std::size_t plane_size = pitch * height;
-        const std::size_t last_plane = position.z + pCopyParams->extent.depth - 1;
-        const std::size_t last_row = position.y + pCopyParams->extent.height - 1;
-        if (plane_size != 0 && last_plane > maximum / plane_size) return false;
-        const std::size_t plane_offset = last_plane * plane_size;
-        if (pitch != 0 && last_row > maximum / pitch) return false;
-        const std::size_t row_offset = last_row * pitch;
-        const std::size_t row_end = position.x + pCopyParams->extent.width;
-        return plane_offset <= maximum - row_offset &&
-               plane_offset + row_offset <= maximum - row_end;
-    };
-    std::size_t array_width_bytes = 0;
-    std::size_t array_source_span = 0;
-    std::size_t array_destination_span = 0;
-    if ((pCopyParams->srcArray == nullptr && pCopyParams->dstArray == nullptr &&
-         (!valid_pointer_span(pCopyParams->srcPtr, pCopyParams->srcPos) ||
-          !valid_pointer_span(pCopyParams->dstPtr, pCopyParams->dstPos))) ||
-        ((pCopyParams->srcArray != nullptr || pCopyParams->dstArray != nullptr) &&
-         validate_array_memcpy_3d(*pCopyParams, &array_width_bytes,
-                                  &array_source_span,
-                                  &array_destination_span) != cudaSuccess)) {
+    if (!pGraphNode || !graph || !validate_graph_memcpy_3d_params(pCopyParams)) {
         return fail(cudaErrorInvalidValue);
     }
     auto* node = new cudaGraphNode_st();
@@ -4754,20 +4768,7 @@ cudaError_t cudaGraphAddMemcpyNode1D(cudaGraphNode_t* pGraphNode,
 cudaError_t cudaGraphAddMemsetNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
                                     const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                     const cudaMemsetParams* pMemsetParams) {
-    if (!pGraphNode || !graph || !pMemsetParams || pMemsetParams->dst == nullptr ||
-        pMemsetParams->width == 0 || pMemsetParams->height == 0 ||
-        (pMemsetParams->elementSize != 1 && pMemsetParams->elementSize != 2 &&
-         pMemsetParams->elementSize != 4) ||
-        pMemsetParams->width >
-            std::numeric_limits<std::size_t>::max() / pMemsetParams->elementSize) {
-        return fail(cudaErrorInvalidValue);
-    }
-    const std::size_t row_bytes =
-        pMemsetParams->width * static_cast<std::size_t>(pMemsetParams->elementSize);
-    const std::size_t pitch = pMemsetParams->pitch == 0 ? row_bytes : pMemsetParams->pitch;
-    if (pitch < row_bytes ||
-        (pMemsetParams->height - 1) >
-            (std::numeric_limits<std::size_t>::max() - row_bytes) / pitch) {
+    if (!pGraphNode || !graph || !validate_graph_memset_params(pMemsetParams)) {
         return fail(cudaErrorInvalidValue);
     }
     auto* node = new cudaGraphNode_st();
@@ -5066,6 +5067,82 @@ cudaError_t cudaDeviceGraphMemTrim(int device) {
     return fail(cudaSuccess);
 }
 
+cudaError_t cudaGraphKernelNodeSetParams(cudaGraphNode_t node,
+                                          const cudaKernelNodeParams* nodeParams) {
+    if (node == nullptr || nodeParams == nullptr ||
+        node->type != cudaGraphNodeTypeKernel || nodeParams->func == nullptr ||
+        nodeParams->gridDim.x == 0 || nodeParams->gridDim.y == 0 ||
+        nodeParams->gridDim.z == 0 || nodeParams->blockDim.x == 0 ||
+        nodeParams->blockDim.y == 0 || nodeParams->blockDim.z == 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    cudaGraphNode_st updated = *node;
+    updated.func = nodeParams->func;
+    updated.grid_dim = nodeParams->gridDim;
+    updated.block_dim = nodeParams->blockDim;
+    updated.shared_mem = nodeParams->sharedMemBytes;
+    if (!snapshot_graph_kernel_arguments(&updated, updated.func,
+                                         nodeParams->kernelParams)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    *node = std::move(updated);
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphMemcpyNodeSetParams(cudaGraphNode_t node,
+                                          const cudaMemcpy3DParms* params) {
+    if (node == nullptr || node->type != cudaGraphNodeTypeMemcpy ||
+        !validate_graph_memcpy_3d_params(params)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    node->uses_memcpy_3d_params = true;
+    node->memcpy_3d_params = *params;
+    node->dst = nullptr;
+    node->src = nullptr;
+    node->count = 0;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphMemcpyNodeSetParams1D(cudaGraphNode_t node, void* dst,
+                                            const void* src, size_t count,
+                                            cudaMemcpyKind kind) {
+    if (node == nullptr || node->type != cudaGraphNodeTypeMemcpy || dst == nullptr ||
+        src == nullptr || count == 0 || validate_memcpy_kind(kind) != cudaSuccess) {
+        return fail(cudaErrorInvalidValue);
+    }
+    node->uses_memcpy_3d_params = false;
+    node->memcpy_3d_params = {};
+    node->dst = dst;
+    node->src = src;
+    node->count = count;
+    node->memcpy_kind = kind;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphMemsetNodeSetParams(cudaGraphNode_t node,
+                                          const cudaMemsetParams* params) {
+    if (node == nullptr || node->type != cudaGraphNodeTypeMemset ||
+        !validate_graph_memset_params(params)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    node->dst = params->dst;
+    node->memset_value = static_cast<int>(params->value);
+    node->uses_memset_params = true;
+    node->memset_params = *params;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphHostNodeSetParams(cudaGraphNode_t node,
+                                        const cudaHostNodeParams* params) {
+    if (node == nullptr || node->type != cudaGraphNodeTypeHost || params == nullptr ||
+        params->fn == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    node->host_fn = params->fn;
+    node->host_user_data = params->userData;
+    return fail(cudaSuccess);
+}
+
 cudaError_t cudaGraphExecKernelNodeSetParams(cudaGraphExec_t hGraphExec,
                                               cudaGraphNode_t hNode,
                                               const cudaKernelNodeParams* nodeParams) {
@@ -5090,6 +5167,59 @@ cudaError_t cudaGraphExecKernelNodeSetParams(cudaGraphExec_t hGraphExec,
     }
     node = std::move(updated);
     return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphExecMemcpyNodeSetParams(cudaGraphExec_t graphExec,
+                                              cudaGraphNode_t node,
+                                              const cudaMemcpy3DParms* params) {
+    if (graphExec == nullptr || node == nullptr ||
+        !validate_graph_memcpy_3d_params(params)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const auto it = graphExec->source_node_index.find(node);
+    if (it == graphExec->source_node_index.end() ||
+        graphExec->nodes[it->second].type != cudaGraphNodeTypeMemcpy) {
+        return fail(cudaErrorInvalidValue);
+    }
+    return cudaGraphMemcpyNodeSetParams(&graphExec->nodes[it->second], params);
+}
+
+cudaError_t cudaGraphExecMemcpyNodeSetParams1D(cudaGraphExec_t graphExec,
+                                                cudaGraphNode_t node, void* dst,
+                                                const void* src, size_t count,
+                                                cudaMemcpyKind kind) {
+    if (graphExec == nullptr || node == nullptr) return fail(cudaErrorInvalidValue);
+    const auto it = graphExec->source_node_index.find(node);
+    if (it == graphExec->source_node_index.end() ||
+        graphExec->nodes[it->second].type != cudaGraphNodeTypeMemcpy) {
+        return fail(cudaErrorInvalidValue);
+    }
+    return cudaGraphMemcpyNodeSetParams1D(&graphExec->nodes[it->second], dst, src,
+                                           count, kind);
+}
+
+cudaError_t cudaGraphExecMemsetNodeSetParams(cudaGraphExec_t graphExec,
+                                              cudaGraphNode_t node,
+                                              const cudaMemsetParams* params) {
+    if (graphExec == nullptr || node == nullptr) return fail(cudaErrorInvalidValue);
+    const auto it = graphExec->source_node_index.find(node);
+    if (it == graphExec->source_node_index.end() ||
+        graphExec->nodes[it->second].type != cudaGraphNodeTypeMemset) {
+        return fail(cudaErrorInvalidValue);
+    }
+    return cudaGraphMemsetNodeSetParams(&graphExec->nodes[it->second], params);
+}
+
+cudaError_t cudaGraphExecHostNodeSetParams(cudaGraphExec_t graphExec,
+                                            cudaGraphNode_t node,
+                                            const cudaHostNodeParams* params) {
+    if (graphExec == nullptr || node == nullptr) return fail(cudaErrorInvalidValue);
+    const auto it = graphExec->source_node_index.find(node);
+    if (it == graphExec->source_node_index.end() ||
+        graphExec->nodes[it->second].type != cudaGraphNodeTypeHost) {
+        return fail(cudaErrorInvalidValue);
+    }
+    return cudaGraphHostNodeSetParams(&graphExec->nodes[it->second], params);
 }
 
 cudaError_t cudaGraphNodeGetType(cudaGraphNode_t node, cudaGraphNodeType* pType) {
@@ -6873,9 +7003,7 @@ cudaError_t cudaFuncSetCacheConfig(const void* func, cudaFuncCache cacheConfig) 
         cacheConfig > cudaFuncCachePreferEqual) {
         return fail(cudaErrorInvalidValue);
     }
-    cumetal::metal_backend::KernelProperties kernel{};
-    const cudaError_t query = query_runtime_kernel_properties(func, &kernel);
-    if (query != cudaSuccess) return fail(query);
+    if (!is_runtime_kernel_handle(func)) return fail(cudaErrorInvalidValue);
     return fail(cudaSuccess);
 }
 
@@ -6884,9 +7012,7 @@ cudaError_t cudaFuncSetSharedMemConfig(const void* func, cudaSharedMemConfig con
         config > cudaSharedMemBankSizeEightByte) {
         return fail(cudaErrorInvalidValue);
     }
-    cumetal::metal_backend::KernelProperties kernel{};
-    const cudaError_t query = query_runtime_kernel_properties(func, &kernel);
-    if (query != cudaSuccess) return fail(query);
+    if (!is_runtime_kernel_handle(func)) return fail(cudaErrorInvalidValue);
     return fail(cudaSuccess);
 }
 

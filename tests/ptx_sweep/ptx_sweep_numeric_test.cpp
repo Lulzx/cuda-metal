@@ -342,6 +342,137 @@ Outcome run_case(const Case& test_case,
     return outcome;
 }
 
+Outcome run_object_dimension_queries(const std::string& cumetalc,
+                                     const std::filesystem::path& workdir) {
+    Outcome outcome;
+    const std::filesystem::path ptx_path = workdir / "object_dimension_queries.ptx";
+    const std::filesystem::path metallib_path =
+        workdir / "object_dimension_queries.metallib";
+    const std::filesystem::path log_path = workdir / "object_dimension_queries.log";
+    static constexpr const char* kPtx = R"ptx(.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry object_dimension_queries(
+  .param .u64 tex,
+  .param .u64 surf,
+  .param .u64 out
+)
+{
+  .reg .b64 %rd<4>;
+  .reg .b32 %r<7>;
+  ld.param.u64 %rd1, [tex];
+  ld.param.u64 %rd2, [surf];
+  ld.param.u64 %rd3, [out];
+  cvta.to.global.u64 %rd3, %rd3;
+  txq.width.b32 %r1, [%rd1];
+  txq.height.b32 %r2, [%rd1];
+  txq.depth.b32 %r3, [%rd1];
+  suq.width.b32 %r4, [%rd2];
+  suq.height.b32 %r5, [%rd2];
+  suq.depth.b32 %r6, [%rd2];
+  st.global.u32 [%rd3], %r1;
+  st.global.u32 [%rd3+4], %r2;
+  st.global.u32 [%rd3+8], %r3;
+  st.global.u32 [%rd3+12], %r4;
+  st.global.u32 [%rd3+16], %r5;
+  st.global.u32 [%rd3+20], %r6;
+  ret;
+}
+)ptx";
+
+    FILE* file = std::fopen(ptx_path.c_str(), "w");
+    if (file == nullptr) {
+        outcome.detail = "could not write object-query PTX";
+        return outcome;
+    }
+    std::fwrite(kPtx, 1, std::strlen(kPtx), file);
+    std::fclose(file);
+
+    std::error_code ec;
+    std::filesystem::remove(metallib_path, ec);
+    const std::string command = shell_quote(cumetalc) +
+                                " --mode xcrun --overwrite --ptx-strict --entry "
+                                "object_dimension_queries --input " +
+                                shell_quote(ptx_path.string()) + " --output " +
+                                shell_quote(metallib_path.string()) + " > " +
+                                shell_quote(log_path.string()) + " 2>&1";
+    if (std::system(command.c_str()) != 0 ||
+        !std::filesystem::exists(metallib_path)) {
+        outcome.detail = "cumetalc declined object queries (see " + log_path.string() + ")";
+        return outcome;
+    }
+
+    __cumetal_texture_descriptor texture{};
+    texture.width = 17;
+    texture.height = 19;
+    texture.depth = 23;
+    __cumetal_texture_descriptor surface{};
+    surface.width = 29;
+    surface.height = 31;
+    surface.depth = 37;
+    void* device_texture = nullptr;
+    void* device_surface = nullptr;
+    void* device_output = nullptr;
+    auto cleanup = [&]() {
+        if (device_texture != nullptr) cudaFree(device_texture);
+        if (device_surface != nullptr) cudaFree(device_surface);
+        if (device_output != nullptr) cudaFree(device_output);
+    };
+    if (cudaMalloc(&device_texture, sizeof(texture)) != cudaSuccess ||
+        cudaMalloc(&device_surface, sizeof(surface)) != cudaSuccess ||
+        cudaMalloc(&device_output, 6 * sizeof(std::uint32_t)) != cudaSuccess ||
+        cudaMemcpy(device_texture, &texture, sizeof(texture), cudaMemcpyHostToDevice) !=
+            cudaSuccess ||
+        cudaMemcpy(device_surface, &surface, sizeof(surface), cudaMemcpyHostToDevice) !=
+            cudaSuccess) {
+        outcome.detail = "object-query device setup failed";
+        cleanup();
+        return outcome;
+    }
+
+    static const cumetalKernelArgInfo_t kArgInfo[] = {
+        {CUMETAL_ARG_BUFFER, 0},
+        {CUMETAL_ARG_BUFFER, 0},
+        {CUMETAL_ARG_BUFFER, 0},
+    };
+    const std::string metallib_string = metallib_path.string();
+    const cumetalKernel_t kernel{
+        .metallib_path = metallib_string.c_str(),
+        .kernel_name = "object_dimension_queries",
+        .arg_count = 3,
+        .arg_info = kArgInfo,
+    };
+    void* launch_args[] = {&device_texture, &device_surface, &device_output};
+    if (cudaLaunchKernel(&kernel, dim3(1), dim3(1), launch_args, 0, nullptr) != cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess) {
+        outcome.detail = "object-query kernel launch failed";
+        cleanup();
+        return outcome;
+    }
+
+    std::uint32_t actual[6]{};
+    if (cudaMemcpy(actual, device_output, sizeof(actual), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        outcome.detail = "object-query result copy failed";
+        cleanup();
+        return outcome;
+    }
+    cleanup();
+
+    const std::uint32_t expected[6] = {17, 19, 23, 29, 31, 37};
+    if (std::memcmp(actual, expected, sizeof(expected)) != 0) {
+        outcome.result = Result::kWrong;
+        char detail[256];
+        std::snprintf(detail, sizeof(detail),
+                      "got {%u,%u,%u,%u,%u,%u}, expected {17,19,23,29,31,37}",
+                      actual[0], actual[1], actual[2], actual[3], actual[4], actual[5]);
+        outcome.detail = detail;
+        return outcome;
+    }
+    outcome.result = Result::kSupported;
+    outcome.detail = "txq={17,19,23}, suq={29,31,37}";
+    return outcome;
+}
+
 void print_value(const Case& test_case, std::uint32_t value, char* buffer, std::size_t size) {
     if (test_case.domain == Domain::kFloat) {
         std::snprintf(buffer, size, "0x%08X (%g)", value,
@@ -424,8 +555,25 @@ int main(int argc, char** argv) {
         }
     }
 
+    const Outcome query_outcome = run_object_dimension_queries(cumetalc, workdir);
+    if (query_outcome.result == Result::kSupported) {
+        ++supported;
+        std::printf("%-28s %-12s %s\n", "object_dimension_queries", "SUPPORTED",
+                    query_outcome.detail.c_str());
+    } else if (query_outcome.result == Result::kWrong) {
+        ++wrong;
+        wrong_names.emplace_back("object_dimension_queries");
+        std::printf("%-28s %-12s %s\n", "object_dimension_queries", "WRONG",
+                    query_outcome.detail.c_str());
+    } else {
+        ++unsupported;
+        unsupported_names.emplace_back("object_dimension_queries");
+        std::printf("%-28s %-12s %s\n", "object_dimension_queries", "UNSUPPORTED",
+                    query_outcome.detail.c_str());
+    }
+
     std::printf("\n%zu cases: %zu supported, %zu wrong, %zu unsupported\n",
-                kCaseCount, supported, wrong, unsupported);
+                kCaseCount + 1, supported, wrong, unsupported);
 
     if (wrong > 0) {
         std::printf("\nFAIL: %zu opcode(s) computed the wrong value:\n", wrong);

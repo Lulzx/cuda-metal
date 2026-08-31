@@ -39,11 +39,13 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   serialization, and device API parity remain open.
 - **cuFFT:** ranks 1 to 3 execute for every transform type, including cuFFT's
   advanced data layout (`inembed`/`onembed`/stride/dist), which is what a padded
-  grid such as GROMACS's PME mesh needs. The single-precision transforms
-  (`C2C`/`R2C`/`C2R`) run on the Apple GPU as Stockham autosort passes, with
-  Bluestein on the same kernels for lengths that are not a power of two; grids
-  below a dispatch-cost threshold and every double-precision entry point stay on
-  the CPU, since Metal has no FP64. Still absent: callbacks, multi-GPU, the rest
+  grid such as GROMACS's PME mesh needs. Eligible dense, out-of-place rank-3
+  single-precision R2C/C2R plans use vendored VkFFT 1.3.4 on Metal. Other
+  single-precision transforms (`C2C`/`R2C`/`C2R`) use project-owned Stockham
+  autosort and Bluestein GPU kernels; grids below a dispatch-cost threshold and
+  every double-precision entry point stay on the CPU, since Metal has no FP64.
+  `CUMETAL_FFT_VKFFT=0` explicitly disables the VkFFT route. Still absent:
+  callbacks, multi-GPU, the rest
   of the Xt surface, and a GPU path for the double transforms. Implemented
   execution rejects untracked, host, interior-short, and otherwise undersized
   input/output spans before dispatch; caller-supplied work areas are accepted
@@ -96,7 +98,10 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   host-backed `cub::Device*` entry points do now synchronize their stream before
   reading the input, which is a correctness requirement rather than a
   performance choice: without it a scan or reduction of a buffer a kernel is
-  still writing silently returns stale memory.
+  still writing silently returns stale memory. The tested aggregate
+  `ShuffleIndex` helper covers trivially-copyable objects up to the fixed
+  32-lane warp model, but broader CUB warp/block free-function and policy
+  overload parity remains unclassified.
 - **NVTX:** annotations are no-ops.
 
 The closure target is a generated support table from actual positive and

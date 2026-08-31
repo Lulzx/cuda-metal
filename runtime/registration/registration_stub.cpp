@@ -8,6 +8,11 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
     return false;
 }
 
+bool is_registered_kernel(const void* host_function) {
+    (void)host_function;
+    return false;
+}
+
 bool lookup_registered_symbol(const void* host_symbol,
                               const void** out_device_symbol,
                               std::size_t* out_size) {

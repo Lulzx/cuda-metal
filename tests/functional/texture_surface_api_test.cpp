@@ -115,6 +115,33 @@ static bool test_texture_object_lifecycle() {
     return true;
 }
 
+static bool test_linear_texture_negative_paths() {
+    float untracked[4]{};
+    cudaResourceDesc resource{};
+    resource.resType = cudaResourceTypeLinear;
+    resource.res.linear.devPtr = untracked;
+    resource.res.linear.desc =
+        cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
+    resource.res.linear.sizeInBytes = sizeof(untracked);
+    cudaTextureDesc texture{};
+    texture.addressMode[0] = cudaAddressModeClamp;
+    texture.filterMode = cudaFilterModePoint;
+    texture.readMode = cudaReadModeElementType;
+    cudaTextureObject_t object = 0;
+    if (cudaCreateTextureObject(&object, &resource, &texture, nullptr) !=
+        cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: linear texture accepted untracked storage\n");
+        return false;
+    }
+    resource.res.linear.devPtr = nullptr;
+    if (cudaCreateTextureObject(&object, &resource, &texture, nullptr) !=
+        cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: linear texture accepted null storage\n");
+        return false;
+    }
+    return true;
+}
+
 static bool test_surface_object_lifecycle() {
     cudaChannelFormatDesc desc = cudaCreateChannelDesc(8, 8, 8, 8, cudaChannelFormatKindUnsigned);
     cudaArray_t arr = nullptr;
@@ -227,6 +254,7 @@ static bool test_channel_format_desc_variants() {
 int main() {
     if (!test_malloc_free_array()) return 1;
     if (!test_texture_object_lifecycle()) return 1;
+    if (!test_linear_texture_negative_paths()) return 1;
     if (!test_surface_object_lifecycle()) return 1;
     if (!test_memcpy_to_from_array()) return 1;
     if (!test_channel_format_desc_variants()) return 1;

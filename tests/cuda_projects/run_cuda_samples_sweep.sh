@@ -194,6 +194,12 @@ classify_sample() {
     local run_args=()
     if [[ "${rel}" == "0_Introduction/simpleTexture3D" ]]; then
         run_args=( --file data/ref_texture3D.bin )
+    elif [[ "${rel}" == "6_Performance/UnifiedMemoryPerf" ]]; then
+        # The upstream default repeats every 64 MiB allocation/transfer mode
+        # twenty times. One iteration still runs and numerically verifies the
+        # complete mode matrix while keeping a conformance sweep below the
+        # Metal GPU watchdog; this gate measures correctness, not throughput.
+        run_args=( --kernel-iterations=1 )
     fi
     run_output="$(cd "${src_dir}" && run_with_timeout 120 "${out_dir}/${name}" "${run_args[@]}" 2>&1)" || status=$?
     printf '%s\n' "${run_output}" >>"${log}"

@@ -134,7 +134,8 @@ bool is_supported_opcode(const std::string& opcode) {
         "mov",       "mul",        "nanosleep", "neg",   "not",   "or",       "popc",  "prmt",
         "rcp",       "redux",      "rem",       "ret",   "rsqrt", "sad",      "selp",  "set",
         "setp",      "shl",        "shr",       "shfl",  "sin",   "sqrt",     "st",    "sub",
-        "fence",     "prefetch",   "prefetchu", "red",   "testp",  "trap",      "vote",  "xor",
+        "fence",     "prefetch",   "prefetchu", "red",   "suq",   "testp",    "trap",  "txq",
+        "vote",      "xor",
     };
     return kSupportedRoots.contains(root);
 }
@@ -153,11 +154,9 @@ bool is_explicitly_unsupported(const std::string& opcode) {
            opcode.rfind("ldmatrix.", 0) == 0 ||
            opcode.rfind("tex.", 0) == 0 ||
            opcode.rfind("tld4.", 0) == 0 ||
-           opcode.rfind("txq.", 0) == 0 ||
            opcode.rfind("sust.", 0) == 0 ||
            opcode.rfind("suld.", 0) == 0 ||
-           opcode.rfind("sured.", 0) == 0 ||
-           opcode.rfind("suq.", 0) == 0;
+           opcode.rfind("sured.", 0) == 0;
 }
 
 // Returns a targeted diagnostic for opcodes that are unsupported with a known reason.
@@ -182,9 +181,9 @@ std::string targeted_unsupported_message(const std::string& opcode) {
                "use MPSMatrixMultiplication for GEMM workloads)";
     }
     if (opcode.rfind("tex.", 0) == 0 || opcode.rfind("tld4.", 0) == 0 ||
-        opcode.rfind("txq.", 0) == 0 || opcode.rfind("sust.", 0) == 0 ||
+        opcode.rfind("sust.", 0) == 0 ||
         opcode.rfind("suld.", 0) == 0 || opcode.rfind("sured.", 0) == 0 ||
-        opcode.rfind("suq.", 0) == 0) {
+        opcode.rfind("suq.", 0) == 0 || opcode.rfind("txq.", 0) == 0) {
         return "unsupported opcode '" + opcode +
                "' (texture/surface instructions not yet supported; "
                "deferred to v2 — use global memory buffers instead)";

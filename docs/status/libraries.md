@@ -34,10 +34,13 @@ full NVIDIA library implementations.
   statuses.
 - **cuFFT:** rank-1 to rank-3 planning and execution for C2C/R2C/C2R and the
   double forms, with cuFFT's advanced data layout (`inembed`/`onembed`, stride,
-  batch distance). The single-precision transforms run on the Apple GPU
-  (Stockham autosort, Bluestein for non-power-of-two lengths); `CUMETAL_FFT_METAL`
-  selects auto/always/never and `CUMETAL_DEBUG_FFT` reports the routing. Small
-  grids and the double-precision forms use the Accelerate/Bluestein CPU path.
+  batch distance). Eligible dense, out-of-place rank-3 single-precision R2C/C2R
+  plans run through vendored VkFFT 1.3.4 on Metal; the project-owned Stockham
+  autosort/Bluestein kernels cover the other single-precision GPU path.
+  `CUMETAL_FFT_VKFFT=0` disables VkFFT, `CUMETAL_FFT_METAL` selects
+  auto/always/never for the project-owned path, and `CUMETAL_DEBUG_FFT` reports
+  routing. Small grids and double-precision forms use the Accelerate/Bluestein
+  CPU path.
   Planning rejects overflowing advanced layouts without retaining a partial
   handle, and execution validates the full typed input/output allocation spans
   (including batch distances, padding, strides, and interior pointers) before
@@ -95,7 +98,10 @@ full NVIDIA library implementations.
   and returns `NOT_SUPPORTED` for utilization, temperature, power, and clocks
   that public macOS APIs cannot supply instead of fabricating measurements.
 - **Thrust / CUB:** header subsets; some algorithms are CPU/sequential over UMA
-  and are labeled accordingly.
+  and are labeled accordingly. The device free-function subset includes a
+  tested `ShuffleIndex` for trivially-copyable scalar and aggregate values;
+  `float3` and `float4` are numerically exercised through the unmodified
+  GROMACS call shape.
 - **NVTX:** no-op annotation compatibility.
 
 ## Precision and execution labeling

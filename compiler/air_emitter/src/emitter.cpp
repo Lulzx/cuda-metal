@@ -589,8 +589,41 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
         {
             const std::string xcrun_path = find_tool("xcrun");
             const std::string xcrun_bin = xcrun_path.empty() ? "xcrun" : xcrun_path;
+            std::filesystem::path llvm_input = options.input;
+            std::string input_error;
+            const std::vector<std::uint8_t> input_bytes =
+                cumetal::common::read_file_bytes(options.input, &input_error);
+            const std::string input_ir = to_text(input_bytes);
+            // air-opt's stock pipelines can turn CuMetal's SIMD-safe lock-bank
+            // retry CFG into a lane-local spin loop, which deadlocks a SIMD
+            // group under contended 64-bit atomics. Preserve that reviewed IR
+            // exactly; ordinary generated AIR benefits substantially from O2.
+            const bool optimizer_safe =
+                input_error.empty() &&
+                input_ir.find("__cumetal_atomic_lock_bank") == std::string::npos;
+            if (optimizer_safe) {
+                const std::filesystem::path optimized_ll = temp_dir / "optimized.ll";
+                const std::string air_opt_command =
+                    xcrun_bin + " air-opt -S -passes='default<O2>' " +
+                    quote_shell(options.input.string()) + " -o " +
+                    quote_shell(optimized_ll.string()) + " 2>&1";
+                const CommandResult air_opt = run_command_capture(air_opt_command);
+                result.logs.push_back("$ " + air_opt_command);
+                result.logs.push_back(air_opt.output);
+                if (air_opt.started && air_opt.exit_code == 0 &&
+                    std::filesystem::exists(optimized_ll)) {
+                    llvm_input = optimized_ll;
+                    result.logs.push_back("used the air-opt default O2 pipeline");
+                } else {
+                    result.logs.push_back(
+                        "air-opt unavailable or rejected input; compiling original LLVM IR");
+                }
+            } else {
+                result.logs.push_back(
+                    "skipped air-opt for SIMD-safe lock-bank atomic control flow");
+            }
             // Full AOT compilation: metal input.ll -o output.metallib (no -c flag)
-            const std::string command = xcrun_bin + " metal " + quote_shell(options.input.string()) + " -o " +
+            const std::string command = xcrun_bin + " metal " + quote_shell(llvm_input.string()) + " -o " +
                                         quote_shell(options.output.string()) + " 2>&1";
             const CommandResult cmd = run_command_capture(command);
             result.logs.push_back("$ " + command);
@@ -605,7 +638,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
             }
             // AOT compilation failed — fall back to Air bitcode path
             result.logs.push_back("xcrun metal AOT failed, falling back to Air bitcode path");
-            const std::string fallback_cmd = xcrun_bin + " metal -c " + quote_shell(options.input.string()) + " -o " +
+            const std::string fallback_cmd = xcrun_bin + " metal -c " + quote_shell(llvm_input.string()) + " -o " +
                                              quote_shell(temp_air.string()) + " 2>&1";
             const CommandResult fallback = run_command_capture(fallback_cmd);
             result.logs.push_back("$ " + fallback_cmd);
@@ -617,7 +650,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
                 const std::string llvm_as_path = find_tool("llvm-as");
                 if (!llvm_as_path.empty()) {
                     const std::string llvm_as_cmd =
-                        llvm_as_path + " " + quote_shell(options.input.string()) + " -o " +
+                        llvm_as_path + " " + quote_shell(llvm_input.string()) + " -o " +
                         quote_shell(temp_air.string()) + " 2>&1";
                     const CommandResult llvm_as_result = run_command_capture(llvm_as_cmd);
                     result.logs.push_back("$ " + llvm_as_cmd);

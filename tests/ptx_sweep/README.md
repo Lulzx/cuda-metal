@@ -34,5 +34,7 @@ PTX bodies; see `docs/known-gaps.md`.
   - special-register moves: `%tid.*`, `%ctaid.*`, `%ntid.*`, `%nctaid.*`
   - memory/addrspace: `ld/st` in shared/global/local + `cvta.to.*`
   - control/other: `bar.sync`, `setp`, `bra`
+  - indirect object queries: `txq`/`suq` width, height, and depth; the numerical
+    sweep executes all six against distinct GPU-resident descriptor values
 - `run_unsupported_ops.sh`: verifies strict mode rejects unsupported instruction roots
-  (`foo`, `trap`, `tex`, `suld`).
+  and forms (`foo`, `trap`, `tex`, `suld`, non-dimension `txq`/`suq`).

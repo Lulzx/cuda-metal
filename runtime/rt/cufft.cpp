@@ -491,6 +491,8 @@ bool layout_element_count(const FftLayout& layout, int rank, const int* dims, in
     return true;
 }
 
+void prepare_metal_plan(const CufftPlanEntry& plan);
+
 static cufftResult make_plan(cufftHandle h, int rank, const int* n, cufftType type, int batch,
                              const int* inembed, int istride, int idist,
                              const int* onembed, int ostride, int odist,
@@ -555,6 +557,7 @@ static cufftResult make_plan(cufftHandle h, int rank, const int* n, cufftType ty
     if (workSize != nullptr) {
         *workSize = 0;
     }
+    prepare_metal_plan(*p);
     return CUFFT_SUCCESS;
 }
 
@@ -611,6 +614,19 @@ bool try_exec_metal(const CufftPlanEntry& p, fft_metal::Kind kind, const void* i
     request.idata = idata;
     request.odata = odata;
     return fft_metal::execute(request);
+}
+
+void prepare_metal_plan(const CufftPlanEntry& p) {
+    if (p.type != CUFFT_R2C && p.type != CUFFT_C2R) return;
+    fft_metal::Request request;
+    request.kind = p.type == CUFFT_R2C ? fft_metal::Kind::kR2C : fft_metal::Kind::kC2R;
+    request.rank = p.rank;
+    for (int axis = 0; axis < p.rank; ++axis) request.n[axis] = p.n[axis];
+    request.batch = p.batch;
+    request.input = to_metal_layout(p.input);
+    request.output = to_metal_layout(p.output);
+    request.stream = p.stream;
+    (void)fft_metal::prepare(request);
 }
 
 }  // namespace

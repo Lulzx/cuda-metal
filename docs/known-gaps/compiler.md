@@ -28,8 +28,11 @@ Remaining typed-path blockers include combinations of:
   32-bit direct/PTX family and lock-backed 64-bit typed-PTX family;
 - PTX call forms beyond the proven FP32 libdevice, constant-format `vprintf`,
   direct scalar-return/pointer-argument helpers, and flat 12-byte by-value/single
-  aggregate-return ABI, including nested/irregular aggregates, multi-result
-  signatures, indirect calls, and general double-signature calls;
+  aggregate-return ABI. The generic registration-JIT path additionally proves
+  the bounded `cuda-samples/newdelete` virtual dispatch with one aligned
+  16-byte by-value argument; nested/irregular aggregates, multi-result
+  signatures, general indirect calls, and general double-signature calls remain
+  open;
 - aggregate insertion/extraction beyond the bounded NVVM reconstruction limit
   (depth 8, width 16, and 64 scalar leaves), plus irregularly padded nested
   device-call ABIs beyond the proven depth-two 12-byte fixture;
@@ -62,9 +65,10 @@ rejected explicitly.
 
 ## PTX and fatbinary coverage
 
-PTX support is per instruction form. Direct PTX texture/surface instructions,
-TMA/cluster operations, FP8, unrestricted device calls, and other unsupported
-forms fail. The binary parser covers bounded raw PTX, CuMetal envelopes, common
+PTX support is per instruction form. Direct PTX indirect-object
+`txq`/`suq` width, height, and depth queries are numerically tested; remaining
+texture/surface forms, TMA/cluster operations, FP8, unrestricted device calls,
+and other unsupported forms fail. The binary parser covers bounded raw PTX, CuMetal envelopes, common
 fatbin PTX wrappers, version-`0x0101` LZ4/Zstd-compressed PTX entries, and
 checked little-endian ELF32/ELF64 sections. Plausible framed entries with an
 unknown kind cannot fall through to the legacy raw-PTX scanner or the

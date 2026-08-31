@@ -53,6 +53,11 @@ bit containers for that same libdevice surface. Direct and PTX-produced typed
 artifacts have separate Apple-GPU numerical gates for the complete 32-bit CUDA
 atomic family, device/threadgroup fences, and host-concurrent system atomics;
 the broader libdevice numerical proof remains attributed to the direct path.
+The direct PTX path also lowers indirect-object
+`txq`/`suq` width, height, and depth queries through the public CuMetal
+descriptor ABI; the opcode sweep executes all six query forms with distinct
+GPU-resident values and retains strict failures for unsupported attributes and
+mip-level forms.
 Both typed frontends also decode constant-format Clang `vprintf` into the same
 bounded atomic ring-record ABI. Focused Apple-GPU tests validate every record
 from a 32-lane multidimensional launch and prove a capacity-boundary record is
@@ -60,6 +65,12 @@ rejected without payload writes while its call still returns the CUDA
 parsed-argument count. Format-only calls return zero, while a statically null format
 returns `-1` without reserving a ring record. Unresolved non-null formats and
 unsupported tuple widths fail explicitly.
+The generic PTX-to-LLVM registration-JIT path preserves volatile global loads
+and tracks global/shared/local pointer provenance through the bounded virtual
+dispatch form exercised by NVIDIA `cuda-samples/newdelete`. That path also
+materializes a complete, 4-byte-aligned 16-byte by-value call argument in
+caller-local memory. This is focused compatibility evidence, not general
+support for irregular aggregates or arbitrary indirect-call signatures.
 The typed PTX frontend also materializes the selected kernel's reachable direct
 `.func` graph. The numerical device-call projects cover scalar returns, pointer
 arguments and offsets, loops, pointer merges, early exits, flat and depth-two

@@ -29,10 +29,14 @@ copy geometry and pitched 1/2/4-byte memset values; malformed pitch, extent,
 element-size, overflow, dependency, and creation-flag inputs are rejected.
 Array-backed graph-copy replay has focused host-to-array, offset array-to-array,
 and array-to-host numerical coverage, including channel-width-aware pitched
-geometry and out-of-bounds rejection. Clone/update and memory-node lifetimes
-still do not cover all node types or multi-stream topologies. Virtual/physical
-allocation reuse, allocator caching/release-threshold behavior, and advanced
-update cases remain incomplete.
+geometry and out-of-bounds rejection. Graph and executable parameter setters
+cover the supported kernel, 1D/3D memcpy, memset, and host node families with
+node-identity, node-type, and malformed-parameter rejection. Clone/update and
+memory-node lifetimes still do not cover child graphs, event/semaphore or
+conditional nodes, every memory-node update interaction, or arbitrary
+multi-stream topologies. Virtual/physical allocation reuse, allocator
+caching/release-threshold behavior, and those advanced update cases remain
+incomplete.
 
 ## Memory and pointers
 
@@ -52,8 +56,13 @@ update cases remain incomplete.
 ## Textures, surfaces, and printf
 
 Texture/surface object lifecycle, arrays, copies, and selected source descriptor
-helpers exist. Direct PTX texture/surface instructions, native Metal texture ABI,
-and remaining addressing/filtering modes do not. Device `printf` has a bounded
+helpers exist. Source `tex1Dfetch` now has numerical scalar/vector element reads
+and clamp/zero-border coverage for tracked linear resources. Direct PTX
+indirect-object `txq`/`suq` width, height, and depth queries have strict-lowering
+and numerical Apple-GPU coverage. Direct PTX sampling, surface load/store/reduction,
+other query attributes, static opaque-reference operands, native Metal texture ABI,
+LOD/gradient/gather families, and remaining addressing/filtering modes do not.
+Device `printf` has a bounded
 buffer and 256-byte format limit. Focused Clang-ABI tests cover 32/64-bit
 signed/unsigned integers, hex flags, `size_t`, pointers, promoted binary64
 floating values, characters, fixed precision, and escaped percent signs

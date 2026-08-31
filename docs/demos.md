@@ -98,6 +98,12 @@ tasks offloaded and that CuMetal traced `device=apple_gpu`. The recorded results
 are a maximum relative energy difference of `2.66e-05` for villin (5,006 atoms)
 and `6.80e-05` for rnase_cubic (24,040).
 
+The same guide records matched water-box performance comparisons against native
+Metal and AdaptiveCpp Metal, explains `ns/day`, and keeps nonbonded-only and
+full-GPU task placements separate. CuMetal wins every currently recorded
+matched pair; the paired all-cases corpus and a full-GPU AdaptiveCpp/Metal FFT
+route remain open rather than being inferred from those bounded results.
+
 Building it exposed five CuMetal defects, all silent or fatal rather than
 warned: `cudaDeviceReset` erasing the fatbin kernel registry, every host-backed
 `cub::Device*` shim ignoring stream order, `cudaDestroyTextureObject(0)`

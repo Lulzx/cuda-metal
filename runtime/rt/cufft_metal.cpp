@@ -7,8 +7,8 @@
 // bit-reversal kernel -- the permutation is folded into the movement each pass
 // already does.
 //
-// Non-power-of-two lengths use Bluestein on the same kernels. PME axes are
-// routinely 40 or 60, so that is the ordinary path rather than a rare one.
+// Small-factor non-power-of-two lengths use one mixed-radix staged dispatch.
+// Bluestein remains the general fallback for lengths with larger prime factors.
 //
 // Every step stays on the stream the caller's plan is bound to, so this is
 // ordered against the rest of their work exactly as the CPU path's synchronize
@@ -52,6 +52,11 @@ Policy policy() {
         return Policy::kAlways;
     }();
     return value;
+}
+
+bool vkfft_enabled() {
+    const char* value = std::getenv("CUMETAL_FFT_VKFFT");
+    return value == nullptr || value[0] == '\0' || value[0] != '0';
 }
 
 bool debug() {
@@ -408,6 +413,64 @@ bool transform_axis_pow2(Context& ctx, Field& field, int axis, bool inverse,
     return true;
 }
 
+bool mixed_radix_supported(std::size_t length) {
+    while (length > 1) {
+        if (length % 5 == 0) length /= 5;
+        else if (length % 4 == 0) length /= 4;
+        else if (length % 3 == 0) length /= 3;
+        else if (length % 2 == 0) length /= 2;
+        else if (length <= 13) length = 1;
+        else return false;
+    }
+    return true;
+}
+
+bool transform_axis_mixed(Context& ctx, Field& field, bool inverse, std::size_t length,
+                          std::size_t outer, std::size_t inner) {
+    constexpr std::size_t kLineTile = 16;
+    const bool tiled = inner > 1 &&
+        2 * length * kLineTile * 2 * sizeof(float) <= threadgroup_memory_budget();
+    const std::size_t staged_bytes =
+        2 * length * (tiled ? kLineTile : 1) * 2 * sizeof(float);
+    if (staged_bytes > threadgroup_memory_budget()) return false;
+    const std::size_t lines = outer * inner;
+    if (lines == 0) return true;
+
+    unsigned threads = tiled ? 256u
+                             : static_cast<unsigned>(std::min<std::size_t>(length, 256));
+    if (threads < 32) threads = 32;
+    PassParams params{};
+    params.outer = static_cast<std::uint32_t>(outer);
+    params.length = static_cast<std::uint32_t>(length);
+    params.inner = static_cast<std::uint32_t>(inner);
+    params.sign = inverse ? 1.0f : -1.0f;
+
+    std::vector<metal_backend::KernelArg> args(3);
+    if (!buffer_arg(field.cur, field.bytes(), &args[0]) ||
+        !buffer_arg(field.alt, field.bytes(), &args[1])) {
+        note("mixed-radix field buffers do not resolve");
+        return false;
+    }
+    args[2] = bytes_arg(params);
+    metal_backend::LaunchConfig config{};
+    config.block = dim3(threads, 1, 1);
+    config.grid = dim3(static_cast<unsigned>(tiled ? (lines + kLineTile - 1) / kLineTile
+                                                   : lines), 1, 1);
+    config.shared_memory_bytes = staged_bytes;
+    config.semantic_quality = "exact";
+    std::string error;
+    const char* kernel = tiled ? "cumetal_fft_stockham_mixed_tile16_f32"
+                               : "cumetal_fft_stockham_mixed_line_f32";
+    if (metal_backend::launch_kernel(*ctx.source, kernel,
+                                     config, args, ctx.stream, &error) != cudaSuccess) {
+        note(error.empty() ? "mixed-radix launch failed" : error.c_str());
+        return false;
+    }
+    ++ctx.dispatches;
+    field.swap();
+    return true;
+}
+
 // Bluestein over one axis, reading and writing the field in place.
 bool transform_axis_bluestein(Context& ctx, Field& field, int axis, bool inverse,
                               std::size_t outer, std::size_t inner) {
@@ -550,6 +613,10 @@ bool transform_axis(Context& ctx, Field& field, int axis, bool inverse) {
     if (is_pow2(length)) {
         return transform_axis_pow2(ctx, field, axis, inverse, outer, inner);
     }
+    if (mixed_radix_supported(length) &&
+        transform_axis_mixed(ctx, field, inverse, length, outer, inner)) {
+        return true;
+    }
     return transform_axis_bluestein(ctx, field, axis, inverse, outer, inner);
 }
 
@@ -622,6 +689,38 @@ void fft_pow2(std::vector<double>& re, std::vector<double>& im, bool inverse) {
     }
 }
 
+bool prepare(const Request& request) {
+    if (policy() == Policy::kNever || !vkfft_enabled() || request.rank != 3 ||
+        request.batch != 1 || request.kind == Kind::kC2C ||
+        request.input.stride != 1 || request.output.stride != 1) {
+        return false;
+    }
+    std::size_t elements = 1;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (request.n[axis] <= 0) return false;
+        elements *= static_cast<std::size_t>(request.n[axis]);
+    }
+    if (policy() != Policy::kAlways && elements < kMinElementsForGpu) return false;
+
+    const Layout& real_layout =
+        request.kind == Kind::kR2C ? request.input : request.output;
+    const Layout& complex_layout =
+        request.kind == Kind::kR2C ? request.output : request.input;
+    metal_backend::Fft3dR2CConfig config{};
+    for (int axis = 0; axis < 3; ++axis) {
+        config.n[axis] = request.n[axis];
+        config.real_embed[axis] = real_layout.embed[axis];
+        config.complex_embed[axis] = complex_layout.embed[axis];
+    }
+    std::shared_ptr<metal_backend::Stream> stream;
+    if (resolve_backend_stream(request.stream, &stream) != cudaSuccess) return false;
+    std::string error;
+    const bool ready =
+        metal_backend::prepare_fft_r2c_3d_f32(config, stream, &error) == cudaSuccess;
+    if (!ready) note(error.empty() ? "VkFFT plan preparation declined" : error.c_str());
+    return ready;
+}
+
 bool execute(const Request& request) {
     if (policy() == Policy::kNever) {
         note("CUMETAL_FFT_METAL=0");
@@ -630,6 +729,21 @@ bool execute(const Request& request) {
     if (request.idata == nullptr || request.odata == nullptr) return false;
 
     const int rank = request.rank;
+    if (debug()) {
+        std::fprintf(stderr,
+                     "CUMETAL_DEBUG_FFT: layout kind=%d rank=%d batch=%d "
+                     "in(stride=%lld dist=%lld embed=%lldx%lldx%lld) "
+                     "out(stride=%lld dist=%lld embed=%lldx%lldx%lld)\n",
+                     static_cast<int>(request.kind), rank, request.batch,
+                     static_cast<long long>(request.input.stride), request.input.dist,
+                     static_cast<long long>(request.input.embed[0]),
+                     static_cast<long long>(request.input.embed[1]),
+                     static_cast<long long>(request.input.embed[2]),
+                     static_cast<long long>(request.output.stride), request.output.dist,
+                     static_cast<long long>(request.output.embed[0]),
+                     static_cast<long long>(request.output.embed[1]),
+                     static_cast<long long>(request.output.embed[2]));
+    }
     int real_dims[3] = {1, 1, 1};
     for (int a = 0; a < rank; ++a) real_dims[a] = request.n[a];
     int complex_dims[3] = {1, 1, 1};
@@ -653,6 +767,50 @@ bool execute(const Request& request) {
     if (resolve_backend_stream(request.stream, &ctx.stream) != cudaSuccess) {
         note("the plan's stream does not resolve to a backend stream");
         return false;
+    }
+
+    // VkFFT's generated Metal kernels are the production path for the dense,
+    // out-of-place 3-D real transform used by PME. Keep the project-owned
+    // Stockham engine below as the explicit general-layout fallback.
+    if (vkfft_enabled() && rank == 3 && request.batch == 1 && real_transform &&
+        request.input.stride == 1 && request.output.stride == 1 &&
+        request.idata != request.odata) {
+        const Layout& real_layout =
+            request.kind == Kind::kR2C ? request.input : request.output;
+        const Layout& complex_layout =
+            request.kind == Kind::kR2C ? request.output : request.input;
+        const void* real_ptr =
+            request.kind == Kind::kR2C ? request.idata : request.odata;
+        const void* complex_ptr =
+            request.kind == Kind::kR2C ? request.odata : request.idata;
+        const std::size_t real_bytes =
+            layout_span(real_layout, rank, real_dims, 0) * sizeof(float);
+        const std::size_t complex_bytes =
+            layout_span(complex_layout, rank, complex_dims, 0) * 2 * sizeof(float);
+        metal_backend::KernelArg real_arg;
+        metal_backend::KernelArg complex_arg;
+        if (buffer_arg(real_ptr, real_bytes, &real_arg) &&
+            buffer_arg(complex_ptr, complex_bytes, &complex_arg)) {
+            metal_backend::Fft3dR2CConfig config{};
+            for (int axis = 0; axis < 3; ++axis) {
+                config.n[axis] = real_dims[axis];
+                config.real_embed[axis] = real_layout.embed[axis];
+                config.complex_embed[axis] = complex_layout.embed[axis];
+            }
+            config.inverse = request.kind == Kind::kC2R;
+            std::string error;
+            if (metal_backend::fft_r2c_3d_f32(
+                    config, real_arg.buffer, real_arg.offset,
+                    complex_arg.buffer, complex_arg.offset, ctx.stream, &error) == cudaSuccess) {
+                if (debug()) {
+                    std::fprintf(stderr,
+                                 "CUMETAL_DEBUG_FFT: VkFFT Apple GPU rank=3 dims=%dx%dx%d\n",
+                                 real_dims[0], real_dims[1], real_dims[2]);
+                }
+                return true;
+            }
+            note(error.empty() ? "VkFFT declined" : error.c_str());
+        }
     }
     ctx.source = source_path();
     if (ctx.source == nullptr) {

@@ -215,6 +215,8 @@ The following PTX opcodes are passed through to subsequent pipeline stages uncha
 | `cp.async.bulk.tensor.*` (TMA) | Per-instruction compile-time error |
 | `cvt.rn.f8x2.*` (FP8) | Per-instruction compile-time error |
 | Direct PTX `wmma.*`, `mma.sync.*`, `ldmatrix.*` | Per-instruction compile-time error; source-level BF16 WMMA instead lowers a CuMetal marker to public Metal SIMD-group matrix intrinsics |
-| Direct PTX `tex.*`, `tld4.*`, `txq.*` | Per-instruction compile-time error; tested source-level helpers lower through software descriptors instead |
-| Direct PTX `sust.*`, `suld.*`, `sured.*`, `suq.*` | Per-instruction compile-time error; the tested source-level `surf2Dwrite` helper does not imply PTX surface-ISA coverage |
+| Direct PTX `txq.{width,height,depth}.b32` | Indirect `.u64` texture-object handles load the corresponding CuMetal descriptor dimension; strict lowering and numerical Apple-GPU coverage |
+| Direct PTX `suq.{width,height,depth}.b32` | Indirect `.u64` surface-object handles load the corresponding CuMetal descriptor dimension; strict lowering and numerical Apple-GPU coverage |
+| Direct PTX `tex.*`, `tld4.*`, other `txq.*` | Per-instruction compile-time error; tested source-level helpers lower through software descriptors instead |
+| Direct PTX `sust.*`, `suld.*`, `sured.*`, other `suq.*` | Per-instruction compile-time error; the tested source-level `surf2Dwrite` helper does not imply broader PTX surface-ISA coverage |
 | Dynamic parallelism (`cudaGetParameterBuffer` / `cudaLaunchDevice`) | Bounded launch-record queue drained by the host runtime; no unrestricted nesting or hardware-recursive parity |

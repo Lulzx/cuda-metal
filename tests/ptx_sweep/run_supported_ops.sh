@@ -75,6 +75,16 @@ run_case "sweep_atom_global_add_f32" "atom.global.add.f32 %f1, [%rd1], %f2;"
 run_case "sweep_vprintf" \
     "call.uni (%r0), vprintf, (\"tid=%u\", %r1);"
 
+# Indirect texture/surface object dimension queries. The object operand is a
+# .u64 register as permitted by PTX ISA; runtime numerical coverage validates
+# the CuMetal descriptor ABI separately.
+run_case "sweep_txq_width"  "txq.width.b32 %r1, [%rd1];"
+run_case "sweep_txq_height" "txq.height.b32 %r1, [%rd1];"
+run_case "sweep_txq_depth"  "txq.depth.b32 %r1, [%rd1];"
+run_case "sweep_suq_width"  "suq.width.b32 %r1, [%rd1];"
+run_case "sweep_suq_height" "suq.height.b32 %r1, [%rd1];"
+run_case "sweep_suq_depth"  "suq.depth.b32 %r1, [%rd1];"
+
 # Warp / SIMD-group primitives
 run_case "sweep_shfl_sync_idx"    "shfl.sync.idx.b32 %r1, %r2, %r3, 0x1f, 0xffffffff;"
 run_case "sweep_shfl_sync_down"   "shfl.sync.down.b32 %r1, %r2, %r3, 0x1f, 0xffffffff;"

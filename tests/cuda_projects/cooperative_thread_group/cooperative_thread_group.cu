@@ -1,5 +1,6 @@
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
 #include <stdio.h>
@@ -78,11 +79,28 @@ __global__ void cooperative_thread_group_probe(int* output) {
     // This write must remain reachable for the other warp when only the first
     // warp executes the nested reduction above.
     output[645u + tid] = static_cast<int>(tid + 7u);
+
+    const float3 value3 = make_float3(static_cast<float>(tid),
+                                     static_cast<float>(tid + 100u),
+                                     static_cast<float>(tid + 200u));
+    const float4 value4 = make_float4(static_cast<float>(tid + 300u),
+                                     static_cast<float>(tid + 400u),
+                                     static_cast<float>(tid + 500u),
+                                     static_cast<float>(tid + 600u));
+    const float3 shuffled3 = cub::ShuffleIndex<32>(value3, 0, 0xffffffffu);
+    const float4 shuffled4 = cub::ShuffleIndex<32>(value4, 7, 0xffffffffu);
+    output[709u + tid * 7u + 0u] = static_cast<int>(shuffled3.x);
+    output[709u + tid * 7u + 1u] = static_cast<int>(shuffled3.y);
+    output[709u + tid * 7u + 2u] = static_cast<int>(shuffled3.z);
+    output[709u + tid * 7u + 3u] = static_cast<int>(shuffled4.x);
+    output[709u + tid * 7u + 4u] = static_cast<int>(shuffled4.y);
+    output[709u + tid * 7u + 5u] = static_cast<int>(shuffled4.z);
+    output[709u + tid * 7u + 6u] = static_cast<int>(shuffled4.w);
 }
 
 int main() {
     constexpr unsigned int kThreads = 64u;
-    constexpr unsigned int kOutputs = 709u;
+    constexpr unsigned int kOutputs = 1157u;
     int* device_output = nullptr;
     int host_output[kOutputs] = {};
 
@@ -161,6 +179,28 @@ int main() {
                     "all=%d nested=%d tail=%d\n",
                     tid, host_output[517u + tid], host_output[581u + tid],
                     host_output[645u + tid]);
+            return 1;
+        }
+
+        const unsigned int warp_base = tid & ~31u;
+        const unsigned int cub_base = 709u + tid * 7u;
+        if (host_output[cub_base + 0u] != static_cast<int>(warp_base) ||
+            host_output[cub_base + 1u] != static_cast<int>(warp_base + 100u) ||
+            host_output[cub_base + 2u] != static_cast<int>(warp_base + 200u) ||
+            host_output[cub_base + 3u] != static_cast<int>(warp_base + 307u) ||
+            host_output[cub_base + 4u] != static_cast<int>(warp_base + 407u) ||
+            host_output[cub_base + 5u] != static_cast<int>(warp_base + 507u) ||
+            host_output[cub_base + 6u] != static_cast<int>(warp_base + 607u)) {
+            fprintf(stderr,
+                    "FAIL: CUB aggregate ShuffleIndex mismatch at thread %u: "
+                    "got=(%d,%d,%d;%d,%d,%d,%d) expected=(%u,%u,%u;%u,%u,%u,%u)\n",
+                    tid,
+                    host_output[cub_base + 0u], host_output[cub_base + 1u],
+                    host_output[cub_base + 2u], host_output[cub_base + 3u],
+                    host_output[cub_base + 4u], host_output[cub_base + 5u],
+                    host_output[cub_base + 6u], warp_base, warp_base + 100u,
+                    warp_base + 200u, warp_base + 307u, warp_base + 407u,
+                    warp_base + 507u, warp_base + 607u);
             return 1;
         }
     }

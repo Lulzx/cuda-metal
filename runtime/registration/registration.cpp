@@ -59,7 +59,7 @@ bool is_debug_registration() {
 // This avoids recompiling the same kernel across process restarts. The binary UUID is what keeps
 // an entry from outliving the compiler that produced it -- see cumetal_binary_uuid() below.
 constexpr std::string_view kRegistrationJitCacheSchema =
-    "cumetal-registration-jit-v13-grid-y-chunk-offset";
+    "cumetal-registration-jit-v23-volatile-aggregate-provenance";
 
 constexpr std::string_view kRegistrationMetadataMagic = "CUMETA01";
 constexpr std::size_t kMaxRegistrationMetadataBytes = 4u * 1024u * 1024u;
@@ -1785,6 +1785,13 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
         out->global_symbols.push_back(std::move(binding));
     }
     return true;
+}
+
+bool is_registered_kernel(const void* host_function) {
+    if (host_function == nullptr) return false;
+    RegistrationState& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    return s.kernels.contains(host_function);
 }
 
 bool lookup_device_kernel_alias(void* module_handle,

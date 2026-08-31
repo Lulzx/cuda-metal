@@ -496,7 +496,9 @@ IntrinsicLowerResult lower_intrinsics(const cumetal::ptx::EntryFunction& entry,
                  instruction.opcode.rfind("brx", 0) == 0) || instruction.opcode.rfind("cvt", 0) == 0 ||
                 instruction.opcode.rfind("cvta", 0) == 0 || instruction.opcode.rfind("mov", 0) == 0 ||
                 instruction.opcode.rfind("call", 0) == 0 || instruction.opcode.rfind("atom", 0) == 0 ||
-                instruction.opcode.rfind("selp", 0) == 0 || instruction.opcode.rfind("set.", 0) == 0) {
+                instruction.opcode.rfind("selp", 0) == 0 || instruction.opcode.rfind("set.", 0) == 0 ||
+                instruction.opcode.rfind("txq.", 0) == 0 ||
+                instruction.opcode.rfind("suq.", 0) == 0) {
                 // keep instruction as-is; lowering not needed yet for this stage.
             } else {
                 result.warnings.push_back("intrinsic_lower: no mapping for opcode '" + instruction.opcode + "'");

@@ -143,9 +143,13 @@ find_package(LLVM CONFIG QUIET
 if(LLVM_FOUND AND LLVM_PACKAGE_VERSION VERSION_GREATER_EQUAL 18)
     message(STATUS "CuMetal NVVM importer enabled with LLVM ${LLVM_PACKAGE_VERSION}")
     llvm_map_components_to_libnames(CUMETAL_LLVM_LIBS
+        Analysis
         Core
         IRReader
+        Passes
+        ScalarOpts
         Support
+        TransformUtils
     )
     target_include_directories(cumetal_ir SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
     target_link_libraries(cumetal_ir PUBLIC ${CUMETAL_LLVM_LIBS})
@@ -267,6 +271,7 @@ add_library(cumetal_runtime SHARED
     runtime/rt/nccl.cpp
     runtime/rt/cuda_runtime.cpp
     runtime/rt/hash_shim.cpp
+    runtime/metal_backend/metalcpp_impl.cpp
     runtime/metal_backend/metal_backend.mm
 )
 
@@ -303,12 +308,18 @@ target_include_directories(cumetal_runtime
         ${CUMETAL_ZSTD_INCLUDE_DIR}
 )
 
+target_include_directories(cumetal_runtime SYSTEM PRIVATE
+    third_party/VkFFT
+    third_party/metal-cpp
+)
+
 target_link_libraries(cumetal_runtime
     PRIVATE
         "-framework Accelerate"
         "-framework Foundation"
         "-framework Metal"
         "-framework MetalPerformanceShaders"
+        "-framework QuartzCore"
         ${CUMETAL_LZ4_LIBRARY}
         ${CUMETAL_ZSTD_LIBRARY}
 )
@@ -317,6 +328,7 @@ target_compile_definitions(cumetal_runtime
     PRIVATE
         CUMETAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
         CUMETAL_VF64_SUPPORT_SHA256="${CUMETAL_VF64_SUPPORT_SHA256}"
+        VKFFT_BACKEND=5
 )
 
 target_compile_options(cumetal_runtime

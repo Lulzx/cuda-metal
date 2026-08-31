@@ -68,6 +68,14 @@ int main() {
         std::fprintf(stderr, "FAIL: device name should be non-empty\n");
         return 1;
     }
+    static constexpr unsigned char kExpectedUuidPrefix[8] = {
+        0x43, 0x75, 0x4d, 0x65, 0x74, 0x61, 0x6c, 0x31,
+    };
+    if (std::memcmp(prop.uuid.bytes, kExpectedUuidPrefix,
+                    sizeof(kExpectedUuidPrefix)) != 0) {
+        std::fprintf(stderr, "FAIL: runtime UUID should match the CuMetal device identity\n");
+        return 1;
+    }
 
     // spec §6.8 extended fields (Apple Silicon constants)
     if (prop.clockRate <= 0) {

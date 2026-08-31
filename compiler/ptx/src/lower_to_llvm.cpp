@@ -244,11 +244,42 @@ int param_type_size_bytes_from_ptx(const std::string& ptx_type) {
     return 4;
 }
 
+std::optional<int> by_value_aggregate_size_bytes(
+    const cumetal::ptx::Parameter& parameter) {
+    if (parameter.is_pointer || parameter.byte_size == 0) {
+        return std::nullopt;
+    }
+    const int scalar_bytes = param_type_size_bytes_from_ptx(parameter.type);
+    if (parameter.byte_size <= static_cast<std::size_t>(scalar_bytes)) {
+        return std::nullopt;
+    }
+    if (parameter.byte_size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return std::nullopt;
+    }
+    return static_cast<int>(parameter.byte_size);
+}
+
 int byte_size_for_param_metadata(const ParamInfo& param) {
     if (const auto arr = parse_trailing_array_size_bytes(param.raw_name)) {
         return *arr;
     }
     return byte_size_for_llvm_type(param.llvm_type);
+}
+
+struct SharedPointerOrigin {
+    std::string symbol;
+    std::int64_t byte_offset = 0;
+
+    bool operator==(const SharedPointerOrigin&) const = default;
+};
+
+struct SharedPointerPayload {
+    int pointer_address_space = 0;
+    std::optional<SharedPointerOrigin> shared_origin;
+};
+
+std::string shared_pointer_location_key(const SharedPointerOrigin& origin) {
+    return origin.symbol + "@" + std::to_string(origin.byte_offset);
 }
 
 struct GenericLlvmBodyResult {
@@ -262,6 +293,10 @@ struct GenericLlvmBodyResult {
     std::vector<ParamInfo> builtin_params;
     std::vector<std::string> declarations;
     std::unordered_map<std::string, std::vector<int>> device_function_param_address_spaces;
+    std::unordered_map<std::string,
+                       std::vector<std::optional<SharedPointerOrigin>>>
+        device_function_param_shared_origins;
+    std::unordered_map<std::string, SharedPointerPayload> shared_pointer_payloads;
     std::vector<std::string> warnings;
     std::string error;
 };
@@ -1143,7 +1178,11 @@ class GenericLlvmEmitter {
                       bool module_uses_grid_barrier = false,
                       bool module_uses_grid_y_offset = false,
                       const std::vector<std::string>* device_kernel_names = nullptr,
-                      const std::vector<int>* parameter_address_spaces = nullptr)
+                      const std::vector<int>* parameter_address_spaces = nullptr,
+                      const std::vector<std::optional<SharedPointerOrigin>>*
+                          parameter_shared_origins = nullptr,
+                      const std::unordered_map<std::string, SharedPointerPayload>*
+                          initial_shared_pointer_payloads = nullptr)
         : entry_(entry), params_(params), arg_decls_(arg_decls), global_symbols_(global_symbols),
           const_symbols_(const_symbols),
           shared_symbols_(shared_symbols), local_depots_(local_depots), fp64_mode_(fp64_mode),
@@ -1156,6 +1195,9 @@ class GenericLlvmEmitter {
           module_uses_grid_barrier_(module_uses_grid_barrier),
           module_uses_grid_y_offset_(module_uses_grid_y_offset),
           device_kernel_names_(device_kernel_names) {
+        if (initial_shared_pointer_payloads != nullptr) {
+            shared_pointer_payloads_ = *initial_shared_pointer_payloads;
+        }
         if (params_ != nullptr) {
             for (std::size_t i = 0; i < params_->size(); ++i) {
                 param_by_raw_[(*params_)[i].raw_name] = static_cast<int>(i);
@@ -1174,6 +1216,12 @@ class GenericLlvmEmitter {
                         param_pointer_as_by_raw_[(*params_)[i].raw_name] =
                             static_cast<PointerAs>(encoded);
                     }
+                }
+                if (parameter_shared_origins != nullptr &&
+                    i < parameter_shared_origins->size() &&
+                    (*parameter_shared_origins)[i].has_value()) {
+                    param_shared_origin_by_raw_[(*params_)[i].raw_name] =
+                        *(*parameter_shared_origins)[i];
                 }
             }
         }
@@ -1232,6 +1280,9 @@ class GenericLlvmEmitter {
             encoded.reserve(spaces.size());
             for (const PointerAs space : spaces) encoded.push_back(static_cast<int>(space));
         }
+        result.device_function_param_shared_origins =
+            device_function_param_shared_origins_;
+        result.shared_pointer_payloads = shared_pointer_payloads_;
         return result;
     }
 
@@ -1278,6 +1329,8 @@ class GenericLlvmEmitter {
 
     std::unordered_map<std::string, int> param_by_raw_;
     std::unordered_map<std::string, PointerAs> param_pointer_as_by_raw_;
+    std::unordered_map<std::string, SharedPointerOrigin>
+        param_shared_origin_by_raw_;
     std::unordered_map<std::string, std::string> builtin_vector_arg_name_;
     std::unordered_map<std::string, std::string> builtin_scalar_arg_name_;
     std::vector<ParamInfo> builtin_params_added_;
@@ -1292,6 +1345,7 @@ class GenericLlvmEmitter {
 
     std::unordered_map<std::string, RegSlot> reg_slots_;
     std::unordered_map<std::string, PointerAs> reg_pointer_as_;
+    std::unordered_map<std::string, SharedPointerOrigin> reg_shared_origin_;
     // Preserve the pointee address space when PTX spills generic pointers into
     // a `.local` depot and reloads one through a computed index.
     std::unordered_map<std::string, std::string> reg_local_origin_;
@@ -1299,8 +1353,15 @@ class GenericLlvmEmitter {
     std::unordered_map<std::string, LocalSymbolInfo> local_symbols_;
     std::unordered_map<std::string, std::string> call_param_slots_;
     std::unordered_map<std::string, PointerAs> call_param_pointer_as_;
+    std::unordered_map<std::string, SharedPointerOrigin>
+        call_param_shared_origin_;
     std::unordered_map<std::string, std::vector<PointerAs>>
         device_function_param_address_spaces_;
+    std::unordered_map<std::string,
+                       std::vector<std::optional<SharedPointerOrigin>>>
+        device_function_param_shared_origins_;
+    std::unordered_map<std::string, SharedPointerPayload>
+        shared_pointer_payloads_;
     std::unordered_map<int, const cumetal::passes::PrintfLoweredCall*> printf_call_by_line_;
     bool uses_device_heap_ = false;
     const std::vector<cumetal::ptx::EntryFunction>* device_functions_ = nullptr;
@@ -3162,6 +3223,10 @@ class GenericLlvmEmitter {
         if (const auto parameter = param_pointer_as_by_raw_.find(src);
             parameter != param_pointer_as_by_raw_.end()) {
             reg_pointer_as_[dst] = parameter->second;
+            if (const auto origin = param_shared_origin_by_raw_.find(src);
+                origin != param_shared_origin_by_raw_.end()) {
+                reg_shared_origin_[dst] = origin->second;
+            }
         } else if (resolve_param_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kParam;
         } else if (resolve_local_symbol_address(os, src).has_value()) {
@@ -3169,12 +3234,19 @@ class GenericLlvmEmitter {
             reg_local_origin_[dst] = src;
         } else if (resolve_threadgroup_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kShared;
+            reg_shared_origin_[dst] = {
+                .symbol = src,
+                .byte_offset = 0,
+            };
         } else if (resolve_global_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kGlobal;
         } else if (resolve_const_symbol_address(os, src).has_value()) {
             reg_pointer_as_[dst] = PointerAs::kParam;
         } else if (is_register_name(src) && reg_pointer_as_.count(src)) {
             reg_pointer_as_[dst] = reg_pointer_as_[src];
+        }
+        if (is_register_name(src) && reg_shared_origin_.count(src)) {
+            reg_shared_origin_[dst] = reg_shared_origin_[src];
         }
         if (is_register_name(src) && reg_local_origin_.count(src)) {
             reg_local_origin_[dst] = reg_local_origin_[src];
@@ -3210,6 +3282,9 @@ class GenericLlvmEmitter {
         if (is_register_name(src) && reg_local_origin_.count(src)) {
             reg_local_origin_[dst] = reg_local_origin_[src];
         }
+        if (is_register_name(src) && reg_shared_origin_.count(src)) {
+            reg_shared_origin_[dst] = reg_shared_origin_[src];
+        }
         return emit_store_reg_bits(os, dst, 64, *src_v, 64);
     }
 
@@ -3242,10 +3317,26 @@ class GenericLlvmEmitter {
             if (reg_local_origin_.count(instr.operands[1])) {
                 reg_local_origin_[dst] = reg_local_origin_[instr.operands[1]];
             }
+            if (reg_shared_origin_.count(instr.operands[1])) {
+                SharedPointerOrigin origin = reg_shared_origin_[instr.operands[1]];
+                if (const auto delta = parse_signed_immediate(instr.operands[2])) {
+                    origin.byte_offset += opcode_root(instr.opcode) == "sub"
+                                              ? -*delta
+                                              : *delta;
+                    reg_shared_origin_[dst] = std::move(origin);
+                }
+            }
         } else if (reg_pointer_as_.count(instr.operands[2]) && (opcode_root(instr.opcode) == "add")) {
             reg_pointer_as_[dst] = reg_pointer_as_[instr.operands[2]];
             if (reg_local_origin_.count(instr.operands[2])) {
                 reg_local_origin_[dst] = reg_local_origin_[instr.operands[2]];
+            }
+            if (reg_shared_origin_.count(instr.operands[2])) {
+                SharedPointerOrigin origin = reg_shared_origin_[instr.operands[2]];
+                if (const auto delta = parse_signed_immediate(instr.operands[1])) {
+                    origin.byte_offset += *delta;
+                    reg_shared_origin_[dst] = std::move(origin);
+                }
             }
         }
         return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, out, bits);
@@ -4190,6 +4281,59 @@ class GenericLlvmEmitter {
         return emit_store_reg_bits(os, dst, 1, pred_value, 1);
     }
 
+    bool emit_texture_surface_query(
+        std::ostringstream& os,
+        const cumetal::ptx::EntryFunction::Instruction& instr) {
+        const std::string root = opcode_root(instr.opcode);
+        if (root != "txq" && root != "suq") {
+            return false;
+        }
+        if (instr.operands.size() != 2) {
+            return fail(instr, root + " requires destination and object operands");
+        }
+        if (instr.opcode.size() < 4 ||
+            instr.opcode.compare(instr.opcode.size() - 4, 4, ".b32") != 0) {
+            return fail(instr, root + " currently supports only .b32 queries");
+        }
+
+        std::int64_t field_offset = -1;
+        if (instr.opcode == root + ".width.b32") {
+            field_offset = 8;
+        } else if (instr.opcode == root + ".height.b32") {
+            field_offset = 16;
+        } else if (instr.opcode == root + ".depth.b32") {
+            field_offset = 24;
+        } else {
+            return fail(instr,
+                        root + " currently supports only width, height, and depth queries");
+        }
+
+        const std::string dst = trim(instr.operands[0]);
+        if (!is_register_name(dst)) {
+            return fail(instr, root + " destination must be a register");
+        }
+        const ParsedMemOperand object = parse_memory_operand(instr.operands[1]);
+        if (!object.ok || object.offset != 0 || !is_register_name(object.base)) {
+            return fail(instr, root + " requires an indirect .u64 register object handle");
+        }
+
+        // cudaTextureObject_t/cudaSurfaceObject_t are device pointers to the
+        // public CuMetal descriptor ABI in cuda_runtime.h. Its first fields are
+        // data, width, height, and depth, all u64. PTX requires these dimension
+        // queries to return b32, so load the ABI field and truncate it.
+        const std::string descriptor_i64 = emit_load_reg_bits(os, object.base, 64);
+        const std::string field_i64 = pointer_add_bytes(os, descriptor_i64, field_offset);
+        const std::string field_ptr = next_tmp(root + "_dimension_ptr");
+        const std::string value_i64 = next_tmp(root + "_dimension");
+        const std::string value_i32 = next_tmp(root + "_dimension32");
+        os << "  " << field_ptr << " = inttoptr i64 " << field_i64
+           << " to i64 addrspace(1)*\n";
+        os << "  " << value_i64 << " = load i64, i64 addrspace(1)* " << field_ptr
+           << ", align 8\n";
+        os << "  " << value_i32 << " = trunc i64 " << value_i64 << " to i32\n";
+        return emit_store_reg_bits(os, dst, 32, value_i32, 32);
+    }
+
     bool emit_ld_st(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
         const std::string root = opcode_root(instr.opcode);
         const bool is_load = (root == "ld");
@@ -4324,6 +4468,11 @@ class GenericLlvmEmitter {
                             pointer_space != param_pointer_as_by_raw_.end()) {
                             reg_pointer_as_[dst] = pointer_space->second;
                         }
+                        if (const auto origin =
+                                param_shared_origin_by_raw_.find(p.raw_name);
+                            origin != param_shared_origin_by_raw_.end()) {
+                            reg_shared_origin_[dst] = origin->second;
+                        }
                         std::string srcv;
                         int src_bits = 0;
                         if (is_pointer_type(p.llvm_type)) {
@@ -4437,6 +4586,10 @@ class GenericLlvmEmitter {
                         provenance != reg_pointer_as_.end()) {
                         call_param_pointer_as_[mem.base] = provenance->second;
                     }
+                    if (const auto origin = reg_shared_origin_.find(data_token);
+                        origin != reg_shared_origin_.end()) {
+                        call_param_shared_origin_[mem.base] = origin->second;
+                    }
                 }
                 if (ty.kind == PtxTypeSpec::Kind::kFloat) {
                     auto fv = decode_float_operand(os, data_token, ty.bits);
@@ -4531,6 +4684,22 @@ class GenericLlvmEmitter {
             return fail(instr, "memory base must be register or param/local/global/const symbol");
         }
         const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
+        std::optional<SharedPointerOrigin> shared_storage_origin;
+        if (addr_space == 3) {
+            if (is_register_name(mem.base)) {
+                if (const auto origin = reg_shared_origin_.find(mem.base);
+                    origin != reg_shared_origin_.end()) {
+                    shared_storage_origin = origin->second;
+                    shared_storage_origin->byte_offset += mem.offset;
+                }
+            } else if (shared_symbols_ != nullptr &&
+                       shared_symbols_->count(mem.base) != 0) {
+                shared_storage_origin = SharedPointerOrigin{
+                    .symbol = mem.base,
+                    .byte_offset = mem.offset,
+                };
+            }
+        }
 
         if (is_load) {
             if (!is_register_name(data_token)) return fail(instr, "load dst must be register");
@@ -4540,11 +4709,15 @@ class GenericLlvmEmitter {
                                             ? (ty.bits == 32 ? "float" : ty.bits == 64 ? "double" : "half")
                                             : llvm_int_type(ty.bits);
             const std::string ld = next_tmp("ld");
+            const char* volatile_qualifier =
+                instr.opcode.find(".volatile") != std::string::npos
+                    ? " volatile"
+                    : "";
             if (addr_space == 0) {
-                os << "  " << ld << " = load " << elem_ty << ", " << elem_ty << "* " << ptr
+                os << "  " << ld << " = load" << volatile_qualifier << " " << elem_ty << ", " << elem_ty << "* " << ptr
                    << ", align " << std::max(1, ty.bits / 8) << "\n";
             } else {
-                os << "  " << ld << " = load " << elem_ty << ", " << elem_ty << " addrspace(" << addr_space << ")* "
+                os << "  " << ld << " = load" << volatile_qualifier << " " << elem_ty << ", " << elem_ty << " addrspace(" << addr_space << ")* "
                    << ptr << ", align " << std::max(1, ty.bits / 8) << "\n";
             }
             Value v{.ir = ld, .type = ty, .bits = ty.bits};
@@ -4555,7 +4728,36 @@ class GenericLlvmEmitter {
             const bool stored =
                 emit_store_reg_bits(os, data_token, slot_bits, *bitsv, slot_bits);
             if (stored && ty.bits == 64) {
-                if (addr_space == 0 && is_register_name(mem.base) &&
+                if (shared_storage_origin.has_value()) {
+                    const auto payload = shared_pointer_payloads_.find(
+                        shared_pointer_location_key(*shared_storage_origin));
+                    if (payload != shared_pointer_payloads_.end() &&
+                        payload->second.pointer_address_space >=
+                            static_cast<int>(PointerAs::kUnknown) &&
+                        payload->second.pointer_address_space <=
+                            static_cast<int>(PointerAs::kLocal)) {
+                        const PointerAs pointee_space = static_cast<PointerAs>(
+                            payload->second.pointer_address_space);
+                        if (pointee_space != PointerAs::kUnknown) {
+                            reg_pointer_as_[data_token] = pointee_space;
+                        } else {
+                            reg_pointer_as_.erase(data_token);
+                        }
+                        if (payload->second.shared_origin.has_value()) {
+                            reg_shared_origin_[data_token] =
+                                *payload->second.shared_origin;
+                        } else {
+                            reg_shared_origin_.erase(data_token);
+                        }
+                    } else {
+                        // A 64-bit value loaded from shared memory is not
+                        // automatically a shared pointer. CUDA frequently
+                        // stages global pointers there, so retain the existing
+                        // conservative default when no exact store is known.
+                        reg_pointer_as_[data_token] = PointerAs::kGlobal;
+                        reg_shared_origin_.erase(data_token);
+                    }
+                } else if (addr_space == 0 && is_register_name(mem.base) &&
                     reg_local_origin_.count(mem.base)) {
                     const std::string& origin = reg_local_origin_.at(mem.base);
                     const auto payload = local_pointer_payload_as_.find(origin);
@@ -4599,6 +4801,23 @@ class GenericLlvmEmitter {
         }
         auto iv = emit_integer_from_any(os, data_token, ty.bits, ty.is_signed);
         if (!iv) return fail(instr, "store int source unsupported");
+        if (shared_storage_origin.has_value() && ty.bits == 64 &&
+            is_register_name(data_token)) {
+            const auto provenance = reg_pointer_as_.find(data_token);
+            if (provenance != reg_pointer_as_.end()) {
+                SharedPointerPayload payload{
+                    .pointer_address_space =
+                        static_cast<int>(provenance->second),
+                };
+                if (const auto origin = reg_shared_origin_.find(data_token);
+                    origin != reg_shared_origin_.end()) {
+                    payload.shared_origin = origin->second;
+                }
+                shared_pointer_payloads_[
+                    shared_pointer_location_key(*shared_storage_origin)] =
+                    std::move(payload);
+            }
+        }
         if (addr_space == 0 && ty.bits == 64 && is_register_name(mem.base) &&
             reg_local_origin_.count(mem.base) && is_register_name(data_token) &&
             reg_pointer_as_.count(data_token)) {
@@ -5413,6 +5632,12 @@ class GenericLlvmEmitter {
         }
 
         const auto ptx_parameter_bits = [](const cumetal::ptx::Parameter& parameter) {
+            // PTX aggregate-by-value parameters are declared as `.b8 name[N]`.
+            // Lower them as a pointer to a caller-owned local copy rather than
+            // pretending the element width (8) is the ABI width.
+            if (by_value_aggregate_size_bytes(parameter).has_value()) {
+                return 64;
+            }
             const PtxTypeSpec type = parse_primary_type_from_opcode(parameter.type);
             return type.bits > 0 ? type.bits : 0;
         };
@@ -5428,10 +5653,27 @@ class GenericLlvmEmitter {
             const cumetal::ptx::EntryFunction& function) {
             if (function.params.size() != arg_names.size() ||
                 function.return_params.size() != dest_names.size()) return false;
-            for (const auto& parameter : function.params) {
+            for (std::size_t i = 0; i < function.params.size(); ++i) {
+                const auto& parameter = function.params[i];
                 // Aggregate-by-value call slots need a byte-addressable ABI;
                 // scalar virtual calls are lowered here first.
                 if (ptx_parameter_bits(parameter) < 16) return false;
+                if (const auto aggregate_bytes =
+                        by_value_aggregate_size_bytes(parameter)) {
+                    if ((*aggregate_bytes % 4) != 0) return false;
+                    for (int offset = 0; offset < *aggregate_bytes; offset += 4) {
+                        const std::string slot_name = offset == 0
+                            ? arg_names[i]
+                            : arg_names[i] + "@" + std::to_string(offset);
+                        if (!get_param_slot(slot_name, 32, false).has_value()) {
+                            return false;
+                        }
+                    }
+                } else if (!get_param_slot(
+                               arg_names[i], ptx_parameter_bits(parameter), false)
+                                .has_value()) {
+                    return false;
+                }
             }
             return function.return_params.empty() ||
                    ptx_parameter_bits(function.return_params.front()) > 0;
@@ -5445,15 +5687,69 @@ class GenericLlvmEmitter {
             if (parameter_spaces.size() < function.params.size()) {
                 parameter_spaces.resize(function.params.size(), PointerAs::kUnknown);
             }
+            auto& parameter_shared_origins =
+                device_function_param_shared_origins_[function.name];
+            if (parameter_shared_origins.size() < function.params.size()) {
+                parameter_shared_origins.resize(function.params.size());
+            }
             for (std::size_t i = 0; i < function.params.size(); ++i) {
                 const int bits = ptx_parameter_bits(function.params[i]);
                 if (bits <= 0) return false;
+                const auto aggregate_bytes =
+                    by_value_aggregate_size_bytes(function.params[i]);
+                if (aggregate_bytes.has_value()) {
+                    if (*aggregate_bytes <= 0 || (*aggregate_bytes % 4) != 0) {
+                        return false;
+                    }
+                    parameter_spaces[i] = PointerAs::kLocal;
+                    const std::string alloca_name =
+                        "%cm_call_aggregate_" +
+                        sanitize_llvm_identifier(arg_names[i], "arg") + "_" +
+                        std::to_string(slot_id_++);
+                    const std::string base_name =
+                        "%cm_call_aggregate_base_" + std::to_string(slot_id_++);
+                    entry_allocas_ << "  " << alloca_name << " = alloca ["
+                                   << *aggregate_bytes << " x i8], align 4\n";
+                    entry_allocas_ << "  " << base_name
+                                   << " = getelementptr [" << *aggregate_bytes
+                                   << " x i8], [" << *aggregate_bytes << " x i8]* "
+                                   << alloca_name << ", i32 0, i32 0\n";
+                    for (int byte_offset = 0; byte_offset < *aggregate_bytes;
+                         byte_offset += 4) {
+                        auto word = load_call_slot_value_at(
+                            os, arg_names[i], 32, byte_offset);
+                        if (!word.has_value()) return false;
+                        const std::string byte_ptr = next_tmp("callagg_byte");
+                        const std::string word_ptr = next_tmp("callagg_word");
+                        os << "  " << byte_ptr << " = getelementptr inbounds i8, i8* "
+                           << base_name << ", i64 " << byte_offset << "\n"
+                           << "  " << word_ptr << " = bitcast i8* " << byte_ptr
+                           << " to i32*\n"
+                           << "  store i32 " << *word << ", i32* " << word_ptr
+                           << ", align 4\n";
+                    }
+                    const std::string pointer_bits = next_tmp("callagg_p2i");
+                    os << "  " << pointer_bits << " = ptrtoint i8* " << base_name
+                       << " to i64\n";
+                    arguments.emplace_back(64, pointer_bits);
+                    continue;
+                }
                 if (const auto provenance =
                         call_param_pointer_as_.find(arg_names[i]);
                     provenance != call_param_pointer_as_.end()) {
                     if (parameter_spaces[i] == PointerAs::kUnknown ||
                         parameter_spaces[i] == provenance->second) {
                         parameter_spaces[i] = provenance->second;
+                    } else {
+                        return false;
+                    }
+                }
+                if (const auto origin =
+                        call_param_shared_origin_.find(arg_names[i]);
+                    origin != call_param_shared_origin_.end()) {
+                    if (!parameter_shared_origins[i].has_value() ||
+                        *parameter_shared_origins[i] == origin->second) {
+                        parameter_shared_origins[i] = origin->second;
                     } else {
                         return false;
                     }
@@ -5903,11 +6199,9 @@ class GenericLlvmEmitter {
             if (!bits) return fail(instr, "__nv_rsqrtf arg missing");
             const std::string f = next_tmp("rsqrtf_bc");
             os << "  " << f << " = bitcast i32 " << *bits << " to float\n";
-            declarations_.insert("declare float @air.fast_sqrt.f32(float)");
-            const std::string s = next_tmp("rsqrtf_sqrt");
-            os << "  " << s << " = call float @air.fast_sqrt.f32(float " << f << ")\n";
-            const std::string r = next_tmp("rsqrtf_div");
-            os << "  " << r << " = fdiv float 1.000000e+00, " << s << "\n";
+            declarations_.insert("declare float @air.fast_rsqrt.f32(float)");
+            const std::string r = next_tmp("rsqrtf");
+            os << "  " << r << " = call float @air.fast_rsqrt.f32(float " << f << ")\n";
             const std::string rbits = next_tmp("rsqrtf_i");
             os << "  " << rbits << " = bitcast float " << r << " to i32\n";
             return store_ret_bits(rbits, 32);
@@ -6996,7 +7290,7 @@ class GenericLlvmEmitter {
         if (instr.operands.size() < 3) {
             return fail(instr, "atom requires at least 3 operands");
         }
-        const int addr_space = (instr.opcode.find(".shared") != std::string::npos) ? 3 : 1;
+        int addr_space = (instr.opcode.find(".shared") != std::string::npos) ? 3 : 1;
 
         std::string operation;
         for (const std::string& tok : split_opcode_tokens(instr.opcode)) {
@@ -7024,6 +7318,13 @@ class GenericLlvmEmitter {
         const ParsedMemOperand mem = parse_memory_operand(instr.operands[1]);
         if (!mem.ok) {
             return fail(instr, "atom: cannot parse memory operand");
+        }
+        if (is_register_name(mem.base)) {
+            if (const auto provenance = reg_pointer_as_.find(mem.base);
+                provenance != reg_pointer_as_.end()) {
+                if (provenance->second == PointerAs::kShared) addr_space = 3;
+                else if (provenance->second == PointerAs::kGlobal) addr_space = 1;
+            }
         }
         std::optional<std::string> resolved_base;
         if (is_register_name(mem.base)) {
@@ -7270,7 +7571,7 @@ class GenericLlvmEmitter {
 
     bool emit_red(std::ostringstream& os, const cumetal::ptx::EntryFunction::Instruction& instr) {
         if (instr.operands.size() < 2) return fail(instr, "red requires 2 operands");
-        const int addr_space = (instr.opcode.find(".shared") != std::string::npos) ? 3 : 1;
+        int addr_space = (instr.opcode.find(".shared") != std::string::npos) ? 3 : 1;
         std::string operation;
         for (const std::string& tok : split_opcode_tokens(instr.opcode)) {
             if (tok == "add" || tok == "and" || tok == "or" || tok == "xor" ||
@@ -7289,6 +7590,11 @@ class GenericLlvmEmitter {
             : llvm_int_type(bits);
         const ParsedMemOperand mem = parse_memory_operand(instr.operands[0]);
         if (!mem.ok || !is_register_name(mem.base)) return fail(instr, "red: cannot parse memory operand");
+        if (const auto provenance = reg_pointer_as_.find(mem.base);
+            provenance != reg_pointer_as_.end()) {
+            if (provenance->second == PointerAs::kShared) addr_space = 3;
+            else if (provenance->second == PointerAs::kGlobal) addr_space = 1;
+        }
         const std::string base_i64 = emit_load_reg_bits(os, mem.base, 64);
         const std::string addr_i64 = pointer_add_bytes(os, base_i64, mem.offset);
 
@@ -7673,6 +7979,19 @@ class GenericLlvmEmitter {
         const bool is64 = instr.opcode.find(".f64") != std::string::npos;
         const int bits = is64 ? 64 : 32;
         const std::string fty = is64 ? "double" : "float";
+        if (!is64) {
+            auto fv = decode_float_operand(os, instr.operands[1], 32);
+            if (!fv) return fail(instr, "rsqrt source unsupported");
+            declarations_.insert("declare float @air.fast_rsqrt.f32(float)");
+            const std::string res = next_tmp("rsqrt_res");
+            os << "  " << res << " = call float @air.fast_rsqrt.f32(float "
+               << fv->ir << ")\n";
+            const Value rv{res, PtxTypeSpec{PtxTypeSpec::Kind::kFloat, 32, false}, 32};
+            auto bitsv = encode_value_to_reg_bits(os, rv, ensure_reg_slot(dst).bits);
+            if (!bitsv) return fail(instr, "rsqrt encode failed");
+            return emit_store_reg_bits(os, dst, ensure_reg_slot(dst).bits, *bitsv,
+                                       ensure_reg_slot(dst).bits);
+        }
         const std::string sqrt_name = "air.fast_sqrt." + fty;
         declarations_.insert("declare " + fty + " @" + sqrt_name + "(" + fty + ")");
         auto fv = decode_float_operand(os, instr.operands[1], bits);
@@ -8228,6 +8547,9 @@ class GenericLlvmEmitter {
         if (root == "ld" || root == "st") {
             return emit_ld_st(os, instr);
         }
+        if (root == "txq" || root == "suq") {
+            return emit_texture_surface_query(os, instr);
+        }
         if (starts_with(instr.opcode, "mul.wide")) {
             return emit_mul_wide(os, instr);
         }
@@ -8308,20 +8630,52 @@ class GenericLlvmEmitter {
         }
         // Allocas are gathered lazily while lowering; they will be inserted before the first branch.
 
-        std::ostringstream blocks;
+        // Form actual basic blocks rather than one block per PTX instruction.
+        // The old layout put an unconditional branch between every pair of
+        // straight-line instructions. Besides producing enormous AIR CFGs, it
+        // prevented Apple's optimizer from promoting hundreds of virtual-register
+        // allocas in production kernels. Leaders are the entry, every label
+        // target, and the instruction following a terminator (the latter keeps
+        // even unreachable PTX structurally valid and independently diagnosable).
+        std::unordered_set<int> leaders{0};
+        for (const auto& [_, target_pos] : label_to_exec_pos_) {
+            if (target_pos >= 0) leaders.insert(target_pos);
+        }
         for (int pos = 0; pos < static_cast<int>(exec_indices_.size()); ++pos) {
-            const auto& instr = entry_.instructions[static_cast<std::size_t>(exec_indices_[static_cast<std::size_t>(pos)])];
-            std::ostringstream bb;
-            bool terminated = false;
-            if (!emit_instruction_block(instr, pos, bb, &terminated)) {
-                return false;
+            const auto& instr = entry_.instructions[static_cast<std::size_t>(
+                exec_indices_[static_cast<std::size_t>(pos)])];
+            const std::string root = opcode_root(instr.opcode);
+            if ((root == "bra" || root == "brx" || root == "ret" || root == "exit") &&
+                pos + 1 < static_cast<int>(exec_indices_.size())) {
+                leaders.insert(pos + 1);
             }
-            if (!terminated) {
-                const int next_pos =
-                    next_exec_pos_by_exec_pos_.count(pos) ? next_exec_pos_by_exec_pos_.at(pos) : -1;
-                bb << "  br label %" << block_name_for_exec_pos(next_pos) << "\n";
+        }
+
+        std::ostringstream blocks;
+        int pos = 0;
+        while (pos < static_cast<int>(exec_indices_.size())) {
+            const int block_pos = pos;
+            blocks << block_name_for_exec_pos(block_pos) << ":\n";
+            for (;;) {
+                const auto& instr = entry_.instructions[static_cast<std::size_t>(
+                    exec_indices_[static_cast<std::size_t>(pos)])];
+                bool terminated = false;
+                if (!emit_instruction_block(instr, pos, blocks, &terminated)) {
+                    return false;
+                }
+                ++pos;
+                if (terminated) {
+                    break;
+                }
+                if (pos >= static_cast<int>(exec_indices_.size())) {
+                    blocks << "  br label %cm_exit\n";
+                    break;
+                }
+                if (leaders.contains(pos)) {
+                    blocks << "  br label %" << block_name_for_exec_pos(pos) << "\n";
+                    break;
+                }
             }
-            blocks << block_name_for_exec_pos(pos) << ":\n" << bb.str();
         }
         blocks << "cm_exit:\n";
         emit_function_return(blocks);
@@ -8376,6 +8730,9 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
     }
 
     const auto parameter_bits = [](const cumetal::ptx::Parameter& parameter) {
+        if (by_value_aggregate_size_bytes(parameter).has_value()) {
+            return 64;
+        }
         const PtxTypeSpec type = parse_primary_type_from_opcode(parameter.type);
         return type.bits > 0 ? type.bits : 0;
     };
@@ -8536,6 +8893,12 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
                 spaces_it == out.device_function_param_address_spaces.end()
                     ? nullptr
                     : &spaces_it->second;
+            const auto origins_it =
+                out.device_function_param_shared_origins.find(function.name);
+            const std::vector<std::optional<SharedPointerOrigin>>* origins =
+                origins_it == out.device_function_param_shared_origins.end()
+                    ? nullptr
+                    : &origins_it->second;
             const std::vector<cumetal::passes::PrintfLoweredCall>* function_printf_calls =
                 nullptr;
             if (device_printf_calls != nullptr) {
@@ -8552,7 +8915,8 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
                 module_uses_device_heap, module_uses_device_printf,
                 module_uses_device_launch_queue, module_uses_device_clock,
                 module_uses_grid_barrier, module_uses_grid_y_offset,
-                &device_kernel_names, spaces);
+                &device_kernel_names, spaces, origins,
+                &out.shared_pointer_payloads);
             GenericLlvmBodyResult function_body = function_emitter.run();
             if (!function_body.ok) {
                 out.ok = false;
@@ -9316,10 +9680,24 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     const int compile_opt_fbfetch_id = next_meta_id++;
     const int air_version_tuple_id = next_meta_id++;
     const int language_version_tuple_id = next_meta_id++;
+    const int max_device_buffers_id = next_meta_id++;
+    const int max_constant_buffers_id = next_meta_id++;
+    const int max_threadgroup_buffers_id = next_meta_id++;
+    const int max_textures_id = next_meta_id++;
+    const int max_read_write_textures_id = next_meta_id++;
+    const int max_samplers_id = next_meta_id++;
 
     ir << "attributes #0 = { \"air.kernel\" \"air.version\"=\"" << air_major << "."
        << air_minor << "\" }\n";
     ir << "attributes #1 = { convergent mustprogress nounwind willreturn }\n\n";
+    // Apple air-opt requires the resource-limit module flags that metalfe puts
+    // on native AIR. Keeping them on generated AIR also lets the runtime run
+    // scalar promotion and CFG cleanup before AOT compilation; without that
+    // pass, large PTX kernels can retain hundreds of virtual-register allocas.
+    ir << "!llvm.module.flags = !{!" << max_device_buffers_id << ", !"
+       << max_constant_buffers_id << ", !" << max_threadgroup_buffers_id << ", !"
+       << max_textures_id << ", !" << max_read_write_textures_id << ", !"
+       << max_samplers_id << "}\n";
     ir << "!air.kernel = !{!" << kernel_node_id << "}\n";
     ir << "!" << kernel_node_id << " = !{" << kernel_type.str() << ", !" << empty_tuple_id << ", !"
        << kernel_args_tuple_id << "}\n";
@@ -9416,6 +9794,16 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     ir << "!" << air_version_tuple_id << " = !{i32 " << air_major << ", i32 " << air_minor << ", i32 0}\n";
     ir << "!" << language_version_tuple_id << " = !{!\"Metal\", i32 " << language_major << ", i32 "
        << language_minor << ", i32 0}\n";
+    ir << "!" << max_device_buffers_id
+       << " = !{i32 7, !\"air.max_device_buffers\", i32 31}\n";
+    ir << "!" << max_constant_buffers_id
+       << " = !{i32 7, !\"air.max_constant_buffers\", i32 31}\n";
+    ir << "!" << max_threadgroup_buffers_id
+       << " = !{i32 7, !\"air.max_threadgroup_buffers\", i32 31}\n";
+    ir << "!" << max_textures_id << " = !{i32 7, !\"air.max_textures\", i32 128}\n";
+    ir << "!" << max_read_write_textures_id
+       << " = !{i32 7, !\"air.max_read_write_textures\", i32 8}\n";
+    ir << "!" << max_samplers_id << " = !{i32 7, !\"air.max_samplers\", i32 16}\n";
 
     result.ok = true;
     result.entry_name = pipeline.entry_name;

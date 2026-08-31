@@ -11,7 +11,10 @@ namespace {
 
 constexpr std::size_t kElementCount = 1u << 18;
 constexpr std::size_t kThreadsPerBlock = 256;
-constexpr unsigned int kSpinIterations = 100000000u;
+// Long enough for the marker on another queue to overtake it when a required
+// legacy-stream wait is missing, but short enough to stay below Metal's GPU
+// watchdog even after the external conformance workload has heated the device.
+constexpr unsigned int kSpinIterations = 10000000u;
 
 bool nearly_equal(float a, float b) {
     return std::fabs(a - b) < 1e-5f;

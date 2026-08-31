@@ -167,6 +167,172 @@ kernel void cumetal_fft_stockham_line_f32(
     }
 }
 
+// Mixed-radix Stockham for the PME sizes that are deliberately chosen to have
+// small factors (2, 3, 4, 5, and occasionally a final prime up to 13). A
+// non-power-of-two line previously went through Bluestein: two padded FFTs plus
+// three gather/multiply/scatter passes. This performs the actual N-point FFT in
+// one threadgroup and one dispatch, without padding or global intermediate
+// traffic.
+kernel void cumetal_fft_stockham_mixed_line_f32(
+    device const float2*  src [[buffer(0)]],
+    device float2*        dst [[buffer(1)]],
+    constant FftPassParams& p [[buffer(2)]],
+    threadgroup float2*   scratch [[threadgroup(0)]],
+    uint line   [[threadgroup_position_in_grid]],
+    uint lid    [[thread_position_in_threadgroup]],
+    uint stride [[threads_per_threadgroup]])
+{
+    const uint length = p.length;
+    if (line >= p.outer * p.inner) return;
+
+    const uint inner_index = line % p.inner;
+    const uint outer_index = line / p.inner;
+    const uint base = outer_index * length * p.inner + inner_index;
+    threadgroup float2* read = scratch;
+    threadgroup float2* write = scratch + length;
+
+    for (uint e = lid; e < length; e += stride) {
+        read[e] = src[base + e * p.inner];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint block_span = 1u;
+    uint remaining = length;
+    while (remaining > 1u) {
+        uint radix;
+        if ((remaining % 5u) == 0u) radix = 5u;
+        else if ((remaining % 4u) == 0u) radix = 4u;
+        else if ((remaining % 3u) == 0u) radix = 3u;
+        else if ((remaining % 2u) == 0u) radix = 2u;
+        else radix = remaining; // host admits this only when <= 13
+
+        const uint next_remaining = remaining / radix;
+        const uint butterflies = length / radix;
+        for (uint t = lid; t < butterflies; t += stride) {
+            const uint j = t / block_span;
+            const uint k = t % block_span;
+            for (uint q = 0u; q < radix; ++q) {
+                float2 sum = float2(0.0f);
+                const float root_angle = p.sign * 2.0f * M_PI_F *
+                                         float(q) / float(radix);
+                const float2 root = float2(fast::cos(root_angle),
+                                           fast::sin(root_angle));
+                float2 w = float2(1.0f, 0.0f);
+                for (uint s = 0u; s < radix; ++s) {
+                    const float2 x = read[k + (j + s * next_remaining) * block_span];
+                    sum += float2(x.x * w.x - x.y * w.y,
+                                  x.x * w.y + x.y * w.x);
+                    w = float2(w.x * root.x - w.y * root.y,
+                               w.x * root.y + w.y * root.x);
+                }
+                const float twiddle_angle = p.sign * 2.0f * M_PI_F *
+                                            float(q * j) /
+                                            float(radix * next_remaining);
+                const float2 twiddle = float2(fast::cos(twiddle_angle),
+                                              fast::sin(twiddle_angle));
+                write[k + (radix * j + q) * block_span] =
+                    float2(sum.x * twiddle.x - sum.y * twiddle.y,
+                           sum.x * twiddle.y + sum.y * twiddle.x);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup float2* swap = read;
+        read = write;
+        write = swap;
+        block_span *= radix;
+        remaining = next_remaining;
+    }
+
+    for (uint e = lid; e < length; e += stride) {
+        dst[base + e * p.inner] = read[e];
+    }
+}
+
+// The same transform tiled across 16 neighbouring lines. For a strided axis,
+// assigning a whole threadgroup to one line makes adjacent SIMD lanes fetch
+// elements `inner` words apart. Here adjacent lanes select adjacent lines while
+// the second thread dimension selects butterflies, turning those accesses back
+// into contiguous transactions. The tile still runs every radix stage in one
+// dispatch and fits a 100-point PME axis in 25.6 KiB of threadgroup memory.
+kernel void cumetal_fft_stockham_mixed_tile16_f32(
+    device const float2*  src [[buffer(0)]],
+    device float2*        dst [[buffer(1)]],
+    constant FftPassParams& p [[buffer(2)]],
+    threadgroup float2* scratch [[threadgroup(0)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint lid [[thread_position_in_threadgroup]],
+    uint stride [[threads_per_threadgroup]])
+{
+    constexpr uint tile = 16u;
+    const uint local_line = lid % tile;
+    const uint worker = lid / tile;
+    const uint workers = stride / tile;
+    const uint line = group * tile + local_line;
+    const uint lines = p.outer * p.inner;
+    const bool valid = line < lines;
+    const uint inner_index = valid ? line % p.inner : 0u;
+    const uint outer_index = valid ? line / p.inner : 0u;
+    const uint base = outer_index * p.length * p.inner + inner_index;
+    threadgroup float2* read = scratch;
+    threadgroup float2* write = scratch + p.length * tile;
+
+    for (uint e = worker; e < p.length; e += workers) {
+        read[e * tile + local_line] =
+            valid ? src[base + e * p.inner] : float2(0.0f);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint block_span = 1u;
+    uint remaining = p.length;
+    while (remaining > 1u) {
+        uint radix;
+        if ((remaining % 5u) == 0u) radix = 5u;
+        else if ((remaining % 4u) == 0u) radix = 4u;
+        else if ((remaining % 3u) == 0u) radix = 3u;
+        else if ((remaining % 2u) == 0u) radix = 2u;
+        else radix = remaining;
+        const uint next_remaining = remaining / radix;
+        const uint butterflies = p.length / radix;
+        for (uint t = worker; t < butterflies; t += workers) {
+            const uint j = t / block_span;
+            const uint k = t % block_span;
+            for (uint q = 0u; q < radix; ++q) {
+                const float root_angle = p.sign * 2.0f * M_PI_F *
+                                         float(q) / float(radix);
+                const float2 root = float2(fast::cos(root_angle), fast::sin(root_angle));
+                float2 w = float2(1.0f, 0.0f);
+                float2 sum = float2(0.0f);
+                for (uint s = 0u; s < radix; ++s) {
+                    const uint index = k + (j + s * next_remaining) * block_span;
+                    const float2 x = read[index * tile + local_line];
+                    sum += float2(x.x * w.x - x.y * w.y, x.x * w.y + x.y * w.x);
+                    w = float2(w.x * root.x - w.y * root.y,
+                               w.x * root.y + w.y * root.x);
+                }
+                const float angle = p.sign * 2.0f * M_PI_F * float(q * j) /
+                                    float(radix * next_remaining);
+                const float2 twiddle = float2(fast::cos(angle), fast::sin(angle));
+                const uint out = k + (radix * j + q) * block_span;
+                write[out * tile + local_line] =
+                    float2(sum.x * twiddle.x - sum.y * twiddle.y,
+                           sum.x * twiddle.y + sum.y * twiddle.x);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup float2* swap = read;
+        read = write;
+        write = swap;
+        block_span *= radix;
+        remaining = next_remaining;
+    }
+
+    if (valid) {
+        for (uint e = worker; e < p.length; e += workers) {
+            dst[base + e * p.inner] = read[e * tile + local_line];
+        }
+    }
+}
+
 // ── cuFFT advanced data layout ───────────────────────────────────────────────
 //
 // Element (x0, x1, x2) of batch b lives at b*dist + stride*((x0*embed1 + x1)*embed2 + x2).

@@ -495,6 +495,12 @@ static bool test_graph_dependencies_and_updates() {
         std::fprintf(stderr, "FAIL: kernel-node construction failed\n");
         return false;
     }
+    if (cudaGraphKernelNodeSetParams(kernel_node, &kernel_params) != cudaSuccess ||
+        cudaGraphKernelNodeSetParams(child, &kernel_params) != cudaErrorInvalidValue ||
+        cudaGraphKernelNodeSetParams(kernel_node, nullptr) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: graph kernel-node update contract mismatch\n");
+        return false;
+    }
     cudaGraph_t cloned = nullptr;
     size_t cloned_root_count = 0;
     if (cudaGraphClone(&cloned, graph) != cudaSuccess ||
@@ -538,6 +544,119 @@ static bool test_graph_dependencies_and_updates() {
     cudaGraphDestroy(cloned);
     cudaGraphDestroy(other_graph);
     cudaGraphDestroy(graph);
+    return true;
+}
+
+static bool test_graph_parameter_setters() {
+    unsigned char graph_source[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    unsigned char exec_source[8] = {9, 10, 11, 12, 13, 14, 15, 16};
+    unsigned char copied[8] = {};
+    void* copy_target = nullptr;
+    void* memset_target = nullptr;
+    if (cudaMalloc(&copy_target, sizeof(copied)) != cudaSuccess ||
+        cudaMalloc(&memset_target, sizeof(copied)) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: graph setter allocation failed\n");
+        return false;
+    }
+
+    cudaGraph_t graph = nullptr;
+    cudaGraphNode_t copy_node = nullptr;
+    cudaGraphNode_t memset_node = nullptr;
+    cudaGraphNode_t host_node = nullptr;
+    int graph_callback_count = 0;
+    int exec_callback_count = 0;
+    cudaMemsetParams memset_params{};
+    memset_params.dst = memset_target;
+    memset_params.value = 0x22;
+    memset_params.elementSize = 1;
+    memset_params.width = sizeof(copied);
+    memset_params.height = 1;
+    cudaHostNodeParams host_params{graph_host_increment, &graph_callback_count};
+    if (cudaGraphCreate(&graph, 0) != cudaSuccess ||
+        cudaGraphAddMemcpyNode1D(&copy_node, graph, nullptr, 0, copy_target,
+                                 graph_source, sizeof(graph_source),
+                                 cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaGraphAddMemsetNode(&memset_node, graph, &copy_node, 1,
+                               &memset_params) != cudaSuccess ||
+        cudaGraphAddHostNode(&host_node, graph, &memset_node, 1,
+                             &host_params) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: graph setter node construction failed\n");
+        return false;
+    }
+
+    cudaMemcpy3DParms pitched{};
+    pitched.srcPtr = make_cudaPitchedPtr(graph_source, sizeof(graph_source),
+                                         sizeof(graph_source), 1);
+    pitched.dstPtr = make_cudaPitchedPtr(copy_target, sizeof(copied),
+                                         sizeof(copied), 1);
+    pitched.extent = make_cudaExtent(sizeof(graph_source), 1, 1);
+    pitched.kind = cudaMemcpyHostToDevice;
+    cudaMemcpy3DParms invalid_pitched = pitched;
+    invalid_pitched.extent.width = 0;
+    cudaMemsetParams invalid_memset = memset_params;
+    invalid_memset.elementSize = 3;
+    cudaHostNodeParams invalid_host{nullptr, nullptr};
+    if (cudaGraphMemcpyNodeSetParams(copy_node, &pitched) != cudaSuccess ||
+        cudaGraphMemcpyNodeSetParams(copy_node, &invalid_pitched) !=
+            cudaErrorInvalidValue ||
+        cudaGraphMemcpyNodeSetParams(host_node, &pitched) != cudaErrorInvalidValue ||
+        cudaGraphMemsetNodeSetParams(memset_node, &memset_params) != cudaSuccess ||
+        cudaGraphMemsetNodeSetParams(memset_node, &invalid_memset) !=
+            cudaErrorInvalidValue ||
+        cudaGraphHostNodeSetParams(host_node, &host_params) != cudaSuccess ||
+        cudaGraphHostNodeSetParams(host_node, &invalid_host) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: mutable graph-node validation mismatch\n");
+        return false;
+    }
+
+    cudaGraphExec_t exec = nullptr;
+    cudaHostNodeParams exec_host_params{graph_host_increment, &exec_callback_count};
+    cudaMemsetParams exec_memset_params = memset_params;
+    exec_memset_params.value = 0x7b;
+    if (cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0) != cudaSuccess ||
+        cudaGraphExecMemcpyNodeSetParams1D(
+            exec, copy_node, copy_target, exec_source, sizeof(exec_source),
+            cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaGraphExecMemcpyNodeSetParams(exec, copy_node, &invalid_pitched) !=
+            cudaErrorInvalidValue ||
+        cudaGraphExecMemcpyNodeSetParams1D(
+            exec, host_node, copy_target, exec_source, sizeof(exec_source),
+            cudaMemcpyHostToDevice) != cudaErrorInvalidValue ||
+        cudaGraphExecMemsetNodeSetParams(exec, memset_node, &exec_memset_params) !=
+            cudaSuccess ||
+        cudaGraphExecMemsetNodeSetParams(exec, copy_node, &exec_memset_params) !=
+            cudaErrorInvalidValue ||
+        cudaGraphExecHostNodeSetParams(exec, host_node, &exec_host_params) !=
+            cudaSuccess ||
+        cudaGraphExecHostNodeSetParams(exec, memset_node, &exec_host_params) !=
+            cudaErrorInvalidValue ||
+        cudaGraphLaunch(exec, nullptr) != cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess ||
+        cudaMemcpy(copied, copy_target, sizeof(copied), cudaMemcpyDeviceToHost) !=
+            cudaSuccess) {
+        std::fprintf(stderr, "FAIL: executable graph-node parameter update failed\n");
+        return false;
+    }
+
+    unsigned char memset_bytes[8] = {};
+    if (cudaMemcpy(memset_bytes, memset_target, sizeof(memset_bytes),
+                   cudaMemcpyDeviceToHost) != cudaSuccess ||
+        std::memcmp(copied, exec_source, sizeof(copied)) != 0 ||
+        graph_callback_count != 0 || exec_callback_count != 1) {
+        std::fprintf(stderr, "FAIL: executable graph-node updates did not replay\n");
+        return false;
+    }
+    for (unsigned char value : memset_bytes) {
+        if (value != 0x7b) {
+            std::fprintf(stderr, "FAIL: executable memset update wrote 0x%02x\n", value);
+            return false;
+        }
+    }
+
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    cudaFree(memset_target);
+    cudaFree(copy_target);
     return true;
 }
 
@@ -970,6 +1089,7 @@ int main() {
     if (!test_event_linked_capture_lifetime()) return 1;
     if (!test_graph_null_args()) return 1;
     if (!test_graph_dependencies_and_updates()) return 1;
+    if (!test_graph_parameter_setters()) return 1;
     if (!test_graph_pitched_copy_and_typed_memset()) return 1;
     if (!test_graph_array_copy_geometry()) return 1;
     if (!test_capture_memcpy_replay()) return 1;

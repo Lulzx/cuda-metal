@@ -67,6 +67,30 @@ int main(int argc, char** argv) {
         buffer_arg(a), buffer_arg(b), buffer_arg(intermediate)};
     const std::vector<KernelArg> second{
         buffer_arg(intermediate), buffer_arg(b), buffer_arg(output)};
+
+    // Force two command buffers on one stream. Metal command-queue commit
+    // order is the stream dependency here; CuMetal must not require a
+    // redundant wait on its own shared-event timeline to preserve the result.
+    LaunchConfig split_config = config;
+    split_config.disable_batching = true;
+    if (launch_kernel(argv[1], "vector_add", split_config, first, producer, &error) != cudaSuccess ||
+        launch_kernel(argv[1], "vector_add", split_config, second, producer, &error) != cudaSuccess ||
+        stream_synchronize(producer, &error) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: same-queue split launch: %s\n", error.c_str());
+        return 1;
+    }
+    const auto* same_queue_got = static_cast<const float*>(output->contents());
+    for (std::size_t i = 0; i < kElements; ++i) {
+        const float expected = host_a[i] + 2.0f * host_b[i];
+        if (std::fabs(same_queue_got[i] - expected) > 1e-5f) {
+            std::fprintf(stderr,
+                         "FAIL: same-queue split mismatch at %zu: got=%g expected=%g\n",
+                         i, static_cast<double>(same_queue_got[i]),
+                         static_cast<double>(expected));
+            return 1;
+        }
+    }
+
     if (launch_kernel(argv[1], "vector_add", config, first, producer, &error) != cudaSuccess ||
         launch_kernel(argv[1], "vector_add", config, second, consumer, &error) != cudaSuccess ||
         stream_synchronize(consumer, &error) != cudaSuccess) {
@@ -89,6 +113,6 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "FAIL: stream destruction: %s\n", error.c_str());
         return 1;
     }
-    std::puts("PASS: shared-buffer MTLSharedEvent fence ordered two command queues");
+    std::puts("PASS: same-queue commit order and cross-queue MTLSharedEvent ordering");
     return 0;
 }

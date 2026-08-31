@@ -99,6 +99,11 @@ compiler paths and their selection policy are in
 - `VF64-metal` is pinned and its `fast48`, `wide48`, and `ieee64` integration
   validation passes on the recorded Apple M4 Pro system. Each mode has different
   precision semantics; this is not native Metal FP64.
+- The GROMACS demo records matched same-host wins over native Metal and
+  AdaptiveCpp Metal on bounded water workloads. Its `ns/day` values are
+  throughput, so higher is better; unmatched task placements are not compared.
+  The full paired-corpus target remains open. See the
+  [GROMACS benchmark guide](demos/gromacs/README.md#reading-nsday-and-comparing-backends).
 
 Exact commands, tolerances, device provenance, and third-party boundaries are
 in [verified results](docs/verified-results.md). The executable source/sample
@@ -115,8 +120,9 @@ matrix is `tests/cuda_projects/backend_matrix_manifest.txt`.
 - FP64 uses `fast48`, `wide48`, or software `ieee64`; observable IEEE exception
   status is not fully integrated.
 - Dynamic launch uses a bounded device queue drained by the host.
-- Texture/surface lifecycle and a source descriptor subset exist; direct PTX
-  texture/surface instructions do not.
+- Texture/surface lifecycle and a source descriptor subset exist. Direct PTX
+  indirect-object `txq`/`suq` width, height, and depth queries execute on the
+  GPU; sampling, load/store/reduction, and other query forms remain incomplete.
 - Graph allocator reuse, cross-stream capture, and other advanced semantics are
   incomplete.
 

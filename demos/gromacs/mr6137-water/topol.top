@@ -1,0 +1,7 @@
+#include "amber99sb.ff/forcefield.itp"
+#include "amber99sb.ff/spce.itp"
+
+[ system ]
+SPC/E water benchmark
+
+[ molecules ]

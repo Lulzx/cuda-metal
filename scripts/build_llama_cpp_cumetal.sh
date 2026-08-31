@@ -11,6 +11,7 @@
 #   CUMETAL_LLAMA_TAG    git tag/branch to pin (default: latest main)
 #   CUMETAL_CLANG        clang++ binary to use (default: auto-detect)
 #   CUMETAL_CUDA_ARCH    CUDA arch string (default: sm_80)
+#   CUMETAL_BUILD_DIR    CuMetal build tree to link/use (default: ./build)
 #
 # CuMetal does not currently lower llama.cpp's fused FlashAttention kernels.
 # The build therefore disables GGML_CUDA_FA so llama.cpp's normal backend
@@ -19,6 +20,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CUMETAL_ACTIVE_BUILD_DIR="${CUMETAL_BUILD_DIR:-${ROOT_DIR}/build}"
+if [[ "${CUMETAL_ACTIVE_BUILD_DIR}" != /* ]]; then
+    CUMETAL_ACTIVE_BUILD_DIR="$(cd "$(dirname "${CUMETAL_ACTIVE_BUILD_DIR}")" && pwd)/$(basename "${CUMETAL_ACTIVE_BUILD_DIR}")"
+fi
 # shellcheck source=scripts/cumetal_cuda_flags.sh
 source "${SCRIPT_DIR}/cumetal_cuda_flags.sh"
 
@@ -59,7 +64,7 @@ echo "clang++: ${CLANG_BIN}"
 #   2. nvcc -v __cmake_determine_cuda  → parse "#$ TOP=" and "#$ NVVMIR_LIBRARY_DIR="
 #   3. Existence of ${toolkit_root}/nvvm/libdevice  → fallback LIBRARY_ROOT
 # We handle all three.
-FAKE_CUDA="${ROOT_DIR}/build/cumetal-cuda-toolkit"
+FAKE_CUDA="${CUMETAL_ACTIVE_BUILD_DIR}/cumetal-cuda-toolkit"
 mkdir -p \
     "${FAKE_CUDA}/bin" \
     "${FAKE_CUDA}/include" \
@@ -79,15 +84,15 @@ done
 
 # Symlink CuMetal dylibs as CUDA runtime libraries (both lib/ and lib64/ for cmake compat)
 for libdir in lib lib64; do
-    ln -sf "${ROOT_DIR}/build/libcumetal.dylib" "${FAKE_CUDA}/${libdir}/libcudart.dylib"    2>/dev/null || true
-    ln -sf "${ROOT_DIR}/build/libcumetal.dylib" "${FAKE_CUDA}/${libdir}/libcuda.dylib"      2>/dev/null || true
+    ln -sf "${CUMETAL_ACTIVE_BUILD_DIR}/libcumetal.dylib" "${FAKE_CUDA}/${libdir}/libcudart.dylib"    2>/dev/null || true
+    ln -sf "${CUMETAL_ACTIVE_BUILD_DIR}/libcumetal.dylib" "${FAKE_CUDA}/${libdir}/libcuda.dylib"      2>/dev/null || true
     # CMake's own FindCUDAToolkit runs in preference to the config file below and
     # only defines CUDA::cudart_static if find_library(cudart_static) succeeds.
     # GROMACS's nblib links that target. CuMetal is a single shared object, so
     # the "static" name resolves to the same dylib.
-    ln -sf "${ROOT_DIR}/build/libcumetal.dylib" "${FAKE_CUDA}/${libdir}/libcudart_static.dylib" 2>/dev/null || true
+    ln -sf "${CUMETAL_ACTIVE_BUILD_DIR}/libcumetal.dylib" "${FAKE_CUDA}/${libdir}/libcudart_static.dylib" 2>/dev/null || true
     for lib in cublas cublasLt cufft curand cusparse cusolver cudnn nccl; do
-        src="${ROOT_DIR}/build/lib${lib}.dylib"
+        src="${CUMETAL_ACTIVE_BUILD_DIR}/lib${lib}.dylib"
         [[ -f "${src}" ]] && ln -sf "${src}" "${FAKE_CUDA}/${libdir}/lib${lib}.dylib" 2>/dev/null || true
     done
 done
@@ -225,7 +230,7 @@ for arg in "\$@"; do
     if [[ \$SKIP_NEXT -eq 1 ]]; then SKIP_NEXT=0; continue; fi
     case "\$arg" in
         -c|-S|-E|-M|-MM|-MD|-MMD) COMPILE_ONLY=1 ;;
-        *.cu)
+        *.cu|*.cpp|*.cxx|*.cc|*.c)
             HAS_CUDA_SOURCE=1
             case "\$arg" in
                 *CMakeCUDACompilerId.cu|*CMakeCUDACompilerABI.cu|*/CMakeScratch/*/*.cu)
@@ -404,8 +409,8 @@ cmake -S "${LLAMA_DIR}" -B "${LLAMA_BUILD}" \
     -DCUDAToolkit_ROOT="${FAKE_CUDA}" \
     -DCMAKE_CUDA_ARCHITECTURES="80" \
     -DCMAKE_CUDA_COMPILER_LIBRARY_ROOT="${FAKE_CUDA}" \
-    -DCMAKE_EXE_LINKER_FLAGS="-L${ROOT_DIR}/build -Wl,-rpath,${ROOT_DIR}/build" \
-    -DCMAKE_SHARED_LINKER_FLAGS="-L${ROOT_DIR}/build -Wl,-rpath,${ROOT_DIR}/build" \
+    -DCMAKE_EXE_LINKER_FLAGS="-L${CUMETAL_ACTIVE_BUILD_DIR} -Wl,-rpath,${CUMETAL_ACTIVE_BUILD_DIR}" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-L${CUMETAL_ACTIVE_BUILD_DIR} -Wl,-rpath,${CUMETAL_ACTIVE_BUILD_DIR}" \
     -DLLAMA_NATIVE=OFF \
     -DLLAMA_BUILD_TESTS=OFF \
     -DLLAMA_BUILD_EXAMPLES=ON \

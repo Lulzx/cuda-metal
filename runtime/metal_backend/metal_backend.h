@@ -72,6 +72,16 @@ struct LaunchConfig {
     std::vector<std::shared_ptr<Buffer>> resident_buffers;
 };
 
+// Dense, out-of-place single-precision real 3-D transform. Dimensions and
+// embeds use cuFFT order (slowest to fastest). The implementation is a VkFFT
+// plan wholly contained by the public Metal backend boundary.
+struct Fft3dR2CConfig {
+    int n[3] = {1, 1, 1};
+    int real_embed[3] = {1, 1, 1};
+    int complex_embed[3] = {1, 1, 1};
+    bool inverse = false;
+};
+
 cudaError_t initialize(std::string* error_message);
 cudaError_t query_device_properties(DeviceProperties* out_properties, std::string* error_message);
 cudaError_t query_kernel_properties(const std::string& metallib_path,
@@ -121,6 +131,16 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                           const std::vector<KernelArg>& args,
                           const std::shared_ptr<Stream>& stream,
                           std::string* error_message);
+cudaError_t fft_r2c_3d_f32(const Fft3dR2CConfig& config,
+                           const std::shared_ptr<Buffer>& real_buffer,
+                           std::size_t real_offset,
+                           const std::shared_ptr<Buffer>& complex_buffer,
+                           std::size_t complex_offset,
+                           const std::shared_ptr<Stream>& stream,
+                           std::string* error_message);
+cudaError_t prepare_fft_r2c_3d_f32(const Fft3dR2CConfig& config,
+                                   const std::shared_ptr<Stream>& stream,
+                                   std::string* error_message);
 
 // GPU timing result from MTLCommandBuffer.GPUStartTime / GPUEndTime.
 // Both fields are in seconds (CFTimeInterval). Duration = gpu_end_s - gpu_start_s.

@@ -47,7 +47,8 @@ launch success. CPU or approximate paths must identify themselves.
   little-endian ELF32/ELF64 PTX sections. Decompression is capped at 64 MiB.
 - CUDA graph coverage includes tested kernel, linear, pointer-backed pitched,
   and channel-aware array-backed 3D memcpy, byte and pitched 1/2/4-byte memset,
-  host, clone/update,
+  host, clone/update, and graph/executable parameter mutation for the supported
+  kernel, 1D/3D memcpy, memset, and host node families,
   graph-memory node behavior, and event-linked two-stream ordered replay with
   capture-conflict rejection. Graph creation rejects unsupported flags instead
   of silently accepting them.
@@ -55,7 +56,12 @@ launch success. CPU or approximate paths must identify themselves.
   focused tests cover parent-child-grandchild ordering, invalid child
   configurations, and the 1,023-record overflow boundary.
 - Texture/surface objects, arrays, memcpy, and source descriptor helpers cover a
-  tested subset.
+  tested subset. Source `tex1Dfetch` handles scalar and trivially-copyable
+  vector element reads from tracked linear resources, including tested clamp
+  and zero-border behavior; the GROMACS `float4` call shape compiles without a
+  delayed-lookup warning. Direct PTX indirect-object `txq`/`suq` width, height,
+  and depth queries have strict negative-form checks and numerical Apple-GPU
+  execution; other direct PTX texture/surface forms remain gaps.
 - Cooperative launch supports resident grids up to four blocks. CUDA-visible
   `multiProcessorCount` is 1 because public Metal exposes physical GPU-core
   count but no per-kernel simultaneous-residency query; this makes CUDA's
