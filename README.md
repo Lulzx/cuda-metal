@@ -103,7 +103,7 @@ compiler paths and their selection policy are in
   AdaptiveCpp Metal on bounded water workloads. Its `ns/day` values are
   throughput, so higher is better; unmatched task placements are not compared.
   The full paired-corpus target remains open. See the
-  [GROMACS benchmark guide](demos/gromacs/README.md#reading-nsday-and-comparing-backends).
+  [GROMACS benchmark guide](demos/gromacs/docs/performance.md#reading-nsday).
 
 Exact commands, tolerances, device provenance, and third-party boundaries are
 in [verified results](docs/verified-results.md). The executable source/sample
