@@ -39,7 +39,10 @@ sample_nonpassing=$((sample_total - sample_pass - sample_waive))
 [[ "${sample_waive}" -eq 0 && "${sample_nonpassing}" -eq 0 ]] ||
     fail "current roadmap requires zero sample waivers and nonpassing entries"
 
-expect_fragment README.md "**${sample_pass}/${sample_total} pass**"
+# README stays a concise entry point; detailed evidence lives in linked pages.
+expect_fragment README.md "[verified results](docs/verified-results.md)"
+expect_fragment README.md "[known gaps](docs/known-gaps.md)"
+expect_fragment README.md "[compiler architecture](docs/compiler-architecture.md)"
 expect_fragment docs/status.md "**${sample_pass}/${sample_total} pass**"
 expect_fragment docs/known-gaps/verification.md "all ${sample_pass} pass"
 expect_fragment docs/verified-results.md "classifies all ${sample_total} enrolled"
@@ -62,7 +65,6 @@ read -r matrix_total direct_legacy direct_typed ptx_legacy ptx_typed < <(
 )
 
 for file in \
-    README.md \
     docs/status.md \
     docs/status/compiler.md \
     docs/known-gaps/compiler.md \
@@ -75,7 +77,6 @@ do
 done
 
 for file in \
-    README.md \
     docs/status.md \
     docs/status/compiler.md \
     docs/known-gaps/compiler.md \
