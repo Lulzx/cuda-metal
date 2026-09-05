@@ -1,0 +1,53 @@
+# Warp patch workflow
+
+These patches target NVIDIA Warp `v1.12.0`, commit
+`e6c3ba2d54bb048115760b5cd7a4bb2573329ae7`.
+
+Warp needs two upstream changes before it builds against CuMetal. They belong
+in NVIDIA's repository, so this repo carries them as patches rather than a
+fork, and applies them to a pinned clone:
+
+```bash
+scripts/build_warp_cumetal.sh
+```
+
+That clones `https://github.com/NVIDIA/warp.git` at `v1.12.0` into
+`../warp-cumetal` (override with `CUMETAL_WARP_DIR`), applies the patch set,
+generates the CuMetal CUDA toolkit shim, and compiles `libwarp`'s CUDA sources
+through it. Pass `--clone-only` to stop after patching, or `--build` to hand
+off to Warp's own `build_lib.py`.
+
+To patch a checkout you already have:
+
+```bash
+scripts/warp-patches/apply_warp_patches.sh /path/to/warp
+```
+
+The application script is idempotent and rejects any other Warp revision.
+
+The first patch makes Warp buildable with CUDA enabled on macOS. It guards
+`crt.h`'s barebones-Clang include on `WP_CUMETAL`, since CuMetal drives Clang
+with a real CUDA header set; adds an `__APPLE__` branch to `cuda_util.cpp` that
+`dlopen`s `libcuda.dylib` or `libcumetal.dylib` for the driver surface Warp
+resolves through `cuGetProcAddress`; honours an explicit `--cuda-path` on
+Darwin, where `build_lib.py` otherwise discards it because no CUDA toolkit can
+exist; and adds a CuMetal branch to `build_dll.py` that reads the toolkit's
+`version.json`, defines `WP_CUMETAL=1`, and links `-lcuda` instead of the
+NVRTC and PTX compiler static libraries CuMetal does not ship separately.
+
+The second patch includes `<new>` in `volume_builder.cu` for its device-side
+placement `new`. nvcc includes it implicitly and Clang does not, so the file
+fails to compile through any Clang-driven toolchain, CuMetal's included.
+
+## What compiles
+
+`libwarp` builds 11 `.cu` files. Six compile through CuMetal today — `hashgrid`,
+`mesh`, `scan`, `volume`, `volume_builder`, `warp` — and the sweep in
+`build_warp_cumetal.sh` fails if any of them regresses. The other five are
+blocked on CuMetal's CUB shim, which is Phase 4 in `docs/warp-feasibility.md`:
+
+| File | Blocker |
+|---|---|
+| `reduce.cu`, `runlength_encode.cu`, `sparse.cu` | `cub/device/device_reduce.cuh`, `device_run_length_encode.cuh` missing |
+| `sort.cu` | `cub::DoubleBuffer` missing |
+| `bvh.cu` | `cub::BlockReduce::Reduce` overload set incomplete, plus a `__shared__` variable with an initializer that Clang rejects and nvcc accepts |

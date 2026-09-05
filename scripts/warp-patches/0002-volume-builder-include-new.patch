@@ -1,0 +1,14 @@
+diff --git a/warp/native/volume_builder.cu b/warp/native/volume_builder.cu
+index 24dac23..b1d08f7 100644
+--- a/warp/native/volume_builder.cu
++++ b/warp/native/volume_builder.cu
+@@ -22,6 +22,9 @@
+ 
+ #include <cub/cub.cuh>
+ #include <cuda.h>
++// Placement new is used in device code below. nvcc includes <new> implicitly;
++// Clang does not, so name the dependency rather than rely on the toolchain.
++#include <new>
+ #include <cuda_runtime_api.h>
+ #include <nanovdb/tools/cuda/PointsToGrid.cuh>
+ 

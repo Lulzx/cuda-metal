@@ -101,7 +101,11 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   still writing silently returns stale memory. The tested aggregate
   `ShuffleIndex` helper covers trivially-copyable objects up to the fixed
   32-lane warp model, but broader CUB warp/block free-function and policy
-  overload parity remains unclassified.
+  overload parity remains unclassified. Named missing pieces, all found by
+  compiling NVIDIA Warp's `libwarp` sources (`scripts/build_warp_cumetal.sh`):
+  the `cub/device/device_reduce.cuh` and `cub/device/device_run_length_encode.cuh`
+  headers, `cub::DoubleBuffer`, and part of the `cub::BlockReduce::Reduce`
+  overload set.
 - **NVTX:** annotations are no-ops.
 
 The closure target is a generated support table from actual positive and

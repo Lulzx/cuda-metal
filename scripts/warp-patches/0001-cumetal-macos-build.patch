@@ -1,0 +1,119 @@
+diff --git a/build_lib.py b/build_lib.py
+index 8a004af..17294eb 100644
+--- a/build_lib.py
++++ b/build_lib.py
+@@ -490,7 +490,10 @@ def main(argv: list[str] | None = None) -> int:
+             return 1
+ 
+     # setup CUDA Toolkit path
+-    if platform.system() == "Darwin" or not args.cuda:
++    if (platform.system() == "Darwin" and not args.cuda_path) or not args.cuda:
++        # On macOS CUDA is only available through CuMetal, which must be named
++        # explicitly with --cuda-path pointing at its generated toolkit
++        # (build/cumetal-cuda-toolkit); there is nothing to auto-discover.
+         if not args.cuda:
+             print("CUDA support disabled (--no-cuda)")
+         args.cuda_path = None
+diff --git a/warp/_src/build_dll.py b/warp/_src/build_dll.py
+index 7892660..7a38a34 100644
+--- a/warp/_src/build_dll.py
++++ b/warp/_src/build_dll.py
+@@ -574,6 +574,17 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
+     # is the library being built with CUDA enabled?
+     cuda_enabled = "WP_ENABLE_CUDA=1" if (cu_paths is not None) else "WP_ENABLE_CUDA=0"
+ 
++    # CuMetal (CUDA on Apple Silicon) presents itself as a CUDA toolkit whose
++    # nvcc is a Clang-driven shim and whose driver, runtime and libraries are
++    # one dylib. Its toolkit root carries a version.json naming it.
++    cumetal_toolkit = False
++    if cu_paths and cuda_home:
++        version_json = os.path.join(cuda_home, "version.json")
++        if os.path.exists(version_json):
++            with open(version_json, encoding="utf-8") as f:
++                cumetal_toolkit = "cumetal" in f.read().lower()
++    cumetal_define = " -DWP_CUMETAL=1" if cumetal_toolkit else ""
++
+     if args.libmathdx_path:
+         libmathdx_includes = f' -I"{args.libmathdx_path}/include"'
+         mathdx_enabled = "WP_ENABLE_MATHDX=1"
+@@ -709,7 +720,7 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
+             else:
+                 version = ""
+ 
+-        cpp_flags = f'-Werror -Wuninitialized {version} --std=c++17 -fno-rtti -D{cuda_enabled} -D{mathdx_enabled} -D{cuda_compat_enabled} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -I"{native_dir}" {includes} '
++        cpp_flags = f'-Werror -Wuninitialized {version} --std=c++17 -fno-rtti -D{cuda_enabled} -D{mathdx_enabled} -D{cuda_compat_enabled}{cumetal_define} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -I"{native_dir}" {includes} '
+ 
+         if mode == "debug":
+             cpp_flags += "-O0 -g -D_DEBUG -DWP_ENABLE_DEBUG=1 -fkeep-inline-functions"
+@@ -753,9 +764,9 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
+ 
+                     if cuda_compiler == "nvcc":
+                         if mode == "debug":
+-                            cuda_cmd = f'{nvcc_cmd} --std=c++17 -g -G -O0 --compiler-options -fPIC,-fvisibility=hidden,-fvisibility-inlines-hidden -D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 -line-info {" ".join(_nvcc_opts)} -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
++                            cuda_cmd = f'{nvcc_cmd} --std=c++17 -g -G -O0 --compiler-options -fPIC,-fvisibility=hidden,-fvisibility-inlines-hidden -D_DEBUG -D_ITERATOR_DEBUG_LEVEL=0 -line-info {" ".join(_nvcc_opts)} -DWP_ENABLE_CUDA=1{cumetal_define} -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+                         elif mode == "release":
+-                            cuda_cmd = f'{nvcc_cmd} --std=c++17 -O3 --compiler-options -fPIC,-fvisibility=hidden,-fvisibility-inlines-hidden {" ".join(_nvcc_opts)} -DNDEBUG -DWP_ENABLE_CUDA=1 -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
++                            cuda_cmd = f'{nvcc_cmd} --std=c++17 -O3 --compiler-options -fPIC,-fvisibility=hidden,-fvisibility-inlines-hidden {" ".join(_nvcc_opts)} -DNDEBUG -DWP_ENABLE_CUDA=1{cumetal_define} -I"{native_dir}" -D{mathdx_enabled} {libmathdx_includes} -o "{cu_out}" -c "{cu_path}"'
+                     else:
+                         # Use Clang compiler
+                         if mode == "debug":
+@@ -767,9 +778,13 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
+ 
+                     ld_inputs.append(quote(cu_out))
+ 
+-                ld_inputs.append(
+-                    f'-L"{cuda_home}/lib64" -lcudart_static -lnvrtc_static -lnvrtc-builtins_static -lnvptxcompiler_static -lpthread -ldl -lrt'
+-                )
++                if cumetal_toolkit:
++                    # Driver, runtime and NVRTC surfaces all live in libcumetal.
++                    ld_inputs.append(f'-L"{cuda_home}/lib64" -lcuda -lpthread -ldl')
++                else:
++                    ld_inputs.append(
++                        f'-L"{cuda_home}/lib64" -lcudart_static -lnvrtc_static -lnvrtc-builtins_static -lnvptxcompiler_static -lpthread -ldl -lrt'
++                    )
+ 
+                 if args.libmathdx_path:
+                     ld_inputs.append(f"-lnvJitLink_static -L{args.libmathdx_path}/lib -lmathdx_static")
+diff --git a/warp/native/crt.h b/warp/native/crt.h
+index 0bde8c3..7bc4f8a 100644
+--- a/warp/native/crt.h
++++ b/warp/native/crt.h
+@@ -244,8 +244,9 @@ typedef unsigned long long uint64_t;
+ 
+ #if defined(__CUDACC__)
+ 
+-#if defined(__clang__)
++#if defined(__clang__) && !defined(WP_CUMETAL)
+ // When compiling CUDA with barebones Clang we need to define its builtins and runtime functions ourselves.
++// CuMetal drives Clang with a real CUDA header set, so its overlay already provides them.
+ #include "cuda_crt.h"
+ #endif
+ 
+diff --git a/warp/native/cuda_util.cpp b/warp/native/cuda_util.cpp
+index 7b573a1..a58930a 100644
+--- a/warp/native/cuda_util.cpp
++++ b/warp/native/cuda_util.cpp
+@@ -200,6 +200,23 @@ bool init_cuda_driver()
+         }
+     }
+     pfn_cuGetProcAddress = (PFN_cuGetProcAddress)dlsym(hCudaDriver, "cuGetProcAddress");
++#elif defined(__APPLE__)
++    // CuMetal provides the CUDA driver surface on Apple Silicon. Its libcuda.dylib
++    // alias is optional (CUMETAL_ENABLE_BINARY_SHIM), so fall back to the library's
++    // own name; both export cuGetProcAddress.
++    static void* hCudaDriver = dlopen("libcuda.dylib", RTLD_NOW);
++    if (hCudaDriver == NULL) {
++        hCudaDriver = dlopen("libcumetal.dylib", RTLD_NOW);
++        if (hCudaDriver == NULL) {
++            fprintf(
++                stderr,
++                "Warp CUDA warning: Could not find or load the CuMetal CUDA driver (libcuda.dylib / "
++                "libcumetal.dylib). GPU execution will not be available.\n"
++            );
++            return false;
++        }
++    }
++    pfn_cuGetProcAddress = (PFN_cuGetProcAddress)dlsym(hCudaDriver, "cuGetProcAddress");
+ #endif
+ 
+     if (!pfn_cuGetProcAddress) {

@@ -61,6 +61,14 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Added
 
+- **`scripts/build_warp_cumetal.sh`**, which clones NVIDIA Warp at `v1.12.0`, applies the two
+  upstream changes in `scripts/warp-patches/`, generates the CuMetal CUDA toolkit shim, and
+  compiles each of `libwarp`'s 11 `.cu` files through it, reporting per file and failing if one of
+  the six that compile today regresses. The changes -- `crt.h` guarded on `WP_CUMETAL`, an
+  `__APPLE__` driver `dlopen` branch, `--cuda-path` honoured on Darwin, a CuMetal branch in
+  `build_dll.py`, and the `<new>` that `volume_builder.cu`'s placement `new` needs -- belong in
+  NVIDIA's repository, so they are carried here as patches against a pinned clone rather than as a
+  fork. Previously the only way to reproduce Warp results was a hand-patched local checkout.
 - **`cuGetProcAddress`**, resolving against the library's own exported `cu*` symbols, plus
   `cuMemcpy2D`, `cuMemcpy2DAsync`, `cuMemcpyBatchAsync`, `cuEventRecordWithFlags` and
   `cuStreamGetCtx`. These are the driver entry points NVIDIA Warp resolves dynamically; with them
