@@ -10,7 +10,8 @@ float_abs_source=$6
 float_math_source=$7
 byval_aggregate_memcpy_source=$8
 float_atomic_add_source=$9
-nvcc=${10}
+texture_vector_source=${10}
+nvcc=${11}
 
 workdir=$(mktemp -d "${TMPDIR:-/tmp}/cumetalc-shared-ir.XXXXXX")
 trap 'rm -rf "$workdir"' EXIT
@@ -57,6 +58,12 @@ if grep -qE 'cm_atomic_cas|atomic_compare_exchange' "$workdir/float_atomic_add.m
     echo "device float atomicAdd regressed to a CAS loop on the source-first path" >&2
     exit 1
 fi
+
+# Warp's texture.h instantiates tex1D/tex2D/tex3D for float2 and float4 with
+# linear filtering; the software filter must accept vector texels.
+"$cumetalc" "$texture_vector_source" --backend=cumetal-ir --emit=msl \
+    --overwrite -o "$workdir/texture_vector.metal"
+grep -q 'kernel void cuda_texture_vector_fetch' "$workdir/texture_vector.metal"
 
 # NVIDIA's C++ overlay selects binary32 for unsuffixed rsqrt/fma calls. A
 # missing overload silently inserts f32->f64->f32 conversions and the double

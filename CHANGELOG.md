@@ -34,6 +34,14 @@ All notable changes to CuMetal are documented here. Format follows
   every Warp entry point outside the OpenGL, IPC, graph-capture and CUDA-array groups is
   reachable. `functional_driver_proc_address` covers the lookup and each new entry point.
 - NVIDIA Warp Phase 0 feasibility audit (`docs/warp-feasibility.md`).
+- **`cudaTypedefs.h`**, generated from `cuda.h` by `scripts/generate_cuda_typedefs.py`, with the
+  versioned `PFN_cu*` function-pointer typedefs hosts that load the driver dynamically declare.
+  With it come the graph, stream-capture, IPC and graphics-interop types those signatures need
+  (declared for compatibility; the entry points are not implemented), `CUDA_RESOURCE_VIEW_DESC`,
+  the `CUfunction_attribute` spelling, and `cudaCpuDeviceId`.
+- **`tex1D`**, and linear texture filtering for `float2`/`float4` fetches; the software filter
+  previously only instantiated for scalar texel types.
+- The `nvcc` shim accepts `-gencode=…` and the `-t`/`--threads` parallel-compilation flags.
 
 ## [0.2.1] - 2026-08-26
 

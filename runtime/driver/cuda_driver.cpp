@@ -2961,7 +2961,7 @@ CUresult cuArrayDestroy(CUarray hArray) {
 CUresult cuTexObjectCreate(CUtexObject* pTexObject,
                            const CUDA_RESOURCE_DESC* pResDesc,
                            const CUDA_TEXTURE_DESC* pTexDesc,
-                           const void* /*pResViewDesc*/) {
+                           const CUDA_RESOURCE_VIEW_DESC* /*pResViewDesc*/) {
     if (pTexObject == nullptr || pResDesc == nullptr || pTexDesc == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }

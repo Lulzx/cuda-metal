@@ -98,9 +98,12 @@ for libdir in lib lib64; do
 done
 
 # Version files — cmake parses these to detect CUDA 12.x
+# The "cumetal" key lets build systems that special-case this toolkit (NVIDIA
+# Warp's build_dll.py) recognise it; cmake only reads "cuda.version".
 cat > "${FAKE_CUDA}/version.json" <<'JSON'
 {
-   "cuda" : { "version" : "12.2.0" }
+   "cuda" : { "version" : "12.2.0" },
+   "cumetal" : { "toolkit" : true }
 }
 JSON
 echo "CUDA Version 12.2.0" > "${FAKE_CUDA}/version.txt"
@@ -242,7 +245,10 @@ for arg in "\$@"; do
     case "\$arg" in
         # nvcc gencode flags — clang uses --cuda-gpu-arch instead
         -gencode)                              SKIP_NEXT=1; continue ;;
-        --generate-code=*)                     continue ;;
+        -gencode=*|--generate-code=*)          continue ;;
+        # nvcc parallel-compilation knob (-t0, -t 8, --threads 8); clang has none.
+        -t|--threads)                          SKIP_NEXT=1; continue ;;
+        -t[0-9]*|--threads=*)                  continue ;;
         arch=compute_*|code=sm_*|code=lto_*)  continue ;;
         # nvcc -arch / --gpu-architecture: cmake emits these from
         # CMAKE_CUDA_ARCHITECTURES (including the literal "all"). clang selects

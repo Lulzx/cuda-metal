@@ -266,6 +266,95 @@ typedef enum CUarray_format_enum {
     CU_AD_FORMAT_FLOAT = 0x20,
 } CUarray_format;
 
+// ── Graph, stream-capture, IPC and graphics interop types ────────────────────
+// Declared so that hosts built against NVIDIA's cudaTypedefs.h (NVIDIA Warp
+// among them) compile unchanged. The entry points behind these types are not
+// implemented; cuGetProcAddress reports them as not found and callers take
+// their documented fallback paths.
+typedef unsigned long long cuuint64_t;
+typedef unsigned int cuuint32_t;
+
+typedef struct CUgraphicsResource_st* CUgraphicsResource;
+
+#define CU_IPC_HANDLE_SIZE 64
+typedef struct CUipcEventHandle_st {
+    char reserved[CU_IPC_HANDLE_SIZE];
+} CUipcEventHandle;
+typedef struct CUipcMemHandle_st {
+    char reserved[CU_IPC_HANDLE_SIZE];
+} CUipcMemHandle;
+
+typedef enum CUstreamCaptureStatus_enum {
+    CU_STREAM_CAPTURE_STATUS_NONE = 0,
+    CU_STREAM_CAPTURE_STATUS_ACTIVE = 1,
+    CU_STREAM_CAPTURE_STATUS_INVALIDATED = 2,
+} CUstreamCaptureStatus;
+
+typedef enum CUstreamCaptureMode_enum {
+    CU_STREAM_CAPTURE_MODE_GLOBAL = 0,
+    CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1,
+    CU_STREAM_CAPTURE_MODE_RELAXED = 2,
+} CUstreamCaptureMode;
+
+typedef enum CUgraphNodeType_enum {
+    CU_GRAPH_NODE_TYPE_KERNEL = 0,
+    CU_GRAPH_NODE_TYPE_MEMCPY = 1,
+    CU_GRAPH_NODE_TYPE_MEMSET = 2,
+    CU_GRAPH_NODE_TYPE_HOST = 3,
+    CU_GRAPH_NODE_TYPE_GRAPH = 4,
+    CU_GRAPH_NODE_TYPE_EMPTY = 5,
+    CU_GRAPH_NODE_TYPE_WAIT_EVENT = 6,
+    CU_GRAPH_NODE_TYPE_EVENT_RECORD = 7,
+    CU_GRAPH_NODE_TYPE_EXT_SEMAS_SIGNAL = 8,
+    CU_GRAPH_NODE_TYPE_EXT_SEMAS_WAIT = 9,
+    CU_GRAPH_NODE_TYPE_MEM_ALLOC = 10,
+    CU_GRAPH_NODE_TYPE_MEM_FREE = 11,
+    CU_GRAPH_NODE_TYPE_BATCH_MEM_OP = 12,
+    CU_GRAPH_NODE_TYPE_CONDITIONAL = 13,
+} CUgraphNodeType;
+
+typedef enum CUgraphConditionalNodeType_enum {
+    CU_GRAPH_COND_TYPE_IF = 0,
+    CU_GRAPH_COND_TYPE_WHILE = 1,
+    CU_GRAPH_COND_TYPE_SWITCH = 2,
+} CUgraphConditionalNodeType;
+
+typedef cuuint64_t CUgraphConditionalHandle;
+
+typedef struct CUDA_CONDITIONAL_NODE_PARAMS_st {
+    CUgraphConditionalHandle handle;
+    CUgraphConditionalNodeType type;
+    unsigned int size;
+    CUgraph* phGraph_out;
+    CUcontext ctx;
+} CUDA_CONDITIONAL_NODE_PARAMS;
+
+// Only the conditional member is spelled out; the remaining node parameter
+// unions are reserved space so the struct keeps CUDA's size and alignment.
+typedef struct CUgraphNodeParams_st {
+    CUgraphNodeType type;
+    int reserved0[3];
+    union {
+        long long reserved1[29];
+        CUDA_CONDITIONAL_NODE_PARAMS conditional;
+    };
+    long long reserved2;
+} CUgraphNodeParams;
+
+typedef struct CUgraphEdgeData_st {
+    unsigned char from_port;
+    unsigned char to_port;
+    unsigned char type;
+    unsigned char reserved[5];
+} CUgraphEdgeData;
+
+typedef struct CUDA_ARRAY_DESCRIPTOR_st {
+    size_t Width;
+    size_t Height;
+    CUarray_format Format;
+    unsigned int NumChannels;
+} CUDA_ARRAY_DESCRIPTOR;
+
 typedef struct CUDA_ARRAY3D_DESCRIPTOR_st {
     size_t Width;
     size_t Height;
@@ -309,6 +398,48 @@ typedef struct CUDA_RESOURCE_DESC_st {
     } res;
     unsigned int flags;
 } CUDA_RESOURCE_DESC;
+
+typedef enum CUresourceViewFormat_enum {
+    CU_RES_VIEW_FORMAT_NONE = 0x00,
+    CU_RES_VIEW_FORMAT_UINT_1X8 = 0x01,
+    CU_RES_VIEW_FORMAT_UINT_2X8 = 0x02,
+    CU_RES_VIEW_FORMAT_UINT_4X8 = 0x03,
+    CU_RES_VIEW_FORMAT_SINT_1X8 = 0x04,
+    CU_RES_VIEW_FORMAT_SINT_2X8 = 0x05,
+    CU_RES_VIEW_FORMAT_SINT_4X8 = 0x06,
+    CU_RES_VIEW_FORMAT_UINT_1X16 = 0x07,
+    CU_RES_VIEW_FORMAT_UINT_2X16 = 0x08,
+    CU_RES_VIEW_FORMAT_UINT_4X16 = 0x09,
+    CU_RES_VIEW_FORMAT_SINT_1X16 = 0x0a,
+    CU_RES_VIEW_FORMAT_SINT_2X16 = 0x0b,
+    CU_RES_VIEW_FORMAT_SINT_4X16 = 0x0c,
+    CU_RES_VIEW_FORMAT_UINT_1X32 = 0x0d,
+    CU_RES_VIEW_FORMAT_UINT_2X32 = 0x0e,
+    CU_RES_VIEW_FORMAT_UINT_4X32 = 0x0f,
+    CU_RES_VIEW_FORMAT_SINT_1X32 = 0x10,
+    CU_RES_VIEW_FORMAT_SINT_2X32 = 0x11,
+    CU_RES_VIEW_FORMAT_SINT_4X32 = 0x12,
+    CU_RES_VIEW_FORMAT_FLOAT_1X16 = 0x13,
+    CU_RES_VIEW_FORMAT_FLOAT_2X16 = 0x14,
+    CU_RES_VIEW_FORMAT_FLOAT_4X16 = 0x15,
+    CU_RES_VIEW_FORMAT_FLOAT_1X32 = 0x16,
+    CU_RES_VIEW_FORMAT_FLOAT_2X32 = 0x17,
+    CU_RES_VIEW_FORMAT_FLOAT_4X32 = 0x18,
+} CUresourceViewFormat;
+
+// Accepted by cuTexObjectCreate for signature compatibility; CuMetal's
+// software texture path samples the underlying resource format directly.
+typedef struct CUDA_RESOURCE_VIEW_DESC_st {
+    CUresourceViewFormat format;
+    size_t width;
+    size_t height;
+    size_t depth;
+    unsigned int firstMipmapLevel;
+    unsigned int lastMipmapLevel;
+    unsigned int firstLayer;
+    unsigned int lastLayer;
+    unsigned int reserved[16];
+} CUDA_RESOURCE_VIEW_DESC;
 
 typedef struct CUDA_TEXTURE_DESC_st {
     CUaddress_mode addressMode[3];
@@ -538,7 +669,7 @@ CUresult cuArrayDestroy(CUarray hArray);
 CUresult cuTexObjectCreate(CUtexObject* pTexObject,
                            const CUDA_RESOURCE_DESC* pResDesc,
                            const CUDA_TEXTURE_DESC* pTexDesc,
-                           const void* pResViewDesc);
+                           const CUDA_RESOURCE_VIEW_DESC* pResViewDesc);
 CUresult cuTexObjectDestroy(CUtexObject texObject);
 // Generic device-to-device async copy (infers direction from allocation table).
 CUresult cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src, size_t byteCount, CUstream hStream);
@@ -608,6 +739,8 @@ typedef enum CUfunc_attribute {
     CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8,
     CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT = 9,
 } CUfunc_attribute;
+// NVIDIA's header spells the enum CUfunction_attribute; keep both names.
+typedef CUfunc_attribute CUfunction_attribute;
 
 typedef enum CUfunc_cache {
     CU_FUNC_CACHE_PREFER_NONE = 0,

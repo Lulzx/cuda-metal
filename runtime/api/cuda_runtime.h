@@ -46,6 +46,12 @@
 
 #include "cuda.h"
 
+// Special device ids accepted by memory-advice and prefetch APIs.
+#ifndef cudaCpuDeviceId
+#define cudaCpuDeviceId ((int)-1)
+#define cudaInvalidDeviceId ((int)-2)
+#endif
+
 #ifndef CUDARTAPI
 #define CUDARTAPI
 #endif
@@ -1356,6 +1362,30 @@ __device__ __forceinline__ T __cumetal_texture_load(
     return *reinterpret_cast<const T*>(bytes);
 }
 
+// Linear filtering runs in software here, so the texel arithmetic must be
+// spelled for every fetch type. Real CUDA only permits linear filtering on
+// float-returning fetches, which is why the vector overloads stop at float
+// vectors; integer fetches route through the scalar template unchanged.
+template <typename T>
+__device__ __forceinline__ T __cumetal_texture_mix(T a, T b, float t) {
+    return static_cast<T>((1.0f - t) * a + t * b);
+}
+__device__ __forceinline__ float2 __cumetal_texture_mix(float2 a, float2 b, float t) {
+    return make_float2((1.0f - t) * a.x + t * b.x, (1.0f - t) * a.y + t * b.y);
+}
+__device__ __forceinline__ float4 __cumetal_texture_mix(float4 a, float4 b, float t) {
+    return make_float4((1.0f - t) * a.x + t * b.x, (1.0f - t) * a.y + t * b.y,
+                       (1.0f - t) * a.z + t * b.z, (1.0f - t) * a.w + t * b.w);
+}
+
+// Floor of a (possibly negative) sample coordinate and its fractional part.
+__device__ __forceinline__ int __cumetal_texture_floor(float value, float* fraction) {
+    int whole = static_cast<int>(value);
+    if (static_cast<float>(whole) > value) --whole;
+    *fraction = value - static_cast<float>(whole);
+    return whole;
+}
+
 template <typename T>
 __device__ __forceinline__ T tex1Dfetch(cudaTextureObject_t texture, int x) {
     const auto* descriptor = reinterpret_cast<const __cumetal_texture_descriptor*>(texture);
@@ -1365,6 +1395,33 @@ __device__ __forceinline__ T tex1Dfetch(cudaTextureObject_t texture, int x) {
         return T{};
     }
     const int ix = x < 0 ? 0 : (x >= extent ? extent - 1 : x);
+    return __cumetal_texture_load<T>(descriptor, ix, 0, 0);
+}
+
+template <typename T>
+__device__ __forceinline__ T tex1D(cudaTextureObject_t texture, float x) {
+    const auto* descriptor = reinterpret_cast<const __cumetal_texture_descriptor*>(texture);
+    if (descriptor->filter_mode == cudaFilterModeLinear) {
+        const float sx = (descriptor->normalized_coords
+                              ? x * static_cast<float>(descriptor->width) : x) - 0.5f;
+        float fx = 0.0f;
+        const int x0 = __cumetal_texture_floor(sx, &fx);
+        const unsigned int address_x = descriptor->normalized_coords
+                                           ? descriptor->address_mode[0]
+                                           : cudaAddressModeClamp;
+        const int ix0 = __cumetal_texture_index(static_cast<float>(x0), descriptor->width,
+                                                0, address_x);
+        const int ix1 = __cumetal_texture_index(static_cast<float>(x0 + 1), descriptor->width,
+                                                0, address_x);
+        const T p0 = __cumetal_texture_load<T>(descriptor, ix0, 0, 0);
+        const T p1 = __cumetal_texture_load<T>(descriptor, ix1, 0, 0);
+        return __cumetal_texture_mix(p0, p1, fx);
+    }
+    const int ix = __cumetal_texture_index(x, descriptor->width,
+                                           descriptor->normalized_coords,
+                                           descriptor->normalized_coords
+                                               ? descriptor->address_mode[0]
+                                               : cudaAddressModeClamp);
     return __cumetal_texture_load<T>(descriptor, ix, 0, 0);
 }
 
@@ -1398,8 +1455,8 @@ __device__ __forceinline__ T tex2D(cudaTextureObject_t texture, float x, float y
         const T p10 = __cumetal_texture_load<T>(descriptor, ix1, iy0, 0);
         const T p01 = __cumetal_texture_load<T>(descriptor, ix0, iy1, 0);
         const T p11 = __cumetal_texture_load<T>(descriptor, ix1, iy1, 0);
-        return static_cast<T>((1.0f - fy) * ((1.0f - fx) * p00 + fx * p10) +
-                              fy * ((1.0f - fx) * p01 + fx * p11));
+        return __cumetal_texture_mix(__cumetal_texture_mix(p00, p10, fx),
+                                     __cumetal_texture_mix(p01, p11, fx), fy);
     }
     const int ix = __cumetal_texture_index(x, descriptor->width,
                                            descriptor->normalized_coords,
