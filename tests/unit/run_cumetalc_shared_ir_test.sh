@@ -16,6 +16,17 @@ nvcc=${11}
 workdir=$(mktemp -d "${TMPDIR:-/tmp}/cumetalc-shared-ir.XXXXXX")
 trap 'rm -rf "$workdir"' EXIT
 
+# The nvcc shim is generated into the build tree on demand, not by the build, so
+# it is present only where something has already asked for it. This test passed
+# in whichever tree happened to have one and failed everywhere else. Generate it
+# here rather than depend on that.
+if [[ ! -x "$nvcc" ]]; then
+    toolkit_build_dir="${nvcc%/cumetal-cuda-toolkit/bin/nvcc}"
+    root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+    CUMETAL_BUILD_DIR="$toolkit_build_dir" \
+        bash "$root_dir/scripts/build_llama_cpp_cumetal.sh" --toolkit-only >/dev/null
+fi
+
 "$cumetalc" "$ptx" --backend=cumetal-ir --emit=cumetal-ir \
     --overwrite -o "$workdir/vector.cmir"
 grep -q 'kernel @vector_add' "$workdir/vector.cmir"

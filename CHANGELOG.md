@@ -64,6 +64,11 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Changed
 
+- `unit_cumetalc_shared_ir` generates the `nvcc` shim it needs instead of assuming a build tree
+  already has one. The shim is written on demand by `scripts/build_llama_cpp_cumetal.sh
+  --toolkit-only`, never by the build, so the test passed in whichever tree had previously asked for
+  one and failed in every other -- including a fresh Release configure. Same class as the PhysX
+  harnesses that hardcoded `build/`.
 - A `__device__` function passed by value as a callback is now recorded as a known compiler gap.
   It decays to a function pointer, so `cumetalc`'s native-AOT path rejects it with `indirect device
   calls are unsupported` unless something devirtualizes it first -- and `cumetalc` exposes no
