@@ -25,19 +25,36 @@ scripts/warp-patches/apply_warp_patches.sh /path/to/warp
 
 The application script is idempotent and rejects any other Warp revision.
 
-The first patch makes Warp buildable with CUDA enabled on macOS. It guards
-`crt.h`'s barebones-Clang include on `WP_CUMETAL`, since CuMetal drives Clang
-with a real CUDA header set; adds an `__APPLE__` branch to `cuda_util.cpp` that
-`dlopen`s `libcuda.dylib` or `libcumetal.dylib` for the driver surface Warp
-resolves through `cuGetProcAddress`; honours an explicit `--cuda-path` on
-Darwin, where `build_lib.py` otherwise discards it because no CUDA toolkit can
-exist; and adds a CuMetal branch to `build_dll.py` that reads the toolkit's
-`version.json`, defines `WP_CUMETAL=1`, and links `-lcuda` instead of the
-NVRTC and PTX compiler static libraries CuMetal does not ship separately.
+The first patch makes Warp build and run with CUDA enabled on macOS. It:
+
+- guards `crt.h`'s barebones-Clang include on `WP_CUMETAL`, since CuMetal drives
+  Clang with a real CUDA header set;
+- adds an `__APPLE__` branch to `cuda_util.cpp` that `dlopen`s `libcuda.dylib`
+  or `libcumetal.dylib` for the driver surface Warp resolves through
+  `cuGetProcAddress`;
+- honours an explicit `--cuda-path` on Darwin, where `build_lib.py` otherwise
+  discards it because no CUDA toolkit can exist;
+- adds a CuMetal branch to `build_dll.py` that reads the toolkit's
+  `version.json`, defines `WP_CUMETAL=1`, and links `-lcuda` with the toolkit's
+  library directory on the rpath, instead of the NVRTC and PTX compiler static
+  libraries CuMetal does not ship separately;
+- carries `WP_CUMETAL=1` into the JIT NVRTC options in `warp.cu`, so a
+  runtime-compiled kernel sees the same `crt.h` branch the static library did;
+- returns `cubin` from `Device.get_cuda_output_format` on Darwin. Warp otherwise
+  picks PTX whenever the driver is at least as new as the toolkit, and CuMetal
+  lowers CUDA source to a Metal library with no PTX to hand back at any version.
 
 The second patch includes `<new>` in `volume_builder.cu` for its device-side
 placement `new`. nvcc includes it implicitly and Clang does not, so the file
 fails to compile through any Clang-driven toolchain, CuMetal's included.
+
+## What runs
+
+`scripts/build_warp_cumetal.sh --build` links `warp/bin/libwarp.dylib` against
+`libcumetal`, and `warp.init()` enumerates `cuda:0`. A `@wp.kernel` over
+`wp.array(dtype=wp.vec3)` compiles through NVRTC and returns correct results.
+Warp's own `warp/tests` are a long way from green on that device; see
+`docs/warp-feasibility.md` for the measured baseline.
 
 ## What compiles
 

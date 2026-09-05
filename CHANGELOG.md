@@ -6,6 +6,40 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A by-value aggregate kernel parameter could not be launched.** Clang lowers one to
+  `ptr byval(%T)`, and the NVVM importer classified it as a pointer: the ABI sidecar said
+  `arg buffer 8`, and `cuLaunchKernel` tried to resolve the first eight bytes of the caller's own
+  struct as a device address. Depending on those bytes the launch either returned
+  `CUDA_ERROR_INVALID_VALUE` or, through the NULL-terminator fallback, bound garbage and ran a
+  kernel that did nothing. The importer now takes the `byval` type's alloc size, so the parameter
+  binds as bytes. This blocked every NVIDIA Warp kernel, all of which take a by-value
+  `launch_bounds_t` first. `functional_byval_aggregate_launch` covers a launch end to end; the
+  existing `byval_aggregate_memcpy` fixture only ever checked that such a kernel compiles.
+- **The kernel ABI sidecar was lost between NVRTC and module load.** `cumetalc` writes it beside
+  the metallib and the NVRTC shim deleted its workspace, so a caller that compiled in memory and
+  loaded the bytes got no ABI metadata and `cuLaunchKernel` fell back to scanning `kernelParams`
+  for a NULL terminator CUDA does not guarantee. The shim now publishes the sidecar into the
+  content-addressed module cache at the address those metallib bytes hash to, which is where the
+  matching `cuModuleLoadData` looks.
+- **NVRTC did not predefine `__CUDACC_RTC__`.** Real NVRTC does, and sources branch on it to skip
+  includes that only a full toolkit has. CuMetal's device line force-includes `cuda_runtime.h`, so
+  the declarations those branches expect are in fact present; the macro is now seeded ahead of the
+  caller's options, and an explicit `--undefine-macro` still cancels it.
+
+### Added
+
+- `cudaTypedefs.h` now also spells each driver entry point unversioned
+  (`PFN_cuGetProcAddress`), as NVIDIA's header does for the ABI the toolkit targets.
+- `cudaErrorCallRequiresNewerDriver`, and the `CUDA_ARRAY3D_*` and `CU_TRSF_*` flag names, for
+  hosts that resolve driver entry points themselves. The texture entry points still report
+  `CUDA_ERROR_NOT_SUPPORTED`; these are spellings, not behaviour.
+- `scripts/build_warp_cumetal.sh --build` runs Warp's `build_lib.py` to a linked
+  `libwarp.dylib`: it picks a Python interpreter, passes `--cuda-path` (not `--cuda_path`) and
+  `--no-use-libmathdx`, and the toolkit shim now carries a `libcumetal.dylib` name so `-lcuda`
+  plus an rpath resolves the `@rpath`-relative install name.
+
 ## [0.5.0] - 2026-09-05
 
 ### Fixed

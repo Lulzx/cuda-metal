@@ -294,9 +294,10 @@ marching cubes. Adds the `BVH_SHARED_STACK` pointer-field question. 7 of 78
 shipped examples need this.
 
 **Phase 4 — the static library.** All 11 `.cu` files compile as of 2026-09-05,
-which is the first half. What remains is linking `libwarp` and running the
-algorithms: `wp.utils`, sorting, sparse, volumes. The CUB entry points they use
-are host-backed, so this unlocks correctness before it unlocks speed.
+and `libwarp.dylib` links and loads against CuMetal the same day (see "First
+Warp kernel on the device" below). What remains is running the algorithms:
+`wp.utils`, sorting, sparse, volumes. The CUB entry points they use are
+host-backed, so this unlocks correctness before it unlocks speed.
 
 **Phase 5 — tiles.** `tile_*.h`: every warp intrinsic in the codebase, plus
 `cp.async` and `cvta` inline PTX, plus the MathDx/cuBLASDx LTO path
@@ -394,6 +395,65 @@ program log, rather than returning bytes the caller would mis-handle.
 (sm_80), which is what steers Warp onto the CUBIN path unprompted. And
 `nvPTXCompiler` is a pass-through: CuMetal's module loader parses PTX text
 itself, so "compiling" hands the same PTX back.
+
+## First Warp kernel on the device (2026-09-05)
+
+`scripts/build_warp_cumetal.sh --build` now runs Warp's own `build_lib.py`
+against the CuMetal toolkit shim to completion. `warp/bin/libwarp.dylib` links
+against `libcumetal`, `warp.init()` enumerates `cuda:0` as `Apple M4 Pro`
+(sm_80, mempool enabled), and a `@wp.kernel` over `wp.array(dtype=wp.vec3)`
+compiles through NVRTC to a metallib and returns numerically correct results.
+
+Four things had to change for that, three of them CuMetal defects rather than
+Warp ones:
+
+1. **`__CUDACC_RTC__` was not predefined.** NVRTC predefines it for every
+   program it compiles, and sources branch on it to skip includes only a full
+   toolkit has — `tile.h` does exactly that for `float4`. Without it Warp fell
+   into its "CUDA is unavailable" branch and redefined `float4` on top of the
+   one CuMetal's forced `cuda_runtime.h` include already provides.
+2. **The kernel ABI sidecar did not survive `nvrtcGetCUBIN`.** `cumetalc`
+   writes `<module>.metallib.cumetal-abi` next to its output, and the NVRTC
+   shim deleted its workspace before the caller ever saw it. `cuLaunchKernel`
+   then fell back to scanning `kernelParams` for a NULL terminator CUDA does
+   not promise. The shim now publishes the sidecar into the content-addressed
+   module cache at the address the metallib bytes themselves hash to, which is
+   exactly where the later `cuModuleLoadData` of those bytes looks.
+3. **By-value aggregate kernel parameters were never launchable.** Clang lowers
+   one to `ptr byval(%T)`, and the NVVM importer classified it as a pointer, so
+   the sidecar said `arg buffer 8` and the launch tried to resolve the first
+   eight bytes of the caller's struct as a device address. Every Warp kernel
+   begins with a by-value `launch_bounds_t`, so every launch either failed with
+   `CUDA_ERROR_INVALID_VALUE` or — via the NULL-scan fallback — silently read
+   `dim.size` as zero and did nothing at all. The importer now reads the
+   `byval` type's alloc size and the parameter binds as bytes.
+   `functional_byval_aggregate_launch` covers it end to end; the compile-only
+   `byval_aggregate_memcpy` fixture had never exercised a launch.
+4. **Warp asks for PTX by default on any driver at least as new as the
+   toolkit.** CuMetal lowers CUDA source to a Metal library and has no PTX to
+   hand back, so patch 0001 makes `get_cuda_output_format` return `cubin` on
+   Darwin, where CUDA can only be CuMetal.
+
+### Where the test suite actually stands
+
+Running `warp/tests` with `-k cuda_0`, one process per module, 300s cap
+(2026-09-05, Release/no-shim):
+
+- 54 of 87 modules reach a unittest summary; **33 crash the process outright**
+  (SIGSEGV, SIGTRAP or SIGBUS) and one, `test_fabricarray`, wedges the GPU into
+  a command-buffer timeout.
+- Of the 344 tests that do report: **132 pass**, 118 fail, 89 error, 5 skip.
+- Modules with no failures: `test_copy`, `test_dense`, `test_devices`,
+  `test_enum`, `test_import`, `test_module_hashing`,
+  `test_triangle_closest_point`.
+
+Read that as a starting line, not a score. It is the first run of Warp's own
+suite on a Metal device, and the Phase 1 gate — "a handful of `warp/tests`
+modules running green on `device=\"cuda:0\"`" — is met by seven of them.
+
+Separately, `test_binary_ops_float16_cpu` segfaults with no CuMetal in the
+picture at all: it runs on Warp's bundled LLVM CPU JIT. That is an upstream
+macOS-arm64 problem and the reason the sweep is filtered to `cuda_0`.
 
 ## Stop conditions
 

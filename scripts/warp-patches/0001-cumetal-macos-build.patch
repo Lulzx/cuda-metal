@@ -15,7 +15,7 @@ index 8a004af..17294eb 100644
              print("CUDA support disabled (--no-cuda)")
          args.cuda_path = None
 diff --git a/warp/_src/build_dll.py b/warp/_src/build_dll.py
-index 7892660..7a38a34 100644
+index 7892660..8f2e22e 100644
 --- a/warp/_src/build_dll.py
 +++ b/warp/_src/build_dll.py
 @@ -574,6 +574,17 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
@@ -57,7 +57,7 @@ index 7892660..7a38a34 100644
                      else:
                          # Use Clang compiler
                          if mode == "debug":
-@@ -767,9 +778,13 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
+@@ -767,9 +778,17 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
  
                      ld_inputs.append(quote(cu_out))
  
@@ -65,8 +65,12 @@ index 7892660..7a38a34 100644
 -                    f'-L"{cuda_home}/lib64" -lcudart_static -lnvrtc_static -lnvrtc-builtins_static -lnvptxcompiler_static -lpthread -ldl -lrt'
 -                )
 +                if cumetal_toolkit:
-+                    # Driver, runtime and NVRTC surfaces all live in libcumetal.
-+                    ld_inputs.append(f'-L"{cuda_home}/lib64" -lcuda -lpthread -ldl')
++                    # Driver, runtime and NVRTC surfaces all live in libcumetal,
++                    # whose install name is @rpath-relative, so the toolkit's
++                    # library directory has to be on libwarp's rpath as well.
++                    ld_inputs.append(
++                        f'-L"{cuda_home}/lib64" -Wl,-rpath,"{cuda_home}/lib64" -lcuda -lpthread -ldl'
++                    )
 +                else:
 +                    ld_inputs.append(
 +                        f'-L"{cuda_home}/lib64" -lcudart_static -lnvrtc_static -lnvrtc-builtins_static -lnvptxcompiler_static -lpthread -ldl -lrt'
@@ -74,6 +78,23 @@ index 7892660..7a38a34 100644
  
                  if args.libmathdx_path:
                      ld_inputs.append(f"-lnvJitLink_static -L{args.libmathdx_path}/lib -lmathdx_static")
+diff --git a/warp/_src/context.py b/warp/_src/context.py
+index e7b3035..e149133 100644
+--- a/warp/_src/context.py
++++ b/warp/_src/context.py
+@@ -3809,6 +3809,12 @@ class Device:
+             # CPU devices don't use CUDA compilation
+             return None
+ 
++        if platform.system() == "Darwin":
++            # CUDA on macOS is CuMetal, which lowers CUDA source to a Metal
++            # library. It has no PTX to hand back at any driver version, so the
++            # version comparison below would pick an output it cannot produce.
++            return "cubin"
++
+         if not self.is_cubin_supported:
+             return "ptx"
+ 
 diff --git a/warp/native/crt.h b/warp/native/crt.h
 index 0bde8c3..7bc4f8a 100644
 --- a/warp/native/crt.h
@@ -90,9 +111,18 @@ index 0bde8c3..7bc4f8a 100644
  #endif
  
 diff --git a/warp/native/cuda_util.cpp b/warp/native/cuda_util.cpp
-index 7b573a1..a58930a 100644
+index 7b573a1..a20a2ea 100644
 --- a/warp/native/cuda_util.cpp
 +++ b/warp/native/cuda_util.cpp
+@@ -25,7 +25,7 @@
+ #define NOMINMAX
+ #include <windows.h>
+ #include <wingdi.h>  // needed for OpenGL includes
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__APPLE__)
+ #include <dlfcn.h>
+ #endif
+ 
 @@ -200,6 +200,23 @@ bool init_cuda_driver()
          }
      }
@@ -117,3 +147,21 @@ index 7b573a1..a58930a 100644
  #endif
  
      if (!pfn_cuGetProcAddress) {
+diff --git a/warp/native/warp.cu b/warp/native/warp.cu
+index da72c2d..94fb9e3 100644
+--- a/warp/native/warp.cu
++++ b/warp/native/warp.cu
+@@ -3883,6 +3883,13 @@ size_t wp_cuda_compile_program(
+     opts.push_back("--define-macro=WP_ENABLE_MATHDX=0");
+ #endif
+ 
++#if defined(WP_CUMETAL)
++    // Carry the CuMetal build's identity into the JIT translation unit: crt.h
++    // keys its barebones-Clang builtin definitions on the macro being absent,
++    // and CuMetal drives Clang with a real CUDA header set that supplies them.
++    opts.push_back("--define-macro=WP_CUMETAL=1");
++#endif
++
+     if (fast_math)
+         opts.push_back("--use_fast_math");
+ 

@@ -82,9 +82,19 @@ fi
 
 # ── Warp's own build ─────────────────────────────────────────────────────────
 if [[ "${MODE}" == "build" ]]; then
-    echo "=== build_lib.py --cuda_path=${FAKE_CUDA} ==="
+    PYTHON="${CUMETAL_PYTHON:-}"
+    if [[ -z "${PYTHON}" ]]; then
+        for candidate in python3 python; do
+            command -v "${candidate}" >/dev/null 2>&1 && { PYTHON="${candidate}"; break; }
+        done
+    fi
+    [[ -n "${PYTHON}" ]] || { echo "ERROR: no python interpreter on PATH." >&2; exit 2; }
+    # libmathdx ships no Darwin build, and Warp only uses it for tile linear
+    # algebra (cuBLASDx/cuFFTDx), which CuMetal does not provide either.
+    echo "=== build_lib.py --cuda-path=${FAKE_CUDA} --no-use-libmathdx ==="
     cd "${WARP_DIR}"
-    exec python build_lib.py --cuda_path="${FAKE_CUDA}" --jobs="${JOBS}"
+    exec "${PYTHON}" build_lib.py --cuda-path="${FAKE_CUDA}" \
+        --no-use-libmathdx --jobs="${JOBS}"
 fi
 
 # ── per-file compile sweep ───────────────────────────────────────────────────

@@ -25,10 +25,15 @@ fi
 patch_marker_is_present() {
     case "$(basename "$1")" in
         0001-cumetal-macos-build.patch)
+            # One marker per file the patch touches, so a checkout carrying an
+            # older revision of this patch is re-patched rather than reported as
+            # already done.
             grep -q 'defined(__clang__) && !defined(WP_CUMETAL)' \
                 "${WARP_REPO}/warp/native/crt.h" &&
                 grep -q 'cumetal_toolkit' "${WARP_REPO}/warp/_src/build_dll.py" &&
-                grep -q 'libcumetal.dylib' "${WARP_REPO}/warp/native/cuda_util.cpp"
+                grep -q 'libcumetal.dylib' "${WARP_REPO}/warp/native/cuda_util.cpp" &&
+                grep -q 'define-macro=WP_CUMETAL=1' "${WARP_REPO}/warp/native/warp.cu" &&
+                grep -q 'CuMetal, which lowers CUDA source' "${WARP_REPO}/warp/_src/context.py"
             ;;
         0002-volume-builder-include-new.patch)
             grep -q '#include <new>' "${WARP_REPO}/warp/native/volume_builder.cu"
