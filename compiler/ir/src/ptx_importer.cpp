@@ -2038,8 +2038,18 @@ struct Importer {
         } else if (root == "selp") {
             operation.opcode = OpCode::kSelect;
             operation.operands.push_back(source_operand(3, Type::predicate()));
-            operation.operands.push_back(source_operand(1, operation.result_types.front()));
-            operation.operands.push_back(source_operand(2, operation.result_types.front()));
+            // PTX keeps float temporaries in .b32 registers, so `selp.f32` reads
+            // two integer-typed values and produces a float one. Taking them
+            // through source_operand assigned the raw bit pattern to a float
+            // result, which Metal then reads as a numeric conversion:
+            // selp.f32 over the bits of 4.0f yielded 1082130432.0. Go through
+            // the bit container so the mismatch becomes a bitcast, as every
+            // other arithmetic form already does. Pointer selects are unchanged;
+            // the helper only rewrites a same-width float/integer pair.
+            operation.operands.push_back(
+                bit_container_operand(1, operation.result_types.front()));
+            operation.operands.push_back(
+                bit_container_operand(2, operation.result_types.front()));
         } else if (root == "bar") {
             if (!instruction.predicate.empty()) {
                 operation.attributes["predicate"] = instruction.predicate;
@@ -2935,7 +2945,40 @@ struct Importer {
                                 last,
                                 "non-void PTX device function has no return value");
                         }
-                        terminator.operands.push_back(*function_return);
+                        // The value reaching `st.param` carries the type of the
+                        // instruction that produced it, which for a float in a
+                        // .b32 register is not the declared return type. The
+                        // aggregate path already reinterprets each field;
+                        // without the same step here a scalar float return is
+                        // emitted as a numeric conversion into the integer
+                        // container. Widths must match -- anything else is a
+                        // malformed return, not a reinterpretation.
+                        Operand returned = *function_return;
+                        if (!(returned.type == function.return_type)) {
+                            if (type_size(returned.type) !=
+                                type_size(function.return_type)) {
+                                return fail(last,
+                                            "PTX device return value does not fit "
+                                            "its declared return type");
+                            }
+                            Operation conversion;
+                            conversion.opcode = OpCode::kConvert;
+                            conversion.location = {
+                                .file = result.module.source_name,
+                                .line = static_cast<std::uint32_t>(
+                                    std::max(0, last->line)),
+                            };
+                            conversion.operands = {returned};
+                            conversion.attributes["bitcast"] = "true";
+                            const ValueId converted = builder.next_value();
+                            conversion.results = {converted};
+                            conversion.result_types = {function.return_type};
+                            value_types[converted] = function.return_type;
+                            block.operations.push_back(std::move(conversion));
+                            returned =
+                                Operand::value_ref(converted, function.return_type);
+                        }
+                        terminator.operands.push_back(returned);
                     }
                 }
                 terminator.location = {

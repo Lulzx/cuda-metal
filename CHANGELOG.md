@@ -8,6 +8,22 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
+- **A float `selp` returned its operand's bit pattern as a number.** PTX keeps float temporaries in
+  `.b32` registers, so `selp.f32` reads two integer-typed operands and produces a float one. The
+  typed CuMetal IR importer assigned them straight across, and Metal read that as a numeric
+  conversion: selecting between the bits of `1.0f` and `4.0f` produced `1082130432.0`. Every other
+  arithmetic form already routes its operands through the bit container that turns a same-width
+  float/integer mismatch into a bitcast; `selp` now does too. Found by a `cub::BlockReduce` max over
+  `vec3` -- a comparison-selected float only escapes a kernel through a device call, so nothing in
+  the corpus reached it. Third instance of the `.b32` register-typing class, after the 0.2.1 bug and
+  the float atomics.
+- **A scalar float device-call return was converted rather than reinterpreted.** The value reaching
+  `st.param` carries its producing instruction's type, which for a float in a `.b32` register is not
+  the declared return type; the aggregate return path reinterpreted each field but the scalar path
+  did not. It stayed invisible because the float-to-integer and integer-to-float conversions
+  cancelled for the values that happened to be tested, and became visible the moment the `selp` fix
+  above stopped feeding it a value that round-tripped. `functional_cuda_projects_aggregate_device_calls`
+  covers both, and fails on the aggregate case without the `selp` fix.
 - **A float `atomicAdd` on `__shared__` memory silently did nothing on the PTX path.** CuMetal's
   CUDA overlay spells `atomicAdd(float*, float)` as inline `atom.global.add.f32` so the lowering
   selects Metal's native float atomic. The PTX-to-LLVM path already resolved the pointer's real
