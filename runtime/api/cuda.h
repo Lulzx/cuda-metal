@@ -157,7 +157,22 @@ typedef enum CUdevice_attribute {
 } CUdevice_attribute;
 
 CUresult cuInit(unsigned int flags);
+// cuGetProcAddress (CUDA 12.0 signature).
+typedef enum CUdriverProcAddress_flags_enum {
+    CU_GET_PROC_ADDRESS_DEFAULT = 0,
+    CU_GET_PROC_ADDRESS_LEGACY_STREAM = 1 << 0,
+    CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM = 1 << 1,
+} CUdriverProcAddress_flags;
+
+typedef enum CUdriverProcAddressQueryResult_enum {
+    CU_GET_PROC_ADDRESS_SUCCESS = 0,
+    CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND = 1,
+    CU_GET_PROC_ADDRESS_VERSION_NOT_SUFFICIENT = 2,
+} CUdriverProcAddressQueryResult;
+
 CUresult cuDriverGetVersion(int* driverVersion);
+CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
+                          uint64_t flags, CUdriverProcAddressQueryResult* symbolStatus);
 CUresult cuDeviceGetCount(int* count);
 CUresult cuDeviceGet(CUdevice* device, int ordinal);
 CUresult cuDeviceGetName(char* name, int len, CUdevice dev);
@@ -190,6 +205,7 @@ CUresult cuStreamSynchronize(CUstream hStream);
 CUresult cuStreamQuery(CUstream hStream);
 CUresult cuStreamGetPriority(CUstream hStream, int* priority);
 CUresult cuStreamGetFlags(CUstream hStream, unsigned int* flags);
+CUresult cuStreamGetCtx(CUstream hStream, CUcontext* pctx);
 CUresult cuStreamAddCallback(CUstream hStream,
                              CUstreamCallback callback,
                              void* userData,
@@ -200,6 +216,7 @@ CUresult cuLaunchHostFunc(CUstream hStream, CUhostFn fn, void* userData);
 CUresult cuEventCreate(CUevent* phEvent, unsigned int flags);
 CUresult cuEventDestroy(CUevent hEvent);
 CUresult cuEventRecord(CUevent hEvent, CUstream hStream);
+CUresult cuEventRecordWithFlags(CUevent hEvent, CUstream hStream, unsigned int flags);
 CUresult cuEventSynchronize(CUevent hEvent);
 CUresult cuEventQuery(CUevent hEvent);
 CUresult cuEventElapsedTime(float* pMilliseconds, CUevent hStart, CUevent hEnd);
@@ -306,6 +323,27 @@ typedef struct CUDA_TEXTURE_DESC_st {
     int reserved[12];
 } CUDA_TEXTURE_DESC;
 
+typedef struct CUDA_MEMCPY2D_st {
+    size_t          srcXInBytes;
+    size_t          srcY;
+    CUmemorytype    srcMemoryType;
+    const void*     srcHost;
+    CUdeviceptr     srcDevice;
+    CUarray         srcArray;
+    size_t          srcPitch;
+
+    size_t          dstXInBytes;
+    size_t          dstY;
+    CUmemorytype    dstMemoryType;
+    void*           dstHost;
+    CUdeviceptr     dstDevice;
+    CUarray         dstArray;
+    size_t          dstPitch;
+
+    size_t          WidthInBytes;
+    size_t          Height;
+} CUDA_MEMCPY2D;
+
 typedef struct CUDA_MEMCPY3D_st {
     size_t          srcXInBytes;
     size_t          srcY;
@@ -365,6 +403,30 @@ typedef struct CUmemLocation_st {
     CUmemLocationType type;
     int id;
 } CUmemLocation;
+
+// cuMemcpyBatchAsync attributes (CUDA 12.8). On unified memory every copy
+// is a host memcpy ordered on its stream, so the access-order and location
+// hints are accepted and have no effect.
+typedef enum CUmemcpySrcAccessOrder_enum {
+    CU_MEMCPY_SRC_ACCESS_ORDER_INVALID = 0x0,
+    CU_MEMCPY_SRC_ACCESS_ORDER_STREAM = 0x1,
+    CU_MEMCPY_SRC_ACCESS_ORDER_DURING_API_CALL = 0x2,
+    CU_MEMCPY_SRC_ACCESS_ORDER_ANY = 0x3,
+    CU_MEMCPY_SRC_ACCESS_ORDER_MAX = 0x7FFFFFFF,
+} CUmemcpySrcAccessOrder;
+
+typedef enum CUmemcpyFlags_enum {
+    CU_MEMCPY_FLAG_DEFAULT = 0x0,
+    CU_MEMCPY_FLAG_PREFER_OVERLAP_WITH_COMPUTE = 0x1,
+} CUmemcpyFlags;
+
+typedef struct CUmemcpyAttributes_st {
+    CUmemcpySrcAccessOrder srcAccessOrder;
+    CUmemLocation srcLocHint;
+    CUmemLocation dstLocHint;
+    unsigned int flags;
+} CUmemcpyAttributes;
+
 
 typedef enum CUmemAllocationCompType_enum {
     CU_MEM_ALLOCATION_COMP_NONE = 0,
@@ -464,6 +526,11 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
                                     CUstream hStream,
                                     void** kernelParams);
 
+CUresult cuMemcpy2D(const CUDA_MEMCPY2D* pCopy);
+CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D* pCopy, CUstream hStream);
+CUresult cuMemcpyBatchAsync(CUdeviceptr* dsts, CUdeviceptr* srcs, size_t* sizes, size_t count,
+                            CUmemcpyAttributes* attrs, size_t* attrsIdxs, size_t numAttrs,
+                            size_t* failIdx, CUstream hStream);
 CUresult cuMemcpy3D(const CUDA_MEMCPY3D* pCopy);
 CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D* pCopy, CUstream hStream);
 CUresult cuArray3DCreate(CUarray* pHandle, const CUDA_ARRAY3D_DESCRIPTOR* pAllocateArray);

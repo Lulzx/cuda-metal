@@ -246,6 +246,13 @@ alias — but it has one hard gate:
 
 - **`cuGetProcAddress` is not exported by `libcumetal.dylib`.** Nothing resolves
   without it. It is a name→pointer table over symbols that mostly already exist.
+  **Resolved (2026-09-05):** exported, resolving against the library's own
+  `cu*` symbol table so it cannot drift from the real surface.
+  `cuMemcpy2D`, `cuMemcpy2DAsync`, `cuMemcpyBatchAsync`,
+  `cuEventRecordWithFlags` and `cuStreamGetCtx` were added at the same time;
+  `functional_driver_proc_address` covers all six. Of Warp's 70 entry points,
+  the 16 still missing are exactly the GL, IPC, graph-capture and
+  `cuArrayCreate` groups below.
 
 Of the 70 entry points Warp asks for, 49 are already exported. The 21 missing
 ones cluster by feature, and most are optional:
@@ -267,9 +274,9 @@ synthetic device.
 
 ## Proposed phasing
 
-**Phase 1 — scalar kernels, source-first.** Defect 1's reduced compiler case is
-fixed; fix defect 2, then export
-`cuGetProcAddress` plus the 5 needed driver entry points. Patch `build_cuda` to
+**Phase 1 — scalar kernels, source-first.** Defects 1 and 2 are fixed and
+`cuGetProcAddress` plus the 5 needed driver entry points are exported
+(2026-09-05). Remaining: patch `build_cuda` to
 call `cumetalc`, and add a `darwin-arm64 + CuMetal` branch to `build_dll.py` so
 `WP_ENABLE_CUDA=1` is expressible. Gate: a handful of `warp/tests` modules
 running green on `device="cuda:0"`.

@@ -22,9 +22,17 @@ All notable changes to CuMetal are documented here. Format follows
   lower to `atomic_fetch_add_explicit` on `device atomic_float`; threadgroup float add/sub use a
   bit-pattern compare-and-swap helper because Metal has no threadgroup float atomics. Float min/max
   and CAS remain explicit diagnostics. Every Warp adjoint kernel depends on this.
+- **`cuMemcpy3DAsync` silently copied nothing.** Its host-func callback re-entered `cuMemcpy3D` on
+  the stream worker thread, which holds no current CUDA context, so the copy failed the context
+  check and the error was discarded. Copy operands are now resolved when the copy is enqueued.
 
 ### Added
 
+- **`cuGetProcAddress`**, resolving against the library's own exported `cu*` symbols, plus
+  `cuMemcpy2D`, `cuMemcpy2DAsync`, `cuMemcpyBatchAsync`, `cuEventRecordWithFlags` and
+  `cuStreamGetCtx`. These are the driver entry points NVIDIA Warp resolves dynamically; with them
+  every Warp entry point outside the OpenGL, IPC, graph-capture and CUDA-array groups is
+  reachable. `functional_driver_proc_address` covers the lookup and each new entry point.
 - NVIDIA Warp Phase 0 feasibility audit (`docs/warp-feasibility.md`).
 
 ## [0.2.1] - 2026-08-26

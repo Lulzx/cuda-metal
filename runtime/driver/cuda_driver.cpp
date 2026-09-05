@@ -10,6 +10,8 @@
 #include "metal_backend.h"
 #include "module_cache.h"
 
+#include <dlfcn.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -671,6 +673,42 @@ CUresult cuInit(unsigned int flags) {
     return CUDA_SUCCESS;
 }
 
+// Driver-API entry-point table. NVIDIA's libcuda answers this with a
+// versioned symbol table; CuMetal exports each entry point once, under its
+// unversioned name, with the CUDA 12 ABI. The lookup therefore resolves
+// against this library's own exported symbols, so a new driver function
+// becomes reachable through cuGetProcAddress the moment it is exported and
+// the table cannot drift from the real surface. The per-thread-default-stream
+// flag has no distinct entry points here: CuMetal's null stream already
+// follows the per-thread policy set at build time.
+CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
+                          uint64_t /*flags*/, CUdriverProcAddressQueryResult* symbolStatus) {
+    if (symbolStatus != nullptr) *symbolStatus = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+    if (symbol == nullptr || pfn == nullptr || cudaVersion < 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *pfn = nullptr;
+    static void* const self_handle = [] {
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<const void*>(&cuGetProcAddress), &info) == 0 ||
+            info.dli_fname == nullptr) {
+            return static_cast<void*>(nullptr);
+        }
+        return dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD);
+    }();
+    if (self_handle == nullptr) return CUDA_ERROR_NOT_FOUND;
+    // CUDA rejects names that are not driver entry points before looking at
+    // the version. Only the exported `cu*` surface is reachable here.
+    if (std::strncmp(symbol, "cu", 2) != 0 || symbol[2] < 'A' || symbol[2] > 'Z') {
+        return CUDA_ERROR_NOT_FOUND;
+    }
+    void* resolved = dlsym(self_handle, symbol);
+    if (resolved == nullptr) return CUDA_ERROR_NOT_FOUND;
+    *pfn = resolved;
+    if (symbolStatus != nullptr) *symbolStatus = CU_GET_PROC_ADDRESS_SUCCESS;
+    return CUDA_SUCCESS;
+}
+
 CUresult cuDriverGetVersion(int* driverVersion) {
     if (driverVersion == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
@@ -1164,6 +1202,24 @@ CUresult cuStreamGetFlags(CUstream hStream, unsigned int* flags) {
         cudaStreamGetFlags(reinterpret_cast<cudaStream_t>(hStream), flags));
 }
 
+CUresult cuStreamGetCtx(CUstream /*hStream*/, CUcontext* pctx) {
+    if (pctx == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    // Every CuMetal stream belongs to the single device's current context;
+    // the driver does not track per-stream contexts separately.
+    DriverState& state = driver_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.initialized) {
+        return CUDA_ERROR_NOT_INITIALIZED;
+    }
+    if (!has_current_context_locked(state)) {
+        return CUDA_ERROR_INVALID_CONTEXT;
+    }
+    *pctx = g_current_context;
+    return CUDA_SUCCESS;
+}
+
 CUresult cuStreamAddCallback(CUstream hStream,
                              CUstreamCallback callback,
                              void* userData,
@@ -1257,6 +1313,16 @@ CUresult cuEventRecord(CUevent hEvent, CUstream hStream) {
     }
     return map_cuda_error(cudaEventRecord(reinterpret_cast<cudaEvent_t>(hEvent),
                                           reinterpret_cast<cudaStream_t>(hStream)));
+}
+
+CUresult cuEventRecordWithFlags(CUevent hEvent, CUstream hStream, unsigned int flags) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    return map_cuda_error(cudaEventRecordWithFlags(reinterpret_cast<cudaEvent_t>(hEvent),
+                                                   reinterpret_cast<cudaStream_t>(hStream),
+                                                   flags));
 }
 
 CUresult cuEventSynchronize(CUevent hEvent) {
@@ -1995,59 +2061,79 @@ CUresult cuMemcpyPeerAsync(CUdeviceptr dstDevice, CUcontext /*dstContext*/,
     return cuMemcpyDtoDAsync(dstDevice, srcDevice, ByteCount, hStream);
 }
 
-CUresult cuMemcpy3D(const CUDA_MEMCPY3D* pCopy) {
-    if (pCopy == nullptr) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) {
-        return ready;
-    }
-    const size_t src_pitch  = pCopy->srcPitch  ? pCopy->srcPitch  : pCopy->WidthInBytes;
-    const size_t dst_pitch  = pCopy->dstPitch  ? pCopy->dstPitch  : pCopy->WidthInBytes;
-    const size_t src_height = pCopy->srcHeight ? pCopy->srcHeight : pCopy->Height;
-    const size_t dst_height = pCopy->dstHeight ? pCopy->dstHeight : pCopy->Height;
-    const size_t src_span = pCopy->Depth == 0 || pCopy->Height == 0
-                                ? 0
-                                : (pCopy->srcZ + pCopy->Depth - 1) * src_pitch * src_height +
-                                      (pCopy->srcY + pCopy->Height - 1) * src_pitch +
-                                      pCopy->srcXInBytes + pCopy->WidthInBytes;
-    const size_t dst_span = pCopy->Depth == 0 || pCopy->Height == 0
-                                ? 0
-                                : (pCopy->dstZ + pCopy->Depth - 1) * dst_pitch * dst_height +
-                                      (pCopy->dstY + pCopy->Height - 1) * dst_pitch +
-                                      pCopy->dstXInBytes + pCopy->WidthInBytes;
-    const char* src_base =
+namespace {
+
+struct ResolvedMemcpy3D {
+    const char* src_base = nullptr;
+    char* dst_base = nullptr;
+    size_t src_pitch = 0;
+    size_t dst_pitch = 0;
+    size_t src_height = 0;
+    size_t dst_height = 0;
+    CUDA_MEMCPY3D copy{};
+};
+
+CUresult resolve_memcpy3d(const CUDA_MEMCPY3D* pCopy, ResolvedMemcpy3D* out) {
+    if (pCopy == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    out->copy = *pCopy;
+    out->src_pitch = pCopy->srcPitch ? pCopy->srcPitch : pCopy->WidthInBytes;
+    out->dst_pitch = pCopy->dstPitch ? pCopy->dstPitch : pCopy->WidthInBytes;
+    out->src_height = pCopy->srcHeight ? pCopy->srcHeight : pCopy->Height;
+    out->dst_height = pCopy->dstHeight ? pCopy->dstHeight : pCopy->Height;
+    if (pCopy->WidthInBytes == 0 || pCopy->Height == 0 || pCopy->Depth == 0) return CUDA_SUCCESS;
+    const size_t src_span =
+        (pCopy->srcZ + pCopy->Depth - 1) * out->src_pitch * out->src_height +
+        (pCopy->srcY + pCopy->Height - 1) * out->src_pitch + pCopy->srcXInBytes + pCopy->WidthInBytes;
+    const size_t dst_span =
+        (pCopy->dstZ + pCopy->Depth - 1) * out->dst_pitch * out->dst_height +
+        (pCopy->dstY + pCopy->Height - 1) * out->dst_pitch + pCopy->dstXInBytes + pCopy->WidthInBytes;
+    out->src_base =
         (pCopy->srcMemoryType == CU_MEMORYTYPE_HOST)
             ? static_cast<const char*>(pCopy->srcHost)
             : static_cast<const char*>(cumetalRuntimeGetHostPointer(
                   reinterpret_cast<const void*>(static_cast<std::uintptr_t>(pCopy->srcDevice)),
                   src_span));
-    char* dst_base =
+    out->dst_base =
         (pCopy->dstMemoryType == CU_MEMORYTYPE_HOST)
             ? static_cast<char*>(pCopy->dstHost)
             : static_cast<char*>(cumetalRuntimeGetHostPointer(
                   reinterpret_cast<const void*>(static_cast<std::uintptr_t>(pCopy->dstDevice)),
                   dst_span));
-
-    if (src_base == nullptr || dst_base == nullptr) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-
-    for (size_t z = 0; z < pCopy->Depth; ++z) {
-        const size_t sz_off = (pCopy->srcZ + z) * src_pitch * src_height;
-        const size_t dz_off = (pCopy->dstZ + z) * dst_pitch * dst_height;
-        for (size_t y = 0; y < pCopy->Height; ++y) {
-            const char* src_row = src_base + sz_off + (pCopy->srcY + y) * src_pitch
-                                + pCopy->srcXInBytes;
-            char*       dst_row = dst_base + dz_off + (pCopy->dstY + y) * dst_pitch
-                                + pCopy->dstXInBytes;
-            std::memcpy(dst_row, src_row, pCopy->WidthInBytes);
-        }
-    }
+    if (out->src_base == nullptr || out->dst_base == nullptr) return CUDA_ERROR_INVALID_VALUE;
     return CUDA_SUCCESS;
 }
 
+void perform_memcpy3d(const ResolvedMemcpy3D& resolved) {
+    const CUDA_MEMCPY3D& copy = resolved.copy;
+    if (copy.WidthInBytes == 0 || copy.Height == 0 || copy.Depth == 0) return;
+    for (size_t z = 0; z < copy.Depth; ++z) {
+        const size_t sz_off = (copy.srcZ + z) * resolved.src_pitch * resolved.src_height;
+        const size_t dz_off = (copy.dstZ + z) * resolved.dst_pitch * resolved.dst_height;
+        for (size_t y = 0; y < copy.Height; ++y) {
+            const char* src_row =
+                resolved.src_base + sz_off + (copy.srcY + y) * resolved.src_pitch + copy.srcXInBytes;
+            char* dst_row =
+                resolved.dst_base + dz_off + (copy.dstY + y) * resolved.dst_pitch + copy.dstXInBytes;
+            std::memcpy(dst_row, src_row, copy.WidthInBytes);
+        }
+    }
+}
+
+}  // namespace
+
+CUresult cuMemcpy3D(const CUDA_MEMCPY3D* pCopy) {
+    if (pCopy == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    ResolvedMemcpy3D resolved;
+    const CUresult status = resolve_memcpy3d(pCopy, &resolved);
+    if (status != CUDA_SUCCESS) return status;
+    perform_memcpy3d(resolved);
+    return CUDA_SUCCESS;
+}
+
+// The host-func callback runs on a worker thread with no current context, so
+// the operands are resolved here rather than by re-entering cuMemcpy3D there.
 CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D* pCopy, CUstream hStream) {
     if (pCopy == nullptr) return CUDA_ERROR_INVALID_VALUE;
     const CUresult ready = require_initialized_context();
@@ -2061,20 +2147,183 @@ CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D* pCopy, CUstream hStream) {
         (pCopy->dstMemoryType == CU_MEMORYTYPE_DEVICE && pCopy->dstDevice == 0)) {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    struct Payload {
-        CUDA_MEMCPY3D copy;
-    };
-    auto* payload = new (std::nothrow) Payload{*pCopy};
+    auto* payload = new (std::nothrow) ResolvedMemcpy3D;
     if (payload == nullptr) return CUDA_ERROR_OUT_OF_MEMORY;
-    const cudaError_t status = cudaLaunchHostFunc(
+    const CUresult status = resolve_memcpy3d(pCopy, payload);
+    if (status != CUDA_SUCCESS) {
+        delete payload;
+        return status;
+    }
+    const cudaError_t launched = cudaLaunchHostFunc(
         reinterpret_cast<cudaStream_t>(hStream),
         +[](void* raw) {
-            std::unique_ptr<Payload> owned(static_cast<Payload*>(raw));
-            (void)cuMemcpy3D(&owned->copy);
+            std::unique_ptr<ResolvedMemcpy3D> owned(static_cast<ResolvedMemcpy3D*>(raw));
+            perform_memcpy3d(*owned);
         },
         payload);
-    if (status != cudaSuccess) delete payload;
-    return map_cuda_error(status);
+    if (launched != cudaSuccess) delete payload;
+    return map_cuda_error(launched);
+}
+
+namespace {
+
+// Resolve a 2D copy operand to a host-visible byte pointer. Device memory is
+// unified on Apple Silicon, so the tracked host mapping is the copy target.
+const char* memcpy2d_source(const CUDA_MEMCPY2D& copy, size_t span) {
+    switch (copy.srcMemoryType) {
+        case CU_MEMORYTYPE_HOST:
+            return static_cast<const char*>(copy.srcHost);
+        case CU_MEMORYTYPE_DEVICE:
+        case CU_MEMORYTYPE_UNIFIED:
+            return static_cast<const char*>(cumetalRuntimeGetHostPointer(
+                reinterpret_cast<const void*>(static_cast<std::uintptr_t>(copy.srcDevice)), span));
+        default:
+            return nullptr;
+    }
+}
+
+char* memcpy2d_destination(const CUDA_MEMCPY2D& copy, size_t span) {
+    switch (copy.dstMemoryType) {
+        case CU_MEMORYTYPE_HOST:
+            return static_cast<char*>(copy.dstHost);
+        case CU_MEMORYTYPE_DEVICE:
+        case CU_MEMORYTYPE_UNIFIED:
+            return static_cast<char*>(cumetalRuntimeGetHostPointer(
+                reinterpret_cast<const void*>(static_cast<std::uintptr_t>(copy.dstDevice)), span));
+        default:
+            return nullptr;
+    }
+}
+
+CUresult validate_memcpy2d(const CUDA_MEMCPY2D* pCopy) {
+    if (pCopy == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    if (pCopy->srcMemoryType == CU_MEMORYTYPE_ARRAY ||
+        pCopy->dstMemoryType == CU_MEMORYTYPE_ARRAY) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    const size_t src_pitch = pCopy->srcPitch ? pCopy->srcPitch : pCopy->WidthInBytes;
+    const size_t dst_pitch = pCopy->dstPitch ? pCopy->dstPitch : pCopy->WidthInBytes;
+    if (pCopy->WidthInBytes > src_pitch || pCopy->WidthInBytes > dst_pitch) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return CUDA_SUCCESS;
+}
+
+}  // namespace
+
+namespace {
+
+struct ResolvedMemcpy2D {
+    const char* src_base = nullptr;
+    char* dst_base = nullptr;
+    size_t src_pitch = 0;
+    size_t dst_pitch = 0;
+    CUDA_MEMCPY2D copy{};
+};
+
+// Host-func callbacks run on a worker thread that holds no current CUDA
+// context, so the operands must be resolved before the copy is enqueued.
+CUresult resolve_memcpy2d(const CUDA_MEMCPY2D* pCopy, ResolvedMemcpy2D* out) {
+    const CUresult valid = validate_memcpy2d(pCopy);
+    if (valid != CUDA_SUCCESS) return valid;
+    out->copy = *pCopy;
+    out->src_pitch = pCopy->srcPitch ? pCopy->srcPitch : pCopy->WidthInBytes;
+    out->dst_pitch = pCopy->dstPitch ? pCopy->dstPitch : pCopy->WidthInBytes;
+    if (pCopy->WidthInBytes == 0 || pCopy->Height == 0) return CUDA_SUCCESS;
+    const size_t src_span =
+        (pCopy->srcY + pCopy->Height - 1) * out->src_pitch + pCopy->srcXInBytes + pCopy->WidthInBytes;
+    const size_t dst_span =
+        (pCopy->dstY + pCopy->Height - 1) * out->dst_pitch + pCopy->dstXInBytes + pCopy->WidthInBytes;
+    out->src_base = memcpy2d_source(*pCopy, src_span);
+    out->dst_base = memcpy2d_destination(*pCopy, dst_span);
+    if (out->src_base == nullptr || out->dst_base == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    return CUDA_SUCCESS;
+}
+
+void perform_memcpy2d(const ResolvedMemcpy2D& resolved) {
+    const CUDA_MEMCPY2D& copy = resolved.copy;
+    if (copy.WidthInBytes == 0 || copy.Height == 0) return;
+    for (size_t y = 0; y < copy.Height; ++y) {
+        const char* src_row =
+            resolved.src_base + (copy.srcY + y) * resolved.src_pitch + copy.srcXInBytes;
+        char* dst_row = resolved.dst_base + (copy.dstY + y) * resolved.dst_pitch + copy.dstXInBytes;
+        std::memmove(dst_row, src_row, copy.WidthInBytes);
+    }
+}
+
+}  // namespace
+
+CUresult cuMemcpy2D(const CUDA_MEMCPY2D* pCopy) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    ResolvedMemcpy2D resolved;
+    const CUresult status = resolve_memcpy2d(pCopy, &resolved);
+    if (status != CUDA_SUCCESS) return status;
+    perform_memcpy2d(resolved);
+    return CUDA_SUCCESS;
+}
+
+CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D* pCopy, CUstream hStream) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    auto* payload = new (std::nothrow) ResolvedMemcpy2D;
+    if (payload == nullptr) return CUDA_ERROR_OUT_OF_MEMORY;
+    const CUresult status = resolve_memcpy2d(pCopy, payload);
+    if (status != CUDA_SUCCESS) {
+        delete payload;
+        return status;
+    }
+    if (payload->copy.WidthInBytes == 0 || payload->copy.Height == 0) {
+        delete payload;
+        return CUDA_SUCCESS;
+    }
+    const cudaError_t launched = cudaLaunchHostFunc(
+        reinterpret_cast<cudaStream_t>(hStream),
+        +[](void* raw) {
+            std::unique_ptr<ResolvedMemcpy2D> owned(static_cast<ResolvedMemcpy2D*>(raw));
+            perform_memcpy2d(*owned);
+        },
+        payload);
+    if (launched != cudaSuccess) delete payload;
+    return map_cuda_error(launched);
+}
+
+CUresult cuMemcpyBatchAsync(CUdeviceptr* dsts, CUdeviceptr* srcs, size_t* sizes, size_t count,
+                            CUmemcpyAttributes* attrs, size_t* attrsIdxs, size_t numAttrs,
+                            size_t* failIdx, CUstream hStream) {
+    if (failIdx != nullptr) *failIdx = SIZE_MAX;
+    if (count == 0) return CUDA_SUCCESS;
+    if (dsts == nullptr || srcs == nullptr || sizes == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    // CUDA requires the attribute index list to start at copy 0 and be
+    // ascending; the attributes themselves are hints on unified memory.
+    if (numAttrs != 0) {
+        if (attrs == nullptr || attrsIdxs == nullptr || attrsIdxs[0] != 0) {
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        for (size_t i = 1; i < numAttrs; ++i) {
+            if (attrsIdxs[i] <= attrsIdxs[i - 1] || attrsIdxs[i] >= count) {
+                return CUDA_ERROR_INVALID_VALUE;
+            }
+        }
+        for (size_t i = 0; i < numAttrs; ++i) {
+            if (attrs[i].srcAccessOrder == CU_MEMCPY_SRC_ACCESS_ORDER_INVALID) {
+                return CUDA_ERROR_INVALID_VALUE;
+            }
+        }
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    for (size_t i = 0; i < count; ++i) {
+        const cudaError_t status = cudaMemcpyAsync(
+            reinterpret_cast<void*>(static_cast<std::uintptr_t>(dsts[i])),
+            reinterpret_cast<const void*>(static_cast<std::uintptr_t>(srcs[i])),
+            sizes[i], cudaMemcpyDefault, reinterpret_cast<cudaStream_t>(hStream));
+        if (status != cudaSuccess) {
+            if (failIdx != nullptr) *failIdx = i;
+            return map_cuda_error(status);
+        }
+    }
+    return CUDA_SUCCESS;
 }
 
 CUresult cuMemGetInfo(size_t* freeBytes, size_t* totalBytes) {
