@@ -183,6 +183,10 @@ typedef enum cudaError {
     cudaErrorCooperativeLaunchTooLarge = 720,
     cudaErrorNotPermitted = 800,
     cudaErrorNotSupported = 801,
+    // What cudart returns when a driver entry point is too new for the
+    // installed driver; hosts that resolve entry points themselves, such as
+    // NVIDIA Warp, return this when a lookup fails.
+    cudaErrorCallRequiresNewerDriver = 803,
     cudaErrorGraphExecUpdateFailure = 910,
     cudaErrorUnknown = 999,
     // Deprecated numbering CUDA keeps for source compatibility. cudaErrorAssert

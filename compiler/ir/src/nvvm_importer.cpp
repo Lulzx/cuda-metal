@@ -1046,14 +1046,28 @@ struct Importer {
                 };
             }
             if (state->output.kernel_abi.has_value()) {
-                const std::uint32_t size = type_size(type);
+                // Clang lowers a by-value aggregate kernel parameter to a
+                // `ptr byval(%T)`, and the Metal signature takes it as a buffer
+                // of the struct's bytes. It is a pointer in the IR but not in
+                // the CUDA ABI: the caller hands cuLaunchKernel a pointer to the
+                // struct itself, not a device address, so the launch has to bind
+                // `size` bytes of it rather than resolve it as an allocation.
+                llvm::Type* const byval_type = argument.getParamByValType();
+                const bool is_byval = byval_type != nullptr;
+                const std::uint32_t size =
+                    is_byval ? static_cast<std::uint32_t>(
+                                   function.getParent()->getDataLayout().getTypeAllocSize(byval_type))
+                             : type_size(type);
                 state->output.kernel_abi->arguments.push_back({
                     .name = name,
-                    .kind = type.is_pointer() ? ArgumentKind::kPointer : ArgumentKind::kScalar,
+                    .kind = is_byval          ? ArgumentKind::kAggregate
+                            : type.is_pointer() ? ArgumentKind::kPointer
+                                                : ArgumentKind::kScalar,
                     .type = type,
                     .size = size,
                     .alignment = std::min<std::uint32_t>(size, 8),
-                    .address_space = type.is_pointer() ? type.address_space : AddressSpace::kConstant,
+                    .address_space = (type.is_pointer() && !is_byval) ? type.address_space
+                                                                      : AddressSpace::kConstant,
                     .binding_indices = {argument_index},
                 });
                 state->output.kernel_abi->bindings.push_back({

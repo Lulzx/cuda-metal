@@ -393,6 +393,19 @@ typedef struct CUDA_ARRAY_DESCRIPTOR_st {
     unsigned int NumChannels;
 } CUDA_ARRAY_DESCRIPTOR;
 
+// CUDA_ARRAY3D_DESCRIPTOR::Flags. CuMetal's cuArray3DCreate reports
+// CUDA_ERROR_NOT_SUPPORTED for every array, so these exist so that callers
+// which name the flags compile; none of them selects behaviour here.
+#define CUDA_ARRAY3D_LAYERED            0x01
+#define CUDA_ARRAY3D_2DARRAY            0x01
+#define CUDA_ARRAY3D_SURFACE_LDST       0x02
+#define CUDA_ARRAY3D_CUBEMAP            0x04
+#define CUDA_ARRAY3D_TEXTURE_GATHER     0x08
+#define CUDA_ARRAY3D_DEPTH_TEXTURE      0x10
+#define CUDA_ARRAY3D_COLOR_ATTACHMENT   0x20
+#define CUDA_ARRAY3D_SPARSE             0x40
+#define CUDA_ARRAY3D_DEFERRED_MAPPING   0x80
+
 typedef struct CUDA_ARRAY3D_DESCRIPTOR_st {
     size_t Width;
     size_t Height;
@@ -478,6 +491,14 @@ typedef struct CUDA_RESOURCE_VIEW_DESC_st {
     unsigned int lastLayer;
     unsigned int reserved[16];
 } CUDA_RESOURCE_VIEW_DESC;
+
+// CUDA_TEXTURE_DESC::flags, for the same reason as the CUDA_ARRAY3D_ flags:
+// cuTexObjectCreate reports CUDA_ERROR_NOT_SUPPORTED regardless of them.
+#define CU_TRSF_READ_AS_INTEGER                 0x01
+#define CU_TRSF_NORMALIZED_COORDINATES          0x02
+#define CU_TRSF_SRGB                            0x10
+#define CU_TRSF_DISABLE_TRILINEAR_OPTIMIZATION  0x20
+#define CU_TRSF_SEAMLESS_CUBEMAP                0x40
 
 typedef struct CUDA_TEXTURE_DESC_st {
     CUaddress_mode addressMode[3];

@@ -132,6 +132,10 @@ CUresult map_cuda_error(cudaError_t error) {
             return CUDA_ERROR_ILLEGAL_ADDRESS;
         case cudaErrorDevicesUnavailable:
             return CUDA_ERROR_DEVICES_UNAVAILABLE;
+        // Neither has a CUresult spelling CuMetal declares; both mean the
+        // request cannot be served by this driver.
+        case cudaErrorCallRequiresNewerDriver:
+        case cudaErrorOperatingSystem:
         case cudaErrorNotSupported:
             return CUDA_ERROR_NOT_SUPPORTED;
         case cudaErrorCudartUnloading:

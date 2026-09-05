@@ -97,7 +97,12 @@ bool is_ignorable(const std::string& option) {
 TranslatedOptions translate_options(const std::vector<std::string>& options) {
     TranslatedOptions result;
     std::vector<std::string> include_dirs;
-    std::vector<std::string> defines;
+    // NVRTC predefines __CUDACC_RTC__ for every program it compiles, and
+    // sources branch on it to skip includes that only a full toolkit has.
+    // CuMetal's device line force-includes cuda_runtime.h, so the declarations
+    // those branches expect to be built in are in fact present. Seeding it here
+    // rather than appending means an explicit `--undefine-macro` still wins.
+    std::vector<std::string> defines{"__CUDACC_RTC__=1"};
     bool arch_seen = false;
 
     const auto add_define = [&defines](const std::string& definition) {

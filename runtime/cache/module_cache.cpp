@@ -137,4 +137,44 @@ bool stage_metallib_bytes(const void* image,
     return true;
 }
 
+
+bool stage_metallib_abi_sidecar(const std::filesystem::path& metallib_path,
+                                const void* sidecar,
+                                std::size_t size,
+                                std::string* error_message) {
+    if (sidecar == nullptr || size == 0 || metallib_path.empty()) {
+        if (error_message != nullptr) {
+            *error_message = "stage_metallib_abi_sidecar invalid argument";
+        }
+        return false;
+    }
+
+    const std::filesystem::path target = metallib_path.string() + ".cumetal-abi";
+    std::error_code ec;
+    if (std::filesystem::exists(target, ec) && !ec && file_size_matches(target, size)) {
+        return true;
+    }
+
+    // Same publish-by-rename as the metallib itself: a reader must never see a
+    // sidecar that is half written, since a truncated one parses as invalid and
+    // sends the launch back to guessing.
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path temp = target.string() + ".tmp." + std::to_string(nonce);
+    if (!write_file_bytes(temp, static_cast<const std::uint8_t*>(sidecar), size, error_message)) {
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+
+    ec.clear();
+    std::filesystem::rename(temp, target, ec);
+    if (ec) {
+        std::filesystem::remove(temp, ec);
+        if (error_message != nullptr) {
+            *error_message = "failed to publish ABI sidecar: " + target.string();
+        }
+        return false;
+    }
+    return true;
+}
+
 }  // namespace cumetal::cache

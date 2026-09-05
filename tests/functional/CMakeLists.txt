@@ -328,6 +328,10 @@ add_executable(cumetal_nested_device_pointer_test
     nested_device_pointer_test.cpp
 )
 
+add_executable(cumetal_byval_aggregate_launch_test
+    byval_aggregate_launch_test.cpp
+)
+
 add_executable(cumetal_driver_module_load_data_ptx_test
     driver_module_load_data_ptx_test.cpp
 )
@@ -991,6 +995,11 @@ target_link_libraries(cumetal_driver_kernel_params_bounds_test
 )
 
 target_link_libraries(cumetal_nested_device_pointer_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_byval_aggregate_launch_test
     PRIVATE
         cumetal_runtime
 )
@@ -2728,6 +2737,17 @@ add_test(
             ${CMAKE_CURRENT_BINARY_DIR}/nested_device_pointer.metallib
 )
 set_tests_properties(functional_nested_device_pointer PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_byval_aggregate_launch
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_byval_aggregate_launch.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/byval_aggregate_launch.cu
+            $<TARGET_FILE:cumetal_byval_aggregate_launch_test>
+            ${CMAKE_CURRENT_BINARY_DIR}/byval_aggregate_launch.metallib
+)
+set_tests_properties(functional_byval_aggregate_launch PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
     NAME functional_texture_descriptor_device

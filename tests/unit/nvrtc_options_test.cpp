@@ -44,6 +44,21 @@ int main() {
             return 1;
         }
         if (!expect(!result.ptx_requested, "no PTX requested by default")) return 1;
+        if (!expect(contains_pair(result.compiler_args, "-D", "__CUDACC_RTC__=1"),
+                    "__CUDACC_RTC__ is predefined as NVRTC does")) {
+            return 1;
+        }
+    }
+
+    // Sources branch on __CUDACC_RTC__ to skip includes a runtime compile has
+    // no toolkit for; a caller that explicitly cancels it gets that honoured.
+    {
+        const TranslatedOptions result =
+            translate_options({"--undefine-macro=__CUDACC_RTC__"});
+        if (!expect(!contains(result.compiler_args, "__CUDACC_RTC__=1"),
+                    "__CUDACC_RTC__ can be undefined by the caller")) {
+            return 1;
+        }
     }
 
     // The option set Warp's wp_cuda_compile_program builds for a release build.
@@ -135,7 +150,8 @@ int main() {
                     "unknown option reported")) {
             return 1;
         }
-        if (!expect(result.compiler_args.size() == 2,
+        // --cuda-arch sm_80 and -D __CUDACC_RTC__=1, and nothing else.
+        if (!expect(result.compiler_args.size() == 4,
                     "unknown option does not reach cumetalc")) {
             return 1;
         }

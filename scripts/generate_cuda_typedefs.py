@@ -128,6 +128,16 @@ def render() -> str:
         lines.append(f"typedef CUresult (CUDAAPI *PFN_{name}_v{VERSIONS[name]})({params});{status}")
     if missing:
         raise SystemExit(f"no signature for: {', '.join(missing)}")
+
+    # NVIDIA's header also spells each name unversioned, resolving to the
+    # typedef for the ABI the toolkit targets. Callers use the short spelling
+    # when they do not care which generation introduced the entry point.
+    lines += [
+        "",
+        "// Unversioned aliases for the CUDA 12 ABI, as NVIDIA's header defines them.",
+    ]
+    for name in sorted(VERSIONS):
+        lines.append(f"#define PFN_{name}  PFN_{name}_v{VERSIONS[name]}")
     lines += ["", "#ifdef __cplusplus", "}", "#endif", "", "#endif  // CUMETAL_CUDA_TYPEDEFS_H", ""]
     return "\n".join(lines)
 
