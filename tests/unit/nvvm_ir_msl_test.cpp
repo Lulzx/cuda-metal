@@ -736,6 +736,47 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmFloatAtomicAsm = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @float_atomic_asm(ptr %total, ptr %old_out, float %value) {
+entry:
+  %old = call float asm sideeffect "atom.global.add.f32 $0, [$1], $2;", "=f,l,f,~{memory}"(ptr %total, float %value)
+  store float %old, ptr %old_out, align 4
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmFloatAtomicRmw = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+@shared_total = internal addrspace(3) global float 0.0, align 4
+
+define ptx_kernel void @float_atomic_rmw(ptr %total, ptr %old_out, float %value) {
+entry:
+  %old = atomicrmw fadd ptr %total, float %value monotonic, align 4
+  store float %old, ptr %old_out, align 4
+  %shared = addrspacecast ptr addrspace(3) @shared_total to ptr
+  %shared_old = atomicrmw fsub ptr %shared, float %value monotonic, align 4
+  %slot = getelementptr float, ptr %old_out, i64 1
+  store float %shared_old, ptr %slot, align 4
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmFloatAtomicMax = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @float_atomic_max(ptr %total, float %value) {
+entry:
+  %old = atomicrmw fmax ptr %total, float %value monotonic, align 4
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmCudaCmpXchg = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1720,6 +1761,47 @@ int main() {
                          "atomic_compare_exchange_weak_explicit") !=
                          std::string::npos,
                  "CUDA cmpxchg imports its old-value and success tuple through a retrying Metal CAS");
+
+    const metal::NvvmToMslResult float_atomic_asm =
+        metal::compile_nvvm_to_msl(kNvvmFloatAtomicAsm,
+                                   "float-atomic-asm.ll", "float_atomic_asm");
+    ok &= expect(float_atomic_asm.ok &&
+                     float_atomic_asm.source.find(
+                         "atomic_fetch_add_explicit(reinterpret_cast<device atomic_float*>") !=
+                         std::string::npos &&
+                     float_atomic_asm.source.find("memory_order_relaxed") !=
+                         std::string::npos,
+                 "the CUDA overlay's inline-PTX float atomicAdd lowers to Metal's native "
+                 "device atomic_float add: " + float_atomic_asm.error);
+
+    const metal::NvvmToMslResult float_atomic_rmw =
+        metal::compile_nvvm_to_msl(kNvvmFloatAtomicRmw,
+                                   "float-atomic-rmw.ll", "float_atomic_rmw");
+    ok &= expect(float_atomic_rmw.ok &&
+                     float_atomic_rmw.source.find(
+                         "atomic_fetch_add_explicit(reinterpret_cast<device atomic_float*>") !=
+                         std::string::npos &&
+                     float_atomic_rmw.source.find(
+                         "cm_atomic_fadd_threadgroup(reinterpret_cast<threadgroup atomic_uint*>") !=
+                         std::string::npos &&
+                     float_atomic_rmw.source.find(
+                         "float cm_atomic_fadd_threadgroup(threadgroup atomic_uint* pointer, float value)") !=
+                         std::string::npos &&
+                     float_atomic_rmw.source.find("atomic_compare_exchange_weak_explicit") !=
+                         std::string::npos &&
+                     float_atomic_rmw.source.find("atomic_float*>(cm_shared") ==
+                         std::string::npos,
+                 "atomicrmw fadd/fsub lower to native device atomic_float and a "
+                 "threadgroup CAS helper: " + float_atomic_rmw.error);
+
+    const metal::NvvmToMslResult float_atomic_max =
+        metal::compile_nvvm_to_msl(kNvvmFloatAtomicMax,
+                                   "float-atomic-max.ll", "float_atomic_max");
+    ok &= expect(!float_atomic_max.ok &&
+                     float_atomic_max.error.find(
+                         "unsupported Metal float atomic operation 'fmax'") !=
+                         std::string::npos,
+                 "float atomic min/max remain an explicit diagnostic");
     if (!cuda_cmpxchg.ok) std::cerr << cuda_cmpxchg.error << "\n";
 
     const metal::NvvmToMslResult cuda_cmpxchg64_helper =

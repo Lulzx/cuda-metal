@@ -168,9 +168,10 @@ indexing, `wp::load`, `wp::array_store`, and the launch-bounds struct — the
 spine of every Warp kernel. It works today.
 
 **Did not compile at the audit baseline:** the same kernel with
-`dtype=wp.vec3`, which exposed defect 1. The reduced case is fixed in the
-current working tree; the generated Warp kernel still needs a fresh downstream
-rerun.
+`dtype=wp.vec3`, which exposed defect 1. **Rerun 2026-09-05:** after the
+defect-1 and defect-2 fixes, both the `float` and `vec3` generated modules
+compile end to end to validated metallibs, forward and backward kernels
+included, with `texture.h` stubbed out of `builtin.h` (defect 3).
 
 Two upstream frictions were also needed to get that far, both one-liners:
 
@@ -204,7 +205,14 @@ they were prematurely treated as private instead of resolving from each use's
 device base. The focused IR test and a direct `.cu` frontend fixture now pass.
 
 **2. `atomicAdd(float*, float)` cannot be compiled on the default path.**
-Blocking for any reduction or force accumulation.
+Blocking for any reduction or force accumulation. **Resolved (2026-09-05):**
+the source-first path now lowers the overlay's inline `atom.global.add.f32`,
+`atomicrmw fadd`/`fsub`, and PTX `atom.add.f32` to Metal's native device
+`atomic_float`; threadgroup float add uses a bit-pattern CAS helper because no
+Metal language version has threadgroup float atomics. With that, the generated
+`kf`/`kv` modules below compile to metallibs *including their adjoint kernels*.
+`tests/cuda_projects/float_atomics` is the numeric check; texture.h (defect 3)
+must still be stubbed out of the include set.
 
 ```cuda
 extern "C" __global__ void k(float* out, const float* in) { atomicAdd(out, in[threadIdx.x]); }

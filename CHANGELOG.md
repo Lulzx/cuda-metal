@@ -15,6 +15,13 @@ All notable changes to CuMetal are documented here. Format follows
   legalizer rejected them with `host-populated pointer field reaches a conflicting concrete address
   space`. Generic status now propagates to those synthetic pointers. This was the blocker for nearly
   every generated NVIDIA Warp kernel; see `docs/warp-feasibility.md`.
+- **`atomicAdd(float*, float)` did not compile on the source-first path.** The CUDA overlay spells
+  it as inline `atom.global.add.f32` so the PTX path selects Metal's native float atomic, and the
+  `cumetal-ir` backend rejected its own asm; `__fAtomicAdd` (`atomicrmw fadd`) then failed in Metal
+  atomic lowering, which accepted only integer payloads. Both spellings, and PTX `atom.add.f32`, now
+  lower to `atomic_fetch_add_explicit` on `device atomic_float`; threadgroup float add/sub use a
+  bit-pattern compare-and-swap helper because Metal has no threadgroup float atomics. Float min/max
+  and CAS remain explicit diagnostics. Every Warp adjoint kernel depends on this.
 
 ### Added
 

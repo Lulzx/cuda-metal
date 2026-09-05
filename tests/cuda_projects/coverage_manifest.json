@@ -191,6 +191,13 @@
       "source": "wide_atomics.cu",
       "binary": "wide_atomics",
       "harness": "standard"
+    },
+    {
+      "name": "float_atomics",
+      "subdir": "float_atomics",
+      "source": "float_atomics.cu",
+      "binary": "float_atomics",
+      "harness": "standard"
     }
   ]
 }

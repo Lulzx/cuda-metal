@@ -9,7 +9,8 @@ switch_source=$5
 float_abs_source=$6
 float_math_source=$7
 byval_aggregate_memcpy_source=$8
-nvcc=$9
+float_atomic_add_source=$9
+nvcc=${10}
 
 workdir=$(mktemp -d "${TMPDIR:-/tmp}/cumetalc-shared-ir.XXXXXX")
 trap 'rm -rf "$workdir"' EXIT
@@ -47,6 +48,15 @@ test "$(grep -o 'fabs(' "$workdir/float_abs.metal" | wc -l | tr -d ' ')" -ge 2
     --overwrite -o "$workdir/byval_aggregate_memcpy.metal"
 grep -q 'kernel void byval_aggregate_memcpy' "$workdir/byval_aggregate_memcpy.metal"
 grep -q 'reinterpret_cast<device uint\*>' "$workdir/byval_aggregate_memcpy.metal"
+
+"$cumetalc" "$float_atomic_add_source" --backend=cumetal-ir --emit=msl \
+    --overwrite -o "$workdir/float_atomic_add.metal"
+grep -q 'kernel void cuda_float_atomic_add' "$workdir/float_atomic_add.metal"
+test "$(grep -o 'reinterpret_cast<device atomic_float\*>' "$workdir/float_atomic_add.metal" | wc -l | tr -d ' ')" -ge 2
+if grep -qE 'cm_atomic_cas|atomic_compare_exchange' "$workdir/float_atomic_add.metal"; then
+    echo "device float atomicAdd regressed to a CAS loop on the source-first path" >&2
+    exit 1
+fi
 
 # NVIDIA's C++ overlay selects binary32 for unsuffixed rsqrt/fma calls. A
 # missing overload silently inserts f32->f64->f32 conversions and the double

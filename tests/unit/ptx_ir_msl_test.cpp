@@ -997,6 +997,29 @@ BODY:
     ok &= expect(reciprocal.ok && reciprocal.source.find(" / ") != std::string::npos,
                  "PTX reciprocal lowers to a typed floating division");
 
+    const std::string atomic_f32_ptx = R"ptx(
+.version 8.8
+.target sm_80
+.address_size 64
+.visible .entry atomic_f32(.param .u64 output) {
+    .reg .f32 %f<3>;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    mov.f32 %f1, 0f3F800000;
+    atom.global.add.f32 %f2, [%rd1], %f1;
+    st.global.f32 [%rd1+4], %f2;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult atomic_f32 =
+        metal::compile_ptx_to_msl(atomic_f32_ptx);
+    ok &= expect(atomic_f32.ok &&
+                     atomic_f32.source.find(
+                         "atomic_fetch_add_explicit(reinterpret_cast<device atomic_float*>") !=
+                         std::string::npos,
+                 "PTX atom.add.f32 lowers to Metal's native device atomic_float add: " +
+                     atomic_f32.error);
+
     const std::string atomic32_ptx = R"ptx(
 .version 8.8
 .target sm_80

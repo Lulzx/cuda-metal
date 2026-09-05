@@ -84,6 +84,54 @@ MslType atomic_uint_type() {
     return MslType{.kind = MslTypeKind::kStruct, .struct_name = "atomic_uint"};
 }
 
+// Metal has native atomic_float add/sub/exchange in device storage only. A
+// threadgroup float add is a compare-and-swap loop over the value's bit
+// pattern: each retry recomputes the sum from the freshly observed word, so the
+// result is the same sequence of correctly rounded adds a native atomic gives.
+MslFunction make_threadgroup_float_add_helper() {
+    const MslType atomic_uint = {
+        .kind = MslTypeKind::kStruct,
+        .struct_name = "atomic_uint",
+    };
+    const MslType atomic_pointer =
+        MslType::pointer(atomic_uint, MslAddressSpace::kThreadgroup);
+    const MslType memory_order = {
+        .kind = MslTypeKind::kStruct,
+        .struct_name = "memory_order",
+    };
+    const MslType f32 = MslType::floating();
+    const MslExpr pointer = MslExpression::identifier("pointer", atomic_pointer);
+    const MslExpr value = MslExpression::identifier("value", f32);
+    const MslExpr expected = MslExpression::identifier("expected", MslType::uint());
+    const MslExpr expected_pointer = MslExpression::unary(
+        "&", expected, MslType::pointer(MslType::uint(), MslAddressSpace::kThread));
+    const MslExpr relaxed =
+        MslExpression::identifier("memory_order_relaxed", memory_order);
+    const MslExpr desired = MslExpression::bitcast(
+        MslType::uint(),
+        MslExpression::binary("+", MslExpression::bitcast(f32, expected), value, f32));
+    const MslExpr exchanged = MslExpression::call(
+        "atomic_compare_exchange_weak_explicit",
+        {pointer, expected_pointer, desired, relaxed, relaxed},
+        MslType::boolean());
+
+    MslFunction helper;
+    helper.name = "cm_atomic_fadd_threadgroup";
+    helper.return_type = f32;
+    helper.parameters = {
+        {.type = atomic_pointer, .name = "pointer"},
+        {.type = f32, .name = "value"},
+    };
+    helper.statements.push_back(MslStatement::variable(
+        MslType::uint(), "expected",
+        MslExpression::call("atomic_load_explicit", {pointer, relaxed}, MslType::uint())));
+    helper.statements.push_back(MslStatement::while_statement(
+        MslExpression::unary("!", exchanged, MslType::boolean()), {}));
+    helper.statements.push_back(
+        MslStatement::return_statement(MslExpression::bitcast(f32, expected)));
+    return helper;
+}
+
 MslType memory_order_type() {
     return MslType{.kind = MslTypeKind::kStruct, .struct_name = "memory_order"};
 }
@@ -2718,18 +2766,111 @@ struct AstLowerer {
         }
 
         if (operation.opcode == ir::OpCode::kMetalAtomic) {
-            if (operation.results.size() != 1 || operation.result_types.size() != 1 ||
-                operation.result_types.front().kind != ir::TypeKind::kInteger ||
-                (operation.result_types.front().bit_width != 32 &&
-                 operation.result_types.front().bit_width != 64)) {
+            const bool float_result =
+                operation.results.size() == 1 && operation.result_types.size() == 1 &&
+                operation.result_types.front().kind == ir::TypeKind::kFloat &&
+                operation.result_types.front().bit_width == 32;
+            if (!float_result &&
+                (operation.results.size() != 1 || operation.result_types.size() != 1 ||
+                 operation.result_types.front().kind != ir::TypeKind::kInteger ||
+                 (operation.result_types.front().bit_width != 32 &&
+                  operation.result_types.front().bit_width != 64))) {
                 fail(&operation,
-                     "Metal atomic lowering requires one 32-bit or lock-backed 64-bit "
-                     "integer result");
+                     "Metal atomic lowering requires one 32-bit integer or float, or "
+                     "lock-backed 64-bit integer result");
                 return std::nullopt;
             }
             const auto atomic_op = operation.attributes.find("atomic_op");
             const std::string operation_name =
                 atomic_op == operation.attributes.end() ? std::string{} : atomic_op->second;
+            if (float_result) {
+                // Metal exposes atomic_float with add, sub and exchange in
+                // device and threadgroup storage; there is no native float
+                // min/max/CAS, so those stay explicit diagnostics.
+                static const std::unordered_map<std::string, std::string> kFloatAtomicCallees = {
+                    {"add", "atomic_fetch_add_explicit"},
+                    {"sub", "atomic_fetch_sub_explicit"},
+                    {"exch", "atomic_exchange_explicit"},
+                    {"xchg", "atomic_exchange_explicit"},
+                };
+                const auto mapped = kFloatAtomicCallees.find(operation_name);
+                if (mapped == kFloatAtomicCallees.end()) {
+                    fail(&operation, "unsupported Metal float atomic operation '" +
+                                         (operation_name.empty() ? std::string("<missing>")
+                                                                 : operation_name) +
+                                         "'");
+                    return std::nullopt;
+                }
+                if (operation.operands.size() != 2) {
+                    fail(&operation, "Metal float atomic '" + operation_name +
+                                         "' requires 2 operands");
+                    return std::nullopt;
+                }
+                if (operation.memory_ordering != ir::MemoryOrdering::kRelaxed) {
+                    fail(&operation,
+                         "Metal atomic lowering currently requires relaxed CUDA ordering");
+                    return std::nullopt;
+                }
+                const MslExpr raw_pointer = expression_for(operation.operands.front());
+                const MslAddressSpace address_space =
+                    raw_pointer->type.kind == MslTypeKind::kPointer
+                        ? raw_pointer->type.address_space
+                        : lower_address_space(operation.operands.front().type.address_space);
+                if (address_space != MslAddressSpace::kDevice &&
+                    address_space != MslAddressSpace::kThreadgroup) {
+                    fail(&operation, "Metal atomics require device or threadgroup storage");
+                    return std::nullopt;
+                }
+                const MslExpr ordering = MslExpression::identifier(
+                    "memory_order_relaxed", MslType{
+                                                .kind = MslTypeKind::kStruct,
+                                                .struct_name = "memory_order",
+                                            });
+                const MslType value_type = MslType::floating();
+                const MslExpr value = MslExpression::cast(
+                    value_type, expression_for(operation.operands[1]));
+                if (address_space == MslAddressSpace::kThreadgroup) {
+                    // No threadgroup atomic_float exists in any Metal language
+                    // version; operate on the word's bit pattern instead.
+                    const MslExpr word_pointer = MslExpression::cast(
+                        MslType::pointer(MslType{.kind = MslTypeKind::kStruct,
+                                                 .struct_name = "atomic_uint"},
+                                         address_space),
+                        raw_pointer, true);
+                    if (operation_name == "add" || operation_name == "sub") {
+                        const MslExpr addend =
+                            operation_name == "sub"
+                                ? MslExpression::unary("-", value, value_type)
+                                : value;
+                        return declare_result(
+                            operation,
+                            MslExpression::call("cm_atomic_fadd_threadgroup",
+                                                {word_pointer, addend}, value_type));
+                    }
+                    return declare_result(
+                        operation,
+                        MslExpression::bitcast(
+                            value_type,
+                            MslExpression::call(
+                                "atomic_exchange_explicit",
+                                {word_pointer,
+                                 MslExpression::bitcast(MslType::uint(), value),
+                                 ordering},
+                                MslType::uint())));
+                }
+                const MslType atomic_float = {
+                    .kind = MslTypeKind::kStruct,
+                    .struct_name = "atomic_float",
+                };
+                const MslExpr pointer = MslExpression::cast(
+                    MslType::pointer(atomic_float, address_space), raw_pointer, true);
+                return declare_result(
+                    operation,
+                    MslExpression::call(
+                        mapped->second,
+                        {pointer, value, ordering},
+                        value_type));
+            }
             static const std::unordered_map<std::string, std::string> kAtomicCallees = {
                 {"add", "atomic_fetch_add_explicit"},
                 {"sub", "atomic_fetch_sub_explicit"},
@@ -4538,6 +4679,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     bool needs_device_cas = false;
     bool needs_threadgroup_cas = false;
     bool needs_fp64_support = false;
+    bool needs_threadgroup_float_add = false;
     std::unordered_set<std::string> wide_atomic_helpers;
     std::vector<MslFunction> wide_atomic_helper_functions;
     for (const ir::Function& function : metal_module.functions) {
@@ -4576,6 +4718,17 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                         }
                     }
                 }
+                if (operation.opcode == ir::OpCode::kMetalAtomic &&
+                    operation.result_types.size() == 1 &&
+                    operation.result_types.front().kind == ir::TypeKind::kFloat &&
+                    operation.attributes.contains("atomic_op") &&
+                    (operation.attributes.at("atomic_op") == "add" ||
+                     operation.attributes.at("atomic_op") == "sub") &&
+                    !operation.operands.empty() &&
+                    lower_address_space(operation.operands.front().type.address_space) ==
+                        MslAddressSpace::kThreadgroup) {
+                    needs_threadgroup_float_add = true;
+                }
                 if (operation.opcode != ir::OpCode::kMetalAtomic ||
                     !operation.attributes.contains("atomic_op") ||
                     operation.attributes.at("atomic_op") != "cas" ||
@@ -4597,6 +4750,9 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     if (needs_threadgroup_cas) {
         result.ast.functions.push_back(
             make_atomic_cas_u32_helper(MslAddressSpace::kThreadgroup));
+    }
+    if (needs_threadgroup_float_add) {
+        result.ast.functions.push_back(make_threadgroup_float_add_helper());
     }
     result.ast.functions.insert(result.ast.functions.end(),
                                 wide_atomic_helper_functions.begin(),

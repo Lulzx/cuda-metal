@@ -1302,6 +1302,15 @@ struct Importer {
         return successor;
     }
 
+    static bool is_float_atomic_add_asm(const llvm::CallBase& call) {
+        if (!call.isInlineAsm()) return false;
+        const auto* assembly = llvm::dyn_cast<llvm::InlineAsm>(call.getCalledOperand());
+        if (assembly == nullptr) return false;
+        const std::string text = llvm::StringRef(assembly->getAsmString()).str();
+        return text.find("atom.global.add.f32") != std::string::npos ||
+               text.find("atom.add.f32") != std::string::npos;
+    }
+
     bool import_call(const llvm::CallBase& call, FunctionState* state, Operation* operation) {
         if (call.isInlineAsm()) {
             const auto* assembly = llvm::dyn_cast<llvm::InlineAsm>(call.getCalledOperand());
@@ -2281,6 +2290,25 @@ struct Importer {
                 // LLVM optimization passes and has no runtime GPU semantics.
                 return true;
             }
+            if (is_float_atomic_add_asm(*call)) {
+                // CuMetal's CUDA overlay spells `atomicAdd(float*, float)` as
+                // `atom.global.add.f32` so the PTX path selects Metal's native
+                // float atomic instead of a CAS loop. Give the source-first
+                // path the same operation rather than rejecting its own asm.
+                if (call->arg_size() != 2) {
+                    return fail(&instruction, "malformed float atomic add inline assembly");
+                }
+                operation.opcode = OpCode::kAtomic;
+                operation.operands.push_back(import_pointer_operand(
+                    *call->getArgOperand(0), state, output_block, operation.location));
+                operation.operands.push_back(import_operand(*call->getArgOperand(1), *state));
+                operation.attributes["atomic_op"] = "add";
+                operation.attributes["cuda_legacy_atomic"] = "true";
+                operation.memory_scope = MemoryScope::kDevice;
+                operation.memory_ordering = MemoryOrdering::kRelaxed;
+                output_block->operations.push_back(std::move(operation));
+                return true;
+            }
             if (!import_call(*call, state, &operation)) return false;
         } else if (const auto* atomic = llvm::dyn_cast<llvm::AtomicRMWInst>(&instruction)) {
             operation.opcode = OpCode::kAtomic;
@@ -2289,6 +2317,13 @@ struct Importer {
             operation.operands.push_back(import_operand(*atomic->getValOperand(), *state));
             operation.attributes["atomic_op"] =
                 llvm::AtomicRMWInst::getOperationName(atomic->getOperation()).str();
+            // Floating add/sub lower to Metal's atomic_float family; the
+            // integer spelling of the operation is what the backend keys on.
+            if (atomic->getOperation() == llvm::AtomicRMWInst::FAdd) {
+                operation.attributes["atomic_op"] = "add";
+            } else if (atomic->getOperation() == llvm::AtomicRMWInst::FSub) {
+                operation.attributes["atomic_op"] = "sub";
+            }
             if (atomic->getOperation() == llvm::AtomicRMWInst::Max ||
                 atomic->getOperation() == llvm::AtomicRMWInst::Min) {
                 operation.attributes["signed"] = "true";

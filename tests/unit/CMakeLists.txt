@@ -389,6 +389,7 @@ add_test(
             ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cuda_float_abs.cu
             ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cuda_float_math_overloads.cu
             ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/byval_aggregate_memcpy.cu
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cuda_float_atomic_add.cu
             ${CMAKE_BINARY_DIR}/cumetal-cuda-toolkit/bin/nvcc
 )
 

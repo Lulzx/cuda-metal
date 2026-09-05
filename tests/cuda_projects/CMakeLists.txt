@@ -292,6 +292,15 @@ cumetal_add_cuda_project_test(
     wide_atomics wide_atomics.cu wide_atomics
 )
 
+# Float atomics. Metal has native atomic_float add/sub/exchange in device and
+# threadgroup storage; the source-first path used to reject CuMetal's own
+# inline-PTX spelling of float atomicAdd. Exact integer-valued sums prove the
+# lowering is a real atomic, not a racing read-modify-write.
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_float_atomics
+    float_atomics float_atomics.cu float_atomics
+)
+
 add_test(
     NAME functional_cuda_projects_wide_atomics_typed_ptx
     COMMAND bash
