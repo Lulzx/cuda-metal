@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(cumetal VERSION 0.4.0 LANGUAGES C CXX OBJCXX)
+project(cumetal VERSION 0.5.0 LANGUAGES C CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

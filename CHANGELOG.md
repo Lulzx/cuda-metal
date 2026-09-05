@@ -6,6 +6,8 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-05
+
 ### Fixed
 
 - **A float `selp` returned its operand's bit pattern as a number.** PTX keeps float temporaries in

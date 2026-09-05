@@ -2,6 +2,9 @@
 
 [Documentation index](../README.md)
 
+- [v0.5.0](v0.5.0.md) — NVIDIA Warp's CUDA sources compile end to end, an
+  NVRTC surface, dynamic driver resolution, and three silent miscompilations
+  fixed
 - [v0.4.0](v0.4.0.md) — source-first compiler closure, runtime and library
   robustness, AIR tooling, and strict negative-path validation
 - [v0.3.0](v0.3.0.md) — CUDA-samples closure, virtual FP64 integration,
