@@ -2783,6 +2783,13 @@ struct AstLowerer {
             const auto atomic_op = operation.attributes.find("atomic_op");
             const std::string operation_name =
                 atomic_op == operation.attributes.end() ? std::string{} : atomic_op->second;
+            // A lowered operand may arrive as a reference to the scalar rather
+            // than the scalar itself, so classify by what it refers to.
+            const auto scalar_kind = [](const MslType& type) {
+                return type.kind == MslTypeKind::kReference && type.element != nullptr
+                           ? type.element->kind
+                           : type.kind;
+            };
             if (float_result) {
                 // Metal exposes atomic_float with add, sub and exchange in
                 // device and threadgroup storage; there is no native float
@@ -2827,8 +2834,28 @@ struct AstLowerer {
                                                 .struct_name = "memory_order",
                                             });
                 const MslType value_type = MslType::floating();
-                const MslExpr value = MslExpression::cast(
-                    value_type, expression_for(operation.operands[1]));
+                // PTX keeps float temporaries in `.b32` registers, so the
+                // payload frequently arrives typed as an integer holding the
+                // value's bit pattern. `float(x)` would then convert the bit
+                // pattern as a number -- atomicAdd(p, 1.0f) became an add of
+                // 1065353216.0f, and the sums came back as garbage rather than
+                // as an obvious failure. Reinterpret those bits instead, and
+                // only convert what is already floating-point.
+                const MslExpr raw_value = expression_for(operation.operands[1]);
+                MslExpr value;
+                const MslTypeKind payload_kind = scalar_kind(raw_value->type);
+                if (payload_kind == MslTypeKind::kFloat) {
+                    value = raw_value;
+                } else if (payload_kind == MslTypeKind::kInt ||
+                           payload_kind == MslTypeKind::kUInt) {
+                    value = MslExpression::bitcast(value_type, raw_value);
+                } else {
+                    fail(&operation,
+                         "Metal float atomic payload must be a float or a 32-bit integer "
+                         "bit pattern, got " +
+                             raw_value->type.str());
+                    return std::nullopt;
+                }
                 if (address_space == MslAddressSpace::kThreadgroup) {
                     // No threadgroup atomic_float exists in any Metal language
                     // version; operate on the word's bit pattern instead.
@@ -2976,6 +3003,39 @@ struct AstLowerer {
                                             .kind = MslTypeKind::kStruct,
                                             .struct_name = "memory_order",
                                         });
+            const MslType word_type = is_signed ? MslType::sint() : MslType::uint();
+            // An integer atomic can carry a float payload: clang expands a
+            // float atomicAdd that the target cannot do natively into a CAS
+            // loop over the value's bits, so the comparand and the desired
+            // value arrive as floats. Converting those numerically would store
+            // the truncated number where the bit pattern belongs -- an
+            // accumulator ending at 2.8e-45, the float whose bits are 2. Take
+            // the bits.
+            const auto atomic_word = [&](const ir::Operand& source) {
+                const MslExpr expression = expression_for(source);
+                const MslTypeKind kind = scalar_kind(expression->type);
+                if (kind == MslTypeKind::kFloat || kind == MslTypeKind::kHalf ||
+                    kind == MslTypeKind::kDouble) {
+                    return MslExpression::bitcast(word_type, expression);
+                }
+                if (expression->type == word_type) {
+                    return expression;
+                }
+                return MslExpression::cast(word_type, expression);
+            };
+            // The word an atomic returns is the storage's bit pattern for the
+            // same reason, so a float-typed result reinterprets rather than
+            // converts.
+            const auto atomic_result = [&](MslExpr call) {
+                const MslType result_type = lower_result_type(operation);
+                if (result_type == word_type) return call;
+                const MslTypeKind result_kind = scalar_kind(result_type);
+                if (result_kind == MslTypeKind::kFloat || result_kind == MslTypeKind::kHalf ||
+                    result_kind == MslTypeKind::kDouble) {
+                    return MslExpression::bitcast(result_type, std::move(call));
+                }
+                return MslExpression::cast(result_type, std::move(call));
+            };
             if (is_cas) {
                 const std::string helper =
                     address_space == MslAddressSpace::kThreadgroup
@@ -2983,24 +3043,15 @@ struct AstLowerer {
                         : "cm_atomic_cas_device_u32";
                 return declare_result(
                     operation,
-                    MslExpression::call(
+                    atomic_result(MslExpression::call(
                         helper,
-                        {pointer, expression_for(operation.operands[1]),
-                         expression_for(operation.operands[2])},
-                        lower_result_type(operation)));
+                        {pointer, atomic_word(operation.operands[1]),
+                         atomic_word(operation.operands[2])},
+                        word_type)));
             }
-            const MslType value_type = is_signed ? MslType::sint() : MslType::uint();
             MslExpr call = MslExpression::call(
-                callee,
-                {pointer,
-                 MslExpression::cast(value_type,
-                                     expression_for(operation.operands[1])),
-                 ordering},
-                value_type);
-            if (is_signed) {
-                call = MslExpression::cast(lower_result_type(operation), call);
-            }
-            return declare_result(operation, std::move(call));
+                callee, {pointer, atomic_word(operation.operands[1]), ordering}, word_type);
+            return declare_result(operation, atomic_result(std::move(call)));
         }
 
         if (operation.opcode == ir::OpCode::kMetalReduction) {

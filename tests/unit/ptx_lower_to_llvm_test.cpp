@@ -2483,6 +2483,100 @@ $L_done:
         return 1;
     }
 
+    // A float atomic on threadgroup storage must not reach AIR as `atomicrmw
+    // fadd ... addrspace(3)`. Metal has no threadgroup float atomic, and the
+    // toolchain accepts that instruction and drops the add, so a __shared__
+    // accumulator silently keeps its initial value. It has to become the same
+    // compare-and-swap loop MSL spells by hand.
+    const std::string threadgroup_float_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry shared_accumulate(
+    .param .u64 shared_accumulate_param_0
+)
+{
+    .reg .b32 %r<4>;
+    .reg .b64 %rd<6>;
+    .shared .align 4 .f32 shared_total;
+
+    ld.param.b64 %rd1, [shared_accumulate_param_0];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.b64 %rd4, shared_total;
+    cvta.shared.u64 %rd3, %rd4;
+    mov.b32 %r2, 1065353216;
+    atom.global.add.f32 %r1, [%rd3], %r2;
+    st.global.b32 [%rd2], %r1;
+    ret;
+}
+)PTX";
+
+    cumetal::ptx::LowerToLlvmOptions threadgroup_float_options;
+    threadgroup_float_options.entry_name = "shared_accumulate";
+    threadgroup_float_options.strict = true;
+    const auto threadgroup_float_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(threadgroup_float_ptx, threadgroup_float_options);
+    if (!expect(threadgroup_float_lowered.ok &&
+                    contains(threadgroup_float_lowered.llvm_ir,
+                             "@air.atomic.local.cmpxchg.weak.i32") &&
+                    contains(threadgroup_float_lowered.llvm_ir,
+                             "@air.atomic.local.load.i32") &&
+                    !contains(threadgroup_float_lowered.llvm_ir,
+                              "atomicrmw fadd float addrspace(3)"),
+                "threadgroup float add lowers to an AIR compare-and-swap loop")) {
+        if (!threadgroup_float_lowered.ok) {
+            std::fprintf(stderr, "  error: %s\n", threadgroup_float_lowered.error.c_str());
+        }
+        return 1;
+    }
+
+    // The pointer's state space, not the instruction's qualifier, decides where
+    // the atomic lands: CuMetal's own overlay spells atomicAdd(float*) as
+    // `atom.global.add.f32` even when the argument came from cvta.shared.
+    if (!expect(contains(threadgroup_float_lowered.llvm_ir, "i32 addrspace(3)*") &&
+                    !contains(threadgroup_float_lowered.llvm_ir,
+                              "atomicrmw fadd float addrspace(1)"),
+                "a cvta.shared pointer keeps threadgroup storage through the atomic")) {
+        return 1;
+    }
+
+    // The device case must keep using the native float atomic.
+    const std::string device_float_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry device_accumulate(
+    .param .u64 device_accumulate_param_0
+)
+{
+    .reg .b32 %r<4>;
+    .reg .b64 %rd<4>;
+
+    ld.param.b64 %rd1, [device_accumulate_param_0];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.b32 %r2, 1065353216;
+    atom.global.add.f32 %r1, [%rd2], %r2;
+    ret;
+}
+)PTX";
+
+    cumetal::ptx::LowerToLlvmOptions device_float_options;
+    device_float_options.entry_name = "device_accumulate";
+    device_float_options.strict = true;
+    const auto device_float_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(device_float_ptx, device_float_options);
+    if (!expect(device_float_lowered.ok &&
+                    contains(device_float_lowered.llvm_ir,
+                             "atomicrmw fadd float addrspace(1)") &&
+                    !contains(device_float_lowered.llvm_ir,
+                              "@air.atomic.local.cmpxchg.weak.i32"),
+                "device float add keeps Metal's native atomic_float")) {
+        if (!device_float_lowered.ok) {
+            std::fprintf(stderr, "  error: %s\n", device_float_lowered.error.c_str());
+        }
+        return 1;
+    }
+
     std::printf("PASS: ptx lower-to-llvm unit tests\n");
     return 0;
 }

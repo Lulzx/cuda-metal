@@ -7114,6 +7114,97 @@ class GenericLlvmEmitter {
     // iteration finishes and releases within that same iteration, and only then
     // does the group go round again for the losers. Spinning *inside* the
     // acquire, the shape a naive lock takes, deadlocks a SIMD group instead.
+    // Metal has no threadgroup float atomic in any language version. MSL spells
+    // one as a compare-and-swap loop over the word's bit pattern, and AIR gives
+    // it the same shape: air.atomic.local.cmpxchg.weak.i32 returns the observed
+    // value and writes it back through the expected slot, so the retry
+    // recomputes the sum from what it just saw.
+    //
+    // Emitting `atomicrmw fadd` on addrspace(3) instead is worse than
+    // unsupported: `xcrun metallib` accepts it and produces a kernel whose add
+    // never lands, leaving a threadgroup accumulator at its initial value with
+    // no diagnostic anywhere. That is exactly how a __shared__ float reduction
+    // came back as zero.
+    bool emit_threadgroup_float_add(std::ostringstream& os,
+                                    const cumetal::ptx::EntryFunction::Instruction& instr,
+                                    int bits,
+                                    const std::string& addr_i64,
+                                    const std::string& src_operand,
+                                    const std::string* dst_reg) {
+        if (bits != 32) {
+            return fail(instr,
+                        "atom: threadgroup float atomics are supported at 32 bits only");
+        }
+        auto value = decode_float_operand(os, src_operand, bits);
+        if (!value) return fail(instr, "atom: threadgroup float source operand unsupported");
+
+        declarations_.insert(
+            "declare i32 @air.atomic.local.load.i32(i32 addrspace(3)* nocapture, i32, i32, i1)");
+        declarations_.insert(
+            "declare i32 @air.atomic.local.cmpxchg.weak.i32(i32 addrspace(3)* nocapture, "
+            "i32* nocapture, i32, i32, i32, i32, i1)");
+
+        const std::string expected_slot =
+            "%cm_tg_fadd_expected_" + std::to_string(slot_id_++);
+        entry_allocas_ << "  " << expected_slot << " = alloca i32, align 4\n";
+
+        const std::string ptr_i8 = next_tmp("tgf_i2p");
+        os << "  " << ptr_i8 << " = inttoptr i64 " << addr_i64 << " to i8 addrspace(3)*\n";
+        const std::string ptr32 = next_tmp("tgf_ptr");
+        os << "  " << ptr32 << " = bitcast i8 addrspace(3)* " << ptr_i8
+           << " to i32 addrspace(3)*\n";
+        const std::string init = next_tmp("tgf_init");
+        os << "  " << init << " = call i32 @air.atomic.local.load.i32(i32 addrspace(3)* "
+           << ptr32 << ", i32 0, i32 1, i1 true)\n";
+
+        // The enclosing block's label is not known here, so branch into one this
+        // expansion names itself and use it as the loop's entry predecessor.
+        const std::string tag = next_tmp("tgf").substr(1);
+        const std::string pre = tag + "_pre";
+        const std::string head = tag + "_head";
+        const std::string done_lbl = tag + "_done";
+
+        const std::string cur = next_tmp("tgf_cur");
+        const std::string observed = next_tmp("tgf_obs");
+
+        os << "  br label %" << pre << "\n";
+        os << pre << ":\n";
+        os << "  br label %" << head << "\n";
+
+        os << head << ":\n";
+        os << "  " << cur << " = phi i32 [ " << init << ", %" << pre << " ], [ " << observed
+           << ", %" << head << " ]\n";
+        const std::string cur_f = next_tmp("tgf_curf");
+        os << "  " << cur_f << " = bitcast i32 " << cur << " to float\n";
+        const std::string sum = next_tmp("tgf_sum");
+        os << "  " << sum << " = fadd float " << cur_f << ", " << value->ir << "\n";
+        const std::string desired = next_tmp("tgf_des");
+        os << "  " << desired << " = bitcast float " << sum << " to i32\n";
+        os << "  store i32 " << cur << ", i32* " << expected_slot << ", align 4\n";
+        const std::string old = next_tmp("tgf_old");
+        os << "  " << old
+           << " = call i32 @air.atomic.local.cmpxchg.weak.i32(i32 addrspace(3)* " << ptr32
+           << ", i32* " << expected_slot << ", i32 " << desired
+           << ", i32 0, i32 0, i32 1, i1 true)\n";
+        const std::string ok = next_tmp("tgf_ok");
+        os << "  " << ok << " = icmp eq i32 " << cur << ", " << old << "\n";
+        os << "  " << observed << " = load i32, i32* " << expected_slot << ", align 4\n";
+        os << "  br i1 " << ok << ", label %" << done_lbl << ", label %" << head << "\n";
+
+        os << done_lbl << ":\n";
+        if (dst_reg == nullptr) return true;
+        // On the winning iteration the swap observed exactly what this thread
+        // expected, so the value it replaced is the loop-carried expectation.
+        const std::string old_f = next_tmp("tgf_oldf");
+        os << "  " << old_f << " = bitcast i32 " << cur << " to float\n";
+        const int slot_bits = ensure_reg_slot(*dst_reg).bits;
+        const PtxTypeSpec f32{.kind = PtxTypeSpec::Kind::kFloat, .bits = 32, .is_signed = true};
+        const Value v{old_f, f32, 32};
+        auto encoded = encode_value_to_reg_bits(os, v, slot_bits);
+        if (!encoded) return fail(instr, "atom: threadgroup float result encode failed");
+        return emit_store_reg_bits(os, *dst_reg, slot_bits, *encoded, slot_bits);
+    }
+
     bool emit_wide_atomic(std::ostringstream& os,
                           const cumetal::ptx::EntryFunction::Instruction& instr,
                           const std::string& operation,
@@ -7355,6 +7446,18 @@ class GenericLlvmEmitter {
                 is_register_name(instr.operands[0]) ? &instr.operands[0] : nullptr;
             return emit_wide_atomic(os, instr, operation, ty, addr_space, addr_i64,
                                     src_operand, cmp_operand, dst_reg);
+        }
+
+        if (is_float && addr_space == 3) {
+            if (operation != "add") {
+                return fail(instr,
+                            "atom: threadgroup float '" + operation +
+                                "' has no Metal equivalent");
+            }
+            const std::string* dst_reg =
+                is_register_name(instr.operands[0]) ? &instr.operands[0] : nullptr;
+            return emit_threadgroup_float_add(os, instr, bits, addr_i64, instr.operands[2],
+                                              dst_reg);
         }
 
         const std::string ptr_i8 = next_tmp("atom_i2p");
@@ -7604,6 +7707,16 @@ class GenericLlvmEmitter {
         if (bits == 64) {
             return emit_wide_atomic(os, instr, operation, ty, addr_space, addr_i64,
                                     instr.operands[1], nullptr, nullptr);
+        }
+
+        if (is_float && addr_space == 3) {
+            if (operation != "add") {
+                return fail(instr,
+                            "red: threadgroup float '" + operation +
+                                "' has no Metal equivalent");
+            }
+            return emit_threadgroup_float_add(os, instr, bits, addr_i64, instr.operands[1],
+                                              nullptr);
         }
 
         const std::string ptr_i8 = next_tmp("red_i2p");
