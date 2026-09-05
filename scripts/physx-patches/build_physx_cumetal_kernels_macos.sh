@@ -5,8 +5,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUMETAL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PHYSX_REPO="${PHYSX_REPO:-${CUMETAL_ROOT}/../PhysX}"
 BUILD_DIR="${CUMETAL_PHYSX_GPU_BUILD_DIR:-${CUMETAL_ROOT}/build/physx-cumetal-phase2}"
+# The CuMetal build tree is not always the default `build`: ctest runs from
+# whichever tree configured it, and a checkout commonly carries several.
+CUMETAL_BUILD_DIR="${CUMETAL_BUILD_DIR:-${CUMETAL_ROOT}/build}"
+
 EMIT_MODE="${CUMETAL_PHYSX_EMIT_MODE:-xcrun}"
-CUMETALC="${CUMETALC_EXECUTABLE:-${CUMETAL_ROOT}/build/cumetalc}"
+CUMETALC="${CUMETALC_EXECUTABLE:-${CUMETAL_BUILD_DIR}/cumetalc}"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
     echo "error: this build requires macOS on Apple Silicon" >&2
@@ -22,7 +26,7 @@ command -v ninja >/dev/null
 command -v xcrun >/dev/null
 
 "${SCRIPT_DIR}/apply_physx_patches.sh" "${PHYSX_REPO}"
-cmake --build "${CUMETAL_ROOT}/build" --target cumetalc air_validate air_inspect --parallel
+cmake --build "${CUMETAL_BUILD_DIR}" --target cumetalc air_validate air_inspect --parallel
 
 cmake \
     -S "${PHYSX_REPO}/physx/compiler/public" \
@@ -57,11 +61,11 @@ KERNEL_ROWS="$(python3 -c \
     'import json,sys; [print("{}\t{}".format(k["name"], k["metallib"])) for k in json.load(open(sys.argv[1]))["kernels"]]' \
     "${MANIFEST}")"
 while IFS=$'\t' read -r KERNEL_NAME METALLIB; do
-    "${CUMETAL_ROOT}/build/air_validate" \
+    "${CUMETAL_BUILD_DIR}/air_validate" \
         "${METALLIB}" \
         --require-function-list \
         --require-metadata >/dev/null
-    INSPECT_JSON="$("${CUMETAL_ROOT}/build/air_inspect" "${METALLIB}" --json)"
+    INSPECT_JSON="$("${CUMETAL_BUILD_DIR}/air_inspect" "${METALLIB}" --json)"
     grep -q '"function_count": 1' <<<"${INSPECT_JSON}"
     grep -q "\"name\": \"${KERNEL_NAME}\"" <<<"${INSPECT_JSON}"
 done <<<"${KERNEL_ROWS}"

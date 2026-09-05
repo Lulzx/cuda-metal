@@ -5,6 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PHYSX_REPO="${PHYSX_REPO:-${ROOT_DIR}/../PhysX}"
 BUILD_DIR="${CUMETAL_PHYSX_RUNTIME_BUILD_DIR:-${ROOT_DIR}/build/physx-cumetal-runtime}"
+# ctest runs from whichever build tree configured it, which is not always
+# the default `build`. Follow the same override the rest of the harnesses use.
+CUMETAL_BUILD_DIR="${CUMETAL_BUILD_DIR:-${ROOT_DIR}/build}"
+export CUMETAL_BUILD_DIR
 STEPS="${CUMETAL_PHYSX_CONFORMANCE_STEPS:-30}"
 REL_TOL="${CUMETAL_PHYSX_REL_TOL:-1e-3}"
 ABS_TOL="${CUMETAL_PHYSX_ABS_TOL:-1e-5}"
@@ -15,6 +19,10 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
 fi
 if ! xcrun -f metal >/dev/null 2>&1; then
     echo "SKIP: xcrun metal is unavailable"
+    exit 77
+fi
+if [[ ! -f "${CUMETAL_BUILD_DIR}/libcumetal.dylib" ]]; then
+    echo "SKIP: CuMetal is not built at ${CUMETAL_BUILD_DIR}"
     exit 77
 fi
 if [[ ! -d "${PHYSX_REPO}/.git" ]]; then
@@ -41,7 +49,7 @@ env \
     CUMETAL_PHYSX_KERNEL_DIR="${KERNEL_DIR}" \
     CUMETAL_SYNC_EACH_LAUNCH=1 \
     CUMETAL_TRACE_GPU=1 \
-    DYLD_LIBRARY_PATH="${ROOT_DIR}/build${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}" \
+    DYLD_LIBRARY_PATH="${CUMETAL_BUILD_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}" \
     "${SNIPPET}" --gpu --box --frictionless --steps "${STEPS}" \
     --dump "${GPU_DUMP}" >"${GPU_LOG}" 2>&1
 

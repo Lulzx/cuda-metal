@@ -45,11 +45,19 @@ if ! grep -Fq "${headline}" "${KNOWN_GAPS}"; then
     exit 1
 fi
 
+# The README is status-oriented and links to docs/verified-results.md rather
+# than restating every number. Guard the claim where it is made: if the README
+# quotes the sweep, the figure must match the manifest, but requiring a figure
+# the README no longer carries only forces a number back into a document that
+# deliberately dropped it. The authoritative counts are checked above and below,
+# in known-gaps and verified-results.
 readme_headline="**${pass_count}/${total_count} pass**"
-if ! grep -Fq "${readme_headline}" "${README}"; then
-    echo "FAIL: README cuda-samples headline does not match the manifest" >&2
-    echo "Expected fragment: ${readme_headline}" >&2
-    exit 1
+if grep -Fqi "cuda-samples" "${README}" || grep -Fq " pass**" "${README}"; then
+    if ! grep -Fq "${readme_headline}" "${README}"; then
+        echo "FAIL: README cuda-samples headline does not match the manifest" >&2
+        echo "Expected fragment: ${readme_headline}" >&2
+        exit 1
+    fi
 fi
 
 verified_headline="classifies all ${total_count} enrolled"

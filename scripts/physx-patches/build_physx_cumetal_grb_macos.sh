@@ -5,6 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUMETAL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PHYSX_REPO="${PHYSX_REPO:-${CUMETAL_ROOT}/../PhysX}"
 BUILD_DIR="${CUMETAL_PHYSX_RUNTIME_BUILD_DIR:-${CUMETAL_ROOT}/build/physx-cumetal-runtime}"
+# The CuMetal build tree is not always the default `build`: ctest runs from
+# whichever tree configured it, and a checkout commonly carries several.
+CUMETAL_BUILD_DIR="${CUMETAL_BUILD_DIR:-${CUMETAL_ROOT}/build}"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
     echo "error: this build requires macOS on Apple Silicon" >&2
@@ -28,7 +31,7 @@ fi
 xcrun metal --version >/dev/null
 
 "${SCRIPT_DIR}/apply_physx_patches.sh" "${PHYSX_REPO}"
-cmake --build "${CUMETAL_ROOT}/build" --target cumetal_runtime cumetalc --parallel
+cmake --build "${CUMETAL_BUILD_DIR}" --target cumetal_runtime cumetalc --parallel
 
 cmake \
     -S "${PHYSX_REPO}/physx/compiler/public" \
@@ -46,8 +49,8 @@ cmake \
     -DPX_CUMETAL_GPU_SUBSET=ON \
     -DPX_CUMETAL_GPU_RUNTIME=ON \
     -DCUMETAL_ROOT_DIR="${CUMETAL_ROOT}" \
-    -DCUMETALC_EXECUTABLE="${CUMETAL_ROOT}/build/cumetalc" \
-    -DCUMETAL_LIBRARY="${CUMETAL_ROOT}/build/libcumetal.dylib" \
+    -DCUMETALC_EXECUTABLE="${CUMETAL_BUILD_DIR}/cumetalc" \
+    -DCUMETAL_LIBRARY="${CUMETAL_BUILD_DIR}/libcumetal.dylib" \
     -DPX_CUMETAL_EMIT_MODE=xcrun \
     -DCMAKE_BUILD_TYPE=release \
     -DCMAKE_OSX_ARCHITECTURES=arm64
@@ -64,7 +67,7 @@ env \
     CUMETAL_PHYSX_KERNEL_DIR="${KERNEL_DIR}" \
     CUMETAL_SYNC_EACH_LAUNCH=1 \
     CUMETAL_TRACE_GPU=1 \
-    DYLD_LIBRARY_PATH="${CUMETAL_ROOT}/build${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}" \
+    DYLD_LIBRARY_PATH="${CUMETAL_BUILD_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}" \
     "${SNIPPET}" >"${RUN_LOG}" 2>&1
 
 grep -q 'source=metallib.*device=apple_gpu.*launch_success=true' "${RUN_LOG}"
