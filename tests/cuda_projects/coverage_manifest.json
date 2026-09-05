@@ -50,6 +50,13 @@
       "harness": "standard"
     },
     {
+      "name": "cub_block_reduce",
+      "subdir": "cub_block_reduce",
+      "source": "cub_block_reduce.cu",
+      "binary": "cub_block_reduce",
+      "harness": "standard"
+    },
+    {
       "name": "cooperative_thread_group",
       "subdir": "cooperative_thread_group",
       "source": "cooperative_thread_group.cu",

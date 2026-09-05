@@ -101,11 +101,14 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   still writing silently returns stale memory. The tested aggregate
   `ShuffleIndex` helper covers trivially-copyable objects up to the fixed
   32-lane warp model, but broader CUB warp/block free-function and policy
-  overload parity remains unclassified. Named missing pieces, all found by
-  compiling NVIDIA Warp's `libwarp` sources (`scripts/build_warp_cumetal.sh`):
-  the `cub/device/device_reduce.cuh` and `cub/device/device_run_length_encode.cuh`
-  headers, `cub::DoubleBuffer`, and part of the `cub::BlockReduce::Reduce`
-  overload set.
+  overload parity remains unclassified. `cub::BlockReduce` is a real cooperative
+  reduction in device code and a sequential fallback on the host; the other
+  block and warp primitives are still host-only fallbacks and cannot be called
+  from a kernel. `DeviceRadixSort` and `DeviceSegmentedRadixSort` accept
+  `cub::DoubleBuffer` but sort in place, so the selector they return is always
+  the one they were given -- correct for callers that read `Current()`, which is
+  how CUB is meant to be used, but not the ping-pong a caller inspecting
+  `selector` might expect.
 - **NVTX:** annotations are no-ops.
 
 The closure target is a generated support table from actual positive and

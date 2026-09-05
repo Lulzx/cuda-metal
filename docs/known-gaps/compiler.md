@@ -8,8 +8,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/30 | **30/30** |
-| PTX / `--cuda-device` | **28/30** | **30/30** |
+| direct `.cu` | 0/31 | **31/31** |
+| PTX / `--cuda-device` | **29/31** | **31/31** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
@@ -36,7 +36,15 @@ Remaining typed-path blockers include combinations of:
   the bounded `cuda-samples/newdelete` virtual dispatch with one aligned
   16-byte by-value argument; nested/irregular aggregates, multi-result
   signatures, general indirect calls, and general double-signature calls remain
-  open;
+  open. A `__device__` function passed by value as a callback -- the classic
+  reduction-operator spelling, and the one NVIDIA Warp's `bvh.cu` uses for
+  `cub::BlockReduce::Reduce` -- decays to a function pointer and lands in that
+  gap: the native-AOT path rejects it with `indirect device calls are
+  unsupported` unless the optimizer devirtualizes it first, and `cumetalc` has
+  no optimization level to ask for (`--cuda-inline-threshold` maps to
+  `-fgpu-inline-threshold`, which Clang ignores without one). The same source
+  compiles through the `nvcc` shim, which is why Warp builds. Passing a functor
+  instead of a function avoids it entirely;
 - aggregate insertion/extraction beyond the bounded NVVM reconstruction limit
   (depth 8, width 16, and 64 scalar leaves), plus irregularly padded nested
   device-call ABIs beyond the proven depth-two 12-byte fixture;

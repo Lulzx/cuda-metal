@@ -26,8 +26,8 @@ constant buffer, symbol address/size queries, and persistent GPU updates across
 two launches.
 
 On 2026-08-31, the exact manifest-controlled 27-project corpus passed on Apple
-M4 Pro with workload specializations disabled: 27/27 through typed PTX and
-27/27 through direct native AOT. The device-call probes pass pointer
+M4 Pro with workload specializations disabled: 28/28 through typed PTX and
+28/28 through direct native AOT. The device-call probes pass pointer
 arguments and offsets through a scalar-returning noinline helper with a loop,
 pointer merge, and early exit, and preserve every field through flat and
 depth-two nested 12-byte aggregate returns followed by by-value aggregate

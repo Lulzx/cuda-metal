@@ -17,11 +17,13 @@ static void test_block_reduce() {
     cub::BlockReduce<float, BLOCK> reducer(temp, 0);
 
     // Simulate thread 0 calling Reduce with data from all threads
-    // In this sequential fallback, thread 0 writes all values then reduces
-    temp.data[0] = 1.0f;
-    temp.data[1] = 2.0f;
-    temp.data[2] = 3.0f;
-    temp.data[3] = 4.0f;
+    // In this sequential fallback, thread 0 writes all values then reduces.
+    // TempStorage is uninitialized bytes so that it is legal in __shared__, so
+    // the slots are reached through data() rather than as an array member.
+    temp.data()[0] = 1.0f;
+    temp.data()[1] = 2.0f;
+    temp.data()[2] = 3.0f;
+    temp.data()[3] = 4.0f;
     float result = 0;
     // Thread 0 performs the full reduction
     {

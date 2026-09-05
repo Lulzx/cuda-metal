@@ -41,13 +41,11 @@ fails to compile through any Clang-driven toolchain, CuMetal's included.
 
 ## What compiles
 
-`libwarp` builds 11 `.cu` files. Six compile through CuMetal today — `hashgrid`,
-`mesh`, `scan`, `volume`, `volume_builder`, `warp` — and the sweep in
-`build_warp_cumetal.sh` fails if any of them regresses. The other five are
-blocked on CuMetal's CUB shim, which is Phase 4 in `docs/warp-feasibility.md`:
-
-| File | Blocker |
-|---|---|
-| `reduce.cu`, `runlength_encode.cu`, `sparse.cu` | `cub/device/device_reduce.cuh`, `device_run_length_encode.cuh` missing |
-| `sort.cu` | `cub::DoubleBuffer` missing |
-| `bvh.cu` | `cub::BlockReduce::Reduce` overload set incomplete, plus a `__shared__` variable with an initializer that Clang rejects and nvcc accepts |
+All 11 of `libwarp`'s `.cu` files compile through CuMetal as of 2026-09-05, and
+`build_warp_cumetal.sh` fails if any of them regresses. Getting the last five
+there needed, on the CuMetal side: `.cuh` spellings of the device-wide CUB
+headers, `cub::DoubleBuffer` with the matching `DeviceRadixSort` overloads, a
+`DeviceSegmentedRadixSort`, and a `cub::BlockReduce` that works in device code
+rather than only on the host. See `docs/warp-feasibility.md` for what that
+result does and does not claim -- in particular, the CUB device-wide algorithms
+are host-backed, so this is correctness rather than device parallelism.

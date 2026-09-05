@@ -186,6 +186,85 @@ static void test_device_transform() {
           "DeviceTransform multi-input multi-output tuple transform");
 }
 
+static void test_double_buffer_radix_sort() {
+    // The DoubleBuffer form is what NVIDIA Warp's sort.cu and sparse.cu call.
+    // The caller reads the result through Current(), so a shim that sorts in
+    // place must leave the selector alone.
+    int keys[8] = {5, 3, 9, 1, 7, 2, 8, 4};
+    int alternate_keys[8] = {};
+    int values[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    int alternate_values[8] = {};
+
+    cub::DoubleBuffer<int> d_keys(keys, alternate_keys);
+    cub::DoubleBuffer<int> d_values(values, alternate_values);
+    CHECK(d_keys.Current() == keys && d_keys.Alternate() == alternate_keys,
+          "DoubleBuffer selects its first buffer");
+
+    size_t temp_bytes = 0;
+    CHECK(cub::DeviceRadixSort::SortPairs(nullptr, temp_bytes, d_keys, d_values, 8) == cudaSuccess &&
+              temp_bytes > 0,
+          "DeviceRadixSort DoubleBuffer temp-storage query");
+
+    std::vector<char> storage(temp_bytes);
+    CHECK(cub::DeviceRadixSort::SortPairs(storage.data(), temp_bytes, d_keys, d_values, 8) ==
+              cudaSuccess,
+          "DeviceRadixSort DoubleBuffer sort");
+
+    const int* sorted_keys = d_keys.Current();
+    const int* sorted_values = d_values.Current();
+    CHECK(sorted_keys[0] == 1 && sorted_keys[3] == 4 && sorted_keys[7] == 9,
+          "DeviceRadixSort DoubleBuffer keys ascending");
+    // Values follow their keys: key 1 was at index 3, key 9 at index 2.
+    CHECK(sorted_values[0] == 3 && sorted_values[7] == 2,
+          "DeviceRadixSort DoubleBuffer values follow keys");
+}
+
+static void test_radix_sort_is_stable() {
+    // CUB's radix sort is stable and callers depend on it: Warp's sparse path
+    // run-length encodes the sorted keys, so equal keys must keep their input
+    // order for the block indices to pair up.
+    const int keys_in[6] = {2, 1, 2, 1, 2, 1};
+    const int values_in[6] = {0, 1, 2, 3, 4, 5};
+    int keys_out[6] = {};
+    int values_out[6] = {};
+
+    size_t temp_bytes = 0;
+    cub::DeviceRadixSort::SortPairs(nullptr, temp_bytes, keys_in, keys_out, values_in, values_out, 6);
+    std::vector<char> storage(temp_bytes);
+    CHECK(cub::DeviceRadixSort::SortPairs(storage.data(), temp_bytes, keys_in, keys_out, values_in,
+                                          values_out, 6) == cudaSuccess &&
+              values_out[0] == 1 && values_out[1] == 3 && values_out[2] == 5 &&
+              values_out[3] == 0 && values_out[4] == 2 && values_out[5] == 4,
+          "DeviceRadixSort keeps equal keys in input order");
+}
+
+static void test_segmented_radix_sort() {
+    // Three segments, the middle one empty; each is sorted independently and
+    // nothing crosses a segment boundary.
+    int keys[6] = {9, 4, 7, 3, 8, 1};
+    int values[6] = {0, 1, 2, 3, 4, 5};
+    const int begin_offsets[3] = {0, 3, 3};
+    const int end_offsets[3] = {3, 3, 6};
+
+    cub::DoubleBuffer<int> d_keys(keys, nullptr);
+    cub::DoubleBuffer<int> d_values(values, nullptr);
+
+    size_t temp_bytes = 0;
+    CHECK(cub::DeviceSegmentedRadixSort::SortPairs(nullptr, temp_bytes, d_keys, d_values, 6, 3,
+                                                   begin_offsets, end_offsets, 0, 32) == cudaSuccess,
+          "DeviceSegmentedRadixSort temp-storage query");
+
+    std::vector<char> storage(temp_bytes);
+    CHECK(cub::DeviceSegmentedRadixSort::SortPairs(storage.data(), temp_bytes, d_keys, d_values, 6, 3,
+                                                   begin_offsets, end_offsets, 0, 32) == cudaSuccess &&
+              keys[0] == 4 && keys[1] == 7 && keys[2] == 9 &&
+              keys[3] == 1 && keys[4] == 3 && keys[5] == 8,
+          "DeviceSegmentedRadixSort sorts each segment in place");
+    CHECK(values[0] == 1 && values[1] == 2 && values[2] == 0 &&
+              values[3] == 5 && values[4] == 3 && values[5] == 4,
+          "DeviceSegmentedRadixSort permutes values with their segment");
+}
+
 int main() {
     test_block_load();
     test_block_load_partial();
@@ -198,6 +277,9 @@ int main() {
     test_device_find();
     test_device_segmented_scan();
     test_device_transform();
+    test_double_buffer_radix_sort();
+    test_radix_sort_is_stable();
+    test_segmented_radix_sort();
 
     printf("\n%s (%d failures)\n", g_fail ? "SOME TESTS FAILED" : "ALL TESTS PASSED", g_fail);
     return g_fail ? 1 : 0;

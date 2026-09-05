@@ -14,6 +14,7 @@ tests/cuda_projects/aggregate_device_calls/aggregate_device_calls.cu fail pass f
 tests/cuda_projects/async_memcpy/async_memcpy_hazard.cu fail pass pass pass
 tests/cuda_projects/barrier_cfg/barrier_cfg.cu fail pass pass pass
 tests/cuda_projects/constant_symbol/constant_symbol.cu fail pass pass pass
+tests/cuda_projects/cub_block_reduce/cub_block_reduce.cu fail pass pass pass
 tests/cuda_projects/cooperative_thread_group/cooperative_thread_group.cu fail pass pass pass
 tests/cuda_projects/device_printf_clang/device_printf_clang.cu fail pass pass pass
 tests/cuda_projects/device_calls/device_calls.cu fail pass pass pass

@@ -1,5 +1,6 @@
 #pragma once
 // CuMetal CUB shim: umbrella header.
+#include "util_type.h"
 #include "block/block_reduce.h"
 #include "block/block_scan.h"
 #include "block/block_exchange.h"
@@ -11,6 +12,7 @@
 #include "device/device_reduce.h"
 #include "device/device_scan.h"
 #include "device/device_radix_sort.h"
+#include "device/device_segmented_radix_sort.h"
 #include "device/device_select.h"
 #include "device/device_histogram.h"
 #include "device/device_run_length_encode.h"

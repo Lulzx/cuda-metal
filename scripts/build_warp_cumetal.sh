@@ -28,11 +28,8 @@
 #         provides implicitly and Clang does not.
 #
 # ── what the sweep reports ───────────────────────────────────────────────────
-# libwarp compiles 11 .cu files. Six compile through CuMetal today; the other
-# five need CUB device headers that the CuMetal shim does not yet carry (Phase
-# 4 in docs/warp-feasibility.md). The sweep prints one line per file and fails
-# only if a file in the known-good set regresses. A file in the known-blocked
-# set that starts compiling is reported as news, not as a failure.
+# libwarp compiles 11 .cu files, and all 11 go through CuMetal. The sweep prints
+# one line per file and fails if any of them regresses.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,9 +83,6 @@ fi
 # ── Warp's own build ─────────────────────────────────────────────────────────
 if [[ "${MODE}" == "build" ]]; then
     echo "=== build_lib.py --cuda_path=${FAKE_CUDA} ==="
-    echo "Note: this needs all 11 .cu files; five of them are still blocked on"
-    echo "      the CUB device headers. Run without --build for the file-level"
-    echo "      status this repo actually claims."
     cd "${WARP_DIR}"
     exec python build_lib.py --cuda_path="${FAKE_CUDA}" --jobs="${JOBS}"
 fi
@@ -108,9 +102,10 @@ compile_one() {
         -I"${NATIVE}" -o "${OUT_DIR}/$1.o" -c "${NATIVE}/$1.cu"
 }
 
-# Known-good as of 2026-09-05; see docs/warp-feasibility.md.
-EXPECTED_PASS=(hashgrid mesh scan volume volume_builder warp)
-EXPECTED_FAIL=(bvh reduce runlength_encode sort sparse)
+# All 11 compile as of 2026-09-05; see docs/warp-feasibility.md. Anything that
+# stops compiling is a regression, so EXPECTED_FAIL is empty and stays that way.
+EXPECTED_PASS=(bvh hashgrid mesh reduce runlength_encode scan sort sparse volume volume_builder warp)
+EXPECTED_FAIL=()
 
 is_expected_pass() {
     local candidate
@@ -122,7 +117,7 @@ regressions=()
 surprises=()
 passed=0
 echo "=== compiling libwarp's CUDA sources through cumetalc ==="
-for name in "${EXPECTED_PASS[@]}" "${EXPECTED_FAIL[@]}"; do
+for name in "${EXPECTED_PASS[@]}" ${EXPECTED_FAIL[@]+"${EXPECTED_FAIL[@]}"}; do
     log="${OUT_DIR}/${name}.log"
     if compile_one "${name}" >"${log}" 2>&1; then
         passed=$((passed + 1))

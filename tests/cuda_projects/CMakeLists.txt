@@ -292,6 +292,17 @@ cumetal_add_cuda_project_test(
     wide_atomics wide_atomics.cu wide_atomics
 )
 
+# cub::BlockReduce running on the GPU rather than as a host fallback. The shim's
+# methods were __host__-only and its TempStorage was an array of T, which is
+# illegal in __shared__ for a T with a user-provided default constructor --
+# together these blocked NVIDIA Warp's bvh.cu. Partial-tile bounds are the case
+# that matters: a poison value from a thread past valid_items must not reach the
+# result.
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_cub_block_reduce
+    cub_block_reduce cub_block_reduce.cu cub_block_reduce
+)
+
 # Float atomics. Metal has native atomic_float add/sub/exchange in device and
 # threadgroup storage; the source-first path used to reject CuMetal's own
 # inline-PTX spelling of float atomicAdd. Exact integer-valued sums prove the

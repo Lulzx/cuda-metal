@@ -64,6 +64,12 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Changed
 
+- A `__device__` function passed by value as a callback is now recorded as a known compiler gap.
+  It decays to a function pointer, so `cumetalc`'s native-AOT path rejects it with `indirect device
+  calls are unsupported` unless something devirtualizes it first -- and `cumetalc` exposes no
+  optimization level, so `--cuda-inline-threshold` maps to a `-fgpu-inline-threshold` that Clang
+  discards. NVIDIA Warp's `bvh.cu` uses exactly this spelling for its `cub::BlockReduce` operator
+  and builds only because it goes through the `nvcc` shim.
 - The PhysX GRB conformance harnesses and their build scripts honour `CUMETAL_BUILD_DIR`, and ctest
   passes the tree that configured it. They hardcoded `build/`, so running the suite from any other
   build directory failed with `build is not a directory` rather than testing anything. They now also
@@ -77,10 +83,29 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Added
 
+- **All 11 of NVIDIA Warp's `libwarp` CUDA sources now compile through CuMetal**, up from six. The
+  CUB shim spelled its device-wide headers `.h` while CUB spells them `.cuh`, which is what callers
+  include, so `cub/device/device_reduce.cuh` and `cub/device/device_run_length_encode.cuh`
+  forwarders were added. `cub::DoubleBuffer` (`cub/util_type.h`) and the `DoubleBuffer` overloads of
+  `DeviceRadixSort::Sort{Keys,Pairs}` were missing, as was `DeviceSegmentedRadixSort` entirely; both
+  sort in place, so the selector handed back is the one passed in, which is correct for any caller
+  that reads `Current()`. The radix sorts are now stable, as CUB's are -- Warp's sparse path
+  run-length encodes sorted keys, so the order of equal keys decides which blocks pair up, and
+  `std::sort` does not preserve it.
+- **`cub::BlockReduce` works in device code.** Its methods were `__host__`, so a kernel calling
+  `Reduce` got `call to __host__ function from __global__ function`, and its `TempStorage` was a
+  `T` array, which a `__shared__` variable may not be once `T` has a user-provided default
+  constructor -- `wp::vec3` in Warp's `bvh.cu` has one. It is now a cooperative tree reduction over
+  threadgroup memory, with the sequential host fallback kept behind `__CUDA_ARCH__`, over
+  uninitialized storage reached through `data()`. `functional_cuda_projects_cub_block_reduce` runs
+  the partial-tile and full-tile forms on the GPU over a type with a non-trivial default
+  constructor; `functional_cub_extended` covers `DoubleBuffer`, segmented sort and sort stability.
+  The new fixture joins both exact corpora, so the in-tree numerical corpus is 28/28 and the
+  production-metallib matrix 31/31.
 - **`scripts/build_warp_cumetal.sh`**, which clones NVIDIA Warp at `v1.12.0`, applies the two
   upstream changes in `scripts/warp-patches/`, generates the CuMetal CUDA toolkit shim, and
-  compiles each of `libwarp`'s 11 `.cu` files through it, reporting per file and failing if one of
-  the six that compile today regresses. The changes -- `crt.h` guarded on `WP_CUMETAL`, an
+  compiles each of `libwarp`'s 11 `.cu` files through it, reporting per file and failing if any of
+  them regresses. The changes -- `crt.h` guarded on `WP_CUMETAL`, an
   `__APPLE__` driver `dlopen` branch, `--cuda-path` honoured on Darwin, a CuMetal branch in
   `build_dll.py`, and the `<new>` that `volume_builder.cu`'s placement `new` needs -- belong in
   NVIDIA's repository, so they are carried here as patches against a pinned clone rather than as a
@@ -110,8 +135,8 @@ All notable changes to CuMetal are documented here. Format follows
   `cudaGraphReleaseUserObject`), whose reference counting ties a host resource's destructor to a
   graph's lifetime. Apple Silicon has no PCI enumeration, so the identity triple reports zeros
   rather than failing; the pool-access calls describe the single device, which always has
-  read-write access to its own pool. With these, `warp.cu` compiles against CuMetal -- 6 of
-  `libwarp`'s 11 `.cu` files now do, the remaining 5 blocked on CUB device headers.
+  read-write access to its own pool. With these, `warp.cu` compiles against CuMetal; the CUB work
+  above closed the rest.
 - **An NVRTC and nvPTXCompiler surface** (`nvrtc.h`, `nvPTXCompiler.h`), exported from
   `libcumetal.dylib` and aliased as `libnvrtc.dylib`. `nvrtcCompileProgram` writes the program and
   any in-memory headers to a temporary directory and runs `cumetalc … --emit metallib`;
