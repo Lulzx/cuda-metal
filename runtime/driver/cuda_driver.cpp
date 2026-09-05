@@ -853,7 +853,23 @@ CUresult cuDeviceGetAttribute(int* pi, CUdevice_attribute attrib, CUdevice dev) 
             *pi = prop.maxGridSize[2];
             break;
         case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK:
+        // Metal has one threadgroup memory limit, with no opt-in tier above the
+        // default the way NVIDIA's carve-out works, so the opt-in query answers
+        // with the same budget rather than refusing.
+        case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN:
             *pi = prop.sharedMemPerBlock;
+            break;
+        // Apple Silicon exposes no PCI enumeration. A host asking for the PCI
+        // triple is building a device identity or comparing two ordinals, and
+        // both work against a stable synthetic triple; failing the query would
+        // take out otherwise fine device-setup code.
+        case CU_DEVICE_ATTRIBUTE_PCI_BUS_ID:
+        case CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID:
+        case CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID:
+            *pi = 0;
+            break;
+        case CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED:
+            *pi = 1;  // cuMemAllocAsync / cudaMemPool* are implemented
             break;
         case CU_DEVICE_ATTRIBUTE_WARP_SIZE:
             *pi = prop.warpSize;
@@ -2704,6 +2720,16 @@ CUresult cuPointerGetAttribute(void* data, CUpointer_attribute attribute, CUdevi
         case CU_POINTER_ATTRIBUTE_MAPPED: {
             auto* out = static_cast<unsigned int*>(data);
             *out = is_known ? 1u : 0u;
+            return CUDA_SUCCESS;
+        }
+        case CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE: {
+            // CuMetal's async allocations come from the same allocator as the
+            // synchronous ones -- there is no separate pooled arena a pointer
+            // could belong to. CUDA reports a null handle for an allocation
+            // that did not come from a pool, and that is the honest answer for
+            // every CuMetal pointer.
+            auto* out = static_cast<void**>(data);
+            *out = nullptr;
             return CUDA_SUCCESS;
         }
         case CU_POINTER_ATTRIBUTE_CONTEXT: {

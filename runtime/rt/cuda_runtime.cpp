@@ -269,12 +269,57 @@ struct cudaGraphNode_st {
     void* graph_free_ptr = nullptr;
 };
 
+// A graph user object is a refcounted handle to a host resource plus the
+// function that frees it. The graph holds references; when the last one is
+// dropped -- by an explicit release or by the graph's destruction -- the
+// destructor runs. CUDA allows the destructor to run asynchronously; CuMetal
+// runs it on the thread that drops the last reference, which is within spec for
+// both cudaUserObjectNoDestructorSync and its absence.
+struct cudaUserObject_st {
+    void* ptr = nullptr;
+    cudaHostFn_t destroy = nullptr;
+    unsigned int refcount = 0;
+    std::mutex mutex;
+};
+
+namespace {
+
+// Drops `count` references and destroys the object if that was the last one.
+// Returns false when the caller asked to drop more references than exist,
+// which is a host bug CUDA reports as an invalid value.
+bool release_user_object(cudaUserObject_t object, unsigned int count) {
+    if (object == nullptr || count == 0) return false;
+    cudaHostFn_t destroy = nullptr;
+    void* payload = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(object->mutex);
+        if (count > object->refcount) return false;
+        object->refcount -= count;
+        if (object->refcount != 0) return true;
+        destroy = object->destroy;
+        payload = object->ptr;
+    }
+    // Run the destructor outside the lock: it is host code that may do
+    // anything, including touching this same handle's neighbours.
+    if (destroy != nullptr) destroy(payload);
+    delete object;
+    return true;
+}
+
+}  // namespace
+
 struct cudaGraph_st {
     std::vector<cudaGraphNode_st*> nodes;
     std::shared_ptr<GraphLifetimeState> lifetime =
         std::make_shared<GraphLifetimeState>();
+    // Objects whose lifetime this graph extends, with the number of references
+    // the graph itself holds on each.
+    std::vector<std::pair<cudaUserObject_t, unsigned int>> user_objects;
     ~cudaGraph_st() {
         for (auto* n : nodes) { delete n; }
+        for (const auto& [object, count] : user_objects) {
+            release_user_object(object, count);
+        }
     }
 };
 
@@ -4392,6 +4437,152 @@ cudaError_t cudaGraphClone(cudaGraph_t* pGraphClone, cudaGraph_t originalGraph) 
     return fail(cudaSuccess);
 }
 
+// Uploading is an optimization on CUDA: it moves work off the first launch and
+// makes node edits visible to it. CuMetal's replay reads the executable graph's
+// node vector directly at launch, so an edit is already visible and there is
+// nothing to stage ahead of time. Validate the handles and report success
+// rather than an error a host would treat as a failed graph.
+cudaError_t cudaGraphUpload(cudaGraphExec_t graphExec, cudaStream_t stream) {
+    (void)stream;
+    if (graphExec == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    return fail(cudaSuccess);
+}
+
+namespace {
+
+const char* graph_node_type_name(cudaGraphNodeType type) {
+    switch (type) {
+        case cudaGraphNodeTypeKernel: return "kernel";
+        case cudaGraphNodeTypeMemcpy: return "memcpy";
+        case cudaGraphNodeTypeMemset: return "memset";
+        case cudaGraphNodeTypeHost: return "host";
+        case cudaGraphNodeTypeGraph: return "graph";
+        case cudaGraphNodeTypeEmpty: return "empty";
+        case cudaGraphNodeTypeWaitEvent: return "wait_event";
+        case cudaGraphNodeTypeEventRecord: return "event_record";
+        case cudaGraphNodeTypeMemAlloc: return "mem_alloc";
+        case cudaGraphNodeTypeMemFree: return "mem_free";
+        default: return "node";
+    }
+}
+
+}  // namespace
+
+cudaError_t cudaGraphDebugDotPrint(cudaGraph_t graph, const char* path,
+                                   unsigned int /*flags*/) {
+    if (graph == nullptr || path == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    std::ofstream out(path);
+    if (!out) {
+        return fail(cudaErrorOperatingSystem);
+    }
+
+    std::unordered_map<const cudaGraphNode_st*, std::size_t> index;
+    for (std::size_t i = 0; i < graph->nodes.size(); ++i) {
+        index[graph->nodes[i]] = i;
+    }
+
+    out << "digraph cumetal_graph {\n";
+    for (std::size_t i = 0; i < graph->nodes.size(); ++i) {
+        out << "  node" << i << " [label=\"" << graph_node_type_name(graph->nodes[i]->type)
+            << "\"];\n";
+    }
+    for (std::size_t i = 0; i < graph->nodes.size(); ++i) {
+        for (const cudaGraphNode_st* dependency : graph->nodes[i]->dependencies) {
+            const auto found = index.find(dependency);
+            if (found == index.end()) continue;
+            out << "  node" << found->second << " -> node" << i << ";\n";
+        }
+    }
+    out << "}\n";
+    if (!out) {
+        return fail(cudaErrorOperatingSystem);
+    }
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaUserObjectCreate(cudaUserObject_t* object_out, void* ptr,
+                                 cudaHostFn_t destroy, unsigned int initialRefcount,
+                                 unsigned int flags) {
+    if (object_out == nullptr || destroy == nullptr || initialRefcount == 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    if (flags != 0 && flags != cudaUserObjectNoDestructorSync) {
+        return fail(cudaErrorInvalidValue);
+    }
+    auto* object = new cudaUserObject_st();
+    object->ptr = ptr;
+    object->destroy = destroy;
+    object->refcount = initialRefcount;
+    *object_out = object;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaUserObjectRetain(cudaUserObject_t object, unsigned int count) {
+    if (object == nullptr || count == 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    std::lock_guard<std::mutex> lock(object->mutex);
+    object->refcount += count;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaUserObjectRelease(cudaUserObject_t object, unsigned int count) {
+    if (!release_user_object(object, count)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphRetainUserObject(cudaGraph_t graph, cudaUserObject_t object,
+                                      unsigned int count, unsigned int flags) {
+    if (graph == nullptr || object == nullptr || count == 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    if (flags != 0 && flags != cudaGraphUserObjectMove) {
+        return fail(cudaErrorInvalidValue);
+    }
+    if (flags != cudaGraphUserObjectMove) {
+        // Without the move flag the graph takes references of its own; with it,
+        // the caller's references are what the graph ends up holding.
+        std::lock_guard<std::mutex> lock(object->mutex);
+        object->refcount += count;
+    }
+    for (auto& [held, held_count] : graph->user_objects) {
+        if (held == object) {
+            held_count += count;
+            return fail(cudaSuccess);
+        }
+    }
+    graph->user_objects.emplace_back(object, count);
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphReleaseUserObject(cudaGraph_t graph, cudaUserObject_t object,
+                                       unsigned int count) {
+    if (graph == nullptr || object == nullptr || count == 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    for (auto entry = graph->user_objects.begin(); entry != graph->user_objects.end();
+         ++entry) {
+        if (entry->first != object) continue;
+        if (count > entry->second) {
+            return fail(cudaErrorInvalidValue);
+        }
+        entry->second -= count;
+        const bool exhausted = entry->second == 0;
+        if (exhausted) graph->user_objects.erase(entry);
+        if (!release_user_object(object, count)) {
+            return fail(cudaErrorInvalidValue);
+        }
+        return fail(cudaSuccess);
+    }
+    return fail(cudaErrorInvalidValue);
+}
+
 cudaError_t cudaGraphDestroy(cudaGraph_t graph) {
     if (graph == nullptr) {
         return fail(cudaErrorInvalidValue);
@@ -7324,6 +7515,39 @@ cudaError_t cudaDeviceGetDefaultMemPool(cudaMemPool_t* pool, int /*device*/) {
 }
 
 cudaError_t cudaDeviceSetMemPool(int /*device*/, cudaMemPool_t /*pool*/) {
+    return fail(cudaSuccess);
+}
+
+// CuMetal presents a single device, so the only access relationship a pool can
+// have is with device 0, and that one is implicit and always read-write. A host
+// enabling access for its own device is asking for what it already has;
+// anything else names a device that does not exist here.
+cudaError_t cudaMemPoolSetAccess(cudaMemPool_t pool, const cudaMemAccessDesc* descList,
+                                 size_t count) {
+    if (pool == nullptr) return fail(cudaErrorInvalidValue);
+    if (count == 0) return fail(cudaSuccess);
+    if (descList == nullptr) return fail(cudaErrorInvalidValue);
+    for (size_t i = 0; i < count; ++i) {
+        if (descList[i].location.type != cudaMemLocationTypeDevice ||
+            descList[i].location.id != 0) {
+            return fail(cudaErrorInvalidDevice);
+        }
+        // Access to the owning device cannot be revoked.
+        if (descList[i].flags == cudaMemAccessFlagsProtNone) {
+            return fail(cudaErrorInvalidValue);
+        }
+    }
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaMemPoolGetAccess(cudaMemAccessFlags* flags, cudaMemPool_t pool,
+                                 cudaMemLocation* location) {
+    if (flags == nullptr || pool == nullptr || location == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const bool is_this_device =
+        location->type == cudaMemLocationTypeDevice && location->id == 0;
+    *flags = is_this_device ? cudaMemAccessFlagsProtReadWrite : cudaMemAccessFlagsProtNone;
     return fail(cudaSuccess);
 }
 

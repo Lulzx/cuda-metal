@@ -1,6 +1,7 @@
 #include "cuda.h"
 
 #include <cstdio>
+#include <initializer_list>
 
 int main() {
     if (cuInit(0) != CUDA_SUCCESS) {
@@ -71,6 +72,42 @@ int main() {
 
     if (cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_CLOCK_RATE, 0) != CUDA_SUCCESS || value <= 0) {
         std::fprintf(stderr, "FAIL: clock rate should be positive\n");
+        return 1;
+    }
+
+    // Apple Silicon has no PCI enumeration. A host reading the PCI triple is
+    // building a device identity or comparing ordinals; both work against a
+    // stable synthetic triple, and failing the query would take out otherwise
+    // fine device setup.
+    for (const CUdevice_attribute pci_attribute :
+         {CU_DEVICE_ATTRIBUTE_PCI_BUS_ID, CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
+          CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID}) {
+        value = -1;
+        if (cuDeviceGetAttribute(&value, pci_attribute, 0) != CUDA_SUCCESS || value != 0) {
+            std::fprintf(stderr, "FAIL: PCI identity attributes should report 0, not fail\n");
+            return 1;
+        }
+    }
+
+    // Metal has a single threadgroup memory budget with no opt-in tier above
+    // the default, so the two queries must agree.
+    int shared_default = 0;
+    int shared_optin = 0;
+    if (cuDeviceGetAttribute(&shared_default, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, 0) !=
+            CUDA_SUCCESS ||
+        cuDeviceGetAttribute(&shared_optin,
+                             CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, 0) !=
+            CUDA_SUCCESS ||
+        shared_optin != shared_default || shared_optin <= 0) {
+        std::fprintf(stderr,
+                     "FAIL: opt-in shared memory should match the default budget\n");
+        return 1;
+    }
+
+    if (cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED, 0) !=
+            CUDA_SUCCESS ||
+        value != 1) {
+        std::fprintf(stderr, "FAIL: memory pools should be reported as supported\n");
         return 1;
     }
 

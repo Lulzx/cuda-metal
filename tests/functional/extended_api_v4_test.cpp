@@ -229,6 +229,16 @@ static void test_cu_pointer_get_attribute() {
     CHECK(r4 == CUDA_SUCCESS, "cuPointerGetAttribute IS_MANAGED success");
     // On UMA: cudaMalloc memory may or may not be managed; just verify the call succeeds
 
+    // MEMPOOL_HANDLE. CuMetal serves async allocations from the same allocator
+    // as synchronous ones, so no pointer belongs to a distinct pool and the
+    // handle is null -- which is what CUDA reports for a non-pooled allocation.
+    // Hosts use a non-null handle to detect pooled memory, so answering with a
+    // stale or invented handle would be worse than the query failing.
+    void* mempool_handle = reinterpret_cast<void*>(0x1);
+    CUresult r5 = cuPointerGetAttribute(&mempool_handle, CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, dptr);
+    CHECK(r5 == CUDA_SUCCESS, "cuPointerGetAttribute MEMPOOL_HANDLE success");
+    CHECK(mempool_handle == nullptr, "cuPointerGetAttribute MEMPOOL_HANDLE is null");
+
     cudaFree(ptr);
 }
 

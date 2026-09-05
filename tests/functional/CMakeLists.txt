@@ -280,6 +280,14 @@ add_executable(cumetal_driver_context_requirements_test
     driver_context_requirements_test.cpp
 )
 
+add_executable(cumetal_nvrtc_compile_test
+    nvrtc_compile_test.cpp
+)
+
+add_executable(cumetal_graph_user_object_test
+    graph_user_object_test.cpp
+)
+
 add_executable(cumetal_driver_async_memcpy_test
     driver_async_memcpy_test.cpp
 )
@@ -911,6 +919,30 @@ target_link_libraries(cumetal_driver_context_switch_test
 target_link_libraries(cumetal_driver_context_requirements_test
     PRIVATE
         cumetal_runtime
+)
+
+target_link_libraries(cumetal_nvrtc_compile_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_graph_user_object_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_compile_options(cumetal_graph_user_object_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_nvrtc_compile_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
 )
 
 target_link_libraries(cumetal_driver_async_memcpy_test
@@ -2604,6 +2636,21 @@ add_test(
     NAME functional_driver_context_requirements
     COMMAND cumetal_driver_context_requirements_test
 )
+
+add_test(
+    NAME functional_graph_user_object
+    COMMAND cumetal_graph_user_object_test
+)
+
+add_test(
+    NAME functional_nvrtc_compile
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_nvrtc_compile.sh
+            $<TARGET_FILE:cumetal_nvrtc_compile_test>
+            $<TARGET_FILE:cumetalc>
+)
+
+set_tests_properties(functional_nvrtc_compile PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
 add_test(
     NAME functional_driver_async_memcpy

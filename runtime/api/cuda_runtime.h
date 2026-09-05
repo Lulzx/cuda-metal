@@ -195,6 +195,9 @@ typedef enum cudaError {
     cudaErrorInsufficientDriver = 35,
     cudaErrorNoDevice = 100,
     cudaErrorInvalidResourceHandle = 400,
+    // A host-side OS call failed. CuMetal reports it where an API writes a file
+    // on the host's behalf, such as cudaGraphDebugDotPrint.
+    cudaErrorOperatingSystem = 304,
     cudaErrorCudartUnloading = 4,
 } cudaError_t;
 
@@ -912,6 +915,13 @@ cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec,
                                            cudaGraph_t graph,
                                            unsigned long long flags);
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream);
+// Upload an instantiated graph to the device ahead of its first launch. On
+// CUDA this front-loads work the first launch would otherwise pay for, and a
+// host that mutates graph nodes must upload explicitly so the edits are in
+// place before the launch reads them.
+cudaError_t cudaGraphUpload(cudaGraphExec_t graphExec, cudaStream_t stream);
+// Write a graph's structure to `path` as a Graphviz DOT file.
+cudaError_t cudaGraphDebugDotPrint(cudaGraph_t graph, const char* path, unsigned int flags);
 cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
                                 cudaGraphNode_t* hErrorNode_out,
                                 cudaGraphExecUpdateResult* updateResult_out);
@@ -1016,6 +1026,35 @@ cudaError_t cudaDeviceGetLimit(size_t* pValue, cudaLimit limit);
 // cudaLaunchHostFunc — enqueues a host callback on the stream (spec §6.9).
 typedef void (*cudaHostFn_t)(void* userData);
 cudaError_t cudaLaunchHostFunc(cudaStream_t stream, cudaHostFn_t fn, void* userData);
+
+// ── Graph user objects ───────────────────────────────────────────────────────
+// A user object ties a host-side resource to a graph's lifetime: the graph
+// holds references, and the destructor runs once the last one goes away. Hosts
+// use it to free bookkeeping that must outlive every launch of a graph but not
+// the process.
+typedef struct cudaUserObject_st* cudaUserObject_t;
+
+typedef enum cudaUserObjectFlags {
+    // The destructor may run without synchronizing against the caller. CuMetal
+    // runs destructors synchronously on the thread that drops the last
+    // reference, which satisfies both this flag and its absence.
+    cudaUserObjectNoDestructorSync = 1,
+} cudaUserObjectFlags;
+
+typedef enum cudaUserObjectRetainFlags {
+    // Transfer the caller's reference to the graph instead of taking a new one.
+    cudaGraphUserObjectMove = 1,
+} cudaUserObjectRetainFlags;
+
+cudaError_t cudaUserObjectCreate(cudaUserObject_t* object_out, void* ptr,
+                                 cudaHostFn_t destroy, unsigned int initialRefcount,
+                                 unsigned int flags);
+cudaError_t cudaUserObjectRetain(cudaUserObject_t object, unsigned int count);
+cudaError_t cudaUserObjectRelease(cudaUserObject_t object, unsigned int count);
+cudaError_t cudaGraphRetainUserObject(cudaGraph_t graph, cudaUserObject_t object,
+                                      unsigned int count, unsigned int flags);
+cudaError_t cudaGraphReleaseUserObject(cudaGraph_t graph, cudaUserObject_t object,
+                                       unsigned int count);
 
 cudaError_t cudaLaunchCooperativeKernel(const void* func,
                                          dim3 gridDim,
@@ -1134,6 +1173,13 @@ cudaError_t cudaMemPoolGetAttribute(cudaMemPool_t pool, cudaMemPoolAttr attr, vo
 cudaError_t cudaDeviceGetDefaultMemPool(cudaMemPool_t* pool, int device);
 cudaError_t cudaDeviceSetMemPool(int device, cudaMemPool_t pool);
 cudaError_t cudaMallocFromPoolAsync(void** dev_ptr, size_t size, cudaMemPool_t pool, cudaStream_t stream);
+// Peer access control for a memory pool. CuMetal presents one device, so the
+// only location that can be granted access is device 0, which always has
+// read-write access to its own pool.
+cudaError_t cudaMemPoolSetAccess(cudaMemPool_t pool, const cudaMemAccessDesc* descList,
+                                 size_t count);
+cudaError_t cudaMemPoolGetAccess(cudaMemAccessFlags* flags, cudaMemPool_t pool,
+                                 cudaMemLocation* location);
 
 // Graph node addition APIs
 typedef struct cudaKernelNodeParams {
@@ -1227,6 +1273,13 @@ cudaError_t cudaGraphExecHostNodeSetParams(cudaGraphExec_t graphExec,
                                             cudaGraphNode_t node,
                                             const cudaHostNodeParams* params);
 cudaError_t cudaGraphNodeGetType(cudaGraphNode_t node, cudaGraphNodeType* pType);
+// How cudaStreamUpdateCaptureDependencies treats the node list it is handed:
+// append to the stream's current capture dependencies, or replace them.
+typedef enum cudaStreamUpdateCaptureDependenciesFlags {
+    cudaStreamAddCaptureDependencies = 0x0,
+    cudaStreamSetCaptureDependencies = 0x1,
+} cudaStreamUpdateCaptureDependenciesFlags;
+
 cudaError_t cudaStreamGetCaptureInfo(cudaStream_t stream, cudaStreamCaptureStatus* pCaptureStatus,
                                       unsigned long long* pId);
 

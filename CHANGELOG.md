@@ -8,6 +8,26 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
+- **A float `atomicAdd` on `__shared__` memory silently did nothing on the PTX path.** CuMetal's
+  CUDA overlay spells `atomicAdd(float*, float)` as inline `atom.global.add.f32` so the lowering
+  selects Metal's native float atomic. The PTX-to-LLVM path already resolved the pointer's real
+  state space from `cvta.shared`, but then emitted `atomicrmw fadd float addrspace(3)*`, and Metal
+  has no threadgroup float atomic in any language version. `xcrun metallib` accepted the
+  instruction and produced a kernel whose add never landed, so a `__shared__` accumulator kept its
+  initial value with no diagnostic anywhere -- the registration/JIT path returned 0 for a
+  256-thread block reduction. Threadgroup float adds now expand to the same compare-and-swap loop
+  MSL spells by hand, over `air.atomic.local.cmpxchg.weak.i32`; other threadgroup float operations
+  are refused explicitly rather than miscompiled. Device float atomics still use the native
+  instruction. This shipped with the float-atomic lowering while runtime tests could not execute,
+  so it landed unverified; `functional_cuda_projects_float_atomics` now covers it.
+- **Float atomics on the typed CuMetal IR backend computed garbage.** PTX keeps float temporaries in
+  `.b32` registers, so an atomic's payload arrives typed as an integer holding the value's bit
+  pattern. The Metal atomic lowering converted it numerically instead of reinterpreting it:
+  `atomicAdd(p, 1.0f)` emitted `float(1065353216)`, and the CAS loop clang expands a system-scope
+  float add into passed a `float` into a `uint` parameter, so an accumulator ended at 2.8e-45 --
+  the float whose bits are 2. Payload and result now bitcast between the storage word and the
+  float. This is the same class of defect as the 0.2.1 `.b32` register typing bug, at the atomic
+  sites that audit did not reach. `conformance_cuda_projects_typed_ptx_corpus` now passes 28/28.
 - **Constant-size aggregate copies between two host-populated device-buffer descriptors failed to
   lower on the source-first path.** `struct A { float4* data; int n; }` passed by value and copied
   element-wise emits `llvm.memcpy` between pointers derived from two byval parameters; the offset
@@ -26,6 +46,19 @@ All notable changes to CuMetal are documented here. Format follows
   the stream worker thread, which holds no current CUDA context, so the copy failed the context
   check and the error was discarded. Copy operands are now resolved when the copy is enqueued.
 
+### Changed
+
+- The PhysX GRB conformance harnesses and their build scripts honour `CUMETAL_BUILD_DIR`, and ctest
+  passes the tree that configured it. They hardcoded `build/`, so running the suite from any other
+  build directory failed with `build is not a directory` rather than testing anything. They now also
+  skip, rather than error, when CuMetal has not been built -- matching how every other prerequisite
+  in those scripts is handled.
+- The cuda-samples sweep-status check verifies the README headline only when the README states one.
+  The README dropped its per-corpus figures when it was simplified, which left the check demanding a
+  number the document no longer carried; the authoritative counts in
+  `docs/known-gaps/verification.md` and `docs/verified-results.md` are still enforced
+  unconditionally.
+
 ### Added
 
 - **`cuGetProcAddress`**, resolving against the library's own exported `cu*` symbols, plus
@@ -42,6 +75,30 @@ All notable changes to CuMetal are documented here. Format follows
 - **`tex1D`**, and linear texture filtering for `float2`/`float4` fetches; the software filter
   previously only instantiated for scalar texel types.
 - The `nvcc` shim accepts `-gencode=…` and the `-t`/`--threads` parallel-compilation flags.
+- **The driver and runtime API surface NVIDIA Warp's `warp.cu` needs**: the
+  `CU_DEVICE_ATTRIBUTE_PCI_*` identity triple, `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN` and
+  `MEMORY_POOLS_SUPPORTED` attributes; `CU_EVENT_RECORD_*` / `CU_EVENT_WAIT_*`,
+  `CU_STREAM_ADD/SET_CAPTURE_DEPENDENCIES`, `CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS` and
+  `CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE`; `cudaStreamAdd/SetCaptureDependencies`;
+  `cudaMemPoolGetAccess` / `cudaMemPoolSetAccess`; `cudaGraphUpload`; `cudaGraphDebugDotPrint`,
+  which writes a real Graphviz file; and graph user objects (`cudaUserObjectCreate`,
+  `cudaUserObjectRetain`, `cudaUserObjectRelease`, `cudaGraphRetainUserObject`,
+  `cudaGraphReleaseUserObject`), whose reference counting ties a host resource's destructor to a
+  graph's lifetime. Apple Silicon has no PCI enumeration, so the identity triple reports zeros
+  rather than failing; the pool-access calls describe the single device, which always has
+  read-write access to its own pool. With these, `warp.cu` compiles against CuMetal -- 6 of
+  `libwarp`'s 11 `.cu` files now do, the remaining 5 blocked on CUB device headers.
+- **An NVRTC and nvPTXCompiler surface** (`nvrtc.h`, `nvPTXCompiler.h`), exported from
+  `libcumetal.dylib` and aliased as `libnvrtc.dylib`. `nvrtcCompileProgram` writes the program and
+  any in-memory headers to a temporary directory and runs `cumetalc … --emit metallib`;
+  `nvrtcGetCUBIN` returns those bytes, which `cuModuleLoadDataEx` already accepts by their `MTLB`
+  magic, so a caller written against NVRTC never learns it is driving a Metal toolchain. NVRTC
+  options that describe PTX/SASS code generation are recognised and dropped with a note in the
+  program log; include paths, macros and the target architecture map onto `cumetalc` flags.
+  `nvrtcGetPTX` fails and `compute_XX` architectures are rejected at compile time, because
+  `cumetalc` lowers CUDA source to AIR and never to PTX; `nvPTXCompiler` passes PTX through, since
+  the module loader compiles it. This is the surface NVIDIA Warp's `warp.cu` compiles its runtime
+  kernels through.
 
 ## [0.2.1] - 2026-08-26
 

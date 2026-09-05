@@ -60,6 +60,19 @@ enum {
     CU_EVENT_INTERPROCESS = 0x4,
 };
 
+// Flags for cuEventRecordWithFlags and cuStreamWaitEvent. The "external"
+// variants only mean something inside a graph capture, where they keep the
+// event out of the captured dependency graph.
+enum {
+    CU_EVENT_RECORD_DEFAULT = 0x0,
+    CU_EVENT_RECORD_EXTERNAL = 0x1,
+};
+
+enum {
+    CU_EVENT_WAIT_DEFAULT = 0x0,
+    CU_EVENT_WAIT_EXTERNAL = 0x1,
+};
+
 enum {
     CU_CTX_SCHED_AUTO = 0x00,
     CU_CTX_SCHED_SPIN = 0x01,
@@ -154,6 +167,19 @@ typedef enum CUdevice_attribute {
     CU_DEVICE_ATTRIBUTE_VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED = 102,
     CU_DEVICE_ATTRIBUTE_GENERIC_COMPRESSION_SUPPORTED = 153,
     CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR = 81,
+    // Hosts that build a device identity string, or that decide whether two
+    // ordinals name the same physical GPU, read the PCI triple. Apple Silicon
+    // has no PCI enumeration; the driver answers with a stable synthetic
+    // identity rather than an error, since the query itself is legitimate.
+    CU_DEVICE_ATTRIBUTE_PCI_BUS_ID = 33,
+    CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID = 34,
+    CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID = 50,
+    // Opt-in shared memory: on NVIDIA this is the larger per-block threadgroup
+    // budget a kernel may request beyond the default. Metal has a single
+    // threadgroup memory limit, so this reports the same value as
+    // MAX_SHARED_MEMORY_PER_BLOCK.
+    CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = 97,
+    CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED = 115,
 } CUdevice_attribute;
 
 CUresult cuInit(unsigned int flags);
@@ -277,6 +303,11 @@ typedef unsigned int cuuint32_t;
 typedef struct CUgraphicsResource_st* CUgraphicsResource;
 
 #define CU_IPC_HANDLE_SIZE 64
+
+typedef enum CUipcMem_flags_enum {
+    CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS = 0x1,
+} CUipcMem_flags;
+
 typedef struct CUipcEventHandle_st {
     char reserved[CU_IPC_HANDLE_SIZE];
 } CUipcEventHandle;
@@ -295,6 +326,13 @@ typedef enum CUstreamCaptureMode_enum {
     CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1,
     CU_STREAM_CAPTURE_MODE_RELAXED = 2,
 } CUstreamCaptureMode;
+
+// How cuStreamUpdateCaptureDependencies treats the node list it is handed:
+// append to the stream's current capture dependencies, or replace them.
+typedef enum CUstreamUpdateCaptureDependencies_flags_enum {
+    CU_STREAM_ADD_CAPTURE_DEPENDENCIES = 0x0,
+    CU_STREAM_SET_CAPTURE_DEPENDENCIES = 0x1,
+} CUstreamUpdateCaptureDependencies_flags;
 
 typedef enum CUgraphNodeType_enum {
     CU_GRAPH_NODE_TYPE_KERNEL = 0,
@@ -709,6 +747,10 @@ typedef enum CUpointer_attribute_enum {
     CU_POINTER_ATTRIBUTE_HOST_POINTER    = 4,
     CU_POINTER_ATTRIBUTE_MAPPED          = 7,
     CU_POINTER_ATTRIBUTE_IS_MANAGED      = 8,
+    // The memory pool an allocation came from, or a null handle when it came
+    // from cuMemAlloc. Hosts query it to tell pooled allocations apart from
+    // ordinary ones.
+    CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE  = 20,
 } CUpointer_attribute;
 
 CUresult cuPointerGetAttribute(void* data, CUpointer_attribute attribute, CUdeviceptr ptr);
