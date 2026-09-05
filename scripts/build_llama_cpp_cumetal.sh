@@ -91,7 +91,7 @@ for libdir in lib lib64; do
     # GROMACS's nblib links that target. CuMetal is a single shared object, so
     # the "static" name resolves to the same dylib.
     ln -sf "${CUMETAL_ACTIVE_BUILD_DIR}/libcumetal.dylib" "${FAKE_CUDA}/${libdir}/libcudart_static.dylib" 2>/dev/null || true
-    for lib in cublas cublasLt cufft curand cusparse cusolver cudnn nccl; do
+    for lib in cublas cublasLt cufft curand cusparse cusolver cudnn nccl nvrtc; do
         src="${CUMETAL_ACTIVE_BUILD_DIR}/lib${lib}.dylib"
         [[ -f "${src}" ]] && ln -sf "${src}" "${FAKE_CUDA}/${libdir}/lib${lib}.dylib" 2>/dev/null || true
     done

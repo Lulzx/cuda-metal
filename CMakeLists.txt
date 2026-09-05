@@ -269,6 +269,8 @@ add_library(cumetal_runtime SHARED
     runtime/rt/cudnn.cpp
     runtime/rt/nvml.cpp
     runtime/rt/nccl.cpp
+    runtime/rt/nvrtc.cpp
+    runtime/rt/nvrtc_options.cpp
     runtime/rt/cuda_runtime.cpp
     runtime/rt/hash_shim.cpp
     runtime/metal_backend/metalcpp_impl.cpp
@@ -376,6 +378,9 @@ if(APPLE)
         COMMAND ${CMAKE_COMMAND} -E create_symlink
                 $<TARGET_FILE_NAME:cumetal_runtime>
                 $<TARGET_FILE_DIR:cumetal_runtime>/libnccl.dylib
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+                $<TARGET_FILE_NAME:cumetal_runtime>
+                $<TARGET_FILE_DIR:cumetal_runtime>/libnvrtc.dylib
     )
 
     if(CUMETAL_ENABLE_BINARY_SHIM)
@@ -711,6 +716,10 @@ if(APPLE)
             COMMAND "${CMAKE_COMMAND}" -E create_symlink
                     "libcumetal.dylib"
                     "${CMAKE_INSTALL_PREFIX}/lib/libnccl.dylib")
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E create_symlink
+                    "libcumetal.dylib"
+                    "${CMAKE_INSTALL_PREFIX}/lib/libnvrtc.dylib")
     ]])
 
     if(CUMETAL_ENABLE_BINARY_SHIM)
@@ -741,6 +750,8 @@ install(FILES
     runtime/api/cudnn.h
     runtime/api/nvml.h
     runtime/api/nccl.h
+    runtime/api/nvrtc.h
+    runtime/api/nvPTXCompiler.h
     runtime/api/cooperative_groups.h
     runtime/api/cuComplex.h
     runtime/api/device_launch_parameters.h

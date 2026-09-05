@@ -80,6 +80,31 @@ registration environment fallback. Other entry versions, codecs, and remaining
 container variants are open; SASS-only and big-endian inputs are outside the
 current target.
 
+## Threadgroup float atomics
+
+Metal has no threadgroup float atomic in any language version. CuMetal expands a
+32-bit threadgroup float add into a compare-and-swap loop over the word's bit
+pattern -- `cm_atomic_fadd_threadgroup` on the MSL path,
+`air.atomic.local.cmpxchg.weak.i32` on the LLVM path -- which is correct but
+serializes contending threads rather than using hardware. Other threadgroup
+float operations (min, max, exchange, compare-and-swap) are refused with a
+diagnostic. Device float add, subtract and exchange use Metal's native
+`atomic_float`.
+
+## Runtime compilation (NVRTC)
+
+`nvrtcCompileProgram` compiles by spawning `cumetalc`, so runtime compilation
+needs the compiler binary on disk and Xcode's Metal toolchain; a caller that
+ships only `libcumetal.dylib` gets `NVRTC_ERROR_BUILTIN_OPERATION_FAILURE` with
+the reason in the program log. Output is a metallib: `nvrtcGetPTX` and
+`nvrtcGetLTOIR` fail, and a `compute_XX` architecture request is rejected at
+compile time rather than served with bytes the caller would mis-handle. There is
+no `-dlto` path. `nvrtcGetLoweredName` answers only for `extern "C"` entry
+points, whose lowered name is the expression itself; template and namespace
+expressions return `NVRTC_ERROR_NAME_EXPRESSION_NOT_VALID` because the shim does
+not recover the device compiler's mangling. `nvPTXCompiler` is a pass-through,
+not a PTX compiler: it returns its input, which the module loader then compiles.
+
 ## AIR and Apple tools
 
 Production output depends on Apple's public Metal compiler. `air_inspect`,

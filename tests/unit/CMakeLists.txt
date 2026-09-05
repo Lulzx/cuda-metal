@@ -91,6 +91,23 @@ add_executable(cumetal_threadgroup_tiling_test
     threadgroup_tiling_test.cpp
 )
 
+add_executable(cumetal_nvrtc_options_test
+    nvrtc_options_test.cpp
+    ${CMAKE_SOURCE_DIR}/runtime/rt/nvrtc_options.cpp
+)
+
+target_include_directories(cumetal_nvrtc_options_test
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/runtime/rt
+)
+
+target_compile_options(cumetal_nvrtc_options_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
 target_include_directories(cumetal_allocation_table_test
     PRIVATE
         ${CMAKE_SOURCE_DIR}/runtime/api
@@ -369,6 +386,7 @@ add_test(
     COMMAND cumetal_ptx_parser_test
 )
 
+add_test(NAME unit_nvrtc_options COMMAND cumetal_nvrtc_options_test)
 add_test(NAME unit_cumetal_ir COMMAND cumetal_ir_test)
 add_test(NAME unit_msl_ast COMMAND cumetal_msl_ast_test)
 add_test(NAME unit_ptx_ir_msl COMMAND cumetal_ptx_ir_msl_test)
