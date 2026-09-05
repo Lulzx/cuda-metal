@@ -6,6 +6,20 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Constant-size aggregate copies between two host-populated device-buffer descriptors failed to
+  lower on the source-first path.** `struct A { float4* data; int n; }` passed by value and copied
+  element-wise emits `llvm.memcpy` between pointers derived from two byval parameters; the offset
+  pointers created while expanding that memcpy were not marked generic, so the address-space
+  legalizer rejected them with `host-populated pointer field reaches a conflicting concrete address
+  space`. Generic status now propagates to those synthetic pointers. This was the blocker for nearly
+  every generated NVIDIA Warp kernel; see `docs/warp-feasibility.md`.
+
+### Added
+
+- NVIDIA Warp Phase 0 feasibility audit (`docs/warp-feasibility.md`).
+
 ## [0.2.1] - 2026-08-26
 
 ### Fixed

@@ -1619,6 +1619,10 @@ struct Importer {
             if (offset == 0) return base;
             const ValueId value = builder.next_value();
             state->value_types[value] = base.type;
+            if (base.kind == OperandKind::kValue &&
+                state->output.generic_pointer_values.contains(base.value)) {
+                state->output.generic_pointer_values.insert(value);
+            }
             Operation pointer_offset;
             pointer_offset.opcode = OpCode::kPointerOffset;
             pointer_offset.results = {value};

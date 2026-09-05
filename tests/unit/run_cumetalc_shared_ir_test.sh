@@ -8,7 +8,8 @@ unsupported=$4
 switch_source=$5
 float_abs_source=$6
 float_math_source=$7
-nvcc=$8
+byval_aggregate_memcpy_source=$8
+nvcc=$9
 
 workdir=$(mktemp -d "${TMPDIR:-/tmp}/cumetalc-shared-ir.XXXXXX")
 trap 'rm -rf "$workdir"' EXIT
@@ -41,6 +42,11 @@ grep -q 'br i1' "$workdir/switch.ll"
     --overwrite -o "$workdir/float_abs.metal"
 grep -q 'kernel void cuda_float_abs' "$workdir/float_abs.metal"
 test "$(grep -o 'fabs(' "$workdir/float_abs.metal" | wc -l | tr -d ' ')" -ge 2
+
+"$cumetalc" "$byval_aggregate_memcpy_source" --backend=cumetal-ir --emit=msl \
+    --overwrite -o "$workdir/byval_aggregate_memcpy.metal"
+grep -q 'kernel void byval_aggregate_memcpy' "$workdir/byval_aggregate_memcpy.metal"
+grep -q 'reinterpret_cast<device uint\*>' "$workdir/byval_aggregate_memcpy.metal"
 
 # NVIDIA's C++ overlay selects binary32 for unsuffixed rsqrt/fma calls. A
 # missing overload silently inserts f32->f64->f32 conversions and the double

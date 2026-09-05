@@ -377,6 +377,31 @@ entry:
 }
 )llvm";
 
+constexpr const char* kNvvmByvalAggregateMemcpy = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%descriptor = type { ptr, i32 }
+%float4 = type { float, float, float, float }
+
+define ptx_kernel void @byval_aggregate_memcpy(ptr byval(%descriptor) %source,
+                                               ptr byval(%descriptor) %destination,
+                                               i64 %index) {
+entry:
+  %source.field = getelementptr %descriptor, ptr %source, i64 0, i32 0
+  %source.data = load ptr, ptr %source.field, align 8
+  %source.element = getelementptr %float4, ptr %source.data, i64 %index
+  %destination.field = getelementptr %descriptor, ptr %destination, i64 0, i32 0
+  %destination.data = load ptr, ptr %destination.field, align 8
+  %destination.element = getelementptr %float4, ptr %destination.data, i64 %index
+  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %destination.element,
+                                   ptr align 4 %source.element, i64 16, i1 false)
+  ret void
+}
+
+declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly,
+                                    ptr noalias nocapture readonly, i64, i1 immarg)
+)llvm";
+
 constexpr const char* kNvvmStaticThreadgroupGlobal = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1457,6 +1482,17 @@ int main() {
                      kernel_descriptor_pointer.source.find(
                          "reinterpret_cast<device uchar*>") != std::string::npos,
                  "host-populated pointer fields in kernel descriptors resolve as device pointers");
+
+    const metal::NvvmToMslResult byval_aggregate_memcpy =
+        metal::compile_nvvm_to_msl(kNvvmByvalAggregateMemcpy,
+                                   "byval-aggregate-memcpy.ll",
+                                   "byval_aggregate_memcpy");
+    ok &= expect(byval_aggregate_memcpy.ok &&
+                     byval_aggregate_memcpy.source.find(
+                         "reinterpret_cast<device uint*>") != std::string::npos,
+                 "aggregate memcpy between host-populated descriptor buffers retains "
+                 "per-use device pointer provenance: " +
+                     byval_aggregate_memcpy.error);
 
     const metal::NvvmToMslResult static_threadgroup_global =
         metal::compile_nvvm_to_msl(kNvvmStaticThreadgroupGlobal,

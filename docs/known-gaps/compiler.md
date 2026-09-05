@@ -23,7 +23,8 @@ Remaining typed-path blockers include combinations of:
 - compound shared-memory layouts beyond the proven static arrays and single
   runtime-sized `extern __shared__` binding;
 - generic pointer provenance through call/aggregate/memory/merge combinations
-  beyond the proven device and shared-memory helper arguments;
+  beyond the proven device and shared-memory helper arguments and constant-size
+  aggregate copies between host-populated device-buffer descriptors;
 - atomic scope/order/address-space combinations beyond the numerically proven
   32-bit direct/PTX family and lock-backed 64-bit typed-PTX family;
 - PTX call forms beyond the proven FP32 libdevice, constant-format `vprintf`,
