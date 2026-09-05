@@ -20,9 +20,14 @@ All notable changes to CuMetal are documented here. Format follows
 - **The kernel ABI sidecar was lost between NVRTC and module load.** `cumetalc` writes it beside
   the metallib and the NVRTC shim deleted its workspace, so a caller that compiled in memory and
   loaded the bytes got no ABI metadata and `cuLaunchKernel` fell back to scanning `kernelParams`
-  for a NULL terminator CUDA does not guarantee. The shim now publishes the sidecar into the
-  content-addressed module cache at the address those metallib bytes hash to, which is where the
-  matching `cuModuleLoadData` looks.
+  for a NULL terminator CUDA does not guarantee. `nvrtcGetCUBIN` now returns a CuMetal module
+  image (`CUMTLMD1` magic, two lengths, the metallib, the sidecar) so the metadata survives any
+  round trip that handles only bytes -- Warp's kernel cache, a later process --
+  and `cuModuleLoadData` recognises the image and stages both parts.
+- **The ABI sidecar described only the first kernel in a metallib.** NVIDIA Warp emits a forward
+  and a backward kernel for every `@wp.kernel`, so every launch but the first was guessing its
+  argument count. The sidecar is now `CUMETAL_ABI_V2`: one `kernel` block per entry, and the
+  driver, runtime, and shared-memory readers seek the block they want by name.
 - **NVRTC did not predefine `__CUDACC_RTC__`.** Real NVRTC does, and sources branch on it to skip
   includes that only a full toolkit has. CuMetal's device line force-includes `cuda_runtime.h`, so
   the declarations those branches expect are in fact present; the macro is now seeded ahead of the

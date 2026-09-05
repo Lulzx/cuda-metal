@@ -70,21 +70,17 @@ bool load_inline_static_shared_bytes_uncached(const char* metallib_path,
     }
 
     std::string line;
-    if (!std::getline(abi, line) || line != "CUMETAL_ABI_V1" ||
-        !std::getline(abi, line)) {
+    if (!std::getline(abi, line) ||
+        (line != "CUMETAL_ABI_V1" && line != "CUMETAL_ABI_V2")) {
         return false;
     }
-    {
-        std::istringstream kernel_line(line);
-        std::string keyword;
-        std::string kernel_name;
-        std::string extra;
-        if (!(kernel_line >> keyword >> kernel_name) || keyword != "kernel" ||
-            kernel_name != expected_kernel || (kernel_line >> extra)) {
-            return false;
-        }
-    }
 
+    // V2 holds one block per kernel in the metallib, so read past the blocks
+    // for other kernels rather than rejecting the file on sight. Every block is
+    // still validated: a malformed one anywhere means the file cannot be
+    // trusted for the block we do want.
+    bool in_wanted_block = false;
+    bool found = false;
     bool saw_shared = false;
     while (std::getline(abi, line)) {
         if (line.empty()) {
@@ -95,6 +91,17 @@ bool load_inline_static_shared_bytes_uncached(const char* metallib_path,
         if (!(record >> keyword)) {
             return false;
         }
+        if (keyword == "kernel") {
+            std::string kernel_name;
+            std::string extra;
+            if (!(record >> kernel_name) || (record >> extra)) {
+                return false;
+            }
+            if (found) break;
+            in_wanted_block = kernel_name == expected_kernel;
+            saw_shared = false;
+            continue;
+        }
         if (keyword == "shared") {
             unsigned long long bytes = 0;
             std::string extra;
@@ -102,8 +109,11 @@ bool load_inline_static_shared_bytes_uncached(const char* metallib_path,
                 bytes > 16ull * 1024ull * 1024ull) {
                 return false;
             }
-            *out_bytes = static_cast<std::size_t>(bytes);
             saw_shared = true;
+            if (in_wanted_block) {
+                *out_bytes = static_cast<std::size_t>(bytes);
+                found = true;
+            }
             continue;
         }
         if (keyword == "arg") {
@@ -118,6 +128,9 @@ bool load_inline_static_shared_bytes_uncached(const char* metallib_path,
         }
         return false;
     }
+    // A sidecar that never names this kernel is not an error: it describes a
+    // metallib whose other kernels are irrelevant here, and zero static
+    // threadgroup memory is the right answer.
     return true;
 }
 

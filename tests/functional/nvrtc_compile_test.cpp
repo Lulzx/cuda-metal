@@ -11,6 +11,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -129,9 +130,33 @@ int main(int argc, char** argv) {
     if (!compile_ok(kKernelSource, "scale_module", kWarpLikeOptions, &cubin)) {
         return 1;
     }
-    if (!expect(cubin.size() > 4 && std::memcmp(cubin.data(), "MTLB", 4) == 0,
-                "compiled output is a Metal library")) {
-        return 1;
+    // The "CUBIN" is a CuMetal module image: an 8-byte magic, two 64-bit
+    // lengths, then the metallib and the kernel ABI sidecar cumetalc wrote
+    // beside it. The sidecar rides inside the image because nothing in the
+    // NVRTC -> cache -> cuModuleLoadData round trip carries a second file.
+    {
+        constexpr std::size_t kHeader = 8 + 2 * sizeof(std::uint64_t);
+        if (!expect(cubin.size() > kHeader && std::memcmp(cubin.data(), "CUMTLMD1", 8) == 0,
+                    "compiled output is a CuMetal module image")) {
+            return 1;
+        }
+        std::uint64_t sizes[2] = {0, 0};
+        std::memcpy(sizes, cubin.data() + 8, sizeof(sizes));
+        if (!expect(sizes[0] > 4 && sizes[1] > 0 && kHeader + sizes[0] + sizes[1] == cubin.size(),
+                    "module image lengths cover the buffer exactly")) {
+            return 1;
+        }
+        if (!expect(std::memcmp(cubin.data() + kHeader, "MTLB", 4) == 0,
+                    "module image carries a Metal library")) {
+            return 1;
+        }
+        const std::string sidecar(cubin.data() + kHeader + sizes[0], static_cast<std::size_t>(sizes[1]));
+        if (!expect(sidecar.rfind("CUMETAL_ABI_V", 0) == 0 &&
+                        sidecar.find("kernel scale_kernel") != std::string::npos,
+                    "module image carries the kernel ABI sidecar")) {
+            std::fprintf(stderr, "%s\n", sidecar.c_str());
+            return 1;
+        }
     }
 
     // An in-memory header must reach the compile the way a quoted include

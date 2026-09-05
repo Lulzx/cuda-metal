@@ -12,6 +12,16 @@ struct LaunchBounds {
     size_t size;
 };
 
+// Two kernels, because the ABI sidecar describes the whole metallib and the
+// kernel under test is deliberately not the first one in it. Warp's codegen
+// emits a forward and a backward kernel for every @wp.kernel, so a sidecar that
+// only ever described one kernel left every launch but the first guessing.
+extern "C" __global__ void byval_aggregate_unused(LaunchBounds bounds, int* out) {
+    if (threadIdx.x < bounds.size) {
+        out[threadIdx.x] = bounds.ndim;
+    }
+}
+
 extern "C" __global__ void byval_aggregate_launch(LaunchBounds bounds,
                                                   float scale,
                                                   float* out) {

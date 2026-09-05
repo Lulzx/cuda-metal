@@ -13,6 +13,7 @@
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
@@ -215,52 +216,87 @@ CUresult query_function_properties(
         metallib_path, kernel_name, properties, &error));
 }
 
+// Strict unsigned parse for ABI sidecar fields: the whole token must be digits,
+// and the value must fit the field's documented bound.
+bool parse_unsigned(const std::string& text, unsigned long long limit,
+                    unsigned long long* out) {
+    if (text.empty() || text.size() > 20 ||
+        !std::all_of(text.begin(), text.end(),
+                     [](unsigned char c) { return std::isdigit(c) != 0; })) {
+        return false;
+    }
+    const unsigned long long value = std::strtoull(text.c_str(), nullptr, 10);
+    if (value > limit) return false;
+    *out = value;
+    return true;
+}
+
 void load_function_argument_count(CUfunc_st* function) {
     if (function == nullptr || function->module == nullptr) {
         return;
     }
     const std::filesystem::path abi_path =
         function->module->metallib_path + ".cumetal-abi";
-    std::ifstream abi(abi_path);
-    if (abi) {
+    // A V2 sidecar carries one block per kernel in the metallib -- NVIDIA Warp
+    // emits a forward and a backward kernel per @wp.kernel, so a generated
+    // module routinely holds a dozen -- and the blocks are read by seeking the
+    // one naming this function. A V1 file holds exactly one block and parses the
+    // same way. Anything malformed is abandoned in favour of the scan below,
+    // which is correct, just slower and noisier.
+    std::vector<std::string> tokens;
+    {
+        std::ifstream abi(abi_path);
         std::string header;
-        std::string kernel_keyword;
-        std::string kernel_name;
-        if (std::getline(abi, header) && header == "CUMETAL_ABI_V1" &&
-            (abi >> kernel_keyword >> kernel_name) && kernel_keyword == "kernel" &&
-            kernel_name == function->kernel_name) {
-            std::vector<cumetalKernelArgInfo_t> info;
-            std::string record_keyword;
-            bool valid = true;
-            while (abi >> record_keyword) {
-                if (record_keyword == "shared") {
-                    unsigned long long shared_bytes = 0;
-                    if (!(abi >> shared_bytes) || shared_bytes > 16ull * 1024ull * 1024ull) {
-                        valid = false;
-                        break;
-                    }
-                    continue;
+        if (abi && std::getline(abi, header) &&
+            (header == "CUMETAL_ABI_V1" || header == "CUMETAL_ABI_V2")) {
+            for (std::string token; abi >> token;) {
+                if (tokens.size() >= 4096) {
+                    tokens.clear();
+                    break;
                 }
-                std::string kind;
-                unsigned long size = 0;
-                if (record_keyword != "arg" || !(abi >> kind >> size) ||
-                    size == 0 || size > 4096 ||
-                    (kind != "buffer" && kind != "bytes") || info.size() >= 31) {
-                    info.clear();
+                tokens.push_back(std::move(token));
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i + 1 < tokens.size();) {
+        if (tokens[i] != "kernel") break;
+        const bool wanted = tokens[i + 1] == function->kernel_name;
+        i += 2;
+
+        std::vector<cumetalKernelArgInfo_t> info;
+        bool valid = true;
+        for (; i < tokens.size() && tokens[i] != "kernel";) {
+            if (tokens[i] == "shared") {
+                unsigned long long shared_bytes = 0;
+                if (i + 1 >= tokens.size() ||
+                    !parse_unsigned(tokens[i + 1], 16ull * 1024ull * 1024ull, &shared_bytes)) {
                     valid = false;
                     break;
                 }
-                info.push_back(cumetalKernelArgInfo_t{
-                    .kind = kind == "buffer" ? CUMETAL_ARG_BUFFER : CUMETAL_ARG_BYTES,
-                    .size_bytes = static_cast<std::uint32_t>(size),
-                });
+                i += 2;
+                continue;
             }
-            if (valid && !info.empty() && abi.eof()) {
-                function->argument_count = static_cast<std::uint32_t>(info.size());
-                function->has_argument_count = true;
-                function->argument_info = std::move(info);
-                return;
+            unsigned long long size = 0;
+            if (tokens[i] != "arg" || i + 2 >= tokens.size() ||
+                (tokens[i + 1] != "buffer" && tokens[i + 1] != "bytes") ||
+                !parse_unsigned(tokens[i + 2], 4096, &size) || size == 0 ||
+                info.size() >= 31) {
+                valid = false;
+                break;
             }
+            info.push_back(cumetalKernelArgInfo_t{
+                .kind = tokens[i + 1] == "buffer" ? CUMETAL_ARG_BUFFER : CUMETAL_ARG_BYTES,
+                .size_bytes = static_cast<std::uint32_t>(size),
+            });
+            i += 3;
+        }
+        if (!valid) break;
+        if (wanted && !info.empty()) {
+            function->argument_count = static_cast<std::uint32_t>(info.size());
+            function->has_argument_count = true;
+            function->argument_info = std::move(info);
+            return;
         }
     }
 
@@ -1414,6 +1450,24 @@ CUresult cuModuleLoadData(CUmodule* module, const void* image) {
         if (!has_current_context_locked(state)) {
             return CUDA_ERROR_INVALID_CONTEXT;
         }
+    }
+
+    // A CuMetal module image carries the metallib together with the ABI sidecar
+    // cumetalc produced for it. Stage both, so the launch binds arguments from
+    // recorded metadata rather than guessing at a NULL terminator.
+    cumetal::cache::ModuleImageParts parts;
+    if (cumetal::cache::parse_module_image(image, kMaxImageBytes, &parts)) {
+        std::filesystem::path cache_path;
+        std::string cache_error;
+        if (!cumetal::cache::stage_metallib_bytes(parts.metallib, parts.metallib_size,
+                                                  &cache_path, &cache_error)) {
+            return CUDA_ERROR_UNKNOWN;
+        }
+        // Best effort: without the sidecar the module still loads and the launch
+        // path reports that it is guessing.
+        cumetal::cache::stage_metallib_abi_sidecar(cache_path, parts.sidecar,
+                                                   parts.sidecar_size, &cache_error);
+        return create_module_from_path(cache_path.string(), /*owns_path=*/false, module);
     }
 
     std::string ptx_text;

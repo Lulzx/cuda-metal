@@ -75,6 +75,14 @@ std::uint32_t ptx_param_size(const cumetal::ptx::Parameter& param) {
     return ptx_scalar_size(param.type);
 }
 
+// The sidecar describes the metallib, and a metallib holds every kernel the
+// translation unit defined -- NVIDIA Warp emits a forward and a backward kernel
+// for each @wp.kernel, and a generated module routinely carries a dozen. A
+// single-kernel sidecar left every kernel but the first with no ABI metadata, so
+// the launch fell back to scanning kernelParams for a NULL terminator. V2 is
+// therefore one `kernel` block per entry; readers seek the block they want by
+// name. `requested_entry`, when set, still narrows the file to that one kernel,
+// because then the metallib holds only that one too.
 std::string build_ptx_abi_sidecar(std::string_view ptx_source,
                                   const std::string& requested_entry) {
     cumetal::ptx::ParseOptions parse_options;
@@ -85,11 +93,13 @@ std::string build_ptx_abi_sidecar(std::string_view ptx_source,
                   << "\n";
         return {};
     }
+    std::string text = "CUMETAL_ABI_V2\n";
+    std::size_t emitted = 0;
     for (const auto& entry : parsed.module.entries) {
         if (!requested_entry.empty() && entry.name != requested_entry) {
             continue;
         }
-        std::string text = "CUMETAL_ABI_V1\nkernel " + entry.name + "\n";
+        text += "kernel " + entry.name + "\n";
         text += "shared " +
                 std::to_string(cumetal::ptx::compute_static_shared_bytes(ptx_source,
                                                                          entry.name)) + "\n";
@@ -97,11 +107,14 @@ std::string build_ptx_abi_sidecar(std::string_view ptx_source,
             text += param.is_pointer ? "arg buffer 8\n"
                                      : "arg bytes " + std::to_string(ptx_param_size(param)) + "\n";
         }
-        return text;
+        ++emitted;
     }
-    std::cerr << "cumetalc: PTX ABI sidecar not written: no entry named '" << requested_entry
-              << "' in the parsed PTX\n";
-    return {};
+    if (emitted == 0) {
+        std::cerr << "cumetalc: PTX ABI sidecar not written: no entry named '" << requested_entry
+                  << "' in the parsed PTX\n";
+        return {};
+    }
+    return text;
 }
 
 // The NVVM route (.cu -> clang LLVM IR -> MSL) never produces PTX, so
@@ -112,6 +125,8 @@ std::string build_ptx_abi_sidecar(std::string_view ptx_source,
 // the sidecar from that instead.
 std::string build_ir_abi_sidecar(const cumetal::ir::Module& module,
                                  const std::string& requested_entry) {
+    std::string text = "CUMETAL_ABI_V2\n";
+    std::size_t emitted = 0;
     for (const auto& function : module.functions) {
         if (!function.is_kernel || !function.kernel_abi.has_value()) {
             continue;
@@ -120,27 +135,33 @@ std::string build_ir_abi_sidecar(const cumetal::ir::Module& module,
             continue;
         }
         const cumetal::ir::KernelAbi& abi = *function.kernel_abi;
-        std::string text = "CUMETAL_ABI_V1\nkernel " + function.name + "\n";
-        text += "shared " + std::to_string(abi.static_threadgroup_memory) + "\n";
+        std::string block = "kernel " + function.name + "\n";
+        block += "shared " + std::to_string(abi.static_threadgroup_memory) + "\n";
+        bool usable = true;
         for (const auto& argument : abi.arguments) {
             if (argument.hidden_role.has_value()) continue;
             if (argument.kind == cumetal::ir::ArgumentKind::kPointer) {
-                text += "arg buffer 8\n";
+                block += "arg buffer 8\n";
                 continue;
             }
             if (argument.size == 0 || argument.size > 4096) {
-                // The runtime rejects these outright; emitting a sidecar the
-                // runtime refuses is worse than emitting none.
-                std::cerr << "cumetalc: PTX ABI sidecar not written: argument '"
-                          << argument.name << "' of kernel '" << function.name
-                          << "' has unusable size " << argument.size << "\n";
-                return {};
+                // The runtime rejects these outright, and a block it refuses
+                // invalidates the whole file. Drop this kernel and keep the
+                // rest: it launches with a guessed argument count, exactly as
+                // it did before there was a sidecar at all.
+                std::cerr << "cumetalc: kernel ABI omitted for '" << function.name
+                          << "': argument '" << argument.name << "' has unusable size "
+                          << argument.size << "\n";
+                usable = false;
+                break;
             }
-            text += "arg bytes " + std::to_string(argument.size) + "\n";
+            block += "arg bytes " + std::to_string(argument.size) + "\n";
         }
-        return text;
+        if (!usable) continue;
+        text += block;
+        ++emitted;
     }
-    return {};
+    return emitted == 0 ? std::string{} : text;
 }
 
 void print_usage(const char* argv0) {

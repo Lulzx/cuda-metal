@@ -452,29 +452,22 @@ nvrtcResult nvrtcCompileProgram(nvrtcProgram prog, int numOptions, const char* c
         return NVRTC_ERROR_COMPILATION;
     }
 
-    program->cubin = std::move(bytes);
-
-    // cumetalc writes the kernel ABI beside the metallib, and the workspace is
-    // about to be deleted. The caller will hand the metallib bytes to
-    // cuModuleLoadData, which stages them in the content-addressed module cache;
-    // publish the sidecar at that same address now so the driver finds it there
-    // instead of guessing argument counts at launch. Best-effort: a failure here
-    // costs the ABI metadata, not the compile.
-    {
-        std::vector<char> abi_bytes;
-        if (read_file_bytes(std::filesystem::path(output_path.string() + ".cumetal-abi"),
-                            &abi_bytes) &&
-            !abi_bytes.empty()) {
-            std::filesystem::path staged;
-            std::string cache_error;
-            if (cumetal::cache::stage_metallib_bytes(program->cubin.data(),
-                                                     program->cubin.size(), &staged,
-                                                     &cache_error) &&
-                !cumetal::cache::stage_metallib_abi_sidecar(staged, abi_bytes.data(),
-                                                            abi_bytes.size(), &cache_error)) {
-                log += "cumetal: " + cache_error + "\n";
-            }
-        }
+    // cumetalc writes the kernel ABI beside the metallib and the workspace is
+    // about to be deleted, so the sidecar has to travel inside the image the
+    // caller takes away. Everything downstream -- Warp's kernel cache, a later
+    // process, cuModuleLoadData -- handles only bytes, and without the sidecar
+    // cuLaunchKernel has to guess an argument count.
+    std::vector<char> abi_bytes;
+    if (read_file_bytes(std::filesystem::path(output_path.string() + ".cumetal-abi"),
+                        &abi_bytes) &&
+        !abi_bytes.empty()) {
+        const std::string image = cumetal::cache::pack_module_image(
+            bytes.data(), bytes.size(), abi_bytes.data(), abi_bytes.size());
+        program->cubin.assign(image.begin(), image.end());
+    } else {
+        // No sidecar means no ABI metadata to carry; the bare metallib still
+        // loads, and the driver says so at launch.
+        program->cubin = std::move(bytes);
     }
 
     program->compiled = true;

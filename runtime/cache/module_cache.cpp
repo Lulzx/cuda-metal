@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -174,6 +175,56 @@ bool stage_metallib_abi_sidecar(const std::filesystem::path& metallib_path,
         }
         return false;
     }
+    return true;
+}
+
+
+namespace {
+
+constexpr char kModuleImageMagic[8] = {'C', 'U', 'M', 'T', 'L', 'M', 'D', '1'};
+constexpr std::size_t kModuleImageHeader = sizeof(kModuleImageMagic) + 2 * sizeof(std::uint64_t);
+
+}  // namespace
+
+std::string pack_module_image(const void* metallib,
+                              std::size_t metallib_size,
+                              const void* sidecar,
+                              std::size_t sidecar_size) {
+    std::string image;
+    image.reserve(kModuleImageHeader + metallib_size + sidecar_size);
+    image.append(kModuleImageMagic, sizeof(kModuleImageMagic));
+
+    const std::uint64_t sizes[2] = {static_cast<std::uint64_t>(metallib_size),
+                                    static_cast<std::uint64_t>(sidecar_size)};
+    image.append(reinterpret_cast<const char*>(sizes), sizeof(sizes));
+    image.append(static_cast<const char*>(metallib), metallib_size);
+    image.append(static_cast<const char*>(sidecar), sidecar_size);
+    return image;
+}
+
+bool parse_module_image(const void* image, std::size_t max_size, ModuleImageParts* out) {
+    if (image == nullptr || out == nullptr || max_size < kModuleImageHeader) {
+        return false;
+    }
+
+    const auto* bytes = static_cast<const std::uint8_t*>(image);
+    if (std::memcmp(bytes, kModuleImageMagic, sizeof(kModuleImageMagic)) != 0) {
+        return false;
+    }
+
+    std::uint64_t sizes[2] = {0, 0};
+    std::memcpy(sizes, bytes + sizeof(kModuleImageMagic), sizeof(sizes));
+    // A sidecar of zero length is not a container worth writing, and either
+    // length overrunning the caller's bound means the header is not ours.
+    if (sizes[0] == 0 || sizes[1] == 0 || sizes[0] > max_size || sizes[1] > max_size ||
+        kModuleImageHeader + sizes[0] + sizes[1] > max_size) {
+        return false;
+    }
+
+    out->metallib = bytes + kModuleImageHeader;
+    out->metallib_size = static_cast<std::size_t>(sizes[0]);
+    out->sidecar = out->metallib + out->metallib_size;
+    out->sidecar_size = static_cast<std::size_t>(sizes[1]);
     return true;
 }
 
