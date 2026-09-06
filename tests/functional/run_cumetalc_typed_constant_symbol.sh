@@ -15,8 +15,15 @@ fi
 
 "$1" "$3" --backend=cumetal-ir --emit=metallib --no-link --overwrite \
     --fp64=fast48 -o "$4"
-if [[ $(grep -c '^arg buffer 8$' "$4.cumetal-abi") -ne 1 ]]; then
+# The sidecar carries one block per kernel; each of the two kernels takes a
+# single pointer, so anything beyond one `arg buffer 8` per block is a hidden
+# symbol buffer that leaked into the CUDA-visible ABI.
+kernels=$(grep -c '^kernel ' "$4.cumetal-abi")
+pointer_args=$(grep -c '^arg buffer 8$' "$4.cumetal-abi")
+all_args=$(grep -c '^arg ' "$4.cumetal-abi")
+if [[ "$kernels" -ne 2 || "$pointer_args" -ne 2 || "$all_args" -ne 2 ]]; then
     echo "FAIL: hidden typed symbol buffers leaked into the CUDA launch ABI" >&2
+    cat "$4.cumetal-abi" >&2
     exit 1
 fi
 "$2" "$4"

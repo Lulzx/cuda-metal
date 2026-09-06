@@ -115,6 +115,10 @@ add_executable(cumetal_runtime_host_alloc_test
     runtime_host_alloc_test.cpp
 )
 
+add_executable(cumetal_runtime_pageable_memcpy_test
+    runtime_pageable_memcpy_test.cpp
+)
+
 add_executable(cumetal_runtime_host_pointer_api_test
     runtime_host_pointer_api_test.cpp
 )
@@ -716,6 +720,11 @@ target_link_libraries(cumetal_runtime_mem_get_info_test
 )
 
 target_link_libraries(cumetal_runtime_host_alloc_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_pageable_memcpy_test
     PRIVATE
         cumetal_runtime
 )
@@ -1483,6 +1492,13 @@ target_compile_options(cumetal_runtime_mem_get_info_test
 )
 
 target_compile_options(cumetal_runtime_host_alloc_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_runtime_pageable_memcpy_test
     PRIVATE
         -Wall
         -Wextra
@@ -2342,6 +2358,13 @@ add_test(
 )
 
 set_tests_properties(functional_runtime_host_alloc PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_runtime_pageable_memcpy
+    COMMAND $<TARGET_FILE:cumetal_runtime_pageable_memcpy_test>
+)
+
+set_tests_properties(functional_runtime_pageable_memcpy PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
     NAME functional_runtime_host_pointer_api

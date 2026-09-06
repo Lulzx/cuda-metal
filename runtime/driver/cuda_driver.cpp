@@ -2314,6 +2314,18 @@ CUresult resolve_memcpy2d(const CUDA_MEMCPY2D* pCopy, ResolvedMemcpy2D* out) {
     return CUDA_SUCCESS;
 }
 
+// A host-typed operand that the allocation table does not know is pageable
+// memory: ordinary malloc/stack storage the caller controls.
+bool memcpy2d_touches_pageable_host(const CUDA_MEMCPY2D& copy) {
+    const bool src_pageable = copy.srcMemoryType == CU_MEMORYTYPE_HOST &&
+                              copy.srcHost != nullptr &&
+                              cumetalRuntimeIsDevicePointer(copy.srcHost) == 0;
+    const bool dst_pageable = copy.dstMemoryType == CU_MEMORYTYPE_HOST &&
+                              copy.dstHost != nullptr &&
+                              cumetalRuntimeIsDevicePointer(copy.dstHost) == 0;
+    return src_pageable || dst_pageable;
+}
+
 void perform_memcpy2d(const ResolvedMemcpy2D& resolved) {
     const CUDA_MEMCPY2D& copy = resolved.copy;
     if (copy.WidthInBytes == 0 || copy.Height == 0) return;
@@ -2351,6 +2363,12 @@ CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D* pCopy, CUstream hStream) {
         delete payload;
         return CUDA_SUCCESS;
     }
+    // CUDA's pageable-memory contract: a copy with a pageable host end is
+    // synchronous with respect to the host, because the caller may free or
+    // reuse that memory as soon as the call returns. Keep the copy stream-
+    // ordered by enqueueing it, then wait for it when either end is pageable.
+    // Pinned (tracked) host memory and device memory stay asynchronous.
+    const bool pageable = memcpy2d_touches_pageable_host(payload->copy);
     const cudaError_t launched = cudaLaunchHostFunc(
         reinterpret_cast<cudaStream_t>(hStream),
         +[](void* raw) {
@@ -2358,8 +2376,14 @@ CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D* pCopy, CUstream hStream) {
             perform_memcpy2d(*owned);
         },
         payload);
-    if (launched != cudaSuccess) delete payload;
-    return map_cuda_error(launched);
+    if (launched != cudaSuccess) {
+        delete payload;
+        return map_cuda_error(launched);
+    }
+    if (pageable) {
+        return cuStreamSynchronize(hStream);
+    }
+    return CUDA_SUCCESS;
 }
 
 CUresult cuMemcpyBatchAsync(CUdeviceptr* dsts, CUdeviceptr* srcs, size_t* sizes, size_t count,

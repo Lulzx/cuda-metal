@@ -42,6 +42,16 @@ incomplete.
 
 - Arbitrary pageable `malloc` pointers are not kernel-bindable merely because
   Apple Silicon uses UMA; tracked Metal-backed allocations are required.
+- Asynchronous copies follow CUDA's pageable-memory contract: a copy whose host
+  end is pageable is synchronous with respect to the host (the source is staged
+  at the call; a pageable destination is written before the call returns, in
+  stream order). Only pinned memory from `cudaHostAlloc`/`cudaMallocHost` is
+  copied asynchronously. A pageable-destination copy therefore drains the
+  stream, which is the CUDA cost model rather than a CuMetal limitation, but
+  the drain is a full stream synchronization rather than a wait on that one
+  operation. Memsets targeting pageable host memory, which CUDA rejects and
+  CuMetal accepts on unified memory, are completed before returning for the
+  same reason.
 - Managed-memory API compatibility does not imply CUDA concurrent managed access
   or CPU/GPU atomics. Prefetch/advice/range-query/attach calls validate tracked
   spans and arguments and preserve prefetch stream ordering, but do not control

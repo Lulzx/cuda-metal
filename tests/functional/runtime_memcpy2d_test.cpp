@@ -1,6 +1,7 @@
 #include "cuda_runtime.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -120,21 +121,24 @@ int main() {
         }
     }
 
-    // A host operation queued ahead of the async copy must hold it back, while
-    // the API call itself must return without synchronizing the stream.
+    // CUDA's pageable-memory contract: an asynchronous copy or memset whose
+    // host end is pageable is synchronous with respect to the host -- the
+    // data is in place when the call returns -- while still being stream
+    // ordered, so it runs only after the work queued ahead of it. A host
+    // function parked on the stream records that it ran; a call that returns
+    // with the flag set and the data in place has both properties. (A
+    // pageable source is captured at call time, as CUDA specifies, so the
+    // parked function must not be expected to influence the copied bytes.)
     struct Gate {
-        std::atomic<bool> entered{false};
-        std::atomic<bool> release{false};
+        std::atomic<bool> ran{false};
     } gate;
-    auto block_stream = [](void* opaque) {
-        auto* g = static_cast<Gate*>(opaque);
-        g->entered.store(true, std::memory_order_release);
-        while (!g->release.load(std::memory_order_acquire))
-            std::this_thread::yield();
+    auto slow_host_op = [](void* opaque) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        static_cast<Gate*>(opaque)->ran.store(true, std::memory_order_release);
     };
     cudaStream_t ordered_stream = nullptr;
     if (cudaStreamCreate(&ordered_stream) != cudaSuccess ||
-        cudaLaunchHostFunc(ordered_stream, block_stream, &gate) != cudaSuccess) {
+        cudaLaunchHostFunc(ordered_stream, slow_host_op, &gate) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: failed to create async-ordering gate\n");
         return 1;
     }
@@ -145,37 +149,37 @@ int main() {
         std::fprintf(stderr, "FAIL: ordered cudaMemcpy2DAsync returned %d\n", err);
         return 1;
     }
-    if (host_dst[0][0] != 0.0f) {
-        std::fprintf(stderr, "FAIL: cudaMemcpy2DAsync ignored prior stream work\n");
+    if (!gate.ran.load(std::memory_order_acquire) || host_dst[0][0] != host_src[0][0]) {
+        std::fprintf(stderr,
+                     "FAIL: cudaMemcpy2DAsync into pageable memory must complete, in stream "
+                     "order, before returning (ran=%d dst=%f)\n",
+                     gate.ran.load() ? 1 : 0, static_cast<double>(host_dst[0][0]));
         return 1;
     }
-    gate.release.store(true, std::memory_order_release);
-    if (cudaStreamSynchronize(ordered_stream) != cudaSuccess ||
-        host_dst[0][0] != host_src[0][0]) {
-        std::fprintf(stderr, "FAIL: cudaMemcpy2DAsync did not complete in stream order\n");
+    if (cudaStreamSynchronize(ordered_stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaStreamSynchronize after ordered copy\n");
         return 1;
     }
 
-    gate.entered.store(false, std::memory_order_release);
-    gate.release.store(false, std::memory_order_release);
-    if (cudaLaunchHostFunc(ordered_stream, block_stream, &gate) != cudaSuccess) {
-        std::fprintf(stderr, "FAIL: failed to create memset ordering gate\n");
+    gate.ran.store(false, std::memory_order_release);
+    if (cudaLaunchHostFunc(ordered_stream, slow_host_op, &gate) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: failed to re-arm async-ordering gate\n");
         return 1;
     }
-    std::memset(host_dst, 0, sizeof(host_dst));
     if (cudaMemset2DAsync(host_dst, kDPitch, 0x5a, kWidth, kRows,
                           ordered_stream) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: ordered cudaMemset2DAsync failed\n");
         return 1;
     }
-    if (reinterpret_cast<unsigned char*>(host_dst)[0] != 0) {
-        std::fprintf(stderr, "FAIL: cudaMemset2DAsync ignored prior stream work\n");
+    if (!gate.ran.load(std::memory_order_acquire) ||
+        reinterpret_cast<const unsigned char*>(host_dst)[0] != 0x5a) {
+        std::fprintf(stderr,
+                     "FAIL: cudaMemset2DAsync into pageable memory must complete, in stream "
+                     "order, before returning\n");
         return 1;
     }
-    gate.release.store(true, std::memory_order_release);
-    if (cudaStreamSynchronize(ordered_stream) != cudaSuccess ||
-        reinterpret_cast<unsigned char*>(host_dst)[0] != 0x5a) {
-        std::fprintf(stderr, "FAIL: cudaMemset2DAsync did not complete in stream order\n");
+    if (cudaStreamSynchronize(ordered_stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaStreamSynchronize after ordered memset\n");
         return 1;
     }
     cudaStreamDestroy(ordered_stream);

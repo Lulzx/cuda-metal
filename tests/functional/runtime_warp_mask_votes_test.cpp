@@ -169,12 +169,19 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::string same_length_corruption = saved_sidecar.str();
-    const std::string kVersionLine = "CUMETAL_ABI_V1";
-    if (same_length_corruption.compare(0, kVersionLine.size(), kVersionLine) != 0) {
-        std::fprintf(stderr, "FAIL: sidecar does not start with %s\n", kVersionLine.c_str());
+    // V1 described one kernel; V2 carries one block per kernel in the
+    // metallib. Either is a valid sidecar, and the corruption below turns the
+    // version digit into one the runtime has never issued.
+    const std::string kVersionLine = "CUMETAL_ABI_V";
+    if (same_length_corruption.compare(0, kVersionLine.size(), kVersionLine) != 0 ||
+        same_length_corruption.size() <= kVersionLine.size() ||
+        (same_length_corruption[kVersionLine.size()] != '1' &&
+         same_length_corruption[kVersionLine.size()] != '2')) {
+        std::fprintf(stderr, "FAIL: sidecar does not start with %s1 or %s2\n",
+                     kVersionLine.c_str(), kVersionLine.c_str());
         return 1;
     }
-    same_length_corruption[kVersionLine.size() - 1] = '9';  // CUMETAL_ABI_V1 -> CUMETAL_ABI_V9
+    same_length_corruption[kVersionLine.size()] = '9';  // CUMETAL_ABI_Vn -> CUMETAL_ABI_V9
     if (same_length_corruption.size() != saved_sidecar.str().size()) {
         std::fprintf(stderr, "FAIL: same-length fixture changed the sidecar size\n");
         return 1;

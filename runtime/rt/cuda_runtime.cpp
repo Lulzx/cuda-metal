@@ -1685,6 +1685,40 @@ cudaError_t enqueue_stream_host_op(cudaStream_t stream, std::function<void()> op
         backend_stream, std::move(operation), &error);
 }
 
+// CUDA's pageable-memory contract, from the cudaMemcpyAsync reference: a copy
+// whose host end is ordinary (pageable) memory is synchronous with respect to
+// the host. Host-to-device returns once the source has been staged, and
+// device-to-host or host-to-host returns only once the destination has been
+// written. Only pinned memory -- cudaHostAlloc / cudaHostRegister, which the
+// allocation table tracks -- may be copied truly asynchronously, because only
+// pinned memory is guaranteed to outlive the call.
+//
+// Programs lean on this constantly: cudaMemcpyAsync(&value, dev, 4, D2H, s)
+// into a stack variable, or into a std::vector that goes out of scope on the
+// next line. Deferring that write to the stream's host-op queue let it land
+// after the caller had freed the memory; NVIDIA Warp's test suite died of
+// exactly that heap corruption in 21 of its 87 modules.
+bool is_pageable_host_memory(const void* ptr) {
+    if (ptr == nullptr) {
+        return false;
+    }
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    return !runtime_state().allocations.resolve(ptr, &resolved);
+}
+
+// Enqueue `operation` in stream order -- so it still waits for everything the
+// stream had queued ahead of it, including legacy null-stream ordering -- and,
+// when `complete_before_return`, wait for it before returning to the caller.
+cudaError_t enqueue_stream_host_op_pageable(cudaStream_t stream,
+                                            bool complete_before_return,
+                                            std::function<void()> operation) {
+    const cudaError_t status = enqueue_stream_host_op(stream, std::move(operation));
+    if (status != cudaSuccess || !complete_before_return) {
+        return status;
+    }
+    return synchronize_stream_for_host_op(stream, nullptr);
+}
+
 cudaError_t update_event_completion(cudaEvent_t event, bool wait_for_completion) {
     if (event == nullptr) {
         return cudaErrorInvalidValue;
@@ -3490,8 +3524,13 @@ cudaError_t cudaMemcpyAsync(void* dst,
         std::memcpy(staged_h2d->data(), host_src, count);
         relocate_embedded_device_pointers(staged_h2d.get());
     }
-    const cudaError_t enqueue_status = enqueue_stream_host_op(
-        stream, [host_dst, host_src, count, resolved_kind, staged_h2d]() {
+    // A pageable destination must hold the data when this call returns; a
+    // pageable source has been staged above (host-to-device) or is covered by
+    // the same wait (host-to-host). Pinned and device ends stay asynchronous.
+    const bool complete_before_return = count > 0 && is_pageable_host_memory(dst);
+    const cudaError_t enqueue_status = enqueue_stream_host_op_pageable(
+        stream, complete_before_return,
+        [host_dst, host_src, count, resolved_kind, staged_h2d]() {
             if (count == 0) return;
             if (staged_h2d != nullptr) {
                 std::memcpy(host_dst, staged_h2d->data(), count);
@@ -3623,10 +3662,18 @@ cudaError_t cudaMemcpyToSymbolAsync(const void* symbol,
         return fail(symbol_status);
     }
 
+    // A pageable source may be freed the moment this returns, so take the
+    // bytes now; the symbol itself is device memory and the write can wait.
+    std::shared_ptr<std::vector<std::uint8_t>> staged;
+    if (count > 0 && is_pageable_host_memory(src)) {
+        staged = std::make_shared<std::vector<std::uint8_t>>(count);
+        std::memcpy(staged->data(), src, count);
+    }
     const cudaError_t enqueue_status = enqueue_stream_host_op(
-        stream, [symbol_ptr, src, count]() {
+        stream, [symbol_ptr, src, count, staged]() {
             if (count > 0)
-                std::memcpy(const_cast<unsigned char*>(symbol_ptr), src, count);
+                std::memcpy(const_cast<unsigned char*>(symbol_ptr),
+                            staged != nullptr ? staged->data() : src, count);
         });
     return fail(enqueue_status);
 }
@@ -3659,8 +3706,8 @@ cudaError_t cudaMemcpyFromSymbolAsync(void* dst,
         return fail(symbol_status);
     }
 
-    const cudaError_t enqueue_status = enqueue_stream_host_op(
-        stream, [dst, symbol_ptr, count]() {
+    const cudaError_t enqueue_status = enqueue_stream_host_op_pageable(
+        stream, count > 0 && is_pageable_host_memory(dst), [dst, symbol_ptr, count]() {
             if (count > 0) std::memcpy(dst, symbol_ptr, count);
         });
     return fail(enqueue_status);
@@ -3723,8 +3770,11 @@ cudaError_t cudaMemsetAsync(void* dev_ptr, int value, size_t count, cudaStream_t
     if (host_ptr == nullptr && count > 0) {
         return fail(cudaErrorInvalidValue);
     }
-    const cudaError_t enqueue_status = enqueue_stream_host_op(
-        stream, [host_ptr, value, count]() {
+    // CUDA does not accept pageable host memory here at all; CuMetal does,
+    // because on unified memory it is addressable. Never defer a write into
+    // memory the caller may free on return: complete it before returning.
+    const cudaError_t enqueue_status = enqueue_stream_host_op_pageable(
+        stream, count > 0 && is_pageable_host_memory(dev_ptr), [host_ptr, value, count]() {
             if (count > 0) std::memset(host_ptr, value, count);
         });
     if (enqueue_status != cudaSuccess) return fail(enqueue_status);
@@ -3790,13 +3840,26 @@ cudaError_t cudaMemcpy2DAsync(void* dst, size_t dpitch,
                                size_t width, size_t height,
                                cudaMemcpyKind kind, cudaStream_t stream) {
     (void)kind;
+    const size_t src_span = height == 0 ? 0 : (height - 1) * spitch + width;
     auto* d = static_cast<uint8_t*>(host_accessible_pointer(
         dst, height == 0 ? 0 : (height - 1) * dpitch + width));
-    const auto* s = static_cast<const uint8_t*>(host_accessible_pointer(
-        src, height == 0 ? 0 : (height - 1) * spitch + width));
+    const auto* s = static_cast<const uint8_t*>(host_accessible_pointer(src, src_span));
     if ((d == nullptr || s == nullptr) && width > 0 && height > 0)
         return fail(cudaErrorInvalidValue);
-    return fail(enqueue_stream_host_op(stream, [=]() {
+    // Pageable-memory contract: stage a pageable source now, and finish a
+    // copy into a pageable destination before returning.
+    std::shared_ptr<std::vector<uint8_t>> staged;
+    if (src_span > 0 && width > 0 && is_pageable_host_memory(src)) {
+        staged = std::make_shared<std::vector<uint8_t>>(src_span);
+        std::memcpy(staged->data(), s, src_span);
+        s = staged->data();
+    }
+    const bool complete_before_return = width > 0 && height > 0 && is_pageable_host_memory(dst);
+    // `staged` must be named in the capture: a default [=] only copies what the
+    // body mentions, and the body reads it through `s`.
+    return fail(enqueue_stream_host_op_pageable(stream, complete_before_return,
+                                                [=, keep_alive = staged]() {
+        (void)keep_alive;
         for (size_t row = 0; row < height; ++row)
             if (width > 0) std::memcpy(d + row * dpitch, s + row * spitch, width);
     }));
@@ -3834,7 +3897,8 @@ cudaError_t cudaMemset2DAsync(void* dev_ptr, size_t pitch,
         dev_ptr, height == 0 ? 0 : (height - 1) * pitch + width));
     if (d == nullptr && width > 0 && height > 0)
         return fail(cudaErrorInvalidValue);
-    return fail(enqueue_stream_host_op(stream, [=]() {
+    const bool pageable = width > 0 && height > 0 && is_pageable_host_memory(dev_ptr);
+    return fail(enqueue_stream_host_op_pageable(stream, pageable, [=]() {
         for (size_t row = 0; row < height; ++row)
             if (width > 0) std::memset(d + row * pitch, value, width);
     }));
@@ -3881,7 +3945,9 @@ cudaError_t cudaMemset3DAsync(cudaPitchedPtr pitchedDevPtr, int value, cudaExten
         host_accessible_pointer(pitchedDevPtr.ptr, span));
     if (base == nullptr && extent.width > 0 && extent.height > 0 && extent.depth > 0)
         return fail(cudaErrorInvalidValue);
-    return fail(enqueue_stream_host_op(stream, [=]() {
+    const bool pageable = extent.width > 0 && extent.height > 0 && extent.depth > 0 &&
+                          is_pageable_host_memory(pitchedDevPtr.ptr);
+    return fail(enqueue_stream_host_op_pageable(stream, pageable, [=]() {
         for (size_t z = 0; z < extent.depth; ++z)
             for (size_t y = 0; y < extent.height; ++y)
                 if (extent.width > 0)
@@ -4022,7 +4088,22 @@ cudaError_t cudaMemcpy3DAsync(const cudaMemcpy3DParms* p, cudaStream_t stream) {
     if ((src_base == nullptr || dst_base == nullptr) &&
         params.extent.width > 0 && params.extent.height > 0 && params.extent.depth > 0)
         return fail(cudaErrorInvalidValue);
-    return fail(enqueue_stream_host_op(stream, [=]() {
+    const bool has_extent =
+        params.extent.width > 0 && params.extent.height > 0 && params.extent.depth > 0;
+    // Pageable-memory contract: stage a pageable source now, and finish a
+    // copy into a pageable destination before returning.
+    std::shared_ptr<std::vector<char>> staged;
+    if (has_extent && src_span > 0 && is_pageable_host_memory(params.srcPtr.ptr)) {
+        staged = std::make_shared<std::vector<char>>(src_span);
+        std::memcpy(staged->data(), src_base, src_span);
+        src_base = staged->data();
+    }
+    const bool complete_before_return = has_extent && is_pageable_host_memory(params.dstPtr.ptr);
+    // `staged` must be named in the capture: a default [=] only copies what the
+    // body mentions, and the body reads it through `src_base`.
+    return fail(enqueue_stream_host_op_pageable(stream, complete_before_return,
+                                                [=, keep_alive = staged]() {
+        (void)keep_alive;
         for (size_t z = 0; z < params.extent.depth; ++z) {
             const size_t src_z = (params.srcPos.z + z) * src_pitch * src_height;
             const size_t dst_z = (params.dstPos.z + z) * dst_pitch * dst_height;

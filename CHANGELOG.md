@@ -8,6 +8,21 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
+- **Asynchronous copies into pageable host memory corrupted the heap.** `cudaMemcpyAsync`,
+  `cudaMemcpy{2D,3D}Async`, `cudaMemcpyFromSymbolAsync`, `cudaMemset{,2D,3D}Async` and the driver's
+  `cuMemcpy2DAsync` deferred every copy to the stream's host-op queue, so a device-to-host copy into
+  a stack variable or a temporary `std::vector` landed after the caller had freed the memory.
+  `cudaMemcpyToSymbolAsync` likewise read its pageable source later. CUDA's contract is that a copy
+  whose host end is pageable is synchronous with respect to the host -- host-to-device returns once
+  the source is staged, device-to-host and host-to-host return once the destination is written -- and
+  only pinned memory is copied truly asynchronously. The runtime now follows that contract: pageable
+  sources are staged at the call, pageable destinations are written before the call returns (still in
+  stream order), and pinned and device ends keep the asynchronous path. NVIDIA Warp's test suite
+  had been taking the interpreter down with a malloc heap-corruption trap in 21 of 87 modules;
+  Guard Malloc pinned the write to the deferred `cudaMemcpyAsync` lambda on a dispatch worker
+  thread. `functional_runtime_pageable_memcpy` parks a slow host function on the stream first, so
+  a copy that was merely queued cannot pass, and `functional_runtime_memcpy2d` now asserts the
+  contract instead of the old deferred behaviour.
 - **A by-value aggregate kernel parameter could not be launched.** Clang lowers one to
   `ptr byval(%T)`, and the NVVM importer classified it as a pointer: the ABI sidecar said
   `arg buffer 8`, and `cuLaunchKernel` tried to resolve the first eight bytes of the caller's own
