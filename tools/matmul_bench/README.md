@@ -6,7 +6,7 @@ The supplied kernel listings are expressed with shorter names and shared helpers
 this is an algorithm reproduction, not the author's unavailable host benchmark,
 compiler revision, or M1 environment. Fixed launch sizes follow the article.
 
-`kernels.cu` includes the four article algorithms, an axis-swapped naive control,
+[`demos/matmul/kernels.cu`](../../demos/matmul/kernels.cu) includes the four article algorithms, an axis-swapped naive control,
 and portable CUDA block-tile experiments. `block64_32` is the best balanced
 configuration in this M4 Pro sweep: 64x64 output, K tile 32, 256 threads,
 16 accumulators per thread. This is a source kernel optimization, not an
@@ -66,10 +66,10 @@ mix tracing into the published timing runs.
 
 ## Native Metal control
 
-`native.metal` expresses the same blocked algorithm directly in Metal:
+[`demos/matmul/native.metal`](../../demos/matmul/native.metal) expresses the same blocked algorithm directly in Metal:
 
 ```bash
-xcrun metal -fno-fast-math -ffp-contract=fast -c tools/matmul_bench/native.metal -o /tmp/matmul-native.air
+xcrun metal -fno-fast-math -ffp-contract=fast -c demos/matmul/native.metal -o /tmp/matmul-native.air
 xcrun metallib /tmp/matmul-native.air -o /tmp/matmul-native.metallib
 build-matmul-release/matmul-bench/matmul_bench /tmp/matmul-native.metallib 4096 4096 4096 20 block64_32
 ```

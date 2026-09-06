@@ -20,7 +20,7 @@ it calls MPS. This is an explicit library path, not compiler-generated GEMM.
 
 No compiler/runtime implementation was changed for this experiment. The
 improvement lives in a reusable CUDA kernel in
-[`tools/matmul_bench/kernels.cu`](../tools/matmul_bench/kernels.cu).
+[`demos/matmul/kernels.cu`](../demos/matmul/kernels.cu).
 It is not automatically applied to arbitrary CUDA kernels.
 
 ## Matched 4096 x 4096 x 4096 FP32 comparison

@@ -48,12 +48,13 @@ article corrections, precision, timing boundaries, and remaining performance gap
 
 ## Source and artifacts
 
-The demo shares its implementation with [tools/matmul_bench](../../tools/matmul_bench/README.md):
+The CUDA, host, and native Metal sources live in this demo directory. Shared
+measurement helpers remain in [tools/matmul_bench](../../tools/matmul_bench/README.md):
 
-- [kernels.cu](../../tools/matmul_bench/kernels.cu): article algorithms,
+- [kernels.cu](kernels.cu): article algorithms,
   axis-swapped naive control, and portable CUDA tile experiments.
-- [main.cpp](../../tools/matmul_bench/main.cpp): host runner and correctness checks.
-- [native.metal](../../tools/matmul_bench/native.metal): direct-Metal algorithm control.
+- [main.cpp](main.cpp): host runner and correctness checks.
+- [native.metal](native.metal): direct-Metal algorithm control.
 - [MPS reference](../../runtime/metal_backend/matmul_bench_reference.mm): standalone
   comparison helper, kept inside the Metal API boundary.
 
