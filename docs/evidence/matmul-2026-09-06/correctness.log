@@ -1,0 +1,332 @@
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+result,accelerate,64,32,48,2,0.000563,0.000563,0.000459,0.000667,349.215
+mps_device,Apple M4 Pro
+check,mps,max_abs=0,relative_l2=0,bad=0
+result,mps,64,32,48,2,0.146791,0.146791,0.136625,0.156958,1.339
+first_launch,naive,2.244750 ms
+check,naive,max_abs=0,relative_l2=0,bad=0
+result,naive,64,32,48,2,0.156126,0.156126,0.147917,0.164334,1.259
+first_launch,coalesced,0.332500 ms
+check,coalesced,max_abs=0,relative_l2=0,bad=0
+result,coalesced,64,32,48,2,0.159958,0.159958,0.131125,0.188791,1.229
+first_launch,tiled,0.349791 ms
+check,tiled,max_abs=0,relative_l2=0,bad=0
+result,tiled,64,32,48,2,0.123333,0.123333,0.123125,0.123542,1.594
+first_launch,registers,0.192083 ms
+check,registers,max_abs=0,relative_l2=0,bad=0
+result,registers,64,32,48,2,0.122749,0.122749,0.120791,0.124708,1.602
+first_launch,vectorized,0.167833 ms
+check,vectorized,max_abs=0,relative_l2=0,bad=0
+result,vectorized,64,32,48,2,0.138500,0.138500,0.119250,0.157750,1.420
+first_launch,block64,0.177083 ms
+check,block64,max_abs=0,relative_l2=0,bad=0
+result,block64,64,32,48,2,0.125188,0.125188,0.118250,0.132125,1.571
+first_launch,block64x32,0.178000 ms
+check,block64x32,max_abs=0,relative_l2=0,bad=0
+result,block64x32,64,32,48,2,0.139271,0.139271,0.127917,0.150625,1.412
+first_launch,block32,0.247667 ms
+check,block32,max_abs=0,relative_l2=0,bad=0
+result,block32,64,32,48,2,0.128333,0.128333,0.127000,0.129667,1.532
+first_launch,block64_8,0.216958 ms
+check,block64_8,max_abs=0,relative_l2=0,bad=0
+result,block64_8,64,32,48,2,0.142667,0.142667,0.141625,0.143709,1.378
+first_launch,block64_32,0.192334 ms
+check,block64_32,max_abs=0,relative_l2=0,bad=0
+result,block64_32,64,32,48,2,0.121208,0.121208,0.118500,0.123917,1.622
+first_launch,block64_8x8,0.283958 ms
+check,block64_8x8,max_abs=0,relative_l2=0,bad=0
+result,block64_8x8,64,32,48,2,0.181416,0.181416,0.178750,0.184083,1.084
+first_launch,block64_8x4,0.214834 ms
+check,block64_8x4,max_abs=0,relative_l2=0,bad=0
+result,block64_8x4,64,32,48,2,0.133542,0.133542,0.133167,0.133917,1.472
+first_launch,block64_4x8,0.200541 ms
+check,block64_4x8,max_abs=0,relative_l2=0,bad=0
+result,block64_4x8,64,32,48,2,0.204271,0.204271,0.185584,0.222959,0.962
+first_launch,block128x64,0.281958 ms
+check,block128x64,max_abs=0,relative_l2=0,bad=0
+result,block128x64,64,32,48,2,0.140708,0.140708,0.119292,0.162125,1.397
+first_launch,block64x128,0.203417 ms
+check,block64x128,max_abs=0,relative_l2=0,bad=0
+result,block64x128,64,32,48,2,0.128563,0.128563,0.120209,0.136917,1.529
+first_launch,block64_k64,0.215834 ms
+check,block64_k64,max_abs=0,relative_l2=0,bad=0
+result,block64_k64,64,32,48,2,0.146667,0.146667,0.137167,0.156167,1.341
+check,cublas_mps,max_abs=0,relative_l2=0,bad=0
+result,cublas_mps,64,32,48,2,0.143438,0.143438,0.139334,0.147542,1.371
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+result,accelerate,1,1,1,2,0.000041,0.000041,0.000041,0.000041,0.049
+mps_device,Apple M4 Pro
+check,mps,max_abs=0,relative_l2=0,bad=0
+result,mps,1,1,1,2,0.144980,0.144980,0.124709,0.165250,0.000
+first_launch,naive,2.590292 ms
+check,naive,max_abs=0,relative_l2=0,bad=0
+result,naive,1,1,1,2,0.114146,0.114146,0.114041,0.114250,0.000
+first_launch,coalesced,0.198542 ms
+check,coalesced,max_abs=0,relative_l2=0,bad=0
+result,coalesced,1,1,1,2,0.111563,0.111563,0.111291,0.111834,0.000
+first_launch,tiled,0.180583 ms
+check,tiled,max_abs=0,relative_l2=0,bad=0
+result,tiled,1,1,1,2,0.117771,0.117771,0.113417,0.122125,0.000
+first_launch,registers,0.191583 ms
+check,registers,max_abs=0,relative_l2=0,bad=0
+result,registers,1,1,1,2,0.127792,0.127792,0.121250,0.134333,0.000
+skip,vectorized,article requires aligned K and N
+first_launch,block64,0.209667 ms
+check,block64,max_abs=0,relative_l2=0,bad=0
+result,block64,1,1,1,2,0.113167,0.113167,0.112917,0.113417,0.000
+first_launch,block64x32,0.247334 ms
+check,block64x32,max_abs=0,relative_l2=0,bad=0
+result,block64x32,1,1,1,2,0.099438,0.099438,0.098291,0.100584,0.000
+first_launch,block32,0.168125 ms
+check,block32,max_abs=0,relative_l2=0,bad=0
+result,block32,1,1,1,2,0.105438,0.105438,0.098291,0.112584,0.000
+first_launch,block64_8,0.178916 ms
+check,block64_8,max_abs=0,relative_l2=0,bad=0
+result,block64_8,1,1,1,2,0.156438,0.156438,0.113000,0.199875,0.000
+first_launch,block64_32,0.174167 ms
+check,block64_32,max_abs=0,relative_l2=0,bad=0
+result,block64_32,1,1,1,2,0.111146,0.111146,0.092500,0.129792,0.000
+first_launch,block64_8x8,0.272584 ms
+check,block64_8x8,max_abs=0,relative_l2=0,bad=0
+result,block64_8x8,1,1,1,2,0.155062,0.155062,0.152792,0.157333,0.000
+first_launch,block64_8x4,0.196167 ms
+check,block64_8x4,max_abs=0,relative_l2=0,bad=0
+result,block64_8x4,1,1,1,2,0.122396,0.122396,0.121333,0.123459,0.000
+first_launch,block64_4x8,0.173541 ms
+check,block64_4x8,max_abs=0,relative_l2=0,bad=0
+result,block64_4x8,1,1,1,2,0.118500,0.118500,0.106375,0.130625,0.000
+first_launch,block128x64,0.227792 ms
+check,block128x64,max_abs=0,relative_l2=0,bad=0
+result,block128x64,1,1,1,2,0.121604,0.121604,0.113083,0.130125,0.000
+first_launch,block64x128,0.193208 ms
+check,block64x128,max_abs=0,relative_l2=0,bad=0
+result,block64x128,1,1,1,2,0.109854,0.109854,0.105542,0.114167,0.000
+first_launch,block64_k64,0.172625 ms
+check,block64_k64,max_abs=0,relative_l2=0,bad=0
+result,block64_k64,1,1,1,2,0.126646,0.126646,0.125167,0.128125,0.000
+check,cublas_mps,max_abs=0,relative_l2=0,bad=0
+result,cublas_mps,1,1,1,2,0.121333,0.121333,0.119834,0.122833,0.000
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+result,accelerate,17,19,23,2,0.000396,0.000396,0.000291,0.000500,37.568
+mps_device,Apple M4 Pro
+check,mps,max_abs=0,relative_l2=0,bad=0
+result,mps,17,19,23,2,0.139083,0.139083,0.133042,0.145125,0.107
+first_launch,naive,2.320292 ms
+check,naive,max_abs=0,relative_l2=0,bad=0
+result,naive,17,19,23,2,0.107583,0.107583,0.104791,0.110375,0.138
+first_launch,coalesced,0.235583 ms
+check,coalesced,max_abs=0,relative_l2=0,bad=0
+result,coalesced,17,19,23,2,0.111501,0.111501,0.108334,0.114667,0.133
+first_launch,tiled,0.216083 ms
+check,tiled,max_abs=0,relative_l2=0,bad=0
+result,tiled,17,19,23,2,0.124771,0.124771,0.121959,0.127583,0.119
+first_launch,registers,0.210750 ms
+check,registers,max_abs=0,relative_l2=0,bad=0
+result,registers,17,19,23,2,0.117541,0.117541,0.112250,0.122833,0.126
+skip,vectorized,article requires aligned K and N
+first_launch,block64,0.189833 ms
+check,block64,max_abs=0,relative_l2=0,bad=0
+result,block64,17,19,23,2,0.118771,0.118771,0.116625,0.120917,0.125
+first_launch,block64x32,0.179709 ms
+check,block64x32,max_abs=0,relative_l2=0,bad=0
+result,block64x32,17,19,23,2,0.123292,0.123292,0.123167,0.123417,0.121
+first_launch,block32,0.191375 ms
+check,block32,max_abs=0,relative_l2=0,bad=0
+result,block32,17,19,23,2,0.119917,0.119917,0.113000,0.126833,0.124
+first_launch,block64_8,0.191125 ms
+check,block64_8,max_abs=0,relative_l2=0,bad=0
+result,block64_8,17,19,23,2,0.114478,0.114478,0.104166,0.124791,0.130
+first_launch,block64_32,0.188500 ms
+check,block64_32,max_abs=0,relative_l2=0,bad=0
+result,block64_32,17,19,23,2,0.108604,0.108604,0.107667,0.109542,0.137
+first_launch,block64_8x8,0.214125 ms
+check,block64_8x8,max_abs=0,relative_l2=0,bad=0
+result,block64_8x8,17,19,23,2,0.164062,0.164062,0.161208,0.166917,0.091
+first_launch,block64_8x4,0.173333 ms
+check,block64_8x4,max_abs=0,relative_l2=0,bad=0
+result,block64_8x4,17,19,23,2,0.112417,0.112417,0.108125,0.116708,0.132
+first_launch,block64_4x8,0.175542 ms
+check,block64_4x8,max_abs=0,relative_l2=0,bad=0
+result,block64_4x8,17,19,23,2,0.115084,0.115084,0.111917,0.118250,0.129
+first_launch,block128x64,0.279500 ms
+check,block128x64,max_abs=0,relative_l2=0,bad=0
+result,block128x64,17,19,23,2,0.114041,0.114041,0.107333,0.120750,0.130
+first_launch,block64x128,0.296042 ms
+check,block64x128,max_abs=0,relative_l2=0,bad=0
+result,block64x128,17,19,23,2,0.120166,0.120166,0.110625,0.129708,0.124
+first_launch,block64_k64,0.189833 ms
+check,block64_k64,max_abs=0,relative_l2=0,bad=0
+result,block64_k64,17,19,23,2,0.127020,0.127020,0.121333,0.132708,0.117
+check,cublas_mps,max_abs=0,relative_l2=0,bad=0
+result,cublas_mps,17,19,23,2,0.148396,0.148396,0.144792,0.152000,0.100
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+result,accelerate,65,37,49,2,0.000833,0.000833,0.000833,0.000833,282.941
+mps_device,Apple M4 Pro
+check,mps,max_abs=0,relative_l2=0,bad=0
+result,mps,65,37,49,2,0.152791,0.152791,0.144541,0.161041,1.543
+first_launch,naive,2.207833 ms
+check,naive,max_abs=0,relative_l2=0,bad=0
+result,naive,65,37,49,2,0.118688,0.118688,0.093042,0.144333,1.986
+first_launch,coalesced,0.274167 ms
+check,coalesced,max_abs=0,relative_l2=0,bad=0
+result,coalesced,65,37,49,2,0.122291,0.122291,0.109750,0.134833,1.927
+first_launch,tiled,0.338125 ms
+check,tiled,max_abs=0,relative_l2=0,bad=0
+result,tiled,65,37,49,2,0.113292,0.113292,0.109583,0.117000,2.080
+first_launch,registers,0.191792 ms
+check,registers,max_abs=0,relative_l2=0,bad=0
+result,registers,65,37,49,2,0.141521,0.141521,0.119708,0.163334,1.665
+skip,vectorized,article requires aligned K and N
+first_launch,block64,0.186375 ms
+check,block64,max_abs=0,relative_l2=0,bad=0
+result,block64,65,37,49,2,0.115604,0.115604,0.111958,0.119250,2.039
+first_launch,block64x32,0.173542 ms
+check,block64x32,max_abs=0,relative_l2=0,bad=0
+result,block64x32,65,37,49,2,0.121478,0.121478,0.119166,0.123791,1.940
+first_launch,block32,0.177458 ms
+check,block32,max_abs=0,relative_l2=0,bad=0
+result,block32,65,37,49,2,0.120146,0.120146,0.120125,0.120167,1.962
+first_launch,block64_8,0.176208 ms
+check,block64_8,max_abs=0,relative_l2=0,bad=0
+result,block64_8,65,37,49,2,0.121374,0.121374,0.120583,0.122166,1.942
+first_launch,block64_32,0.155667 ms
+check,block64_32,max_abs=0,relative_l2=0,bad=0
+result,block64_32,65,37,49,2,0.149334,0.149334,0.116584,0.182083,1.578
+first_launch,block64_8x8,0.267125 ms
+check,block64_8x8,max_abs=0,relative_l2=0,bad=0
+result,block64_8x8,65,37,49,2,0.200020,0.200020,0.199625,0.200416,1.178
+first_launch,block64_8x4,0.189583 ms
+check,block64_8x4,max_abs=0,relative_l2=0,bad=0
+result,block64_8x4,65,37,49,2,0.117771,0.117771,0.116292,0.119250,2.001
+first_launch,block64_4x8,0.173375 ms
+check,block64_4x8,max_abs=0,relative_l2=0,bad=0
+result,block64_4x8,65,37,49,2,0.109937,0.109937,0.108666,0.111208,2.144
+first_launch,block128x64,0.170708 ms
+check,block128x64,max_abs=0,relative_l2=0,bad=0
+result,block128x64,65,37,49,2,0.233229,0.233229,0.210875,0.255583,1.011
+first_launch,block64x128,0.216083 ms
+check,block64x128,max_abs=0,relative_l2=0,bad=0
+result,block64x128,65,37,49,2,0.121563,0.121563,0.113625,0.129500,1.939
+first_launch,block64_k64,0.186584 ms
+check,block64_k64,max_abs=0,relative_l2=0,bad=0
+result,block64_k64,65,37,49,2,0.118042,0.118042,0.116917,0.119167,1.997
+check,cublas_mps,max_abs=0,relative_l2=0,bad=0
+result,cublas_mps,65,37,49,2,0.144125,0.144125,0.138875,0.149375,1.635
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+result,accelerate,33,36,52,2,0.000604,0.000604,0.000583,0.000625,204.556
+mps_device,Apple M4 Pro
+check,mps,max_abs=0,relative_l2=0,bad=0
+result,mps,33,36,52,2,0.150313,0.150313,0.140541,0.160084,0.822
+first_launch,naive,2.275958 ms
+check,naive,max_abs=0,relative_l2=0,bad=0
+result,naive,33,36,52,2,0.125083,0.125083,0.121208,0.128959,0.988
+first_launch,coalesced,0.260958 ms
+check,coalesced,max_abs=0,relative_l2=0,bad=0
+result,coalesced,33,36,52,2,0.123374,0.123374,0.121291,0.125458,1.001
+first_launch,tiled,0.186125 ms
+check,tiled,max_abs=0,relative_l2=0,bad=0
+result,tiled,33,36,52,2,0.148354,0.148354,0.128958,0.167750,0.833
+first_launch,registers,0.222167 ms
+check,registers,max_abs=0,relative_l2=0,bad=0
+result,registers,33,36,52,2,0.120062,0.120062,0.116166,0.123958,1.029
+first_launch,vectorized,0.194375 ms
+check,vectorized,max_abs=0,relative_l2=0,bad=0
+result,vectorized,33,36,52,2,0.120229,0.120229,0.120000,0.120459,1.028
+first_launch,block64,0.186209 ms
+check,block64,max_abs=0,relative_l2=0,bad=0
+result,block64,33,36,52,2,0.129250,0.129250,0.127917,0.130583,0.956
+first_launch,block64x32,0.195375 ms
+check,block64x32,max_abs=0,relative_l2=0,bad=0
+result,block64x32,33,36,52,2,0.127916,0.127916,0.126208,0.129625,0.966
+first_launch,block32,0.186833 ms
+check,block32,max_abs=0,relative_l2=0,bad=0
+result,block32,33,36,52,2,0.149958,0.149958,0.124209,0.175708,0.824
+first_launch,block64_8,0.188000 ms
+check,block64_8,max_abs=0,relative_l2=0,bad=0
+result,block64_8,33,36,52,2,0.122479,0.122479,0.118875,0.126084,1.009
+first_launch,block64_32,0.172917 ms
+check,block64_32,max_abs=0,relative_l2=0,bad=0
+result,block64_32,33,36,52,2,0.115667,0.115667,0.111750,0.119584,1.068
+first_launch,block64_8x8,0.325000 ms
+check,block64_8x8,max_abs=0,relative_l2=0,bad=0
+result,block64_8x8,33,36,52,2,0.202666,0.202666,0.200416,0.204917,0.610
+first_launch,block64_8x4,0.182709 ms
+check,block64_8x4,max_abs=0,relative_l2=0,bad=0
+result,block64_8x4,33,36,52,2,0.244542,0.244542,0.225208,0.263875,0.505
+first_launch,block64_4x8,0.186291 ms
+check,block64_4x8,max_abs=0,relative_l2=0,bad=0
+result,block64_4x8,33,36,52,2,0.141437,0.141437,0.135750,0.147125,0.874
+first_launch,block128x64,0.189000 ms
+check,block128x64,max_abs=0,relative_l2=0,bad=0
+result,block128x64,33,36,52,2,0.140313,0.140313,0.134458,0.146167,0.881
+first_launch,block64x128,0.207083 ms
+check,block64x128,max_abs=0,relative_l2=0,bad=0
+result,block64x128,33,36,52,2,0.138459,0.138459,0.137917,0.139000,0.892
+first_launch,block64_k64,0.187625 ms
+check,block64_k64,max_abs=0,relative_l2=0,bad=0
+result,block64_k64,33,36,52,2,0.141479,0.141479,0.131375,0.151583,0.873
+check,cublas_mps,max_abs=0,relative_l2=0,bad=0
+result,cublas_mps,33,36,52,2,0.157771,0.157771,0.146375,0.169166,0.783
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+result,accelerate,129,67,131,2,0.002708,0.002708,0.002583,0.002833,836.213
+mps_device,Apple M4 Pro
+check,mps,max_abs=0,relative_l2=0,bad=0
+result,mps,129,67,131,2,0.142833,0.142833,0.134500,0.151166,15.854
+first_launch,naive,2.316041 ms
+check,naive,max_abs=0,relative_l2=0,bad=0
+result,naive,129,67,131,2,0.126479,0.126479,0.122333,0.130625,17.904
+first_launch,coalesced,0.233083 ms
+check,coalesced,max_abs=0,relative_l2=0,bad=0
+result,coalesced,129,67,131,2,0.147500,0.147500,0.122958,0.172042,15.352
+first_launch,tiled,0.195250 ms
+check,tiled,max_abs=0,relative_l2=0,bad=0
+result,tiled,129,67,131,2,0.105687,0.105687,0.105083,0.106291,21.426
+first_launch,registers,0.207000 ms
+check,registers,max_abs=0,relative_l2=0,bad=0
+result,registers,129,67,131,2,0.110354,0.110354,0.105667,0.115042,20.520
+skip,vectorized,article requires aligned K and N
+first_launch,block64,0.188750 ms
+check,block64,max_abs=0,relative_l2=0,bad=0
+result,block64,129,67,131,2,0.130209,0.130209,0.125917,0.134500,17.391
+first_launch,block64x32,0.185917 ms
+check,block64x32,max_abs=0,relative_l2=0,bad=0
+result,block64x32,129,67,131,2,0.132605,0.132605,0.130750,0.134459,17.077
+first_launch,block32,0.192916 ms
+check,block32,max_abs=0,relative_l2=0,bad=0
+result,block32,129,67,131,2,0.144583,0.144583,0.144583,0.144583,15.662
+first_launch,block64_8,0.230084 ms
+check,block64_8,max_abs=0,relative_l2=0,bad=0
+result,block64_8,129,67,131,2,0.135187,0.135187,0.132916,0.137458,16.751
+first_launch,block64_32,0.220542 ms
+check,block64_32,max_abs=0,relative_l2=0,bad=0
+result,block64_32,129,67,131,2,0.132771,0.132771,0.119459,0.146083,17.055
+first_launch,block64_8x8,0.304916 ms
+check,block64_8x8,max_abs=0,relative_l2=0,bad=0
+result,block64_8x8,129,67,131,2,0.324916,0.324916,0.278042,0.371791,6.969
+first_launch,block64_8x4,0.224625 ms
+check,block64_8x4,max_abs=0,relative_l2=0,bad=0
+result,block64_8x4,129,67,131,2,0.145813,0.145813,0.125375,0.166250,15.530
+first_launch,block64_4x8,0.200125 ms
+check,block64_4x8,max_abs=0,relative_l2=0,bad=0
+result,block64_4x8,129,67,131,2,0.134271,0.134271,0.128292,0.140250,16.865
+first_launch,block128x64,0.263000 ms
+check,block128x64,max_abs=0,relative_l2=0,bad=0
+result,block128x64,129,67,131,2,0.150625,0.150625,0.144625,0.156625,15.034
+first_launch,block64x128,0.207834 ms
+check,block64x128,max_abs=0,relative_l2=0,bad=0
+result,block64x128,129,67,131,2,0.131500,0.131500,0.129166,0.133834,17.220
+first_launch,block64_k64,0.211875 ms
+check,block64_k64,max_abs=0,relative_l2=0,bad=0
+result,block64_k64,129,67,131,2,0.138375,0.138375,0.138333,0.138416,16.365
+check,cublas_mps,max_abs=0,relative_l2=0,bad=0
+result,cublas_mps,129,67,131,2,0.148041,0.148041,0.145500,0.150583,15.296
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+skip,vectorized,article requires aligned K and N
+PASS: all valid variants, rectangular tails, small sizes and invalid arguments

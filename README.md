@@ -66,6 +66,7 @@ See [compiler architecture](docs/compiler-architecture.md) for backend details.
 
 - [Status](docs/status.md) and [verified results](docs/verified-results.md)
 - [Roadmap](docs/spec-closure-roadmap.md) and [specification](spec.md)
+- [Matmul performance study](docs/matmul-performance.md)
 - [All documentation](docs/README.md)
 
 ## License

@@ -17,6 +17,22 @@ bash demos/apollo/run.sh
 `bash demos/apollo/run.sh --full` also runs the llm.c GPT-2 FP32 gate. See
 [the Apollo guide](../demos/apollo/README.md) for scope limits and artifacts.
 
+## CUDA matmul vs MPS
+
+Reproduce the matmul article's kernel progression, check numerical output and
+Apple-GPU provenance, and compare a tuned CUDA kernel with MPS and Accelerate:
+
+```bash
+bash demos/matmul/run.sh --quick   # 512-cubed smoke comparison
+bash demos/matmul/run.sh           # 4096-cubed, 3 rounds x 20 iterations
+```
+
+The recorded M4 Pro result is 2.03 TFLOP/s for the tuned CUDA kernel (1.48x the
+article's final kernel), versus 5.06 TFLOP/s for MPS. The explicit CuMetal cuBLAS
+path already calls MPS. See [the matmul demo guide](../demos/matmul/README.md)
+for runnable modes and [the study](matmul-performance.md) for raw evidence,
+article corrections, and hardware-specific limits.
+
 ## 3D Gaussian Splatting
 
 The Inria tile-based Gaussian rasterizer (`renderCUDA` plus binning kernels)

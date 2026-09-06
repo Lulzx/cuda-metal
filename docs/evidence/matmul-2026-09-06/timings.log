@@ -1,0 +1,179 @@
+round1-accelerate.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+result,accelerate,4096,4096,4096,20,49.316083,49.113208,48.174667,54.007000,2786.899
+
+round1-block64_32.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,block64_32,74.517875 ms
+check,block64_32,max_abs=0,relative_l2=0,bad=0
+result,block64_32,4096,4096,4096,20,67.519983,67.533625,66.946541,68.222125,2035.530
+
+round1-coalesced.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,coalesced,305.396167 ms
+check,coalesced,max_abs=0,relative_l2=0,bad=0
+result,coalesced,4096,4096,4096,20,298.755977,298.903417,296.584791,300.074791,460.038
+
+round1-cublas_mps.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+check,cublas_mps,max_abs=0,relative_l2=0,bad=0
+result,cublas_mps,4096,4096,4096,20,27.198279,27.154479,26.753917,27.907958,5053.222
+
+round1-mps.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+mps_device,Apple M4 Pro
+check,mps,max_abs=0,relative_l2=0,bad=0
+result,mps,4096,4096,4096,20,27.157165,27.152875,26.889541,27.487125,5060.873
+
+round1-naive.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,naive,413.021875 ms
+check,naive,max_abs=0,relative_l2=0,bad=0
+result,naive,4096,4096,4096,20,406.178902,406.175709,404.238209,407.950084,338.370
+
+round1-registers.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,registers,96.802375 ms
+check,registers,max_abs=0,relative_l2=0,bad=0
+result,registers,4096,4096,4096,20,92.122750,92.123708,91.588916,92.473292,1491.911
+
+round1-tiled.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,tiled,182.598209 ms
+check,tiled,max_abs=0,relative_l2=0,bad=0
+result,tiled,4096,4096,4096,20,176.587508,176.471729,176.003708,177.741333,778.305
+
+round1-vectorized.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,vectorized,106.468375 ms
+check,vectorized,max_abs=0,relative_l2=0,bad=0
+result,vectorized,4096,4096,4096,20,99.678983,99.630645,99.383708,100.154291,1378.816
+
+round2-accelerate.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+result,accelerate,4096,4096,4096,20,47.927254,45.551604,43.364750,72.123541,2867.658
+
+round2-block64_32.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,block64_32,74.481625 ms
+check,block64_32,max_abs=0,relative_l2=0,bad=0
+result,block64_32,4096,4096,4096,20,67.754694,67.692042,67.246375,68.412125,2028.479
+
+round2-coalesced.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,coalesced,304.777042 ms
+check,coalesced,max_abs=0,relative_l2=0,bad=0
+result,coalesced,4096,4096,4096,20,297.307109,297.434855,294.918083,298.762792,462.279
+
+round2-cublas_mps.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+check,cublas_mps,max_abs=0,relative_l2=0,bad=0
+result,cublas_mps,4096,4096,4096,20,27.180531,27.195042,26.847542,27.532666,5056.522
+
+round2-mps.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+mps_device,Apple M4 Pro
+check,mps,max_abs=0,relative_l2=0,bad=0
+result,mps,4096,4096,4096,20,27.140835,27.127479,26.950583,27.372625,5063.918
+
+round2-naive.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,naive,413.743417 ms
+check,naive,max_abs=0,relative_l2=0,bad=0
+result,naive,4096,4096,4096,20,407.449387,407.399021,403.328292,411.196583,337.315
+
+round2-registers.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,registers,99.151000 ms
+check,registers,max_abs=0,relative_l2=0,bad=0
+result,registers,4096,4096,4096,20,92.346421,92.376063,91.693916,92.954208,1488.298
+
+round2-tiled.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,tiled,181.879125 ms
+check,tiled,max_abs=0,relative_l2=0,bad=0
+result,tiled,4096,4096,4096,20,176.501492,176.488605,175.690459,177.222750,778.684
+
+round2-vectorized.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,vectorized,105.959625 ms
+check,vectorized,max_abs=0,relative_l2=0,bad=0
+result,vectorized,4096,4096,4096,20,100.046635,100.054541,99.742334,100.480459,1373.749
+
+round3-accelerate.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+result,accelerate,4096,4096,4096,20,47.224463,45.958251,44.896125,54.157209,2910.334
+
+round3-block64_32.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,block64_32,73.142375 ms
+check,block64_32,max_abs=0,relative_l2=0,bad=0
+result,block64_32,4096,4096,4096,20,67.671225,67.630771,67.174500,68.728375,2030.981
+
+round3-coalesced.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,coalesced,303.671833 ms
+check,coalesced,max_abs=0,relative_l2=0,bad=0
+result,coalesced,4096,4096,4096,20,303.882044,299.201271,275.436208,330.078458,452.277
+
+round3-cublas_mps.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+check,cublas_mps,max_abs=0,relative_l2=0,bad=0
+result,cublas_mps,4096,4096,4096,20,27.210233,27.180896,26.930583,27.622375,5051.002
+
+round3-mps.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+mps_device,Apple M4 Pro
+check,mps,max_abs=0,relative_l2=0,bad=0
+result,mps,4096,4096,4096,20,27.239275,27.258251,26.922375,27.582542,5045.617
+
+round3-naive.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,naive,413.700250 ms
+check,naive,max_abs=0,relative_l2=0,bad=0
+result,naive,4096,4096,4096,20,406.265612,405.563063,403.348583,409.541042,338.298
+
+round3-registers.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,registers,99.234625 ms
+check,registers,max_abs=0,relative_l2=0,bad=0
+result,registers,4096,4096,4096,20,97.266586,97.451854,95.438375,98.190667,1413.013
+
+round3-tiled.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,tiled,191.701542 ms
+check,tiled,max_abs=0,relative_l2=0,bad=0
+result,tiled,4096,4096,4096,20,176.547825,176.478146,176.243584,177.881500,778.480
+
+round3-vectorized.log
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,vectorized,106.887791 ms
+check,vectorized,max_abs=0,relative_l2=0,bad=0
+result,vectorized,4096,4096,4096,20,102.282000,102.377834,99.338166,103.816208,1343.726

@@ -1,0 +1,245 @@
+[
+  {
+    "round": 1,
+    "name": "mps",
+    "mean_ms": 27.157165,
+    "median_ms": 27.152875,
+    "min_ms": 26.889541,
+    "max_ms": 27.487125,
+    "gflops": 5060.873
+  },
+  {
+    "round": 1,
+    "name": "naive",
+    "mean_ms": 406.178902,
+    "median_ms": 406.175709,
+    "min_ms": 404.238209,
+    "max_ms": 407.950084,
+    "gflops": 338.37
+  },
+  {
+    "round": 1,
+    "name": "coalesced",
+    "mean_ms": 298.755977,
+    "median_ms": 298.903417,
+    "min_ms": 296.584791,
+    "max_ms": 300.074791,
+    "gflops": 460.038
+  },
+  {
+    "round": 1,
+    "name": "tiled",
+    "mean_ms": 176.587508,
+    "median_ms": 176.471729,
+    "min_ms": 176.003708,
+    "max_ms": 177.741333,
+    "gflops": 778.305
+  },
+  {
+    "round": 1,
+    "name": "registers",
+    "mean_ms": 92.12275,
+    "median_ms": 92.123708,
+    "min_ms": 91.588916,
+    "max_ms": 92.473292,
+    "gflops": 1491.911
+  },
+  {
+    "round": 1,
+    "name": "vectorized",
+    "mean_ms": 99.678983,
+    "median_ms": 99.630645,
+    "min_ms": 99.383708,
+    "max_ms": 100.154291,
+    "gflops": 1378.816
+  },
+  {
+    "round": 1,
+    "name": "block64_32",
+    "mean_ms": 67.519983,
+    "median_ms": 67.533625,
+    "min_ms": 66.946541,
+    "max_ms": 68.222125,
+    "gflops": 2035.53
+  },
+  {
+    "round": 1,
+    "name": "cublas_mps",
+    "mean_ms": 27.198279,
+    "median_ms": 27.154479,
+    "min_ms": 26.753917,
+    "max_ms": 27.907958,
+    "gflops": 5053.222
+  },
+  {
+    "round": 1,
+    "name": "accelerate",
+    "mean_ms": 49.316083,
+    "median_ms": 49.113208,
+    "min_ms": 48.174667,
+    "max_ms": 54.007,
+    "gflops": 2786.899
+  },
+  {
+    "round": 2,
+    "name": "tiled",
+    "mean_ms": 176.501492,
+    "median_ms": 176.488605,
+    "min_ms": 175.690459,
+    "max_ms": 177.22275,
+    "gflops": 778.684
+  },
+  {
+    "round": 2,
+    "name": "registers",
+    "mean_ms": 92.346421,
+    "median_ms": 92.376063,
+    "min_ms": 91.693916,
+    "max_ms": 92.954208,
+    "gflops": 1488.298
+  },
+  {
+    "round": 2,
+    "name": "vectorized",
+    "mean_ms": 100.046635,
+    "median_ms": 100.054541,
+    "min_ms": 99.742334,
+    "max_ms": 100.480459,
+    "gflops": 1373.749
+  },
+  {
+    "round": 2,
+    "name": "block64_32",
+    "mean_ms": 67.754694,
+    "median_ms": 67.692042,
+    "min_ms": 67.246375,
+    "max_ms": 68.412125,
+    "gflops": 2028.479
+  },
+  {
+    "round": 2,
+    "name": "cublas_mps",
+    "mean_ms": 27.180531,
+    "median_ms": 27.195042,
+    "min_ms": 26.847542,
+    "max_ms": 27.532666,
+    "gflops": 5056.522
+  },
+  {
+    "round": 2,
+    "name": "accelerate",
+    "mean_ms": 47.927254,
+    "median_ms": 45.551604,
+    "min_ms": 43.36475,
+    "max_ms": 72.123541,
+    "gflops": 2867.658
+  },
+  {
+    "round": 2,
+    "name": "mps",
+    "mean_ms": 27.140835,
+    "median_ms": 27.127479,
+    "min_ms": 26.950583,
+    "max_ms": 27.372625,
+    "gflops": 5063.918
+  },
+  {
+    "round": 2,
+    "name": "naive",
+    "mean_ms": 407.449387,
+    "median_ms": 407.399021,
+    "min_ms": 403.328292,
+    "max_ms": 411.196583,
+    "gflops": 337.315
+  },
+  {
+    "round": 2,
+    "name": "coalesced",
+    "mean_ms": 297.307109,
+    "median_ms": 297.434855,
+    "min_ms": 294.918083,
+    "max_ms": 298.762792,
+    "gflops": 462.279
+  },
+  {
+    "round": 3,
+    "name": "block64_32",
+    "mean_ms": 67.671225,
+    "median_ms": 67.630771,
+    "min_ms": 67.1745,
+    "max_ms": 68.728375,
+    "gflops": 2030.981
+  },
+  {
+    "round": 3,
+    "name": "cublas_mps",
+    "mean_ms": 27.210233,
+    "median_ms": 27.180896,
+    "min_ms": 26.930583,
+    "max_ms": 27.622375,
+    "gflops": 5051.002
+  },
+  {
+    "round": 3,
+    "name": "accelerate",
+    "mean_ms": 47.224463,
+    "median_ms": 45.958251,
+    "min_ms": 44.896125,
+    "max_ms": 54.157209,
+    "gflops": 2910.334
+  },
+  {
+    "round": 3,
+    "name": "mps",
+    "mean_ms": 27.239275,
+    "median_ms": 27.258251,
+    "min_ms": 26.922375,
+    "max_ms": 27.582542,
+    "gflops": 5045.617
+  },
+  {
+    "round": 3,
+    "name": "naive",
+    "mean_ms": 406.265612,
+    "median_ms": 405.563063,
+    "min_ms": 403.348583,
+    "max_ms": 409.541042,
+    "gflops": 338.298
+  },
+  {
+    "round": 3,
+    "name": "coalesced",
+    "mean_ms": 303.882044,
+    "median_ms": 299.201271,
+    "min_ms": 275.436208,
+    "max_ms": 330.078458,
+    "gflops": 452.277
+  },
+  {
+    "round": 3,
+    "name": "tiled",
+    "mean_ms": 176.547825,
+    "median_ms": 176.478146,
+    "min_ms": 176.243584,
+    "max_ms": 177.8815,
+    "gflops": 778.48
+  },
+  {
+    "round": 3,
+    "name": "registers",
+    "mean_ms": 97.266586,
+    "median_ms": 97.451854,
+    "min_ms": 95.438375,
+    "max_ms": 98.190667,
+    "gflops": 1413.013
+  },
+  {
+    "round": 3,
+    "name": "vectorized",
+    "mean_ms": 102.282,
+    "median_ms": 102.377834,
+    "min_ms": 99.338166,
+    "max_ms": 103.816208,
+    "gflops": 1343.726
+  }
+]

@@ -29,3 +29,6 @@ Highs.log
 demos/highs/lpfeas/*.log
 # Stray default output name from ad-hoc nvcc-shim compiles
 a.out
+
+# Matmul demo binaries and measurement logs
+demos/matmul/out/

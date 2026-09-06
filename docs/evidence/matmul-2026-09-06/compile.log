@@ -1,0 +1,44 @@
+$ /usr/bin/xcrun metal -fno-strict-aliasing -fno-fast-math -ffp-contract=fast -c '/var/folders/gd/wrrx978s0l50dt_9tzksbh8h0000gn/T/cumetalc-ptx-90557-82109389318041.metal' -o '/var/folders/gd/wrrx978s0l50dt_9tzksbh8h0000gn/T/cumetal-air-emitter-90557-82109391844083/kernel.air' 2>&1
+$ /usr/bin/xcrun metallib '/var/folders/gd/wrrx978s0l50dt_9tzksbh8h0000gn/T/cumetal-air-emitter-90557-82109391844083/kernel.air' -o '/Users/lulzx/work/cumetal/build-release-noshim/matmul-bench/kernels.metallib' 2>&1
+Validation result: PASS
+File: /Users/lulzx/work/cumetal/build-release-noshim/matmul-bench/kernels.metallib
+Size: 92835 bytes
+Magic: MTLB
+Bitcode sections: 16
+Function parser: metallib-function-list
+Kernel count: 16
+[INFO] found 16 candidate embedded bitcode section(s)
+[INFO] parsed function list via metallib-function-list
+[INFO] kernel naive bitcode has LLVM signature prefix
+[INFO] kernel naive includes required metadata fields
+[INFO] kernel coalesced bitcode has LLVM signature prefix
+[INFO] kernel coalesced includes required metadata fields
+[INFO] kernel tiled bitcode has LLVM signature prefix
+[INFO] kernel tiled includes required metadata fields
+[INFO] kernel registers bitcode has LLVM signature prefix
+[INFO] kernel registers includes required metadata fields
+[INFO] kernel vectorized bitcode has LLVM signature prefix
+[INFO] kernel vectorized includes required metadata fields
+[INFO] kernel block64 bitcode has LLVM signature prefix
+[INFO] kernel block64 includes required metadata fields
+[INFO] kernel block64x32 bitcode has LLVM signature prefix
+[INFO] kernel block64x32 includes required metadata fields
+[INFO] kernel block32 bitcode has LLVM signature prefix
+[INFO] kernel block32 includes required metadata fields
+[INFO] kernel block64_8 bitcode has LLVM signature prefix
+[INFO] kernel block64_8 includes required metadata fields
+[INFO] kernel block64_32 bitcode has LLVM signature prefix
+[INFO] kernel block64_32 includes required metadata fields
+[INFO] kernel block64_8x8 bitcode has LLVM signature prefix
+[INFO] kernel block64_8x8 includes required metadata fields
+[INFO] kernel block64_8x4 bitcode has LLVM signature prefix
+[INFO] kernel block64_8x4 includes required metadata fields
+[INFO] kernel block64_4x8 bitcode has LLVM signature prefix
+[INFO] kernel block64_4x8 includes required metadata fields
+[INFO] kernel block128x64 bitcode has LLVM signature prefix
+[INFO] kernel block128x64 includes required metadata fields
+[INFO] kernel block64x128 bitcode has LLVM signature prefix
+[INFO] kernel block64x128 includes required metadata fields
+[INFO] kernel block64_k64 bitcode has LLVM signature prefix
+[INFO] kernel block64_k64 includes required metadata fields
+wrote "/Users/lulzx/work/cumetal/build-release-noshim/matmul-bench/kernels.metallib"

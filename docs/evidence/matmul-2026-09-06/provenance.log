@@ -1,0 +1,8 @@
+CUMETAL_PROVENANCE event=kernel_launch kernel="block64_32" source=metallib provenance=precompiled_metallib semantic_quality=exact device=apple_gpu device_name="Apple M4 Pro" math_mode=precompiled compile_cache_hit=false launch_success=true duration_ns=16500 grid=(2,2,1) block=(256,1,1) unsupported_reason=""
+CUMETAL_PROVENANCE event=kernel_launch kernel="block64_32" source=metallib provenance=precompiled_metallib semantic_quality=exact device=apple_gpu device_name="Apple M4 Pro" math_mode=precompiled compile_cache_hit=true launch_success=true duration_ns=14291 grid=(2,2,1) block=(256,1,1) unsupported_reason=""
+CUMETAL_PROVENANCE event=kernel_launch kernel="block64_32" source=metallib provenance=precompiled_metallib semantic_quality=exact device=apple_gpu device_name="Apple M4 Pro" math_mode=precompiled compile_cache_hit=true launch_success=true duration_ns=13916 grid=(2,2,1) block=(256,1,1) unsupported_reason=""
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,block64_32,3.003708 ms
+check,block64_32,max_abs=0,relative_l2=0,bad=0
+result,block64_32,128,64,96,1,0.163375,0.163375,0.163375,0.163375,9.627
