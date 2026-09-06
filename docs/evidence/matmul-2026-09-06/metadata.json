@@ -9,8 +9,8 @@
   "build": "Release; CUMETAL_ENABLE_BINARY_SHIM=OFF",
   "metal_flags": "-fno-strict-aliasing -fno-fast-math -ffp-contract=fast",
   "files_sha256": {
-    "tools/matmul_bench/kernels.cu": "aa3efcd996ee87595da2260d8057c2c4c30af268ca11639b3b8caf80a89a8f01",
-    "tools/matmul_bench/main.cpp": "eb326e6e34d8d91bd680fc0ff48c45201aa5640ee2904380f01608b916020eb3",
+    "demos/matmul/kernels.cu": "aa3efcd996ee87595da2260d8057c2c4c30af268ca11639b3b8caf80a89a8f01",
+    "demos/matmul/main.cpp": "eb326e6e34d8d91bd680fc0ff48c45201aa5640ee2904380f01608b916020eb3",
     "runtime/metal_backend/matmul_bench_reference.mm": "8044420bbe5d2ecdbb936fb72ef8f5a4c9673bf6aa39b5a90048603ae496eeda",
     "build-release-noshim/matmul-bench/kernels.metallib": "6ae0592617c04360eeaf783a6d6fb944be6e049e39c3e83661c5c88f4af459bf"
   }

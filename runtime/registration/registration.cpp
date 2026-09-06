@@ -1148,6 +1148,7 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     emit_options.validate_output = true;
     emit_options.fallback_to_experimental = true;
     emit_options.kernel_name = kernel_name;
+    emit_options.math_mode = cumetal::metal_math_mode_name(cumetal::current_metal_math_mode());
 
     std::string io_error;
     bool use_direct_msl = lowered_metal.matched && !lowered_metal.metal_source.empty();

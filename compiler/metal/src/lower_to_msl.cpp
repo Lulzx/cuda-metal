@@ -9,6 +9,8 @@
 #include <queue>
 #include <sstream>
 #include <unordered_map>
+#include <cstdio>
+#include <cstdlib>
 #include <unordered_set>
 
 namespace cumetal::metal {
@@ -611,6 +613,10 @@ public:
         return spaces_[find(node)];
     }
 
+    std::size_t size() const { return parents_.size(); }
+
+    const std::vector<std::pair<std::size_t, std::size_t>>& flows() const { return flows_; }
+
     std::optional<ir::AddressSpace> space(std::size_t node) {
         const std::uint8_t value = mask(node);
         if (value == 0 || (value & (value - 1)) != 0) return std::nullopt;
@@ -643,6 +649,7 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
          ++function_index) {
         ir::Function& function = module->functions[function_index];
         function.mixed_pointer_address_spaces.clear();
+        function.mixed_pointer_return_spaces = 0;
         function_indices[function.name] = function_index;
         if (function.return_type.is_pointer()) {
             return_nodes[function_index] = constraints.add_node();
@@ -718,6 +725,16 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
             }
         }
     }
+
+    // Call results are typed per call site (see the materialization pass
+    // below), so the callee's return node is not connected to them here.
+    struct PendingCallResult {
+        std::size_t caller = 0;
+        std::size_t callee = 0;
+        std::size_t result_node = 0;
+        std::vector<ir::Operand> operands;
+    };
+    std::vector<PendingCallResult> pending_call_results;
 
     auto constrain_operand = [&](std::size_t node, const ir::Operand& operand) {
         if (operand.kind == ir::OperandKind::kValue &&
@@ -840,8 +857,10 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                         if (!operation.results.empty() &&
                             value_nodes.contains(operation.results.front()) &&
                             return_nodes[callee_index->second].has_value()) {
-                            constraints.flow(*return_nodes[callee_index->second],
-                                             value_nodes.at(operation.results.front()));
+                            pending_call_results.push_back(PendingCallResult{
+                                function_index, callee_index->second,
+                                value_nodes.at(operation.results.front()),
+                                operation.operands});
                         }
                     }
                 }
@@ -951,37 +970,200 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
         }
     }
 
+    // Per-call-site result typing. A helper whose pointer return is one of its
+    // own pointer arguments -- `T& operator+=(T& a, const T& b) { ...; return a; }`
+    // -- is called with a local object at one site and a device object at
+    // another. Flowing the callee's merged return into every call result would
+    // type each result as a mixed pointer, which callers cannot use. Instead
+    // the result at each site flows from that site's own operand, so it takes
+    // exactly the space the caller passed; the callee itself becomes a set of
+    // address-space clones, each returning its own space. Which arguments a
+    // return derives from is found by walking the flow graph backwards from
+    // the return node and stopping at the function's arguments, and it must be
+    // known for a callee before any of its callers is processed, so functions
+    // go in call-graph post-order (the call graph is verified acyclic).
+    std::vector<std::vector<std::size_t>> return_derived_arguments(module->functions.size());
+    std::vector<bool> return_has_non_argument_origin(module->functions.size(), false);
+    {
+        std::vector<std::vector<std::size_t>> pending_by_caller(module->functions.size());
+        for (std::size_t i = 0; i < pending_call_results.size(); ++i) {
+            pending_by_caller[pending_call_results[i].caller].push_back(i);
+        }
+        std::vector<std::vector<std::size_t>> callees_of(module->functions.size());
+        for (std::size_t i = 0; i < module->functions.size(); ++i) {
+            for (const ir::BasicBlock& block : module->functions[i].blocks) {
+                for (const ir::Operation& operation : block.operations) {
+                    if (operation.opcode != ir::OpCode::kCall) continue;
+                    const auto callee = operation.attributes.find("callee");
+                    if (callee == operation.attributes.end()) continue;
+                    const auto found = function_indices.find(callee->second);
+                    if (found != function_indices.end()) callees_of[i].push_back(found->second);
+                }
+            }
+        }
+        std::vector<std::size_t> post_order;
+        std::vector<std::uint8_t> visit_state(module->functions.size(), 0);
+        for (std::size_t root = 0; root < module->functions.size(); ++root) {
+            if (visit_state[root] != 0) continue;
+            std::vector<std::pair<std::size_t, std::size_t>> stack = {{root, 0}};
+            visit_state[root] = 1;
+            while (!stack.empty()) {
+                auto& [index, next] = stack.back();
+                if (next < callees_of[index].size()) {
+                    const std::size_t callee = callees_of[index][next++];
+                    if (visit_state[callee] == 0) {
+                        visit_state[callee] = 1;
+                        stack.emplace_back(callee, 0);
+                    }
+                    continue;
+                }
+                visit_state[index] = 2;
+                post_order.push_back(index);
+                stack.pop_back();
+            }
+        }
+
+        std::vector<std::vector<std::size_t>> predecessors(constraints.size());
+        std::size_t indexed_flows = 0;
+        const auto index_new_flows = [&] {
+            const auto& flows = constraints.flows();
+            for (; indexed_flows < flows.size(); ++indexed_flows) {
+                predecessors[flows[indexed_flows].second].push_back(flows[indexed_flows].first);
+            }
+        };
+
+        for (const std::size_t function_index : post_order) {
+            ir::Function& function = module->functions[function_index];
+            for (const std::size_t pending_index : pending_by_caller[function_index]) {
+                const PendingCallResult& pending = pending_call_results[pending_index];
+                const std::vector<std::size_t>& derived = return_derived_arguments[pending.callee];
+                if (derived.empty()) {
+                    constraints.flow(*return_nodes[pending.callee], pending.result_node);
+                    continue;
+                }
+                for (const std::size_t argument_index : derived) {
+                    if (argument_index >= pending.operands.size() ||
+                        !pending.operands[argument_index].type.is_pointer()) {
+                        continue;
+                    }
+                    if (!constrain_operand(pending.result_node, pending.operands[argument_index])) {
+                        return {false, "device helper '" +
+                                           module->functions[pending.callee].name +
+                                           "' returns a pointer of a conflicting concrete address space"};
+                    }
+                }
+                if (return_has_non_argument_origin[pending.callee]) {
+                    constraints.flow(*return_nodes[pending.callee], pending.result_node);
+                }
+            }
+            if (!return_nodes[function_index].has_value()) continue;
+            index_new_flows();
+            std::unordered_map<std::size_t, std::size_t> argument_nodes;
+            for (std::size_t i = 0; i < function.arguments.size(); ++i) {
+                if (function.arguments[i].type.is_pointer() &&
+                    value_nodes.contains(function.arguments[i].value)) {
+                    argument_nodes[value_nodes.at(function.arguments[i].value)] = i;
+                }
+            }
+            std::unordered_set<std::size_t> visited;
+            std::vector<std::size_t> stack = {*return_nodes[function_index]};
+            bool non_argument_origin = false;
+            while (!stack.empty()) {
+                const std::size_t node = stack.back();
+                stack.pop_back();
+                if (!visited.insert(node).second) continue;
+                if (const auto argument = argument_nodes.find(node);
+                    argument != argument_nodes.end()) {
+                    return_derived_arguments[function_index].push_back(argument->second);
+                    continue;
+                }
+                // A seeded node is a concrete origin (an alloca, a symbol, a
+                // stored value); a node with no producer at all is a
+                // host-supplied or null component. Neither is an argument.
+                if (constraints.mask(node) != 0 || predecessors[node].empty()) {
+                    non_argument_origin = true;
+                }
+                for (const std::size_t predecessor : predecessors[node]) {
+                    stack.push_back(predecessor);
+                }
+            }
+            std::sort(return_derived_arguments[function_index].begin(),
+                      return_derived_arguments[function_index].end());
+            return_has_non_argument_origin[function_index] = non_argument_origin;
+        }
+    }
+
     if (!constraints.solve()) {
         return {false,
                 "directional pointer flow reaches a conflicting concrete address space"};
     }
 
-    // A pointer-valued field read from device storage, but never written by
-    // device code in the reachable module, comes from the host-populated kernel
-    // ABI. CUDA host launch arguments can only supply device pointers. This is
-    // the common array-descriptor shape used by Warp and similar runtimes.
-    // Keep fields with an observed device-side store polymorphic: their stored
-    // value remains the authoritative address-space constraint.
-    bool seeded_host_pointer_field = false;
-    for (const auto& [slot, address_nodes] : pointer_memory_slot_address_nodes) {
-        if (pointer_memory_slots_with_stores.contains(slot) || address_nodes.empty()) {
-            continue;
-        }
-        const bool device_backed = std::all_of(
-            address_nodes.begin(), address_nodes.end(), [&](std::size_t address_node) {
-                return constraints.space(address_node) == ir::AddressSpace::kDevice;
-            });
-        if (device_backed) {
-            if (!constraints.seed(slot, ir::AddressSpace::kDevice)) {
-                return {false,
-                        "host-populated pointer field conflicts with device address space"};
-            }
-            seeded_host_pointer_field = true;
+    // Totality rule. After the fixed point, a pointer component that no
+    // concrete producer in the reachable module flows into can only hold an
+    // address the host supplied -- a kernel-argument buffer, or a pointer field
+    // the host filled in, which on Metal is always `device` -- or be null, or
+    // be dead. `device` is therefore the unique sound default, and applying
+    // it makes the legalizer total for well-formed CUDA instead of refusing
+    // the program. Nothing that compiled before changes meaning: a component
+    // with an empty mask never reached emission.
+    //
+    // The old special case -- a storeless pointer field read only through
+    // device-resident aggregates (Warp's array_t, cuDNN-style descriptors) --
+    // is the most common instance and is subsumed. It also covers the same
+    // field read through a private, by-value copy of the aggregate, which the
+    // special case could not seed and therefore refused, and device helpers
+    // that nothing calls, whose reference parameters never receive a flow.
+    std::vector<std::size_t> defaulted_nodes;
+    for (std::size_t node = 0; node < constraints.size(); ++node) {
+        if (constraints.find(node) == node && constraints.mask(node) == 0) {
+            constraints.seed(node, ir::AddressSpace::kDevice);
+            defaulted_nodes.push_back(node);
         }
     }
-    if (seeded_host_pointer_field && !constraints.solve()) {
+    if (!defaulted_nodes.empty() && !constraints.solve()) {
         return {false,
-                "host-populated pointer field reaches a conflicting concrete address space"};
+                "a pointer with no in-module producer (defaulted to device memory) "
+                "reaches a conflicting concrete address space"};
+    }
+    if (!defaulted_nodes.empty() && std::getenv("CUMETAL_DEBUG_ADDRESS_SPACES") != nullptr) {
+        const std::unordered_set<std::size_t> defaulted(defaulted_nodes.begin(),
+                                                        defaulted_nodes.end());
+        for (const ir::Function& function : module->functions) {
+            const auto report = [&](ir::ValueId value, const char* what) {
+                const auto node = value_nodes.find(value);
+                if (node == value_nodes.end() || !defaulted.contains(node->second)) return;
+                std::string detail;
+                if (const auto provenance = function.pointer_provenance.find(value);
+                    provenance != function.pointer_provenance.end()) {
+                    detail = " layout='" + provenance->second.memory_layout + "' offset=" +
+                             (provenance->second.known_byte_offset.has_value()
+                                  ? std::to_string(*provenance->second.known_byte_offset)
+                                  : std::string("unknown"));
+                }
+                std::fprintf(stderr, "cumetal: address space defaulted to device: %s %s value %u%s\n",
+                             function.name.c_str(), what, static_cast<unsigned>(value),
+                             detail.c_str());
+            };
+            for (const ir::FunctionArgument& argument : function.arguments) {
+                report(argument.value, "argument");
+            }
+            for (const ir::BasicBlock& block : function.blocks) {
+                for (const ir::BlockArgument& argument : block.arguments) {
+                    report(argument.value, "block argument");
+                }
+                for (const ir::Operation& operation : block.operations) {
+                    for (const ir::ValueId result : operation.results) report(result, "result");
+                }
+            }
+        }
+        for (std::size_t function_index = 0; function_index < module->functions.size();
+             ++function_index) {
+            if (return_nodes[function_index].has_value() &&
+                defaulted.contains(*return_nodes[function_index])) {
+                std::fprintf(stderr, "cumetal: address space defaulted to device: %s return\n",
+                             module->functions[function_index].name.c_str());
+            }
+        }
     }
 
     auto resolve_type = [&](ir::Function* function, ir::ValueId value, ir::Type* type,
@@ -1009,7 +1191,7 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                               : std::string("unknown")) +
                          ")";
             }
-            return "unresolved generic pointer address space for " +
+            return "internal: pointer component escaped address-space defaulting for " +
                    std::string(context) + " value " + std::to_string(value) + detail;
         }
         type->address_space = *space;
@@ -1021,11 +1203,35 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
         ir::Function& function = module->functions[function_index];
         if (return_nodes[function_index].has_value()) {
             const auto space = constraints.space(*return_nodes[function_index]);
-            if (!space.has_value()) {
-                return {false, "unresolved generic pointer return address space in '" +
-                                   function.name + "'"};
+            if (space.has_value()) {
+                function.return_type.address_space = *space;
+            } else {
+                // The return carries more than one space. That is representable
+                // exactly when it is one of the function's own mixed pointer
+                // arguments handed back: each address-space clone then returns
+                // the space it was specialized for, and every call site already
+                // typed its result from the operand it passed.
+                const std::uint8_t mask = constraints.mask(*return_nodes[function_index]);
+                bool representable = !return_derived_arguments[function_index].empty() &&
+                                     !return_has_non_argument_origin[function_index];
+                for (const std::size_t argument_index :
+                     return_derived_arguments[function_index]) {
+                    const ir::ValueId argument = function.arguments[argument_index].value;
+                    const std::uint8_t argument_mask =
+                        constraints.mask(value_nodes.at(argument));
+                    if (constraints.space(value_nodes.at(argument)).has_value() ||
+                        (mask & ~argument_mask) != 0) {
+                        representable = false;
+                    }
+                }
+                if (!representable) {
+                    return {false, "pointer return of '" + function.name +
+                                       "' merges sources of different address spaces that no "
+                                       "argument specialization can carry"};
+                }
+                function.mixed_pointer_return_spaces = mask;
+                function.return_type.address_space = ir::AddressSpace::kNone;
             }
-            function.return_type.address_space = *space;
         }
         for (ir::FunctionArgument& argument : function.arguments) {
             if (const auto error = resolve_type(&function, argument.value, &argument.type,
@@ -1140,8 +1346,14 @@ void collect_msl_struct(const ir::Type& type, std::unordered_set<std::string>* s
     MslStruct structure;
     structure.name = name;
     for (std::size_t i = 0; i < type.elements.size(); ++i) {
+        // A pointer field holds an address whose space differs per instance
+        // of the struct (a descriptor read from device memory or copied to a
+        // local); one MSL field type cannot spell both. Store the raw 64-bit
+        // address and reinterpret it at each extraction, which is exactly the
+        // memory layout CUDA gives the field.
         structure.fields.push_back({
-            .type = lower_type(type.elements[i]),
+            .type = type.elements[i].is_pointer() ? MslType::uint(64)
+                                                  : lower_type(type.elements[i]),
             .name = "field" + std::to_string(i),
         });
     }
@@ -1515,6 +1727,12 @@ struct AstLowerer {
     }
 
     MslStmt declare_result(const ir::Operation& operation, MslExpr initializer) {
+        if (operation.results.empty() || initializer == nullptr) {
+            fail(&operation, "operation has no result value or expression to declare");
+            return MslStatement::expression(
+                initializer != nullptr ? std::move(initializer)
+                                       : MslExpression::literal("0", MslType::sint(32)));
+        }
         const ir::ValueId value = operation.results.front();
         const MslType type = lower_result_type(operation);
         values[value] = MslExpression::identifier(value_name(value), type);
@@ -1604,9 +1822,15 @@ struct AstLowerer {
                 const MslType wide_type = is_signed
                                               ? MslType::sint(operand_bits * 2)
                                               : MslType::uint(operand_bits * 2);
+                // PTX keeps every 32-bit temporary in an unsigned bit container,
+                // so a signed mul.hi must reinterpret each operand as signed
+                // before widening; long(uint) would zero-extend a negative input.
+                const MslType narrow_type = is_signed ? MslType::sint(operand_bits)
+                                                      : MslType::uint(operand_bits);
                 const MslExpr product = MslExpression::binary(
-                    "*", MslExpression::cast(wide_type, left),
-                    MslExpression::cast(wide_type, right), wide_type);
+                    "*", MslExpression::cast(wide_type, MslExpression::cast(narrow_type, left)),
+                    MslExpression::cast(wide_type, MslExpression::cast(narrow_type, right)),
+                    wide_type);
                 const MslExpr high = MslExpression::binary(
                     ">>", product,
                     MslExpression::literal(std::to_string(operand_bits) + "u",
@@ -1723,12 +1947,25 @@ struct AstLowerer {
                 fail(&operation, "struct aggregate extraction requires a constant index");
                 return std::nullopt;
             }
+            const MslType result_type = lower_result_type(operation);
+            if (result_type.kind == MslTypeKind::kPointer) {
+                // Pointer fields are stored as raw addresses; reinterpret to the
+                // space this use resolved to.
+                return declare_result(
+                    operation,
+                    MslExpression::cast(
+                        result_type,
+                        MslExpression::member(expression_for(operation.operands[0]),
+                                              "field" + operation.operands[1].text,
+                                              MslType::uint(64)),
+                        true));
+            }
             return declare_result(
                 operation,
                 MslExpression::member(
                     expression_for(operation.operands[0]),
                     "field" + operation.operands[1].text,
-                    lower_result_type(operation)));
+                    result_type));
         }
 
         if (operation.opcode == ir::OpCode::kAggregateConstruct) {
@@ -1741,8 +1978,14 @@ struct AstLowerer {
             }
             std::vector<MslExpr> elements;
             elements.reserve(operation.operands.size());
+            const bool struct_aggregate =
+                aggregate_init && !is_native_vector_aggregate(operation.result_types.front());
             for (const ir::Operand& operand : operation.operands) {
-                elements.push_back(expression_for(operand));
+                MslExpr element = expression_for(operand);
+                if (struct_aggregate && element->type.kind == MslTypeKind::kPointer) {
+                    element = MslExpression::cast(MslType::uint(64), element, true);
+                }
+                elements.push_back(std::move(element));
             }
             const MslType result_type = lower_result_type(operation);
             return declare_result(
@@ -1760,12 +2003,74 @@ struct AstLowerer {
                 fail(&operation, "direct call is missing a callee");
                 return std::nullopt;
             }
-            if (operation.attributes.contains("fp64_mode")) {
+            // A double crosses a call boundary as its 64-bit storage word; only
+            // builtin math needs a software-ALU helper. A user device function
+            // with double parameters or results therefore takes the ordinary
+            // call path below, whose parameter and return types already lower
+            // binary64 to `ulong`. The FP64 mode selects the ALU; it is not a
+            // legality gate.
+            const bool module_local_callee =
+                std::any_of(module.functions.begin(), module.functions.end(),
+                            [&](const ir::Function& candidate) {
+                                return candidate.name == callee->second;
+                            });
+            if (operation.attributes.contains("fp64_mode") && !module_local_callee) {
                 std::vector<MslExpr> arguments;
                 for (const ir::Operand& operand : operation.operands) {
                     arguments.push_back(expression_for(operand));
                 }
                 const std::string& mode = operation.attributes.at("fp64_mode");
+                // Sign-bit operations are exact bit manipulation in every mode.
+                if (callee->second == "fabs" && arguments.size() == 1) {
+                    return declare_result(
+                        operation,
+                        MslExpression::binary(
+                            "&", arguments.front(),
+                            MslExpression::literal("0x7FFFFFFFFFFFFFFFul", MslType::uint(64)),
+                            MslType::uint(64)));
+                }
+                if (callee->second == "copysign" && arguments.size() == 2) {
+                    const MslExpr magnitude = MslExpression::binary(
+                        "&", arguments[0],
+                        MslExpression::literal("0x7FFFFFFFFFFFFFFFul", MslType::uint(64)),
+                        MslType::uint(64));
+                    const MslExpr sign = MslExpression::binary(
+                        "&", arguments[1],
+                        MslExpression::literal("0x8000000000000000ul", MslType::uint(64)),
+                        MslType::uint(64));
+                    return declare_result(
+                        operation, MslExpression::binary("|", magnitude, sign, MslType::uint(64)));
+                }
+                // Classification reads the binary64 bit pattern directly; it
+                // needs no software ALU and is exact in every FP64 mode.
+                if ((callee->second == "isnan" || callee->second == "isinf" ||
+                     callee->second == "isfinite" || callee->second == "signbit") &&
+                    arguments.size() == 1) {
+                    const MslExpr bits = arguments.front();
+                    const MslExpr magnitude = MslExpression::binary(
+                        "&", bits,
+                        MslExpression::literal("0x7FFFFFFFFFFFFFFFul", MslType::uint(64)),
+                        MslType::uint(64));
+                    const MslExpr infinity =
+                        MslExpression::literal("0x7FF0000000000000ul", MslType::uint(64));
+                    MslExpr test;
+                    if (callee->second == "isnan") {
+                        test = MslExpression::binary(">", magnitude, infinity, MslType::boolean());
+                    } else if (callee->second == "isinf") {
+                        test = MslExpression::binary("==", magnitude, infinity, MslType::boolean());
+                    } else if (callee->second == "isfinite") {
+                        test = MslExpression::binary("<", magnitude, infinity, MslType::boolean());
+                    } else {
+                        test = MslExpression::binary(
+                            "!=",
+                            MslExpression::binary(">>", bits,
+                                                  MslExpression::literal("63u", MslType::uint()),
+                                                  MslType::uint(64)),
+                            MslExpression::literal("0ul", MslType::uint(64)), MslType::boolean());
+                    }
+                    return declare_result(operation,
+                                          MslExpression::cast(lower_result_type(operation), test));
+                }
                 std::string target;
                 if (callee->second == "fma") {
                     target = mode == "fast48" ? "cm_fp64_fast_fma"
@@ -2174,6 +2479,12 @@ struct AstLowerer {
                          "void calls through mixed CUDA pointers require statement dispatch");
                     return std::nullopt;
                 }
+                if (callee_function->mixed_pointer_return_spaces != 0) {
+                    fail(&operation,
+                         "calls through a tagged mixed pointer to a helper whose pointer "
+                         "return depends on the argument's address space are unsupported");
+                    return std::nullopt;
+                }
                 auto specialized_arguments = [&](ir::AddressSpace space) {
                     std::vector<MslExpr> result = arguments;
                     const std::size_t count = std::min(
@@ -2253,10 +2564,20 @@ struct AstLowerer {
                         arguments[i] = MslExpression::cast(
                             lower_type(expected_type), arguments[i], true);
                     }
+                    MslType callee_return_type = return_type;
+                    if (callee_function->mixed_pointer_return_spaces != 0 &&
+                        callee_function->return_type.is_pointer()) {
+                        ir::Type specialized = callee_function->return_type;
+                        specialized.address_space = *concrete_specialization;
+                        callee_return_type = lower_type(specialized);
+                    }
                     MslExpr call = MslExpression::call(
                         specialized_callee(callee->second,
                                            *concrete_specialization),
-                        std::move(arguments), return_type);
+                        std::move(arguments), callee_return_type);
+                    if (!(callee_return_type == return_type)) {
+                        call = MslExpression::cast(return_type, call, true);
+                    }
                     if (operation.results.empty()) {
                         return MslStatement::expression(std::move(call));
                     }
@@ -2328,6 +2649,49 @@ struct AstLowerer {
                     MslType::sint(operation.operands[0].type.bit_width);
                 left = MslExpression::cast(signed_type, left);
                 right = MslExpression::cast(signed_type, right);
+            }
+            // IEEE unordered and ordered-not-equal predicates. C++ relational
+            // operators are the ordered forms and `!=` the unordered one, so
+            // the rest are spelled through their complements and
+            // isunordered(); this holds only because generated MSL is compiled
+            // without fast-math, which would fold every NaN test away.
+            if (operation.operands[0].type.kind == ir::TypeKind::kFloat) {
+                const auto predicate = operation.attributes.find("predicate");
+                const std::string value =
+                    predicate == operation.attributes.end() ? "eq" : predicate->second;
+                const auto compare = [&](const char* op, const MslExpr& a, const MslExpr& b) {
+                    return MslExpression::binary(op, a, b, MslType::boolean());
+                };
+                const auto negate = [&](const MslExpr& e) {
+                    return MslExpression::unary("!", e, MslType::boolean());
+                };
+                const auto unordered = [&] {
+                    return MslExpression::call("isunordered", {left, right}, MslType::boolean());
+                };
+                std::optional<MslExpr> unordered_form;
+                if (value == "equ") {
+                    unordered_form = MslExpression::binary("||", compare("==", left, right),
+                                                           unordered(), MslType::boolean());
+                } else if (value == "one") {
+                    unordered_form = MslExpression::binary("||", compare("<", left, right),
+                                                           compare(">", left, right),
+                                                           MslType::boolean());
+                } else if (value == "ltu") {
+                    unordered_form = negate(compare(">=", left, right));
+                } else if (value == "leu") {
+                    unordered_form = negate(compare(">", left, right));
+                } else if (value == "gtu") {
+                    unordered_form = negate(compare("<=", left, right));
+                } else if (value == "geu") {
+                    unordered_form = negate(compare("<", left, right));
+                } else if (value == "nan") {
+                    unordered_form = unordered();
+                } else if (value == "num") {
+                    unordered_form = negate(unordered());
+                }
+                if (unordered_form.has_value()) {
+                    return declare_result(operation, *unordered_form);
+                }
             }
             return declare_result(
                 operation,
@@ -3228,7 +3592,11 @@ struct AstLowerer {
 
     MslStmt lower_return(const ir::Operation& operation) {
         if (operation.operands.empty()) return MslStatement::return_statement();
-        return MslStatement::return_statement(expression_for(operation.operands.front()));
+        MslExpr value = expression_for(operation.operands.front());
+        if (function.mixed_pointer_return_spaces != 0 && !(value->type == output.return_type)) {
+            value = MslExpression::cast(output.return_type, value, true);
+        }
+        return MslStatement::return_statement(std::move(value));
     }
 
     MslExpr pointer_tag_for(const MslExpr& pointer) const {
@@ -4265,7 +4633,14 @@ struct AstLowerer {
         output.name = pointer_specialization.has_value()
                           ? specialized_callee(function.name, *pointer_specialization)
                           : function.name;
-        output.return_type = lower_type(function.return_type);
+        if (function.mixed_pointer_return_spaces != 0 && function.return_type.is_pointer()) {
+            ir::Type specialized = function.return_type;
+            specialized.address_space =
+                pointer_specialization.value_or(ir::AddressSpace::kDevice);
+            output.return_type = lower_type(specialized);
+        } else {
+            output.return_type = lower_type(function.return_type);
+        }
         output.is_kernel = function.is_kernel;
         for (std::size_t i = 0; i < function.arguments.size(); ++i) {
             const ir::FunctionArgument& argument = function.arguments[i];
@@ -4529,6 +4904,49 @@ struct AstLowerer {
 
 }  // namespace
 
+// Drop device functions that no kernel can reach. Clang emits every
+// external-linkage function in the translation unit whether or not a kernel
+// calls it -- NVIDIA Warp generates an `add(const S&, const S&)` and an
+// `adj_atomic_add` per struct "for compiling adjoints", and a third of a
+// generated module can be dead -- and a dead helper's pointer parameters have
+// no call sites to give them an address space. Nothing downstream needs them:
+// CuMetal links no device code across metallibs, so the only functions a
+// metallib must contain are its kernels and their call closure. Modules with
+// no kernel at all (library translation units) are left untouched.
+void prune_functions_unreachable_from_kernels(ir::Module* module) {
+    std::unordered_map<std::string, std::size_t> indices;
+    std::vector<std::size_t> worklist;
+    for (std::size_t i = 0; i < module->functions.size(); ++i) {
+        indices[module->functions[i].name] = i;
+        if (module->functions[i].is_kernel) worklist.push_back(i);
+    }
+    if (worklist.empty()) return;
+    std::vector<bool> reachable(module->functions.size(), false);
+    while (!worklist.empty()) {
+        const std::size_t index = worklist.back();
+        worklist.pop_back();
+        if (reachable[index]) continue;
+        reachable[index] = true;
+        for (const ir::BasicBlock& block : module->functions[index].blocks) {
+            for (const ir::Operation& operation : block.operations) {
+                if (operation.opcode != ir::OpCode::kCall) continue;
+                const auto callee = operation.attributes.find("callee");
+                if (callee == operation.attributes.end()) continue;
+                const auto found = indices.find(callee->second);
+                if (found != indices.end() && !reachable[found->second]) {
+                    worklist.push_back(found->second);
+                }
+            }
+        }
+    }
+    std::vector<ir::Function> kept;
+    kept.reserve(module->functions.size());
+    for (std::size_t i = 0; i < module->functions.size(); ++i) {
+        if (reachable[i]) kept.push_back(std::move(module->functions[i]));
+    }
+    module->functions = std::move(kept);
+}
+
 MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     MetalLegalizeResult result;
     const ir::VerifyResult input_verification = ir::verify(module);
@@ -4537,6 +4955,7 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
         return result;
     }
     result.module = module;
+    prune_functions_unreachable_from_kernels(&result.module);
     const AddressSpaceResolution address_spaces =
         resolve_generic_address_spaces(&result.module);
     if (!address_spaces.ok) {
@@ -4725,6 +5144,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         result.ast.global_byte_arrays.push_back({
             .name = global.name,
             .bytes = global.bytes,
+            .alignment = global.alignment,
         });
     }
     bool needs_device_cas = false;

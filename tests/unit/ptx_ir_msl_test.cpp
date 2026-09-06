@@ -85,7 +85,7 @@ int main() {
                  "typed backend emits Metal threadgroup builtin");
     ok &= expect(result.source.find("if (") != std::string::npos,
                  "simple forward branch is structurized");
-    ok &= expect(result.source.find("reinterpret_cast<device float*>") !=
+    ok &= expect(result.source.find("reinterpret_cast<device cm_alias_float*>") !=
                      std::string::npos,
                  "typed backend emits checked pointer casts");
 
@@ -414,7 +414,7 @@ BODY:
         metal::compile_ptx_to_msl(local_depot_ptx);
     ok &= expect(local_depot.ok &&
                      local_depot.source.find("thread uchar") != std::string::npos &&
-                     local_depot.source.find("reinterpret_cast<thread uint*>") !=
+                     local_depot.source.find("reinterpret_cast<thread cm_alias_uint*>") !=
                          std::string::npos,
                  "PTX local depots retain bounded private byte-array storage");
     if (!local_depot.ok) std::cerr << local_depot.error << "\n";
@@ -464,7 +464,7 @@ BODY:
                          "device uchar* cm___cumetal_global_state [[buffer(1)]]") !=
                          std::string::npos &&
                      module_global.source.find(
-                         "reinterpret_cast<device uchar*>") !=
+                         "reinterpret_cast<device cm_alias_uchar*>") !=
                          std::string::npos &&
                      module_global.source.find(" + 28)") != std::string::npos &&
                      module_global.source.find("[state+28]") == std::string::npos;
@@ -1064,7 +1064,7 @@ BODY:
                  "typed PTX lowers the complete 32-bit CUDA atomic family with explicit UMA policy");
     ok &= expect(atomic32.ok &&
                      atomic32.source.find(
-                         "reinterpret_cast<device uchar*>") !=
+                         "reinterpret_cast<device cm_alias_uchar*>") !=
                          std::string::npos &&
                      atomic32.source.find(" + 28)") != std::string::npos,
                  "PTX atomic memory operands retain literal byte displacements");
@@ -1232,7 +1232,7 @@ BODY:
     ok &= expect(pointer_select.ok &&
                      pointer_select.source.find("device uchar*") !=
                          std::string::npos &&
-                     pointer_select.source.find("reinterpret_cast<device uint*>") !=
+                     pointer_select.source.find("reinterpret_cast<device cm_alias_uint*>") !=
                          std::string::npos,
                  "typed PTX propagates device pointers through selp and pointer arithmetic");
     if (!pointer_select.ok) std::cerr << pointer_select.error << "\n";
@@ -1256,7 +1256,7 @@ BODY:
         metal::compile_ptx_to_msl(signed_narrow_load_ptx);
     ok &= expect(signed_narrow_load.ok &&
                      signed_narrow_load.source.find(
-                         "reinterpret_cast<device char*>") != std::string::npos &&
+                         "reinterpret_cast<device cm_alias_char*>") != std::string::npos &&
                      signed_narrow_load.source.find("short(") != std::string::npos,
                  "typed PTX sign-extends narrow signed loads before numeric conversion");
     if (!signed_narrow_load.ok) std::cerr << signed_narrow_load.error << "\n";

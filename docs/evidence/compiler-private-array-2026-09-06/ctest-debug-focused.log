@@ -1,0 +1,13 @@
+Test project /Users/lulzx/work/cumetal/build
+    Start 255: unit_nvvm_ir_msl
+1/2 Test #255: unit_nvvm_ir_msl .................   Passed    4.15 sec
+    Start 287: unit_nvvm_private_array
+2/2 Test #287: unit_nvvm_private_array ..........   Passed    3.21 sec
+
+100% tests passed out of 2
+
+Label Time Summary:
+hosted    =   7.36 sec*proc (2 tests)
+unit      =   7.36 sec*proc (2 tests)
+
+Total Test time (real) =   7.37 sec

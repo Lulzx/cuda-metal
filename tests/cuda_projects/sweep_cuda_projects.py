@@ -138,6 +138,16 @@ def load_manifest(path: Path, fixtures_root: Path) -> list[dict[str, str]]:
         project = {key: str(raw[key]) for key in required}
         if "expect_pattern" in raw:
             project["expect_pattern"] = str(raw["expect_pattern"])
+        # A project may be enrolled for a subset of backends while another
+        # frontend still lacks a construct it uses; the sweep reports the skip
+        # instead of silently counting the project as covered.
+        if "backends" in raw:
+            backends = raw["backends"]
+            if not isinstance(backends, list) or not backends or not all(
+                backend in ("legacy", "cumetal-ir", "native-aot") for backend in backends
+            ):
+                raise ValueError(f"invalid backends for {project['name']}")
+            project["backends"] = list(backends)
         if project["name"] in names:
             raise ValueError(f"duplicate project name: {project['name']}")
         if project["harness"] not in ("standard", "strict"):
@@ -225,6 +235,13 @@ def main() -> int:
     env.setdefault("CUMETAL_BUILD_DIR", str(root / "build"))
     env["CUMETAL_CUDA_PROJECT_STRICT_CLASSIFICATION"] = "1"
     for project in projects:
+        enrolled = project.get("backends")
+        if enrolled and args.backend not in enrolled:
+            print(
+                f"{project['name']}\tnot_enrolled\tbackends={','.join(enrolled)}",
+                flush=True,
+            )
+            continue
         typed_ptx = args.backend == "cumetal-ir"
         native_aot = args.backend == "native-aot"
         if native_aot:

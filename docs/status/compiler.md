@@ -13,13 +13,13 @@
   production libraries.
 - Direct AIR generation remains tooling/research only.
 
-With CUDA Clang 21-23, the reviewed manifest-controlled 30-file
+With CUDA Clang 21-23, the reviewed manifest-controlled 37-file
 production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/31 | **31/31** |
-| PTX / `--cuda-device` | **29/31** | **31/31** |
+| direct `.cu` | 0/37 | **37/37** |
+| PTX / `--cuda-device` | **33/37** | **34/37** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler
@@ -153,3 +153,11 @@ semantic and per-form; an accepted PTX version header is not blanket support.
 
 Detailed compiler selection and legality stages are in
 [compiler architecture](../compiler-architecture.md).
+
+## Bounded performance optimization
+
+The NVVM importer selectively unrolls explicitly hinted tiny loops in functions
+with large static private arrays, then applies scalar replacement. Shared-array
+constant GEPs preserve their threadgroup address space. See
+[the compiler performance study](../compiler-performance.md) for exact selection
+bounds, excluded operations, measurements, and regression gates.

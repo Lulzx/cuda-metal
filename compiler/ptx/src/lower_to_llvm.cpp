@@ -6207,6 +6207,30 @@ class GenericLlvmEmitter {
             return store_ret_bits(rbits, 32);
         }
 
+        // Classification on the float bit pattern: exact, and independent of
+        // whatever math mode the AIR is later compiled under.
+        if (callee == "__nv_isnanf" || callee == "__nv_isinff" || callee == "__nv_finitef" ||
+            callee == "__nv_signbitf") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            auto bits = load_call_slot_value(os, arg_names[0], 32);
+            if (!bits) return fail(instr, callee + " arg missing");
+            const std::string magnitude = next_tmp("classify_mag");
+            os << "  " << magnitude << " = and i32 " << *bits << ", 2147483647\n";
+            const std::string flag = next_tmp("classify_flag");
+            if (callee == "__nv_isnanf") {
+                os << "  " << flag << " = icmp ugt i32 " << magnitude << ", 2139095040\n";
+            } else if (callee == "__nv_isinff") {
+                os << "  " << flag << " = icmp eq i32 " << magnitude << ", 2139095040\n";
+            } else if (callee == "__nv_finitef") {
+                os << "  " << flag << " = icmp ult i32 " << magnitude << ", 2139095040\n";
+            } else {
+                os << "  " << flag << " = icmp slt i32 " << *bits << ", 0\n";
+            }
+            const std::string out = next_tmp("classify_i32");
+            os << "  " << out << " = zext i1 " << flag << " to i32\n";
+            return store_ret_bits(out, 32);
+        }
+
         if (callee == "__nv_fabsf") {
             if (arg_names.empty()) return fail(instr, "__nv_fabsf expects 1 arg");
             auto bits = load_call_slot_value(os, arg_names[0], 32);

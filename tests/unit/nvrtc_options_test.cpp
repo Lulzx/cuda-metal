@@ -96,10 +96,18 @@ int main() {
             return 1;
         }
         if (!expect(contains(result.ignored, "--extra-device-vectorization") &&
-                        contains(result.ignored, "--diag-suppress=177,550") &&
-                        contains(result.ignored, "--fmad=false") &&
-                        contains(result.ignored, "--std=c++17"),
-                    "code-generation options are recorded as ignored")) {
+                        contains(result.ignored, "--diag-suppress=177,550"),
+                    "code-generation options with no Metal meaning are recorded as ignored")) {
+            return 1;
+        }
+        if (!expect(contains(result.compiler_args, "-std=c++17") &&
+                        contains(result.compiler_args, "--fmad=false") &&
+                        contains(result.compiler_args, "--device-as-default-execution-space") &&
+                        contains(result.compiler_args, "--clang-arg=-Wno-macro-redefined"),
+                    "language standard, contraction, and execution-space options are honoured")) {
+            for (const std::string& arg : result.compiler_args) {
+                std::fprintf(stderr, "  arg: %s\n", arg.c_str());
+            }
             return 1;
         }
     }
@@ -150,8 +158,10 @@ int main() {
                     "unknown option reported")) {
             return 1;
         }
-        // --cuda-arch sm_80 and -D __CUDACC_RTC__=1, and nothing else.
-        if (!expect(result.compiler_args.size() == 4,
+        // --cuda-arch sm_80, -D __CUDACC_RTC__=1, the RTC-mode warning
+        // suppression, and nothing else.
+        if (!expect(result.compiler_args.size() == 5 &&
+                        contains(result.compiler_args, "--clang-arg=-Wno-macro-redefined"),
                     "unknown option does not reach cumetalc")) {
             return 1;
         }

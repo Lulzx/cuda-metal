@@ -1329,6 +1329,170 @@ declare i32 @llvm.nvvm.read.ptx.sreg.clock()
 declare void @__cumetal_grid_sync()
 )llvm";
 
+// A device helper nothing calls: Clang emits every external-linkage function
+// in the translation unit, and its reference parameters have no call site to
+// give them an address space. The legalizer must prune it rather than refuse
+// the module.
+constexpr const char* kNvvmDeadGenericHelper = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%pair = type { float, float }
+
+define float @dead_add(ptr %a, ptr %b) {
+entry:
+  %a.x = getelementptr %pair, ptr %a, i64 0, i32 0
+  %b.x = getelementptr %pair, ptr %b, i64 0, i32 0
+  %av = load float, ptr %a.x, align 4
+  %bv = load float, ptr %b.x, align 4
+  %sum = fadd float %av, %bv
+  ret float %sum
+}
+
+define ptx_kernel void @dead_helper_kernel(ptr %out) {
+entry:
+  store float 1.0, ptr %out, align 4
+  ret void
+}
+)llvm";
+
+// A host-populated pointer field read through both a device-resident kernel
+// parameter and a private by-value copy of the same descriptor. No device
+// code stores the field, so its address space comes only from the totality
+// default: a pointer with no in-module producer is host-supplied device memory.
+constexpr const char* kNvvmStorelessFieldPrivateCopy = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%descriptor = type { ptr, i32 }
+
+define ptr @descriptor_at(ptr %descriptor, i64 %index) {
+entry:
+  %field = getelementptr %descriptor, ptr %descriptor, i64 0, i32 0
+  %data = load ptr, ptr %field, align 8
+  %element = getelementptr i32, ptr %data, i64 %index
+  ret ptr %element
+}
+
+define void @descriptor_put(ptr %descriptor, i64 %index, i32 %value) {
+entry:
+  %element = call ptr @descriptor_at(ptr %descriptor, i64 %index)
+  store i32 %value, ptr %element, align 4
+  ret void
+}
+
+define i32 @descriptor_first(ptr byval(%descriptor) %descriptor) {
+entry:
+  %element = call ptr @descriptor_at(ptr %descriptor, i64 0)
+  %value = load i32, ptr %element, align 4
+  ret i32 %value
+}
+
+define ptx_kernel void @storeless_field_private_copy(ptr byval(%descriptor) %in,
+                                                     ptr byval(%descriptor) %out) {
+entry:
+  %copy = alloca %descriptor, align 8
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %copy, ptr align 8 %in, i64 16, i1 false)
+  %first = call i32 @descriptor_first(ptr byval(%descriptor) %copy)
+  call void @descriptor_put(ptr %out, i64 0, i32 %first)
+  ret void
+}
+
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
+)llvm";
+
+// A helper returning one of its reference arguments, called with a private
+// object and with a device object. Each clone returns its own address space
+// and each call site's result takes the space of the object it passed.
+constexpr const char* kNvvmMixedReturnPerCallSite = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%vec = type { float, float, float }
+
+define ptr @bump(ptr %value) {
+entry:
+  %x = getelementptr %vec, ptr %value, i64 0, i32 0
+  %old = load float, ptr %x, align 4
+  %new = fadd float %old, 1.0
+  store float %new, ptr %x, align 4
+  ret ptr %value
+}
+
+define ptx_kernel void @mixed_return_kernel(ptr %out) {
+entry:
+  %local = alloca %vec, align 4
+  %local.x = getelementptr %vec, ptr %local, i64 0, i32 0
+  store float 2.0, ptr %local.x, align 4
+  %bumped.local = call ptr @bump(ptr %local)
+  %bumped.out = call ptr @bump(ptr %out)
+  %read = getelementptr %vec, ptr %bumped.local, i64 0, i32 0
+  %value = load float, ptr %read, align 4
+  %write = getelementptr %vec, ptr %bumped.out, i64 0, i32 1
+  store float %value, ptr %write, align 4
+  ret void
+}
+)llvm";
+
+// A pointer return that merges two non-argument sources of different address
+// spaces has no clone that could carry it: this must fail precisely.
+constexpr const char* kNvvmUnrepresentableMixedReturn = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+@device_table = internal addrspace(1) global [4 x float] zeroinitializer, align 16
+@shared_table = internal addrspace(3) global [4 x float] undef, align 16
+
+define ptr @pick(i1 %choose_device) {
+entry:
+  %device = addrspacecast ptr addrspace(1) @device_table to ptr
+  %shared = addrspacecast ptr addrspace(3) @shared_table to ptr
+  %chosen = select i1 %choose_device, ptr %device, ptr %shared
+  ret ptr %chosen
+}
+
+define ptx_kernel void @unrepresentable_return_kernel(ptr %out, i32 %flag) {
+entry:
+  %choose = icmp ne i32 %flag, 0
+  %target = call ptr @pick(i1 %choose)
+  store float 1.0, ptr %target, align 4
+  ret void
+}
+)llvm";
+
+// Inline PTX is lowered by the PTX instruction importer after operand
+// substitution: an "=h" half arrives in an i16 and must be reinterpreted, a
+// two-output block binds both results, and an immediate is spelled inline.
+constexpr const char* kNvvmInlineAsmIdioms = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @asm_idioms(ptr %out, ptr %in, i32 %a, i32 %b) {
+entry:
+  %x = load float, ptr %in, align 4
+  %h = call i16 asm "{  cvt.rn.f16.f32 $0, $1;}\0A", "=h,f"(float %x)
+  %back = call float asm "{  cvt.f32.f16 $0, $1;}\0A", "=f,h"(i16 %h)
+  %quot = call float asm "div.approx.f32 $0, $1, $2;", "=f,f,f"(float %back, float %x)
+  store float %quot, ptr %out, align 4
+  %pair = call { i32, i32 } asm "mul.hi.u32 $0, $2, $3;\0A\09mul.lo.u32 $1, $2, $3;", "=r,=r,r,r"(i32 %a, i32 %b)
+  %hi = extractvalue { i32, i32 } %pair, 0
+  %lo = extractvalue { i32, i32 } %pair, 1
+  %shifted = call i32 asm "shl.b32 $0, $1, $2;", "=r,r,n"(i32 %lo, i32 3)
+  %sum = add i32 %hi, %shifted
+  %out.i = getelementptr i32, ptr %out, i64 1
+  store i32 %sum, ptr %out.i, align 4
+  ret void
+}
+)llvm";
+
+constexpr const char* kNvvmInlineAsmControlFlow = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @asm_branch(ptr %out) {
+entry:
+  call void asm sideeffect "bra DONE;\0ADONE:", ""()
+  store float 1.0, ptr %out, align 4
+  ret void
+}
+)llvm";
+
 int main() {
     using namespace cumetal;
     if (!ir::llvm_frontend_available()) {
@@ -1509,7 +1673,7 @@ int main() {
                          "void store_helper(\n    device uchar* out") !=
                          std::string::npos &&
                      generic_device_pointer.source.find(
-                         "reinterpret_cast<thread uchar*>(arg0)") ==
+                         "reinterpret_cast<thread cm_alias_uchar*>(arg0)") ==
                          std::string::npos,
                  "generic helper pointers inherit concrete device address spaces from callers");
 
@@ -1521,7 +1685,7 @@ int main() {
                      kernel_descriptor_pointer.source.find(
                          "device uchar* descriptor_element(") != std::string::npos &&
                      kernel_descriptor_pointer.source.find(
-                         "reinterpret_cast<device uchar*>") != std::string::npos,
+                         "reinterpret_cast<device cm_alias_uchar*>") != std::string::npos,
                  "host-populated pointer fields in kernel descriptors resolve as device pointers");
 
     const metal::NvvmToMslResult byval_aggregate_memcpy =
@@ -1530,10 +1694,85 @@ int main() {
                                    "byval_aggregate_memcpy");
     ok &= expect(byval_aggregate_memcpy.ok &&
                      byval_aggregate_memcpy.source.find(
-                         "reinterpret_cast<device uint*>") != std::string::npos,
+                         "reinterpret_cast<device cm_alias_uint*>") != std::string::npos,
                  "aggregate memcpy between host-populated descriptor buffers retains "
                  "per-use device pointer provenance: " +
                      byval_aggregate_memcpy.error);
+
+    const metal::NvvmToMslResult dead_generic_helper =
+        metal::compile_nvvm_to_msl(kNvvmDeadGenericHelper, "dead-generic-helper.ll",
+                                   "dead_helper_kernel");
+    ok &= expect(dead_generic_helper.ok &&
+                     dead_generic_helper.source.find("dead_add") == std::string::npos,
+                 "device helpers no kernel reaches are pruned instead of refused: " +
+                     dead_generic_helper.error);
+
+    const metal::NvvmToMslResult storeless_field_private_copy =
+        metal::compile_nvvm_to_msl(kNvvmStorelessFieldPrivateCopy,
+                                   "storeless-field-private-copy.ll",
+                                   "storeless_field_private_copy");
+    ok &= expect(storeless_field_private_copy.ok &&
+                     storeless_field_private_copy.source.find(
+                         "device uchar* descriptor_at__cm_device(device uchar*") !=
+                         std::string::npos &&
+                     storeless_field_private_copy.source.find(
+                         "device uchar* descriptor_at__cm_thread(thread uchar*") !=
+                         std::string::npos &&
+                     storeless_field_private_copy.source.find(
+                         "reinterpret_cast<thread cm_alias_uchar*>(arg0)") == std::string::npos,
+                 "a storeless pointer field read through a private descriptor copy "
+                 "defaults to device memory in every clone: " +
+                     storeless_field_private_copy.error);
+
+    const metal::NvvmToMslResult mixed_return_per_call_site =
+        metal::compile_nvvm_to_msl(kNvvmMixedReturnPerCallSite,
+                                   "mixed-return-per-call-site.ll",
+                                   "mixed_return_kernel");
+    ok &= expect(mixed_return_per_call_site.ok &&
+                     mixed_return_per_call_site.source.find(
+                         "thread uchar* bump__cm_thread(thread uchar*") !=
+                         std::string::npos &&
+                     mixed_return_per_call_site.source.find(
+                         "device uchar* bump__cm_device(device uchar*") !=
+                         std::string::npos &&
+                     mixed_return_per_call_site.source.find("as_type<ulong>") ==
+                         std::string::npos &&
+                     mixed_return_per_call_site.source.find("_space") == std::string::npos,
+                 "a helper returning its reference argument gets one clone per address "
+                 "space, and each call site's result takes the operand's space: " +
+                     mixed_return_per_call_site.error);
+
+    const metal::NvvmToMslResult unrepresentable_mixed_return =
+        metal::compile_nvvm_to_msl(kNvvmUnrepresentableMixedReturn,
+                                   "unrepresentable-mixed-return.ll",
+                                   "unrepresentable_return_kernel");
+    ok &= expect(!unrepresentable_mixed_return.ok &&
+                     unrepresentable_mixed_return.error.find("address space") !=
+                         std::string::npos &&
+                     unrepresentable_mixed_return.error.find("internal:") ==
+                         std::string::npos,
+                 "a pointer return merging non-argument sources of different address "
+                 "spaces is refused with a precise diagnostic: " +
+                     unrepresentable_mixed_return.error);
+
+    const metal::NvvmToMslResult inline_asm_idioms =
+        metal::compile_nvvm_to_msl(kNvvmInlineAsmIdioms, "inline-asm-idioms.ll",
+                                   "asm_idioms");
+    ok &= expect(inline_asm_idioms.ok &&
+                     inline_asm_idioms.source.find("half(") != std::string::npos &&
+                     inline_asm_idioms.source.find(" / ") != std::string::npos &&
+                     inline_asm_idioms.source.find(">> 32u") != std::string::npos &&
+                     inline_asm_idioms.source.find("<< 3") != std::string::npos,
+                 "inline PTX idioms lower through the PTX instruction importer: " +
+                     inline_asm_idioms.error);
+
+    const metal::NvvmToMslResult inline_asm_control_flow =
+        metal::compile_nvvm_to_msl(kNvvmInlineAsmControlFlow, "inline-asm-branch.ll",
+                                   "asm_branch");
+    ok &= expect(!inline_asm_control_flow.ok &&
+                     inline_asm_control_flow.error.find("control flow") != std::string::npos,
+                 "inline PTX branches are refused with a precise diagnostic: " +
+                     inline_asm_control_flow.error);
 
     const metal::NvvmToMslResult static_threadgroup_global =
         metal::compile_nvvm_to_msl(kNvvmStaticThreadgroupGlobal,
@@ -1608,9 +1847,9 @@ int main() {
                      mixed_device_threadgroup_phi.source.find("v7_space == 1u") !=
                          std::string::npos &&
                      mixed_device_threadgroup_phi.source.find(
-                         "reinterpret_cast<device uchar*>(v7)") != std::string::npos &&
+                         "reinterpret_cast<device cm_alias_uchar*>(v7)") != std::string::npos &&
                      mixed_device_threadgroup_phi.source.find(
-                         "reinterpret_cast<threadgroup uchar*>(v7)") != std::string::npos,
+                         "reinterpret_cast<threadgroup cm_alias_uchar*>(v7)") != std::string::npos,
                  "mixed CUDA generic-pointer PHIs dispatch concrete device and threadgroup helper specializations");
 
     const metal::NvvmToMslResult malformed_phi =
@@ -1657,14 +1896,14 @@ int main() {
     const metal::NvvmToMslResult memcpy =
         metal::compile_nvvm_to_msl(kNvvmMemcpy, "memcpy.ll", "memcpy_kernel");
     ok &= expect(memcpy.ok &&
-                     memcpy.source.find("reinterpret_cast<device uint*>") != std::string::npos,
+                     memcpy.source.find("reinterpret_cast<device cm_alias_uint*>") != std::string::npos,
                  "constant-length aligned LLVM memcpy expands into typed Metal loads and stores");
 
     const metal::NvvmToMslResult memset = metal::compile_nvvm_to_msl(
         kNvvmMemset, "memset.ll", "memset_kernel");
     ok &= expect(memset.ok &&
                      memset.source.find("1515870810") != std::string::npos &&
-                     memset.source.find("reinterpret_cast<device uint*>") !=
+                     memset.source.find("reinterpret_cast<device cm_alias_uint*>") !=
                          std::string::npos,
                  "constant-length aligned LLVM memset expands into repeated typed Metal stores");
 
@@ -1712,7 +1951,7 @@ int main() {
                      float_frexp_via_double_abi.source.find("double v") ==
                      std::string::npos &&
                      float_frexp_via_double_abi.source.find(
-                         "frexp(value, *reinterpret_cast<thread int*>(&v") !=
+                         "frexp(value, *reinterpret_cast<thread cm_alias_int*>(&v") !=
                          std::string::npos,
                  "float frexp round-trips through CUDA's double ABI without FP64 arithmetic");
 
@@ -1826,7 +2065,7 @@ int main() {
     ok &= expect(pointer_alignment.ok &&
                      pointer_alignment.source.find("reinterpret_cast<ulong>") !=
                          std::string::npos &&
-                     pointer_alignment.source.find("reinterpret_cast<device uchar*>") !=
+                     pointer_alignment.source.find("reinterpret_cast<device cm_alias_uchar*>") !=
                          std::string::npos,
                  "64-bit pointer alignment arithmetic preserves the Metal address space");
 
@@ -1917,9 +2156,9 @@ int main() {
                      thread_alloca.source.find("struct Pair") != std::string::npos &&
                      thread_alloca.source.find("Pair v") != std::string::npos &&
                      thread_alloca.source.find(
-                         "reinterpret_cast<thread uchar*>(&") != std::string::npos &&
+                         "reinterpret_cast<thread cm_alias_uchar*>(&") != std::string::npos &&
                      thread_alloca.source.find("_storage + 4") == std::string::npos &&
-                     thread_alloca.source.find("reinterpret_cast<thread float*>") !=
+                     thread_alloca.source.find("reinterpret_cast<thread cm_alias_float*>") !=
                          std::string::npos,
                  "LLVM aggregate allocas apply byte offsets after byte-pointer casts");
 
@@ -1951,7 +2190,7 @@ int main() {
                      opaque_pointer_loop.source.find("while (true)") !=
                          std::string::npos &&
                      opaque_pointer_loop.source.find(
-                         "reinterpret_cast<thread uchar*>") != std::string::npos,
+                         "reinterpret_cast<thread cm_alias_uchar*>") != std::string::npos,
                  "opaque-pointer loop PHIs normalize inferred aggregate pointees to byte pointers");
     if (!opaque_pointer_loop.ok) std::cerr << opaque_pointer_loop.error << "\n";
 

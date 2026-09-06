@@ -493,6 +493,106 @@ void parse_instructions(const std::string& body,
     int line = start_line;
     bool skipping_multiline_directive = false;
     int branch_table_instruction = -1;
+    // Bare register names declared by `.reg` in this body, mapped to the
+    // `%`-prefixed spelling the rest of the pipeline recognises.
+    // Each entry remembers the brace depth of its declaration: PTX scopes such
+    // names lexically, and a kernel routinely has both `{ .reg .b32 tmp; ... }`
+    // and a module symbol called `tmp` (the dynamic shared array), so the
+    // mapping must end with its block.
+    struct BareRegister {
+        std::string name;
+        std::string renamed;
+        int depth = 0;
+    };
+    std::vector<BareRegister> bare_registers;
+    int scope_depth = 0;
+    int pending_opens = 0;
+    int pending_closes = 0;
+    const auto close_scopes = [&](int count) {
+        for (int i = 0; i < count; ++i) {
+            if (scope_depth > 0) --scope_depth;
+            bare_registers.erase(
+                std::remove_if(bare_registers.begin(), bare_registers.end(),
+                               [&](const BareRegister& r) { return r.depth > scope_depth; }),
+                bare_registers.end());
+        }
+    };
+    const auto record_register_directive = [&](std::string_view directive) {
+        // `.reg .<type> a, b, %c;` -- ranges such as `%r<8>` already carry `%`.
+        std::string text(directive);
+        if (!starts_with(text, ".reg")) return;
+        const std::size_t type_begin = text.find('.', 4);
+        if (type_begin == std::string::npos) return;
+        std::size_t type_end = type_begin + 1;
+        while (type_end < text.size() &&
+               (std::isalnum(static_cast<unsigned char>(text[type_end])) != 0 ||
+                text[type_end] == '_')) {
+            ++type_end;
+        }
+        const std::string type = text.substr(type_begin + 1, type_end - type_begin - 1);
+        std::string names = text.substr(type_end);
+        const std::size_t semi = names.find(';');
+        if (semi != std::string::npos) names = names.substr(0, semi);
+        std::size_t start = 0;
+        while (start <= names.size()) {
+            const std::size_t comma = names.find(',', start);
+            const std::string name = trim(names.substr(
+                start, comma == std::string::npos ? std::string::npos : comma - start));
+            if (!name.empty() && name.find('<') == std::string::npos) {
+                if (name[0] == '%') {
+                    entry->register_declarations.push_back({name, type});
+                } else {
+                    // The legacy backend types a register by its NVPTX name
+                    // prefix (%p predicate, %rs 16-bit, %r/%f 32-bit, %rd/%fd
+                    // 64-bit), so the synthetic name must carry the declared
+                    // type's prefix. `%cm_` alone would be an unknown width.
+                    const std::string prefix =
+                        type == "pred"                                        ? "%p_cm_"
+                        : (type == "b64" || type == "u64" || type == "s64")  ? "%rd_cm_"
+                        : type == "f64"                                       ? "%fd_cm_"
+                        : (type == "b16" || type == "u16" || type == "s16" ||
+                           type == "f16" || type == "b8" || type == "u8" || type == "s8")
+                                                                              ? "%rs_cm_"
+                        : type == "f32"                                       ? "%f_cm_"
+                                                                              : "%r_cm_";
+                    const std::string renamed = prefix + name;
+                    bare_registers.push_back({name, renamed, scope_depth});
+                    entry->register_declarations.push_back({renamed, type});
+                }
+            }
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+    };
+    const auto rename_bare_registers = [&](const std::string& text) {
+        if (bare_registers.empty()) return text;
+        std::string out;
+        for (std::size_t i = 0; i < text.size();) {
+            bool replaced = false;
+            const unsigned char before = i == 0 ? ' ' : static_cast<unsigned char>(text[i - 1]);
+            const bool boundary_before = std::isalnum(before) == 0 && before != '_' &&
+                                         before != '%' && before != '$' && before != '.';
+            if (boundary_before) {
+                for (const BareRegister& reg : bare_registers) {
+                    const std::string& name = reg.name;
+                    const std::string& renamed = reg.renamed;
+                    if (text.compare(i, name.size(), name) != 0) continue;
+                    const std::size_t after = i + name.size();
+                    if (after < text.size() &&
+                        (std::isalnum(static_cast<unsigned char>(text[after])) != 0 ||
+                         text[after] == '_')) {
+                        continue;
+                    }
+                    out += renamed;
+                    i = after;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) out += text[i++];
+        }
+        return out;
+    };
 
     std::istringstream stream(body);
     std::string raw_line;
@@ -520,14 +620,23 @@ void parse_instructions(const std::string& body,
         // PTX allows lexical scope braces to appear on the same line as
         // declarations/instructions. Strip standalone leading/trailing braces so
         // lines like "{ .reg .b32 %r<4>;" parse correctly.
+        // Scope bookkeeping for bare register names: braces stripped from the
+        // front of a line take effect before its content, braces stripped from
+        // the back after it (i.e. before the next line).
+        scope_depth += pending_opens;
+        close_scopes(pending_closes);
+        pending_opens = 0;
+        pending_closes = 0;
         bool stripped_brace = false;
         do {
             stripped_brace = false;
             if (!line_text.empty() && (line_text.front() == '{' || line_text.front() == '}')) {
+                if (line_text.front() == '{') ++scope_depth; else close_scopes(1);
                 line_text = trim(line_text.substr(1));
                 stripped_brace = true;
             }
             if (!line_text.empty() && (line_text.back() == '{' || line_text.back() == '}')) {
+                if (line_text.back() == '{') ++pending_opens; else ++pending_closes;
                 line_text.pop_back();
                 line_text = trim(line_text);
                 stripped_brace = true;
@@ -573,11 +682,13 @@ void parse_instructions(const std::string& body,
                 line_text.clear();
                 break;
             }
+            record_register_directive(line_text.substr(0, semi + 1));
             line_text = trim(line_text.substr(semi + 1));
         }
         if (line_text.empty()) {
             continue;
         }
+        line_text = rename_bare_registers(line_text);
 
         // `name : .callprototype (...) _ (...);` declares the signature of an
         // indirect-call target. It is a declaration, not an instruction, but the
@@ -665,6 +776,16 @@ void parse_instructions(const std::string& body,
 
 ParseResult parse_ptx(std::string_view text) {
     return parse_ptx(text, ParseOptions{});
+}
+
+EntryFunction parse_instruction_block(std::string_view body, int start_line,
+                                      std::vector<std::string>* warnings) {
+    EntryFunction entry;
+    entry.name = "cm_inline_asm";
+    std::vector<std::string> local_warnings;
+    parse_instructions(strip_comments(body), start_line, &entry,
+                       warnings != nullptr ? warnings : &local_warnings);
+    return entry;
 }
 
 ParseResult parse_ptx(std::string_view text, const ParseOptions& options) {

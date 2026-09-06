@@ -626,3 +626,9 @@ list(REMOVE_ITEM
 )
 set_tests_properties(${CUMETAL_UNIT_TESTS} PROPERTIES LABELS "hosted;unit")
 set_tests_properties(unit_cumetal_bench_ratio_gate PROPERTIES LABELS "gpu")
+
+add_executable(cumetal_nvvm_private_array_test nvvm_private_array_test.cpp)
+target_link_libraries(cumetal_nvvm_private_array_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_nvvm_private_array_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_nvvm_private_array COMMAND cumetal_nvvm_private_array_test)
+set_tests_properties(unit_nvvm_private_array PROPERTIES SKIP_RETURN_CODE 77 LABELS "hosted;unit")

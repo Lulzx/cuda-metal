@@ -39,14 +39,10 @@ std::string strip_arch_suffix(const std::string& arch) {
 // working; none of them changes the meaning of the source CuMetal compiles.
 bool is_ignorable(const std::string& option) {
     static const char* const kExact[] = {
-        "--device-as-default-execution-space",
-        "-default-device",
         "--extra-device-vectorization",
         "-extra-device-vectorization",
         "--restrict",
         "-restrict",
-        "--use_fast_math",
-        "-use_fast_math",
         "--generate-line-info",
         "-lineinfo",
         "--device-debug",
@@ -78,7 +74,7 @@ bool is_ignorable(const std::string& option) {
 
     static const char* const kPrefixes[] = {
         "--diag-suppress=",   "-diag-suppress=", "--diag-error=",
-        "--diag-warn=",       "--fmad=",         "-fmad=",
+        "--diag-warn=",
         "--ftz=",             "-ftz=",           "--prec-div=",
         "-prec-div=",         "--prec-sqrt=",    "-prec-sqrt=",
         "--maxrregcount=",    "-maxrregcount=",  "--Ofast-compile=",
@@ -185,9 +181,22 @@ TranslatedOptions translate_options(const std::vector<std::string>& options) {
             continue;
         }
         if (value_of("--std=", "-std=", &value)) {
-            // CuMetal's device compile is fixed at C++20, which subsumes every
-            // standard NVRTC accepts. Record the request without acting on it.
-            result.ignored.push_back(option);
+            // Clang's CUDA headers need at least C++11; c++03 is upgraded and
+            // every later standard is passed through as spelled.
+            if (value == "c++03") value = "c++11";
+            result.compiler_args.push_back("-std=" + value);
+            continue;
+        }
+        if (option == "--device-as-default-execution-space" || option == "-default-device") {
+            result.compiler_args.push_back("--device-as-default-execution-space");
+            continue;
+        }
+        if (option == "--use_fast_math" || option == "-use_fast_math") {
+            result.compiler_args.push_back("--use_fast_math");
+            continue;
+        }
+        if (value_of("--fmad=", "-fmad=", &value)) {
+            result.compiler_args.push_back("--fmad=" + value);
             continue;
         }
         if (value_of("--pre-include=", "-include", &value)) {
@@ -211,6 +220,10 @@ TranslatedOptions translate_options(const std::vector<std::string>& options) {
     std::vector<std::string> args;
     args.push_back("--cuda-arch");
     args.push_back(result.arch);
+    // NVRTC ships no host SDK headers, so sources written for it redefine
+    // limits and math constants the macOS SDK already provides; the values
+    // agree and the warnings only flood the program log.
+    args.push_back("--clang-arg=-Wno-macro-redefined");
     for (const std::string& dir : include_dirs) {
         args.push_back("-I");
         args.push_back(dir);

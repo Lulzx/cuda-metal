@@ -1,0 +1,128 @@
+[
+  {
+    "round": 1,
+    "name": "block64_8x8",
+    "mode": "before",
+    "mean_ms": 903.225967,
+    "gflops": 152.165
+  },
+  {
+    "round": 1,
+    "name": "block64_8x8",
+    "mode": "after",
+    "mean_ms": 144.095792,
+    "gflops": 953.803
+  },
+  {
+    "round": 1,
+    "name": "block64_32",
+    "mode": "before",
+    "mean_ms": 74.303433,
+    "gflops": 1849.699
+  },
+  {
+    "round": 1,
+    "name": "block64_32",
+    "mode": "after",
+    "mean_ms": 132.539612,
+    "gflops": 1036.965
+  },
+  {
+    "round": 1,
+    "name": "registers",
+    "mode": "before",
+    "mean_ms": 182.260033,
+    "gflops": 754.082
+  },
+  {
+    "round": 1,
+    "name": "registers",
+    "mode": "after",
+    "mean_ms": 182.925908,
+    "gflops": 751.337
+  },
+  {
+    "round": 2,
+    "name": "block64_32",
+    "mode": "after",
+    "mean_ms": 128.658888,
+    "gflops": 1068.243
+  },
+  {
+    "round": 2,
+    "name": "block64_32",
+    "mode": "before",
+    "mean_ms": 111.668663,
+    "gflops": 1230.775
+  },
+  {
+    "round": 2,
+    "name": "registers",
+    "mode": "after",
+    "mean_ms": 162.819692,
+    "gflops": 844.118
+  },
+  {
+    "round": 2,
+    "name": "registers",
+    "mode": "before",
+    "mean_ms": 160.323083,
+    "gflops": 857.262
+  },
+  {
+    "round": 2,
+    "name": "block64_8x8",
+    "mode": "after",
+    "mean_ms": 199.090338,
+    "gflops": 690.335
+  },
+  {
+    "round": 2,
+    "name": "block64_8x8",
+    "mode": "before",
+    "mean_ms": 1088.127775,
+    "gflops": 126.308
+  },
+  {
+    "round": 3,
+    "name": "registers",
+    "mode": "before",
+    "mean_ms": 124.819779,
+    "gflops": 1101.099
+  },
+  {
+    "round": 3,
+    "name": "registers",
+    "mode": "after",
+    "mean_ms": 90.109483,
+    "gflops": 1525.244
+  },
+  {
+    "round": 3,
+    "name": "block64_8x8",
+    "mode": "before",
+    "mean_ms": 581.357438,
+    "gflops": 236.41
+  },
+  {
+    "round": 3,
+    "name": "block64_8x8",
+    "mode": "after",
+    "mean_ms": 93.358863,
+    "gflops": 1472.158
+  },
+  {
+    "round": 3,
+    "name": "block64_32",
+    "mode": "before",
+    "mean_ms": 65.912108,
+    "gflops": 2085.185
+  },
+  {
+    "round": 3,
+    "name": "block64_32",
+    "mode": "after",
+    "mean_ms": 65.723075,
+    "gflops": 2091.183
+  }
+]

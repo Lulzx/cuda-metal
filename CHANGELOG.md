@@ -8,6 +8,92 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
+- **Typed PTX vector stores wrote only their first lane.** `st.global.v2.b32 [addr], {%r1, %r2}`
+  (Clang's spelling for two adjacent struct fields at `-O2`) stored `%r1` and silently dropped
+  `%r2`; vector loads bound only their first destination. Both now expand to one memory operation
+  per lane at the right byte displacement. Found by the inline-PTX fixture's result struct, whose
+  second field read back as zero on the PTX path.
+- **Bare register names were not registers on the PTX paths.** PTX allows `.reg .pred p;` and then
+  `p` without a `%`; the parser dropped the directive and every path treated `p` as an unknown
+  operand, which crashed the MSL lowering on the `setp` that defined it. The parser now renames such
+  registers to `%cm_r_<name>` and records their declared types, and the lowering reports an
+  operation with no result instead of dereferencing one.
+- **Doubles could not cross a device-call boundary.** The MSL lowering treated the FP64 mode as a
+  legality gate on every call, so a user function with a `double` parameter or result was refused
+  as an unsupported software FP64 call. A double crosses a call as its 64-bit storage word and only
+  builtin math needs a helper; user calls now take the ordinary path, `fabs`/`copysign` on doubles
+  are sign-bit operations, and `tests/cuda_projects/fp64_device_calls` checks parameters, returns,
+  pointers and a struct of doubles on the direct path.
+- **Pointer fields inside aggregates carried one address space for every instance.** A struct such
+  as Warp's `array_t` returned by value had its pointer field typed `thread`, so extracting it into
+  a `device` pointer failed in Apple's compiler. Aggregate pointer fields are now stored as raw
+  64-bit addresses and reinterpreted at each extraction to the space that use resolved to.
+- **An `undef` scalar argument reached the MSL as the identifier `undef`.** Clang at `-O0` passes
+  an uninitialised variable as `undef`; it is now imported as zero.
+- **Inline PTX was rejected unless it matched one of five strings.** The NVVM importer compared
+  the `asm` template against `mov %laneid`, `mov %activemask`, three `shfl.sync` forms and a float
+  `atom.add`, and refused everything else, which took down every NVIDIA Warp module that touched
+  `float16` (`cvt.rn.f16.f32`) or fast division (`div.approx.f32`). Inline PTX is now lowered by
+  the PTX instruction importer itself: operands are bound to synthetic registers from the
+  constraint string, including immediates, tied `+r` operands and multi-output blocks, and the
+  template is parsed and lowered in place, so anything the typed PTX path supports works inside
+  `asm`. Control flow inside a template and `${N:mod}` modifiers are refused with a diagnostic.
+  `tests/cuda_projects/inline_ptx_idioms` checks half conversions, approximate division, wide and
+  high multiplies, an immediate, a tied operand and a block-local predicate against the host on
+  both the direct and PTX paths.
+- **Generated Metal code ran under fast-math, so `NaN == NaN` was true and `x != x` false.** Apple's
+  `metal` compiler defaults to `-ffast-math -ffinite-math-only`, and CuMetal passed no math flags,
+  so every NaN guard in a CUDA kernel was folded away. CUDA's contract is IEEE comparisons with NaN
+  and infinity preserved and FMA contraction allowed; generated MSL is now compiled that way
+  (`-fno-fast-math -ffp-contract=fast`), the runtime JIT's `CUMETAL_MSL_MATH_MODE` defaults to
+  `safe`, and `--use_fast_math` (or `CUMETAL_MSL_MATH_MODE=fast`) is the explicit opt-in. The NVVM
+  importer also keeps LLVM's ordered/unordered floating predicates apart (`FCMP_ONE` is no longer
+  spelled `!=`), and `isnan`/`isinf`/`isfinite`/`signbit` are `__device__` overloads lowered to
+  Metal's bit-pattern builtins on all three lowering paths, including the double forms on the
+  binary64 storage word. `tests/cuda_projects/nan_semantics` checks all of it against the host.
+- **NVRTC's `--device-as-default-execution-space` was dropped.** NVRTC treats every unannotated
+  function as device code; CuMetal's shim logged the option and compiled with Clang's host
+  default, so a `constexpr` helper, a constructor or a lambda without `__device__` produced
+  `reference to __host__ function` and Warp's tile headers could not build. `cumetalc` now honours
+  the option (`#pragma clang force_cuda_host_device begin`, force-included after the SDK headers
+  that `cuda_runtime.h` pre-includes so their declarations stay host-only), and the shim maps it,
+  `--std=`, `--fmad=` and `--use_fast_math` instead of ignoring them. `cumetalc` also accepts
+  `-std=`, `-U`, `-O<n>`, `--fmad=`, `--use_fast_math` and `--clang-arg`.
+- **Generic-pointer legalization refused well-formed CUDA.** Three shapes produced `cannot legalize
+  CUDA generic pointers: unresolved generic pointer address space`, the largest compile-failure class
+  in NVIDIA Warp's test suite (about 70 modules): a device helper that nothing calls (Clang emits every
+  external-linkage function, and Warp generates an `add(const S&, const S&)` per struct "for adjoints"),
+  a host-populated pointer field such as `array_t::data` read through a private by-value copy of the
+  descriptor, and a helper returning one of its reference arguments (`T& operator+=`) called with both
+  a local and a device object. The legalizer now prunes functions no kernel reaches, defaults a pointer
+  component with no in-module producer to device memory (the only thing such a pointer can be on Metal
+  besides null or dead), and types each call result from the operand the caller passed while every
+  address-space clone of the helper returns its own space. A return that merges non-argument sources of
+  different spaces is still refused, now with a precise message. `CUMETAL_DEBUG_ADDRESS_SPACES=1`
+  reports every defaulted value.
+- **Function-local constant tables were referenced but never declared.** The NVVM importer only
+  embedded initialised read-only globals that Clang placed in address space 4 (`static const` in
+  device code). Function-local `const T tbl[] = {...}`, brace-initialised aggregate temporaries and
+  string literals live in address space 0 under Clang's `__const.<fn>.<var>`, `constinit` and `.str`
+  names, so the MSL used them without a declaration and Apple's compiler failed on a temporary file
+  with `use of undeclared identifier`. Every referenced initialised read-only global is now embedded as
+  a `constant` byte array regardless of its address space or name, with its alignment, and an
+  undefined `extern __device__` symbol is reported by the importer naming the CUDA symbol.
+- **Apple's optimizer dropped reads of word-copied private aggregates.** Generated MSL reads and writes
+  memory through reinterpreted pointers by design, because it translates LLVM's untyped loads, stores
+  and byte-wise copies; under type-based aliasing a brace-initialised struct array copied word-wise
+  into a private array came back as garbage at the default optimisation level. Every reinterpreting
+  cast now goes through a `may_alias` spelling of its type, which holds under both the offline
+  compiler and `newLibraryWithSource`, and the offline compiles also pass `-fno-strict-aliasing`.
+- **`mul.wide` produced a 32-bit product.** The typed PTX importer typed `mul.wide.s32 %rd, %r, 4`,
+  the byte offset of every indexed access, at the operand width, so the offset was a 32-bit multiply
+  added to a pointer. Besides truncating real offsets, that shape trips an Apple compiler miscompile
+  of 32-bit pointer displacements derived from a magic-number division: `table[i % 6]` read zero for
+  every `i >= 6` while `i % 5` worked. The product is now 64-bit with sign- or zero-extended operands,
+  and a signed `mul.hi` reinterprets its operands as signed before widening instead of zero-extending
+  them.
+- **Async copies staged from pageable memory could dangle.** Follow-up to the pageable-memory fix: the
+  2D and 3D staging buffers were not captured by the deferred copy and were freed before it ran.
 - **Asynchronous copies into pageable host memory corrupted the heap.** `cudaMemcpyAsync`,
   `cudaMemcpy{2D,3D}Async`, `cudaMemcpyFromSymbolAsync`, `cudaMemset{,2D,3D}Async` and the driver's
   `cuMemcpy2DAsync` deferred every copy to the stream's host-op queue, so a device-to-host copy into

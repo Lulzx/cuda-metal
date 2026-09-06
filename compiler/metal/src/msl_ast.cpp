@@ -7,6 +7,9 @@
 #include <unordered_set>
 
 namespace cumetal::metal {
+
+std::string may_alias_spelling(const MslType& type);
+
 namespace {
 
 std::string address_space_spelling(MslAddressSpace address_space) {
@@ -62,6 +65,25 @@ public:
             out_ << "#include <" << include << ">\n";
         }
         out_ << "using namespace metal;\n\n";
+        // Generated code reads and writes memory through reinterpreted
+        // pointers by design: it translates LLVM's untyped loads, stores and
+        // byte-wise memcpys, so a word written as `uint` is routinely read
+        // back as `float`. C++ type-based aliasing does not describe that
+        // program, and Apple's optimizer has been observed to drop such reads
+        // (a brace-initialised struct table copied word-wise into a private
+        // array came back as garbage). Every reinterpreted access therefore
+        // goes through a may_alias spelling of its type, which holds under
+        // both the offline compiler and newLibraryWithSource.
+        for (const char* scalar : {"bool", "char", "uchar", "short", "ushort", "int", "uint",
+                                   "long", "ulong", "half", "float"}) {
+            out_ << "typedef " << scalar << " __attribute__((may_alias)) cm_alias_" << scalar
+                 << ";\n";
+            for (int lanes = 2; lanes <= 4; ++lanes) {
+                out_ << "typedef " << scalar << lanes << " __attribute__((may_alias)) cm_alias_"
+                     << scalar << lanes << ";\n";
+            }
+        }
+        out_ << "\n";
 
         std::unordered_set<std::string> names;
         for (const MslStruct& structure : module.structs) {
@@ -87,6 +109,7 @@ public:
                 errors_.push_back("global byte array cannot be empty: " + name);
                 continue;
             }
+            if (global.alignment > 1) out_ << "alignas(" << global.alignment << ") ";
             out_ << "constant uchar " << name << "[" << global.bytes.size()
                  << "] = {";
             for (std::size_t i = 0; i < global.bytes.size(); ++i) {
@@ -212,7 +235,7 @@ private:
                         print_expression(node.operand);
                         out_ << ")";
                     } else if (node.reinterpret) {
-                        out_ << "reinterpret_cast<" << node.target.str() << ">(";
+                        out_ << "reinterpret_cast<" << may_alias_spelling(node.target) << ">(";
                         print_expression(node.operand);
                         out_ << ")";
                     } else {
@@ -403,6 +426,30 @@ bool operator==(const MslType& left, const MslType& right) {
         return left.element == nullptr && right.element == nullptr;
     }
     return *left.element == *right.element;
+}
+
+// The may_alias spelling of a pointer or reference to a scalar or vector,
+// for reinterpreting casts; every other type prints unchanged.
+std::string may_alias_spelling(const MslType& type) {
+    if ((type.kind != MslTypeKind::kPointer && type.kind != MslTypeKind::kReference) ||
+        type.element == nullptr) {
+        return type.str();
+    }
+    const MslType& element = *type.element;
+    const bool scalar = element.kind == MslTypeKind::kBool || element.kind == MslTypeKind::kInt ||
+                        element.kind == MslTypeKind::kUInt || element.kind == MslTypeKind::kHalf ||
+                        element.kind == MslTypeKind::kFloat;
+    const bool vector = element.kind == MslTypeKind::kVector && element.element != nullptr &&
+                        element.lanes >= 2 && element.lanes <= 4 &&
+                        (element.element->kind == MslTypeKind::kBool ||
+                         element.element->kind == MslTypeKind::kInt ||
+                         element.element->kind == MslTypeKind::kUInt ||
+                         element.element->kind == MslTypeKind::kHalf ||
+                         element.element->kind == MslTypeKind::kFloat);
+    if (!scalar && !vector) return type.str();
+    const std::string address_space = address_space_spelling(type.address_space);
+    return (address_space.empty() ? std::string{} : address_space + " ") + "cm_alias_" +
+           element.str() + (type.kind == MslTypeKind::kPointer ? "*" : "&");
 }
 
 std::string MslType::str() const {
@@ -642,6 +689,13 @@ std::string sanitize_identifier(std::string_view name) {
         "public", "register", "return", "short", "signed", "sizeof", "static", "struct",
         "switch", "template", "this", "thread", "threadgroup", "true", "typedef", "typename",
         "uint", "ulong", "union", "unsigned", "using", "virtual", "void", "volatile", "while",
+        // C++20 spellings Clang also uses as global names (`constinit`); hedge
+        // against a future Metal compiler treating them as keywords.
+        "constinit", "consteval", "concept", "requires", "co_await", "co_return", "co_yield",
+        "char8_t", "constexpr", "const", "export", "new", "delete", "try", "catch", "throw",
+        "nullptr", "static_assert", "static_cast", "reinterpret_cast", "const_cast",
+        "dynamic_cast", "decltype", "noexcept", "explicit", "extern", "mutable", "not",
+        "xor", "compl", "bitand", "bitor", "typeid", "wchar_t", "char16_t", "char32_t",
     };
 
     std::string out;

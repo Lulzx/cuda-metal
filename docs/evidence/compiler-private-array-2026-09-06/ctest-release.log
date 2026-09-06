@@ -1,0 +1,584 @@
+Test project /Users/lulzx/work/cumetal/build-release-noshim
+        Start   1: bench_phase5_all_kernels
+  1/285 Test   #1: bench_phase5_all_kernels ...........................................   Passed    5.44 sec
+        Start   2: air_abi_metal_load
+  2/285 Test   #2: air_abi_metal_load .................................................   Passed    0.03 sec
+        Start   3: air_abi_emit_validate_experimental
+  3/285 Test   #3: air_abi_emit_validate_experimental .................................   Passed    0.02 sec
+        Start   4: air_abi_validate_reference
+  4/285 Test   #4: air_abi_validate_reference .........................................   Passed    9.22 sec
+        Start   5: air_abi_emit_validate_xcrun
+  5/285 Test   #5: air_abi_emit_validate_xcrun ........................................   Passed    0.55 sec
+        Start   6: air_abi_emit_load_xcrun
+  6/285 Test   #6: air_abi_emit_load_xcrun ............................................   Passed    0.09 sec
+        Start   7: air_abi_cumetalc_emit_load_xcrun
+  7/285 Test   #7: air_abi_cumetalc_emit_load_xcrun ...................................   Passed    2.24 sec
+        Start   8: air_abi_cumetalc_positional_emit_load_xcrun
+  8/285 Test   #8: air_abi_cumetalc_positional_emit_load_xcrun ........................   Passed    0.10 sec
+        Start   9: air_abi_cumetalc_default_output_emit_load_xcrun
+  9/285 Test   #9: air_abi_cumetalc_default_output_emit_load_xcrun ....................   Passed    0.10 sec
+        Start  10: air_abi_multikernel_emit_validate_load_xcrun
+ 10/285 Test  #10: air_abi_multikernel_emit_validate_load_xcrun .......................   Passed    0.59 sec
+        Start  11: air_abi_validate_negative
+ 11/285 Test  #11: air_abi_validate_negative ..........................................   Passed    0.07 sec
+        Start  12: air_abi_ptx_to_experimental_validate
+ 12/285 Test  #12: air_abi_ptx_to_experimental_validate ...............................   Passed    1.88 sec
+        Start  13: air_abi_matrix_ptx_to_experimental_validate
+ 13/285 Test  #13: air_abi_matrix_ptx_to_experimental_validate ........................   Passed    0.03 sec
+        Start  14: air_abi_cumetalc_ptx_experimental_validate
+ 14/285 Test  #14: air_abi_cumetalc_ptx_experimental_validate .........................   Passed    0.03 sec
+        Start  15: air_abi_cumetalc_matrix_ptx_experimental_validate
+ 15/285 Test  #15: air_abi_cumetalc_matrix_ptx_experimental_validate ..................   Passed    0.03 sec
+        Start  16: air_abi_cumetalc_cu_experimental_validate
+ 16/285 Test  #16: air_abi_cumetalc_cu_experimental_validate ..........................   Passed    0.14 sec
+        Start  17: air_abi_cumetalc_cuda_device_frontend_validate
+ 17/285 Test  #17: air_abi_cumetalc_cuda_device_frontend_validate .....................   Passed    3.40 sec
+        Start  18: air_abi_cumetalc_cu_default_output_validate
+ 18/285 Test  #18: air_abi_cumetalc_cu_default_output_validate ........................   Passed    0.14 sec
+        Start  19: air_abi_cumetalc_cu_emit_load_xcrun
+ 19/285 Test  #19: air_abi_cumetalc_cu_emit_load_xcrun ................................   Passed    0.21 sec
+        Start  20: air_abi_cumetalc_ptx_default_output_validate
+ 20/285 Test  #20: air_abi_cumetalc_ptx_default_output_validate .......................   Passed    0.03 sec
+        Start  21: air_abi_cumetalc_ptx_emit_load_xcrun
+ 21/285 Test  #21: air_abi_cumetalc_ptx_emit_load_xcrun ...............................   Passed    0.11 sec
+        Start  22: air_abi_cumetalc_matrix_ptx_emit_load_xcrun
+ 22/285 Test  #22: air_abi_cumetalc_matrix_ptx_emit_load_xcrun ........................   Passed    0.56 sec
+        Start  23: air_abi_ptx2llvm_positional_default_output
+ 23/285 Test  #23: air_abi_ptx2llvm_positional_default_output .........................   Passed    0.02 sec
+        Start  24: air_abi_xcode_matrix_regression
+ 24/285 Test  #24: air_abi_xcode_matrix_regression ....................................   Passed    0.23 sec
+        Start  25: conformance_physx_grb
+ 25/285 Test  #25: conformance_physx_grb ..............................................   Passed   32.01 sec
+        Start  26: conformance_physx_grb_friction
+ 26/285 Test  #26: conformance_physx_grb_friction .....................................   Passed    2.05 sec
+        Start  27: conformance_physx_grb_multibody
+ 27/285 Test  #27: conformance_physx_grb_multibody ....................................   Passed    1.52 sec
+        Start  28: conformance_physx_grb_stacked
+ 28/285 Test  #28: conformance_physx_grb_stacked ......................................   Passed    2.51 sec
+        Start  29: conformance_physx_grb_box
+ 29/285 Test  #29: conformance_physx_grb_box ..........................................   Passed    1.55 sec
+        Start  30: conformance_physx_grb_trimesh
+ 30/285 Test  #30: conformance_physx_grb_trimesh ......................................   Passed    2.49 sec
+        Start  31: conformance_phase4_functional
+ 31/285 Test  #31: conformance_phase4_functional ......................................   Passed  253.93 sec
+        Start  32: conformance_llama_cpp_output_gate
+ 32/285 Test  #32: conformance_llama_cpp_output_gate ..................................   Passed    1.30 sec
+        Start  33: unit_phase4_gate_policy
+ 33/285 Test  #33: unit_phase4_gate_policy ............................................   Passed    0.69 sec
+        Start  34: conformance_llama_cpp
+ 34/285 Test  #34: conformance_llama_cpp ..............................................   Passed    5.08 sec
+        Start  35: functional_runtime_vector_add
+ 35/285 Test  #35: functional_runtime_vector_add ......................................   Passed    0.14 sec
+        Start  36: functional_runtime_vector_add_heap_alloc
+ 36/285 Test  #36: functional_runtime_vector_add_heap_alloc ...........................   Passed    0.14 sec
+        Start  37: functional_runtime_vector_add_cu
+ 37/285 Test  #37: functional_runtime_vector_add_cu ...................................   Passed    0.34 sec
+        Start  38: functional_sample_vector_add
+ 38/285 Test  #38: functional_sample_vector_add .......................................   Passed    1.14 sec
+        Start  39: functional_runtime_matrix_mul
+ 39/285 Test  #39: functional_runtime_matrix_mul ......................................   Passed    0.14 sec
+        Start  40: functional_runtime_matrix_mul_tiled
+ 40/285 Test  #40: functional_runtime_matrix_mul_tiled ................................   Passed    0.10 sec
+        Start  41: functional_runtime_printf
+ 41/285 Test  #41: functional_runtime_printf ..........................................   Passed    0.11 sec
+        Start  42: functional_runtime_dynamic_shared
+ 42/285 Test  #42: functional_runtime_dynamic_shared ..................................   Passed    0.11 sec
+        Start  43: functional_runtime_struct_arg
+ 43/285 Test  #43: functional_runtime_struct_arg ......................................   Passed    0.10 sec
+        Start  44: functional_runtime_barrier_order
+ 44/285 Test  #44: functional_runtime_barrier_order ...................................   Passed    0.10 sec
+        Start  45: functional_runtime_cp_async_emul
+ 45/285 Test  #45: functional_runtime_cp_async_emul ...................................   Passed    0.10 sec
+        Start  46: functional_runtime_warp_partial_mask
+ 46/285 Test  #46: functional_runtime_warp_partial_mask ...............................   Passed    0.10 sec
+        Start  47: functional_runtime_warp_mask_votes_cu
+ 47/285 Test  #47: functional_runtime_warp_mask_votes_cu ..............................   Passed    0.20 sec
+        Start  48: functional_runtime_warp_size_lane
+ 48/285 Test  #48: functional_runtime_warp_size_lane ..................................   Passed    0.10 sec
+        Start  49: functional_runtime_stream_vector_add
+ 49/285 Test  #49: functional_runtime_stream_vector_add ...............................   Passed    0.14 sec
+        Start  50: functional_metal_backend_cross_queue_fence
+ 50/285 Test  #50: functional_metal_backend_cross_queue_fence .........................   Passed    0.14 sec
+        Start  51: functional_runtime_null_stream_sync
+ 51/285 Test  #51: functional_runtime_null_stream_sync ................................   Passed    0.62 sec
+        Start  52: functional_runtime_stream_per_thread
+ 52/285 Test  #52: functional_runtime_stream_per_thread ...............................   Passed    0.15 sec
+        Start  53: functional_runtime_async_memops
+ 53/285 Test  #53: functional_runtime_async_memops ....................................   Passed    0.14 sec
+        Start  54: functional_runtime_event
+ 54/285 Test  #54: functional_runtime_event ...........................................   Passed    0.19 sec
+        Start  55: functional_runtime_stream_wait_event
+ 55/285 Test  #55: functional_runtime_stream_wait_event ...............................   Passed    0.14 sec
+        Start  56: functional_runtime_stream_query
+ 56/285 Test  #56: functional_runtime_stream_query ....................................   Passed    0.15 sec
+        Start  57: functional_runtime_memcpy_kind
+ 57/285 Test  #57: functional_runtime_memcpy_kind .....................................   Passed    0.03 sec
+        Start  58: functional_runtime_memcpy2d
+ 58/285 Test  #58: functional_runtime_memcpy2d ........................................   Passed    0.33 sec
+        Start  59: functional_runtime_symbol_memcpy
+ 59/285 Test  #59: functional_runtime_symbol_memcpy ...................................   Passed    0.03 sec
+        Start  60: functional_runtime_mem_get_info
+ 60/285 Test  #60: functional_runtime_mem_get_info ....................................   Passed    0.03 sec
+        Start  61: functional_runtime_host_alloc
+ 61/285 Test  #61: functional_runtime_host_alloc ......................................   Passed    0.14 sec
+        Start  62: functional_runtime_pageable_memcpy
+ 62/285 Test  #62: functional_runtime_pageable_memcpy .................................   Passed    3.35 sec
+        Start  63: functional_runtime_host_pointer_api
+ 63/285 Test  #63: functional_runtime_host_pointer_api ................................   Passed    0.03 sec
+        Start  64: functional_runtime_stream_flags
+ 64/285 Test  #64: functional_runtime_stream_flags ....................................   Passed    0.03 sec
+        Start  65: functional_runtime_stream_callback
+ 65/285 Test  #65: functional_runtime_stream_callback .................................   Passed    0.03 sec
+        Start  66: functional_runtime_device_api
+ 66/285 Test  #66: functional_runtime_device_api ......................................   Passed    0.02 sec
+        Start  67: functional_runtime_device_properties
+ 67/285 Test  #67: functional_runtime_device_properties ...............................   Passed    0.03 sec
+        Start  68: functional_runtime_device_attribute
+ 68/285 Test  #68: functional_runtime_device_attribute ................................   Passed    0.02 sec
+        Start  69: functional_runtime_device_reset
+ 69/285 Test  #69: functional_runtime_device_reset ....................................   Passed    0.02 sec
+        Start  70: functional_runtime_device_flags
+ 70/285 Test  #70: functional_runtime_device_flags ....................................   Passed    0.02 sec
+        Start  71: functional_runtime_error_api
+ 71/285 Test  #71: functional_runtime_error_api .......................................   Passed    0.14 sec
+        Start  72: functional_runtime_profiler_api
+ 72/285 Test  #72: functional_runtime_profiler_api ....................................   Passed    0.03 sec
+        Start  73: functional_curand_uniform
+ 73/285 Test  #73: functional_curand_uniform ..........................................   Passed    0.03 sec
+        Start  74: functional_cublas_api
+ 74/285 Test  #74: functional_cublas_api ..............................................   Passed    0.04 sec
+        Start  75: functional_cublas_blas1_metal
+ 75/285 Test  #75: functional_cublas_blas1_metal ......................................   Passed    0.12 sec
+        Start  76: functional_cublas_extended_api
+ 76/285 Test  #76: functional_cublas_extended_api .....................................   Passed    0.06 sec
+        Start  77: functional_cublas_device_pointer_table
+ 77/285 Test  #77: functional_cublas_device_pointer_table .............................   Passed    0.03 sec
+        Start  78: functional_misc_extended_api
+ 78/285 Test  #78: functional_misc_extended_api .......................................   Passed    0.02 sec
+        Start  79: functional_extended_api_v2
+ 79/285 Test  #79: functional_extended_api_v2 .........................................   Passed    0.03 sec
+        Start  80: functional_extended_api_v3
+ 80/285 Test  #80: functional_extended_api_v3 .........................................   Passed    0.02 sec
+        Start  81: functional_extended_api_v4
+ 81/285 Test  #81: functional_extended_api_v4 .........................................   Passed    0.03 sec
+        Start  82: functional_extended_api_v5
+ 82/285 Test  #82: functional_extended_api_v5 .........................................   Passed    0.02 sec
+        Start  83: functional_extended_api_v6
+ 83/285 Test  #83: functional_extended_api_v6 .........................................   Passed    0.03 sec
+        Start  84: functional_cufft_c2c
+ 84/285 Test  #84: functional_cufft_c2c ...............................................   Passed    0.03 sec
+        Start  85: functional_cufft_nd
+ 85/285 Test  #85: functional_cufft_nd ................................................   Passed    4.50 sec
+        Start  86: functional_cufft_nd_metal
+ 86/285 Test  #86: functional_cufft_nd_metal ..........................................   Passed    3.79 sec
+        Start  87: functional_runtime_occupancy
+ 87/285 Test  #87: functional_runtime_occupancy .......................................   Passed    0.03 sec
+        Start  88: functional_runtime_device_limits
+ 88/285 Test  #88: functional_runtime_device_limits ...................................   Passed    0.03 sec
+        Start  89: functional_driver_extended_api
+ 89/285 Test  #89: functional_driver_extended_api .....................................   Passed    0.03 sec
+        Start  90: functional_driver_proc_address
+ 90/285 Test  #90: functional_driver_proc_address .....................................   Passed    1.49 sec
+        Start  91: functional_driver_vector_add
+ 91/285 Test  #91: functional_driver_vector_add .......................................   Passed    0.16 sec
+        Start  92: functional_driver_null_stream_sync
+ 92/285 Test  #92: functional_driver_null_stream_sync .................................   Passed    0.65 sec
+        Start  93: functional_driver_matrix_mul
+ 93/285 Test  #93: functional_driver_matrix_mul .......................................   Passed    0.12 sec
+        Start  94: functional_driver_device_api
+ 94/285 Test  #94: functional_driver_device_api .......................................   Passed    0.03 sec
+        Start  95: functional_driver_error_api
+ 95/285 Test  #95: functional_driver_error_api ........................................   Passed    0.01 sec
+        Start  96: functional_driver_profiler_api
+ 96/285 Test  #96: functional_driver_profiler_api .....................................   Passed    0.03 sec
+        Start  97: functional_driver_device_query
+ 97/285 Test  #97: functional_driver_device_query .....................................   Passed    0.03 sec
+        Start  98: functional_driver_device_attribute
+ 98/285 Test  #98: functional_driver_device_attribute .................................   Passed    0.03 sec
+        Start  99: functional_driver_stream_flags
+ 99/285 Test  #99: functional_driver_stream_flags .....................................   Passed    0.03 sec
+        Start 100: functional_driver_stream_per_thread
+100/285 Test #100: functional_driver_stream_per_thread ................................   Passed    0.16 sec
+        Start 101: functional_driver_stream_callback
+101/285 Test #101: functional_driver_stream_callback ..................................   Passed    0.03 sec
+        Start 102: functional_driver_launch_host_func
+102/285 Test #102: functional_driver_launch_host_func .................................   Passed    0.06 sec
+        Start 103: functional_runtime_device_attribute_ext
+103/285 Test #103: functional_runtime_device_attribute_ext ............................   Passed    0.03 sec
+        Start 104: functional_runtime_device_properties_ext
+104/285 Test #104: functional_runtime_device_properties_ext ...........................   Passed    0.03 sec
+        Start 105: functional_runtime_malloc_pitch
+105/285 Test #105: functional_runtime_malloc_pitch ....................................   Passed    0.03 sec
+        Start 106: functional_runtime_heap_auto_threshold
+106/285 Test #106: functional_runtime_heap_auto_threshold .............................   Passed    0.04 sec
+        Start 107: functional_runtime_heap_disabled
+107/285 Test #107: functional_runtime_heap_disabled ...................................   Passed    0.04 sec
+        Start 108: functional_runtime_peer_access
+108/285 Test #108: functional_runtime_peer_access .....................................   Passed    0.03 sec
+        Start 109: functional_runtime_stream_priority
+109/285 Test #109: functional_runtime_stream_priority .................................   Passed    0.02 sec
+        Start 110: functional_runtime_cooperative_groups_grid
+110/285 Test #110: functional_runtime_cooperative_groups_grid .........................   Passed    0.03 sec
+        Start 111: functional_driver_context_switch
+111/285 Test #111: functional_driver_context_switch ...................................   Passed    0.02 sec
+        Start 112: functional_driver_context_requirements
+112/285 Test #112: functional_driver_context_requirements .............................   Passed    0.03 sec
+        Start 113: functional_graph_user_object
+113/285 Test #113: functional_graph_user_object .......................................   Passed    0.73 sec
+        Start 114: functional_nvrtc_compile
+114/285 Test #114: functional_nvrtc_compile ...........................................   Passed    1.43 sec
+        Start 115: functional_driver_async_memcpy
+115/285 Test #115: functional_driver_async_memcpy .....................................   Passed    0.15 sec
+        Start 116: functional_driver_memset
+116/285 Test #116: functional_driver_memset ...........................................   Passed    0.03 sec
+        Start 117: functional_driver_mem_get_info
+117/285 Test #117: functional_driver_mem_get_info .....................................   Passed    0.02 sec
+        Start 118: functional_driver_mem_alloc_managed
+118/285 Test #118: functional_driver_mem_alloc_managed ................................   Passed    0.03 sec
+        Start 119: functional_driver_vmm
+119/285 Test #119: functional_driver_vmm ..............................................   Passed    0.02 sec
+        Start 120: functional_driver_host_alloc
+120/285 Test #120: functional_driver_host_alloc .......................................   Passed    0.15 sec
+        Start 121: functional_driver_host_pointer_api
+121/285 Test #121: functional_driver_host_pointer_api .................................   Passed    0.03 sec
+        Start 122: functional_driver_module_load_data
+122/285 Test #122: functional_driver_module_load_data .................................   Passed    0.15 sec
+        Start 250: unit_metallib_parser
+123/285 Test #250: unit_metallib_parser ...............................................   Passed    0.01 sec
+        Start 123: functional_driver_kernel_params_bounds
+124/285 Test #123: functional_driver_kernel_params_bounds .............................   Passed    0.02 sec
+        Start 124: functional_nested_device_pointer
+125/285 Test #124: functional_nested_device_pointer ...................................   Passed    0.18 sec
+        Start 125: functional_byval_aggregate_launch
+126/285 Test #125: functional_byval_aggregate_launch ..................................   Passed    0.97 sec
+        Start 126: functional_texture_descriptor_device
+127/285 Test #126: functional_texture_descriptor_device ...............................   Passed    1.05 sec
+        Start 127: functional_memcpy2d_device_synchronization
+128/285 Test #127: functional_memcpy2d_device_synchronization .........................   Passed    0.83 sec
+        Start 128: functional_runtime_nested_pointer_relocation
+129/285 Test #128: functional_runtime_nested_pointer_relocation .......................   Passed    0.88 sec
+        Start 129: functional_device_clock
+130/285 Test #129: functional_device_clock ............................................   Passed    1.54 sec
+        Start 130: functional_cooperative_grid_barrier
+131/285 Test #130: functional_cooperative_grid_barrier ................................   Passed    0.94 sec
+        Start 131: functional_driver_module_load_data_ptx
+132/285 Test #131: functional_driver_module_load_data_ptx .............................   Passed    1.03 sec
+        Start 132: functional_driver_launch_extra
+133/285 Test #132: functional_driver_launch_extra .....................................   Passed    0.19 sec
+        Start 133: functional_cumetalc_ptx_aggregate_abi
+134/285 Test #133: functional_cumetalc_ptx_aggregate_abi ..............................   Passed    0.08 sec
+        Start 134: functional_driver_launch_extra_scalar
+135/285 Test #134: functional_driver_launch_extra_scalar ..............................   Passed    0.12 sec
+        Start 135: functional_driver_stream_wait_event
+136/285 Test #135: functional_driver_stream_wait_event ................................   Passed    0.16 sec
+        Start 136: functional_runtime_axpy_offset
+137/285 Test #136: functional_runtime_axpy_offset .....................................   Passed    0.10 sec
+        Start 137: functional_runtime_atomic
+138/285 Test #137: functional_runtime_atomic ..........................................   Passed    0.10 sec
+        Start 138: functional_typed_direct_device_atomics
+139/285 Test #138: functional_typed_direct_device_atomics .............................   Passed    0.26 sec
+        Start 139: functional_typed_direct_system_atomics
+140/285 Test #139: functional_typed_direct_system_atomics .............................   Passed    0.23 sec
+        Start 140: functional_typed_ptx_device_atomics
+141/285 Test #140: functional_typed_ptx_device_atomics ................................   Passed    0.25 sec
+        Start 141: functional_typed_ptx_system_atomics
+142/285 Test #141: functional_typed_ptx_system_atomics ................................   Passed    0.21 sec
+        Start 142: functional_typed_direct_constant_symbol
+143/285 Test #142: functional_typed_direct_constant_symbol ............................   Passed    0.22 sec
+        Start 143: functional_typed_direct_sgemm_2d
+144/285 Test #143: functional_typed_direct_sgemm_2d ...................................   Passed    0.24 sec
+        Start 144: functional_typed_direct_flash_attention
+145/285 Test #144: functional_typed_direct_flash_attention ............................   Passed    0.23 sec
+        Start 145: functional_typed_direct_device_printf
+146/285 Test #145: functional_typed_direct_device_printf ..............................   Passed    0.24 sec
+        Start 146: functional_typed_ptx_device_printf
+147/285 Test #146: functional_typed_ptx_device_printf .................................   Passed    0.22 sec
+        Start 147: functional_typed_direct_fence
+148/285 Test #147: functional_typed_direct_fence ......................................   Passed    0.22 sec
+        Start 148: functional_typed_ptx_fence
+149/285 Test #148: functional_typed_ptx_fence .........................................   Passed    0.21 sec
+        Start 149: functional_runtime_atomic_shared
+150/285 Test #149: functional_runtime_atomic_shared ...................................   Passed    0.12 sec
+        Start 150: functional_runtime_warp_shuffle
+151/285 Test #150: functional_runtime_warp_shuffle ....................................   Passed    0.11 sec
+        Start 151: functional_runtime_warp_vote
+152/285 Test #151: functional_runtime_warp_vote .......................................   Passed    0.11 sec
+        Start 152: functional_runtime_fp16_ops
+153/285 Test #152: functional_runtime_fp16_ops ........................................   Passed    0.11 sec
+        Start 153: functional_runtime_shared_reduce
+154/285 Test #153: functional_runtime_shared_reduce ...................................   Passed    0.11 sec
+        Start 154: functional_runtime_grid_2d
+155/285 Test #154: functional_runtime_grid_2d .........................................   Passed    0.10 sec
+        Start 155: functional_runtime_grid_3d
+156/285 Test #155: functional_runtime_grid_3d .........................................   Passed    0.10 sec
+        Start 156: functional_runtime_fp64_ops
+157/285 Test #156: functional_runtime_fp64_ops ........................................   Passed    0.32 sec
+        Start 157: functional_runtime_rope_neox
+158/285 Test #157: functional_runtime_rope_neox .......................................   Passed    0.06 sec
+        Start 158: functional_runtime_ptx_lowering_regression
+159/285 Test #158: functional_runtime_ptx_lowering_regression .........................   Passed    0.99 sec
+        Start 159: functional_runtime_cooperative_launch
+160/285 Test #159: functional_runtime_cooperative_launch ..............................   Passed    0.15 sec
+        Start 160: functional_runtime_registration_path
+161/285 Test #160: functional_runtime_registration_path ...............................   Passed    0.14 sec
+        Start 161: functional_runtime_call_config_registration
+162/285 Test #161: functional_runtime_call_config_registration ........................   Passed    0.15 sec
+        Start 162: functional_runtime_registration_fatbin_ptx
+163/285 Test #162: functional_runtime_registration_fatbin_ptx .........................   Passed    0.06 sec
+        Start 163: functional_runtime_registration_jit_cache
+164/285 Test #163: functional_runtime_registration_jit_cache ..........................   Passed    2.65 sec
+        Start 164: functional_runtime_msl_math_mode
+165/285 Test #164: functional_runtime_msl_math_mode ...................................   Passed    0.14 sec
+        Start 165: functional_runtime_legacy_launch_registration
+166/285 Test #165: functional_runtime_legacy_launch_registration ......................   Passed    0.17 sec
+        Start 166: functional_runtime_registration_fatbinary2_symbols
+167/285 Test #166: functional_runtime_registration_fatbinary2_symbols .................   Passed    0.15 sec
+        Start 167: functional_runtime_registration_var_symbol
+168/285 Test #167: functional_runtime_registration_var_symbol .........................   Passed    0.03 sec
+        Start 168: functional_runtime_registration_printf
+169/285 Test #168: functional_runtime_registration_printf .............................   Passed    0.05 sec
+        Start 169: functional_runtime_registration_metadata_cache
+170/285 Test #169: functional_runtime_registration_metadata_cache .....................   Passed    0.11 sec
+        Start 170: functional_cusparse_api
+171/285 Test #170: functional_cusparse_api ............................................   Passed    0.03 sec
+        Start 171: functional_cusolver_api
+172/285 Test #171: functional_cusolver_api ............................................   Passed    0.03 sec
+        Start 172: functional_cuda_graph_api
+173/285 Test #172: functional_cuda_graph_api ..........................................   Passed    0.03 sec
+        Start 173: functional_texture_surface_api
+174/285 Test #173: functional_texture_surface_api .....................................   Passed    0.03 sec
+        Start 174: functional_cublaslt_api
+175/285 Test #174: functional_cublaslt_api ............................................   Passed    0.03 sec
+        Start 175: functional_async_mempool_api
+176/285 Test #175: functional_async_mempool_api .......................................   Passed    0.04 sec
+        Start 176: functional_cudnn_api
+177/285 Test #176: functional_cudnn_api ...............................................   Passed    0.03 sec
+        Start 177: functional_nvml_api
+178/285 Test #177: functional_nvml_api ................................................   Passed    0.01 sec
+        Start 178: functional_nccl_api
+179/285 Test #178: functional_nccl_api ................................................   Passed    0.03 sec
+        Start 179: functional_thrust_api
+180/285 Test #179: functional_thrust_api ..............................................   Passed    0.02 sec
+        Start 180: functional_cucomplex_api
+181/285 Test #180: functional_cucomplex_api ...........................................   Passed    0.01 sec
+        Start 181: functional_cub_api
+182/285 Test #181: functional_cub_api .................................................   Passed    0.04 sec
+        Start 182: functional_nvtx_api
+183/285 Test #182: functional_nvtx_api ................................................   Passed    0.01 sec
+        Start 183: functional_thrust_iterators
+184/285 Test #183: functional_thrust_iterators ........................................   Passed    0.03 sec
+        Start 184: functional_cub_extended
+185/285 Test #184: functional_cub_extended ............................................   Passed    0.03 sec
+        Start 185: functional_curand_kernel
+186/285 Test #185: functional_curand_kernel ...........................................   Passed    0.01 sec
+        Start 186: functional_cusparse_fp64
+187/285 Test #186: functional_cusparse_fp64 ...........................................   Passed    0.02 sec
+        Start 187: functional_cusparse_spmv_conformance
+188/285 Test #187: functional_cusparse_spmv_conformance ...............................   Passed    0.07 sec
+        Start 188: functional_cusparse_spmv_conformance_cpu
+189/285 Test #188: functional_cusparse_spmv_conformance_cpu ...........................   Passed    0.03 sec
+        Start 189: functional_cusparse_spmv_conformance_simd
+190/285 Test #189: functional_cusparse_spmv_conformance_simd ..........................   Passed    0.07 sec
+        Start 190: functional_cusparse_graph_capture
+191/285 Test #190: functional_cusparse_graph_capture ..................................   Passed    0.04 sec
+        Start 191: functional_cusparse_graph_capture_cpu
+192/285 Test #191: functional_cusparse_graph_capture_cpu ..............................   Passed    0.03 sec
+        Start 192: functional_blas1_stride
+193/285 Test #192: functional_blas1_stride ............................................   Passed    0.03 sec
+        Start 193: functional_cusparse_coo
+194/285 Test #193: functional_cusparse_coo ............................................   Passed    0.03 sec
+        Start 194: functional_cub_partition_sort
+195/285 Test #194: functional_cub_partition_sort ......................................   Passed    0.04 sec
+        Start 195: functional_cudnn_attention
+196/285 Test #195: functional_cudnn_attention .........................................   Passed    0.03 sec
+        Start 196: functional_cusparse_spsv
+197/285 Test #196: functional_cusparse_spsv ...........................................   Passed    0.03 sec
+        Start 197: functional_cusolver_sparse
+198/285 Test #197: functional_cusolver_sparse .........................................   Passed    0.03 sec
+        Start 198: functional_cumetalc_link_executable
+199/285 Test #198: functional_cumetalc_link_executable ................................   Passed    0.93 sec
+        Start 199: functional_cumetalc_native_aot_multi_kernel
+200/285 Test #199: functional_cumetalc_native_aot_multi_kernel ........................   Passed    1.01 sec
+        Start 200: functional_cumetalc_native_aot_symbols
+201/285 Test #200: functional_cumetalc_native_aot_symbols .............................   Passed    1.09 sec
+        Start 201: functional_cumetalc_host_stdlib_implicit
+202/285 Test #201: functional_cumetalc_host_stdlib_implicit ...........................   Passed    0.96 sec
+        Start 202: functional_cumetalc_double_vector_add
+203/285 Test #202: functional_cumetalc_double_vector_add ..............................   Passed    0.99 sec
+        Start 203: functional_wmma_numeric
+204/285 Test #203: functional_wmma_numeric ............................................   Passed    3.04 sec
+        Start 204: functional_device_heap
+205/285 Test #204: functional_device_heap .............................................   Passed    1.25 sec
+        Start 205: functional_device_launch_queue
+206/285 Test #205: functional_device_launch_queue .....................................   Passed    1.58 sec
+        Start 206: functional_installed_cumetalc_link_executable
+207/285 Test #206: functional_installed_cumetalc_link_executable ......................   Passed    5.54 sec
+        Start 207: functional_cuda_source_gpu_vector_add
+208/285 Test #207: functional_cuda_source_gpu_vector_add ..............................   Passed    0.89 sec
+        Start 208: conformance_cuda_samples_sweep
+209/285 Test #208: conformance_cuda_samples_sweep .....................................   Passed  257.28 sec
+        Start 209: unit_cuda_samples_sweep_status
+210/285 Test #209: unit_cuda_samples_sweep_status .....................................   Passed    0.02 sec
+        Start 210: conformance_compiler_backend_matrix
+211/285 Test #210: conformance_compiler_backend_matrix ................................   Passed   24.50 sec
+        Start 211: conformance_compiler_backend_matrix_versions
+212/285 Test #211: conformance_compiler_backend_matrix_versions .......................   Passed   86.77 sec
+        Start 212: conformance_cuda_samples_vectoradd_gpu
+213/285 Test #212: conformance_cuda_samples_vectoradd_gpu .............................   Passed    2.02 sec
+        Start 213: functional_cuda_projects_device_printf_clang
+214/285 Test #213: functional_cuda_projects_device_printf_clang .......................   Passed    1.72 sec
+        Start 214: functional_cuda_projects_device_printf_clang_typed_ptx
+215/285 Test #214: functional_cuda_projects_device_printf_clang_typed_ptx .............   Passed    2.27 sec
+        Start 215: functional_cuda_projects_device_calls_typed_ptx
+216/285 Test #215: functional_cuda_projects_device_calls_typed_ptx ....................   Passed    2.74 sec
+        Start 216: functional_cuda_projects_aggregate_device_calls_typed_ptx
+217/285 Test #216: functional_cuda_projects_aggregate_device_calls_typed_ptx ..........   Passed    2.29 sec
+        Start 217: functional_cuda_projects_nested_aggregate_device_calls_typed_ptx
+218/285 Test #217: functional_cuda_projects_nested_aggregate_device_calls_typed_ptx ...   Passed    2.37 sec
+        Start 218: functional_cuda_projects_barrier_cfg_typed_ptx
+219/285 Test #218: functional_cuda_projects_barrier_cfg_typed_ptx .....................   Passed    2.46 sec
+        Start 219: functional_cuda_projects_initialized_global_typed_ptx
+220/285 Test #219: functional_cuda_projects_initialized_global_typed_ptx ..............   Passed    2.66 sec
+        Start 220: functional_cuda_projects_device_sync_primitives
+221/285 Test #220: functional_cuda_projects_device_sync_primitives ....................   Passed    2.29 sec
+        Start 221: functional_cuda_projects_constant_symbol
+222/285 Test #221: functional_cuda_projects_constant_symbol ...........................   Passed    1.78 sec
+        Start 222: functional_cuda_projects_libdevice_frexp
+223/285 Test #222: functional_cuda_projects_libdevice_frexp ...........................   Passed    2.32 sec
+        Start 223: functional_cuda_projects_system_atomics
+224/285 Test #223: functional_cuda_projects_system_atomics ............................   Passed    2.15 sec
+        Start 224: functional_cuda_projects_wide_atomics
+225/285 Test #224: functional_cuda_projects_wide_atomics ..............................   Passed    2.21 sec
+        Start 225: functional_cuda_projects_cub_block_reduce
+226/285 Test #225: functional_cuda_projects_cub_block_reduce ..........................   Passed    2.54 sec
+        Start 226: functional_cuda_projects_float_atomics
+227/285 Test #226: functional_cuda_projects_float_atomics .............................   Passed    2.10 sec
+        Start 227: functional_cuda_projects_wide_atomics_typed_ptx
+228/285 Test #227: functional_cuda_projects_wide_atomics_typed_ptx ....................   Passed    1.89 sec
+        Start 228: functional_cuda_projects_cooperative_thread_group
+229/285 Test #228: functional_cuda_projects_cooperative_thread_group ..................   Passed    3.65 sec
+        Start 229: functional_cuda_projects_dynamic_cooperative_groups
+230/285 Test #229: functional_cuda_projects_dynamic_cooperative_groups ................   Passed    0.52 sec
+        Start 230: functional_cuda_projects_partial_lane_shuffle_guard
+231/285 Test #230: functional_cuda_projects_partial_lane_shuffle_guard ................   Passed    0.49 sec
+        Start 231: functional_cuda_projects_sgemm_naive
+232/285 Test #231: functional_cuda_projects_sgemm_naive ...............................   Passed    1.87 sec
+        Start 232: functional_cuda_projects_sgemm_shmem
+233/285 Test #232: functional_cuda_projects_sgemm_shmem ...............................   Passed    1.49 sec
+        Start 233: functional_cuda_projects_sgemm_2d
+234/285 Test #233: functional_cuda_projects_sgemm_2d ..................................   Passed    1.75 sec
+        Start 234: functional_cuda_projects_reduction
+235/285 Test #234: functional_cuda_projects_reduction .................................   Passed    2.74 sec
+        Start 235: functional_cuda_projects_transpose
+236/285 Test #235: functional_cuda_projects_transpose .................................   Passed    2.13 sec
+        Start 236: functional_cuda_projects_async_memcpy_hazard
+237/285 Test #236: functional_cuda_projects_async_memcpy_hazard .......................   Passed    2.62 sec
+        Start 237: functional_cuda_projects_libdevice_math
+238/285 Test #237: functional_cuda_projects_libdevice_math ............................   Passed    3.84 sec
+        Start 238: functional_cuda_projects_raytracer
+239/285 Test #238: functional_cuda_projects_raytracer .................................   Passed    0.69 sec
+        Start 239: functional_cuda_projects_fp64_precision
+240/285 Test #239: functional_cuda_projects_fp64_precision ............................   Passed    0.56 sec
+        Start 240: functional_cuda_projects_ggml_output_ops
+241/285 Test #240: functional_cuda_projects_ggml_output_ops ...........................   Passed    0.85 sec
+        Start 241: conformance_cuda_projects_typed_ptx_corpus
+242/285 Test #241: conformance_cuda_projects_typed_ptx_corpus .........................   Passed   72.68 sec
+        Start 242: conformance_cuda_projects_native_aot_corpus
+243/285 Test #242: conformance_cuda_projects_native_aot_corpus ........................   Passed   72.14 sec
+        Start 243: functional_cumetalc_native_aot_device_printf
+244/285 Test #243: functional_cumetalc_native_aot_device_printf .......................   Passed    0.73 sec
+        Start 244: ptx_sweep_supported_ops
+245/285 Test #244: ptx_sweep_supported_ops ............................................   Passed    1.91 sec
+        Start 245: ptx_sweep_unsupported_ops
+246/285 Test #245: ptx_sweep_unsupported_ops ..........................................   Passed    0.09 sec
+        Start 246: ptx_sweep_numeric
+247/285 Test #246: ptx_sweep_numeric ..................................................   Passed    3.50 sec
+        Start 247: unit_allocation_table
+248/285 Test #247: unit_allocation_table ..............................................   Passed    1.10 sec
+        Start 248: unit_module_cache
+249/285 Test #248: unit_module_cache ..................................................   Passed    0.97 sec
+        Start 249: unit_library_conflict
+250/285 Test #249: unit_library_conflict ..............................................   Passed    0.00 sec
+        Start 251: unit_ptx_parser
+251/285 Test #251: unit_ptx_parser ....................................................   Passed    0.88 sec
+        Start 252: unit_nvrtc_options
+252/285 Test #252: unit_nvrtc_options .................................................   Passed    0.80 sec
+        Start 253: unit_cumetal_ir
+253/285 Test #253: unit_cumetal_ir ....................................................   Passed    1.04 sec
+        Start 254: unit_msl_ast
+254/285 Test #254: unit_msl_ast .......................................................   Passed    1.27 sec
+        Start 255: unit_ptx_ir_msl
+255/285 Test #255: unit_ptx_ir_msl ....................................................   Passed    2.69 sec
+        Start 256: unit_nvvm_ir_msl
+256/285 Test #256: unit_nvvm_ir_msl ...................................................   Passed    2.19 sec
+        Start 257: unit_native_registration
+257/285 Test #257: unit_native_registration ...........................................   Passed    2.19 sec
+        Start 258: unit_registration_arg_index
+258/285 Test #258: unit_registration_arg_index ........................................   Passed    1.73 sec
+        Start 259: unit_cumetalc_shared_ir
+259/285 Test #259: unit_cumetalc_shared_ir ............................................   Passed    3.45 sec
+        Start 260: unit_intrinsic_lower
+260/285 Test #260: unit_intrinsic_lower ...............................................   Passed    1.34 sec
+        Start 261: unit_printf_lower
+261/285 Test #261: unit_printf_lower ..................................................   Passed    0.94 sec
+        Start 262: unit_addrspace_pass
+262/285 Test #262: unit_addrspace_pass ................................................   Passed    0.99 sec
+        Start 263: unit_metadata_pass
+263/285 Test #263: unit_metadata_pass .................................................   Passed    0.96 sec
+        Start 264: unit_phase1_pipeline
+264/285 Test #264: unit_phase1_pipeline ...............................................   Passed    1.32 sec
+        Start 265: unit_ptx_lower_to_llvm
+265/285 Test #265: unit_ptx_lower_to_llvm .............................................   Passed    1.17 sec
+        Start 266: unit_ptx_lower_to_metal
+266/285 Test #266: unit_ptx_lower_to_metal ............................................   Passed    2.29 sec
+        Start 267: unit_cuda_fp16_host
+267/285 Test #267: unit_cuda_fp16_host ................................................   Passed    0.00 sec
+        Start 268: unit_cuda_vector_types
+268/285 Test #268: unit_cuda_vector_types .............................................   Passed    3.12 sec
+        Start 269: unit_cuda_host_qualifiers
+269/285 Test #269: unit_cuda_host_qualifiers ..........................................   Passed    0.09 sec
+        Start 270: unit_threadgroup_tiling
+270/285 Test #270: unit_threadgroup_tiling ............................................   Passed    0.09 sec
+        Start 271: unit_cumetal_bench_help
+271/285 Test #271: unit_cumetal_bench_help ............................................   Passed    0.01 sec
+        Start 272: unit_cumetal_bench_invalid_arg
+272/285 Test #272: unit_cumetal_bench_invalid_arg .....................................   Passed    0.01 sec
+        Start 273: unit_cumetal_bench_ratio_gate
+273/285 Test #273: unit_cumetal_bench_ratio_gate ......................................   Passed    0.08 sec
+        Start 274: unit_install_uninstall_scripts
+274/285 Test #274: unit_install_uninstall_scripts .....................................   Passed    1.67 sec
+        Start 275: unit_llama_build_contract
+275/285 Test #275: unit_llama_build_contract ..........................................   Passed    0.01 sec
+        Start 276: unit_llama_ngl_sweep_classifier
+276/285 Test #276: unit_llama_ngl_sweep_classifier ....................................   Passed    0.03 sec
+        Start 277: unit_cuda_project_sweep_classifier
+277/285 Test #277: unit_cuda_project_sweep_classifier .................................   Passed    0.03 sec
+        Start 278: unit_runtime_library_aliases
+278/285 Test #278: unit_runtime_library_aliases .......................................   Passed    0.01 sec
+        Start 279: unit_library_link_aliases
+279/285 Test #279: unit_library_link_aliases ..........................................   Passed    1.63 sec
+        Start 280: unit_cusparse_cusolver_symlinks
+280/285 Test #280: unit_cusparse_cusolver_symlinks ....................................   Passed    0.02 sec
+        Start 281: unit_version_matches
+281/285 Test #281: unit_version_matches ...............................................   Passed    0.02 sec
+        Start 282: unit_cumetal_cli
+282/285 Test #282: unit_cumetal_cli ...................................................   Passed    1.38 sec
+        Start 283: unit_ci_report
+283/285 Test #283: unit_ci_report .....................................................   Passed    2.01 sec
+        Start 284: unit_documentation_consistency
+284/285 Test #284: unit_documentation_consistency .....................................   Passed    0.09 sec
+        Start 285: unit_nvvm_private_array
+285/285 Test #285: unit_nvvm_private_array ............................................   Passed    1.98 sec
+
+100% tests passed out of 285
+
+Label Time Summary:
+air-compiler    =   5.79 sec*proc (11 tests)
+benchmark       =   5.44 sec*proc (1 test)
+gpu             =   9.02 sec*proc (3 tests)
+hosted          =  48.00 sec*proc (51 tests)
+performance     =   5.44 sec*proc (1 test)
+ptx-lowering    =   2.00 sec*proc (2 tests)
+unit            =  40.22 sec*proc (38 tests)
+
+Total Test time (real) = 1005.08 sec

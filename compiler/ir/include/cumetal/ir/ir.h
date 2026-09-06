@@ -297,6 +297,12 @@ struct Function {
     // AddressSpace enum value. Metal legalization must dispatch every use through
     // concrete specializations; it must never print these as unqualified pointers.
     std::unordered_map<ValueId, std::uint8_t> mixed_pointer_address_spaces;
+    // Address spaces a pointer return can carry when it derives from a mixed
+    // argument (`T& operator+=(T& a, ...) { ...; return a; }` called with both
+    // local and device objects). Each address-space clone returns its own
+    // space; the bit positions follow AddressSpace. Zero once the return
+    // resolved to a single space.
+    std::uint8_t mixed_pointer_return_spaces = 0;
     bool generic_pointer_return = false;
 
     [[nodiscard]] const BasicBlock* find_block(BlockId id) const;

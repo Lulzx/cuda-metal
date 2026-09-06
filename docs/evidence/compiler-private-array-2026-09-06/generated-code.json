@@ -1,0 +1,66 @@
+[
+  {
+    "kernel": "naive",
+    "identical_msl": true,
+    "before_lines": 104,
+    "after_lines": 104,
+    "before_msl_sha256": "e830e4a7c5c0dccd5c1277c6061a84ac2fa0e7e65d29d9d912f0e1dd7a720bed",
+    "after_msl_sha256": "e830e4a7c5c0dccd5c1277c6061a84ac2fa0e7e65d29d9d912f0e1dd7a720bed"
+  },
+  {
+    "kernel": "coalesced",
+    "identical_msl": true,
+    "before_lines": 104,
+    "after_lines": 104,
+    "before_msl_sha256": "0b1da3dd0e786350eec83fa70ac7668be19f04d3665ddb60a761ccb6e43255ce",
+    "after_msl_sha256": "0b1da3dd0e786350eec83fa70ac7668be19f04d3665ddb60a761ccb6e43255ce"
+  },
+  {
+    "kernel": "tiled",
+    "identical_msl": true,
+    "before_lines": 235,
+    "after_lines": 235,
+    "before_msl_sha256": "0700ad34eac0375c4231903044dee3ad3d453cc3bbae26ba5700dd4fe58eb6bf",
+    "after_msl_sha256": "0700ad34eac0375c4231903044dee3ad3d453cc3bbae26ba5700dd4fe58eb6bf"
+  },
+  {
+    "kernel": "registers",
+    "identical_msl": true,
+    "before_lines": 463,
+    "after_lines": 463,
+    "before_msl_sha256": "9e755ab00485251b3577c53594c96053b6570befca92e4e1beee7b5045ca5167",
+    "after_msl_sha256": "9e755ab00485251b3577c53594c96053b6570befca92e4e1beee7b5045ca5167"
+  },
+  {
+    "kernel": "vectorized",
+    "identical_msl": true,
+    "before_lines": 650,
+    "after_lines": 650,
+    "before_msl_sha256": "0acd49fd703a28b97e61cd27e85a3eb00acc71214ef6d6675878ab0b12a166fd",
+    "after_msl_sha256": "0acd49fd703a28b97e61cd27e85a3eb00acc71214ef6d6675878ab0b12a166fd"
+  },
+  {
+    "kernel": "block64",
+    "identical_msl": true,
+    "before_lines": 471,
+    "after_lines": 471,
+    "before_msl_sha256": "65720cfb6ae3cf3cd5de08f0cfc1dc73d3e45c3dc486332f80793340e62b9242",
+    "after_msl_sha256": "65720cfb6ae3cf3cd5de08f0cfc1dc73d3e45c3dc486332f80793340e62b9242"
+  },
+  {
+    "kernel": "block64_32",
+    "identical_msl": true,
+    "before_lines": 471,
+    "after_lines": 471,
+    "before_msl_sha256": "b6e69ab4f7127d50a5686cb0385580c279ae1c1cc3bf4c547c2698e3001baf0e",
+    "after_msl_sha256": "b6e69ab4f7127d50a5686cb0385580c279ae1c1cc3bf4c547c2698e3001baf0e"
+  },
+  {
+    "kernel": "block64_8x8",
+    "identical_msl": false,
+    "before_lines": 615,
+    "after_lines": 1392,
+    "before_msl_sha256": "5435aea5829c86bb189bfb79539c2d0cb4689ae10c1745cc9e898c2eca6beda3",
+    "after_msl_sha256": "b398d02bb9713007fec7248ac0965448101ab561692837e454b51634c920eb4d"
+  }
+]

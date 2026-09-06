@@ -1,0 +1,5 @@
+device,Apple M4 Pro; FP32; warmup=2; synchronized wall ms; excludes allocation, transfers, compilation
+columns,name,M,K,N,iterations,mean_ms,median_ms,min_ms,max_ms,GFLOPs_from_mean
+first_launch,registers,97.542500 ms
+check,registers,max_abs=0,relative_l2=0,bad=0
+result,registers,4096,4096,4096,10,90.697458,90.711917,89.511875,91.990625,1515.356

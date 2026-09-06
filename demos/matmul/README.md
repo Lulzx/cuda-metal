@@ -69,3 +69,12 @@ are re-expressed from the supplied listings; its original host benchmark was
 not available. The float4 variant is restricted to aligned row strides; other
 variants support rectangular tails. The optimization is in the source kernel,
 not an automatic compiler substitution or reduced-precision path.
+
+## Compiler optimization experiment
+
+The large-accumulator `block64_8x8` variant is included in `kernels.cu` and in the
+`all` correctness sweep. It is intentionally absent from the default headline
+comparison because `block64_32` is faster. A bounded compiler pass improves its
+private-array loops without changing the CUDA source. See the
+[compiler study](../../docs/compiler-performance.md) and
+[before/after comparison script](../../tools/matmul_bench/compare_compilers.py).

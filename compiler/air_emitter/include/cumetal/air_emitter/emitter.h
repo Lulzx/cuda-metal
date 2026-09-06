@@ -27,6 +27,13 @@ struct EmitOptions {
     // for private inline support code that must be part of the kernel's own
     // translation unit rather than an MTL visible-function library.
     std::vector<std::filesystem::path> textual_include_inputs;
+    // CUDA's default floating-point contract: IEEE comparisons and NaN/Inf
+    // preserved ("safe"), with FMA contraction allowed. Apple's compiler
+    // defaults to -ffast-math, under which `NaN == NaN` is true and
+    // `x != x` is false, so generated MSL is compiled with -fno-fast-math
+    // unless the caller asked for --use_fast_math ("fast").
+    std::string math_mode = "safe";
+    bool fp_contract = true;
 };
 
 struct EmitResult {

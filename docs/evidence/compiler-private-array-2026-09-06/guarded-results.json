@@ -1,0 +1,146 @@
+[
+  {
+    "round": 1,
+    "name": "block64_8x8",
+    "mode": "before",
+    "mean_ms": 583.963262,
+    "min_ms": 581.679416,
+    "gflops": 235.355
+  },
+  {
+    "round": 1,
+    "name": "block64_8x8",
+    "mode": "after",
+    "mean_ms": 97.7457,
+    "min_ms": 95.274084,
+    "gflops": 1406.087
+  },
+  {
+    "round": 1,
+    "name": "block64_32",
+    "mode": "before",
+    "mean_ms": 66.081017,
+    "min_ms": 65.247417,
+    "gflops": 2079.855
+  },
+  {
+    "round": 1,
+    "name": "block64_32",
+    "mode": "after",
+    "mean_ms": 65.711958,
+    "min_ms": 65.223291,
+    "gflops": 2091.536
+  },
+  {
+    "round": 1,
+    "name": "registers",
+    "mode": "before",
+    "mean_ms": 90.697458,
+    "min_ms": 89.511875,
+    "gflops": 1515.356
+  },
+  {
+    "round": 1,
+    "name": "registers",
+    "mode": "after",
+    "mean_ms": 89.999408,
+    "min_ms": 89.688083,
+    "gflops": 1527.11
+  },
+  {
+    "round": 2,
+    "name": "block64_32",
+    "mode": "after",
+    "mean_ms": 66.845021,
+    "min_ms": 65.951458,
+    "gflops": 2056.084
+  },
+  {
+    "round": 2,
+    "name": "block64_32",
+    "mode": "before",
+    "mean_ms": 66.16295,
+    "min_ms": 65.647709,
+    "gflops": 2077.28
+  },
+  {
+    "round": 2,
+    "name": "registers",
+    "mode": "after",
+    "mean_ms": 90.214658,
+    "min_ms": 89.722417,
+    "gflops": 1523.466
+  },
+  {
+    "round": 2,
+    "name": "registers",
+    "mode": "before",
+    "mean_ms": 91.277088,
+    "min_ms": 90.481792,
+    "gflops": 1505.733
+  },
+  {
+    "round": 2,
+    "name": "block64_8x8",
+    "mode": "after",
+    "mean_ms": 95.000017,
+    "min_ms": 92.937958,
+    "gflops": 1446.726
+  },
+  {
+    "round": 2,
+    "name": "block64_8x8",
+    "mode": "before",
+    "mean_ms": 584.284633,
+    "min_ms": 578.528042,
+    "gflops": 235.226
+  },
+  {
+    "round": 3,
+    "name": "registers",
+    "mode": "before",
+    "mean_ms": 92.627921,
+    "min_ms": 90.017125,
+    "gflops": 1483.775
+  },
+  {
+    "round": 3,
+    "name": "registers",
+    "mode": "after",
+    "mean_ms": 94.422671,
+    "min_ms": 92.503709,
+    "gflops": 1455.572
+  },
+  {
+    "round": 3,
+    "name": "block64_8x8",
+    "mode": "before",
+    "mean_ms": 584.003312,
+    "min_ms": 579.031667,
+    "gflops": 235.339
+  },
+  {
+    "round": 3,
+    "name": "block64_8x8",
+    "mode": "after",
+    "mean_ms": 95.009017,
+    "min_ms": 93.156167,
+    "gflops": 1446.589
+  },
+  {
+    "round": 3,
+    "name": "block64_32",
+    "mode": "before",
+    "mean_ms": 66.544925,
+    "min_ms": 65.59975,
+    "gflops": 2065.356
+  },
+  {
+    "round": 3,
+    "name": "block64_32",
+    "mode": "after",
+    "mean_ms": 66.068375,
+    "min_ms": 65.273,
+    "gflops": 2080.253
+  }
+]

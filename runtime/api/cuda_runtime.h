@@ -1792,8 +1792,33 @@ static inline CUMETAL_SYMBOL_BY_REF(T) cudaGetSymbolAddress(void** devPtr, const
 
 #if defined(__cplusplus) && defined(__clang__) && defined(__CUDA__)
 
+// Every SDK header device-visible code commonly pulls in is included here,
+// ahead of anything a --device-as-default-execution-space region could cover.
+// Their declarations therefore keep their host execution space, and a later
+// include from inside the region is guard-skipped instead of re-declaring
+// (for example) memcpy as a __host__ __device__ function that collides with
+// Clang's device builtin.
 #include <limits.h>
 #include <math.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <cfloat>
+#include <climits>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <initializer_list>
+#include <limits>
+#include <new>
+#include <type_traits>
+#include <utility>
 
 #include <__clang_cuda_builtin_vars.h>
 #include <__clang_cuda_libdevice_declares.h>
@@ -1824,12 +1849,27 @@ static __device__ __forceinline__ int printf(const char*, Args...) {
 }
 #endif
 
-// Device-safe fallback for unqualified `isinf(...)` in CUDA sources when libc++
-// only surfaces host overloads in the current include order.
-template <typename T>
-static __device__ __forceinline__ int isinf(T x) {
-    return __builtin_isinf_sign(x) != 0;
-}
+// Device classification overloads. libc++ declares host-only
+// `bool isnan(float)` and friends, so an unqualified `::isnan(x)` in device
+// code resolves to a __host__ function and is rejected. These are __device__
+// overloads of the same signatures (a host and a device overload of one
+// signature are legal, a __host__ __device__ one would not be) built on the
+// __nv_* classification calls the compiler lowers to Metal's bit-pattern
+// builtins, which are immune to fast-math folding.
+static __device__ __forceinline__ bool isnan(float x) { return __isnanf(x) != 0; }
+static __device__ __forceinline__ bool isnan(double x) { return __isnan(x) != 0; }
+static __device__ __forceinline__ bool isinf(float x) { return __isinff(x) != 0; }
+static __device__ __forceinline__ bool isinf(double x) { return __isinf(x) != 0; }
+static __device__ __forceinline__ bool isfinite(float x) { return __finitef(x) != 0; }
+static __device__ __forceinline__ bool isfinite(double x) { return __isfinited(x) != 0; }
+static __device__ __forceinline__ bool signbit(float x) { return __signbitf(x) != 0; }
+static __device__ __forceinline__ bool signbit(double x) { return __signbitd(x) != 0; }
+namespace std {
+using ::isfinite;
+using ::isinf;
+using ::isnan;
+using ::signbit;
+}  // namespace std
 
 // NVIDIA's CUDA math overlay provides C++ float overloads in addition to the
 // C `*f` spellings. Clang's standalone CUDA overlay only declares

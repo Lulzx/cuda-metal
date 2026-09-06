@@ -8,8 +8,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/31 | **31/31** |
-| PTX / `--cuda-device` | **29/31** | **31/31** |
+| direct `.cu` | 0/37 | **37/37** |
+| PTX / `--cuda-device` | **33/37** | **34/37** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
@@ -22,9 +22,15 @@ Remaining typed-path blockers include combinations of:
   barrier-containing regions beyond the proven uniform multi-exit helper;
 - compound shared-memory layouts beyond the proven static arrays and single
   runtime-sized `extern __shared__` binding;
-- generic pointer provenance through call/aggregate/memory/merge combinations
-  beyond the proven device and shared-memory helper arguments and constant-size
-  aggregate copies between host-populated device-buffer descriptors;
+- generic pointer provenance: the legalizer is total for well-formed CUDA
+  (unreachable helpers are pruned, a pointer with no in-module producer
+  defaults to device memory, helpers are cloned per address space, and a
+  reference-returning helper's result takes each call site's space), with two
+  named residuals: a helper whose pointer return merges non-argument sources
+  of different address spaces, and a helper called with mixed-space arguments
+  in *different* spaces at one call site (`f(local, device_elem)`), which the
+  single-space clone cannot serve and is refused with `polymorphic helper call
+  has multiple concrete address spaces`;
 - atomic scope/order/address-space combinations beyond the numerically proven
   32-bit direct/PTX family, lock-backed 64-bit typed-PTX family, and the
   32-bit float add/sub/exchange family (native `atomic_float` in device
@@ -49,10 +55,18 @@ Remaining typed-path blockers include combinations of:
   (depth 8, width 16, and 64 scalar leaves), plus irregularly padded nested
   device-call ABIs beyond the proven depth-two 12-byte fixture;
 - initialized writable PTX `.global` forms beyond the proven visible numeric
-  byte-array and translation-unit-private integer-scalar paths; module-private
-  CUDA Clang `__const_$` aggregate literals and other write-free initialized
-  byte arrays are embedded read-only, while unsupported initializer types fail
-  explicitly;
+  byte-array and translation-unit-private integer-scalar paths. Both frontends
+  embed every referenced initialised read-only global as a `constant` byte
+  array regardless of its LLVM address space or Clang/LLVM name (`__const_$`,
+  `__const.<fn>.<var>`, `constinit`, `.str`), writable translation-unit-private
+  globals use the hidden-buffer ABI, and an undefined `extern __device__`
+  global is a compile-time error naming the symbol; unsupported initializer
+  types still fail explicitly;
+- pointer-returning device helpers on the typed PTX path: the PTX importer
+  types a `.param .b64` return as an integer, so `int& at(const Arr&, int)`
+  compiles on the direct `.cu` path (see `tests/cuda_projects/descriptor_copy`
+  and `ref_return`, enrolled for the native corpus only) but not yet through
+  PTX;
 - FP64 modes and operations beyond the numerically proven `fast48`
   arithmetic/storage/comparison/rounding corpus, including observable IEEE
   exception status;
@@ -88,6 +102,20 @@ registration environment fallback. Other entry versions, codecs, and remaining
 container variants are open; SASS-only and big-endian inputs are outside the
 current target.
 
+## Inline PTX
+
+Inline `asm` in CUDA source is lowered by the same PTX instruction importer
+the PTX frontend uses: operands are bound to synthetic registers from the
+constraint string (`r`, `h`, `c`, `l`, `f`, `d`, `b`, immediates, tied `+r`
+operands, multiple outputs) and the template's instructions are lowered in
+place, so any instruction the typed PTX path supports works inside `asm`.
+Refused with a diagnostic: control flow inside the template (`bra`, `call`,
+`ret`), `${N:modifier}` operand modifiers, and instructions the PTX path does
+not lower (tensor-core `mma`/`wmma`/`ldmatrix`, `mbarrier`, TMA, texture
+instructions). A template with no instruction (`asm volatile("" ::: "memory")`)
+lowers to nothing; it does not act as a compiler barrier for Metal. Predicated
+instructions inside a block follow the PTX path's predication rules.
+
 ## Threadgroup float atomics
 
 Metal has no threadgroup float atomic in any language version. CuMetal expands a
@@ -104,7 +132,12 @@ diagnostic. Device float add, subtract and exchange use Metal's native
 `nvrtcCompileProgram` compiles by spawning `cumetalc`, so runtime compilation
 needs the compiler binary on disk and Xcode's Metal toolchain; a caller that
 ships only `libcumetal.dylib` gets `NVRTC_ERROR_BUILTIN_OPERATION_FAILURE` with
-the reason in the program log. Output is a metallib: `nvrtcGetPTX` and
+the reason in the program log. `--device-as-default-execution-space` makes
+unannotated functions `__host__ __device__` (Clang has no device-only
+default), so a function that also has an explicit `__host__` declaration in the
+SDK headers keeps that declaration; programs still see the macOS SDK headers
+rather than NVRTC's freestanding set. `--ftz`, `--prec-div` and `--prec-sqrt`
+have no Metal knob and are accepted as no-ops. Output is a metallib: `nvrtcGetPTX` and
 `nvrtcGetLTOIR` fail, and a `compute_XX` architecture request is rejected at
 compile time rather than served with bytes the caller would mis-handle. There is
 no `-dlto` path. `nvrtcGetLoweredName` answers only for `extern "C"` entry

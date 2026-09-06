@@ -29,6 +29,17 @@ struct EntryFunction {
         bool supported = false;
     };
     std::vector<Instruction> instructions;
+    // Registers declared inside the body by `.reg` directives. A register may
+    // be spelled without the `%` prefix (`.reg .pred p;`); the parser renames
+    // such names to a `%`-prefixed synthetic register whose NVPTX prefix
+    // encodes the declared width (`%p_cm_p`, `%r_cm_tmp`, `%rd_cm_x`, ...) and
+    // records the declared PTX type (`pred`, `b32`, `f32`, ...) here so the
+    // typed importer can type them before inference.
+    struct RegisterDeclaration {
+        std::string name;
+        std::string type;
+    };
+    std::vector<RegisterDeclaration> register_declarations;
 };
 
 struct ModuleInfo {
@@ -52,5 +63,12 @@ struct ParseResult {
 
 ParseResult parse_ptx(std::string_view text);
 ParseResult parse_ptx(std::string_view text, const ParseOptions& options);
+
+// Parses a bare instruction block -- the body of an inline `asm` statement
+// after operand substitution -- with the same line parser the module parser
+// uses, so braces, `.reg` declarations, predicates and the supported-opcode
+// classification apply unchanged. Line numbers start at `start_line`.
+EntryFunction parse_instruction_block(std::string_view body, int start_line,
+                                      std::vector<std::string>* warnings);
 
 }  // namespace cumetal::ptx

@@ -59,7 +59,7 @@ test "$(grep -o 'fabs(' "$workdir/float_abs.metal" | wc -l | tr -d ' ')" -ge 2
 "$cumetalc" "$byval_aggregate_memcpy_source" --backend=cumetal-ir --emit=msl \
     --overwrite -o "$workdir/byval_aggregate_memcpy.metal"
 grep -q 'kernel void byval_aggregate_memcpy' "$workdir/byval_aggregate_memcpy.metal"
-grep -q 'reinterpret_cast<device uint\*>' "$workdir/byval_aggregate_memcpy.metal"
+grep -qE 'reinterpret_cast<device (cm_alias_)?uint\*>' "$workdir/byval_aggregate_memcpy.metal"
 
 "$cumetalc" "$float_atomic_add_source" --backend=cumetal-ir --emit=msl \
     --overwrite -o "$workdir/float_atomic_add.metal"

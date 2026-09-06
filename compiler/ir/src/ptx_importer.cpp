@@ -2,6 +2,7 @@
 
 #include "cumetal/passes/printf_lower.h"
 #include "cumetal/ptx/parser.h"
+#include "ptx_inline_asm.h"
 
 #include <algorithm>
 #include <cctype>
@@ -40,6 +41,13 @@ std::string trim(std::string_view input) {
         --end;
     }
     return std::string(input.substr(begin, end - begin));
+}
+
+// Element count of a `.v2`/`.v4` memory instruction, or 1.
+std::size_t memory_vector_width(std::string_view opcode) {
+    if (opcode.find(".v4.") != std::string_view::npos) return 4;
+    if (opcode.find(".v2.") != std::string_view::npos) return 2;
+    return 1;
 }
 
 std::string root_opcode(std::string_view opcode) {
@@ -89,7 +97,11 @@ std::vector<std::string> destination_registers(const Instruction& instruction) {
     std::vector<std::string> destinations = registers_in(instruction.operands.front());
     const bool tuple_move = root == "mov" &&
                             instruction.opcode.find(".b64") != std::string::npos;
-    if (root != "setp" && root != "shfl" && !tuple_move &&
+    // `ld.*.v2/.v4 {a, b, ...}, [addr]` defines every register of the tuple.
+    const bool vector_load = root == "ld" &&
+                             (instruction.opcode.find(".v2.") != std::string::npos ||
+                              instruction.opcode.find(".v4.") != std::string::npos);
+    if (root != "setp" && root != "shfl" && !tuple_move && !vector_load &&
         destinations.size() > 1) {
         destinations.resize(1);
     }
@@ -260,6 +272,25 @@ struct BuiltinSignature {
 };
 
 std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
+    // Classification returns an int and takes one float or double. The MSL
+    // backend lowers the float forms to Metal's bit-pattern builtins and the
+    // double forms on the binary64 storage word, so both are exact in every
+    // math and FP64 mode.
+    static const std::unordered_map<std::string, std::pair<std::string, unsigned>>
+        kClassifyBuiltins = {
+            {"__nv_isnanf", {"isnan", 32}},      {"__nv_isnand", {"isnan", 64}},
+            {"__nv_isinff", {"isinf", 32}},      {"__nv_isinfd", {"isinf", 64}},
+            {"__nv_finitef", {"isfinite", 32}},  {"__nv_isfinited", {"isfinite", 64}},
+            {"__nv_signbitf", {"signbit", 32}},  {"__nv_signbitd", {"signbit", 64}},
+        };
+    const auto classify = kClassifyBuiltins.find(std::string(name));
+    if (classify != kClassifyBuiltins.end()) {
+        return BuiltinSignature{
+            .metal_name = classify->second.first,
+            .return_type = Type::integer(32),
+            .argument_types = {Type::floating(classify->second.second)},
+        };
+    }
     static const std::unordered_map<std::string, std::string> kDoubleBuiltins = {
         {"__nv_fma", "fma"}, {"__nv_sqrt", "sqrt"},
         {"__nv_rsqrt", "rsqrt"},
@@ -991,9 +1022,29 @@ struct Importer {
         }
     }
 
+    static std::optional<Type> declared_register_type(const std::string& name) {
+        if (name == "pred") return Type::predicate();
+        if (name == "b8" || name == "u8" || name == "s8") return Type::integer(8);
+        if (name == "b16" || name == "u16" || name == "s16") return Type::integer(16);
+        if (name == "f16") return Type::floating(16);
+        if (name == "b32" || name == "u32" || name == "s32") return Type::integer(32);
+        if (name == "f32") return Type::floating(32);
+        if (name == "b64" || name == "u64" || name == "s64") return Type::integer(64);
+        if (name == "f64") return Type::floating(64);
+        return std::nullopt;
+    }
+
     void infer_register_types() {
         for (const auto& parameter : entry->params) {
             parameter_types[parameter.name] = parameter_type(parameter);
+        }
+        // Body-local `.reg` declarations name their type explicitly; use it
+        // before inference so a predicate stays a predicate.
+        for (const auto& declaration : entry->register_declarations) {
+            if (register_types.contains(declaration.name)) continue;
+            if (const auto type = declared_register_type(declaration.type)) {
+                register_types[declaration.name] = *type;
+            }
         }
 
         // Older CUDA Clang PTX (notably 21) omits `.ptr` from device-function
@@ -1417,6 +1468,26 @@ struct Importer {
             return index < instruction.operands.size()
                        ? operand_for(instruction.operands[index], *environment, fallback)
                        : Operand::immediate("0", fallback);
+        };
+        const auto bit_container_of = [&](Operand operand, const Type& expected) {
+            const bool same_width = operand.type.bit_width == expected.bit_width;
+            const bool float_integer_pair =
+                (operand.type.kind == TypeKind::kFloat &&
+                 expected.kind == TypeKind::kInteger) ||
+                (operand.type.kind == TypeKind::kInteger &&
+                 expected.kind == TypeKind::kFloat);
+            if (!same_width || !float_integer_pair) return operand;
+            Operation conversion;
+            conversion.opcode = OpCode::kConvert;
+            conversion.location = operation.location;
+            conversion.operands.push_back(operand);
+            const ValueId converted = builder.next_value();
+            conversion.results.push_back(converted);
+            conversion.result_types.push_back(expected);
+            conversion.attributes["bitcast"] = "true";
+            value_types[converted] = expected;
+            block->operations.push_back(std::move(conversion));
+            return Operand::value_ref(converted, expected);
         };
         const auto bit_container_operand = [&](std::size_t index, const Type& expected) {
             Operand operand = source_operand(index, expected);
@@ -1955,6 +2026,65 @@ struct Importer {
         } else if (root == "ld") {
             operation.opcode = OpCode::kLoad;
             if (instruction.operands.size() < 2) return fail(&instruction, "malformed load");
+            // Vector loads: `ld.global.v2.b32 {%r1, %r2}, [addr]` fills each
+            // register from consecutive elements. Lanes after the first become
+            // their own loads at the right byte displacement; the instruction's
+            // own operation keeps lane 0, so guarding and result bookkeeping
+            // stay unchanged.
+            const std::size_t lanes = memory_vector_width(instruction.opcode);
+            if (lanes > 1) {
+                if (operation.results.size() != lanes) {
+                    return fail(&instruction, "vector load destination tuple width mismatch");
+                }
+                if (module_constant_symbols.contains(
+                        parameter_name_from_operand(instruction.operands[1]))) {
+                    return fail(&instruction, "vector load from a module constant is unsupported");
+                }
+                const Type element_type = ptx_scalar_type(instruction.opcode);
+                const AddressSpace lane_space =
+                    instruction.opcode.find(".shared") != std::string::npos
+                        ? AddressSpace::kThreadgroup
+                    : instruction.opcode.find(".local") != std::string::npos
+                        ? AddressSpace::kPrivate
+                    : instruction.opcode.find(".const") != std::string::npos
+                        ? AddressSpace::kConstant
+                        : AddressSpace::kDevice;
+                const Operand base = memory_address_operand(
+                    1, Type::pointer(element_type, lane_space));
+                for (std::size_t lane = 1; lane < lanes; ++lane) {
+                    Operation offset;
+                    offset.opcode = OpCode::kPointerOffset;
+                    offset.location = operation.location;
+                    offset.operands = {
+                        base,
+                        Operand::immediate(std::to_string(lane * type_size(element_type)),
+                                           Type::integer(64)),
+                    };
+                    offset.attributes["offset_unit"] = "bytes";
+                    const ValueId pointer = builder.next_value();
+                    offset.results = {pointer};
+                    offset.result_types = {base.type};
+                    value_types[pointer] = base.type;
+                    block->operations.push_back(std::move(offset));
+
+                    Operation load;
+                    load.opcode = OpCode::kLoad;
+                    load.location = operation.location;
+                    load.attributes["ptx_opcode"] = instruction.opcode;
+                    load.operands.push_back(Operand::value_ref(pointer, base.type));
+                    load.results = {operation.results[lane]};
+                    load.result_types = {operation.result_types[lane]};
+                    load.attributes["memory_bit_width"] = std::to_string(element_type.bit_width);
+                    if (has_signed_integer_type(instruction.opcode)) {
+                        load.attributes["signed"] = "true";
+                    }
+                    load.attributes["alignment"] = std::to_string(type_size(element_type));
+                    if (!append_guard(&load, instruction, *environment)) return false;
+                    block->operations.push_back(std::move(load));
+                }
+                operation.results.resize(1);
+                operation.result_types.resize(1);
+            }
             const std::string referenced_symbol =
                 parameter_name_from_operand(instruction.operands[1]);
             const auto module_constant = module_constant_symbols.find(referenced_symbol);
@@ -2017,11 +2147,52 @@ struct Importer {
                     : instruction.opcode.find(".const") != std::string::npos
                     ? AddressSpace::kConstant
                     : AddressSpace::kDevice;
-            operation.operands.push_back(memory_address_operand(
-                0, Type::pointer(ptx_scalar_type(instruction.opcode),
-                                 store_address_space)));
+            const Type element_type = ptx_scalar_type(instruction.opcode);
+            const Operand base = memory_address_operand(
+                0, Type::pointer(element_type, store_address_space));
+            // Vector stores: `st.global.v2.b32 [addr], {%r1, %r2}` writes each
+            // register to consecutive elements. Clang emits these for adjacent
+            // struct fields at -O2, and storing only the first lane silently
+            // dropped the rest.
+            const std::size_t lanes = memory_vector_width(instruction.opcode);
+            const std::vector<std::string> lane_registers = registers_in(instruction.operands[1]);
+            if (lanes > 1 && lane_registers.size() != lanes) {
+                return fail(&instruction,
+                            "vector store source tuple must name one register per lane");
+            }
+            for (std::size_t lane = 1; lane < lanes; ++lane) {
+                Operation offset;
+                offset.opcode = OpCode::kPointerOffset;
+                offset.location = operation.location;
+                offset.operands = {
+                    base,
+                    Operand::immediate(std::to_string(lane * type_size(element_type)),
+                                       Type::integer(64)),
+                };
+                offset.attributes["offset_unit"] = "bytes";
+                const ValueId pointer = builder.next_value();
+                offset.results = {pointer};
+                offset.result_types = {base.type};
+                value_types[pointer] = base.type;
+                block->operations.push_back(std::move(offset));
+
+                Operation store;
+                store.opcode = OpCode::kStore;
+                store.location = operation.location;
+                store.attributes["ptx_opcode"] = instruction.opcode;
+                store.operands.push_back(Operand::value_ref(pointer, base.type));
+                store.operands.push_back(bit_container_of(
+                    operand_for(lane_registers[lane], *environment, element_type), element_type));
+                store.attributes["alignment"] = std::to_string(type_size(element_type));
+                if (!append_guard(&store, instruction, *environment)) return false;
+                block->operations.push_back(std::move(store));
+            }
+            operation.operands.push_back(base);
             operation.operands.push_back(
-                bit_container_operand(1, ptx_scalar_type(instruction.opcode)));
+                lanes > 1
+                    ? bit_container_of(operand_for(lane_registers[0], *environment, element_type),
+                                       element_type)
+                    : bit_container_operand(1, element_type));
             operation.attributes["address"] = instruction.operands[0];
             operation.attributes["alignment"] =
                 std::to_string(type_size(ptx_scalar_type(instruction.opcode)));
@@ -2516,9 +2687,47 @@ struct Importer {
                                               "' has no CuMetal IR normalization");
             }
             const std::size_t first_source = destinations.empty() ? 0 : 1;
-            const Type arithmetic_type = ptx_scalar_type(instruction.opcode);
+            const Type source_type = ptx_scalar_type(instruction.opcode);
+            // mul.wide / mad.wide produce a result twice as wide as their
+            // operands: the operands are sign- or zero-extended first and the
+            // destination register is 64-bit. Typing the product at the operand
+            // width turned `mul.wide.s32 %rd, %r, 4` -- the byte offset of every
+            // indexed access -- into a 32-bit multiply added to a pointer, which
+            // both truncates real offsets and trips an Apple compiler
+            // miscompile of 32-bit pointer displacements.
+            const bool wide_product =
+                (root == "mul" || root == "mad") &&
+                source_type.kind == TypeKind::kInteger &&
+                instruction.opcode.find(".wide.") != std::string::npos;
+            const Type arithmetic_type =
+                wide_product ? Type::integer(source_type.bit_width * 2) : source_type;
+            const bool wide_signed = wide_product && has_signed_integer_type(instruction.opcode);
             for (std::size_t i = first_source; i < instruction.operands.size(); ++i) {
-                operation.operands.push_back(bit_container_operand(i, arithmetic_type));
+                Operand operand = bit_container_operand(i, source_type);
+                if (wide_product && operand.type.kind == TypeKind::kInteger &&
+                    operand.type.bit_width == source_type.bit_width) {
+                    Operation extend;
+                    extend.opcode = OpCode::kConvert;
+                    extend.location = operation.location;
+                    extend.operands.push_back(operand);
+                    const ValueId extended = builder.next_value();
+                    extend.results.push_back(extended);
+                    extend.result_types.push_back(arithmetic_type);
+                    if (wide_signed) extend.attributes["signed_input"] = "true";
+                    value_types[extended] = arithmetic_type;
+                    block->operations.push_back(std::move(extend));
+                    operand = Operand::value_ref(extended, arithmetic_type);
+                }
+                operation.operands.push_back(std::move(operand));
+            }
+            if (wide_product) {
+                for (std::size_t i = 0; i < operation.results.size(); ++i) {
+                    if (i < operation.result_types.size() &&
+                        !operation.result_types[i].is_pointer()) {
+                        operation.result_types[i] = arithmetic_type;
+                        value_types[operation.results[i]] = arithmetic_type;
+                    }
+                }
             }
             if (!operation.result_types.empty() && operation.result_types.front().is_pointer()) {
                 if (root == "mad") {
@@ -3035,6 +3244,178 @@ struct Importer {
 };
 
 }  // namespace
+
+namespace detail {
+
+// Substitute `$N` placeholders with synthetic registers (or immediates), and
+// put braces on their own lines so the module parser's scope handling sees
+// them the way it does in a .ptx file.
+static bool substitute_inline_asm_operands(const InlineAsmRequest& request,
+                                           std::string* text, std::string* error) {
+    text->clear();
+    const std::string& in = request.text;
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        const char c = in[i];
+        if (c == '{' || c == '}') {
+            *text += '\n';
+            *text += c;
+            *text += '\n';
+            continue;
+        }
+        if (c != '$') {
+            *text += c;
+            continue;
+        }
+        if (i + 1 < in.size() && in[i + 1] == '$') {
+            *text += '$';
+            ++i;
+            continue;
+        }
+        if (i + 1 < in.size() && in[i + 1] == '{') {
+            *error = "inline PTX operand modifiers are unsupported";
+            return false;
+        }
+        std::size_t end = i + 1;
+        while (end < in.size() && std::isdigit(static_cast<unsigned char>(in[end]))) ++end;
+        if (end == i + 1) {
+            *error = "malformed inline PTX operand reference";
+            return false;
+        }
+        const std::size_t index = static_cast<std::size_t>(std::stoul(in.substr(i + 1, end - i - 1)));
+        if (index >= request.bindings.size()) {
+            *error = "inline PTX references operand $" + std::to_string(index) +
+                     " but only " + std::to_string(request.bindings.size()) + " are bound";
+            return false;
+        }
+        const InlineAsmBinding& binding = request.bindings[index];
+        if (binding.is_immediate) {
+            *text += binding.immediate_text;
+        } else {
+            *text += "%cm_asm_" + std::to_string(index);
+        }
+        i = end - 1;
+    }
+    return true;
+}
+
+InlineAsmResult lower_inline_ptx_asm(const InlineAsmRequest& request, Builder* builder,
+                                     std::unordered_map<ValueId, Type>* value_types,
+                                     Function* function, BasicBlock* block) {
+    InlineAsmResult out;
+    std::string text;
+    if (!substitute_inline_asm_operands(request, &text, &out.error)) return out;
+
+    std::vector<std::string> warnings;
+    cumetal::ptx::EntryFunction entry = cumetal::ptx::parse_instruction_block(
+        text, static_cast<int>(request.line), &warnings);
+
+    std::size_t output_count = 0;
+    for (const InlineAsmBinding& binding : request.bindings) {
+        if (binding.is_output) ++output_count;
+    }
+    if (entry.instructions.empty()) {
+        // `asm volatile("" ::: "memory")` and friends: a compiler barrier
+        // with nothing for the GPU to do. Outputs would be undefined.
+        if (output_count != 0) {
+            out.error = "inline PTX defines no instruction but declares an output";
+            return out;
+        }
+        out.ok = true;
+        return out;
+    }
+    for (const auto& instruction : entry.instructions) {
+        const std::string root = root_opcode(instruction.opcode);
+        if (root == "bra" || root == "brx" || root == "call" || root == "ret" ||
+            root == "exit") {
+            out.error = "inline PTX control flow ('" + instruction.opcode +
+                        "') is unsupported; keep branches in CUDA C++";
+            return out;
+        }
+        if (!instruction.supported) {
+            out.error = "unsupported PTX opcode '" + instruction.opcode + "' in inline asm";
+            return out;
+        }
+    }
+
+    Importer importer;
+    importer.builder = *builder;
+    importer.result.module.source_name = request.source_name;
+    importer.result.module.attributes["fp64_mode"] =
+        request.fp64_mode.empty() ? std::string("fast48") : request.fp64_mode;
+    importer.entry = &entry;
+    importer.is_kernel = false;
+
+    std::unordered_map<std::string, ValueId> environment;
+    for (std::size_t i = 0; i < request.bindings.size(); ++i) {
+        const InlineAsmBinding& binding = request.bindings[i];
+        const std::string name = "%cm_asm_" + std::to_string(i);
+        importer.register_types[name] = binding.type;
+        if (binding.is_immediate || !binding.input.has_value()) continue;
+        const Operand& input = *binding.input;
+        ValueId value = kInvalidValue;
+        if (input.kind == OperandKind::kValue) {
+            value = input.value;
+            importer.value_types[value] = input.type;
+        } else {
+            // A symbol (module global) operand: give it an SSA name so the
+            // PTX lowering can treat it like any register.
+            value = importer.builder.next_value();
+            Operation materialize;
+            materialize.opcode = OpCode::kConvert;
+            materialize.operands.push_back(input);
+            materialize.results.push_back(value);
+            materialize.result_types.push_back(input.type);
+            materialize.attributes["bitcast"] = "true";
+            materialize.location = {.file = request.source_name, .line = request.line};
+            block->operations.push_back(std::move(materialize));
+            importer.value_types[value] = input.type;
+        }
+        environment[name] = value;
+        if (binding.tied_output.has_value()) {
+            const std::string tied = "%cm_asm_" + std::to_string(*binding.tied_output);
+            environment[tied] = value;
+            importer.value_types[value] = input.type;
+        }
+    }
+
+    importer.infer_register_types();
+    RawBlock raw;
+    raw.id = kInvalidBlock;
+    raw.name = "cm_inline_asm";
+    for (const auto& instruction : entry.instructions) raw.instructions.push_back(&instruction);
+    importer.raw_blocks.push_back(std::move(raw));
+    importer.allocate_values();
+
+    for (const auto& instruction : entry.instructions) {
+        if (!importer.translate_instruction(function, block, instruction, &environment)) {
+            out.error = importer.result.error.empty()
+                            ? "inline PTX lowering failed"
+                            : importer.result.error;
+            return out;
+        }
+    }
+
+    for (std::size_t i = 0; i < request.bindings.size(); ++i) {
+        if (!request.bindings[i].is_output) continue;
+        const auto value = environment.find("%cm_asm_" + std::to_string(i));
+        if (value == environment.end()) {
+            out.error = "inline PTX never writes output operand $" + std::to_string(i);
+            return out;
+        }
+        const auto type = importer.value_types.find(value->second);
+        out.outputs.push_back(Operand::value_ref(
+            value->second,
+            type != importer.value_types.end() ? type->second : request.bindings[i].type));
+    }
+
+    *builder = importer.builder;
+    for (const auto& [value, type] : importer.value_types) (*value_types)[value] = type;
+    out.caveats = importer.result.module.semantic_caveats;
+    out.ok = true;
+    return out;
+}
+
+}  // namespace detail
 
 PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options) {
     Importer importer;

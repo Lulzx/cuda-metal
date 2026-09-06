@@ -56,8 +56,8 @@ if ! grep -q "invalid CUMETAL_MSL_MATH_MODE='invalid-mode'" "$INVALID_LOG"; then
   echo "FAIL: invalid math mode did not emit a diagnostic"
   exit 1
 fi
-if ! grep -q 'CUMETAL_PROVENANCE .*math_mode=fast .*launch_success=true' "$INVALID_LOG"; then
-  echo "FAIL: invalid math mode did not use the documented fast default"
+if ! grep -q 'CUMETAL_PROVENANCE .*math_mode=safe .*launch_success=true' "$INVALID_LOG"; then
+  echo "FAIL: invalid math mode did not use the CUDA default (safe)"
   exit 1
 fi
 

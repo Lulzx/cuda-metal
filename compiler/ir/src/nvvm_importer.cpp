@@ -18,6 +18,8 @@
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/InlineAsm.h>
+#include "ptx_inline_asm.h"
+#include "private_array_unroll.h"
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -411,28 +413,33 @@ std::string value_name(ValueId value) {
 
 std::string comparison_predicate(llvm::CmpInst::Predicate predicate) {
     switch (predicate) {
+        // Floating predicates keep their ordered/unordered distinction, in
+        // the PTX spelling the MSL backend already lowers: `x != x` is
+        // FCMP_UNE and must be true for NaN, FCMP_ONE must be false for it.
         case llvm::CmpInst::ICMP_EQ:
-        case llvm::CmpInst::FCMP_OEQ:
-        case llvm::CmpInst::FCMP_UEQ: return "eq";
+        case llvm::CmpInst::FCMP_OEQ: return "eq";
+        case llvm::CmpInst::FCMP_UEQ: return "equ";
         case llvm::CmpInst::ICMP_NE:
-        case llvm::CmpInst::FCMP_ONE:
         case llvm::CmpInst::FCMP_UNE: return "ne";
+        case llvm::CmpInst::FCMP_ONE: return "one";
         case llvm::CmpInst::ICMP_SLT: return "slt";
         case llvm::CmpInst::ICMP_ULT:
-        case llvm::CmpInst::FCMP_OLT:
-        case llvm::CmpInst::FCMP_ULT: return "lt";
+        case llvm::CmpInst::FCMP_OLT: return "lt";
+        case llvm::CmpInst::FCMP_ULT: return "ltu";
         case llvm::CmpInst::ICMP_SLE: return "sle";
         case llvm::CmpInst::ICMP_ULE:
-        case llvm::CmpInst::FCMP_OLE:
-        case llvm::CmpInst::FCMP_ULE: return "le";
+        case llvm::CmpInst::FCMP_OLE: return "le";
+        case llvm::CmpInst::FCMP_ULE: return "leu";
         case llvm::CmpInst::ICMP_SGT: return "sgt";
         case llvm::CmpInst::ICMP_UGT:
-        case llvm::CmpInst::FCMP_OGT:
-        case llvm::CmpInst::FCMP_UGT: return "gt";
+        case llvm::CmpInst::FCMP_OGT: return "gt";
+        case llvm::CmpInst::FCMP_UGT: return "gtu";
         case llvm::CmpInst::ICMP_SGE: return "sge";
         case llvm::CmpInst::ICMP_UGE:
-        case llvm::CmpInst::FCMP_OGE:
-        case llvm::CmpInst::FCMP_UGE: return "ge";
+        case llvm::CmpInst::FCMP_OGE: return "ge";
+        case llvm::CmpInst::FCMP_UGE: return "geu";
+        case llvm::CmpInst::FCMP_UNO: return "nan";
+        case llvm::CmpInst::FCMP_ORD: return "num";
         default: return "unsupported";
     }
 }
@@ -538,6 +545,15 @@ struct Importer {
     };
     std::vector<ExternalGlobalInfo> external_globals;
     std::uint64_t external_constant_buffer_size = 0;
+    // Initialised read-only globals embedded in the MSL as `constant` byte
+    // arrays, whatever LLVM address space or name Clang gave them. Those in
+    // addrspace(4) are declared unconditionally as before; the Clang-synthesised
+    // addrspace(0) ones (`__const.<fn>.<var>`, `constinit`, `.str`) are declared
+    // only once a function references them, so a Warp module does not embed
+    // every assertion string it never indexes.
+    std::unordered_set<const llvm::GlobalVariable*> embedded_constants;
+    std::unordered_set<std::string> referenced_embedded_constants;
+    std::vector<GlobalConstant> pending_embedded_constants;
 
     bool fail(const llvm::Instruction* instruction, std::string message) {
         if (instruction != nullptr) {
@@ -559,6 +575,12 @@ struct Importer {
                 }
             }
             if (global != nullptr) {
+                if (embedded_constants.contains(global)) {
+                    referenced_embedded_constants.insert(global->getName().str());
+                    return Operand::symbol(
+                        global->getName().str(),
+                        Type::pointer(Type::integer(8), AddressSpace::kConstant));
+                }
                 return Operand::symbol(
                     global->getName().str(),
                     Type::pointer(Type::integer(8),
@@ -571,6 +593,19 @@ struct Importer {
                      << floating->getValueAPF().bitcastToAPInt().getZExtValue()
                      << "ul";
                 return Operand::immediate(bits.str(), Type::floating(64));
+            }
+            if (llvm::isa<llvm::UndefValue>(constant) || llvm::isa<llvm::PoisonValue>(constant)) {
+                // An uninitialised scalar passed along (Clang at -O0 does this
+                // for a variable read before assignment). Any value is a valid
+                // reading; zero is the one that never reaches the MSL as the
+                // identifier `undef`.
+                const Type type = import_type(value.getType());
+                if (type.is_pointer()) return Operand::immediate("null", type);
+                if (type.kind == TypeKind::kFloat) {
+                    return Operand::immediate(type.bit_width == 64 ? "0x0000000000000000ul" : "0.0",
+                                              type);
+                }
+                return Operand::immediate("0", type);
             }
             return Operand::immediate(constant_spelling(*constant), import_type(value.getType()));
         }
@@ -869,11 +904,63 @@ struct Importer {
         return Operand::value_ref(pointer, found->second.base.type);
     }
 
+    // Constant GEPs folded by LLVM (including loop unrolling) retain their
+    // global's concrete address space, for both embedded constants and shared
+    // arrays. They must never reach MSL as LLVM constant-expression text.
+    std::optional<Operand> import_static_global_pointer(
+        const llvm::Value& value, FunctionState* state, BasicBlock* output_block,
+        const SourceLocation& location) {
+        const llvm::GlobalVariable* global = referenced_global(value);
+        if (global == nullptr) return std::nullopt;
+        const bool embedded = embedded_constants.contains(global);
+        if (!embedded && global->getAddressSpace() != 3) return std::nullopt;
+        std::int64_t expression_offset = 0;
+        const llvm::Value* cursor = &value;
+        while (const auto* expression = llvm::dyn_cast<llvm::ConstantExpr>(cursor)) {
+            if (expression->getOpcode() == llvm::Instruction::GetElementPtr) {
+                llvm::APInt offset(64, 0, true);
+                const auto* gep = llvm::cast<llvm::GEPOperator>(expression);
+                if (!gep->accumulateConstantOffset(input->getDataLayout(), offset)) {
+                    return std::nullopt;
+                }
+                expression_offset += offset.getSExtValue();
+            } else if (!expression->isCast()) {
+                return std::nullopt;
+            }
+            cursor = expression->getOperand(0);
+        }
+        if (embedded) referenced_embedded_constants.insert(global->getName().str());
+        const Type pointer_type = Type::pointer(
+            Type::integer(8), embedded ? AddressSpace::kConstant
+                                      : AddressSpace::kThreadgroup);
+        const Operand base = Operand::symbol(global->getName().str(), pointer_type);
+        if (expression_offset == 0) return base;
+
+        const ValueId pointer = builder.next_value();
+        state->value_types[pointer] = pointer_type;
+        Operation offset;
+        offset.opcode = OpCode::kPointerOffset;
+        offset.results = {pointer};
+        offset.result_types = {pointer_type};
+        offset.operands = {
+            base,
+            Operand::immediate(std::to_string(expression_offset), Type::integer(64)),
+        };
+        offset.attributes["offset_unit"] = "bytes";
+        offset.location = location;
+        output_block->operations.push_back(std::move(offset));
+        return Operand::value_ref(pointer, pointer_type);
+    }
+
     Operand import_pointer_operand(const llvm::Value& value, FunctionState* state,
                                    BasicBlock* output_block,
                                    const SourceLocation& location) {
         if (auto external = import_external_pointer(value, state, output_block, location)) {
             return *external;
+        }
+        if (auto embedded =
+                import_static_global_pointer(value, state, output_block, location)) {
+            return *embedded;
         }
         return import_operand(value, *state);
     }
@@ -1325,6 +1412,168 @@ struct Importer {
                text.find("atom.add.f32") != std::string::npos;
     }
 
+    // The handful of asm idioms with dedicated IR operations keep their direct
+    // import; everything else goes through the PTX instruction lowering.
+    static bool is_direct_asm_idiom(const llvm::CallBase& call) {
+        if (!call.isInlineAsm()) return false;
+        const auto* assembly = llvm::dyn_cast<llvm::InlineAsm>(call.getCalledOperand());
+        if (assembly == nullptr) return true;  // let import_call report it
+        const std::string text = llvm::StringRef(assembly->getAsmString()).str();
+        return text.find("mov.u32 $0, %activemask") != std::string::npos ||
+               text.find("mov.u32 $0, %laneid") != std::string::npos ||
+               text.find("shfl.sync.idx.b32") != std::string::npos ||
+               text.find("shfl.sync.down.b32") != std::string::npos ||
+               text.find("shfl.sync.up.b32") != std::string::npos;
+    }
+
+    // PTX register type for an inline-asm constraint code.
+    static std::optional<Type> ptx_constraint_type(const std::string& code) {
+        if (code == "r") return Type::integer(32);
+        if (code == "h") return Type::integer(16);
+        if (code == "c") return Type::integer(8);
+        if (code == "l") return Type::integer(64);
+        if (code == "f") return Type::floating(32);
+        if (code == "d") return Type::floating(64);
+        if (code == "b") return Type::predicate();
+        return std::nullopt;
+    }
+
+    bool import_inline_asm(const llvm::CallBase& call, FunctionState* state,
+                           BasicBlock* output_block, const SourceLocation& location) {
+        const auto* assembly = llvm::dyn_cast<llvm::InlineAsm>(call.getCalledOperand());
+        if (assembly == nullptr) return fail(&call, "malformed LLVM inline assembly call");
+        detail::InlineAsmRequest request;
+        request.text = llvm::StringRef(assembly->getAsmString()).str();
+        request.source_name = result.module.source_name;
+        request.line = location.line;
+        if (result.module.attributes.contains("fp64_mode")) {
+            request.fp64_mode = result.module.attributes.at("fp64_mode");
+        }
+
+        std::vector<llvm::Type*> output_types;
+        if (!call.getType()->isVoidTy()) {
+            if (auto* aggregate = llvm::dyn_cast<llvm::StructType>(call.getType())) {
+                for (llvm::Type* element : aggregate->elements()) output_types.push_back(element);
+            } else {
+                output_types.push_back(call.getType());
+            }
+        }
+
+        const llvm::InlineAsm::ConstraintInfoVector constraints = assembly->ParseConstraints();
+        std::size_t output_index = 0;
+        std::size_t input_index = 0;
+        for (const llvm::InlineAsm::ConstraintInfo& info : constraints) {
+            if (info.Type != llvm::InlineAsm::isOutput && info.Type != llvm::InlineAsm::isInput) {
+                continue;  // clobbers and labels are not numbered operands
+            }
+            const std::string code = info.Codes.empty() ? std::string() : info.Codes.front();
+            detail::InlineAsmBinding binding;
+            if (info.Type == llvm::InlineAsm::isOutput) {
+                if (output_index >= output_types.size()) {
+                    return fail(&call, "inline PTX declares more outputs than the call returns");
+                }
+                binding.is_output = true;
+                binding.type = ptx_constraint_type(code).value_or(
+                    import_type(output_types[output_index]));
+                ++output_index;
+                request.bindings.push_back(std::move(binding));
+                continue;
+            }
+            if (input_index >= call.arg_size()) {
+                return fail(&call, "inline PTX declares more inputs than the call passes");
+            }
+            const llvm::Value& argument = *call.getArgOperand(input_index++);
+            const bool tied = !code.empty() &&
+                              std::all_of(code.begin(), code.end(),
+                                          [](unsigned char c) { return std::isdigit(c) != 0; });
+            if (tied) {
+                const std::size_t target = static_cast<std::size_t>(std::stoul(code));
+                if (target >= request.bindings.size() || !request.bindings[target].is_output) {
+                    return fail(&call, "inline PTX ties an input to a missing output");
+                }
+                binding.tied_output = target;
+                binding.type = request.bindings[target].type;
+            } else if (const auto type = ptx_constraint_type(code)) {
+                binding.type = *type;
+            } else if (code == "n" || code == "i") {
+                binding.type = import_type(argument.getType());
+            } else {
+                return fail(&call, "unsupported inline PTX constraint '" + code + "'");
+            }
+            const auto* constant = llvm::dyn_cast<llvm::Constant>(&argument);
+            if (constant != nullptr && !llvm::isa<llvm::GlobalValue>(constant) &&
+                !llvm::isa<llvm::ConstantExpr>(constant)) {
+                binding.is_immediate = true;
+                if (const auto* integer = llvm::dyn_cast<llvm::ConstantInt>(constant)) {
+                    binding.immediate_text = std::to_string(integer->getSExtValue());
+                } else if (const auto* floating = llvm::dyn_cast<llvm::ConstantFP>(constant)) {
+                    const llvm::APInt bits = floating->getValueAPF().bitcastToAPInt();
+                    std::ostringstream text;
+                    text << (bits.getBitWidth() == 64 ? "0d" : "0f") << std::hex
+                         << std::uppercase << std::setw(bits.getBitWidth() / 4)
+                         << std::setfill('0') << bits.getZExtValue();
+                    binding.immediate_text = text.str();
+                } else {
+                    return fail(&call, "unsupported inline PTX immediate operand");
+                }
+            } else if (argument.getType()->isPointerTy()) {
+                binding.input = import_pointer_operand(argument, state, output_block, location);
+            } else {
+                binding.input = import_operand(argument, *state);
+            }
+            request.bindings.push_back(std::move(binding));
+        }
+
+        const detail::InlineAsmResult lowered = detail::lower_inline_ptx_asm(
+            request, &builder, &state->value_types, &state->output, output_block);
+        if (!lowered.ok) return fail(&call, "inline PTX: " + lowered.error);
+        for (const std::string& caveat : lowered.caveats) {
+            if (std::find(result.module.semantic_caveats.begin(),
+                          result.module.semantic_caveats.end(), caveat) ==
+                result.module.semantic_caveats.end()) {
+                result.module.semantic_caveats.push_back(caveat);
+            }
+        }
+        if (call.getType()->isVoidTy()) return true;
+        if (lowered.outputs.size() != output_types.size()) {
+            return fail(&call, "inline PTX produced a different number of outputs than declared");
+        }
+
+        // Connect each output to the value LLVM expects, reinterpreting at
+        // equal width (an "=h" half arrives in an i16) rather than converting.
+        const auto connect = [&](const Operand& output, const Type& expected,
+                                 ValueId destination) -> bool {
+            if (output.type.bit_width != expected.bit_width) {
+                return fail(&call, "inline PTX output width does not match its constraint");
+            }
+            Operation convert;
+            convert.opcode = OpCode::kConvert;
+            convert.location = location;
+            convert.operands.push_back(output);
+            convert.results.push_back(destination);
+            convert.result_types.push_back(expected);
+            convert.attributes["bitcast"] = "true";
+            state->value_types[destination] = expected;
+            output_block->operations.push_back(std::move(convert));
+            return true;
+        };
+        if (!llvm::isa<llvm::StructType>(call.getType())) {
+            const ValueId destination = state->values.at(&call);
+            return connect(lowered.outputs.front(), state->value_types.at(destination),
+                           destination);
+        }
+        FunctionState::AggregateState aggregate;
+        aggregate.type = import_type(call.getType());
+        for (std::size_t i = 0; i < output_types.size(); ++i) {
+            const Type leaf_type = import_type(output_types[i]);
+            const ValueId leaf = builder.next_value();
+            if (!connect(lowered.outputs[i], leaf_type, leaf)) return false;
+            aggregate.leaves[{static_cast<unsigned>(i)}] = Operand::value_ref(leaf, leaf_type);
+        }
+        state->aggregate_components[&call] = std::move(aggregate);
+        return true;
+    }
+
     bool import_call(const llvm::CallBase& call, FunctionState* state, Operation* operation) {
         if (call.isInlineAsm()) {
             const auto* assembly = llvm::dyn_cast<llvm::InlineAsm>(call.getCalledOperand());
@@ -1459,6 +1708,19 @@ struct Importer {
         }
 
         static const std::unordered_map<std::string, std::string> kCudaBuiltins = {
+            // Classification: Metal's builtins test the bit pattern and are
+            // immune to fast-math folding; the double forms are lowered on the
+            // binary64 storage word by the FP64 call path.
+            {"__nv_isnanf", "isnan"},
+            {"__nv_isnand", "isnan"},
+            {"__nv_isinff", "isinf"},
+            {"__nv_isinfd", "isinf"},
+            {"__nv_finitef", "isfinite"},
+            {"__nv_isfinited", "isfinite"},
+            {"__nv_signbitf", "signbit"},
+            {"__nv_signbitd", "signbit"},
+            {"__nv_fabs", "fabs"},
+            {"__nv_copysign", "copysign"},
             {"__nv_fminf", "fmin"},
             {"__nv_fmaxf", "fmax"},
             {"__nv_sqrtf", "sqrt"},
@@ -2304,6 +2566,10 @@ struct Importer {
                 // LLVM optimization passes and has no runtime GPU semantics.
                 return true;
             }
+            if (call->isInlineAsm() && !is_float_atomic_add_asm(*call) &&
+                !is_direct_asm_idiom(*call)) {
+                return import_inline_asm(*call, state, output_block, operation.location);
+            }
             if (is_float_atomic_add_asm(*call)) {
                 // CuMetal's CUDA overlay spells `atomicAdd(float*, float)` as
                 // `atom.global.add.f32` so the PTX path selects Metal's native
@@ -2607,15 +2873,24 @@ struct Importer {
                     std::move(external_symbol));
                 continue;
             }
+            // Every other initialised read-only global is an embedded constant
+            // table, whatever its LLVM address space or name. Clang keeps CUDA
+            // `__constant__` tables in addrspace(4), but it synthesises
+            // addrspace(0) private constants for function-local
+            // `const T tbl[] = {...}` (`__const.<fn>.<var>`), brace-initialised
+            // aggregate temporaries (`constinit`, `constinit1`, ...), string
+            // literals (`.str`) and compound literals. Skipping those left the
+            // reference in the MSL with no declaration, which Apple's compiler
+            // reported as an undeclared identifier on a temporary file.
             if (!global.isConstant() || !global.hasInitializer() ||
-                global.getAddressSpace() != 4 ||
+                global.getAddressSpace() == 3 ||
                 global.getName().starts_with("llvm.")) {
                 continue;
             }
-            const std::uint64_t size = global_size;
             GlobalConstant imported;
             imported.name = global.getName().str();
-            imported.bytes.assign(size, 0);
+            // A zero-length array still needs one byte to be declarable.
+            imported.bytes.assign(global_size == 0 ? 1 : global_size, 0);
             imported.alignment = global.getAlign().has_value()
                                      ? global.getAlign()->value()
                                      : 1;
@@ -2625,7 +2900,12 @@ struct Importer {
                                imported.name;
                 return std::move(result);
             }
-            result.module.global_constants.push_back(std::move(imported));
+            embedded_constants.insert(&global);
+            if (global.getAddressSpace() == 4) {
+                result.module.global_constants.push_back(std::move(imported));
+            } else {
+                pending_embedded_constants.push_back(std::move(imported));
+            }
         }
 
         std::vector<const llvm::Function*> functions_to_import;
@@ -2670,6 +2950,50 @@ struct Importer {
 
         for (const llvm::Function* function : functions_to_import) {
             if (!import_function(*function)) return std::move(result);
+        }
+        for (GlobalConstant& constant : pending_embedded_constants) {
+            if (referenced_embedded_constants.contains(constant.name)) {
+                result.module.global_constants.push_back(std::move(constant));
+            }
+        }
+        // Every symbol operand that names one of the input module's globals
+        // must now have a declaration; otherwise the only diagnostic would be
+        // Apple's compiler failing on a temporary file. This is what an
+        // `extern __device__` variable with no definition looks like.
+        {
+            std::unordered_set<std::string> declared;
+            for (const GlobalConstant& constant : result.module.global_constants) {
+                declared.insert(constant.name);
+            }
+            for (const ExternalSymbol& symbol : result.module.external_symbols) {
+                declared.insert(symbol.name);
+            }
+            for (const GlobalThreadgroup& shared : result.module.global_threadgroups) {
+                declared.insert(shared.name);
+            }
+            std::unordered_set<std::string> module_globals;
+            for (const llvm::GlobalVariable& global : module->globals()) {
+                module_globals.insert(global.getName().str());
+            }
+            for (const Function& function : result.module.functions) {
+                for (const BasicBlock& block : function.blocks) {
+                    for (const Operation& operation : block.operations) {
+                        for (const Operand& operand : operation.operands) {
+                            if (operand.kind != OperandKind::kSymbol ||
+                                declared.contains(operand.text) ||
+                                !module_globals.contains(operand.text)) {
+                                continue;
+                            }
+                            result.error = "device global '" + operand.text +
+                                           "' is referenced by '" + function.name +
+                                           "' but has no definition in this module; "
+                                           "extern __device__/__constant__ symbols cannot "
+                                           "be resolved by CuMetal";
+                            return std::move(result);
+                        }
+                    }
+                }
+            }
         }
         if (result.module.functions.empty()) {
             result.error = "LLVM module contains no device function definitions";
@@ -2745,11 +3069,20 @@ NvvmImportResult parse_module(std::unique_ptr<llvm::MemoryBuffer> buffer,
             llvm::LoopUnrollPass(unroll_options)});
     function_passes.addPass(
         RunForMarkedPrivateShufflePass<llvm::SimplifyCFGPass>{});
+    function_passes.addPass(PrivateArrayUnrollPass{});
     llvm::ModulePassManager passes;
     passes.addPass(llvm::createModuleToFunctionPassAdaptor(
         std::move(function_passes)));
     passes.run(*module, module_analyses);
 
+    std::string optimized_verification;
+    llvm::raw_string_ostream optimized_stream(optimized_verification);
+    if (llvm::verifyModule(*module, &optimized_stream)) {
+        optimized_stream.flush();
+        NvvmImportResult result;
+        result.error = "invalid LLVM/NVVM module after normalization: " + optimized_verification;
+        return result;
+    }
     return Importer{}.run(module.get(), options);
 }
 

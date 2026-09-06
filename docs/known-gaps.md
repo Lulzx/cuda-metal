@@ -25,7 +25,9 @@ The named five-kernel Phase 5 release set is closed for its selected-set
 criterion; broader performance claims remain explicitly out of scope.
 The [matmul study](matmul-performance.md) measures a remaining custom FP32
 CUDA-kernel gap to MPS; its source-tile optimization is not an automatic
-compiler optimization or evidence of M1/NVIDIA performance.
+compiler optimization or evidence of M1/NVIDIA performance. A separate
+[bounded private-array compiler pass](compiler-performance.md) targets large
+per-thread arrays; it does not automatically retile kernels or provide MPS parity.
 
 The executable priority/evidence table is in
 [the specification closure roadmap](spec-closure-roadmap.md).

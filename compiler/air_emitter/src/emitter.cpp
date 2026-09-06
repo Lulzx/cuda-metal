@@ -514,6 +514,13 @@ EmitResult emit_experimental(const EmitOptions& options) {
     return result;
 }
 
+// The Metal compiler flags for the requested floating-point contract.
+std::string math_flags(const EmitOptions& options) {
+    std::string flags = options.math_mode == "fast" ? "-ffast-math" : "-fno-fast-math";
+    flags += options.fp_contract ? " -ffp-contract=fast" : " -ffp-contract=off";
+    return flags;
+}
+
 EmitResult emit_with_xcrun(const EmitOptions& options) {
     EmitResult result;
     result.mode_used = EmitMode::kXcrun;
@@ -571,7 +578,9 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
                 return result;
             }
         }
-        const std::string command = xcrun_metal_bin + " metal -c " + quote_shell(metal_input.string()) +
+        const std::string command = xcrun_metal_bin + " metal -fno-strict-aliasing " +
+                                    math_flags(options) + " -c " +
+                                    quote_shell(metal_input.string()) +
                                     " -o " + quote_shell(temp_air.string()) + " 2>&1";
         const CommandResult cmd = run_command_capture(command);
         result.logs.push_back("$ " + command);
@@ -623,7 +632,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
                     "skipped air-opt for SIMD-safe lock-bank atomic control flow");
             }
             // Full AOT compilation: metal input.ll -o output.metallib (no -c flag)
-            const std::string command = xcrun_bin + " metal " + quote_shell(llvm_input.string()) + " -o " +
+            const std::string command = xcrun_bin + " metal -fno-strict-aliasing " + quote_shell(llvm_input.string()) + " -o " +
                                         quote_shell(options.output.string()) + " 2>&1";
             const CommandResult cmd = run_command_capture(command);
             result.logs.push_back("$ " + command);
@@ -638,7 +647,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
             }
             // AOT compilation failed — fall back to Air bitcode path
             result.logs.push_back("xcrun metal AOT failed, falling back to Air bitcode path");
-            const std::string fallback_cmd = xcrun_bin + " metal -c " + quote_shell(llvm_input.string()) + " -o " +
+            const std::string fallback_cmd = xcrun_bin + " metal -fno-strict-aliasing -c " + quote_shell(llvm_input.string()) + " -o " +
                                              quote_shell(temp_air.string()) + " 2>&1";
             const CommandResult fallback = run_command_capture(fallback_cmd);
             result.logs.push_back("$ " + fallback_cmd);
@@ -709,7 +718,8 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
                 return result;
             }
             const auto compiled = temp_dir / ("support-" + std::to_string(index) + ".air");
-            const std::string command = xcrun_bin + " metal -std=metal3.2 -c " +
+            const std::string command = xcrun_bin + " metal -std=metal3.2 -fno-strict-aliasing " +
+                math_flags(options) + " -c " +
                 quote_shell(input.string()) + " -o " + quote_shell(compiled.string()) + " 2>&1";
             const CommandResult cmd = run_command_capture(command);
             result.logs.push_back("$ " + command);

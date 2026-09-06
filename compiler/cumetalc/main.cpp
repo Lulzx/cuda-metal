@@ -469,6 +469,12 @@ bool emit_inspection_stage(const cumetal::metal::PtxToMslResult& compiled,
     return write_text_output(output, text, overwrite, error);
 }
 
+// Floating-point contract for generated MSL, set from the command line and
+// read wherever a metallib is emitted. CUDA's default is IEEE comparisons
+// with FMA contraction; --use_fast_math selects Apple's fast-math.
+std::string g_math_mode = "safe";
+bool g_fp_contract = true;
+
 struct ExecutableDriverOptions {
     std::filesystem::path input;
     std::filesystem::path output;
@@ -1167,6 +1173,8 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     emit.mode = cumetal::air_emitter::EmitMode::kXcrun;
     emit.overwrite = true;
     emit.validate_output = true;
+    emit.math_mode = g_math_mode;
+    emit.fp_contract = g_fp_contract;
     if (metal_text.find("cm_fp64_") != std::string::npos) {
         emit.textual_include_inputs.push_back(
             std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
@@ -1261,6 +1269,10 @@ int main(int argc, char** argv) {
     std::vector<std::filesystem::path> cuda_include_dirs;
     std::vector<std::string> cuda_defines;
     std::vector<std::filesystem::path> cuda_forced_includes;
+    std::vector<std::string> cuda_undefines;
+    std::vector<std::string> extra_clang_args;
+    std::string cuda_std = "c++20";
+    bool device_default_execution_space = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -1395,6 +1407,40 @@ int main(int argc, char** argv) {
             cuda_include_dirs.emplace_back(argv[++i]);
         } else if (arg.size() > 2 && arg.substr(0, 2) == "-I") {
             cuda_include_dirs.emplace_back(arg.substr(2));
+        } else if (arg == "--device-as-default-execution-space" || arg == "-default-device") {
+            device_default_execution_space = true;
+        } else if (arg.rfind("-std=", 0) == 0 || arg.rfind("--std=", 0) == 0) {
+            cuda_std = arg.substr(arg.find('=') + 1);
+            if (cuda_std.rfind("c++", 0) != 0) {
+                std::cerr << "-std expects a C++ standard such as c++17\n";
+                return 2;
+            }
+        } else if (arg == "-U") {
+            if (i + 1 >= argc) {
+                std::cerr << "-U expects a macro name\n";
+                return 2;
+            }
+            cuda_undefines.emplace_back(argv[++i]);
+        } else if (arg.size() > 2 && arg.substr(0, 2) == "-U") {
+            cuda_undefines.emplace_back(arg.substr(2));
+        } else if (arg == "--use_fast_math" || arg == "-use_fast_math") {
+            g_math_mode = "fast";
+        } else if (arg == "--fmad=true" || arg == "-fmad=true") {
+            g_fp_contract = true;
+        } else if (arg == "--fmad=false" || arg == "-fmad=false") {
+            g_fp_contract = false;
+        } else if (arg == "-O0" || arg == "-O1" || arg == "-O2" || arg == "-O3" || arg == "-Os") {
+            // Accepted for nvcc/NVRTC command-line compatibility. Device
+            // optimisation happens in Apple's Metal compiler at its default
+            // level; the LLVM pipeline the importer consumes is fixed.
+        } else if (arg == "--clang-arg") {
+            if (i + 1 >= argc) {
+                std::cerr << "--clang-arg expects an argument\n";
+                return 2;
+            }
+            extra_clang_args.emplace_back(argv[++i]);
+        } else if (arg.rfind("--clang-arg=", 0) == 0) {
+            extra_clang_args.emplace_back(arg.substr(std::string("--clang-arg=").size()));
         } else if (arg == "-D") {
             if (i + 1 >= argc) {
                 std::cerr << "-D expects a definition\n";
@@ -1550,7 +1596,7 @@ int main(int argc, char** argv) {
         temp_stage_file = make_temp_path(".ptx");
         std::string command =
             quote_shell(compiler.string()) +
-            " -x cuda --cuda-device-only -S -std=c++17 -O1 -fno-jump-tables"
+            " -x cuda --cuda-device-only -S -std=" + cuda_std + " -O1 -fno-jump-tables"
             " -ftrivial-auto-var-init=zero"
             " --cuda-gpu-arch=" +
             quote_shell(cuda_arch) +
@@ -1803,7 +1849,7 @@ int main(int argc, char** argv) {
             const std::string ptx_feature = ptx_feature_for_arch(arch);
             std::string command =
                 quote_shell(clang.string()) +
-                " -x cuda --cuda-device-only -std=c++20 -O0 "
+                " -x cuda --cuda-device-only -std=" + cuda_std + " -O0 "
                 "-Xclang -disable-O0-optnone -S -emit-llvm "
                 "-gline-tables-only -nocudainc -nocudalib "
                 "--cuda-gpu-arch=" + quote_shell(arch) + " ";
@@ -1814,14 +1860,27 @@ int main(int argc, char** argv) {
             command += "-D__CUDACC__=1 -D__NVCC__=1 -I " +
                        quote_shell(runtime_api_dir.string()) +
                        " -include cuda_runtime.h ";
+            if (device_default_execution_space) {
+                // NVRTC's --device-as-default-execution-space: the region
+                // opens after CuMetal's own header (and the SDK headers it
+                // pre-includes) and before the caller's forced includes.
+                command += "-include cumetal_device_default_execution_space.h "
+                           "-DCUMETAL_DEVICE_DEFAULT_EXECUTION_SPACE=1 ";
+            }
             for (const auto& include_dir : cuda_include_dirs) {
                 command += "-I " + quote_shell(include_dir.string()) + " ";
             }
             for (const auto& define : cuda_defines) {
                 command += "-D " + quote_shell(define) + " ";
             }
+            for (const auto& undefine : cuda_undefines) {
+                command += "-U " + quote_shell(undefine) + " ";
+            }
             for (const auto& forced_include : cuda_forced_includes) {
                 command += "-include " + quote_shell(forced_include.string()) + " ";
+            }
+            for (const auto& extra : extra_clang_args) {
+                command += quote_shell(extra) + " ";
             }
             command += quote_shell(original_input.string()) + " -o " +
                        quote_shell(raw_device_ll.string()) + " 2>&1";

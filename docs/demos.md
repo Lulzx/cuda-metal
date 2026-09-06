@@ -141,7 +141,9 @@ The program should print a numerical `PASS`. The trace must contain a
 `CUMETAL_PROVENANCE` record with `device=apple_gpu` and `launch_success=true`.
 A correct number without GPU provenance is not proof of GPU execution.
 
-Runtime-compiled MSL preserves Metal's fast-math default. Set
-`CUMETAL_MSL_MATH_MODE=safe` to request safe Metal math for JIT-compiled source;
-GPU provenance reports the selected `math_mode`. Precompiled metallibs retain
-the policy used when they were built.
+Generated MSL is compiled under CUDA's floating-point contract: IEEE
+comparisons with NaN and infinity preserved, FMA contraction allowed. Apple's
+compiler defaults to fast math, under which `x != x` is false for NaN; set
+`CUMETAL_MSL_MATH_MODE=fast` (or pass `--use_fast_math` to `cumetalc`) to opt
+into that. GPU provenance reports the selected `math_mode`. Precompiled
+metallibs retain the policy used when they were built.

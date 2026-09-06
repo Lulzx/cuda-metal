@@ -1,0 +1,10 @@
+{
+  "size": 4096,
+  "iterations": 10,
+  "rounds": 3,
+  "artifacts": {
+    "/Users/lulzx/work/cumetal/build-release-noshim/matmul-bench/matmul_bench": "344aac8ad06d63609e8e12c9ba18f7ae588f6f8540823fe7cabfe197b3eb997e",
+    "/Users/lulzx/work/cumetal/build-release-noshim/matmul-bench/kernels.metallib": "6ae0592617c04360eeaf783a6d6fb944be6e049e39c3e83661c5c88f4af459bf",
+    "/private/tmp/mm-after/kernels.metallib": "46aba54e41e686db8a2474d3c26652ab1813dd2c4cc10dc13eaefc7f5aef05d9"
+  }
+}

@@ -205,6 +205,57 @@
       "source": "float_atomics.cu",
       "binary": "float_atomics",
       "harness": "standard"
+    },
+    {
+      "name": "descriptor_copy",
+      "subdir": "descriptor_copy",
+      "source": "descriptor_copy.cu",
+      "binary": "descriptor_copy",
+      "harness": "standard",
+      "backends": [
+        "native-aot"
+      ]
+    },
+    {
+      "name": "ref_return",
+      "subdir": "ref_return",
+      "source": "ref_return.cu",
+      "binary": "ref_return",
+      "harness": "standard",
+      "backends": [
+        "native-aot"
+      ]
+    },
+    {
+      "name": "local_const_tables",
+      "subdir": "local_const_tables",
+      "source": "local_const_tables.cu",
+      "binary": "local_const_tables",
+      "harness": "standard"
+    },
+    {
+      "name": "nan_semantics",
+      "subdir": "nan_semantics",
+      "source": "nan_semantics.cu",
+      "binary": "nan_semantics",
+      "harness": "standard"
+    },
+    {
+      "name": "inline_ptx_idioms",
+      "subdir": "inline_ptx_idioms",
+      "source": "inline_ptx_idioms.cu",
+      "binary": "inline_ptx_idioms",
+      "harness": "standard"
+    },
+    {
+      "name": "fp64_device_calls",
+      "subdir": "fp64_device_calls",
+      "source": "fp64_device_calls.cu",
+      "binary": "fp64_device_calls",
+      "harness": "standard",
+      "backends": [
+        "native-aot"
+      ]
     }
   ]
 }

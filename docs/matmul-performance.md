@@ -10,6 +10,9 @@ Run the [matmul demo](../demos/matmul/README.md) with
 `bash demos/matmul/run.sh` to build, validate, and repeat this comparison.
 Use `--quick` for a smaller smoke run.
 
+This page records the original source-tuning experiment. The later
+[compiler optimization](compiler-performance.md) has separate before/after evidence.
+
 ## Outcome
 
 The article's basic optimization story reproduces, but its final vectorization
@@ -126,3 +129,10 @@ error thresholds, source/host-path scope, and native Metal control. The focused
 benchmark tests passed on Release/shim-off. The repository-wide CTest suite
 was not rerun: this change adds a standalone experiment and documentation and
 preserves the pre-existing compiler/runtime work.
+
+## Follow-up: compiler optimization
+
+The measurements above precede the bounded private-array compiler pass. A
+[separate compiler study](compiler-performance.md) tests the unchanged
+large-accumulator kernel before and after that pass. It is distinct from the
+source-level tiling improvement measured here.

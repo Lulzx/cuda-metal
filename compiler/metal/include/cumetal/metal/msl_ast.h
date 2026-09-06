@@ -247,6 +247,7 @@ struct MslStruct {
 struct MslGlobalByteArray {
     std::string name;
     std::vector<std::uint8_t> bytes;
+    std::uint32_t alignment = 1;
 };
 
 struct MslModule {

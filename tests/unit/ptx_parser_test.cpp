@@ -421,6 +421,48 @@ $L_one:
         return 1;
     }
 
+    // A bare register declared inside a `{ ... }` block is renamed only within
+    // that block. cuda-samples kernels declare `.extern .shared .b8 tmp[]` AND
+    // `{ .reg .b32 tmp; mov.b64 {tmp, %r2}, %rd1; }`; a rename that leaked out
+    // of the block rewrote the later `mov.b64 %rd2, tmp;` (the shared symbol).
+    const std::string scoped_register_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.extern .shared .align 16 .b8 tmp[];
+.visible .entry scoped(
+    .param .u64 scoped_0
+) {
+    .reg .b32 %r<4>;
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [scoped_0];
+    {
+    .reg .b32 tmp;
+    mov.b64 {tmp, %r2}, %rd1;
+    mov.b32 %r1, tmp;
+    }
+    { .reg .b32 tmp; mov.b64 {tmp, %r3}, %rd1; }
+    mov.b64 %rd2, tmp;
+    ret;
+}
+)PTX";
+    const auto scoped = cumetal::ptx::parse_ptx(scoped_register_ptx);
+    bool scoped_ok = scoped.ok && scoped.module.entries.size() == 1;
+    std::size_t renamed_uses = 0;
+    std::size_t bare_uses = 0;
+    if (scoped_ok) {
+        for (const auto& instruction : scoped.module.entries[0].instructions) {
+            for (const auto& operand : instruction.operands) {
+                if (operand.find("%r_cm_tmp") != std::string::npos) ++renamed_uses;
+                if (operand == "tmp") ++bare_uses;
+            }
+        }
+    }
+    if (!expect(scoped_ok && renamed_uses == 3 && bare_uses == 1,
+                "bare .reg names are renamed only inside their brace scope")) {
+        std::fprintf(stderr, "  renamed_uses=%zu bare_uses=%zu\n", renamed_uses, bare_uses);
+        return 1;
+    }
+
     std::printf("PASS: ptx parser unit tests\n");
     return 0;
 }

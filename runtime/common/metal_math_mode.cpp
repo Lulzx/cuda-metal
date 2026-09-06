@@ -12,8 +12,11 @@ namespace cumetal {
 MetalMathMode current_metal_math_mode() {
     static const MetalMathMode mode = [] {
         const char* value = std::getenv("CUMETAL_MSL_MATH_MODE");
+        // CUDA's default contract is IEEE comparisons with NaN and infinity
+        // preserved; Apple's fast-math folds `x != x` to false. Fast math is
+        // an explicit request, never the default.
         if (value == nullptr || value[0] == '\0') {
-            return MetalMathMode::kFast;
+            return MetalMathMode::kSafe;
         }
         std::string normalized(value);
         std::transform(
@@ -28,8 +31,8 @@ MetalMathMode current_metal_math_mode() {
         warn_once(
             "invalid-msl-math-mode",
             "invalid CUMETAL_MSL_MATH_MODE='" + std::string(value) +
-                "'; expected 'fast' or 'safe', using compatibility default 'fast'");
-        return MetalMathMode::kFast;
+                "'; expected 'fast' or 'safe', using the CUDA default 'safe'");
+        return MetalMathMode::kSafe;
     }();
     return mode;
 }

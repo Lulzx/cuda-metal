@@ -1,0 +1,86 @@
+[
+  {
+    "round": 1,
+    "name": "block64_8x8",
+    "mode": "before",
+    "mean_ms": 586.610737,
+    "gflops": 234.293
+  },
+  {
+    "round": 1,
+    "name": "block64_8x8",
+    "mode": "after",
+    "mean_ms": 96.320229,
+    "gflops": 1426.896
+  },
+  {
+    "round": 1,
+    "name": "block64_32",
+    "mode": "before",
+    "mean_ms": 67.077554,
+    "gflops": 2048.956
+  },
+  {
+    "round": 1,
+    "name": "block64_32",
+    "mode": "after",
+    "mean_ms": 66.403108,
+    "gflops": 2069.767
+  },
+  {
+    "round": 2,
+    "name": "block64_32",
+    "mode": "after",
+    "mean_ms": 66.329788,
+    "gflops": 2072.055
+  },
+  {
+    "round": 2,
+    "name": "block64_32",
+    "mode": "before",
+    "mean_ms": 67.291775,
+    "gflops": 2042.433
+  },
+  {
+    "round": 2,
+    "name": "block64_8x8",
+    "mode": "after",
+    "mean_ms": 96.596996,
+    "gflops": 1422.808
+  },
+  {
+    "round": 2,
+    "name": "block64_8x8",
+    "mode": "before",
+    "mean_ms": 584.438067,
+    "gflops": 235.164
+  },
+  {
+    "round": 3,
+    "name": "block64_8x8",
+    "mode": "before",
+    "mean_ms": 584.674817,
+    "gflops": 235.069
+  },
+  {
+    "round": 3,
+    "name": "block64_8x8",
+    "mode": "after",
+    "mean_ms": 95.079771,
+    "gflops": 1445.512
+  },
+  {
+    "round": 3,
+    "name": "block64_32",
+    "mode": "before",
+    "mean_ms": 66.569655,
+    "gflops": 2064.589
+  },
+  {
+    "round": 3,
+    "name": "block64_32",
+    "mode": "after",
+    "mean_ms": 66.000812,
+    "gflops": 2082.383
+  }
+]

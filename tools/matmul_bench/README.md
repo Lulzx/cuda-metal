@@ -78,3 +78,12 @@ This control uses the same runtime launch path, isolating source translation
 from algorithm choice. It is not MPS and does not use SIMD-group matrix intrinsics.
 
 See [measured results](../../docs/matmul-performance.md) for provenance and limits.
+
+## Comparing compiler changes
+
+`compare_compilers.py` accepts `--runner`, `--before`, `--after`, and `--output`.
+It compares saved metallibs using identical CUDA source and one host/runtime
+runner, alternating before/after order across three rounds. Defaults are 4096
+cubed and ten timed iterations; `--variants` selects kernels. Each timed result
+requires a successful full-output check. See
+[the bounded private-array compiler study](../../docs/compiler-performance.md).

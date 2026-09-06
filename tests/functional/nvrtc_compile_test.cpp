@@ -189,6 +189,51 @@ extern "C" __global__ void header_kernel(float* out, const float* in, int count)
         nvrtcDestroyProgram(&program);
     }
 
+    // NVRTC treats every unannotated function as device code
+    // (--device-as-default-execution-space). A helper with no __device__ on it
+    // must compile under that option and be rejected without it, which is the
+    // difference between Warp's tile headers building and not.
+    {
+        const char* const source = R"(
+inline float twice_unannotated(float x) { return x + x; }
+struct Scale { float factor; Scale(float f) : factor(f) {} float apply(float x) const { return x * factor; } };
+extern "C" __global__ void unannotated_kernel(float* out, const float* in, int count) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < count) {
+        Scale scale(3.0f);
+        out[index] = scale.apply(twice_unannotated(in[index]));
+    }
+}
+)";
+        std::vector<char> image;
+        if (!compile_ok(source, "unannotated_module", kWarpLikeOptions, &image)) {
+            return 1;
+        }
+        std::vector<const char*> host_default;
+        for (const char* option : kWarpLikeOptions) {
+            if (std::strcmp(option, "--device-as-default-execution-space") != 0) {
+                host_default.push_back(option);
+            }
+        }
+        nvrtcProgram program = nullptr;
+        if (!expect(nvrtcCreateProgram(&program, source, "host_default_module", 0, nullptr,
+                                       nullptr) == NVRTC_SUCCESS,
+                    "nvrtcCreateProgram for the host-default case")) {
+            return 1;
+        }
+        const nvrtcResult compiled = nvrtcCompileProgram(
+            program, static_cast<int>(host_default.size()), host_default.data());
+        const std::string log = program_log(program);
+        nvrtcDestroyProgram(&program);
+        if (!expect(compiled == NVRTC_ERROR_COMPILATION &&
+                        log.find("__host__") != std::string::npos,
+                    "without --device-as-default-execution-space an unannotated helper is "
+                    "host-only")) {
+            std::fprintf(stderr, "%s\n", log.c_str());
+            return 1;
+        }
+    }
+
     // Asking for a virtual architecture means asking for PTX, which CuMetal
     // cannot emit from CUDA source. Fail at compile time, with a log that says
     // why, rather than handing back bytes the caller will mis-handle.
