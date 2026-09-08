@@ -35,13 +35,17 @@ Phase1PipelineOutput run_phase1_pipeline(std::string_view ptx, const Phase1Pipel
     Phase1PipelineOutput out;
 
     cumetal::ptx::ParseOptions parse_options;
-    parse_options.strict = options.strict;
+    // Parse the module tolerantly, then apply strictness to the selected entry
+    // in each lowering pass below. CUDA translation units commonly contain
+    // unrelated entry points that use instructions the requested kernel does
+    // not reach; rejecting those makes --entry ineffective as a compatibility
+    // boundary.
+    parse_options.strict = false;
     const auto parsed = cumetal::ptx::parse_ptx(ptx, parse_options);
     if (!parsed.ok) {
         out.error = "ptx parse failed: " + parsed.error;
         return out;
     }
-    out.warnings.insert(out.warnings.end(), parsed.warnings.begin(), parsed.warnings.end());
 
     const cumetal::ptx::EntryFunction* entry = nullptr;
     if (!options.entry_name.empty()) {

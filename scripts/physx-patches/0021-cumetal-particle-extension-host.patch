@@ -1,0 +1,13 @@
+diff --git a/physx/source/compiler/cmake/PhysXExtensions.cmake b/physx/source/compiler/cmake/PhysXExtensions.cmake
+index d3e8b6676..7fa1242d6 100644
+--- a/physx/source/compiler/cmake/PhysXExtensions.cmake
++++ b/physx/source/compiler/cmake/PhysXExtensions.cmake
+@@ -81,7 +81,7 @@ SET(PHYSX_EXTENSIONS_SOURCE
+ )
+ 
+ #TODO, create a propper define for whether GPU features are enabled or not!
+-if (PX_GENERATE_GPU_PROJECTS AND 
++if ((PX_GENERATE_GPU_PROJECTS OR PX_CUMETAL_GPU_RUNTIME) AND
+     (NOT (CMAKE_CROSSCOMPILING OR CMAKE_GENERATOR_PLATFORM STREQUAL "NX64")))
+ 	LIST(APPEND PHYSX_EXTENSIONS_SOURCE "${LL_SOURCE_DIR}/ExtDeformableSkinning.cpp")
+ 	LIST(APPEND PHYSX_EXTENSIONS_SOURCE "${LL_SOURCE_DIR}/ExtParticleExt.cpp")

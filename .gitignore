@@ -32,3 +32,6 @@ a.out
 
 # Matmul demo binaries and measurement logs
 demos/matmul/out/
+
+# PhysX recreation renders and capture data (regenerable, large)
+/videos/

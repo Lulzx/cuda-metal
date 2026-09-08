@@ -140,6 +140,61 @@ patch_marker_is_present() {
                 grep -q 'PX_CUMETAL_KERNEL_INIT(initNarrowphaseKernels5)' \
                     "${PHYSX_REPO}/physx/source/cudamanager/src/CuMetalKernelInitStubs.cpp"
             ;;
+        0021-cumetal-particle-extension-host.patch)
+            grep -q 'PX_GENERATE_GPU_PROJECTS OR PX_CUMETAL_GPU_RUNTIME' \
+                "${PHYSX_REPO}/physx/source/compiler/cmake/PhysXExtensions.cmake"
+            ;;
+        0022-cumetal-physx-recreation-scenes.patch)
+            grep -q 'setWind(PxVec3(10.0f, 0.0f, 2.0f))' \
+                "${PHYSX_REPO}/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp" &&
+                grep -q 'y -= particleSpacing;' \
+                    "${PHYSX_REPO}/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp"
+            ;;
+        0023-cumetal-pbd-cloth-kernels.patch)
+            grep -q 'particlesystem.cu|ps_solveAerodynamics2Launch' \
+                "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt" &&
+                grep -q 'MemCopyBalanced.cu|clampMaxValue' \
+                    "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
+            ;;
+        0024-cumetal-particle-grid-float-floor.patch)
+            grep -q 'gridPos.x = floorf' \
+                "${PHYSX_REPO}/physx/source/gpucommon/src/CUDA/gridCal.cuh"
+            ;;
+        0025-cumetal-pbd-cloth-conformance.patch)
+            grep -q 'CUMETAL_PHYSX_FLAG' \
+                "${PHYSX_REPO}/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp"
+            ;;
+        0026-cumetal-pbd-tgs-kernels.patch)
+            grep -q 'solverMultiBlockTGS.cu|solveWholeIslandTGS' \
+                "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
+            ;;
+        0027-cumetal-pbd-external-force-path.patch)
+            grep -q 'mData.mWind \* 0.25f' \
+                "${PHYSX_REPO}/physx/source/gpusimulationcontroller/src/CUDA/particlesystem.cu" &&
+                grep -q 'if(context.mBodyCount != 0)' \
+                    "${PHYSX_REPO}/physx/source/gpusolver/src/PxgTGSCudaSolverCore.cpp"
+            ;;
+        0028-cumetal-pbd-inflatable-kernels.patch)
+            grep -q 'particlesystem.cu|ps_solveInflatableVolume' \
+                "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
+            ;;
+        0029-cumetal-pbd-inflatable-frog-scenes.patch)
+            test -f \
+                "${PHYSX_REPO}/physx/snippets/snippetpbdinflatable/CuMetalInflatable.cu" &&
+                grep -q 'CUMETAL_PHYSX_FROG' \
+                    "${PHYSX_REPO}/physx/snippets/snippetpbdinflatable/SnippetPBDInflatable.cpp" &&
+                grep -q 'CuMetalInflatable.cu|cumetalInflatablePressure' \
+                    "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
+            ;;
+        0030-cumetal-pbd-flag-capture.patch)
+            grep -q 'CUMETAL_CAPTURE_JSON' \
+                "${PHYSX_REPO}/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp"
+            ;;
+        0031-cumetal-pbd-cloth-drape.patch)
+            grep -q 'cumetalClothCollide' \
+                "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt" &&
+                test -f "${PHYSX_REPO}/physx/snippets/snippetpbdcloth/CuMetalCloth.cu"
+            ;;
         *)
             return 1
             ;;

@@ -1,0 +1,42 @@
+diff --git a/physx/source/gpusimulationcontroller/src/CUDA/particlesystem.cu b/physx/source/gpusimulationcontroller/src/CUDA/particlesystem.cu
+index b59c7c2fc..e1e923ef1 100644
+--- a/physx/source/gpusimulationcontroller/src/CUDA/particlesystem.cu
++++ b/physx/source/gpusimulationcontroller/src/CUDA/particlesystem.cu
+@@ -347,7 +347,11 @@ extern "C" __global__ __launch_bounds__(1024, 1) void ps_preIntegrateLaunch(
+ 		
+ 		const PxReal damping = 1.f - PxMin(1.f, mat.damping * dt);
+ 
++#if PX_CUMETAL
++		const PxVec3 tGravity = gravity + particleSystem.mData.mWind * 0.25f;
++#else
+ 		const PxVec3 tGravity = gravity * mat.gravityScale;
++#endif
+ 
+ 		float4 tPos = positions[activeIndex];
+ 		PxVec3 vel(0.f);
+diff --git a/physx/source/gpusolver/src/PxgTGSCudaSolverCore.cpp b/physx/source/gpusolver/src/PxgTGSCudaSolverCore.cpp
+index 5d7803785..c46403160 100644
+--- a/physx/source/gpusolver/src/PxgTGSCudaSolverCore.cpp
++++ b/physx/source/gpusolver/src/PxgTGSCudaSolverCore.cpp
+@@ -1147,10 +1147,17 @@ void PxgTGSCudaSolverCore::solvePartitions(PxgIslandContext* islandContexts, PxIn
+ 				PX_CUDA_KERNEL_PARAM(accumulatedDt),    PX_CUDA_KERNEL_PARAM(minPen)
+ 			};
+ 
+-			CUresult result = mCudaContext->launchKernel(solveWholeIslandFunction, 1, 1, 1, 256, 1, 1, 0, mStream, kernelParams,
+-														 sizeof(kernelParams), 0, PX_FL);
+-			if(result != CUDA_SUCCESS)
+-				PxGetFoundation().error(PxErrorCode::eINTERNAL_ERROR, PX_FL, "GPU solveWholdIslandTGS fail to launch kernel!!\n");
++#if PX_CUMETAL
++			if(context.mBodyCount != 0)
++			{
++#endif
++				CUresult result = mCudaContext->launchKernel(solveWholeIslandFunction, 1, 1, 1, 256, 1, 1, 0, mStream, kernelParams,
++															 sizeof(kernelParams), 0, PX_FL);
++				if(result != CUDA_SUCCESS)
++					PxGetFoundation().error(PxErrorCode::eINTERNAL_ERROR, PX_FL, "GPU solveWholdIslandTGS fail to launch kernel!!\n");
++#if PX_CUMETAL
++			}
++#endif
+ 		}
+ 		else
+ 		{

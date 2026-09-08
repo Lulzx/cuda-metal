@@ -1,0 +1,88 @@
+diff --git a/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp b/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp
+index 0ef032c..cfdac91 100644
+--- a/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp
++++ b/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp
+@@ -292,6 +292,67 @@ void stepPhysics(bool /*interactive*/)
+ 	}
+ }
+ 	
++static bool validateFlag()
++{
++	const PxU32 numX = 32;
++	const PxU32 numZ = 24;
++	const PxReal spacing = 0.15f;
++	const PxVec3 origin(0.0f, 8.0f, 0.0f);
++	const PxU32 numParticles = numX * numZ;
++	PxVec4* positions = Ext::PxCudaHelpersExt::allocPinnedHostBuffer<PxVec4>(
++		*gCudaContextManager, numParticles);
++	PxVec4* velocities = Ext::PxCudaHelpersExt::allocPinnedHostBuffer<PxVec4>(
++		*gCudaContextManager, numParticles);
++	Ext::PxCudaHelpersExt::copyDToH(*gCudaContextManager, positions,
++		gClothBuffer->getPositionInvMasses(), numParticles);
++	Ext::PxCudaHelpersExt::copyDToH(*gCudaContextManager, velocities,
++		gClothBuffer->getVelocities(), numParticles);
++
++	PxReal maxPinnedDrift = 0.0f;
++	PxReal maxFreeDisplacement = 0.0f;
++	PxReal maxSpeed = 0.0f;
++	PxReal minInvMass = PX_MAX_F32;
++	PxReal maxInvMass = -PX_MAX_F32;
++	PxVec3 minimum(PX_MAX_F32);
++	PxVec3 maximum(-PX_MAX_F32);
++	bool finite = true;
++	for (PxU32 i = 0; i < numX; ++i)
++	{
++		for (PxU32 j = 0; j < numZ; ++j)
++		{
++			const PxVec4& position = positions[id(i, j, numZ)];
++			const PxVec4& velocity = velocities[id(i, j, numZ)];
++			finite = finite && position.isFinite();
++			finite = finite && velocity.isFinite();
++			maxSpeed = PxMax(maxSpeed, PxVec3(velocity.x, velocity.y, velocity.z).magnitude());
++			minInvMass = PxMin(minInvMass, position.w);
++			maxInvMass = PxMax(maxInvMass, position.w);
++			const PxVec3 current(position.x, position.y, position.z);
++			const PxVec3 initial = origin + PxVec3(
++				PxReal(i) * spacing, -PxReal(j) * spacing, 0.0f);
++			const PxReal displacement = (current - initial).magnitude();
++			minimum = minimum.minimum(current);
++			maximum = maximum.maximum(current);
++			if (i == 0)
++				maxPinnedDrift = PxMax(maxPinnedDrift, displacement);
++			else
++				maxFreeDisplacement = PxMax(maxFreeDisplacement, displacement);
++		}
++	}
++
++	Ext::PxCudaHelpersExt::freePinnedHostBuffer(*gCudaContextManager, positions);
++	Ext::PxCudaHelpersExt::freePinnedHostBuffer(*gCudaContextManager, velocities);
++	const bool passed = finite && maxPinnedDrift <= 1.0e-4f &&
++		maxFreeDisplacement >= 5.0e-2f;
++	printf("CUMETAL_PHYSX_FLAG %s particles=%u pinned_drift=%.9g "
++		"free_displacement=%.9g max_speed=%.9g inv_mass=[%.6g,%.6g] "
++		"bounds=[%.6g,%.6g,%.6g]-[%.6g,%.6g,%.6g]\n",
++		passed ? "PASS" : "FAIL", numParticles, maxPinnedDrift,
++		maxFreeDisplacement, maxSpeed, minInvMass, maxInvMass, minimum.x, minimum.y, minimum.z,
++		maximum.x, maximum.y, maximum.z);
++	return passed;
++}
++
+ void cleanupPhysics(bool /*interactive*/)
+ {
+ 	PX_RELEASE(gScene);
+@@ -325,11 +386,14 @@ int snippetMain(int, const char*const*)
+ 	extern void renderLoop();
+ 	renderLoop();
+ #else
+-	static const PxU32 frameCount = 100;
++	static const PxU32 frameCount = 15;
+ 	initPhysics(false);
++	bool passed = false;
+ 	for(PxU32 i=0; i<frameCount; i++)
+ 		stepPhysics(false);
++	passed = validateFlag();
+ 	cleanupPhysics(false);
++	return passed ? 0 : 1;
+ #endif
+ 
+ 	return 0;

@@ -21,6 +21,8 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+
+#include "cumetal_diag.h"
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -267,9 +269,20 @@ std::size_t align_up(std::size_t value, std::size_t alignment) {
     return value + (alignment - remainder);
 }
 
+void unregister_live_buffer(id<MTLBuffer> buffer);
+
 class BufferImpl final : public Buffer {
 public:
-    explicit BufferImpl(id<MTLBuffer> buffer) : buffer_(buffer) {}
+    explicit BufferImpl(id<MTLBuffer> buffer, bool heap_backed = false)
+        : buffer_(buffer), heap_backed_(heap_backed) {}
+
+    ~BufferImpl() override {
+        // Heap-backed allocations are covered by useHeap and are never in the
+        // registry.
+        if (!heap_backed_) {
+            unregister_live_buffer(buffer_);
+        }
+    }
 
     void* contents() const override {
         return [buffer_ contents];
@@ -287,6 +300,10 @@ public:
         return buffer_;
     }
 
+    bool heap_backed() const {
+        return heap_backed_;
+    }
+
     std::pair<id<MTLSharedEvent>, std::uint64_t> last_access() const {
         return {last_access_event_, last_access_value_};
     }
@@ -298,6 +315,7 @@ public:
 
 private:
     id<MTLBuffer> buffer_;
+    bool heap_backed_ = false;
     id<MTLSharedEvent> last_access_event_ = nil;
     std::uint64_t last_access_value_ = 0;
 };
@@ -673,6 +691,10 @@ struct BackendState {
     std::shared_ptr<Buffer> atomic_lock_bank;
     std::shared_ptr<Buffer> device_clock;
     std::vector<HeapArena> buffer_heaps;
+    // Every live device allocation. A kernel can reach any of these through a
+    // raw device address embedded in a struct, so the encoder must be told
+    // about all of them, not just the ones bound as arguments.
+    std::vector<id<MTLBuffer>> live_buffers;
     std::vector<std::weak_ptr<StreamImpl>> streams;
 };
 
@@ -899,8 +921,12 @@ void encode_resource_signals(
 }
 
 BackendState& state() {
-    static BackendState kState;
-    return kState;
+    // Runtime allocation objects can be destroyed by other translation-unit
+    // statics after main returns. Keep the process-wide Metal state alive until
+    // process teardown so their unregister path never touches a destroyed
+    // mutex (cross-TU static destruction order is unspecified).
+    static BackendState* kState = new BackendState;
+    return *kState;
 }
 
 bool ensure_initialized(std::string* error_message) {
@@ -1430,6 +1456,79 @@ bool mixed_encoder_batching_enabled() {
     return enabled;
 }
 
+// Buffers reached through a raw 64-bit device address stored inside a struct
+// are never bound with setBuffer, so Metal does not know the dispatch touches
+// them and they are not made resident. The GPU then reads zeros and silently
+// drops writes, with no fault and no validation error. PhysX reaches most of
+// its solver state exactly this way, through pointers inside device-resident
+// descriptor structs, so every live allocation has to be marked.
+//
+// Only in that mode, though. Marking every live allocation read-write on every
+// dispatch tells Metal each dispatch may write every buffer, which serializes
+// work that has no real dependency: with it on unconditionally, a kernel on a
+// non-blocking stream is ordered against an unrelated null-stream kernel and
+// the two null-stream ordering tests fail. Gate it on the same environment
+// switch that puts raw Metal device addresses into kernel arguments in the
+// first place -- CUMETAL_USE_METAL_DEVICE_ADDRESSES, read here rather than
+// plumbed down so the backend does not depend on the runtime layer.
+bool metal_device_addresses_enabled() {
+    static const bool enabled = [] {
+        // Same rule as the runtime layer's use_metal_device_addresses(): set
+        // to anything but 0/false. The two must not disagree about whether
+        // kernel arguments carry raw device addresses.
+        const char* v = std::getenv("CUMETAL_USE_METAL_DEVICE_ADDRESSES");
+        return v != nullptr && v[0] != '\0' && std::strcmp(v, "0") != 0 &&
+               std::strcmp(v, "false") != 0 && std::strcmp(v, "FALSE") != 0;
+    }();
+    return enabled;
+}
+
+void unregister_live_buffer(id<MTLBuffer> buffer) {
+    if (buffer == nil) {
+        return;
+    }
+    BackendState& backend = state();
+    std::lock_guard<std::mutex> lock(backend.mutex);
+    auto& live = backend.live_buffers;
+    for (auto it = live.begin(); it != live.end(); ++it) {
+        if (*it == buffer) {
+            live.erase(it);
+            return;
+        }
+    }
+}
+
+void mark_allocations_resident(id<MTLComputeCommandEncoder> encoder, BackendState& backend) {
+    if (!metal_device_addresses_enabled()) {
+        return;
+    }
+    cumetal::warn_once(
+        "metal_device_address_residency",
+        "CUMETAL_USE_METAL_DEVICE_ADDRESSES marks every live allocation "
+        "read-write on every dispatch so kernels can follow raw device "
+        "addresses; this removes cross-stream concurrency.");
+    std::vector<id<MTLHeap>> heaps;
+    std::vector<id<MTLBuffer>> buffers;
+    {
+        std::lock_guard<std::mutex> lock(backend.mutex);
+        heaps.reserve(backend.buffer_heaps.size());
+        for (const BackendState::HeapArena& arena : backend.buffer_heaps) {
+            if (arena.heap != nil) {
+                heaps.push_back(arena.heap);
+            }
+        }
+        buffers = backend.live_buffers;
+    }
+    for (id<MTLHeap> heap : heaps) {
+        [encoder useHeap:heap];
+    }
+    if (!buffers.empty()) {
+        [encoder useResources:buffers.data()
+                        count:buffers.size()
+                        usage:(MTLResourceUsageRead | MTLResourceUsageWrite)];
+    }
+}
+
 id<MTLBuffer> allocate_buffer_from_heap_locked(BackendState& backend,
                                                std::size_t size,
                                                std::string* error_message) {
@@ -1655,7 +1754,19 @@ cudaError_t allocate_buffer(std::size_t size,
         error_message->clear();
     }
 
-    *out_buffer = std::make_shared<BufferImpl>(buffer);
+    if (std::getenv("CUMETAL_DEBUG_ALLOC") != nullptr) {
+        std::fprintf(stderr,
+                     "CUMETAL_ALLOC size=%zu heap=%d gpuAddress=0x%llx end=0x%llx\n",
+                     size, use_heap ? 1 : 0,
+                     static_cast<unsigned long long>([buffer gpuAddress]),
+                     static_cast<unsigned long long>([buffer gpuAddress]) + size);
+    }
+
+    if (!use_heap) {
+        backend.live_buffers.push_back(buffer);
+    }
+
+    *out_buffer = std::make_shared<BufferImpl>(buffer, use_heap);
     return cudaSuccess;
 }
 
@@ -2876,6 +2987,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         }
 
         [encoder setComputePipelineState:pipeline];
+        mark_allocations_resident(encoder, backend);
 
         // Metal cannot infer residency for a resource referenced only by a GPU
         // virtual address loaded from another buffer. Texture/surface software
@@ -3394,6 +3506,7 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
         }
 
         [encoder setComputePipelineState:pipeline];
+        mark_allocations_resident(encoder, backend);
 
         for (std::size_t i = 0; i < args.size(); ++i) {
             const KernelArg& arg = args[i];

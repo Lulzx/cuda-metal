@@ -1,0 +1,449 @@
+diff --git a/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp b/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp
+--- a/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp
++++ b/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp
+@@ -40,6 +40,7 @@
+ #include "../snippetutils/SnippetUtils.h"
+ #include "extensions/PxParticleExt.h"
+ #include "extensions/PxCudaHelpersExt.h"
++#include "cudamanager/PxCudaContext.h"
+ 
+ using namespace physx;
+ using namespace ExtGpu;
+@@ -58,7 +59,22 @@
+ static bool							gIsRunning			= true;
+ static FILE*						gCaptureFile		= NULL;
+ static bool							gFirstCaptureFrame	= true;
++static bool							gDrapeScene			= false;
++static PxArray<PxU32>				gCaptureTriangles;
++static CUmodule						gCollideModule		= NULL;
++static CUfunction					gCollideKernel		= NULL;
++static CUstream						gCollideStream		= NULL;
+ 
++// Drape scene: a free square sheet falls onto a fixed sphere under gravity.
++static const PxVec3					gDrapeSphereCenter	= PxVec3(0.0f, 2.5f, 0.0f);
++static const PxReal					gDrapeSphereRadius	= 1.5f;
++
++// Selected by the scene mode in initPhysics; validateCloth reuses them.
++static PxU32						gNumX				= 32;
++static PxU32						gNumZ				= 24;
++static PxReal						gParticleSpacing	= 0.15f;
++static PxVec3						gClothOrigin		= PxVec3(0.0f, 8.0f, 0.0f);
++
+ PxRigidDynamic* sphere;
+ 
+ static void initObstacles()
+@@ -106,8 +122,10 @@
+ 
+ 	const PxReal restOffset = particleSpacing;
+ 	
+-	const PxReal stretchStiffness = 10000.f;
+-	const PxReal shearStiffness = 100.f;
++	PxReal stretchStiffness = 10000.f;
++	PxReal shearStiffness = 100.f;
++	if (const char* v = getenv("CUMETAL_PHYSX_CLOTH_STRETCH")) stretchStiffness = PxReal(atof(v));
++	if (const char* v = getenv("CUMETAL_PHYSX_CLOTH_SHEAR")) shearStiffness = PxReal(atof(v));
+ 	const PxReal springDamping = 0.001f;
+ 
+ 	// Material setup
+@@ -125,7 +143,8 @@
+ 	particleSystem->setParticleContactOffset(restOffset + 0.02f);
+ 	particleSystem->setSolidRestOffset(restOffset);
+ 	particleSystem->setFluidRestOffset(0.0f);
+-	particleSystem->setWind(PxVec3(10.0f, 0.0f, 2.0f));
++	if (!gDrapeScene)
++		particleSystem->setWind(PxVec3(10.0f, 0.0f, 2.0f));
+ 
+ 	gScene->addActor(*particleSystem);
+ 
+@@ -154,7 +173,9 @@
+ 		{
+ 			const PxU32 index = i * numZ + j;
+ 
+-			PxVec4 pos(x, y, z, i == 0 ? 0.0f : 1.0f / particleMass);
++			// The flag pins its leading column; the drape sheet is entirely free.
++			const PxReal invMass = (!gDrapeScene && i == 0) ? 0.0f : 1.0f / particleMass;
++			PxVec4 pos(x, y, z, invMass);
+ 			phase[index] = particlePhase;
+ 			positionInvMass[index] = pos;
+ 			velocity[index] = PxVec4(0.0f);
+@@ -187,14 +208,21 @@
+ 				triangles.pushBack(id(i, j, numZ));
+ 			}
+ 
+-			y -= particleSpacing;
++			// The flag hangs in XY; the drape sheet lies flat in XZ.
++			if (gDrapeScene)
++				z += particleSpacing;
++			else
++				y -= particleSpacing;
+ 		}
++		z = position.z;
+ 		y = position.y;
+ 		x += particleSpacing;
+ 	}
+ 
+ 	PX_ASSERT(numSprings == springs.size());
+ 	PX_ASSERT(numTriangles == triangles.size()/3);
++
++	gCaptureTriangles = triangles;
+ 	
+ 	clothBuffers->addCloth(0.0f, 0.0f, 0.0f, triangles.begin(), numTriangles, springs.begin(), numSprings, positionInvMass, numParticles);
+ 
+@@ -230,6 +258,104 @@
+ PxParticleClothBuffer* getUserClothBuffer()
+ {
+ 	return gClothBuffer;
++}
++
++// Particle/rigid-body narrowphase is not part of the CuMetal PBD kernel
++// closure, so the drape's obstacle is supplied by a source-first CUDA kernel
++// compiled by cumetalc, in the same way the inflatable supplies its pressure.
++static bool initCuMetalCollideKernel()
++{
++	const char* kernelDirectory = getenv("CUMETAL_PHYSX_KERNEL_DIR");
++	if (!kernelDirectory || !gCudaContextManager->tryAcquireContext())
++		return false;
++
++	char path[1024];
++	Pxsnprintf(path, sizeof(path), "%s/cumetalClothCollide.metallib", kernelDirectory);
++	PxCudaContext* context = gCudaContextManager->getCudaContext();
++	PxCUresult result = context->moduleLoadDataEx(&gCollideModule, path, 0, NULL, NULL);
++	if (result.value == 0)
++		result = context->moduleGetFunction(&gCollideKernel, gCollideModule, "cumetalClothCollide");
++	if (result.value == 0)
++		result = context->streamCreate(&gCollideStream, 0);
++	gCudaContextManager->releaseContext();
++
++	if (result.value != 0)
++	{
++		printf("CUMETAL_PHYSX_DRAPE collide kernel load failed (%u): %s\n",
++			PxU32(result), path);
++		gCollideKernel = NULL;
++		return false;
++	}
++	return true;
++}
++
++static bool applyCuMetalCollide(PxReal dt)
++{
++	if (!gCollideKernel)
++		return false;
++
++	PxCudaContext* context = gCudaContextManager->getCudaContext();
++	PxVec4* velocities = gClothBuffer->getVelocities();
++	const PxVec4* positions = gClothBuffer->getPositionInvMasses();
++	const PxU32 count = gClothBuffer->getNbActiveParticles();
++	const PxReal centerX = gDrapeSphereCenter.x;
++	const PxReal centerY = gDrapeSphereCenter.y;
++	const PxReal centerZ = gDrapeSphereCenter.z;
++	const PxReal radius = gDrapeSphereRadius + gParticleSpacing;
++	const PxReal groundY = 0.0f;
++	const PxReal invDt = 1.0f / dt;
++	const PxReal friction = 0.25f;
++	PxCudaKernelParam params[] =
++	{
++		PX_CUDA_KERNEL_PARAM(velocities),
++		PX_CUDA_KERNEL_PARAM(positions),
++		PX_CUDA_KERNEL_PARAM(count),
++		PX_CUDA_KERNEL_PARAM(centerX),
++		PX_CUDA_KERNEL_PARAM(centerY),
++		PX_CUDA_KERNEL_PARAM(centerZ),
++		PX_CUDA_KERNEL_PARAM(radius),
++		PX_CUDA_KERNEL_PARAM(groundY),
++		PX_CUDA_KERNEL_PARAM(invDt),
++		PX_CUDA_KERNEL_PARAM(friction)
++	};
++	const PxU32 blockSize = 256;
++	const PxCUresult result = context->launchKernel(
++		gCollideKernel, (count + blockSize - 1) / blockSize, 1, 1,
++		blockSize, 1, 1, 0, gCollideStream, params, sizeof(params), NULL,
++		__FILE__, __LINE__);
++	if (result.value == 0)
++		context->streamSynchronize(gCollideStream);
++	// Without this the next simulate() re-uploads the stale host-side
++	// velocities and the kernel's work is silently discarded.
++	gClothBuffer->raiseFlags(PxParticleBufferFlag::eUPDATE_VELOCITY);
++	return result.value == 0;
++}
++
++// Capture geometry: the renderer needs the surface topology, not just points.
++static void openCapture(const char* sceneName)
++{
++	const char* capturePath = getenv("CUMETAL_CAPTURE_JSON");
++	if (!capturePath)
++		return;
++
++	gCaptureFile = fopen(capturePath, "wb");
++	if (!gCaptureFile)
++		return;
++
++	fprintf(gCaptureFile, "{\"scene\":\"%s\",\"particle_count\":%u,\"fps\":60"
++		",\"grid\":[%u,%u]",
++		sceneName, gClothBuffer->getNbActiveParticles(), gNumX, gNumZ);
++	fprintf(gCaptureFile, ",\"triangles\":[");
++	for (PxU32 i = 0; i < gCaptureTriangles.size(); ++i)
++		fprintf(gCaptureFile, "%s%u", i ? "," : "", gCaptureTriangles[i]);
++	fprintf(gCaptureFile, "]");
++	if (gDrapeScene)
++		fprintf(gCaptureFile,
++			",\"colliders\":[{\"type\":\"sphere\",\"center\":[%.7g,%.7g,%.7g],"
++			"\"radius\":%.7g}]",
++			double(gDrapeSphereCenter.x), double(gDrapeSphereCenter.y),
++			double(gDrapeSphereCenter.z), double(gDrapeSphereRadius));
++	fprintf(gCaptureFile, ",\"frames\":[");
+ }
+ 
+ static void captureParticleFrame()
+@@ -254,6 +380,38 @@
+ // -----------------------------------------------------------------------------------------------------------------
+ void initPhysics(bool /*interactive*/)
+ {
++	gDrapeScene = getenv("CUMETAL_PHYSX_DRAPE") != NULL;
++	if (gDrapeScene)
++	{
++		// A flat sheet, wide enough to fold well past the sphere's equator.
++		// 31x33 keeps the system under the 1024-particle ceiling above which
++		// the CuMetal PBD path silently stops integrating (see README).
++		gNumX = 31;
++		gNumZ = 33;
++		gParticleSpacing = 0.14f;
++		gClothOrigin = PxVec3(
++			gDrapeSphereCenter.x - 0.5f * PxReal(gNumX - 1) * gParticleSpacing,
++			gDrapeSphereCenter.y + gDrapeSphereRadius + 1.6f,
++			gDrapeSphereCenter.z - 0.5f * PxReal(gNumZ - 1) * gParticleSpacing);
++	}
++	else
++	{
++		// Also held under the 1024-particle ceiling.
++		gNumX = 42;
++		gNumZ = 24;
++		gParticleSpacing = 0.12f;
++		gClothOrigin = PxVec3(0.0f, 8.0f, 0.0f);
++	}
++
++	if (const char* v = getenv("CUMETAL_PHYSX_CLOTH_NX")) gNumX = PxU32(atoi(v));
++	if (const char* v = getenv("CUMETAL_PHYSX_CLOTH_NZ")) gNumZ = PxU32(atoi(v));
++	if (const char* v = getenv("CUMETAL_PHYSX_CLOTH_SPACING")) gParticleSpacing = PxReal(atof(v));
++	if (gDrapeScene)
++		gClothOrigin = PxVec3(
++			gDrapeSphereCenter.x - 0.5f * PxReal(gNumX - 1) * gParticleSpacing,
++			gDrapeSphereCenter.y + gDrapeSphereRadius + 1.6f,
++			gDrapeSphereCenter.z - 0.5f * PxReal(gNumZ - 1) * gParticleSpacing);
++
+ 	gFoundation = PxCreateFoundation(PX_PHYSICS_VERSION, gAllocator, gErrorCallback);
+ 
+ 	gPvd = PxCreatePvd(*gFoundation);
+@@ -286,18 +444,10 @@
+ 	// Setup Cloth
+ 	const PxReal totalClothMass = 10.0f;
+ 
+-	PxU32 numPointsX = 32;
+-	PxU32 numPointsZ = 24;
+-	PxReal particleSpacing = 0.15f;
+-	initCloth(numPointsX, numPointsZ, PxVec3(0.0f, 8.0f, 0.0f),
+-		particleSpacing, totalClothMass);
+-	if (const char* capturePath = getenv("CUMETAL_CAPTURE_JSON"))
+-	{
+-		gCaptureFile = fopen(capturePath, "wb");
+-		if (gCaptureFile)
+-			fprintf(gCaptureFile, "{\"particle_count\":%u,\"fps\":60,\"frames\":[",
+-				gClothBuffer->getNbActiveParticles());
+-	}
++	initCloth(gNumX, gNumZ, gClothOrigin, gParticleSpacing, totalClothMass);
++	if (gDrapeScene && !getenv("CUMETAL_PHYSX_DRAPE_NO_OBSTACLE"))
++		initCuMetalCollideKernel();
++	openCapture(gDrapeScene ? "drape" : "flag");
+ }
+ 
+ // ---------------------------------------------------
+@@ -308,10 +458,13 @@
+ 	{
+ 		const PxReal dt = 1.0f / 60.0f;
+ 
+-		gParticleSystem->setWind(PxVec3(
+-			10.0f + 2.0f * PxSin(simTime * 1.7f),
+-			0.7f * PxSin(simTime * 0.9f),
+-			2.0f + 1.5f * PxSin(simTime * 1.3f)));
++		if (gDrapeScene)
++			applyCuMetalCollide(dt);
++		else
++			gParticleSystem->setWind(PxVec3(
++				10.0f + 2.0f * PxSin(simTime * 1.7f),
++				0.7f * PxSin(simTime * 0.9f),
++				2.0f + 1.5f * PxSin(simTime * 1.3f)));
+ 
+ 		gScene->simulate(dt);
+ 		gScene->fetchResults(true);
+@@ -321,12 +474,73 @@
+ 	}
+ }
+ 	
++// The drape has no pinned reference, so it is gated on contact invariants:
++// the sheet must not sink into the sphere, must wrap past its equator, and
++// must have settled by the end of the capture window.
++static bool validateDrape()
++{
++	const PxU32 numParticles = gNumX * gNumZ;
++	PxVec4* positions = Ext::PxCudaHelpersExt::allocPinnedHostBuffer<PxVec4>(
++		*gCudaContextManager, numParticles);
++	PxVec4* velocities = Ext::PxCudaHelpersExt::allocPinnedHostBuffer<PxVec4>(
++		*gCudaContextManager, numParticles);
++	Ext::PxCudaHelpersExt::copyDToH(*gCudaContextManager, positions,
++		gClothBuffer->getPositionInvMasses(), numParticles);
++	Ext::PxCudaHelpersExt::copyDToH(*gCudaContextManager, velocities,
++		gClothBuffer->getVelocities(), numParticles);
++
++	bool finite = true;
++	PxReal minRadius = PX_MAX_F32;
++	PxReal maxSpeed = 0.0f;
++	PxReal totalSpeed = 0.0f;
++	PxReal minY = PX_MAX_F32;
++	PxReal maxY = -PX_MAX_F32;
++	PxU32 contactCount = 0;
++	for (PxU32 i = 0; i < numParticles; ++i)
++	{
++		const PxVec4& position = positions[i];
++		const PxVec4& velocity = velocities[i];
++		finite = finite && position.isFinite() && velocity.isFinite();
++		const PxReal speed = PxVec3(velocity.x, velocity.y, velocity.z).magnitude();
++		maxSpeed = PxMax(maxSpeed, speed);
++		totalSpeed += speed;
++		const PxVec3 current(position.x, position.y, position.z);
++		const PxReal radius = (current - gDrapeSphereCenter).magnitude();
++		minRadius = PxMin(minRadius, radius);
++		minY = PxMin(minY, current.y);
++		maxY = PxMax(maxY, current.y);
++		if (radius < gDrapeSphereRadius + 2.0f * gParticleSpacing)
++			++contactCount;
++	}
++
++	Ext::PxCudaHelpersExt::freePinnedHostBuffer(*gCudaContextManager, positions);
++	Ext::PxCudaHelpersExt::freePinnedHostBuffer(*gCudaContextManager, velocities);
++
++	// A sheet resting on the sphere touches it, hangs below its equator, and
++	// does not tunnel through its surface.
++	const PxReal penetration = PxMax(0.0f, gDrapeSphereRadius - minRadius);
++	const bool touching = contactCount >= 16;
++	const bool wrapped = minY < gDrapeSphereCenter.y;
++	// A single wedged particle can hold a large velocity while the sheet is
++	// visibly at rest, so rest is judged on the mean, not the maximum.
++	const PxReal meanSpeed = totalSpeed / PxReal(numParticles);
++	const bool settled = meanSpeed < 1.0f;
++	const bool passed = finite && touching && wrapped && settled &&
++		penetration <= 2.0f * gParticleSpacing;
++	printf("CUMETAL_PHYSX_DRAPE %s particles=%u penetration=%.9g contacts=%u "
++		"mean_speed=%.9g max_speed=%.9g y=[%.6g,%.6g] sphere_top=%.6g\n",
++		passed ? "PASS" : "FAIL", numParticles, penetration, contactCount,
++		meanSpeed, maxSpeed, minY, maxY,
++		double(gDrapeSphereCenter.y + gDrapeSphereRadius));
++	return passed;
++}
++
+ static bool validateFlag()
+ {
+-	const PxU32 numX = 32;
+-	const PxU32 numZ = 24;
+-	const PxReal spacing = 0.15f;
+-	const PxVec3 origin(0.0f, 8.0f, 0.0f);
++	const PxU32 numX = gNumX;
++	const PxU32 numZ = gNumZ;
++	const PxReal spacing = gParticleSpacing;
++	const PxVec3 origin = gClothOrigin;
+ 	const PxU32 numParticles = numX * numZ;
+ 	PxVec4* positions = Ext::PxCudaHelpersExt::allocPinnedHostBuffer<PxVec4>(
+ 		*gCudaContextManager, numParticles);
+@@ -390,6 +604,8 @@
+ 		fclose(gCaptureFile);
+ 		gCaptureFile = NULL;
+ 	}
++	// PxArray frees through the foundation allocator, so it cannot outlive it.
++	gCaptureTriangles.reset();
+ 	PX_RELEASE(gScene);
+ 	PX_RELEASE(gDispatcher);
+ 	PX_RELEASE(gPhysics);
+@@ -428,7 +644,7 @@
+ 	bool passed = false;
+ 	for(PxU32 i=0; i<frameCount; i++)
+ 		stepPhysics(false);
+-	passed = validateFlag();
++	passed = gDrapeScene ? validateDrape() : validateFlag();
+ 	cleanupPhysics(false);
+ 	return passed ? 0 : 1;
+ #endif
+diff --git a/physx/snippets/snippetpbdcloth/CuMetalCloth.cu b/physx/snippets/snippetpbdcloth/CuMetalCloth.cu
+new file mode 100644
+--- /dev/null
++++ b/physx/snippets/snippetpbdcloth/CuMetalCloth.cu
+@@ -0,0 +1,62 @@
++// A small source-first CUDA collision driver used by the CuMetal drape
++// recreation. PhysX still owns integration, spring solving, self-collision,
++// and aerodynamics; this kernel only supplies the analytic sphere and ground
++// constraints, because particle/rigid-body narrowphase is not part of the
++// CuMetal PBD kernel closure.
++
++extern "C" __global__ void cumetalClothCollide(
++	float4* velocities, const float4* positions, unsigned int count,
++	float centerX, float centerY, float centerZ, float radius,
++	float groundY, float invDt, float friction)
++{
++	const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
++	if (index >= count)
++		return;
++
++	const float4 position = positions[index];
++	float4 velocity = velocities[index];
++
++	// Analytic sphere: cancel the inward normal velocity and add just enough
++	// separation speed to resolve the current penetration over one step.
++	const float dx = position.x - centerX;
++	const float dy = position.y - centerY;
++	const float dz = position.z - centerZ;
++	const float distanceSquared = dx * dx + dy * dy + dz * dz;
++	if (distanceSquared > 1.0e-12f && distanceSquared < radius * radius)
++	{
++		const float inverseDistance = rsqrtf(distanceSquared);
++		const float nx = dx * inverseDistance;
++		const float ny = dy * inverseDistance;
++		const float nz = dz * inverseDistance;
++		const float depth = radius - 1.0f / inverseDistance;
++
++		const float normalSpeed = velocity.x * nx + velocity.y * ny + velocity.z * nz;
++		const float targetSpeed = depth * invDt * 0.8f;
++		if (normalSpeed < targetSpeed)
++		{
++			const float correction = targetSpeed - normalSpeed;
++			velocity.x += nx * correction;
++			velocity.y += ny * correction;
++			velocity.z += nz * correction;
++		}
++
++		// Coulomb-style tangential damping keeps the sheet from sliding off.
++		const float tangentSpeed = velocity.x * nx + velocity.y * ny + velocity.z * nz;
++		velocity.x -= friction * (velocity.x - nx * tangentSpeed);
++		velocity.y -= friction * (velocity.y - ny * tangentSpeed);
++		velocity.z -= friction * (velocity.z - nz * tangentSpeed);
++	}
++
++	// Ground plane.
++	const float groundDepth = groundY - position.y;
++	if (groundDepth > 0.0f)
++	{
++		const float targetSpeed = groundDepth * invDt * 0.8f;
++		if (velocity.y < targetSpeed)
++			velocity.y = targetSpeed;
++		velocity.x -= friction * velocity.x;
++		velocity.z -= friction * velocity.z;
++	}
++
++	velocities[index] = velocity;
++}
+diff --git a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+--- a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -138,5 +138,6 @@
+ 	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_solveInflatableVolume"
+ 	"../snippets/snippetpbdinflatable/CuMetalInflatable.cu|cumetalInflatablePressure"
++	"../snippets/snippetpbdcloth/CuMetalCloth.cu|cumetalClothCollide"
+ 	"gpunarrowphase/src/CUDA/cudaParticleSystem.cu|ps_reorderPrimitiveContactsLaunch"
+ 	"gpunarrowphase/src/CUDA/cudaSphere.cu|sphereNphase_Kernel"
+ 	"gpunarrowphase/src/CUDA/pairManagement.cu|removeContactManagers_Stage1"

@@ -66,6 +66,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
             TIMEOUT 1800
             ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
         )
+        add_test(
+            NAME conformance_physx_pbd_recreations
+            COMMAND bash
+                    ${CMAKE_CURRENT_SOURCE_DIR}/run_physx_pbd_recreations.sh
+        )
+        set_tests_properties(conformance_physx_pbd_recreations PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 1800
+        )
     else()
         message(STATUS "Skipping PhysX GRB conformance registration (xcrun unavailable)")
     endif()

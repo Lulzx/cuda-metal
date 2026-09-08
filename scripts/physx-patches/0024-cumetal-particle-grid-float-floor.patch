@@ -1,0 +1,17 @@
+diff --git a/physx/source/gpucommon/src/CUDA/gridCal.cuh b/physx/source/gpucommon/src/CUDA/gridCal.cuh
+index b33997682..22d07a99e 100644
+--- a/physx/source/gpucommon/src/CUDA/gridCal.cuh
++++ b/physx/source/gpucommon/src/CUDA/gridCal.cuh
+@@ -35,9 +35,9 @@ PX_FORCE_INLINE static __device__ int3 calcGridPos(const float4& particlePos, con
+ {
+ 	int3 gridPos;
+ 
+-	gridPos.x = floor((particlePos.x) / cellWidth);
+-	gridPos.y = floor((particlePos.y) / cellWidth);
+-	gridPos.z = floor((particlePos.z) / cellWidth);
++	gridPos.x = floorf((particlePos.x) / cellWidth);
++	gridPos.y = floorf((particlePos.y) / cellWidth);
++	gridPos.z = floorf((particlePos.z) / cellWidth);
+ 
+ 	return gridPos;
+ }

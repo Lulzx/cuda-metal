@@ -1,0 +1,85 @@
+diff --git a/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp b/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp
+index cfdac91..6cab7af 100644
+--- a/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp
++++ b/physx/snippets/snippetpbdcloth/SnippetPBDCloth.cpp
+@@ -56,6 +56,8 @@ static PxPvd*						gPvd				= NULL;
+ static PxPBDParticleSystem*			gParticleSystem		= NULL;
+ static PxParticleClothBuffer*		gClothBuffer		= NULL;
+ static bool							gIsRunning			= true;
++static FILE*						gCaptureFile		= NULL;
++static bool							gFirstCaptureFrame	= true;
+ 
+ PxRigidDynamic* sphere;
+ 
+@@ -230,6 +232,25 @@ PxParticleClothBuffer* getUserClothBuffer()
+ 	return gClothBuffer;
+ }
+ 
++static void captureParticleFrame()
++{
++	if (!gCaptureFile)
++		return;
++
++	const PxU32 count = gClothBuffer->getNbActiveParticles();
++	PxVec4* positions = Ext::PxCudaHelpersExt::allocPinnedHostBuffer<PxVec4>(
++		*gCudaContextManager, count);
++	Ext::PxCudaHelpersExt::copyDToH(*gCudaContextManager, positions,
++		gClothBuffer->getPositionInvMasses(), count);
++	fprintf(gCaptureFile, "%s[", gFirstCaptureFrame ? "" : ",");
++	for (PxU32 i = 0; i < count; ++i)
++		fprintf(gCaptureFile, "%s[%.7g,%.7g,%.7g]", i ? "," : "",
++			double(positions[i].x), double(positions[i].y), double(positions[i].z));
++	fprintf(gCaptureFile, "]");
++	gFirstCaptureFrame = false;
++	Ext::PxCudaHelpersExt::freePinnedHostBuffer(*gCudaContextManager, positions);
++}
++
+ // -----------------------------------------------------------------------------------------------------------------
+ void initPhysics(bool /*interactive*/)
+ {
+@@ -270,6 +291,13 @@ void initPhysics(bool /*interactive*/)
+ 	PxReal particleSpacing = 0.15f;
+ 	initCloth(numPointsX, numPointsZ, PxVec3(0.0f, 8.0f, 0.0f),
+ 		particleSpacing, totalClothMass);
++	if (const char* capturePath = getenv("CUMETAL_CAPTURE_JSON"))
++	{
++		gCaptureFile = fopen(capturePath, "wb");
++		if (gCaptureFile)
++			fprintf(gCaptureFile, "{\"particle_count\":%u,\"fps\":60,\"frames\":[",
++				gClothBuffer->getNbActiveParticles());
++	}
+ }
+ 
+ // ---------------------------------------------------
+@@ -289,6 +317,7 @@ void stepPhysics(bool /*interactive*/)
+ 		gScene->fetchResults(true);
+ 		gScene->fetchResultsParticleSystem();
+ 		simTime += dt;
++		captureParticleFrame();
+ 	}
+ }
+ 	
+@@ -355,6 +384,12 @@ static bool validateFlag()
+ 
+ void cleanupPhysics(bool /*interactive*/)
+ {
++	if (gCaptureFile)
++	{
++		fprintf(gCaptureFile, "]}\n");
++		fclose(gCaptureFile);
++		gCaptureFile = NULL;
++	}
+ 	PX_RELEASE(gScene);
+ 	PX_RELEASE(gDispatcher);
+ 	PX_RELEASE(gPhysics);
+@@ -386,7 +421,9 @@ int snippetMain(int, const char*const*)
+ 	extern void renderLoop();
+ 	renderLoop();
+ #else
+-	static const PxU32 frameCount = 15;
++	PxU32 frameCount = 15;
++	if (const char* captureFrames = getenv("CUMETAL_CAPTURE_FRAMES"))
++		frameCount = PxU32(PxMax(1, atoi(captureFrames)));
+ 	initPhysics(false);
+ 	bool passed = false;
+ 	for(PxU32 i=0; i<frameCount; i++)

@@ -1,0 +1,42 @@
+diff --git a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+index b8c9b4c1a..0abf5c25e 100644
+--- a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -62,6 +62,7 @@ ENDFOREACH()
+ # source path relative to physx/source | PTX entry point
+ SET(PX_CUMETAL_KERNEL_SPECS
+ 	"gpucommon/src/CUDA/MemCopyBalanced.cu|MemCopyBalanced"
++	"gpucommon/src/CUDA/MemCopyBalanced.cu|clampMaxValue"
+ 	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortMultiBlockLaunch"
+ 	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortMultiCalculateRanksLaunch"
+ 	"gpucommon/src/CUDA/radixSortImpl.cu|radixSortMultiBlockLaunchWithoutCount"
+@@ -111,6 +112,29 @@ SET(PX_CUMETAL_KERNEL_SPECS
+ 	"gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu|updateBodiesLaunch"
+ 	"gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu|updateShapesLaunch"
+ 	"gpusimulationcontroller/src/CUDA/updateBodiesAndShapes.cu|updateBodyExternalVelocitiesLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_stepParticlesLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_updateUnsortedArrayLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_updateUserBufferLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_preIntegrateLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_updateBoundFirstPassLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_updateBoundSecondPassLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_calculateHashLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_reorderDataAndFindCellStartLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_selfCollisionLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_contactPrepareLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_solveOneWayContactDeltaVLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_updateParticleLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_integrateLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_applyDeltaLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_updateRemapVertsLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_initializeSpringsLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_solveSpringsLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_averageVertsLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_solveAerodynamics1Launch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_solveAerodynamics2Launch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_finalizeParticlesLaunch"
++	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_updateMaterials"
++	"gpunarrowphase/src/CUDA/cudaParticleSystem.cu|ps_reorderPrimitiveContactsLaunch"
+ 	"gpunarrowphase/src/CUDA/cudaSphere.cu|sphereNphase_Kernel"
+ 	"gpunarrowphase/src/CUDA/pairManagement.cu|removeContactManagers_Stage1"
+ 	"gpunarrowphase/src/CUDA/pairManagement.cu|removeContactManagers_Stage2"

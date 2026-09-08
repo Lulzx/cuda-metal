@@ -1,0 +1,16 @@
+diff --git a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+index 928fa8b30..53122d1da 100644
+--- a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -170,6 +170,11 @@ SET(PX_CUMETAL_KERNEL_SPECS
+ 	"gpusolver/src/CUDA/solverMultiBlock.cu|dmaBackChangedElems"
+ 	"gpusolver/src/CUDA/solverMultiBlock.cu|solveStaticBlock"
+ 	"gpusolver/src/CUDA/solverMultiBlock.cu|propagateStaticSolverBodyVelocities"
++	"gpusolver/src/CUDA/solverMultiBlockTGS.cu|ZeroBodiesTGS"
++	"gpusolver/src/CUDA/solverMultiBlockTGS.cu|initializeSolverVelocitiesTGS"
++	"gpusolver/src/CUDA/solverMultiBlockTGS.cu|propagateAverageSolverBodyVelocityTGS"
++	"gpusolver/src/CUDA/solverMultiBlockTGS.cu|applyTGSSubstepGravity"
++	"gpusolver/src/CUDA/solverMultiBlockTGS.cu|solveWholeIslandTGS"
+ 	"gpusolver/src/CUDA/constraintBlockPrep.cu|contactConstraintBlockPrepareParallelLaunch"
+ 	"gpusolver/src/CUDA/constraintBlockPrePrep.cu|constraintContactBlockPrePrepLaunch"
+ 	"gpusolver/src/CUDA/constraintBlockPrePrep.cu|clearFrictionPatchCounts"

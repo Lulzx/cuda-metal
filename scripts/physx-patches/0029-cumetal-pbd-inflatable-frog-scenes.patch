@@ -1,0 +1,349 @@
+diff --git a/physx/snippets/snippetpbdinflatable/SnippetPBDInflatable.cpp b/physx/snippets/snippetpbdinflatable/SnippetPBDInflatable.cpp
+index 66f25b1..98b0f8c 100644
+--- a/physx/snippets/snippetpbdinflatable/SnippetPBDInflatable.cpp
++++ b/physx/snippets/snippetpbdinflatable/SnippetPBDInflatable.cpp
+@@ -41,6 +41,7 @@
+ #include "extensions/PxParticleExt.h"
+ #include "extensions/PxParticleClothCooker.h"
+ #include "extensions/PxCudaHelpersExt.h"
++#include "cudamanager/PxCudaContext.h"
+ 
+ using namespace physx;
+ using namespace ExtGpu;
+@@ -56,6 +57,13 @@ static PxMaterial*					gMaterial			= NULL;
+ static PxPvd*						gPvd				= NULL;
+ static PxPBDParticleSystem*			gParticleSystem		= NULL;
+ static PxParticleClothBuffer*		gUserClothBuffer	= NULL;
++static CUmodule						gPressureModule		= NULL;
++static CUfunction					gPressureKernel		= NULL;
++static CUstream						gPressureStream		= NULL;
++static PxU32						gFrameIndex			= 0;
++static FILE*						gCaptureFile		= NULL;
++static bool							gFirstCaptureFrame	= true;
++static bool							gFrogScene			= false;
+ static bool							gIsRunning			= true;
+ 
+ 
+@@ -121,6 +129,31 @@ static void createSphere(PxArray<PxVec3>& triVerts, PxArray<PxU32>& triIndices,
+ 		projectPointsOntoSphere(triVerts, center, radius);
+ }
+ 
++static void shapeFrog(PxArray<PxVec3>& vertices)
++{
++	for (PxU32 i = 0; i < vertices.size(); ++i)
++	{
++		PxVec3& p = vertices[i];
++		const PxReal nx = p.x * 0.5f;
++		const PxReal ny = p.y * 0.5f;
++		const PxReal upper = PxMax(ny, 0.0f);
++		const PxReal lower = PxMax(-ny, 0.0f);
++		const PxReal side = PxAbs(nx);
++
++		// A closed, sphere-topology frog: broad head, compact torso, large
++		// rear haunches/feet, and two raised eye lobes.
++		p.x *= 0.92f + 0.34f * upper + 0.52f * lower;
++		p.y = p.y * (0.72f + 0.08f * upper) + 0.45f;
++		p.z *= 0.62f + 0.12f * upper;
++		p.x += (nx < 0.0f ? -1.0f : 1.0f) * lower * lower * 0.78f;
++
++		const PxReal eye = PxMax(upper - 0.18f, 0.0f) *
++			PxMax(side - 0.22f, 0.0f) * 2.8f;
++		p.y += eye;
++		p.z += eye * 0.55f;
++	}
++}
++
+ static void initInflatable(PxArray<PxVec3>& verts, PxArray<PxU32>& indices, const PxReal restOffset = 0.1f, const PxReal totalInflatableMass = 10.f)
+ {
+ 	PxCudaContextManager* cudaContextManager = gScene->getCudaContextManager();
+@@ -135,11 +168,11 @@ static void initInflatable(PxArray<PxVec3>& verts, PxArray<PxU32>& indices, cons
+ 
+ 	const PxU32 numParticles = vertices.size();
+ 
+-	const PxReal stretchStiffness = 100000.f;
+-	const PxReal shearStiffness = 1000.f;
+-	const PxReal bendStiffness = 1000.f;
++	const PxReal stretchStiffness = gFrogScene ? 800.f : 0.f;
++	const PxReal shearStiffness = gFrogScene ? 80.f : 0.f;
++	const PxReal bendStiffness = gFrogScene ? 60.f : 0.f;
+ 	
+-	const PxReal pressure = 1.0f; //Pressure is used to compute the target volume of the inflatable by scaling its rest volume
++	const PxReal pressure = 2.0f; //Pressure is used to compute the target volume of the inflatable by scaling its rest volume
+ 
+ 	// Cook cloth
+ 	PxParticleClothCooker* cooker = PxCreateParticleClothCooker(vertices.size(), vertices.begin(), indices.size(), indices.begin(),
+@@ -254,6 +287,81 @@ static void initInflatable(PxArray<PxVec3>& verts, PxArray<PxU32>& indices, cons
+ 	PX_EXT_PINNED_MEMORY_FREE(*cudaContextManager, phases);
+ }
+ 
++static bool initCuMetalPressureKernel()
++{
++	const char* kernelDirectory = getenv("CUMETAL_PHYSX_KERNEL_DIR");
++	if (!kernelDirectory || !gCudaContextManager->tryAcquireContext())
++		return false;
++
++	char path[1024];
++	Pxsnprintf(path, sizeof(path), "%s/cumetalInflatablePressure.metallib", kernelDirectory);
++	PxCudaContext* context = gCudaContextManager->getCudaContext();
++	PxCUresult result = context->moduleLoadDataEx(&gPressureModule, path, 0, NULL, NULL);
++	if (result.value == 0)
++		result = context->moduleGetFunction(&gPressureKernel, gPressureModule, "cumetalInflatablePressure");
++	if (result.value == 0)
++		result = context->streamCreate(&gPressureStream, 0);
++	gCudaContextManager->releaseContext();
++
++	if (result.value != 0)
++	{
++		printf("CUMETAL_PHYSX_INFLATABLE pressure kernel load failed (%u): %s\n",
++			PxU32(result), path);
++		gPressureKernel = NULL;
++		return false;
++	}
++	return true;
++}
++
++static bool applyCuMetalPressure()
++{
++	if (!gPressureKernel)
++		return false;
++
++	PxCudaContext* context = gCudaContextManager->getCudaContext();
++	PxVec4* velocities = gUserClothBuffer->getVelocities();
++	const PxVec4* positions = gUserClothBuffer->getPositionInvMasses();
++	const PxU32 count = gUserClothBuffer->getNbActiveParticles();
++	const PxReal elapsed = PxReal(gFrameIndex) / 60.0f;
++	const PxReal centerY = -0.5f * 9.81f * elapsed * elapsed;
++	const PxReal radialVelocityStep = gFrogScene ? 0.025f : 0.18f;
++	PxCudaKernelParam params[] =
++	{
++		PX_CUDA_KERNEL_PARAM(velocities),
++		PX_CUDA_KERNEL_PARAM(positions),
++		PX_CUDA_KERNEL_PARAM(count),
++		PX_CUDA_KERNEL_PARAM(centerY),
++		PX_CUDA_KERNEL_PARAM(radialVelocityStep)
++	};
++	const PxU32 blockSize = 256;
++	const PxCUresult result = context->launchKernel(
++		gPressureKernel, (count + blockSize - 1) / blockSize, 1, 1,
++		blockSize, 1, 1, 0, gPressureStream, params, sizeof(params), NULL,
++		__FILE__, __LINE__);
++	if (result.value == 0)
++		context->streamSynchronize(gPressureStream);
++	return result.value == 0;
++}
++
++static void captureParticleFrame()
++{
++	if (!gCaptureFile)
++		return;
++
++	const PxU32 count = gUserClothBuffer->getNbActiveParticles();
++	PxVec4* positions = Ext::PxCudaHelpersExt::allocPinnedHostBuffer<PxVec4>(
++		*gCudaContextManager, count);
++	Ext::PxCudaHelpersExt::copyDToH(*gCudaContextManager, positions,
++		gUserClothBuffer->getPositionInvMasses(), count);
++	fprintf(gCaptureFile, "%s[", gFirstCaptureFrame ? "" : ",");
++	for (PxU32 i = 0; i < count; ++i)
++		fprintf(gCaptureFile, "%s[%.7g,%.7g,%.7g]", i ? "," : "",
++			double(positions[i].x), double(positions[i].y), double(positions[i].z));
++	fprintf(gCaptureFile, "]");
++	gFirstCaptureFrame = false;
++	Ext::PxCudaHelpersExt::freePinnedHostBuffer(*gCudaContextManager, positions);
++}
++
+ PxPBDParticleSystem* getParticleSystem()
+ {
+ 	return gParticleSystem;
+@@ -267,6 +375,7 @@ PxParticleClothBuffer* getUserClothBuffer()
+ // -----------------------------------------------------------------------------------------------------------------
+ void initPhysics(bool /*interactive*/)
+ {
++	gFrogScene = getenv("CUMETAL_PHYSX_FROG") != NULL;
+ 	gFoundation = PxCreateFoundation(PX_PHYSICS_VERSION, gAllocator, gErrorCallback);
+ 
+ 	gPvd = PxCreatePvd(*gFoundation);
+@@ -297,32 +406,24 @@ void initPhysics(bool /*interactive*/)
+ 	gMaterial = gPhysics->createMaterial(0.5f, 0.5f, 0.6f);
+ 
+ 	// Setup Cloth
+-	const PxReal totalInflatableMass = 100.0f;
++	const PxReal totalInflatableMass = 10.0f;
+ 	
+-	PxReal particleSpacing = 0.05f;
++	PxReal particleSpacing = 0.1f;
+ 
+ 	PxArray<PxVec3> vertices;
+ 	PxArray<PxU32> indices;
+-	createSphere(vertices, indices, PxVec3(0, 10, 0), 3, 0.25f);
++	createSphere(vertices, indices, PxVec3(0, 0, 0), 2, 0.5f);
++	if (gFrogScene)
++		shapeFrog(vertices);
+ 	initInflatable(vertices, indices, particleSpacing, totalInflatableMass);
+-
+-	initObstacles();
+-
+-	gScene->addActor(*PxCreatePlane(*gPhysics, PxPlane(0.f, 1.f, 0.f, 0.0f), *gMaterial));
+-	
+-
+-	// Setup rigid bodies
+-	const PxReal boxSize = 0.75f;
+-	const PxReal boxMass = 0.25f;
+-	PxShape* shape = gPhysics->createShape(PxBoxGeometry(0.5f * boxSize, 0.5f * boxSize, 0.5f * boxSize), *gMaterial);
+-	for (int i = 0; i < 5; ++i)
++	initCuMetalPressureKernel();
++	if (const char* capturePath = getenv("CUMETAL_CAPTURE_JSON"))
+ 	{
+-		PxRigidDynamic* body = gPhysics->createRigidDynamic(PxTransform(PxVec3(i - 2.0f, 10, 0.f)));
+-		body->attachShape(*shape);
+-		PxRigidBodyExt::updateMassAndInertia(*body, boxMass);
+-		gScene->addActor(*body);
++		gCaptureFile = fopen(capturePath, "wb");
++		if (gCaptureFile)
++			fprintf(gCaptureFile, "{\"particle_count\":%u,\"fps\":60,\"frames\":[",
++				gUserClothBuffer->getNbActiveParticles());
+ 	}
+-	shape->release();
+ }
+ 
+ // ---------------------------------------------------
+@@ -331,14 +432,78 @@ void stepPhysics(bool /*interactive*/)
+ 	if (gIsRunning)
+ 	{
+ 		const PxReal dt = 1.0f / 60.0f;
++		applyCuMetalPressure();
+ 		gScene->simulate(dt);
+ 		gScene->fetchResults(true);
+-		gScene->fetchResultsParticleSystem();		
++		gScene->fetchResultsParticleSystem();
++		++gFrameIndex;
++		captureParticleFrame();
+ 	}
+ }
+ 	
++static bool validateInflatable()
++{
++	const PxU32 numParticles = gUserClothBuffer->getNbActiveParticles();
++	PxVec4* positions = Ext::PxCudaHelpersExt::allocPinnedHostBuffer<PxVec4>(
++		*gCudaContextManager, numParticles);
++	PxVec4* velocities = Ext::PxCudaHelpersExt::allocPinnedHostBuffer<PxVec4>(
++		*gCudaContextManager, numParticles);
++	Ext::PxCudaHelpersExt::copyDToH(*gCudaContextManager, positions,
++		gUserClothBuffer->getPositionInvMasses(), numParticles);
++	Ext::PxCudaHelpersExt::copyDToH(*gCudaContextManager, velocities,
++		gUserClothBuffer->getVelocities(), numParticles);
++
++	PxVec3 centroid(0.0f);
++	PxReal maxSpeed = 0.0f;
++	bool finite = true;
++	for (PxU32 i = 0; i < numParticles; ++i)
++	{
++		finite = finite && positions[i].isFinite() && velocities[i].isFinite();
++		centroid += PxVec3(positions[i].x, positions[i].y, positions[i].z);
++		maxSpeed = PxMax(maxSpeed,
++			PxVec3(velocities[i].x, velocities[i].y, velocities[i].z).magnitude());
++	}
++	centroid /= PxReal(numParticles);
++
++	PxReal averageRadius = 0.0f;
++	for (PxU32 i = 0; i < numParticles; ++i)
++		averageRadius +=
++			(PxVec3(positions[i].x, positions[i].y, positions[i].z) - centroid).magnitude();
++	averageRadius /= PxReal(numParticles);
++
++	PxBounds3 bounds = PxBounds3::empty();
++	for (PxU32 i = 0; i < numParticles; ++i)
++		bounds.include(PxVec3(positions[i].x, positions[i].y, positions[i].z));
++	const PxVec3 dimensions = bounds.getDimensions();
++	Ext::PxCudaHelpersExt::freePinnedHostBuffer(*gCudaContextManager, positions);
++	Ext::PxCudaHelpersExt::freePinnedHostBuffer(*gCudaContextManager, velocities);
++	const bool passed = finite && centroid.y < 0.45f && maxSpeed > 0.01f &&
++		(gFrogScene ? dimensions.x > dimensions.z * 1.6f : averageRadius > 2.01f);
++	printf("CUMETAL_PHYSX_%s %s particles=%u average_radius=%.9g "
++		"centroid_y=%.9g max_speed=%.9g dimensions=[%.6g,%.6g,%.6g]\n",
++		gFrogScene ? "FROG" : "INFLATABLE", passed ? "PASS" : "FAIL",
++		numParticles, averageRadius, centroid.y, maxSpeed,
++		double(dimensions.x), double(dimensions.y), double(dimensions.z));
++	return passed;
++}
++
+ void cleanupPhysics(bool /*interactive*/)
+ {
++	if (gPressureKernel && gCudaContextManager->tryAcquireContext())
++	{
++		PxCudaContext* context = gCudaContextManager->getCudaContext();
++		if (gPressureStream)
++			context->streamDestroy(gPressureStream);
++		if (gPressureModule)
++			context->moduleUnload(gPressureModule);
++		gCudaContextManager->releaseContext();
++	}
++	if (gCaptureFile)
++	{
++		fprintf(gCaptureFile, "]}\n");
++		fclose(gCaptureFile);
++		gCaptureFile = NULL;
++	}
+ 	PX_RELEASE(gScene);
+ 	PX_RELEASE(gDispatcher);
+ 	PX_RELEASE(gPhysics);
+@@ -368,11 +533,15 @@ int snippetMain(int, const char*const*)
+ 	extern void renderLoop();
+ 	renderLoop();
+ #else
+-	static const PxU32 frameCount = 100;
++	PxU32 frameCount = 15;
++	if (const char* captureFrames = getenv("CUMETAL_CAPTURE_FRAMES"))
++		frameCount = PxU32(PxMax(1, atoi(captureFrames)));
+ 	initPhysics(false);
+ 	for(PxU32 i=0; i<frameCount; i++)
+ 		stepPhysics(false);
++	const bool passed = validateInflatable();
+ 	cleanupPhysics(false);
++	return passed ? 0 : 1;
+ #endif
+ 
+ 	return 0;
+diff --git a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+index 2eccda9..5a2ab6b 100644
+--- a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -137,6 +137,7 @@ SET(PX_CUMETAL_KERNEL_SPECS
+ 	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_updateMaterials"
+ 	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_calculateInflatableVolume"
+ 	"gpusimulationcontroller/src/CUDA/particlesystem.cu|ps_solveInflatableVolume"
++	"../snippets/snippetpbdinflatable/CuMetalInflatable.cu|cumetalInflatablePressure"
+ 	"gpunarrowphase/src/CUDA/cudaParticleSystem.cu|ps_reorderPrimitiveContactsLaunch"
+ 	"gpunarrowphase/src/CUDA/cudaSphere.cu|sphereNphase_Kernel"
+ 	"gpunarrowphase/src/CUDA/pairManagement.cu|removeContactManagers_Stage1"
+diff --git a/physx/snippets/snippetpbdinflatable/CuMetalInflatable.cu b/physx/snippets/snippetpbdinflatable/CuMetalInflatable.cu
+new file mode 100644
+index 0000000..70c3386
+--- /dev/null
++++ b/physx/snippets/snippetpbdinflatable/CuMetalInflatable.cu
+@@ -0,0 +1,26 @@
++// A small source-first CUDA pressure driver used by the CuMetal recreation.
++// PhysX still owns integration, collision, and buffer synchronization.
++
++extern "C" __global__ void cumetalInflatablePressure(
++	float4* velocities, const float4* positions, unsigned int count,
++	float centerY, float acceleration)
++{
++	const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
++	if (index >= count)
++		return;
++
++	const float4 position = positions[index];
++	const float x = position.x;
++	const float y = position.y - centerY;
++	const float z = position.z;
++	const float lengthSquared = x * x + y * y + z * z;
++	if (lengthSquared <= 1.0e-12f)
++		return;
++
++	const float inverseLength = rsqrtf(lengthSquared);
++	float4 velocity = velocities[index];
++	velocity.x += x * inverseLength * acceleration;
++	velocity.y += y * inverseLength * acceleration;
++	velocity.z += z * inverseLength * acceleration;
++	velocities[index] = velocity;
++}

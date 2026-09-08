@@ -134,6 +134,102 @@ adding the `CuMetalKernelInitStubs.cpp` file already referenced by patch 0005.
 These empty link anchors replace the init symbols normally emitted by nvcc;
 CuMetal loads the source-recompiled kernels by name at runtime.
 
+The twenty-first patch includes PhysX's particle extension host helpers when
+the CuMetal GPU runtime is enabled. This closes the native macOS link boundary
+for the PBD cloth and inflatable snippets without enabling CUDA as a CMake
+language; their device kernels remain explicit CuMetal manifest entries.
+
+The twenty-second patch starts the recreation scenes by turning the PBD cloth
+into a compact vertical flag with a pinned edge and time-varying wind. The
+modern PhysX PBD and deformable paths retain their required TGS solver.
+
+The twenty-third patch adds the explicit PBD cloth kernel closure observed by
+the minimized flag scene, including particle integration, hashing/reordering,
+spring projection, self-collision, aerodynamic forces, and finalization.
+
+The twenty-fourth patch keeps particle grid quantization in single precision.
+The operands are already `float`; spelling the operation `floorf` avoids an
+otherwise needless libdevice double-precision call, which Metal does not
+support, without changing the CUDA result type or grid indices.
+
+The twenty-fifth patch gives the headless flag recreation a numerical
+conformance result. After 100 frames it copies particle positions back through
+the public PhysX CUDA context, rejects non-finite values, verifies that the
+pinned edge stayed fixed, and requires measurable motion on the free cloth.
+
+The twenty-sixth patch adds the four TGS scheduling kernels reached by the
+minimal PBD flag. Modern PhysX drives PBD particle stepping and finalization
+through the TGS solver, so these are required even in a scene with no rigid
+obstacles.
+
+The twenty-seventh patch supplies the flag recreation's external acceleration
+directly from scene gravity and wind during particle pre-integration. This is a
+scoped CuMetal workaround for the still-unverified GPU particle-material
+`gravityScale` lookup. It also skips the monolithic rigid-island TGS kernel when
+the island contains no rigid bodies; creating its Metal pipeline exceeds the
+macOS compiler service's limits and it has no work in this particle-only scene.
+
+The twenty-eighth patch adds the two pressure-volume kernels used by the
+inflatable recreation on top of the common PBD particle closure.
+
+The twenty-ninth patch completes three headless recreations. The flag uses
+PhysX PBD cloth, springs, and aerodynamics. The inflatable adds a small
+source-first CUDA pressure kernel, compiled by `cumetalc`, that acts on the
+public PhysX particle buffers. Frog mode uses the same PBD path with a
+procedurally generated closed frog-shaped surface. It is a visual/behavioral
+recreation, not compatibility with the historical PhysX 2.x sample binary or
+modern PhysX FEM deformable-volume kernels.
+
+The thirtieth patch adds opt-in JSON frame capture to the flag snippet so its
+real GPU particle positions can be rendered without changing the default
+headless conformance run.
+
+The thirty-first patch adds the cloth drape scene, selected with
+`CUMETAL_PHYSX_DRAPE=1`. A free 31x33 sheet falls onto a sphere and settles.
+Particle/rigid-body narrowphase is not part of the CuMetal PBD kernel closure —
+a sheet dropped onto a `PxRigidStatic` sphere passes straight through it — so
+the obstacle and ground are supplied by `cumetalClothCollide`, a source-first
+CUDA kernel compiled by `cumetalc`, in the same way the inflatable supplies its
+pressure. PhysX still owns integration, self-collision, and aerodynamics. The
+patch also exports the surface topology and grid dimensions in the capture so
+the recreation can be rendered as a shaded surface rather than a point cloud,
+and it holds both cloth scenes under 1024 particles (see the known limits
+below). The 240-step gate requires real contact, no penetration of the sphere,
+wrap past its equator, and a settled mean velocity.
+
+## Known limits in the CuMetal PBD path
+
+These are reproducible with the snippets in this series and are not fixed here:
+
+- **PBD spring constraints have no effect.** Sweeping the cloth stretch
+  stiffness from `10` to `1000000`
+  (`CUMETAL_PHYSX_CLOTH_STRETCH`/`CUMETAL_PHYSX_CLOTH_SHEAR`) produces
+  bit-identical particle state. `ps_solveSpringsLaunch` dispatches and reports
+  success, but its result never reaches the particles, so the cloth behaves as
+  free particles with self-collision and aerodynamics only. Over a long window
+  the flag stretches to many times its rest length instead of holding together.
+- **Particle systems of 1024 or more particles silently stop integrating.**
+  At 1023 particles the flag moves normally; at 1024 every particle stays at
+  its initial position with zero velocity. The kernel sequence, launch counts,
+  and grid/block dimensions are identical on both sides of the boundary, so the
+  divergence is inside a kernel and data dependent. Both cloth scenes are sized
+  under this ceiling.
+- **`CUMETAL_USE_METAL_DEVICE_ADDRESSES=1` costs cross-stream concurrency.**
+  PhysX reaches most of its solver state through raw device addresses embedded
+  in descriptor structs, which are never bound with `setBuffer`, so that mode
+  marks every live allocation read-write on every dispatch to keep it resident.
+  Metal then treats unrelated work on different streams as dependent and
+  serializes it. The runtime prints a one-time warning when the mode is active.
+- **Velocity written to a particle buffer between steps is discarded unless
+  the buffer is re-flagged.** `PxParticleBuffer::raiseFlags(eUPDATE_VELOCITY)`
+  is required after a kernel writes `getVelocities()`; without it the next
+  `simulate()` re-uploads the stale contents. The drape's collision kernel
+  raises it. `cumetalInflatablePressure` does not, so the inflatable and frog
+  scenes run with that kernel dispatching successfully but not affecting the
+  simulation — the conformance gate only asserts that it launched. Raising the
+  flag there makes those two scenes unstable, because the inflatable surface
+  depends on the spring network above.
+
 Build and verify the static CPU SDK and non-rendering HelloWorld snippet:
 
 ```bash
@@ -214,3 +310,14 @@ negative control:
 ```bash
 tests/conformance/run_physx_grb_trimesh.sh
 ```
+
+Build and run the flag, inflatable, and frog PBD recreations:
+
+```bash
+tests/conformance/run_physx_pbd_recreations.sh
+```
+
+The gate checks numerical scene invariants and verifies successful Apple GPU
+dispatch of the aerodynamic, collision, and source-recompiled pressure kernels.
+Each scene can also be captured to JSON for offline rendering; the renders
+themselves are not kept in this repository.

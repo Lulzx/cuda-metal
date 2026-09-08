@@ -121,6 +121,28 @@ int main() {
         return 1;
     }
 
+    const std::string mixed_entries_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .entry unsupported_neighbor()
+{
+    prototype_7 : .callprototype ()_ (.param .b64 _);
+    ret;
+}
+.visible .entry selected_kernel()
+{
+    ret;
+}
+)PTX";
+    cumetal::passes::Phase1PipelineOptions selected_options;
+    selected_options.strict = true;
+    selected_options.entry_name = "selected_kernel";
+    const auto selected =
+        cumetal::passes::run_phase1_pipeline(mixed_entries_ptx, selected_options);
+    if (!expect(selected.ok, "strict pipeline ignores unsupported unselected entries")) {
+        return 1;
+    }
+
     cumetal::passes::Phase1PipelineOptions missing_entry;
     missing_entry.entry_name = "does_not_exist";
     const auto missing = cumetal::passes::run_phase1_pipeline(ptx, missing_entry);
