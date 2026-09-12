@@ -6302,76 +6302,89 @@ class GenericLlvmEmitter {
             return store_ret_bits(out, 64);
         }
 
-        // CUDA interval arithmetic spells directed binary64 operations as
-        // libdevice calls. Apple GPUs have no public FP64 ALU, so evaluate in
-        // CuMetal's normalized FP32 pair and widen the low component by a
-        // conservative pair-precision error bound in the requested direction.
-        // The padding is intentionally larger than one pair ULP: preserving an
-        // enclosure matters more here than reproducing round-to-nearest bits.
-        const bool directed_double =
-            callee == "__nv_dadd_rd" || callee == "__nv_dadd_ru" ||
-            callee == "__nv_dmul_rd" || callee == "__nv_dmul_ru" ||
-            callee == "__nv_ddiv_rd" || callee == "__nv_ddiv_ru";
-        if (directed_double) {
-            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
-            auto a_bits = load_call_slot_value(os, arg_names[0], 64);
-            auto b_bits = load_call_slot_value(os, arg_names[1], 64);
-            if (!a_bits || !b_bits) return fail(instr, callee + " args missing");
-            if (uses_vf64_support()) {
-                if (fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48) {
-                    return fail(instr, "wide48 does not support directed libdevice arithmetic");
+        // CUDA interval arithmetic spells directed operations as libdevice
+        // calls: __nv_{f,d}{add,sub,mul,div,rcp,sqrt}_{rd,ru,rz} plus the fma
+        // forms. The vf64 software ALU is correctly rounded, so routing the
+        // calls through vf64_*_round gives exact directed results under every
+        // mode that links it -- including kEmulate, where the slots already
+        // carry raw IEEE binary64 bits. Binary32 forms widen each operand to
+        // binary64 (exact), run the vf64 op, and convert back with the
+        // requested rounding; that is the exact directed binary32 result for
+        // add/sub/mul, and within one binary32 ulp of it for div/rcp/sqrt/fma
+        // where the correctly-rounded binary64 intermediate can double-round.
+        if (callee.size() > 8) {
+            const std::string_view suffix(callee.data() + callee.size() - 3, 3);
+            const int rounding =
+                suffix == "_rd" ? 2 :
+                suffix == "_ru" ? 3 :
+                suffix == "_rz" ? 1 : -1;
+            const std::string stem = callee.substr(5, callee.size() - 8);
+            static const std::unordered_map<std::string, const char*>
+                kDirectedOps = {
+                    {"fadd", "vf64_add_round"}, {"dadd", "vf64_add_round"},
+                    {"fsub", "vf64_sub_round"}, {"dsub", "vf64_sub_round"},
+                    {"fmul", "vf64_mul_round"}, {"dmul", "vf64_mul_round"},
+                    {"fdiv", "vf64_div_round"}, {"ddiv", "vf64_div_round"},
+                    {"fsqrt", "vf64_sqrt_round"}, {"dsqrt", "vf64_sqrt_round"},
+                    {"fmaf", "vf64_fma_round"}, {"fma", "vf64_fma_round"},
+                    {"frcp", "vf64_div_round"}, {"drcp", "vf64_div_round"},
+                };
+            const auto directed = kDirectedOps.find(stem);
+            if (directed != kDirectedOps.end() && rounding >= 0) {
+                const bool is_double = stem.front() == 'd' || stem == "fma";
+                const bool unary = stem.ends_with("rcp") ||
+                                   stem.ends_with("sqrt");
+                const std::size_t arity =
+                    stem == "fma" || stem == "fmaf" ? 3 : unary ? 1 : 2;
+                if (arg_names.size() < arity) {
+                    return fail(instr, callee + " expects " +
+                                           std::to_string(arity) + " args");
                 }
-                const std::string operation = callee.find("dadd") != std::string::npos
-                                                  ? "add"
-                                              : callee.find("dmul") != std::string::npos
-                                                  ? "mul"
-                                                  : "div";
-                const std::string function = "vf64_" + operation + "_round";
-                declarations_.insert("declare i64 @" + function + "(i64, i64, i32)");
-                const int rounding = callee.size() >= 3 &&
-                                             callee.compare(callee.size() - 3, 3, "_rd") == 0
-                                         ? 2
-                                         : 3;
-                const std::string result = next_tmp("vf64_directed_libdevice");
-                os << "  " << result << " = call i64 @" << function << "(i64 "
-                   << *a_bits << ", i64 " << *b_bits << ", i32 " << rounding << ")\n";
-                return store_ret_bits(result, 64);
+                std::vector<std::string> wide_args;
+                wide_args.reserve(arity + 1);
+                for (std::size_t index = 0; index < arity; ++index) {
+                    auto bits = load_call_slot_value(os, arg_names[index],
+                                                     is_double ? 64 : 32);
+                    if (!bits) return fail(instr, callee + " arg missing");
+                    if (is_double) {
+                        wide_args.push_back(*bits);
+                    } else {
+                        declarations_.insert(
+                            "declare i64 @vf64_f32_to_f64(i32)");
+                        const std::string wide = next_tmp("vf64_widen");
+                        os << "  " << wide << " = call i64 @vf64_f32_to_f64(i32 "
+                           << *bits << ")\n";
+                        wide_args.push_back(wide);
+                    }
+                }
+                if (stem == "frcp" || stem == "drcp") {
+                    wide_args.insert(wide_args.begin(),
+                                     "4607182418800017408");  // 1.0 f64 bits
+                }
+                std::string signature;
+                for (std::size_t index = 0; index < wide_args.size(); ++index) {
+                    signature += index == 0 ? "i64" : ", i64";
+                }
+                signature += ", i32";
+                declarations_.insert("declare i64 @" +
+                                     std::string(directed->second) + "(" +
+                                     signature + ")");
+                const std::string result = next_tmp("vf64_directed");
+                os << "  " << result << " = call i64 @" << directed->second
+                   << "(";
+                for (std::size_t index = 0; index < wide_args.size(); ++index) {
+                    os << (index == 0 ? "i64 " : ", i64 ") << wide_args[index];
+                }
+                os << ", i32 " << rounding << ")\n";
+                if (is_double) {
+                    return store_ret_bits(result, 64);
+                }
+                declarations_.insert("declare i32 @vf64_f64_to_f32(i64, i32)");
+                const std::string narrowed = next_tmp("vf64_narrow");
+                os << "  " << narrowed << " = call i32 @vf64_f64_to_f32(i64 "
+                   << result << ", i32 " << rounding << ")\n";
+                return store_ret_bits(narrowed, 32);
             }
-            const Fp64Pair a = fp64_pair_from_ieee_bits(os, *a_bits);
-            const Fp64Pair b = fp64_pair_from_ieee_bits(os, *b_bits);
-            Fp64Pair result;
-            if (callee.find("dadd") != std::string::npos) {
-                result = emit_fp64_pair_add(os, a, b);
-            } else if (callee.find("dmul") != std::string::npos) {
-                result = emit_fp64_pair_mul(os, a, b);
-            } else {
-                result = emit_fp64_pair_div(os, a, b);
-            }
-
-            declarations_.insert("declare float @llvm.fabs.f32(float)");
-            const std::string magnitude = next_tmp("directed_fp64_abs");
-            os << "  " << magnitude << " = call float @llvm.fabs.f32(float "
-               << result.hi << ")\n";
-            const std::string relative = next_tmp("directed_fp64_relative");
-            const std::string scale = emit_float_constant(
-                os, 5.684341886080802e-14f, "directed_fp64_scale");
-            os << "  " << relative << " = fmul float " << magnitude << ", "
-               << scale << "\n";
-            const std::string minimum = emit_float_constant(
-                os, 1.1754943508222875e-38f, "directed_fp64_minimum");
-            const std::string padding = next_tmp("directed_fp64_padding");
-            os << "  " << padding << " = fadd float " << relative << ", "
-               << minimum << "\n";
-            std::string signed_padding = padding;
-            if (callee.size() >= 3 &&
-                callee.compare(callee.size() - 3, 3, "_rd") == 0) {
-                signed_padding = next_tmp("directed_fp64_negative_padding");
-                os << "  " << signed_padding << " = fneg float " << padding << "\n";
-            }
-            const std::string zero = emit_float_constant(os, 0.0f,
-                                                         "directed_fp64_zero");
-            result = emit_fp64_pair_add(os, result, Fp64Pair{zero, signed_padding});
-            return store_ret_bits(fp64_ieee_bits_from_pair(os, result), 64);
         }
 
         if (callee == "__nv_longlong_as_double") {
@@ -6549,13 +6562,13 @@ class GenericLlvmEmitter {
             os << "  " << sel << " = select i1 " << cmp << ", i32 " << *a << ", i32 " << *b << "\n";
             return store_ret_bits(sel, 32);
         }
-        if (callee == "__nv_fast_sincosf") {
-            if (arg_names.size() < 3) return fail(instr, "__nv_fast_sincosf expects 3 args");
+        if (callee == "__nv_fast_sincosf" || callee == "__nv_sincosf") {
+            if (arg_names.size() < 3) return fail(instr, callee + " expects 3 args");
             auto x = load_call_slot_f32(arg_names[0]);
             auto sin_ptr_bits = load_call_slot_value(os, arg_names[1], 64);
             auto cos_ptr_bits = load_call_slot_value(os, arg_names[2], 64);
             if (!x || !sin_ptr_bits || !cos_ptr_bits) {
-                return fail(instr, "__nv_fast_sincosf args missing");
+                return fail(instr, callee + " args missing");
             }
             declarations_.insert("declare float @air.fast_sin.f32(float)");
             declarations_.insert("declare float @air.fast_cos.f32(float)");
@@ -6571,13 +6584,15 @@ class GenericLlvmEmitter {
             os << "  store float " << cos_value << ", float* " << cos_ptr << ", align 4\n";
             return true;
         }
-        if (callee == "__nv_fast_fdividef") {
-            if (arg_names.size() < 2) return fail(instr, "__nv_fast_fdividef expects 2 args");
+        if (callee == "__nv_fast_fdividef" || callee == "__nv_fdividef") {
+            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
             auto numerator = load_call_slot_f32(arg_names[0]);
             auto denominator = load_call_slot_f32(arg_names[1]);
-            if (!numerator || !denominator) return fail(instr, "__nv_fast_fdividef args missing");
-            const std::string out = next_tmp("fast_fdividef");
-            os << "  " << out << " = fdiv fast float " << *numerator << ", " << *denominator << "\n";
+            if (!numerator || !denominator) return fail(instr, callee + " args missing");
+            const std::string out = next_tmp("fdividef");
+            os << "  " << out << " = fdiv "
+               << (callee == "__nv_fast_fdividef" ? "fast float " : "float ")
+               << *numerator << ", " << *denominator << "\n";
             return store_ret_f32(out);
         }
         if (cumetal::ptx::fp64_mode_links_vf64_support(fp64_mode_) &&
@@ -6614,7 +6629,8 @@ class GenericLlvmEmitter {
         // the two are lowered together rather than duplicating three FP64 modes.
         // GROMACS's nbnxm kernels call __nv_rsqrt; before this it was an
         // unsupported call target that made the whole kernel unlowerable.
-        if (callee == "__nv_sqrt" || callee == "__nv_rsqrt") {
+        if (callee == "__nv_sqrt" || callee == "__nv_rsqrt" ||
+            callee == "__nv_dsqrt_rn") {
             const bool want_reciprocal = (callee == "__nv_rsqrt");
             if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
             auto input_bits = load_call_slot_value(os, arg_names[0], 64);
@@ -6743,6 +6759,17 @@ class GenericLlvmEmitter {
             {"__nv_fmodf", "air.fmod.f32", 2},
             {"__nv_copysignf", "llvm.copysign.f32", 2},
             {"__nv_fmaf", "llvm.fma.f32", 3},
+            {"__nv_fmaf_rn", "llvm.fma.f32", 3},
+            {"__nv_fmaf_ieee_rn", "llvm.fma.f32", 3},
+            {"__nv_fsqrt_rn", "air.fast_sqrt.f32", 1},
+            {"__nv_fast_exp10f", "air.fast_exp10.f32", 1},
+            {"__nv_fast_sinf", "air.fast_sin.f32", 1},
+            {"__nv_fast_cosf", "air.fast_cos.f32", 1},
+            {"__nv_fast_tanf", "air.fast_tan.f32", 1},
+            {"__nv_fast_logf", "air.fast_log.f32", 1},
+            {"__nv_fast_log2f", "air.fast_log2.f32", 1},
+            {"__nv_fast_log10f", "air.fast_log10.f32", 1},
+            {"__nv_fast_powf", "air.fast_pow.f32", 2},
         };
         for (const FloatBuiltin& fb : kFloatBuiltins) {
             if (callee != fb.nv) continue;
@@ -6941,26 +6968,22 @@ class GenericLlvmEmitter {
             os << "  " << out << " = fsub float " << *x << ", " << prod << "\n";
             return store_ret_f32(out);
         }
-        if (callee == "__nv_erff" || callee == "__nv_erfcf") {
-            // Metal has no erf/erfc. Abramowitz & Stegun 7.1.26 gives
-            //   erfc(|x|) ~ P(t) * exp(-x^2),  t = 1/(1 + 0.3275911|x|)
-            // with |absolute error| <= 1.5e-7.
-            //
+        // Metal has no erf/erfc. Abramowitz & Stegun 7.1.26 gives
+        //   erfc(|x|) ~ P(t) * exp(-x^2),  t = 1/(1 + 0.3275911|x|)
+        // with |absolute error| <= 1.5e-7. Shared by the float builtins and the
+        // double libdevice calls (which decode to binary32 first).
+        auto emit_erfc_tail = [&](const std::string& x) -> std::string {
             // erfc is computed from that product directly rather than as
             // 1 - erf(x): the subtraction cancels catastrophically for large x
             // (erfc(5) is ~1.5e-12, so 1 - erf would return a flat 0), and a
             // silently-zero tail is exactly the kind of wrong answer that must
             // not ship. erf keeps the 1 - P*exp form, which is accurate for
             // small x and saturates correctly to +-1 for large x.
-            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
-            auto x = load_call_slot_f32(arg_names[0]);
-            if (!x) return fail(instr, callee + " arg missing");
             declarations_.insert("declare float @llvm.fabs.f32(float)");
-            declarations_.insert("declare float @llvm.copysign.f32(float, float)");
             declarations_.insert("declare float @air.fast_exp.f32(float)");
 
             const std::string ax = next_tmp("erf_ax");
-            os << "  " << ax << " = call float @llvm.fabs.f32(float " << *x << ")\n";
+            os << "  " << ax << " = call float @llvm.fabs.f32(float " << x << ")\n";
             const std::string td = next_tmp("erf_td");
             const std::string td1 = next_tmp("erf_td1");
             os << "  " << td << " = fmul float " << ax << ", 0x3FD4F740A0000000\n";
@@ -6993,6 +7016,67 @@ class GenericLlvmEmitter {
             os << "  " << ex << " = call float @air.fast_exp.f32(float " << nx2 << ")\n";
             const std::string tail = next_tmp("erf_tail");  // == erfc(|x|)
             os << "  " << tail << " = fmul float " << poly << ", " << ex << "\n";
+            return tail;
+        };
+        // Double libdevice calls that have no software binary64 primitive
+        // evaluate through binary32: decode each binary64 call-slot word to a
+        // float, run the AIR binary32 builtin (or its float expansion), and
+        // re-encode the result into the binary64 bit pattern. Precision and
+        // range follow binary32 (for example exp overflows near 88, not 709) —
+        // the same documented fallback as the typed MSL path; see
+        // docs/fp64-policy.md and docs/known-gaps/compiler.md.
+        auto f64_slot_to_f32 = [&](std::ostringstream& emit_os,
+                                   const std::string& slot_name)
+            -> std::optional<std::string> {
+            auto bits = load_call_slot_value(emit_os, slot_name, 64);
+            if (!bits) return std::nullopt;
+            const std::string value = next_tmp("f64via32_in");
+            if (cumetal::ptx::fp64_mode_links_vf64_support(fp64_mode_)) {
+                declarations_.insert("declare i32 @vf64_f64_to_f32(i64, i32)");
+                const std::string raw = next_tmp("f64via32_raw");
+                emit_os << "  " << raw << " = call i32 @vf64_f64_to_f32(i64 " << *bits
+                        << ", i32 0)\n";
+                emit_os << "  " << value << " = bitcast i32 " << raw << " to float\n";
+            } else {
+                const std::string wide = next_tmp("f64via32_wide");
+                emit_os << "  " << wide << " = bitcast i64 " << *bits << " to double\n";
+                emit_os << "  " << value << " = fptrunc double " << wide << " to float\n";
+            }
+            return value;
+        };
+        auto f32_bits_to_f64 = [&](std::ostringstream& emit_os,
+                                   const std::string& value_bits) -> std::string {
+            const std::string bits = next_tmp("f64via32_out");
+            if (cumetal::ptx::fp64_mode_links_vf64_support(fp64_mode_)) {
+                declarations_.insert("declare i64 @vf64_f32_to_f64(i32)");
+                emit_os << "  " << bits << " = call i64 @vf64_f32_to_f64(i32 "
+                        << value_bits << ")\n";
+            } else {
+                const std::string value = next_tmp("f64via32_outf");
+                const std::string wide = next_tmp("f64via32_outw");
+                emit_os << "  " << value << " = bitcast i32 " << value_bits
+                        << " to float\n";
+                emit_os << "  " << wide << " = fpext float " << value << " to double\n";
+                emit_os << "  " << bits << " = bitcast double " << wide << " to i64\n";
+            }
+            return bits;
+        };
+        auto store_f32_bits_as_f64_ret = [&](std::ostringstream& emit_os,
+                                             const std::string& value_bits) -> bool {
+            return store_ret_bits(f32_bits_to_f64(emit_os, value_bits), 64);
+        };
+        auto store_f32_value_as_f64_ret = [&](std::ostringstream& emit_os,
+                                              const std::string& value) -> bool {
+            const std::string raw = next_tmp("f64via32_out_raw");
+            emit_os << "  " << raw << " = bitcast float " << value << " to i32\n";
+            return store_f32_bits_as_f64_ret(emit_os, raw);
+        };
+        if (callee == "__nv_erff" || callee == "__nv_erfcf") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            auto x = load_call_slot_f32(arg_names[0]);
+            if (!x) return fail(instr, callee + " arg missing");
+            declarations_.insert("declare float @llvm.copysign.f32(float, float)");
+            const std::string tail = emit_erfc_tail(*x);
 
             if (callee == "__nv_erff") {
                 const std::string mag = next_tmp("erf_mag");
@@ -7026,6 +7110,955 @@ class GenericLlvmEmitter {
             os << "  " << out << " = select i1 " << hi << ", float " << c0
                << ", float 1.000000e+00\n";
             return store_ret_f32(out);
+        }
+        // Float builtins whose signatures are not uniform float args:
+        // integer-exponent forms (ldexp/scalbn/powi), the IEEE bit-step
+        // nextafter, reciprocal cube root, and the pointer-output modf/frexp.
+        if (callee == "__nv_ldexpf" || callee == "__nv_scalbnf") {
+            // ldexp(x, n) = x * 2^n; same expansion the MSL path emits.
+            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
+            auto x = load_call_slot_f32(arg_names[0]);
+            auto n = load_call_slot_value(os, arg_names[1], 32);
+            if (!x || !n) return fail(instr, callee + " args missing");
+            declarations_.insert("declare float @air.fast_exp2.f32(float)");
+            const std::string nf = next_tmp("ldexp_nf");
+            os << "  " << nf << " = sitofp i32 " << *n << " to float\n";
+            const std::string scale = next_tmp("ldexp_scale");
+            os << "  " << scale << " = call float @air.fast_exp2.f32(float " << nf << ")\n";
+            const std::string out = next_tmp("ldexp");
+            os << "  " << out << " = fmul float " << *x << ", " << scale << "\n";
+            return store_ret_f32(out);
+        }
+        if (callee == "__nv_powif") {
+            if (arg_names.size() < 2) return fail(instr, "__nv_powif expects 2 args");
+            auto x = load_call_slot_f32(arg_names[0]);
+            auto n = load_call_slot_value(os, arg_names[1], 32);
+            if (!x || !n) return fail(instr, "__nv_powif args missing");
+            declarations_.insert("declare float @air.fast_pow.f32(float, float)");
+            const std::string nf = next_tmp("powi_nf");
+            os << "  " << nf << " = sitofp i32 " << *n << " to float\n";
+            const std::string out = next_tmp("powi");
+            os << "  " << out << " = call float @air.fast_pow.f32(float " << *x
+               << ", float " << nf << ")\n";
+            return store_ret_f32(out);
+        }
+        if (callee == "__nv_nextafterf" || callee == "__nv_nextafter") {
+            // IEEE bit-step: for float the signed-integer ordering of the bit
+            // pattern matches the value ordering within each sign, so one
+            // increment/decrement moves exactly one ULP. The double spelling
+            // decodes to binary32 first, so this block stays float-shaped for
+            // both (handled below through the f64via32 decode).
+            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
+            const bool double_arg = callee == "__nv_nextafter";
+            auto x = double_arg ? f64_slot_to_f32(os, arg_names[0])
+                                : load_call_slot_f32(arg_names[0]);
+            auto y = double_arg ? f64_slot_to_f32(os, arg_names[1])
+                                : load_call_slot_f32(arg_names[1]);
+            if (!x || !y) return fail(instr, callee + " args missing");
+            const std::string xb = next_tmp("nextafter_xb");
+            const std::string yb = next_tmp("nextafter_yb");
+            os << "  " << xb << " = bitcast float " << *x << " to i32\n";
+            os << "  " << yb << " = bitcast float " << *y << " to i32\n";
+            const std::string isnan = next_tmp("nextafter_nan");
+            os << "  " << isnan << " = fcmp uno float " << *x << ", " << *y << "\n";
+            const std::string equal = next_tmp("nextafter_eq");
+            os << "  " << equal << " = fcmp oeq float " << *x << ", " << *y << "\n";
+            const std::string negative = next_tmp("nextafter_neg");
+            os << "  " << negative << " = icmp slt i32 " << xb << ", 0\n";
+            const std::string toward = next_tmp("nextafter_toward");
+            os << "  " << toward << " = fcmp olt float " << *x << ", " << *y << "\n";
+            // Negative floats order backwards in signed-int bits, so a "step
+            // up" toward y is a decrement when the sign bit is set. +-0 needs
+            // its own rule: stepping from 0x80000000 by integer add would wrap
+            // into NaN instead of producing the smallest subnormal toward y.
+            const std::string increment = next_tmp("nextafter_inc");
+            os << "  " << increment << " = icmp ne i1 " << toward << ", " << negative << "\n";
+            const std::string up = next_tmp("nextafter_up");
+            const std::string down = next_tmp("nextafter_down");
+            os << "  " << up << " = add i32 " << xb << ", 1\n";
+            os << "  " << down << " = sub i32 " << xb << ", 1\n";
+            const std::string stepped_int = next_tmp("nextafter_step_int");
+            os << "  " << stepped_int << " = select i1 " << increment << ", i32 " << up
+               << ", i32 " << down << "\n";
+            const std::string x_zero_pos = next_tmp("nextafter_xzp");
+            const std::string x_zero_neg = next_tmp("nextafter_xzn");
+            os << "  " << x_zero_pos << " = icmp eq i32 " << xb << ", 0\n";
+            os << "  " << x_zero_neg << " = icmp eq i32 " << xb << ", -2147483648\n";
+            const std::string x_zero = next_tmp("nextafter_xz");
+            os << "  " << x_zero << " = or i1 " << x_zero_pos << ", " << x_zero_neg << "\n";
+            const std::string zero_step = next_tmp("nextafter_zero_step");
+            os << "  " << zero_step << " = select i1 " << toward
+               << ", i32 1, i32 -2147483647\n";
+            const std::string stepped = next_tmp("nextafter_step");
+            os << "  " << stepped << " = select i1 " << x_zero << ", i32 " << zero_step
+               << ", i32 " << stepped_int << "\n";
+            const std::string fin = next_tmp("nextafter_fin");
+            os << "  " << fin << " = select i1 " << equal << ", i32 " << yb << ", i32 "
+               << stepped << "\n";
+            const std::string res = next_tmp("nextafter_res");
+            os << "  " << res << " = select i1 " << isnan << ", i32 " << xb << ", i32 "
+               << fin << "\n";
+            if (double_arg) return store_f32_bits_as_f64_ret(os, res);
+            return store_ret_bits(res, 32);
+        }
+        if (callee == "__nv_modff") {
+            if (arg_names.size() < 2) return fail(instr, "__nv_modff expects 2 args");
+            auto x = load_call_slot_f32(arg_names[0]);
+            auto int_ptr_bits = load_call_slot_value(os, arg_names[1], 64);
+            if (!x || !int_ptr_bits) return fail(instr, "__nv_modff args missing");
+            declarations_.insert("declare float @llvm.trunc.f32(float)");
+            const std::string integral = next_tmp("modf_int");
+            os << "  " << integral << " = call float @llvm.trunc.f32(float " << *x << ")\n";
+            const std::string int_ptr = next_tmp("modf_ptr");
+            os << "  " << int_ptr << " = inttoptr i64 " << *int_ptr_bits << " to float*\n";
+            os << "  store float " << integral << ", float* " << int_ptr << ", align 4\n";
+            const std::string frac = next_tmp("modf_frac");
+            os << "  " << frac << " = fsub float " << *x << ", " << integral << "\n";
+            return store_ret_f32(frac);
+        }
+        if (callee == "__nv_frexpf") {
+            // Binary32 version of the __nv_frexp decomposition above: split
+            // sign/exponent/mantissa, normalize subnormals with ctlz, and keep
+            // zero/inf/NaN (and exponent 0) unchanged.
+            if (arg_names.size() < 2) return fail(instr, "__nv_frexpf expects 2 args");
+            auto input = load_call_slot_value(os, arg_names[0], 32);
+            auto exponent_ptr_bits = load_call_slot_value(os, arg_names[1], 64);
+            if (!input || !exponent_ptr_bits) {
+                return fail(instr, "__nv_frexpf args missing");
+            }
+            declarations_.insert("declare i32 @llvm.ctlz.i32(i32, i1)");
+            const std::string sign = next_tmp("frexp_sign");
+            const std::string exp_shift = next_tmp("frexp_exp_shift");
+            const std::string exp_raw = next_tmp("frexp_exp_raw");
+            const std::string mantissa = next_tmp("frexp_mantissa");
+            os << "  " << sign << " = and i32 " << *input << ", -2147483648\n";
+            os << "  " << exp_shift << " = lshr i32 " << *input << ", 23\n";
+            os << "  " << exp_raw << " = and i32 " << exp_shift << ", 255\n";
+            os << "  " << mantissa << " = and i32 " << *input << ", 8388607\n";
+            const std::string zero_exp = next_tmp("frexp_zero_exp");
+            const std::string zero_mantissa = next_tmp("frexp_zero_mantissa");
+            const std::string is_zero = next_tmp("frexp_is_zero");
+            const std::string is_special = next_tmp("frexp_is_special");
+            os << "  " << zero_exp << " = icmp eq i32 " << exp_raw << ", 0\n";
+            os << "  " << zero_mantissa << " = icmp eq i32 " << mantissa << ", 0\n";
+            os << "  " << is_zero << " = and i1 " << zero_exp << ", " << zero_mantissa << "\n";
+            os << "  " << is_special << " = icmp eq i32 " << exp_raw << ", 255\n";
+            const std::string nonzero_mantissa = next_tmp("frexp_nonzero_mantissa");
+            const std::string is_subnormal = next_tmp("frexp_is_subnormal");
+            os << "  " << nonzero_mantissa << " = xor i1 " << zero_mantissa << ", true\n";
+            os << "  " << is_subnormal << " = and i1 " << zero_exp << ", " << nonzero_mantissa << "\n";
+            // For a subnormal, x = mantissa * 2^-149. Shifting the top set bit
+            // into the implicit-one position (bit 23) normalizes it; the count
+            // of leading zeros inside the 23-bit field lowers the exponent.
+            const std::string leading = next_tmp("frexp_leading");
+            os << "  " << leading << " = call i32 @llvm.ctlz.i32(i32 " << mantissa
+               << ", i1 false)\n";
+            const std::string sub_shift = next_tmp("frexp_sub_shift");
+            os << "  " << sub_shift << " = sub i32 " << leading << ", 8\n";
+            const std::string normalized_full = next_tmp("frexp_normalized");
+            os << "  " << normalized_full << " = shl i32 " << mantissa << ", " << sub_shift << "\n";
+            const std::string normalized_mantissa = next_tmp("frexp_norm_mantissa");
+            os << "  " << normalized_mantissa << " = and i32 " << normalized_full
+               << ", 8388607\n";
+            const std::string normal_result = next_tmp("frexp_normal_result");
+            const std::string normal_or = next_tmp("frexp_normal_or");
+            os << "  " << normal_or << " = or i32 " << sign << ", 1056964608\n";
+            os << "  " << normal_result << " = or i32 " << normal_or << ", " << mantissa << "\n";
+            const std::string sub_result = next_tmp("frexp_sub_result");
+            const std::string sub_or = next_tmp("frexp_sub_or");
+            os << "  " << sub_or << " = or i32 " << sign << ", 1056964608\n";
+            os << "  " << sub_result << " = or i32 " << sub_or << ", " << normalized_mantissa << "\n";
+            const std::string finite_result = next_tmp("frexp_finite_result");
+            os << "  " << finite_result << " = select i1 " << is_subnormal << ", i32 "
+               << sub_result << ", i32 " << normal_result << "\n";
+            const std::string zero_or_special = next_tmp("frexp_zero_or_special");
+            os << "  " << zero_or_special << " = or i1 " << is_zero << ", " << is_special << "\n";
+            const std::string result_bits = next_tmp("frexp_result");
+            os << "  " << result_bits << " = select i1 " << zero_or_special << ", i32 "
+               << *input << ", i32 " << finite_result << "\n";
+            const std::string normal_exp = next_tmp("frexp_normal_exp");
+            const std::string sub_exp = next_tmp("frexp_sub_exp");
+            os << "  " << normal_exp << " = sub i32 " << exp_raw << ", 126\n";
+            os << "  " << sub_exp << " = sub i32 -117, " << leading << "\n";
+            const std::string finite_exp = next_tmp("frexp_finite_exp");
+            os << "  " << finite_exp << " = select i1 " << is_subnormal << ", i32 "
+               << sub_exp << ", i32 " << normal_exp << "\n";
+            const std::string exponent = next_tmp("frexp_exponent");
+            os << "  " << exponent << " = select i1 " << zero_or_special << ", i32 0, i32 "
+               << finite_exp << "\n";
+            const std::string exponent_ptr = next_tmp("frexp_exponent_ptr");
+            os << "  " << exponent_ptr << " = inttoptr i64 " << *exponent_ptr_bits << " to i32*\n";
+            os << "  store i32 " << exponent << ", i32* " << exponent_ptr << ", align 4\n";
+            return store_ret_bits(result_bits, 32);
+        }
+        if (callee == "__nv_rcbrtf") {
+            // rcbrt(x) = copysign(pow(|x|, -1/3), x); pow(0, -1/3) is +inf,
+            // which is also the correct signed rcbrt(+-0).
+            if (arg_names.empty()) return fail(instr, "__nv_rcbrtf expects 1 arg");
+            auto x = load_call_slot_f32(arg_names[0]);
+            if (!x) return fail(instr, "__nv_rcbrtf arg missing");
+            declarations_.insert("declare float @llvm.fabs.f32(float)");
+            declarations_.insert("declare float @llvm.copysign.f32(float, float)");
+            declarations_.insert("declare float @air.fast_pow.f32(float, float)");
+            const std::string ax = next_tmp("rcbrt_ax");
+            os << "  " << ax << " = call float @llvm.fabs.f32(float " << *x << ")\n";
+            const std::string p = next_tmp("rcbrt_pow");
+            os << "  " << p << " = call float @air.fast_pow.f32(float " << ax
+               << ", float 0xBFD5555560000000)\n";  // -1/3
+            const std::string out = next_tmp("rcbrt");
+            os << "  " << out << " = call float @llvm.copysign.f32(float " << p
+               << ", float " << *x << ")\n";
+            return store_ret_f32(out);
+        }
+
+        // Double libdevice family: every entry point below decodes its
+        // binary64 arguments through f64_slot_to_f32 and stores through
+        // store_f32_*_as_f64_ret, so it runs at binary32 precision/range under
+        // every fp64 mode.
+        static const std::unordered_map<std::string, std::string> kFp64ViaF32Unary = {
+            {"__nv_exp", "air.fast_exp.f32"},
+            {"__nv_exp2", "air.fast_exp2.f32"},
+            {"__nv_exp10", "air.fast_exp10.f32"},
+            {"__nv_log", "air.fast_log.f32"},
+            {"__nv_log2", "air.fast_log2.f32"},
+            {"__nv_log10", "air.fast_log10.f32"},
+            {"__nv_sin", "air.fast_sin.f32"},
+            {"__nv_cos", "air.fast_cos.f32"},
+            {"__nv_tan", "air.fast_tan.f32"},
+            {"__nv_asin", "air.fast_asin.f32"},
+            {"__nv_acos", "air.fast_acos.f32"},
+            {"__nv_atan", "air.fast_atan.f32"},
+            {"__nv_sinh", "air.fast_sinh.f32"},
+            {"__nv_cosh", "air.fast_cosh.f32"},
+            {"__nv_tanh", "air.fast_tanh.f32"},
+            {"__nv_asinh", "air.fast_asinh.f32"},
+            {"__nv_acosh", "air.fast_acosh.f32"},
+            {"__nv_atanh", "air.fast_atanh.f32"},
+        };
+        const auto f64_unary = kFp64ViaF32Unary.find(callee);
+        if (f64_unary != kFp64ViaF32Unary.end()) {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            auto x = f64_slot_to_f32(os, arg_names[0]);
+            if (!x) return fail(instr, callee + " arg missing");
+            declarations_.insert("declare float @" + f64_unary->second + "(float)");
+            const std::string out = next_tmp("f64via32_call");
+            os << "  " << out << " = call float @" << f64_unary->second << "(float "
+               << *x << ")\n";
+            return store_f32_value_as_f64_ret(os, out);
+        }
+        static const std::unordered_map<std::string, std::string> kFp64ViaF32Binary = {
+            {"__nv_pow", "air.fast_pow.f32"},
+            {"__nv_atan2", "air.fast_atan2.f32"},
+            {"__nv_fmod", "air.fmod.f32"},
+        };
+        const auto f64_binary = kFp64ViaF32Binary.find(callee);
+        if (f64_binary != kFp64ViaF32Binary.end()) {
+            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
+            auto x = f64_slot_to_f32(os, arg_names[0]);
+            auto y = f64_slot_to_f32(os, arg_names[1]);
+            if (!x || !y) return fail(instr, callee + " args missing");
+            declarations_.insert("declare float @" + f64_binary->second +
+                                 "(float, float)");
+            const std::string out = next_tmp("f64via32_call");
+            os << "  " << out << " = call float @" << f64_binary->second << "(float "
+               << *x << ", float " << *y << ")\n";
+            return store_f32_value_as_f64_ret(os, out);
+        }
+        if (callee == "__nv_expm1" || callee == "__nv_log1p") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            auto x = f64_slot_to_f32(os, arg_names[0]);
+            if (!x) return fail(instr, callee + " arg missing");
+            const std::string out = next_tmp("f64via32_call");
+            if (callee == "__nv_expm1") {
+                declarations_.insert("declare float @air.fast_exp.f32(float)");
+                const std::string e = next_tmp("expm1_e");
+                os << "  " << e << " = call float @air.fast_exp.f32(float " << *x << ")\n";
+                os << "  " << out << " = fsub float " << e << ", 1.000000e+00\n";
+            } else {
+                declarations_.insert("declare float @air.fast_log.f32(float)");
+                const std::string p = next_tmp("log1p_p");
+                os << "  " << p << " = fadd float " << *x << ", 1.000000e+00\n";
+                os << "  " << out << " = call float @air.fast_log.f32(float " << p << ")\n";
+            }
+            return store_f32_value_as_f64_ret(os, out);
+        }
+        if (callee == "__nv_powi" || callee == "__nv_ldexp" ||
+            callee == "__nv_scalbn") {
+            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
+            auto x = f64_slot_to_f32(os, arg_names[0]);
+            auto n = load_call_slot_value(os, arg_names[1], 32);
+            if (!x || !n) return fail(instr, callee + " args missing");
+            const std::string nf = next_tmp("f64via32_nf");
+            os << "  " << nf << " = sitofp i32 " << *n << " to float\n";
+            const std::string out = next_tmp("f64via32_call");
+            if (callee == "__nv_powi") {
+                declarations_.insert("declare float @air.fast_pow.f32(float, float)");
+                os << "  " << out << " = call float @air.fast_pow.f32(float " << *x
+                   << ", float " << nf << ")\n";
+            } else {
+                declarations_.insert("declare float @air.fast_exp2.f32(float)");
+                const std::string scale = next_tmp("ldexp_scale");
+                os << "  " << scale << " = call float @air.fast_exp2.f32(float "
+                   << nf << ")\n";
+                os << "  " << out << " = fmul float " << *x << ", " << scale << "\n";
+            }
+            return store_f32_value_as_f64_ret(os, out);
+        }
+        if (callee == "__nv_hypot") {
+            if (arg_names.size() < 2) return fail(instr, "__nv_hypot expects 2 args");
+            auto x = f64_slot_to_f32(os, arg_names[0]);
+            auto y = f64_slot_to_f32(os, arg_names[1]);
+            if (!x || !y) return fail(instr, "__nv_hypot args missing");
+            declarations_.insert("declare float @llvm.sqrt.f32(float)");
+            const std::string xx = next_tmp("hypot_xx");
+            const std::string yy = next_tmp("hypot_yy");
+            const std::string sum = next_tmp("hypot_sum");
+            const std::string out = next_tmp("hypot");
+            os << "  " << xx << " = fmul float " << *x << ", " << *x << "\n";
+            os << "  " << yy << " = fmul float " << *y << ", " << *y << "\n";
+            os << "  " << sum << " = fadd float " << xx << ", " << yy << "\n";
+            os << "  " << out << " = call float @llvm.sqrt.f32(float " << sum << ")\n";
+            return store_f32_value_as_f64_ret(os, out);
+        }
+        if (callee == "__nv_fdim") {
+            if (arg_names.size() < 2) return fail(instr, "__nv_fdim expects 2 args");
+            auto x = f64_slot_to_f32(os, arg_names[0]);
+            auto y = f64_slot_to_f32(os, arg_names[1]);
+            if (!x || !y) return fail(instr, "__nv_fdim args missing");
+            const std::string isnan = next_tmp("fdim_nan");
+            os << "  " << isnan << " = fcmp uno float " << *x << ", " << *y << "\n";
+            const std::string nan_out = next_tmp("fdim_nan_out");
+            os << "  " << nan_out << " = fadd float " << *x << ", " << *y << "\n";
+            const std::string greater = next_tmp("fdim_gt");
+            os << "  " << greater << " = fcmp ogt float " << *x << ", " << *y << "\n";
+            const std::string diff = next_tmp("fdim_diff");
+            os << "  " << diff << " = fsub float " << *x << ", " << *y << "\n";
+            const std::string positive = next_tmp("fdim_pos");
+            os << "  " << positive << " = select i1 " << greater << ", float " << diff
+               << ", float 0.000000e+00\n";
+            const std::string out = next_tmp("fdim");
+            os << "  " << out << " = select i1 " << isnan << ", float " << nan_out
+               << ", float " << positive << "\n";
+            return store_f32_value_as_f64_ret(os, out);
+        }
+        if (callee == "__nv_cbrt" || callee == "__nv_rcbrt") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            auto x = f64_slot_to_f32(os, arg_names[0]);
+            if (!x) return fail(instr, callee + " arg missing");
+            declarations_.insert("declare float @llvm.fabs.f32(float)");
+            declarations_.insert("declare float @llvm.copysign.f32(float, float)");
+            declarations_.insert("declare float @air.fast_pow.f32(float, float)");
+            const std::string ax = next_tmp("cbrt_ax");
+            os << "  " << ax << " = call float @llvm.fabs.f32(float " << *x << ")\n";
+            const std::string p = next_tmp("cbrt_pow");
+            os << "  " << p << " = call float @air.fast_pow.f32(float " << ax
+               << (callee == "__nv_cbrt" ? ", float 0x3FD5555560000000)\n"
+                                        : ", float 0xBFD5555560000000)\n");
+            const std::string out = next_tmp("cbrt");
+            os << "  " << out << " = call float @llvm.copysign.f32(float " << p
+               << ", float " << *x << ")\n";
+            return store_f32_value_as_f64_ret(os, out);
+        }
+        if (callee == "__nv_erf" || callee == "__nv_erfc") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            auto x = f64_slot_to_f32(os, arg_names[0]);
+            if (!x) return fail(instr, callee + " arg missing");
+            declarations_.insert("declare float @llvm.copysign.f32(float, float)");
+            const std::string tail = emit_erfc_tail(*x);
+            std::string out;
+            if (callee == "__nv_erf") {
+                const std::string mag = next_tmp("erf_mag");
+                os << "  " << mag << " = fsub float 1.000000e+00, " << tail << "\n";
+                out = next_tmp("erf");
+                os << "  " << out << " = call float @llvm.copysign.f32(float " << mag
+                   << ", float " << *x << ")\n";
+            } else {
+                const std::string neg = next_tmp("erfc_neg");
+                os << "  " << neg << " = fcmp olt float " << *x << ", 0.000000e+00\n";
+                const std::string refl = next_tmp("erfc_refl");
+                os << "  " << refl << " = fsub float 2.000000e+00, " << tail << "\n";
+                out = next_tmp("erfc");
+                os << "  " << out << " = select i1 " << neg << ", float " << refl
+                   << ", float " << tail << "\n";
+            }
+            return store_f32_value_as_f64_ret(os, out);
+        }
+        if (callee == "__nv_sincos") {
+            // Pointer-out double builtin: both out-params point at binary64
+            // storage, so each f32 trig result is re-encoded to binary64 bits
+            // before the store.
+            if (arg_names.size() < 3) return fail(instr, "__nv_sincos expects 3 args");
+            auto x = f64_slot_to_f32(os, arg_names[0]);
+            auto sin_ptr_bits = load_call_slot_value(os, arg_names[1], 64);
+            auto cos_ptr_bits = load_call_slot_value(os, arg_names[2], 64);
+            if (!x || !sin_ptr_bits || !cos_ptr_bits) {
+                return fail(instr, "__nv_sincos args missing");
+            }
+            declarations_.insert("declare float @air.fast_sin.f32(float)");
+            declarations_.insert("declare float @air.fast_cos.f32(float)");
+            const std::string sin_value = next_tmp("sincos_sin");
+            const std::string cos_value = next_tmp("sincos_cos");
+            os << "  " << sin_value << " = call float @air.fast_sin.f32(float "
+               << *x << ")\n";
+            os << "  " << cos_value << " = call float @air.fast_cos.f32(float "
+               << *x << ")\n";
+            auto store_f64 = [&](const std::string& ptr_bits,
+                                 const std::string& value) {
+                const std::string raw = next_tmp("sincos_raw");
+                os << "  " << raw << " = bitcast float " << value << " to i32\n";
+                const std::string bits = f32_bits_to_f64(os, raw);
+                const std::string ptr = next_tmp("sincos_ptr");
+                os << "  " << ptr << " = inttoptr i64 " << ptr_bits << " to i64*\n";
+                os << "  store i64 " << bits << ", i64* " << ptr << ", align 8\n";
+            };
+            store_f64(*sin_ptr_bits, sin_value);
+            store_f64(*cos_ptr_bits, cos_value);
+            return true;
+        }
+        if (callee == "__nv_modf") {
+            // modf's integral output is trunc(x); the fraction is x - trunc(x)
+            // (exact by Sterbenz) except at +-inf, where the subtraction is NaN
+            // and modf returns a signed zero.
+            if (arg_names.size() < 2) return fail(instr, "__nv_modf expects 2 args");
+            auto x = f64_slot_to_f32(os, arg_names[0]);
+            auto int_ptr_bits = load_call_slot_value(os, arg_names[1], 64);
+            if (!x || !int_ptr_bits) return fail(instr, "__nv_modf args missing");
+            declarations_.insert("declare float @llvm.trunc.f32(float)");
+            declarations_.insert("declare float @llvm.copysign.f32(float, float)");
+            const std::string integral = next_tmp("modf_int");
+            os << "  " << integral << " = call float @llvm.trunc.f32(float " << *x << ")\n";
+            const std::string integral_raw = next_tmp("modf_int_raw");
+            os << "  " << integral_raw << " = bitcast float " << integral << " to i32\n";
+            const std::string integral_bits = f32_bits_to_f64(os, integral_raw);
+            const std::string int_ptr = next_tmp("modf_ptr");
+            os << "  " << int_ptr << " = inttoptr i64 " << *int_ptr_bits << " to i64*\n";
+            os << "  store i64 " << integral_bits << ", i64* " << int_ptr
+               << ", align 8\n";
+            const std::string xb = next_tmp("modf_xb");
+            const std::string mag = next_tmp("modf_mag");
+            const std::string isinf = next_tmp("modf_isinf");
+            os << "  " << xb << " = bitcast float " << *x << " to i32\n";
+            os << "  " << mag << " = and i32 " << xb << ", 2147483647\n";
+            os << "  " << isinf << " = icmp eq i32 " << mag << ", 2139095040\n";
+            const std::string diff = next_tmp("modf_frac");
+            os << "  " << diff << " = fsub float " << *x << ", " << integral << "\n";
+            const std::string signed_zero = next_tmp("modf_zero");
+            os << "  " << signed_zero
+               << " = call float @llvm.copysign.f32(float 0.000000e+00, float "
+               << *x << ")\n";
+            const std::string frac = next_tmp("modf_out");
+            os << "  " << frac << " = select i1 " << isinf << ", float "
+               << signed_zero << ", float " << diff << "\n";
+            return store_f32_value_as_f64_ret(os, frac);
+        }
+
+        // IEEE arithmetic spelled as device functions. The binary32 forms are
+        // plain float ops; the binary64 forms reach the same software-ALU
+        // helpers as add.rn.f64 in every FP64 mode.
+        {
+            struct ArithBuiltin { const char* nv; const char* op; };
+            static const ArithBuiltin kFloatArith[] = {
+                {"__nv_fadd_rn", "fadd"}, {"__nv_fsub_rn", "fsub"},
+                {"__nv_fmul_rn", "fmul"}, {"__nv_fdiv_rn", "fdiv"},
+            };
+            for (const ArithBuiltin& entry : kFloatArith) {
+                if (callee != entry.nv) continue;
+                if (arg_names.size() < 2)
+                    return fail(instr, callee + " expects 2 args");
+                auto a = load_call_slot_f32(arg_names[0]);
+                auto b = load_call_slot_f32(arg_names[1]);
+                if (!a || !b) return fail(instr, callee + " args missing");
+                const std::string out = next_tmp("nv_arith");
+                os << "  " << out << " = " << entry.op << " float " << *a
+                   << ", " << *b << "\n";
+                return store_ret_f32(out);
+            }
+            static const ArithBuiltin kDoubleArith[] = {
+                {"__nv_dadd_rn", "add"}, {"__nv_dsub_rn", "sub"},
+                {"__nv_dmul_rn", "mul"}, {"__nv_ddiv_rn", "div"},
+            };
+            for (const ArithBuiltin& entry : kDoubleArith) {
+                if (callee != entry.nv) continue;
+                if (arg_names.size() < 2)
+                    return fail(instr, callee + " expects 2 args");
+                auto a = load_call_slot_value(os, arg_names[0], 64);
+                auto b = load_call_slot_value(os, arg_names[1], 64);
+                if (!a || !b) return fail(instr, callee + " args missing");
+                const std::string operation(entry.op);
+                if (uses_vf64_support()) {
+                    const bool wide =
+                        fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48;
+                    const std::string function =
+                        wide ? "vf64_wide_" + operation
+                             : "vf64_" + operation + "_round";
+                    declarations_.insert("declare i64 @" + function +
+                                         (wide ? "(i64, i64)"
+                                               : "(i64, i64, i32)"));
+                    const std::string result = next_tmp("vf64_arith");
+                    os << "  " << result << " = call i64 @" << function
+                       << "(i64 " << *a << ", i64 " << *b
+                       << (wide ? "" : ", i32 0") << ")\n";
+                    return store_ret_bits(result, 64);
+                }
+                if (fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                    const Fp64Pair lhs = fp64_pair_from_ieee_bits(os, *a);
+                    const Fp64Pair rhs = fp64_pair_from_ieee_bits(os, *b);
+                    Fp64Pair result;
+                    if (operation == "add") {
+                        result = emit_fp64_pair_add(os, lhs, rhs);
+                    } else if (operation == "sub") {
+                        result = emit_fp64_pair_add(os, lhs, rhs, true);
+                    } else if (operation == "mul") {
+                        result = emit_fp64_pair_mul(os, lhs, rhs);
+                    } else {
+                        result = emit_fp64_pair_div(os, lhs, rhs);
+                    }
+                    return store_ret_bits(fp64_ieee_bits_from_pair(os, result),
+                                          64);
+                }
+                const std::string lhs = next_tmp("nv_darith_a");
+                const std::string rhs = next_tmp("nv_darith_b");
+                const std::string value = next_tmp("nv_darith_v");
+                const std::string bits = next_tmp("nv_darith_bits");
+                os << "  " << lhs << " = bitcast i64 " << *a << " to double\n";
+                os << "  " << rhs << " = bitcast i64 " << *b << " to double\n";
+                os << "  " << value << " = f" << operation << " double " << lhs
+                   << ", " << rhs << "\n";
+                os << "  " << bits << " = bitcast double " << value
+                   << " to i64\n";
+                return store_ret_bits(bits, 64);
+            }
+        }
+        // __nv_frcp_rn / __nv_drcp_rn are the correctly-rounded reciprocals:
+        // 1.0 / x in the operand's own precision. __nv_frsqrt_rn composes as
+        // 1.0f/sqrt(x) (~1 ulp) since no exact reciprocal-sqrt primitive is
+        // declared on this path.
+        if (callee == "__nv_frcp_rn" || callee == "__nv_frsqrt_rn") {
+            if (arg_names.empty())
+                return fail(instr, callee + " expects 1 arg");
+            auto x = load_call_slot_f32(arg_names[0]);
+            if (!x) return fail(instr, callee + " arg missing");
+            std::string divisor = *x;
+            if (callee == "__nv_frsqrt_rn") {
+                declarations_.insert("declare float @air.fast_sqrt.f32(float)");
+                divisor = next_tmp("frsqrt_sqrt");
+                os << "  " << divisor << " = call float @air.fast_sqrt.f32(float "
+                   << *x << ")\n";
+            }
+            const std::string out = next_tmp("nvrn_rcp");
+            os << "  " << out << " = fdiv float 1.000000e+00, " << divisor
+               << "\n";
+            return store_ret_f32(out);
+        }
+        if (callee == "__nv_drcp_rn") {
+            if (arg_names.empty())
+                return fail(instr, "__nv_drcp_rn expects 1 arg");
+            auto input_bits = load_call_slot_value(os, arg_names[0], 64);
+            if (!input_bits) return fail(instr, "__nv_drcp_rn arg missing");
+            const std::string one_bits = "4607182418800017408";
+            if (uses_vf64_support()) {
+                const bool wide =
+                    fp64_mode_ == cumetal::ptx::Fp64Mode::kWide48;
+                const std::string function =
+                    wide ? "vf64_wide_div" : "vf64_div_round";
+                declarations_.insert("declare i64 @" + function +
+                                     (wide ? "(i64, i64)" : "(i64, i64, i32)"));
+                const std::string result = next_tmp("vf64_drcp");
+                os << "  " << result << " = call i64 @" << function << "(i64 "
+                   << one_bits << ", i64 " << *input_bits
+                   << (wide ? "" : ", i32 0") << ")\n";
+                return store_ret_bits(result, 64);
+            }
+            if (fp64_mode_ == cumetal::ptx::Fp64Mode::kEmulate) {
+                const Fp64Pair divisor = fp64_pair_from_ieee_bits(os, *input_bits);
+                const std::string one_hi =
+                    emit_float_constant(os, 1.0f, "drcp_pair_one_hi");
+                const std::string one_lo =
+                    emit_float_constant(os, 0.0f, "drcp_pair_one_lo");
+                const Fp64Pair result =
+                    emit_fp64_pair_div(os, Fp64Pair{one_hi, one_lo}, divisor);
+                return store_ret_bits(fp64_ieee_bits_from_pair(os, result), 64);
+            }
+            const std::string input = next_tmp("drcp_in");
+            const std::string value = next_tmp("drcp_v");
+            const std::string bits = next_tmp("drcp_bits");
+            os << "  " << input << " = bitcast i64 " << *input_bits
+               << " to double\n";
+            os << "  " << value << " = fdiv double 1.000000e+00, " << input
+               << "\n";
+            os << "  " << bits << " = bitcast double " << value << " to i64\n";
+            return store_ret_bits(bits, 64);
+        }
+
+        // __nv_<src>2double_<mode> / __nv_double2<dst>_<mode> are real binary64
+        // conversions. The mode suffix follows the vf64 helper encoding
+        // (0=rne, 1=rtz, 2=rtn, 3=rtp); under the pair-emulated or native modes
+        // directed f64->f32 rounding is approximated by fptrunc.
+        if (callee.rfind("__nv_", 0) == 0 &&
+            callee.find("double") != std::string::npos) {
+            const std::size_t mode_sep = callee.rfind('_');
+            const std::string suffix = callee.substr(mode_sep + 1);
+            static const std::unordered_map<std::string, int> kConvModes = {
+                {"rn", 0}, {"rz", 1}, {"rd", 2}, {"ru", 3},
+            };
+            const auto mode = kConvModes.find(suffix);
+            if (mode != kConvModes.end() && mode_sep != std::string::npos &&
+                mode_sep > 5) {
+                const std::string body = callee.substr(5, mode_sep - 5);
+                const std::size_t two = body.find('2');
+                if (two != std::string::npos) {
+                    const std::string source = body.substr(0, two);
+                    const std::string destination = body.substr(two + 1);
+                    const bool source_signed =
+                        source == "int" || source == "ll";
+                    const int source_bits =
+                        (source == "ll" || source == "ull") ? 64 : 32;
+                    const bool dest_signed =
+                        destination == "int" || destination == "ll";
+                    const int dest_bits =
+                        (destination == "ll" || destination == "ull") ? 64 : 32;
+                    const bool int_to_f64 =
+                        destination == "double" &&
+                        (source == "int" || source == "ll" ||
+                         source == "uint" || source == "ull");
+                    const bool f64_to_f32 =
+                        source == "double" && destination == "float";
+                    const bool f64_to_int =
+                        source == "double" &&
+                        (destination == "int" || destination == "ll" ||
+                         destination == "uint" || destination == "ull");
+                    if (int_to_f64 || f64_to_f32 || f64_to_int) {
+                        if (arg_names.empty())
+                            return fail(instr, callee + " expects 1 arg");
+                        if (int_to_f64) {
+                            auto value = load_call_slot_value(
+                                os, arg_names[0], source_bits);
+                            if (!value)
+                                return fail(instr, callee + " arg missing");
+                            if (cumetal::ptx::fp64_mode_links_vf64_support(
+                                    fp64_mode_)) {
+                                const std::string function =
+                                    "vf64_" +
+                                    std::string(source_signed ? "i" : "ui") +
+                                    std::to_string(source_bits) + "_to_f64";
+                                declarations_.insert(
+                                    "declare i64 @" + function + "(" +
+                                    llvm_int_type(source_bits) + ", i32)");
+                                const std::string out = next_tmp("nvconv_d");
+                                os << "  " << out << " = call i64 @" << function
+                                   << "(" << llvm_int_type(source_bits) << " "
+                                   << *value << ", i32 " << mode->second
+                                   << ")\n";
+                                return store_ret_bits(out, 64);
+                            }
+                            const std::string wide = next_tmp("nvconv_dw");
+                            const std::string bits = next_tmp("nvconv_db");
+                            os << "  " << wide << " = "
+                               << (source_signed ? "sitofp" : "uitofp") << " "
+                               << llvm_int_type(source_bits) << " " << *value
+                               << " to double\n";
+                            os << "  " << bits << " = bitcast double " << wide
+                               << " to i64\n";
+                            return store_ret_bits(bits, 64);
+                        }
+                        auto raw =
+                            load_call_slot_value(os, arg_names[0], 64);
+                        if (!raw)
+                            return fail(instr, callee + " arg missing");
+                        if (f64_to_f32) {
+                            if (cumetal::ptx::fp64_mode_links_vf64_support(
+                                    fp64_mode_)) {
+                                declarations_.insert(
+                                    "declare i32 @vf64_f64_to_f32(i64, i32)");
+                                const std::string narrow =
+                                    next_tmp("nvconv_fr");
+                                os << "  " << narrow
+                                   << " = call i32 @vf64_f64_to_f32(i64 "
+                                   << *raw << ", i32 " << mode->second
+                                   << ")\n";
+                                const std::string out = next_tmp("nvconv_f");
+                                os << "  " << out << " = bitcast i32 " << narrow
+                                   << " to float\n";
+                                return store_ret_f32(out);
+                            }
+                            const std::string wide = next_tmp("nvconv_fw");
+                            const std::string out = next_tmp("nvconv_f");
+                            os << "  " << wide << " = bitcast i64 " << *raw
+                               << " to double\n";
+                            os << "  " << out << " = fptrunc double " << wide
+                               << " to float\n";
+                            return store_ret_f32(out);
+                        }
+                        if (cumetal::ptx::fp64_mode_links_vf64_support(
+                                fp64_mode_)) {
+                            const std::string function =
+                                "vf64_f64_to_" +
+                                std::string(dest_signed ? "i" : "ui") +
+                                std::to_string(dest_bits);
+                            declarations_.insert(
+                                "declare " + llvm_int_type(dest_bits) + " @" +
+                                function + "(i64, i32, i1)");
+                            const std::string out = next_tmp("nvconv_i");
+                            os << "  " << out << " = call "
+                               << llvm_int_type(dest_bits) << " @" << function
+                               << "(i64 " << *raw << ", i32 " << mode->second
+                               << ", i1 true)\n";
+                            return store_ret_bits(out, dest_bits);
+                        }
+                        const std::string wide = next_tmp("nvconv_iw");
+                        os << "  " << wide << " = bitcast i64 " << *raw
+                           << " to double\n";
+                        std::string rounded = wide;
+                        if (mode->second != 1) {
+                            const char* intrinsic =
+                                mode->second == 0   ? "llvm.rint.f64"
+                                : mode->second == 2 ? "llvm.floor.f64"
+                                                    : "llvm.ceil.f64";
+                            declarations_.insert(std::string("declare double @") +
+                                                 intrinsic + "(double)");
+                            rounded = next_tmp("nvconv_ir");
+                            os << "  " << rounded << " = call double @"
+                               << intrinsic << "(double " << wide << ")\n";
+                        }
+                        const std::string out = next_tmp("nvconv_i");
+                        os << "  " << out << " = "
+                           << (dest_signed ? "fptosi" : "fptoui") << " double "
+                           << rounded << " to " << llvm_int_type(dest_bits)
+                           << "\n";
+                        return store_ret_bits(out, dest_bits);
+                    }
+                }
+            }
+        }
+
+        // Raw binary64 storage-word access: the slot already holds the packed
+        // IEEE word in every FP64 mode, so these are plain bit operations.
+        if (callee == "__nv_hiloint2double") {
+            if (arg_names.size() < 2)
+                return fail(instr, "__nv_hiloint2double expects 2 args");
+            auto hi = load_call_slot_value(os, arg_names[0], 32);
+            auto lo = load_call_slot_value(os, arg_names[1], 32);
+            if (!hi || !lo)
+                return fail(instr, "__nv_hiloint2double args missing");
+            const std::string hi64 = next_tmp("hilo_hi64");
+            const std::string lo64 = next_tmp("hilo_lo64");
+            const std::string shifted = next_tmp("hilo_sh");
+            const std::string bits = next_tmp("hilo_bits");
+            os << "  " << hi64 << " = zext i32 " << *hi << " to i64\n";
+            os << "  " << lo64 << " = zext i32 " << *lo << " to i64\n";
+            os << "  " << shifted << " = shl i64 " << hi64 << ", 32\n";
+            os << "  " << bits << " = or i64 " << shifted << ", " << lo64
+               << "\n";
+            return store_ret_bits(bits, 64);
+        }
+        if (callee == "__nv_double2hiint" || callee == "__nv_double2loint") {
+            if (arg_names.empty())
+                return fail(instr, callee + " expects 1 arg");
+            auto bits = load_call_slot_value(os, arg_names[0], 64);
+            if (!bits) return fail(instr, callee + " arg missing");
+            std::string half = *bits;
+            if (callee == "__nv_double2hiint") {
+                half = next_tmp("d2hi_sh");
+                os << "  " << half << " = lshr i64 " << *bits << ", 32\n";
+            }
+            const std::string out = next_tmp("d2hilo");
+            os << "  " << out << " = trunc i64 " << half << " to i32\n";
+            return store_ret_bits(out, 32);
+        }
+
+        // Expansions with no AIR builtin live in
+        // cumetal_libdevice_support.metal and are linked in whenever the
+        // generated IR references cm_libdevice_*. Double-precision callees
+        // decode to binary32 and re-encode, matching the typed MSL path.
+        {
+            // is_double cannot be derived from a trailing 'f' -- __nv_normcdf is
+            // the double spelling (the float form is __nv_normcdff).
+            struct HelperBuiltin {
+                const char* nv; const char* sym; int arity; bool is_double;
+            };
+            static const HelperBuiltin kLibdeviceHelpers[] = {
+                {"__nv_sinpif", "cm_libdevice_sinpi", 1, false},
+                {"__nv_sinpi", "cm_libdevice_sinpi", 1, true},
+                {"__nv_cospif", "cm_libdevice_cospi", 1, false},
+                {"__nv_cospi", "cm_libdevice_cospi", 1, true},
+                {"__nv_logbf", "cm_libdevice_logb", 1, false},
+                {"__nv_logb", "cm_libdevice_logb", 1, true},
+                {"__nv_erfcxf", "cm_libdevice_erfcx", 1, false},
+                {"__nv_erfcx", "cm_libdevice_erfcx", 1, true},
+                {"__nv_normcdff", "cm_libdevice_normcdf", 1, false},
+                {"__nv_normcdf", "cm_libdevice_normcdf", 1, true},
+                {"__nv_normcdfinvf", "cm_libdevice_normcdfinv", 1, false},
+                {"__nv_normcdfinv", "cm_libdevice_normcdfinv", 1, true},
+                {"__nv_erfinvf", "cm_libdevice_erfinv", 1, false},
+                {"__nv_erfinv", "cm_libdevice_erfinv", 1, true},
+                {"__nv_erfcinvf", "cm_libdevice_erfcinv", 1, false},
+                {"__nv_erfcinv", "cm_libdevice_erfcinv", 1, true},
+                {"__nv_tgammaf", "cm_libdevice_tgamma", 1, false},
+                {"__nv_tgamma", "cm_libdevice_tgamma", 1, true},
+                {"__nv_lgammaf", "cm_libdevice_lgamma", 1, false},
+                {"__nv_lgamma", "cm_libdevice_lgamma", 1, true},
+                {"__nv_rhypotf", "cm_libdevice_rhypot", 2, false},
+                {"__nv_rhypot", "cm_libdevice_rhypot", 2, true},
+                {"__nv_norm3df", "cm_libdevice_norm3d", 3, false},
+                {"__nv_norm3d", "cm_libdevice_norm3d", 3, true},
+                {"__nv_norm4df", "cm_libdevice_norm4d", 4, false},
+                {"__nv_norm4d", "cm_libdevice_norm4d", 4, true},
+                {"__nv_rnorm3df", "cm_libdevice_rnorm3d", 3, false},
+                {"__nv_rnorm3d", "cm_libdevice_rnorm3d", 3, true},
+                {"__nv_rnorm4df", "cm_libdevice_rnorm4d", 4, false},
+                {"__nv_rnorm4d", "cm_libdevice_rnorm4d", 4, true},
+            };
+            for (const HelperBuiltin& helper : kLibdeviceHelpers) {
+                if (callee != helper.nv) continue;
+                const bool is_double = helper.is_double;
+                if (arg_names.size() < static_cast<std::size_t>(helper.arity))
+                    return fail(instr, callee + " arg count mismatch");
+                std::vector<std::string> values;
+                values.reserve(static_cast<std::size_t>(helper.arity));
+                for (int i = 0; i < helper.arity; ++i) {
+                    auto value = is_double
+                                     ? f64_slot_to_f32(os, arg_names[static_cast<std::size_t>(i)])
+                                     : load_call_slot_f32(arg_names[static_cast<std::size_t>(i)]);
+                    if (!value) return fail(instr, callee + " arg missing");
+                    values.push_back(*value);
+                }
+                std::string decl = "declare float @" + std::string(helper.sym) +
+                                   "(float";
+                for (int i = 1; i < helper.arity; ++i) decl += ", float";
+                decl += ")";
+                declarations_.insert(decl);
+                const std::string out = next_tmp("nvlibdev");
+                os << "  " << out << " = call float @" << helper.sym << "(";
+                for (int i = 0; i < helper.arity; ++i) {
+                    if (i != 0) os << ", ";
+                    os << "float " << values[static_cast<std::size_t>(i)];
+                }
+                os << ")\n";
+                if (is_double) return store_f32_value_as_f64_ret(os, out);
+                return store_ret_f32(out);
+            }
+        }
+        if (callee == "__nv_ilogbf" || callee == "__nv_ilogb") {
+            // ilogb returns a plain int, so no binary64 re-encoding.
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            const bool is_double = callee.back() != 'f';
+            auto x = is_double ? f64_slot_to_f32(os, arg_names[0])
+                               : load_call_slot_f32(arg_names[0]);
+            if (!x) return fail(instr, callee + " arg missing");
+            declarations_.insert("declare i32 @cm_libdevice_ilogb(float)");
+            const std::string out = next_tmp("nvilogb");
+            os << "  " << out << " = call i32 @cm_libdevice_ilogb(float " << *x
+               << ")\n";
+            return store_ret_bits(out, 32);
+        }
+        if (callee == "__nv_llrintf" || callee == "__nv_llrint" ||
+            callee == "__nv_llroundf" || callee == "__nv_llround") {
+            // llrint/llround return long (i64), not a binary64 word.
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            const bool is_double = callee.back() != 'f';
+            auto x = is_double ? f64_slot_to_f32(os, arg_names[0])
+                               : load_call_slot_f32(arg_names[0]);
+            if (!x) return fail(instr, callee + " arg missing");
+            const char* sym = callee.find("llrint") != std::string::npos
+                                  ? "cm_libdevice_llrint"
+                                  : "cm_libdevice_llround";
+            declarations_.insert(std::string("declare i64 @") + sym + "(float)");
+            const std::string out = next_tmp("nvllr");
+            os << "  " << out << " = call i64 @" << sym << "(float " << *x
+               << ")\n";
+            return store_ret_bits(out, 64);
+        }
+        if (callee == "__nv_sincospif" || callee == "__nv_sincospi") {
+            // Pointer-out like sincos: the out-params are float* for the f
+            // form and binary64 storage for the double form.
+            if (arg_names.size() < 3)
+                return fail(instr, callee + " expects 3 args");
+            const bool is_double = callee.back() != 'f';
+            auto x = is_double ? f64_slot_to_f32(os, arg_names[0])
+                               : load_call_slot_f32(arg_names[0]);
+            auto sin_ptr = load_call_slot_value(os, arg_names[1], 64);
+            auto cos_ptr = load_call_slot_value(os, arg_names[2], 64);
+            if (!x || !sin_ptr || !cos_ptr)
+                return fail(instr, callee + " args missing");
+            declarations_.insert("declare float @cm_libdevice_sinpi(float)");
+            declarations_.insert("declare float @cm_libdevice_cospi(float)");
+            const std::string sin_value = next_tmp("sincospi_s");
+            const std::string cos_value = next_tmp("sincospi_c");
+            os << "  " << sin_value
+               << " = call float @cm_libdevice_sinpi(float " << *x << ")\n";
+            os << "  " << cos_value
+               << " = call float @cm_libdevice_cospi(float " << *x << ")\n";
+            auto store_value = [&](const std::string& ptr_bits,
+                                   const std::string& value,
+                                   const char* tag) {
+                const std::string raw = next_tmp(tag);
+                os << "  " << raw << " = bitcast float " << value << " to i32\n";
+                if (is_double) {
+                    const std::string bits = f32_bits_to_f64(os, raw);
+                    const std::string ptr = next_tmp(tag);
+                    os << "  " << ptr << " = inttoptr i64 " << ptr_bits
+                       << " to i64*\n";
+                    os << "  store i64 " << bits << ", i64* " << ptr
+                       << ", align 8\n";
+                } else {
+                    const std::string ptr = next_tmp(tag);
+                    os << "  " << ptr << " = inttoptr i64 " << ptr_bits
+                       << " to i32*\n";
+                    os << "  store i32 " << raw << ", i32* " << ptr
+                       << ", align 4\n";
+                }
+            };
+            store_value(*sin_ptr, sin_value, "sincospi_sin");
+            store_value(*cos_ptr, cos_value, "sincospi_cos");
+            return true;
+        }
+        if (callee == "__nv_remquof" || callee == "__nv_remquo") {
+            // remquo(x, y, quo): the remainder is x - rne(x/y) * y (single fma
+            // rounding); the quotient out-param is a plain int taking the low
+            // bits of rne(x / y).
+            if (arg_names.size() < 3)
+                return fail(instr, callee + " expects 3 args");
+            const bool is_double = callee.back() != 'f';
+            auto x = is_double ? f64_slot_to_f32(os, arg_names[0])
+                               : load_call_slot_f32(arg_names[0]);
+            auto y = is_double ? f64_slot_to_f32(os, arg_names[1])
+                               : load_call_slot_f32(arg_names[1]);
+            auto quo_ptr = load_call_slot_value(os, arg_names[2], 64);
+            if (!x || !y || !quo_ptr)
+                return fail(instr, callee + " args missing");
+            declarations_.insert("declare float @cm_libdevice_rne(float)");
+            declarations_.insert("declare float @llvm.fma.f32(float, float, float)");
+            const std::string ratio = next_tmp("remquo_div");
+            const std::string quotient = next_tmp("remquo_q");
+            const std::string quotient_i = next_tmp("remquo_qi");
+            const std::string quo_pointer = next_tmp("remquo_qp");
+            os << "  " << ratio << " = fdiv float " << *x << ", " << *y << "\n";
+            os << "  " << quotient << " = call float @cm_libdevice_rne(float "
+               << ratio << ")\n";
+            os << "  " << quotient_i << " = fptosi float " << quotient
+               << " to i32\n";
+            std::string quo_value = quotient_i;
+            if (is_double) {
+                // CUDA documents remquo's quotient as agreeing with the exact
+                // quotient only in the low 3 bits. The double entry point on
+                // the libm reference implementation (Darwin, used by the
+                // functional tests) exposes 7; srem keeps the sign of x/y.
+                const std::string masked = next_tmp("remquo_qm");
+                os << "  " << masked << " = srem i32 " << quotient_i
+                   << ", 128\n";
+                quo_value = masked;
+            }
+            os << "  " << quo_pointer << " = inttoptr i64 " << *quo_ptr
+               << " to i32*\n";
+            os << "  store i32 " << quo_value << ", i32* " << quo_pointer
+               << ", align 4\n";
+            const std::string neg_q = next_tmp("remquo_nq");
+            const std::string remainder = next_tmp("remquo_r");
+            os << "  " << neg_q << " = fneg float " << quotient << "\n";
+            os << "  " << remainder << " = call float @llvm.fma.f32(float "
+               << neg_q << ", float " << *y << ", float " << *x << ")\n";
+            if (is_double) return store_f32_value_as_f64_ret(os, remainder);
+            return store_ret_f32(remainder);
         }
 
         return fail(instr, "unsupported call target '" + callee + "'");

@@ -148,6 +148,11 @@ def load_manifest(path: Path, fixtures_root: Path) -> list[dict[str, str]]:
             ):
                 raise ValueError(f"invalid backends for {project['name']}")
             project["backends"] = list(backends)
+        if "timeout" in raw:
+            timeout = raw["timeout"]
+            if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+                raise ValueError(f"invalid timeout for {project['name']}")
+            project["timeout"] = float(timeout)
         if project["name"] in names:
             raise ValueError(f"duplicate project name: {project['name']}")
         if project["harness"] not in ("standard", "strict"):
@@ -288,8 +293,12 @@ def main() -> int:
         elif project["name"] == "ggml_output_ops":
             project_env["CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS"] = "0"
         started = time.monotonic()
+        # Per-project override for legitimately long runs -- the libdevice
+        # probe compiles each of its ~150 kernels through the offline Metal
+        # path under the strict harness.
+        project_timeout = float(project.get("timeout", args.timeout))
         returncode, output, timed_out = run_command(
-            command, root, project_env, args.timeout
+            command, root, project_env, project_timeout
         )
         elapsed = time.monotonic() - started
         classification = classify(returncode, output, timed_out)

@@ -269,6 +269,30 @@ struct BuiltinSignature {
     Type return_type;
     std::vector<Type> argument_types;
     bool tolerance_bounded = false;
+    // True when the double-precision builtin has no software-ALU helper and
+    // lower_to_msl evaluates it through binary32.
+    bool fp64_via_f32 = false;
+    // Non-kCall opcodes let a device-math name ride the arithmetic or
+    // conversion lowering instead of emitting a call: __nv_dadd_rn is a real
+    // binary64 add and __nv_double2int_rd a real binary64->i32 conversion.
+    OpCode opcode = OpCode::kCall;
+    std::string fp64_conversion;
+    std::string rounding_mode;
+};
+
+// Double-precision libdevice names whose callee has no FP64 software-ALU
+// primitive; lower_to_msl decodes the binary64 words and runs the Metal
+// binary32 builtin.
+static const std::unordered_set<std::string> kFp64ViaF32Builtins = {
+    "__nv_exp",   "__nv_exp2",    "__nv_exp10",  "__nv_expm1",
+    "__nv_log",   "__nv_log2",    "__nv_log10",  "__nv_log1p",
+    "__nv_sin",   "__nv_cos",     "__nv_tan",    "__nv_asin",
+    "__nv_acos",  "__nv_atan",    "__nv_atan2",  "__nv_sinh",
+    "__nv_cosh",  "__nv_tanh",    "__nv_asinh",  "__nv_acosh",
+    "__nv_atanh", "__nv_cbrt",    "__nv_erf",    "__nv_erfc",
+    "__nv_pow",   "__nv_powi",    "__nv_fmod",   "__nv_fdim",
+    "__nv_hypot", "__nv_ldexp",   "__nv_scalbn", "__nv_nextafter",
+    "__nv_rcbrt",
 };
 
 std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
@@ -298,16 +322,36 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
         {"__nv_remainder", "remainder"}, {"__nv_floor", "floor"},
         {"__nv_ceil", "ceil"}, {"__nv_trunc", "trunc"},
         {"__nv_round", "round"}, {"__nv_rint", "rint"},
+        {"__nv_fabs", "fabs"}, {"__nv_copysign", "copysign"},
+        // No software-ALU helper exists for these; lower_to_msl evaluates
+        // them through binary32 (see kFp64ViaF32Builtins).
+        {"__nv_exp", "exp"}, {"__nv_exp2", "exp2"}, {"__nv_exp10", "exp10"},
+        {"__nv_expm1", "expm1"}, {"__nv_log", "log"}, {"__nv_log2", "log2"},
+        {"__nv_log10", "log10"}, {"__nv_log1p", "log1p"}, {"__nv_sin", "sin"},
+        {"__nv_cos", "cos"}, {"__nv_tan", "tan"}, {"__nv_asin", "asin"},
+        {"__nv_acos", "acos"}, {"__nv_atan", "atan"}, {"__nv_atan2", "atan2"},
+        {"__nv_sinh", "sinh"}, {"__nv_cosh", "cosh"}, {"__nv_tanh", "tanh"},
+        {"__nv_asinh", "asinh"}, {"__nv_acosh", "acosh"}, {"__nv_atanh", "atanh"},
+        {"__nv_cbrt", "cbrt"}, {"__nv_erf", "erf"}, {"__nv_erfc", "erfc"},
+        {"__nv_pow", "pow"}, {"__nv_fmod", "fmod"}, {"__nv_fdim", "fdim"},
+        {"__nv_hypot", "hypot"}, {"__nv_nextafter", "nextafter"},
+        {"__nv_rcbrt", "__cumetal_rcbrt"},
     };
     const auto double_builtin = kDoubleBuiltins.find(std::string(name));
     if (double_builtin != kDoubleBuiltins.end()) {
-        const std::size_t arity = name == "__nv_fma" ? 3 :
-                                  (name == "__nv_fmin" || name == "__nv_fmax" ||
-                                   name == "__nv_remainder" ? 2 : 1);
+        static const std::unordered_set<std::string> kBinaryDoubleBuiltins = {
+            "__nv_fmin",   "__nv_fmax",    "__nv_remainder", "__nv_atan2",
+            "__nv_pow",    "__nv_fmod",    "__nv_fdim",      "__nv_hypot",
+            "__nv_copysign", "__nv_nextafter",
+        };
+        const std::size_t arity =
+            name == "__nv_fma" ? 3
+            : kBinaryDoubleBuiltins.contains(std::string(name)) ? 2 : 1;
         return BuiltinSignature{
             .metal_name = double_builtin->second,
             .return_type = Type::floating(64),
             .argument_types = std::vector<Type>(arity, Type::floating(64)),
+            .fp64_via_f32 = kFp64ViaF32Builtins.contains(std::string(name)),
         };
     }
     static const std::unordered_map<std::string, std::string> kFloatBuiltins = {
@@ -316,6 +360,7 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
         {"__nv_fabsf", "fabs"}, {"__nv_acosf", "acos"},
         {"__nv_expf", "exp"}, {"__nv_fast_expf", "exp"},
         {"__nv_exp2f", "exp2"}, {"__nv_exp10f", "exp10"},
+        {"__nv_fast_exp10f", "exp10"},
         {"__nv_expm1f", "expm1"}, {"__nv_logf", "log"},
         {"__nv_log2f", "log2"}, {"__nv_log10f", "log10"},
         {"__nv_log1pf", "log1p"}, {"__nv_sinf", "sin"},
@@ -332,6 +377,13 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
         {"__nv_hypotf", "hypot"}, {"__nv_fmodf", "fmod"},
         {"__nv_copysignf", "copysign"}, {"__nv_fdimf", "fdim"},
         {"__nv_remainderf", "remainder"}, {"__nv_fmaf", "fma"},
+        {"__nv_fast_sinf", "sin"}, {"__nv_fast_cosf", "cos"},
+        {"__nv_fast_tanf", "tan"}, {"__nv_fast_logf", "log"},
+        {"__nv_fast_log2f", "log2"}, {"__nv_fast_log10f", "log10"},
+        {"__nv_fast_powf", "pow"}, {"__nv_nextafterf", "nextafter"},
+        {"__nv_saturatef", "saturate"}, {"__nv_rcbrtf", "__cumetal_rcbrt"},
+        {"__nv_fdividef", "__cumetal_fdivide"},
+        {"__nv_fast_fdividef", "__cumetal_fdivide"},
     };
     const auto builtin = kFloatBuiltins.find(std::string(name));
     if (builtin != kFloatBuiltins.end()) {
@@ -341,10 +393,12 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
              name == "__nv_hypotf" || name == "__nv_fmodf" ||
              name == "__nv_copysignf" || name == "__nv_fdimf" ||
              name == "__nv_remainderf" || name == "__nv_fminf" ||
-             name == "__nv_fmaxf" ? 2 : 1);
+             name == "__nv_fmaxf" || name == "__nv_nextafterf" ||
+             name == "__nv_fast_powf" || name == "__nv_fdividef" ||
+             name == "__nv_fast_fdividef" ? 2 : 1);
         static const std::unordered_set<std::string> kExpandedMath = {
             "__nv_expm1f", "__nv_log1pf", "__nv_cbrtf", "__nv_erff",
-            "__nv_erfcf", "__nv_hypotf", "__nv_remainderf",
+            "__nv_erfcf", "__nv_hypotf", "__nv_remainderf", "__nv_rcbrtf",
         };
         return BuiltinSignature{
             .metal_name = builtin->second,
@@ -418,7 +472,7 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
             .argument_types = {Type::integer(32)},
         };
     }
-    if (name == "__nv_frexp") {
+    if (name == "__nv_frexpf") {
         return BuiltinSignature{
             .metal_name = "frexp",
             .return_type = Type::floating(32),
@@ -426,6 +480,383 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
                 Type::floating(32),
                 Type::pointer(Type::integer(8), AddressSpace::kPrivate),
             },
+        };
+    }
+    if (name == "__nv_frexp") {
+        return BuiltinSignature{
+            .metal_name = "frexp",
+            .return_type = Type::floating(64),
+            .argument_types = {
+                Type::floating(64),
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate),
+            },
+            .fp64_via_f32 = true,
+        };
+    }
+    if (name == "__nv_modf") {
+        return BuiltinSignature{
+            .metal_name = "modf",
+            .return_type = Type::floating(64),
+            .argument_types = {
+                Type::floating(64),
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate),
+            },
+            .fp64_via_f32 = true,
+        };
+    }
+    if (name == "__nv_sincos") {
+        return BuiltinSignature{
+            .metal_name = "sincos",
+            .return_type = Type::void_type(),
+            .argument_types = {
+                Type::floating(64),
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate),
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate),
+            },
+            .fp64_via_f32 = true,
+        };
+    }
+    if (name == "__nv_modff") {
+        return BuiltinSignature{
+            .metal_name = "modf",
+            .return_type = Type::floating(32),
+            .argument_types = {
+                Type::floating(32),
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate),
+            },
+        };
+    }
+    if (name == "__nv_sincosf" || name == "__nv_fast_sincosf") {
+        return BuiltinSignature{
+            .metal_name = "sincos",
+            .return_type = Type::void_type(),
+            .argument_types = {
+                Type::floating(32),
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate),
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate),
+            },
+        };
+    }
+    if (name == "__nv_ldexpf" || name == "__nv_scalbnf") {
+        return BuiltinSignature{
+            .metal_name = "ldexp",
+            .return_type = Type::floating(32),
+            .argument_types = {Type::floating(32), Type::integer(32)},
+        };
+    }
+    if (name == "__nv_powif") {
+        return BuiltinSignature{
+            .metal_name = "pow",
+            .return_type = Type::floating(32),
+            .argument_types = {Type::floating(32), Type::integer(32)},
+        };
+    }
+    // Double libdevice calls whose second operand is an integer exponent or
+    // that still lack a software-ALU primitive evaluate through binary32.
+    if (name == "__nv_ldexp" || name == "__nv_scalbn") {
+        return BuiltinSignature{
+            .metal_name = "ldexp",
+            .return_type = Type::floating(64),
+            .argument_types = {Type::floating(64), Type::integer(32)},
+            .fp64_via_f32 = true,
+        };
+    }
+    if (name == "__nv_powi") {
+        return BuiltinSignature{
+            .metal_name = "pow",
+            .return_type = Type::floating(64),
+            .argument_types = {Type::floating(64), Type::integer(32)},
+            .fp64_via_f32 = true,
+        };
+    }
+    // IEEE arithmetic spelled as device functions. These become real IR ops
+    // rather than calls, so the binary64 forms reach the same software-ALU
+    // lowering as add.rn.f64 and friends in every FP64 mode.
+    static const std::unordered_map<std::string, OpCode> kFp64ArithBuiltins = {
+        {"__nv_dadd_rn", OpCode::kAdd}, {"__nv_dsub_rn", OpCode::kSub},
+        {"__nv_dmul_rn", OpCode::kMul}, {"__nv_ddiv_rn", OpCode::kDiv},
+    };
+    if (const auto arith = kFp64ArithBuiltins.find(std::string(name));
+        arith != kFp64ArithBuiltins.end()) {
+        return BuiltinSignature{
+            .return_type = Type::floating(64),
+            .argument_types = {Type::floating(64), Type::floating(64)},
+            .opcode = arith->second,
+        };
+    }
+    static const std::unordered_map<std::string, OpCode> kFloatArithBuiltins = {
+        {"__nv_fadd_rn", OpCode::kAdd}, {"__nv_fsub_rn", OpCode::kSub},
+        {"__nv_fmul_rn", OpCode::kMul}, {"__nv_fdiv_rn", OpCode::kDiv},
+        {"__nv_fmaf_rn", OpCode::kFma}, {"__nv_fmaf_ieee_rn", OpCode::kFma},
+    };
+    if (const auto arith = kFloatArithBuiltins.find(std::string(name));
+        arith != kFloatArithBuiltins.end()) {
+        const std::size_t arity = arith->second == OpCode::kFma ? 3 : 2;
+        return BuiltinSignature{
+            .return_type = Type::floating(32),
+            .argument_types = std::vector<Type>(arity, Type::floating(32)),
+            .opcode = arith->second,
+        };
+    }
+    // Directed-rounding interval intrinsics stay calls (metal_name is the
+    // stem plus suffix, e.g. "fadd_rd"); both lowerings route them through
+    // the correctly-rounded vf64 software ALU. Binary32 forms widen each
+    // operand to binary64, run the vf64 op, and convert back with the
+    // requested rounding — exact for add/sub/mul since those operands'
+    // products and sums always fit in the binary64 significand.
+    if (name.starts_with("__nv_") && name.size() > 8) {
+        const std::string_view suffix = name.substr(name.size() - 3);
+        if (suffix == "_rd" || suffix == "_ru" || suffix == "_rz") {
+            const std::string_view stem = name.substr(5, name.size() - 8);
+            static const std::unordered_set<std::string_view> kDirectedStems = {
+                "fadd", "fsub", "fmul", "fdiv", "frcp", "fsqrt", "fmaf",
+                "dadd", "dsub", "dmul", "ddiv", "drcp", "dsqrt", "fma",
+            };
+            if (kDirectedStems.contains(stem)) {
+                const bool is_double = stem.front() == 'd' || stem == "fma";
+                const std::size_t arity =
+                    stem == "fma" || stem == "fmaf" ? 3
+                    : stem.ends_with("rcp") || stem.ends_with("sqrt") ? 1
+                                                                      : 2;
+                return BuiltinSignature{
+                    .metal_name = std::string(stem) + std::string(suffix),
+                    .return_type = Type::floating(is_double ? 64 : 32),
+                    .argument_types = std::vector<Type>(
+                        arity, Type::floating(is_double ? 64 : 32)),
+                };
+            }
+        }
+    }
+    // __nv_frcp_rn is the correctly-rounded reciprocal; binary32 division is
+    // already IEEE rne so it composes as 1.0f/x. __nv_frsqrt_rn has no exact
+    // reciprocal-sqrt primitive, so it composes as 1.0f/sqrt(x) (~1 ulp).
+    // __nv_drcp_rn divides in the active binary64 mode, which is exact.
+    if (name == "__nv_frcp_rn" || name == "__nv_frsqrt_rn" ||
+        name == "__nv_drcp_rn") {
+        const bool is_double = name == "__nv_drcp_rn";
+        return BuiltinSignature{
+            .metal_name = name == "__nv_frsqrt_rn" ? "frsqrt_rn" : "rcp",
+            .return_type = Type::floating(is_double ? 64 : 32),
+            .argument_types = {Type::floating(is_double ? 64 : 32)},
+            .tolerance_bounded = name == "__nv_frsqrt_rn",
+        };
+    }
+    if (name == "__nv_fsqrt_rn") {
+        return BuiltinSignature{
+            .metal_name = "sqrt",
+            .return_type = Type::floating(32),
+            .argument_types = {Type::floating(32)},
+        };
+    }
+    if (name == "__nv_dsqrt_rn") {
+        return BuiltinSignature{
+            .metal_name = "sqrt",
+            .return_type = Type::floating(64),
+            .argument_types = {Type::floating(64)},
+        };
+    }
+    // __nv_<src>2double_<mode> and __nv_double2<dst>_<mode> are real
+    // binary64 conversions, not calls: they become kConvert ops carrying the
+    // software-FP64 conversion kind and the encoded rounding mode. The float
+    // variants are already covered by kFloatToIntBuiltins/kIntToFloat above.
+    if (name.starts_with("__nv_")) {
+        const std::size_t mode_sep = name.rfind('_');
+        const std::string_view suffix =
+            mode_sep == std::string_view::npos
+                ? std::string_view{}
+                : std::string_view(name).substr(mode_sep + 1);
+        static const std::unordered_map<std::string_view, const char*>
+            kRoundSuffix = {
+                {"rn", "0u"}, {"rz", "1u"}, {"rd", "2u"}, {"ru", "3u"},
+            };
+        const auto rounding = kRoundSuffix.find(suffix);
+        if (rounding != kRoundSuffix.end() &&
+            name.substr(0, mode_sep).find("double") != std::string_view::npos) {
+            const std::string body(name.substr(5, mode_sep - 5));
+            const std::size_t two = body.find('2');
+            if (two != std::string::npos) {
+                const std::string source = body.substr(0, two);
+                const std::string destination = body.substr(two + 1);
+                auto int_type = [](const std::string& kind) -> Type {
+                    return kind == "ll" || kind == "ull" ? Type::integer(64)
+                                                         : Type::integer(32);
+                };
+                if (destination == "double" &&
+                    (source == "int" || source == "ll" || source == "uint" ||
+                     source == "ull")) {
+                    return BuiltinSignature{
+                        .return_type = Type::floating(64),
+                        .argument_types = {int_type(source)},
+                        .opcode = OpCode::kConvert,
+                        .fp64_conversion = source.front() == 'u'
+                                               ? "unsigned_to_f64"
+                                               : "signed_to_f64",
+                        .rounding_mode = rounding->second,
+                    };
+                }
+                if (source == "double" &&
+                    (destination == "int" || destination == "ll" ||
+                     destination == "uint" || destination == "ull" ||
+                     destination == "float")) {
+                    const bool to_float = destination == "float";
+                    return BuiltinSignature{
+                        .return_type = to_float ? Type::floating(32)
+                                                : int_type(destination),
+                        .argument_types = {Type::floating(64)},
+                        .opcode = OpCode::kConvert,
+                        .fp64_conversion =
+                            to_float ? "f64_to_f32"
+                            : destination.front() == 'u' ? "f64_to_unsigned"
+                                                         : "f64_to_signed",
+                        .rounding_mode = rounding->second,
+                    };
+                }
+            }
+        }
+    }
+    // Raw binary64 storage-word access. hiloint2double packs two u32 halves;
+    // double2hiint/double2loint extract them. Bit-exact in every FP64 mode.
+    if (name == "__nv_hiloint2double") {
+        return BuiltinSignature{
+            .metal_name = "hiloint2double",
+            .return_type = Type::floating(64),
+            .argument_types = {Type::integer(32), Type::integer(32)},
+        };
+    }
+    if (name == "__nv_double2hiint" || name == "__nv_double2loint") {
+        return BuiltinSignature{
+            .metal_name = std::string(name == "__nv_double2hiint"
+                                          ? "double2hiint"
+                                          : "double2loint"),
+            .return_type = Type::integer(32),
+            .argument_types = {Type::floating(64)},
+        };
+    }
+    // sinpi/cospi map to the Metal builtins; sincospi keeps the pointer-out
+    // ABI like sincos. logb is the unbiased exponent as a float, ilogb as an
+    // int. The double forms evaluate through binary32 like the rest of the
+    // transcendental surface.
+    if (name == "__nv_sinpif" || name == "__nv_sinpi" ||
+        name == "__nv_cospif" || name == "__nv_cospi") {
+        const bool is_double = name.back() != 'f';
+        return BuiltinSignature{
+            .metal_name = name.find("sinpi") != std::string_view::npos
+                              ? "sinpi"
+                              : "cospi",
+            .return_type = Type::floating(is_double ? 64 : 32),
+            .argument_types = {Type::floating(is_double ? 64 : 32)},
+            .fp64_via_f32 = is_double,
+        };
+    }
+    if (name == "__nv_sincospif" || name == "__nv_sincospi") {
+        const bool is_double = name.back() != 'f';
+        const Type scalar = Type::floating(is_double ? 64 : 32);
+        return BuiltinSignature{
+            .metal_name = "sincospi",
+            .return_type = Type::void_type(),
+            .argument_types = {
+                scalar,
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate),
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate),
+            },
+            .fp64_via_f32 = is_double,
+        };
+    }
+    if (name == "__nv_logbf" || name == "__nv_logb") {
+        const bool is_double = name.back() != 'f';
+        return BuiltinSignature{
+            .metal_name = "logb",
+            .return_type = Type::floating(is_double ? 64 : 32),
+            .argument_types = {Type::floating(is_double ? 64 : 32)},
+            .fp64_via_f32 = is_double,
+        };
+    }
+    if (name == "__nv_ilogbf" || name == "__nv_ilogb") {
+        const bool is_double = name.back() != 'f';
+        return BuiltinSignature{
+            .metal_name = "ilogb",
+            .return_type = Type::integer(32),
+            .argument_types = {Type::floating(is_double ? 64 : 32)},
+            .fp64_via_f32 = is_double,
+        };
+    }
+    if (name == "__nv_llrintf" || name == "__nv_llrint" ||
+        name == "__nv_llroundf" || name == "__nv_llround") {
+        const bool is_double = name.back() != 'f';
+        return BuiltinSignature{
+            .metal_name = name.find("llrint") != std::string_view::npos
+                              ? "llrint"
+                              : "llround",
+            .return_type = Type::integer(64),
+            .argument_types = {Type::floating(is_double ? 64 : 32)},
+            .fp64_via_f32 = is_double,
+        };
+    }
+    if (name == "__nv_remquof" || name == "__nv_remquo") {
+        const bool is_double = name.back() != 'f';
+        const Type scalar = Type::floating(is_double ? 64 : 32);
+        return BuiltinSignature{
+            .metal_name = "remquo",
+            .return_type = scalar,
+            .argument_types = {
+                scalar, scalar,
+                Type::pointer(Type::integer(8), AddressSpace::kPrivate),
+            },
+            .tolerance_bounded = !is_double,
+            .fp64_via_f32 = is_double,
+        };
+    }
+    // Multi-argument norms without a Metal builtin compose from sqrt/fabs.
+    static const std::unordered_map<std::string, unsigned> kNormBuiltins = {
+        {"__nv_norm3df", 3}, {"__nv_norm3d", 3},
+        {"__nv_norm4df", 4}, {"__nv_norm4d", 4},
+        {"__nv_rnorm3df", 3}, {"__nv_rnorm3d", 3},
+        {"__nv_rnorm4df", 4}, {"__nv_rnorm4d", 4},
+        {"__nv_rhypotf", 2}, {"__nv_rhypot", 2},
+    };
+    if (const auto norm = kNormBuiltins.find(std::string(name));
+        norm != kNormBuiltins.end()) {
+        const bool is_double = name.back() != 'f';
+        const Type scalar = Type::floating(is_double ? 64 : 32);
+        std::string metal = norm->first.substr(5);
+        if (metal.back() == 'f') metal.pop_back();
+        return BuiltinSignature{
+            .metal_name = std::move(metal),
+            .return_type = scalar,
+            .argument_types = std::vector<Type>(norm->second, scalar),
+            .tolerance_bounded = !is_double,
+            .fp64_via_f32 = is_double,
+        };
+    }
+    // Inverse-error-function and gamma family. None has a Metal builtin; each
+    // lowers through a numerically-tested binary32 expansion, so the float
+    // forms are tolerance-bounded and the double forms evaluate through
+    // binary32 under emulation.
+    static const std::unordered_set<std::string> kExpansionBuiltins = {
+        "__nv_erfcxf",  "__nv_erfcx",
+        "__nv_normcdff", "__nv_normcdf",
+        "__nv_normcdfinvf", "__nv_normcdfinv",
+        "__nv_erfinvf", "__nv_erfinv",
+        "__nv_erfcinvf", "__nv_erfcinv",
+        "__nv_tgammaf", "__nv_tgamma",
+        "__nv_lgammaf", "__nv_lgamma",
+    };
+    if (kExpansionBuiltins.contains(std::string(name))) {
+        // The double spelling is the bare base name; the float form appends
+        // 'f'. A trailing 'f' only marks float when the stripped name is also
+        // a known builtin -- __nv_normcdf is double, __nv_normcdff is float.
+        const bool is_double =
+            name.back() != 'f' ||
+            !kExpansionBuiltins.contains(std::string(name.substr(0, name.size() - 1)));
+        const Type scalar = Type::floating(is_double ? 64 : 32);
+        std::string metal(name.substr(5));
+        if (!is_double && metal.back() == 'f') metal.pop_back();
+        return BuiltinSignature{
+            .metal_name = std::move(metal),
+            .return_type = scalar,
+            .argument_types = {scalar},
+            .tolerance_bounded = !is_double,
+            .fp64_via_f32 = is_double,
         };
     }
     return std::nullopt;
@@ -773,6 +1204,24 @@ std::uint32_t ptx_register_container_bits(std::string_view name) {
 bool cvt_has_signed_source(std::string_view opcode) {
     return opcode.ends_with(".s8") || opcode.ends_with(".s16") ||
            opcode.ends_with(".s32") || opcode.ends_with(".s64");
+}
+
+// The vf64 conversion helpers take the same mode encoding as
+// vf64_rounding_mode in lower_to_llvm.cpp: 0=rne, 1=rtz, 2=rtn, 3=rtp.
+// PTX spells them .rn/.rz/.rm/.rp for float destinations and
+// .rni/.rzi/.rmi/.rpi for integer destinations; a bare cvt to an integer
+// destination defaults to rtz and to float defaults to rne.
+std::string cvt_rounding_mode(std::string_view opcode) {
+    if (opcode.find(".rni.") != std::string::npos ||
+        opcode.find(".rn.") != std::string::npos) return "0u";
+    if (opcode.find(".rzi.") != std::string::npos ||
+        opcode.find(".rz.") != std::string::npos) return "1u";
+    if (opcode.find(".rmi.") != std::string::npos ||
+        opcode.find(".rm.") != std::string::npos) return "2u";
+    if (opcode.find(".rpi.") != std::string::npos ||
+        opcode.find(".rp.") != std::string::npos) return "3u";
+    const Type destination = ptx_cvt_result_type(opcode);
+    return destination.kind == TypeKind::kInteger ? "1u" : "0u";
 }
 
 std::pair<std::string, bool> normalized_predicate(std::string_view predicate) {
@@ -2389,6 +2838,36 @@ struct Importer {
                 operation.operands.push_back(
                     bit_container_operand(1, Type::floating(64)));
                 operation.attributes["fp64_conversion"] = "f64_to_f32";
+            } else if (ptx_cvt_source_type(instruction.opcode) ==
+                           Type::floating(64) &&
+                       operation.result_types.front().kind ==
+                           TypeKind::kInteger) {
+                // cvt.<round>.{s,u}{32,64}.f64: a binary64 -> integer
+                // conversion. The generic path would emit `int(bits)` -- a
+                // bit-pattern truncation that returns the low 32 bits of the
+                // storage word instead of the numeric value.
+                const bool signed_dest =
+                    instruction.opcode.find(".s32.f64") != std::string::npos ||
+                    instruction.opcode.find(".s64.f64") != std::string::npos;
+                operation.attributes["fp64_conversion"] =
+                    signed_dest ? "f64_to_signed" : "f64_to_unsigned";
+                operation.attributes["rounding_mode"] =
+                    cvt_rounding_mode(instruction.opcode);
+                operation.operands.push_back(
+                    bit_container_operand(1, Type::floating(64)));
+            } else if (operation.result_types.front() == Type::floating(64) &&
+                       ptx_cvt_source_type(instruction.opcode).kind ==
+                           TypeKind::kInteger) {
+                // cvt.<round>.f64.{s,u}{32,64}: integer -> binary64.
+                operation.attributes["fp64_conversion"] =
+                    cvt_has_signed_source(instruction.opcode)
+                        ? "signed_to_f64"
+                        : "unsigned_to_f64";
+                operation.attributes["rounding_mode"] =
+                    cvt_rounding_mode(instruction.opcode);
+                operation.operands.push_back(
+                    bit_container_operand(
+                        1, ptx_cvt_source_type(instruction.opcode)));
             } else {
                 operation.operands.push_back(
                     bit_container_operand(1, ptx_cvt_source_type(instruction.opcode)));
@@ -2577,10 +3056,29 @@ struct Importer {
                 return fail(&instruction, "device call target '" + callee +
                                               "' received the wrong argument count");
             }
-            operation.opcode = OpCode::kCall;
-            operation.attributes["callee"] = signature->metal_name;
-            if (builtin_call) operation.attributes["builtin"] = "true";
-            if (signature->return_type == Type::floating(64)) {
+            operation.opcode = signature->opcode;
+            if (signature->opcode == OpCode::kCall) {
+                operation.attributes["callee"] = signature->metal_name;
+                if (builtin_call) operation.attributes["builtin"] = "true";
+            }
+            if (!signature->fp64_conversion.empty()) {
+                operation.attributes["fp64_conversion"] =
+                    signature->fp64_conversion;
+            }
+            if (!signature->rounding_mode.empty()) {
+                operation.attributes["rounding_mode"] = signature->rounding_mode;
+            }
+            // A double crosses the call boundary as its 64-bit storage word;
+            // mark the op whenever the signature carries binary64 anywhere --
+            // __nv_sincos is void-returning but still takes a double input.
+            const bool signature_uses_fp64 =
+                signature->return_type == Type::floating(64) ||
+                std::any_of(signature->argument_types.begin(),
+                            signature->argument_types.end(),
+                            [](const Type& argument_type) {
+                                return argument_type == Type::floating(64);
+                            });
+            if (signature_uses_fp64) {
                 operation.attributes["fp64_mode"] =
                     result.module.attributes.at("fp64_mode");
             }
@@ -2611,27 +3109,6 @@ struct Importer {
                                                       "' was not initialized");
                     }
                     argument = slot->second;
-                }
-                if (callee == "__nv_frexp" && i == 0 &&
-                    argument.type == Type::floating(64) &&
-                    signature->argument_types[i] == Type::floating(32) &&
-                    argument.kind == OperandKind::kValue) {
-                    // Clang widens float to the ABI's double slot before the
-                    // call. This builtin is intentionally the proven float
-                    // normalization: recover the exact f32 producer instead
-                    // of bitcasting the now-correct 64-bit software value.
-                    for (auto prior = block->operations.rbegin();
-                         prior != block->operations.rend(); ++prior) {
-                        if (prior->results.size() == 1 &&
-                            prior->results.front() == argument.value &&
-                            prior->attributes.contains("fp64_conversion") &&
-                            prior->attributes.at("fp64_conversion") ==
-                                "f32_to_f64" &&
-                            prior->operands.size() == 1) {
-                            argument = prior->operands.front();
-                            break;
-                        }
-                    }
                 }
                 if (!(argument.type == signature->argument_types[i])) {
                     Operation conversion;
@@ -2674,6 +3151,18 @@ struct Importer {
                 result.module.semantic_quality = SemanticQuality::kToleranceBounded;
                 const std::string caveat =
                     "Metal-missing float math functions use numerically tested typed expansions";
+                if (std::find(result.module.semantic_caveats.begin(),
+                              result.module.semantic_caveats.end(), caveat) ==
+                    result.module.semantic_caveats.end()) {
+                    result.module.semantic_caveats.push_back(caveat);
+                }
+            }
+            if (builtin_call && signature->fp64_via_f32) {
+                if (result.module.semantic_quality == SemanticQuality::kExact) {
+                    result.module.semantic_quality = SemanticQuality::kSemanticEmulation;
+                }
+                const std::string caveat =
+                    "FP64 libdevice calls evaluate through binary32 under emulation";
                 if (std::find(result.module.semantic_caveats.begin(),
                               result.module.semantic_caveats.end(), caveat) ==
                     result.module.semantic_caveats.end()) {

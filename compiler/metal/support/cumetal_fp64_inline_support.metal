@@ -174,6 +174,40 @@ inline ulong vf64_fma_rne(ulong a, ulong b, ulong c) {
     return soft_fma64_status(a, b, c, soft_round_near_even, flags);
 }
 
+// Directed-rounding variants used by the __nv_*_{rd,ru,rz} libdevice
+// intrinsics. They are correctly rounded under every mode: the mode argument
+// is the soft_round_* code (0 rne, 1 rz, 2 rd, 3 ru), same as the Interop
+// [[visible]] wrappers linked into AIR.
+inline ulong vf64_add_round(ulong a, ulong b, uint mode) {
+    uint flags = 0;
+    return soft_add64_status(a, b, mode, flags);
+}
+
+inline ulong vf64_sub_round(ulong a, ulong b, uint mode) {
+    uint flags = 0;
+    return soft_sub64_status(a, b, mode, flags);
+}
+
+inline ulong vf64_mul_round(ulong a, ulong b, uint mode) {
+    uint flags = 0;
+    return soft_mul64_status(a, b, mode, flags);
+}
+
+inline ulong vf64_div_round(ulong a, ulong b, uint mode) {
+    uint flags = 0;
+    return soft_div64_status(a, b, mode, flags);
+}
+
+inline ulong vf64_sqrt_round(ulong a, uint mode) {
+    uint flags = 0;
+    return soft_sqrt64_status(a, mode, flags);
+}
+
+inline ulong vf64_fma_round(ulong a, ulong b, ulong c, uint mode) {
+    uint flags = 0;
+    return soft_fma64_status(a, b, c, mode, flags);
+}
+
 inline ulong vf64_wide_add(ulong a, ulong b) {
     return wide_pack64(wide_add(wide_unpack64(a), wide_unpack64(b)));
 }

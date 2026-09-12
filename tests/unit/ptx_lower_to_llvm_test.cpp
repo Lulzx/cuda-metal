@@ -599,6 +599,31 @@ $L_done:
     st.param.b64 [cos_ptr_arg], %rd2;
     call.uni (call_ret64), __nv_frexp, (call_arg64, cos_ptr_arg);
     call.uni __nv_fast_sincosf, (call_arg, sin_ptr_arg, cos_ptr_arg);
+    call.uni __nv_sincosf, (call_arg, sin_ptr_arg, cos_ptr_arg);
+    call.uni (call_ret), __nv_fdividef, (call_arg, call_arg2);
+    call.uni (call_ret), __nv_ldexpf, (call_arg, call_arg2);
+    call.uni (call_ret), __nv_scalbnf, (call_arg, call_arg2);
+    call.uni (call_ret), __nv_powif, (call_arg, call_arg2);
+    call.uni (call_ret), __nv_nextafterf, (call_arg, call_arg2);
+    call.uni (call_ret), __nv_rcbrtf, (call_arg);
+    call.uni (call_ret), __nv_saturatef, (call_arg);
+    call.uni (call_ret), __nv_modff, (call_arg, cos_ptr_arg);
+    call.uni (call_ret), __nv_frexpf, (call_arg, cos_ptr_arg);
+    call.uni (call_ret), __nv_fast_sinf, (call_arg);
+    call.uni (call_ret64), __nv_exp, (call_arg64);
+    call.uni (call_ret64), __nv_sin, (call_arg64);
+    call.uni (call_ret64), __nv_pow, (call_arg64, call_arg64);
+    call.uni (call_ret64), __nv_hypot, (call_arg64, call_arg64);
+    call.uni (call_ret64), __nv_atan2, (call_arg64, call_arg64);
+    call.uni (call_ret64), __nv_fmod, (call_arg64, call_arg64);
+    call.uni (call_ret64), __nv_ldexp, (call_arg64, call_arg2);
+    call.uni (call_ret64), __nv_erf, (call_arg64);
+    call.uni (call_ret64), __nv_dadd_rd, (call_arg64, call_arg64);
+    call.uni (call_ret64), __nv_dsqrt_rz, (call_arg64);
+    call.uni (call_ret64), __nv_fma_ru, (call_arg64, call_arg64, call_arg64);
+    call.uni (call_ret), __nv_fadd_rd, (call_arg, call_arg2);
+    call.uni (call_ret), __nv_frcp_ru, (call_arg);
+    call.uni (call_ret), __nv_fmaf_rz, (call_arg, call_arg2, call_arg);
     ret;
 }
 )PTX";
@@ -684,6 +709,71 @@ $L_done:
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sin.f32") &&
                     contains(vector_memory_lowered.llvm_ir, "@air.fast_cos.f32"),
                 "destination-less __nv_fast_sincosf call lowers to Metal trig intrinsics")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, " = fdiv fast float ") &&
+                    contains(vector_memory_lowered.llvm_ir, " = fdiv float "),
+                "__nv_fast_fdividef uses fast fdiv while __nv_fdividef stays IEEE")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "ldexp_scale") &&
+                    contains(vector_memory_lowered.llvm_ir, "sitofp i32") &&
+                    contains(vector_memory_lowered.llvm_ir, "@air.fast_exp2.f32"),
+                "__nv_ldexpf/scalbnf lower through x * exp2(n)")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "nextafter_inc") &&
+                    contains(vector_memory_lowered.llvm_ir, "nextafter_step"),
+                "__nv_nextafterf lowers to the IEEE bit-step")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "rcbrt") &&
+                    contains(vector_memory_lowered.llvm_ir, "0xBFD5555560000000"),
+                "__nv_rcbrtf lowers to copysign(pow(|x|, -1/3), x)")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "modf_int") &&
+                    contains(vector_memory_lowered.llvm_ir, "@llvm.trunc.f32") &&
+                    contains(vector_memory_lowered.llvm_ir, "inttoptr i64"),
+                "__nv_modff stores the integral part through the pointer argument")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "frexp_norm_mantissa") &&
+                    contains(vector_memory_lowered.llvm_ir, "@llvm.ctlz.i32") &&
+                    contains(vector_memory_lowered.llvm_ir, "1056964608"),
+                "__nv_frexpf decomposes binary32 bits and stores the exponent")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "@vf64_f64_to_f32") &&
+                    contains(vector_memory_lowered.llvm_ir, "@vf64_f32_to_f64") &&
+                    contains(vector_memory_lowered.llvm_ir, "f64via32_in") &&
+                    contains(vector_memory_lowered.llvm_ir, "@air.fast_exp.f32"),
+                "double __nv_* libdevice calls decode to binary32 and re-encode")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir, "erf_tail"),
+                "double __nv_erf reuses the erfc tail expansion")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir,
+                        "@vf64_add_round(i64, i64, i32)") &&
+                    contains(vector_memory_lowered.llvm_ir,
+                             "@vf64_sqrt_round(i64, i32)") &&
+                    contains(vector_memory_lowered.llvm_ir,
+                             "@vf64_fma_round(i64, i64, i64, i32)") &&
+                    contains(vector_memory_lowered.llvm_ir,
+                             "vf64_directed"),
+                "double directed intrinsics call the vf64 *_round ALU")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir,
+                        "@vf64_f32_to_f64(i32)") &&
+                    contains(vector_memory_lowered.llvm_ir,
+                             "@vf64_div_round(i64, i64, i32)") &&
+                    contains(vector_memory_lowered.llvm_ir, "vf64_widen") &&
+                    contains(vector_memory_lowered.llvm_ir, "vf64_narrow"),
+                "float directed intrinsics widen to binary64 and convert "
+                "back with the requested rounding")) {
         return 1;
     }
 
@@ -2011,15 +2101,20 @@ $L_done:
         cumetal::ptx::lower_ptx_to_llvm_ir(directed_fp64_ptx,
                                             directed_fp64_options);
     if (!expect(directed_fp64_lowered.ok,
-                "directed fp64 libdevice calls lower under pair emulation")) {
+                "directed fp64 libdevice calls lower under fp64 emulation")) {
         std::fprintf(stderr, "  error: %s\n", directed_fp64_lowered.error.c_str());
         return 1;
     }
     if (!expect(contains(directed_fp64_lowered.llvm_ir,
-                         "directed_fp64_padding") &&
+                         "@vf64_add_round(i64, i64, i32)") &&
                     contains(directed_fp64_lowered.llvm_ir,
-                             "directed_fp64_negative_padding"),
-                "directed fp64 calls widen results in the requested direction")) {
+                             "@vf64_mul_round(i64, i64, i32)") &&
+                    contains(directed_fp64_lowered.llvm_ir,
+                             "@vf64_div_round(i64, i64, i32)") &&
+                    contains(directed_fp64_lowered.llvm_ir, "i32 3") &&
+                    contains(directed_fp64_lowered.llvm_ir, "i32 2"),
+                "directed fp64 calls route through the correctly-rounded "
+                "vf64 ALU with the requested rounding mode")) {
         return 1;
     }
 

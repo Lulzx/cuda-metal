@@ -1175,10 +1175,16 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     emit.validate_output = true;
     emit.math_mode = g_math_mode;
     emit.fp_contract = g_fp_contract;
-    if (metal_text.find("cm_fp64_") != std::string::npos) {
+    if (metal_text.find("cm_fp64_") != std::string::npos ||
+        metal_text.find("vf64_") != std::string::npos) {
         emit.textual_include_inputs.push_back(
             std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
             "support" / "cumetal_fp64_inline_support.metal");
+    }
+    if (metal_text.find("cm_libdevice_") != std::string::npos) {
+        emit.textual_include_inputs.push_back(
+            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
+            "support" / "cumetal_libdevice_support.metal");
     }
     const auto emitted = cumetal::air_emitter::emit_metallib(emit);
     if (!emitted.ok) {
@@ -1262,6 +1268,7 @@ int main(int argc, char** argv) {
     cumetal::ptx::Fp64Mode ptx_fp64_mode = cumetal::ptx::Fp64Mode::kNative;
     bool fp64_mode_set_explicitly = false;
     bool needs_vf64_support = false;
+    bool needs_libdevice_support = false;
     bool cuda_device_frontend = false;
     std::string cuda_arch = "sm_80";
     std::filesystem::path cuda_clang;
@@ -1704,7 +1711,12 @@ int main(int argc, char** argv) {
             options.input = temp_stage_file;
             options.kernel_name = compiled.gpu_ir.functions.front().name;
             temp_files.push_back(temp_stage_file);
-            needs_vf64_support = ptx_source.find(".f64") != std::string::npos;
+            needs_vf64_support =
+                ptx_source.find(".f64") != std::string::npos ||
+                compiled.source.find("cm_fp64_") != std::string::npos ||
+                compiled.source.find("vf64_") != std::string::npos;
+            needs_libdevice_support =
+                compiled.source.find("cm_libdevice_") != std::string::npos;
         } else {
             if (emit_stage == EmitStage::kCumetalIr ||
                 emit_stage == EmitStage::kMetalIr) {
@@ -1776,8 +1788,12 @@ int main(int argc, char** argv) {
                 options.kernel_name = lowered.entry_name;
                 temp_files.push_back(temp_stage_file);
                 needs_vf64_support =
-                    ptx_source.find(".f64") != std::string::npos &&
-                cumetal::ptx::fp64_mode_links_vf64_support(ptx_fp64_mode);
+                    (ptx_source.find(".f64") != std::string::npos &&
+                     cumetal::ptx::fp64_mode_links_vf64_support(
+                         ptx_fp64_mode)) ||
+                    lowered.llvm_ir.find("vf64_") != std::string::npos;
+                needs_libdevice_support =
+                    lowered.llvm_ir.find("cm_libdevice_") != std::string::npos;
             }
         }
     } else if (input_ext == ".ll" || input_ext == ".llvm") {
@@ -1820,7 +1836,12 @@ int main(int argc, char** argv) {
                 return 1;
             }
             options.input = temp_stage_file;
-            needs_vf64_support = llvm_ir.find("double") != std::string::npos;
+            needs_vf64_support =
+                llvm_ir.find("double") != std::string::npos ||
+                compiled.source.find("cm_fp64_") != std::string::npos ||
+                compiled.source.find("vf64_") != std::string::npos;
+            needs_libdevice_support =
+                compiled.source.find("cm_libdevice_") != std::string::npos;
             options.kernel_name = compiled.gpu_ir.functions.front().name;
         } else if (emit_stage != EmitStage::kMetallib) {
             std::cerr << "cumetalc failed: LLVM inspection stages require "
@@ -1958,7 +1979,12 @@ int main(int argc, char** argv) {
             std::filesystem::remove(device_ll, ec);
             options.input = temp_stage_file;
             options.kernel_name = compiled.gpu_ir.functions.front().name;
-            needs_vf64_support = llvm_ir.find("double") != std::string::npos;
+            needs_vf64_support =
+                llvm_ir.find("double") != std::string::npos ||
+                compiled.source.find("cm_fp64_") != std::string::npos ||
+                compiled.source.find("vf64_") != std::string::npos;
+            needs_libdevice_support =
+                compiled.source.find("cm_libdevice_") != std::string::npos;
         } else {
         if (!command_exists("xcrun")) {
             std::cerr << "cumetalc failed: xcrun is required for .cu frontend compilation\n";
@@ -2005,6 +2031,14 @@ int main(int argc, char** argv) {
             std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
             "support" / (typed_msl ? "cumetal_fp64_inline_support.metal"
                                      : "cumetal_fp64_support.metal"));
+    }
+    if (needs_libdevice_support) {
+        const bool typed_msl = options.input.extension() == ".metal";
+        auto& support_inputs = typed_msl ? options.textual_include_inputs
+                                         : options.additional_link_inputs;
+        support_inputs.push_back(
+            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
+            "support" / "cumetal_libdevice_support.metal");
     }
     const auto result = cumetal::air_emitter::emit_metallib(options);
     for (const auto& temp_file : temp_files) {

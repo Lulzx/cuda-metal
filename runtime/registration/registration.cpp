@@ -1162,7 +1162,17 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
 
     std::filesystem::path staged_input = ll_path;
     const bool typed_msl_needs_fp64_support =
-        use_direct_msl && ptx_source.find(".f64") != std::string::npos;
+        use_direct_msl &&
+        (ptx_source.find(".f64") != std::string::npos ||
+         lowered_metal.metal_source.find("cm_fp64_") != std::string::npos ||
+         lowered_metal.metal_source.find("vf64_") != std::string::npos);
+    const bool typed_msl_needs_libdevice_support =
+        use_direct_msl &&
+        lowered_metal.metal_source.find("cm_libdevice_") != std::string::npos;
+    // Kernels needing either support file take the offline compile path:
+    // the helpers must share the kernel's translation unit.
+    const bool typed_msl_needs_support =
+        typed_msl_needs_fp64_support || typed_msl_needs_libdevice_support;
     if (use_direct_msl) {
         REG_DEBUG("using direct Metal lowering path for '%s'", kernel_name.c_str());
         const std::vector<std::uint8_t> metal_bytes(lowered_metal.metal_source.begin(),
@@ -1174,10 +1184,10 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         staged_input = metal_path;
         emit_options.kernel_name =
             lowered_metal.entry_name.empty() ? kernel_name : lowered_metal.entry_name;
-        if (!typed_msl_needs_fp64_support) {
+        if (!typed_msl_needs_support) {
             // Short-circuit non-linked MSL through newLibraryWithSource. FP64
-            // needs private inline support in the same translation unit and
-            // therefore takes the offline compile path below.
+            // and libdevice helpers need private inline support in the same
+            // translation unit and therefore take the offline compile path below.
             std::filesystem::path msl_final = metal_path;
             if (!cached_metallib.empty()) {
                 msl_final = cached_metallib;
@@ -1198,9 +1208,16 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
             }
             return true;
         }
-        emit_options.textual_include_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
-            "support" / "cumetal_fp64_inline_support.metal");
+        if (typed_msl_needs_fp64_support) {
+            emit_options.textual_include_inputs.push_back(
+                std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
+                "metal" / "support" / "cumetal_fp64_inline_support.metal");
+        }
+        if (typed_msl_needs_libdevice_support) {
+            emit_options.textual_include_inputs.push_back(
+                std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
+                "metal" / "support" / "cumetal_libdevice_support.metal");
+        }
     } else {
         REG_DEBUG("using LLVM IR lowering path for '%s'", kernel_name.c_str());
         maybe_dump_ptx_for_llvm_debug(kernel_name, ptx_source);
@@ -1238,11 +1255,22 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
             return false;
         }
         emit_options.kernel_name = lowered.entry_name.empty() ? kernel_name : lowered.entry_name;
-        if (ptx_source.find(".f64") != std::string::npos &&
-            cumetal::ptx::fp64_mode_links_vf64_support(lower_options.fp64_mode)) {
+        // The .f64 PTX scan covers the arithmetic ops; the vf64_ IR scan
+        // additionally covers libdevice helpers (conversions, directed
+        // interval intrinsics) whose only FP64 footprint is a call.
+        if ((ptx_source.find(".f64") != std::string::npos &&
+             cumetal::ptx::fp64_mode_links_vf64_support(
+                 lower_options.fp64_mode)) ||
+            lowered.llvm_ir.find("vf64_") != std::string::npos) {
             emit_options.additional_link_inputs.push_back(
                 std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
                 "metal" / "support" / "cumetal_fp64_support.metal"
+            );
+        }
+        if (lowered.llvm_ir.find("cm_libdevice_") != std::string::npos) {
+            emit_options.additional_link_inputs.push_back(
+                std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
+                "metal" / "support" / "cumetal_libdevice_support.metal"
             );
         }
     }

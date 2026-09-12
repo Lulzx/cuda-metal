@@ -1706,6 +1706,77 @@ struct Importer {
             }
             return true;
         }
+        // IEEE arithmetic spelled as device functions. These become real IR
+        // ops rather than calls, so the binary64 forms reach the same
+        // software-ALU lowering as add.rn.f64 and friends in every FP64 mode.
+        static const std::unordered_map<std::string, OpCode> kArithBuiltins = {
+            {"__nv_dadd_rn", OpCode::kAdd}, {"__nv_dsub_rn", OpCode::kSub},
+            {"__nv_dmul_rn", OpCode::kMul}, {"__nv_ddiv_rn", OpCode::kDiv},
+            {"__nv_fadd_rn", OpCode::kAdd}, {"__nv_fsub_rn", OpCode::kSub},
+            {"__nv_fmul_rn", OpCode::kMul}, {"__nv_fdiv_rn", OpCode::kDiv},
+            {"__nv_fmaf_rn", OpCode::kFma},
+            {"__nv_fmaf_ieee_rn", OpCode::kFma},
+        };
+        if (const auto arith = kArithBuiltins.find(name);
+            arith != kArithBuiltins.end()) {
+            operation->opcode = arith->second;
+            for (const llvm::Use& argument : call.args()) {
+                operation->operands.push_back(import_operand(*argument.get(), *state));
+            }
+            return true;
+        }
+        // __nv_<src>2double_<mode> / __nv_double2<dst>_<mode> are real
+        // conversions: they become kConvert ops carrying the software-FP64
+        // conversion kind and the encoded rounding mode (0=rne, 1=rtz,
+        // 2=rtn, 3=rtp), so lower_to_msl emits the vf64 helpers the same way
+        // it does for cvt instructions.
+        if (name.find("double") != std::string::npos) {
+            const std::size_t mode_sep = name.rfind('_');
+            const std::string_view suffix =
+                mode_sep == std::string::npos
+                    ? std::string_view{}
+                    : std::string_view(name).substr(mode_sep + 1);
+            static const std::unordered_map<std::string_view, const char*>
+                kRoundSuffix = {
+                    {"rn", "0u"}, {"rz", "1u"}, {"rd", "2u"}, {"ru", "3u"},
+                };
+            const auto rounding = kRoundSuffix.find(suffix);
+            if (rounding != kRoundSuffix.end()) {
+                const std::string body(name.substr(5, mode_sep - 5));
+                const std::size_t two = body.find('2');
+                if (two != std::string::npos) {
+                    const std::string source = body.substr(0, two);
+                    const std::string destination = body.substr(two + 1);
+                    const bool int_to_f64 =
+                        destination == "double" &&
+                        (source == "int" || source == "ll" ||
+                         source == "uint" || source == "ull");
+                    const bool f64_to_int_or_float =
+                        source == "double" &&
+                        (destination == "int" || destination == "ll" ||
+                         destination == "uint" || destination == "ull" ||
+                         destination == "float");
+                    if (int_to_f64 || f64_to_int_or_float) {
+                        operation->opcode = OpCode::kConvert;
+                        operation->attributes["fp64_conversion"] =
+                            int_to_f64
+                                ? (source.front() == 'u' ? "unsigned_to_f64"
+                                                         : "signed_to_f64")
+                            : destination == "float"
+                                ? "f64_to_f32"
+                            : destination.front() == 'u' ? "f64_to_unsigned"
+                                                         : "f64_to_signed";
+                        operation->attributes["rounding_mode"] =
+                            rounding->second;
+                        for (const llvm::Use& argument : call.args()) {
+                            operation->operands.push_back(
+                                import_operand(*argument.get(), *state));
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
 
         static const std::unordered_map<std::string, std::string> kCudaBuiltins = {
             // Classification: Metal's builtins test the bit pattern and are
@@ -1739,6 +1810,26 @@ struct Importer {
             {"__nv_sinf", "sin"},
             {"__nv_cosf", "cos"},
             {"__nv_tanf", "tan"},
+            {"__nv_fast_sinf", "sin"},
+            {"__nv_fast_cosf", "cos"},
+            {"__nv_fast_tanf", "tan"},
+            {"__nv_fast_logf", "log"},
+            {"__nv_fast_log2f", "log2"},
+            {"__nv_fast_log10f", "log10"},
+            {"__nv_fast_powf", "pow"},
+            {"__nv_sincosf", "sincos"},
+            {"__nv_fast_sincosf", "sincos"},
+            {"__nv_modff", "modf"},
+            {"__nv_frexpf", "frexp"},
+            {"__nv_ldexpf", "ldexp"},
+            {"__nv_scalbnf", "ldexp"},
+            {"__nv_nextafterf", "nextafter"},
+            {"__nv_powif", "pow"},
+            {"__nv_saturatef", "saturate"},
+            {"__nv_rcbrtf", "__cumetal_rcbrt"},
+            {"__nv_fdividef", "__cumetal_fdivide"},
+            {"__nv_fast_fdividef", "__cumetal_fdivide"},
+            {"__nv_finite", "isfinite"},
             {"__nv_sinhf", "sinh"},
             {"__nv_coshf", "cosh"},
             {"__nv_tanhf", "tanh"},
@@ -1769,11 +1860,110 @@ struct Importer {
             {"__nv_fmin", "fmin"},
             {"__nv_fmax", "fmax"},
             {"__nv_remainder", "remainder"},
+            // Double-precision libdevice calls that have no software-ALU
+            // helper evaluate through binary32 in lower_to_msl; the
+            // kFp64ViaF32 set below records the caveat on the module.
+            {"__nv_exp", "exp"},
+            {"__nv_exp2", "exp2"},
+            {"__nv_exp10", "exp10"},
+            {"__nv_expm1", "expm1"},
+            {"__nv_log", "log"},
+            {"__nv_log2", "log2"},
+            {"__nv_log10", "log10"},
+            {"__nv_log1p", "log1p"},
+            {"__nv_sin", "sin"},
+            {"__nv_cos", "cos"},
+            {"__nv_tan", "tan"},
+            {"__nv_asin", "asin"},
+            {"__nv_acos", "acos"},
+            {"__nv_atan", "atan"},
+            {"__nv_atan2", "atan2"},
+            {"__nv_sinh", "sinh"},
+            {"__nv_cosh", "cosh"},
+            {"__nv_tanh", "tanh"},
+            {"__nv_asinh", "asinh"},
+            {"__nv_acosh", "acosh"},
+            {"__nv_atanh", "atanh"},
+            {"__nv_cbrt", "cbrt"},
+            {"__nv_erf", "erf"},
+            {"__nv_erfc", "erfc"},
+            {"__nv_pow", "pow"},
+            {"__nv_powi", "pow"},
+            {"__nv_fmod", "fmod"},
+            {"__nv_fdim", "fdim"},
+            {"__nv_hypot", "hypot"},
+            {"__nv_ldexp", "ldexp"},
+            {"__nv_scalbn", "ldexp"},
+            {"__nv_nextafter", "nextafter"},
+            {"__nv_rcbrt", "__cumetal_rcbrt"},
+            {"__nv_sincos", "sincos"},
+            {"__nv_modf", "modf"},
+            {"__nv_frexp", "frexp"},
             {"__nv_floor", "floor"},
             {"__nv_ceil", "ceil"},
             {"__nv_trunc", "trunc"},
             {"__nv_round", "round"},
             {"__nv_rint", "rint"},
+            // Correctly-rounded unary arithmetic spelled as functions. rcp on
+            // f32 composes as 1.0f/x (binary32 division is already rne); on
+            // binary64 the call path divides in the active FP64 mode.
+            // frsqrt_rn composes as 1.0f/sqrt(x), within ~1 ulp.
+            {"__nv_frcp_rn", "rcp"},
+            {"__nv_frsqrt_rn", "frsqrt_rn"},
+            {"__nv_fsqrt_rn", "sqrt"},
+            {"__nv_drcp_rn", "rcp"},
+            {"__nv_dsqrt_rn", "sqrt"},
+            {"__nv_fast_exp10f", "exp10"},
+            {"__nv_sinpif", "sinpi"},   {"__nv_sinpi", "sinpi"},
+            {"__nv_cospif", "cospi"},   {"__nv_cospi", "cospi"},
+            {"__nv_sincospif", "sincospi"}, {"__nv_sincospi", "sincospi"},
+            {"__nv_logbf", "logb"},     {"__nv_logb", "logb"},
+            {"__nv_ilogbf", "ilogb"},   {"__nv_ilogb", "ilogb"},
+            {"__nv_llrintf", "llrint"}, {"__nv_llrint", "llrint"},
+            {"__nv_llroundf", "llround"}, {"__nv_llround", "llround"},
+            {"__nv_remquof", "remquo"}, {"__nv_remquo", "remquo"},
+            {"__nv_norm3df", "norm3d"}, {"__nv_norm3d", "norm3d"},
+            {"__nv_norm4df", "norm4d"}, {"__nv_norm4d", "norm4d"},
+            {"__nv_rnorm3df", "rnorm3d"}, {"__nv_rnorm3d", "rnorm3d"},
+            {"__nv_rnorm4df", "rnorm4d"}, {"__nv_rnorm4d", "rnorm4d"},
+            {"__nv_rhypotf", "rhypot"}, {"__nv_rhypot", "rhypot"},
+            {"__nv_erfcxf", "erfcx"},   {"__nv_erfcx", "erfcx"},
+            {"__nv_normcdff", "normcdf"}, {"__nv_normcdf", "normcdf"},
+            {"__nv_normcdfinvf", "normcdfinv"},
+            {"__nv_normcdfinv", "normcdfinv"},
+            {"__nv_erfinvf", "erfinv"}, {"__nv_erfinv", "erfinv"},
+            {"__nv_erfcinvf", "erfcinv"}, {"__nv_erfcinv", "erfcinv"},
+            {"__nv_tgammaf", "tgamma"}, {"__nv_tgamma", "tgamma"},
+            {"__nv_lgammaf", "lgamma"}, {"__nv_lgamma", "lgamma"},
+            // Directed-rounding interval intrinsics stay calls; both
+            // lowerings route them through the correctly-rounded vf64
+            // software ALU (f32 operands widen exactly to binary64 first).
+            {"__nv_fadd_rd", "fadd_rd"}, {"__nv_fadd_ru", "fadd_ru"},
+            {"__nv_fadd_rz", "fadd_rz"}, {"__nv_fsub_rd", "fsub_rd"},
+            {"__nv_fsub_ru", "fsub_ru"}, {"__nv_fsub_rz", "fsub_rz"},
+            {"__nv_fmul_rd", "fmul_rd"}, {"__nv_fmul_ru", "fmul_ru"},
+            {"__nv_fmul_rz", "fmul_rz"}, {"__nv_fdiv_rd", "fdiv_rd"},
+            {"__nv_fdiv_ru", "fdiv_ru"}, {"__nv_fdiv_rz", "fdiv_rz"},
+            {"__nv_frcp_rd", "frcp_rd"}, {"__nv_frcp_ru", "frcp_ru"},
+            {"__nv_frcp_rz", "frcp_rz"}, {"__nv_fsqrt_rd", "fsqrt_rd"},
+            {"__nv_fsqrt_ru", "fsqrt_ru"}, {"__nv_fsqrt_rz", "fsqrt_rz"},
+            {"__nv_fmaf_rd", "fmaf_rd"}, {"__nv_fmaf_ru", "fmaf_ru"},
+            {"__nv_fmaf_rz", "fmaf_rz"},
+            {"__nv_dadd_rd", "dadd_rd"}, {"__nv_dadd_ru", "dadd_ru"},
+            {"__nv_dadd_rz", "dadd_rz"}, {"__nv_dsub_rd", "dsub_rd"},
+            {"__nv_dsub_ru", "dsub_ru"}, {"__nv_dsub_rz", "dsub_rz"},
+            {"__nv_dmul_rd", "dmul_rd"}, {"__nv_dmul_ru", "dmul_ru"},
+            {"__nv_dmul_rz", "dmul_rz"}, {"__nv_ddiv_rd", "ddiv_rd"},
+            {"__nv_ddiv_ru", "ddiv_ru"}, {"__nv_ddiv_rz", "ddiv_rz"},
+            {"__nv_drcp_rd", "drcp_rd"}, {"__nv_drcp_ru", "drcp_ru"},
+            {"__nv_drcp_rz", "drcp_rz"}, {"__nv_dsqrt_rd", "dsqrt_rd"},
+            {"__nv_dsqrt_ru", "dsqrt_ru"}, {"__nv_dsqrt_rz", "dsqrt_rz"},
+            {"__nv_fma_rd", "fma_rd"},   {"__nv_fma_ru", "fma_ru"},
+            {"__nv_fma_rz", "fma_rz"},
+            // Binary64 storage-word access; bit-exact in every FP64 mode.
+            {"__nv_hiloint2double", "hiloint2double"},
+            {"__nv_double2hiint", "double2hiint"},
+            {"__nv_double2loint", "double2loint"},
             {"__nv_popc", "popcount"},
             {"__nv_clz", "clz"},
             {"__nv_abs", "__cumetal_signed_abs"},
@@ -1808,6 +1998,13 @@ struct Importer {
             static const std::unordered_set<std::string> kExpandedMath = {
                 "__nv_expm1f", "__nv_log1pf", "__nv_cbrtf", "__nv_erff",
                 "__nv_erfcf", "__nv_hypotf", "__nv_remainderf",
+                "__nv_rcbrtf", "__nv_frsqrt_rn",
+                "__nv_remquof",
+                "__nv_norm3df", "__nv_norm4df", "__nv_rnorm3df",
+                "__nv_rnorm4df", "__nv_rhypotf",
+                "__nv_erfcxf", "__nv_normcdff", "__nv_normcdfinvf",
+                "__nv_erfinvf", "__nv_erfcinvf",
+                "__nv_tgammaf", "__nv_lgammaf",
             };
             if (kExpandedMath.contains(name)) {
                 if (result.module.semantic_quality == SemanticQuality::kExact) {
@@ -1815,6 +2012,41 @@ struct Importer {
                 }
                 const std::string caveat =
                     "Metal-missing float math functions use numerically tested typed expansions";
+                if (std::find(result.module.semantic_caveats.begin(),
+                              result.module.semantic_caveats.end(), caveat) ==
+                    result.module.semantic_caveats.end()) {
+                    result.module.semantic_caveats.push_back(caveat);
+                }
+            }
+            // Metal has no FP64 and the software ALU only covers arithmetic,
+            // classification, rounding, sqrt, fma, min/max, and remainder. The
+            // remaining double-precision libdevice calls decode each binary64
+            // operand, evaluate in binary32, and re-encode; range and precision
+            // follow binary32. The fp64_mode attribute set by the caller marks
+            // the module kSemanticEmulation; this caveat explains the further
+            // reduction instead of leaving it implicit.
+            static const std::unordered_set<std::string> kFp64ViaF32 = {
+                "__nv_exp",   "__nv_exp2",    "__nv_exp10",  "__nv_expm1",
+                "__nv_log",   "__nv_log2",    "__nv_log10",  "__nv_log1p",
+                "__nv_sin",   "__nv_cos",     "__nv_tan",    "__nv_asin",
+                "__nv_acos",  "__nv_atan",    "__nv_atan2",  "__nv_sinh",
+                "__nv_cosh",  "__nv_tanh",    "__nv_asinh",  "__nv_acosh",
+                "__nv_atanh", "__nv_cbrt",    "__nv_erf",    "__nv_erfc",
+                "__nv_pow",   "__nv_powi",    "__nv_fmod",   "__nv_fdim",
+                "__nv_hypot", "__nv_ldexp",   "__nv_scalbn", "__nv_nextafter",
+                "__nv_rcbrt", "__nv_sincos",  "__nv_modf",   "__nv_frexp",
+                "__nv_sinpi", "__nv_cospi",   "__nv_sincospi",
+                "__nv_logb",  "__nv_ilogb",   "__nv_llrint", "__nv_llround",
+                "__nv_remquo",
+                "__nv_norm3d",  "__nv_norm4d",  "__nv_rnorm3d",
+                "__nv_rnorm4d", "__nv_rhypot",
+                "__nv_erfcx",   "__nv_normcdf", "__nv_normcdfinv",
+                "__nv_erfinv",  "__nv_erfcinv",
+                "__nv_tgamma",  "__nv_lgamma",
+            };
+            if (kFp64ViaF32.contains(name)) {
+                const std::string caveat =
+                    "FP64 libdevice calls evaluate through binary32 under emulation";
                 if (std::find(result.module.semantic_caveats.begin(),
                               result.module.semantic_caveats.end(), caveat) ==
                     result.module.semantic_caveats.end()) {

@@ -2041,6 +2041,42 @@ struct AstLowerer {
                     return declare_result(
                         operation, MslExpression::binary("|", magnitude, sign, MslType::uint(64)));
                 }
+                // Raw binary64 storage-word access: bit-exact in every FP64
+                // mode because the storage word *is* the representation.
+                if (callee->second == "hiloint2double" && arguments.size() == 2) {
+                    const MslExpr hi = MslExpression::binary(
+                        "<<",
+                        MslExpression::cast(MslType::uint(64), arguments[0]),
+                        MslExpression::literal("32u", MslType::uint()),
+                        MslType::uint(64));
+                    const MslExpr lo = MslExpression::binary(
+                        "&",
+                        MslExpression::cast(MslType::uint(64), arguments[1]),
+                        MslExpression::literal("0xFFFFFFFFul",
+                                               MslType::uint(64)),
+                        MslType::uint(64));
+                    return declare_result(
+                        operation,
+                        MslExpression::binary("|", hi, lo, MslType::uint(64)));
+                }
+                if ((callee->second == "double2hiint" ||
+                     callee->second == "double2loint") &&
+                    arguments.size() == 1) {
+                    const MslExpr word =
+                        callee->second == "double2hiint"
+                            ? MslExpression::binary(
+                                  ">>", arguments[0],
+                                  MslExpression::literal("32u", MslType::uint()),
+                                  MslType::uint(64))
+                            : MslExpression::binary(
+                                  "&", arguments[0],
+                                  MslExpression::literal("0xFFFFFFFFul",
+                                                         MslType::uint(64)),
+                                  MslType::uint(64));
+                    return declare_result(
+                        operation,
+                        MslExpression::cast(lower_result_type(operation), word));
+                }
                 // Classification reads the binary64 bit pattern directly; it
                 // needs no software ALU and is exact in every FP64 mode.
                 if ((callee->second == "isnan" || callee->second == "isinf" ||
@@ -2070,6 +2106,53 @@ struct AstLowerer {
                     }
                     return declare_result(operation,
                                           MslExpression::cast(lower_result_type(operation), test));
+                }
+                // Directed-rounding interval intrinsics: the vf64 software
+                // ALU rounds correctly under every FP64 mode, so these are
+                // exact rather than enclosures. The trailing mode literal is
+                // the soft_round_* code (1=rz, 2=rd, 3=ru).
+                if (callee->second.size() > 3) {
+                    const std::string_view suffix(callee->second.data() +
+                                                      callee->second.size() - 3,
+                                                  3);
+                    const std::string stem =
+                        callee->second.substr(0, callee->second.size() - 3);
+                    static const std::unordered_map<std::string, const char*>
+                        kDirectedF64 = {
+                            {"dadd", "vf64_add_round"},
+                            {"dsub", "vf64_sub_round"},
+                            {"dmul", "vf64_mul_round"},
+                            {"ddiv", "vf64_div_round"},
+                            {"dsqrt", "vf64_sqrt_round"},
+                            {"fma", "vf64_fma_round"},
+                        };
+                    const auto directed = kDirectedF64.find(stem);
+                    const char* rounding =
+                        suffix == "_rd" ? "2u" :
+                        suffix == "_ru" ? "3u" :
+                        suffix == "_rz" ? "1u" : nullptr;
+                    if (directed != kDirectedF64.end() && rounding != nullptr) {
+                        arguments.push_back(MslExpression::literal(
+                            rounding, MslType::uint()));
+                        return declare_result(
+                            operation,
+                            MslExpression::call(directed->second,
+                                                std::move(arguments),
+                                                MslType::uint(64)));
+                    }
+                    if (stem == "drcp" && rounding != nullptr &&
+                        arguments.size() == 1) {
+                        const MslExpr one = MslExpression::literal(
+                            "0x3FF0000000000000ul", MslType::uint(64));
+                        return declare_result(
+                            operation,
+                            MslExpression::call(
+                                "vf64_div_round",
+                                {one, arguments[0],
+                                 MslExpression::literal(rounding,
+                                                        MslType::uint())},
+                                MslType::uint(64)));
+                    }
                 }
                 std::string target;
                 if (callee->second == "fma") {
@@ -2102,6 +2185,20 @@ struct AstLowerer {
                         operation,
                         MslExpression::call(div_target, {one, root},
                                             MslType::uint(64)));
+                } else if (callee->second == "rcp") {
+                    // __nv_drcp_rn: the correctly-rounded reciprocal divides
+                    // 1.0 by the operand in the active FP64 mode -- exact in
+                    // all three, unlike the f32 fallback below.
+                    const std::string div_target =
+                        mode == "fast48" ? "cm_fp64_fast_div"
+                        : mode == "wide48" ? "vf64_wide_div"
+                                           : "vf64_div_rne";
+                    const MslExpr one = MslExpression::literal(
+                        "0x3FF0000000000000ul", MslType::uint(64));
+                    return declare_result(
+                        operation,
+                        MslExpression::call(div_target, {one, arguments[0]},
+                                            MslType::uint(64)));
                 } else if (callee->second == "fmin" || callee->second == "fmax") {
                     target = mode == "fast48"
                                  ? "cm_fp64_fast_" +
@@ -2128,9 +2225,277 @@ struct AstLowerer {
                             "false", MslType::boolean()));
                     }
                 } else {
-                    fail(&operation, "unsupported software FP64 call '" +
-                                         callee->second + "'");
-                    return std::nullopt;
+                    // No software-ALU primitive exists for transcendental
+                    // libdevice calls. Evaluate them in binary32: decode each
+                    // binary64 storage word, run the Metal float builtin or its
+                    // typed expansion, and re-encode. Range and precision
+                    // follow binary32; the importer records that reduction on
+                    // the module's caveat list rather than failing the kernel
+                    // outright.
+                    static const std::unordered_set<std::string> kDirectF32 = {
+                        "exp",   "exp2", "exp10", "log",   "log2", "log10",
+                        "sin",   "cos",  "tan",   "asin",  "acos", "atan",
+                        "sinh",  "cosh", "tanh",  "asinh", "acosh", "atanh",
+                        "pow",   "atan2", "fmod", "fdim",  "nextafter",
+                        "ldexp", "sinpi", "cospi",
+                    };
+                    auto as_f32 = [](const MslExpr& bits) {
+                        return MslExpression::bitcast(
+                            MslType::floating(),
+                            MslExpression::call(
+                                "vf64_f64_to_f32",
+                                {bits, MslExpression::literal("0u",
+                                                              MslType::uint())},
+                                MslType::uint()));
+                    };
+                    auto to_f64 = [](MslExpr value) {
+                        return MslExpression::call(
+                            "cm_fp64_fast_f32_to_f64",
+                            {MslExpression::bitcast(MslType::uint(), value)},
+                            MslType::uint(64));
+                    };
+                    std::vector<MslExpr> f32args;
+                    f32args.reserve(arguments.size());
+                    for (std::size_t index = 0; index < arguments.size(); ++index) {
+                        const ir::Type& operand_type = operation.operands[index].type;
+                        f32args.push_back(
+                            operand_type.kind == ir::TypeKind::kFloat &&
+                                    operand_type.bit_width == 64
+                                ? as_f32(arguments[index])
+                                : arguments[index]);
+                    }
+                    auto f32literal = [](const char* spelling) {
+                        return MslExpression::literal(spelling,
+                                                      MslType::floating());
+                    };
+                    auto f32call = [](const std::string& function,
+                                      std::vector<MslExpr> call_args) {
+                        return MslExpression::call(function, std::move(call_args),
+                                                   MslType::floating());
+                    };
+                    auto f32binary = [](const std::string& op, MslExpr left,
+                                        MslExpr right) {
+                        return MslExpression::binary(op, std::move(left),
+                                                     std::move(right),
+                                                     MslType::floating());
+                    };
+                    // pow keeps a float exponent: powi arrives with an integer
+                    // second operand, which MSL's pow does not take directly.
+                    if (callee->second == "pow") {
+                        for (std::size_t index = 0; index < f32args.size(); ++index) {
+                            if (operation.operands[index].type.kind ==
+                                ir::TypeKind::kInteger) {
+                                f32args[index] = MslExpression::cast(
+                                    MslType::floating(), f32args[index]);
+                            }
+                        }
+                    }
+                    MslExpr value;
+                    if (kDirectF32.contains(callee->second)) {
+                        value = f32call(callee->second, std::move(f32args));
+                    } else if (callee->second == "expm1" && f32args.size() == 1) {
+                        value = f32binary("-", f32call("exp", {f32args.front()}),
+                                          f32literal("1.0f"));
+                    } else if (callee->second == "log1p" && f32args.size() == 1) {
+                        value = f32call("log", {f32binary("+", f32literal("1.0f"),
+                                                          f32args.front())});
+                    } else if ((callee->second == "cbrt" ||
+                                callee->second == "__cumetal_rcbrt") &&
+                               f32args.size() == 1) {
+                        const MslExpr magnitude = f32call("fabs", {f32args.front()});
+                        const MslExpr root = f32call(
+                            "pow",
+                            {magnitude,
+                             f32literal(callee->second == "cbrt"
+                                            ? "0.3333333333333333f"
+                                            : "-0.3333333333333333f")});
+                        value = f32call("copysign", {root, f32args.front()});
+                    } else if (callee->second == "hypot" && f32args.size() == 2) {
+                        value = f32call(
+                            "sqrt",
+                            {f32binary("+", f32binary("*", f32args[0], f32args[0]),
+                                       f32binary("*", f32args[1], f32args[1]))});
+                    } else if ((callee->second == "erf" ||
+                                callee->second == "erfc") &&
+                               f32args.size() == 1) {
+                        // Abramowitz-Stegun 7.1.26 on the binary32 operand; the
+                        // same expansion the float path emits below.
+                        const MslExpr magnitude = f32call("fabs", {f32args.front()});
+                        const MslExpr t = f32binary(
+                            "/", f32literal("1.0f"),
+                            f32binary("+", f32literal("1.0f"),
+                                      f32binary("*", f32literal("0.3275911f"),
+                                                magnitude)));
+                        MslExpr polynomial = f32literal("1.061405429f");
+                        polynomial = f32binary("+", f32literal("-1.453152027f"),
+                                               f32binary("*", t, polynomial));
+                        polynomial = f32binary("+", f32literal("1.421413741f"),
+                                               f32binary("*", t, polynomial));
+                        polynomial = f32binary("+", f32literal("-0.284496736f"),
+                                               f32binary("*", t, polynomial));
+                        polynomial = f32binary("+", f32literal("0.254829592f"),
+                                               f32binary("*", t, polynomial));
+                        const MslExpr decay = f32call(
+                            "exp",
+                            {MslExpression::unary(
+                                "-", f32binary("*", magnitude, magnitude),
+                                MslType::floating())});
+                        value = f32call(
+                            "copysign",
+                            {f32binary(
+                                 "-", f32literal("1.0f"),
+                                 f32binary("*", f32binary("*", polynomial, t),
+                                           decay)),
+                             f32args.front()});
+                        if (callee->second == "erfc") {
+                            value = f32binary("-", f32literal("1.0f"), value);
+                        }
+                    } else if (callee->second == "frexp" && f32args.size() == 2) {
+                        // The exponent out-param stays int32 on both float and
+                        // double frexp; only the fraction round-trips binary64.
+                        const MslExpr exponent_pointer = MslExpression::cast(
+                            MslType::pointer(MslType::sint(32),
+                                             MslAddressSpace::kThread),
+                            f32args[1], true);
+                        value = f32call(
+                            "frexp",
+                            {f32args[0], MslExpression::unary(
+                                             "*", exponent_pointer,
+                                             MslType::sint(32))});
+                    } else if (callee->second == "modf" && f32args.size() == 2) {
+                        // The integral out-param is binary64 storage, so the
+                        // f32 integral part is re-encoded before the store.
+                        // modf's integral is trunc(x) for every input; the
+                        // fraction is x - trunc(x) (exact by Sterbenz), except
+                        // +-inf where the subtraction would produce NaN and
+                        // modf returns a signed zero instead.
+                        const MslExpr integral_pointer = MslExpression::cast(
+                            MslType::pointer(MslType::uint(64),
+                                             MslAddressSpace::kThread),
+                            f32args[1], true);
+                        const MslExpr truncated =
+                            f32call("trunc", {f32args[0]});
+                        const MslExpr store = MslExpression::binary(
+                            "=",
+                            MslExpression::unary("*", integral_pointer,
+                                                 MslType::uint(64)),
+                            to_f64(truncated), MslType::uint(64));
+                        const MslExpr fraction = MslExpression::conditional(
+                            f32call("isinf", {f32args[0]}),
+                            f32call("copysign", {f32literal("0.0f"),
+                                                 f32args[0]}),
+                            f32binary("-", f32args[0], truncated),
+                            MslType::floating());
+                        return declare_result(
+                            operation,
+                            MslExpression::binary(",", store, to_f64(fraction),
+                                                  MslType::uint(64)));
+                    } else if ((callee->second == "sincos" ||
+                                callee->second == "sincospi") &&
+                               f32args.size() == 3) {
+                        // Both out-params are binary64 storage; re-encode each
+                        // f32 trig result before storing it through the
+                        // pointer, sequenced as one comma expression.
+                        const bool pi_form = callee->second == "sincospi";
+                        auto store_output = [&](std::size_t index,
+                                                const char* function) {
+                            const MslExpr pointer = MslExpression::cast(
+                                MslType::pointer(MslType::uint(64),
+                                                 MslAddressSpace::kThread),
+                                f32args[index], true);
+                            return MslExpression::binary(
+                                "=",
+                                MslExpression::unary("*", pointer,
+                                                     MslType::uint(64)),
+                                to_f64(f32call(function, {f32args[0]})),
+                                MslType::uint(64));
+                        };
+                        return MslStatement::expression(MslExpression::binary(
+                            ",", store_output(1, pi_form ? "sinpi" : "sin"),
+                            store_output(2, pi_form ? "cospi" : "cos"),
+                            MslType::uint(64)));
+                    } else if (callee->second == "remquo" &&
+                               f32args.size() == 3) {
+                        // remquo(x, y, quo): the remainder evaluates in
+                        // binary32 like the rest; the quotient out-param is a
+                        // plain int -- low bits of rne(x / y) -- not binary64
+                        // storage.
+                        const MslExpr quotient = f32call(
+                            "cm_libdevice_rne",
+                            {f32binary("/", f32args[0], f32args[1])});
+                        const MslExpr quo_pointer = MslExpression::cast(
+                            MslType::pointer(MslType::sint(32),
+                                             MslAddressSpace::kThread),
+                            f32args[2], true);
+                        // CUDA documents remquo's quotient as agreeing with
+                        // the exact quotient only in the low 3 bits; the
+                        // libm reference used by the functional tests exposes
+                        // 7 for the double entry point, so mask (sign kept by
+                        // integer %).
+                        const MslExpr masked_quotient = MslExpression::binary(
+                            "%",
+                            MslExpression::cast(MslType::sint(32), quotient),
+                            MslExpression::literal("128", MslType::sint(32)),
+                            MslType::sint(32));
+                        const MslExpr store = MslExpression::binary(
+                            "=",
+                            MslExpression::unary("*", quo_pointer,
+                                                 MslType::sint(32)),
+                            masked_quotient,
+                            MslType::sint(32));
+                        const MslExpr remainder = f32binary(
+                            "-", f32args[0],
+                            f32binary("*", quotient, f32args[1]));
+                        return declare_result(
+                            operation,
+                            MslExpression::binary(",", store,
+                                                  to_f64(remainder),
+                                                  MslType::uint(64)));
+                    } else if (callee->second == "ilogb" &&
+                               f32args.size() == 1) {
+                        // ilogb returns int, not a binary64 word.
+                        return declare_result(
+                            operation,
+                            MslExpression::cast(
+                                lower_result_type(operation),
+                                MslExpression::call("ilogb", {f32args[0]},
+                                                    MslType::sint(32))));
+                    } else if ((callee->second == "llrint" ||
+                                callee->second == "llround") &&
+                               f32args.size() == 1) {
+                        // llrint/llround return long, not a binary64 word.
+                        return declare_result(
+                            operation,
+                            MslExpression::cast(
+                                lower_result_type(operation),
+                                MslExpression::call(
+                                    "cm_libdevice_" + callee->second,
+                                    {f32args[0]}, MslType::sint(64))));
+                    } else {
+                        static const std::unordered_set<std::string>
+                            kLibdeviceHelpers = {
+                                "logb",     "erfcx",    "normcdf",
+                                "normcdfinv", "erfinv", "erfcinv",
+                                "tgamma",   "lgamma",   "norm3d",
+                                "norm4d",   "rhypot",   "rnorm3d",
+                                "rnorm4d",
+                            };
+                        if (!kLibdeviceHelpers.contains(callee->second)) {
+                            fail(&operation, "unsupported software FP64 call '" +
+                                                 callee->second + "'");
+                            return std::nullopt;
+                        }
+                        // Float expansions living in
+                        // cumetal_libdevice_support.metal; the double call
+                        // decodes to binary32, calls the helper, re-encodes.
+                        return declare_result(
+                            operation,
+                            to_f64(MslExpression::call(
+                                "cm_libdevice_" + callee->second,
+                                std::move(f32args), MslType::floating())));
+                    }
+                    return declare_result(operation,
+                                          to_f64(std::move(value)));
                 }
                 return declare_result(
                     operation, MslExpression::call(
@@ -2380,6 +2745,218 @@ struct AstLowerer {
                                            "*", exponent_pointer,
                                            MslType::sint(32))},
                         return_type));
+            }
+            if (callee->second == "modf" && arguments.size() == 2) {
+                const MslType integral_pointer_type =
+                    MslType::pointer(MslType::floating(), MslAddressSpace::kThread);
+                const MslExpr integral_pointer = MslExpression::cast(
+                    integral_pointer_type, arguments[1], true);
+                return declare_result(
+                    operation,
+                    MslExpression::call(
+                        "modf",
+                        {arguments[0], MslExpression::unary(
+                                           "*", integral_pointer,
+                                           MslType::floating())},
+                        return_type));
+            }
+            if (callee->second == "sincos" && arguments.size() == 3) {
+                // MSL has no sincos; write both results through their output
+                // pointers as one sequenced expression.
+                const MslType output_pointer_type =
+                    MslType::pointer(MslType::floating(), MslAddressSpace::kThread);
+                auto store_output = [&](std::size_t index, const char* function) {
+                    const MslExpr pointer = MslExpression::cast(
+                        output_pointer_type, arguments[index], true);
+                    const MslExpr destination = MslExpression::unary(
+                        "*", pointer, MslType::floating());
+                    return MslExpression::binary(
+                        "=", destination,
+                        MslExpression::call(function, {arguments[0]},
+                                            MslType::floating()),
+                        MslType::floating());
+                };
+                return MslStatement::expression(MslExpression::binary(
+                    ",", store_output(1, "sin"), store_output(2, "cos"),
+                    MslType::floating()));
+            }
+            if (callee->second == "__cumetal_fdivide" && arguments.size() == 2) {
+                return declare_result(operation,
+                                      binary("/", arguments[0], arguments[1]));
+            }
+            if (callee->second == "__cumetal_rcbrt" && arguments.size() == 1) {
+                const MslExpr magnitude = unary_call("fabs", arguments[0]);
+                const MslExpr inverse_root = MslExpression::call(
+                    "pow", {magnitude, literal("-0.3333333333333333f")},
+                    return_type);
+                return declare_result(
+                    operation,
+                    MslExpression::call("copysign", {inverse_root, arguments[0]},
+                                        return_type));
+            }
+            // __nv_frcp_rn: binary32 division is already IEEE rne, so the
+            // correctly-rounded reciprocal is a plain 1.0f/x. __nv_frsqrt_rn
+            // has no exact reciprocal-sqrt builtin; 1.0f/sqrt(x) is ~1 ulp.
+            if (callee->second == "rcp" && arguments.size() == 1) {
+                return declare_result(
+                    operation, binary("/", literal("1.0f"), arguments[0]));
+            }
+            if (callee->second == "frsqrt_rn" && arguments.size() == 1) {
+                return declare_result(
+                    operation,
+                    binary("/", literal("1.0f"),
+                           unary_call("sqrt", arguments[0])));
+            }
+            if ((callee->second == "sinpi" || callee->second == "cospi") &&
+                arguments.size() == 1) {
+                return declare_result(
+                    operation, unary_call(callee->second, arguments[0]));
+            }
+            if (callee->second == "sincospi" && arguments.size() == 3) {
+                const MslType output_pointer_type =
+                    MslType::pointer(MslType::floating(), MslAddressSpace::kThread);
+                auto store_output = [&](std::size_t index, const char* function) {
+                    const MslExpr pointer = MslExpression::cast(
+                        output_pointer_type, arguments[index], true);
+                    const MslExpr destination = MslExpression::unary(
+                        "*", pointer, MslType::floating());
+                    return MslExpression::binary(
+                        "=", destination,
+                        MslExpression::call(function, {arguments[0]},
+                                            MslType::floating()),
+                        MslType::floating());
+                };
+                return MslStatement::expression(MslExpression::binary(
+                    ",", store_output(1, "sinpi"), store_output(2, "cospi"),
+                    MslType::floating()));
+            }
+            if (callee->second == "remquo" && arguments.size() == 3) {
+                // remquo(x, y, quo): remainder is x - rne(x/y) * y; the
+                // quotient out-param takes the low bits of that integer.
+                const MslExpr quotient = MslExpression::call(
+                    "cm_libdevice_rne",
+                    {binary("/", arguments[0], arguments[1])}, return_type);
+                const MslExpr quo_pointer = MslExpression::cast(
+                    MslType::pointer(MslType::sint(32), MslAddressSpace::kThread),
+                    arguments[2], true);
+                const MslExpr store = MslExpression::binary(
+                    "=",
+                    MslExpression::unary("*", quo_pointer, MslType::sint(32)),
+                    MslExpression::cast(MslType::sint(32), quotient),
+                    MslType::sint(32));
+                return declare_result(
+                    operation,
+                    MslExpression::binary(
+                        ",", store,
+                        binary("-", arguments[0],
+                               binary("*", quotient, arguments[1])),
+                        return_type));
+            }
+            if (callee->second == "ilogb" && arguments.size() == 1) {
+                return declare_result(
+                    operation,
+                    MslExpression::cast(
+                        lower_result_type(operation),
+                        MslExpression::call("ilogb", {arguments[0]},
+                                            MslType::sint(32))));
+            }
+            if ((callee->second == "llrint" || callee->second == "llround") &&
+                arguments.size() == 1) {
+                return declare_result(
+                    operation,
+                    MslExpression::cast(
+                        lower_result_type(operation),
+                        MslExpression::call("cm_libdevice_" + callee->second,
+                                            {arguments[0]}, MslType::sint(64))));
+            }
+            // Directed-rounding binary32 intrinsics __f<op>_{rd,ru,rz}: widen
+            // each operand to binary64 exactly, run the correctly-rounded
+            // vf64 op, and convert back with the requested rounding. add/sub/
+            // mul of two binary32 values are exact in binary64 so the result
+            // is the exact directed rounding; div/rcp/sqrt/fma round the
+            // quotient through binary64 first, so they can sit one binary32
+            // ulp from the exact directed result in rare boundary cases.
+            if (callee->second.size() > 3) {
+                const std::string_view suffix(callee->second.data() +
+                                                  callee->second.size() - 3,
+                                              3);
+                const std::string stem =
+                    callee->second.substr(0, callee->second.size() - 3);
+                static const std::unordered_map<std::string, const char*>
+                    kDirectedF32 = {
+                        {"fadd", "vf64_add_round"},
+                        {"fsub", "vf64_sub_round"},
+                        {"fmul", "vf64_mul_round"},
+                        {"fdiv", "vf64_div_round"},
+                        {"fsqrt", "vf64_sqrt_round"},
+                        {"fmaf", "vf64_fma_round"},
+                    };
+                const auto directed = kDirectedF32.find(stem);
+                const char* rounding =
+                    suffix == "_rd" ? "2u" :
+                    suffix == "_ru" ? "3u" :
+                    suffix == "_rz" ? "1u" : nullptr;
+                if ((directed != kDirectedF32.end() || stem == "frcp") &&
+                    rounding != nullptr) {
+                    auto widen = [](const MslExpr& value) {
+                        return MslExpression::call(
+                            "cm_fp64_fast_f32_to_f64",
+                            {MslExpression::bitcast(MslType::uint(), value)},
+                            MslType::uint(64));
+                    };
+                    const MslExpr mode_literal = MslExpression::literal(
+                        rounding, MslType::uint());
+                    MslExpr wide_result;
+                    if (stem == "frcp") {
+                        const MslExpr one = MslExpression::literal(
+                            "0x3FF0000000000000ul", MslType::uint(64));
+                        wide_result = MslExpression::call(
+                            "vf64_div_round",
+                            {one, widen(arguments[0]), mode_literal},
+                            MslType::uint(64));
+                    } else {
+                        std::vector<MslExpr> wide_args;
+                        wide_args.reserve(arguments.size() + 1);
+                        for (const MslExpr& argument : arguments) {
+                            wide_args.push_back(widen(argument));
+                        }
+                        wide_args.push_back(mode_literal);
+                        wide_result = MslExpression::call(
+                            directed->second, std::move(wide_args),
+                            MslType::uint(64));
+                    }
+                    return declare_result(
+                        operation,
+                        MslExpression::bitcast(
+                            MslType::floating(),
+                            MslExpression::call(
+                                "vf64_f64_to_f32",
+                                {wide_result,
+                                 MslExpression::literal(rounding,
+                                                        MslType::uint())},
+                                MslType::uint())));
+                }
+            }
+            // Expansions with no Metal builtin live in
+            // cumetal_libdevice_support.metal, textually included (typed path)
+            // or linked (AIR path) when generated code references them.
+            static const std::unordered_set<std::string> kLibdeviceHelpers = {
+                "logb",     "erfcx",    "normcdf",  "normcdfinv",
+                "erfinv",   "erfcinv",  "tgamma",   "lgamma",
+                "norm3d",   "norm4d",   "rhypot",   "rnorm3d",  "rnorm4d",
+            };
+            if (kLibdeviceHelpers.contains(callee->second)) {
+                return declare_result(
+                    operation,
+                    MslExpression::call("cm_libdevice_" + callee->second,
+                                        std::move(arguments), return_type));
+            }
+            if (callee->second == "pow" && arguments.size() == 2 &&
+                operation.operands.size() == 2 &&
+                operation.operands[1].type.kind == ir::TypeKind::kInteger) {
+                // __nv_powif carries an integer exponent; MSL pow takes floats.
+                arguments[1] =
+                    MslExpression::cast(return_type, arguments[1]);
             }
             const auto callee_function = std::find_if(
                 module.functions.begin(), module.functions.end(),
@@ -2773,6 +3350,16 @@ struct AstLowerer {
                 const std::string& conversion =
                     operation.attributes.at("fp64_conversion");
                 const MslExpr input = expression_for(operation.operands.front());
+                // The importer records the rounding mode on conversion ops
+                // (0=rne, 1=rtz, 2=rtn, 3=rtp). The defaults match the bare
+                // PTX forms: f64->int defaults to rtz, the rest to rne.
+                const auto rounding_literal = [&](const char* fallback) {
+                    return MslExpression::literal(
+                        operation.attributes.contains("rounding_mode")
+                            ? operation.attributes.at("rounding_mode")
+                            : fallback,
+                        MslType::uint());
+                };
                 if (conversion == "f32_to_f64") {
                     return declare_result(
                         operation, MslExpression::call(
@@ -2783,7 +3370,7 @@ struct AstLowerer {
                 if (conversion == "f64_to_f32") {
                     const MslExpr raw = MslExpression::call(
                         "vf64_f64_to_f32",
-                        {input, MslExpression::literal("0u", MslType::uint())},
+                        {input, rounding_literal("0u")},
                         MslType::uint());
                     return declare_result(
                         operation, MslExpression::bitcast(MslType::floating(), raw));
@@ -2797,8 +3384,7 @@ struct AstLowerer {
                     return declare_result(
                         operation, MslExpression::call(
                                        callee,
-                                       {input, MslExpression::literal(
-                                                   "0u", MslType::uint())},
+                                       {input, rounding_literal("0u")},
                                        MslType::uint(64)));
                 }
                 const bool output64 = operation.result_types.front().bit_width == 64;
@@ -2809,7 +3395,7 @@ struct AstLowerer {
                 return declare_result(
                     operation, MslExpression::call(
                                    callee,
-                                   {input, MslExpression::literal("1u", MslType::uint()),
+                                   {input, rounding_literal("1u"),
                                     MslExpression::literal("true", MslType::boolean())},
                                    lower_result_type(operation)));
             }
@@ -5344,6 +5930,12 @@ ulong vf64_mul_rne(ulong, ulong);
 ulong vf64_div_rne(ulong, ulong);
 ulong vf64_sqrt_rne(ulong);
 ulong vf64_fma_rne(ulong, ulong, ulong);
+ulong vf64_add_round(ulong, ulong, uint);
+ulong vf64_sub_round(ulong, ulong, uint);
+ulong vf64_mul_round(ulong, ulong, uint);
+ulong vf64_div_round(ulong, ulong, uint);
+ulong vf64_sqrt_round(ulong, uint);
+ulong vf64_fma_round(ulong, ulong, ulong, uint);
 ulong vf64_remainder(ulong, ulong);
 ulong vf64_round_to_int(ulong, uint, bool);
 bool vf64_eq(ulong, ulong);
@@ -5375,6 +5967,36 @@ long vf64_f64_to_i64(ulong, uint, bool);
             return result;
         }
         result.source.insert(insertion + anchor.size(), kFp64Declarations);
+    }
+    if (result.source.find("cm_libdevice_") != std::string::npos) {
+        static constexpr std::string_view kLibdeviceDeclarations = R"msl(
+extern "C" float cm_libdevice_rne(float);
+extern "C" float cm_libdevice_erfcx(float);
+extern "C" float cm_libdevice_normcdf(float);
+extern "C" float cm_libdevice_normcdfinv(float);
+extern "C" float cm_libdevice_erfinv(float);
+extern "C" float cm_libdevice_erfcinv(float);
+extern "C" float cm_libdevice_tgamma(float);
+extern "C" float cm_libdevice_lgamma(float);
+extern "C" float cm_libdevice_logb(float);
+extern "C" long cm_libdevice_llrint(float);
+extern "C" long cm_libdevice_llround(float);
+extern "C" float cm_libdevice_norm3d(float, float, float);
+extern "C" float cm_libdevice_norm4d(float, float, float, float);
+extern "C" float cm_libdevice_rhypot(float, float);
+extern "C" float cm_libdevice_rnorm3d(float, float, float);
+extern "C" float cm_libdevice_rnorm4d(float, float, float, float);
+extern "C" float cm_libdevice_sinpi(float);
+extern "C" float cm_libdevice_cospi(float);
+extern "C" int cm_libdevice_ilogb(float);
+)msl";
+        const std::string anchor = "using namespace metal;\n";
+        const std::size_t insertion = result.source.find(anchor);
+        if (insertion == std::string::npos) {
+            result.error = "typed MSL libdevice declaration anchor is missing";
+            return result;
+        }
+        result.source.insert(insertion + anchor.size(), kLibdeviceDeclarations);
     }
     result.ok = true;
     return result;

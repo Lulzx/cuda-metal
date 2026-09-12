@@ -27,6 +27,8 @@ int precedence(const MslExpression& expression) {
     if (std::holds_alternative<MslConditional>(expression.value)) return 2;
     if (const auto* binary = std::get_if<MslBinary>(&expression.value)) {
         const std::string& op = binary->operation;
+        if (op == ",") return 1;
+        if (op == "=") return 2;
         if (op == "||") return 3;
         if (op == "&&") return 4;
         if (op == "|") return 5;
@@ -283,14 +285,17 @@ private:
                     out_ << " " << sanitize_identifier(node.name);
                     if (node.initializer.has_value()) {
                         out_ << " = ";
-                        print_expression(*node.initializer);
+                        // A comma expression as the initializer would split at
+                        // statement level without parentheses; everything at
+                        // precedence `=` or tighter already binds correctly.
+                        print_expression(*node.initializer, 2);
                     }
                     out_ << ";\n";
                 } else if constexpr (std::is_same_v<Node, MslAssignment>) {
                     indent(depth);
                     print_expression(node.target);
                     out_ << " = ";
-                    print_expression(node.value);
+                    print_expression(node.value, 2);
                     out_ << ";\n";
                 } else if constexpr (std::is_same_v<Node, MslExpressionStatement>) {
                     indent(depth);

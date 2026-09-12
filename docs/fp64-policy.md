@@ -58,6 +58,34 @@ through the virtual FP64 support ABI:
 - IEEE remainder and round-to-integer operations;
 - binary16/binary32 and signed/unsigned 32/64-bit integer conversions.
 
+On the MSL lowering path, double-precision libdevice calls without a software
+primitive -- `exp`/`log`/trigonometric/hyperbolic families, `pow`, `fmod`,
+`hypot`, `erf`, `ldexp`/`scalbn`/`powi`, `nextafter`, `sinpi`/`cospi`/
+`sincospi`, `logb`/`ilogb`, `llrint`/`llround`, `remquo`, the
+`norm`/`rnorm`/`rhypot` families, `erfcx`, `normcdf`/`normcdfinv`,
+`erfinv`/`erfcinv`, and `tgamma`/`lgamma` -- evaluate through
+binary32: each binary64 operand decodes to `float`, the Metal binary32 builtin
+or typed expansion computes the result, and it re-encodes into binary64
+storage. This applies under every mode, including `ieee64`, so a kernel that
+calls `exp` on a `double` gets binary32 precision and binary32 range (`exp`
+overflows to `inf` near 88, not ~709). The generated module records the
+`FP64 libdevice calls evaluate through binary32 under emulation` semantic
+caveat rather than implying binary64 coverage. The double pointer-out
+builtins `sincos`, `modf`, `frexp`, and `sincospi` evaluate the same way on
+every path, re-encoding each binary32 out-value into binary64 storage (or the
+`int` exponent slot for `frexp`) before the store.
+
+The directed-rounding interval intrinsics are the exception: they are exact.
+`__nv_{f,d}{add,sub,mul,div,rcp,sqrt}_{rd,ru,rz}` and
+`__nv_{fmaf,fma}_{rd,ru,rz}` run through the correctly-rounded vf64 software
+ALU under every mode, including `fast48` -- binary64 calls invoke
+`vf64_*_round` directly, and binary32 calls widen each operand to binary64
+exactly, run the op, and convert back with the requested rounding (exact for
+`add`/`sub`/`mul`; within one binary32 ulp for `div`/`rcp`/`sqrt`/`fma`,
+where the binary64 intermediate can double-round). The `_rn` arithmetic and
+the `*2double_*`/`double2*_*` conversion spellings map to the same IR
+operations as their PTX instruction forms.
+
 Round-to-nearest-even and PTX's directed arithmetic modes are preserved in
 `ieee64`. `wide48` intentionally accepts round-to-nearest-even arithmetic only.
 The support runtime itself also exports classification, exception-status, and

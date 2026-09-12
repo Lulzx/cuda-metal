@@ -567,11 +567,18 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path) {
     emit_options.validate_output = false;
     emit_options.fallback_to_experimental = true;
     emit_options.kernel_name = lowered.entry_name.empty() ? "vector_add" : lowered.entry_name;
-    if (ptx.find(".f64") != std::string::npos &&
-        cumetal::ptx::fp64_mode_links_vf64_support(lower_opts.fp64_mode)) {
+    if ((ptx.find(".f64") != std::string::npos &&
+         cumetal::ptx::fp64_mode_links_vf64_support(lower_opts.fp64_mode)) ||
+        lowered.llvm_ir.find("vf64_") != std::string::npos) {
         emit_options.additional_link_inputs.push_back(
             std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
             "metal" / "support" / "cumetal_fp64_support.metal"
+        );
+    }
+    if (lowered.llvm_ir.find("cm_libdevice_") != std::string::npos) {
+        emit_options.additional_link_inputs.push_back(
+            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
+            "metal" / "support" / "cumetal_libdevice_support.metal"
         );
     }
 

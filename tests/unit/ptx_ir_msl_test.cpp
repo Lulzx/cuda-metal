@@ -664,6 +664,216 @@ BODY:
         std::cerr << frexp_abi.source << "\n";
     }
 
+    const std::string double_exp_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry double_exp(.param .u64 output) {
+    .reg .b64 %rd<4>;
+    .reg .f32 %f1;
+    ld.param.u64 %rd1, [output];
+    mov.f32 %f1, 0f3f800000;
+    cvt.f64.f32 %rd2, %f1;
+    .param .b64 param0;
+    .param .b64 retval0;
+    st.param.b64 [param0], %rd2;
+    call.uni (retval0), __nv_exp, (param0);
+    ld.param.b64 %rd3, [retval0];
+    st.global.b64 [%rd1], %rd3;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult double_exp =
+        metal::compile_ptx_to_msl(double_exp_ptx);
+    ok &= expect(double_exp.ok &&
+                     double_exp.source.find("vf64_f64_to_f32(") !=
+                         std::string::npos &&
+                     double_exp.source.find("exp(as_type<float>") !=
+                         std::string::npos &&
+                     double_exp.source.find("cm_fp64_fast_f32_to_f64(") !=
+                         std::string::npos &&
+                     double_exp.source.find(
+                         "cumetal-semantic-caveat: FP64 libdevice calls "
+                         "evaluate through binary32") != std::string::npos,
+                 "double-precision __nv_exp evaluates through binary32 with an "
+                 "explicit caveat: " + double_exp.error);
+    if (!double_exp.ok) std::cerr << double_exp.error << "\n";
+
+    const std::string sincos_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry sincos_probe(.param .f32 input, .param .u64 output) {
+    .local .align 4 .b8 sin_slot[4];
+    .local .align 4 .b8 cos_slot[4];
+    .reg .b32 %r1;
+    .reg .b64 %rd<5>;
+    ld.param.f32 %r1, [input];
+    ld.param.u64 %rd1, [output];
+    mov.b64 %rd2, sin_slot;
+    mov.b64 %rd3, cos_slot;
+    .param .b32 param0;
+    .param .b64 param1;
+    .param .b64 param2;
+    st.param.b32 [param0], %r1;
+    st.param.b64 [param1], %rd2;
+    st.param.b64 [param2], %rd3;
+    call.uni __nv_sincosf, (param0, param1, param2);
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult sincos_probe =
+        metal::compile_ptx_to_msl(sincos_ptx);
+    ok &= expect(sincos_probe.ok &&
+                     sincos_probe.source.find("= sin(") != std::string::npos &&
+                     sincos_probe.source.find("= cos(") != std::string::npos,
+                 "void __nv_sincosf writes both results through its output "
+                 "pointers: " + sincos_probe.error);
+    if (!sincos_probe.ok) std::cerr << sincos_probe.error << "\n";
+
+    const std::string sincos_double_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry sincos_double(.param .f32 input, .param .u64 output) {
+    .local .align 8 .b8 sin_slot[8];
+    .local .align 8 .b8 cos_slot[8];
+    .reg .b32 %r1;
+    .reg .b64 %rd<6>;
+    .reg .f32 %f1;
+    ld.param.f32 %r1, [input];
+    ld.param.u64 %rd1, [output];
+    cvt.f64.f32 %rd2, %r1;
+    mov.b64 %rd3, sin_slot;
+    mov.b64 %rd4, cos_slot;
+    .param .b64 param0;
+    .param .b64 param1;
+    .param .b64 param2;
+    st.param.b64 [param0], %rd2;
+    st.param.b64 [param1], %rd3;
+    st.param.b64 [param2], %rd4;
+    call.uni __nv_sincos, (param0, param1, param2);
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult sincos_double_probe =
+        metal::compile_ptx_to_msl(sincos_double_ptx);
+    ok &= expect(sincos_double_probe.ok &&
+                     sincos_double_probe.source.find("vf64_f64_to_f32(") !=
+                         std::string::npos &&
+                     sincos_double_probe.source.find("sin(as_type<float>") !=
+                         std::string::npos &&
+                     sincos_double_probe.source.find("cos(as_type<float>") !=
+                         std::string::npos &&
+                     sincos_double_probe.source.find(
+                         "cm_fp64_fast_f32_to_f64(") != std::string::npos,
+                 "void __nv_sincos evaluates through binary32 and writes "
+                 "binary64 storage through both output pointers: " +
+                     sincos_double_probe.error);
+    if (!sincos_double_probe.ok) {
+        std::cerr << sincos_double_probe.error << "\n";
+    } else if (sincos_double_probe.source.find("vf64_f64_to_f32(") ==
+                   std::string::npos ||
+               sincos_double_probe.source.find("sin(as_type<float>") ==
+                   std::string::npos ||
+               sincos_double_probe.source.find("cos(as_type<float>") ==
+                   std::string::npos ||
+               sincos_double_probe.source.find("cm_fp64_fast_f32_to_f64(") ==
+                   std::string::npos) {
+        std::cerr << sincos_double_probe.source << "\n";
+    }
+
+    const std::string modf_double_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry modf_double(.param .f32 input, .param .u64 output) {
+    .local .align 8 .b8 integral_slot[8];
+    .reg .b32 %r1;
+    .reg .b64 %rd<6>;
+    ld.param.f32 %r1, [input];
+    ld.param.u64 %rd1, [output];
+    cvt.f64.f32 %rd2, %r1;
+    mov.b64 %rd3, integral_slot;
+    .param .b64 param0;
+    .param .b64 param1;
+    .param .b64 retval0;
+    st.param.b64 [param0], %rd2;
+    st.param.b64 [param1], %rd3;
+    call.uni (retval0), __nv_modf, (param0, param1);
+    ld.param.b64 %rd4, [retval0];
+    st.global.b64 [%rd1], %rd4;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult modf_double_probe =
+        metal::compile_ptx_to_msl(modf_double_ptx);
+    ok &= expect(modf_double_probe.ok &&
+                     modf_double_probe.source.find("vf64_f64_to_f32(") !=
+                         std::string::npos &&
+                     modf_double_probe.source.find("trunc(") !=
+                         std::string::npos &&
+                     modf_double_probe.source.find(
+                         "cm_fp64_fast_f32_to_f64(") != std::string::npos,
+                 "double __nv_modf stores a binary64 integral part and "
+                 "returns the fraction through binary32: " +
+                     modf_double_probe.error);
+    if (!modf_double_probe.ok) {
+        std::cerr << modf_double_probe.error << "\n";
+    } else if (!ok) {
+        std::cerr << modf_double_probe.source << "\n";
+    }
+
+    const std::string directed_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry directed_probe(.param .f32 input, .param .f32 input2,
+                               .param .u64 output) {
+    .reg .f32 %f<4>;
+    .reg .b64 %rd<4>;
+    ld.param.f32 %f1, [input];
+    ld.param.f32 %f2, [input2];
+    ld.param.u64 %rd1, [output];
+    cvt.f64.f32 %rd2, %f1;
+    .param .b64 param0;
+    .param .b64 param1;
+    .param .b64 retval0;
+    .param .b32 param2;
+    .param .b32 param3;
+    .param .b32 retval1;
+    st.param.b64 [param0], %rd2;
+    st.param.b64 [param1], %rd2;
+    call.uni (retval0), __nv_dadd_rd, (param0, param1);
+    ld.param.b64 %rd3, [retval0];
+    st.global.b64 [%rd1], %rd3;
+    st.param.b32 [param2], %f1;
+    st.param.b32 [param3], %f2;
+    call.uni (retval1), __nv_fmul_ru, (param2, param3);
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult directed_probe =
+        metal::compile_ptx_to_msl(directed_ptx);
+    ok &= expect(directed_probe.ok &&
+                     directed_probe.source.find("vf64_add_round(") !=
+                         std::string::npos &&
+                     directed_probe.source.find("vf64_mul_round(") !=
+                         std::string::npos &&
+                     directed_probe.source.find("vf64_f64_to_f32(") !=
+                         std::string::npos &&
+                     directed_probe.source.find("cm_fp64_fast_f32_to_f64(") !=
+                         std::string::npos,
+                 "directed-rounding intrinsics lower through the "
+                 "correctly-rounded vf64 ALU: " + directed_probe.error);
+    if (!directed_probe.ok) {
+        std::cerr << directed_probe.error << "\n";
+    } else if (!ok) {
+        std::cerr << directed_probe.source << "\n";
+    }
+
     const std::string rint_ptx = R"ptx(
 .version 7.0
 .target sm_80

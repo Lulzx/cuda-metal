@@ -80,6 +80,57 @@ The exact 27-project in-tree numerical corpus passes both typed PTX and direct
 native AOT on Apple M4 Pro with workload specializations disabled. This closes
 the reviewed corpus, not the residual combinations listed above.
 
+### FP64 libdevice math
+
+Double-precision libdevice calls without a software-ALU primitive --
+`exp`/`exp2`/`exp10`/`expm1`, `log`/`log2`/`log10`/`log1p`, the
+`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`, hyperbolic, and inverse
+hyperbolic families, `pow`/`powi`, `fmod`, `fdim`, `hypot`, `cbrt`, `rcbrt`,
+`erf`/`erfc`, `ldexp`/`scalbn`, `nextafter`, `sinpi`/`cospi`/`sincospi`,
+`logb`/`ilogb`, `llrint`/`llround`, `remquo`, `norm3d`/`norm4d`,
+`rhypot`/`rnorm3d`/`rnorm4d`, `erfcx`, `normcdf`/`normcdfinv`,
+`erfinv`/`erfcinv`, and `tgamma`/`lgamma` -- evaluate through binary32:
+each binary64 storage word decodes to `float`, the binary32 builtin or
+its expansion runs, and the result re-encodes into binary64 storage.
+This is not CUDA's binary64 transcendental semantics: precision is binary32's
+(roughly 24 significant bits), and range is binary32's -- `exp`, for example,
+overflows to `inf` near 88 rather than ~709. On the typed source/PTX-to-MSL
+paths modules carry the `FP64 libdevice calls evaluate through binary32 under
+emulation` semantic caveat in the generated source and report
+`semantic_emulation` quality; the registration-JIT PTX-to-LLVM path applies
+the same decode/evaluate/re-encode expansion in AIR text. The double
+pointer-out builtins `sincos`, `modf`, `frexp`, and `sincospi` follow the
+same fallback on all paths: out-params keep their ABI (`int` exponent for
+`frexp`, binary64 storage elsewhere), and `modf`'s integral part is
+re-encoded from the binary32 `trunc` result before the store. `remquo`'s
+double form writes the low 7 quotient bits sign-adjusted (CUDA's contract is
+the low 3), matching the platform `remquo` reference. A full
+software binary64 transcendental library is intentionally deferred.
+
+Helpers absent from MSL -- `logb`, `erfcx`, `normcdf`/`normcdfinv`,
+`erfinv`/`erfcinv`, `tgamma`/`lgamma`, `llrint`/`llround`, the `norm`/`rnorm`
+families, and the shared round-to-nearest-even primitive behind `remquo` --
+live in `compiler/metal/support/cumetal_libdevice_support.metal`, an
+`extern "C"` module textually included into typed MSL and linked into AIR
+for the JIT path. The expansions are binary32-quality approximations
+(Acklam inverse-normal, Lanczos gamma, Abramowitz-Stegun `erfc`), not
+libdevice's own implementations.
+
+Two libdevice families are exact rather than approximate. The
+`__nv_{f,d}{add,sub,mul,div,rcp,sqrt}_{rd,ru,rz}` and `__nv_{fmaf,fma}_{rd,ru,rz}`
+interval intrinsics route through the correctly-rounded vf64 software ALU in
+every FP64 mode: binary64 operands run `vf64_*_round` directly; binary32
+operands widen to binary64 exactly, run the vf64 op, and convert back with
+the requested rounding -- exact for `add`/`sub`/`mul`, within one binary32
+ulp for `div`/`rcp`/`sqrt`/`fma` where the correctly-rounded binary64
+intermediate can double-round. Separately, the `_rn` spellings
+(`__nv_dadd_rn`, `__nv_fadd_rn`, `__nv_fmaf_rn`, `__nv_drcp_rn`, and friends)
+map onto the same IR opcodes as `add.rn.f64` and `fma.rn.f32`, so they run
+in the active FP64 mode's own arithmetic, and the
+`__nv_{int,ll,uint,ull}2double_*`/`__nv_double2{float,int,uint,ll,ull}_*`
+conversion intrinsics plus `__nv_hiloint2double`/`__nv_double2hi/loint` are
+exact through the software-FP64 conversion helpers.
+
 ## Source AOT architecture
 
 The linked source flow uses native ABI version 3 with an embedded metallib and

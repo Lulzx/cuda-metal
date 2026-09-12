@@ -919,6 +919,56 @@ entry:
 }
 )llvm";
 
+// The fast-math, pointer-out, and integer-exponent float builtins plus the
+// double-precision libdevice calls that have no software-ALU helper. The
+// double calls lower through the binary32 evaluation path.
+constexpr const char* kNvvmCudaMathExtended = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+declare double @__nv_exp(double)
+declare double @__nv_pow(double, double)
+declare float @__nv_fast_sinf(float)
+declare float @__nv_fdividef(float, float)
+declare float @__nv_ldexpf(float, i32)
+declare float @__nv_powif(float, i32)
+declare float @__nv_saturatef(float)
+declare float @__nv_modff(float, ptr)
+declare float @__nv_frexpf(float, ptr)
+declare void @__nv_sincosf(float, ptr, ptr)
+declare float @__nv_fadd_rd(float, float)
+declare double @__nv_dmul_ru(double, double)
+
+define ptx_kernel void @cuda_math_ext(ptr %out, float %x, i32 %n) {
+entry:
+  %wide = fpext float %x to double
+  %exponential = call double @__nv_exp(double %wide)
+  %powered = call double @__nv_pow(double %exponential, double %wide)
+  %narrow = fptrunc double %powered to float
+  %fast_sine = call float @__nv_fast_sinf(float %narrow)
+  %scaled = call float @__nv_ldexpf(float %fast_sine, i32 %n)
+  %divided = call float @__nv_fdividef(float %scaled, float %x)
+  %raised = call float @__nv_powif(float %divided, i32 %n)
+  %clamped = call float @__nv_saturatef(float %raised)
+  %integral = alloca float, align 4
+  %fraction = call float @__nv_modff(float %clamped, ptr %integral)
+  %exponent = alloca i32, align 4
+  %mantissa = call float @__nv_frexpf(float %fraction, ptr %exponent)
+  %sine_out = alloca float, align 4
+  %cosine_out = alloca float, align 4
+  call void @__nv_sincosf(float %mantissa, ptr %sine_out, ptr %cosine_out)
+  %sine = load float, ptr %sine_out, align 4
+  %cosine = load float, ptr %cosine_out, align 4
+  %total = fadd float %sine, %cosine
+  %down = call float @__nv_fadd_rd(float %total, float %x)
+  %up64 = call double @__nv_dmul_ru(double %wide, double %wide)
+  %up = fptrunc double %up64 to float
+  %sum = fadd float %down, %up
+  store float %sum, ptr %out, align 4
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmHeterogeneousAggregate = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -2095,6 +2145,40 @@ int main() {
                      cuda_math.source.find("ctz(") != std::string::npos &&
                      cuda_math.source.find(" ? ") != std::string::npos,
                  "CUDA math and bit-count declarations map to semantics-correct Metal builtins");
+
+    const metal::NvvmToMslResult cuda_math_ext =
+        metal::compile_nvvm_to_msl(kNvvmCudaMathExtended, "cuda-math-ext.ll",
+                                   "cuda_math_ext");
+    ok &= expect(
+        cuda_math_ext.ok &&
+            cuda_math_ext.source.find("vf64_f64_to_f32(") != std::string::npos &&
+            cuda_math_ext.source.find("cm_fp64_fast_f32_to_f64(") !=
+                std::string::npos &&
+            cuda_math_ext.source.find("exp(as_type<float>") != std::string::npos &&
+            cuda_math_ext.source.find("cumetal-semantic-caveat: FP64 libdevice "
+                                      "calls evaluate through binary32") !=
+                std::string::npos &&
+            cuda_math_ext.source.find("cumetal-semantic-quality: "
+                                      "semantic_emulation") !=
+                std::string::npos &&
+            cuda_math_ext.source.find("= sin(") != std::string::npos &&
+            cuda_math_ext.source.find("= cos(") != std::string::npos &&
+            cuda_math_ext.source.find("modf(") != std::string::npos &&
+            cuda_math_ext.source.find("frexp(") != std::string::npos &&
+            cuda_math_ext.source.find("ldexp(") != std::string::npos &&
+            cuda_math_ext.source.find("saturate(") != std::string::npos &&
+            cuda_math_ext.source.find("pow(") != std::string::npos &&
+            cuda_math_ext.source.find("float(n)") != std::string::npos &&
+            cuda_math_ext.source.find(" / ") != std::string::npos &&
+            cuda_math_ext.source.find("vf64_add_round(") !=
+                std::string::npos &&
+            cuda_math_ext.source.find("vf64_mul_round(") !=
+                std::string::npos,
+        "extended CUDA math surface lowers: fast builtins, pointer-out "
+        "sincos/modf/frexp, integer-exponent pow, directed-rounding vf64 "
+        "calls, and binary32-evaluated FP64 libdevice calls: " +
+            cuda_math_ext.error);
+    if (!cuda_math_ext.ok) std::cerr << cuda_math_ext.error << "\n";
 
     const metal::NvvmToMslResult heterogeneous_aggregate =
         metal::compile_nvvm_to_msl(kNvvmHeterogeneousAggregate,
