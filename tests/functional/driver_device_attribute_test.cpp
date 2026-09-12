@@ -70,6 +70,24 @@ int main() {
         return 1;
     }
 
+    int regs_per_block = value;
+    if (cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, 0) !=
+            CUDA_SUCCESS ||
+        value != regs_per_block) {
+        std::fprintf(stderr,
+                     "FAIL: max registers per multiprocessor should match regs/block, got %d\n",
+                     value);
+        return 1;
+    }
+
+    // One guaranteed-progress resident block, not an NVIDIA occupancy limit.
+    if (cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR, 0) !=
+            CUDA_SUCCESS ||
+        value != 1) {
+        std::fprintf(stderr, "FAIL: max blocks per multiprocessor should be 1, got %d\n", value);
+        return 1;
+    }
+
     if (cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_CLOCK_RATE, 0) != CUDA_SUCCESS || value <= 0) {
         std::fprintf(stderr, "FAIL: clock rate should be positive\n");
         return 1;

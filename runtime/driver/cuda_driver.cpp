@@ -927,6 +927,12 @@ CUresult cuDeviceGetAttribute(int* pi, CUdevice_attribute attrib, CUdevice dev) 
         case CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK:
             *pi = 65536;
             break;
+        case CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR:
+            *pi = prop.regsPerMultiprocessor;
+            break;
+        case CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR:
+            *pi = prop.maxBlocksPerMultiProcessor;
+            break;
         case CU_DEVICE_ATTRIBUTE_CLOCK_RATE:
             *pi = 1296000;  // kHz — conservative estimate for M-series GPU
             break;

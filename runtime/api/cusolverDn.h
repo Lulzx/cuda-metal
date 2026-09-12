@@ -10,6 +10,10 @@
 
 #include "cusolver_common.h"
 
+// cublasFillMode_t and cublasSideMode_t are owned by cublas_v2.h; including it
+// here keeps one definition in either include order.
+#include "cublas_v2.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -22,17 +26,7 @@ extern "C" {
 typedef struct CUstream_st* cudaStream_t;
 #endif  // CUMETAL_CUDA_STREAM_T_DEFINED
 typedef struct cusolverDnContext* cusolverDnHandle_t;
-
-typedef enum cublasFillMode_t {
-    CUBLAS_FILL_MODE_LOWER = 0,
-    CUBLAS_FILL_MODE_UPPER = 1,
-    CUBLAS_FILL_MODE_FULL = 2,
-} cublasFillMode_t;
-
-typedef enum cublasSideMode_t {
-    CUBLAS_SIDE_LEFT = 0,
-    CUBLAS_SIDE_RIGHT = 1,
-} cublasSideMode_t;
+typedef struct cusolverDnParams* cusolverDnParams_t;
 
 // Handle management
 cusolverStatus_t cusolverDnCreate(cusolverDnHandle_t* handle);
@@ -127,6 +121,110 @@ cusolverStatus_t cusolverDnDgesvd(cusolverDnHandle_t handle, signed char jobu,
                                    signed char jobvt, int m, int n, double* A, int lda,
                                    double* S, double* U, int ldu, double* VT, int ldvt,
                                    double* work, int lwork, double* rwork, int* devInfo);
+
+// Version query. Reports CuMetal's own version, not an NVIDIA library release.
+cusolverStatus_t cusolverGetProperty(libraryPropertyType type, int* value);
+
+// Params handle for the 64-bit generic interfaces.
+cusolverStatus_t cusolverDnCreateParams(cusolverDnParams_t* params);
+cusolverStatus_t cusolverDnDestroyParams(cusolverDnParams_t params);
+
+// Generic syevd. Bounded subset: dataTypeA, dataTypeW and computeType must be
+// the same type, either CUDA_R_32F or CUDA_R_64F; anything else is rejected
+// with CUSOLVER_STATUS_INVALID_VALUE. Sizes stay 64-bit on the interface and
+// are range-checked against the int-wide LAPACK backend.
+cusolverStatus_t cusolverDnXsyevd_bufferSize(cusolverDnHandle_t handle,
+                                             cusolverDnParams_t params,
+                                             cusolverEigMode_t jobz,
+                                             cublasFillMode_t uplo, int64_t n,
+                                             cudaDataType dataTypeA, const void* A,
+                                             int64_t lda, cudaDataType dataTypeW,
+                                             const void* W, cudaDataType computeType,
+                                             size_t* workspaceInBytesOnDevice,
+                                             size_t* workspaceInBytesOnHost);
+cusolverStatus_t cusolverDnXsyevd(cusolverDnHandle_t handle,
+                                  cusolverDnParams_t params,
+                                  cusolverEigMode_t jobz,
+                                  cublasFillMode_t uplo, int64_t n,
+                                  cudaDataType dataTypeA, void* A, int64_t lda,
+                                  cudaDataType dataTypeW, void* W,
+                                  cudaDataType computeType,
+                                  void* bufferOnDevice,
+                                  size_t workspaceInBytesOnDevice,
+                                  void* bufferOnHost,
+                                  size_t workspaceInBytesOnHost, int* info);
+
+// Batched generic syevd over strided matrices, homogeneous FP32/FP64 subset.
+cusolverStatus_t cusolverDnXsyevBatched_bufferSize(cusolverDnHandle_t handle,
+                                                   cusolverDnParams_t params,
+                                                   cusolverEigMode_t jobz,
+                                                   cublasFillMode_t uplo,
+                                                   int64_t n,
+                                                   cudaDataType dataTypeA,
+                                                   const void* A, int64_t lda,
+                                                   int64_t strideA,
+                                                   cudaDataType dataTypeW,
+                                                   const void* W, int64_t strideW,
+                                                   cudaDataType computeType,
+                                                   int64_t batchSize,
+                                                   size_t* workspaceInBytesOnDevice,
+                                                   size_t* workspaceInBytesOnHost);
+cusolverStatus_t cusolverDnXsyevBatched(cusolverDnHandle_t handle,
+                                        cusolverDnParams_t params,
+                                        cusolverEigMode_t jobz,
+                                        cublasFillMode_t uplo, int64_t n,
+                                        cudaDataType dataTypeA, void* A,
+                                        int64_t lda, int64_t strideA,
+                                        cudaDataType dataTypeW, void* W,
+                                        int64_t strideW, cudaDataType computeType,
+                                        int64_t batchSize, void* bufferOnDevice,
+                                        size_t workspaceInBytesOnDevice,
+                                        void* bufferOnHost,
+                                        size_t workspaceInBytesOnHost, int* info);
+
+// Jacobi eigensolver configuration. CuMetal runs a real cyclic Jacobi sweep,
+// so tolerance, max_sweeps and sort_eig are honoured rather than stored.
+cusolverStatus_t cusolverDnCreateSyevjInfo(syevjInfo_t* info);
+cusolverStatus_t cusolverDnDestroySyevjInfo(syevjInfo_t info);
+cusolverStatus_t cusolverDnXsyevjSetTolerance(syevjInfo_t info, double tolerance);
+cusolverStatus_t cusolverDnXsyevjSetMaxSweeps(syevjInfo_t info, int max_sweeps);
+cusolverStatus_t cusolverDnXsyevjSetSortEig(syevjInfo_t info, int sort_eig);
+// Post-run statistics: the worst residual and sweep count across the batch
+// processed through this info object.
+cusolverStatus_t cusolverDnXsyevjGetResidual(cusolverDnHandle_t handle,
+                                             syevjInfo_t info, double* residual);
+cusolverStatus_t cusolverDnXsyevjGetSweeps(cusolverDnHandle_t handle,
+                                          syevjInfo_t info, int* executed_sweeps);
+
+// Batched Jacobi eigensolver. A and W are batchSize contiguous matrices and
+// vectors; devInfo[i] reports per-matrix convergence (0 = converged, >0 =
+// sweeps exhausted without reaching tolerance).
+cusolverStatus_t cusolverDnSsyevjBatched_bufferSize(cusolverDnHandle_t handle,
+                                                    cusolverEigMode_t jobz,
+                                                    cublasFillMode_t uplo, int n,
+                                                    const float* A, int lda,
+                                                    const float* W, int* lwork,
+                                                    syevjInfo_t params,
+                                                    int batchSize);
+cusolverStatus_t cusolverDnDsyevjBatched_bufferSize(cusolverDnHandle_t handle,
+                                                    cusolverEigMode_t jobz,
+                                                    cublasFillMode_t uplo, int n,
+                                                    const double* A, int lda,
+                                                    const double* W, int* lwork,
+                                                    syevjInfo_t params,
+                                                    int batchSize);
+cusolverStatus_t cusolverDnSsyevjBatched(cusolverDnHandle_t handle,
+                                        cusolverEigMode_t jobz,
+                                        cublasFillMode_t uplo, int n, float* A,
+                                        int lda, float* W, float* work,
+                                        int lwork, int* devInfo,
+                                        syevjInfo_t params, int batchSize);
+cusolverStatus_t cusolverDnDsyevjBatched(cusolverDnHandle_t handle,
+                                        cusolverEigMode_t jobz,
+                                        cublasFillMode_t uplo, int n, double* A,
+                                        int lda, double* W, double* work,
+                                        int lwork, int* devInfo,
+                                        syevjInfo_t params, int batchSize);
 
 #ifdef __cplusplus
 }

@@ -167,6 +167,8 @@ typedef enum CUdevice_attribute {
     CU_DEVICE_ATTRIBUTE_VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED = 102,
     CU_DEVICE_ATTRIBUTE_GENERIC_COMPRESSION_SUPPORTED = 153,
     CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR = 81,
+    CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR = 82,
+    CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR = 106,
     // Hosts that build a device identity string, or that decide whether two
     // ordinals name the same physical GPU, read the PCI triple. Apple Silicon
     // has no PCI enumeration; the driver answers with a stable synthetic

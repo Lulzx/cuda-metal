@@ -26,7 +26,11 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   datatypes, FP16/TF32 Lt compute, broadcast batches, general algorithm objects,
   and FP64 epilogues are rejected rather than emulated. Tracked allocations are
   range-checked across their full strided-batch footprints; untracked host
-  buffers remain accepted specifically for the CPU fallback.
+  buffers remain accepted specifically for the CPU fallback. `cublasSetWorkspace`
+  follows the CUDA contract (256-byte alignment, a span contained in one
+  tracked allocation, NULL selects the default pool, `cublasSetStream` resets
+  it unconditionally), but the recorded span is handle state only -- the
+  backends still manage their own scratch rather than sub-allocating from it.
 - **cuRAND:** the default and MTGP32 compatibility generators are not claimed
   as NVIDIA bitstream parity; MTGP32 is proven only for host/device
   self-consistency in the enrolled NVIDIA sample. Named XORWOW, MRG32k3a,
@@ -61,7 +65,16 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   execution entry points validate their current argument/workspace surface;
   sparse Cholesky/QR additionally validate CSR structure and singularity
   tolerance. Sparse reordering is not implemented and nonzero `reorder` is
-  rejected instead of being silently ignored. Broader dense/sparse routine,
+  rejected instead of being silently ignored. The generic 64-bit
+  `cusolverDnXsyevd`/`cusolverDnXsyevBatched` surface exists for the
+  homogeneous FP32/FP64 subset (data/compute/output types must agree) over the
+  same Accelerate LAPACK path; other type combinations are rejected. Real
+  Jacobi `cusolverDnS/DsyevjBatched` runs a CPU cyclic-Jacobi iteration that
+  honors `syevjInfo_t` tolerance, max-sweeps, and ascending-sort controls and
+  reports per-matrix nonconvergence through `devInfo`; single-matrix `syevj`,
+  CSR sparse solvers, and other Jacobi variants remain absent.
+  `cusolverGetProperty` reports CuMetal's own version, not an NVIDIA release.
+  Broader dense/sparse routine,
   datatype, batched, analysis/reuse, and GPU execution coverage remains open.
 - **cuDNN:** selected descriptors/operations only. The hardened CPU-backed
   surface is primarily contiguous FP32/NCHW; it synchronizes the handle stream
@@ -102,7 +115,11 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   `ShuffleIndex` helper covers trivially-copyable objects up to the fixed
   32-lane warp model, but broader CUB warp/block free-function and policy
   overload parity remains unclassified. `cub::BlockReduce` is a real cooperative
-  reduction in device code and a sequential fallback on the host; the other
+  reduction in device code and a sequential fallback on the host.
+  `cub::BlockScan` is likewise a real cooperative scan in device code
+  (multiple warps, 1D/2D/3D row-major indexing, custom operators,
+  caller-barrier storage reuse, aggregate outputs) with a sequential host
+  fallback. The other
   block and warp primitives are still host-only fallbacks and cannot be called
   from a kernel. `DeviceRadixSort` and `DeviceSegmentedRadixSort` accept
   `cub::DoubleBuffer` but sort in place, so the selector they return is always

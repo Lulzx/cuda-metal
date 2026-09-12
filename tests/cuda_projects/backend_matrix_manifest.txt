@@ -16,8 +16,10 @@ tests/cuda_projects/barrier_cfg/barrier_cfg.cu fail pass pass pass
 tests/cuda_projects/constant_symbol/constant_symbol.cu fail pass pass pass
 tests/cuda_projects/cooperative_thread_group/cooperative_thread_group.cu fail pass pass pass
 tests/cuda_projects/cub_block_reduce/cub_block_reduce.cu fail pass pass pass
+tests/cuda_projects/cub_block_scan/cub_block_scan.cu fail pass pass pass
 tests/cuda_projects/descriptor_copy/descriptor_copy.cu fail pass fail fail
 tests/cuda_projects/device_calls/device_calls.cu fail pass pass pass
+tests/cuda_projects/device_graph_probe/device_graph_probe.cu fail pass pass pass
 tests/cuda_projects/device_printf_clang/device_printf_clang.cu fail pass pass pass
 tests/cuda_projects/device_sync_primitives/device_sync_primitives.cu fail pass pass pass
 tests/cuda_projects/dynamic_cooperative_groups/dynamic_cooperative_groups.cu fail pass pass pass

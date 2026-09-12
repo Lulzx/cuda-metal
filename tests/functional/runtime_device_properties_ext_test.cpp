@@ -1,5 +1,6 @@
 #include "cuda_runtime.h"
 
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 
@@ -138,6 +139,31 @@ int main() {
         std::fprintf(stderr, "FAIL: invalid persisting-L2 hint limits\n");
         return 1;
     }
+
+    // Occupancy fields consumed from the reserved tail: one resident block per
+    // reported processor, and a register budget that cannot derive more.
+    if (prop.maxBlocksPerMultiProcessor != 1) {
+        std::fprintf(stderr,
+                     "FAIL: maxBlocksPerMultiProcessor should be 1, got %d\n",
+                     prop.maxBlocksPerMultiProcessor);
+        return 1;
+    }
+    if (prop.regsPerMultiprocessor != prop.regsPerBlock) {
+        std::fprintf(stderr,
+                     "FAIL: regsPerMultiprocessor (%d) should match regsPerBlock (%d)\n",
+                     prop.regsPerMultiprocessor, prop.regsPerBlock);
+        return 1;
+    }
+
+    // The new fields must sit where the reserved tail began: inserting them
+    // beside older occupancy fields and shrinking the reserve keeps the total
+    // size but shifts every subsequent field's offset.
+    static_assert(offsetof(cudaDeviceProp, maxBlocksPerMultiProcessor) >
+                      offsetof(cudaDeviceProp, uuid),
+                  "occupancy fields must be consumed from the reserved tail");
+    static_assert(offsetof(cudaDeviceProp, cumetalReserved) ==
+                      offsetof(cudaDeviceProp, regsPerMultiprocessor) + sizeof(int),
+                  "reserved tail must directly follow the occupancy fields");
 
     // Verify cudaComputeMode enum values compile correctly.
     static_assert(cudaComputeModeDefault         == 0, "cudaComputeModeDefault should be 0");

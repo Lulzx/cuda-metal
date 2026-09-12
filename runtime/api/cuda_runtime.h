@@ -357,7 +357,15 @@ typedef struct cudaDeviceProp {
     int accessPolicyMaxWindowSize;   // accepted stream access-window budget
     int ECCEnabled;                  // 0 (Apple Silicon unified memory has no ECC)
     cudaUUID_t uuid;                 // Stable CuMetal device identity
-    int cumetalReserved[55];
+    // Consumed from cumetalReserved so earlier field offsets are unchanged.
+    // 1: the occupancy API guarantees one resident block per reported
+    // processor, and this must not overstate that.
+    int maxBlocksPerMultiProcessor;
+    // Synthetic budget: Metal does not expose a register file. Kept equal to
+    // regsPerBlock so occupancy arithmetic cannot derive more resident blocks
+    // than maxBlocksPerMultiProcessor promises.
+    int regsPerMultiprocessor;
+    int cumetalReserved[53];
 } cudaDeviceProp;
 
 typedef enum cudaDeviceAttr {
@@ -384,6 +392,8 @@ typedef enum cudaDeviceAttr {
     cudaDevAttrMemoryBusWidth = 37,
     cudaDevAttrL2CacheSize = 38,
     cudaDevAttrMaxThreadsPerMultiProcessor = 39,
+    cudaDevAttrMaxRegistersPerMultiprocessor = 82,
+    cudaDevAttrMaxBlocksPerMultiprocessor = 106,
     cudaDevAttrIntegrated = 18,
     cudaDevAttrCanMapHostMemory = 19,
     cudaDevAttrComputeMode = 20,
@@ -1319,6 +1329,31 @@ static inline cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec,
                                                unsigned long long flags) {
     return cudaGraphInstantiateWithFlags(pGraphExec, graph, flags);
 }
+
+// Device-side graph launch sentinels (CUDA 12 device graph launch API).
+#ifndef cudaStreamGraphTailLaunch
+#define cudaStreamGraphTailLaunch ((cudaStream_t)0x0100000000000000)
+#endif
+#ifndef cudaStreamGraphFireAndForget
+#define cudaStreamGraphFireAndForget ((cudaStream_t)0x0200000000000000)
+#endif
+
+#if defined(__clang__) && defined(__CUDA__)
+// Device graph execution is not supported on CuMetal. These inline device
+// overloads give kernels the honest capability surface CUDA documents: the
+// probe reports no current graph, and an attempted device launch returns
+// cudaErrorNotSupported instead of being an unresolved call. They are real
+// bodies rather than declarations so dead-code elimination cannot hide an
+// unresolved reference; the extern "C" host cudaGraphLaunch keeps its own
+// behaviour.
+static __device__ __forceinline__ cudaGraphExec_t cudaGetCurrentGraphExec(void) {
+    return nullptr;
+}
+static __device__ __forceinline__ cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec,
+                                                            cudaStream_t stream) {
+    return cudaErrorNotSupported;
+}
+#endif
 
 static inline cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec,
                                               cudaGraph_t hGraph,

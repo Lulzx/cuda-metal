@@ -582,6 +582,18 @@ add_test(
             $<TARGET_FILE_DIR:cumetal_runtime>
 )
 
+# cublas_v2.h and cusolverDn.h share cublasFillMode_t/cublasSideMode_t; they
+# used to define the enums independently, so a TU including both failed.
+add_test(
+    NAME unit_cublas_cusolver_header_coinclude
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cublas_cusolver_header_test.sh
+            ${CMAKE_CXX_COMPILER}
+            ${CMAKE_SOURCE_DIR}/runtime/api
+            ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(unit_cublas_cusolver_header_coinclude PROPERTIES SKIP_RETURN_CODE 77)
+
 # The release version is duplicated between CMakeLists.txt and cumetal_native.h so the header
 # stays standalone-usable; this pins them together so they cannot drift silently.
 add_test(

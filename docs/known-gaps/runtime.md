@@ -38,6 +38,13 @@ multi-stream topologies. Virtual/physical allocation reuse, allocator
 caching/release-threshold behavior, and those advanced update cases remain
 incomplete.
 
+Device-side graph capability probes compile but honestly report the missing
+feature: `cudaGetCurrentGraphExec()` returns null in device code and the
+device `cudaGraphLaunch` overload returns `cudaErrorNotSupported`.
+`cudaStreamGraphTailLaunch`/`cudaStreamGraphFireAndForget` are the CUDA
+sentinel stream values for source compatibility; tail-launch and
+fire-and-forget graph semantics are not implemented.
+
 ## Memory and pointers
 
 - Arbitrary pageable `malloc` pointers are not kernel-bindable merely because
@@ -102,5 +109,9 @@ compilation is not atomic contention proof.
 
 Several reported CUDA properties are conservative or synthetic compatibility
 values (for example compute capability 8.0, zero PCI identifiers, priority range
-0/0). They must not be used as proof that the corresponding NVIDIA hardware
+0/0). `cudaDeviceProp.maxBlocksPerMultiProcessor` reports 1 and
+`regsPerMultiprocessor` mirrors `regsPerBlock` -- consistent with the
+one-resident-block occupancy guarantee, not an NVIDIA architectural limit --
+and both are also queryable through `cudaDeviceGetAttribute`/`cuDeviceGetAttribute`.
+They must not be used as proof that the corresponding NVIDIA hardware
 feature exists.

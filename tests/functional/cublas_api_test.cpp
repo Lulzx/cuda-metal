@@ -91,6 +91,95 @@ int main() {
         return 1;
     }
 
+    // cublasSetWorkspace: CUDA requires a 256-byte-aligned span inside one
+    // tracked allocation; NULL selects the default pool and cublasSetStream
+    // resets to it. CuMetal's backends manage their own scratch, so the value
+    // is handle state rather than memory kernels sub-allocate from.
+    if (cublasSetWorkspace(nullptr, nullptr, 0) != CUBLAS_STATUS_NOT_INITIALIZED) {
+        std::fprintf(stderr, "FAIL: expected NOT_INITIALIZED for cublasSetWorkspace null handle\n");
+        return 1;
+    }
+    // Untracked pointers cannot be workspaces.
+    alignas(256) unsigned char untracked_workspace[512] = {};
+    if (cublasSetWorkspace(handle, untracked_workspace, sizeof(untracked_workspace)) !=
+        CUBLAS_STATUS_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: expected INVALID_VALUE for untracked workspace\n");
+        return 1;
+    }
+    void* workspace_alloc = nullptr;
+    if (cudaMalloc(&workspace_alloc, 4096) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaMalloc for workspace failed\n");
+        return 1;
+    }
+    // Misaligned interior pointer is rejected.
+    void* misaligned = static_cast<unsigned char*>(workspace_alloc) + 8;
+    if (cublasSetWorkspace(handle, misaligned, 1024) != CUBLAS_STATUS_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: expected INVALID_VALUE for misaligned workspace\n");
+        return 1;
+    }
+    // A span running past the end of its allocation is rejected even when the
+    // base pointer itself is tracked and aligned.
+    void* interior = static_cast<unsigned char*>(workspace_alloc) + 256;
+    if (cublasSetWorkspace(handle, interior, 4096) != CUBLAS_STATUS_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: expected INVALID_VALUE for workspace span past allocation end\n");
+        return 1;
+    }
+    // Interior pointer whose span fits is accepted, as is a zero-size span.
+    if (cublasSetWorkspace(handle, interior, 4096 - 256) != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cublasSetWorkspace interior span failed\n");
+        return 1;
+    }
+    if (cublasSetWorkspace(handle, workspace_alloc, 0) != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cublasSetWorkspace zero-size span failed\n");
+        return 1;
+    }
+    // A pinned host allocation is also a legal workspace.
+    void* host_workspace = nullptr;
+    if (cudaMallocHost(&host_workspace, 512) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaMallocHost for workspace failed\n");
+        return 1;
+    }
+    if (cublasSetWorkspace(handle, host_workspace, 512) != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cublasSetWorkspace pinned host span failed\n");
+        return 1;
+    }
+    // NULL resets to the default pool; cublasSetStream resets unconditionally.
+    if (cublasSetWorkspace(handle, nullptr, 0) != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: cublasSetWorkspace NULL reset failed\n");
+        return 1;
+    }
+    if (cublasSetWorkspace(handle, workspace_alloc, 1024) != CUBLAS_STATUS_SUCCESS ||
+        cublasSetStream(handle, stream) != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: workspace/stream reconfiguration failed\n");
+        return 1;
+    }
+    // A BLAS call must still produce correct results after the handle's
+    // workspace and stream have been reconfigured.
+    {
+        const int kN = 4;
+        float ws_x[kN] = {1.0f, 2.0f, 3.0f, 4.0f};
+        float ws_alpha = 2.0f;
+        float* dev_ws_x = nullptr;
+        if (cudaMalloc(reinterpret_cast<void**>(&dev_ws_x), sizeof(ws_x)) != cudaSuccess ||
+            cudaMemcpy(dev_ws_x, ws_x, sizeof(ws_x), cudaMemcpyHostToDevice) != cudaSuccess ||
+            cublasSscal(handle, kN, &ws_alpha, dev_ws_x, 1) != CUBLAS_STATUS_SUCCESS ||
+            cudaMemcpy(ws_x, dev_ws_x, sizeof(ws_x), cudaMemcpyDeviceToHost) != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: post-workspace SCAL path failed\n");
+            return 1;
+        }
+        for (int i = 0; i < kN; ++i) {
+            if (!nearly_equal(ws_x[i], 2.0f * static_cast<float>(i + 1))) {
+                std::fprintf(stderr, "FAIL: post-workspace SSCAL result mismatch at %d\n", i);
+                return 1;
+            }
+        }
+        cudaFree(dev_ws_x);
+    }
+    if (cudaFree(workspace_alloc) != cudaSuccess || cudaFreeHost(host_workspace) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: workspace free failed\n");
+        return 1;
+    }
+
     constexpr int kPointerModeCount = 3;
     const float pointer_mode_x[kPointerModeCount] = {1.0f, 2.0f, 3.0f};
     const float pointer_mode_y[kPointerModeCount] = {4.0f, 5.0f, 6.0f};

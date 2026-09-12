@@ -20,6 +20,13 @@ struct cublasContext {
     cudaStream_t stream = nullptr;
     cublasMath_t math_mode = CUBLAS_DEFAULT_MATH;
     cublasPointerMode_t pointer_mode = CUBLAS_POINTER_MODE_HOST;
+    // Caller-provided workspace. nullptr selects the default pool; a non-null
+    // pointer with size 0 is a real (empty) user workspace, not the default.
+    // CuMetal's Accelerate/Metal paths manage their own scratch and do not
+    // sub-allocate from this span; it is validated and tracked so callers get
+    // CUDA's configuration semantics.
+    void* workspace = nullptr;
+    std::size_t workspace_size = 0;
     std::mutex mutex;
 };
 
@@ -629,6 +636,10 @@ cublasStatus_t cublasSetStream(cublasHandle_t handle, cudaStream_t stream_id) {
     }
     std::lock_guard<std::mutex> lock(handle->mutex);
     handle->stream = stream_id;
+    // CUDA unconditionally resets the handle's workspace to the default pool
+    // when the stream changes.
+    handle->workspace = nullptr;
+    handle->workspace_size = 0;
     return CUBLAS_STATUS_SUCCESS;
 }
 
@@ -638,6 +649,36 @@ cublasStatus_t cublasGetStream(cublasHandle_t handle, cudaStream_t* stream_id) {
     }
     std::lock_guard<std::mutex> lock(handle->mutex);
     *stream_id = handle->stream;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasSetWorkspace(cublasHandle_t handle, void* workspace,
+                                  std::size_t workspace_size) {
+    if (handle == nullptr) {
+        return CUBLAS_STATUS_NOT_INITIALIZED;
+    }
+    if (workspace == nullptr) {
+        // NULL selects the default pool.
+        std::lock_guard<std::mutex> lock(handle->mutex);
+        handle->workspace = nullptr;
+        handle->workspace_size = 0;
+        return CUBLAS_STATUS_SUCCESS;
+    }
+    // CUDA requires the user workspace to be 256-byte aligned.
+    if (reinterpret_cast<std::uintptr_t>(workspace) % 256 != 0) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    // The whole span must fit inside one tracked allocation. An interior
+    // pointer is fine as long as [workspace, workspace + size) stays within
+    // its allocation; an untracked pointer is not a valid workspace.
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    if (!cumetal::rt::resolve_allocation_for_pointer(workspace, &resolved) ||
+        workspace_size > resolved.remaining_size) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    std::lock_guard<std::mutex> lock(handle->mutex);
+    handle->workspace = workspace;
+    handle->workspace_size = workspace_size;
     return CUBLAS_STATUS_SUCCESS;
 }
 

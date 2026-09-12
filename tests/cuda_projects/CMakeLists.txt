@@ -303,6 +303,28 @@ cumetal_add_cuda_project_test(
     cub_block_reduce cub_block_reduce.cu cub_block_reduce
 )
 
+# cub::BlockScan running on the GPU rather than as a host fallback. The shim's
+# default constructor hard-wired linear_tid_ to zero and its methods carried
+# no __device__ annotation, so a kernel could not run it as a cooperative
+# block scan. Covers <cub/block/block_scan.cuh>, exclusive/inclusive scans,
+# aggregates, a custom associative op, storage reuse across the caller
+# barrier, and a 3D block's row-major indexing.
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_cub_block_scan
+    cub_block_scan cub_block_scan.cu cub_block_scan
+)
+
+# Device-side CUDA graph probes. cudaGetCurrentGraphExec() and
+# cudaStreamGraphTailLaunch were missing and cudaGraphLaunch was host-only, so
+# kernels checking device graph support could not compile. CuMetal does not
+# execute device launches: the probe reports no current graph and the launch
+# returns cudaErrorNotSupported. The launch is unconditional so dead-code
+# elimination cannot hide an unresolved call.
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_device_graph_probe
+    device_graph_probe device_graph_probe.cu device_graph_probe
+)
+
 # Float atomics. Metal has native atomic_float add/sub/exchange in device and
 # threadgroup storage; the source-first path used to reject CuMetal's own
 # inline-PTX spelling of float atomicAdd. Exact integer-valued sums prove the

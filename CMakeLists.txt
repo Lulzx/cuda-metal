@@ -831,6 +831,7 @@ install(FILES
 install(FILES
     runtime/api/cub/block/block_reduce.h
     runtime/api/cub/block/block_scan.h
+    runtime/api/cub/block/block_scan.cuh
     runtime/api/cub/block/block_exchange.h
     runtime/api/cub/block/block_load.h
     runtime/api/cub/block/block_store.h

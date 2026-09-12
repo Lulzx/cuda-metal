@@ -131,6 +131,26 @@ int main() {
         return 1;
     }
 
+    // Occupancy-model attributes. The runtime guarantees one resident block per
+    // reported processor, so maxBlocksPerMultiprocessor is 1, not an NVIDIA
+    // architectural limit, and the synthetic register budget matches
+    // regsPerBlock so occupancy arithmetic derives the same one block.
+    if (cudaDeviceGetAttribute(&value, cudaDevAttrMaxBlocksPerMultiprocessor, 0) != cudaSuccess || value != 1) {
+        std::fprintf(stderr, "FAIL: cudaDevAttrMaxBlocksPerMultiprocessor should be 1, got %d\n", value);
+        return 1;
+    }
+    int regs_per_block = 0;
+    if (cudaDeviceGetAttribute(&regs_per_block, cudaDevAttrMaxRegistersPerBlock, 0) != cudaSuccess || regs_per_block <= 0) {
+        std::fprintf(stderr, "FAIL: cudaDevAttrMaxRegistersPerBlock should be positive\n");
+        return 1;
+    }
+    if (cudaDeviceGetAttribute(&value, cudaDevAttrMaxRegistersPerMultiprocessor, 0) != cudaSuccess || value != regs_per_block) {
+        std::fprintf(stderr,
+                     "FAIL: cudaDevAttrMaxRegistersPerMultiprocessor should match "
+                     "MaxRegistersPerBlock (%d), got %d\n", regs_per_block, value);
+        return 1;
+    }
+
     std::printf("PASS: extended device attribute API behaves correctly\n");
     return 0;
 }

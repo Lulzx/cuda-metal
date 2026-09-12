@@ -40,18 +40,19 @@ static void test_block_scan() {
     typename cub::BlockScan<int, BLOCK>::TempStorage temp;
 
     // Pre-fill values for all threads
-    temp.data[0] = 1;
-    temp.data[1] = 2;
-    temp.data[2] = 3;
-    temp.data[3] = 4;
+    temp.data()[0] = 1;
+    temp.data()[1] = 2;
+    temp.data()[2] = 3;
+    temp.data()[3] = 4;
 
     cub::BlockScan<int, BLOCK> scanner(temp, 0);
     int out;
     scanner.ExclusiveSum(1, out);
     CHECK(out == 0, "BlockScan::ExclusiveSum thread0=0");
 
-    // Check that thread 2 got prefix sum of 1+2=3
-    CHECK(temp.data[2] == 3, "BlockScan::ExclusiveSum thread2=3");
+    // Temp storage now holds the inclusive prefix (exclusive outputs are
+    // derived from the previous slot), so slot 2 is 1+2+3=6.
+    CHECK(temp.data()[2] == 6, "BlockScan::ExclusiveSum inclusive prefix=6");
 }
 
 static void test_warp_reduce() {

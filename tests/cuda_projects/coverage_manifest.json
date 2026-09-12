@@ -57,6 +57,20 @@
       "harness": "standard"
     },
     {
+      "name": "cub_block_scan",
+      "subdir": "cub_block_scan",
+      "source": "cub_block_scan.cu",
+      "binary": "cub_block_scan",
+      "harness": "standard"
+    },
+    {
+      "name": "device_graph_probe",
+      "subdir": "device_graph_probe",
+      "source": "device_graph_probe.cu",
+      "binary": "device_graph_probe",
+      "harness": "standard"
+    },
+    {
       "name": "cooperative_thread_group",
       "subdir": "cooperative_thread_group",
       "source": "cooperative_thread_group.cu",

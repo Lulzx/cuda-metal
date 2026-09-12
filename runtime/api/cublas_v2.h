@@ -42,9 +42,13 @@ typedef enum cublasOperation_t {
     CUBLAS_OP_C = 2,
 } cublasOperation_t;
 
+// Canonical definition shared with cusolverDn.h, which includes this header.
+// CUBLAS_FILL_MODE_FULL exists so dense-solver callers can name it; entry
+// points that only support triangular inputs still reject it at validation.
 typedef enum cublasFillMode_t {
     CUBLAS_FILL_MODE_LOWER = 0,
     CUBLAS_FILL_MODE_UPPER = 1,
+    CUBLAS_FILL_MODE_FULL  = 2,
 } cublasFillMode_t;
 
 typedef enum cublasMath_t {
@@ -101,6 +105,13 @@ cublasStatus_t cublasDestroy(cublasHandle_t handle);
 cublasStatus_t cublasGetVersion(cublasHandle_t handle, int* version);
 cublasStatus_t cublasSetStream(cublasHandle_t handle, cudaStream_t stream_id);
 cublasStatus_t cublasGetStream(cublasHandle_t handle, cudaStream_t* stream_id);
+// CUDA semantics: workspace must be 256-byte aligned and cover a single
+// tracked allocation; NULL selects the default pool, and cublasSetStream
+// unconditionally resets to it. CuMetal's backends manage their own scratch,
+// so the recorded span is handle state for source compatibility rather than
+// memory the kernels allocate from.
+cublasStatus_t cublasSetWorkspace(cublasHandle_t handle, void* workspace,
+                                  size_t workspaceSizeInBytes);
 cublasStatus_t cublasSetMathMode(cublasHandle_t handle, cublasMath_t mode);
 cublasStatus_t cublasGetMathMode(cublasHandle_t handle, cublasMath_t* mode);
 cublasStatus_t cublasSetPointerMode(cublasHandle_t handle, cublasPointerMode_t mode);

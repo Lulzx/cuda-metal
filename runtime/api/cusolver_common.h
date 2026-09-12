@@ -35,6 +35,10 @@ typedef enum cusolverEigMode_t {
     CUSOLVER_EIG_MODE_VECTOR = 1,
 } cusolverEigMode_t;
 
+// Jacobi eigensolver configuration. sort_eig: 0 leaves eigenvalues unsorted,
+// non-zero sorts them ascending after convergence.
+typedef struct syevjInfo* syevjInfo_t;
+
 #ifdef __cplusplus
 }
 #endif

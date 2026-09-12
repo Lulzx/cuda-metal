@@ -2978,6 +2978,13 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
     };
     std::memcpy(prop->uuid.bytes, kCuMetalUuid, sizeof(kCuMetalUuid));
+    // The occupancy API guarantees a single resident block per reported
+    // processor; an NVIDIA architectural block limit would overstate it.
+    prop->maxBlocksPerMultiProcessor = 1;
+    // Metal does not expose a register file. Equal to regsPerBlock so callers
+    // dividing the SM budget by the per-block budget get the same one-block
+    // answer the occupancy API gives.
+    prop->regsPerMultiprocessor = prop->regsPerBlock;
     for (size_t i = 0; i < sizeof(prop->cumetalReserved) / sizeof(prop->cumetalReserved[0]); ++i) {
         prop->cumetalReserved[i] = 0;
     }
@@ -3029,6 +3036,12 @@ cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device) {
             break;
         case cudaDevAttrMaxRegistersPerBlock:
             *value = 65536;  // Metal has no per-block register limit; return generous value
+            break;
+        case cudaDevAttrMaxRegistersPerMultiprocessor:
+            *value = prop.regsPerMultiprocessor;
+            break;
+        case cudaDevAttrMaxBlocksPerMultiprocessor:
+            *value = prop.maxBlocksPerMultiProcessor;
             break;
         case cudaDevAttrClockRate:
             *value = 1296000;  // kHz — conservative estimate for M-series GPU

@@ -95,6 +95,7 @@ ctest --test-dir build-nosshim --output-on-failure
 
 - Any behavior change must include tests (unit and/or functional).
 - Add negative-path coverage whenever adding compatibility behavior.
+- Commit messages carry no tool attribution or co-author trailers.
 - Keep `README.md` and `docs/known-gaps.md` aligned with implementation reality.
 - If a feature is intentionally partial, document it explicitly instead of implying full support.
 
