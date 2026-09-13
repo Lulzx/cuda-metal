@@ -2154,6 +2154,13 @@ struct Importer {
                             break;
                         }
                     }
+                } else if (root == "sub" && instruction.operands.size() == 3 &&
+                           ptx_scalar_type(instruction.opcode) == Type::integer(64)) {
+                    const auto left = register_types.find(first_register(instruction.operands[1]));
+                    const auto right = register_types.find(first_register(instruction.operands[2]));
+                    if (left != register_types.end() && left->second.is_pointer() &&
+                        (right == register_types.end() || !right->second.is_pointer()))
+                        inferred = left->second;
                 } else if ((root == "add" || root == "mov" || root == "mad") &&
                            instruction.operands.size() >= 2) {
                     const std::string source_symbol =
@@ -4096,6 +4103,16 @@ struct Importer {
                         value_types[operation.results[i]] = arithmetic_type;
                     }
                 }
+            }
+            if (root == "sub" && std::any_of(operation.operands.begin(), operation.operands.end(),
+                                               [](const Operand& operand) { return operand.type.is_pointer(); })) {
+                if (operation.operands.size() != 2 || !operation.operands[0].type.is_pointer() ||
+                    operation.operands[1].type != Type::integer(64) || source_type != Type::integer(64))
+                    return fail(&instruction, "pointer subtraction requires a pointer minus a 64-bit integer byte offset");
+                if (operation.result_types.empty() || !operation.result_types[0].is_pointer())
+                    return fail(&instruction, "pointer subtraction lost its result address space");
+                operation.attributes["offset_direction"] = "subtract";
+                operation.attributes["offset_unit"] = "bytes";
             }
             if (!operation.result_types.empty() && operation.result_types.front().is_pointer()) {
                 if (root == "mad") {

@@ -253,3 +253,31 @@ Validation:
 LLVM 19's previously observed pointer-subtraction/address-space compilation
 errors remain the next separate base58 task. No LLVM 19 numerical pass or full
 mining-kernel validation is claimed.
+
+## Fix 9: pointer subtraction preserves address spaces
+
+LLVM 19 base58's reverse loop subtracts an integer byte offset from a local
+pointer. Type inference previously recognized pointer addition but lost the
+pointer on subtraction. The generated MSL consequently assigned a pointer to
+an integer and later cast that integer to a pointer without an address space.
+
+The importer now preserves the left pointer's type for 64-bit pointer-minus-
+integer operations and records subtraction explicitly on the pointer-offset IR.
+MSL emits byte subtraction in the original address space. Pointer differences,
+integer-minus-pointer, and narrow pointer subtraction fail explicitly.
+
+Validation:
+
+- A focused GPU regression checks local byte reversal through a loop and device
+  pointer subtraction for 261 boundary/random inputs, with output guards.
+- Three compiler negative cases cover the rejected subtraction forms.
+- All 28 focused compiler/GPU regression tests pass.
+- The unchanged full-module LLVM 19 `kernel_self_test_primitive_base58` from
+  pinned run `34778991430` now compiles and **numerically passes on Apple M5**:
+  slot 3 = 1, other 117 slots and 16 guard words intact. Trap reporting remains
+  enabled; no diagnostic instrumentation is used.
+- Logs: `/tmp/pointer-sub-base58-llvm19.log`,
+  `/tmp/pointer-sub-base58-llvm19.gpu.log`, `/tmp/pointer-sub-tests.log`.
+
+This closes the observed base58 primitive failures for both producers. It does
+not establish complete base58 input coverage or validate the full mining kernels.

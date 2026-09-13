@@ -47,3 +47,9 @@ separate handling.
 PTX in call-free kernels without user barriers/collectives. It reports a
 stream-level software launch failure; full context-abort semantics and arbitrary
 precompiled trap ABI are not implemented.
+
+PTX pointer-minus-64-bit-integer byte offsets preserve pointer address spaces,
+including local reverse loops. Pointer differences, integer-minus-pointer, and
+narrow pointer subtraction remain explicitly rejected. Both pinned base58
+primitive self-tests now pass; full mining kernels remain unvalidated. See the
+[miner fix backlog](experiments/miner-fix-backlog.md).

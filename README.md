@@ -98,5 +98,6 @@ normalization and byte-array return packing. Runtime-seeded helper regressions
 cover 261 seeds. LLVM 19's bounded local-buffer tail recursion also passes its
 original xoroshiro self-test and 388 runtime seed cases. Both base58 variants
 now get past trap lowering. LLVM 7 base58 numerically passes after correcting
-unsigned integer widening; LLVM 19 still exposes Metal pointer-typing errors. See the
+unsigned integer widening; LLVM 19 now also numerically passes after preserving
+pointer types and byte-offset subtraction through its reverse loop. See the
 [miner fix backlog](docs/experiments/miner-fix-backlog.md) for scope and evidence.

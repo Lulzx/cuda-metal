@@ -1808,7 +1808,10 @@ struct AstLowerer {
                 MslExpression::identifier("cm_lane_id", MslType::uint()));
         }
 
-        const std::string binary = binary_spelling(operation.opcode);
+        const std::string binary = operation.opcode == ir::OpCode::kPointerOffset &&
+                                           operation.attributes.contains("offset_direction") &&
+                                           operation.attributes.at("offset_direction") == "subtract"
+                                       ? "-" : binary_spelling(operation.opcode);
         if (!binary.empty()) {
             if (operation.results.size() != 1 || operation.operands.size() < 2) {
                 fail(&operation, "malformed binary operation");
@@ -1932,7 +1935,7 @@ struct AstLowerer {
                 !is_mixed_pointer(operation.results.front())) {
                 // CuMetal pointer offsets are byte offsets even when the source
                 // pointer originated from an aggregate alloca. Cast before the
-                // addition so C++/MSL cannot scale the offset by the aggregate's
+                // arithmetic so C++/MSL cannot scale the offset by the aggregate's
                 // sizeof (for example, `&vec3_storage + 4`).
                 const MslAddressSpace address_space =
                     expression_type.kind == MslTypeKind::kPointer
