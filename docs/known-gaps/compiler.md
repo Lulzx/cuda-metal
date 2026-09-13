@@ -263,5 +263,7 @@ Ed25519 entry now passes CFG/SSA import after eliminating an unobserved
 self-select arm. The rewrite requires a matching, unchanged branch predicate
 and proves the false path cannot read the old value before overwrite or
 revisiting the select. Observable undefined values still fail verification.
-Apple Metal compilation next rejects an ambiguous `max(ulong, int)` call;
-the kernel has not reached GPU execution. See [dual LLVM evidence](../experiments/dual-llvm-miner-smoke.md).
+Integer min/max now use explicitly typed Metal operands, including signed
+comparison semantics. The unchanged LLVM 19 Ed25519 entry now passes its single
+known-answer fixture on Apple M5 with other result slots and guards intact.
+This does not validate arbitrary inputs or full mining kernels. See [dual LLVM evidence](../experiments/dual-llvm-miner-smoke.md).

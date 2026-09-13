@@ -83,3 +83,9 @@ See [compiler architecture](docs/compiler-architecture.md) for backend details.
 ## License
 
 [Apache 2.0](LICENSE) · [Legal notice](docs/legal-notice.md)
+
+The new LLVM 7 and LLVM 19 miner artifacts both pass the launch probe and the
+single Ed25519 known-answer fixture on Apple M5, with result and guard checks.
+LLVM 19 required typed pointer relocation, a reviewed guarded-select rewrite,
+and explicitly typed integer min/max operands. Full mining kernels remain
+unvalidated. See [dual LLVM smoke evidence](docs/experiments/dual-llvm-miner-smoke.md).

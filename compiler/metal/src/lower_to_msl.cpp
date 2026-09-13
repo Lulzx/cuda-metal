@@ -2501,6 +2501,28 @@ struct AstLowerer {
                     operation, MslExpression::call(
                                    target, std::move(arguments), MslType::uint(64)));
             }
+            if ((callee->second == "min" || callee->second == "max") &&
+                operation.attributes.contains("builtin") &&
+                operation.result_types.size() == 1 &&
+                operation.result_types.front().kind == ir::TypeKind::kInteger) {
+                if (operation.operands.size() != 2) {
+                    fail(&operation, "malformed integer min/max builtin");
+                    return std::nullopt;
+                }
+                const auto width = operation.result_types.front().bit_width;
+                const MslType argument_type = operation.attributes.contains("signed")
+                    ? MslType::sint(width) : MslType::uint(width);
+                // Literal AST types alone do not type the emitted C++ token.
+                // Cast both operands to select the exact Metal overload and
+                // preserve PTX signed comparisons over integer bit containers.
+                std::vector<MslExpr> arguments;
+                for (const auto& operand : operation.operands) {
+                    arguments.push_back(MslExpression::cast(argument_type, expression_for(operand)));
+                }
+                return declare_result(operation, MslExpression::cast(
+                    lower_result_type(operation), MslExpression::call(
+                        callee->second, std::move(arguments), argument_type)));
+            }
             if (callee->second == "__cumetal_signed_abs") {
                 if (operation.results.empty() || operation.operands.size() != 1) {
                     fail(&operation, "malformed CUDA signed abs builtin");

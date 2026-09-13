@@ -163,7 +163,46 @@ or numerical result was obtained for this kernel. The generated module is
 
 Compiler SHA-256 for guarded-select retry: `401be0ba517d5e5d46b6e46886e00749a554b8ec404176a9eccefe1cedcc2092`
 
-Independent review found a malformed tuple could become a valid mov. The rewrite
-is restricted to matching scalar registers; added tests cover that case, the
-64-bit form, false-path joins, predicated overwrites and initialized observable
-false arms. No valid scalar-register observable miscompile was found.
+## Reviewed rewrite and successful LLVM 19 GPU retry
+
+An independent agent reviewed the CFG proof and found no demonstrated observable
+miscompile for valid scalar-register forms. It did find that an unrestricted
+true operand could turn malformed scalar `selp` into valid tuple `mov` syntax.
+The final rewrite requires exact scalar-register operands of matching 32-/64-bit
+container width. The regression uses two initialized 16-bit tuple lanes so it
+specifically catches the originally accepted malformed case.
+
+Additional unit cases cover the 64-bit form, a false edge joining the true-path
+use, a predicated overwrite followed by a read, and an initialized observable
+false arm. The reviewer confirmed the restriction resolves its finding. This
+is bounded support, not a general path-sensitive undefined-value analysis.
+
+Integer `min`/`max` now explicitly cast both Metal arguments to their comparison
+width and signedness. The importer retains signed comparison metadata; the
+backend returns the result in the existing integer bit container. This removes
+literal overload ambiguity and avoids unsigned comparison for signed PTX.
+The GPU regression covers 12 unsigned/signed 64-bit boundary values (including
+both sign boundaries), min and max, and immediates in both operand positions.
+All 17 focused tests pass across the initial run and the two-test corrective
+rerun. The initial new min/max fixture reused an offset register as a pointer,
+exposing a separate register-wide pointer-inference limitation; the fixture
+now uses distinct offset/address registers to isolate min/max. That reuse
+limitation is not fixed by this change.
+
+The unchanged LLVM 19 artifact from run 34778991430 now compiles, loads and
+executes its Ed25519 known-answer self-test successfully on Apple M5.
+No PTX modifications, output substitution or workload specialization were used.
+
+```text
+CUMETAL_PROVENANCE event=kernel_launch kernel="kernel_self_test_primitive_ed25519" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=10792625 grid=(1,1,1) block=(1,1,1) unsupported_reason=""
+NUMERICAL_PASS kernel=kernel_self_test_primitive_ed25519 slot=2 actual=1 expected=1; other 117 slots and 16 guard words intact
+```
+
+Reproduction uses the earlier compiler/runner commands with output
+`/tmp/minmax-ed25519.metal`, kernel `kernel_self_test_primitive_ed25519` and slot 2.
+This remains a single known-answer fixture; full mining kernels and arbitrary
+Ed25519 inputs are unvalidated.
+
+Compiler SHA-256: `3a4bbfb3e944933af0a359bd6b9419899f33995273fa8adf26217676bde52556`
+
+MSL SHA-256: `043c10f9b6a45f1bfd3c28df89b6a1bb366dfcab2821f44570b3b417d0b6833c`

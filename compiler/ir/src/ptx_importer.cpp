@@ -3420,6 +3420,9 @@ struct Importer {
                 root == "abs"
                     ? (type.kind == TypeKind::kFloat ? "fabs" : "__cumetal_signed_abs")
                     : (root == "min" ? "min" : "max");
+            if ((root == "min" || root == "max") && has_signed_integer_type(instruction.opcode)) {
+                operation.attributes["signed"] = "true";
+            }
             const std::size_t arity = root == "abs" ? 1 : 2;
             for (std::size_t i = 0; i < arity; ++i) {
                 operation.operands.push_back(bit_container_operand(i + 1, type));
