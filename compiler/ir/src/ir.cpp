@@ -503,8 +503,15 @@ VerifyResult verify(const Module& module) {
                     (!operation.operands.empty() && !operation.result_types.empty())) {
                     const Type& source = operation.operands.front().type;
                     const Type& target = operation.result_types.front();
+                    // Generic helper parameters are explicitly tracked until
+                    // call-site specialization. Permit only that source in GPU
+                    // IR; legalized IR must have concrete spaces on both sides.
+                    const bool pending_generic_source =
+                        module.stage == IrStage::kGpuSemantic && source.is_pointer() &&
+                        operation.operands.front().kind == OperandKind::kValue &&
+                        function.generic_pointer_values.contains(operation.operands.front().value);
                     if (!source.is_pointer() || !target.is_pointer() ||
-                        source.address_space == AddressSpace::kNone ||
+                        (source.address_space == AddressSpace::kNone && !pending_generic_source) ||
                         target.address_space == AddressSpace::kNone) {
                         add_diagnostic(&result, operation.location,
                                        "address-space casts require explicit pointer address spaces");

@@ -1636,6 +1636,15 @@ struct Importer {
         std::unordered_set<std::string> required_device_pointers;
         for (const Instruction& instruction : entry->instructions) {
             const std::string root = root_opcode(instruction.opcode);
+            // A helper's explicit generic-to-local address conversion proves
+            // pointer-ness even when all subsequent accesses are ld.local.
+            // Keep its argument generic; call-site specialization determines
+            // the actual address space rather than guessing from integer width.
+            if (!is_kernel && instruction.opcode == "cvta.to.local.u64" &&
+                instruction.operands.size() == 2) {
+                const std::string source = first_register(instruction.operands[1]);
+                if (!source.empty()) required_device_pointers.insert(source);
+            }
             if (root != "ld" && root != "st") continue;
             if (instruction.opcode.find(".param") != std::string::npos ||
                 instruction.opcode.find(".shared") != std::string::npos ||

@@ -278,3 +278,10 @@ Signed/unsigned 64-bit PTX mul.hi now lowers through exact 32-bit partial produc
 4,217 input pairs pass a Python-oracle GPU regression. Base58/WIF integration
 retries advance to trap lowering, which remains unsupported. See the
 [fix backlog](../experiments/miner-fix-backlog.md).
+
+Generic helper parameters used by explicit `cvta.to.local.u64` now retain pointer
+identity through GPU import and call-site specialization. Tracked generic cast
+sources are allowed only before Metal legalization; unresolved sources and
+incompatible call-site spaces remain rejected. The reduced local-helper GPU
+identity passes. Both LLVM secp256k1-compressed retries now stop at trap lowering
+rather than IR verification; numerical validation remains pending.

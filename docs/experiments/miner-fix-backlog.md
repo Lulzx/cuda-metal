@@ -29,7 +29,7 @@ may expose another; update this list rather than declaring the kernel validated.
 - [ ] **Device-call cycle rejection.** Inspect rand_xoshiro seed/from_seed call
   graph and compare with PTX definitions. Distinguish real recursion from a
   call-graph/importer bug before changing recursion handling.
-- [ ] **IR verification failures.** Preserve the full verifier diagnostics and
+- [x] **Local-helper pointer IR verification failures.** Preserve the full verifier diagnostics and
   reduce secp256k1 failures; the first-line error alone is insufficient diagnosis.
 - [x] **64-bit mul.hi support.** Reproduce the operand combinations in base58/WIF; cover
   signedness, narrow/wide boundaries and independent numerical expected results.
@@ -79,3 +79,28 @@ Original LLVM 7 base58 and both LLVM WIF-compressed-mainnet entries now get past
 mul.hi and stop at unsupported trap lowering. LLVM 19 base58 still stops at its
 pre-existing trap. Logs: `/tmp/cumetal-mulhi-retest`. No numerical pass is claimed
 for those entries. The trap backlog remains open.
+
+## Fix 3: generic helper pointers converted to local addresses
+
+Helper `cvta.to.local.u64` establishes pointer-ness for its input parameter even
+when the signature omits `.ptr` and every subsequent access is local. The
+parameter remains generic until call-site specialization. GPU-stage verification
+permits an explicitly tracked generic cast source with a concrete target;
+Metal-stage verification still requires concrete address spaces on both sides.
+Integer and incompatible device arguments remain rejected.
+
+Independent review found no soundness issue. Added direct verifier tests cover
+tracked/untracked sources, concrete/generic targets, and GPU-versus-Metal stages.
+The local-memory helper identity passes on M5; 22 focused regressions passed,
+followed by the additional verifier-boundary test. Both original LLVM variants
+of secp256k1-compressed now pass IR verification and stop at trap lowering.
+Logs: `/tmp/cumetal-local-helper-final`. No secp256k1 numerical pass is claimed.
+
+## Remaining design work
+
+Trap lowering is now the shared first blocker for the retested base58, WIF and
+secp256k1 entries. A faithful implementation needs a defined runtime failure
+channel and propagation through helper calls, including GPU tests where a trap
+actually executes. Removing traps or returning normal success would hide bugs.
+The real rand_xoshiro recursion cycle and the remaining base58 SSA case also
+remain open; their semantics require separate analyses before code changes.

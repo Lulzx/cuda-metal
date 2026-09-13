@@ -2864,6 +2864,8 @@ add_test(
 )
 
 if(APPLE)
+    add_test(NAME functional_ptx_local_helper
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_local_helper.py ${CMAKE_BINARY_DIR})
     add_test(NAME functional_ptx_mul_hi_64
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_mul_hi_64.py ${CMAKE_BINARY_DIR})
     add_test(NAME functional_ptx_dead_pointer_cast

@@ -1956,6 +1956,58 @@ ret;
     const auto merged_cast = metal::compile_ptx_to_msl(merged_pointer_cast);
     ok &= expect(!merged_cast.ok && merged_cast.error.find("observable pointer-to-integer") != std::string::npos,
                  "pointer truncation passed as a CFG block argument remains observable");
+    const std::string local_helper_probe = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.func (.param .b64 retvalue) local_helper(.param .b64 address) {
+.reg .b64 %rd<4>;
+ld.param.b64 %rd1, [address];
+cvta.to.local.u64 %rd2, %rd1;
+ld.local.u64 %rd3, [%rd2];
+st.param.b64 [retvalue], %rd3;
+ret;
+}
+.visible .entry local_helper_probe(.param .u64 input, .param .u64 output, .param .u32 count) {
+.local .align 8 .b8 depot[8];
+.reg .b64 %rd<10>;
+.reg .b32 %r<7>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd3, %r2, 8;
+add.u64 %rd4, %rd1, %rd3;
+add.u64 %rd5, %rd2, %rd3;
+ld.global.u64 %rd6, [%rd4];
+mov.u64 %rd7, depot;
+st.local.u64 [%rd7], %rd6;
+cvta.local.u64 %rd9, %rd7;
+.param .b64 arg;
+.param .b64 value;
+st.param.b64 [arg], %rd9;
+call.uni (value), local_helper, (arg);
+ld.param.b64 %rd8, [value];
+st.global.u64 [%rd5], %rd8;
+DONE:
+ret;
+}
+)ptx";
+    const auto local_helper_result = metal::compile_ptx_to_msl(local_helper_probe);
+    ok &= expect(local_helper_result.ok, "cvta.to.local proves helper parameter pointer-ness: " + local_helper_result.error);
+    for (const std::string argument : {"7", "%rd1"}) {
+        std::string invalid = local_helper_probe;
+        invalid.replace(invalid.find("st.param.b64 [arg], %rd9;"), std::string("st.param.b64 [arg], %rd9;").size(),
+                        "st.param.b64 [arg], " + argument + ";");
+        const auto rejected = metal::compile_ptx_to_msl(invalid);
+        ok &= expect(!rejected.ok, "integer and device pointers cannot be silently treated as local helper pointers");
+    }
     if (!ok) return 1;
     std::cout << "PTX -> CuMetal IR -> typed MSL tests passed\n";
     return 0;

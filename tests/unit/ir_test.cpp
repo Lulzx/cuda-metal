@@ -110,6 +110,38 @@ int main() {
         recursive_call.functions.back().blocks.front().operations.end() - 1, recurse);
     ok &= expect(!verify(recursive_call).ok, "recursive device calls are rejected");
 
+    Module generic_cast;
+    Function generic_helper;
+    generic_helper.name = "generic_helper";
+    const Type generic_pointer = Type::pointer(Type::integer(8), AddressSpace::kNone);
+    generic_helper.arguments.push_back({1, "address", generic_pointer});
+    generic_helper.generic_pointer_values.insert(1);
+    generic_helper.pointer_provenance[1] = PointerProvenance{};
+    BasicBlock cast_block;
+    cast_block.id = 1;
+    cast_block.name = "entry";
+    Operation cast;
+    cast.opcode = OpCode::kAddressSpaceCast;
+    cast.results = {2};
+    cast.result_types = {Type::pointer(Type::integer(8), AddressSpace::kPrivate)};
+    cast.operands = {Operand::value_ref(1, generic_pointer)};
+    cast_block.operations.push_back(cast);
+    Operation cast_return;
+    cast_return.opcode = OpCode::kReturn;
+    cast_block.operations.push_back(cast_return);
+    generic_helper.blocks.push_back(cast_block);
+    generic_cast.functions.push_back(generic_helper);
+    ok &= expect(verify(generic_cast).ok, "tracked generic source can await GPU call-site specialization");
+    Module concrete_required = generic_cast;
+    concrete_required.stage = IrStage::kMetalLegalized;
+    ok &= expect(!verify(concrete_required).ok, "Metal IR rejects unresolved generic cast sources");
+    Module untracked = generic_cast;
+    untracked.functions.front().generic_pointer_values.clear();
+    ok &= expect(!verify(untracked).ok, "untracked generic cast sources remain invalid");
+    Module generic_target = generic_cast;
+    generic_target.functions.front().blocks.front().operations.front().result_types.front() = generic_pointer;
+    ok &= expect(!verify(generic_target).ok, "generic cast targets remain invalid");
+
     if (!ok) return 1;
     std::cout << "CuMetal IR tests passed\n";
     return 0;
