@@ -217,3 +217,39 @@ New base58 backlog: LLVM 7 now executes and reports a taken trap (719); trace
 its failing translated path next. LLVM 19 now exposes Metal pointer subtraction
 and missing pointer-address-space errors before GPU execution. Neither variant
 has a numerical pass. Full mining kernels remain unvalidated.
+
+## Fix 8: unsigned integer widening preserves the source width
+
+LLVM 7 base58's taken trap was the alphabet bounds check (`$L__BB94_46`,
+PTX line 305662). Temporary generated-MSL diagnostics found an out-of-range
+numeric digit (165) before alphabet lookup. The input PTX was never modified.
+
+The divide-by-58 sequence uses
+`mul.wide.u32 %rd, %r, -1925330167`. That literal represents the u32 bit pattern
+`0x8d3dcb09`. The emitter widened it as `ulong(-1925330167)`, yielding
+`0xffffffff8d3dcb09`, rather than `ulong(uint(-1925330167))`. This corrupted the
+quotient/remainder and eventually triggered the legitimate bounds check.
+
+Unsigned integer widening now explicitly establishes the source-width bit
+pattern before converting to the wider result. Signed widening retains its
+existing signed-source cast; floating, pointer and narrowing conversions are
+unchanged. A small GPU regression failed before the fix for input 1 with exactly
+those differing products, independently of base58.
+
+Validation:
+
+- Six GPU cases, each with 263 boundary/runtime inputs: unsigned and signed
+  16-bit and 32-bit wide products, negative-spelled constants, -1 and minimum
+  signed constants. Both outputs are checked against Python integer arithmetic,
+  including output guards (1,578 input/coefficient pairs, 3,156 products).
+- 27 focused compiler/GPU tests pass.
+- The original full-module LLVM 7 `kernel_self_test_primitive_base58` now
+  **numerically passes on Apple M5**, slot 3 = 1, with the other 117 slots and
+  16 guards intact. Trap reporting remains enabled. Input remains the pinned
+  run `34778991430`; no diagnostic MSL instrumentation is used for this pass.
+- Logs: `/tmp/widen-before.log`, `/tmp/widen-after.log`,
+  `/tmp/widen-base58-llvm7.log` and `/tmp/widen-base58-llvm7.gpu.log`.
+
+LLVM 19's previously observed pointer-subtraction/address-space compilation
+errors remain the next separate base58 task. No LLVM 19 numerical pass or full
+mining-kernel validation is claimed.

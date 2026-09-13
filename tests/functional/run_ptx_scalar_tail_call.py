@@ -51,7 +51,7 @@ def run_case(build, ptx_source, values, expected, label):
                 if result[i] != value:
                     raise RuntimeError(f'word {i}: got {result[i]:08x}, expected {value:08x}')
             assert list(result)[len(expected):] == [0xa5a5a5a5] * 16, 'tail guard overwritten'
-            print(f'NUMERICAL_PASS {label}: {count} inputs, aggregate return, guards')
+            print(f'NUMERICAL_PASS {label}: {count} inputs, output values, guards')
     finally:
         for allocation in allocations:
             api('cuMemFree', [u64], allocation)

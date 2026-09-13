@@ -77,3 +77,9 @@ are unchanged. Both compile through CuMetal to MSL after this change.
 Logs: `/tmp/trap-base58-llvm7.log`, `/tmp/trap-base58-llvm7.gpu.log`, and the
 corresponding `llvm19` files. These failures supersede the old first-blocker
 message about missing trap lowering; they do not validate any mining kernel.
+
+Subsequent investigation fixed the LLVM 7 numerical cause: an unsigned
+32-to-64-bit immediate was widened without first preserving its 32-bit pattern.
+The original base58 self-test now passes with trap reporting enabled; see
+[fix 8](miner-fix-backlog.md#fix-8-unsigned-integer-widening-preserves-the-source-width).
+The observations above describe the initial trap-reporting milestone.
