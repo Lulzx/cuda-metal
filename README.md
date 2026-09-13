@@ -47,7 +47,8 @@ checks on Apple M5 using runtime MSL compilation. See the harness's recorded
 provenance and regression commands; this is not full Rust-CUDA compatibility.
 The fresh full miner module also passes its launch probe after
 [selected-entry initializer handling](docs/experiments/ptx-initializer-selection.md);
-other miner entries still require separate validation.
+a focused GPU regression also covers byte-encoded pointers to read-only tables.
+Other miner entries still require separate validation.
 
 ## How it works
 

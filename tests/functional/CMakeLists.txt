@@ -2865,6 +2865,11 @@ add_test(
 
 if(APPLE)
     add_test(
+        NAME functional_ptx_relocated_table
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_relocated_table.py
+                ${CMAKE_BINARY_DIR}
+    )
+    add_test(
         NAME functional_ptx_bit_permutation
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_bit_permutation.py
                 ${CMAKE_BINARY_DIR}

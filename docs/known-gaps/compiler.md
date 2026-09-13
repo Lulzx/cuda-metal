@@ -214,8 +214,11 @@ distinct installations and runtime-load results.
 ## Rust PTX integration coverage
 
 Initialized-data decoding now follows selected-entry/helper symbol references;
-unused unsupported initializers no longer block independent kernels. Required
-symbolic initializers still fail: global relocation support is not implemented.
+unused unsupported initializers no longer block independent kernels. Complete
+byte-encoded pointers to private read-only numeric tables can now be resolved
+symbolically when the pointer object is read only by direct whole-pointer loads.
+Mutable/exported pointers, chains, address addends, packed pointer fields and
+arbitrary runtime relocations remain unsupported and fail explicitly.
 See the [design and full-miner launch-probe evidence](../experiments/ptx-initializer-selection.md).
 
 The typed path numerically passes the pinned Rust vector-add and fixed-32-byte

@@ -1,0 +1,19 @@
+Full-miner table relocation diagnostic — Apple M5, 2026-09-13
+Producer: vanity-miner-rs 36ca4ed2be0cb16e6028f8ebd74deffd07500adc
+Producer Actions run: 34774932262
+Original PTX SHA-256: 41db05e2e1b6281923b9d9f8f157ced57f69a9a9e9d794d0513db6e618bbb6d7
+Original PTX bytes: 25087361
+Compiler SHA-256: 5ce02afe1584d77c3982a2a21121fc6c4f3b9883e08d9b17cf54c3527284e836
+
+Command:
+python3 tests/functional/run_ptx_relocated_table.py build-rust-ptx-apple /tmp/vanity-miner-34774932262/output.ptx
+
+The original module is preserved as a prefix; an appended diagnostic kernel
+reads its original pointer initializer and table. This is not an original
+Ed25519 kernel execution. Runtime-selected inputs visit every table word.
+
+CUMETAL_PROVENANCE event=kernel_launch kernel="relocated_table" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=8833 grid=(121,1,1) block=(64,1,1) unsupported_reason=""
+NUMERICAL_PASS relocated_table: 7681 runtime-selected reads from 30720 table bytes through relocated pointer; guards intact
+
+Scoped regression result: 10/10 CTests passed. Additional helper and negative
+initializer cases passed in unit_ptx_global_reachability after that run.

@@ -125,3 +125,11 @@ The first failure may hide additional unsupported behavior in the same entry.
 The [full miner baseline](../../docs/experiments/vanity-miner-ptx-inventory.md)
 records the fresh 123-entry artifact, per-entry outcomes, and the next bounded
 compatibility task.
+
+### Initialized table pointers
+
+The typed importer now resolves complete byte-encoded pointers to private,
+read-only numeric tables when the pointer is used only by direct 64-bit loads.
+See [supported forms, exclusions, and the full-miner table diagnostic](../../docs/experiments/ptx-initializer-selection.md#complete-pointer-initializer-resolution).
+This does not establish full Ed25519 compatibility; its unchanged entry currently
+hits a separate multiline-call parser failure.
