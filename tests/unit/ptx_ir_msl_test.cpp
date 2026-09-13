@@ -2161,6 +2161,48 @@ ret;
         ok &= expect(!rejected.ok && rejected.error.find("recursive PTX") != std::string::npos,
                      "non-tail, malformed, predicated and memory-dependent recursion remain rejected: " + rejected.error);
     }
+    const std::string trap_probe = R"ptx(
+.version 7.1
+.target sm_80
+.visible .entry trap_probe(.param .u64 output, .param .u32 mode) {
+.reg .b64 %rd1;
+.reg .b32 %r1;
+.reg .pred %p1;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [mode];
+setp.eq.u32 %p1, %r1, 1;
+@%p1 bra FAIL;
+st.global.u32 [%rd1], 1;
+ret;
+FAIL:
+trap;
+}
+)ptx";
+    const auto trap_result = metal::compile_ptx_to_msl(trap_probe);
+    ok &= expect(trap_result.ok && trap_result.source.find("atomic_fetch_or_explicit(cm_trap_status") != std::string::npos &&
+                     trap_result.source.find("atomic_load_explicit(cm_trap_status") != std::string::npos,
+                 "kernel traps report failure and poll cancellation: " + trap_result.error);
+    for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+        {"FAIL:\ntrap;", "FAIL:\nbar.sync 0;\ntrap;"},
+        {"output", "cm_trap_status"}}) {
+        std::string invalid = trap_probe;
+        for (std::size_t at = 0; (at = invalid.find(from, at)) != std::string::npos; at += to.size())
+            invalid.replace(at, from.size(), to);
+        const auto rejected = metal::compile_ptx_to_msl(invalid);
+        ok &= expect(!rejected.ok, "trap barriers and hidden argument collisions rejected");
+    }
+    const auto helper_trap = metal::compile_ptx_to_msl(R"ptx(
+.version 7.1
+.target sm_80
+.func helper() {
+trap;
+}
+.visible .entry helper_trap() {
+call.uni helper, ();
+ret;
+}
+)ptx");
+    ok &= expect(!helper_trap.ok, "traps in helpers remain unsupported");
     if (!ok) return 1;
     std::cout << "PTX -> CuMetal IR -> typed MSL tests passed\n";
     return 0;

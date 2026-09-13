@@ -1595,6 +1595,7 @@ struct AstLowerer {
     bool needs_threadgroups_per_grid = false;
     bool needs_lane_id = false;
     bool needs_wide_atomic_lock_bank = false;
+    bool reports_traps = false;
     bool needs_device_clock = false;
     bool needs_grid_barrier = false;
     bool cfg_dispatcher_mode = false;
@@ -5171,8 +5172,10 @@ struct AstLowerer {
                     condition, std::move(first), std::move(second)));
                 body.push_back(MslStatement::break_statement());
             } else if (terminator.opcode == ir::OpCode::kTrap) {
-                return fail(&terminator,
-                            "trap has no faithful MSL source representation");
+                // Execute this block's operations before announcing its trap.
+                body.push_back(MslStatement::assignment(state,
+                    MslExpression::literal(std::to_string(function.blocks.size()) + "u", MslType::uint())));
+                body.push_back(MslStatement::break_statement());
             } else {
                 return fail(&terminator, "malformed dispatcher terminator");
             }
@@ -5182,9 +5185,29 @@ struct AstLowerer {
                 .statements = std::move(body),
             });
         }
+        std::vector<MslStmt> iteration;
+        if (reports_traps) {
+            const MslExpr at_trap = MslExpression::binary("==", state,
+                MslExpression::literal(std::to_string(function.blocks.size()) + "u", MslType::uint()),
+                MslType::boolean());
+            // Publish before entering divergent switch arms. The SIMD vote
+            // keeps a spinning arm from starving a sibling's pending trap arm.
+            iteration.push_back(MslStatement::expression(MslExpression::call(
+                "atomic_fetch_or_explicit",
+                {MslExpression::identifier("cm_trap_status", MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice)),
+                 MslExpression::cast(MslType::uint(), MslExpression::call("simd_any", {at_trap}, MslType::boolean())),
+                 MslExpression::identifier("memory_order_relaxed", MslType::uint())}, MslType::uint())));
+            // Poll at every CFG block boundary, including backedges, so a
+            // sibling lane cannot spin indefinitely after a trapping lane exits.
+            iteration.push_back(MslStatement::if_statement(
+                MslExpression::call("atomic_load_explicit",
+                    {MslExpression::identifier("cm_trap_status", MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice)),
+                     MslExpression::identifier("memory_order_relaxed", MslType::uint())}, MslType::uint()),
+                {MslStatement::return_statement()}));
+        }
+        iteration.push_back(MslStatement::switch_statement(state, std::move(cases)));
         statements->push_back(MslStatement::while_statement(
-            MslExpression::literal("true", MslType::boolean()),
-            {MslStatement::switch_statement(state, std::move(cases))}));
+            MslExpression::literal("true", MslType::boolean()), std::move(iteration)));
         return true;
     }
 
@@ -5299,6 +5322,45 @@ struct AstLowerer {
     }
 
     LowerToMslResult run() {
+        for (const auto& block : function.blocks)
+            for (const auto& operation : block.operations)
+                reports_traps |= operation.opcode == ir::OpCode::kTrap;
+        if (reports_traps) {
+            if (!function.is_kernel) {
+                fail(nullptr, "trap reporting does not yet support device helpers");
+                return result;
+            }
+            for (const auto& block : function.blocks) {
+                for (const auto& operation : block.operations) {
+                    if (operation.opcode == ir::OpCode::kCall ||
+                        operation.opcode == ir::OpCode::kMetalBarrier ||
+                        operation.opcode == ir::OpCode::kMetalShuffle ||
+                        operation.opcode == ir::OpCode::kMetalBallot ||
+                        operation.opcode == ir::OpCode::kMetalVote ||
+                        operation.opcode == ir::OpCode::kMetalReduction ||
+                        operation.opcode == ir::OpCode::kPrintf) {
+                        fail(&operation, "trap reporting requires a call-free kernel without barriers or collectives");
+                        return result;
+                    }
+                }
+            }
+            for (std::size_t i = 0; i < function.arguments.size(); ++i) {
+                bool collision = i == 25;
+                if (function.kernel_abi && i < function.kernel_abi->arguments.size()) {
+                    const auto& bindings = function.kernel_abi->arguments[i].binding_indices;
+                    if (!bindings.empty()) collision = std::find(bindings.begin(), bindings.end(), 25) != bindings.end();
+                }
+                if (collision || function.arguments[i].name == "cm_trap_status") {
+                    fail(nullptr, "trap status binding or name conflicts with a kernel argument");
+                    return result;
+                }
+            }
+            output.parameters.push_back({
+                .type = MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice),
+                .name = "cm_trap_status",
+                .attributes = {MslAttribute{.name = "buffer", .index = 25}},
+            });
+        }
         output.name = pointer_specialization.has_value()
                           ? specialized_callee(function.name, *pointer_specialization)
                           : function.name;
@@ -5506,7 +5568,7 @@ struct AstLowerer {
             }
         }
 
-        if (force_cfg_dispatcher || requires_cfg_dispatcher()) {
+        if (reports_traps || force_cfg_dispatcher || requires_cfg_dispatcher()) {
             if (!emit_cfg_dispatcher(&output.statements)) return result;
         } else if (!emit_from(0, &output.statements)) {
             return result;

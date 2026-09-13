@@ -97,5 +97,6 @@ The LLVM 7 xoroshiro self-test also passes after bounded scalar tail-call
 normalization and byte-array return packing. Runtime-seeded helper regressions
 cover 261 seeds. LLVM 19's bounded local-buffer tail recursion also passes its
 original xoroshiro self-test and 388 runtime seed cases. Both base58 variants
-still fail at trap lowering. See the
+now get past trap lowering: LLVM 7 reports a taken trap on the GPU; LLVM 19
+exposes Metal pointer-typing errors. Neither has a numerical pass. See the
 [miner fix backlog](docs/experiments/miner-fix-backlog.md) for scope and evidence.

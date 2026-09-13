@@ -1,3 +1,8 @@
+add_executable(cumetal_trap_binding_test trap_binding_test.cpp)
+target_link_libraries(cumetal_trap_binding_test PRIVATE cumetal_runtime)
+target_include_directories(cumetal_trap_binding_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/runtime/metal_backend ${CMAKE_SOURCE_DIR}/runtime/api)
+
 if(NOT APPLE)
     message(STATUS "Skipping functional tests: Apple platform required")
     return()
@@ -2864,6 +2869,11 @@ add_test(
 )
 
 if(APPLE)
+    add_test(NAME functional_ptx_trap_reporting
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR})
+    add_test(NAME functional_ptx_trap_reporting_trace
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --trace)
+    set_tests_properties(functional_ptx_trap_reporting functional_ptx_trap_reporting_trace PROPERTIES TIMEOUT 45)
     add_test(NAME functional_ptx_local_buffer_tail_call
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_local_buffer_tail_call.py ${CMAKE_BINARY_DIR})
     add_test(NAME functional_ptx_scalar_tail_call

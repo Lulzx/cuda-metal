@@ -3,6 +3,7 @@
 import argparse
 import ctypes as c
 import os
+import sys
 from pathlib import Path
 
 
@@ -53,11 +54,21 @@ def main():
               f"other {args.result_count - 1} slots and 16 guard words intact")
         return 0 if passed else 1
     finally:
+        # A stream with a reported trap remains failed; cleanup APIs can report
+        # the same error. Preserve the original launch/synchronization failure.
+        failing = sys.exc_info()[0] is not None
+        cleanup = []
         if allocation.value:
-            api("cuMemFree", [u64], allocation)
+            cleanup.append(("cuMemFree", [u64], allocation))
         if module.value:
-            api("cuModuleUnload", [ptr], module)
-        api("cuCtxDestroy", [ptr], context)
+            cleanup.append(("cuModuleUnload", [ptr], module))
+        cleanup.append(("cuCtxDestroy", [ptr], context))
+        for name, types, value in cleanup:
+            try:
+                api(name, types, value)
+            except RuntimeError:
+                if not failing:
+                    raise
 
 
 if __name__ == "__main__":

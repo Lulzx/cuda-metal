@@ -33,8 +33,9 @@ may expose another; update this list rather than declaring the kernel validated.
   reduce secp256k1 failures; the first-line error alone is insufficient diagnosis.
 - [x] **64-bit mul.hi support.** Reproduce the operand combinations in base58/WIF; cover
   signedness, narrow/wide boundaries and independent numerical expected results.
-- [ ] **Trap handling.** Separate provably unreachable panic paths from reachable
-  device traps. Preserve failure semantics; do not silently turn traps into no-ops.
+- [ ] **Trap handling.** Bounded call-free kernel reporting is implemented (fix 7).
+  Helper propagation, user barriers/collectives and full context-failure semantics
+  remain open. Never silently turn traps into no-ops.
 - [ ] **Additional SSA definedness.** Reduce the LLVM 19 base58 loop failure and
   prove any rewrite separately from the existing Ed25519 guarded-select case.
 - [ ] **Retry affected entries after fixes**, recording newly exposed errors and
@@ -197,3 +198,22 @@ representation` at PTX line 305647 (LLVM 7) / 406366 (LLVM 19). Logs are
 `/tmp/local-tail-base58-llvm7.log` and `/tmp/local-tail-base58-llvm19.log`.
 Neither base58 variant reached GPU execution. Trap propagation remains the
 next shared blocker; no result from these RNG fixes establishes mining success.
+
+## Fix 7: bounded kernel trap reporting
+
+Unchanged PTX now lowers kernel traps to a per-launch failure buffer with SIMD
+publication and cooperative cancellation at dispatcher boundaries. Runtime
+completion checks retain and inspect the buffer, report launch failure and latch
+it on the affected stream. Calls, user barriers/collectives and helper traps
+remain rejected; this is not full CUDA context abort. See the
+[design, regression coverage and limitations](trap-reporting.md).
+
+26 focused tests pass. Five additional stream tests pass and ten old fixture
+checks skip without `xcrun metal`. Review caught and tests now protect remapped
+binding collisions, completion races, spinning peers, and store-before-trap
+instruction ordering.
+
+New base58 backlog: LLVM 7 now executes and reports a taken trap (719); trace
+its failing translated path next. LLVM 19 now exposes Metal pointer subtraction
+and missing pointer-address-space errors before GPU execution. Neither variant
+has a numerical pass. Full mining kernels remain unvalidated.

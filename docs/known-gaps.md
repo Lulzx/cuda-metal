@@ -35,10 +35,15 @@ The executable priority/evidence table is in
 PTX recursive device calls remain unsupported except for the strictly checked
 scalar and read-all / replace-all local-buffer tail-self-call forms documented
 in the [miner fix backlog](experiments/miner-fix-backlog.md). General local-frame
-recursion and device trap propagation remain open; the bounded LLVM 19 xoroshiro
+recursion and helper trap propagation remain open; the bounded LLVM 19 xoroshiro
 fallback now passes numerical validation.
 
 Vector parameter-slot transfers support the checked unpredicated direct-slot
 `v2.b64` form. Other vector parameter forms fail explicitly; register-indirect
 vector loads are not expanded because destination/address aliasing needs
 separate handling.
+
+[Bounded kernel trap reporting](experiments/trap-reporting.md) supports unchanged
+PTX in call-free kernels without user barriers/collectives. It reports a
+stream-level software launch failure; full context-abort semantics and arbitrary
+precompiled trap ABI are not implemented.

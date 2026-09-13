@@ -106,6 +106,7 @@ inline constexpr std::size_t kAtomicLockBankSlots = 4096;
 inline constexpr std::size_t kDeviceClockBindingIndex = 28;
 inline constexpr std::size_t kGridBarrierBindingIndex = 27;
 inline constexpr std::size_t kGridYOffsetBindingIndex = 26;
+inline constexpr std::size_t kTrapStatusBindingIndex = 25;
 
 std::vector<ExternalConstantSymbol> find_referenced_external_constant_symbols(
     std::string_view ptx,
