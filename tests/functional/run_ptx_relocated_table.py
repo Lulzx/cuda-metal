@@ -55,7 +55,11 @@ def main():
     ptr, u32, u64 = c.c_void_p, c.c_uint32, c.c_uint64
     ptx_source = PTX
     table_bytes = bytes([42,17,99,5,254,1,128,63,9,8,7,6,255,0,127,128])
-    if len(sys.argv) > 2:
+    if len(sys.argv) > 2 and sys.argv[2] == '--typed':
+        ptx_source = re.sub(r'\.global \.align 8 \.u8 alias\[8\] = \{[^}]+\};',
+                            '.global .align 8 .u64 alias[1] = {table};', ptx_source)
+        ptx_source = ptx_source.replace('ld.global.nc.u64', 'ld.global.nc.b64')
+    elif len(sys.argv) > 2:
         # Keep the supplied module byte-for-byte as a prefix; append only a
         # diagnostic entry that reads its real table through its real alias.
         original = Path(sys.argv[2]).read_text()

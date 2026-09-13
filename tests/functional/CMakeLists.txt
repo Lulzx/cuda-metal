@@ -2864,6 +2864,9 @@ add_test(
 )
 
 if(APPLE)
+    add_test(NAME functional_ptx_typed_relocated_table
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_relocated_table.py
+                ${CMAKE_BINARY_DIR} --typed)
     add_test(
         NAME functional_ptx_tuple_move
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_tuple_move.py

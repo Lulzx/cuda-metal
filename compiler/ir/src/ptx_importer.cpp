@@ -986,6 +986,12 @@ InitializedByteArrayScan scan_initialized_byte_arrays(
     const std::regex declaration(
         R"(^\s*(?:(?:\.visible|\.extern|\.weak)\s+)?\.(const|global)\s+\.align\s+([0-9]+)\s+\.[bu]8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*=\s*\{([^}]*)\}\s*;\s*$)"
     );
+    // One complete symbolic pointer object, as emitted by LLVM 19. Decode
+    // into the same relocation representation as the masked byte form;
+    // privacy, mutability and use validation remain in the common resolver.
+    const std::regex pointer_declaration(
+        R"(^\s*(?:(?:\.visible|\.extern|\.weak)\s+)?\.(const|global)\s+\.align\s+([0-9]+)\s+\.[bu]64\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*1\s*\]\s*=\s*\{\s*([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\}\s*;\s*$)"
+    );
     const std::regex scalar_declaration(
         R"(^\s*(?:(?:\.visible|\.extern|\.weak)\s+)?\.(const|global)\s+\.align\s+([0-9]+)\s+\.[bus](8|16|32|64)\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*=\s*([^;]+)\s*;\s*$)"
     );
@@ -1029,6 +1035,33 @@ InitializedByteArrayScan scan_initialized_byte_arrays(
         if (!decoded.insert(name).second || !declarations.contains(name)) continue;
         line = declarations.at(name);
         std::smatch match;
+        if (std::regex_match(line, match, pointer_declaration)) {
+            std::uint64_t alignment = 0;
+            try { alignment = std::stoull(match[2].str()); }
+            catch (...) {
+                result.error = "invalid initialized PTX pointer alignment";
+                return result;
+            }
+            const std::string target = match[4].str();
+            if (alignment == 0 || alignment > UINT32_MAX ||
+                !declarations.contains(target)) {
+                result.error = "invalid or unresolved initialized PTX pointer declaration";
+                return result;
+            }
+            pending.push_back(target);
+            result.arrays.push_back({
+                .name = match[3].str(),
+                .bytes = std::vector<std::uint8_t>(8),
+                .alignment = static_cast<std::uint32_t>(alignment),
+                .constant_space = match[1].str() == "const",
+                .module_private =
+                    !starts_with(trim(line), ".visible") &&
+                    !starts_with(trim(line), ".extern") &&
+                    !starts_with(trim(line), ".weak"),
+                .pointer_target = target,
+            });
+            continue;
+        }
         if (line.find('{') == std::string::npos &&
             std::regex_match(line, match, scalar_declaration)) {
             std::uint64_t alignment = 0;
@@ -4421,6 +4454,11 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     // Do not invent a numeric address or embed host/device pointer bytes in MSL.
     for (const auto& alias : initialized_arrays.arrays) {
         if (alias.pointer_target.empty()) continue;
+        if (alias.bytes.size() != 8 || alias.alignment < 8 ||
+            (alias.alignment & (alias.alignment - 1)) != 0) {
+            importer.result.error = "PTX address relocation requires one aligned 64-bit pointer";
+            return importer.result;
+        }
         if (!initialized_arrays.address_size_64) {
             importer.result.error = "PTX address relocation requires explicit 64-bit addressing";
             return importer.result;

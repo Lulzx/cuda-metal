@@ -215,7 +215,8 @@ distinct installations and runtime-load results.
 
 Initialized-data decoding now follows selected-entry/helper symbol references;
 unused unsupported initializers no longer block independent kernels. Complete
-byte-encoded pointers to private read-only numeric tables can now be resolved
+byte-encoded pointers and single-element `.u64`/`.b64` symbolic pointer arrays
+to private read-only numeric tables can now be resolved
 symbolically when the pointer object is read only by direct whole-pointer loads.
 Mutable/exported pointers, chains, address addends, packed pointer fields and
 arbitrary runtime relocations remain unsupported and fail explicitly.
@@ -256,3 +257,7 @@ supports two 16-bit register lanes and optional unpack sinks; four-byte tuples,
 predicated forms and other unsupported layouts fail explicitly. This is not
 validation of all Ed25519 inputs or the Solana mining kernel. See the
 [root cause and original-kernel proof](../experiments/ptx-halfword-tuples.md).
+
+LLVM 19 miner table-pointer initializers now pass relocation decoding. Its
+Ed25519 entry next encounters an undefined incoming register in CFG/SSA import;
+it has not reached GPU execution. See [dual LLVM evidence](../experiments/dual-llvm-miner-smoke.md).

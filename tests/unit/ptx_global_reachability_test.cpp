@@ -195,5 +195,37 @@ int main() {
             bytes + "};\n" + relocated_entry, options);
         ok &= expect(!result.ok, "incomplete, reordered, mixed-target and mixed-numeric relocations reject");
     }
+    // Typed pointer initializers must use the same guarded relocation path.
+    for (const std::string type : {"u64", "b64"}) {
+        const std::string alias = ".global .align 8 ." + type + " alias[1] = {table};\n";
+        for (const bool forward : {false, true}) {
+            result = compile_ptx_to_msl(header + (forward ? alias + table : table + alias) + relocated_entry, options);
+            ok &= expect(result.ok && result.gpu_ir.global_constants.size() == 1 &&
+                         result.gpu_ir.global_constants.front().bytes == std::vector<std::uint8_t>({42,17,99,5}),
+                         "typed pointer retains only the target bytes: " + result.error);
+        }
+        result = compile_ptx_to_msl(header + table + alias + helper, options);
+        ok &= expect(result.ok, "typed relocation works through reachable helpers: " + result.error);
+        for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+            {".global", ".visible .global"}, {".align 8", ".align 4"},
+            {".align 8", ".align 12"}, {"[1]", "[2]"},
+            {"{table}", "{table+8}"}, {"{table}", "{table,table}"},
+            {"{table}", "{missing}"}, {"{table}", "{alias}"}}) {
+            std::string changed = alias;
+            changed.replace(changed.find(from), from.size(), to);
+            result = compile_ptx_to_msl(header + table + changed + relocated_entry, options);
+            ok &= expect(!result.ok, "invalid typed pointer rejects: " + to);
+        }
+        for (const std::string extra : {
+            ".visible .entry writer() {\nst.global.u64 [alias], 0;\nret;\n}\n",
+            ".visible .entry writer() {\nst.global.u32 [table], 0;\nret;\n}\n",
+            ".visible .entry partial() {\n.reg .b32 %r1;\nld.global.u32 %r1, [alias];\nret;\n}\n",
+            ".visible .entry escape() {\n.reg .b64 %rd1;\nmov.u64 %rd1, alias;\nret;\n}\n"}) {
+            result = compile_ptx_to_msl(header + table + alias + relocated_entry + extra, options);
+            ok &= expect(!result.ok, "typed pointer retains mutation, partial-load and escape checks");
+        }
+        result = compile_ptx_to_msl(".version 7.1\n.target sm_80\n.address_size 32\n" + table + alias + relocated_entry, options);
+        ok &= expect(!result.ok, "typed relocation requires 64-bit addressing");
+    }
     return ok ? 0 : 1;
 }
