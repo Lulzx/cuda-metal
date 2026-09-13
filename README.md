@@ -89,3 +89,6 @@ single Ed25519 known-answer fixture on Apple M5, with result and guard checks.
 LLVM 19 required typed pointer relocation, a reviewed guarded-select rewrite,
 and explicitly typed integer min/max operands. Full mining kernels remain
 unvalidated. See [dual LLVM smoke evidence](docs/experiments/dual-llvm-miner-smoke.md).
+
+For the next small validation steps and remaining work, see the
+[vanity-miner validation checklist](docs/experiments/vanity-miner-validation-todo.md).
