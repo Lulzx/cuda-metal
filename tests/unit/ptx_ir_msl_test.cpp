@@ -2063,6 +2063,30 @@ ret;
         const auto rejected = metal::compile_ptx_to_msl(invalid);
         ok &= expect(!rejected.ok, "malformed, overlapping, missing and out-of-bounds wide return fields rejected");
     }
+    std::string vector_return = wide_return;
+    for (std::size_t pos = 0; (pos = vector_return.find(".align 8 .b8", pos)) != std::string::npos; pos += 13)
+        vector_return.replace(pos, 12, ".align 16 .b8");
+    const std::string scalar_stores = "st.param.b64 [retval], 1;\nst.param.b64 [retval+8], 2;";
+    vector_return.replace(vector_return.find(scalar_stores), scalar_stores.size(),
+                          "st.param.v2.b64 [retval], {1, 2};");
+    const std::string scalar_loads = "ld.param.b64 %rd8, [result];\nld.param.b64 %rd9, [result+8];";
+    vector_return.replace(vector_return.find(scalar_loads), scalar_loads.size(),
+                          "ld.param.v2.b64 {%rd8, %rd9}, [result];");
+    const auto vector_result = metal::compile_ptx_to_msl(vector_return);
+    ok &= expect(vector_result.ok, "both vector parameter lanes participate in aggregate ABI: " + vector_result.error);
+    for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+        {"{1, 2}", "{1}"}, {"{1, 2}", "{1, unknown}"},
+        {"{%rd8, %rd9}", "{%rd8, %rd8}"},
+        {"{%rd8, %rd9}", "{%rd8, %r1}"},
+        {"[result];", "[result+8];"},
+        {"[result];", "[result+unknown];"},
+        {"[result];", "[%rd8];"},
+        {"st.param.v2.b64", "@%p1 st.param.v2.b64"}}) {
+        std::string invalid = vector_return;
+        invalid.replace(invalid.find(from), from.size(), to);
+        const auto rejected = metal::compile_ptx_to_msl(invalid);
+        ok &= expect(!rejected.ok, "malformed, misaligned and predicated vector parameter transfers rejected");
+    }
     const std::string scalar_tail = R"ptx(
 .version 7.1
 .target sm_80

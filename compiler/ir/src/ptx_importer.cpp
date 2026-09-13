@@ -1456,6 +1456,52 @@ bool normalize_scalar_tail_call(cumetal::ptx::EntryFunction* function) {
     return true;
 }
 
+// Parameter slots are compiler-managed byte storage, not observable memory.
+// Expand exact, aligned v2.b64 transfers before SSA so both lanes participate
+// in normal definition tracking and the existing aggregate ABI checks.
+void normalize_vector_parameter_transfers(cumetal::ptx::EntryFunction* function) {
+    std::vector<Instruction> rewritten;
+    for (const auto& instruction : function->instructions) {
+        const bool load = instruction.opcode == "ld.param.v2.b64";
+        if ((!load && instruction.opcode != "st.param.v2.b64") ||
+            !instruction.predicate.empty() || instruction.operands.size() != 2) {
+            rewritten.push_back(instruction);
+            continue;
+        }
+        const auto& address = instruction.operands[load ? 1 : 0];
+        const std::string name = parameter_name_from_operand(address);
+        const auto offset = parameter_slot_offset(address, name);
+        const std::string tuple = trim(instruction.operands[load ? 0 : 1]);
+        if (name.empty() || !registers_in(name).empty() || !offset || *offset < 0 || *offset % 16 != 0 ||
+            *offset > std::numeric_limits<std::int64_t>::max() - 8 ||
+            tuple.size() < 2 || tuple.front() != '{' || tuple.back() != '}') {
+            rewritten.push_back(instruction);
+            continue;
+        }
+        const auto lanes = grouped_names(tuple.substr(1, tuple.size() - 2));
+        bool valid = lanes.size() == 2 && (!load || lanes[0] != lanes[1]);
+        for (const auto& lane : lanes) {
+            if (first_register(lane) == lane && ptx_register_container_bits(lane) == 64) continue;
+            if (load) { valid = false; break; }
+            try {
+                std::size_t consumed = 0;
+                std::stoll(lane, &consumed, 0);
+                valid &= consumed == lane.size();
+            } catch (...) { valid = false; }
+        }
+        if (!valid) { rewritten.push_back(instruction); continue; }
+        for (int i = 0; i < 2; ++i) {
+            Instruction scalar = instruction;
+            scalar.opcode = load ? "ld.param.b64" : "st.param.b64";
+            const std::string slot = "[" + name + "+" + std::to_string(*offset + 8*i) + "]";
+            scalar.operands = load ? std::vector<std::string>{lanes[i], slot} :
+                                     std::vector<std::string>{slot, lanes[i]};
+            rewritten.push_back(std::move(scalar));
+        }
+    }
+    function->instructions = std::move(rewritten);
+}
+
 OpCode arithmetic_opcode(std::string_view root) {
     if (root == "add") return OpCode::kAdd;
     if (root == "sub") return OpCode::kSub;
@@ -2770,6 +2816,9 @@ struct Importer {
             }
         }
 
+        if ((starts_with(instruction.opcode, "st.param") || starts_with(instruction.opcode, "ld.param")) &&
+            memory_vector_width(instruction.opcode) != 1)
+            return fail(&instruction, "unsupported or malformed vector PTX parameter transfer");
         if (starts_with(instruction.opcode, "st.param")) {
             if (instruction.operands.size() < 2) {
                 return fail(&instruction, "malformed st.param instruction");
@@ -4651,7 +4700,11 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     }
     importer.result.warnings = parsed.warnings;
     // Normalize copies before capturing pointers into the parsed function list.
-    for (auto& function : parsed.module.functions) normalize_scalar_tail_call(&function);
+    for (auto& function : parsed.module.functions) {
+        normalize_scalar_tail_call(&function);
+        normalize_vector_parameter_transfers(&function);
+    }
+    for (auto& entry : parsed.module.entries) normalize_vector_parameter_transfers(&entry);
     if (!importer.select_entry(parsed, options)) return importer.result;
     const cumetal::ptx::EntryFunction* selected_entry = importer.entry;
     for (const cumetal::ptx::EntryFunction& function : parsed.module.functions) {

@@ -36,3 +36,8 @@ PTX recursive device calls remain unsupported except for the strictly checked
 scalar tail-self-call form documented in the
 [miner fix backlog](experiments/miner-fix-backlog.md). Local-frame recursion,
 including LLVM 19's xoroshiro fallback, and device trap propagation remain open.
+
+Vector parameter-slot transfers support the checked unpredicated direct-slot
+`v2.b64` form. Other vector parameter forms fail explicitly; register-indirect
+vector loads are not expanded because destination/address aliasing needs
+separate handling.

@@ -143,3 +143,18 @@ The constant-return test also exposed a separate unused unannotated b64 helper
 parameter being inferred as a pointer, causing a Metal integer-to-pointer cast
 error. The ABI-only regression uses a no-argument constant helper; the unused
 parameter inference case remains a follow-up rather than expanding this fix.
+
+## Fix 5: vector parameter transfers
+
+Exact unpredicated `ld.param.v2.b64` / `st.param.v2.b64` transfers through direct
+parameter slots now expand into two scalar transfers before SSA construction.
+Both lanes therefore use the existing aggregate ABI and definedness checks.
+Malformed tuples, duplicate/narrow destinations, nonliteral or misaligned byte
+offsets, predication, and register-indirect slots remain rejected. The last
+restriction prevents a first lane from overwriting the address of the second.
+Independent review identified that alias hazard; a negative test covers it.
+
+Nonrecursive GPU regressions cover immediate zero/one, all bits set, high-bit
+and mixed-bit return words. Existing scalar-return and independent u32-read
+regressions remain enabled. This repairs an ABI blocker encountered while
+working on LLVM 19 local-frame recursion; it does not itself eliminate cycles.

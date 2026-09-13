@@ -79,6 +79,14 @@ def main():
         ptx = ptx.replace('call.uni (result), tail_count, (arg);', 'call.uni (result), tail_count, ();')
         expected = [first & ((1 << 64) - 1), second & ((1 << 64) - 1)]
         run_case(build, ptx, [0], expected, f'immediate aggregate {first}, {second}')
+        vector_ptx = ptx.replace('.align 8 .b8', '.align 16 .b8').replace(
+            f'st.param.b64 [retval], {first};\nst.param.b64 [retval+8], {second};',
+            f'st.param.v2.b64 [retval], {{{first}, {second}}};')
+        vector_ptx = vector_ptx.replace(
+            'ld.param.b64 %rd8, [result];\nld.param.b64 %rd9, [result+8];',
+            'ld.param.v2.b64 {%rd8, %rd9}, [result];')
+        run_case(build, vector_ptx, [0], expected, f'vector parameter lanes {first}, {second}')
+
         ptx = ptx.replace('.reg .b32 %r<5>;', '.reg .b32 %r<9>;')
         begin = ptx.index('ld.param.b64 %rd8, [result];')
         end = ptx.index('DONE:', begin)
