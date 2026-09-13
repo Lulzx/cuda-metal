@@ -133,7 +133,7 @@ bool is_supported_opcode(const std::string& opcode) {
         "ld",        "lg2",        "lop3",      "mad",   "match", "max",      "membar","min",
         "mov",       "mul",        "nanosleep", "neg",   "not",   "or",       "popc",  "prmt",
         "rcp",       "redux",      "rem",       "ret",   "rsqrt", "sad",      "selp",  "set",
-        "setp",      "shl",        "shr",       "shfl",  "sin",   "sqrt",     "st",    "sub",
+        "setp",      "shl",        "shr",       "shf",   "shfl",  "sin",   "sqrt",     "st",    "sub",
         "fence",     "prefetch",   "prefetchu", "red",   "suq",   "testp",    "trap",  "txq",
         "vote",      "xor",
     };

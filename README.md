@@ -42,8 +42,9 @@ for validation commands.
 
 The experimental [Rust PTX harness](demos/rust-ptx/README.md) consumes
 separately exported Rust-CUDA kernels and checks vector addition and SHA-256.
-It uses runtime MSL compilation; successful PTX export alone does not establish
-Apple-GPU correctness or full Rust-CUDA compatibility.
+Both kernels from the unchanged, pinned Rust-CUDA PTX artifact pass numerical
+checks on Apple M5 using runtime MSL compilation. See the harness's recorded
+provenance and regression commands; this is not full Rust-CUDA compatibility.
 
 ## How it works
 

@@ -2597,17 +2597,54 @@ struct Importer {
                     ? AddressSpace::kConstant
                     : AddressSpace::kDevice;
             const Type element_type = ptx_scalar_type(instruction.opcode);
+            const auto store_value = [&](Operand input) {
+                input = bit_container_of(input, element_type);
+                // PTX permits st.b8/st.b16 from a wider integer register.
+                // Preserve the memory width instead of emitting a u32 store.
+                if (input.type.kind == TypeKind::kInteger &&
+                    element_type.kind == TypeKind::kInteger &&
+                    input.type.bit_width > element_type.bit_width) {
+                    Operation truncate;
+                    truncate.opcode = OpCode::kConvert;
+                    truncate.location = operation.location;
+                    const ValueId value = builder.next_value();
+                    truncate.results = {value};
+                    truncate.result_types = {element_type};
+                    truncate.operands = {input};
+                    value_types[value] = element_type;
+                    block->operations.push_back(std::move(truncate));
+                    input = Operand::value_ref(value, element_type);
+                }
+                return input;
+            };
             const Operand base = memory_address_operand(
                 0, Type::pointer(element_type, store_address_space));
-            // Vector stores: `st.global.v2.b32 [addr], {%r1, %r2}` writes each
-            // register to consecutive elements. Clang emits these for adjacent
+            // Vector stores: `st.global.v2.b32 [addr], {%r1, 0}` writes each
+            // register or literal to consecutive elements. Clang emits these for adjacent
             // struct fields at -O2, and storing only the first lane silently
             // dropped the rest.
             const std::size_t lanes = memory_vector_width(instruction.opcode);
-            const std::vector<std::string> lane_registers = registers_in(instruction.operands[1]);
-            if (lanes > 1 && lane_registers.size() != lanes) {
+            std::vector<std::string> lane_operands;
+            if (lanes > 1) {
+                const std::string tuple = trim(instruction.operands[1]);
+                if (tuple.size() < 2 || tuple.front() != '{' || tuple.back() != '}') {
+                    return fail(&instruction, "vector store source requires a braced tuple");
+                }
+                const std::string contents = tuple.substr(1, tuple.size() - 2);
+                std::size_t begin = 0;
+                do {
+                    const std::size_t end = contents.find(',', begin);
+                    lane_operands.push_back(trim(contents.substr(begin, end - begin)));
+                    if (lane_operands.back().empty()) {
+                        return fail(&instruction, "vector store source tuple has an empty lane");
+                    }
+                    if (end == std::string::npos) break;
+                    begin = end + 1;
+                } while (true);
+            }
+            if (lanes > 1 && lane_operands.size() != lanes) {
                 return fail(&instruction,
-                            "vector store source tuple must name one register per lane");
+                            "vector store source tuple must provide one operand per lane");
             }
             for (std::size_t lane = 1; lane < lanes; ++lane) {
                 Operation offset;
@@ -2630,8 +2667,8 @@ struct Importer {
                 store.location = operation.location;
                 store.attributes["ptx_opcode"] = instruction.opcode;
                 store.operands.push_back(Operand::value_ref(pointer, base.type));
-                store.operands.push_back(bit_container_of(
-                    operand_for(lane_registers[lane], *environment, element_type), element_type));
+                store.operands.push_back(store_value(
+                    operand_for(lane_operands[lane], *environment, element_type)));
                 store.attributes["alignment"] = std::to_string(type_size(element_type));
                 if (!append_guard(&store, instruction, *environment)) return false;
                 block->operations.push_back(std::move(store));
@@ -2639,9 +2676,8 @@ struct Importer {
             operation.operands.push_back(base);
             operation.operands.push_back(
                 lanes > 1
-                    ? bit_container_of(operand_for(lane_registers[0], *environment, element_type),
-                                       element_type)
-                    : bit_container_operand(1, element_type));
+                    ? store_value(operand_for(lane_operands[0], *environment, element_type))
+                    : store_value(source_operand(1, element_type)));
             operation.attributes["address"] = instruction.operands[0];
             operation.attributes["alignment"] =
                 std::to_string(type_size(ptx_scalar_type(instruction.opcode)));
@@ -2736,6 +2772,74 @@ struct Importer {
                 operation.operands.push_back(
                     source_operand(i, ptx_scalar_type(instruction.opcode)));
             }
+        } else if (root == "shf" || root == "prmt") {
+            const bool left = instruction.opcode == "shf.l.wrap.b32";
+            const bool permute = instruction.opcode == "prmt.b32";
+            if ((!left && !permute && instruction.opcode != "shf.r.wrap.b32") ||
+                instruction.operands.size() != 4 || destinations.size() != 1) {
+                return fail(&instruction, "typed bit permutation requires shf.{l,r}.wrap.b32 or prmt.b32 and four operands");
+            }
+            // PTX concatenates [b:a]. Use unsigned 64-bit intermediates so
+            // shifts of zero (including wrapped 32) never shift a u32 by 32.
+            const Type u32 = Type::integer(32);
+            const Type u64 = Type::integer(64);
+            const auto emit = [&](OpCode opcode, Type type, std::vector<Operand> inputs) {
+                Operation temporary;
+                temporary.opcode = opcode;
+                temporary.location = operation.location;
+                const ValueId value = builder.next_value();
+                temporary.results = {value};
+                temporary.result_types = {type};
+                temporary.operands = std::move(inputs);
+                value_types[value] = type;
+                block->operations.push_back(std::move(temporary));
+                return Operand::value_ref(value, type);
+            };
+            const Operand a = bit_container_operand(1, u32);
+            const Operand b = bit_container_operand(2, u32);
+            const Operand count = source_operand(3, u32);
+            const Operand low = emit(OpCode::kConvert, u64, {a});
+            const Operand high = emit(OpCode::kConvert, u64, {b});
+            const Operand high_bits = emit(OpCode::kShiftLeft, u64,
+                {high, Operand::immediate("32", u64)});
+            const Operand packed = emit(OpCode::kBitOr, u64, {high_bits, low});
+            Operand shifted;
+            if (permute) {
+                const Operand selector = emit(OpCode::kConvert, u64, {count});
+                const auto imm = [&](unsigned n) { return Operand::immediate(std::to_string(n), u64); };
+                shifted = imm(0);
+                for (unsigned lane = 0; lane < 4; ++lane) {
+                    const Operand nibble = emit(OpCode::kShiftRight, u64, {selector, imm(lane * 4)});
+                    const Operand index = emit(OpCode::kBitAnd, u64, {nibble, imm(7)});
+                    const Operand distance = emit(OpCode::kMul, u64, {index, imm(8)});
+                    const Operand source = emit(OpCode::kShiftRight, u64, {packed, distance});
+                    const Operand byte = emit(OpCode::kBitAnd, u64, {source, imm(255)});
+                    const Operand sign = emit(OpCode::kShiftRight, u64, {byte, imm(7)});
+                    const Operand replicated = emit(OpCode::kMul, u64, {sign, imm(255)});
+                    const Operand flag_bits = emit(OpCode::kShiftRight, u64, {nibble, imm(3)});
+                    const Operand flag = emit(OpCode::kBitAnd, u64, {flag_bits, imm(1)});
+                    const Operand mask = emit(OpCode::kSub, u64, {imm(0), flag});
+                    const Operand difference = emit(OpCode::kBitXor, u64, {byte, replicated});
+                    const Operand selected_difference = emit(OpCode::kBitAnd, u64, {difference, mask});
+                    const Operand selected = emit(OpCode::kBitXor, u64, {byte, selected_difference});
+                    const Operand positioned = emit(OpCode::kShiftLeft, u64, {selected, imm(lane * 8)});
+                    shifted = emit(OpCode::kBitOr, u64, {shifted, positioned});
+                }
+            } else {
+                const Operand masked = emit(OpCode::kBitAnd, u32,
+                    {count, Operand::immediate("31", u32)});
+                const Operand shift = emit(OpCode::kConvert, u64, {masked});
+                shifted = emit(left ? OpCode::kShiftLeft : OpCode::kShiftRight,
+                               u64, {packed, shift});
+                if (left) {
+                    shifted = emit(OpCode::kShiftRight, u64,
+                        {shifted, Operand::immediate("32", u64)});
+                }
+            }
+            operation.opcode = OpCode::kConvert;
+            operation.result_types = {u32};
+            operation.operands = {shifted};
+            value_types[operation.results.front()] = u32;
         } else if (root == "shfl") {
             operation.opcode = OpCode::kShuffle;
             if (instruction.opcode.find(".down.") != std::string::npos) {
@@ -3938,7 +4042,9 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     }
 
     cumetal::ptx::ParseOptions parse_options;
-    parse_options.strict = options.strict;
+    // Parse the module first; strict opcode checks apply to the selected entry
+    // and its reachable helpers, not unrelated kernels in the same PTX file.
+    parse_options.strict = false;
     const auto parsed = cumetal::ptx::parse_ptx(ptx, parse_options);
     if (!parsed.ok) {
         importer.result.error = parsed.error;
@@ -3967,6 +4073,10 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         }
         bool uses_printf = false;
         for (const Instruction& instruction : function.instructions) {
+            if (options.strict && !instruction.supported) {
+                importer.fail(&instruction, "unsupported opcode '" + instruction.opcode + "'");
+                return std::nullopt;
+            }
             const std::optional<std::string> target = direct_call_target(instruction);
             if (!target.has_value()) continue;
             if (*target == "vprintf" || *target == "printf") {

@@ -210,3 +210,14 @@ Production output depends on Apple's public Metal compiler. `air_inspect`,
 `air_validate`, and direct AIR container generation do not constitute a stable
 private AIR compiler. Cross-Xcode evidence is incomplete without genuinely
 distinct installations and runtime-load results.
+
+## Rust PTX integration coverage
+
+The typed path numerically passes the pinned Rust vector-add and fixed-32-byte
+SHA-256 artifact on Apple M5; see [provenance and commands](../../demos/rust-ptx/README.md#verified-rust-artifact-2026-09-13).
+Supported additions are `shf.{l,r}.wrap.b32`, generic `prmt.b32` (including
+sign replication), vector-store immediate lanes, and narrow stores from wider
+integer registers. Clamp funnel shifts, specialized byte-permutation modes,
+and predicated forms remain unsupported here. Entry selection limits strict
+opcode checks to the selected entry and reachable helpers; it does not establish
+support for other kernels in the module or arbitrary Rust-CUDA workloads.

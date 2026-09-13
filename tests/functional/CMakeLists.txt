@@ -2865,11 +2865,23 @@ add_test(
 
 if(APPLE)
     add_test(
+        NAME functional_ptx_bit_permutation
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_bit_permutation.py
+                ${CMAKE_BINARY_DIR}
+    )
+    add_test(
         NAME functional_rust_ptx_harness_control
         COMMAND python3 ${CMAKE_SOURCE_DIR}/demos/rust-ptx/run.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/reference/rust_ptx_harness_control.ptx
                 --build-dir ${CMAKE_BINARY_DIR} --mode vecadd
                 --out ${CMAKE_CURRENT_BINARY_DIR}/rust-ptx-control
+    )
+    add_test(
+        NAME functional_rust_ptx_export
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/demos/rust-ptx/run.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/reference/rust_ptx_export_93d104d.ptx
+                --build-dir ${CMAKE_BINARY_DIR} --mode all
+                --out ${CMAKE_CURRENT_BINARY_DIR}/rust-ptx-export
     )
 endif()
 

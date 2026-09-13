@@ -1,0 +1,28 @@
+Rust-CUDA producer: 93d104d36708b9bfa7ad7fe170c36eb09768eed5
+PTX SHA-256: 237ae88084e727c0e2f9b1d51a1f9003cf5d5dfec4da3622c2fc9c8961967a69
+Apple M5, 2026-09-13; generic typed PTX; workload specializations disabled.
+
+CUMETAL_PROVENANCE event=kernel_launch kernel="rust_vecadd" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=6541 grid=(1,1,1) block=(64,1,1) unsupported_reason=""
+CUMETAL_PROVENANCE event=kernel_launch kernel="rust_vecadd" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=true launch_success=true duration_ns=6333 grid=(1,1,1) block=(64,1,1) unsupported_reason=""
+CUMETAL_PROVENANCE event=kernel_launch kernel="rust_vecadd" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=true launch_success=true duration_ns=7333 grid=(1,1,1) block=(64,1,1) unsupported_reason=""
+CUMETAL_PROVENANCE event=kernel_launch kernel="rust_vecadd" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=true launch_success=true duration_ns=6375 grid=(1,1,1) block=(64,1,1) unsupported_reason=""
+CUMETAL_PROVENANCE event=kernel_launch kernel="rust_vecadd" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=true launch_success=true duration_ns=7124 grid=(5,1,1) block=(64,1,1) unsupported_reason=""
+DEVICE Apple M5
+NUMERICAL_PASS kernel=rust_vecadd count=1
+NUMERICAL_PASS kernel=rust_vecadd count=31
+NUMERICAL_PASS kernel=rust_vecadd count=32
+NUMERICAL_PASS kernel=rust_vecadd count=33
+NUMERICAL_PASS kernel=rust_vecadd count=257
+
+CUMETAL_PROVENANCE event=kernel_launch kernel="rust_sha256_32" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=63333 grid=(1,1,1) block=(64,1,1) unsupported_reason=""
+CUMETAL_PROVENANCE event=kernel_launch kernel="rust_sha256_32" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=true launch_success=true duration_ns=48875 grid=(1,1,1) block=(64,1,1) unsupported_reason=""
+CUMETAL_PROVENANCE event=kernel_launch kernel="rust_sha256_32" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=true launch_success=true duration_ns=48999 grid=(1,1,1) block=(64,1,1) unsupported_reason=""
+CUMETAL_PROVENANCE event=kernel_launch kernel="rust_sha256_32" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=true launch_success=true duration_ns=247458 grid=(1,1,1) block=(64,1,1) unsupported_reason=""
+CUMETAL_PROVENANCE event=kernel_launch kernel="rust_sha256_32" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=true launch_success=true duration_ns=819249 grid=(5,1,1) block=(64,1,1) unsupported_reason=""
+DEVICE Apple M5
+NUMERICAL_PASS kernel=rust_sha256_32 count=1
+NUMERICAL_PASS kernel=rust_sha256_32 count=31
+NUMERICAL_PASS kernel=rust_sha256_32 count=32
+NUMERICAL_PASS kernel=rust_sha256_32 count=33
+NUMERICAL_PASS kernel=rust_sha256_32 count=257
+

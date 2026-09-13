@@ -60,6 +60,81 @@ int main() {
     using namespace cumetal;
     bool ok = true;
 
+    // Strict mode checks the selected entry and every reachable helper.
+    const std::string entry_scope_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .entry good() {
+    ret;
+}
+.visible .entry bad() {
+    unknown.b32 %r1, 0;
+    ret;
+}
+.func helper() {
+    unknown.b32 %r1, 0;
+    ret;
+}
+.visible .entry caller() {
+    call helper, ();
+    ret;
+}
+)ptx";
+    metal::PtxToMslOptions strict_options;
+    strict_options.strict = true;
+    strict_options.entry_name = "good";
+    ok &= expect(metal::compile_ptx_to_msl(entry_scope_ptx, strict_options).ok,
+                 "unrelated unsupported entry does not fail strict compilation");
+    for (const auto* name : {"bad", "caller"}) {
+        strict_options.entry_name = name;
+        const auto invalid = metal::compile_ptx_to_msl(entry_scope_ptx, strict_options);
+        ok &= expect(!invalid.ok && invalid.error.find("unknown.b32") != std::string::npos,
+                     "strict compilation rejects unsupported reachable instructions");
+    }
+
+    const std::string funnel_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.visible .entry funnel(.param .u64 output) {
+    .reg .b64 %rd1;
+    .reg .b32 %r<4>;
+    ld.param.u64 %rd1, [output];
+    mov.u32 %r1, %tid.x;
+    shf.l.wrap.b32 %r2, 305419896, 2596069104, %r1;
+    shf.r.wrap.b32 %r3, 305419896, 2596069104, %r1;
+    st.global.v4.b32 [%rd1], {%r2, -1, %r3, 0};
+    st.global.b8 [%rd1+15], %r2;
+    st.global.b16 [%rd1+12], %r3;
+    ret;
+}
+)ptx";
+    strict_options.entry_name = "funnel";
+    const auto funnel = metal::compile_ptx_to_msl(funnel_ptx, strict_options);
+    ok &= expect(funnel.ok, "wrapped funnel shifts and mixed literal vector stores compile: " + funnel.error);
+    ok &= expect(funnel.source.find("uchar(") != std::string::npos &&
+                 funnel.source.find("ushort(") != std::string::npos,
+                 "narrow stores truncate wider PTX source registers");
+    for (const auto* invalid_opcode : {"shf.l.clamp.b32", "shf.l.wrap.b64", "shf.l.extra.wrap.b32"}) {
+        auto invalid_ptx = funnel_ptx;
+        invalid_ptx.replace(invalid_ptx.find("shf.l.wrap.b32"), 14, invalid_opcode);
+        ok &= expect(!metal::compile_ptx_to_msl(invalid_ptx, strict_options).ok,
+                     "unsupported funnel shift variants fail");
+    }
+    for (const auto* tuple : {"{%r2, 0}", "{%r2, , %r3, 0}", "{%r2, 0, %r3,}"}) {
+        auto invalid_ptx = funnel_ptx;
+        const std::string original = "{%r2, -1, %r3, 0}";
+        invalid_ptx.replace(invalid_ptx.find(original), original.size(), tuple);
+        ok &= expect(!metal::compile_ptx_to_msl(invalid_ptx, strict_options).ok,
+                     "malformed vector store tuples fail");
+    }
+    for (const auto* opcode : {"prmt.b32", "prmt.b32.f4e", "prmt.b64"}) {
+        auto permute_ptx = funnel_ptx;
+        permute_ptx.replace(permute_ptx.find("shf.l.wrap.b32"), 14, opcode);
+        const auto compiled = metal::compile_ptx_to_msl(permute_ptx, strict_options);
+        ok &= expect(compiled.ok == (std::string(opcode) == "prmt.b32"),
+                     "only generic prmt.b32 is supported");
+    }
+
     metal::PtxToMslOptions options;
     options.entry_name = "vector_add";
     options.source_name = "vector_add.ptx";

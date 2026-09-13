@@ -64,3 +64,40 @@ logs. Successful compilation alone is not evidence that the GPU results match.
 This is an experimental integration fixture, not a claim of full Rust-CUDA or
 vanity-miner compatibility. The next step after these kernels pass is a bounded
 Shallenge batch and then individual crypto self-test kernels.
+
+## Verified Rust artifact (2026-09-13)
+
+Both kernels passed on Apple M5 for counts 1, 31, 32, 33, and 257, including
+CPU comparisons, the SHA-256 fixed known answer, tail guards, and
+`generic_ptx_lowering` / `device=apple_gpu` provenance with specializations off.
+The [execution transcript](verified-apple-m5.txt) records these checks.
+This uses runtime MSL compilation with Command Line Tools, without offline
+`metal`/`metallib` tools. No performance comparison is claimed.
+
+- Producer: Rust-CUDA commit `93d104d36708b9bfa7ad7fe170c36eb09768eed5`.
+- [Successful export run](https://github.com/brandonros/Rust-CUDA/actions/runs/34773189004).
+- Toolchain: the producer's locked `.#v19` shell, `--features llvm19`.
+- PTX SHA-256: `237ae88084e727c0e2f9b1d51a1f9003cf5d5dfec4da3622c2fc9c8961967a69`.
+- Byte-for-byte artifact: `tests/functional/reference/rust_ptx_export_93d104d.ptx`.
+  It was generated from the Rust exporter kernels (including RustCrypto `sha2`);
+  no instructions or target headers were rewritten for CuMetal.
+
+The integration required typed lowering for `shf.{l,r}.wrap.b32` and generic
+`prmt.b32`, vector stores with immediate lanes, and truncation of wider register
+values for byte/halfword stores. Strict opcode validation now checks only the
+selected entry and reachable device helpers. Other entries remain uncompiled.
+`shf` clamp variants, specialized `prmt` modes, and predicated forms of these
+operations remain unsupported by this typed path.
+
+Reproduce with a tests-enabled build:
+
+```sh
+ctest --test-dir build-rust-ptx -R '^(unit_ptx_ir_msl|functional_ptx_bit_permutation|functional_rust_ptx_export)$' --output-on-failure
+```
+
+The independent bit-permutation GPU regression covers all 65,536 selectors
+(including byte sign replication), ignored upper selector bits, distinct source
+words, shift boundaries 0/1/7/16/31/32/33/63/64/UINT_MAX, mixed literal/register
+stores, byte/halfword truncation, and output guards. Unsupported instruction
+variants, malformed tuples, and reachable unsupported helpers have negative
+host regression coverage.
