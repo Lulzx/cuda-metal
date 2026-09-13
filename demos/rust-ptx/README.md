@@ -138,3 +138,12 @@ return-width error in `subtle::black_box`. The subsequent
 [narrow-load inference fix](../../docs/experiments/ptx-narrow-load-returns.md)
 passes exhaustive byte/halfword helper-return checks and moves that entry to
 unsupported `bfi.b32` normalization.
+
+The [bit-insertion follow-up](../../docs/experiments/ptx-bit-insert.md) adds
+`bfi.b32`/`bfi.b64` lowering, verified across every control-byte pair for three
+source patterns on Apple M5.
+
+The original Ed25519 self-test now compiles and launches but returns failure
+(slot 2 = 0, expected 1), with intact surrounding slots and guards.
+`run_self_test.py` runs a compiled MSL self-test with one result-buffer argument;
+see the [reproduction command and numerical failure](../../docs/experiments/ptx-bit-insert.md#original-ed25519-kernel-compiles-and-launches-numerical-failure).

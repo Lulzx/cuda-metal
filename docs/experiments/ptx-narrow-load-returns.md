@@ -66,3 +66,6 @@ PTX opcode 'bfi.b32' has no CuMetal IR normalization
 
 This establishes progress past helper return typing, not a successful Ed25519
 kernel compilation or execution. The full 123-entry inventory was not rerun.
+
+Follow-up: [bit-field insertion](ptx-bit-insert.md) now has typed lowering and
+numerical tests for both 32- and 64-bit forms.

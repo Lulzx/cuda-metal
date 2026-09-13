@@ -240,5 +240,16 @@ in `subtle::black_box`; see
 Ordinary PTX integer memory loads now preserve each destination register's width
 while retaining the actual memory-access width and signedness. Byte/halfword
 helper returns pass exhaustive numerical GPU checks. Parameter-load ABI handling
-is unchanged. The full miner Ed25519 entry now stops at `bfi.b32`, which lacks
-CuMetal IR normalization; see [evidence](../experiments/ptx-narrow-load-returns.md).
+is unchanged. The narrow-load change exposed missing `bfi.b32` normalization; see
+[historical evidence](../experiments/ptx-narrow-load-returns.md).
+
+Unpredicated `bfi.b32`/`bfi.b64` now lower to typed bit operations and selects,
+including dynamic low-byte position/length, clipping, and zero/out-of-range
+cases. Predicated and other-width forms remain explicit errors. All control-byte
+pairs across three source patterns pass numerical GPU tests; see
+[bit-insertion evidence](../experiments/ptx-bit-insert.md).
+
+With bit insertion implemented, the unchanged full miner Ed25519 self-test
+compiles to MSL and launches on Apple M5, but returns 0 in its expected-pass
+slot. Other slots/guards remain intact. Ed25519 numerical correctness is still
+unresolved; [reproduction and transcript](../experiments/ptx-bit-insert.md#original-ed25519-kernel-compiles-and-launches-numerical-failure).

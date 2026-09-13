@@ -1147,6 +1147,33 @@ BODY:
     ok &= expect(mixed_load.ok && byte16 && byte32 && half64,
                  "vector lanes and 64-bit destinations retain independent register and memory widths");
 
+
+    const auto bfi_module = [](const std::string& instruction) {
+        return ".version 7.1\n.target sm_80\n.address_size 64\n"
+               ".visible .entry insert_bits(.param .u64 input) {\n"
+               ".reg .b32 %r<3>;\n.reg .b64 %rd<3>;\n.reg .pred %p1;\n"
+               "ld.param.u64 %rd1, [input];\n"
+               "ld.global.u32 %r1, [%rd1];\nld.global.u64 %rd2, [%rd1];\n"
+               "setp.eq.u32 %p1, %r1, 0;\n" + instruction + "\nret;\n}\n";
+    };
+    for (const auto* instruction : {"bfi.b32 %r2, %r1, 42, 3, 13;",
+                                    "bfi.b64 %rd2, %rd2, 42, %r1, 64;"}) {
+        const auto result = metal::compile_ptx_to_msl(bfi_module(instruction));
+        ok &= expect(result.ok, "32/64-bit bit insertion supports register and immediate operands");
+        if (!result.ok) std::cerr << result.error << "\n";
+    }
+    for (const auto* instruction : {"bfi.b16 %r2, %r1, 0, 3, 13;",
+                                    "bfi.u32 %r2, %r1, 0, 3, 13;",
+                                    "bfi.b32.extra %r2, %r1, 0, 3, 13;",
+                                    "bfi.b32 %r2, %r1, 0, 3;",
+                                    "bfi.b32 %r2, %rd2, 0, 3, 13;",
+                                    "bfi.b32 %r2, %r1, 0, %rd2, 13;",
+                                    "@%p1 bfi.b32 %r2, %r1, 0, 3, 13;"}) {
+        const auto result = metal::compile_ptx_to_msl(bfi_module(instruction));
+        ok &= expect(!result.ok && result.error.find("bfi") != std::string::npos,
+                     "unsupported bit-insertion forms and mismatched operands fail explicitly");
+    }
+
     const std::string inferred_pointer_device_call_ptx = R"ptx(
 .version 7.0
 .target sm_80

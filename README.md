@@ -51,7 +51,9 @@ a focused GPU regression also covers byte-encoded pointers to read-only tables.
 [Multiline PTX calls](docs/experiments/ptx-multiline-calls.md) also pass a nested-helper
 GPU regression. [Narrow integer loads](docs/experiments/ptx-narrow-load-returns.md)
 pass exhaustive byte/halfword helper-return checks. Other miner entries still
-require separate validation.
+require separate validation. [Bit-field insertion](docs/experiments/ptx-bit-insert.md)
+passes numerical tests for both PTX widths. The original Ed25519 kernel now
+compiles and launches, but its numerical self-test still fails.
 
 ## How it works
 

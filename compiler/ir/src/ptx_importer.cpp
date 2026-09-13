@@ -3109,6 +3109,64 @@ struct Importer {
                     type.bit_width == 16 ? "65535" : "4294967295",
                     type));
             }
+        } else if (root == "bfi") {
+            if ((instruction.opcode != "bfi.b32" && instruction.opcode != "bfi.b64") ||
+                instruction.operands.size() != 5 || destinations.size() != 1 ||
+                !instruction.predicate.empty()) {
+                return fail(&instruction, "typed PTX bfi requires unpredicated bfi.b32/b64 with five operands");
+            }
+            const Type type = ptx_scalar_type(instruction.opcode);
+            const Type u32 = Type::integer(32);
+            const Operand a = bit_container_operand(1, type);
+            const Operand b = bit_container_operand(2, type);
+            const Operand position = source_operand(3, u32);
+            const Operand length = source_operand(4, u32);
+            if (!(a.type == type) || !(b.type == type) ||
+                !(position.type == u32) || !(length.type == u32)) {
+                return fail(&instruction, "typed PTX bfi operand widths do not match the instruction");
+            }
+            const auto emit = [&](OpCode opcode, Type result_type,
+                                  std::vector<Operand> inputs, std::string predicate = "") {
+                Operation temporary;
+                temporary.opcode = opcode;
+                temporary.location = operation.location;
+                const ValueId value = builder.next_value();
+                temporary.results = {value};
+                temporary.result_types = {result_type};
+                temporary.operands = std::move(inputs);
+                if (!predicate.empty()) temporary.attributes["predicate"] = predicate;
+                value_types[value] = result_type;
+                block->operations.push_back(std::move(temporary));
+                return Operand::value_ref(value, result_type);
+            };
+            const auto imm32 = [&](unsigned n) {
+                return Operand::immediate(std::to_string(n), u32);
+            };
+            const Operand all = Operand::immediate(
+                type.bit_width == 64 ? "18446744073709551615" : "4294967295", type);
+            const Operand pos = emit(OpCode::kBitAnd, u32, {position, imm32(255)});
+            const Operand len = emit(OpCode::kBitAnd, u32, {length, imm32(255)});
+            // Even discarded select arms must avoid an undefined full-width
+            // shift. Clamp shift counts by masking, then select the PTX result.
+            const Operand safe_pos = emit(OpCode::kBitAnd, u32, {pos, imm32(type.bit_width - 1)});
+            const Operand safe_len = emit(OpCode::kBitAnd, u32, {len, imm32(type.bit_width - 1)});
+            const Operand shifted_ones = emit(OpCode::kShiftLeft, type, {all, safe_len});
+            const Operand short_mask = emit(OpCode::kBitXor, type, {shifted_ones, all});
+            const Operand full_length = emit(OpCode::kCompare, Type::predicate(),
+                {len, imm32(type.bit_width)}, "ge");
+            const Operand low_mask = emit(OpCode::kSelect, type, {full_length, all, short_mask});
+            const Operand mask = emit(OpCode::kShiftLeft, type, {low_mask, safe_pos});
+            const Operand inverse = emit(OpCode::kBitXor, type, {mask, all});
+            const Operand retained = emit(OpCode::kBitAnd, type, {b, inverse});
+            const Operand shifted_a = emit(OpCode::kShiftLeft, type, {a, safe_pos});
+            const Operand inserted = emit(OpCode::kBitAnd, type, {shifted_a, mask});
+            const Operand merged = emit(OpCode::kBitOr, type, {retained, inserted});
+            const Operand in_range = emit(OpCode::kCompare, Type::predicate(),
+                {pos, imm32(type.bit_width)}, "lt");
+            operation.opcode = OpCode::kSelect;
+            operation.result_types = {type};
+            operation.operands = {in_range, merged, b};
+            value_types[operation.results.front()] = type;
         } else if (root == "bfe") {
             if (instruction.operands.size() != 4 ||
                 has_signed_integer_type(instruction.opcode)) {
