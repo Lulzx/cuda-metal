@@ -31,7 +31,7 @@ may expose another; update this list rather than declaring the kernel validated.
   call-graph/importer bug before changing recursion handling.
 - [ ] **IR verification failures.** Preserve the full verifier diagnostics and
   reduce secp256k1 failures; the first-line error alone is insufficient diagnosis.
-- [ ] **mul.hi widths.** Reproduce the operand combinations in base58/WIF; cover
+- [x] **64-bit mul.hi support.** Reproduce the operand combinations in base58/WIF; cover
   signedness, narrow/wide boundaries and independent numerical expected results.
 - [ ] **Trap handling.** Separate provably unreachable panic paths from reachable
   device traps. Preserve failure semantics; do not silently turn traps into no-ops.
@@ -64,3 +64,18 @@ The call-cycle investigation also confirmed a real self-call in LLVM 19's
 seed then calls itself. It is not merely a misidentified call-graph edge.
 Preserving its semantics needs a separate recursion-elimination design or a
 producer-side change; do not disable the cycle rejection.
+
+## Fix 2: exact 64-bit mul.hi
+
+The MSL backend now handles signed and unsigned 64-bit high-half products using
+four 32x32 partial products with bounded carry sums. Signed results apply the
+standard unsigned-high correction modulo 2^64. Independent review verified the
+sum bounds and signed correction. GPU tests compare 4,217 operand pairs against
+Python arbitrary-precision multiplication, including all boundary cross-products
+and 4,096 deterministic generated pairs, plus signed/unsigned immediate forms.
+All 19 focused tests pass.
+
+Original LLVM 7 base58 and both LLVM WIF-compressed-mainnet entries now get past
+mul.hi and stop at unsupported trap lowering. LLVM 19 base58 still stops at its
+pre-existing trap. Logs: `/tmp/cumetal-mulhi-retest`. No numerical pass is claimed
+for those entries. The trap backlog remains open.

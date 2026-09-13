@@ -273,3 +273,8 @@ only when no SSA use (including CFG edge arguments) observes the result.
 Observable narrow pointer conversions remain unsupported. The original miner
 black_box-u64 and SHA-256-32 fixtures pass on M5 with both LLVM producers after
 this fix; see [partial sweep and fixes](../experiments/miner-fix-backlog.md).
+
+Signed/unsigned 64-bit PTX mul.hi now lowers through exact 32-bit partial products;
+4,217 input pairs pass a Python-oracle GPU regression. Base58/WIF integration
+retries advance to trap lowering, which remains unsupported. See the
+[fix backlog](../experiments/miner-fix-backlog.md).
