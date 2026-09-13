@@ -1456,6 +1456,126 @@ bool normalize_scalar_tail_call(cumetal::ptx::EntryFunction* function) {
     return true;
 }
 
+// Reuse a local frame only for a read-all / replace-all tail-call diamond.
+// The input is consumed before any frame write, addresses cannot escape, and
+// the continuation only forwards the complete result. No iteration cap or
+// knowledge of a particular RNG's constants is needed.
+bool normalize_local_buffer_tail_call(cumetal::ptx::EntryFunction* function,
+                                     const std::unordered_map<std::string, LocalDepot>& depots) {
+    auto& code = function->instructions;
+    if (function->params.size() != 1 || function->params[0].byte_size != 8 ||
+        function->return_params.size() != 1 || function->return_params[0].byte_size != 16 ||
+        code.size() < 17) return false;
+    const auto exact = [&](std::size_t i, std::string_view opcode, std::size_t operands) {
+        return i < code.size() && code[i].opcode == opcode && code[i].supported &&
+               code[i].predicate.empty() && code[i].operands.size() == operands;
+    };
+    if (!exact(0, "mov.b64", 2) || !exact(1, "cvta.local.u64", 2) ||
+        !exact(2, "ld.param.b64", 2) || !exact(3, "cvta.to.local.u64", 2)) return false;
+    const std::string local = code[0].operands[0], generic = code[1].operands[0];
+    const std::string input = code[2].operands[0], read = code[3].operands[0];
+    const auto depot = depots.find(code[0].operands[1]);
+    if (depot == depots.end() || depot->second.byte_size != 16 || depot->second.alignment < 16 ||
+        code[1].operands[1] != local || code[3].operands[1] != input ||
+        parameter_slot_offset(code[2].operands[1], function->params[0].name) != 0) return false;
+    std::set<std::string> pointers = {local, generic, input, read};
+    if (pointers.size() != 4) return false;
+    for (const auto& pointer : pointers)
+        if (first_register(pointer) != pointer) return false;
+
+    std::set<int> bytes;
+    std::set<std::string> scalars;
+    const auto scalar = [&](const std::string& operand) {
+        if (scalars.contains(operand)) return true;
+        try {
+            std::size_t consumed = 0;
+            std::stoll(operand, &consumed, 0);
+            return consumed == operand.size();
+        } catch (...) { return false; }
+    };
+    std::size_t branch = 4;
+    for (; branch < code.size() && root_opcode(code[branch].opcode) != "bra"; ++branch) {
+        const auto& instruction = code[branch];
+        if (!instruction.predicate.empty() || !instruction.supported || instruction.operands.empty()) return false;
+        const auto& destination = instruction.operands[0];
+        if (first_register(destination) != destination || pointers.contains(destination)) return false;
+        if (instruction.opcode == "ld.local.b8" && instruction.operands.size() == 2) {
+            const auto offset = parameter_slot_offset(instruction.operands[1], read);
+            if (!offset || *offset < 0 || *offset >= 16 || !bytes.insert(static_cast<int>(*offset)).second) return false;
+        } else {
+            // These integer operations cover byte assembly and its predicate;
+            // no addresses, calls, stores, labels or other control flow occur.
+            if ((instruction.opcode != "shl.b64" && instruction.opcode != "or.b64" &&
+                 instruction.opcode != "setp.eq.b64") || instruction.operands.size() != 3 ||
+                !scalar(instruction.operands[1]) || !scalar(instruction.operands[2])) return false;
+        }
+        scalars.insert(destination);
+    }
+    if (bytes.size() != 16 || branch + 12 != code.size()) return false;
+    if (code[branch].opcode != "bra" || code[branch].predicate.empty() ||
+        code[branch].operands.size() != 1 || !exact(branch+1, "bra.uni", 1) ||
+        code[branch+2].opcode != "ptx.label" || code[branch+2].operands.size() != 1 ||
+        code[branch].operands[0] != code[branch+2].operands[0]) return false;
+    if (!exact(branch+3, "add.u64", 3) || !exact(branch+4, "add.u64", 3) ||
+        code[branch+3].operands[1] != generic || code[branch+3].operands[2] != "0" ||
+        code[branch+4].operands[1] != local || code[branch+4].operands[2] != "0") return false;
+    const std::string argument_pointer = code[branch+3].operands[0];
+    const std::string store_pointer = code[branch+4].operands[0];
+    for (const auto& pointer : {argument_pointer, store_pointer}) {
+        if (first_register(pointer) != pointer || scalars.contains(pointer) || !pointers.insert(pointer).second) return false;
+    }
+    if (!exact(branch+5, "st.local.v2.b64", 2) ||
+        parameter_slot_offset(code[branch+5].operands[0], store_pointer) != 0) return false;
+    const auto tuple = [](const std::string& operand) {
+        const std::string value = trim(operand);
+        if (value.size() < 2 || value.front() != '{' || value.back() != '}') return std::vector<std::string>{};
+        return grouped_names(value.substr(1, value.size() - 2));
+    };
+    const auto stored = tuple(code[branch+5].operands[1]);
+    if (stored.size() != 2 || !scalar(stored[0]) || !scalar(stored[1])) return false;
+    if (!exact(branch+6, "st.param.b64", 2) || code[branch+6].operands[1] != argument_pointer ||
+        !exact(branch+7, "call.uni", 3) || direct_call_target(code[branch+7]) != function->name) return false;
+    const auto arguments = grouped_names(code[branch+7].operands[2]);
+    const auto results = grouped_names(code[branch+7].operands[0]);
+    if (arguments.size() != 1 || results.size() != 1 ||
+        parameter_slot_offset(code[branch+6].operands[0], arguments[0]) != 0 ||
+        !exact(branch+8, "ld.param.v2.b64", 2) ||
+        parameter_slot_offset(code[branch+8].operands[1], results[0]) != 0) return false;
+    if (code[branch+9].opcode != "ptx.label" || code[branch+9].operands.size() != 1 ||
+        code[branch+1].operands[0] != code[branch+9].operands[0] ||
+        code[branch+2].operands[0] == code[branch+9].operands[0] ||
+        !exact(branch+10, "st.param.v2.b64", 2) || !exact(branch+11, "ret", 0) ||
+        parameter_slot_offset(code[branch+10].operands[0], function->return_params[0].name) != 0) return false;
+    const auto forwarded = tuple(code[branch+8].operands[0]);
+    if (forwarded.size() != 2 || forwarded[0] == forwarded[1] ||
+        tuple(code[branch+10].operands[1]) != forwarded) return false;
+    for (const auto& value : forwarded)
+        if (!scalars.contains(value) || ptx_register_container_bits(value) != 64) return false;
+
+    std::string header = "$cm_local_tail_header";
+    while (std::any_of(code.begin(), code.end(), [&](const Instruction& instruction) {
+        return std::any_of(instruction.operands.begin(), instruction.operands.end(),
+            [&](const std::string& operand) { return operand.find(header) != std::string::npos; });
+    })) header += "_";
+    Instruction label;
+    label.opcode = "ptx.label"; label.operands = {header}; label.supported = true;
+    label.line = code[3].line;
+    Instruction update = code[2];
+    update.opcode = "mov.b64"; update.operands = {input, argument_pointer};
+    Instruction jump = code[branch+1]; jump.operands = {header};
+    std::vector<Instruction> rewritten;
+    for (std::size_t i = 0; i < code.size(); ++i) {
+        if (i == 3) rewritten.push_back(label);
+        if (i == branch+6 || i == branch+8) continue;
+        if (i == branch+7) {
+            rewritten.push_back(update);
+            rewritten.push_back(jump);
+        } else rewritten.push_back(code[i]);
+    }
+    code = std::move(rewritten);
+    return true;
+}
+
 // Parameter slots are compiler-managed byte storage, not observable memory.
 // Expand exact, aligned v2.b64 transfers before SSA so both lanes participate
 // in normal definition tracking and the existing aggregate ABI checks.
@@ -4701,7 +4821,8 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     importer.result.warnings = parsed.warnings;
     // Normalize copies before capturing pointers into the parsed function list.
     for (auto& function : parsed.module.functions) {
-        normalize_scalar_tail_call(&function);
+        if (!normalize_scalar_tail_call(&function))
+            normalize_local_buffer_tail_call(&function, importer.local_depots);
         normalize_vector_parameter_transfers(&function);
     }
     for (auto& entry : parsed.module.entries) normalize_vector_parameter_transfers(&entry);

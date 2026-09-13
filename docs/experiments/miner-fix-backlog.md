@@ -26,9 +26,9 @@ may expose another; update this list rather than declaring the kernel validated.
 - [x] **Unused narrow pointer-to-integer conversions.** Start with black_box identity
   and small arithmetic checks. Determine whether results are used; never invent
   numeric pointer values to make observable casts compile.
-- [ ] **Device-call cycle rejection.** Inspect rand_xoshiro seed/from_seed call
-  graph and compare with PTX definitions. Distinguish real recursion from a
-  call-graph/importer bug before changing recursion handling.
+- [ ] **Device-call cycle rejection.** The targeted LLVM 7 scalar and LLVM 19
+  local-buffer RNG cycles are fixed and numerically tested (fixes 4 and 6).
+  Retry the remaining cycle failures; this is not a claim that all 30 pass.
 - [x] **Local-helper pointer IR verification failures.** Preserve the full verifier diagnostics and
   reduce secp256k1 failures; the first-line error alone is insufficient diagnosis.
 - [x] **64-bit mul.hi support.** Reproduce the operand combinations in base58/WIF; cover
@@ -102,8 +102,8 @@ Trap lowering is now the shared first blocker for the retested base58, WIF and
 secp256k1 entries. A faithful implementation needs a defined runtime failure
 channel and propagation through helper calls, including GPU tests where a trap
 actually executes. Removing traps or returning normal success would hide bugs.
-LLVM 19's local-memory rand_xoshiro cycle and the remaining base58 SSA case
-remain open; their semantics require separate analyses before code changes.
+The targeted RNG cycles are now handled (fixes 4 and 6). Other cycle failures
+need retesting; the remaining base58 SSA case still needs separate analysis.
 
 ## Fix 4: scalar tail recursion and byte-array return packing
 
@@ -158,3 +158,42 @@ Nonrecursive GPU regressions cover immediate zero/one, all bits set, high-bit
 and mixed-bit return words. Existing scalar-return and independent u32-read
 regressions remain enabled. This repairs an ABI blocker encountered while
 working on LLVM 19 local-frame recursion; it does not itself eliminate cycles.
+
+## Fix 6: read-all / replace-all local-buffer tail recursion
+
+The original LLVM 19 `from_seed` helper now compiles and numerically passes.
+The transform accepts a narrow tail-call diamond: one pointer argument, a
+16-byte private frame, all 16 distinct input-byte reads in a straight-line
+prefix, scalar byte assembly, one full-frame replacement, a self-call with that
+frame's address, and complete unmodified return forwarding. Pointer arithmetic
+is restricted to the checked zero-offset aliases; addresses cannot be used as
+scalar data or escape. There are no intervening calls, memory accesses or
+side effects. Any shape outside this proof remains a recursion error.
+
+The frame is safe to reuse because every input byte is consumed before the
+replacement write; the next iteration rereads the complete replacement. No
+iteration cap, fixed seed substitution, trap removal or frame zeroing is added.
+Independent review found no issue in this bounded frame-reuse proof.
+
+Evidence on Apple M5:
+
+- The unchanged extracted helper passes **388 runtime inputs**: the all-zero
+  seed (which actually takes the fallback), each individual bit in both words,
+  boundary inputs and 256 deterministic random pairs. Nonzero seeds preserve
+  both words exactly; zero returns the known SplitMix64 seed expansion.
+- Nine negative cases reject incomplete/out-of-bounds input consumption,
+  partial/offset frame replacement, pointer use as scalar data, predicated
+  writes and observable post-call work.
+- **24 focused compiler/GPU tests pass**, including the existing scalar-tail,
+  independent return packing, address-space and arithmetic regressions.
+- The unchanged full-module LLVM 19 `kernel_self_test_primitive_xoroshiro`
+  returns **slot 0 = 1**, with the other 117 slots and 16 guards intact.
+  The pinned input hash is in the checked-in helper fixture; compile/GPU logs
+  are `/tmp/local-tail-rng-llvm19.log` and `.gpu.log`.
+
+Fresh full-module base58 retests remain blocked in both producers:
+`kernel_self_test_primitive_base58` reaches `trap has no faithful MSL source
+representation` at PTX line 305647 (LLVM 7) / 406366 (LLVM 19). Logs are
+`/tmp/local-tail-base58-llvm7.log` and `/tmp/local-tail-base58-llvm19.log`.
+Neither base58 variant reached GPU execution. Trap propagation remains the
+next shared blocker; no result from these RNG fixes establishes mining success.

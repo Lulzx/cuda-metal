@@ -2864,6 +2864,8 @@ add_test(
 )
 
 if(APPLE)
+    add_test(NAME functional_ptx_local_buffer_tail_call
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_local_buffer_tail_call.py ${CMAKE_BINARY_DIR})
     add_test(NAME functional_ptx_scalar_tail_call
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_scalar_tail_call.py ${CMAKE_BINARY_DIR})
     add_test(NAME functional_ptx_local_helper

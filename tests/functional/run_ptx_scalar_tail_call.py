@@ -21,8 +21,8 @@ def run_case(build, ptx_source, values, expected, label):
         if result:
             raise RuntimeError(f'{name} failed: {result}')
     ptr, u32, u64 = c.c_void_p, c.c_uint32, c.c_uint64
-    count = len(values)
-    source = (u64 * count)(*values)
+    count = len(expected) // 2
+    source = (u64 * len(values))(*values)
     result = (u64 * (len(expected) + 16))(*([0xa5a5a5a5] * (len(expected) + 16)))
     context, module, function = ptr(), ptr(), ptr()
     allocations = []

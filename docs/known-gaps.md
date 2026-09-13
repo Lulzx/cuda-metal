@@ -33,9 +33,10 @@ The executable priority/evidence table is in
 [the specification closure roadmap](spec-closure-roadmap.md).
 
 PTX recursive device calls remain unsupported except for the strictly checked
-scalar tail-self-call form documented in the
-[miner fix backlog](experiments/miner-fix-backlog.md). Local-frame recursion,
-including LLVM 19's xoroshiro fallback, and device trap propagation remain open.
+scalar and read-all / replace-all local-buffer tail-self-call forms documented
+in the [miner fix backlog](experiments/miner-fix-backlog.md). General local-frame
+recursion and device trap propagation remain open; the bounded LLVM 19 xoroshiro
+fallback now passes numerical validation.
 
 Vector parameter-slot transfers support the checked unpredicated direct-slot
 `v2.b64` form. Other vector parameter forms fail explicitly; register-indirect

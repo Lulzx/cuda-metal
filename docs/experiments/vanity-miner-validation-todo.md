@@ -16,7 +16,7 @@ names but have not been executed in this comparison.
 | --- | --- | --- | --- |
 | Full-module launch probe | Pass | Pass | Result and guard checks on M5 |
 | Ed25519 primitive, slot 2 | Pass | Pass | One fixed known-answer fixture on M5 |
-| Xoroshiro primitive, slot 0 | Pass | Blocked | LLVM 7 scalar tail-call fix; LLVM 19 local-frame cycle |
+| Xoroshiro primitive, slot 0 | Pass | Pass | Scalar / local-buffer tail-call fixes; additional runtime-input regressions |
 | Remaining numerical self-tests | Partial | Partial | See fix backlog; no aggregate pass claim |
 | Four mining kernels | Pending | Pending | No end-to-end mining claim |
 
