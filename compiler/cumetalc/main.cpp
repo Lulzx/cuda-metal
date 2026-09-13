@@ -1694,8 +1694,12 @@ int main(int argc, char** argv) {
                 return 1;
             }
             if (emit_stage != EmitStage::kMetallib) {
+                // Runtime-compiled MSL needs the same launch ABI as a metallib.
                 if (!emit_inspection_stage(compiled, emit_stage, options.output,
-                                           options.overwrite, &io_error)) {
+                                           options.overwrite, &io_error) ||
+                    (emit_stage == EmitStage::kMsl && !abi_sidecar.empty() &&
+                     !write_text_output(options.output.string() + ".cumetal-abi", abi_sidecar,
+                                        options.overwrite, &io_error))) {
                     std::cerr << "cumetalc failed: " << io_error << "\n";
                     return 1;
                 }
@@ -1742,7 +1746,10 @@ int main(int argc, char** argv) {
             if (emit_stage == EmitStage::kMsl) {
                 if (!lowered_metal.matched ||
                     !write_text_output(options.output, lowered_metal.metal_source,
-                                       options.overwrite, &io_error)) {
+                                       options.overwrite, &io_error) ||
+                    (!abi_sidecar.empty() &&
+                     !write_text_output(options.output.string() + ".cumetal-abi", abi_sidecar,
+                                        options.overwrite, &io_error))) {
                     std::cerr << "cumetalc failed: "
                               << (!lowered_metal.matched
                                       ? "legacy backend did not produce MSL"

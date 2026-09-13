@@ -1,0 +1,35 @@
+// Handwritten harness control, NOT evidence of Rust-CUDA code generation.
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry rust_vecadd(
+    .param .u64 a,
+    .param .u64 b,
+    .param .u64 output,
+    .param .u32 count
+) {
+    .reg .pred %p;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<5>;
+    .reg .f32 %f<3>;
+    ld.param.u64 %rd0, [a];
+    ld.param.u64 %rd1, [b];
+    ld.param.u64 %rd2, [output];
+    ld.param.u32 %r0, [count];
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r4, %r1, %r2, %r3;
+    setp.ge.u32 %p, %r4, %r0;
+    @%p bra done;
+    mul.wide.u32 %rd3, %r4, 4;
+    add.u64 %rd0, %rd0, %rd3;
+    add.u64 %rd1, %rd1, %rd3;
+    add.u64 %rd2, %rd2, %rd3;
+    ld.global.f32 %f0, [%rd0];
+    ld.global.f32 %f1, [%rd1];
+    add.f32 %f2, %f0, %f1;
+    st.global.f32 [%rd2], %f2;
+done:
+    ret;
+}

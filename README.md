@@ -40,6 +40,11 @@ build/cumetalc samples/vectorAdd/vectorAdd.cu -o vectorAdd
 See [demos](docs/demos.md) for larger workloads and [testing](docs/testing.md)
 for validation commands.
 
+The experimental [Rust PTX harness](demos/rust-ptx/README.md) consumes
+separately exported Rust-CUDA kernels and checks vector addition and SHA-256.
+It uses runtime MSL compilation; successful PTX export alone does not establish
+Apple-GPU correctness or full Rust-CUDA compatibility.
+
 ## How it works
 
 ```text

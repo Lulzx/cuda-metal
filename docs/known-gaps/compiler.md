@@ -142,6 +142,13 @@ rejected explicitly.
 
 ## PTX and fatbinary coverage
 
+PTX `--emit=msl` emits a `.cumetal-abi` sidecar on both typed and legacy
+backends for Driver API loading through Metal's runtime source compiler.
+`functional_ptx_msl_abi` checks this without requiring offline Metal tools;
+it is ABI emission evidence, not numerical GPU correctness. The Rust-generated
+PTX experiment in `demos/rust-ptx` separately requires numerical and GPU provenance
+checks. Full Rust-CUDA kernel compatibility remains unverified.
+
 PTX support is per instruction form. Direct PTX indirect-object
 `txq`/`suq` width, height, and depth queries are numerically tested; remaining
 texture/surface forms, TMA/cluster operations, FP8, unrestricted device calls,

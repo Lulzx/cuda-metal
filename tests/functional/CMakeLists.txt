@@ -2855,6 +2855,24 @@ add_test(
 set_tests_properties(functional_cumetalc_ptx_aggregate_abi PROPERTIES
     SKIP_RETURN_CODE 77)
 
+# Pure PTX-to-MSL inspection: no Apple Metal compiler or GPU is required.
+add_test(
+    NAME functional_ptx_msl_abi
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_msl_abi.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx
+)
+
+if(APPLE)
+    add_test(
+        NAME functional_rust_ptx_harness_control
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/demos/rust-ptx/run.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/reference/rust_ptx_harness_control.ptx
+                --build-dir ${CMAKE_BINARY_DIR} --mode vecadd
+                --out ${CMAKE_CURRENT_BINARY_DIR}/rust-ptx-control
+    )
+endif()
+
 add_test(
     NAME functional_driver_launch_extra_scalar
     COMMAND bash

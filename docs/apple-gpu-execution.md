@@ -76,6 +76,12 @@ synchronizes direct launches.
 
 ## GPU provenance
 
+Direct Driver API launches preserve the loaded library's provenance, including
+generic PTX lowered to `.metal` and compiled at runtime. They do not label every
+direct module as a precompiled metallib. The handwritten
+`functional_rust_ptx_harness_control` checks numerical results and this provenance
+without requiring offline Metal tools; it does not establish Rust codegen compatibility.
+
 Set `CUMETAL_TRACE_GPU=1` to print one `CUMETAL_PROVENANCE` record per completed
 Metal dispatch. Records identify:
 

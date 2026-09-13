@@ -35,3 +35,4 @@ demos/matmul/out/
 
 # PhysX recreation renders and capture data (regenerable, large)
 /videos/
+/demos/rust-ptx/out/
