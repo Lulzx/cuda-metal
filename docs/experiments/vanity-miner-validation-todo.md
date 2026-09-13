@@ -16,10 +16,12 @@ names but have not been executed in this comparison.
 | --- | --- | --- | --- |
 | Full-module launch probe | Pass | Pass | Result and guard checks on M5 |
 | Ed25519 primitive, slot 2 | Pass | Pass | One fixed known-answer fixture on M5 |
-| Other 117 numerical self-tests | Pending | Pending | No aggregate pass claim |
+| Xoroshiro primitive, slot 0 | Pass | Blocked | LLVM 7 scalar tail-call fix; LLVM 19 local-frame cycle |
+| Remaining numerical self-tests | Partial | Partial | See fix backlog; no aggregate pass claim |
 | Four mining kernels | Pending | Pending | No end-to-end mining claim |
 
 [Evidence, hashes and historical blockers](dual-llvm-miner-smoke.md).
+[Subsequent fixes and targeted retests](miner-fix-backlog.md).
 CuMetal commits through `967d8c7` include typed relocation, reviewed self-select
 normalization and min/max typing. The earlier zero-pass compile inventory is
 historical; do not use it as the current compatibility count.

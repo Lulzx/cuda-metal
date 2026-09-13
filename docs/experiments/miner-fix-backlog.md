@@ -102,5 +102,44 @@ Trap lowering is now the shared first blocker for the retested base58, WIF and
 secp256k1 entries. A faithful implementation needs a defined runtime failure
 channel and propagation through helper calls, including GPU tests where a trap
 actually executes. Removing traps or returning normal success would hide bugs.
-The real rand_xoshiro recursion cycle and the remaining base58 SSA case also
+LLVM 19's local-memory rand_xoshiro cycle and the remaining base58 SSA case
 remain open; their semantics require separate analyses before code changes.
+
+## Fix 4: scalar tail recursion and byte-array return packing
+
+The LLVM 7 `seed_from_u64` helper has a scalar tail self-call. A conservative
+pre-import rewrite turns this into a loop: load the initial argument once,
+update it at the tail call, and branch back to the body. There is no iteration
+limit, invented seed, or removed trap. Eligibility requires one scalar 64-bit
+argument, a 16-byte return, exact forwarding of both return words, no other
+calls, and no memory or pointer operations beyond parameter loads/stores.
+Non-tail, predicated, malformed and memory-dependent cycles still fail.
+
+This exposed a separate ABI mismatch: a byte-array return is represented by
+four u32 fields, while the helper writes and the caller reads two b64 words.
+Complete contiguous integer words now split/recombine with explicit 64-bit
+typing and checked slot offsets. Holes, overlaps, malformed offsets and
+out-of-bounds reads remain errors. Independent review caught an immediate
+shift-typing bug and permissive offset parsing; both were fixed and retested.
+
+Regression evidence on Apple M5:
+
+- Tail-count helper: 66 runtime inputs, zero through 1,024 tail iterations.
+- Unchanged extracted LLVM 7 seed helper: 261 runtime seeds checked against
+  an independent SplitMix64 oracle (including zero and integer boundaries).
+- Nonrecursive immediate aggregate returns: zero, one, all bits set, high bit,
+  and mixed bits; checked through both b64 and independent b32 field reads.
+- All GPU cases check output guards. The 23 focused compiler/GPU tests pass.
+- Original full-module LLVM 7 `kernel_self_test_primitive_xoroshiro`: slot 0
+  returns 1, with other 117 slots and 16 guards intact. Input is the pinned
+  run above; compile output `/tmp/tail-rng-llvm7.metal`.
+
+LLVM 19 uses a pointer into a local frame in its `from_seed` self-call; it is
+intentionally ineligible for this scalar rewrite. A separate proof of complete
+input consumption, frame reuse and pointer non-escape is needed. The cycle
+backlog remains partially open, and no mining-kernel pass is claimed.
+
+The constant-return test also exposed a separate unused unannotated b64 helper
+parameter being inferred as a pointer, causing a Metal integer-to-pointer cast
+error. The ABI-only regression uses a no-argument constant helper; the unused
+parameter inference case remains a follow-up rather than expanding this fix.

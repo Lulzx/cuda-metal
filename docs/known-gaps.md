@@ -31,3 +31,8 @@ per-thread arrays; it does not automatically retile kernels or provide MPS parit
 
 The executable priority/evidence table is in
 [the specification closure roadmap](spec-closure-roadmap.md).
+
+PTX recursive device calls remain unsupported except for the strictly checked
+scalar tail-self-call form documented in the
+[miner fix backlog](experiments/miner-fix-backlog.md). Local-frame recursion,
+including LLVM 19's xoroshiro fallback, and device trap propagation remain open.

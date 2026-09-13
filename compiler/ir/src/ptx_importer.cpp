@@ -1265,6 +1265,24 @@ std::int64_t memory_operand_offset(std::string_view operand) {
     }
 }
 
+// Parameter slots require a literal byte offset; never interpret malformed
+// offsets as zero (the permissive address helper is used by other paths).
+std::optional<std::int64_t> parameter_slot_offset(std::string operand, const std::string& name) {
+    operand.erase(std::remove_if(operand.begin(), operand.end(),
+        [](unsigned char c) { return std::isspace(c); }), operand.end());
+    const std::string prefix = "[" + name;
+    if (!starts_with(operand, prefix) || operand.back() != ']') return std::nullopt;
+    const std::string suffix = operand.substr(prefix.size(), operand.size() - prefix.size() - 1);
+    if (suffix.empty()) return 0;
+    if (suffix.front() != '+' && suffix.front() != '-') return std::nullopt;
+    try {
+        std::size_t consumed = 0;
+        const auto offset = std::stoll(suffix, &consumed, 0);
+        if (consumed == suffix.size()) return offset;
+    } catch (...) {}
+    return std::nullopt;
+}
+
 std::string branch_target(const Instruction& instruction) {
     return instruction.operands.empty() ? std::string{} : trim(instruction.operands.back());
 }
@@ -1286,6 +1304,156 @@ std::optional<std::string> direct_call_target(const Instruction& instruction) {
         return std::nullopt;
     }
     return trim(instruction.operands[has_return ? 1 : 0]);
+}
+
+std::uint32_t ptx_register_container_bits(std::string_view name);
+
+// Bounded tail-self-call elimination for scalar integer helpers. Ineligible
+// cycles retain the normal call-graph rejection. In particular, no local frame
+// is reused: memory operations and pointer/address instructions are excluded.
+bool normalize_scalar_tail_call(cumetal::ptx::EntryFunction* function) {
+    if (function->params.size() != 1 || function->return_params.size() != 1 ||
+        function->params.front().is_pointer ||
+        (function->params.front().type != ".b64" && function->params.front().type != ".u64") ||
+        function->params.front().byte_size != 8 || function->return_params.front().byte_size != 16) return false;
+    const auto slot_at = [](std::string operand, const std::string& name, int offset) {
+        operand.erase(std::remove_if(operand.begin(), operand.end(),
+            [](unsigned char c) { return std::isspace(c); }), operand.end());
+        return operand == "[" + name + "+" + std::to_string(offset) + "]" ||
+               (offset == 0 && operand == "[" + name + "]");
+    };
+    auto& instructions = function->instructions;
+    if (instructions.empty()) return false;
+    const std::string parameter = function->params.front().name;
+    const std::string return_parameter = function->return_params.front().name;
+    std::size_t call_index = instructions.size();
+    const std::unordered_set<std::string> pure_roots = {
+        "mov", "add", "sub", "mul", "mad", "shr", "shl", "xor", "or", "and",
+        "not", "neg", "setp", "selp", "bra", "ret", "call", "ptx"};
+    for (std::size_t i = 0; i < instructions.size(); ++i) {
+        const auto& instruction = instructions[i];
+        const auto root = root_opcode(instruction.opcode);
+        if (root == "call") {
+            if (call_index != instructions.size() || !instruction.predicate.empty() ||
+                (instruction.opcode != "call" && instruction.opcode != "call.uni") ||
+                !instruction.supported || direct_call_target(instruction) != function->name) return false;
+            call_index = i;
+        } else if (root == "ld" || root == "st") {
+            if (!starts_with(instruction.opcode, "ld.param.") &&
+                !starts_with(instruction.opcode, "st.param.")) return false;
+        } else if (!pure_roots.contains(root) ||
+                   (root == "ptx" && instruction.opcode != "ptx.label")) return false;
+        // Never let address-valued symbols (including local depots) enter the
+        // scalar loop through arithmetic or selects. Match whole operands;
+        // first_register alone would also accept tuples or address expressions.
+        if (root != "ld" && root != "st" && root != "bra" && root != "call" &&
+            root != "ret" && root != "ptx") {
+            if (instruction.operands.empty() ||
+                first_register(instruction.operands.front()) != trim(instruction.operands.front())) return false;
+            for (const auto& operand : instruction.operands) {
+                const std::string value = trim(operand);
+                if (!value.empty() && first_register(value) == value) continue;
+                try {
+                    std::size_t consumed = 0;
+                    std::stoll(value, &consumed, 0);
+                    if (consumed != value.size()) return false;
+                } catch (...) { return false; }
+            }
+        }
+    }
+    if (call_index == instructions.size() || call_index == 0) return false;
+    const auto& call = instructions[call_index];
+    if (call.operands.size() != 3) return false;
+    const auto arguments = grouped_names(call.operands[2]);
+    const auto returns = grouped_names(call.operands[0]);
+    if (arguments.size() != 1 || returns.size() != 1) return false;
+    const auto& argument_store = instructions[call_index - 1];
+    if (argument_store.opcode != "st.param.b64" || !argument_store.predicate.empty() ||
+        argument_store.operands.size() != 2 ||
+        parameter_name_from_operand(argument_store.operands[0]) != arguments.front() ||
+        !slot_at(argument_store.operands[0], arguments.front(), 0)) return false;
+    const std::string argument = trim(argument_store.operands[1]);
+    if (first_register(argument) != argument) {
+        try {
+            std::size_t consumed = 0;
+            std::stoll(argument, &consumed, 0);
+            if (consumed != argument.size()) return false;
+        } catch (...) { return false; }
+    } else if (ptx_register_container_bits(argument) != 64) return false;
+
+    // The supported continuation is two scalar loads of the recursive result,
+    // followed by optional join labels, two identical return stores and ret.
+    // No computation, branch, memory effect or predication may intervene.
+    std::map<std::int64_t, std::string> forwarded;
+    std::set<std::size_t> remove;
+    std::size_t cursor = call_index + 1;
+    for (int lane = 0; lane < 2; ++lane, ++cursor) {
+        if (cursor >= instructions.size()) return false;
+        const auto& load = instructions[cursor];
+        if (load.opcode != "ld.param.b64" || !load.predicate.empty() || load.operands.size() != 2 ||
+            parameter_name_from_operand(load.operands[1]) != returns.front() ||
+            ptx_register_container_bits(load.operands[0]) != 64) return false;
+        const auto offset = slot_at(load.operands[1], returns.front(), 0) ? 0 :
+                            slot_at(load.operands[1], returns.front(), 8) ? 8 : -1;
+        if ((offset != 0 && offset != 8) || !forwarded.emplace(offset, load.operands[0]).second) return false;
+        remove.insert(cursor);
+    }
+    if (forwarded.at(0) == forwarded.at(8)) return false;
+    while (cursor < instructions.size() && instructions[cursor].opcode == "ptx.label") ++cursor;
+    std::set<std::int64_t> stored;
+    for (int lane = 0; lane < 2; ++lane, ++cursor) {
+        if (cursor >= instructions.size()) return false;
+        const auto& store = instructions[cursor];
+        if (store.opcode != "st.param.b64" || !store.predicate.empty() || store.operands.size() != 2 ||
+            parameter_name_from_operand(store.operands[0]) != return_parameter) return false;
+        const auto offset = slot_at(store.operands[0], return_parameter, 0) ? 0 :
+                            slot_at(store.operands[0], return_parameter, 8) ? 8 : -1;
+        if (!forwarded.contains(offset) || store.operands[1] != forwarded.at(offset) || !stored.insert(offset).second) return false;
+    }
+    if (cursor + 1 != instructions.size() || instructions[cursor].opcode != "ret" ||
+        !instructions[cursor].predicate.empty()) return false;
+
+    const auto& first = instructions.front();
+    if ((first.opcode != "ld.param.u64" && first.opcode != "ld.param.b64") ||
+        !first.predicate.empty() || first.operands.size() != 2 ||
+        parameter_name_from_operand(first.operands[1]) != parameter ||
+        !slot_at(first.operands[1], parameter, 0) ||
+        ptx_register_container_bits(first.operands[0]) != 64) return false;
+    // No hidden parameter-slot aliases or extra reads/stores are allowed.
+    for (std::size_t i = 1; i < instructions.size(); ++i) {
+        const auto& instruction = instructions[i];
+        if (starts_with(instruction.opcode, "ld.param") && !remove.contains(i)) return false;
+        if (starts_with(instruction.opcode, "st.param") && i != call_index - 1 && i < cursor - 2) return false;
+    }
+    std::string current = "%rd_cm_tail_argument", header = "$cm_tail_header";
+    const auto collides = [&](const std::string& name) {
+        return std::any_of(instructions.begin(), instructions.end(), [&](const Instruction& instruction) {
+            return std::any_of(instruction.operands.begin(), instruction.operands.end(),
+                               [&](const std::string& operand) { return operand.find(name) != std::string::npos; });
+        });
+    };
+    while (collides(current)) current += "_";
+    while (collides(header)) header += "_";
+    const auto make = [&](std::string opcode, std::vector<std::string> operands, int line) {
+        Instruction result;
+        result.opcode = std::move(opcode); result.operands = std::move(operands);
+        result.line = line; result.supported = true;
+        return result;
+    };
+    std::vector<Instruction> rewritten;
+    rewritten.push_back(make(first.opcode, {current, first.operands[1]}, first.line));
+    rewritten.push_back(make("ptx.label", {header}, first.line));
+    rewritten.push_back(make("mov.u64", {first.operands[0], current}, first.line));
+    for (std::size_t i = 1; i < instructions.size(); ++i) {
+        if (i == call_index - 1 || remove.contains(i)) continue;
+        if (i == call_index) {
+            rewritten.push_back(make("mov.u64", {current, argument}, call.line));
+            rewritten.push_back(make("bra.uni", {header}, call.line));
+        } else rewritten.push_back(instructions[i]);
+    }
+    instructions = std::move(rewritten);
+    function->register_declarations.push_back({current, "b64"});
+    return true;
 }
 
 OpCode arithmetic_opcode(std::string_view root) {
@@ -1464,7 +1632,43 @@ struct Importer {
                  std::string(description) + " does not have an aggregate type");
             return std::nullopt;
         }
-        if (fields.size() != type.elements.size()) {
+        auto normalized_fields = fields;
+        // PTX parameter arrays are byte storage. A pair of b64 stores may
+        // populate an ABI aggregate represented as four u32 fields. Split only
+        // complete, contiguous integer words; holes/overlaps still fail below.
+        const bool u32_layout = std::all_of(type.elements.begin(), type.elements.end(),
+            [](const Type& element) { return element == Type::integer(32); });
+        if (u32_layout && fields.size() * 2 == type.elements.size()) {
+            bool complete_u64 = true;
+            std::int64_t expected_offset = 0;
+            for (const auto& [offset, value] : fields) {
+                complete_u64 &= offset == expected_offset && value.type == Type::integer(64);
+                expected_offset += 8;
+            }
+            if (complete_u64) {
+                normalized_fields.clear();
+                for (const auto& [offset, value] : fields) {
+                    const auto emit = [&](OpCode opcode, Type result_type, std::vector<Operand> operands) {
+                        Operation operation;
+                        operation.opcode = opcode;
+                        operation.operands = std::move(operands);
+                        const ValueId id = builder.next_value();
+                        operation.results = {id}; operation.result_types = {result_type};
+                        value_types[id] = result_type;
+                        block->operations.push_back(std::move(operation));
+                        return Operand::value_ref(id, result_type);
+                    };
+                    // Materialize immediates as ulong before shifting: `1 >> 32`
+                    // would otherwise use a 32-bit Metal literal.
+                    const Operand wide = emit(OpCode::kConvert, Type::integer(64), {value});
+                    normalized_fields[offset] = emit(OpCode::kConvert, Type::integer(32), {wide});
+                    const Operand high = emit(OpCode::kShiftRight, Type::integer(64),
+                        {wide, Operand::immediate("32", Type::integer(64))});
+                    normalized_fields[offset + 4] = emit(OpCode::kConvert, Type::integer(32), {high});
+                }
+            }
+        }
+        if (normalized_fields.size() != type.elements.size()) {
             fail(instruction, std::string(description) +
                                   " has missing, partial, or overlapping fields");
             return std::nullopt;
@@ -1479,8 +1683,8 @@ struct Importer {
         };
         std::int64_t byte_offset = 0;
         for (const Type& element_type : type.elements) {
-            const auto field = fields.find(byte_offset);
-            if (field == fields.end()) {
+            const auto field = normalized_fields.find(byte_offset);
+            if (field == normalized_fields.end()) {
                 fail(instruction, std::string(description) +
                                       " is missing field at byte offset " +
                                       std::to_string(byte_offset));
@@ -2574,8 +2778,9 @@ struct Importer {
             if (name.empty()) return fail(&instruction, "call parameter slot has no name");
             const Operand stored =
                 source_operand(1, ptx_scalar_type(instruction.opcode));
-            const std::int64_t byte_offset =
-                memory_operand_offset(instruction.operands[0]);
+            const auto checked_offset = parameter_slot_offset(instruction.operands[0], name);
+            if (!checked_offset) return fail(&instruction, "invalid PTX parameter slot byte offset");
+            const std::int64_t byte_offset = *checked_offset;
             if (byte_offset < 0) {
                 return fail(&instruction,
                             "PTX call parameter slot has a negative byte offset");
@@ -2658,25 +2863,53 @@ struct Importer {
                 } else {
                     if (returned->second.type.kind == TypeKind::kAggregate) {
                         const Type& aggregate_type = returned->second.type;
-                        const std::int64_t byte_offset =
-                            memory_operand_offset(instruction.operands[1]);
+                        const auto checked_offset = parameter_slot_offset(instruction.operands[1], name);
+                        if (!checked_offset) return fail(&instruction, "invalid PTX return slot byte offset");
+                        const std::int64_t byte_offset = *checked_offset;
                         const std::uint32_t loaded_size =
                             type_size(operation.result_types.front());
-                        if (byte_offset < 0 || loaded_size == 0 ||
-                            aggregate_type.elements.empty() ||
-                            type_size(aggregate_type.elements.front()) != loaded_size ||
-                            byte_offset % loaded_size != 0 ||
-                            static_cast<std::uint64_t>(byte_offset / loaded_size) >=
-                                aggregate_type.elements.size()) {
-                            return fail(
-                                &instruction,
-                                "aggregate PTX call return load is not an aligned field");
+                        if (loaded_size == 8 && operation.result_types.front() == Type::integer(64) &&
+                            byte_offset >= 0 && byte_offset % 8 == 0 &&
+                            (static_cast<std::uint64_t>(byte_offset) + 8) <= type_size(aggregate_type) &&
+                            std::all_of(aggregate_type.elements.begin(), aggregate_type.elements.end(),
+                                [](const Type& field) { return field == Type::integer(32); })) {
+                            const auto emit = [&](OpCode opcode, Type type, std::vector<Operand> operands) {
+                                Operation part;
+                                part.opcode = opcode; part.location = operation.location;
+                                part.operands = std::move(operands);
+                                const ValueId id = builder.next_value();
+                                part.results = {id}; part.result_types = {type};
+                                value_types[id] = type;
+                                block->operations.push_back(std::move(part));
+                                return Operand::value_ref(id, type);
+                            };
+                            const auto word = [&](std::int64_t index) {
+                                const Operand value = emit(OpCode::kAggregateExtract, Type::integer(32),
+                                    {returned->second, Operand::immediate(std::to_string(index), Type::integer(32))});
+                                return emit(OpCode::kConvert, Type::integer(64), {value});
+                            };
+                            const Operand low = word(byte_offset / 4);
+                            const Operand high = emit(OpCode::kShiftLeft, Type::integer(64),
+                                {word(byte_offset / 4 + 1), Operand::immediate("32", Type::integer(64))});
+                            operation.opcode = OpCode::kBitOr;
+                            operation.operands = {low, high};
+                        } else {
+                            if (byte_offset < 0 || loaded_size == 0 ||
+                                aggregate_type.elements.empty() ||
+                                type_size(aggregate_type.elements.front()) != loaded_size ||
+                                byte_offset % loaded_size != 0 ||
+                                static_cast<std::uint64_t>(byte_offset / loaded_size) >=
+                                    aggregate_type.elements.size()) {
+                                return fail(
+                                    &instruction,
+                                    "aggregate PTX call return load is not an aligned field");
+                            }
+                            operation.opcode = OpCode::kAggregateExtract;
+                            operation.operands.push_back(returned->second);
+                            operation.operands.push_back(Operand::immediate(
+                                std::to_string(byte_offset / loaded_size),
+                                Type::integer(32)));
                         }
-                        operation.opcode = OpCode::kAggregateExtract;
-                        operation.operands.push_back(returned->second);
-                        operation.operands.push_back(Operand::immediate(
-                            std::to_string(byte_offset / loaded_size),
-                            Type::integer(32)));
                     } else {
                         operation.opcode = OpCode::kConvert;
                         operation.operands.push_back(returned->second);
@@ -4417,6 +4650,8 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         return importer.result;
     }
     importer.result.warnings = parsed.warnings;
+    // Normalize copies before capturing pointers into the parsed function list.
+    for (auto& function : parsed.module.functions) normalize_scalar_tail_call(&function);
     if (!importer.select_entry(parsed, options)) return importer.result;
     const cumetal::ptx::EntryFunction* selected_entry = importer.entry;
     for (const cumetal::ptx::EntryFunction& function : parsed.module.functions) {

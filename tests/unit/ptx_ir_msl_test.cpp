@@ -2008,6 +2008,135 @@ ret;
         const auto rejected = metal::compile_ptx_to_msl(invalid);
         ok &= expect(!rejected.ok, "integer and device pointers cannot be silently treated as local helper pointers");
     }
+    const std::string wide_return = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.func (.param .align 8 .b8 retval[16]) tail_count(.param .b64 seed) {
+st.param.b64 [retval], 1;
+st.param.b64 [retval+8], 2;
+ret;
+}
+.visible .entry tail_probe(.param .u64 input, .param .u64 output, .param .u32 count) {
+.reg .b64 %rd<10>;
+.reg .b32 %r<5>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd3, %r2, 8;
+mul.wide.u32 %rd4, %r2, 16;
+add.u64 %rd5, %rd1, %rd3;
+add.u64 %rd6, %rd2, %rd4;
+ld.global.u64 %rd7, [%rd5];
+.param .b64 arg;
+.param .align 8 .b8 result[16];
+st.param.b64 [arg], %rd7;
+call.uni (result), tail_count, (arg);
+ld.param.b64 %rd8, [result];
+ld.param.b64 %rd9, [result+8];
+st.global.u64 [%rd6], %rd8;
+st.global.u64 [%rd6+8], %rd9;
+DONE:
+ret;
+}
+)ptx";
+    const auto wide_result = metal::compile_ptx_to_msl(wide_return);
+    ok &= expect(wide_result.ok, "64-bit immediate stores populate byte-array returns: " + wide_result.error);
+    for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+        {"[retval+8]", "[retval+4]"},
+        {"[retval+8]", "[retval+16]"},
+        {"[retval+8]", "[retval+unknown]"},
+        {"[retval+8]", "[retval+8junk]"},
+        {"[result+8]", "[result+unknown]"},
+        {"[result+8]", "[result+8junk]"},
+        {"[result+8]", "[result+4]"},
+        {"[result+8]", "[result+16]"}}) {
+        std::string invalid = wide_return;
+        invalid.replace(invalid.find(from), from.size(), to);
+        const auto rejected = metal::compile_ptx_to_msl(invalid);
+        ok &= expect(!rejected.ok, "malformed, overlapping, missing and out-of-bounds wide return fields rejected");
+    }
+    const std::string scalar_tail = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.func (.param .align 8 .b8 retval[16]) tail_count(.param .b64 seed) {
+.reg .b64 %rd<7>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [seed];
+setp.eq.u64 %p1, %rd1, 0;
+@%p1 bra BASE;
+sub.u64 %rd2, %rd1, 1;
+bra AGAIN;
+BASE:
+mov.u64 %rd3, 0;
+mov.u64 %rd4, 81985529216486895;
+bra RETURN;
+AGAIN:
+.param .b64 arg;
+.param .align 8 .b8 result[16];
+st.param.b64 [arg], %rd2;
+call.uni (result), tail_count, (arg);
+ld.param.b64 %rd3, [result];
+ld.param.b64 %rd4, [result+8];
+RETURN:
+st.param.b64 [retval], %rd3;
+st.param.b64 [retval+8], %rd4;
+ret;
+}
+.visible .entry tail_probe(.param .u64 input, .param .u64 output, .param .u32 count) {
+.reg .b64 %rd<10>;
+.reg .b32 %r<5>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd3, %r2, 8;
+mul.wide.u32 %rd4, %r2, 16;
+add.u64 %rd5, %rd1, %rd3;
+add.u64 %rd6, %rd2, %rd4;
+ld.global.u64 %rd7, [%rd5];
+.param .b64 arg;
+.param .align 8 .b8 result[16];
+st.param.b64 [arg], %rd7;
+call.uni (result), tail_count, (arg);
+ld.param.b64 %rd8, [result];
+ld.param.b64 %rd9, [result+8];
+st.global.u64 [%rd6], %rd8;
+st.global.u64 [%rd6+8], %rd9;
+DONE:
+ret;
+}
+)ptx";
+    const auto tail_result = metal::compile_ptx_to_msl(scalar_tail);
+    ok &= expect(tail_result.ok, "scalar aggregate-return tail call becomes a loop: " + tail_result.error);
+    for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+        {"RETURN:\nst.param.b64 [retval], %rd3;", "RETURN:\nadd.u64 %rd3, %rd3, 1;\nst.param.b64 [retval], %rd3;"},
+        {"ld.param.b64 %rd4, [result+8];", "ld.param.b64 %rd4, [result];"},
+        {"st.param.b64 [retval+8], %rd4;", "st.param.b64 [retval+8], %rd3;"},
+        {"call.uni (result), tail_count, (arg);", "@%p1 call.uni (result), tail_count, (arg);"},
+        {"sub.u64 %rd2, %rd1, 1;", "ld.local.u64 %rd2, [%rd1];"},
+        {"sub.u64 %rd2, %rd1, 1;", "add.u64 %rd2, depot, 0;"},
+        {"st.param.b64 [arg], %rd2;", "st.param.b64 [arg+unknown], %rd2;"}}) {
+        std::string unsupported = scalar_tail;
+        unsupported.replace(unsupported.find(from), from.size(), to);
+        const auto rejected = metal::compile_ptx_to_msl(unsupported);
+        ok &= expect(!rejected.ok && rejected.error.find("recursive PTX") != std::string::npos,
+                     "non-tail, malformed, predicated and memory-dependent recursion remain rejected: " + rejected.error);
+    }
     if (!ok) return 1;
     std::cout << "PTX -> CuMetal IR -> typed MSL tests passed\n";
     return 0;

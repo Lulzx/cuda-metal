@@ -92,3 +92,8 @@ unvalidated. See [dual LLVM smoke evidence](docs/experiments/dual-llvm-miner-smo
 
 For the next small validation steps and remaining work, see the
 [vanity-miner validation checklist](docs/experiments/vanity-miner-validation-todo.md).
+
+The LLVM 7 xoroshiro self-test also passes after bounded scalar tail-call
+normalization and byte-array return packing. Runtime-seeded helper regressions
+cover 261 seeds; LLVM 19's local-frame recursion remains unsupported. See the
+[miner fix backlog](docs/experiments/miner-fix-backlog.md) for scope and evidence.
