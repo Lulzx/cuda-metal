@@ -1,0 +1,882 @@
+{
+  "evidence": "strict typed PTX-to-MSL compilation only; no Metal compilation or GPU execution",
+  "ptx_sha256": "41db05e2e1b6281923b9d9f8f157ced57f69a9a9e9d794d0513db6e618bbb6d7",
+  "compiler_sha256": "de7a5f535af246a4740a5a3342c1c4c263670ef5e6d402795b1dbcd74db0962b",
+  "entry_count": 123,
+  "timeout_seconds": 180.0,
+  "results": [
+    {
+      "entry": "kernel_find_better_shallenge_nonce",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.963,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_find_bitcoin_vanity_private_key",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.834,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_find_ethereum_vanity_private_key",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.677,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_find_solana_vanity_private_key",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.652,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_blackbox_identity_u32",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 35.798,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_blackbox_identity_u64",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.537,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_carry_chain_3limb",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 35.607,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_divrem_by_58_pow_5",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 37.298,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_i128_chain_add",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 41.382,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_mad_hi_u64",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 41.09,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_mad_lo_u64",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.481,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_mask_blend_false",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 41.101,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_mask_blend_true",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 41.421,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_mul_wide_u32",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 42.16,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_overflowing_add",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.933,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_overflowing_sub",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 41.158,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_u128_imm_shr_52",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.731,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_u128_mul",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.591,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_u32_div_const",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.038,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_u32_div_var",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.17,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_u32_mul_lo",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.618,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_u32_rem_var",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.776,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_u64_div_const",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.794,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_u64_div_var",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 35.397,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_u64_mul_hi",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.521,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_u64_mul_lo",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 38.692,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_u64_rem_var",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 38.557,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_var_shl_u64",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 38.765,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_var_shr_u64",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.69,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_widening_mul_chain_3term",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.129,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_arith_widening_mul_pair",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.27,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_base58_all_zeros",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.798,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_base58_div_by_58",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 35.991,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_base58_handrolled_no_seq",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 37.232,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_base58_inner_mutate_phase",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.579,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_base58_limb_divrem",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.112,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_base58_min_nonzero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 35.879,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_base58_var_len",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.84,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_base58_var_len_leading_zero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.127,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_bech32_p2wpkh",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 35.784,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_bitcoin_encoded",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 38.139,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_bitcoin_matches",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 37.531,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_bitcoin_pkh",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 37.18,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_bitcoin_priv",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 37.934,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_bitcoin_pub",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.692,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_compare_hashes_eq",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 38.997,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_compare_hashes_gt",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 37.896,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_compare_hashes_lt",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 38.592,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_clamp_integer",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 34.823,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_from_canonical_zero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 35.035,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_mul_base_scalar_one",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 37.972,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_reduce_pipeline_zero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 35.337,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar52_as_bytes_one",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 33.803,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar52_as_bytes_zero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 33.505,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar52_from_bytes",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 33.372,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar52_from_bytes_zero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 34.458,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar52_montgomery_reduce_r",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.132,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar52_montgomery_reduce_with_sub",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.399,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar52_montgomery_reduce_zero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.477,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar52_mul_internal_then_reduce_one_r",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.914,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar52_mul_internal_zero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.228,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar52_sub_no_underflow",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.768,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar52_sub_with_underflow",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.571,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar_eq_zero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.032,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar_from_bytes_wide_zero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 59.101,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar_one_to_bytes_direct",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 59.572,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar_round_trip_one",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 59.184,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_scalar_round_trip_zero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 58.472,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dalek_zero_eq_zero",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 59.17,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_dynamic_index_write",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 59.231,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_ethereum_address",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 59.279,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_ethereum_priv",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 58.436,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_ethereum_pub",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 38.957,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_field_bytes_into_conversion",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.805,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_from_affine_coords_replica",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.974,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_generic_array_as_slice_last",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.032,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_generic_array_basic_index",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 38.997,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_generic_array_copy_from_ga_source",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 38.676,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_generic_array_copy_from_slice",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.822,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_index_trait_const_indices",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.37,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_index_trait_dispatch",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 43.768,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_iter_mut_alphabet_lookup",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 41.954,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_iter_mut_slice_partial",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 42.627,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_iter_static_slice_lookup",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 44.275,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_iter_static_table_lookup",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 42.759,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_k256_affine_generator_encode",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 43.763,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_k256_derive_scalar_one",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 44.721,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_k256_derive_scalar_two",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 43.85,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_k256_double_generator",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 75.929,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_k256_encode_generator",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 76.183,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_k256_encoded_point_from_affine_coords",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 77.571,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_k256_scalar_one_round_trip",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 77.639,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_k256_secret_from_bytes_one",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 78.262,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_named_field_struct_return",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 76.618,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_primitive_base58",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 77.267,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_primitive_ed25519",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 78.098,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_primitive_keccak256",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 63.837,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_primitive_ripemd160",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 63.881,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_primitive_secp256k1_compressed",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 66.153,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_primitive_secp256k1_uncompressed",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 66.394,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_primitive_sha256_32",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 65.529,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_primitive_sha256_variable",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 65.92,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_primitive_sha512",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 65.268,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_primitive_xoroshiro",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 65.473,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_reverse_range_write",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 74.57,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_shallenge_hash",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 73.488,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_shallenge_is_better",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 72.49,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_shallenge_nonce_len",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 72.627,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_slice_reverse_partial",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 73.771,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_solana_encoded",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 72.636,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_solana_priv",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 74.943,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_solana_pub",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 74.473,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_static_depth4_newtype_nesting",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.198,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_static_struct_wrapped_u64_lookup",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 40.368,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_static_u64_array_lookup",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.675,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_stub",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 39.217,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_subtle_choice_u8_into_bool",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 37.709,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_subtle_conditional_select_u64",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 37.814,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_wif_compressed_mainnet",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.664,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_wif_compressed_testnet",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 36.737,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_wif_uncompressed_mainnet",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 26.393,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_wif_uncompressed_testnet",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 25.713,
+      "diagnostic_id": "F1"
+    },
+    {
+      "entry": "kernel_self_test_xoroshiro_base64_nonce",
+      "status": "compile_failure",
+      "returncode": 1,
+      "seconds": 25.242,
+      "diagnostic_id": "F1"
+    }
+  ],
+  "completed": 123,
+  "counts": {
+    "compile_failure": 123
+  },
+  "diagnostics": {
+    "F1": "unsupported initialized PTX declaration: .global .align 8 .u8 _RNvNtNtNtNtCsbZJm7v6G7YB_16curve25519_dalek7backend6serial3u649constants23ED25519_BASEPOINT_TABLE[8] = {0XFF(_RNvNtNtNtNtCsbZJm7v6G7YB_16curve25519_dalek7backend6serial3u649constants40ED25519_BASEPOINT_TABLE_INNER_DOC_HIDDEN), 0xFF00(_RNvNtNtNtNtCsbZJm7v6G7YB_16curve25519_dalek7backend6serial3u649constants40ED25519_BASEPOINT_TABLE_INNER_DOC_HIDDEN), 0xFF0000(_RNvNtNtNtNtCsbZJm7v6G7YB_16curve25519_dalek7backend6serial3u649constants40ED25519_BASEPOINT_TABLE_INNER_DOC_HIDDEN), 0xFF000000(_RNvNtNtNtNtCsbZJm7v6G7YB_16curve25519_dalek7backend6serial3u649constants40ED25519_BASEPOINT_TABLE_INNER_DOC_HIDDEN), 0xFF00000000(_RNvNtNtNtNtCsbZJm7v6G7YB_16curve25519_dalek7backend6serial3u649constants40ED25519_BASEPOINT_TABLE_INNER_DOC_HIDDEN), 0xFF0000000000(_RNvNtNtNtNtCsbZJm7v6G7YB_16curve25519_dalek7backend6serial3u649constants40ED25519_BASEPOINT_TABLE_INNER_DOC_HIDDEN), 0xFF000000000000(_RNvNtNtNtNtCsbZJm7v6G7YB_16curve25519_dalek7backend6serial3u649constants40ED25519_BASEPOINT_TABLE_INNER_DOC_HIDDEN), 0xFF00000000000000(_RNvNtNtNtNtCsbZJm7v6G7YB_16curve25519_dalek7backend6serial3u649constants40ED25519_BASEPOINT_TABLE_INNER_DOC_HIDDEN)};"
+  },
+  "failure_groups": {
+    "F1": 123
+  },
+  "producer_commit": "36ca4ed2be0cb16e6028f8ebd74deffd07500adc",
+  "consumer_commit": "210939bd2b7a888b4f11f0e707fa196a9db662ba"
+}

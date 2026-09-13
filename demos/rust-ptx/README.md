@@ -101,3 +101,27 @@ words, shift boundaries 0/1/7/16/31/32/33/63/64/UINT_MAX, mixed literal/register
 stores, byte/halfword truncation, and output guards. Unsupported instruction
 variants, malformed tuples, and reachable unsupported helpers have negative
 host regression coverage.
+
+## Inventory a larger PTX module
+
+`inventory.py` runs the production compiler separately for every `.entry` in
+an unchanged PTX file, with strict typed lowering and no workload
+specializations. It does not load MSL or launch kernels:
+
+```sh
+python3 demos/rust-ptx/inventory.py /path/to/output.ptx \
+  --compiler build-rust-ptx/cumetalc --out /tmp/miner-inventory \
+  --jobs 8 --timeout 180
+```
+
+Each entry gets a compiler log and, if successful, MSL plus an ABI sidecar.
+`inventory.json` is updated after every result and records input/compiler
+checksums, timings, return codes, timeouts, and grouped first diagnostics.
+The script exits successfully when the inventory completes even if individual
+compilations fail; it is a diagnostic report, not a compatibility pass gate.
+Check `completed == entry_count` before treating a report as a complete sweep.
+The first failure may hide additional unsupported behavior in the same entry.
+
+The [full miner baseline](../../docs/experiments/vanity-miner-ptx-inventory.md)
+records the fresh 123-entry artifact, per-entry outcomes, and the next bounded
+compatibility task.

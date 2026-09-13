@@ -390,6 +390,8 @@ add_test(NAME unit_nvrtc_options COMMAND cumetal_nvrtc_options_test)
 add_test(NAME unit_cumetal_ir COMMAND cumetal_ir_test)
 add_test(NAME unit_msl_ast COMMAND cumetal_msl_ast_test)
 add_test(NAME unit_ptx_ir_msl COMMAND cumetal_ptx_ir_msl_test)
+add_test(NAME unit_ptx_inventory
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/ptx_inventory_test.py)
 add_test(NAME unit_nvvm_ir_msl COMMAND cumetal_nvvm_ir_msl_test)
 add_test(NAME unit_native_registration COMMAND cumetal_native_registration_test)
 if(CUMETAL_ENABLE_CUDA_REGISTRATION)
