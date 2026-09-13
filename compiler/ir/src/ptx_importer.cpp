@@ -1768,9 +1768,20 @@ struct Importer {
                     }
                 }
                 for (const std::string& destination : destinations) {
+                    Type destination_type = inferred;
+                    if (root == "ld" && !starts_with(instruction.opcode, "ld.param") &&
+                        inferred.kind == TypeKind::kInteger) {
+                        // PTX integer loads extend to each destination register's
+                        // width. Keep memory width/signedness on the load so MSL
+                        // reads only the requested bytes and extends correctly.
+                        // Parameter loads retain their separate ABI/pointer path.
+                        destination_type = Type::integer(std::max(
+                            ptx_scalar_type(instruction.opcode).bit_width,
+                            ptx_register_container_bits(destination)));
+                    }
                     const auto existing = register_types.find(destination);
-                    if (existing == register_types.end() || !(existing->second == inferred)) {
-                        register_types[destination] = inferred;
+                    if (existing == register_types.end() || !(existing->second == destination_type)) {
+                        register_types[destination] = destination_type;
                         changed = true;
                     }
                 }

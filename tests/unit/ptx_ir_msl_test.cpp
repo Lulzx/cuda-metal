@@ -1091,6 +1091,62 @@ BODY:
                  "multiline direct device call produces identical MSL to the one-line form");
     if (!multiline_device_call.ok) std::cerr << multiline_device_call.error << "\n";
 
+
+    std::string byte_return_ptx = direct_device_call_ptx;
+    const std::string addition = "    add.u32 %r2, %r1, 1;";
+    byte_return_ptx.replace(byte_return_ptx.find(addition), addition.size(),
+        "    .local .align 1 .b8 scratch[1];\n"
+        "    .reg .b64 %rd1;\n"
+        "    mov.u64 %rd1, scratch;\n"
+        "    st.local.u8 [%rd1], %r1;\n"
+        "    ld.volatile.local.u8 %r2, [%rd1];");
+    const auto byte_return = metal::compile_ptx_to_msl(byte_return_ptx);
+    ok &= expect(byte_return.ok,
+                 "unsigned byte load into a 32-bit register satisfies a 32-bit helper return");
+    if (!byte_return.ok) std::cerr << byte_return.error << "\n";
+
+
+    std::string mismatched_return_ptx = byte_return_ptx;
+    const auto return_decl = mismatched_return_ptx.find(".param .b32 add_one_ret");
+    mismatched_return_ptx.replace(return_decl, std::string(".param .b32 add_one_ret").size(),
+                                  ".param .b64 add_one_ret");
+    const auto mismatched_return = metal::compile_ptx_to_msl(mismatched_return_ptx);
+    ok &= expect(!mismatched_return.ok &&
+                 mismatched_return.error.find("does not fit its declared return type") != std::string::npos,
+                 "load widening does not weaken the return ABI width check");
+
+
+    const auto mixed_load = metal::compile_ptx_to_msl(R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry mixed_load(.param .u64 input) {
+ .reg .b64 %rd<3>;
+ .reg .b16 %rs1;
+ .reg .b32 %r1;
+ ld.param.u64 %rd1, [input];
+ ld.global.v2.u8 {%rs1, %r1}, [%rd1];
+ ld.global.u16 %rd2, [%rd1];
+ ret;
+}
+)ptx");
+    bool byte16 = false, byte32 = false, half64 = false;
+    if (mixed_load.ok) {
+        for (const auto& fn : mixed_load.gpu_ir.functions)
+            for (const auto& block : fn.blocks)
+                for (const auto& op : block.operations) {
+                    if (op.opcode != ir::OpCode::kLoad || op.result_types.size() != 1 ||
+                        !op.attributes.contains("memory_bit_width")) continue;
+                    const auto bits = op.result_types[0].bit_width;
+                    const auto memory = op.attributes.at("memory_bit_width");
+                    byte16 |= memory == "8" && bits == 16;
+                    byte32 |= memory == "8" && bits == 32;
+                    half64 |= memory == "16" && bits == 64;
+                }
+    }
+    ok &= expect(mixed_load.ok && byte16 && byte32 && half64,
+                 "vector lanes and 64-bit destinations retain independent register and memory widths");
+
     const std::string inferred_pointer_device_call_ptx = R"ptx(
 .version 7.0
 .target sm_80

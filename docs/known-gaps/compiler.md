@@ -233,6 +233,12 @@ support for other kernels in the module or arbitrary Rust-CUDA workloads.
 PTX multiline `call` statements are assembled through the semicolon in entries
 and helpers, with source-line and lexical-scope preservation. Nested direct
 calls pass numerical Apple-GPU tests. This does not add indirect-call execution
-or arbitrary multiline instructions. The full miner Ed25519 entry now reaches
-a narrow-value return-typing failure in `subtle::black_box`; see
+or arbitrary multiline instructions. The multiline-call change exposed a narrow-value return-typing failure
+in `subtle::black_box`; see
 [reproduction and evidence](../experiments/ptx-multiline-calls.md).
+
+Ordinary PTX integer memory loads now preserve each destination register's width
+while retaining the actual memory-access width and signedness. Byte/halfword
+helper returns pass exhaustive numerical GPU checks. Parameter-load ABI handling
+is unchanged. The full miner Ed25519 entry now stops at `bfi.b32`, which lacks
+CuMetal IR normalization; see [evidence](../experiments/ptx-narrow-load-returns.md).

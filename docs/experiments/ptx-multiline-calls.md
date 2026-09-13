@@ -69,3 +69,7 @@ slot. The remaining failure concerns narrow-value/register/return typing and
 needs its own numerical and negative-path tests. Ed25519 arithmetic has not run.
 A fresh 123-entry inventory and the full CUDA C++/offline-metallib suite were not
 run for this change.
+
+Follow-up: the [narrow-load inference fix](ptx-narrow-load-returns.md) resolves
+that return mismatch, with exhaustive byte/halfword numerical checks. The
+unchanged Ed25519 entry now reaches unsupported `bfi.b32` normalization.

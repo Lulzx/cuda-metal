@@ -49,7 +49,9 @@ The fresh full miner module also passes its launch probe after
 [selected-entry initializer handling](docs/experiments/ptx-initializer-selection.md);
 a focused GPU regression also covers byte-encoded pointers to read-only tables.
 [Multiline PTX calls](docs/experiments/ptx-multiline-calls.md) also pass a nested-helper
-GPU regression. Other miner entries still require separate validation.
+GPU regression. [Narrow integer loads](docs/experiments/ptx-narrow-load-returns.md)
+pass exhaustive byte/halfword helper-return checks. Other miner entries still
+require separate validation.
 
 ## How it works
 

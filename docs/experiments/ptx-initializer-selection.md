@@ -124,7 +124,8 @@ initializer bytes. This is a table/relocation test, not Ed25519 arithmetic.
 The initial unchanged `kernel_self_test_primitive_ed25519` attempt failed at
 line 303275 because the parser split a multiline call. The subsequent
 [multiline-call fix](ptx-multiline-calls.md) gets past that point and reaches a
-return-width error in `subtle::black_box`. The original Ed25519 kernel has not
+return-width error in `subtle::black_box`. The [narrow-load fix](ptx-narrow-load-returns.md)
+resolves that error and reaches `bfi.b32` normalization. The original Ed25519 kernel has not
 passed compilation or execution.
 
 Final validation passed all ten scoped CTests and the full-miner table diagnostic

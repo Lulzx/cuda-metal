@@ -2865,6 +2865,11 @@ add_test(
 
 if(APPLE)
     add_test(
+        NAME functional_ptx_narrow_loads
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_narrow_loads.py
+                ${CMAKE_BINARY_DIR}
+    )
+    add_test(
         NAME functional_ptx_multiline_call
         COMMAND python3 ${CMAKE_SOURCE_DIR}/demos/rust-ptx/run.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/reference/ptx_multiline_call.ptx

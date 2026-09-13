@@ -134,4 +134,7 @@ See [supported forms, exclusions, and the full-miner table diagnostic](../../doc
 This does not establish full Ed25519 compatibility. The subsequent
 [multiline-call parser fix](../../docs/experiments/ptx-multiline-calls.md) passes
 nested-helper numerical tests and moves the unchanged Ed25519 entry to a
-return-width error in `subtle::black_box`.
+return-width error in `subtle::black_box`. The subsequent
+[narrow-load inference fix](../../docs/experiments/ptx-narrow-load-returns.md)
+passes exhaustive byte/halfword helper-return checks and moves that entry to
+unsupported `bfi.b32` normalization.
