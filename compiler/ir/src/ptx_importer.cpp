@@ -1827,6 +1827,80 @@ struct Importer {
         }
     }
 
+    // Stable storage for instructions normalized before register SSA.
+    std::map<const Instruction*, Instruction> normalized_selects;
+
+    void remove_unobserved_self_selects() {
+        for (RawBlock& block : raw_blocks) {
+            if (block.instructions.empty() || block.successors.size() != 2) continue;
+            const Instruction* branch = block.instructions.back();
+            if (root_opcode(branch->opcode) != "bra" || branch->predicate.empty()) continue;
+            const auto [predicate, inverted] = normalized_predicate(branch->predicate);
+            if (inverted) continue;
+            for (std::size_t index = 0; index + 1 < block.instructions.size(); ++index) {
+                const Instruction* select = block.instructions[index];
+                if ((select->opcode != "selp.b32" && select->opcode != "selp.b64") ||
+                    !select->predicate.empty() || select->operands.size() != 4 ||
+                    trim(select->operands[3]) != predicate) continue;
+                const std::string destination = trim(select->operands[0]);
+                const std::string source = trim(select->operands[1]);
+                const int width = select->opcode == "selp.b32" ? 32 : 64;
+                // Do not turn malformed select operands into valid mov tuples.
+                // Keep this proof restricted to matching scalar registers.
+                if (first_register(source) != source ||
+                    ptx_register_container_bits(source) != width ||
+                    ptx_register_container_bits(destination) != width) continue;
+                if (first_register(destination) != destination ||
+                    trim(select->operands[2]) != destination ||
+                    trim(select->operands[1]) == destination) continue;
+                bool safe = true;
+                for (std::size_t i = index + 1; i + 1 < block.instructions.size(); ++i) {
+                    const auto sources = source_registers(*block.instructions[i]);
+                    const auto destinations = destination_registers(*block.instructions[i]);
+                    if (std::find(sources.begin(), sources.end(), destination) != sources.end() ||
+                        std::find(destinations.begin(), destinations.end(), destination) != destinations.end() ||
+                        std::find(destinations.begin(), destinations.end(), predicate) != destinations.end()) safe = false;
+                }
+                if (!safe) continue;
+                // Follow the false edge until an unconditional overwrite or
+                // this same select. Cycles are safe only if no path reads the
+                // old value. A subsequent true edge supplies the new value.
+                std::vector<std::size_t> pending{block.successors[1]};
+                std::unordered_set<std::size_t> visited;
+                while (!pending.empty() && safe) {
+                    const auto current = pending.back();
+                    pending.pop_back();
+                    if (!visited.insert(current).second) continue;
+                    bool killed = false;
+                    for (const Instruction* instruction : raw_blocks[current].instructions) {
+                        if (instruction == select) { killed = true; break; }
+                        const auto sources = source_registers(*instruction);
+                        if (std::find(sources.begin(), sources.end(), destination) != sources.end()) {
+                            safe = false;
+                            break;
+                        }
+                        const auto destinations = destination_registers(*instruction);
+                        if (instruction->predicate.empty() &&
+                            std::find(destinations.begin(), destinations.end(), destination) != destinations.end()) {
+                            killed = true;
+                            break;
+                        }
+                    }
+                    if (!killed) {
+                        pending.insert(pending.end(), raw_blocks[current].successors.begin(),
+                                       raw_blocks[current].successors.end());
+                    }
+                }
+                if (!safe) continue;
+                Instruction replacement = *select;
+                replacement.opcode = select->opcode == "selp.b32" ? "mov.b32" : "mov.b64";
+                replacement.operands = {select->operands[0], select->operands[1]};
+                auto [stored, inserted] = normalized_selects.emplace(select, std::move(replacement));
+                block.instructions[index] = &stored->second;
+            }
+        }
+    }
+
     void allocate_values() {
         for (const std::string& name : implicit_definitions) {
             const ValueId value = builder.next_value();
@@ -4703,6 +4777,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
 
         next.infer_register_types();
         next.build_cfg();
+        next.remove_unobserved_self_selects();
         next.allocate_values();
         if (!next.construct_ssa() || !next.materialize_function()) {
             importer = std::move(next);

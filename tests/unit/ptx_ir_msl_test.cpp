@@ -1820,6 +1820,93 @@ indirect_join:
                          std::string::npos,
                  "typed PTX rejects unresolved printf formats instead of emitting a fallback");
 
+    const std::string guarded_select = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry guarded_select(.param .u64 input, .param .u64 output, .param .u32 count) {
+.reg .b64 %rd<6>;
+.reg .b32 %r<12>;
+.reg .pred %p<4>;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd3, %r2, 4;
+add.u64 %rd4, %rd1, %rd3;
+add.u64 %rd5, %rd2, %rd3;
+ld.global.u32 %r5, [%rd4];
+and.b32 %r5, %r5, 7;
+mov.u32 %r6, 0;
+mov.u32 %r7, 0;
+HEAD:
+setp.lt.u32 %p2, %r6, %r5;
+@%p2 bra SELECT;
+st.global.u32 [%rd5], %r7;
+bra DONE;
+SELECT:
+and.b32 %r8, %r6, 1;
+setp.ne.u32 %p3, %r8, 0;
+selp.b32 %r9, %r6, %r9, %p3;
+add.u32 %r6, %r6, 1;
+@%p3 bra USE;
+bra HEAD;
+USE:
+add.u32 %r7, %r7, %r9;
+bra HEAD;
+DONE:
+ret;
+}
+)ptx";
+    const auto selected = metal::compile_ptx_to_msl(guarded_select);
+    ok &= expect(selected.ok, "unobserved loop-carried select arm is eliminated: " + selected.error);
+    std::string observable_select = guarded_select;
+    const auto false_edge = observable_select.find("@%p3 bra USE;\nbra HEAD;");
+    observable_select.replace(false_edge, std::string("@%p3 bra USE;\nbra HEAD;").size(),
+        "@%p3 bra USE;\nst.global.u32 [%rd5], %r9;\nbra HEAD;");
+    const auto observable = metal::compile_ptx_to_msl(observable_select);
+    ok &= expect(!observable.ok && observable.error.find("undefined") != std::string::npos,
+                 "observable undefined false arm remains rejected");
+    for (const std::string replacement : {
+        "@%p2 bra USE;", "@!%p3 bra USE;",
+        "st.global.u32 [%rd5], %r9;\n@%p3 bra USE;",
+        "setp.eq.u32 %p3, %r6, 0;\n@%p3 bra USE;"}) {
+        std::string unsafe_select = guarded_select;
+        unsafe_select.replace(unsafe_select.find("@%p3 bra USE;"),
+                              std::string("@%p3 bra USE;").size(), replacement);
+        const auto rejected = metal::compile_ptx_to_msl(unsafe_select);
+        ok &= expect(!rejected.ok, "select rewrite requires matching unchanged predicate and no intervening use");
+    }
+    std::string tuple_select = guarded_select;
+    tuple_select.insert(tuple_select.find(".reg .pred"), ".reg .b16 %rs1;\n.reg .b16 %rs2;\n");
+    tuple_select.insert(tuple_select.find("selp.b32 %r9"), "mov.u16 %rs1, 1;\nmov.u16 %rs2, 2;\n");
+    tuple_select.replace(tuple_select.find("%r6, %r9, %p3"), std::string("%r6, %r9, %p3").size(), "{%rs1,%rs2}, %r9, %p3");
+    ok &= expect(!metal::compile_ptx_to_msl(tuple_select).ok, "malformed tuple cannot become a valid mov");
+    for (const std::string false_path : {
+        "bra USE;", "@%p3 mov.u32 %r9, 7;\nst.global.u32 [%rd5], %r9;\nbra HEAD;"}) {
+        std::string crossing = guarded_select;
+        crossing.replace(crossing.find("@%p3 bra USE;\nbra HEAD;"),
+                         std::string("@%p3 bra USE;\nbra HEAD;").size(), "@%p3 bra USE;\n" + false_path);
+        ok &= expect(!metal::compile_ptx_to_msl(crossing).ok,
+                     "false-path joins and predicated kills cannot hide an undefined read");
+    }
+    std::string initialized = observable_select;
+    initialized.insert(initialized.find("HEAD:"), "mov.u32 %r9, 99;\n");
+    const auto initialized_result = metal::compile_ptx_to_msl(initialized);
+    ok &= expect(initialized_result.ok && initialized_result.source.find(" ? ") != std::string::npos,
+                 "observable but initialized false arm remains valid");
+    std::string wide_select = guarded_select;
+    wide_select.insert(wide_select.find(".reg .pred"), ".reg .b64 %rd90;\n.reg .b64 %rd91;\n");
+    const std::string narrow = "selp.b32 %r9, %r6, %r9, %p3;";
+    wide_select.replace(wide_select.find(narrow), narrow.size(),
+        "cvt.u64.u32 %rd90, %r6;\nselp.b64 %rd91, %rd90, %rd91, %p3;");
+    wide_select.insert(wide_select.find("add.u32 %r7, %r7, %r9;"), "cvt.u32.u64 %r9, %rd91;\n");
+    ok &= expect(metal::compile_ptx_to_msl(wide_select).ok, "64-bit guarded self-select compiles");
     if (!ok) return 1;
     std::cout << "PTX -> CuMetal IR -> typed MSL tests passed\n";
     return 0;

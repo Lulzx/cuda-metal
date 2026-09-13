@@ -259,5 +259,9 @@ validation of all Ed25519 inputs or the Solana mining kernel. See the
 [root cause and original-kernel proof](../experiments/ptx-halfword-tuples.md).
 
 LLVM 19 miner table-pointer initializers now pass relocation decoding. Its
-Ed25519 entry next encounters an undefined incoming register in CFG/SSA import;
-it has not reached GPU execution. See [dual LLVM evidence](../experiments/dual-llvm-miner-smoke.md).
+Ed25519 entry now passes CFG/SSA import after eliminating an unobserved
+self-select arm. The rewrite requires a matching, unchanged branch predicate
+and proves the false path cannot read the old value before overwrite or
+revisiting the select. Observable undefined values still fail verification.
+Apple Metal compilation next rejects an ambiguous `max(ulong, int)` call;
+the kernel has not reached GPU execution. See [dual LLVM evidence](../experiments/dual-llvm-miner-smoke.md).

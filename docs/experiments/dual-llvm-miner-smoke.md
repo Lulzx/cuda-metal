@@ -129,3 +129,41 @@ Final compiler SHA-256: `88d06aa741003baf1a4d4bb85fecda246d0c37a59bdff97f7a7dbb9
 CUMETAL_PROVENANCE event=kernel_launch kernel="relocated_table" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=6250 grid=(5,1,1) block=(64,1,1) unsupported_reason=""
 NUMERICAL_PASS relocated_table: 257 runtime-selected reads from 16 table bytes through relocated pointer; guards intact
 ```
+
+## Guarded self-select follow-up
+
+The CFG normalizer now handles unpredicated `selp.b32`/`selp.b64` with a
+self-referential false operand followed by a branch on the same non-inverted
+predicate. It verifies there is no intervening destination use/redefinition or
+predicate redefinition. Starting from the false successor, it follows every
+path until an unconditional overwrite or the same select; any read of the old
+destination rejects the rewrite. This proves the preserved arm is unobserved,
+so replacing the select with a move of the true operand preserves observable
+behavior, including loop iterations. SSA construction and verification remain
+unchanged; undefined values are neither initialized nor permitted in the IR.
+
+Sixteen focused CTests pass. Unit tests include an observable false-arm read,
+an intervening read, mismatched/inverted predicates and predicate redefinition.
+`functional_ptx_guarded_self_select` compares GPU sums of odd loop indices
+against CPU results for 65,541 input words (loop limits 0 through 7), with guards.
+The fixture is `tests/functional/reference/ptx_guarded_self_select.ptx`.
+
+The unchanged LLVM 19 artifact now compiles to 2.4 MB of MSL. On attempting the
+Apple M5 launch, Apple's Metal compiler rejects:
+
+```text
+program_source:49376:25: error: call to 'max' is ambiguous
+```
+
+The expression is `max(v27540, 64)`, with an unsigned 64-bit register and an
+untyped integer literal. This is the next backend typing issue; no GPU launch
+or numerical result was obtained for this kernel. The generated module is
+`/tmp/self-select-ed25519.metal`; logs are `/tmp/self-select-ed25519.log` and
+`/tmp/self-select-ed25519-gpu.log`.
+
+Compiler SHA-256 for guarded-select retry: `401be0ba517d5e5d46b6e46886e00749a554b8ec404176a9eccefe1cedcc2092`
+
+Independent review found a malformed tuple could become a valid mov. The rewrite
+is restricted to matching scalar registers; added tests cover that case, the
+64-bit form, false-path joins, predicated overwrites and initialized observable
+false arms. No valid scalar-register observable miscompile was found.
