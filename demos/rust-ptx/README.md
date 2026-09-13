@@ -143,7 +143,9 @@ The [bit-insertion follow-up](../../docs/experiments/ptx-bit-insert.md) adds
 `bfi.b32`/`bfi.b64` lowering, verified across every control-byte pair for three
 source patterns on Apple M5.
 
-The original Ed25519 self-test now compiles and launches but returns failure
-(slot 2 = 0, expected 1), with intact surrounding slots and guards.
+The original Ed25519 self-test now passes its known-answer fixture on Apple M5
+(slot 2 = 1, surrounding slots and guards intact) after the
+[halfword-tuple fix](../../docs/experiments/ptx-halfword-tuples.md).
 `run_self_test.py` runs a compiled MSL self-test with one result-buffer argument;
-see the [reproduction command and numerical failure](../../docs/experiments/ptx-bit-insert.md#original-ed25519-kernel-compiles-and-launches-numerical-failure).
+that document includes the reproduction command, artifact/compiler checksums,
+and GPU transcript. This result covers one fixture, not all miner kernels.

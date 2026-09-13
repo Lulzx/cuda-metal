@@ -45,15 +45,11 @@ separately exported Rust-CUDA kernels and checks vector addition and SHA-256.
 Both kernels from the unchanged, pinned Rust-CUDA PTX artifact pass numerical
 checks on Apple M5 using runtime MSL compilation. See the harness's recorded
 provenance and regression commands; this is not full Rust-CUDA compatibility.
-The fresh full miner module also passes its launch probe after
-[selected-entry initializer handling](docs/experiments/ptx-initializer-selection.md);
-a focused GPU regression also covers byte-encoded pointers to read-only tables.
-[Multiline PTX calls](docs/experiments/ptx-multiline-calls.md) also pass a nested-helper
-GPU regression. [Narrow integer loads](docs/experiments/ptx-narrow-load-returns.md)
-pass exhaustive byte/halfword helper-return checks. Other miner entries still
-require separate validation. [Bit-field insertion](docs/experiments/ptx-bit-insert.md)
-passes numerical tests for both PTX widths. The original Ed25519 kernel now
-compiles and launches, but its numerical self-test still fails.
+The fresh full miner module passes its launch probe and its original
+[Ed25519 known-answer self-test](docs/experiments/ptx-halfword-tuples.md) on
+Apple M5, with intact result-buffer guards. Focused GPU regressions cover table
+pointers, multiline calls, narrow loads, bit insertion and halfword packing.
+Other miner kernels and broader input coverage still require validation.
 
 ## How it works
 

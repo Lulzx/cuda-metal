@@ -249,7 +249,10 @@ cases. Predicated and other-width forms remain explicit errors. All control-byte
 pairs across three source patterns pass numerical GPU tests; see
 [bit-insertion evidence](../experiments/ptx-bit-insert.md).
 
-With bit insertion implemented, the unchanged full miner Ed25519 self-test
-compiles to MSL and launches on Apple M5, but returns 0 in its expected-pass
-slot. Other slots/guards remain intact. Ed25519 numerical correctness is still
-unresolved; [reproduction and transcript](../experiments/ptx-bit-insert.md#original-ed25519-kernel-compiles-and-launches-numerical-failure).
+The full miner Ed25519 self-test now passes its single known-answer fixture on
+Apple M5 after fixing `mov.b32` two-halfword packing/unpacking. Previously the
+high halfword was silently lost and later stores wrote only 16 bits. The fix
+supports two 16-bit register lanes and optional unpack sinks; four-byte tuples,
+predicated forms and other unsupported layouts fail explicitly. This is not
+validation of all Ed25519 inputs or the Solana mining kernel. See the
+[root cause and original-kernel proof](../experiments/ptx-halfword-tuples.md).

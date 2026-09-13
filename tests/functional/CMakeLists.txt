@@ -2865,6 +2865,11 @@ add_test(
 
 if(APPLE)
     add_test(
+        NAME functional_ptx_tuple_move
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_tuple_move.py
+                ${CMAKE_BINARY_DIR}
+    )
+    add_test(
         NAME functional_ptx_bit_insert
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_bit_insert.py
                 ${CMAKE_BINARY_DIR}

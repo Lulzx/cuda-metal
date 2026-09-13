@@ -96,7 +96,8 @@ std::vector<std::string> destination_registers(const Instruction& instruction) {
     }
     std::vector<std::string> destinations = registers_in(instruction.operands.front());
     const bool tuple_move = root == "mov" &&
-                            instruction.opcode.find(".b64") != std::string::npos;
+                            (instruction.opcode == "mov.b32" ||
+                             instruction.opcode.find(".b64") != std::string::npos);
     // `ld.*.v2/.v4 {a, b, ...}, [addr]` defines every register of the tuple.
     const bool vector_load = root == "ld" &&
                              (instruction.opcode.find(".v2.") != std::string::npos ||
@@ -1689,6 +1690,10 @@ struct Importer {
                     if (container_bits > inferred.bit_width) {
                         inferred = Type::integer(container_bits);
                     }
+                } else if (instruction.opcode == "mov.b32" && instruction.operands.size() == 2 &&
+                           (instruction.operands[0].find('{') != std::string::npos ||
+                            instruction.operands[1].find('{') != std::string::npos)) {
+                    inferred = Type::integer(instruction.operands[0].find('{') != std::string::npos ? 16 : 32);
                 } else if (root == "mov" && instruction.operands.size() >= 2 &&
                            starts_with(trim(instruction.operands[1]), "0f")) {
                     inferred = Type::floating(32);
@@ -2241,6 +2246,89 @@ struct Importer {
             }
         }
 
+        if (instruction.opcode == "mov.b32" &&
+            std::any_of(instruction.operands.begin(), instruction.operands.end(),
+                        [](const std::string& operand) { return operand.find('{') != std::string::npos; })) {
+            if (instruction.operands.size() != 2 || !instruction.predicate.empty()) {
+                return fail(&instruction, "mov.b32 tuples require two operands and no predicate");
+            }
+            const bool unpack = instruction.operands[0].find('{') != std::string::npos;
+            const std::string tuple = trim(instruction.operands[unpack ? 0 : 1]);
+            const auto comma = tuple.find(',');
+            if (tuple.size() < 5 || tuple.front() != '{' || tuple.back() != '}' ||
+                comma == std::string::npos || tuple.find(',', comma + 1) != std::string::npos) {
+                return fail(&instruction, "mov.b32 currently requires exactly two 16-bit tuple lanes");
+            }
+            const std::vector<std::string> lanes = {
+                trim(tuple.substr(1, comma - 1)),
+                trim(tuple.substr(comma + 1, tuple.size() - comma - 2)),
+            };
+            for (const auto& lane : lanes) {
+                if (unpack && lane == "_") continue;
+                if (lane.empty() || lane != first_register(lane) ||
+                    ptx_register_container_bits(lane) != 16) {
+                    return fail(&instruction, "mov.b32 tuple lanes must be 16-bit registers (or unpack sinks)");
+                }
+            }
+            if (destinations.empty() || (unpack && lanes[0] == lanes[1])) {
+                return fail(&instruction, "mov.b32 tuple needs distinct non-sink destinations");
+            }
+            const Type u16 = Type::integer(16), u32 = Type::integer(32);
+            const auto emit = [&](OpCode opcode, Type type, std::vector<Operand> inputs) {
+                Operation temporary;
+                temporary.opcode = opcode;
+                temporary.location = operation.location;
+                const ValueId value = builder.next_value();
+                temporary.results = {value};
+                temporary.result_types = {type};
+                temporary.operands = std::move(inputs);
+                value_types[value] = type;
+                block->operations.push_back(std::move(temporary));
+                return Operand::value_ref(value, type);
+            };
+            if (!unpack) {
+                if (destinations.size() != 1 || ptx_register_container_bits(destinations[0]) != 32) {
+                    return fail(&instruction, "mov.b32 tuple packing requires a 32-bit scalar destination");
+                }
+                const Operand low = bit_container_of(operand_for(lanes[0], *environment, u16), u16);
+                const Operand high = bit_container_of(operand_for(lanes[1], *environment, u16), u16);
+                if (!(low.type == u16) || !(high.type == u16)) {
+                    return fail(&instruction, "mov.b32 tuple source values must contain 16 bits");
+                }
+                const Operand low32 = emit(OpCode::kConvert, u32, {low});
+                const Operand high32 = emit(OpCode::kConvert, u32, {high});
+                const Operand shifted = emit(OpCode::kShiftLeft, u32,
+                    {high32, Operand::immediate("16", u32)});
+                operation.opcode = OpCode::kBitOr;
+                operation.result_types = {u32};
+                operation.operands = {low32, shifted};
+                value_types[operation.results.front()] = u32;
+                block->operations.push_back(std::move(operation));
+                (*environment)[destinations[0]] = instruction_results[&instruction][0];
+            } else {
+                const Operand packed = bit_container_operand(1, u32);
+                if (!(packed.type == u32)) {
+                    return fail(&instruction, "mov.b32 tuple unpacking requires a 32-bit source value");
+                }
+                std::size_t result_index = 0;
+                for (std::size_t lane = 0; lane < 2; ++lane) {
+                    if (lanes[lane] == "_") continue;
+                    const Operand selected = lane == 0 ? packed : emit(OpCode::kShiftRight, u32,
+                        {packed, Operand::immediate("16", u32)});
+                    Operation extract;
+                    extract.opcode = OpCode::kConvert;
+                    extract.location = operation.location;
+                    const ValueId result_value = instruction_results[&instruction][result_index++];
+                    extract.results = {result_value};
+                    extract.result_types = {u16};
+                    extract.operands = {selected};
+                    value_types[result_value] = u16;
+                    block->operations.push_back(std::move(extract));
+                    (*environment)[lanes[lane]] = result_value;
+                }
+            }
+            return true;
+        }
         if (root == "mov" && instruction.opcode.find(".b64") != std::string::npos &&
             destinations.size() == 2 && instruction.operands.size() >= 2) {
             if (!instruction.predicate.empty()) {

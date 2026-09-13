@@ -48,7 +48,7 @@ NUMERICAL_PASS bit_insert: all 65536 position/length pairs x 3 patterns; b32/b64
 The full CUDA C++/offline-metallib suite and a fresh 123-entry inventory were not
 run for this change.
 
-## Original Ed25519 kernel: compiles and launches, numerical failure
+## Historical Ed25519 result at 7c8e53c: numerical failure
 
 The unchanged full miner PTX from commit
 `36ca4ed2be0cb16e6028f8ebd74deffd07500adc`, Actions run `34774932262`, now compiles
@@ -88,3 +88,7 @@ NUMERICAL_FAIL kernel=kernel_self_test_primitive_ed25519 slot=2 actual=0 expecte
 
 The next investigation needs to locate the first arithmetic divergence against
 a CPU reference; the previous missing-opcode compilation failure is resolved.
+
+Resolved by the [halfword-tuple fix](ptx-halfword-tuples.md): the original
+Ed25519 self-test now returns 1 on Apple M5 with all guards intact. The failed
+run above is retained as historical evidence.

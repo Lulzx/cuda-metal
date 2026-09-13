@@ -1174,6 +1174,37 @@ BODY:
                      "unsupported bit-insertion forms and mismatched operands fail explicitly");
     }
 
+
+    const auto tuple_module = [](const std::string& instruction) {
+        return ".version 7.1\n.target sm_80\n.address_size 64\n"
+               ".visible .entry tuple_move(.param .u64 input) {\n"
+               ".reg .b64 %rd1;\n.reg .b32 %r<3>;\n.reg .b16 %rs<5>;\n.reg .pred %p1;\n"
+               "ld.param.u64 %rd1, [input];\nld.global.u32 %r1, [%rd1];\n"
+               "cvt.u16.u32 %rs1, %r1;\nmov.u16 %rs2, 43981;\n"
+               "setp.eq.u32 %p1, %r1, 0;\n" + instruction + "\nret;\n}\n";
+    };
+    for (const auto* instruction : {"mov.b32 %r2, {%rs1, %rs2};",
+                                    "mov.b32 {%rs3, %rs4}, %r1;",
+                                    "mov.b32 {_, %rs4}, %r1;",
+                                    "mov.b32 {%rs3, _}, %r1;"}) {
+        const auto result = metal::compile_ptx_to_msl(tuple_module(instruction));
+        ok &= expect(result.ok, "mov.b32 halfword packing/unpacking and sink lanes compile");
+        if (!result.ok) std::cerr << result.error << "\n";
+    }
+    for (const auto* instruction : {"mov.b32 %r2, {%rs1};",
+                                    "mov.b32 %r2, {%rs1, %rs2, %rs1, %rs2};",
+                                    "mov.b32 %r2, {%r1, %rs2};",
+                                    "mov.b32 %r2, {%rs1, _};",
+                                    "mov.b32 %r2, {%rs1, 7};",
+                                    "mov.b32 {_, _}, %r1;",
+                                    "mov.b32 {%rs3, %rs3}, %r1;",
+                                    "mov.b32 {%rs3, %rs4}, %rd1;",
+                                    "@%p1 mov.b32 %r2, {%rs1, %rs2};"}) {
+        const auto result = metal::compile_ptx_to_msl(tuple_module(instruction));
+        ok &= expect(!result.ok && result.error.find("mov.b32") != std::string::npos,
+                     "unsupported/malformed mov.b32 tuples are rejected rather than scalarized");
+    }
+
     const std::string inferred_pointer_device_call_ptx = R"ptx(
 .version 7.0
 .target sm_80
