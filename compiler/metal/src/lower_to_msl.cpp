@@ -1575,6 +1575,7 @@ struct AstLowerer {
     LowerToMslResult result;
     MslFunction output;
     std::unordered_map<ir::ValueId, MslExpr> values;
+    std::unordered_set<ir::ValueId> used_values;
     std::unordered_map<ir::ValueId, MslExpr> mixed_pointer_tags;
     std::unordered_set<ir::ValueId> declared_block_arguments;
     std::unordered_map<ir::BlockId, std::size_t> block_indices;
@@ -1619,6 +1620,18 @@ struct AstLowerer {
           force_cfg_dispatcher(force_dispatcher),
           barrier_in_call_graph(has_barrier),
           pointer_specialization(specialization) {
+        // Include terminators, edge arguments and guard operands: a value
+        // unused in its defining block can still be observed elsewhere.
+        for (const auto& block : function.blocks) {
+            for (const auto& operation : block.operations) {
+                for (const auto& operand : operation.operands) {
+                    if (operand.kind == ir::OperandKind::kValue) used_values.insert(operand.value);
+                }
+                for (const auto& successor : operation.successors) {
+                    used_values.insert(successor.arguments.begin(), successor.arguments.end());
+                }
+            }
+        }
         const BuiltinUsage& required = builtin_usage.at(function.name);
         needs_thread_position = required.thread_position;
         needs_threadgroup_position = required.threadgroup_position;
@@ -3312,6 +3325,18 @@ struct AstLowerer {
             operation.opcode == ir::OpCode::kAddressSpaceCast) {
             if (operation.results.empty() || operation.operands.empty()) {
                 fail(&operation, "malformed conversion");
+                return std::nullopt;
+            }
+            if (operation.opcode == ir::OpCode::kConvert &&
+                operation.results.size() == 1 && operation.operands.size() == 1 &&
+                operation.operands.front().type.is_pointer() &&
+                operation.result_types.front().kind == ir::TypeKind::kInteger &&
+                operation.result_types.front().bit_width < 64) {
+                // Rust black_box leaves a dead local-address truncation in PTX.
+                // Conversion itself has no side effects. Do not emit an invalid
+                // Metal cast when no SSA use can observe its result.
+                if (!used_values.contains(operation.results.front())) return std::nullopt;
+                fail(&operation, "observable pointer-to-integer conversion has no faithful MSL representation");
                 return std::nullopt;
             }
             const bool reinterpret =

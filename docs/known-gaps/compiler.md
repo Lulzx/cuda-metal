@@ -267,3 +267,9 @@ Integer min/max now use explicitly typed Metal operands, including signed
 comparison semantics. The unchanged LLVM 19 Ed25519 entry now passes its single
 known-answer fixture on Apple M5 with other result slots and guards intact.
 This does not validate arbitrary inputs or full mining kernels. See [dual LLVM evidence](../experiments/dual-llvm-miner-smoke.md).
+
+Dead narrow pointer-to-integer conversions left by Rust black_box are omitted
+only when no SSA use (including CFG edge arguments) observes the result.
+Observable narrow pointer conversions remain unsupported. The original miner
+black_box-u64 and SHA-256-32 fixtures pass on M5 with both LLVM producers after
+this fix; see [partial sweep and fixes](../experiments/miner-fix-backlog.md).

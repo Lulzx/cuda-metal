@@ -1907,6 +1907,55 @@ ret;
         "cvt.u64.u32 %rd90, %r6;\nselp.b64 %rd91, %rd90, %rd91, %p3;");
     wide_select.insert(wide_select.find("add.u32 %r7, %r7, %r9;"), "cvt.u32.u64 %r9, %rd91;\n");
     ok &= expect(metal::compile_ptx_to_msl(wide_select).ok, "64-bit guarded self-select compiles");
+    const std::string dead_pointer_cast = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry dead_pointer_cast(.param .u64 input, .param .u64 output, .param .u32 count) {
+.local .align 8 .b8 depot[8];
+.reg .b64 %rd<10>;
+.reg .b32 %r<7>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd3, %r2, 8;
+add.u64 %rd4, %rd1, %rd3;
+add.u64 %rd5, %rd2, %rd3;
+ld.global.u64 %rd6, [%rd4];
+mov.u64 %rd7, depot;
+st.local.u64 [%rd7], %rd6;
+cvt.u32.u64 %r5, %rd7;
+ld.volatile.local.u64 %rd8, [%rd7];
+st.global.u64 [%rd5], %rd8;
+DONE:
+ret;
+}
+)ptx";
+    ok &= expect(metal::compile_ptx_to_msl(dead_pointer_cast).ok,
+                 "unused pointer truncation does not require numeric Metal pointer semantics");
+    for (const std::string use : {
+        "st.global.u32 [%rd5], %r5;",
+        "bra OBSERVE;\nOBSERVE:\nst.global.u32 [%rd5], %r5;",
+        "setp.eq.u32 %p1, %r5, 0;\n@%p1 bra DONE;"}) {
+        std::string observed = dead_pointer_cast;
+        observed.insert(observed.find("ld.volatile.local.u64"), use + "\n");
+        const auto rejected = metal::compile_ptx_to_msl(observed);
+        ok &= expect(!rejected.ok && rejected.error.find("observable pointer-to-integer") != std::string::npos,
+                     "observable truncation, cross-block and predicate uses stay rejected: " + rejected.error);
+    }
+    std::string merged_pointer_cast = dead_pointer_cast;
+    merged_pointer_cast.insert(merged_pointer_cast.find("ld.volatile.local.u64"),
+        "@%p1 bra ZERO;\nbra MERGE;\nZERO:\nmov.u32 %r5, 0;\nMERGE:\nst.global.u32 [%rd5], %r5;\n");
+    const auto merged_cast = metal::compile_ptx_to_msl(merged_pointer_cast);
+    ok &= expect(!merged_cast.ok && merged_cast.error.find("observable pointer-to-integer") != std::string::npos,
+                 "pointer truncation passed as a CFG block argument remains observable");
     if (!ok) return 1;
     std::cout << "PTX -> CuMetal IR -> typed MSL tests passed\n";
     return 0;

@@ -1,0 +1,30 @@
+
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry dead_pointer_cast(.param .u64 input, .param .u64 output, .param .u32 count) {
+.local .align 8 .b8 depot[8];
+.reg .b64 %rd<10>;
+.reg .b32 %r<7>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd3, %r2, 8;
+add.u64 %rd4, %rd1, %rd3;
+add.u64 %rd5, %rd2, %rd3;
+ld.global.u64 %rd6, [%rd4];
+mov.u64 %rd7, depot;
+st.local.u64 [%rd7], %rd6;
+cvt.u32.u64 %r5, %rd7;
+ld.volatile.local.u64 %rd8, [%rd7];
+st.global.u64 [%rd5], %rd8;
+DONE:
+ret;
+}

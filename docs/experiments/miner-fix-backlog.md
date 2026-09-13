@@ -23,7 +23,7 @@ negative cases, fix, run focused tests, retry affected original entries on both
 LLVM artifacts, commit and push. Keep each fix separate. A cleared first blocker
 may expose another; update this list rather than declaring the kernel validated.
 
-- [ ] **Unused pointer-to-integer conversions.** Start with black_box identity
+- [x] **Unused narrow pointer-to-integer conversions.** Start with black_box identity
   and small arithmetic checks. Determine whether results are used; never invent
   numeric pointer values to make observable casts compile.
 - [ ] **Device-call cycle rejection.** Inspect rand_xoshiro seed/from_seed call
@@ -44,3 +44,23 @@ may expose another; update this list rather than declaring the kernel validated.
 
 Full numerical correctness and the four mining kernels remain later milestones;
 see the [validation checklist](vanity-miner-validation-todo.md).
+
+## Fix 1: dead narrow pointer conversions
+
+The MSL emitter omits a pointer-to-integer conversion narrower than 64 bits only
+when its sole result has no SSA uses anywhere in the function, including edge
+arguments. Observable conversions still fail explicitly. Memory reads/stores
+remain intact. Independent review found no correctness issue; a diamond/phi
+negative regression was added in response to review.
+
+18 focused tests passed; the strengthened unit test also passed afterward.
+Original LLVM 7 and LLVM 19 black_box-u64 identity (slot 57) and SHA-256-32
+(slot 8) now numerically pass on M5 with other 117 slots and 16 guards intact.
+Logs: `/tmp/cumetal-dead-cast-retest`. This establishes four retested passes,
+not that all 52 original cast failures are resolved.
+
+The call-cycle investigation also confirmed a real self-call in LLVM 19's
+`rand_xoshiro::from_seed` zero-seed fallback, which constructs a fixed nonzero
+seed then calls itself. It is not merely a misidentified call-graph edge.
+Preserving its semantics needs a separate recursion-elimination design or a
+producer-side change; do not disable the cycle rejection.
