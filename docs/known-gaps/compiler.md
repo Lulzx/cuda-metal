@@ -229,3 +229,10 @@ integer registers. Clamp funnel shifts, specialized byte-permutation modes,
 and predicated forms remain unsupported here. Entry selection limits strict
 opcode checks to the selected entry and reachable helpers; it does not establish
 support for other kernels in the module or arbitrary Rust-CUDA workloads.
+
+PTX multiline `call` statements are assembled through the semicolon in entries
+and helpers, with source-line and lexical-scope preservation. Nested direct
+calls pass numerical Apple-GPU tests. This does not add indirect-call execution
+or arbitrary multiline instructions. The full miner Ed25519 entry now reaches
+a narrow-value return-typing failure in `subtle::black_box`; see
+[reproduction and evidence](../experiments/ptx-multiline-calls.md).

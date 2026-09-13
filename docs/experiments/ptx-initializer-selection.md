@@ -121,10 +121,11 @@ entry. It reads the original Ed25519 alias and all 7,680 words of the original
 outputs and 16 guard words. The CPU oracle zero-fills the two implicit trailing
 initializer bytes. This is a table/relocation test, not Ed25519 arithmetic.
 
-Compiling the unchanged `kernel_self_test_primitive_ed25519` currently fails at
-line 303275: the multiline call to `subtle::black_box` is parsed as an unsupported
-opcode. That is an independent parser blocker, encountered before initializer
-resolution. The original Ed25519 kernel has not passed compilation or execution.
+The initial unchanged `kernel_self_test_primitive_ed25519` attempt failed at
+line 303275 because the parser split a multiline call. The subsequent
+[multiline-call fix](ptx-multiline-calls.md) gets past that point and reaches a
+return-width error in `subtle::black_box`. The original Ed25519 kernel has not
+passed compilation or execution.
 
 Final validation passed all ten scoped CTests and the full-miner table diagnostic
 on Apple M5; see [compiler checksum and GPU transcript](full-miner-table-relocation.txt).

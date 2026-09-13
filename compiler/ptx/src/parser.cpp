@@ -31,6 +31,7 @@ std::string strip_comments(std::string_view text) {
         }
 
         if (state == State::kBlockComment) {
+            if (c == '\n') out.push_back(c);
             if (c == '*' && next == '/') {
                 state = State::kNormal;
                 ++i;
@@ -46,6 +47,7 @@ std::string strip_comments(std::string_view text) {
 
         if (c == '/' && next == '*') {
             state = State::kBlockComment;
+            out.push_back(' '); // Comments separate tokens rather than joining them.
             ++i;
             continue;
         }
@@ -596,8 +598,18 @@ void parse_instructions(const std::string& body,
 
     std::istringstream stream(body);
     std::string raw_line;
-    while (std::getline(stream, raw_line)) {
-        const int current_line = line++;
+    std::string remainder;
+    int remainder_line = 0;
+    while (true) {
+        int current_line;
+        if (!remainder.empty()) {
+            raw_line = std::move(remainder);
+            remainder.clear();
+            current_line = remainder_line;
+        } else {
+            if (!std::getline(stream, raw_line)) break;
+            current_line = line++;
+        }
         std::string line_text = trim(raw_line);
         if (line_text.empty()) {
             continue;
@@ -688,6 +700,48 @@ void parse_instructions(const std::string& body,
         if (line_text.empty()) {
             continue;
         }
+        // A physical newline is whitespace inside a PTX call. Rust/LLVM emits
+        // the return tuple, callee and argument tuple on separate lines. Assemble
+        // through the semicolon before operand splitting or register renaming.
+        std::string call_head = line_text;
+        if (call_head.front() == '@') {
+            const auto predicate_end = call_head.find_first_of(" \t");
+            if (predicate_end != std::string::npos) {
+                call_head = trim(call_head.substr(predicate_end + 1));
+            }
+        }
+        const std::string candidate_opcode = call_head.substr(0, call_head.find_first_of(" \t"));
+        std::string assembly_error;
+        if (candidate_opcode == "call" || starts_with(candidate_opcode, "call.")) {
+            int last_line = current_line;
+            std::size_t semi = line_text.find(';');
+            while (semi == std::string::npos && std::getline(stream, raw_line)) {
+                last_line = line++;
+                line_text += " " + trim(raw_line);
+                semi = line_text.find(';');
+            }
+            if (semi == std::string::npos) {
+                assembly_error = "unterminated PTX call at line " + std::to_string(current_line);
+            } else {
+                remainder = trim(line_text.substr(semi + 1));
+                remainder_line = last_line;
+                if (!remainder.empty()) {
+                    // Braces stripped from the original physical line close
+                    // only after its remaining instructions have been parsed.
+                    remainder += std::string(pending_closes, '}');
+                    pending_closes = 0;
+                }
+                line_text.resize(semi + 1);
+                int parentheses = 0;
+                for (char ch : line_text) {
+                    if (ch == '(') ++parentheses;
+                    if (ch == ')' && --parentheses < 0) break;
+                }
+                if (parentheses != 0) {
+                    assembly_error = "unbalanced PTX call parentheses at line " + std::to_string(current_line);
+                }
+            }
+        }
         line_text = rename_bare_registers(line_text);
 
         // `name : .callprototype (...) _ (...);` declares the signature of an
@@ -759,12 +813,28 @@ void parse_instructions(const std::string& body,
             instruction.operands = split_operands(line_text.substr(ws + 1));
         }
 
-        instruction.supported = !is_explicitly_unsupported(instruction.opcode) &&
+        if (opcode_root(instruction.opcode) == "call" && assembly_error.empty()) {
+            // Do not absorb a following instruction when a call's semicolon
+            // is missing: top-level operands are single names or complete tuples.
+            for (const auto& operand : instruction.operands) {
+                if ((operand.front() == '(' && operand.back() != ')') ||
+                    (operand.front() != '(' && operand.find_first_of(" \t") != std::string::npos)) {
+                    assembly_error = "malformed PTX call operand at line " + std::to_string(current_line);
+                    break;
+                }
+            }
+            if (instruction.operands.empty()) {
+                assembly_error = "missing PTX call target at line " + std::to_string(current_line);
+            }
+        }
+        instruction.supported = assembly_error.empty() &&
+                                !is_explicitly_unsupported(instruction.opcode) &&
                                 is_supported_opcode(instruction.opcode);
         if (!instruction.supported) {
             const std::string targeted = targeted_unsupported_message(instruction.opcode);
-            warnings->push_back(!targeted.empty()
-                                     ? targeted
+            warnings->push_back(!assembly_error.empty()
+                                     ? assembly_error
+                                     : !targeted.empty() ? targeted
                                      : "unsupported opcode '" + instruction.opcode + "' at line " +
                                            std::to_string(instruction.line));
         }

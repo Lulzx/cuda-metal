@@ -1081,6 +1081,16 @@ BODY:
                  "typed PTX materializes direct scalar device helpers and return slots");
     if (!direct_device_call.ok) std::cerr << direct_device_call.error << "\n";
 
+
+    std::string multiline_device_call_ptx = direct_device_call_ptx;
+    const std::string one_line_call = "call.uni (retval0), add_one, (param0);";
+    multiline_device_call_ptx.replace(multiline_device_call_ptx.find(one_line_call),
+        one_line_call.size(), "call.uni (retval0),\n add_one,\n (\n param0\n );");
+    const auto multiline_device_call = metal::compile_ptx_to_msl(multiline_device_call_ptx);
+    ok &= expect(multiline_device_call.ok && multiline_device_call.source == direct_device_call.source,
+                 "multiline direct device call produces identical MSL to the one-line form");
+    if (!multiline_device_call.ok) std::cerr << multiline_device_call.error << "\n";
+
     const std::string inferred_pointer_device_call_ptx = R"ptx(
 .version 7.0
 .target sm_80
@@ -1222,11 +1232,17 @@ BODY:
 .version 7.0
 .target sm_80
 .visible .func recursive_helper() {
-    call.uni recursive_helper, ();
+    call.uni
+    recursive_helper,
+    (
+    );
     ret;
 }
 .visible .entry recursive_device_call() {
-    call.uni recursive_helper, ();
+    call.uni
+    recursive_helper,
+    (
+    );
     ret;
 }
 )ptx";

@@ -463,6 +463,42 @@ $L_one:
         return 1;
     }
 
+
+    std::vector<std::string> call_warnings;
+    const auto calls = cumetal::ptx::parse_instruction_block(
+        ".reg .b32 arg;\n"
+        "@%p1 call.uni (result), // return slot\n"
+        "helper, /* comment\n spanning lines */\n"
+        "(arg,\n 7); ret;\n"
+        "call\n no_args;\n", 100, &call_warnings);
+    if (!expect(call_warnings.empty() && calls.instructions.size() == 3,
+                "multiline calls assemble once and retain trailing instructions") ||
+        !expect(calls.instructions[0].opcode == "call.uni" &&
+                calls.instructions[0].predicate == "@%p1" &&
+                calls.instructions[0].line == 101 &&
+                calls.instructions[0].operands == std::vector<std::string>({"(result)", "helper", "(%r_cm_arg, 7)"}),
+                "call preserves predicate, return slot, callee, argument tuple and start line") ||
+        !expect(calls.instructions[1].opcode == "ret" && calls.instructions[1].line == 105 &&
+                calls.instructions[2].opcode == "call" && calls.instructions[2].line == 106 &&
+                calls.instructions[2].operands == std::vector<std::string>({"no_args"}),
+                "trailing and subsequent statements retain physical source lines")) return 1;
+
+    call_warnings.clear();
+    const auto call_scope = cumetal::ptx::parse_instruction_block(
+        "{ .reg .b32 arg; call helper, (arg); call helper, (arg); }\n"
+        "call helper, (arg);\n", 1, &call_warnings);
+    if (!expect(call_warnings.empty() && call_scope.instructions.size() == 3 &&
+                call_scope.instructions[0].operands[1] == "(%r_cm_arg)" &&
+                call_scope.instructions[1].operands[1] == "(%r_cm_arg)" &&
+                call_scope.instructions[2].operands[1] == "(arg)",
+                "call remainders keep bare register scopes until the closing brace")) return 1;
+    for (const auto* text : {"call.uni (r),\nhelper,\n(a)", "call helper,\n(a;", "call helper,\na);", "call helper,\n(a)\nret;", "call;"}) {
+        call_warnings.clear();
+        const auto invalid = cumetal::ptx::parse_instruction_block(text, 20, &call_warnings);
+        if (!expect(!call_warnings.empty() && invalid.instructions.size() == 1 &&
+                    !invalid.instructions[0].supported && invalid.instructions[0].line == 20,
+                    "unterminated/unbalanced calls are explicit unsupported instructions")) return 1;
+    }
     std::printf("PASS: ptx parser unit tests\n");
     return 0;
 }

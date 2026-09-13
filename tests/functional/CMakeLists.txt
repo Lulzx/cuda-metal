@@ -2865,6 +2865,13 @@ add_test(
 
 if(APPLE)
     add_test(
+        NAME functional_ptx_multiline_call
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/demos/rust-ptx/run.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/reference/ptx_multiline_call.ptx
+                --build-dir ${CMAKE_BINARY_DIR} --mode vecadd
+                --out ${CMAKE_CURRENT_BINARY_DIR}/ptx-multiline-call
+    )
+    add_test(
         NAME functional_ptx_relocated_table
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_relocated_table.py
                 ${CMAKE_BINARY_DIR}

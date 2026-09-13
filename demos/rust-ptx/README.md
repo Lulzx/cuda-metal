@@ -131,5 +131,7 @@ compatibility task.
 The typed importer now resolves complete byte-encoded pointers to private,
 read-only numeric tables when the pointer is used only by direct 64-bit loads.
 See [supported forms, exclusions, and the full-miner table diagnostic](../../docs/experiments/ptx-initializer-selection.md#complete-pointer-initializer-resolution).
-This does not establish full Ed25519 compatibility; its unchanged entry currently
-hits a separate multiline-call parser failure.
+This does not establish full Ed25519 compatibility. The subsequent
+[multiline-call parser fix](../../docs/experiments/ptx-multiline-calls.md) passes
+nested-helper numerical tests and moves the unchanged Ed25519 entry to a
+return-width error in `subtle::black_box`.
