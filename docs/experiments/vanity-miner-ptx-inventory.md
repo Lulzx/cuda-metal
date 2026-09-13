@@ -1,5 +1,10 @@
 # Full vanity-miner PTX compilation inventory
 
+Historical baseline at consumer commit `210939b`. The subsequent
+[initialized-data selection change](ptx-initializer-selection.md) unblocks
+and numerically verifies the full-module launch probe; the counts below have
+not been replaced with an unmeasured post-fix inventory.
+
 This baseline measures strict typed PTX-to-MSL emission only. It does not
 measure Apple's MSL compilation, runtime loading, numerical GPU correctness,
 or mining throughput. See the [per-entry JSON report](vanity-miner-ptx-inventory.json)

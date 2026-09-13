@@ -213,6 +213,11 @@ distinct installations and runtime-load results.
 
 ## Rust PTX integration coverage
 
+Initialized-data decoding now follows selected-entry/helper symbol references;
+unused unsupported initializers no longer block independent kernels. Required
+symbolic initializers still fail: global relocation support is not implemented.
+See the [design and full-miner launch-probe evidence](../experiments/ptx-initializer-selection.md).
+
 The typed path numerically passes the pinned Rust vector-add and fixed-32-byte
 SHA-256 artifact on Apple M5; see [provenance and commands](../../demos/rust-ptx/README.md#verified-rust-artifact-2026-09-13).
 Supported additions are `shf.{l,r}.wrap.b32`, generic `prmt.b32` (including

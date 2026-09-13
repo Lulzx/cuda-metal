@@ -246,6 +246,38 @@ std::string parameter_name_from_operand(std::string_view operand) {
     return inside;
 }
 
+// Collect whole PTX identifier tokens, not substrings. Besides direct symbols,
+// operands can contain addresses, offsets, tuples, or generic(symbol) forms.
+// Register names, numeric literals, and quoted strings are not global roots.
+void collect_operand_symbols(std::string_view operand,
+                             std::unordered_set<std::string>* symbols) {
+    const auto token_char = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) ||
+               c == '_' || c == '.' || c == '$' || c == '%';
+    };
+    for (std::size_t cursor = 0; cursor < operand.size();) {
+        if (operand[cursor] == '"') {
+            ++cursor;
+            while (cursor < operand.size()) {
+                const char c = operand[cursor++];
+                if (c == '\\' && cursor < operand.size()) ++cursor;
+                else if (c == '"') break;
+            }
+            continue;
+        }
+        if (!token_char(operand[cursor])) {
+            ++cursor;
+            continue;
+        }
+        const std::size_t begin = cursor++;
+        while (cursor < operand.size() && token_char(operand[cursor])) ++cursor;
+        const char first = operand[begin];
+        if (first != '%' && !std::isdigit(static_cast<unsigned char>(first))) {
+            symbols->emplace(operand.substr(begin, cursor - begin));
+        }
+    }
+}
+
 std::vector<std::string> grouped_names(std::string_view operand) {
     std::string contents = trim(operand);
     if (contents.size() >= 2 && contents.front() == '(' && contents.back() == ')') {
@@ -941,7 +973,8 @@ struct InitializedByteArrayScan {
     std::string error;
 };
 
-InitializedByteArrayScan scan_initialized_byte_arrays(std::string_view ptx) {
+InitializedByteArrayScan scan_initialized_byte_arrays(
+    std::string_view ptx, const std::unordered_set<std::string>& referenced_symbols) {
     InitializedByteArrayScan result;
     std::istringstream lines{std::string(ptx)};
     std::string line;
@@ -950,6 +983,11 @@ InitializedByteArrayScan scan_initialized_byte_arrays(std::string_view ptx) {
     );
     const std::regex scalar_declaration(
         R"(^\s*(?:(?:\.visible|\.extern|\.weak)\s+)?\.(const|global)\s+\.align\s+([0-9]+)\s+\.[bus](8|16|32|64)\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*=\s*([^;]+)\s*;\s*$)"
+    );
+    // Recognize the declaration's identity independently of its supported
+    // initializer encoding. Do not guess at an unidentifiable declaration.
+    const std::regex declaration_name(
+        R"(^\s*(?:(?:\.visible|\.extern|\.weak)\s+)?\.(?:const|global)\s+(?:\.align\s+[0-9]+\s+)?(?:\.v[24]\s+)?\.[busf][0-9]+\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*(?:\[[^\]\r\n]*\]\s*)*=)"
     );
     while (std::getline(lines, line)) {
         const std::size_t comment = line.find("//");
@@ -961,6 +999,16 @@ InitializedByteArrayScan scan_initialized_byte_arrays(std::string_view ptx) {
         }
 
         std::smatch match;
+        if (!std::regex_search(line, match, declaration_name)) {
+            result.error = "cannot identify initialized PTX declaration: " + trim(line);
+            return result;
+        }
+        if (!referenced_symbols.contains(match[1].str())) continue;
+
+        // All supported initializers below contain numeric bytes/scalars only.
+        // A referenced symbolic initializer still fails here; its dependencies
+        // must never be silently replaced by zero or omitted. If relocation
+        // support is added, global-to-global reachability must be added with it.
         if (line.find('{') == std::string::npos &&
             std::regex_match(line, match, scalar_declaration)) {
             std::uint64_t alignment = 0;
@@ -4034,13 +4082,6 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     }
     importer.implicit_definitions = scan_implicit_definitions(ptx);
 
-    const InitializedByteArrayScan initialized_arrays =
-        scan_initialized_byte_arrays(ptx);
-    if (!initialized_arrays.error.empty()) {
-        importer.result.error = initialized_arrays.error;
-        return importer.result;
-    }
-
     cumetal::ptx::ParseOptions parse_options;
     // Parse the module first; strict opcode checks apply to the selected entry
     // and its reachable helpers, not unrelated kernels in the same PTX file.
@@ -4116,31 +4157,33 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     };
     collect_printf_scaffold(*selected_entry);
     for (const auto* helper : reachable_helpers) collect_printf_scaffold(*helper);
+
+    std::unordered_set<std::string> referenced_symbols;
+    std::unordered_set<std::string> non_printf_referenced_symbols;
+    const auto collect_function_symbols = [&](const cumetal::ptx::EntryFunction& function) {
+        for (const Instruction& instruction : function.instructions) {
+            for (const std::string& operand : instruction.operands) {
+                collect_operand_symbols(operand, &referenced_symbols);
+                if (!decoded_printf_scaffold_lines.contains(instruction.line)) {
+                    collect_operand_symbols(operand, &non_printf_referenced_symbols);
+                }
+            }
+        }
+    };
+    collect_function_symbols(*selected_entry);
+    for (const auto* helper : reachable_helpers) collect_function_symbols(*helper);
+
+    const InitializedByteArrayScan initialized_arrays =
+        scan_initialized_byte_arrays(ptx, referenced_symbols);
+    if (!initialized_arrays.error.empty()) {
+        importer.result.error = initialized_arrays.error;
+        return importer.result;
+    }
     const auto symbol_is_referenced = [&](std::string_view symbol,
                                           bool include_printf_scaffold) {
-        const auto instruction_references_symbol = [&](const Instruction& instruction) {
-            if (!include_printf_scaffold &&
-                decoded_printf_scaffold_lines.contains(instruction.line)) {
-                return false;
-            }
-            return std::any_of(
-                instruction.operands.begin(), instruction.operands.end(),
-                [&](const std::string& operand) {
-                    return parameter_name_from_operand(operand) == symbol;
-                });
-        };
-        if (std::any_of(selected_entry->instructions.begin(),
-                        selected_entry->instructions.end(),
-                        instruction_references_symbol)) {
-            return true;
-        }
-        return std::any_of(
-            reachable_helpers.begin(), reachable_helpers.end(),
-            [&](const cumetal::ptx::EntryFunction* helper) {
-                return std::any_of(helper->instructions.begin(),
-                                   helper->instructions.end(),
-                                   instruction_references_symbol);
-            });
+        const auto& symbols = include_printf_scaffold ? referenced_symbols
+                                                      : non_printf_referenced_symbols;
+        return symbols.contains(std::string(symbol));
     };
     const auto symbol_is_written = [&](std::string_view symbol) {
         const auto writes_symbol = [&](const Instruction& instruction) {

@@ -1,0 +1,8 @@
+Full miner launch probe, Apple M5, 2026-09-13
+Producer commit: 36ca4ed2be0cb16e6028f8ebd74deffd07500adc
+PTX SHA-256: 41db05e2e1b6281923b9d9f8f157ced57f69a9a9e9d794d0513db6e618bbb6d7
+Compiler SHA-256: 25b8c8d80e62dca23198168c8c010a4ebe5ca212ce653476145968378a87ee10
+Full unchanged module; strict typed PTX; runtime MSL compilation; specializations disabled.
+
+CUMETAL_PROVENANCE event=kernel_launch kernel="kernel_self_test_stub" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name="Apple M5" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=5375 grid=(1,1,1) block=(1,1,1) unsupported_reason=""
+NUMERICAL_PASS full-miner kernel_self_test_stub: slot 0 = 1; remaining 117 result slots and 16 guard words intact

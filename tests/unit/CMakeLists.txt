@@ -33,6 +33,12 @@ add_executable(cumetal_ptx_ir_msl_test
     ptx_ir_msl_test.cpp
 )
 
+add_executable(cumetal_ptx_global_reachability_test
+    ptx_global_reachability_test.cpp
+)
+target_link_libraries(cumetal_ptx_global_reachability_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_global_reachability_test PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(cumetal_nvvm_ir_msl_test
     nvvm_ir_msl_test.cpp
 )
@@ -390,6 +396,7 @@ add_test(NAME unit_nvrtc_options COMMAND cumetal_nvrtc_options_test)
 add_test(NAME unit_cumetal_ir COMMAND cumetal_ir_test)
 add_test(NAME unit_msl_ast COMMAND cumetal_msl_ast_test)
 add_test(NAME unit_ptx_ir_msl COMMAND cumetal_ptx_ir_msl_test)
+add_test(NAME unit_ptx_global_reachability COMMAND cumetal_ptx_global_reachability_test)
 add_test(NAME unit_ptx_inventory
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/ptx_inventory_test.py)
 add_test(NAME unit_nvvm_ir_msl COMMAND cumetal_nvvm_ir_msl_test)

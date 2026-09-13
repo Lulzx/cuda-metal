@@ -2877,6 +2877,13 @@ if(APPLE)
                 --out ${CMAKE_CURRENT_BINARY_DIR}/rust-ptx-control
     )
     add_test(
+        NAME functional_ptx_unused_initializer
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/demos/rust-ptx/run.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/reference/ptx_unused_initializer.ptx
+                --build-dir ${CMAKE_BINARY_DIR} --mode vecadd
+                --out ${CMAKE_CURRENT_BINARY_DIR}/ptx-unused-initializer
+    )
+    add_test(
         NAME functional_rust_ptx_export
         COMMAND python3 ${CMAKE_SOURCE_DIR}/demos/rust-ptx/run.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/reference/rust_ptx_export_93d104d.ptx
