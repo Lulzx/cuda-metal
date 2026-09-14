@@ -9,6 +9,12 @@ beside the generated MSL when loading the module so the runtime can recover
 argument layout. A sidecar write failure fails compilation; this metadata does
 not extend the set of supported PTX instructions or argument forms.
 
+Integer loads retain their destination register width while accessing the
+instruction's memory width. Integer memory/parameter stores and `cvt` source
+operands discard high register bits when required by their instruction width;
+unsigned widening preserves the source bit pattern even for negative-spelled
+literals. These rules do not relax argument or return ABI byte-width checks.
+
 ## Typed CuMetal IR migration
 
 With CUDA Clang 21-23, the reviewed production-metallib matrix is:

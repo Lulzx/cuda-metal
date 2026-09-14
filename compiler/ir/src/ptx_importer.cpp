@@ -3,6 +3,7 @@
 #include "cumetal/passes/printf_lower.h"
 #include "cumetal/ptx/parser.h"
 #include "ptx_inline_asm.h"
+#include "ptx_operand_conversion.h"
 
 #include <algorithm>
 #include <cctype>
@@ -1671,9 +1672,20 @@ struct Importer {
                     }
                 }
                 for (const std::string& destination : destinations) {
+                    Type destination_type = inferred;
+                    if (root == "ld" && !starts_with(instruction.opcode, "ld.param") &&
+                        inferred.kind == TypeKind::kInteger) {
+                        // PTX integer loads extend to each destination register's
+                        // width. Keep memory width/signedness on the load so MSL
+                        // reads only the requested bytes and extends correctly.
+                        // Parameter loads retain their separate ABI/pointer path.
+                        destination_type = Type::integer(std::max(
+                            ptx_scalar_type(instruction.opcode).bit_width,
+                            ptx_register_container_bits(destination)));
+                    }
                     const auto existing = register_types.find(destination);
-                    if (existing == register_types.end() || !(existing->second == inferred)) {
-                        register_types[destination] = inferred;
+                    if (existing == register_types.end() || !(existing->second == destination_type)) {
+                        register_types[destination] = destination_type;
                         changed = true;
                     }
                 }
@@ -1918,46 +1930,12 @@ struct Importer {
                        ? operand_for(instruction.operands[index], *environment, fallback)
                        : Operand::immediate("0", fallback);
         };
-        const auto bit_container_of = [&](Operand operand, const Type& expected) {
-            const bool same_width = operand.type.bit_width == expected.bit_width;
-            const bool float_integer_pair =
-                (operand.type.kind == TypeKind::kFloat &&
-                 expected.kind == TypeKind::kInteger) ||
-                (operand.type.kind == TypeKind::kInteger &&
-                 expected.kind == TypeKind::kFloat);
-            if (!same_width || !float_integer_pair) return operand;
-            Operation conversion;
-            conversion.opcode = OpCode::kConvert;
-            conversion.location = operation.location;
-            conversion.operands.push_back(operand);
-            const ValueId converted = builder.next_value();
-            conversion.results.push_back(converted);
-            conversion.result_types.push_back(expected);
-            conversion.attributes["bitcast"] = "true";
-            value_types[converted] = expected;
-            block->operations.push_back(std::move(conversion));
-            return Operand::value_ref(converted, expected);
+        detail::PtxOperandConversion conversions(builder, *block, value_types, operation.location);
+        const auto bit_container_of = [&](Operand input, const Type& expected) {
+            return conversions.bit_container(std::move(input), expected);
         };
         const auto bit_container_operand = [&](std::size_t index, const Type& expected) {
-            Operand operand = source_operand(index, expected);
-            const bool same_width = operand.type.bit_width == expected.bit_width;
-            const bool float_integer_pair =
-                (operand.type.kind == TypeKind::kFloat &&
-                 expected.kind == TypeKind::kInteger) ||
-                (operand.type.kind == TypeKind::kInteger &&
-                 expected.kind == TypeKind::kFloat);
-            if (!same_width || !float_integer_pair) return operand;
-            Operation conversion;
-            conversion.opcode = OpCode::kConvert;
-            conversion.location = operation.location;
-            conversion.operands.push_back(operand);
-            const ValueId converted = builder.next_value();
-            conversion.results.push_back(converted);
-            conversion.result_types.push_back(expected);
-            conversion.attributes["bitcast"] = "true";
-            value_types[converted] = expected;
-            block->operations.push_back(std::move(conversion));
-            return Operand::value_ref(converted, expected);
+            return bit_container_of(source_operand(index, expected), expected);
         };
         const auto memory_address_operand = [&](std::size_t index,
                                                 const Type& fallback_pointer) {
@@ -2260,8 +2238,8 @@ struct Importer {
             }
             const std::string name = parameter_name_from_operand(instruction.operands[0]);
             if (name.empty()) return fail(&instruction, "call parameter slot has no name");
-            const Operand stored =
-                source_operand(1, ptx_scalar_type(instruction.opcode));
+            const Type store_type = ptx_scalar_type(instruction.opcode);
+            const Operand stored = conversions.low_integer_bits(source_operand(1, store_type), store_type);
             const std::int64_t byte_offset =
                 memory_operand_offset(instruction.operands[0]);
             if (byte_offset < 0) {
@@ -2597,6 +2575,9 @@ struct Importer {
                     ? AddressSpace::kConstant
                     : AddressSpace::kDevice;
             const Type element_type = ptx_scalar_type(instruction.opcode);
+            const auto store_value = [&](Operand input) {
+                return conversions.low_integer_bits(bit_container_of(input, element_type), element_type);
+            };
             const Operand base = memory_address_operand(
                 0, Type::pointer(element_type, store_address_space));
             // Vector stores: `st.global.v2.b32 [addr], {%r1, %r2}` writes each
@@ -2630,8 +2611,8 @@ struct Importer {
                 store.location = operation.location;
                 store.attributes["ptx_opcode"] = instruction.opcode;
                 store.operands.push_back(Operand::value_ref(pointer, base.type));
-                store.operands.push_back(bit_container_of(
-                    operand_for(lane_registers[lane], *environment, element_type), element_type));
+                store.operands.push_back(store_value(
+                    operand_for(lane_registers[lane], *environment, element_type)));
                 store.attributes["alignment"] = std::to_string(type_size(element_type));
                 if (!append_guard(&store, instruction, *environment)) return false;
                 block->operations.push_back(std::move(store));
@@ -2639,9 +2620,8 @@ struct Importer {
             operation.operands.push_back(base);
             operation.operands.push_back(
                 lanes > 1
-                    ? bit_container_of(operand_for(lane_registers[0], *environment, element_type),
-                                       element_type)
-                    : bit_container_operand(1, element_type));
+                    ? store_value(operand_for(lane_registers[0], *environment, element_type))
+                    : store_value(source_operand(1, element_type)));
             operation.attributes["address"] = instruction.operands[0];
             operation.attributes["alignment"] =
                 std::to_string(type_size(ptx_scalar_type(instruction.opcode)));
@@ -2871,6 +2851,10 @@ struct Importer {
             } else {
                 operation.operands.push_back(
                     bit_container_operand(1, ptx_cvt_source_type(instruction.opcode)));
+            }
+            if (operation.operands.size() == 1) {
+                operation.operands.front() = conversions.low_integer_bits(
+                    operation.operands.front(), ptx_cvt_source_type(instruction.opcode));
             }
         } else if (root == "rcp") {
             operation.opcode = OpCode::kDiv;
@@ -3111,6 +3095,9 @@ struct Importer {
                     argument = slot->second;
                 }
                 if (!(argument.type == signature->argument_types[i])) {
+                    if (type_size(argument.type) != type_size(signature->argument_types[i])) {
+                        return fail(&instruction, "PTX call parameter value does not fit its declared argument type");
+                    }
                     Operation conversion;
                     conversion.opcode = OpCode::kConvert;
                     conversion.location = operation.location;

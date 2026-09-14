@@ -3405,6 +3405,13 @@ struct AstLowerer {
                 operation.operands.front().type.kind == ir::TypeKind::kInteger) {
                 input = MslExpression::cast(
                     MslType::sint(operation.operands.front().type.bit_width), input);
+            } else if (operation.operands.front().type.kind == ir::TypeKind::kInteger &&
+                       operation.result_types.front().kind == ir::TypeKind::kInteger &&
+                       operation.result_types.front().bit_width > operation.operands.front().type.bit_width) {
+                // Literal spelling is not its IR width: ulong(-1) sign-extends
+                // the C++ literal, whereas widening a u32 -1 requires
+                // ulong(uint(-1)). Establish the source bit pattern first.
+                input = MslExpression::cast(lower_type(operation.operands.front().type), input);
             }
             return declare_result(
                 operation,
