@@ -58,3 +58,5 @@ python3 demos/rust-ptx/run_self_test.py "$OUT.metal" \
 Compilation was bounded at 600 seconds per entry, runtime attempts at 300 seconds.
 Local output modules, ABI sidecars and logs: `/tmp/llvm21-address-validation`.
 Next bounded batch: the four LLVM 21 WIF variants (slots 21–24).
+
+Follow-up: [all four LLVM 21 WIF variants now pass](llvm21-wif-checks.md).

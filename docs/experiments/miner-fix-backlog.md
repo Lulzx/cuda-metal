@@ -479,3 +479,12 @@ other slots and all 16 guards remain intact. No additional compiler change was
 needed. [Nine-entry evidence and timings](llvm21-address-checks.md).
 Next bounded batch: LLVM 21 WIF variants (21–24); full-suite and mining validation
 remain incomplete.
+
+## LLVM 21 WIF validation
+
+All four network/compression variants (21–24) compile and numerically pass on M5
+at `e4ba46b`, without further compiler changes. Every selected slot equals 1;
+other slots and 16 guards remain intact. Original PTX is unchanged.
+[Evidence, timings, and scope](llvm21-wif-checks.md).
+Next bounded batch: Shallenge checks (25–27). Full-suite and mining validation
+remain incomplete.

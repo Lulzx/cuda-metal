@@ -1,0 +1,108 @@
+{
+  "commit": "e4ba46b3930a8071ff3fae802f9415d92caf2300",
+  "ptx": {
+    "path": "/Users/brandon/Downloads/vanity-miner-aarch64-llvm21/output-llvm21.ptx",
+    "bytes": 25161784,
+    "sha256": "2840485fe193d39cfdbb2e5babd25f6772a08a2550843c20b3beba5a26185f4b"
+  },
+  "compiler": {
+    "path": "/Users/brandon/Desktop/gpu/cuda-metal/build-rust-ptx-apple/cumetalc",
+    "bytes": 3220992,
+    "sha256": "4c5c932658a5b3eab8ea0ff5a6d7d5c9d084b8ecca9120ff15457bb16908805b"
+  },
+  "runtime": {
+    "path": "/Users/brandon/Desktop/gpu/cuda-metal/build-rust-ptx-apple/libcumetal.dylib",
+    "bytes": 5004992,
+    "sha256": "6e41295ad0d934f15b70bfa7d12a9c93b74f5852d947e07eff130d78a824f30f"
+  },
+  "results": [
+    {
+      "slot": 21,
+      "entry": "kernel_self_test_wif_compressed_mainnet",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 61.931,
+        "log": "wrote \"/tmp/llvm21-wif-validation/kernel_self_test_wif_compressed_mainnet.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-wif-validation/kernel_self_test_wif_compressed_mainnet.metal",
+        "bytes": 1438427,
+        "sha256": "cf45738451f332b03ae28ffeb973495ebbf8f19c288ae7a5a6d94dcea1260f62"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 22.813,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_wif_compressed_mainnet\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=331875 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_wif_compressed_mainnet slot=21 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 331875
+    },
+    {
+      "slot": 22,
+      "entry": "kernel_self_test_wif_uncompressed_mainnet",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 61.187,
+        "log": "wrote \"/tmp/llvm21-wif-validation/kernel_self_test_wif_uncompressed_mainnet.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-wif-validation/kernel_self_test_wif_uncompressed_mainnet.metal",
+        "bytes": 1392072,
+        "sha256": "49efb8fb8f1d21ffdc9e20b9a80842de70469bc1ddd3b497016465bf8e8ad8cd"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 26.353,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_wif_uncompressed_mainnet\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=332916 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_wif_uncompressed_mainnet slot=22 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 332916
+    },
+    {
+      "slot": 23,
+      "entry": "kernel_self_test_wif_compressed_testnet",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 81.674,
+        "log": "wrote \"/tmp/llvm21-wif-validation/kernel_self_test_wif_compressed_testnet.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-wif-validation/kernel_self_test_wif_compressed_testnet.metal",
+        "bytes": 1438359,
+        "sha256": "e8c8a5917e99050f6cdb51ba534b36e230136e6bdbcc1696b445a42673d5f136"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 16.607,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_wif_compressed_testnet\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=336041 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_wif_compressed_testnet slot=23 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 336041
+    },
+    {
+      "slot": 24,
+      "entry": "kernel_self_test_wif_uncompressed_testnet",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 82.698,
+        "log": "wrote \"/tmp/llvm21-wif-validation/kernel_self_test_wif_uncompressed_testnet.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-wif-validation/kernel_self_test_wif_uncompressed_testnet.metal",
+        "bytes": 1392017,
+        "sha256": "1c4a9ed55b4c979f7749998780441a31535b7ae1a85778505730ea7228a34188"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 14.368,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_wif_uncompressed_testnet\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=327124 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_wif_uncompressed_testnet slot=24 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 327124
+    }
+  ],
+  "ptx_modified": false,
+  "metal_instrumented": false,
+  "workload_specializations": false,
+  "device": "Apple M5",
+  "compile_workers": 2,
+  "gpu_launches": "sequential",
+  "compile_timeout_seconds": 600,
+  "runtime_timeout_seconds": 300
+}

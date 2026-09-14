@@ -6,7 +6,8 @@ bounded CFG proofs. The earlier [smoke-test ledger](llvm21-miner-smoke.md)
 records probe/SHA-512 passes and the now-resolved import failures.
 [Uncompressed secp256k1 and all eight Ethereum/Bitcoin checks now pass](llvm21-address-checks.md)
 individually on M5, with other slots and guards intact.
-Next bounded batch: LLVM 21 WIF variants, slots 21–24.
+[All four LLVM 21 WIF variants, slots 21–24, also pass](llvm21-wif-checks.md).
+Next bounded batch: LLVM 21 Shallenge checks, slots 25–27.
 No complete LLVM 21 suite or mining validation is claimed.
 
 Goal: run all vanity-miner self-tests and all four mining kernels correctly on
