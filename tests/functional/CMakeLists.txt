@@ -2855,6 +2855,12 @@ add_test(
 set_tests_properties(functional_cumetalc_ptx_aggregate_abi PROPERTIES
     SKIP_RETURN_CODE 77)
 
+# Checks emitted metadata without an offline Metal toolchain or GPU.
+add_test(NAME functional_ptx_msl_abi
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_msl_abi.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx)
+
 add_test(
     NAME functional_driver_launch_extra_scalar
     COMMAND bash

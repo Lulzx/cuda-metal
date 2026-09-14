@@ -2,6 +2,13 @@
 
 [Known-gaps index](../known-gaps.md) · [Compiler status](../status/compiler.md)
 
+## Runtime-compiled PTX output
+
+Both PTX backends emit a `.cumetal-abi` sidecar with `--emit=msl`. Keep it
+beside the generated MSL when loading the module so the runtime can recover
+argument layout. A sidecar write failure fails compilation; this metadata does
+not extend the set of supported PTX instructions or argument forms.
+
 ## Typed CuMetal IR migration
 
 With CUDA Clang 21-23, the reviewed production-metallib matrix is:
