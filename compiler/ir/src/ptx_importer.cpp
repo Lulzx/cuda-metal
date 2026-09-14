@@ -9,6 +9,8 @@
 #include "ptx_instruction.h"
 #include "ptx_text.h"
 #include "ptx_cfg.h"
+#include "ptx_tail_calls.h"
+#include "ptx_parameters.h"
 
 #include <algorithm>
 #include <cctype>
@@ -52,6 +54,7 @@ using detail::direct_call_target;
 
 using Instruction = cumetal::ptx::EntryFunction::Instruction;
 
+using detail::parameter_slot_offset;
 using detail::RawBlock;
 using detail::ptx_register_container_bits;
 using detail::normalized_predicate;
@@ -934,7 +937,36 @@ struct Importer {
                  std::string(description) + " does not have an aggregate type");
             return std::nullopt;
         }
-        if (fields.size() != type.elements.size()) {
+        auto normalized_fields = fields;
+        // PTX parameter arrays are byte storage. A pair of b64 stores may
+        // populate an ABI aggregate represented as four u32 fields. Split only
+        // complete, contiguous integer words; holes/overlaps still fail below.
+        const bool u32_layout = std::all_of(type.elements.begin(), type.elements.end(),
+            [](const Type& element) { return element == Type::integer(32); });
+        if (u32_layout && fields.size() * 2 == type.elements.size()) {
+            bool complete_u64 = true;
+            std::int64_t expected_offset = 0;
+            for (const auto& [offset, value] : fields) {
+                complete_u64 &= offset == expected_offset && value.type == Type::integer(64);
+                expected_offset += 8;
+            }
+            if (complete_u64) {
+                normalized_fields.clear();
+                for (const auto& [offset, value] : fields) {
+                    detail::PtxValueBuilder expressions(builder, *block, value_types,
+                        {result.module.source_name, static_cast<std::uint32_t>(
+                            std::max(0, instruction == nullptr ? 0 : instruction->line)), 0});
+                    // Materialize immediates as ulong before shifting: `1 >> 32`
+                    // would otherwise use a 32-bit Metal literal.
+                    const Operand wide = expressions.emit(OpCode::kConvert, Type::integer(64), {value});
+                    normalized_fields[offset] = expressions.emit(OpCode::kConvert, Type::integer(32), {wide});
+                    const Operand high = expressions.emit(OpCode::kShiftRight, Type::integer(64),
+                        {wide, Operand::immediate("32", Type::integer(64))});
+                    normalized_fields[offset + 4] = expressions.emit(OpCode::kConvert, Type::integer(32), {high});
+                }
+            }
+        }
+        if (normalized_fields.size() != type.elements.size()) {
             fail(instruction, std::string(description) +
                                   " has missing, partial, or overlapping fields");
             return std::nullopt;
@@ -949,8 +981,8 @@ struct Importer {
         };
         std::int64_t byte_offset = 0;
         for (const Type& element_type : type.elements) {
-            const auto field = fields.find(byte_offset);
-            if (field == fields.end()) {
+            const auto field = normalized_fields.find(byte_offset);
+            if (field == normalized_fields.end()) {
                 fail(instruction, std::string(description) +
                                       " is missing field at byte offset " +
                                       std::to_string(byte_offset));
@@ -1923,6 +1955,9 @@ struct Importer {
             }
         }
 
+        if ((starts_with(instruction.opcode, "st.param") || starts_with(instruction.opcode, "ld.param")) &&
+            memory_vector_width(instruction.opcode) != 1)
+            return fail(&instruction, "unsupported or malformed vector PTX parameter transfer");
         if (starts_with(instruction.opcode, "st.param")) {
             if (instruction.operands.size() < 2) {
                 return fail(&instruction, "malformed st.param instruction");
@@ -1931,8 +1966,9 @@ struct Importer {
             if (name.empty()) return fail(&instruction, "call parameter slot has no name");
             const Type store_type = ptx_scalar_type(instruction.opcode);
             const Operand stored = expressions.low_integer_bits(source_operand(1, store_type), store_type);
-            const std::int64_t byte_offset =
-                memory_operand_offset(instruction.operands[0]);
+            const auto checked_offset = parameter_slot_offset(instruction.operands[0], name);
+            if (!checked_offset) return fail(&instruction, "invalid PTX parameter slot byte offset");
+            const std::int64_t byte_offset = *checked_offset;
             if (byte_offset < 0) {
                 return fail(&instruction,
                             "PTX call parameter slot has a negative byte offset");
@@ -2015,25 +2051,43 @@ struct Importer {
                 } else {
                     if (returned->second.type.kind == TypeKind::kAggregate) {
                         const Type& aggregate_type = returned->second.type;
-                        const std::int64_t byte_offset =
-                            memory_operand_offset(instruction.operands[1]);
+                        const auto checked_offset = parameter_slot_offset(instruction.operands[1], name);
+                        if (!checked_offset) return fail(&instruction, "invalid PTX return slot byte offset");
+                        const std::int64_t byte_offset = *checked_offset;
                         const std::uint32_t loaded_size =
                             type_size(operation.result_types.front());
-                        if (byte_offset < 0 || loaded_size == 0 ||
-                            aggregate_type.elements.empty() ||
-                            type_size(aggregate_type.elements.front()) != loaded_size ||
-                            byte_offset % loaded_size != 0 ||
-                            static_cast<std::uint64_t>(byte_offset / loaded_size) >=
-                                aggregate_type.elements.size()) {
-                            return fail(
-                                &instruction,
-                                "aggregate PTX call return load is not an aligned field");
+                        if (loaded_size == 8 && operation.result_types.front() == Type::integer(64) &&
+                            byte_offset >= 0 && byte_offset % 8 == 0 &&
+                            (static_cast<std::uint64_t>(byte_offset) + 8) <= type_size(aggregate_type) &&
+                            std::all_of(aggregate_type.elements.begin(), aggregate_type.elements.end(),
+                                [](const Type& field) { return field == Type::integer(32); })) {
+                            const auto word = [&](std::int64_t index) {
+                                const Operand value = expressions.emit(OpCode::kAggregateExtract, Type::integer(32),
+                                    {returned->second, Operand::immediate(std::to_string(index), Type::integer(32))});
+                                return expressions.emit(OpCode::kConvert, Type::integer(64), {value});
+                            };
+                            const Operand low = word(byte_offset / 4);
+                            const Operand high = expressions.emit(OpCode::kShiftLeft, Type::integer(64),
+                                {word(byte_offset / 4 + 1), Operand::immediate("32", Type::integer(64))});
+                            operation.opcode = OpCode::kBitOr;
+                            operation.operands = {low, high};
+                        } else {
+                            if (byte_offset < 0 || loaded_size == 0 ||
+                                aggregate_type.elements.empty() ||
+                                type_size(aggregate_type.elements.front()) != loaded_size ||
+                                byte_offset % loaded_size != 0 ||
+                                static_cast<std::uint64_t>(byte_offset / loaded_size) >=
+                                    aggregate_type.elements.size()) {
+                                return fail(
+                                    &instruction,
+                                    "aggregate PTX call return load is not an aligned field");
+                            }
+                            operation.opcode = OpCode::kAggregateExtract;
+                            operation.operands.push_back(returned->second);
+                            operation.operands.push_back(Operand::immediate(
+                                std::to_string(byte_offset / loaded_size),
+                                Type::integer(32)));
                         }
-                        operation.opcode = OpCode::kAggregateExtract;
-                        operation.operands.push_back(returned->second);
-                        operation.operands.push_back(Operand::immediate(
-                            std::to_string(byte_offset / loaded_size),
-                            Type::integer(32)));
                     } else {
                         operation.opcode = OpCode::kConvert;
                         operation.operands.push_back(returned->second);
@@ -3677,6 +3731,12 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         return importer.result;
     }
     importer.result.warnings = parsed.warnings;
+    // Normalize copies before capturing pointers into the parsed function list.
+    for (auto& function : parsed.module.functions) {
+        detail::normalize_tail_calls(function, importer.local_depots);
+        detail::normalize_vector_parameter_transfers(&function);
+    }
+    for (auto& entry : parsed.module.entries) detail::normalize_vector_parameter_transfers(&entry);
     if (!importer.select_entry(parsed, options)) return importer.result;
     const cumetal::ptx::EntryFunction* selected_entry = importer.entry;
     for (const cumetal::ptx::EntryFunction& function : parsed.module.functions) {

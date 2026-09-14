@@ -2871,6 +2871,12 @@ if(APPLE)
                     ${CMAKE_BINARY_DIR} ${guard_case})
         set_tests_properties(functional_ptx_${guard_case} PROPERTIES TIMEOUT 120)
     endforeach()
+    foreach(tail_case scalar local)
+        add_test(NAME functional_ptx_${tail_case}_tail_calls
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_tail_calls.py
+                    ${CMAKE_BINARY_DIR} ${tail_case})
+        set_tests_properties(functional_ptx_${tail_case}_tail_calls PROPERTIES TIMEOUT 120)
+    endforeach()
     foreach(arithmetic_case integer_minmax mul_hi_64)
         add_test(NAME functional_ptx_${arithmetic_case}
             COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_integer_arithmetic.py

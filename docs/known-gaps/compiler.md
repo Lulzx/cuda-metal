@@ -262,3 +262,17 @@ rejected. Specialization retains non-branch instructions, explores at most eight
 successors per chain, and shares limits of 4,096 cloned blocks / 131,072
 instructions per function. Reaching a limit leaves the original path for SSA
 validation; this is not general predicate optimization.
+
+## PTX parameter storage and tail calls
+
+Complete integer words can populate byte-array aggregate returns without losing
+their upper halves. Exact aligned `ld.param.v2.b64` / `st.param.v2.b64` transfers
+expand before SSA so both lanes participate in the normal ABI checks; malformed,
+partial, overlapping, misaligned and predicated transfers remain rejected.
+
+Tail-self-call elimination is limited to one scalar 64-bit argument with a
+16-byte forwarded result, or a proven 16-byte local-frame read-all/replace-all
+diamond. Recognition validates the complete continuation before rewriting.
+Memory-dependent scalar recursion, escaping local addresses, partial frame reads
+or writes, and general recursion remain unsupported. The transformed loop has
+no artificial iteration limit.
