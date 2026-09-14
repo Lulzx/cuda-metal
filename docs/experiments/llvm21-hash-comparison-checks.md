@@ -39,3 +39,5 @@ Imports were bounded at 600 seconds and runtime attempts at 300 seconds.
 Local output: `/tmp/llvm21-hash-comparison-validation`.
 Next bounded batch: arithmetic checks, slots 31–40. The full LLVM 21 suite and
 four mining kernels remain unvalidated; historical LLVM 7/19 totals are unchanged.
+
+Follow-up: [all ten LLVM 21 arithmetic checks now pass](llvm21-arithmetic-checks.md).

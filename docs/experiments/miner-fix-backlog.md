@@ -506,3 +506,12 @@ slots and 16 guards intact. PTX remains unchanged.
 [Evidence and scope](llvm21-hash-comparison-checks.md).
 Next bounded batch: arithmetic checks (31–40). Full-suite and mining validation
 remain incomplete.
+
+## LLVM 21 arithmetic validation
+
+All ten division, remainder, and multiplication checks (31–40) compile and
+numerically pass on M5 at `40758eb`, including high-u64 and wrapping-u128 products.
+No compiler changes were needed. Selected slots equal 1; other slots and 16 guards
+remain intact. [Evidence and scope](llvm21-arithmetic-checks.md).
+PTX is unchanged. Next bounded batch: composed-primitive checks (41–45).
+Full-suite and mining validation remain incomplete.
