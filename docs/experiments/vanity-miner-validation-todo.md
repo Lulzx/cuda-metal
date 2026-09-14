@@ -20,6 +20,9 @@ names but have not been executed in this comparison.
 | Base58 primitive, slot 3 | Pass | Pass | Unsigned widening and pointer subtraction fixes; see [fix backlog](miner-fix-backlog.md) |
 | Compressed-mainnet WIF, slot 21 | Pass | Pass | Trap/call fix; unchanged PTX on M5 |
 | Compressed secp256k1, slot 4 | Runtime attempt timeout | Pass | LLVM 19 signed-byte conversion fix; unchanged PTX, selected slot 1 and guards intact on M5 |
+| Uncompressed secp256k1, slot 5 | Not retested | Pass | Full 65-byte known-answer check at `93ebd6b` |
+| Ethereum address, slot 15 | Not retested | Pass | Seeded address known-answer check at `93ebd6b` |
+| Bitcoin Bech32 address, slot 19 | Not retested | Pass | Full encoded address and length check at `93ebd6b` |
 | Full numerical inventory | 90 / 118 pass | 82 / 118 pass | All entries attempted on `6d2549b`; remaining entries fail compilation |
 | Four mining kernels | Pending | Pending | No end-to-end mining claim |
 
@@ -40,11 +43,16 @@ entries pass their result and guard checks. Folded fixtures remain limited evide
 - [x] Attempt every self-test entry in both original PTX modules.
 - [x] Implement bounded trap reporting across device calls/helpers (fix 10).
 - [x] Run the six existing LLVM 19 k256 bisects: all pass, including derivation
-  for scalars 1 and 2; the original nontrivial scalar still fails. See
+  for scalars 1 and 2; the initial nontrivial-scalar failure was then fixed. See
   [secp256k1 isolation](secp256k1-isolation.md).
 - [x] Locate and fix the nontrivial-scalar failure: `cvt.s16.s8` lost sign
   extension during table selection. Original compressed LLVM 19 primitive passes
   after fix 12, with a runtime-input regression and CPU-checked intermediate snapshots.
+- [x] Validate uncompressed secp256k1 (5), Ethereum address (15), and Bitcoin
+  encoded address (19) individually on LLVM 19: all pass with guards intact.
+  [Results and scope](secp256k1-dependent-checks.md).
+- [ ] Run the remaining Ethereum (13–14) and Bitcoin (16–18, 20) entries
+  individually at the current revision.
 - [ ] Retest the 47 previously trap-blocked entries; both compressed-mainnet WIF
   entries pass. Both compressed secp256k1 entries clear MSL lowering but expose
   a subsequently fixed numerical failure (LLVM 19 passes after fix 12) and

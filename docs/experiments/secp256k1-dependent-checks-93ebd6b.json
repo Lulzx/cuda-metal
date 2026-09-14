@@ -1,0 +1,68 @@
+{
+  "compiler_commit": "93ebd6b42c1b9bd6a3c805d9d39fb229cf3e5258",
+  "date": "2026-09-13 America/New_York",
+  "device": "Apple M5",
+  "producer": "LLVM 19",
+  "artifact_run": "34778991430",
+  "ptx_sha256": "f5c3d523a33e9ecc73f896ed26a46cda58039b16b1859af170e1d3af289be709",
+  "ptx_modified": false,
+  "msl_manually_modified": false,
+  "workload_specializations": false,
+  "grid": [
+    1,
+    1,
+    1
+  ],
+  "block": [
+    1,
+    1,
+    1
+  ],
+  "results": [
+    {
+      "kernel": "kernel_self_test_primitive_secp256k1_uncompressed",
+      "slot": 5,
+      "compile_returncode": 0,
+      "compile_seconds": 142.54,
+      "runtime_returncode": 0,
+      "runtime_attempt_seconds": 105.57,
+      "runtime_log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_primitive_secp256k1_uncompressed\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=18549583 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_primitive_secp256k1_uncompressed slot=5 actual=1 expected=1; other 117 slots and 16 guard words intact\n",
+      "msl_sha256": "4180642f25a44a2d648a32e5bb0ae409f8457b65078a49a70693e7b545469711",
+      "outcome": "numerical_pass",
+      "actual": 1,
+      "expected": 1,
+      "other_slots_intact": 117,
+      "guard_words_intact": 16
+    },
+    {
+      "kernel": "kernel_self_test_ethereum_address",
+      "slot": 15,
+      "compile_returncode": 0,
+      "compile_seconds": 147.52,
+      "runtime_returncode": 0,
+      "runtime_attempt_seconds": 104.81,
+      "runtime_log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_ethereum_address\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=31657250 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_ethereum_address slot=15 actual=1 expected=1; other 117 slots and 16 guard words intact\n",
+      "msl_sha256": "9bee42f114378392f0ec7bb42ef02fbb072ffdabd4ba2a8e52f4508d4b530213",
+      "outcome": "numerical_pass",
+      "actual": 1,
+      "expected": 1,
+      "other_slots_intact": 117,
+      "guard_words_intact": 16
+    },
+    {
+      "kernel": "kernel_self_test_bitcoin_encoded",
+      "slot": 19,
+      "compile_returncode": 0,
+      "compile_seconds": 148.31,
+      "runtime_returncode": 0,
+      "runtime_attempt_seconds": 124.65,
+      "runtime_log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_bitcoin_encoded\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=23714374 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_bitcoin_encoded slot=19 actual=1 expected=1; other 117 slots and 16 guard words intact\n",
+      "msl_sha256": "c0314ca6159f521b2a95985a3293e2d427b3c7362b27c4c39230d233ca461b1e",
+      "outcome": "numerical_pass",
+      "actual": 1,
+      "expected": 1,
+      "other_slots_intact": 117,
+      "guard_words_intact": 16
+    }
+  ]
+}

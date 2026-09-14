@@ -421,3 +421,17 @@ LLVM 7's earlier timeout remains uninvestigated. Uncompressed secp256k1 and
 composed/mining kernels have not been retested in this milestone. The historical
 full-sweep ledger is unchanged. Next: validate the uncompressed LLVM 19 sibling
 and then the dependent Ethereum/Bitcoin self-tests individually.
+
+## Targeted validation after fix 12
+
+At `93ebd6b`, three more original LLVM 19 entries compile and numerically pass
+on M5: uncompressed secp256k1 (slot 5), Ethereum address (15), and Bitcoin's
+complete Bech32 address (19). Each selected slot is 1; the other 117 slots and
+16 guards are intact. PTX and generated MSL are unchanged by instrumentation.
+No additional compiler fix was needed.
+
+[Per-entry evidence and reproduction](secp256k1-dependent-checks.md). These
+fixed fixtures do not replace the historical full sweep or validate the mining
+kernels. Next: separately check Ethereum's private/public-key entries (13–14),
+Bitcoin's private/public-key/hash entries (16–18), and its matching flag (20).
+LLVM 7 remains outside this targeted batch.

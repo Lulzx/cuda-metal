@@ -116,3 +116,6 @@ compressed secp256k1 self-test now passes on M5 with guards intact. Six smaller
 k256 checks also pass. LLVM 7 still has an earlier bounded runtime-attempt timeout.
 See [fix 12](docs/experiments/miner-fix-backlog.md#fix-12-cvt-interprets-the-instructions-source-width)
 and [intermediate-value evidence](docs/experiments/secp256k1-isolation.md).
+At `93ebd6b`, the original LLVM 19 uncompressed secp256k1, Ethereum-address and
+Bitcoin-Bech32-address self-tests also pass on M5, with guards intact.
+[Targeted results](docs/experiments/secp256k1-dependent-checks.md).
