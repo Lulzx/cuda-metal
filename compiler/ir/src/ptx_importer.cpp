@@ -2952,8 +2952,23 @@ struct Importer {
             }
             const std::string name = parameter_name_from_operand(instruction.operands[0]);
             if (name.empty()) return fail(&instruction, "call parameter slot has no name");
-            const Operand stored =
-                source_operand(1, ptx_scalar_type(instruction.opcode));
+            const Type store_type = ptx_scalar_type(instruction.opcode);
+            Operand stored = source_operand(1, store_type);
+            if (stored.type.kind == TypeKind::kInteger && store_type.kind == TypeKind::kInteger &&
+                stored.type.bit_width > store_type.bit_width) {
+                // st.param writes the instruction width, not the register width.
+                // Keep low bits before recording scalar or aggregate slot data.
+                Operation truncate;
+                truncate.opcode = OpCode::kConvert;
+                truncate.location = operation.location;
+                truncate.operands = {stored};
+                const ValueId value = builder.next_value();
+                truncate.results = {value};
+                truncate.result_types = {store_type};
+                value_types[value] = store_type;
+                block->operations.push_back(std::move(truncate));
+                stored = Operand::value_ref(value, store_type);
+            }
             const auto checked_offset = parameter_slot_offset(instruction.operands[0], name);
             if (!checked_offset) return fail(&instruction, "invalid PTX parameter slot byte offset");
             const std::int64_t byte_offset = *checked_offset;
@@ -3997,6 +4012,8 @@ struct Importer {
                     argument = slot->second;
                 }
                 if (!(argument.type == signature->argument_types[i])) {
+                    if (type_size(argument.type) != type_size(signature->argument_types[i]))
+                        return fail(&instruction, "PTX call parameter value does not fit its declared argument type");
                     Operation conversion;
                     conversion.opcode = OpCode::kConvert;
                     conversion.location = operation.location;
@@ -4553,7 +4570,8 @@ struct Importer {
                                 type_size(function.return_type)) {
                                 return fail(last,
                                             "PTX device return value does not fit "
-                                            "its declared return type");
+                                            "its declared return type (" + returned.type.str() + " to " +
+                                                function.return_type.str() + ")");
                             }
                             Operation conversion;
                             conversion.opcode = OpCode::kConvert;

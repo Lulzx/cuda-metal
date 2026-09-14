@@ -340,3 +340,34 @@ bitcast failure, investigate the LLVM 7 timeout, and retest the other affected
 entries in small batches. Barrier-aware cancellation, unknown builtins, general
 recursion, expansion beyond its limits and full CUDA context-abort semantics
 remain unsupported.
+
+## Fix 11: parameter stores preserve their instruction width
+
+LLVM 19 compressed secp256k1 stores a 64-bit register into a 32-bit call slot
+at PTX lines 615739 and 616651, then calls `subtle::black_box`. The importer
+retained the register's i64 type rather than the 32 bits written by `st.param.b32`.
+Argument ABI conversion subsequently emitted the illegal `as_type<uint>(ulong)`.
+
+Integer parameter stores now truncate wider registers to the store width before
+recording scalar/aggregate argument or return-slot values. Matching-width
+reinterpretation remains a bitcast; incompatible argument byte widths now fail
+explicitly at import instead of reaching Metal as an invalid bitcast. Return
+width diagnostics also show the actual and declared types.
+
+Validation:
+
+- All 32 focused compiler/GPU tests pass.
+- 267 boundary/random runtime inputs per width test 64-to-32, 64-to-16 and
+  64-to-8-bit argument and return stores: 1,602 output comparisons plus guards.
+- A negative case rejects a 32-bit stored argument passed to a 64-bit parameter.
+- The unchanged original LLVM 19 compressed secp256k1 self-test now **compiles
+  and launches on Apple M5**. It returns **0 rather than 1** at slot 4, with the
+  other 117 slots and all 16 guard words intact. GPU trace reports successful
+  launch (about 18 ms). This is a numerical failure, not a pass or a taken trap.
+- Logs: `/tmp/param-trunc-tests.log`, `/tmp/param-trunc-secp-llvm19.log`,
+  `/tmp/param-trunc-secp-llvm19.gpu.log`. Original PTX remains pinned to run
+  `34778991430`; the generated MSL is not manually edited.
+
+Next: isolate secp256k1's numerical mismatch with its existing arithmetic/curve
+bisects. LLVM 7's earlier timeout has not been retested in this milestone. The
+complete sweep remains historical; no new aggregate compatibility count is claimed.

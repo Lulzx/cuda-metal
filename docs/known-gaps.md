@@ -64,6 +64,12 @@ coverage for constant-folded fixtures.
 
 Since that sweep, bounded trap/call support clears the WIF compressed-mainnet
 checks in both producers. Compressed secp256k1 now reaches MSL but remains
-unvalidated: LLVM 19 fails Metal bitcast typing and LLVM 7 times out during its
-180-second runtime attempt. These targeted results do not replace the full
+unvalidated: after parameter-store truncation is fixed, LLVM 19 compiles and
+launches but returns 0 instead of 1 with intact guards; LLVM 7 timed out during
+its earlier 180-second runtime attempt. These targeted results do not replace the full
 historical ledger; see [fix 10](experiments/miner-fix-backlog.md#fix-10-trap-propagation-through-supported-device-call-graphs).
+
+Integer `st.param` stores truncate wider registers to the instruction width
+before call/return ABI handling. Mismatched argument byte widths are rejected;
+equal-width bit reinterpretations retain their semantics. See
+[fix 11](experiments/miner-fix-backlog.md#fix-11-parameter-stores-preserve-their-instruction-width).

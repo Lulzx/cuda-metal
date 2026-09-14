@@ -110,6 +110,7 @@ Passing fixed fixtures may be constant-folded; full mining kernels remain unvali
 
 Bounded trap propagation now supports device-call graphs: trapping/looping helpers
 expand into the cancellation CFG, while proven finite helpers remain calls.
-Both original compressed-mainnet WIF self-tests now pass on M5. Compressed
-secp256k1 clears PTX-to-MSL lowering but still has a Metal bitcast error (LLVM 19)
-and a bounded runtime-attempt timeout (LLVM 7). See [fix 10](docs/experiments/miner-fix-backlog.md#fix-10-trap-propagation-through-supported-device-call-graphs).
+Both original compressed-mainnet WIF self-tests now pass on M5. After fixing
+parameter-store truncation, LLVM 19 compressed secp256k1 compiles and launches
+but returns 0 instead of 1, with guards intact. LLVM 7 still has an earlier
+bounded runtime-attempt timeout. See [fix 10](docs/experiments/miner-fix-backlog.md#fix-10-trap-propagation-through-supported-device-call-graphs).

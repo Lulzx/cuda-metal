@@ -2871,6 +2871,8 @@ add_test(
 if(APPLE)
     add_test(NAME functional_ptx_pointer_subtract
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_pointer_subtract.py ${CMAKE_BINARY_DIR})
+    add_test(NAME functional_ptx_param_truncation
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_param_truncation.py ${CMAKE_BINARY_DIR})
     add_test(NAME functional_ptx_widening
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_widening.py ${CMAKE_BINARY_DIR})
     add_test(NAME functional_ptx_trap_reporting
