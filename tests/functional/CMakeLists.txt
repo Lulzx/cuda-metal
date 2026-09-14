@@ -2865,6 +2865,9 @@ if(APPLE)
     add_test(NAME functional_ptx_pointers
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_pointers.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_pointers PROPERTIES TIMEOUT 120)
+    add_test(NAME functional_ptx_provenance
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_provenance.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_provenance PROPERTIES TIMEOUT 45)
     add_executable(cumetal_trap_binding_test trap_binding_test.cpp)
     target_link_libraries(cumetal_trap_binding_test PRIVATE cumetal_runtime)
     add_test(NAME functional_ptx_trap_reporting

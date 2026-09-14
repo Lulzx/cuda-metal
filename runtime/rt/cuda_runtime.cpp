@@ -6474,7 +6474,9 @@ cudaError_t cudaLaunchKernel(const void* func,
         .block = block_dim,
         .shared_memory_bytes = effective_shared_mem,
         .provenance =
-            use_registered_kernel ? registered_kernel.provenance : "precompiled_metallib",
+            // Direct Driver API modules may contain runtime-compiled MSL.
+            // Let the backend report the loaded library's actual provenance.
+            use_registered_kernel ? registered_kernel.provenance : "",
         .semantic_quality =
             use_registered_kernel ? registered_kernel.semantic_quality : "exact",
         .resident_buffers = std::move(resident_buffers),
