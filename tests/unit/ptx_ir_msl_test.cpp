@@ -60,6 +60,35 @@ int main() {
     using namespace cumetal;
     bool ok = true;
 
+    const std::string reused_register = R"ptx(
+.version 7.0
+.target sm_80
+.visible .entry reuse(.param .u64 .ptr input, .param .u32 index) {
+.reg .b64 %rd<3>;
+.reg .b32 %r<3>;
+ld.param.u64 %rd1, [input];
+ld.param.u32 %r1, [index];
+cvt.u64.u32 %rd2, %r1;
+shl.b64 %rd2, %rd2, 2;
+add.u64 %rd2, %rd1, %rd2;
+ld.global.u32 %r2, [%rd2];
+ret;
+}
+)ptx";
+    const auto reused = metal::compile_ptx_to_msl(reused_register);
+    bool scalar_shift = false, pointer_offset = false;
+    if (reused.ok) {
+        for (const auto& function : reused.gpu_ir.functions)
+            for (const auto& block : function.blocks)
+                for (const auto& operation : block.operations) {
+                    scalar_shift |= operation.opcode == ir::OpCode::kShiftLeft &&
+                        operation.result_types == std::vector<ir::Type>{ir::Type::integer(64)};
+                    pointer_offset |= operation.opcode == ir::OpCode::kPointerOffset &&
+                        operation.result_types.size() == 1 && operation.result_types.front().is_pointer();
+                }
+    }
+    ok &= expect(reused.ok && scalar_shift && pointer_offset,
+                 "reused register definitions retain scalar and pointer SSA types: " + reused.error);
     const std::string promoted_global = R"ptx(
 .version 7.0
 .target sm_80

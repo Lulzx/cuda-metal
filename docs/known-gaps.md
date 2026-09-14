@@ -79,3 +79,9 @@ Mutation through supported same-function register aliases prevents promotion,
 including predicated writes and register reuse. Stores through a helper pointer
 that resolves to constant storage are rejected; interprocedural mutation-based
 reclassification of private globals is not yet implemented.
+
+SSA allocation retains the inferred type of each PTX instruction definition,
+so a register reused as a pointer does not retroactively retype earlier scalar
+offsets. Block arguments and instructions synthesized during CFG normalization
+retain the existing register-wide type seed. General scalar/pointer register
+reuse across control-flow joins remains unsupported.

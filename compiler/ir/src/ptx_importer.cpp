@@ -891,6 +891,7 @@ struct Importer {
     std::unordered_map<std::string, std::string> aggregate_parameter_registers;
     std::unordered_map<std::string, Type> register_types;
     std::unordered_map<const Instruction*, std::vector<ValueId>> instruction_results;
+    std::unordered_map<const Instruction*, std::vector<Type>> definition_types;
     std::unordered_map<ValueId, Type> value_types;
     std::unordered_set<ValueId> integer_zero_values;
     std::vector<RawBlock> raw_blocks;
@@ -1274,6 +1275,10 @@ struct Importer {
                         }
                     }
                 }
+                // Retain each definition's type before a later assignment to
+                // the same PTX register changes the register-wide summary.
+                auto& types = definition_types[&instruction];
+                types.clear();
                 for (const std::string& destination : destinations) {
                     Type destination_type = inferred;
                     if (root == "ld" && !starts_with(instruction.opcode, "ld.param") &&
@@ -1286,6 +1291,7 @@ struct Importer {
                             ptx_scalar_type(instruction.opcode).bit_width,
                             ptx_register_container_bits(destination)));
                     }
+                    types.push_back(destination_type);
                     const auto existing = register_types.find(destination);
                     if (existing == register_types.end() || !(existing->second == destination_type)) {
                         register_types[destination] = destination_type;
@@ -1318,9 +1324,15 @@ struct Importer {
                     values.push_back(value);
                     locally_defined.insert(destination);
                     block.last_definitions[destination] = value;
-                    const auto type = register_types.find(destination);
-                    value_types[value] =
-                        type == register_types.end() ? Type::integer(32) : type->second;
+                    const auto definitions = definition_types.find(instruction);
+                    if (definitions != definition_types.end() && values.size() <= definitions->second.size()) {
+                        value_types[value] = definitions->second[values.size() - 1];
+                    } else {
+                        // CFG normalization synthesizes instructions after the
+                        // initial inference pass; retain its established fallback.
+                        const auto type = register_types.find(destination);
+                        value_types[value] = type == register_types.end() ? Type::integer(32) : type->second;
+                    }
                 }
                 instruction_results[instruction] = std::move(values);
             }
