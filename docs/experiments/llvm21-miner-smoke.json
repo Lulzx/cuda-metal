@@ -1,0 +1,45 @@
+{
+  "ptx_sha256": "2840485fe193d39cfdbb2e5babd25f6772a08a2550843c20b3beba5a26185f4b",
+  "ptx_bytes": 25161784,
+  "producer": "CUDA 13.3.33 / NVVM 23.0.0 / PTX 9.3 / sm_100",
+  "compiler_commit": "798dc6236b39a76dc02f49bb71f6817ed42ebac7",
+  "compiler_sha256": "4ae768bb7c7d1c8c177f326ef40c432b30bf53698a40f7c521057c72fa665bec",
+  "runtime_sha256": "6e41295ad0d934f15b70bfa7d12a9c93b74f5852d947e07eff130d78a824f30f",
+  "device": "Apple M5",
+  "workload_specializations": false,
+  "results": [
+    {
+      "entry": "kernel_self_test_stub",
+      "slot": 0,
+      "compile_log": "wrote \"/tmp/miner-llvm21-cumetal/stub.msl\"\n",
+      "status": "numerical_pass",
+      "gpu_log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_stub\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=1541 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_stub slot=0 actual=1 expected=1; other 117 slots and 16 guard words intact\n",
+      "metal_bytes": 7145,
+      "metal_sha256": "9280c3a4943d3d8e29fbbe515ac755ea8618d89b734934b4cb4de88f6bb696bf"
+    },
+    {
+      "entry": "kernel_self_test_primitive_sha512",
+      "slot": 1,
+      "compile_log": "wrote \"/tmp/miner-llvm21-cumetal/kernel_self_test_primitive_sha512.msl\"\n",
+      "status": "numerical_pass",
+      "gpu_log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_primitive_sha512\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=1666 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_primitive_sha512 slot=1 actual=1 expected=1; other 117 slots and 16 guard words intact\n",
+      "metal_bytes": 7308,
+      "metal_sha256": "e7772a26a6f337b78b2f351c48df48c731448e7cc8a450a1845f822ed9a0ad3b",
+      "compile_seconds": 84.56783208399999
+    },
+    {
+      "entry": "kernel_self_test_primitive_ed25519",
+      "slot": 2,
+      "compile_log": "cumetalc failed: PTX register '%rd22022' is undefined on an incoming edge to block '$L__BB95_1'\n",
+      "status": "ptx_import_failure",
+      "compile_seconds": 79.02728441599999
+    },
+    {
+      "entry": "kernel_self_test_primitive_secp256k1_compressed",
+      "slot": 4,
+      "compile_log": "cumetalc failed: PTX register '%rd34990' is undefined on an incoming edge to block '$L__BB127_1'\n",
+      "status": "ptx_import_failure",
+      "compile_seconds": 69.02690258300001
+    }
+  ]
+}

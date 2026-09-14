@@ -1,5 +1,9 @@
 # Vanity miner on CuMetal: incremental validation checklist
 
+LLVM 21 now has a [separate smoke-test ledger](llvm21-miner-smoke.md): probe and
+SHA-512 pass on M5; Ed25519 and compressed secp256k1 fail CFG definedness import.
+No complete LLVM 21 suite or mining validation is claimed.
+
 Goal: run all vanity-miner self-tests and all four mining kernels correctly on
 CuMetal, from unchanged Rust-CUDA PTX. Advance one small test or failure at a
 time; this checklist does not authorize or require running the entire suite
