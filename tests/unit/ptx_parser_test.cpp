@@ -16,6 +16,25 @@ bool expect(bool condition, const char* message) {
 }  // namespace
 
 int main() {
+    // Explicit scalar use isolates store provenance from width-based defaults.
+    const auto stores = cumetal::ptx::parse_ptx(R"PTX(
+.version 7.0
+.target sm_80
+.visible .entry stores(.param .u64 output, .param .u64 length) {
+ld.param.u64 %rd1, [output];
+ld.param.u64 %rd2, [length];
+mul.lo.u64 %rd3, %rd2, 3;
+st.global.u64 [%rd1], %rd3;
+st.global.u64 [%rd1+8], %rd2;
+st.global.u8 [%rd1+16], 7;
+ret;
+}
+)PTX");
+    if (!expect(stores.ok && stores.module.entries.size() == 1 &&
+                stores.module.entries[0].params[0].is_pointer &&
+                !stores.module.entries[0].params[1].is_pointer,
+                "stores preserve address provenance without promoting stored scalars")) return 1;
+
     const std::string sample_ptx = R"PTX(
 // vector ops
 .version 8.0

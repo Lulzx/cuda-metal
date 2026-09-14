@@ -31,3 +31,6 @@ per-thread arrays; it does not automatically retile kernels or provide MPS parit
 
 The executable priority/evidence table is in
 [the specification closure roadmap](spec-closure-roadmap.md).
+
+PTX parameter inference preserves address-register provenance across stores;
+stored scalar values do not redefine the destination address register.

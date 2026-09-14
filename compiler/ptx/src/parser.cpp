@@ -393,7 +393,9 @@ void infer_pointer_parameters(EntryFunction* entry) {
             }
         }
 
-        if (!starts_with(instruction.opcode, "ld.param") && !instruction.operands.empty()) {
+        // A store reads its address; it does not define that register.
+        if (!starts_with(instruction.opcode, "ld.param") &&
+            opcode_root(instruction.opcode) != "st" && !instruction.operands.empty()) {
             const std::string dest_register = extract_register_name(instruction.operands[0]);
             if (!dest_register.empty()) {
                 std::string mapped_param;
