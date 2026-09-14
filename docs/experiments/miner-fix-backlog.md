@@ -454,3 +454,10 @@ and mining-kernel validation are unchanged.
 Next small batch: the remaining WIF variants (22–24), then the remaining
 previously trap-blocked LLVM 19 entries. Negative matching and concurrent mining
 validation remain separate checklist items.
+
+## LLVM 21 bounded-loop definedness
+
+Bounded comparison-edge specialization and inverted self-select handling now
+unblock Ed25519: numerical pass on M5 with guards intact. Unit negative cases
+and 131,082 GPU regression inputs pass. [Proof, results, and remaining guarded-load
+blocker in secp256k1](llvm21-loop-definedness.md). Original PTX is unchanged.

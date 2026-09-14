@@ -1,0 +1,25 @@
+{
+  "ptx_sha256": "2840485fe193d39cfdbb2e5babd25f6772a08a2550843c20b3beba5a26185f4b",
+  "results": [
+    {
+      "entry": "kernel_self_test_primitive_ed25519",
+      "slot": 2,
+      "compile_code": 0,
+      "compile_seconds": 108.80342291599999,
+      "gpu_code": 0,
+      "gpu_seconds": 8.589933041999984,
+      "compile_log": "wrote \"/tmp/miner-llvm21-loop-fixed/kernel_self_test_primitive_ed25519.metal\"\n",
+      "gpu_log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_primitive_ed25519\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=2775791 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_primitive_ed25519 slot=2 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+    },
+    {
+      "entry": "kernel_self_test_primitive_secp256k1_compressed",
+      "slot": 4,
+      "compile_code": 1,
+      "compile_seconds": 125.00178362499999,
+      "compile_log": "cumetalc failed: PTX register '%rd34990' is undefined on an incoming edge to block '$L__BB127_1'\n"
+    }
+  ],
+  "compiler_commit": "e239d097ad2dab3651ae7316c464808a7e9e900c",
+  "compiler_sha256": "d2727afb0d0496f2032b98158ff78c39cc1fe94fee08b8634f4913df64545a5b",
+  "runtime_sha256": "6e41295ad0d934f15b70bfa7d12a9c93b74f5852d947e07eff130d78a824f30f"
+}
