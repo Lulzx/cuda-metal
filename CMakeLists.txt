@@ -121,6 +121,8 @@ add_library(cumetal_ir STATIC
     compiler/ir/src/ir.cpp
     compiler/ir/src/nvvm_importer.cpp
     compiler/ir/src/ptx_importer.cpp
+    compiler/ir/src/ptx_module.cpp
+    compiler/ir/src/ptx_instruction.cpp
 )
 
 target_include_directories(cumetal_ir

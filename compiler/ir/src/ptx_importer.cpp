@@ -4,6 +4,9 @@
 #include "cumetal/ptx/parser.h"
 #include "ptx_inline_asm.h"
 #include "ptx_operand_conversion.h"
+#include "ptx_module.h"
+#include "ptx_instruction.h"
+#include "ptx_text.h"
 
 #include <algorithm>
 #include <cctype>
@@ -18,6 +21,31 @@
 namespace cumetal::ir {
 namespace {
 
+using detail::LocalDepot;
+using detail::ModuleConstantSymbol;
+using detail::InitializedByteArray;
+using detail::InitializedByteArrayScan;
+using detail::scan_threadgroup_globals;
+using detail::scan_local_depots;
+using detail::scan_implicit_definitions;
+using detail::scan_initialized_byte_arrays;
+using detail::scan_module_constant_symbols;
+using detail::scan_module_global_symbols;
+using detail::trim;
+using detail::starts_with;
+
+using detail::memory_vector_width;
+using detail::root_opcode;
+using detail::registers_in;
+using detail::first_register;
+using detail::destination_registers;
+using detail::source_registers;
+using detail::grouped_names;
+using detail::branch_target;
+using detail::is_conditional_branch;
+using detail::is_terminating_instruction;
+using detail::direct_call_target;
+
 using Instruction = cumetal::ptx::EntryFunction::Instruction;
 
 struct RawBlock {
@@ -29,111 +57,6 @@ struct RawBlock {
     std::unordered_map<std::string, ValueId> last_definitions;
     std::unordered_set<std::string> uses_before_definition;
 };
-
-std::string trim(std::string_view input) {
-    std::size_t begin = 0;
-    while (begin < input.size() &&
-           std::isspace(static_cast<unsigned char>(input[begin])) != 0) {
-        ++begin;
-    }
-    std::size_t end = input.size();
-    while (end > begin &&
-           std::isspace(static_cast<unsigned char>(input[end - 1])) != 0) {
-        --end;
-    }
-    return std::string(input.substr(begin, end - begin));
-}
-
-// Element count of a `.v2`/`.v4` memory instruction, or 1.
-std::size_t memory_vector_width(std::string_view opcode) {
-    if (opcode.find(".v4.") != std::string_view::npos) return 4;
-    if (opcode.find(".v2.") != std::string_view::npos) return 2;
-    return 1;
-}
-
-std::string root_opcode(std::string_view opcode) {
-    const std::size_t dot = opcode.find('.');
-    return std::string(opcode.substr(0, dot));
-}
-
-bool starts_with(std::string_view value, std::string_view prefix) {
-    return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
-}
-
-std::vector<std::string> registers_in(std::string_view input) {
-    std::vector<std::string> registers;
-    for (std::size_t i = 0; i < input.size(); ++i) {
-        if (input[i] != '%') {
-            continue;
-        }
-        std::size_t end = i + 1;
-        while (end < input.size()) {
-            const unsigned char c = static_cast<unsigned char>(input[end]);
-            if (std::isalnum(c) == 0 && c != '_' && c != '.' && c != '$') {
-                break;
-            }
-            ++end;
-        }
-        if (end > i + 1) {
-            registers.emplace_back(input.substr(i, end - i));
-            i = end - 1;
-        }
-    }
-    return registers;
-}
-
-std::string first_register(std::string_view input) {
-    const std::vector<std::string> registers = registers_in(input);
-    return registers.empty() ? std::string{} : registers.front();
-}
-
-std::vector<std::string> destination_registers(const Instruction& instruction) {
-    const std::string root = root_opcode(instruction.opcode);
-    if (instruction.opcode == "ptx.label" || instruction.operands.empty() ||
-        root == "st" || root == "bra" || root == "bar" || root == "membar" ||
-        root == "fence" || root == "ret" || root == "exit" || root == "trap" ||
-        root == "call") {
-        return {};
-    }
-    std::vector<std::string> destinations = registers_in(instruction.operands.front());
-    const bool tuple_move = root == "mov" &&
-                            instruction.opcode.find(".b64") != std::string::npos;
-    // `ld.*.v2/.v4 {a, b, ...}, [addr]` defines every register of the tuple.
-    const bool vector_load = root == "ld" &&
-                             (instruction.opcode.find(".v2.") != std::string::npos ||
-                              instruction.opcode.find(".v4.") != std::string::npos);
-    if (root != "setp" && root != "shfl" && !tuple_move && !vector_load &&
-        destinations.size() > 1) {
-        destinations.resize(1);
-    }
-    return destinations;
-}
-
-std::vector<std::string> source_registers(const Instruction& instruction) {
-    std::vector<std::string> sources;
-    const std::string root = root_opcode(instruction.opcode);
-    std::size_t first_source = destination_registers(instruction).empty() ? 0 : 1;
-    if (root == "st") {
-        first_source = 0;
-    }
-    for (std::size_t i = first_source; i < instruction.operands.size(); ++i) {
-        const std::vector<std::string> found = registers_in(instruction.operands[i]);
-        sources.insert(sources.end(), found.begin(), found.end());
-    }
-    if (!instruction.predicate.empty()) {
-        const std::string predicate = first_register(instruction.predicate);
-        if (!predicate.empty()) {
-            sources.push_back(predicate);
-        }
-    }
-    std::erase_if(sources, [](const std::string& name) {
-        return starts_with(name, "%tid.") || starts_with(name, "%ctaid.") ||
-               starts_with(name, "%ntid.") || starts_with(name, "%nctaid.") ||
-               name == "%laneid" || name == "%warpid" || name == "%smid" ||
-               name == "%activemask" || starts_with(name, "%clock");
-    });
-    return sources;
-}
 
 std::uint32_t ptx_type_bits(std::string_view type) {
     for (std::uint32_t bits : {8U, 16U, 32U, 64U}) {
@@ -245,24 +168,6 @@ std::string parameter_name_from_operand(std::string_view operand) {
         inside.resize(offset);
     }
     return inside;
-}
-
-std::vector<std::string> grouped_names(std::string_view operand) {
-    std::string contents = trim(operand);
-    if (contents.size() >= 2 && contents.front() == '(' && contents.back() == ')') {
-        contents = trim(std::string_view(contents).substr(1, contents.size() - 2));
-    }
-    std::vector<std::string> names;
-    std::size_t begin = 0;
-    while (begin < contents.size()) {
-        const std::size_t comma = contents.find(',', begin);
-        const std::size_t end = comma == std::string::npos ? contents.size() : comma;
-        const std::string name = trim(std::string_view(contents).substr(begin, end - begin));
-        if (!name.empty()) names.push_back(name);
-        if (comma == std::string::npos) break;
-        begin = comma + 1;
-    }
-    return names;
 }
 
 struct BuiltinSignature {
@@ -863,261 +768,6 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
     return std::nullopt;
 }
 
-std::vector<GlobalThreadgroup> scan_threadgroup_globals(std::string_view ptx) {
-    const std::string source(ptx);
-    const std::regex declaration(
-        R"((?:\.extern\s+)?\.shared\s+\.align\s+([0-9]+)\s+\.(?:b|u|s|f)(8|16|32|64)\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*(?:\[\s*([0-9]*)\s*\])?\s*;)"
-    );
-    std::vector<GlobalThreadgroup> globals;
-    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
-         iterator != end; ++iterator) {
-        const std::uint64_t element_bytes =
-            static_cast<std::uint64_t>(std::stoul((*iterator)[2].str())) / 8;
-        const bool has_array_extent = (*iterator)[4].matched;
-        const std::string extent = (*iterator)[4].str();
-        const bool is_dynamic = has_array_extent && extent.empty();
-        const std::uint64_t element_count =
-            !has_array_extent ? 1 : (is_dynamic ? 0 : std::stoull(extent));
-        globals.push_back({
-            .name = (*iterator)[3].str(),
-            .byte_size = element_bytes * element_count,
-            .alignment = static_cast<std::uint32_t>(std::stoul((*iterator)[1].str())),
-            .is_dynamic = is_dynamic,
-        });
-    }
-    return globals;
-}
-
-struct LocalDepot {
-    std::string name;
-    std::uint64_t byte_size = 0;
-    std::uint32_t alignment = 1;
-};
-
-std::vector<LocalDepot> scan_local_depots(std::string_view ptx) {
-    const std::string source(ptx);
-    const std::regex declaration(
-        R"(\.local\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*;)"
-    );
-    std::vector<LocalDepot> depots;
-    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
-         iterator != end; ++iterator) {
-        depots.push_back({
-            .name = (*iterator)[2].str(),
-            .byte_size = std::stoull((*iterator)[3].str()),
-            .alignment = static_cast<std::uint32_t>(std::stoul((*iterator)[1].str())),
-        });
-    }
-    return depots;
-}
-
-std::unordered_set<std::string> scan_implicit_definitions(std::string_view ptx) {
-    const std::string source(ptx);
-    const std::regex marker(R"(//\s*implicit-def:\s*(%[A-Za-z0-9_.$]+))");
-    std::unordered_set<std::string> definitions;
-    for (std::sregex_iterator iterator(source.begin(), source.end(), marker), end;
-         iterator != end; ++iterator) {
-        definitions.insert((*iterator)[1].str());
-    }
-    return definitions;
-}
-
-struct ModuleConstantSymbol {
-    std::string name;
-    std::uint64_t offset = 0;
-    std::uint64_t byte_size = 0;
-    std::uint32_t alignment = 1;
-};
-
-struct InitializedByteArray {
-    std::string name;
-    std::vector<std::uint8_t> bytes;
-    std::uint32_t alignment = 1;
-    bool constant_space = false;
-    bool module_private = false;
-};
-
-struct InitializedByteArrayScan {
-    std::vector<InitializedByteArray> arrays;
-    std::string error;
-};
-
-InitializedByteArrayScan scan_initialized_byte_arrays(std::string_view ptx) {
-    InitializedByteArrayScan result;
-    std::istringstream lines{std::string(ptx)};
-    std::string line;
-    const std::regex declaration(
-        R"(^\s*(?:(?:\.visible|\.extern|\.weak)\s+)?\.(const|global)\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*=\s*\{([^}]*)\}\s*;\s*$)"
-    );
-    const std::regex scalar_declaration(
-        R"(^\s*(?:(?:\.visible|\.extern|\.weak)\s+)?\.(const|global)\s+\.align\s+([0-9]+)\s+\.[bus](8|16|32|64)\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*=\s*([^;]+)\s*;\s*$)"
-    );
-    while (std::getline(lines, line)) {
-        const std::size_t comment = line.find("//");
-        if (comment != std::string::npos) line.resize(comment);
-        if (line.find('=') == std::string::npos ||
-            (line.find(".global") == std::string::npos &&
-             line.find(".const") == std::string::npos)) {
-            continue;
-        }
-
-        std::smatch match;
-        if (line.find('{') == std::string::npos &&
-            std::regex_match(line, match, scalar_declaration)) {
-            std::uint64_t alignment = 0;
-            std::uint64_t bits = 0;
-            try {
-                alignment = std::stoull(match[2].str());
-                std::size_t consumed = 0;
-                const long long value =
-                    std::stoll(trim(match[5].str()), &consumed, 0);
-                if (consumed != trim(match[5].str()).size()) {
-                    throw std::invalid_argument("trailing scalar initializer text");
-                }
-                bits = static_cast<std::uint64_t>(value);
-            } catch (...) {
-                result.error = "invalid initialized PTX scalar declaration: " +
-                               trim(line);
-                return result;
-            }
-            const std::uint64_t byte_count = std::stoull(match[3].str()) / 8;
-            if (alignment == 0 || alignment > UINT32_MAX || byte_count == 0) {
-                result.error = "initialized PTX scalar has invalid size/alignment";
-                return result;
-            }
-            std::vector<std::uint8_t> bytes(static_cast<std::size_t>(byte_count));
-            for (std::size_t index = 0; index < bytes.size(); ++index) {
-                bytes[index] = static_cast<std::uint8_t>(bits >> (index * 8));
-            }
-            result.arrays.push_back({
-                .name = match[4].str(),
-                .bytes = std::move(bytes),
-                .alignment = static_cast<std::uint32_t>(alignment),
-                .constant_space = match[1].str() == "const",
-                .module_private =
-                    !starts_with(trim(line), ".visible") &&
-                    !starts_with(trim(line), ".extern") &&
-                    !starts_with(trim(line), ".weak"),
-            });
-            continue;
-        }
-        if (!std::regex_match(line, match, declaration)) {
-            result.error = "unsupported initialized PTX declaration: " +
-                           trim(line);
-            return result;
-        }
-
-        std::uint64_t declared_count = 0;
-        std::uint64_t alignment = 0;
-        try {
-            alignment = std::stoull(match[2].str());
-            declared_count = std::stoull(match[4].str());
-        } catch (...) {
-            result.error = "invalid initialized PTX byte-array size or alignment";
-            return result;
-        }
-        constexpr std::uint64_t kMaxEmbeddedByteArray = 64u * 1024u * 1024u;
-        if (alignment == 0 || alignment > UINT32_MAX || declared_count == 0 ||
-            declared_count > kMaxEmbeddedByteArray) {
-            result.error = "initialized PTX byte array has invalid or excessive size/alignment";
-            return result;
-        }
-
-        std::vector<std::uint8_t> bytes;
-        std::string initializer = trim(match[5].str());
-        std::size_t begin = 0;
-        while (begin < initializer.size()) {
-            const std::size_t comma = initializer.find(',', begin);
-            const std::size_t end =
-                comma == std::string::npos ? initializer.size() : comma;
-            const std::string item =
-                trim(std::string_view(initializer).substr(begin, end - begin));
-            if (item.empty()) {
-                result.error = "initialized PTX byte array contains an empty element";
-                return result;
-            }
-            try {
-                std::size_t consumed = 0;
-                const long long value = std::stoll(item, &consumed, 0);
-                if (consumed != item.size() || value < -128 || value > 255) {
-                    result.error =
-                        "initialized PTX byte array contains a non-byte element '" +
-                        item + "'";
-                    return result;
-                }
-                bytes.push_back(static_cast<std::uint8_t>(value & 0xff));
-            } catch (...) {
-                result.error =
-                    "initialized PTX byte array contains an invalid element '" +
-                    item + "'";
-                return result;
-            }
-            if (bytes.size() > declared_count) {
-                result.error =
-                    "initialized PTX byte array has more elements than its declaration";
-                return result;
-            }
-            if (comma == std::string::npos) break;
-            begin = comma + 1;
-        }
-        bytes.resize(static_cast<std::size_t>(declared_count), 0);
-        result.arrays.push_back({
-            .name = match[3].str(),
-            .bytes = std::move(bytes),
-            .alignment = static_cast<std::uint32_t>(alignment),
-            .constant_space = match[1].str() == "const",
-            .module_private =
-                !starts_with(trim(line), ".visible") &&
-                !starts_with(trim(line), ".extern") &&
-                !starts_with(trim(line), ".weak"),
-        });
-    }
-    return result;
-}
-
-std::vector<ModuleConstantSymbol> scan_module_constant_symbols(std::string_view ptx) {
-    const std::string source(ptx);
-    const std::regex declaration(
-        R"((?:\.visible\s+|\.extern\s+)?\.const\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*;)"
-    );
-    std::vector<ModuleConstantSymbol> symbols;
-    std::uint64_t cursor = 0;
-    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
-         iterator != end; ++iterator) {
-        const std::uint32_t alignment =
-            static_cast<std::uint32_t>(std::stoul((*iterator)[1].str()));
-        cursor = (cursor + alignment - 1) / alignment * alignment;
-        const std::uint64_t size = std::stoull((*iterator)[3].str());
-        symbols.push_back({
-            .name = (*iterator)[2].str(),
-            .offset = cursor,
-            .byte_size = size,
-            .alignment = alignment,
-        });
-        cursor += size;
-    }
-    return symbols;
-}
-
-std::vector<ModuleConstantSymbol> scan_module_global_symbols(std::string_view ptx) {
-    const std::string source(ptx);
-    const std::regex declaration(
-        R"((?:\.visible\s+|\.extern\s+)?\.global\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*;)"
-    );
-    std::vector<ModuleConstantSymbol> symbols;
-    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
-         iterator != end; ++iterator) {
-        symbols.push_back({
-            .name = (*iterator)[2].str(),
-            .offset = 0,
-            .byte_size = std::stoull((*iterator)[3].str()),
-            .alignment = static_cast<std::uint32_t>(
-                std::stoul((*iterator)[1].str())),
-        });
-    }
-    return symbols;
-}
-
 std::int64_t memory_operand_offset(std::string_view operand) {
     const std::size_t open = operand.find('[');
     const std::size_t close = operand.find(']');
@@ -1133,29 +783,6 @@ std::int64_t memory_operand_offset(std::string_view operand) {
     } catch (...) {
         return 0;
     }
-}
-
-std::string branch_target(const Instruction& instruction) {
-    return instruction.operands.empty() ? std::string{} : trim(instruction.operands.back());
-}
-
-bool is_conditional_branch(const Instruction& instruction) {
-    return root_opcode(instruction.opcode) == "bra" && !instruction.predicate.empty();
-}
-
-bool is_terminating_instruction(const Instruction& instruction) {
-    const std::string root = root_opcode(instruction.opcode);
-    return root == "bra" || root == "ret" || root == "exit" || root == "trap";
-}
-
-std::optional<std::string> direct_call_target(const Instruction& instruction) {
-    if (root_opcode(instruction.opcode) != "call") return std::nullopt;
-    const bool has_return = instruction.operands.size() == 3;
-    if ((!has_return && instruction.operands.size() != 2) ||
-        (has_return && grouped_names(instruction.operands.front()).size() != 1)) {
-        return std::nullopt;
-    }
-    return trim(instruction.operands[has_return ? 1 : 0]);
 }
 
 OpCode arithmetic_opcode(std::string_view root) {
