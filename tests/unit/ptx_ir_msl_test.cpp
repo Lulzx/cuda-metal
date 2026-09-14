@@ -60,6 +60,76 @@ int main() {
     using namespace cumetal;
     bool ok = true;
 
+    // A runtime scalar remains an integer when it precedes an annotated pointer
+    // in commuted address addition. The subtraction exposes false promotion.
+    const std::string commuted_pointer = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry commuted_pointer(
+.param .u64 .ptr .global input,
+.param .u64 length,
+.param .u64 .ptr .global output
+) {
+.reg .b64 %rd<8>;
+.reg .b32 %r1;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [length];
+ld.param.u64 %rd3, [output];
+sub.u64 %rd4, 31, %rd2;
+add.u64 %rd5, %rd2, %rd1;
+ld.global.u8 %r1, [%rd5];
+st.global.u64 [%rd3], %rd4;
+st.global.u8 [%rd3+8], %r1;
+ret;
+}
+)ptx";
+    const auto commuted_result = metal::compile_ptx_to_msl(commuted_pointer);
+    ok &= expect(commuted_result.ok, "commuted pointer addition preserves scalar length: " +
+                 commuted_result.error);
+    std::string ordered_pointer = commuted_pointer;
+    ordered_pointer.replace(ordered_pointer.find("%rd5, %rd2, %rd1"),
+                            std::string("%rd5, %rd2, %rd1").size(), "%rd5, %rd1, %rd2");
+    const auto ordered_result = metal::compile_ptx_to_msl(ordered_pointer);
+    ok &= expect(ordered_result.ok, "ordered pointer addition preserves scalar length: " +
+                 ordered_result.error);
+    std::string local_commuted_pointer = commuted_pointer;
+    const std::string input_load = "ld.param.u64 %rd1, [input];";
+    local_commuted_pointer.replace(local_commuted_pointer.find(input_load), input_load.size(),
+                                  ".local .align 8 .b8 depot[64];\nmov.u64 %rd1, depot;");
+    const std::string global_load = "ld.global.u8 %r1, [%rd5];";
+    local_commuted_pointer.replace(local_commuted_pointer.find(global_load), global_load.size(),
+                                  "st.u8 [%rd5], 7;\nld.u8 %r1, [%rd5];");
+    const auto local_commuted_result = metal::compile_ptx_to_msl(local_commuted_pointer);
+    ok &= expect(local_commuted_result.ok,
+                 "local symbol provenance survives commuted pointer addition: " +
+                 local_commuted_result.error);
+    auto alias_pointer = commuted_pointer;
+    alias_pointer.replace(alias_pointer.find(".reg .b64 %rd<8>"), std::string(".reg .b64 %rd<8>").size(), ".reg .b64 %rd<9>");
+    const std::string alias_load = "ld.param.u64 %rd1, [input];";
+    alias_pointer.replace(alias_pointer.find(alias_load), alias_load.size(),
+        alias_load + "\nmov.u64 %rd6, %rd1;\nadd.u64 %rd7, %rd6, 0;\nsub.u64 %rd8, %rd7, 0;");
+    alias_pointer.replace(alias_pointer.find("%rd5, %rd2, %rd1"), std::string("%rd5, %rd2, %rd1").size(), "%rd5, %rd2, %rd8");
+    const auto aliases = metal::compile_ptx_to_msl(alias_pointer);
+    ok &= expect(aliases.ok, "commuted pointer survives single-definition aliases: " + aliases.error);
+    for (const auto& replacement : {"add.u64 %rd5, %rd3, %rd1;",
+                                   "mov.u64 %rd6, %rd1;\nmov.u64 %rd6, 7;\nadd.u64 %rd5, %rd2, %rd6;"}) {
+        auto invalid = commuted_pointer;
+        const std::string addition = "add.u64 %rd5, %rd2, %rd1;";
+        invalid.replace(invalid.find(addition), addition.size(), replacement);
+        ok &= expect(!metal::compile_ptx_to_msl(invalid).ok,
+                     std::string("conflicting/reused address evidence does not waive typed validation: ") + replacement);
+    }
+    std::string invalid_pointer = commuted_pointer;
+    invalid_pointer.replace(invalid_pointer.find("%rd4, 31, %rd2"),
+                            std::string("%rd4, 31, %rd2").size(), "%rd4, 31, %rd1");
+    const auto invalid_pointer_result = metal::compile_ptx_to_msl(invalid_pointer);
+    ok &= expect(!invalid_pointer_result.ok &&
+                 invalid_pointer_result.error.find("pointer subtraction") != std::string::npos,
+                 "integer minus pointer remains rejected");
+
+
+
     metal::PtxToMslOptions options;
     options.entry_name = "vector_add";
     options.source_name = "vector_add.ptx";

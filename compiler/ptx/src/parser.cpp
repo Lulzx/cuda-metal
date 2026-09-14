@@ -357,6 +357,7 @@ void infer_pointer_parameters(EntryFunction* entry) {
     }
 
     std::unordered_map<std::string, std::string> register_to_param;
+    std::unordered_set<std::string> non_parameter_addresses;
     for (const auto& instruction : entry->instructions) {
         if (starts_with(instruction.opcode, "ld.param") && instruction.operands.size() >= 2) {
             const std::string dest_register = extract_register_name(instruction.operands[0]);
@@ -398,6 +399,21 @@ void infer_pointer_parameters(EntryFunction* entry) {
             opcode_root(instruction.opcode) != "st" && !instruction.operands.empty()) {
             const std::string dest_register = extract_register_name(instruction.operands[0]);
             if (!dest_register.empty()) {
+                const auto root = opcode_root(instruction.opcode);
+                bool address = root == "cvta";
+                if (root == "mov" && instruction.operands.size() == 2) {
+                    const auto source = trim(instruction.operands[1]);
+                    address |= !source.empty() &&
+                        (std::isalpha(static_cast<unsigned char>(source.front())) ||
+                         source.front() == '_' || source.front() == '$') &&
+                        !param_names.contains(source);
+                }
+                if (root == "mov" || root == "add" || root == "sub") {
+                    for (std::size_t i = 1; i < instruction.operands.size(); ++i)
+                        address |= non_parameter_addresses.contains(extract_register_name(instruction.operands[i]));
+                }
+                if (address) non_parameter_addresses.insert(dest_register);
+                else if (instruction.predicate.empty()) non_parameter_addresses.erase(dest_register);
                 std::string mapped_param;
                 bool ambiguous = false;
                 for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
@@ -407,6 +423,13 @@ void infer_pointer_parameters(EntryFunction* entry) {
                     }
                     const auto reg_it = register_to_param.find(src_register);
                     if (reg_it == register_to_param.end()) {
+                        // A known symbol-derived address must not attribute a
+                        // combined address solely to its scalar offset. Keep
+                        // ordinary untracked thread-index arithmetic compatible.
+                        if (non_parameter_addresses.contains(src_register)) {
+                            ambiguous = true;
+                            break;
+                        }
                         continue;
                     }
                     if (mapped_param.empty()) {

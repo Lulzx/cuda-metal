@@ -123,6 +123,7 @@ add_library(cumetal_ir STATIC
     compiler/ir/src/ptx_importer.cpp
     compiler/ir/src/ptx_parameters.cpp
     compiler/ir/src/ptx_tail_calls.cpp
+    compiler/ir/src/ptx_pointer_inference.cpp
     compiler/ir/src/ptx_tuple_normalization.cpp
     compiler/ir/src/ptx_cfg.cpp
     compiler/ir/src/ptx_module.cpp

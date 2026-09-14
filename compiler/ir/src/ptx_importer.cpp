@@ -11,6 +11,7 @@
 #include "ptx_cfg.h"
 #include "ptx_tail_calls.h"
 #include "ptx_parameters.h"
+#include "ptx_pointer_inference.h"
 #include "ptx_tuple_normalization.h"
 
 #include <algorithm>
@@ -1130,103 +1131,11 @@ struct Importer {
             }
         }
 
-        // Older CUDA Clang PTX (notably 21) omits `.ptr` from device-function
-        // parameters even when the CUDA source type is a pointer. Recover that
-        // information from actual address use before forward type inference.
-        // This is deliberately bounded to direct dataflow through the common
-        // mov/ld.param, add, and selp forms; ambiguous integer-only values stay
-        // integers instead of being guessed as pointers.
-        std::unordered_set<std::string> required_device_pointers;
-        // Reachable helpers are imported before their callers. Forwarding a
-        // scalar parameter slot to a proven pointer argument is pointer evidence
-        // even if this function never dereferences the address itself.
-        std::unordered_set<std::string> pointer_slots;
-        for (const Instruction& instruction : entry->instructions) {
-            const auto callee = direct_call_target(instruction);
-            if (!callee) continue;
-            const auto imported = std::find_if(result.module.functions.begin(), result.module.functions.end(),
-                [&](const Function& function) { return function.name == *callee; });
-            if (imported == result.module.functions.end()) continue;
-            const auto arguments = grouped_names(instruction.operands.back());
-            for (std::size_t i = 0; i < arguments.size() && i < imported->arguments.size(); ++i) {
-                if (imported->arguments[i].type.is_pointer()) pointer_slots.insert(arguments[i]);
-            }
-        }
-        for (const Instruction& instruction : entry->instructions) {
-            if ((instruction.opcode == "st.param.b64" || instruction.opcode == "st.param.u64") &&
-                instruction.operands.size() == 2) {
-                const auto slot = parameter_name_from_operand(instruction.operands[0]);
-                if (pointer_slots.contains(slot) && trim(instruction.operands[0]) == "[" + slot + "]") {
-                    const auto source = first_register(instruction.operands[1]);
-                    if (!source.empty()) required_device_pointers.insert(source);
-                }
-            }
-        }
-        for (const Instruction& instruction : entry->instructions) {
-            const std::string root = root_opcode(instruction.opcode);
-            // A helper's explicit generic-to-local address conversion proves
-            // pointer-ness even when all subsequent accesses are ld.local.
-            // Keep its argument generic; call-site specialization determines
-            // the actual address space rather than guessing from integer width.
-            if (!is_kernel && instruction.opcode == "cvta.to.local.u64" &&
-                instruction.operands.size() == 2) {
-                const std::string source = first_register(instruction.operands[1]);
-                if (!source.empty()) required_device_pointers.insert(source);
-            }
-            if (root != "ld" && root != "st") continue;
-            if (instruction.opcode.find(".param") != std::string::npos ||
-                instruction.opcode.find(".shared") != std::string::npos ||
-                instruction.opcode.find(".local") != std::string::npos ||
-                instruction.opcode.find(".const") != std::string::npos) {
-                continue;
-            }
-            const std::size_t memory_index = root == "st" ? 0 : 1;
-            if (instruction.operands.size() <= memory_index) continue;
-            const std::string base =
-                first_register(instruction.operands[memory_index]);
-            if (!base.empty()) required_device_pointers.insert(base);
-        }
-        bool pointer_changed = true;
-        for (int iteration = 0; iteration < 12 && pointer_changed; ++iteration) {
-            pointer_changed = false;
-            for (const Instruction& instruction : entry->instructions) {
-                const std::vector<std::string> destinations =
-                    destination_registers(instruction);
-                if (std::none_of(destinations.begin(), destinations.end(),
-                                 [&](const std::string& destination) {
-                                     return required_device_pointers.contains(destination);
-                                 })) {
-                    continue;
-                }
-                const std::string root = root_opcode(instruction.opcode);
-                std::vector<std::size_t> pointer_sources;
-                if (root == "mov" || starts_with(instruction.opcode, "ld.param")) {
-                    pointer_sources = {1};
-                } else if (root == "add") {
-                    pointer_sources = {1};
-                } else if (root == "selp") {
-                    pointer_sources = {1, 2};
-                }
-                for (const std::size_t source_index : pointer_sources) {
-                    if (instruction.operands.size() <= source_index) continue;
-                    const std::string source =
-                        first_register(instruction.operands[source_index]);
-                    if (!source.empty() &&
-                        required_device_pointers.insert(source).second) {
-                        pointer_changed = true;
-                    }
-                    const std::string parameter = parameter_name_from_operand(
-                        instruction.operands[source_index]);
-                    const auto parameter_type_it = parameter_types.find(parameter);
-                    if (parameter_type_it != parameter_types.end() &&
-                        !parameter_type_it->second.is_pointer()) {
-                        parameter_type_it->second = Type::pointer(
-                            Type::integer(8), AddressSpace::kDevice);
-                        pointer_changed = true;
-                    }
-                }
-            }
-        }
+        auto pointer_symbols = threadgroup_symbols;
+        for (const auto& [name, depot] : local_depots) pointer_symbols.insert(name);
+        for (const auto& [name, symbol] : module_initialized_symbols) pointer_symbols.insert(name);
+        for (const auto& symbol : module_global_symbols) pointer_symbols.insert(symbol.name);
+        detail::infer_entry_pointer_types(*entry, result.module, is_kernel, pointer_symbols, parameter_types);
 
         // A CUDA kernel pointer parameter is a launch-time device pointer, but
         // an ordinary device function receives a CUDA generic pointer. Clang
@@ -3027,6 +2936,15 @@ struct Importer {
                         value_types[operation.results[i]] = arithmetic_type;
                     }
                 }
+            }
+            if (root == "add" && std::any_of(operation.operands.begin(), operation.operands.end(),
+                                               [](const Operand& operand) { return operand.type.is_pointer(); })) {
+                const auto pointers = std::count_if(operation.operands.begin(), operation.operands.end(),
+                    [](const Operand& operand) { return operand.type.is_pointer(); });
+                if (operation.operands.size() != 2 || pointers != 1 || source_type != Type::integer(64) ||
+                    std::any_of(operation.operands.begin(), operation.operands.end(), [](const Operand& operand) {
+                        return !operand.type.is_pointer() && operand.type != Type::integer(64);
+                    })) return fail(&instruction, "pointer addition requires one pointer and a 64-bit integer byte offset");
             }
             if (root == "sub" && std::any_of(operation.operands.begin(), operation.operands.end(),
                                                [](const Operand& operand) { return operand.type.is_pointer(); })) {

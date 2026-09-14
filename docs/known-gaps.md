@@ -57,3 +57,13 @@ PTX calculation because import does not yet populate that IR field. Hidden
 bindings are not user launch arguments. The legacy backend retains parser
 classification and has no typed recovery: ambiguous pointers require `.ptr`
 annotations instead of relying on the former width-only buffer default.
+
+Commuted PTX address addition uses established pointer provenance to choose
+the address operand during backward inference. The proof is bounded to twelve
+passes through single-definition, unpredicated 64-bit register paths rooted
+in known pointer parameters, address conversions, or local/shared/global symbols.
+Unknown or reused paths retain the existing operand-one recovery fallback; this
+is not a general register-provenance solver. Integer-minus-pointer forms remain
+rejected. Parser inference does not attribute combined addresses to a scalar
+parameter when another source has known symbol-address provenance; ordinary
+untracked thread-index arithmetic retains its existing classification.
