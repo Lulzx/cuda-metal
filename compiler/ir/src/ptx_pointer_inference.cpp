@@ -5,9 +5,11 @@
 
 namespace cumetal::ir::detail {
 
-void infer_entry_pointer_types(const ptx::EntryFunction& entry, const Module& module,
+PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, const Module& module,
     bool is_kernel, const std::unordered_set<std::string>& pointer_symbols,
+    const std::unordered_set<std::string>& promoted_global_symbols,
     std::unordered_map<std::string, Type>& parameter_types) {
+    PointerInference evidence;
     // Preserve established pointer evidence before backward recovery. Only
     // single-definition, unpredicated 64-bit registers participate in this proof.
     std::unordered_set<std::string> declared64;
@@ -45,6 +47,22 @@ void infer_entry_pointer_types(const ptx::EntryFunction& entry, const Module& mo
                 pointer = known(1) && !known(2);
             }
             if (pointer && known_pointers.insert(destinations.front()).second) known_changed = true;
+            // A promoted PTX global remains physical Metal constant storage.
+            // Ordinary .const symbols and unrelated conversions are excluded.
+            const auto promoted_source = [&](std::size_t index) {
+                return instruction.operands.size() > index && evidence.promoted_global_registers.contains(
+                    first_register(instruction.operands[index]));
+            };
+            bool promoted = false;
+            if (root == "mov" && instruction.operands[1].find('{') == std::string::npos)
+                promoted = promoted_source(1) || promoted_global_symbols.contains(
+                    parameter_name_from_operand(instruction.operands[1]));
+            else if (root == "add") promoted = promoted_source(1) != promoted_source(2);
+            else if (root == "sub") promoted = promoted_source(1) && !promoted_source(2);
+            else if (instruction.opcode == "cvta.global.u64" || instruction.opcode == "cvta.to.global.u64")
+                promoted = promoted_source(1);
+            if (promoted && evidence.promoted_global_registers.insert(destinations.front()).second)
+                known_changed = true;
         }
     }
 
@@ -150,6 +168,7 @@ void infer_entry_pointer_types(const ptx::EntryFunction& entry, const Module& mo
         }
     }
 
+    return evidence;
 }
 
 }  // namespace cumetal::ir::detail

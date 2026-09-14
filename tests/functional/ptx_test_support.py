@@ -45,8 +45,10 @@ def run_integer_case(build, ptx_source, values, expected, label, entry="integer_
     if not count or len(expected) != output_words * count:
         raise ValueError('output count does not match the kernel layout')
     word_type = {32: u32, 64: u64}[word_bits]
-    source = (word_type * len(values))(*values)
-    result = (word_type * (len(expected) + 16))(*([0xa5a5a5a5] * (len(expected) + 16)))
+    guard = [0xa5a5a5a5] * 16
+    source_words = guard + list(values) + guard
+    source = (word_type * len(source_words))(*source_words)
+    result = (word_type * (len(expected) + 32))(*(guard + [0xa5a5a5a5] * len(expected) + guard))
     context, module, function = ptr(), ptr(), ptr()
     allocations = []
     api('cuInit', [u32], 0)
@@ -72,16 +74,20 @@ def run_integer_case(build, ptx_source, values, expected, label, entry="integer_
                 allocations.append(allocation)
                 api('cuMemcpyHtoD', [u64, ptr, c.c_size_t], allocation, c.cast(data, ptr), c.sizeof(data))
             count_storage = u64(count)  # Current classifier reads eight bytes for scalars.
-            arguments = (*allocations, count_storage)
+            arguments = (*(u64(allocation.value + 16 * c.sizeof(word_type)) for allocation in allocations),
+                         count_storage)
             args = (ptr * 4)(*[c.cast(c.pointer(arguments[i]), ptr) for i in argument_order], None)
             api('cuLaunchKernel', [ptr] + [u32]*7 + [ptr, c.POINTER(ptr), ptr],
                 function, (count + 63) // 64, 1, 1, 64, 1, 1, 0, None, args, None)
             api('cuCtxSynchronize', [])
             api('cuMemcpyDtoH', [ptr, u64, c.c_size_t], c.cast(result, ptr), allocations[1], c.sizeof(result))
             for i, value in enumerate(expected):
-                if result[i] != value:
-                    raise RuntimeError(f'word {i}: got {result[i]:08x}, expected {value:08x}')
-            assert list(result)[len(expected):] == [0xa5a5a5a5] * 16, 'tail guard overwritten'
+                if result[i + 16] != value:
+                    raise RuntimeError(f'word {i}: got {result[i + 16]:08x}, expected {value:08x}')
+            assert list(result)[:16] == guard and list(result)[-16:] == guard, 'output guard overwritten'
+            readback = type(source)()
+            api('cuMemcpyDtoH', [ptr, u64, c.c_size_t], c.cast(readback, ptr), allocations[0], c.sizeof(readback))
+            assert list(readback) == source_words, 'input or input guards changed'
             print(f'NUMERICAL_PASS {label}: {count} inputs, output values, guards')
     finally:
         for allocation in allocations:

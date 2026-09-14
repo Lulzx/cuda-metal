@@ -739,6 +739,9 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
     };
     std::vector<PendingCallResult> pending_call_results;
 
+    constexpr unsigned kPromotedGlobalOrigin = 1;
+    constexpr unsigned kOtherConstantOrigin = 2;
+    std::unordered_map<std::size_t, unsigned> constant_origins;
     auto constrain_operand = [&](std::size_t node, const ir::Operand& operand) {
         if (operand.kind == ir::OperandKind::kValue &&
             value_nodes.contains(operand.value)) {
@@ -746,6 +749,11 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
             return true;
         }
         if (operand.kind == ir::OperandKind::kSymbol && operand.type.is_pointer()) {
+            if (operand.type.address_space == ir::AddressSpace::kConstant) {
+                const auto promoted = module->attributes.find("ptx_promoted_global:" + operand.text);
+                constant_origins[node] |= promoted != module->attributes.end() && promoted->second == "true"
+                    ? kPromotedGlobalOrigin : kOtherConstantOrigin;
+            }
             return constraints.seed(node, operand.type.address_space);
         }
         return true;
@@ -1128,6 +1136,61 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                 "a pointer with no in-module producer (defaulted to device memory) "
                 "reaches a conflicting concrete address space"};
     }
+    // Propagate constant origins once over the same directional graph used for
+    // address spaces. Each node gains at most two bits, bounding work by graph
+    // size rather than retracing every helper conversion independently.
+    const unsigned device_mask = 1U << static_cast<unsigned>(ir::AddressSpace::kDevice);
+    const unsigned constant_mask = 1U << static_cast<unsigned>(ir::AddressSpace::kConstant);
+    std::vector<std::vector<std::size_t>> origin_users(constraints.size());
+    std::vector<bool> has_constant_predecessor(constraints.size(), false);
+    for (const auto& [source, target] : constraints.flows()) {
+        if ((constraints.mask(source) & constant_mask) && (constraints.mask(target) & constant_mask)) {
+            origin_users[source].push_back(target);
+            has_constant_predecessor[target] = true;
+        }
+    }
+    std::vector<unsigned> origins(constraints.size(), 0);
+    std::vector<std::size_t> pending_origins;
+    for (std::size_t node = 0; node < constraints.size(); ++node) {
+        if ((constraints.mask(node) & constant_mask) == 0) continue;
+        origins[node] = constant_origins[node];
+        if (!origins[node] && !has_constant_predecessor[node]) origins[node] = kOtherConstantOrigin;
+        if (origins[node]) pending_origins.push_back(node);
+    }
+    while (!pending_origins.empty()) {
+        const auto source = pending_origins.back();
+        pending_origins.pop_back();
+        for (const auto target : origin_users[source]) {
+            const auto combined = origins[target] | origins[source];
+            if (combined == origins[target]) continue;
+            origins[target] = combined;
+            pending_origins.push_back(target);
+        }
+    }
+    for (const auto& function : module->functions) {
+        for (const auto& block : function.blocks) {
+            for (const auto& operation : block.operations) {
+                if ((operation.opcode == ir::OpCode::kStore || operation.opcode == ir::OpCode::kAtomic) &&
+                    !operation.operands.empty()) {
+                    const auto& address = operation.operands.front();
+                    const auto node = value_nodes.find(address.value);
+                    if ((address.kind == ir::OperandKind::kValue && node != value_nodes.end() &&
+                         (constraints.mask(node->second) & constant_mask)) ||
+                        (address.type.is_pointer() && address.type.address_space == ir::AddressSpace::kConstant))
+                        return {false, "write reaches read-only constant storage at " + operation.location.str()};
+                }
+                if (!operation.attributes.contains("ptx_global_address") || operation.results.empty()) continue;
+                const auto node = value_nodes.find(operation.results.front());
+                if (node == value_nodes.end()) continue;
+                const auto spaces = constraints.mask(node->second);
+                if ((spaces & ~(device_mask | constant_mask)) != 0)
+                    return {false, "PTX global address conversion reaches non-global storage at " + operation.location.str()};
+                if ((spaces & constant_mask) && origins[node->second] != kPromotedGlobalOrigin)
+                    return {false, "PTX global address conversion has an unproven constant-storage origin at " + operation.location.str()};
+            }
+        }
+    }
+
     if (!defaulted_nodes.empty() && std::getenv("CUMETAL_DEBUG_ADDRESS_SPACES") != nullptr) {
         const std::unordered_set<std::size_t> defaulted(defaulted_nodes.begin(),
                                                         defaulted_nodes.end());

@@ -60,6 +60,136 @@ int main() {
     using namespace cumetal;
     bool ok = true;
 
+    const std::string promoted_global = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.global .align 8 .b8 private$table[64] = {74, 75, 72, 73, 78, 79, 76, 77, 66, 67, 64, 65, 70, 71, 68, 69, 122, 123, 120, 121, 126, 127, 124, 125, 114, 115, 112, 113, 118, 119, 116, 117, 106, 107, 104, 105, 110, 111, 108, 109, 98, 99, 96, 97, 102, 103, 100, 101, 26, 27, 24, 25, 30, 31, 28, 29, 18, 19, 16, 17, 22, 23, 20, 21};
+.visible .entry promoted_global(.param .u64 .ptr input, .param .u64 length, .param .u64 .ptr output) {
+.reg .b64 %rd<9>;
+.reg .b32 %r1;
+mov.b64 %rd6, private$table;
+cvta.global.u64 %rd7, %rd6;
+cvta.to.global.u64 %rd1, %rd7;
+ld.param.u64 %rd2, [length];
+ld.param.u64 %rd3, [output];
+sub.u64 %rd4, 31, %rd2;
+add.u64 %rd5, %rd2, %rd1;
+ld.global.u8 %r1, [%rd5];
+st.global.u64 [%rd3], %rd4;
+st.global.u8 [%rd3+8], %r1;
+ret;
+}
+)ptx";
+    const auto promoted_global_result = metal::compile_ptx_to_msl(promoted_global);
+    ok &= expect(promoted_global_result.ok,
+                 "cvta.global preserves promoted read-only storage: " + promoted_global_result.error);
+    auto invalid_global_to_local = promoted_global;
+    invalid_global_to_local.replace(invalid_global_to_local.find("cvta.to.global"), 14, "cvta.to.local");
+    ok &= expect(!metal::compile_ptx_to_msl(invalid_global_to_local).ok,
+                 "promoted global cannot be converted to private storage");
+    auto actual_constant = promoted_global;
+    actual_constant.replace(actual_constant.find(".global .align"), 7, ".const");
+    ok &= expect(!metal::compile_ptx_to_msl(actual_constant).ok,
+                 "PTX constant declarations do not get the promoted-global exception");
+
+    const std::string promoted_helper = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.global .align 8 .b8 private$table[64] = {74, 75, 72, 73, 78, 79, 76, 77, 66, 67, 64, 65, 70, 71, 68, 69, 122, 123, 120, 121, 126, 127, 124, 125, 114, 115, 112, 113, 118, 119, 116, 117, 106, 107, 104, 105, 110, 111, 108, 109, 98, 99, 96, 97, 102, 103, 100, 101, 26, 27, 24, 25, 30, 31, 28, 29, 18, 19, 16, 17, 22, 23, 20, 21};
+.func (.param .b32 retval) load_byte(.param .u64 address) {
+.reg .b64 %rd<3>;
+.reg .b32 %r1;
+ld.param.u64 %rd1, [address];
+cvta.to.global.u64 %rd2, %rd1;
+ld.global.u8 %r1, [%rd2];
+st.param.b32 [retval], %r1;
+ret;
+}
+.visible .entry promoted_helper(.param .u64 .ptr input, .param .u64 length, .param .u64 .ptr output) {
+.reg .b64 %rd<12>;
+.reg .b32 %r<3>;
+mov.b64 %rd6, private$table;
+cvta.global.u64 %rd7, %rd6;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [length];
+ld.param.u64 %rd3, [output];
+add.u64 %rd5, %rd7, %rd2;
+add.u64 %rd8, %rd1, %rd2;
+{
+.param .b64 arg;
+.param .b32 result;
+st.param.b64 [arg], %rd5;
+call.uni (result), load_byte, (arg);
+ld.param.b32 %r1, [result];
+st.param.b64 [arg], %rd8;
+call.uni (result), load_byte, (arg);
+ld.param.b32 %r2, [result];
+}
+cvt.u64.u32 %rd9, %r1;
+cvt.u64.u32 %rd10, %r2;
+shl.b64 %rd10, %rd10, 32;
+or.b64 %rd4, %rd9, %rd10;
+st.global.u64 [%rd3], %rd4;
+st.global.u8 [%rd3+8], %r1;
+ret;
+}
+)ptx";
+    const auto promoted_helper_result = metal::compile_ptx_to_msl(promoted_helper);
+    ok &= expect(promoted_helper_result.ok,
+                 "helper global conversion accepts device and promoted storage: " + promoted_helper_result.error);
+    auto invalid_helper_constant = promoted_helper;
+    invalid_helper_constant.replace(invalid_helper_constant.find(".global .align"), 7, ".const");
+    const std::string global_conversion = "cvta.global.u64 %rd7, %rd6;";
+    invalid_helper_constant.replace(invalid_helper_constant.find(global_conversion), global_conversion.size(),
+                                    "mov.b64 %rd7, %rd6;");
+    ok &= expect(!metal::compile_ptx_to_msl(invalid_helper_constant).ok,
+                 "helper global conversion rejects actual PTX constant origins");
+    auto mixed_constant_origins = promoted_helper;
+    mixed_constant_origins.insert(mixed_constant_origins.find(".func"),
+        ".const .align 8 .b8 other_constant[4] = {1, 2, 3, 4};\n");
+    const std::string helper_input = "ld.param.u64 %rd1, [input];";
+    mixed_constant_origins.replace(mixed_constant_origins.find(helper_input), helper_input.size(),
+                                  "mov.b64 %rd1, other_constant;");
+    ok &= expect(!metal::compile_ptx_to_msl(mixed_constant_origins).ok,
+                 "a promoted call site does not excuse another ordinary constant origin");
+    auto writes_from_helper = promoted_helper;
+    writes_from_helper.insert(writes_from_helper.find("ld.global.u8 %r1, [%rd2];"),
+                              "st.global.u8 [%rd2], 7;\n");
+    const auto helper_write = metal::compile_ptx_to_msl(writes_from_helper);
+    ok &= expect(!helper_write.ok && helper_write.error.find("read-only constant storage") != std::string::npos,
+                 "a helper write cannot use the promoted-global conversion exemption");
+    auto invalid_helper_local = promoted_helper;
+    const std::string table_move = "mov.b64 %rd6, private$table;";
+    invalid_helper_local.replace(invalid_helper_local.find(table_move), table_move.size(),
+                                ".local .align 8 .b8 depot[64];\nmov.b64 %rd6, depot;");
+    invalid_helper_local.replace(invalid_helper_local.find(global_conversion), global_conversion.size(),
+                                "mov.b64 %rd7, %rd6;");
+    ok &= expect(!metal::compile_ptx_to_msl(invalid_helper_local).ok,
+                 "helper global conversion rejects private origins");
+    auto invalid_helper_shared = invalid_helper_local;
+    invalid_helper_shared.replace(invalid_helper_shared.find(".local .align"), 6, ".shared");
+    ok &= expect(!metal::compile_ptx_to_msl(invalid_helper_shared).ok,
+                 "helper global conversion rejects shared origins");
+    auto mutable_global = promoted_global;
+    mutable_global.insert(mutable_global.find("cvta.global.u64 %rd7"), "st.global.u8 [%rd6], 7;\n");
+    const auto mutable_global_result = metal::compile_ptx_to_msl(mutable_global);
+    ok &= expect(mutable_global_result.ok &&
+                 !mutable_global_result.gpu_ir.attributes.contains("ptx_promoted_global:private$table"),
+                 "written globals retain device storage without a promotion exemption: " + mutable_global_result.error);
+    auto mutable_literal = mutable_global;
+    for (std::size_t at = 0; (at = mutable_literal.find("private$table", at)) != std::string::npos; at += 16)
+        mutable_literal.replace(at, 13, "__const_$literal");
+    const auto mutable_literal_result = metal::compile_ptx_to_msl(mutable_literal);
+    ok &= expect(mutable_literal_result.ok &&
+                 !mutable_literal_result.gpu_ir.attributes.contains("ptx_promoted_global:__const_$literal"),
+                 "literal-like names do not override actual write evidence");
+
+
+
+
+
     // A runtime scalar remains an integer when it precedes an annotated pointer
     // in commuted address addition. The subtraction exposes false promotion.
     const std::string commuted_pointer = R"ptx(

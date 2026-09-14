@@ -904,6 +904,7 @@ struct Importer {
         call_parameter_slot_fields;
     std::unordered_map<std::string, Operand> call_return_slots;
     std::unordered_set<std::string> threadgroup_symbols;
+    std::unordered_set<std::string> promoted_global_symbols;
     std::unordered_map<std::string, LocalDepot> local_depots;
     std::unordered_map<std::string, Operand> local_depot_values;
     std::unordered_set<std::string> implicit_definitions;
@@ -1135,7 +1136,8 @@ struct Importer {
         for (const auto& [name, depot] : local_depots) pointer_symbols.insert(name);
         for (const auto& [name, symbol] : module_initialized_symbols) pointer_symbols.insert(name);
         for (const auto& symbol : module_global_symbols) pointer_symbols.insert(symbol.name);
-        detail::infer_entry_pointer_types(*entry, result.module, is_kernel, pointer_symbols, parameter_types);
+        const auto pointer_evidence = detail::infer_entry_pointer_types(
+            *entry, result.module, is_kernel, pointer_symbols, promoted_global_symbols, parameter_types);
 
         // A CUDA kernel pointer parameter is a launch-time device pointer, but
         // an ordinary device function receives a CUDA generic pointer. Clang
@@ -1214,6 +1216,17 @@ struct Importer {
                             ? AddressSpace::kPrivate
                             : AddressSpace::kDevice;
                     inferred = Type::pointer(Type::integer(8), space);
+                    if (!is_kernel && instruction.opcode == "cvta.to.global.u64" &&
+                        instruction.operands.size() == 2) {
+                        const auto source = register_types.find(first_register(instruction.operands[1]));
+                        if (source != register_types.end() && source->second.is_pointer() &&
+                            source->second.address_space == AddressSpace::kNone)
+                            inferred = source->second;  // Call-site storage is resolved during legalization.
+                    }
+                    if ((instruction.opcode == "cvta.global.u64" || instruction.opcode == "cvta.to.global.u64") &&
+                        instruction.operands.size() == 2 && pointer_evidence.promoted_global_registers.contains(
+                            first_register(instruction.operands[1])))
+                        inferred = Type::pointer(Type::integer(8), AddressSpace::kConstant);
                 } else if (root == "selp" && instruction.operands.size() >= 3) {
                     for (std::size_t source_index : {1U, 2U}) {
                         const std::string source =
@@ -2117,6 +2130,14 @@ struct Importer {
             }
         } else if (root == "cvta") {
             operation.opcode = OpCode::kAddressSpaceCast;
+            if (instruction.opcode == "cvta.global.u64" || instruction.opcode == "cvta.to.global.u64") {
+                operation.attributes["ptx_global_address"] = "true";
+                // Keep generic helper addresses connected to call-site storage.
+                // Legalization must still prove that every origin is PTX global.
+                if (operation.result_types.front().is_pointer() &&
+                    operation.result_types.front().address_space == AddressSpace::kNone)
+                    operation.opcode = OpCode::kConvert;
+            }
             Operand source = source_operand(1, operation.result_types.front());
             if (source.kind == OperandKind::kValue &&
                 integer_zero_values.contains(source.value)) {
@@ -3824,6 +3845,10 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
             .bytes = array.bytes,
             .alignment = array.alignment,
         });
+        if (!array.constant_space) {
+            importer.promoted_global_symbols.insert(array.name);
+            importer.result.module.attributes["ptx_promoted_global:" + array.name] = "true";
+        }
         importer.module_initialized_symbols.emplace(
             array.name,
             ModuleConstantSymbol{
@@ -3894,6 +3919,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         next.device_functions = importer.device_functions;
         next.printf_functions = importer.printf_functions;
         next.threadgroup_symbols = importer.threadgroup_symbols;
+        next.promoted_global_symbols = importer.promoted_global_symbols;
         next.local_depots = importer.local_depots;
         next.implicit_definitions = importer.implicit_definitions;
         next.module_constant_symbols = importer.module_constant_symbols;

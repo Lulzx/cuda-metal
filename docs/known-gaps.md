@@ -68,7 +68,14 @@ rejected. Parser inference does not attribute combined addresses to a scalar
 parameter when another source has known symbol-address provenance; ordinary
 untracked thread-index arithmetic retains its existing classification.
 
-Mutation through supported same-function register aliases prevents private-global
-promotion, including predicated writes and register reuse. Literal-like names
-do not override write evidence; unfinished bounded proofs cannot justify promotion.
-Interprocedural mutation through helper pointer arguments remains unsupported.
+A translation-unit-private PTX `.global` already proven immutable and promoted
+to Metal constant storage retains that physical storage through supported global
+address conversions. Single-definition aliases are tracked during import.
+Generic helper conversions retain a PTX-global constraint until call-site storage
+is resolved; constant-space origins must all come from explicitly promoted
+globals. Ordinary PTX `.const`, unknown constant origins, and private/shared
+conversions do not qualify. Mutable globals retain their device storage.
+Mutation through supported same-function register aliases prevents promotion,
+including predicated writes and register reuse. Stores through a helper pointer
+that resolves to constant storage are rejected; interprocedural mutation-based
+reclassification of private globals is not yet implemented.
