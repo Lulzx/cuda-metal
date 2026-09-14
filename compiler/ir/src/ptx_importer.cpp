@@ -8,6 +8,7 @@
 #include "ptx_module.h"
 #include "ptx_instruction.h"
 #include "ptx_text.h"
+#include "ptx_cfg.h"
 
 #include <algorithm>
 #include <cctype>
@@ -51,15 +52,9 @@ using detail::direct_call_target;
 
 using Instruction = cumetal::ptx::EntryFunction::Instruction;
 
-struct RawBlock {
-    BlockId id = kInvalidBlock;
-    std::string name;
-    std::vector<const Instruction*> instructions;
-    std::vector<std::size_t> successors;
-    std::vector<std::size_t> predecessors;
-    std::unordered_map<std::string, ValueId> last_definitions;
-    std::unordered_set<std::string> uses_before_definition;
-};
+using detail::RawBlock;
+using detail::ptx_register_container_bits;
+using detail::normalized_predicate;
 
 std::uint32_t ptx_type_bits(std::string_view type) {
     for (std::uint32_t bits : {8U, 16U, 32U, 64U}) {
@@ -811,13 +806,6 @@ bool has_signed_integer_type(std::string_view opcode) {
            opcode.find(".s64") != std::string_view::npos;
 }
 
-std::uint32_t ptx_register_container_bits(std::string_view name) {
-    if (starts_with(name, "%rd") || starts_with(name, "%fd")) return 64;
-    if (starts_with(name, "%rs") || starts_with(name, "%h")) return 16;
-    if (starts_with(name, "%r") || starts_with(name, "%f")) return 32;
-    return 0;
-}
-
 bool cvt_has_signed_source(std::string_view opcode) {
     return opcode.ends_with(".s8") || opcode.ends_with(".s16") ||
            opcode.ends_with(".s32") || opcode.ends_with(".s64");
@@ -839,11 +827,6 @@ std::string cvt_rounding_mode(std::string_view opcode) {
         opcode.find(".rp.") != std::string::npos) return "3u";
     const Type destination = ptx_cvt_result_type(opcode);
     return destination.kind == TypeKind::kInteger ? "1u" : "0u";
-}
-
-std::pair<std::string, bool> normalized_predicate(std::string_view predicate) {
-    const bool inverted = predicate.find('!') != std::string_view::npos;
-    return {first_register(predicate), inverted};
 }
 
 MemoryScope memory_scope_from_opcode(std::string_view opcode) {
@@ -906,6 +889,7 @@ struct Importer {
     std::unordered_map<ValueId, Type> value_types;
     std::unordered_set<ValueId> integer_zero_values;
     std::vector<RawBlock> raw_blocks;
+    std::deque<Instruction> normalized_instructions;
     std::unordered_map<std::string, std::size_t> label_blocks;
     std::vector<std::unordered_map<std::string, ValueId>> incoming;
     std::vector<std::unordered_map<std::string, ValueId>> outgoing;
@@ -3958,6 +3942,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
 
         next.infer_register_types();
         next.build_cfg();
+        detail::simplify_guarded_paths(next.raw_blocks, next.builder, next.normalized_instructions);
         next.allocate_values();
         if (!next.construct_ssa() || !next.materialize_function()) {
             importer = std::move(next);

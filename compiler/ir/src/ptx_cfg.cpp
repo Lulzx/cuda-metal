@@ -1,0 +1,327 @@
+#include "ptx_cfg.h"
+#include "ptx_text.h"
+
+#include <algorithm>
+#include <map>
+#include <regex>
+
+namespace cumetal::ir::detail {
+namespace {
+
+struct GuardedPaths {
+    std::vector<RawBlock>& raw_blocks;
+    Builder& builder;
+    std::deque<Instruction>& storage;
+    std::size_t cloned_blocks = 0;
+    std::size_t cloned_instructions = 0;
+
+    // A bounded proof may decline to simplify. Never invent a definition when
+    // a proof or budget is exhausted: subsequent SSA construction still checks it.
+    std::optional<std::size_t> clone_edge(std::size_t parent, std::size_t edge,
+                                         const RawBlock& target, std::size_t successor) {
+        if (cloned_blocks >= 4096 ||
+            target.instructions.size() > 131072 - cloned_instructions) return std::nullopt;
+        RawBlock clone;
+        clone.id = builder.next_block();
+        clone.name = target.name + "_guard_" + std::to_string(raw_blocks.size());
+        clone.successors = {successor};
+        for (std::size_t j = 0; j < target.instructions.size(); ++j) {
+            auto instruction = *target.instructions[j];
+            if (j + 1 == target.instructions.size()) {
+                instruction.predicate.clear();
+                instruction.operands = {raw_blocks[successor].name};
+            }
+            storage.push_back(std::move(instruction));
+            clone.instructions.push_back(&storage.back());
+        }
+        const auto index = raw_blocks.size();
+        raw_blocks[parent].successors[edge] = index;
+        ++cloned_blocks;
+        cloned_instructions += clone.instructions.size();
+        raw_blocks.push_back(std::move(clone));
+        return index;
+    }
+
+    struct ThresholdPredicate {
+        std::string reg;
+        std::string width;
+        unsigned long long threshold;
+        bool greater_equal;
+    };
+
+    static std::optional<ThresholdPredicate> threshold_predicate(const Instruction& instruction) {
+        static const std::regex comparison(R"(^setp\.(lt|le|gt|ge)\.u(32|64)$)");
+        std::smatch match;
+        if (!instruction.predicate.empty() || instruction.operands.size() != 3 ||
+            !std::regex_match(instruction.opcode, match, comparison)) return std::nullopt;
+        const auto reg = trim(instruction.operands[1]);
+        const auto immediate = trim(instruction.operands[2]);
+        if (reg.empty() || first_register(reg) != reg || immediate.empty() ||
+            immediate.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
+        try {
+            auto threshold = std::stoull(immediate);
+            const auto maximum = match[2] == "32" ? 0xffffffffULL : ~0ULL;
+            const std::string op = match[1];
+            if (threshold > maximum || ((op == "gt" || op == "le") && threshold == maximum))
+                return std::nullopt;
+            if (op == "gt" || op == "le") ++threshold;
+            return ThresholdPredicate{reg, match[2], threshold, op == "gt" || op == "ge"};
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
+
+    // Specialize a compare-only successor on a known incoming comparison edge.
+    // Keep its predicate definition, but remove the impossible outgoing edge.
+    // This exposes the proof to both self-select liveness and register SSA.
+    void thread_threshold_edges() {
+        const std::size_t original_count = raw_blocks.size();
+        for (std::size_t index = 0; index < original_count; ++index) {
+            const RawBlock source = raw_blocks[index];
+            if (source.instructions.empty() || source.successors.size() != 2) continue;
+            const Instruction* branch = source.instructions.back();
+            if (root_opcode(branch->opcode) != "bra" || branch->predicate.empty()) continue;
+            const auto [pred, inverted] = normalized_predicate(branch->predicate);
+            std::optional<ThresholdPredicate> condition;
+            // Remember a comparison only while its predicate and input are unchanged.
+            for (std::size_t i = 0; i + 1 < source.instructions.size(); ++i) {
+                const auto& instruction = *source.instructions[i];
+                const auto written = destination_registers(instruction);
+                if (condition && (std::find(written.begin(), written.end(), pred) != written.end() ||
+                                  std::find(written.begin(), written.end(), condition->reg) != written.end()))
+                    condition.reset();
+                if (root_opcode(instruction.opcode) == "call") condition.reset();
+                if (written.size() == 1 && written[0] == pred)
+                    condition = threshold_predicate(instruction);
+            }
+            if (!condition) continue;
+            for (std::size_t edge = 0; edge < 2; ++edge) {
+                const RawBlock target = raw_blocks[source.successors[edge]];
+                if (target.instructions.size() != 2 || target.successors.size() != 2) continue;
+                const auto next = threshold_predicate(*target.instructions[0]);
+                const Instruction* tail = target.instructions[1];
+                if (!next || root_opcode(tail->opcode) != "bra" || tail->predicate.empty()) continue;
+                const auto [next_pred, next_inverted] = normalized_predicate(tail->predicate);
+                const auto written = destination_registers(*target.instructions[0]);
+                if (written.size() != 1 || written[0] != next_pred || next->reg != condition->reg ||
+                    next->width != condition->width || next->threshold != condition->threshold) continue;
+                const bool known = ((edge == 0) != inverted) == condition->greater_equal;
+                const bool take = (known == next->greater_equal) != next_inverted;
+                clone_edge(index, edge, target, target.successors[take ? 0 : 1]);
+            }
+        }
+    }
+
+    struct EqualityFact {
+        std::string left, right, type;
+        bool equal;
+    };
+
+    static std::optional<EqualityFact> equality_predicate(const Instruction& instruction) {
+        static const std::regex comparison(R"(^setp\.(eq|ne)\.([bu](32|64))$)");
+        std::smatch match;
+        if (!instruction.predicate.empty() || instruction.operands.size() != 3 ||
+            !std::regex_match(instruction.opcode, match, comparison)) return std::nullopt;
+        if (first_register(instruction.operands[0]) != trim(instruction.operands[0])) return std::nullopt;
+        auto left = trim(instruction.operands[1]);
+        auto right = trim(instruction.operands[2]);
+        // Restrict the proof to scalar register comparisons; malformed operands
+        // and other comparison semantics remain the responsibility of the importer.
+        if (left.empty() || right.empty() || first_register(left) != left ||
+            first_register(right) != right) return std::nullopt;
+        if (right < left) std::swap(left, right);
+        return EqualityFact{left, right, match[2], match[1] == "eq"};
+    }
+
+    // Duplicate only a bounded chain of successors whose branch is implied by
+    // the incoming edge. Retain every non-branch instruction, including guarded
+    // loads: this exposes infeasible paths to SSA without inventing definitions.
+    void thread_equality_edges() {
+        const auto original_count = raw_blocks.size();
+        for (std::size_t index = 0; index < original_count; ++index) {
+            const RawBlock source = raw_blocks[index];
+            if (source.instructions.empty() || source.successors.size() != 2) continue;
+            const auto* branch = source.instructions.back();
+            if (root_opcode(branch->opcode) != "bra" || branch->predicate.empty()) continue;
+            const auto [pred, inverted] = normalized_predicate(branch->predicate);
+            std::optional<EqualityFact> comparison;
+            bool combined = false;
+            for (std::size_t j = 0; j + 1 < source.instructions.size(); ++j) {
+                const auto& instruction = *source.instructions[j];
+                const auto written = destination_registers(instruction);
+                for (const auto& reg : written)
+                    if (comparison && (reg == pred || reg == comparison->left || reg == comparison->right))
+                        comparison.reset();
+                if (root_opcode(instruction.opcode) == "call") comparison.reset();
+                if (std::find(written.begin(), written.end(), pred) != written.end()) combined = false;
+                if (written.size() == 1 && written[0] == pred) {
+                    comparison = equality_predicate(instruction);
+                    combined = instruction.opcode == "or.pred" && instruction.predicate.empty();
+                }
+            }
+            if (!comparison && !combined) continue;
+            for (std::size_t edge = 0; edge < 2; ++edge) {
+                std::map<std::string, bool> known{{pred, (edge == 0) != inverted}};
+                auto fact = comparison;
+                if (fact) fact->equal = known[pred] == fact->equal;
+                auto parent = index;
+                auto parent_edge = edge;
+                auto current = source.successors[edge];
+                std::unordered_set<std::size_t> visited{index};
+                for (unsigned depth = 0; depth < 8 && visited.insert(current).second; ++depth) {
+                    const RawBlock target = raw_blocks[current];
+                    if (target.instructions.empty() || target.instructions.size() > 32 ||
+                        target.successors.size() != 2) break;
+                    const auto* tail = target.instructions.back();
+                    if (root_opcode(tail->opcode) != "bra" || tail->predicate.empty()) break;
+                    for (std::size_t j = 0; j + 1 < target.instructions.size(); ++j) {
+                        const auto& instruction = *target.instructions[j];
+                        const auto written = destination_registers(instruction);
+                        std::optional<bool> value;
+                        auto lookup = [&](const std::string& operand) -> std::optional<bool> {
+                            auto found = known.find(trim(operand));
+                            if (found == known.end()) return std::nullopt;
+                            return found->second;
+                        };
+                        if (instruction.predicate.empty()) {
+                            const auto next = equality_predicate(instruction);
+                            if (next && fact && next->left == fact->left && next->right == fact->right &&
+                                next->type == fact->type) value = next->equal == fact->equal;
+                            if (instruction.operands.size() == 2 &&
+                                (instruction.opcode == "mov.pred" || instruction.opcode == "not.pred")) {
+                                value = lookup(instruction.operands[1]);
+                                if (value && instruction.opcode == "not.pred") value = !*value;
+                            }
+                            if (instruction.operands.size() == 3 && instruction.opcode == "or.pred") {
+                                auto a = lookup(instruction.operands[1]);
+                                auto b = lookup(instruction.operands[2]);
+                                if ((a && *a) || (b && *b)) value = true;
+                                else if (a && b) value = false;
+                            }
+                        }
+                        for (const auto& reg : written) {
+                            known.erase(reg);
+                            if (fact && (reg == fact->left || reg == fact->right)) fact.reset();
+                        }
+                        if (root_opcode(instruction.opcode) == "call") { known.clear(); fact.reset(); }
+                        if (value && written.size() == 1) known[written[0]] = *value;
+                    }
+                    const auto [tail_pred, tail_inverted] = normalized_predicate(tail->predicate);
+                    const auto outcome = known.find(tail_pred);
+                    if (outcome == known.end()) break;
+                    const auto successor = target.successors[(outcome->second != tail_inverted) ? 0 : 1];
+                    const auto cloned = clone_edge(parent, parent_edge, target, successor);
+                    if (!cloned) break;
+                    parent = *cloned;
+                    parent_edge = 0;
+                    current = successor;
+                }
+            }
+        }
+    }
+
+    void remove_unobserved_self_selects() {
+        for (RawBlock& block : raw_blocks) {
+            if (block.instructions.empty() || block.successors.size() != 2) continue;
+            const Instruction* branch = block.instructions.back();
+            if (root_opcode(branch->opcode) != "bra" || branch->predicate.empty()) continue;
+            const auto [predicate, inverted] = normalized_predicate(branch->predicate);
+            for (std::size_t index = 0; index + 1 < block.instructions.size(); ++index) {
+                const Instruction* select = block.instructions[index];
+                if ((select->opcode != "selp.b32" && select->opcode != "selp.b64") ||
+                    !select->predicate.empty() || select->operands.size() != 4 ||
+                    first_register(select->operands[3]) != trim(select->operands[3])) continue;
+                const std::string destination = trim(select->operands[0]);
+                const std::string source = trim(select->operands[1]);
+                const int width = select->opcode == "selp.b32" ? 32 : 64;
+                // Do not turn malformed select operands into valid mov tuples.
+                // Keep this proof restricted to matching scalar registers.
+                if (first_register(source) != source ||
+                    ptx_register_container_bits(source) != width ||
+                    ptx_register_container_bits(destination) != width) continue;
+                if (first_register(destination) != destination ||
+                    trim(select->operands[2]) != destination ||
+                    trim(select->operands[1]) == destination) continue;
+                const std::string select_predicate = trim(select->operands[3]);
+                std::map<std::string, bool> predicate_aliases{{select_predicate, true}};
+                bool safe = true;
+                for (std::size_t i = index + 1; i + 1 < block.instructions.size(); ++i) {
+                    const auto sources = source_registers(*block.instructions[i]);
+                    const auto destinations = destination_registers(*block.instructions[i]);
+                    if (std::find(sources.begin(), sources.end(), destination) != sources.end() ||
+                        std::find(destinations.begin(), destinations.end(), destination) != destinations.end() ||
+                        std::find(destinations.begin(), destinations.end(), select_predicate) != destinations.end()) safe = false;
+                    const Instruction& middle = *block.instructions[i];
+                    std::optional<bool> alias;
+                    if (middle.predicate.empty() && middle.operands.size() == 2 &&
+                        (middle.opcode == "not.pred" || middle.opcode == "mov.pred")) {
+                        auto found = predicate_aliases.find(trim(middle.operands[1]));
+                        if (found != predicate_aliases.end())
+                            alias = found->second != (middle.opcode == "not.pred");
+                    }
+                    for (const auto& written : destinations) predicate_aliases.erase(written);
+                    if (alias && destinations.size() == 1) predicate_aliases[destinations[0]] = *alias;
+                }
+                if (!safe) continue;
+                const auto branch_alias = predicate_aliases.find(predicate);
+                if (branch_alias == predicate_aliases.end()) continue;
+                const bool branch_on_selected = branch_alias->second != inverted;
+                const std::size_t false_edge = block.successors[branch_on_selected ? 1 : 0];
+                // Follow the false edge until an unconditional overwrite or
+                // this same select. Cycles are safe only if no path reads the
+                // old value. A subsequent true edge supplies the new value.
+                std::vector<std::size_t> pending{false_edge};
+                std::unordered_set<std::size_t> visited;
+                while (!pending.empty() && safe) {
+                    const auto current = pending.back();
+                    pending.pop_back();
+                    if (!visited.insert(current).second) continue;
+                    bool killed = false;
+                    for (const Instruction* instruction : raw_blocks[current].instructions) {
+                        if (instruction == select) { killed = true; break; }
+                        const auto sources = source_registers(*instruction);
+                        if (std::find(sources.begin(), sources.end(), destination) != sources.end()) {
+                            safe = false;
+                            break;
+                        }
+                        const auto destinations = destination_registers(*instruction);
+                        if (instruction->predicate.empty() &&
+                            std::find(destinations.begin(), destinations.end(), destination) != destinations.end()) {
+                            killed = true;
+                            break;
+                        }
+                    }
+                    if (!killed) {
+                        pending.insert(pending.end(), raw_blocks[current].successors.begin(),
+                                       raw_blocks[current].successors.end());
+                    }
+                }
+                if (!safe) continue;
+
+                Instruction replacement = *select;
+                replacement.opcode = select->opcode == "selp.b32" ? "mov.b32" : "mov.b64";
+                replacement.operands = {select->operands[0], select->operands[1]};
+                storage.push_back(std::move(replacement));
+                block.instructions[index] = &storage.back();
+            }
+        }
+    }
+
+};
+
+}  // namespace
+
+void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
+                            std::deque<Instruction>& storage) {
+    GuardedPaths paths{blocks, builder, storage};
+    paths.thread_threshold_edges();
+    paths.thread_equality_edges();
+    for (auto& block : blocks) block.predecessors.clear();
+    for (std::size_t index = 0; index < blocks.size(); ++index)
+        for (auto successor : blocks[index].successors)
+            blocks[successor].predecessors.push_back(index);
+    paths.remove_unobserved_self_selects();
+}
+
+}  // namespace cumetal::ir::detail

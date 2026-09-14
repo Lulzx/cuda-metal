@@ -250,3 +250,15 @@ integer byte offset, including local-buffer loops. Pointer differences,
 integer-minus-pointer, and narrow pointer arithmetic remain unsupported.
 Unused pointer truncations are removed during legalization; observed truncations
 remain rejected because Metal cannot faithfully represent their numeric result.
+
+## Guarded PTX definitions
+
+Before register SSA, bounded unsigned-threshold and repeated-equality proofs can
+remove infeasible branch edges, including predicate aliases and OR guards. A
+self-select may become a move only when its old value is unobserved on every
+false path until an unconditional overwrite or the same select. Writes invalidate
+tracked facts; unsupported comparisons and observable undefined values remain
+rejected. Specialization retains non-branch instructions, explores at most eight
+successors per chain, and shares limits of 4,096 cloned blocks / 131,072
+instructions per function. Reaching a limit leaves the original path for SSA
+validation; this is not general predicate optimization.

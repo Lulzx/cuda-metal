@@ -151,4 +151,16 @@ std::string parameter_name_from_operand(std::string_view operand) {
     return inside;
 }
 
+std::uint32_t ptx_register_container_bits(std::string_view name) {
+    if (starts_with(name, "%rd") || starts_with(name, "%fd")) return 64;
+    if (starts_with(name, "%rs") || starts_with(name, "%h")) return 16;
+    if (starts_with(name, "%r") || starts_with(name, "%f")) return 32;
+    return 0;
+}
+
+std::pair<std::string, bool> normalized_predicate(std::string_view predicate) {
+    const bool inverted = predicate.find('!') != std::string_view::npos;
+    return {first_register(predicate), inverted};
+}
+
 }  // namespace cumetal::ir::detail

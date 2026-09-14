@@ -3,6 +3,8 @@
 #include "cumetal/ptx/parser.h"
 
 #include <optional>
+#include <cstdint>
+#include <utility>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -23,5 +25,8 @@ std::string branch_target(const Instruction& instruction);
 bool is_conditional_branch(const Instruction& instruction);
 bool is_terminating_instruction(const Instruction& instruction);
 std::optional<std::string> direct_call_target(const Instruction& instruction);
+
+std::uint32_t ptx_register_container_bits(std::string_view name);
+std::pair<std::string, bool> normalized_predicate(std::string_view predicate);
 
 }  // namespace cumetal::ir::detail
