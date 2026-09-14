@@ -120,6 +120,12 @@ ret;
         ok &= expect(!metal::compile_ptx_to_msl(invalid).ok,
                      std::string("conflicting/reused address evidence does not waive typed validation: ") + replacement);
     }
+    auto named_stack = local_commuted_pointer;
+    for (std::size_t at = 0; (at = named_stack.find("%rd1", at)) != std::string::npos; at += 3)
+        named_stack.replace(at, 4, "%SP");
+    named_stack.insert(named_stack.find(".reg .b64"), ".reg .b64 %SP;\n");
+    const auto stack_result = metal::compile_ptx_to_msl(named_stack);
+    ok &= expect(stack_result.ok, "declared stack-pointer names retain provenance: " + stack_result.error);
     std::string invalid_pointer = commuted_pointer;
     invalid_pointer.replace(invalid_pointer.find("%rd4, 31, %rd2"),
                             std::string("%rd4, 31, %rd2").size(), "%rd4, 31, %rd1");

@@ -10,6 +10,11 @@ void infer_entry_pointer_types(const ptx::EntryFunction& entry, const Module& mo
     std::unordered_map<std::string, Type>& parameter_types) {
     // Preserve established pointer evidence before backward recovery. Only
     // single-definition, unpredicated 64-bit registers participate in this proof.
+    std::unordered_set<std::string> declared64;
+    for (const auto& declaration : entry.register_declarations) {
+        if (declaration.type == "b64" || declaration.type == "u64" || declaration.type == "s64")
+            declared64.insert(declaration.name);
+    }
     std::unordered_map<std::string, std::size_t> definitions;
     for (const auto& instruction : entry.instructions)
         for (const auto& destination : destination_registers(instruction)) ++definitions[destination];
@@ -21,7 +26,8 @@ void infer_entry_pointer_types(const ptx::EntryFunction& entry, const Module& mo
             const auto destinations = destination_registers(instruction);
             if (destinations.size() != 1 || definitions[destinations.front()] != 1 ||
                 !instruction.predicate.empty() || instruction.operands.size() < 2 ||
-                ptx_register_container_bits(destinations.front()) != 64) continue;
+                (ptx_register_container_bits(destinations.front()) != 64 &&
+             !declared64.contains(destinations.front()))) continue;
             const auto root = root_opcode(instruction.opcode);
             const auto known = [&](std::size_t index) {
                 return instruction.operands.size() > index &&
