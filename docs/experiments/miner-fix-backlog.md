@@ -488,3 +488,12 @@ other slots and 16 guards remain intact. Original PTX is unchanged.
 [Evidence, timings, and scope](llvm21-wif-checks.md).
 Next bounded batch: Shallenge checks (25–27). Full-suite and mining validation
 remain incomplete.
+
+## LLVM 21 Shallenge validation
+
+Hash, nonce-length arithmetic, and positive is-better checks (25–27) compile and
+numerically pass on M5 at `debc412`, without compiler changes. Every selected slot
+is 1; other slots and 16 guards are intact. PTX remains unchanged.
+[Evidence, timings, and fixed-fixture limits](llvm21-shallenge-checks.md).
+Next bounded batch: hash comparisons (28–30). Full-suite and mining validation
+remain incomplete.

@@ -40,3 +40,5 @@ Local modules, ABI sidecars and logs: `/tmp/llvm21-wif-validation`.
 
 Next bounded batch: Shallenge checks, slots 25–27. The full LLVM 21 numerical
 suite and four mining kernels remain unvalidated; LLVM 7/19 totals are unchanged.
+
+Follow-up: [all three LLVM 21 Shallenge checks now pass](llvm21-shallenge-checks.md).
