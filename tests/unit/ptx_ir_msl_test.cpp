@@ -1907,6 +1907,76 @@ ret;
         "cvt.u64.u32 %rd90, %r6;\nselp.b64 %rd91, %rd90, %rd91, %p3;");
     wide_select.insert(wide_select.find("add.u32 %r7, %r7, %r9;"), "cvt.u32.u64 %r9, %rd91;\n");
     ok &= expect(metal::compile_ptx_to_msl(wide_select).ok, "64-bit guarded self-select compiles");
+    const std::string bounded_select = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry guarded_select(.param .u64 input, .param .u64 output, .param .u32 count) {
+.reg .b64 %rd<12>;
+.reg .b32 %r<12>;
+.reg .pred %p<8>;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd3, %r2, 4;
+add.u64 %rd4, %rd1, %rd3;
+add.u64 %rd5, %rd2, %rd3;
+ld.global.u32 %r5, [%rd4];
+and.b32 %r5, %r5, 7;
+cvt.u64.u32 %rd6, %r5;
+mov.u32 %r7, 0;
+HEAD:
+mov.b64 %rd7, %rd6;
+setp.gt.u64 %p2, %rd7, 3;
+min.u64 %rd6, %rd7, 3;
+add.u64 %rd6, %rd6, 1;
+@%p2 bra CHECK;
+and.b64 %rd8, %rd7, 1;
+setp.ne.u64 %p3, %rd8, 0;
+selp.b64 %rd9, %rd7, %rd9, %p3;
+not.pred %p4, %p3;
+@%p4 bra HEAD;
+CHECK:
+setp.lt.u64 %p5, %rd7, 4;
+@%p5 bra USE;
+st.global.u32 [%rd5], %r7;
+bra DONE;
+USE:
+cvt.u32.u64 %r9, %rd9;
+add.u32 %r7, %r7, %r9;
+bra HEAD;
+DONE:
+ret;
+}
+)ptx";
+    const auto bounded = metal::compile_ptx_to_msl(bounded_select);
+    ok &= expect(bounded.ok, "bounded inverted-predicate self-select compiles: " + bounded.error);
+    auto directly_inverted = bounded_select;
+    directly_inverted.replace(directly_inverted.find("not.pred %p4, %p3;\n@%p4 bra HEAD;"),
+        std::string("not.pred %p4, %p3;\n@%p4 bra HEAD;").size(), "@!%p3 bra HEAD;");
+    ok &= expect(metal::compile_ptx_to_msl(directly_inverted).ok,
+                 "directly inverted branch uses the same false-path proof");
+    for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+        {"setp.gt.u64 %p2, %rd7, 3;", "setp.gt.u64 %p2, %rd7, 3;\nmov.u64 %rd7, 0;"},
+        {"@%p2 bra CHECK;", "not.pred %p2, %p2;\n@%p2 bra CHECK;"},
+        {"not.pred %p4, %p3;", "not.pred %p4, %p3;\nmov.pred %p4, 1;"},
+        {"setp.lt.u64 %p5, %rd7, 4;", "setp.le.u64 %p5, %rd7, 4;"},
+        {"CHECK:\n", "CHECK:\nmov.u64 %rd7, 0;\n"},
+        {"CHECK:\n", "CHECK:\n@%p1 mov.u64 %rd7, 0;\n"},
+        {"not.pred %p4, %p3;", "mov.pred %p4, %p3;"},
+        {"@%p2 bra CHECK;", "@%p2 bra USE;"},
+        {"setp.lt.u64 %p5, %rd7, 4;", "setp.lt.s64 %p5, %rd7, 4;"}}) {
+        auto invalid = bounded_select;
+        invalid.replace(invalid.find(from), from.size(), to);
+        const auto rejected = metal::compile_ptx_to_msl(invalid);
+        ok &= expect(!rejected.ok, "observable/stale bounded self-select must remain rejected: " + to);
+    }
     const std::string dead_pointer_cast = R"ptx(
 .version 7.1
 .target sm_80

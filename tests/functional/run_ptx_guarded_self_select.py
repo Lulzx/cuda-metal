@@ -7,7 +7,8 @@ import subprocess
 import sys
 import tempfile
 
-PTX = (Path(__file__).parent / 'reference/ptx_guarded_self_select.ptx').read_text()
+BOUNDED = '--bounded' in sys.argv
+PTX = (Path(__file__).parent / ('reference/ptx_bounded_self_select.ptx' if BOUNDED else 'reference/ptx_guarded_self_select.ptx')).read_text()
 
 def main():
     build = Path(sys.argv[1]).resolve()
@@ -27,7 +28,7 @@ def main():
     source = (u32 * count)(*values)
     expected = []
     for value in values:
-        expected.append(sum(i for i in range(value & 7) if i & 1))
+        expected.append(sum(i for i in (range(value & 7, 4) if BOUNDED else range(value & 7)) if i & 1))
     result = (u32 * (len(expected) + 16))(*([0xa5a5a5a5] * (len(expected) + 16)))
     context, module, function = ptr(), ptr(), ptr()
     allocations = []
@@ -56,7 +57,7 @@ def main():
                 if result[i] != value:
                     raise RuntimeError(f'word {i}: got {result[i]:08x}, expected {value:08x}')
             assert list(result)[len(expected):] == [0xa5a5a5a5] * 16, 'tail guard overwritten'
-            print('NUMERICAL_PASS guarded_select: 65541 inputs; loop-carried select, guards')
+            print(f'NUMERICAL_PASS {"bounded_select" if BOUNDED else "guarded_select"}: 65541 inputs; loop-carried select, guards')
     finally:
         for allocation in allocations:
             api('cuMemFree', [u64], allocation)
