@@ -18,7 +18,7 @@ names but have not been executed in this comparison.
 | Ed25519 primitive, slot 2 | Pass | Pass | One fixed known-answer fixture on M5 |
 | Xoroshiro primitive, slot 0 | Pass | Pass | Scalar / local-buffer tail-call fixes; additional runtime-input regressions |
 | Base58 primitive, slot 3 | Pass | Pass | Unsigned widening and pointer subtraction fixes; see [fix backlog](miner-fix-backlog.md) |
-| Remaining numerical self-tests | Partial | Partial | See fix backlog; no aggregate pass claim |
+| Full numerical inventory | 90 / 118 pass | 82 / 118 pass | All entries attempted on `6d2549b`; remaining entries fail compilation |
 | Four mining kernels | Pending | Pending | No end-to-end mining claim |
 
 [Evidence, hashes and historical blockers](dual-llvm-miner-smoke.md).
@@ -27,22 +27,23 @@ CuMetal commits through `967d8c7` include typed relocation, reviewed self-select
 normalization and min/max typing. The earlier zero-pass compile inventory is
 historical; do not use it as the current compatibility count.
 
-## Next session: a deliberately small slice
+## Latest full sweep and next fix
 
-- [ ] Inspect the emitted PTX for `kernel_self_test_arith_blackbox_identity_u64`
-  and the corresponding u32 entry; confirm exact entry names against the
-  artifact before invoking them. These correspond to result slots 57 and 58.
-- [ ] Compile and run the u64 identity check from LLVM 7, then LLVM 19.
-- [ ] Repeat for u32. Require the selected slot to equal 1 and all other slots
-  and guards to remain untouched.
-- [ ] Record whether each entry actually exercises the intended identity path
-  or was constant-folded. A folded pass is only a launch/result-store check.
-- [ ] If either fails, isolate that failure and add a regression before
-  advancing. If both pass, take SHA-512 slot 1 as the next primitive, explicitly
-  addressing the folded LLVM 19 fixture before claiming arithmetic coverage.
+[Full 238-attempt ledger](miner-self-test-sweep-6d2549b.md): all 118 numerical
+entries and the plumbing probe were attempted for each producer on `6d2549b`.
+Both probes pass. The 64 failures are all compiler rejections; all 174 launched
+entries pass their result and guard checks. Folded fixtures remain limited evidence.
 
-This small slice checks the test machinery used by many arithmetic diagnostics;
-it is not a substitute for host-provided runtime inputs.
+- [x] Compile/run both u64 and u32 identity checks in both producers.
+- [x] Attempt every self-test entry in both original PTX modules.
+- [ ] Extend trap reporting across device calls/helpers: 47 first-blocked entries.
+- [ ] Reduce LLVM 19 loop-definedness failures: 9 entries across base58 and Dalek.
+- [ ] Resolve LLVM 7 pointer/type gaps: 5 IR verification failures, 1 `mul.hi`
+  operand mismatch, 1 subtraction form and 1 address-space conflict.
+- [ ] Retest each affected original entry after its focused fix.
+
+Do not change the PTX or treat a cleared compiler blocker as a numerical pass.
+Keep the historical partial sweep separate from this complete rerun.
 
 ## Self-test rollout, one entry at a time
 
@@ -50,21 +51,21 @@ The source already has a substantial diagnostic suite. Preserve that work and
 map results back to `logic/src/self_test.rs` labels and kernel result slots.
 Do not equate the number of self-tests with independent arithmetic coverage.
 
-- [ ] Add an opt-in runner/ledger for a selected entry and slot, recording both
+- [x] Add an opt-in runner/ledger for a selected entry and slot, recording both
   producer variants independently. No default "run everything" requirement.
 - [ ] Validate the remaining top-level primitives (slots 0–9): xoroshiro,
   SHA-512, base58, secp256k1 compressed/uncompressed, Keccak-256, RIPEMD-160,
   SHA-256 fixed and variable length. Slot 2 already has one known-answer pass.
-- [ ] Validate relevant raw arithmetic/identity checks (slots 31–40, 46–58)
-  before or while diagnosing a failing primitive.
+- [x] Run raw arithmetic/identity checks (slots 31–40, 46–58) in both producers;
+  all pass their fixed fixtures. Folding audit remains separate.
 - [ ] Work through encoding and subsystem bisects (slots 41–45, 59–69), then
   curve/scalar/indexing/memory diagnostics (slots 70–117). Use the source labels
   as the authority; comments describing old bugs are not current CuMetal results.
 - [ ] Validate composed checks (slots 10–30): Solana, Ethereum, Bitcoin,
   WIF variants, Shallenge and hash comparisons, after their primitives pass.
-- [ ] Eventually account for all 118 numerical slots in both LLVM artifacts,
-  including explicit folded-only, unsupported, timeout and numerical-fail states.
-- [ ] Run a complete suite only once individual results justify it; retain
+- [x] Account for all 118 numerical slots in both LLVM artifacts in the full sweep,
+  recording compile/runtime outcomes; folding audit remains separate.
+- [x] Run the complete self-test inventory after shared fixes; retain
   per-entry isolation so a failure remains attributable.
 
 ## Strengthen the evidence where the current tests fall short

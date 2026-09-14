@@ -53,3 +53,9 @@ including local reverse loops. Pointer differences, integer-minus-pointer, and
 narrow pointer subtraction remain explicitly rejected. Both pinned base58
 primitive self-tests now pass; full mining kernels remain unvalidated. See the
 [miner fix backlog](experiments/miner-fix-backlog.md).
+
+The [complete miner self-test sweep](experiments/miner-self-test-sweep-6d2549b.md)
+records 64 remaining compile failures: 47 trap/call restrictions, 9 LLVM 19 SSA
+definedness failures, and 8 LLVM 7 pointer/type failures. All 174 launched entries
+pass, including two plumbing probes; this does not establish arithmetic
+coverage for constant-folded fixtures.

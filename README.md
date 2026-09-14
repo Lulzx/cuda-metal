@@ -101,3 +101,9 @@ now get past trap lowering. LLVM 7 base58 numerically passes after correcting
 unsigned integer widening; LLVM 19 now also numerically passes after preserving
 pointer types and byte-offset subtraction through its reverse loop. See the
 [miner fix backlog](docs/experiments/miner-fix-backlog.md) for scope and evidence.
+
+The complete self-test rerun on `6d2549b` passes 90/118 numerical entries from
+LLVM 7 and 82/118 from LLVM 19, plus both launch probes. All 64 remaining entries
+fail compilation; no launched entry fails its numerical or guard checks.
+[Full ledger and remaining blocker groups](docs/experiments/miner-self-test-sweep-6d2549b.md).
+Passing fixed fixtures may be constant-folded; full mining kernels remain unvalidated.

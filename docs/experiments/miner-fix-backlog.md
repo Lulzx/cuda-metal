@@ -1,6 +1,12 @@
-# CuMetal fixes from the partial miner sweep
+# CuMetal miner fix backlog
 
-Stopped at user request after 121/238 attempts on compiler `967d8c7`.
+Latest: [complete 238-attempt sweep on `6d2549b`](miner-self-test-sweep-6d2549b.md).
+LLVM 7 passes 90/118 numerical tests; LLVM 19 passes 82/118. Both probes pass.
+All 64 remaining failures occur during compilation. Trap propagation accounts
+for 47 first blockers, LLVM 19 SSA definedness for 9, and LLVM 7 pointer/type
+issues for 8. No device-call cycle is a first blocker in this rerun.
+
+The historical sweep below stopped at user request after 121/238 attempts on compiler `967d8c7`.
 The remaining attempts were not completed, not counted as failures.
 [Raw results and input hashes](miner-partial-sweep.json). All executed checks used
 a fresh process, one GPU thread, a selected result slot and memory guards.
@@ -36,12 +42,13 @@ may expose another; update this list rather than declaring the kernel validated.
 - [ ] **Trap handling.** Bounded call-free kernel reporting is implemented (fix 7).
   Helper propagation, user barriers/collectives and full context-failure semantics
   remain open. Never silently turn traps into no-ops.
-- [ ] **Additional SSA definedness.** Reduce the LLVM 19 base58 loop failure and
-  prove any rewrite separately from the existing Ed25519 guarded-select case.
+- [ ] **Additional SSA definedness.** The base58 primitive passes, but the full
+  rerun finds 9 LLVM 19 loop-definedness failures across variable-length base58
+  and Dalek. Reduce and prove each rewrite; see the complete ledger.
 - [ ] **Retry affected entries after fixes**, recording newly exposed errors and
   genuine numerical failures as separate backlog items.
-- [ ] **Resume uncompleted entries**, then rerun previously failing entries once
-  shared fixes justify it. Preserve the original partial report as historical.
+- [x] **Complete all entries and rerun previous failures** on `6d2549b`.
+  The complete ledger preserves the original partial report as historical.
 
 Full numerical correctness and the four mining kernels remain later milestones;
 see the [validation checklist](vanity-miner-validation-todo.md).
