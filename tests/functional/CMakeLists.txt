@@ -2862,6 +2862,9 @@ add_test(NAME functional_ptx_msl_abi
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx)
 
 if(APPLE)
+    add_test(NAME functional_ptx_pointers
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_pointers.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_pointers PROPERTIES TIMEOUT 120)
     foreach(arithmetic_case integer_minmax mul_hi_64)
         add_test(NAME functional_ptx_${arithmetic_case}
             COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_integer_arithmetic.py

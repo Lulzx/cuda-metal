@@ -1795,7 +1795,10 @@ struct AstLowerer {
                 MslExpression::identifier("cm_lane_id", MslType::uint()));
         }
 
-        const std::string binary = binary_spelling(operation.opcode);
+        const std::string binary = operation.opcode == ir::OpCode::kPointerOffset &&
+                                           operation.attributes.contains("offset_direction") &&
+                                           operation.attributes.at("offset_direction") == "subtract"
+                                       ? "-" : binary_spelling(operation.opcode);
         if (!binary.empty()) {
             if (operation.results.size() != 1 || operation.operands.size() < 2) {
                 fail(&operation, "malformed binary operation");
@@ -1887,7 +1890,7 @@ struct AstLowerer {
                 !is_mixed_pointer(operation.results.front())) {
                 // CuMetal pointer offsets are byte offsets even when the source
                 // pointer originated from an aggregate alloca. Cast before the
-                // addition so C++/MSL cannot scale the offset by the aggregate's
+                // arithmetic so C++/MSL cannot scale the offset by the aggregate's
                 // sizeof (for example, `&vec3_storage + 4`).
                 const MslAddressSpace address_space =
                     expression_type.kind == MslTypeKind::kPointer
@@ -3319,6 +3322,13 @@ struct AstLowerer {
             operation.opcode == ir::OpCode::kAddressSpaceCast) {
             if (operation.results.empty() || operation.operands.empty()) {
                 fail(&operation, "malformed conversion");
+                return std::nullopt;
+            }
+            if (operation.opcode == ir::OpCode::kConvert &&
+                operation.operands.front().type.is_pointer() &&
+                operation.result_types.front().kind == ir::TypeKind::kInteger &&
+                operation.result_types.front().bit_width < 64) {
+                fail(&operation, "observable pointer-to-integer conversion has no faithful MSL representation");
                 return std::nullopt;
             }
             const bool reinterpret =
@@ -5569,6 +5579,33 @@ void prune_functions_unreachable_from_kernels(ir::Module* module) {
     module->functions = std::move(kept);
 }
 
+// Remove only pure, unobserved pointer truncations. A single conservative use
+// scan includes guards, terminators and successor arguments; it deliberately
+// does not infer that chains or unreachable blocks are unobservable.
+static void remove_unused_pointer_truncations(ir::Function& function) {
+    std::unordered_set<ir::ValueId> used;
+    for (const auto& block : function.blocks) {
+        for (const auto& operation : block.operations) {
+            for (const auto& operand : operation.operands) {
+                if (operand.kind == ir::OperandKind::kValue) used.insert(operand.value);
+            }
+            for (const auto& successor : operation.successors) {
+                used.insert(successor.arguments.begin(), successor.arguments.end());
+            }
+        }
+    }
+    for (auto& block : function.blocks) {
+        std::erase_if(block.operations, [&](const ir::Operation& operation) {
+            return operation.opcode == ir::OpCode::kConvert &&
+                   operation.results.size() == 1 && operation.result_types.size() == 1 &&
+                   operation.operands.size() == 1 && operation.operands[0].type.is_pointer() &&
+                   operation.result_types[0].kind == ir::TypeKind::kInteger &&
+                   operation.result_types[0].bit_width < 64 &&
+                   !used.contains(operation.results[0]);
+        });
+    }
+}
+
 MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     MetalLegalizeResult result;
     const ir::VerifyResult input_verification = ir::verify(module);
@@ -5588,6 +5625,7 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     result.module.stage = ir::IrStage::kMetalLegalized;
 
     for (ir::Function& function : result.module.functions) {
+        remove_unused_pointer_truncations(function);
         for (ir::BasicBlock& block : function.blocks) {
             for (ir::Operation& operation : block.operations) {
                 switch (operation.opcode) {

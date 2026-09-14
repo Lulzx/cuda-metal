@@ -499,12 +499,36 @@ VerifyResult verify(const Module& module) {
                     }
                 }
 
+                if (operation.opcode == OpCode::kPointerOffset &&
+                    operation.attributes.contains("offset_direction")) {
+                    const auto& direction = operation.attributes.at("offset_direction");
+                    if (direction != "add" && direction != "subtract") {
+                        add_diagnostic(&result, operation.location, "invalid pointer offset direction");
+                    } else if (direction == "subtract" &&
+                               (operation.operands.size() != 2 || operation.result_types.size() != 1 ||
+                                !operation.operands[0].type.is_pointer() ||
+                                operation.operands[1].type != Type::integer(64) ||
+                                operation.result_types[0] != operation.operands[0].type ||
+                                !operation.attributes.contains("offset_unit") ||
+                                operation.attributes.at("offset_unit") != "bytes" ||
+                                operation.attributes.contains("combined"))) {
+                        add_diagnostic(&result, operation.location,
+                                       "pointer subtraction requires a same-space pointer and 64-bit byte offset");
+                    }
+                }
                 if (operation.opcode == OpCode::kAddressSpaceCast &&
                     (!operation.operands.empty() && !operation.result_types.empty())) {
                     const Type& source = operation.operands.front().type;
                     const Type& target = operation.result_types.front();
+                    // Generic helper parameters are explicitly tracked until
+                    // call-site specialization. Permit only that source in GPU
+                    // IR; legalized IR must have concrete spaces on both sides.
+                    const bool pending_generic_source =
+                        module.stage == IrStage::kGpuSemantic && source.is_pointer() &&
+                        operation.operands.front().kind == OperandKind::kValue &&
+                        function.generic_pointer_values.contains(operation.operands.front().value);
                     if (!source.is_pointer() || !target.is_pointer() ||
-                        source.address_space == AddressSpace::kNone ||
+                        (source.address_space == AddressSpace::kNone && !pending_generic_source) ||
                         target.address_space == AddressSpace::kNone) {
                         add_diagnostic(&result, operation.location,
                                        "address-space casts require explicit pointer address spaces");

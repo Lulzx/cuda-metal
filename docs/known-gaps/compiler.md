@@ -240,3 +240,13 @@ Production output depends on Apple's public Metal compiler. `air_inspect`,
 `air_validate`, and direct AIR container generation do not constitute a stable
 private AIR compiler. Cross-Xcode evidence is incomplete without genuinely
 distinct installations and runtime-load results.
+
+## Pointer lowering
+
+PTX helpers can accept generic pointers proven by `cvta.to.local.u64`; call-site
+specialization must establish a compatible concrete address space before Metal
+legalization completes. Pointer subtraction supports a pointer minus a 64-bit
+integer byte offset, including local-buffer loops. Pointer differences,
+integer-minus-pointer, and narrow pointer arithmetic remain unsupported.
+Unused pointer truncations are removed during legalization; observed truncations
+remain rejected because Metal cannot faithfully represent their numeric result.
