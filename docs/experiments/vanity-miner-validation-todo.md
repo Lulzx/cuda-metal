@@ -39,6 +39,11 @@ entries pass their result and guard checks. Folded fixtures remain limited evide
 - [x] Compile/run both u64 and u32 identity checks in both producers.
 - [x] Attempt every self-test entry in both original PTX modules.
 - [x] Implement bounded trap reporting across device calls/helpers (fix 10).
+- [x] Run the six existing LLVM 19 k256 bisects: all pass, including derivation
+  for scalars 1 and 2; the original nontrivial scalar still fails. See
+  [secp256k1 isolation](secp256k1-isolation.md).
+- [ ] Locate the first intermediate divergence for the nontrivial scalar:
+  decomposition, signed-digit selection, then point accumulation.
 - [ ] Retest the 47 previously trap-blocked entries; both compressed-mainnet WIF
   entries pass. Both compressed secp256k1 entries clear MSL lowering but expose
   a numerical failure (LLVM 19 returns 0 with guards intact after fix 11) and

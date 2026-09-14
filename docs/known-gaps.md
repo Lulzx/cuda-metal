@@ -68,6 +68,10 @@ unvalidated: after parameter-store truncation is fixed, LLVM 19 compiles and
 launches but returns 0 instead of 1 with intact guards; LLVM 7 timed out during
 its earlier 180-second runtime attempt. These targeted results do not replace the full
 historical ledger; see [fix 10](experiments/miner-fix-backlog.md#fix-10-trap-propagation-through-supported-device-call-graphs).
+The six smaller LLVM 19 k256 checks, including full derivation for scalars 1
+and 2, now pass. The failure depends on the scalar; decomposition, signed-digit
+selection and accumulation remain to be isolated. See
+[targeted evidence](experiments/secp256k1-isolation.md).
 
 Integer `st.param` stores truncate wider registers to the instruction width
 before call/return ABI handling. Mismatched argument byte widths are rejected;

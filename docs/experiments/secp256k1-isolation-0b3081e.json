@@ -1,0 +1,100 @@
+{
+  "compiler_commit": "0b3081ef6414e88dea1e1620d40f897c676725af",
+  "date": "2026-09-13 America/New_York",
+  "device": "Apple M5",
+  "producer": "LLVM 19",
+  "artifact_run": "34778991430",
+  "ptx_sha256": "f5c3d523a33e9ecc73f896ed26a46cda58039b16b1859af170e1d3af289be709",
+  "ptx_modified": false,
+  "msl_manually_modified": false,
+  "grid": [
+    1,
+    1,
+    1
+  ],
+  "block": [
+    1,
+    1,
+    1
+  ],
+  "workload_specializations": false,
+  "results": [
+    {
+      "kernel": "kernel_self_test_k256_affine_generator_encode",
+      "slot": 93,
+      "outcome": "numerical_pass",
+      "actual": 1,
+      "expected": 1,
+      "other_slots_intact": 117,
+      "guard_words_intact": 16,
+      "msl_sha256": "02e3cc346e43e587d42e82fb3a1cbbbcf1380a6940b5667af836e18065adf95d",
+      "gpu_duration_ns": 2375
+    },
+    {
+      "kernel": "kernel_self_test_k256_encode_generator",
+      "slot": 78,
+      "outcome": "numerical_pass",
+      "actual": 1,
+      "expected": 1,
+      "other_slots_intact": 117,
+      "guard_words_intact": 16,
+      "msl_sha256": "0b4232b8c1ee58fa61e316dea4416b4278c0935d1068e11ef873159091cbdbe4",
+      "gpu_duration_ns": 69625
+    },
+    {
+      "kernel": "kernel_self_test_k256_double_generator",
+      "slot": 79,
+      "outcome": "numerical_pass",
+      "actual": 1,
+      "expected": 1,
+      "other_slots_intact": 117,
+      "guard_words_intact": 16,
+      "msl_sha256": "f12f9a77c955a0599fad8bb3e0dbe1de38c7c3d35c7f13f26db4c0c623d25e6e",
+      "gpu_duration_ns": 518166
+    },
+    {
+      "kernel": "kernel_self_test_k256_scalar_one_round_trip",
+      "slot": 80,
+      "outcome": "numerical_pass",
+      "actual": 1,
+      "expected": 1,
+      "other_slots_intact": 117,
+      "guard_words_intact": 16,
+      "msl_sha256": "3c80e3ca6cb26549bd0259cf55bc88a8e25dadaf180f6229ca0d0ed7d196e182",
+      "gpu_duration_ns": 2541
+    },
+    {
+      "kernel": "kernel_self_test_k256_derive_scalar_one",
+      "slot": 74,
+      "outcome": "numerical_pass",
+      "actual": 1,
+      "expected": 1,
+      "other_slots_intact": 117,
+      "guard_words_intact": 16,
+      "msl_sha256": "411b552955b6db41a70321a6b43412205f5d5a3ee5409955fe57ab69992d9e97",
+      "gpu_duration_ns": 17806750
+    },
+    {
+      "kernel": "kernel_self_test_k256_derive_scalar_two",
+      "slot": 75,
+      "outcome": "numerical_pass",
+      "actual": 1,
+      "expected": 1,
+      "other_slots_intact": 117,
+      "guard_words_intact": 16,
+      "msl_sha256": "3701e4a3070b8152f37047243a97b5840ac14c503030b972b33845f7d435836f",
+      "gpu_duration_ns": 17598624
+    },
+    {
+      "kernel": "kernel_self_test_primitive_secp256k1_compressed",
+      "slot": 4,
+      "outcome": "numerical_fail",
+      "actual": 0,
+      "expected": 1,
+      "other_slots_intact": 117,
+      "guard_words_intact": 16,
+      "msl_sha256": "7011621565bbbbd7cac53f0f84dcea649c86732ba673d0b2ad691725bd416090",
+      "gpu_duration_ns": 18210958
+    }
+  ]
+}

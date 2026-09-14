@@ -114,3 +114,7 @@ Both original compressed-mainnet WIF self-tests now pass on M5. After fixing
 parameter-store truncation, LLVM 19 compressed secp256k1 compiles and launches
 but returns 0 instead of 1, with guards intact. LLVM 7 still has an earlier
 bounded runtime-attempt timeout. See [fix 10](docs/experiments/miner-fix-backlog.md#fix-10-trap-propagation-through-supported-device-call-graphs).
+Six smaller LLVM 19 k256 checks now pass, including public-key derivation for
+scalars 1 and 2. The original nontrivial scalar still fails;
+[isolation evidence](docs/experiments/secp256k1-isolation.md) records the next
+diagnostic boundaries without claiming an arithmetic fix.

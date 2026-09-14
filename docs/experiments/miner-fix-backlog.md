@@ -371,3 +371,16 @@ Validation:
 Next: isolate secp256k1's numerical mismatch with its existing arithmetic/curve
 bisects. LLVM 7's earlier timeout has not been retested in this milestone. The
 complete sweep remains historical; no new aggregate compatibility count is claimed.
+
+## Secp256k1 isolation after fix 11
+
+All six existing LLVM 19 k256 bisects now pass on M5: affine generator encoding,
+projective generator encoding, doubling, scalar-one round-trip, and full public
+key derivation for scalars 1 and 2. The original nontrivial-key test still returns
+0 with intact guards. Its expected key matches an independent CPU calculation.
+
+This narrows the mismatch to scalar-dependent behavior without identifying a
+faulty opcode. Next compare scalar decomposition, signed digits/table selection,
+and accumulation intermediates. See [the isolation report](secp256k1-isolation.md)
+for evidence, source-path analysis and reproduction. No compiler change in this
+milestone; LLVM 7 and the historical full-sweep counts are unchanged.
