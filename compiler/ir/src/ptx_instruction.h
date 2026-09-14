@@ -18,6 +18,7 @@ std::string first_register(std::string_view input);
 std::vector<std::string> destination_registers(const Instruction& instruction);
 std::vector<std::string> source_registers(const Instruction& instruction);
 std::vector<std::string> grouped_names(std::string_view operand);
+std::string parameter_name_from_operand(std::string_view operand);
 std::string branch_target(const Instruction& instruction);
 bool is_conditional_branch(const Instruction& instruction);
 bool is_terminating_instruction(const Instruction& instruction);

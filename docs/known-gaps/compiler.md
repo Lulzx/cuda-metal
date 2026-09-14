@@ -15,6 +15,17 @@ operands discard high register bits when required by their instruction width;
 unsigned widening preserves the source bit pattern even for negative-spelled
 literals. These rules do not relax argument or return ABI byte-width checks.
 
+Strict opcode checks and initializer decoding follow the selected entry's
+reachable helpers and symbols. Unselected unsupported instructions or unused
+initializers do not block that entry; unidentifiable declarations still fail.
+Module-wide writes remain relevant when deciding whether storage is immutable.
+
+Private immutable table pointers support complete byte-encoded relocations and
+typed 64-bit symbolic initializers. Resolution requires explicit 64-bit
+addressing, aligned whole-pointer loads, a private numeric target, and a proof
+that the table address is neither written nor allowed to escape. Mutable,
+partial, mixed, and escaping relocations remain unsupported.
+
 ## Typed CuMetal IR migration
 
 With CUDA Clang 21-23, the reviewed production-metallib matrix is:

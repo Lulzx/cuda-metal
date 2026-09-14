@@ -5,7 +5,7 @@ import random
 import subprocess
 import sys
 import tempfile
-from ptx_test_support import run_u64_case
+from ptx_test_support import run_integer_case
 
 TEMPLATE = '''
 .version 7.1
@@ -58,7 +58,7 @@ cvt.u64.u32 %rd8, %r6;'''
             for value in values:
                 signed = value if value < 1 << (width-1) else value - (1 << width)
                 expected += [value * (coefficient & mask), (signed * coefficient) & ((1 << (2*width))-1)]
-            run_u64_case(build, TEMPLATE.replace('BODY', body), values, expected,
+            run_integer_case(build, TEMPLATE.replace('BODY', body), values, expected,
                      f'u{width}/s{width} widening immediate {coefficient}')
 
 
@@ -75,7 +75,7 @@ cvt.u64.u16 %rd8, %rs4;
 '''
     template = TEMPLATE.replace('.reg .b16 %rs1;', '.reg .b16 %rs<5>;')
     values = list(range(256))
-    run_u64_case(build, template.replace('BODY', body), values,
+    run_integer_case(build, template.replace('BODY', body), values,
              [x for v in values for x in (abs(v if v < 128 else v-256), v)],
              'all byte encodings through signed conversion and abs')
 
@@ -96,7 +96,7 @@ cvt.u64.u{width} %rd8, {register};'''
             low = value & mask
             signed = low if low < 1 << (width-1) else low-(1 << width)
             expected += [signed & mask64, low]
-        run_u64_case(build, template.replace('BODY', body), values, expected,
+        run_integer_case(build, template.replace('BODY', body), values, expected,
                  f'signed/unsigned {width}-bit cvt in {container}-bit register')
 
 
@@ -141,7 +141,7 @@ def parameters(build):
     values += [rng.getrandbits(64) for _ in range(256)]
     for width in (32, 16, 8):
         mask = (1 << width)-1
-        run_u64_case(build, fixture(width), values,
+        run_integer_case(build, fixture(width), values,
                  [word for value in values for word in (value & mask, value & mask)],
                  f'64-to-{width} parameter argument and return stores')
     with tempfile.TemporaryDirectory(prefix='param-width-negative-') as work:
@@ -177,7 +177,7 @@ st.global.v2.b{width} [%rd6+8], {{%rd9, %rd10}};"""
             expected += [(poison & ~mask) | (value & mask),
                          (poison & ~((1 << (2*width))-1)) |
                          (value & mask) | ((~value & mask) << width)]
-        run_u64_case(build, ptx, values, expected, f'narrow {width}-bit stores')
+        run_integer_case(build, ptx, values, expected, f'narrow {width}-bit stores')
 
 
 def loads(build):
@@ -199,7 +199,7 @@ cvt.u64.u{container} %rd8, {second};"""
         for value in values:
             signed = value if value < 1 << (width-1) else value-(1 << width)
             expected += [signed & ((1 << container)-1), value]
-        run_u64_case(build, ptx, values, expected, f'signed/unsigned {width}-bit loads into {container}')
+        run_integer_case(build, ptx, values, expected, f'signed/unsigned {width}-bit loads into {container}')
 
 
 if __name__ == '__main__':

@@ -2862,6 +2862,12 @@ add_test(NAME functional_ptx_msl_abi
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx)
 
 if(APPLE)
+    foreach(encoding byte typed)
+        add_test(NAME functional_ptx_table_${encoding}
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_relocated_table.py
+                    ${CMAKE_BINARY_DIR} ${encoding})
+        set_tests_properties(functional_ptx_table_${encoding} PROPERTIES TIMEOUT 120)
+    endforeach()
     foreach(width_case widening conversions parameters stores loads)
         add_test(NAME functional_ptx_width_${width_case}
             COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_integer_widths.py

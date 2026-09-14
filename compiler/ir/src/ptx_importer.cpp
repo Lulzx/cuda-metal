@@ -29,6 +29,7 @@ using detail::scan_threadgroup_globals;
 using detail::scan_local_depots;
 using detail::scan_implicit_definitions;
 using detail::scan_initialized_byte_arrays;
+using detail::collect_operand_symbols;
 using detail::scan_module_constant_symbols;
 using detail::scan_module_global_symbols;
 using detail::trim;
@@ -41,6 +42,7 @@ using detail::first_register;
 using detail::destination_registers;
 using detail::source_registers;
 using detail::grouped_names;
+using detail::parameter_name_from_operand;
 using detail::branch_target;
 using detail::is_conditional_branch;
 using detail::is_terminating_instruction;
@@ -154,20 +156,6 @@ std::uint32_t type_size(const Type& type) {
         return total;
     }
     return std::max<std::uint32_t>(1, type.bit_width / 8);
-}
-
-std::string parameter_name_from_operand(std::string_view operand) {
-    const std::size_t open = operand.find('[');
-    const std::size_t close = operand.find(']');
-    if (open == std::string_view::npos || close == std::string_view::npos || close <= open + 1) {
-        return trim(operand);
-    }
-    std::string inside = trim(operand.substr(open + 1, close - open - 1));
-    const std::size_t offset = inside.find_first_of(" +");
-    if (offset != std::string::npos) {
-        inside.resize(offset);
-    }
-    return inside;
 }
 
 struct BuiltinSignature {
@@ -3544,16 +3532,11 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     }
     importer.implicit_definitions = scan_implicit_definitions(ptx);
 
-    const InitializedByteArrayScan initialized_arrays =
-        scan_initialized_byte_arrays(ptx);
-    if (!initialized_arrays.error.empty()) {
-        importer.result.error = initialized_arrays.error;
-        return importer.result;
-    }
-
     cumetal::ptx::ParseOptions parse_options;
-    parse_options.strict = options.strict;
-    const auto parsed = cumetal::ptx::parse_ptx(ptx, parse_options);
+    // Parse the module first; strict opcode checks apply to the selected entry
+    // and its reachable helpers, not unrelated kernels in the same PTX file.
+    parse_options.strict = false;
+    auto parsed = cumetal::ptx::parse_ptx(ptx, parse_options);
     if (!parsed.ok) {
         importer.result.error = parsed.error;
         return importer.result;
@@ -3581,6 +3564,10 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         }
         bool uses_printf = false;
         for (const Instruction& instruction : function.instructions) {
+            if (options.strict && !instruction.supported) {
+                importer.fail(&instruction, "unsupported opcode '" + instruction.opcode + "'");
+                return std::nullopt;
+            }
             const std::optional<std::string> target = direct_call_target(instruction);
             if (!target.has_value()) continue;
             if (*target == "vprintf" || *target == "printf") {
@@ -3620,57 +3607,49 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     };
     collect_printf_scaffold(*selected_entry);
     for (const auto* helper : reachable_helpers) collect_printf_scaffold(*helper);
+
+    std::unordered_set<std::string> referenced_symbols;
+    std::unordered_set<std::string> non_printf_referenced_symbols;
+    const auto collect_function_symbols = [&](const cumetal::ptx::EntryFunction& function) {
+        for (const Instruction& instruction : function.instructions) {
+            for (const std::string& operand : instruction.operands) {
+                collect_operand_symbols(operand, &referenced_symbols);
+                if (!decoded_printf_scaffold_lines.contains(instruction.line)) {
+                    collect_operand_symbols(operand, &non_printf_referenced_symbols);
+                }
+            }
+        }
+    };
+    collect_function_symbols(*selected_entry);
+    for (const auto* helper : reachable_helpers) collect_function_symbols(*helper);
+
+    const InitializedByteArrayScan initialized_arrays =
+        scan_initialized_byte_arrays(ptx, referenced_symbols);
+    if (!initialized_arrays.error.empty()) {
+        importer.result.error = initialized_arrays.error;
+        return importer.result;
+    }
+    for (const auto& array : initialized_arrays.arrays) {
+        if (!array.pointer_target.empty()) {
+            referenced_symbols.insert(array.pointer_target);
+            non_printf_referenced_symbols.insert(array.pointer_target);
+        }
+    }
     const auto symbol_is_referenced = [&](std::string_view symbol,
                                           bool include_printf_scaffold) {
-        const auto instruction_references_symbol = [&](const Instruction& instruction) {
-            if (!include_printf_scaffold &&
-                decoded_printf_scaffold_lines.contains(instruction.line)) {
-                return false;
-            }
-            return std::any_of(
-                instruction.operands.begin(), instruction.operands.end(),
-                [&](const std::string& operand) {
-                    return parameter_name_from_operand(operand) == symbol;
-                });
-        };
-        if (std::any_of(selected_entry->instructions.begin(),
-                        selected_entry->instructions.end(),
-                        instruction_references_symbol)) {
-            return true;
-        }
-        return std::any_of(
-            reachable_helpers.begin(), reachable_helpers.end(),
-            [&](const cumetal::ptx::EntryFunction* helper) {
-                return std::any_of(helper->instructions.begin(),
-                                   helper->instructions.end(),
-                                   instruction_references_symbol);
-            });
+        const auto& symbols = include_printf_scaffold ? referenced_symbols
+                                                      : non_printf_referenced_symbols;
+        return symbols.contains(std::string(symbol));
     };
-    const auto symbol_is_written = [&](std::string_view symbol) {
-        const auto writes_symbol = [&](const Instruction& instruction) {
-            const std::string root = root_opcode(instruction.opcode);
-            if (root != "st" && root != "atom" && root != "red") return false;
-            return std::any_of(
-                instruction.operands.begin(), instruction.operands.end(),
-                [&](const std::string& operand) {
-                    return parameter_name_from_operand(operand) == symbol;
-                });
-        };
-        const auto function_writes = [&](const cumetal::ptx::EntryFunction& function) {
-            return std::any_of(function.instructions.begin(),
-                               function.instructions.end(), writes_symbol);
-        };
-        return std::any_of(parsed.module.entries.begin(), parsed.module.entries.end(),
-                           function_writes) ||
-               std::any_of(parsed.module.functions.begin(), parsed.module.functions.end(),
-                           function_writes);
-    };
+    if (!detail::resolve_immutable_table_pointers(parsed.module, initialized_arrays,
+                                                 &importer.result.error)) return importer.result;
     for (const InitializedByteArray& array : initialized_arrays.arrays) {
+        if (!array.pointer_target.empty()) continue;
         if (!symbol_is_referenced(array.name, !array.module_private)) continue;
         const bool clang_promoted_literal =
             array.module_private && starts_with(array.name, "__const_$");
         const bool private_read_only =
-            array.module_private && !symbol_is_written(array.name);
+            array.module_private && !detail::symbol_is_written(parsed.module, array.name);
         if (!array.constant_space && !clang_promoted_literal && !private_read_only) {
             if (array.module_private) {
                 // CUDA does not emit __cudaRegisterVar for translation-unit

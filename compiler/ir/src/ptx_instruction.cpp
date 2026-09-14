@@ -136,4 +136,18 @@ std::optional<std::string> direct_call_target(const Instruction& instruction) {
     return trim(instruction.operands[has_return ? 1 : 0]);
 }
 
+std::string parameter_name_from_operand(std::string_view operand) {
+    const std::size_t open = operand.find('[');
+    const std::size_t close = operand.find(']');
+    if (open == std::string_view::npos || close == std::string_view::npos || close <= open + 1) {
+        return trim(operand);
+    }
+    std::string inside = trim(operand.substr(open + 1, close - open - 1));
+    const std::size_t offset = inside.find_first_of(" +");
+    if (offset != std::string::npos) {
+        inside.resize(offset);
+    }
+    return inside;
+}
+
 }  // namespace cumetal::ir::detail

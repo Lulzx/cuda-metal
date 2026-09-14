@@ -6,8 +6,9 @@ import subprocess
 import tempfile
 
 
-def run_u64_case(build, ptx_source, values, expected, label, entry="integer_probe"):
-    """Run a two-buffer/count kernel producing two u64 words per input."""
+def run_integer_case(build, ptx_source, values, expected, label, entry="integer_probe",
+                     word_bits=64, outputs_per_input=2):
+    """Run a two-buffer/count kernel with integer inputs and expected outputs."""
     os.environ['CUMETAL_TRACE_GPU'] = '1'
     os.environ['CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS'] = '0'
     lib = c.CDLL(str(build / 'libcumetal.dylib'))
@@ -18,11 +19,12 @@ def run_u64_case(build, ptx_source, values, expected, label, entry="integer_prob
         if result:
             raise RuntimeError(f'{name} failed: {result}')
     ptr, u32, u64 = c.c_void_p, c.c_uint32, c.c_uint64
-    if not values or len(expected) != 2 * len(values):
-        raise ValueError('expected two output words per input word')
+    if not values or len(expected) != outputs_per_input * len(values):
+        raise ValueError('output count does not match the kernel layout')
+    word_type = {32: u32, 64: u64}[word_bits]
     count = len(values)
-    source = (u64 * len(values))(*values)
-    result = (u64 * (len(expected) + 16))(*([0xa5a5a5a5] * (len(expected) + 16)))
+    source = (word_type * len(values))(*values)
+    result = (word_type * (len(expected) + 16))(*([0xa5a5a5a5] * (len(expected) + 16)))
     context, module, function = ptr(), ptr(), ptr()
     allocations = []
     api('cuInit', [u32], 0)
