@@ -19,6 +19,9 @@ Strict opcode checks and initializer decoding follow the selected entry's
 reachable helpers and symbols. Unselected unsupported instructions or unused
 initializers do not block that entry; unidentifiable declarations still fail.
 Module-wide writes remain relevant when deciding whether storage is immutable.
+Multiline PTX calls preserve operand tuples, register scopes, and source lines;
+unterminated or unbalanced calls are rejected. This does not add new call ABI
+forms or permit recursive device-call graphs.
 
 Private immutable table pointers support complete byte-encoded relocations and
 typed 64-bit symbolic initializers. Resolution requires explicit 64-bit

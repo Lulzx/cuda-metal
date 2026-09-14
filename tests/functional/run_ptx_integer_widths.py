@@ -123,11 +123,15 @@ ret;
 .param .b{width} answer;
 ld.global.u64 %rd9, [%rd5];
 st.param.b{width} [narrow], %rd9;
-call.uni (answer), arg_path, (narrow);
+call.uni (answer),
+arg_path,
+(narrow);
 ld.param.u{width} %r5, [answer];
 cvt.u64.u32 %rd7, %r5;
 st.param.b64 [wide], %rd9;
-call.uni (answer), ret_path, (wide);
+call.uni (answer),
+ret_path,
+(wide);
 ld.param.u{width} %r6, [answer];
 cvt.u64.u32 %rd8, %r6;
 '''
