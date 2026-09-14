@@ -34,3 +34,7 @@ The executable priority/evidence table is in
 
 PTX parameter inference preserves address-register provenance across stores;
 stored scalar values do not redefine the destination address register.
+
+PTX tuple-move inference retains the full packed width across CFG edges:
+`mov.b64` packs produce 64 bits and unpack to 32-bit halves; `mov.b32`
+retains its 32-bit pack and 16-bit half behavior.

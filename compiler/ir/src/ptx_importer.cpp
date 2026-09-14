@@ -1234,10 +1234,13 @@ struct Importer {
                     if (container_bits > inferred.bit_width) {
                         inferred = Type::integer(container_bits);
                     }
-                } else if (instruction.opcode == "mov.b32" && instruction.operands.size() == 2 &&
+                } else if ((instruction.opcode == "mov.b32" || instruction.opcode == "mov.b64") &&
+                           instruction.operands.size() == 2 &&
                            (instruction.operands[0].find('{') != std::string::npos ||
                             instruction.operands[1].find('{') != std::string::npos)) {
-                    inferred = Type::integer(instruction.operands[0].find('{') != std::string::npos ? 16 : 32);
+                    const unsigned packed_bits = instruction.opcode == "mov.b64" ? 64 : 32;
+                    inferred = Type::integer(instruction.operands[0].find('{') != std::string::npos
+                                                 ? packed_bits / 2 : packed_bits);
                 } else if (root == "mov" && instruction.operands.size() >= 2 &&
                            starts_with(trim(instruction.operands[1]), "0f")) {
                     inferred = Type::floating(32);

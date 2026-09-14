@@ -2862,6 +2862,10 @@ add_test(NAME functional_ptx_msl_abi
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx)
 
 if(APPLE)
+    add_test(NAME functional_ptx_packed_loop
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_packed_loop.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_packed_loop PROPERTIES TIMEOUT 120)
+
     add_test(NAME functional_ptx_store_provenance
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_store_provenance.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_store_provenance PROPERTIES TIMEOUT 120)
