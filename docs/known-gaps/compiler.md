@@ -35,6 +35,10 @@ unpredicated `bfi.b32/b64`, and two-halfword `mov.b32` packing/unpacking
 Other permutation modes, funnel widths, and tuple shapes remain explicit
 diagnostics. Bit-field lowering bounds every shift, including discarded arms.
 
+Integer min/max explicitly types MSL operands to preserve signed comparisons
+and select the correct overload for literals. Signed and unsigned 64-bit
+`mul.hi` use exact 32-bit partial products; mixed operand widths remain invalid.
+
 ## Typed CuMetal IR migration
 
 With CUDA Clang 21-23, the reviewed production-metallib matrix is:

@@ -1,0 +1,34 @@
+
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry mul_hi_64(.param .u64 input, .param .u64 output, .param .u32 count) {
+.reg .b64 %rd<13>;
+.reg .b32 %r<6>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd10, %r2, 16;
+mul.wide.u32 %rd11, %r2, 32;
+add.u64 %rd3, %rd1, %rd10;
+add.u64 %rd4, %rd2, %rd11;
+ld.global.u64 %rd5, [%rd3];
+ld.global.u64 %rd12, [%rd3+8];
+mul.hi.u64 %rd6, %rd5, %rd12;
+mul.hi.u64 %rd7, %rd5, 7544311872078572213;
+mul.hi.s64 %rd8, %rd5, %rd12;
+mul.hi.s64 %rd9, %rd5, -1;
+st.global.u64 [%rd4], %rd6;
+st.global.u64 [%rd4+8], %rd7;
+st.global.u64 [%rd4+16], %rd8;
+st.global.u64 [%rd4+24], %rd9;
+DONE:
+ret;
+}

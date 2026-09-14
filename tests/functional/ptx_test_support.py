@@ -6,6 +6,19 @@ import subprocess
 import tempfile
 
 
+def expect_compile_failure(build, source, entry, diagnostic):
+    """Check a rejected PTX form without depending on a Metal compiler or GPU."""
+    with tempfile.TemporaryDirectory(prefix='cumetal-ptx-negative-') as work:
+        ptx, msl = Path(work) / 'test.ptx', Path(work) / 'test.metal'
+        ptx.write_text(source)
+        result = subprocess.run(
+            [str(build / 'cumetalc'), str(ptx), '--backend=cumetal-ir',
+             '--ptx-strict', '--entry', entry, '--emit=msl', '-o', str(msl)],
+            capture_output=True, text=True)
+        if result.returncode == 0 or diagnostic not in result.stderr:
+            raise AssertionError(f'expected {diagnostic!r}: {result.stderr}')
+
+
 def run_integer_case(build, ptx_source, values, expected, label, entry="integer_probe",
                      word_bits=64, input_words=1, output_words=2):
     """Run a two-buffer/count kernel with integer inputs and expected outputs."""

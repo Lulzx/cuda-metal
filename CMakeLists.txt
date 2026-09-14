@@ -171,6 +171,7 @@ target_compile_options(cumetal_ir
 
 add_library(cumetal_metal_codegen STATIC
     compiler/metal/src/msl_ast.cpp
+    compiler/metal/src/integer_arithmetic.cpp
     compiler/metal/src/lower_to_msl.cpp
 )
 

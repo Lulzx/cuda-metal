@@ -1,4 +1,5 @@
 #include "cumetal/metal/lower_to_msl.h"
+#include "integer_arithmetic.h"
 
 #include "cumetal/ir/ptx_importer.h"
 #include "cumetal/ir/nvvm_importer.h"
@@ -1810,15 +1811,19 @@ struct AstLowerer {
                     operation.operands[0].type.bit_width;
                 if (operation.operands[0].type.kind != ir::TypeKind::kInteger ||
                     operation.operands[1].type.kind != ir::TypeKind::kInteger ||
-                    operand_bits == 0 || operand_bits > 32 ||
+                    (operand_bits != 8 && operand_bits != 16 && operand_bits != 32 && operand_bits != 64) ||
                     operation.operands[1].type.bit_width != operand_bits) {
                     fail(&operation,
-                         "typed Metal mul.hi requires matching 8-, 16-, or 32-bit integer operands");
+                         "typed Metal mul.hi requires matching 8-, 16-, 32-, or 64-bit integer operands");
                     return std::nullopt;
                 }
                 const bool is_signed =
                     operation.attributes.contains("signed") &&
                     operation.attributes.at("signed") == "true";
+                if (operand_bits == 64) {
+                    return declare_result(operation, MslExpression::cast(expression_type,
+                        detail::integer_high_product_64(left, right, is_signed)));
+                }
                 const MslType wide_type = is_signed
                                               ? MslType::sint(operand_bits * 2)
                                               : MslType::uint(operand_bits * 2);
@@ -2500,6 +2505,30 @@ struct AstLowerer {
                 return declare_result(
                     operation, MslExpression::call(
                                    target, std::move(arguments), MslType::uint(64)));
+            }
+            if ((callee->second == "min" || callee->second == "max") &&
+                operation.attributes.contains("builtin") &&
+                operation.result_types.size() == 1 &&
+                operation.result_types.front().kind == ir::TypeKind::kInteger) {
+                if (operation.operands.size() != 2) {
+                    fail(&operation, "malformed integer min/max builtin");
+                    return std::nullopt;
+                }
+                const auto width = operation.result_types.front().bit_width;
+                const bool is_signed = operation.attributes.contains("signed") &&
+                                       operation.attributes.at("signed") == "true";
+                const MslType argument_type = is_signed ? MslType::sint(width)
+                                                       : MslType::uint(width);
+                // Literal AST types alone do not type the emitted C++ token.
+                // Cast both operands to select the exact Metal overload and
+                // preserve PTX signed comparisons over integer bit containers.
+                std::vector<MslExpr> arguments;
+                for (const auto& operand : operation.operands) {
+                    arguments.push_back(MslExpression::cast(argument_type, expression_for(operand)));
+                }
+                return declare_result(operation, MslExpression::cast(
+                    lower_result_type(operation), MslExpression::call(
+                        callee->second, std::move(arguments), argument_type)));
             }
             if (callee->second == "__cumetal_signed_abs") {
                 if (operation.results.empty() || operation.operands.size() != 1) {
