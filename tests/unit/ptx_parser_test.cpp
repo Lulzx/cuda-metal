@@ -35,6 +35,25 @@ ret;
                 !stores.module.entries[0].params[1].is_pointer,
                 "stores preserve address provenance without promoting stored scalars")) return 1;
 
+    const auto classification = cumetal::ptx::parse_ptx(R"PTX(
+.version 7.0
+.target sm_80
+.visible .entry classify(.param .u64 unused, .param .u64 length,
+                        .param .u64 output, .param .u64 .ptr explicit_pointer) {
+ld.param.u64 %rd1, [output];
+ld.param.u64 %rd2, [length];
+sub.u64 %rd3, 31, %rd2;
+st.global.u64 [%rd1], %rd3;
+ret;
+}
+)PTX");
+    if (!expect(classification.ok && classification.module.entries.size() == 1,
+                "parse scalar and pointer classification")) return 1;
+    const auto& parameters = classification.module.entries[0].params;
+    if (!expect(!parameters[0].is_pointer && !parameters[1].is_pointer &&
+                parameters[2].is_pointer && parameters[3].is_pointer,
+                "width alone is scalar; actual address uses and explicit annotations remain pointers")) return 1;
+
     const std::string sample_ptx = R"PTX(
 // vector ops
 .version 8.0

@@ -124,7 +124,8 @@ std::string build_ptx_abi_sidecar(std::string_view ptx_source,
 // segfaulted. The imported IR already carries the kernel's real ABI, so derive
 // the sidecar from that instead.
 std::string build_ir_abi_sidecar(const cumetal::ir::Module& module,
-                                 const std::string& requested_entry) {
+                                 const std::string& requested_entry,
+                                 std::string_view ptx_source = {}) {
     std::string text = "CUMETAL_ABI_V2\n";
     std::size_t emitted = 0;
     for (const auto& function : module.functions) {
@@ -136,7 +137,11 @@ std::string build_ir_abi_sidecar(const cumetal::ir::Module& module,
         }
         const cumetal::ir::KernelAbi& abi = *function.kernel_abi;
         std::string block = "kernel " + function.name + "\n";
-        block += "shared " + std::to_string(abi.static_threadgroup_memory) + "\n";
+        // PTX import does not yet populate static_threadgroup_memory. Preserve
+        // its existing launch reservation while taking argument types from IR.
+        const auto shared = ptx_source.empty() ? abi.static_threadgroup_memory
+            : cumetal::ptx::compute_static_shared_bytes(ptx_source, function.name);
+        block += "shared " + std::to_string(shared) + "\n";
         bool usable = true;
         for (const auto& argument : abi.arguments) {
             if (argument.hidden_role.has_value()) continue;
@@ -1658,7 +1663,9 @@ int main(int argc, char** argv) {
         }
 
         const std::string ptx_source(reinterpret_cast<const char*>(ptx_bytes.data()), ptx_bytes.size());
-        abi_sidecar = build_ptx_abi_sidecar(ptx_source, ptx_entry_name);
+        if (backend != BackendKind::kCumetalIr) {
+            abi_sidecar = build_ptx_abi_sidecar(ptx_source, ptx_entry_name);
+        }
 
         if (emit_stage == EmitStage::kLlvm) {
             cumetal::ptx::LowerToLlvmOptions lower_options;
@@ -1693,6 +1700,9 @@ int main(int argc, char** argv) {
                 std::cerr << "cumetalc failed: " << compiled.error << "\n";
                 return 1;
             }
+            // Imported pointer types define the emitted signature. Parser-only
+            // guesses can disagree when producers omit pointer annotations.
+            abi_sidecar = build_ir_abi_sidecar(compiled.gpu_ir, ptx_entry_name, ptx_source);
             if (emit_stage != EmitStage::kMetallib) {
                 // Runtime-compiled MSL needs the same launch ABI as a metallib.
                 if (!emit_inspection_stage(compiled, emit_stage, options.output,

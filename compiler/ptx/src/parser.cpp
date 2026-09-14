@@ -470,8 +470,9 @@ void infer_pointer_parameters(EntryFunction* entry) {
             continue;
         }
 
-        // Preserve historical behavior for unannotated .u64 params unless proven scalar.
-        param.is_pointer = true;
+        // Integer width alone is not pointer evidence. The typed importer can
+        // recover omitted annotations from address uses beyond this classifier.
+        param.is_pointer = false;
     }
 }
 

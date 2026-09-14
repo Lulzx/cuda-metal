@@ -32,7 +32,8 @@ def expect_compile_failure(build, source, entry, diagnostic):
 
 
 def run_integer_case(build, ptx_source, values, expected, label, entry="integer_probe",
-                     word_bits=64, input_words=1, output_words=2):
+                     word_bits=64, input_words=1, output_words=2,
+                     backend="cumetal-ir", emit="msl", abi_lines=None, argument_order=(0, 1, 2)):
     """Run a two-buffer/count kernel with integer inputs and expected outputs."""
     os.environ['CUMETAL_TRACE_GPU'] = '1'
     os.environ['CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS'] = '0'
@@ -52,14 +53,17 @@ def run_integer_case(build, ptx_source, values, expected, label, entry="integer_
     api('cuCtxCreate', [c.POINTER(ptr), u32, c.c_int], c.byref(context), 0, 0)
     try:
         with tempfile.TemporaryDirectory(prefix='cumetal-ptx-') as work:
-            ptx, msl = Path(work) / 'test.ptx', Path(work) / 'test.metal'
+            ptx, msl = Path(work) / 'test.ptx', Path(work) / ('test.metallib' if emit == 'metallib' else 'test.metal')
             ptx.write_text(ptx_source)
             compiled = subprocess.run(
-                [str(build / 'cumetalc'), str(ptx), '--backend=cumetal-ir',
-                 '--ptx-strict', '--entry', entry, '--emit=msl', '-o', str(msl)],
+                [str(build / 'cumetalc'), str(ptx), '--backend=' + backend,
+                 '--ptx-strict', '--entry', entry, '--emit=' + emit, '-o', str(msl)],
                 capture_output=True, text=True)
             if compiled.returncode:
                 raise RuntimeError(f'{label}: PTX compilation failed\n{compiled.stderr}')
+            if abi_lines is not None:
+                actual = Path(str(msl) + '.cumetal-abi').read_text().splitlines()
+                assert actual == abi_lines, (label, actual, abi_lines)
             api('cuModuleLoad', [c.POINTER(ptr), c.c_char_p], c.byref(module), os.fsencode(msl))
             api('cuModuleGetFunction', [c.POINTER(ptr), ptr, c.c_char_p], c.byref(function), module, entry.encode())
             for data in (source, result):
@@ -68,7 +72,8 @@ def run_integer_case(build, ptx_source, values, expected, label, entry="integer_
                 allocations.append(allocation)
                 api('cuMemcpyHtoD', [u64, ptr, c.c_size_t], allocation, c.cast(data, ptr), c.sizeof(data))
             count_storage = u64(count)  # Current classifier reads eight bytes for scalars.
-            args = (ptr * 4)(*[c.cast(c.pointer(x), ptr) for x in (*allocations, count_storage)], None)
+            arguments = (*allocations, count_storage)
+            args = (ptr * 4)(*[c.cast(c.pointer(arguments[i]), ptr) for i in argument_order], None)
             api('cuLaunchKernel', [ptr] + [u32]*7 + [ptr, c.POINTER(ptr), ptr],
                 function, (count + 63) // 64, 1, 1, 64, 1, 1, 0, None, args, None)
             api('cuCtxSynchronize', [])

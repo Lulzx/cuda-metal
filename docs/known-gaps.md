@@ -46,3 +46,14 @@ and in the same block, with no intervening call or write to the observed source.
 The discarded extraction destination must be `_` or a named register with no
 source occurrences anywhere in the function. Other partial-definedness cases
 remain subject to ordinary SSA validation; undefined bits are never initialized.
+
+Unannotated 64-bit PTX parameters now require address-use evidence to be
+classified as pointers; unused or ambiguous parameters remain scalars in the
+parser. The typed importer may recover omitted pointer annotations from its
+supported address paths and scalar parameter slots forwarded to already imported
+pointer-taking helpers. Typed MSL and metallib sidecars use imported argument
+types and scalar sizes; PTX static shared-memory reservations retain the existing
+PTX calculation because import does not yet populate that IR field. Hidden
+bindings are not user launch arguments. The legacy backend retains parser
+classification and has no typed recovery: ambiguous pointers require `.ptr`
+annotations instead of relying on the former width-only buffer default.

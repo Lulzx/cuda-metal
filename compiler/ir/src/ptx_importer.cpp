@@ -1137,6 +1137,31 @@ struct Importer {
         // mov/ld.param, add, and selp forms; ambiguous integer-only values stay
         // integers instead of being guessed as pointers.
         std::unordered_set<std::string> required_device_pointers;
+        // Reachable helpers are imported before their callers. Forwarding a
+        // scalar parameter slot to a proven pointer argument is pointer evidence
+        // even if this function never dereferences the address itself.
+        std::unordered_set<std::string> pointer_slots;
+        for (const Instruction& instruction : entry->instructions) {
+            const auto callee = direct_call_target(instruction);
+            if (!callee) continue;
+            const auto imported = std::find_if(result.module.functions.begin(), result.module.functions.end(),
+                [&](const Function& function) { return function.name == *callee; });
+            if (imported == result.module.functions.end()) continue;
+            const auto arguments = grouped_names(instruction.operands.back());
+            for (std::size_t i = 0; i < arguments.size() && i < imported->arguments.size(); ++i) {
+                if (imported->arguments[i].type.is_pointer()) pointer_slots.insert(arguments[i]);
+            }
+        }
+        for (const Instruction& instruction : entry->instructions) {
+            if ((instruction.opcode == "st.param.b64" || instruction.opcode == "st.param.u64") &&
+                instruction.operands.size() == 2) {
+                const auto slot = parameter_name_from_operand(instruction.operands[0]);
+                if (pointer_slots.contains(slot) && trim(instruction.operands[0]) == "[" + slot + "]") {
+                    const auto source = first_register(instruction.operands[1]);
+                    if (!source.empty()) required_device_pointers.insert(source);
+                }
+            }
+        }
         for (const Instruction& instruction : entry->instructions) {
             const std::string root = root_opcode(instruction.opcode);
             // A helper's explicit generic-to-local address conversion proves
