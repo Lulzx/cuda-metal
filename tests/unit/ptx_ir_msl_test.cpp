@@ -1072,6 +1072,70 @@ BODY:
                  "vector lanes and 64-bit destinations retain independent register and memory widths");
 
 
+    const std::string discarded_half = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry discarded_half(.param .u64 input, .param .u64 output, .param .u32 count) {
+.reg .b64 %rd<8>;
+.reg .b32 %r<10>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd3, %r2, 4;
+add.u64 %rd4, %rd1, %rd3;
+add.u64 %rd5, %rd2, %rd3;
+ld.global.u32 %r5, [%rd4];
+mov.b64 %rd6, {%r6, %r5};
+add.u32 %r7, %r5, 3;
+mov.b64 {_, %r8}, %rd6;
+st.global.u32 [%rd5], %r8;
+DONE:
+ret;
+}
+)ptx";
+    auto half_result = metal::compile_ptx_to_msl(discarded_half);
+    ok &= expect(half_result.ok, "unused packed low half does not need a definition: " + half_result.error);
+    auto low_half = discarded_half;
+    low_half.replace(low_half.find("{%r6, %r5}"), 10, "{%r5, %r6}");
+    low_half.replace(low_half.find("{_, %r8}"), 8, "{%r8, _}");
+    ok &= expect(metal::compile_ptx_to_msl(low_half).ok, "unused packed high half also compiles");
+    auto dead_named_half = discarded_half;
+    dead_named_half.replace(dead_named_half.find("{_, %r8}"), 8, "{%r9, %r8}");
+    ok &= expect(metal::compile_ptx_to_msl(dead_named_half).ok,
+                 "named but unread packed half does not require a definition");
+    auto dead_named_high = low_half;
+    dead_named_high.replace(dead_named_high.find("{%r8, _}"), 8, "{%r8, %r9}");
+    ok &= expect(metal::compile_ptx_to_msl(dead_named_high).ok,
+                 "named unread high half also compiles");
+    auto observed_named_half = dead_named_half;
+    observed_named_half.insert(observed_named_half.find("DONE:\n"),
+                               "st.global.u32 [%rd5+4], %r9;\n");
+    ok &= expect(!metal::compile_ptx_to_msl(observed_named_half).ok,
+                 "observed named undefined half remains rejected");
+    for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+        {"{_, %r8}", "{%r8, _}"},
+        {"{_, %r8}", "{_, _}"},
+        {"{%r6, %r5}", "{%r6, %rd5}"},
+        {"{%r6, %r5}", "{%r6, %r5, %r7}"},
+        {"add.u32 %r7, %r5, 3;", "mov.u32 %r5, 0;"},
+        {"add.u32 %r7, %r5, 3;", "@%p1 mov.u32 %r5, 0;"},
+        {"add.u32 %r7, %r5, 3;", "st.global.u64 [%rd5], %rd6;"},
+        {"add.u32 %r7, %r5, 3;", "bra EXTRACT;\nEXTRACT:"},
+        {"mov.b64 %rd6,", "@%p1 mov.b64 %rd6,"},
+        {"mov.b64 {_, %r8}", "@%p1 mov.b64 {_, %r8}"}}) {
+        auto invalid = discarded_half;
+        invalid.replace(invalid.find(from), from.size(), to);
+        ok &= expect(!metal::compile_ptx_to_msl(invalid).ok,
+                     "observable/stale/malformed packed half stays rejected: " + to);
+    }
     const std::string inferred_pointer_device_call_ptx = R"ptx(
 .version 7.0
 .target sm_80

@@ -38,3 +38,11 @@ stored scalar values do not redefine the destination address register.
 PTX tuple-move inference retains the full packed width across CFG edges:
 `mov.b64` packs produce 64 bits and unpack to 32-bit halves; `mov.b32`
 retains its 32-bit pack and 16-bit half behavior.
+
+Pre-SSA tuple normalization can remove one unobserved 32-bit half of a
+`mov.b64` pack/extract pair. The packed register must have one definition and
+one source occurrence in the function; both instructions must be unpredicated
+and in the same block, with no intervening call or write to the observed source.
+The discarded extraction destination must be `_` or a named register with no
+source occurrences anywhere in the function. Other partial-definedness cases
+remain subject to ordinary SSA validation; undefined bits are never initialized.
