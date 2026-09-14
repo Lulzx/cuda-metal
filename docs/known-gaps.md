@@ -67,3 +67,8 @@ is not a general register-provenance solver. Integer-minus-pointer forms remain
 rejected. Parser inference does not attribute combined addresses to a scalar
 parameter when another source has known symbol-address provenance; ordinary
 untracked thread-index arithmetic retains its existing classification.
+
+Mutation through supported same-function register aliases prevents private-global
+promotion, including predicated writes and register reuse. Literal-like names
+do not override write evidence; unfinished bounded proofs cannot justify promotion.
+Interprocedural mutation through helper pointer arguments remains unsupported.

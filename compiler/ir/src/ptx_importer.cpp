@@ -3788,11 +3788,9 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     for (const InitializedByteArray& array : initialized_arrays.arrays) {
         if (!array.pointer_target.empty()) continue;
         if (!symbol_is_referenced(array.name, !array.module_private)) continue;
-        const bool clang_promoted_literal =
-            array.module_private && starts_with(array.name, "__const_$");
         const bool private_read_only =
             array.module_private && !detail::symbol_is_written(parsed.module, array.name);
-        if (!array.constant_space && !clang_promoted_literal && !private_read_only) {
+        if (!array.constant_space && !private_read_only) {
             if (array.module_private) {
                 // CUDA does not emit __cudaRegisterVar for translation-unit
                 // private device storage. Keep the same hidden-buffer ABI as

@@ -1,4 +1,5 @@
 #include "cumetal/metal/lower_to_msl.h"
+#include "ptx_module.h"
 
 #include <cstdint>
 #include <iostream>
@@ -30,6 +31,36 @@ const std::string good_entry = R"ptx(
 
 int main() {
     bool ok = true;
+    // Storage classification must follow aliases, independently of address conversions.
+    for (const std::string name : {"table", "__const_$literal"}) {
+        const std::string prefix = header + ".global .align 4 .b8 " + name + R"ptx([4] = {1,0,0,0};
+.visible .entry alias_write() {
+.reg .b64 %rd<3>;
+.reg .b32 %r1;
+.reg .pred %p1;
+)ptx" + "mov.u64 %rd1, " + name + ";\n";
+        for (const std::string write : {
+                 "st.global.u8 [%rd1], 7;",
+                 "mov.u64 %rd2, %rd1;\nst.global.u8 [%rd2], 7;",
+                 "setp.eq.u32 %p1, 0, 0;\n@%p1 st.global.u8 [%rd1], 7;",
+                 "mov.u64 %rd2, %rd1;\nmov.u64 %rd1, 0;\nst.global.u8 [%rd2], 7;",
+                 "atom.global.add.u32 %r1, [%rd1], 1;",
+                 "red.global.add.u32 [%rd1], 1;"}) {
+            const auto source = prefix + write + "\nret;\n}\n";
+            const auto parsed = cumetal::ptx::parse_ptx(source);
+            ok &= expect(parsed.ok && cumetal::ir::detail::symbol_is_written(parsed.module, name),
+                         "alias analysis observes each write form for " + name);
+            // These forms are parsed but have separate lowering limitations.
+            if (write.find("@%p1") != std::string::npos || write.starts_with("red.")) continue;
+            const auto written = compile_ptx_to_msl(source);
+            ok &= expect(written.ok && written.gpu_ir.global_constants.empty(),
+                         "aliased writes retain mutable storage for " + name + ": " + written.error);
+        }
+        const auto read_only = compile_ptx_to_msl(prefix + "ld.global.u8 %r1, [%rd1];\nret;\n}\n");
+        ok &= expect(read_only.ok && read_only.gpu_ir.global_constants.size() == 1,
+                     "read-only aliases still permit promotion for " + name + ": " + read_only.error);
+    }
+
     cumetal::metal::PtxToMslOptions options;
     options.strict = true;
     options.entry_name = "good";

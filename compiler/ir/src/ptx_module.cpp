@@ -379,8 +379,40 @@ bool symbol_is_written(const cumetal::ptx::ModuleInfo& module, std::string_view 
             });
     };
     const auto function_writes = [&](const cumetal::ptx::EntryFunction& function) {
-        return std::any_of(function.instructions.begin(),
-                           function.instructions.end(), writes_symbol);
+        if (std::any_of(function.instructions.begin(), function.instructions.end(), writes_symbol)) return true;
+        // Keep a conservative union across register reuse and predicates: any
+        // possible store through a symbol-derived address prevents promotion.
+        std::unordered_set<std::string> aliases;
+        bool changed = true;
+        for (int iteration = 0; iteration < 12 && changed; ++iteration) {
+            changed = false;
+            for (const auto& instruction : function.instructions) {
+                const auto root = root_opcode(instruction.opcode);
+                if (root != "mov" && root != "cvta" && root != "add" && root != "sub" &&
+                    root != "selp" && root != "cvt") continue;
+                bool derived = false;
+                for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
+                    derived |= parameter_name_from_operand(instruction.operands[i]) == symbol;
+                    for (const auto& source : registers_in(instruction.operands[i]))
+                        derived |= aliases.contains(source);
+                }
+                if (derived)
+                    for (const auto& destination : destination_registers(instruction))
+                        changed |= aliases.insert(destination).second;
+            }
+        }
+        if (changed) return true;  // An unfinished proof cannot justify promotion.
+        for (const auto& instruction : function.instructions) {
+            const auto root = root_opcode(instruction.opcode);
+            if (root != "st" && root != "atom" && root != "red") continue;
+            // Parameter stores forward values; they do not mutate their pointee.
+            if (starts_with(instruction.opcode, "st.param")) continue;
+            const std::size_t address = root == "atom" ? 1 : 0;
+            if (instruction.operands.size() <= address) continue;
+            for (const auto& source : registers_in(instruction.operands[address]))
+                if (aliases.contains(source)) return true;
+        }
+        return false;
     };
     return std::any_of(module.entries.begin(), module.entries.end(),
                        function_writes) ||
