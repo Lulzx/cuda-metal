@@ -1,0 +1,208 @@
+{
+  "commit": "f5e170fbc7d42f345cdb4a78a16fae8929db022f",
+  "ptx": {
+    "path": "/Users/brandon/Downloads/vanity-miner-aarch64-llvm21/output-llvm21.ptx",
+    "bytes": 25161784,
+    "sha256": "2840485fe193d39cfdbb2e5babd25f6772a08a2550843c20b3beba5a26185f4b"
+  },
+  "compiler": {
+    "path": "/Users/brandon/Desktop/gpu/cuda-metal/build-rust-ptx-apple/cumetalc",
+    "bytes": 3220992,
+    "sha256": "4c5c932658a5b3eab8ea0ff5a6d7d5c9d084b8ecca9120ff15457bb16908805b"
+  },
+  "runtime": {
+    "path": "/Users/brandon/Desktop/gpu/cuda-metal/build-rust-ptx-apple/libcumetal.dylib",
+    "bytes": 5004992,
+    "sha256": "6e41295ad0d934f15b70bfa7d12a9c93b74f5852d947e07eff130d78a824f30f"
+  },
+  "results": [
+    {
+      "slot": 5,
+      "entry": "kernel_self_test_primitive_secp256k1_uncompressed",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 69.815,
+        "log": "wrote \"/tmp/llvm21-address-validation/kernel_self_test_primitive_secp256k1_uncompressed.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-address-validation/kernel_self_test_primitive_secp256k1_uncompressed.metal",
+        "bytes": 7677943,
+        "sha256": "f4cfceebf4785aabf1213ce77571713cd6971936fc40389be74134e051346a4f"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 98.912,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_primitive_secp256k1_uncompressed\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=19474874 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_primitive_secp256k1_uncompressed slot=5 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 19474874
+    },
+    {
+      "slot": 13,
+      "entry": "kernel_self_test_ethereum_priv",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 118.43,
+        "log": "wrote \"/tmp/llvm21-address-validation/kernel_self_test_ethereum_priv.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-address-validation/kernel_self_test_ethereum_priv.metal",
+        "bytes": 7814954,
+        "sha256": "d497869f4577e4d90cf6261558a3dc9338c7078cb21a3e1097c6040a51da5dd8"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 168.274,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_ethereum_priv\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=56166333 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_ethereum_priv slot=13 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 56166333
+    },
+    {
+      "slot": 14,
+      "entry": "kernel_self_test_ethereum_pub",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 118.803,
+        "log": "wrote \"/tmp/llvm21-address-validation/kernel_self_test_ethereum_pub.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-address-validation/kernel_self_test_ethereum_pub.metal",
+        "bytes": 7904012,
+        "sha256": "af902aa71a8fba2239cf874ce00b5b6b5d25fa72106314da0597947ba8aa0834"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 155.241,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_ethereum_pub\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=85260124 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_ethereum_pub slot=14 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 85260124
+    },
+    {
+      "slot": 15,
+      "entry": "kernel_self_test_ethereum_address",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 118.321,
+        "log": "wrote \"/tmp/llvm21-address-validation/kernel_self_test_ethereum_address.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-address-validation/kernel_self_test_ethereum_address.metal",
+        "bytes": 7885798,
+        "sha256": "c6cf534665cbc0521de9774bf4d19743970cd0531605b71d09b820f987941c53"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 103.284,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_ethereum_address\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=38782624 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_ethereum_address slot=15 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 38782624
+    },
+    {
+      "slot": 16,
+      "entry": "kernel_self_test_bitcoin_priv",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 147.599,
+        "log": "wrote \"/tmp/llvm21-address-validation/kernel_self_test_bitcoin_priv.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-address-validation/kernel_self_test_bitcoin_priv.metal",
+        "bytes": 8630393,
+        "sha256": "bcb4ff6950ba39bd9a1975e91b3f3b5ffd303862ae3beab57095315389b30d72"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 108.567,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_bitcoin_priv\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=27201166 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_bitcoin_priv slot=16 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 27201166
+    },
+    {
+      "slot": 17,
+      "entry": "kernel_self_test_bitcoin_pub",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 147.229,
+        "log": "wrote \"/tmp/llvm21-address-validation/kernel_self_test_bitcoin_pub.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-address-validation/kernel_self_test_bitcoin_pub.metal",
+        "bytes": 8902364,
+        "sha256": "bf4712348e1483d958bd05eed8b0b6ee9531d04fb318e3c5f49562944e99c95d"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 113.07,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_bitcoin_pub\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=29248875 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_bitcoin_pub slot=17 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 29248875
+    },
+    {
+      "slot": 18,
+      "entry": "kernel_self_test_bitcoin_pkh",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 148.056,
+        "log": "wrote \"/tmp/llvm21-address-validation/kernel_self_test_bitcoin_pkh.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-address-validation/kernel_self_test_bitcoin_pkh.metal",
+        "bytes": 8622678,
+        "sha256": "108220e2a3f786357915c6518923e8be7d7c2a667ae15f56e12a1db8bdecfe73"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 112.024,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_bitcoin_pkh\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=27732666 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_bitcoin_pkh slot=18 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 27732666
+    },
+    {
+      "slot": 19,
+      "entry": "kernel_self_test_bitcoin_encoded",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 145.008,
+        "log": "wrote \"/tmp/llvm21-address-validation/kernel_self_test_bitcoin_encoded.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-address-validation/kernel_self_test_bitcoin_encoded.metal",
+        "bytes": 8633935,
+        "sha256": "fef1cc1c294e56e85dc97183bedf4a26e4c01a3c01c5aca8f5d29c5660173a87"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 115.561,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_bitcoin_encoded\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=26406749 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_bitcoin_encoded slot=19 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 26406749
+    },
+    {
+      "slot": 20,
+      "entry": "kernel_self_test_bitcoin_matches",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 144.405,
+        "log": "wrote \"/tmp/llvm21-address-validation/kernel_self_test_bitcoin_matches.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-address-validation/kernel_self_test_bitcoin_matches.metal",
+        "bytes": 8574433,
+        "sha256": "bf77502c809b560f575288392c32cf9d034c825a3ca01a8562898e647030cabd"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 119.97,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_bitcoin_matches\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=27984666 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_bitcoin_matches slot=20 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 27984666
+    }
+  ],
+  "ptx_modified": false,
+  "metal_instrumented": false,
+  "workload_specializations": false,
+  "device": "Apple M5",
+  "compile_workers": 3,
+  "gpu_launches": "sequential",
+  "compile_timeout_seconds": 600,
+  "runtime_timeout_seconds": 300
+}

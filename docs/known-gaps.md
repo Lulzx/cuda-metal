@@ -4,8 +4,8 @@ This is the maintained gap index. A missing item is not automatically supported;
 current status must be backed by tests and evidence.
 
 LLVM 21 miner coverage remains partial: [compressed secp256k1 now passes](experiments/llvm21-guarded-load.md)
-with bounded equality/OR guard proofs; the full suite and mining workloads are
-still unvalidated. Arbitrary predicate implications remain unsupported.
+with bounded equality/OR guard proofs. [The uncompressed sibling and eight address checks](experiments/llvm21-address-checks.md)
+also pass; the full suite and mining workloads are still unvalidated. Arbitrary predicate implications remain unsupported.
 
 ## Gap groups
 

@@ -74,3 +74,6 @@ python3 demos/rust-ptx/run_self_test.py /tmp/secp.metal \
 This validates one fixed compressed-key self-test. Next is the uncompressed
 secp256k1 sibling, followed by dependent Ethereum/Bitcoin checks. The full
 LLVM 21 suite and mining kernels remain unvalidated.
+
+Follow-up: [the uncompressed sibling and all eight Ethereum/Bitcoin entries
+also pass](llvm21-address-checks.md), without further compiler changes.

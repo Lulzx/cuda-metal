@@ -470,3 +470,12 @@ secp256k1 now numerically passes on M5 (slot 4 = 1, other slots/guards intact).
 Unit positive/negative checks and 196,639 GPU regression inputs pass.
 [Proof and evidence](llvm21-guarded-load.md). PTX remains unchanged.
 Next: validate the LLVM 21 uncompressed sibling and dependent address checks.
+
+## LLVM 21 uncompressed secp256k1 and address validation
+
+At `f5e170f`, the uncompressed sibling (5), Ethereum checks (13–15), and Bitcoin
+checks (16–20) all compile and numerically pass on M5. Each selected slot equals 1;
+other slots and all 16 guards remain intact. No additional compiler change was
+needed. [Nine-entry evidence and timings](llvm21-address-checks.md).
+Next bounded batch: LLVM 21 WIF variants (21–24); full-suite and mining validation
+remain incomplete.

@@ -9,7 +9,8 @@ libraries. See [verified results](docs/verified-results.md) for what runs today
 and [known gaps](docs/known-gaps.md) for the remaining limits.
 
 Recent experiment: [LLVM 21 compressed secp256k1 passes on Apple M5](docs/experiments/llvm21-guarded-load.md),
-with regression coverage for conditional-load guards.
+with regression coverage for conditional-load guards. The [uncompressed sibling and
+eight Ethereum/Bitcoin checks](docs/experiments/llvm21-address-checks.md) also pass.
 
 ## Install
 
