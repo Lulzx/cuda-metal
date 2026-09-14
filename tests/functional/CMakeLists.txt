@@ -2862,6 +2862,12 @@ add_test(NAME functional_ptx_msl_abi
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx)
 
 if(APPLE)
+    foreach(bit_case bit_permutation bit_insert tuple_move)
+        add_test(NAME functional_ptx_${bit_case}
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_bit_ops.py
+                    ${CMAKE_BINARY_DIR} ${bit_case})
+        set_tests_properties(functional_ptx_${bit_case} PROPERTIES TIMEOUT 120)
+    endforeach()
     foreach(encoding byte typed)
         add_test(NAME functional_ptx_table_${encoding}
             COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_relocated_table.py

@@ -1,0 +1,29 @@
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry bit_permutation(.param .u64 input, .param .u64 output, .param .u32 count) {
+    .reg .b64 %rd<8>;
+    .reg .b32 %r<14>;
+    .reg .pred %p1;
+    ld.param.u64 %rd1, [input];
+    ld.param.u64 %rd2, [output];
+    ld.param.u32 %r1, [count];
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r2, %r3, %r4;
+    setp.ge.u32 %p1, %r5, %r1;
+    @%p1 bra DONE;
+    mul.wide.u32 %rd3, %r5, 16;
+    add.u64 %rd4, %rd1, %rd3;
+    add.u64 %rd5, %rd2, %rd3;
+    ld.global.v4.b32 {%r6, %r7, %r8, %r9}, [%rd4];
+    shf.l.wrap.b32 %r10, %r6, %r7, %r9;
+    shf.r.wrap.b32 %r11, %r6, %r7, %r9;
+    prmt.b32 %r12, %r6, %r7, %r8;
+    st.global.v4.b32 [%rd5], {%r10, %r11, %r12, -1};
+    st.global.b8 [%rd5+15], %r6;
+    st.global.b16 [%rd5+12], %r7;
+DONE:
+    ret;
+}

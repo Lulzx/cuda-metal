@@ -7,7 +7,7 @@ import tempfile
 
 
 def run_integer_case(build, ptx_source, values, expected, label, entry="integer_probe",
-                     word_bits=64, outputs_per_input=2):
+                     word_bits=64, input_words=1, output_words=2):
     """Run a two-buffer/count kernel with integer inputs and expected outputs."""
     os.environ['CUMETAL_TRACE_GPU'] = '1'
     os.environ['CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS'] = '0'
@@ -19,10 +19,12 @@ def run_integer_case(build, ptx_source, values, expected, label, entry="integer_
         if result:
             raise RuntimeError(f'{name} failed: {result}')
     ptr, u32, u64 = c.c_void_p, c.c_uint32, c.c_uint64
-    if not values or len(expected) != outputs_per_input * len(values):
+    if input_words < 1 or len(values) % input_words:
+        raise ValueError('input count does not match the kernel layout')
+    count = len(values) // input_words
+    if not count or len(expected) != output_words * count:
         raise ValueError('output count does not match the kernel layout')
     word_type = {32: u32, 64: u64}[word_bits]
-    count = len(values)
     source = (word_type * len(values))(*values)
     result = (word_type * (len(expected) + 16))(*([0xa5a5a5a5] * (len(expected) + 16)))
     context, module, function = ptr(), ptr(), ptr()

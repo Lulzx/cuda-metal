@@ -3,7 +3,8 @@
 #include "cumetal/passes/printf_lower.h"
 #include "cumetal/ptx/parser.h"
 #include "ptx_inline_asm.h"
-#include "ptx_operand_conversion.h"
+#include "ptx_value_builder.h"
+#include "ptx_bit_ops.h"
 #include "ptx_module.h"
 #include "ptx_instruction.h"
 #include "ptx_text.h"
@@ -1208,6 +1209,10 @@ struct Importer {
                     if (container_bits > inferred.bit_width) {
                         inferred = Type::integer(container_bits);
                     }
+                } else if (instruction.opcode == "mov.b32" && instruction.operands.size() == 2 &&
+                           (instruction.operands[0].find('{') != std::string::npos ||
+                            instruction.operands[1].find('{') != std::string::npos)) {
+                    inferred = Type::integer(instruction.operands[0].find('{') != std::string::npos ? 16 : 32);
                 } else if (root == "mov" && instruction.operands.size() >= 2 &&
                            starts_with(trim(instruction.operands[1]), "0f")) {
                     inferred = Type::floating(32);
@@ -1545,9 +1550,9 @@ struct Importer {
                        ? operand_for(instruction.operands[index], *environment, fallback)
                        : Operand::immediate("0", fallback);
         };
-        detail::PtxOperandConversion conversions(builder, *block, value_types, operation.location);
+        detail::PtxValueBuilder expressions(builder, *block, value_types, operation.location);
         const auto bit_container_of = [&](Operand input, const Type& expected) {
-            return conversions.bit_container(std::move(input), expected);
+            return expressions.bit_container(std::move(input), expected);
         };
         const auto bit_container_operand = [&](std::size_t index, const Type& expected) {
             return bit_container_of(source_operand(index, expected), expected);
@@ -1726,6 +1731,77 @@ struct Importer {
             }
         }
 
+        if (instruction.opcode == "mov.b32" &&
+            std::any_of(instruction.operands.begin(), instruction.operands.end(),
+                        [](const std::string& operand) { return operand.find('{') != std::string::npos; })) {
+            if (instruction.operands.size() != 2 || !instruction.predicate.empty()) {
+                return fail(&instruction, "mov.b32 tuples require two operands and no predicate");
+            }
+            const bool unpack = instruction.operands[0].find('{') != std::string::npos;
+            const std::string tuple = trim(instruction.operands[unpack ? 0 : 1]);
+            const auto comma = tuple.find(',');
+            if (tuple.size() < 5 || tuple.front() != '{' || tuple.back() != '}' ||
+                comma == std::string::npos || tuple.find(',', comma + 1) != std::string::npos) {
+                return fail(&instruction, "mov.b32 currently requires exactly two 16-bit tuple lanes");
+            }
+            const std::vector<std::string> lanes = {
+                trim(tuple.substr(1, comma - 1)),
+                trim(tuple.substr(comma + 1, tuple.size() - comma - 2)),
+            };
+            for (const auto& lane : lanes) {
+                if (unpack && lane == "_") continue;
+                if (lane.empty() || lane != first_register(lane) ||
+                    ptx_register_container_bits(lane) != 16) {
+                    return fail(&instruction, "mov.b32 tuple lanes must be 16-bit registers (or unpack sinks)");
+                }
+            }
+            if (destinations.empty() || (unpack && lanes[0] == lanes[1])) {
+                return fail(&instruction, "mov.b32 tuple needs distinct non-sink destinations");
+            }
+            const Type u16 = Type::integer(16), u32 = Type::integer(32);
+            if (!unpack) {
+                if (destinations.size() != 1 || ptx_register_container_bits(destinations[0]) != 32) {
+                    return fail(&instruction, "mov.b32 tuple packing requires a 32-bit scalar destination");
+                }
+                const Operand low = bit_container_of(operand_for(lanes[0], *environment, u16), u16);
+                const Operand high = bit_container_of(operand_for(lanes[1], *environment, u16), u16);
+                if (!(low.type == u16) || !(high.type == u16)) {
+                    return fail(&instruction, "mov.b32 tuple source values must contain 16 bits");
+                }
+                const Operand low32 = expressions.emit(OpCode::kConvert, u32, {low});
+                const Operand high32 = expressions.emit(OpCode::kConvert, u32, {high});
+                const Operand shifted = expressions.emit(OpCode::kShiftLeft, u32,
+                    {high32, Operand::immediate("16", u32)});
+                operation.opcode = OpCode::kBitOr;
+                operation.result_types = {u32};
+                operation.operands = {low32, shifted};
+                value_types[operation.results.front()] = u32;
+                block->operations.push_back(std::move(operation));
+                (*environment)[destinations[0]] = instruction_results[&instruction][0];
+            } else {
+                const Operand packed = bit_container_operand(1, u32);
+                if (!(packed.type == u32)) {
+                    return fail(&instruction, "mov.b32 tuple unpacking requires a 32-bit source value");
+                }
+                std::size_t result_index = 0;
+                for (std::size_t lane = 0; lane < 2; ++lane) {
+                    if (lanes[lane] == "_") continue;
+                    const Operand selected = lane == 0 ? packed : expressions.emit(OpCode::kShiftRight, u32,
+                        {packed, Operand::immediate("16", u32)});
+                    Operation extract;
+                    extract.opcode = OpCode::kConvert;
+                    extract.location = operation.location;
+                    const ValueId result_value = instruction_results[&instruction][result_index++];
+                    extract.results = {result_value};
+                    extract.result_types = {u16};
+                    extract.operands = {selected};
+                    value_types[result_value] = u16;
+                    block->operations.push_back(std::move(extract));
+                    (*environment)[lanes[lane]] = result_value;
+                }
+            }
+            return true;
+        }
         if (root == "mov" && instruction.opcode.find(".b64") != std::string::npos &&
             destinations.size() == 2 && instruction.operands.size() >= 2) {
             if (!instruction.predicate.empty()) {
@@ -1854,7 +1930,7 @@ struct Importer {
             const std::string name = parameter_name_from_operand(instruction.operands[0]);
             if (name.empty()) return fail(&instruction, "call parameter slot has no name");
             const Type store_type = ptx_scalar_type(instruction.opcode);
-            const Operand stored = conversions.low_integer_bits(source_operand(1, store_type), store_type);
+            const Operand stored = expressions.low_integer_bits(source_operand(1, store_type), store_type);
             const std::int64_t byte_offset =
                 memory_operand_offset(instruction.operands[0]);
             if (byte_offset < 0) {
@@ -2191,19 +2267,36 @@ struct Importer {
                     : AddressSpace::kDevice;
             const Type element_type = ptx_scalar_type(instruction.opcode);
             const auto store_value = [&](Operand input) {
-                return conversions.low_integer_bits(bit_container_of(input, element_type), element_type);
+                return expressions.low_integer_bits(bit_container_of(input, element_type), element_type);
             };
             const Operand base = memory_address_operand(
                 0, Type::pointer(element_type, store_address_space));
-            // Vector stores: `st.global.v2.b32 [addr], {%r1, %r2}` writes each
-            // register to consecutive elements. Clang emits these for adjacent
+            // Vector stores: `st.global.v2.b32 [addr], {%r1, 0}` writes each
+            // register or literal to consecutive elements. Clang emits these for adjacent
             // struct fields at -O2, and storing only the first lane silently
             // dropped the rest.
             const std::size_t lanes = memory_vector_width(instruction.opcode);
-            const std::vector<std::string> lane_registers = registers_in(instruction.operands[1]);
-            if (lanes > 1 && lane_registers.size() != lanes) {
+            std::vector<std::string> lane_operands;
+            if (lanes > 1) {
+                const std::string tuple = trim(instruction.operands[1]);
+                if (tuple.size() < 2 || tuple.front() != '{' || tuple.back() != '}') {
+                    return fail(&instruction, "vector store source requires a braced tuple");
+                }
+                const std::string contents = tuple.substr(1, tuple.size() - 2);
+                std::size_t begin = 0;
+                do {
+                    const std::size_t end = contents.find(',', begin);
+                    lane_operands.push_back(trim(contents.substr(begin, end - begin)));
+                    if (lane_operands.back().empty()) {
+                        return fail(&instruction, "vector store source tuple has an empty lane");
+                    }
+                    if (end == std::string::npos) break;
+                    begin = end + 1;
+                } while (true);
+            }
+            if (lanes > 1 && lane_operands.size() != lanes) {
                 return fail(&instruction,
-                            "vector store source tuple must name one register per lane");
+                            "vector store source tuple must provide one operand per lane");
             }
             for (std::size_t lane = 1; lane < lanes; ++lane) {
                 Operation offset;
@@ -2227,7 +2320,7 @@ struct Importer {
                 store.attributes["ptx_opcode"] = instruction.opcode;
                 store.operands.push_back(Operand::value_ref(pointer, base.type));
                 store.operands.push_back(store_value(
-                    operand_for(lane_registers[lane], *environment, element_type)));
+                    operand_for(lane_operands[lane], *environment, element_type)));
                 store.attributes["alignment"] = std::to_string(type_size(element_type));
                 if (!append_guard(&store, instruction, *environment)) return false;
                 block->operations.push_back(std::move(store));
@@ -2235,7 +2328,7 @@ struct Importer {
             operation.operands.push_back(base);
             operation.operands.push_back(
                 lanes > 1
-                    ? store_value(operand_for(lane_registers[0], *environment, element_type))
+                    ? store_value(operand_for(lane_operands[0], *environment, element_type))
                     : store_value(source_operand(1, element_type)));
             operation.attributes["address"] = instruction.operands[0];
             operation.attributes["alignment"] =
@@ -2331,6 +2424,17 @@ struct Importer {
                 operation.operands.push_back(
                     source_operand(i, ptx_scalar_type(instruction.opcode)));
             }
+        } else if (root == "shf" || root == "prmt") {
+            const bool left = instruction.opcode == "shf.l.wrap.b32";
+            const bool permute = instruction.opcode == "prmt.b32";
+            if ((!left && !permute && instruction.opcode != "shf.r.wrap.b32") ||
+                instruction.operands.size() != 4 || destinations.size() != 1) {
+                return fail(&instruction, "typed bit permutation requires shf.{l,r}.wrap.b32 or prmt.b32 and four operands");
+            }
+            const Type u32 = Type::integer(32);
+            detail::lower_bit_permutation(expressions, operation, instruction.opcode,
+                bit_container_operand(1, u32), bit_container_operand(2, u32), source_operand(3, u32));
+            value_types[operation.results.front()] = u32;
         } else if (root == "shfl") {
             operation.opcode = OpCode::kShuffle;
             if (instruction.opcode.find(".down.") != std::string::npos) {
@@ -2468,7 +2572,7 @@ struct Importer {
                     bit_container_operand(1, ptx_cvt_source_type(instruction.opcode)));
             }
             if (operation.operands.size() == 1) {
-                operation.operands.front() = conversions.low_integer_bits(
+                operation.operands.front() = expressions.low_integer_bits(
                     operation.operands.front(), ptx_cvt_source_type(instruction.opcode));
             }
         } else if (root == "rcp") {
@@ -2496,6 +2600,24 @@ struct Importer {
                     type.bit_width == 16 ? "65535" : "4294967295",
                     type));
             }
+        } else if (root == "bfi") {
+            if ((instruction.opcode != "bfi.b32" && instruction.opcode != "bfi.b64") ||
+                instruction.operands.size() != 5 || destinations.size() != 1 ||
+                !instruction.predicate.empty()) {
+                return fail(&instruction, "typed PTX bfi requires unpredicated bfi.b32/b64 with five operands");
+            }
+            const Type type = ptx_scalar_type(instruction.opcode);
+            const Type u32 = Type::integer(32);
+            const Operand a = bit_container_operand(1, type);
+            const Operand b = bit_container_operand(2, type);
+            const Operand position = source_operand(3, u32);
+            const Operand length = source_operand(4, u32);
+            if (!(a.type == type) || !(b.type == type) ||
+                !(position.type == u32) || !(length.type == u32)) {
+                return fail(&instruction, "typed PTX bfi operand widths do not match the instruction");
+            }
+            detail::lower_bit_insert(expressions, operation, type, a, b, position, length);
+            value_types[operation.results.front()] = type;
         } else if (root == "bfe") {
             if (instruction.operands.size() != 4 ||
                 has_signed_integer_type(instruction.opcode)) {

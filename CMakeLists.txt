@@ -123,6 +123,7 @@ add_library(cumetal_ir STATIC
     compiler/ir/src/ptx_importer.cpp
     compiler/ir/src/ptx_module.cpp
     compiler/ir/src/ptx_instruction.cpp
+    compiler/ir/src/ptx_bit_ops.cpp
 )
 
 target_include_directories(cumetal_ir

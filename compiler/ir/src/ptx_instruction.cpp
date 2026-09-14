@@ -55,7 +55,8 @@ std::vector<std::string> destination_registers(const Instruction& instruction) {
     }
     std::vector<std::string> destinations = registers_in(instruction.operands.front());
     const bool tuple_move = root == "mov" &&
-                            instruction.opcode.find(".b64") != std::string::npos;
+                            (instruction.opcode == "mov.b32" ||
+                             instruction.opcode.find(".b64") != std::string::npos);
     // `ld.*.v2/.v4 {a, b, ...}, [addr]` defines every register of the tuple.
     const bool vector_load = root == "ld" &&
                              (instruction.opcode.find(".v2.") != std::string::npos ||

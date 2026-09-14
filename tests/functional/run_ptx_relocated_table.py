@@ -49,7 +49,7 @@ def main():
     values = [(i * 7 + 1) % len(table) for i in range(257)]
     run_integer_case(Path(sys.argv[1]).resolve(), ptx, values,
                      [table[i] for i in values], 'immutable table '+sys.argv[2],
-                     entry='relocated_table', word_bits=32, outputs_per_input=1)
+                     entry='relocated_table', word_bits=32, output_words=1)
 
 
 if __name__ == '__main__':

@@ -29,6 +29,12 @@ addressing, aligned whole-pointer loads, a private numeric target, and a proof
 that the table address is neither written nor allowed to escape. Mutable,
 partial, mixed, and escaping relocations remain unsupported.
 
+The typed PTX path supports `shf.{l,r}.wrap.b32`, generic `prmt.b32`,
+unpredicated `bfi.b32/b64`, and two-halfword `mov.b32` packing/unpacking
+(including single unpack sinks). Vector memory stores accept literal lanes.
+Other permutation modes, funnel widths, and tuple shapes remain explicit
+diagnostics. Bit-field lowering bounds every shift, including discarded arms.
+
 ## Typed CuMetal IR migration
 
 With CUDA Clang 21-23, the reviewed production-metallib matrix is:
