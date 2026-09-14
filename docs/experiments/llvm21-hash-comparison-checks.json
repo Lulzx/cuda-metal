@@ -1,0 +1,88 @@
+{
+  "commit": "1a3fc92a9f2b990409eb0fccdc482068d7e56e25",
+  "ptx": {
+    "path": "/Users/brandon/Downloads/vanity-miner-aarch64-llvm21/output-llvm21.ptx",
+    "bytes": 25161784,
+    "sha256": "2840485fe193d39cfdbb2e5babd25f6772a08a2550843c20b3beba5a26185f4b"
+  },
+  "compiler": {
+    "path": "/Users/brandon/Desktop/gpu/cuda-metal/build-rust-ptx-apple/cumetalc",
+    "bytes": 3220992,
+    "sha256": "4c5c932658a5b3eab8ea0ff5a6d7d5c9d084b8ecca9120ff15457bb16908805b"
+  },
+  "runtime": {
+    "path": "/Users/brandon/Desktop/gpu/cuda-metal/build-rust-ptx-apple/libcumetal.dylib",
+    "bytes": 5004992,
+    "sha256": "6e41295ad0d934f15b70bfa7d12a9c93b74f5852d947e07eff130d78a824f30f"
+  },
+  "results": [
+    {
+      "slot": 28,
+      "entry": "kernel_self_test_compare_hashes_lt",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 54.521,
+        "log": "wrote \"/tmp/llvm21-hash-comparison-validation/kernel_self_test_compare_hashes_lt.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-hash-comparison-validation/kernel_self_test_compare_hashes_lt.metal",
+        "bytes": 137367,
+        "sha256": "e1b9584a47394ff19484c4b270f64952d30ab77be604fdd54bf87c4c119be3ea"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 0.253,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_compare_hashes_lt\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=1583 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_compare_hashes_lt slot=28 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 1583
+    },
+    {
+      "slot": 29,
+      "entry": "kernel_self_test_compare_hashes_gt",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 57.71,
+        "log": "wrote \"/tmp/llvm21-hash-comparison-validation/kernel_self_test_compare_hashes_gt.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-hash-comparison-validation/kernel_self_test_compare_hashes_gt.metal",
+        "bytes": 139863,
+        "sha256": "fa300651ec3925d871cf90f185f25d4eae3819b2a438a8e71e46bba6d74c790f"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 0.208,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_compare_hashes_gt\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=1625 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_compare_hashes_gt slot=29 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 1625
+    },
+    {
+      "slot": 30,
+      "entry": "kernel_self_test_compare_hashes_eq",
+      "compile": {
+        "exit_code": 0,
+        "host_seconds": 51.167,
+        "log": "wrote \"/tmp/llvm21-hash-comparison-validation/kernel_self_test_compare_hashes_eq.metal\"\n"
+      },
+      "metal": {
+        "path": "/private/tmp/llvm21-hash-comparison-validation/kernel_self_test_compare_hashes_eq.metal",
+        "bytes": 64337,
+        "sha256": "378ceef990539f2e718ddf298e65a27ba90d88a81384871f007d2a0c28ddec35"
+      },
+      "runtime": {
+        "exit_code": 0,
+        "host_seconds": 0.192,
+        "log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_compare_hashes_eq\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=1833 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_compare_hashes_eq slot=30 actual=1 expected=1; other 117 slots and 16 guard words intact\n"
+      },
+      "gpu_duration_ns": 1833
+    }
+  ],
+  "ptx_modified": false,
+  "metal_instrumented": false,
+  "workload_specializations": false,
+  "device": "Apple M5",
+  "compile_workers": 2,
+  "gpu_launches": "sequential",
+  "compile_timeout_seconds": 600,
+  "runtime_timeout_seconds": 300
+}

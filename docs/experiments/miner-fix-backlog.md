@@ -497,3 +497,12 @@ is 1; other slots and 16 guards are intact. PTX remains unchanged.
 [Evidence, timings, and fixed-fixture limits](llvm21-shallenge-checks.md).
 Next bounded batch: hash comparisons (28–30). Full-suite and mining validation
 remain incomplete.
+
+## LLVM 21 hash-comparison validation
+
+Less-than, greater-than, and equal checks (28–30) compile and numerically pass
+on M5 at `1a3fc92`, without compiler changes. Selected slots equal 1, with other
+slots and 16 guards intact. PTX remains unchanged.
+[Evidence and scope](llvm21-hash-comparison-checks.md).
+Next bounded batch: arithmetic checks (31–40). Full-suite and mining validation
+remain incomplete.

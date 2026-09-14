@@ -51,3 +51,5 @@ Local modules, ABI sidecars, and logs: `/tmp/llvm21-shallenge-validation`.
 Next bounded batch: hash comparison checks (less/greater/equal), slots 28–30.
 The full LLVM 21 suite and all four mining kernels remain unvalidated;
 historical LLVM 7/19 totals are unchanged.
+
+Follow-up: [all three LLVM 21 hash-comparison checks now pass](llvm21-hash-comparison-checks.md).
