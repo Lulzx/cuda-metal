@@ -25,12 +25,17 @@ def main():
     context, module, function = ptr(), ptr(), ptr()
     api('cuInit', [u32], 0)
     api('cuCtxCreate', [c.POINTER(ptr), u32, c.c_int], c.byref(context), 0, 0)
-    source = (Path(__file__).parent / 'reference/ptx_trap_reporting.ptx').read_text()
+    fixture = 'ptx_trap_calls.ptx' if '--calls' in sys.argv else 'ptx_trap_reporting.ptx'
+    source = (Path(__file__).parent / 'reference' / fixture).read_text()
     with tempfile.TemporaryDirectory(prefix='cumetal-trap-') as work:
         ptx, msl = Path(work) / 'test.ptx', Path(work) / 'test.metal'
         ptx.write_text(source)
         subprocess.run([str(build / 'cumetalc'), str(ptx), '--backend=cumetal-ir', '--ptx-strict',
                         '--entry', 'trap_probe', '--emit=msl', '-o', str(msl)], check=True)
+        if '--calls' in sys.argv:
+            generated = msl.read_text()
+            assert 'finite(' in generated and 'finite_leaf(' in generated
+            assert 'spin(' not in generated and 'store_then_trap(' not in generated
         subprocess.run([str(build / 'tests/functional/cumetal_trap_binding_test'), str(msl)], check=True)
         api('cuModuleLoad', [c.POINTER(ptr), c.c_char_p], c.byref(module), os.fsencode(msl))
         api('cuModuleGetFunction', [c.POINTER(ptr), ptr, c.c_char_p], c.byref(function), module, b'trap_probe')

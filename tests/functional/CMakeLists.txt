@@ -2877,7 +2877,14 @@ if(APPLE)
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR})
     add_test(NAME functional_ptx_trap_reporting_trace
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --trace)
-    set_tests_properties(functional_ptx_trap_reporting functional_ptx_trap_reporting_trace PROPERTIES TIMEOUT 45)
+    add_test(NAME functional_ptx_trap_call_values
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_call_values.py ${CMAKE_BINARY_DIR})
+    add_test(NAME functional_ptx_trap_calls
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --calls)
+    add_test(NAME functional_ptx_trap_calls_trace
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --calls --trace)
+    set_tests_properties(functional_ptx_trap_reporting functional_ptx_trap_reporting_trace
+        functional_ptx_trap_calls functional_ptx_trap_calls_trace PROPERTIES TIMEOUT 45)
     add_test(NAME functional_ptx_local_buffer_tail_call
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_local_buffer_tail_call.py ${CMAKE_BINARY_DIR})
     add_test(NAME functional_ptx_scalar_tail_call

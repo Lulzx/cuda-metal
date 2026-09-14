@@ -18,6 +18,8 @@ names but have not been executed in this comparison.
 | Ed25519 primitive, slot 2 | Pass | Pass | One fixed known-answer fixture on M5 |
 | Xoroshiro primitive, slot 0 | Pass | Pass | Scalar / local-buffer tail-call fixes; additional runtime-input regressions |
 | Base58 primitive, slot 3 | Pass | Pass | Unsigned widening and pointer subtraction fixes; see [fix backlog](miner-fix-backlog.md) |
+| Compressed-mainnet WIF, slot 21 | Pass | Pass | Trap/call fix; unchanged PTX on M5 |
+| Compressed secp256k1, slot 4 | Runtime attempt timeout | Metal bitcast error | Both now compile to MSL; no numerical pass |
 | Full numerical inventory | 90 / 118 pass | 82 / 118 pass | All entries attempted on `6d2549b`; remaining entries fail compilation |
 | Four mining kernels | Pending | Pending | No end-to-end mining claim |
 
@@ -36,7 +38,10 @@ entries pass their result and guard checks. Folded fixtures remain limited evide
 
 - [x] Compile/run both u64 and u32 identity checks in both producers.
 - [x] Attempt every self-test entry in both original PTX modules.
-- [ ] Extend trap reporting across device calls/helpers: 47 first-blocked entries.
+- [x] Implement bounded trap reporting across device calls/helpers (fix 10).
+- [ ] Retest the 47 previously trap-blocked entries; both compressed-mainnet WIF
+  entries pass. Both compressed secp256k1 entries clear MSL lowering but expose
+  a Metal bitcast error (LLVM 19) and a 180-second runtime-attempt timeout (LLVM 7).
 - [ ] Reduce LLVM 19 loop-definedness failures: 9 entries across base58 and Dalek.
 - [ ] Resolve LLVM 7 pointer/type gaps: 5 IR verification failures, 1 `mul.hi`
   operand mismatch, 1 subtraction form and 1 address-space conflict.

@@ -1,6 +1,7 @@
 # CuMetal miner fix backlog
 
-Latest: [complete 238-attempt sweep on `6d2549b`](miner-self-test-sweep-6d2549b.md).
+Full-sweep baseline: [238 attempts on `6d2549b`](miner-self-test-sweep-6d2549b.md).
+Subsequent bounded trap/call support and targeted retests are recorded in fix 10 below.
 LLVM 7 passes 90/118 numerical tests; LLVM 19 passes 82/118. Both probes pass.
 All 64 remaining failures occur during compilation. Trap propagation accounts
 for 47 first blockers, LLVM 19 SSA definedness for 9, and LLVM 7 pointer/type
@@ -39,9 +40,10 @@ may expose another; update this list rather than declaring the kernel validated.
   reduce secp256k1 failures; the first-line error alone is insufficient diagnosis.
 - [x] **64-bit mul.hi support.** Reproduce the operand combinations in base58/WIF; cover
   signedness, narrow/wide boundaries and independent numerical expected results.
-- [ ] **Trap handling.** Bounded call-free kernel reporting is implemented (fix 7).
-  Helper propagation, user barriers/collectives and full context-failure semantics
-  remain open. Never silently turn traps into no-ops.
+- [ ] **Trap handling.** Kernel reporting (fix 7) now supports bounded device-call
+  expansion and proven finite helpers (fix 10). User barriers/collectives,
+  expansion beyond its limits and full context-failure semantics remain open.
+  Never silently turn traps into no-ops.
 - [ ] **Additional SSA definedness.** The base58 primitive passes, but the full
   rerun finds 9 LLVM 19 loop-definedness failures across variable-length base58
   and Dalek. Reduce and prove each rewrite; see the complete ledger.
@@ -288,3 +290,53 @@ Validation:
 
 This closes the observed base58 primitive failures for both producers. It does
 not establish complete base58 input coverage or validate the full mining kernels.
+
+## Fix 10: trap propagation through supported device-call graphs
+
+Trap-capable kernels now expand trapping/looping device calls into their CFG
+before pointer legalization. Normal helper returns branch to a typed caller
+continuation; traps never do. Fresh block/value IDs preserve independent call
+sites, loop calls, local pointers and scalar/aggregate returns. Both expanded
+GPU IR and Metal IR are verified. This keeps trap publication and backedge
+polling in the existing kernel dispatcher, including spinning sibling helpers.
+
+Helpers remain calls only after proving their CFG and transitive call graph
+finite and free of traps, barriers/collectives, printf, unknown calls and atomics.
+Integer min/max/abs builtins are finite expressions. Retaining these helpers
+avoids excessive duplication of straight-line secp256k1 arithmetic. Expansion
+still rejects excessive code growth; it does not disable cancellation to fit.
+See [the compiler/runtime contract](trap-reporting.md) for bounds and semantics.
+
+Validation:
+
+- All 31 focused compiler/GPU regressions pass.
+- Nested helper tests cover untaken/all/divergent traps, a spinning sibling
+  helper across two SIMD groups, multiple scalar returns, retained finite helper
+  chains, concurrent streams, repeated 719 errors and output guards. A one-thread
+  case verifies the store before a nested trap survives and stores after that
+  call never execute. Both tracing modes pass.
+- 261 runtime inputs cover aggregate returns, local-pointer side effects, two
+  distinct call sites and repeated calls inside a loop, with guards.
+- Negative tests retain transitive barrier rejection and enforce expansion limits.
+- Original, unchanged full-module compressed-mainnet WIF (slot 21) numerically
+  passes for **both LLVM 7 and LLVM 19 on Apple M5**: selected slot = 1, other
+  117 slots and 16 guards intact. Inputs remain run `34778991430`.
+- Both compressed secp256k1 primitive entries (slot 4) now compile to MSL.
+  LLVM 19 reaches Metal compilation, which rejects two `as_type<uint>(ulong)`
+  conversions. LLVM 7's first compile/load/launch attempt times out after 180
+  seconds with no numerical result. Neither secp256k1 entry is a numerical pass.
+
+Logs: `/tmp/trap-expand-tests-final.log`, `/tmp/trap-expand-final-unit.log`,
+`/tmp/trap-expand-{wif,secp}-llvm{7,19}.{log,gpu.log}`. The final unit rerun also
+checks the updated diagnostic wording. A follow-up host-only staged probe for
+LLVM 7 is `/tmp/trap-expand-secp-llvm7.stage.log`: setup APIs complete, then
+`cuLaunchKernel` does not return within 60 seconds. This does not distinguish
+Metal library/pipeline compilation from other work inside that API. PTX/MSL
+bytes are unchanged.
+
+This is a targeted retest, not a rerun of all 47 previously trap-blocked entries.
+The historical 238-attempt ledger remains unchanged. Next: reduce the secp256k1
+bitcast failure, investigate the LLVM 7 timeout, and retest the other affected
+entries in small batches. Barrier-aware cancellation, unknown builtins, general
+recursion, expansion beyond its limits and full CUDA context-abort semantics
+remain unsupported.

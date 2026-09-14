@@ -1,3 +1,4 @@
+#include "trap_call_expansion.h"
 #include "cumetal/metal/lower_to_msl.h"
 
 #include "cumetal/ir/ptx_importer.h"
@@ -1572,6 +1573,7 @@ struct AstLowerer {
     const BuiltinUsageMap& builtin_usage;
     const SharedUsageMap& shared_usage;
     const WideAtomicUsageMap& wide_atomic_usage;
+    const std::unordered_set<std::string>& bounded_trap_helpers;
     LowerToMslResult result;
     MslFunction output;
     std::unordered_map<ir::ValueId, MslExpr> values;
@@ -1610,6 +1612,7 @@ struct AstLowerer {
                const BuiltinUsageMap& input_builtin_usage,
                const SharedUsageMap& input_shared_usage,
                const WideAtomicUsageMap& input_wide_atomic_usage,
+               const std::unordered_set<std::string>& input_bounded_trap_helpers,
                bool force_dispatcher = false,
                std::optional<ir::AddressSpace> specialization = std::nullopt,
                bool has_barrier = false)
@@ -1618,6 +1621,7 @@ struct AstLowerer {
           builtin_usage(input_builtin_usage),
           shared_usage(input_shared_usage),
           wide_atomic_usage(input_wide_atomic_usage),
+          bounded_trap_helpers(input_bounded_trap_helpers),
           force_cfg_dispatcher(force_dispatcher),
           barrier_in_call_graph(has_barrier),
           pointer_specialization(specialization) {
@@ -5342,14 +5346,16 @@ struct AstLowerer {
             }
             for (const auto& block : function.blocks) {
                 for (const auto& operation : block.operations) {
-                    if (operation.opcode == ir::OpCode::kCall ||
+                    if ((operation.opcode == ir::OpCode::kCall && !is_bounded_trap_builtin(operation) &&
+                         (!operation.attributes.contains("callee") ||
+                          !bounded_trap_helpers.contains(operation.attributes.at("callee")))) ||
                         operation.opcode == ir::OpCode::kMetalBarrier ||
                         operation.opcode == ir::OpCode::kMetalShuffle ||
                         operation.opcode == ir::OpCode::kMetalBallot ||
                         operation.opcode == ir::OpCode::kMetalVote ||
                         operation.opcode == ir::OpCode::kMetalReduction ||
                         operation.opcode == ir::OpCode::kPrintf) {
-                        fail(&operation, "trap reporting requires a call-free kernel without barriers or collectives");
+                        fail(&operation, "trap reporting requires expanded or bounded calls, without barriers or collectives");
                         return result;
                     }
                 }
@@ -5697,6 +5703,15 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     }
     result.module = module;
     prune_functions_unreachable_from_kernels(&result.module);
+    if (!expand_trap_call_graphs(&result.module, &result.error)) return result;
+    prune_functions_unreachable_from_kernels(&result.module);
+    const ir::VerifyResult expanded_verification = ir::verify(result.module);
+    if (!expanded_verification.ok) {
+        result.error = "trap call expansion produced invalid GPU IR";
+        for (const auto& diagnostic : expanded_verification.diagnostics)
+            result.error += "\n" + diagnostic.location.str() + ": " + diagnostic.message;
+        return result;
+    }
     const AddressSpaceResolution address_spaces =
         resolve_generic_address_spaces(&result.module);
     if (!address_spaces.ok) {
@@ -5969,6 +5984,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     result.ast.functions.insert(result.ast.functions.end(),
                                 wide_atomic_helper_functions.begin(),
                                 wide_atomic_helper_functions.end());
+    const auto bounded_trap_helpers = find_bounded_trap_helpers(metal_module);
     const BuiltinUsageMap builtin_usage = analyze_builtin_usage(metal_module);
     const SharedUsageMap shared_usage = analyze_shared_usage(metal_module);
     const BarrierUsageMap barrier_usage = analyze_barrier_usage(metal_module);
@@ -6011,7 +6027,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         }
         for (const std::optional<ir::AddressSpace> specialization : specializations) {
             AstLowerer lowerer(metal_module, function, builtin_usage, shared_usage,
-                               wide_atomic_usage, false, specialization,
+                               wide_atomic_usage, bounded_trap_helpers, false, specialization,
                                barrier_usage.at(function.name));
             LowerToMslResult function_result = lowerer.run();
             const bool structurization_failure =
@@ -6033,7 +6049,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                     return function_result;
                 }
                 AstLowerer dispatcher_lowerer(metal_module, function, builtin_usage,
-                                              shared_usage, wide_atomic_usage, true,
+                                              shared_usage, wide_atomic_usage, bounded_trap_helpers, true,
                                               specialization,
                                               barrier_usage.at(function.name));
                 function_result = dispatcher_lowerer.run();

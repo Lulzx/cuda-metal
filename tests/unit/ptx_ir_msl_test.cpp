@@ -2202,7 +2202,49 @@ call.uni helper, ();
 ret;
 }
 )ptx");
-    ok &= expect(!helper_trap.ok, "traps in helpers remain unsupported");
+    ok &= expect(helper_trap.ok && helper_trap.source.find("atomic_fetch_or_explicit(cm_trap_status") != std::string::npos,
+                 "helper trap expands into kernel cancellation CFG: " + helper_trap.error);
+    const std::string nested_barrier = R"ptx(
+.version 7.1
+.target sm_80
+.func barrier_helper() {
+bar.sync 0;
+ret;
+}
+.func caller() {
+call.uni barrier_helper, ();
+trap;
+}
+.visible .entry nested_barrier() {
+call.uni caller, ();
+ret;
+}
+)ptx";
+    const auto rejected_barrier = metal::compile_ptx_to_msl(nested_barrier);
+    ok &= expect(!rejected_barrier.ok && rejected_barrier.error.find("without barriers or collectives") != std::string::npos,
+                 "barriers in expanded call graphs remain rejected: " + rejected_barrier.error);
+    std::string oversized = R"ptx(
+.version 7.1
+.target sm_80
+.func noop(.param .u32 flag) {
+.reg .b32 %r1;
+.reg .pred %p1;
+ld.param.u32 %r1, [flag];
+setp.eq.u32 %p1, %r1, 1;
+@%p1 bra FAIL;
+ret;
+FAIL:
+trap;
+}
+.visible .entry oversized() {
+.param .u32 flag;
+
+)ptx";
+    for (int i = 0; i < 1025; ++i) oversized += "st.param.u32 [flag], 0;\ncall.uni noop, (flag);\n";
+    oversized += "trap;\n}\n";
+    const auto rejected_size = metal::compile_ptx_to_msl(oversized);
+    ok &= expect(!rejected_size.ok && rejected_size.error.find("bounded CFG size") != std::string::npos,
+                 "trap call expansion refuses excessive code growth: " + rejected_size.error);
     if (!ok) return 1;
     std::cout << "PTX -> CuMetal IR -> typed MSL tests passed\n";
     return 0;
