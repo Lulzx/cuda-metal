@@ -19,7 +19,7 @@ names but have not been executed in this comparison.
 | Xoroshiro primitive, slot 0 | Pass | Pass | Scalar / local-buffer tail-call fixes; additional runtime-input regressions |
 | Base58 primitive, slot 3 | Pass | Pass | Unsigned widening and pointer subtraction fixes; see [fix backlog](miner-fix-backlog.md) |
 | Compressed-mainnet WIF, slot 21 | Pass | Pass | Trap/call fix; unchanged PTX on M5 |
-| Compressed secp256k1, slot 4 | Runtime attempt timeout | Numerical failure: 0 | LLVM 19 launches with intact guards after parameter-width fix; no numerical pass |
+| Compressed secp256k1, slot 4 | Runtime attempt timeout | Pass | LLVM 19 signed-byte conversion fix; unchanged PTX, selected slot 1 and guards intact on M5 |
 | Full numerical inventory | 90 / 118 pass | 82 / 118 pass | All entries attempted on `6d2549b`; remaining entries fail compilation |
 | Four mining kernels | Pending | Pending | No end-to-end mining claim |
 
@@ -42,12 +42,13 @@ entries pass their result and guard checks. Folded fixtures remain limited evide
 - [x] Run the six existing LLVM 19 k256 bisects: all pass, including derivation
   for scalars 1 and 2; the original nontrivial scalar still fails. See
   [secp256k1 isolation](secp256k1-isolation.md).
-- [ ] Locate the first intermediate divergence for the nontrivial scalar:
-  decomposition, signed-digit selection, then point accumulation.
+- [x] Locate and fix the nontrivial-scalar failure: `cvt.s16.s8` lost sign
+  extension during table selection. Original compressed LLVM 19 primitive passes
+  after fix 12, with a runtime-input regression and CPU-checked intermediate snapshots.
 - [ ] Retest the 47 previously trap-blocked entries; both compressed-mainnet WIF
   entries pass. Both compressed secp256k1 entries clear MSL lowering but expose
-  a numerical failure (LLVM 19 returns 0 with guards intact after fix 11) and
-  a 180-second runtime-attempt timeout (LLVM 7, not retested in fix 11).
+  a subsequently fixed numerical failure (LLVM 19 passes after fix 12) and
+  a 180-second runtime-attempt timeout (LLVM 7, not retested in fix 12).
 - [ ] Reduce LLVM 19 loop-definedness failures: 9 entries across base58 and Dalek.
 - [ ] Resolve LLVM 7 pointer/type gaps: 5 IR verification failures, 1 `mul.hi`
   operand mismatch, 1 subtraction form and 1 address-space conflict.

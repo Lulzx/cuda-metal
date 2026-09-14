@@ -63,15 +63,18 @@ pass, including two plumbing probes; this does not establish arithmetic
 coverage for constant-folded fixtures.
 
 Since that sweep, bounded trap/call support clears the WIF compressed-mainnet
-checks in both producers. Compressed secp256k1 now reaches MSL but remains
-unvalidated: after parameter-store truncation is fixed, LLVM 19 compiles and
-launches but returns 0 instead of 1 with intact guards; LLVM 7 timed out during
-its earlier 180-second runtime attempt. These targeted results do not replace the full
-historical ledger; see [fix 10](experiments/miner-fix-backlog.md#fix-10-trap-propagation-through-supported-device-call-graphs).
-The six smaller LLVM 19 k256 checks, including full derivation for scalars 1
-and 2, now pass. The failure depends on the scalar; decomposition, signed-digit
-selection and accumulation remain to be isolated. See
-[targeted evidence](experiments/secp256k1-isolation.md).
+checks in both producers. The original compressed secp256k1 LLVM 19 self-test
+now passes after parameter-store truncation and signed-byte `cvt` fixes.
+Six smaller k256 checks also pass. LLVM 7's earlier 180-second runtime-attempt
+timeout remains uninvestigated. These targeted results do not replace the full
+historical ledger or validate other composed/mining kernels. See
+[fix 12](experiments/miner-fix-backlog.md#fix-12-cvt-interprets-the-instructions-source-width)
+and [targeted evidence](experiments/secp256k1-isolation.md).
+
+Integer `cvt` reads the instruction's source width even when its operand occupies
+a wider integer register: truncate first, then apply signed/unsigned conversion.
+Exhaustive byte and randomized wider-register GPU cases guard against losing
+the sign extension required for negative scalar digits.
 
 Integer `st.param` stores truncate wider registers to the instruction width
 before call/return ABI handling. Mismatched argument byte widths are rejected;

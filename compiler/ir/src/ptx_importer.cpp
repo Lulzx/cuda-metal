@@ -3712,6 +3712,27 @@ struct Importer {
                 operation.operands.push_back(
                     bit_container_operand(1, ptx_cvt_source_type(instruction.opcode)));
             }
+            // PTX permits an integer source in a wider register. Interpret
+            // only the instruction's source bits before signed/unsigned
+            // conversion. In particular, ld.b8 into .b16 followed by
+            // cvt.s16.s8 needs i16 -> i8 truncation, then signed extension;
+            // treating it as i16 -> i16 silently loses the byte's sign.
+            const Type source_type = ptx_cvt_source_type(instruction.opcode);
+            if (source_type.kind == TypeKind::kInteger &&
+                operation.operands.size() == 1 &&
+                operation.operands.front().type.kind == TypeKind::kInteger &&
+                operation.operands.front().type.bit_width > source_type.bit_width) {
+                Operation truncate;
+                truncate.opcode = OpCode::kConvert;
+                truncate.location = operation.location;
+                truncate.operands = {operation.operands.front()};
+                const ValueId narrowed = builder.next_value();
+                truncate.results = {narrowed};
+                truncate.result_types = {source_type};
+                value_types[narrowed] = source_type;
+                block->operations.push_back(std::move(truncate));
+                operation.operands.front() = Operand::value_ref(narrowed, source_type);
+            }
         } else if (root == "rcp") {
             operation.opcode = OpCode::kDiv;
             operation.operands.push_back(
