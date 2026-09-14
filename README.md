@@ -8,6 +8,9 @@ The project is experimental and supports a tested subset of CUDA and its
 libraries. See [verified results](docs/verified-results.md) for what runs today
 and [known gaps](docs/known-gaps.md) for the remaining limits.
 
+Recent experiment: [LLVM 21 compressed secp256k1 passes on Apple M5](docs/experiments/llvm21-guarded-load.md),
+with regression coverage for conditional-load guards.
+
 ## Install
 
 Requires Apple Silicon and macOS 14 or newer. See the

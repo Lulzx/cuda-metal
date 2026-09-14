@@ -2307,6 +2307,131 @@ struct Importer {
                 raw_blocks[successor].predecessors.push_back(i);
     }
 
+    struct EqualityFact {
+        std::string left, right, type;
+        bool equal;
+    };
+
+    static std::optional<EqualityFact> equality_predicate(const Instruction& instruction) {
+        static const std::regex comparison(R"(^setp\.(eq|ne)\.([bu](32|64))$)");
+        std::smatch match;
+        if (!instruction.predicate.empty() || instruction.operands.size() != 3 ||
+            !std::regex_match(instruction.opcode, match, comparison)) return std::nullopt;
+        if (first_register(instruction.operands[0]) != trim(instruction.operands[0])) return std::nullopt;
+        auto left = trim(instruction.operands[1]);
+        auto right = trim(instruction.operands[2]);
+        // Restrict the proof to scalar register comparisons; malformed operands
+        // and other comparison semantics remain the responsibility of the importer.
+        if (left.empty() || right.empty() || first_register(left) != left ||
+            first_register(right) != right) return std::nullopt;
+        if (right < left) std::swap(left, right);
+        return EqualityFact{left, right, match[2], match[1] == "eq"};
+    }
+
+    // Duplicate only a bounded chain of successors whose branch is implied by
+    // the incoming edge. Retain every non-branch instruction, including guarded
+    // loads: this exposes infeasible paths to SSA without inventing definitions.
+    void thread_equality_edges() {
+        const auto original_count = raw_blocks.size();
+        for (std::size_t index = 0; index < original_count; ++index) {
+            const RawBlock source = raw_blocks[index];
+            if (source.instructions.empty() || source.successors.size() != 2) continue;
+            const auto* branch = source.instructions.back();
+            if (root_opcode(branch->opcode) != "bra" || branch->predicate.empty()) continue;
+            const auto [pred, inverted] = normalized_predicate(branch->predicate);
+            std::optional<EqualityFact> comparison;
+            bool combined = false;
+            for (std::size_t j = 0; j + 1 < source.instructions.size(); ++j) {
+                const auto& instruction = *source.instructions[j];
+                const auto written = destination_registers(instruction);
+                for (const auto& reg : written)
+                    if (comparison && (reg == pred || reg == comparison->left || reg == comparison->right))
+                        comparison.reset();
+                if (root_opcode(instruction.opcode) == "call") comparison.reset();
+                if (std::find(written.begin(), written.end(), pred) != written.end()) combined = false;
+                if (written.size() == 1 && written[0] == pred) {
+                    comparison = equality_predicate(instruction);
+                    combined = instruction.opcode == "or.pred" && instruction.predicate.empty();
+                }
+            }
+            if (!comparison && !combined) continue;
+            for (std::size_t edge = 0; edge < 2; ++edge) {
+                std::map<std::string, bool> known{{pred, (edge == 0) != inverted}};
+                auto fact = comparison;
+                if (fact) fact->equal = known[pred] == fact->equal;
+                auto parent = index;
+                auto parent_edge = edge;
+                auto current = source.successors[edge];
+                std::unordered_set<std::size_t> visited{index};
+                for (unsigned depth = 0; depth < 8 && visited.insert(current).second; ++depth) {
+                    const RawBlock target = raw_blocks[current];
+                    if (target.instructions.empty() || target.instructions.size() > 32 ||
+                        target.successors.size() != 2) break;
+                    const auto* tail = target.instructions.back();
+                    if (root_opcode(tail->opcode) != "bra" || tail->predicate.empty()) break;
+                    for (std::size_t j = 0; j + 1 < target.instructions.size(); ++j) {
+                        const auto& instruction = *target.instructions[j];
+                        const auto written = destination_registers(instruction);
+                        std::optional<bool> value;
+                        auto lookup = [&](const std::string& operand) -> std::optional<bool> {
+                            auto found = known.find(trim(operand));
+                            if (found == known.end()) return std::nullopt;
+                            return found->second;
+                        };
+                        if (instruction.predicate.empty()) {
+                            const auto next = equality_predicate(instruction);
+                            if (next && fact && next->left == fact->left && next->right == fact->right &&
+                                next->type == fact->type) value = next->equal == fact->equal;
+                            if (instruction.operands.size() == 2 &&
+                                (instruction.opcode == "mov.pred" || instruction.opcode == "not.pred")) {
+                                value = lookup(instruction.operands[1]);
+                                if (value && instruction.opcode == "not.pred") value = !*value;
+                            }
+                            if (instruction.operands.size() == 3 && instruction.opcode == "or.pred") {
+                                auto a = lookup(instruction.operands[1]);
+                                auto b = lookup(instruction.operands[2]);
+                                if ((a && *a) || (b && *b)) value = true;
+                                else if (a && b) value = false;
+                            }
+                        }
+                        for (const auto& reg : written) {
+                            known.erase(reg);
+                            if (fact && (reg == fact->left || reg == fact->right)) fact.reset();
+                        }
+                        if (root_opcode(instruction.opcode) == "call") { known.clear(); fact.reset(); }
+                        if (value && written.size() == 1) known[written[0]] = *value;
+                    }
+                    const auto [tail_pred, tail_inverted] = normalized_predicate(tail->predicate);
+                    const auto outcome = known.find(tail_pred);
+                    if (outcome == known.end()) break;
+                    const auto successor = target.successors[(outcome->second != tail_inverted) ? 0 : 1];
+                    RawBlock clone;
+                    clone.id = builder.next_block();
+                    clone.name = target.name + "_guard_" + std::to_string(raw_blocks.size());
+                    clone.successors = {successor};
+                    for (std::size_t j = 0; j < target.instructions.size(); ++j) {
+                        auto replacement = *target.instructions[j];
+                        if (j + 1 == target.instructions.size()) {
+                            replacement.predicate.clear();
+                            replacement.operands = {raw_blocks[successor].name};
+                        }
+                        auto [stored, inserted] = threaded_instructions.emplace(
+                            std::make_pair(raw_blocks.size(), j), std::move(replacement));
+                        clone.instructions.push_back(&stored->second);
+                    }
+                    raw_blocks[parent].successors[parent_edge] = raw_blocks.size();
+                    parent = raw_blocks.size();
+                    parent_edge = 0;
+                    raw_blocks.push_back(std::move(clone));
+                    current = successor;
+                }
+            }
+        }
+        for (auto& block : raw_blocks) block.predecessors.clear();
+        for (std::size_t i = 0; i < raw_blocks.size(); ++i)
+            for (auto successor : raw_blocks[i].successors) raw_blocks[successor].predecessors.push_back(i);
+    }
+
     void remove_unobserved_self_selects() {
         for (RawBlock& block : raw_blocks) {
             if (block.instructions.empty() || block.successors.size() != 2) continue;
@@ -5362,6 +5487,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         next.infer_register_types();
         next.build_cfg();
         next.thread_threshold_edges();
+        next.thread_equality_edges();
         next.remove_unobserved_self_selects();
         next.allocate_values();
         if (!next.construct_ssa() || !next.materialize_function()) {

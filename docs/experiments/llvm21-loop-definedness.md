@@ -1,5 +1,9 @@
 # LLVM 21 bounded self-select definedness
 
+Update: the separate secp256k1 guarded-load blocker described below is now
+[fixed and numerically validated](llvm21-guarded-load.md). Results below record
+the earlier bounded-loop change.
+
 The LLVM 21 Ed25519 entry failed register SSA import before GPU execution. It
 preserves an initially undefined value in a `selp` false arm, returns to a loop
 header on that arm, and bypasses the select at the upper bound. The bypass goes

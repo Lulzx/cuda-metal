@@ -461,3 +461,12 @@ Bounded comparison-edge specialization and inverted self-select handling now
 unblock Ed25519: numerical pass on M5 with guards intact. Unit negative cases
 and 131,082 GPU regression inputs pass. [Proof, results, and remaining guarded-load
 blocker in secp256k1](llvm21-loop-definedness.md). Original PTX is unchanged.
+
+## LLVM 21 compound-predicate guarded load
+
+The `lincomb` conditional-load definedness blocker is fixed by bounded incoming
+edge specialization for repeated equality and predicate OR. Compressed
+secp256k1 now numerically passes on M5 (slot 4 = 1, other slots/guards intact).
+Unit positive/negative checks and 196,639 GPU regression inputs pass.
+[Proof and evidence](llvm21-guarded-load.md). PTX remains unchanged.
+Next: validate the LLVM 21 uncompressed sibling and dependent address checks.

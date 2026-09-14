@@ -1,10 +1,10 @@
 # Vanity miner on CuMetal: incremental validation checklist
 
-LLVM 21 update: [Ed25519 now numerically passes after bounded CFG specialization](llvm21-loop-definedness.md).
-Secp256k1 remains blocked by a guarded load and compound predicate in `lincomb`.
-
-LLVM 21 now has a [separate smoke-test ledger](llvm21-miner-smoke.md): probe and
-SHA-512 pass on M5; Ed25519 and compressed secp256k1 fail CFG definedness import.
+LLVM 21 update: [Ed25519](llvm21-loop-definedness.md) and
+[compressed secp256k1](llvm21-guarded-load.md) now numerically pass on M5 after
+bounded CFG proofs. The earlier [smoke-test ledger](llvm21-miner-smoke.md)
+records probe/SHA-512 passes and the now-resolved import failures.
+Next: the uncompressed secp256k1 sibling, then dependent Ethereum/Bitcoin checks.
 No complete LLVM 21 suite or mining validation is claimed.
 
 Goal: run all vanity-miner self-tests and all four mining kernels correctly on

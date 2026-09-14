@@ -1,0 +1,50 @@
+{
+  "kernel": "kernel_self_test_primitive_secp256k1_compressed",
+  "producer": "LLVM 21 / NVVM 23 / CUDA 13.3",
+  "device": "Apple M5",
+  "slot": 4,
+  "actual": 1,
+  "other_slots_intact": 117,
+  "guard_words_intact": 16,
+  "gpu_duration_ns": 18653250,
+  "compile_exit_code": 0,
+  "runtime_exit_code": 0,
+  "workload_specializations": false,
+  "ptx_modified": false,
+  "metal_instrumented": false,
+  "files": {
+    "ptx": {
+      "path": "/Users/brandon/Downloads/vanity-miner-aarch64-llvm21/output-llvm21.ptx",
+      "bytes": 25161784,
+      "sha256": "2840485fe193d39cfdbb2e5babd25f6772a08a2550843c20b3beba5a26185f4b"
+    },
+    "compiler": {
+      "path": "/Users/brandon/Desktop/gpu/cuda-metal/build-rust-ptx-apple/cumetalc",
+      "bytes": 3220992,
+      "sha256": "4c5c932658a5b3eab8ea0ff5a6d7d5c9d084b8ecca9120ff15457bb16908805b"
+    },
+    "runtime": {
+      "path": "/Users/brandon/Desktop/gpu/cuda-metal/build-rust-ptx-apple/libcumetal.dylib",
+      "bytes": 5004992,
+      "sha256": "6e41295ad0d934f15b70bfa7d12a9c93b74f5852d947e07eff130d78a824f30f"
+    },
+    "metal": {
+      "path": "/private/tmp/miner-llvm21-guard/secp.metal",
+      "bytes": 7467333,
+      "sha256": "d8077af2b88293211c2683f9362c2db9313de8570bd60a76f0093f6c1b0aa4cc"
+    },
+    "abi": {
+      "path": "/private/tmp/miner-llvm21-guard/secp.metal.cumetal-abi",
+      "bytes": 92,
+      "sha256": "049ca443a49fb165dd49a7f1df0e1067bf68354349b6cd753d3ed873d7eac095"
+    }
+  },
+  "compile_log": "wrote \"/tmp/miner-llvm21-guard/secp.metal\"\n",
+  "gpu_log": "CUMETAL_PROVENANCE event=kernel_launch kernel=\"kernel_self_test_primitive_secp256k1_compressed\" source=generic_ptx provenance=generic_ptx_lowering semantic_quality=exact device=apple_gpu device_name=\"Apple M5\" math_mode=safe compile_cache_hit=false launch_success=true duration_ns=18653250 grid=(1,1,1) block=(1,1,1) unsupported_reason=\"\"\nNUMERICAL_PASS kernel=kernel_self_test_primitive_secp256k1_compressed slot=4 actual=1 expected=1; other 117 slots and 16 guard words intact\n",
+  "unit_log": "PTX -> CuMetal IR -> typed MSL tests passed\n",
+  "gpu_regression_inputs": {
+    "guarded_load": 65557,
+    "guarded_self_select": 65541,
+    "bounded_self_select": 65541
+  }
+}

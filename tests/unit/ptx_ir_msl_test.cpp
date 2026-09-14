@@ -1977,6 +1977,82 @@ ret;
         const auto rejected = metal::compile_ptx_to_msl(invalid);
         ok &= expect(!rejected.ok, "observable/stale bounded self-select must remain rejected: " + to);
     }
+    const std::string guarded_load = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry guarded_load(.param .u64 input, .param .u64 output, .param .u32 count) {
+.reg .b64 %rd<12>;
+.reg .b32 %r<10>;
+.reg .pred %p<8>;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd3, %r2, 4;
+add.u64 %rd4, %rd1, %rd3;
+add.u64 %rd5, %rd2, %rd3;
+ld.global.u32 %r5, [%rd4];
+and.b32 %r6, %r5, 1;
+cvt.u64.u32 %rd6, %r6;
+mov.u64 %rd7, 0;
+mov.u32 %r7, 99;
+mov.u64 %rd10, 0;
+setp.eq.b64 %p2, %rd6, %rd7;
+@%p2 bra CHECK;
+mov.u64 %rd10, %rd4;
+ld.global.u32 %r8, [%rd10];
+CHECK:
+setp.eq.b64 %p3, %rd6, %rd7;
+setp.lt.u32 %p4, %r5, 8;
+or.pred %p5, %p3, %p4;
+@%p5 bra SECOND;
+mov.u32 %r9, %r8;
+SECOND:
+@%p5 bra STORE;
+add.u32 %r7, %r9, 1;
+STORE:
+st.global.u32 [%rd5], %r7;
+DONE:
+ret;
+}
+)ptx";
+    const auto guarded_load_result = metal::compile_ptx_to_msl(guarded_load);
+    ok &= expect(guarded_load_result.ok, "repeated equality and combined predicate guard a load: " + guarded_load_result.error);
+    for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+        {"setp.eq.b64 %p3, %rd6, %rd7;", "setp.eq.b64 %p3, %rd7, %rd6;"},
+        {"setp.eq.b64 %p2, %rd6, %rd7;\n@%p2 bra CHECK;",
+         "setp.ne.b64 %p2, %rd6, %rd7;\n@!%p2 bra CHECK;"},
+        {"setp.eq.b64 %p3, %rd6, %rd7;",
+         "setp.ne.b64 %p3, %rd6, %rd7;\nnot.pred %p3, %p3;"},
+        {"or.pred %p5, %p3, %p4;", "or.pred %p5, %p4, %p3;"},
+        {"SECOND:\n@%p5 bra STORE;", "SECOND:\nmov.pred %p6, %p5;\n@%p6 bra STORE;"}}) {
+        auto equivalent = guarded_load;
+        equivalent.replace(equivalent.find(from), from.size(), to);
+        const auto compiled = metal::compile_ptx_to_msl(equivalent);
+        ok &= expect(compiled.ok, "equivalent load guard compiles: " + to + ": " + compiled.error);
+    }
+    for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+        {"or.pred %p5, %p3, %p4;", "and.pred %p5, %p3, %p4;"},
+        {"@%p2 bra CHECK;", "mov.u64 %rd6, 1;\n@%p2 bra CHECK;"},
+        {"@%p2 bra CHECK;", "not.pred %p2, %p2;\n@%p2 bra CHECK;"},
+        {"@%p5 bra SECOND;", "not.pred %p5, %p5;\n@%p5 bra SECOND;"},
+        {"CHECK:\n", "CHECK:\nmov.u64 %rd6, 1;\n"},
+        {"CHECK:\n", "CHECK:\nmov.u64 %rd7, 1;\n"},
+        {"CHECK:\n", "CHECK:\n@%p1 mov.u64 %rd6, 1;\n"},
+        {"CHECK:\n", "CHECK:\nst.global.u32 [%rd5], %r8;\n"},
+        {"SECOND:\n", "SECOND:\nnot.pred %p5, %p5;\n"},
+        {"setp.eq.b64 %p3, %rd6, %rd7;", "setp.ne.b64 %p3, %rd6, %rd7;"}}) {
+        auto invalid = guarded_load;
+        invalid.replace(invalid.find(from), from.size(), to);
+        ok &= expect(!metal::compile_ptx_to_msl(invalid).ok,
+                     "observable or stale conditional-load proof must be rejected: " + to);
+    }
     const std::string dead_pointer_cast = R"ptx(
 .version 7.1
 .target sm_80

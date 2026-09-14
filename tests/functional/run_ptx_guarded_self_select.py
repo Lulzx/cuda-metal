@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Numerical Apple-GPU regression for an unobserved loop-carried select arm."""
+"""Numerical Apple-GPU regressions for guarded register definitions."""
 import ctypes as c
 import os
 from pathlib import Path
@@ -7,8 +7,15 @@ import subprocess
 import sys
 import tempfile
 
+GUARDED_LOAD = '--guarded-load' in sys.argv
+KERNEL = 'guarded_load' if GUARDED_LOAD else 'guarded_select'
 BOUNDED = '--bounded' in sys.argv
-PTX = (Path(__file__).parent / ('reference/ptx_bounded_self_select.ptx' if BOUNDED else 'reference/ptx_guarded_self_select.ptx')).read_text()
+FIXTURE = 'ptx_guarded_self_select.ptx'
+if GUARDED_LOAD:
+    FIXTURE = 'ptx_guarded_load.ptx'
+elif BOUNDED:
+    FIXTURE = 'ptx_bounded_self_select.ptx'
+PTX = (Path(__file__).parent / 'reference' / FIXTURE).read_text()
 
 def main():
     build = Path(sys.argv[1]).resolve()
@@ -24,11 +31,17 @@ def main():
     ptr, u32, u64 = c.c_void_p, c.c_uint32, c.c_uint64
     values = [i | ((i ^ 65535) << 16) for i in range(65536)]
     values += [0, 0xffffffff, 0x80000000, 0x00008000, 0x1234abcd]
+    if GUARDED_LOAD:
+        values += list(range(16))
     count = len(values)
     source = (u32 * count)(*values)
     expected = []
     for value in values:
-        expected.append(sum(i for i in (range(value & 7, 4) if BOUNDED else range(value & 7)) if i & 1))
+        if GUARDED_LOAD:
+            expected.append((value + 1) & 0xffffffff if value & 1 and value >= 8 else 99)
+        else:
+            indices = range(value & 7, 4) if BOUNDED else range(value & 7)
+            expected.append(sum(i for i in indices if i & 1))
     result = (u32 * (len(expected) + 16))(*([0xa5a5a5a5] * (len(expected) + 16)))
     context, module, function = ptr(), ptr(), ptr()
     allocations = []
@@ -39,9 +52,9 @@ def main():
             ptx, msl = Path(work) / 'test.ptx', Path(work) / 'test.metal'
             ptx.write_text(PTX)
             subprocess.run([str(build / 'cumetalc'), str(ptx), '--backend=cumetal-ir',
-                            '--ptx-strict', '--entry', 'guarded_select', '--emit=msl', '-o', str(msl)], check=True)
+                            '--ptx-strict', '--entry', KERNEL, '--emit=msl', '-o', str(msl)], check=True)
             api('cuModuleLoad', [c.POINTER(ptr), c.c_char_p], c.byref(module), os.fsencode(msl))
-            api('cuModuleGetFunction', [c.POINTER(ptr), ptr, c.c_char_p], c.byref(function), module, b'guarded_select')
+            api('cuModuleGetFunction', [c.POINTER(ptr), ptr, c.c_char_p], c.byref(function), module, KERNEL.encode())
             for data in (source, result):
                 allocation = u64()
                 api('cuMemAlloc', [c.POINTER(u64), c.c_size_t], c.byref(allocation), c.sizeof(data))
@@ -57,7 +70,7 @@ def main():
                 if result[i] != value:
                     raise RuntimeError(f'word {i}: got {result[i]:08x}, expected {value:08x}')
             assert list(result)[len(expected):] == [0xa5a5a5a5] * 16, 'tail guard overwritten'
-            print(f'NUMERICAL_PASS {"bounded_select" if BOUNDED else "guarded_select"}: 65541 inputs; loop-carried select, guards')
+            print(f'NUMERICAL_PASS {"bounded_select" if BOUNDED else KERNEL}: {count} inputs; guarded definitions, guards')
     finally:
         for allocation in allocations:
             api('cuMemFree', [u64], allocation)
