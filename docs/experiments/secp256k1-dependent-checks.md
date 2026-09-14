@@ -55,3 +55,7 @@ Next small batch: separately validate Ethereum private/public-key checks
 (13–14), Bitcoin private/public-key/hash checks (16–18), and Bitcoin's matching
 flag (20). LLVM 7 has not been retested here; its historical failures and the
 complete `6d2549b` sweep remain separate evidence.
+
+Follow-up completed at `b4894ed`: all six of those entries pass individually.
+See [the intermediate-check report](address-intermediates.md). Combined with
+this batch, all eight LLVM 19 Ethereum/Bitcoin entries pass their fixed fixtures.

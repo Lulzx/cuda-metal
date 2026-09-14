@@ -119,3 +119,7 @@ and [intermediate-value evidence](docs/experiments/secp256k1-isolation.md).
 At `93ebd6b`, the original LLVM 19 uncompressed secp256k1, Ethereum-address and
 Bitcoin-Bech32-address self-tests also pass on M5, with guards intact.
 [Targeted results](docs/experiments/secp256k1-dependent-checks.md).
+The six remaining Ethereum/Bitcoin intermediate and matching checks also pass
+individually at `b4894ed`, bringing that LLVM 19 group to **8/8 passing entries**.
+[Evidence and coverage limits](docs/experiments/address-intermediates.md).
+This does not establish a complete pass of the 118-test suite or the mining kernels.

@@ -71,9 +71,12 @@ historical ledger or validate other composed/mining kernels. See
 [fix 12](experiments/miner-fix-backlog.md#fix-12-cvt-interprets-the-instructions-source-width)
 and [targeted evidence](experiments/secp256k1-isolation.md).
 The LLVM 19 uncompressed secp256k1, Ethereum-address and Bitcoin-encoded-address
-entries also pass individually at `93ebd6b`. Other intermediate-field and
-matching-flag entries, LLVM 7 counterparts and full mining kernels are not
-validated by this batch. See [results](experiments/secp256k1-dependent-checks.md).
+entries also pass individually at `93ebd6b`. The remaining six Ethereum/Bitcoin
+intermediate-field and matching-flag entries pass at `b4894ed`, so all eight
+entries in that LLVM 19 group pass their fixed fixtures. Matching only covers a
+positive `bc1q` prefix with an empty suffix. LLVM 7 counterparts, randomized and
+negative matching cases, full-suite completion and mining kernels remain outside
+this validation. See [results](experiments/address-intermediates.md).
 
 Integer `cvt` reads the instruction's source width even when its operand occupies
 a wider integer register: truncate first, then apply signed/unsigned conversion.

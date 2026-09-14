@@ -435,3 +435,22 @@ fixed fixtures do not replace the historical full sweep or validate the mining
 kernels. Next: separately check Ethereum's private/public-key entries (13–14),
 Bitcoin's private/public-key/hash entries (16–18), and its matching flag (20).
 LLVM 7 remains outside this targeted batch.
+
+## Ethereum/Bitcoin intermediate validation
+
+At `b4894ed`, the six remaining LLVM 19 Ethereum/Bitcoin entries all compile
+and numerically pass on M5: Ethereum private/public keys (13–14), Bitcoin
+private/public keys and public-key hash (16–18), and Bitcoin matching (20).
+All selected slots contain 1; the other 117 slots and 16 guards are intact.
+Original PTX and compiler-generated MSL are not manually edited. No further
+compiler fix was required.
+
+Together with slots 15 and 19 from the preceding batch, **all 8 Ethereum/Bitcoin
+self-test entries now pass with LLVM 19**. The matching fixture only checks a
+positive `bc1q` prefix with an empty suffix. Full-suite totals, LLVM 7 coverage
+and mining-kernel validation are unchanged.
+[Results, scope and reproduction](address-intermediates.md).
+
+Next small batch: the remaining WIF variants (22–24), then the remaining
+previously trap-blocked LLVM 19 entries. Negative matching and concurrent mining
+validation remain separate checklist items.
