@@ -44,6 +44,12 @@ target_compile_options(cumetal_ptx_bit_ops_test PRIVATE -Wall -Wextra -Wpedantic
 add_test(NAME unit_ptx_bit_ops COMMAND cumetal_ptx_bit_ops_test)
 add_executable(cumetal_ptx_cfg_test ptx_cfg_test.cpp)
 add_executable(cumetal_ptx_tail_calls_test ptx_tail_calls_test.cpp)
+add_executable(cumetal_ptx_traps_test ptx_traps_test.cpp)
+target_include_directories(cumetal_ptx_traps_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/metal/src)
+target_link_libraries(cumetal_ptx_traps_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_traps_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_traps COMMAND cumetal_ptx_traps_test
+    ${CMAKE_SOURCE_DIR}/tests/functional/reference)
 target_link_libraries(cumetal_ptx_tail_calls_test PRIVATE cumetal_metal_codegen)
 target_compile_options(cumetal_ptx_tail_calls_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME unit_ptx_tail_calls COMMAND cumetal_ptx_tail_calls_test

@@ -1,5 +1,7 @@
+#include "trap_call_expansion.h"
 #include "cumetal/metal/lower_to_msl.h"
 #include "integer_arithmetic.h"
+#include "cumetal/common/kernel_abi.h"
 
 #include "cumetal/ir/ptx_importer.h"
 #include "cumetal/ir/nvvm_importer.h"
@@ -1573,6 +1575,7 @@ struct AstLowerer {
     const BuiltinUsageMap& builtin_usage;
     const SharedUsageMap& shared_usage;
     const WideAtomicUsageMap& wide_atomic_usage;
+    const std::unordered_set<std::string>& bounded_trap_helpers;
     LowerToMslResult result;
     MslFunction output;
     std::unordered_map<ir::ValueId, MslExpr> values;
@@ -1595,6 +1598,7 @@ struct AstLowerer {
     bool needs_threadgroups_per_grid = false;
     bool needs_lane_id = false;
     bool needs_wide_atomic_lock_bank = false;
+    bool reports_traps = false;
     bool needs_device_clock = false;
     bool needs_grid_barrier = false;
     bool cfg_dispatcher_mode = false;
@@ -1609,6 +1613,7 @@ struct AstLowerer {
                const BuiltinUsageMap& input_builtin_usage,
                const SharedUsageMap& input_shared_usage,
                const WideAtomicUsageMap& input_wide_atomic_usage,
+               const std::unordered_set<std::string>& input_bounded_trap_helpers,
                bool force_dispatcher = false,
                std::optional<ir::AddressSpace> specialization = std::nullopt,
                bool has_barrier = false)
@@ -1617,6 +1622,7 @@ struct AstLowerer {
           builtin_usage(input_builtin_usage),
           shared_usage(input_shared_usage),
           wide_atomic_usage(input_wide_atomic_usage),
+          bounded_trap_helpers(input_bounded_trap_helpers),
           force_cfg_dispatcher(force_dispatcher),
           barrier_in_call_graph(has_barrier),
           pointer_specialization(specialization) {
@@ -5134,8 +5140,10 @@ struct AstLowerer {
                     condition, std::move(first), std::move(second)));
                 body.push_back(MslStatement::break_statement());
             } else if (terminator.opcode == ir::OpCode::kTrap) {
-                return fail(&terminator,
-                            "trap has no faithful MSL source representation");
+                // Execute this block's operations before announcing its trap.
+                body.push_back(MslStatement::assignment(state,
+                    MslExpression::literal(std::to_string(function.blocks.size()) + "u", MslType::uint())));
+                body.push_back(MslStatement::break_statement());
             } else {
                 return fail(&terminator, "malformed dispatcher terminator");
             }
@@ -5145,9 +5153,29 @@ struct AstLowerer {
                 .statements = std::move(body),
             });
         }
+        std::vector<MslStmt> iteration;
+        if (reports_traps) {
+            const MslExpr at_trap = MslExpression::binary("==", state,
+                MslExpression::literal(std::to_string(function.blocks.size()) + "u", MslType::uint()),
+                MslType::boolean());
+            // Publish before entering divergent switch arms. The SIMD vote
+            // keeps a spinning arm from starving a sibling's pending trap arm.
+            iteration.push_back(MslStatement::expression(MslExpression::call(
+                "atomic_fetch_or_explicit",
+                {MslExpression::identifier(abi::kTrapStatusName, MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice)),
+                 MslExpression::cast(MslType::uint(), MslExpression::call("simd_any", {at_trap}, MslType::boolean())),
+                 MslExpression::identifier("memory_order_relaxed", MslType::uint())}, MslType::uint())));
+            // Poll at every CFG block boundary, including backedges, so a
+            // sibling lane cannot spin indefinitely after a trapping lane exits.
+            iteration.push_back(MslStatement::if_statement(
+                MslExpression::call("atomic_load_explicit",
+                    {MslExpression::identifier(abi::kTrapStatusName, MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice)),
+                     MslExpression::identifier("memory_order_relaxed", MslType::uint())}, MslType::uint()),
+                {MslStatement::return_statement()}));
+        }
+        iteration.push_back(MslStatement::switch_statement(state, std::move(cases)));
         statements->push_back(MslStatement::while_statement(
-            MslExpression::literal("true", MslType::boolean()),
-            {MslStatement::switch_statement(state, std::move(cases))}));
+            MslExpression::literal("true", MslType::boolean()), std::move(iteration)));
         return true;
     }
 
@@ -5262,6 +5290,47 @@ struct AstLowerer {
     }
 
     LowerToMslResult run() {
+        for (const auto& block : function.blocks)
+            for (const auto& operation : block.operations)
+                reports_traps |= operation.opcode == ir::OpCode::kTrap;
+        if (reports_traps) {
+            if (!function.is_kernel) {
+                fail(nullptr, "trap reporting does not yet support device helpers");
+                return result;
+            }
+            for (const auto& block : function.blocks) {
+                for (const auto& operation : block.operations) {
+                    if ((operation.opcode == ir::OpCode::kCall && !is_bounded_trap_builtin(operation) &&
+                         (!operation.attributes.contains("callee") ||
+                          !bounded_trap_helpers.contains(operation.attributes.at("callee")))) ||
+                        operation.opcode == ir::OpCode::kMetalBarrier ||
+                        operation.opcode == ir::OpCode::kMetalShuffle ||
+                        operation.opcode == ir::OpCode::kMetalBallot ||
+                        operation.opcode == ir::OpCode::kMetalVote ||
+                        operation.opcode == ir::OpCode::kMetalReduction ||
+                        operation.opcode == ir::OpCode::kPrintf) {
+                        fail(&operation, "trap reporting requires expanded or bounded calls, without barriers or collectives");
+                        return result;
+                    }
+                }
+            }
+            for (std::size_t i = 0; i < function.arguments.size(); ++i) {
+                bool collision = i == abi::kTrapStatusBindingIndex;
+                if (function.kernel_abi && i < function.kernel_abi->arguments.size()) {
+                    const auto& bindings = function.kernel_abi->arguments[i].binding_indices;
+                    if (!bindings.empty()) collision = std::find(bindings.begin(), bindings.end(), abi::kTrapStatusBindingIndex) != bindings.end();
+                }
+                if (collision || function.arguments[i].name == abi::kTrapStatusName) {
+                    fail(nullptr, "trap status binding or name conflicts with a kernel argument");
+                    return result;
+                }
+            }
+            output.parameters.push_back({
+                .type = MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice),
+                .name = abi::kTrapStatusName,
+                .attributes = {MslAttribute{.name = "buffer", .index = abi::kTrapStatusBindingIndex}},
+            });
+        }
         output.name = pointer_specialization.has_value()
                           ? specialized_callee(function.name, *pointer_specialization)
                           : function.name;
@@ -5469,7 +5538,7 @@ struct AstLowerer {
             }
         }
 
-        if (force_cfg_dispatcher || requires_cfg_dispatcher()) {
+        if (reports_traps || force_cfg_dispatcher || requires_cfg_dispatcher()) {
             if (!emit_cfg_dispatcher(&output.statements)) return result;
         } else if (!emit_from(0, &output.statements)) {
             return result;
@@ -5615,6 +5684,15 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     }
     result.module = module;
     prune_functions_unreachable_from_kernels(&result.module);
+    if (!expand_trap_call_graphs(&result.module, &result.error)) return result;
+    prune_functions_unreachable_from_kernels(&result.module);
+    const ir::VerifyResult expanded_verification = ir::verify(result.module);
+    if (!expanded_verification.ok) {
+        result.error = "trap call expansion produced invalid GPU IR";
+        for (const auto& diagnostic : expanded_verification.diagnostics)
+            result.error += "\n" + diagnostic.location.str() + ": " + diagnostic.message;
+        return result;
+    }
     const AddressSpaceResolution address_spaces =
         resolve_generic_address_spaces(&result.module);
     if (!address_spaces.ok) {
@@ -5888,6 +5966,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     result.ast.functions.insert(result.ast.functions.end(),
                                 wide_atomic_helper_functions.begin(),
                                 wide_atomic_helper_functions.end());
+    const auto bounded_trap_helpers = find_bounded_trap_helpers(metal_module);
     const BuiltinUsageMap builtin_usage = analyze_builtin_usage(metal_module);
     const SharedUsageMap shared_usage = analyze_shared_usage(metal_module);
     const BarrierUsageMap barrier_usage = analyze_barrier_usage(metal_module);
@@ -5930,7 +6009,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         }
         for (const std::optional<ir::AddressSpace> specialization : specializations) {
             AstLowerer lowerer(metal_module, function, builtin_usage, shared_usage,
-                               wide_atomic_usage, false, specialization,
+                               wide_atomic_usage, bounded_trap_helpers, false, specialization,
                                barrier_usage.at(function.name));
             LowerToMslResult function_result = lowerer.run();
             const bool structurization_failure =
@@ -5952,7 +6031,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                     return function_result;
                 }
                 AstLowerer dispatcher_lowerer(metal_module, function, builtin_usage,
-                                              shared_usage, wide_atomic_usage, true,
+                                              shared_usage, wide_atomic_usage, bounded_trap_helpers, true,
                                               specialization,
                                               barrier_usage.at(function.name));
                 function_result = dispatcher_lowerer.run();

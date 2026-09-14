@@ -174,6 +174,7 @@ target_compile_options(cumetal_ir
 
 add_library(cumetal_metal_codegen STATIC
     compiler/metal/src/msl_ast.cpp
+    compiler/metal/src/trap_call_expansion.cpp
     compiler/metal/src/integer_arithmetic.cpp
     compiler/metal/src/lower_to_msl.cpp
 )
@@ -181,6 +182,8 @@ add_library(cumetal_metal_codegen STATIC
 target_include_directories(cumetal_metal_codegen
     PUBLIC
         compiler/metal/include
+    PRIVATE
+        compiler/common/include
 )
 
 target_link_libraries(cumetal_metal_codegen

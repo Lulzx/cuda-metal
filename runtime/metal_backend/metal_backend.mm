@@ -1,3 +1,4 @@
+#include "cumetal/common/kernel_abi.h"
 #include "metal_backend.h"
 #include "cumetal/ptx/lower_to_llvm.h"
 #include "metal_math_mode.h"
@@ -41,6 +42,17 @@ namespace {
 
 cudaError_t check_command_buffer_status(id<MTLCommandBuffer> command_buffer, std::string* error_message);
 cudaError_t map_command_buffer_error(NSError* command_error);
+cudaError_t check_launch_status(id<MTLCommandBuffer> command_buffer,
+                                const std::shared_ptr<Buffer>& trap_status,
+                                std::string* error_message) {
+    const auto status = check_command_buffer_status(command_buffer, error_message);
+    if (status != cudaSuccess) return status;
+    if (trap_status && *static_cast<const std::uint32_t*>(trap_status->contents()) != 0) {
+        if (error_message) *error_message = "PTX kernel executed trap";
+        return cudaErrorLaunchFailure;
+    }
+    return cudaSuccess;
+}
 
 constexpr std::size_t kDefaultHeapChunkBytes = 64ull * 1024ull * 1024ull;
 // Default auto-enable threshold: 4 MiB.  Allocations at or above this size use
@@ -496,10 +508,10 @@ public:
         (void)flush_open_batch_locked();
     }
 
-    std::uint64_t add_pending(id<MTLCommandBuffer> command_buffer) {
+    std::uint64_t add_pending(id<MTLCommandBuffer> command_buffer, std::shared_ptr<Buffer> trap_status = {}) {
         std::lock_guard<std::mutex> lock(mutex_);
         const std::uint64_t ticket = next_ticket_++;
-        pending_buffers_.push_back(PendingBuffer{.ticket = ticket, .command_buffer = command_buffer});
+        pending_buffers_.push_back(PendingBuffer{.ticket = ticket, .command_buffer = command_buffer, .trap_status = std::move(trap_status)});
         return ticket;
     }
 
@@ -515,28 +527,20 @@ public:
     cudaError_t poll_completed(std::string* error_message) {
         flush_open_batch();
         for (;;) {
-            id<MTLCommandBuffer> completed_buffer = nil;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (pending_buffers_.empty()) {
-                    return cudaSuccess;
-                }
-
-                const PendingBuffer& front = pending_buffers_.front();
-                const MTLCommandBufferStatus status = [front.command_buffer status];
-                if (status != MTLCommandBufferStatusCompleted && status != MTLCommandBufferStatusError) {
-                    return cudaSuccess;
-                }
-
-                completed_ticket_ = front.ticket;
-                completed_buffer = front.command_buffer;
-                pending_buffers_.erase(pending_buffers_.begin());
-            }
-
-            const cudaError_t status = check_command_buffer_status(completed_buffer, error_message);
-            if (status != cudaSuccess) {
-                return status;
-            }
+            // Completion consumption and the sticky trap error are atomic to
+            // other host pollers; no observer may skip a removed failed ticket.
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (trap_error_ != cudaSuccess) return trap_error_;
+            if (pending_buffers_.empty()) return cudaSuccess;
+            const PendingBuffer& front = pending_buffers_.front();
+            const MTLCommandBufferStatus completion = [front.command_buffer status];
+            if (completion != MTLCommandBufferStatusCompleted && completion != MTLCommandBufferStatusError)
+                return cudaSuccess;
+            const cudaError_t status = check_launch_status(front.command_buffer, front.trap_status, error_message);
+            if (front.trap_status && status == cudaErrorLaunchFailure) trap_error_ = status;
+            completed_ticket_ = front.ticket;
+            pending_buffers_.erase(pending_buffers_.begin());
+            if (status != cudaSuccess) return status;
         }
     }
 
@@ -560,6 +564,7 @@ public:
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
+        if (trap_error_ != cudaSuccess) return trap_error_;
         if (ticket >= next_ticket_) {
             if (error_message != nullptr) {
                 *error_message = "query_ticket received unknown ticket";
@@ -586,6 +591,7 @@ public:
             id<MTLCommandBuffer> next_wait = nil;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                if (trap_error_ != cudaSuccess) return trap_error_;
                 if (ticket >= next_ticket_) {
                     if (error_message != nullptr) {
                         *error_message = "wait_ticket received unknown ticket";
@@ -605,10 +611,6 @@ public:
             }
 
             [next_wait waitUntilCompleted];
-            const cudaError_t status = check_command_buffer_status(next_wait, error_message);
-            if (status != cudaSuccess) {
-                return status;
-            }
         }
     }
 
@@ -616,7 +618,9 @@ private:
     struct PendingBuffer {
         std::uint64_t ticket = 0;
         id<MTLCommandBuffer> command_buffer = nil;
+        std::shared_ptr<Buffer> trap_status;
     };
+    cudaError_t trap_error_ = cudaSuccess;
 
     id<MTLCommandQueue> queue_;
     id<MTLSharedEvent> access_event_;
@@ -685,6 +689,7 @@ struct BackendState {
     // certain, and reading it there stays right whichever path -- runtime,
     // driver, or a prebuilt library -- produced the kernel.
     std::unordered_map<std::string, bool> pipeline_uses_lock_bank;
+    std::unordered_map<std::string, bool> pipeline_uses_trap_status;
     std::unordered_map<std::string, bool> pipeline_uses_device_clock;
     std::unordered_map<std::string, bool> pipeline_uses_grid_barrier;
     std::unordered_map<std::string, bool> pipeline_uses_grid_y_offset;
@@ -1250,6 +1255,7 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
         // courtesy the toolchain is free to drop, while index 29 is reserved
         // for this and nothing else may bind there.
         bool uses_lock_bank = false;
+        bool uses_trap_status = false;
         bool uses_device_clock = false;
         bool uses_grid_barrier = false;
         bool uses_grid_y_offset = false;
@@ -1257,6 +1263,11 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
             if ([binding type] != MTLBindingTypeBuffer) {
                 continue;
             }
+            // Initial trap ABI requires the CuMetal-generated name as well:
+            // legacy kernels may use index 25 as an ordinary argument. Stripped
+            // precompiled trap ABI needs separate metadata support.
+            if ([binding index] == cumetal::abi::kTrapStatusBindingIndex &&
+                [[binding name] isEqualToString:[NSString stringWithUTF8String:cumetal::abi::kTrapStatusName]]) uses_trap_status = true;
             if ([binding index] == cumetal::ptx::kAtomicLockBankBindingIndex) {
                 uses_lock_bank = true;
             }
@@ -1270,6 +1281,7 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
                 uses_grid_y_offset = true;
             }
         }
+        backend.pipeline_uses_trap_status[cache_key] = uses_trap_status;
         backend.pipeline_uses_lock_bank[cache_key] = uses_lock_bank;
         backend.pipeline_uses_device_clock[cache_key] = uses_device_clock;
         backend.pipeline_uses_grid_barrier[cache_key] = uses_grid_barrier;
@@ -2804,6 +2816,8 @@ cudaError_t launch_kernel(const std::string& metallib_path,
     std::string lowering_source = "unknown";
     std::string math_mode = "precompiled";
     bool compile_cache_hit = false;
+    std::shared_ptr<Buffer> trap_status;
+    bool needs_trap_status = false;
     bool needs_lock_bank = false;
     bool needs_device_clock = false;
     bool needs_grid_barrier = false;
@@ -2820,6 +2834,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         if (pipeline == nil) {
             return cudaErrorInvalidValue;
         }
+        needs_trap_status = backend.pipeline_uses_trap_status[pipeline_cache_key];
         needs_lock_bank = backend.pipeline_uses_lock_bank[pipeline_cache_key];
         needs_device_clock = backend.pipeline_uses_device_clock[pipeline_cache_key];
         needs_grid_barrier = backend.pipeline_uses_grid_barrier[pipeline_cache_key];
@@ -2841,6 +2856,19 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             stream_impl = backend.default_stream;
         }
         queue = stream_impl != nullptr ? stream_impl->queue() : backend.queue;
+    }
+    if (needs_trap_status) {
+        for (std::size_t i = 0; i < args.size(); ++i) {
+            const auto binding = args[i].binding_index == std::numeric_limits<std::size_t>::max()
+                                     ? i : args[i].binding_index;
+            if (binding == cumetal::abi::kTrapStatusBindingIndex) {
+                if (error_message) *error_message = "kernel argument conflicts with trap status binding";
+                return cudaErrorInvalidValue;
+            }
+        }
+        const auto status = allocate_buffer(sizeof(std::uint32_t), &trap_status, error_message);
+        if (status != cudaSuccess) return status;
+        std::memset(trap_status->contents(), 0, sizeof(std::uint32_t));
     }
     if (needs_lock_bank) {
         lock_bank = ensure_atomic_lock_bank(error_message);
@@ -2933,7 +2961,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         const bool trace_async =
             stream_impl != nullptr && env_truthy(std::getenv("CUMETAL_TRACE_GPU"));
         const bool batching_allowed =
-            stream_impl != nullptr && !trace_async && !config.disable_batching &&
+            stream_impl != nullptr && !trap_status && !trace_async && !config.disable_batching &&
             max_batch_dispatches() > 0;
 
         id<MTLComputeCommandEncoder> encoder = nil;
@@ -2987,6 +3015,10 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         }
 
         [encoder setComputePipelineState:pipeline];
+        if (trap_status) {
+            auto* buffer = dynamic_cast<BufferImpl*>(trap_status.get());
+            [encoder setBuffer:buffer->handle() offset:0 atIndex:cumetal::abi::kTrapStatusBindingIndex];
+        }
         mark_allocations_resident(encoder, backend);
 
         // Metal cannot infer residency for a resource referenced only by a GPU
@@ -3121,7 +3153,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
               @autoreleasepool {
                 const cudaError_t completion_status =
-                    check_command_buffer_status(completed, nullptr);
+                    check_launch_status(completed, trap_status, nullptr);
                 const double duration_seconds =
                     [completed GPUEndTime] - [completed GPUStartTime];
                 const long long duration_ns =
@@ -3159,13 +3191,13 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         [command_buffer commit];
 
         if (stream_impl != nullptr) {
-            stream_impl->add_pending(command_buffer);
+            stream_impl->add_pending(command_buffer, trap_status);
             return cudaSuccess;
         }
 
         [command_buffer waitUntilCompleted];
         const cudaError_t completion_status =
-            check_command_buffer_status(command_buffer, error_message);
+            check_launch_status(command_buffer, trap_status, error_message);
         if (env_truthy(std::getenv("CUMETAL_TRACE_GPU"))) {
             const char* device_name = [[[backend.device name] description] UTF8String];
             const char* legacy_source =
@@ -3422,6 +3454,10 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
             return cudaErrorInvalidValue;
         }
         const std::string pipeline_cache_key = metallib_path + "::" + kernel_name;
+        if (backend.pipeline_uses_trap_status[pipeline_cache_key]) {
+            if (error_message) *error_message = "trap reporting unsupported on direct dispatch path";
+            return cudaErrorNotSupported;
+        }
         needs_lock_bank = backend.pipeline_uses_lock_bank[pipeline_cache_key];
         needs_device_clock = backend.pipeline_uses_device_clock[pipeline_cache_key];
         needs_grid_barrier = backend.pipeline_uses_grid_barrier[pipeline_cache_key];

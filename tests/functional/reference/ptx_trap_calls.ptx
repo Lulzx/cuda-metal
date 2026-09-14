@@ -1,0 +1,122 @@
+.version 7.1
+.target sm_80
+.address_size 64
+.func (.param .u32 result) finite_leaf(.param .u32 input) {
+.reg .b32 %r1;
+ld.param.u32 %r1, [input];
+max.u32 %r1, %r1, 0;
+abs.s32 %r1, %r1;
+st.param.u32 [result], %r1;
+ret;
+}
+.func (.param .u32 result) finite(.param .u32 input) {
+.reg .b32 %r1;
+.param .u32 argument;
+.param .u32 answer;
+ld.param.u32 %r1, [input];
+st.param.u32 [argument], %r1;
+call.uni (answer), finite_leaf, (argument);
+ld.param.u32 %r1, [answer];
+st.param.u32 [result], %r1;
+ret;
+}
+.func spin() {
+LOOP:
+bra LOOP;
+}
+.func store_then_trap(.param .u64 output) {
+.reg .b64 %rd1;
+ld.param.u64 %rd1, [output];
+st.global.u32 [%rd1], 2;
+trap;
+}
+.func (.param .u32 result) leaf(.param .u64 output, .param .u32 mode, .param .u32 tid) {
+.reg .b64 %rd1;
+.reg .b32 %r<5>;
+.reg .pred %p<4>;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [mode];
+ld.param.u32 %r2, [tid];
+setp.eq.u32 %p1, %r1, 4;
+@%p1 bra ORDER;
+setp.eq.u32 %p1, %r1, 3;
+@%p1 bra SPIN_MODE;
+setp.eq.u32 %p1, %r1, 1;
+@%p1 bra FAULT;
+setp.eq.u32 %p2, %r1, 2;
+and.b32 %r3, %r2, 1;
+setp.ne.u32 %p3, %r3, 0;
+and.pred %p1, %p2, %p3;
+@%p1 bra FAULT;
+// Both return blocks must preserve their result and caller continuation.
+@%p3 bra ODD;
+add.u32 %r4, %r2, 17;
+st.param.u32 [result], %r4;
+ret;
+ODD:
+add.u32 %r4, %r2, 18;
+sub.u32 %r4, %r4, 1;
+st.param.u32 [result], %r4;
+ret;
+SPIN_MODE:
+setp.eq.u32 %p1, %r2, 0;
+@%p1 bra FAULT;
+call.uni spin, ();
+st.param.u32 [result], 99;
+ret;
+ORDER:
+.param .u64 p;
+st.param.u64 [p], %rd1;
+call.uni store_then_trap, (p);
+// A trap in the nested helper must never resume these stores.
+st.global.u32 [%rd1], 99;
+st.param.u32 [result], 99;
+ret;
+FAULT:
+trap;
+}
+.func (.param .u32 result) wrapper(.param .u64 output, .param .u32 mode, .param .u32 tid) {
+.reg .b64 %rd1;
+.reg .b32 %r<4>;
+.param .u64 p;
+.param .u32 m;
+.param .u32 t;
+.param .u32 answer;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [mode];
+ld.param.u32 %r2, [tid];
+st.param.u64 [p], %rd1;
+st.param.u32 [m], %r1;
+st.param.u32 [t], %r2;
+call.uni (answer), leaf, (p, m, t);
+ld.param.u32 %r3, [answer];
+sub.u32 %r3, %r3, %r2;
+sub.u32 %r3, %r3, 16;
+.param .u32 finite_arg;
+.param .u32 finite_answer;
+st.param.u32 [finite_arg], %r3;
+call.uni (finite_answer), finite, (finite_arg);
+ld.param.u32 %r3, [finite_answer];
+st.param.u32 [result], %r3;
+ret;
+}
+.visible .entry trap_probe(.param .u64 output, .param .u32 mode) {
+.reg .b64 %rd<4>;
+.reg .b32 %r<4>;
+.param .u64 p;
+.param .u32 m;
+.param .u32 t;
+.param .u32 answer;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [mode];
+mov.u32 %r2, %tid.x;
+st.param.u64 [p], %rd1;
+st.param.u32 [m], %r1;
+st.param.u32 [t], %r2;
+call.uni (answer), wrapper, (p, m, t);
+ld.param.u32 %r3, [answer];
+mul.wide.u32 %rd2, %r2, 4;
+add.u64 %rd3, %rd1, %rd2;
+st.global.u32 [%rd3], %r3;
+ret;
+}

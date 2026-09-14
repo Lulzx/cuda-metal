@@ -6,6 +6,18 @@ import subprocess
 import tempfile
 
 
+def driver_api(build):
+    """Keep the loaded driver alive and check exact CUDA status codes."""
+    lib = c.CDLL(str(build / 'libcumetal.dylib'))
+    def api(name, types, *args, expected=0):
+        fn = getattr(lib, name)
+        fn.argtypes, fn.restype = types, c.c_int
+        status = fn(*args)
+        if status != expected:
+            raise RuntimeError(f'{name}: {status}, expected {expected}')
+    return api
+
+
 def expect_compile_failure(build, source, entry, diagnostic):
     """Check a rejected PTX form without depending on a Metal compiler or GPU."""
     with tempfile.TemporaryDirectory(prefix='cumetal-ptx-negative-') as work:
@@ -24,13 +36,7 @@ def run_integer_case(build, ptx_source, values, expected, label, entry="integer_
     """Run a two-buffer/count kernel with integer inputs and expected outputs."""
     os.environ['CUMETAL_TRACE_GPU'] = '1'
     os.environ['CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS'] = '0'
-    lib = c.CDLL(str(build / 'libcumetal.dylib'))
-    def api(name, types, *args):
-        fn = getattr(lib, name)
-        fn.argtypes, fn.restype = types, c.c_int
-        result = fn(*args)
-        if result:
-            raise RuntimeError(f'{name} failed: {result}')
+    api = driver_api(build)
     ptr, u32, u64 = c.c_void_p, c.c_uint32, c.c_uint64
     if input_words < 1 or len(values) % input_words:
         raise ValueError('input count does not match the kernel layout')

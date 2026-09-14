@@ -276,3 +276,19 @@ diamond. Recognition validates the complete continuation before rewriting.
 Memory-dependent scalar recursion, escaping local addresses, partial frame reads
 or writes, and general recursion remain unsupported. The transformed loop has
 no artificial iteration limit.
+
+## PTX trap completion
+
+Supported trap-capable kernels publish a per-launch atomic status and poll it at
+CFG boundaries so trapping lanes can cancel spinning peers. Required helper
+calls expand into this CFG; finite acyclic helper chains without traps, atomics,
+barriers or collectives may remain calls. Expansion is transactional and limited
+to 1,024 calls, 4,096 blocks and 262,144 operations per kernel.
+
+The compiler/runtime ABI is a reflected `cm_trap_status` buffer at binding 25.
+The runtime keeps each status word until completion and reports launch failure
+through stream/event synchronization and queries, including repeated queries.
+This does not implement CUDA context-wide abort. Trap-capable launches bypass
+batching; timed launches, conflicting bindings, user barriers and collectives
+remain unsupported. Stripped or renamed precompiled trap parameters need durable
+metadata support before this reflection-based contract can cover them.

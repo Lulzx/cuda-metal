@@ -2865,6 +2865,21 @@ if(APPLE)
     add_test(NAME functional_ptx_pointers
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_pointers.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_pointers PROPERTIES TIMEOUT 120)
+    add_executable(cumetal_trap_binding_test trap_binding_test.cpp)
+    target_link_libraries(cumetal_trap_binding_test PRIVATE cumetal_runtime)
+    add_test(NAME functional_ptx_trap_reporting
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR})
+    add_test(NAME functional_ptx_trap_reporting_trace
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --trace)
+    add_test(NAME functional_ptx_trap_calls
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --calls)
+    add_test(NAME functional_ptx_trap_calls_trace
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --calls --trace)
+    add_test(NAME functional_ptx_trap_call_values
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_call_values.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_trap_reporting functional_ptx_trap_reporting_trace
+        functional_ptx_trap_calls functional_ptx_trap_calls_trace functional_ptx_trap_call_values
+        PROPERTIES TIMEOUT 45)
     foreach(guard_case guarded_self_select bounded_self_select guarded_load)
         add_test(NAME functional_ptx_${guard_case}
             COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_guarded_paths.py
