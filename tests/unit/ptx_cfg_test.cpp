@@ -120,6 +120,14 @@ ret;
                             "bra CHECK;\nCHECK:\n");
     ok &= expect(metal::compile_ptx_to_msl(carried_constant).ok,
                  "constant flags propagate across an intervening block");
+    const std::string deep_guard = fixture("ptx_deep_guarded_payload.ptx");
+    const auto deep = metal::compile_ptx_to_msl(deep_guard);
+    ok &= expect(deep.ok, "predicate facts cross more than eight guarded blocks: " + deep.error);
+    auto invalid_deep_guard = deep_guard;
+    invalid_deep_guard.insert(invalid_deep_guard.find("MERGE:\n") + 7,
+                              "mov.pred %p0, 1;\n");
+    ok &= expect(!metal::compile_ptx_to_msl(invalid_deep_guard).ok,
+                 "deep specialization does not invent an undefined payload");
     auto exhausted_constants = carried_constant;
     exhausted_constants.insert(exhausted_constants.find(".reg .pred"),
                                ".reg .pred %q<129>;\n");

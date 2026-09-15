@@ -130,6 +130,10 @@ feeding stores, addresses, branches, or other retained operations remain live.
 The P-256 public-key self-test now emits MSL through the guarded helper ABI.
 The signature self-test still requires further guarded-SSA work; neither full
 module has numerical Apple-GPU validation.
+Predicate threading has no separate eight-block depth cutoff. It follows a
+cycle-free path until the existing 256-instruction inspection limit or shared
+clone budgets stop the proof. Exhausting any bound still leaves SSA to reject
+an unproven read; this does not initialize optional payloads.
 Repeated unchanged branch predicates use the known incoming edge value even
 when their producing comparison is outside that bounded operand analysis.
 Self-select guards can also use matching or complementary integer equality

@@ -549,7 +549,7 @@ struct GuardedPaths {
                 std::unordered_set<std::size_t> visited{index};
                 std::vector<RawBlock> prefix;
                 std::size_t inspected = 0;
-                for (unsigned depth = 0; depth < 8 && visited.insert(current).second; ++depth) {
+                while (visited.insert(current).second) {
                     const RawBlock target = raw_blocks[current];
                     if (target.instructions.empty() || target.instructions.size() > 256 - inspected ||
                         target.successors.empty() || target.successors.size() > 2) break;
