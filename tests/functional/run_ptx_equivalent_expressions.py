@@ -12,7 +12,7 @@ if '--gpu-child' not in sys.argv:
     if result.returncode:
         raise SystemExit(result.returncode)
     launches = [line for line in result.stderr.splitlines() if 'CUMETAL_PROVENANCE event=kernel_launch' in line]
-    assert len(launches) == 9, launches
+    assert len(launches) == 10, launches
     assert all('device=apple_gpu' in line and 'launch_success=true' in line and
                'provenance=generic_ptx_lowering' in line for line in launches), launches
     raise SystemExit(0)
@@ -43,6 +43,12 @@ run_integer_case(build,predecessor_convert,[v for p in pairs for v in p],
 run_integer_case(build,split_predecessors(8),[v for p in pairs for v in p],
                  [99 if a>=b else a for a,b in pairs],
                  '8-block predecessor boundary',entry='guarded_relation',word_bits=32,input_words=2,output_words=1)
+loop_source=(Path(__file__).parent/'reference/ptx_loop_invariant_expression.ptx').read_text()
+loop_inputs=[word for lane in range(65) for word in (1, 0x12340000+lane)]
+loop_outputs=[0x12340000+lane for lane in range(65)]
+run_integer_case(build,loop_source,loop_inputs,loop_outputs,
+                 'loop-invariant predecessor expression',entry='loop_invariant_expression',
+                 word_bits=32,input_words=2,output_words=1)
 wide=source.replace('.reg .b64 %rd<6>;', '.reg .b64 %rd<11>;')
 for a,b in [('%r6','%rd6'),('%r7','%rd7'),('%r8','%rd8'),('%r9','%rd9'),('%r1','%rd10')]:
  wide=wide.replace(a,b)
@@ -91,4 +97,13 @@ for label,case in [
  ('predecessor depth exhausted',split_predecessors(9)),
 ]:
  expect_compile_failure(build,case,'guarded_relation','PTX register')
+ print('REJECTED '+label)
+for label,case in [
+ ('loop input overwrite',loop_source.replace('JOIN:\n', 'JOIN:\nmov.u32 %r6, 1;\n')),
+ ('loop call',loop_source.replace('.visible .entry', '.func noop() { ret; }\n.visible .entry')
+    .replace('JOIN:\n', 'JOIN:\ncall.uni noop, ();\n')),
+ ('irreducible loop entry',loop_source.replace('LOOP:\n',
+    'setp.eq.u32 %p3, %r6, 0;\n@%p3 bra JOIN;\nLOOP:\n')),
+]:
+ expect_compile_failure(build,case,'loop_invariant_expression','PTX register')
  print('REJECTED '+label)

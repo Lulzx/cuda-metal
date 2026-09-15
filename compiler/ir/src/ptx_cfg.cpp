@@ -196,7 +196,7 @@ struct GuardedPaths {
         struct Value { std::string key; std::vector<std::string> dependencies{}; };
         std::map<std::string, Value> values;
         std::deque<std::string> order;
-        void observe(const Instruction& instruction) {
+        void invalidate(const Instruction& instruction) {
             const auto writes = destination_registers(instruction);
             for (const auto& reg : writes) {
                 std::erase_if(values, [&](const auto& item) {
@@ -205,7 +205,12 @@ struct GuardedPaths {
                 });
             }
             std::erase_if(order, [&](const auto& reg) { return !values.contains(reg); });
-            if (root_opcode(instruction.opcode) == "call") { values.clear(); order.clear(); return; }
+            if (root_opcode(instruction.opcode) == "call") { values.clear(); order.clear(); }
+        }
+        void observe(const Instruction& instruction) {
+            const auto writes = destination_registers(instruction);
+            invalidate(instruction);
+            if (root_opcode(instruction.opcode) == "call") return;
             if (!instruction.predicate.empty() || writes.size() != 1) return;
             const bool add = instruction.opcode == "add.u32" || instruction.opcode == "add.s32" ||
                 instruction.opcode == "add.u64" || instruction.opcode == "add.s64";
@@ -251,28 +256,76 @@ struct GuardedPaths {
         }
     };
 
-    // Seed expression identities from a bounded, unambiguous predecessor
-    // chain. A cycle supplies no first execution, and a merge may supply a
-    // different register value, so neither is used as evidence.
+    // Seed expression identities from a bounded predecessor chain. A
+    // single-entry loop may retain only identities untouched in its SCC.
     Expressions expressions_before(std::size_t index) const {
+        if (raw_blocks[index].predecessors.empty()) return {};
+        std::unordered_set<std::size_t> loop_blocks;
+        std::optional<std::size_t> first;
+        if (raw_blocks[index].predecessors.size() == 1) {
+            first = raw_blocks[index].predecessors.front();
+        } else {
+            const auto walk = [&](bool backwards) -> std::optional<std::vector<bool>> {
+                std::vector<bool> reached(raw_blocks.size(), false);
+                std::deque<std::size_t> pending{index};
+                std::size_t budget = 131072;
+                while (!pending.empty()) {
+                    if (budget == 0) return std::nullopt;
+                    --budget;
+                    const auto block = pending.front();
+                    pending.pop_front();
+                    if (reached[block]) continue;
+                    reached[block] = true;
+                    const auto& next = backwards ? raw_blocks[block].predecessors
+                                                 : raw_blocks[block].successors;
+                    pending.insert(pending.end(), next.begin(), next.end());
+                }
+                return reached;
+            };
+            const auto forward = walk(false);
+            const auto backward = walk(true);
+            if (!forward || !backward) return {};
+            for (std::size_t block = 0; block < raw_blocks.size(); ++block)
+                if ((*forward)[block] && (*backward)[block]) loop_blocks.insert(block);
+            std::unordered_set<std::size_t> external;
+            for (const auto predecessor : raw_blocks[index].predecessors)
+                if (!loop_blocks.contains(predecessor)) external.insert(predecessor);
+            if (external.size() != 1 || loop_blocks.size() < 2) return {};
+            first = *external.begin();
+            // Irreducible entries can bypass the preheader expression.
+            for (const auto block : loop_blocks)
+                for (const auto predecessor : raw_blocks[block].predecessors)
+                    if (!loop_blocks.contains(predecessor) &&
+                        (block != index || predecessor != *first)) return {};
+        }
+
         std::vector<std::size_t> prefix;
-        std::unordered_set<std::size_t> visited{index};
+        auto visited = loop_blocks;
+        visited.insert(index);
         std::size_t instructions = 0;
+        auto current = *first;
         for (unsigned depth = 0; depth < 8; ++depth) {
-            if (raw_blocks[index].predecessors.size() != 1) break;
-            const auto predecessor = raw_blocks[index].predecessors.front();
-            if (!visited.insert(predecessor).second) return {};
-            const auto count = raw_blocks[predecessor].instructions.size();
+            if (!visited.insert(current).second) return {};
+            const auto count = raw_blocks[current].instructions.size();
             if (count > 256 - instructions) break;
             instructions += count;
-            prefix.push_back(predecessor);
-            index = predecessor;
+            prefix.push_back(current);
+            if (raw_blocks[current].predecessors.size() != 1) break;
+            current = raw_blocks[current].predecessors.front();
         }
         std::reverse(prefix.begin(), prefix.end());
         Expressions expressions;
         for (const auto block : prefix)
             for (const auto* instruction : raw_blocks[block].instructions)
                 expressions.observe(*instruction);
+        std::size_t loop_budget = 131072;
+        for (const auto block : loop_blocks) {
+            for (const auto* instruction : raw_blocks[block].instructions) {
+                if (loop_budget == 0) return {};
+                --loop_budget;
+                expressions.invalidate(*instruction);
+            }
+        }
         return expressions;
     }
 

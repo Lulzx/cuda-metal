@@ -126,8 +126,10 @@ reversed operands. A bounded table also relates identical single `add.u32/s32/u6
 and `cvt.u64.u32` expressions in different registers. It keeps at most 64 expressions;
 operand/result writes, predication, calls, and eviction conservatively lose proof.
 It can carry identities through at most eight unambiguous predecessor blocks and
-256 instructions; merges and cycles stop that predecessor proof. It preserves the
-computations and memory operations, and does not fold in-place updates, recursive
+256 instructions. A single-entry loop retains preheader identities only when no
+instruction in its strongly connected region writes the result/input registers or
+calls a helper; irreducible entries lose proof. It preserves the computations and
+memory operations, and does not fold in-place updates, recursive
 expressions, signed comparisons, or floating arithmetic. Full
 RSA-PSS and P-256 signature compilation still encounter other guarded-SSA cases.
 
