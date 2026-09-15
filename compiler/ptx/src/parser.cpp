@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <regex>
 #include <sstream>
 #include <unordered_map>
@@ -566,9 +567,23 @@ void parse_instructions(const std::string& body,
             const std::size_t comma = names.find(',', start);
             const std::string name = trim(names.substr(
                 start, comma == std::string::npos ? std::string::npos : comma - start));
+            const auto open = name.find('<');
+            if (!name.empty() && name[0] == '%' && open > 1 &&
+                open != std::string::npos && name.back() == '>') {
+                const auto digits = std::string_view(name).substr(open + 1, name.size() - open - 2);
+                std::size_t count = 0;
+                const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), count);
+                const auto prefix = name.substr(0, open);
+                if (parsed.ec == std::errc{} && parsed.ptr == digits.data() + digits.size() &&
+                    count != 0 && std::all_of(prefix.begin() + 1, prefix.end(), [](unsigned char c) {
+                        return std::isalnum(c) || c == '_' || c == '$';
+                    })) {
+                    entry->register_ranges.push_back({prefix, type, count, scope_depth == 0});
+                }
+            }
             if (!name.empty() && name.find('<') == std::string::npos) {
                 if (name[0] == '%') {
-                    entry->register_declarations.push_back({name, type});
+                    entry->register_declarations.push_back({name, type, scope_depth == 0});
                 } else {
                     // The legacy backend types a register by its NVPTX name
                     // prefix (%p predicate, %rs 16-bit, %r/%f 32-bit, %rd/%fd
@@ -585,7 +600,7 @@ void parse_instructions(const std::string& body,
                                                                               : "%r_cm_";
                     const std::string renamed = prefix + name;
                     bare_registers.push_back({name, renamed, scope_depth});
-                    entry->register_declarations.push_back({renamed, type});
+                    entry->register_declarations.push_back({renamed, type, scope_depth == 0});
                 }
             }
             if (comma == std::string::npos) break;

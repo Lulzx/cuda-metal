@@ -108,13 +108,13 @@ ret;
         ok &= expect(!metal::compile_ptx_to_msl(invalid).ok,
                      "constant facts cannot hide overwritten guards or undefined reads");
     }
-    auto call_kills_constant = constant_guard;
-    call_kills_constant.insert(call_kills_constant.find(".visible .entry"),
+    auto call_preserves_local_constant = constant_guard;
+    call_preserves_local_constant.insert(call_preserves_local_constant.find(".visible .entry"),
                               ".func opaque_helper() { ret; }\n");
-    call_kills_constant.insert(call_kills_constant.find("@%p0 bra JOIN;"),
+    call_preserves_local_constant.insert(call_preserves_local_constant.find("@%p0 bra JOIN;"),
                               "call.uni opaque_helper, ();\n");
-    ok &= expect(!metal::compile_ptx_to_msl(call_kills_constant).ok,
-                 "calls invalidate constant predicate facts");
+    ok &= expect(metal::compile_ptx_to_msl(call_preserves_local_constant).ok,
+                 "direct calls preserve explicitly local constant predicate facts");
     auto carried_constant = constant_guard;
     carried_constant.insert(carried_constant.find("@%p0 bra JOIN;"),
                             "bra CHECK;\nCHECK:\n");
@@ -323,6 +323,42 @@ ret;
         detail::simplify_guarded_paths(cfg, builder, owned);
         ok &= expect(cfg[0].instructions[select_index]->opcode == (rewritten ? "mov.b64" : "selp.b64"),
                      "comparison alias eligibility: " + operand + "/" + std::to_string(padding));
+    }
+    // Exercise call clobbers before SSA, including forms the importer may reject.
+    for (unsigned variant = 0; variant < 9; ++variant) {
+        cumetal::ptx::EntryFunction function;
+        function.register_ranges.push_back({"%p", "pred", variant == 4 ? 3u : 4u, variant != 8});
+        std::deque<detail::Instruction> owned;
+        auto add = [&](std::string opcode, std::vector<std::string> operands,
+                       std::string predicate = {}) -> const detail::Instruction* {
+            detail::Instruction instruction;
+            instruction.opcode = std::move(opcode);
+            instruction.operands = std::move(operands);
+            instruction.predicate = std::move(predicate);
+            owned.push_back(std::move(instruction));
+            return &owned.back();
+        };
+        const std::string reg = variant == 5 ? "%p03" : "%p3";
+        std::vector<detail::RawBlock> cfg(4);
+        for (unsigned i = 0; i < 4; ++i) {
+            cfg[i].id = builder.next_block();
+            cfg[i].name = "call_scope_" + std::to_string(i);
+        }
+        cfg[0].instructions = {add("mov.pred", {reg, "1"}), add("bra", {cfg[1].name})};
+        cfg[0].successors = {1};
+        const auto operands = variant == 1 ? std::vector<std::string>{"(%p3)", "helper", "()"}
+            : variant == 2 ? std::vector<std::string>{"%rd0", "()"}
+            : variant == 3 ? std::vector<std::string>{"helper"}
+            : variant == 7 ? std::vector<std::string>{"(%p0)", "helper", "()"}
+            : std::vector<std::string>{"helper", "()"};
+        cfg[1].instructions = {add("call.uni", operands), add("bra", {cfg[2].name}, reg)};
+        cfg[1].successors = {2, 3};
+        cfg[2].instructions = {add("ret", {})};
+        cfg[3].instructions = {add("ret", {})};
+        detail::simplify_guarded_paths(cfg, builder, owned, variant == 6 ? nullptr : &function);
+        const bool proven = variant == 0 || variant == 7;
+        ok &= expect((cfg[0].successors[0] != 1) == proven,
+                     "caller predicate scope and explicit output clobbers: " + std::to_string(variant));
     }
     return ok ? 0 : 1;
 }

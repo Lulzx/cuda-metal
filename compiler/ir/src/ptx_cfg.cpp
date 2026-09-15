@@ -2,6 +2,8 @@
 #include "ptx_text.h"
 
 #include <algorithm>
+#include <charconv>
+#include <cctype>
 #include <map>
 #include <regex>
 
@@ -12,6 +14,42 @@ struct GuardedPaths {
     std::vector<RawBlock>& raw_blocks;
     Builder& builder;
     std::deque<Instruction>& storage;
+    const cumetal::ptx::EntryFunction* function;
+
+    bool local_predicate(const std::string& reg) const {
+        if (!function) return false;
+        for (const auto& declaration : function->register_declarations)
+            if (declaration.function_scope && declaration.type == "pred" && declaration.name == reg) return true;
+        for (const auto& range : function->register_ranges) {
+            if (!range.function_scope || range.type != "pred" || !reg.starts_with(range.prefix)) continue;
+            const auto digits = std::string_view(reg).substr(range.prefix.size());
+            if (digits.empty() || (digits.size() > 1 && digits.front() == '0')) continue;
+            std::size_t index = 0;
+            const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), index);
+            if (parsed.ec == std::errc{} && parsed.ptr == digits.data() + digits.size() &&
+                index < range.count) return true;
+        }
+        return false;
+    }
+
+    void invalidate_call(const Instruction& instruction, std::map<std::string, bool>& facts) const {
+        const auto target = direct_call_target(instruction);
+        const bool direct = (instruction.opcode == "call" || instruction.opcode == "call.uni") &&
+            target && !target->empty() && target->front() != '%' &&
+            std::all_of(target->begin(), target->end(), [](unsigned char c) {
+                return std::isalnum(c) || c == '_' || c == '$' || c == '.';
+            });
+        if (!direct) { facts.clear(); return; }
+        // Callees cannot address caller-local registers. Explicit return
+        // registers are still writes, including predicated call outputs.
+        const auto outputs = instruction.operands.size() == 3
+            ? registers_in(instruction.operands.front()) : std::vector<std::string>{};
+        std::erase_if(facts, [&](const auto& item) {
+            return !local_predicate(item.first) ||
+                std::find(outputs.begin(), outputs.end(), item.first) != outputs.end();
+        });
+    }
+
     std::size_t cloned_blocks = 0;
     std::size_t cloned_instructions = 0;
 
@@ -197,7 +235,7 @@ struct GuardedPaths {
                 const auto value = predicate_value(*instruction, outgoing);
                 const auto written = destination_registers(*instruction);
                 for (const auto& reg : written) outgoing.erase(reg);
-                if (root_opcode(instruction->opcode) == "call") outgoing.clear();
+                if (root_opcode(instruction->opcode) == "call") invalidate_call(*instruction, outgoing);
                 if (value && written.size() == 1) outgoing[written[0]] = *value;
                 if (outgoing.size() > 128) return std::vector<Facts>(raw_blocks.size());
             }
@@ -244,7 +282,7 @@ struct GuardedPaths {
                 const auto written = destination_registers(instruction);
                 const auto value = predicate_value(instruction, constants);
                 for (const auto& reg : written) constants.erase(reg);
-                if (root_opcode(instruction.opcode) == "call") constants.clear();
+                if (root_opcode(instruction.opcode) == "call") invalidate_call(instruction, constants);
                 if (value && written.size() == 1) constants[written[0]] = *value;
                 for (const auto& reg : written)
                     if (comparison && (reg == pred || reg == comparison->left || reg == comparison->right))
@@ -295,7 +333,7 @@ struct GuardedPaths {
                             known.erase(reg);
                             if (fact && (reg == fact->left || reg == fact->right)) fact.reset();
                         }
-                        if (root_opcode(instruction.opcode) == "call") { known.clear(); fact.reset(); }
+                        if (root_opcode(instruction.opcode) == "call") { invalidate_call(instruction, known); fact.reset(); }
                         if (value && written.size() == 1) known[written[0]] = *value;
                     }
                     if (target.successors.size() == 1) {
@@ -623,8 +661,9 @@ void remove_unreachable_blocks(std::vector<RawBlock>& blocks) {
 }
 
 void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
-                            std::deque<Instruction>& storage) {
-    GuardedPaths paths{blocks, builder, storage};
+                            std::deque<Instruction>& storage,
+                            const cumetal::ptx::EntryFunction* function) {
+    GuardedPaths paths{blocks, builder, storage, function};
     paths.thread_threshold_edges();
     paths.thread_predicate_edges();
     for (auto& block : blocks) block.predecessors.clear();

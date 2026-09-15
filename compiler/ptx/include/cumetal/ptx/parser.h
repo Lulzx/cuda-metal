@@ -38,8 +38,17 @@ struct EntryFunction {
     struct RegisterDeclaration {
         std::string name;
         std::string type;
+        bool function_scope = true;
     };
     std::vector<RegisterDeclaration> register_declarations;
+    // Compact body-local ranges: `%p<8>` declares `%p0` through `%p7`.
+    struct RegisterRangeDeclaration {
+        std::string prefix;
+        std::string type;
+        std::size_t count;
+        bool function_scope = true;
+    };
+    std::vector<RegisterRangeDeclaration> register_ranges;
 };
 
 struct ModuleInfo {

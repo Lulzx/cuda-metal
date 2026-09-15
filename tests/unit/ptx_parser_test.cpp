@@ -537,6 +537,26 @@ $L_one:
                     !invalid.instructions[0].supported && invalid.instructions[0].line == 20,
                     "unterminated/unbalanced calls are explicit unsupported instructions")) return 1;
     }
+    const auto ranges = cumetal::ptx::parse_instruction_block(
+        ".reg .pred %p<7400>, %q<1>;\n.reg .b64 %rd<16>;\n"
+        ".reg .pred %bad<0>, %overflow<999999999999999999999999999999>, %bad2<-1>;\n",
+        1, nullptr);
+    if (!expect(ranges.register_ranges.size() == 3 &&
+                ranges.register_ranges[0].prefix == "%p" &&
+                ranges.register_ranges[0].type == "pred" &&
+                ranges.register_ranges[0].count == 7400 &&
+                ranges.register_ranges[1].count == 1 &&
+                ranges.register_ranges[2].type == "b64" &&
+                ranges.register_declarations.empty(),
+                "local register ranges retain compact metadata without expansion or overflow")) return 1;
+    const auto nested_registers = cumetal::ptx::parse_instruction_block(
+        "{\n.reg .pred %p<8>;\n.reg .pred %flag;\n}\n.reg .pred %outer;\n", 1, nullptr);
+    if (!expect(nested_registers.register_ranges.size() == 1 &&
+                !nested_registers.register_ranges[0].function_scope &&
+                nested_registers.register_declarations.size() == 2 &&
+                !nested_registers.register_declarations[0].function_scope &&
+                nested_registers.register_declarations[1].function_scope,
+                "nested declarations do not prove function-wide register locality")) return 1;
     std::printf("PASS: ptx parser unit tests\n");
     return 0;
 }
