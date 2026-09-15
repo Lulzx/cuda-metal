@@ -3566,7 +3566,12 @@ struct AstLowerer {
             }
             const MslType value_type = lower_result_type(operation);
             MslType memory_type = value_type;
-            if (operation.attributes.contains("memory_bit_width")) {
+            // A PTX pointer is stored in a .u64/.b64 slot, but Metal must load
+            // it through an address-space-qualified pointer-to-pointer. Loading
+            // an ulong first and applying a C++ functional cast emits invalid
+            // MSL and loses the pointee address space.
+            if (!operation.result_types.front().is_pointer() &&
+                operation.attributes.contains("memory_bit_width")) {
                 const std::uint32_t bits = static_cast<std::uint32_t>(
                     std::stoul(operation.attributes.at("memory_bit_width")));
                 const bool is_signed = operation.attributes.contains("signed") &&

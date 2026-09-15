@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <map>
 #include <optional>
 #include <regex>
@@ -1140,6 +1141,513 @@ struct Importer {
         const auto pointer_evidence = detail::infer_entry_pointer_types(
             *entry, result.module, is_kernel, pointer_symbols, promoted_global_symbols, parameter_types);
 
+        // PTX represents pointers as ordinary 64-bit values. Recover pointer
+        // values loaded from local-memory tables without treating an entire
+        // compiler-generated stack depot as one object. Literal offsets from a
+        // named depot identify subobjects; a bounded constant-set analysis then
+        // resolves small dynamic indices within each subobject.
+        using FiniteValues = std::set<std::int64_t>;
+        constexpr std::size_t kMaxFiniteValues = 16;
+        std::unordered_map<std::string, std::vector<const Instruction*>>
+            register_definitions;
+        for (const Instruction& instruction : entry->instructions) {
+            for (const std::string& destination : destination_registers(instruction)) {
+                register_definitions[destination].push_back(&instruction);
+            }
+        }
+        const auto is_64_bit_register = [&](const std::string& name) {
+            if (ptx_register_container_bits(name) == 64) return true;
+            const auto declared = register_types.find(name);
+            return declared != register_types.end() &&
+                   declared->second.kind == TypeKind::kInteger &&
+                   declared->second.bit_width == 64;
+        };
+        const auto integer_literal = [](std::string_view operand)
+            -> std::optional<std::int64_t> {
+            const std::string value = trim(operand);
+            if (value.empty() || value.front() == '%') return std::nullopt;
+            try {
+                std::size_t consumed = 0;
+                const std::int64_t parsed = std::stoll(value, &consumed, 0);
+                if (consumed == value.size()) return parsed;
+            } catch (...) {
+            }
+            return std::nullopt;
+        };
+        const auto finite_binary = [](const FiniteValues& left,
+                                      const FiniteValues& right,
+                                      std::string_view operation)
+            -> std::optional<FiniteValues> {
+            FiniteValues result;
+            for (const std::int64_t a : left) {
+                for (const std::int64_t b : right) {
+                    __int128 value = 0;
+                    if (operation == "add") value = static_cast<__int128>(a) + b;
+                    else if (operation == "sub") value = static_cast<__int128>(a) - b;
+                    else if (operation == "shl") {
+                        if (b < 0 || b >= 63) return std::nullopt;
+                        value = static_cast<__int128>(a) *
+                                (static_cast<__int128>(1) << b);
+                    } else {
+                        return std::nullopt;
+                    }
+                    if (value < std::numeric_limits<std::int64_t>::min() ||
+                        value > std::numeric_limits<std::int64_t>::max()) {
+                        return std::nullopt;
+                    }
+                    result.insert(static_cast<std::int64_t>(value));
+                    if (result.size() > kMaxFiniteValues) return std::nullopt;
+                }
+            }
+            return result;
+        };
+        std::unordered_map<std::string, FiniteValues> finite_values;
+        std::unordered_set<std::string> finite_overflow;
+        const auto operand_values = [&](std::string_view operand)
+            -> std::optional<FiniteValues> {
+            if (const auto literal = integer_literal(operand)) {
+                return FiniteValues{*literal};
+            }
+            const auto known = finite_values.find(first_register(operand));
+            if (known != finite_values.end()) return known->second;
+            return std::nullopt;
+        };
+        const auto instruction_values = [&](const Instruction& instruction)
+            -> std::optional<FiniteValues> {
+            const std::string root = root_opcode(instruction.opcode);
+            if ((root == "mov" || root == "cvt") &&
+                instruction.operands.size() >= 2) {
+                return operand_values(instruction.operands[1]);
+            }
+            if ((root == "add" || root == "sub" || root == "shl") &&
+                instruction.operands.size() >= 3) {
+                const auto left = operand_values(instruction.operands[1]);
+                const auto right = operand_values(instruction.operands[2]);
+                if (!left || !right) return std::nullopt;
+                return finite_binary(*left, *right, root);
+            }
+            if (root == "selp" && instruction.operands.size() >= 3) {
+                const auto left = operand_values(instruction.operands[1]);
+                const auto right = operand_values(instruction.operands[2]);
+                if (!left || !right) return std::nullopt;
+                FiniteValues result = *left;
+                result.insert(right->begin(), right->end());
+                if (result.size() <= kMaxFiniteValues) return result;
+            }
+            return std::nullopt;
+        };
+        bool constants_changed = true;
+        for (int iteration = 0; iteration < 16 && constants_changed; ++iteration) {
+            constants_changed = false;
+            for (const Instruction& instruction : entry->instructions) {
+                const auto destinations = destination_registers(instruction);
+                const auto values = instruction_values(instruction);
+                if (destinations.size() != 1 || !values ||
+                    !is_64_bit_register(destinations.front()) ||
+                    finite_overflow.contains(destinations.front())) {
+                    continue;
+                }
+                auto& known = finite_values[destinations.front()];
+                const std::size_t before = known.size();
+                known.insert(values->begin(), values->end());
+                if (known.size() > kMaxFiniteValues) {
+                    finite_values.erase(destinations.front());
+                    finite_overflow.insert(destinations.front());
+                } else {
+                    constants_changed |= known.size() != before;
+                }
+            }
+        }
+        // A reused register is finite only if every one of its definitions can
+        // be evaluated. Prune dependants to a fixed point after the union pass.
+        bool constants_pruned = true;
+        for (int iteration = 0; iteration < 16 && constants_pruned; ++iteration) {
+            constants_pruned = false;
+            for (auto known = finite_values.begin(); known != finite_values.end();) {
+                bool valid = true;
+                const auto definitions = register_definitions.find(known->first);
+                if (definitions == register_definitions.end()) valid = false;
+                if (valid) for (const Instruction* instruction : definitions->second) {
+                    if (destination_registers(*instruction).size() != 1 ||
+                        !instruction_values(*instruction)) {
+                        valid = false;
+                        break;
+                    }
+                }
+                if (!valid) {
+                    known = finite_values.erase(known);
+                    constants_pruned = true;
+                } else {
+                    ++known;
+                }
+            }
+        }
+
+        struct LocalAddress {
+            std::string depot;
+            std::int64_t base = 0;
+            bool depot_root = true;
+            std::optional<FiniteValues> offsets = FiniteValues{0};
+        };
+        const auto same_subobject = [](const LocalAddress& left,
+                                       const LocalAddress& right) {
+            return left.depot == right.depot && left.base == right.base &&
+                   left.depot_root == right.depot_root;
+        };
+        std::unordered_map<std::string, LocalAddress> local_addresses;
+        const auto operand_address = [&](std::string_view operand)
+            -> std::optional<LocalAddress> {
+            const std::string symbol = parameter_name_from_operand(operand);
+            if (local_depots.contains(symbol)) {
+                return LocalAddress{.depot = symbol};
+            }
+            const auto known = local_addresses.find(first_register(operand));
+            if (known != local_addresses.end()) return known->second;
+            return std::nullopt;
+        };
+        const auto shifted_address = [&](LocalAddress address,
+                                         const FiniteValues& shifts,
+                                         bool subtract,
+                                         bool literal_shift)
+            -> std::optional<LocalAddress> {
+            if (literal_shift && address.depot_root && address.offsets &&
+                *address.offsets == FiniteValues{0} && shifts.size() == 1) {
+                const __int128 base = static_cast<__int128>(address.base) +
+                    (subtract ? -static_cast<__int128>(*shifts.begin())
+                              : static_cast<__int128>(*shifts.begin()));
+                if (base < std::numeric_limits<std::int64_t>::min() ||
+                    base > std::numeric_limits<std::int64_t>::max()) {
+                    return std::nullopt;
+                }
+                address.base = static_cast<std::int64_t>(base);
+                address.depot_root = false;
+                return address;
+            }
+            if (!address.offsets) return address;
+            const auto result = subtract
+                ? finite_binary(*address.offsets, shifts, "sub")
+                : finite_binary(*address.offsets, shifts, "add");
+            address.offsets = result;
+            return address;
+        };
+        const auto instruction_address = [&](const Instruction& instruction)
+            -> std::optional<LocalAddress> {
+            const std::string root = root_opcode(instruction.opcode);
+            if ((root == "mov" || root == "cvta") &&
+                instruction.operands.size() >= 2) {
+                return operand_address(instruction.operands[1]);
+            }
+            if ((root == "add" || root == "sub") &&
+                instruction.operands.size() >= 3) {
+                if (auto address = operand_address(instruction.operands[1])) {
+                    const bool literal = integer_literal(instruction.operands[2]).has_value();
+                    if (const auto shifts = operand_values(instruction.operands[2])) {
+                        return shifted_address(*address, *shifts, root == "sub", literal);
+                    }
+                    address->offsets.reset();
+                    return address;
+                }
+                if (root == "add") {
+                    if (auto address = operand_address(instruction.operands[2])) {
+                        const bool literal = integer_literal(instruction.operands[1]).has_value();
+                        if (const auto shifts = operand_values(instruction.operands[1])) {
+                            return shifted_address(*address, *shifts, false, literal);
+                        }
+                        address->offsets.reset();
+                        return address;
+                    }
+                }
+                return std::nullopt;
+            }
+            if (root == "selp" && instruction.operands.size() >= 3) {
+                const auto left = operand_address(instruction.operands[1]);
+                const auto right = operand_address(instruction.operands[2]);
+                if (!left || !right || !same_subobject(*left, *right)) {
+                    return std::nullopt;
+                }
+                LocalAddress result = *left;
+                if (!left->offsets || !right->offsets) {
+                    result.offsets.reset();
+                } else {
+                    result.offsets->insert(right->offsets->begin(), right->offsets->end());
+                    if (result.offsets->size() > kMaxFiniteValues) result.offsets.reset();
+                }
+                return result;
+            }
+            return std::nullopt;
+        };
+        bool addresses_changed = true;
+        for (int iteration = 0; iteration < 16 && addresses_changed; ++iteration) {
+            addresses_changed = false;
+            for (const Instruction& instruction : entry->instructions) {
+                const auto destinations = destination_registers(instruction);
+                const auto address = instruction_address(instruction);
+                if (destinations.size() != 1 || !address ||
+                    !is_64_bit_register(destinations.front())) {
+                    continue;
+                }
+                const auto found = local_addresses.find(destinations.front());
+                if (found == local_addresses.end()) {
+                    local_addresses.emplace(destinations.front(), *address);
+                    addresses_changed = true;
+                    continue;
+                }
+                if (!same_subobject(found->second, *address)) continue;
+                if (!found->second.offsets || !address->offsets) {
+                    if (found->second.offsets) {
+                        found->second.offsets.reset();
+                        addresses_changed = true;
+                    }
+                    continue;
+                }
+                const std::size_t before = found->second.offsets->size();
+                found->second.offsets->insert(
+                    address->offsets->begin(), address->offsets->end());
+                if (found->second.offsets->size() > kMaxFiniteValues) {
+                    found->second.offsets.reset();
+                }
+                addresses_changed |= !found->second.offsets ||
+                    found->second.offsets->size() != before;
+            }
+        }
+        // Reject address identities with conflicting or unsupported reused
+        // definitions, then transitively prune anything that depends on them.
+        bool addresses_pruned = true;
+        for (int iteration = 0; iteration < 16 && addresses_pruned; ++iteration) {
+            addresses_pruned = false;
+            for (auto known = local_addresses.begin(); known != local_addresses.end();) {
+                bool valid = true;
+                const auto definitions = register_definitions.find(known->first);
+                if (definitions == register_definitions.end()) valid = false;
+                if (valid) for (const Instruction* instruction : definitions->second) {
+                    if (destination_registers(*instruction).size() != 1) {
+                        valid = false;
+                        break;
+                    }
+                    const auto address = instruction_address(*instruction);
+                    if (!address || !same_subobject(known->second, *address)) {
+                        valid = false;
+                        break;
+                    }
+                }
+                if (!valid) {
+                    known = local_addresses.erase(known);
+                    addresses_pruned = true;
+                } else {
+                    ++known;
+                }
+            }
+        }
+        struct LocalContent {
+            std::optional<Type> pointer_type;
+            bool ambiguous = false;
+        };
+        const auto subobject_key = [](const LocalAddress& address) {
+            return address.depot + ":" + std::to_string(address.base) +
+                (address.depot_root ? ":root" : ":object");
+        };
+        std::vector<const Instruction*> local_pointer_events;
+        std::unordered_set<std::string> local_stored_registers;
+        for (const Instruction& instruction : entry->instructions) {
+            const std::string root = root_opcode(instruction.opcode);
+            const bool local_load = root == "ld" &&
+                instruction.opcode.find(".local") != std::string::npos &&
+                ptx_scalar_type(instruction.opcode).bit_width == 64;
+            if (root == "call" || root == "st" || local_load) {
+                local_pointer_events.push_back(&instruction);
+            }
+            if (root == "st" && instruction.opcode.find(".local") != std::string::npos &&
+                instruction.operands.size() >= 2) {
+                for (const std::string& source : registers_in(instruction.operands[1])) {
+                    local_stored_registers.insert(source);
+                }
+            }
+        }
+        const auto local_pointer_load_types = [&]() {
+            std::unordered_map<std::string, LocalContent> register_contents;
+            for (const std::string& stored_register : local_stored_registers) {
+                LocalContent& content = register_contents[stored_register];
+                const auto definitions = register_definitions.find(stored_register);
+                if (definitions == register_definitions.end()) {
+                    content.ambiguous = true;
+                    continue;
+                }
+                for (const Instruction* definition : definitions->second) {
+                    const auto destinations = destination_registers(*definition);
+                    const auto destination = std::find(
+                        destinations.begin(), destinations.end(), stored_register);
+                    const auto types = definition_types.find(definition);
+                    const std::size_t index = static_cast<std::size_t>(
+                        std::distance(destinations.begin(), destination));
+                    if (destination == destinations.end() || types == definition_types.end() ||
+                        index >= types->second.size() || !types->second[index].is_pointer() ||
+                        types->second[index].address_space == AddressSpace::kNone) {
+                        content.ambiguous = true;
+                        continue;
+                    }
+                    const Type normalized = Type::pointer(
+                        Type::integer(8), types->second[index].address_space);
+                    if (content.pointer_type &&
+                        !(content.pointer_type.value() == normalized)) {
+                        content.ambiguous = true;
+                    } else {
+                        content.pointer_type = normalized;
+                    }
+                }
+            }
+            const auto stored_type = [&](std::string_view operand) {
+                const auto known = register_contents.find(first_register(operand));
+                if (known != register_contents.end() && !known->second.ambiguous &&
+                    known->second.pointer_type) {
+                    return *known->second.pointer_type;
+                }
+                const std::string symbol = parameter_name_from_operand(operand);
+                if (local_depots.contains(symbol)) {
+                    return Type::pointer(Type::integer(8), AddressSpace::kPrivate);
+                }
+                return Type::integer(64);
+            };
+            const auto merge_content = [](LocalContent* content, const Type& type) {
+                if (!type.is_pointer() || type.address_space == AddressSpace::kNone) {
+                    content->ambiguous = true;
+                    return;
+                }
+                const Type normalized = Type::pointer(Type::integer(8), type.address_space);
+                if (content->pointer_type && !(content->pointer_type.value() == normalized)) {
+                    content->ambiguous = true;
+                } else {
+                    content->pointer_type = normalized;
+                }
+            };
+
+            std::unordered_map<std::string, LocalContent> homogeneous;
+            std::unordered_map<std::string, std::map<std::int64_t, LocalContent>> cells;
+            std::unordered_set<std::string> escaped;
+            std::unordered_map<const Instruction*, Type> loads;
+            for (const Instruction* event : local_pointer_events) {
+                const Instruction& instruction = *event;
+                const std::string root = root_opcode(instruction.opcode);
+                if (root == "call") {
+                    for (const std::string& source : source_registers(instruction)) {
+                        const auto address = local_addresses.find(source);
+                        if (address == local_addresses.end()) continue;
+                        const std::string key = subobject_key(address->second);
+                        homogeneous[key].ambiguous = true;
+                        cells[key].clear();
+                    }
+                    continue;
+                }
+                if (root == "st" && instruction.opcode.find(".local") == std::string::npos &&
+                    instruction.operands.size() >= 2) {
+                    for (const std::string& source : registers_in(instruction.operands[1])) {
+                        const auto address = local_addresses.find(source);
+                        if (address == local_addresses.end()) continue;
+                        const std::string key = subobject_key(address->second);
+                        escaped.insert(key);
+                        homogeneous[key].ambiguous = true;
+                        cells[key].clear();
+                    }
+                }
+                if (root == "st" && instruction.opcode.find(".local") != std::string::npos &&
+                    instruction.operands.size() >= 2) {
+                    const auto address = operand_address(instruction.operands[0]);
+                    if (!address) continue;
+                    const std::string key = subobject_key(*address);
+                    std::vector<std::string> values;
+                    const std::size_t lanes = memory_vector_width(instruction.opcode);
+                    if (lanes == 1) {
+                        values.push_back(instruction.operands[1]);
+                    } else {
+                        std::string tuple = trim(instruction.operands[1]);
+                        if (tuple.size() >= 2 && tuple.front() == '{' && tuple.back() == '}') {
+                            values = grouped_names(
+                                std::string_view(tuple).substr(1, tuple.size() - 2));
+                        }
+                    }
+                    if (values.size() != lanes) {
+                        homogeneous[key].ambiguous = true;
+                        cells[key].clear();
+                        continue;
+                    }
+                    for (const std::string& value : values) {
+                        merge_content(&homogeneous[key], stored_type(value));
+                    }
+                    if (!address->offsets || !instruction.predicate.empty()) {
+                        cells[key].clear();
+                        continue;
+                    }
+                    const std::int64_t static_offset =
+                        memory_operand_offset(instruction.operands[0]);
+                    const std::int64_t bytes =
+                        static_cast<std::int64_t>(ptx_scalar_type(instruction.opcode).bit_width / 8);
+                    for (const std::int64_t dynamic_offset : *address->offsets) {
+                        for (std::size_t lane = 0; lane < lanes; ++lane) {
+                            const std::int64_t start = dynamic_offset + static_offset +
+                                static_cast<std::int64_t>(lane) * bytes;
+                            auto& known_cells = cells[key];
+                            for (auto cell = known_cells.begin(); cell != known_cells.end();) {
+                                if (cell->first < start + bytes && start < cell->first + 8) {
+                                    cell = known_cells.erase(cell);
+                                } else {
+                                    ++cell;
+                                }
+                            }
+                            const Type type = stored_type(values[lane]);
+                            if (bytes == 8 && type.is_pointer() &&
+                                type.address_space != AddressSpace::kNone) {
+                                LocalContent content;
+                                merge_content(&content, type);
+                                known_cells[start] = content;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if (root != "ld" || instruction.opcode.find(".local") == std::string::npos ||
+                    instruction.operands.size() < 2 ||
+                    ptx_scalar_type(instruction.opcode).bit_width != 64) {
+                    continue;
+                }
+                const auto address = operand_address(instruction.operands[1]);
+                if (!address) continue;
+                const std::string key = subobject_key(*address);
+                if (escaped.contains(key)) continue;
+                std::optional<Type> loaded_type;
+                bool exact = address->offsets.has_value();
+                if (exact) {
+                    const std::int64_t static_offset =
+                        memory_operand_offset(instruction.operands[1]);
+                    const std::size_t lanes = memory_vector_width(instruction.opcode);
+                    for (const std::int64_t dynamic_offset : *address->offsets) {
+                        for (std::size_t lane = 0; lane < lanes; ++lane) {
+                            const std::int64_t offset = dynamic_offset + static_offset +
+                                static_cast<std::int64_t>(lane) * 8;
+                            const auto cell = cells[key].find(offset);
+                            if (cell == cells[key].end() || cell->second.ambiguous ||
+                                !cell->second.pointer_type ||
+                                (loaded_type && !(loaded_type.value() ==
+                                                  cell->second.pointer_type.value()))) {
+                                exact = false;
+                                break;
+                            }
+                            loaded_type = cell->second.pointer_type;
+                        }
+                        if (!exact) break;
+                    }
+                }
+                if (!exact) {
+                    const auto summary = homogeneous.find(key);
+                    if (summary == homogeneous.end() || summary->second.ambiguous ||
+                        !summary->second.pointer_type) {
+                        continue;
+                    }
+                    loaded_type = summary->second.pointer_type;
+                }
+                if (loaded_type) loads.emplace(&instruction, *loaded_type);
+            }
+            return loads;
+        };
+
         // A CUDA kernel pointer parameter is a launch-time device pointer, but
         // an ordinary device function receives a CUDA generic pointer. Clang
         // 21-23 commonly drops `.ptr` entirely from the latter's PTX signature,
@@ -1157,6 +1665,7 @@ struct Importer {
         bool changed = true;
         for (int iteration = 0; iteration < 12 && changed; ++iteration) {
             changed = false;
+            const auto loaded_pointer_types = local_pointer_load_types();
             for (const Instruction& instruction : entry->instructions) {
                 const std::vector<std::string> destinations = destination_registers(instruction);
                 if (destinations.empty()) continue;
@@ -1164,6 +1673,9 @@ struct Importer {
                 const std::string root = root_opcode(instruction.opcode);
                 if (root == "setp") {
                     inferred = Type::predicate();
+                } else if (const auto loaded = loaded_pointer_types.find(&instruction);
+                           loaded != loaded_pointer_types.end()) {
+                    inferred = loaded->second;
                 } else if (starts_with(instruction.opcode, "ld.") &&
                            has_signed_integer_type(instruction.opcode) &&
                            !destinations.empty()) {

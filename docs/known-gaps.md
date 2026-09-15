@@ -135,6 +135,13 @@ calls a helper; irreducible entries lose proof. It preserves the computations an
 memory operations, and does not fold in-place updates, recursive
 expressions, signed comparisons, or floating arithmetic. Full
 RSA-PSS and P-256 signature compilation still encounter other guarded-SSA cases.
+Pointer values stored in local-memory tables retain their address space when
+loaded for indirect access, including scalar/vector stores and loads with
+bounded dynamic indexing. Literal offsets distinguish pointer subtables inside
+a larger compiler stack depot, and exact 64-bit cells may be proven even when
+other fields in that subobject are integers. Homogeneous tables also support an
+unknown dynamic index. Mixed pointer address spaces, ambiguous cells, escaped
+subobjects, and unbounded mixed tables remain rejected.
 
 IR verification computes immediate dominators and queries their tree intervals
 instead of storing a hash set of dominators per block. Storage is linear in CFG
