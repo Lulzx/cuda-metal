@@ -1849,6 +1849,40 @@ ret;
                  "typed PTX pointer literals retain address bits while scalar literals stay integers");
     if (!pointer_literal_select.ok) std::cerr << pointer_literal_select.error << "\n";
 
+    const std::string out_of_order_parameter_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry out_of_order_parameter(
+    .param .u64 input, .param .u64 output, .param .u32 count) {
+    .reg .pred %p<3>;
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<5>;
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r1, [count];
+    setp.eq.u32 %p1, %r1, 0;
+    @%p1 bra TRAP;
+    bra LOAD_PARAMETER;
+READ:
+    add.u64 %rd3, %rd2, 8;
+    ld.global.u64 %rd4, [%rd3];
+    st.global.u64 [%rd1], %rd4;
+    ret;
+TRAP:
+    trap;
+LOAD_PARAMETER:
+    ld.param.u64 %rd2, [input];
+    bra READ;
+}
+)ptx";
+    const metal::PtxToMslResult out_of_order_parameter =
+        metal::compile_ptx_to_msl(out_of_order_parameter_ptx);
+    ok &= expect(out_of_order_parameter.ok &&
+                     out_of_order_parameter.source.find("input + 8") !=
+                         std::string::npos,
+                 "dispatcher binds CFG-dominating parameters before source-ordered block emission");
+    if (!out_of_order_parameter.ok) std::cerr << out_of_order_parameter.error << "\n";
+
     const std::string signed_narrow_load_ptx = R"ptx(
 .version 8.0
 .target sm_80

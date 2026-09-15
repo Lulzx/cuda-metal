@@ -94,6 +94,11 @@ type is emitted with its exact 64-bit address and Metal address-space qualifier.
 This covers nonzero dangling pointers selected inside one instruction; it does
 not infer pointers from integer width, accept nonzero scalar/pointer block
 arguments, or resolve conflicting address spaces.
+Kernel-parameter values are bound before source-ordered dispatcher cases are
+emitted. This permits a parameter load in a textually later block to serve a use
+that it dominates in the CFG. Existing SSA validation still rejects paths that
+bypass the load; this does not hoist ordinary instructions or repair undefined
+registers.
 Bounded guard specialization also follows literal predicate flags through
 incoming branches and fallthroughs, including inversion. Predicate liveness
 removes facts after their final possible use, so dead constants do not exhaust

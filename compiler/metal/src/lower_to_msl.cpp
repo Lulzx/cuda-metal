@@ -1827,6 +1827,14 @@ struct AstLowerer {
         return MslStatement::variable(type, value_name(value), std::move(initializer), true);
     }
 
+    bool bind_parameter(const ir::Operation& operation) {
+        if (operation.results.size() != 1 || operation.operands.size() != 1) {
+            return fail(&operation, "malformed parameter operation");
+        }
+        values[operation.results.front()] = expression_for(operation.operands.front());
+        return true;
+    }
+
     std::optional<MslStmt> lower_operation(const ir::Operation& operation) {
         if (operation.opcode == ir::OpCode::kReturn ||
             operation.opcode == ir::OpCode::kBranch ||
@@ -1839,11 +1847,7 @@ struct AstLowerer {
         }
 
         if (operation.opcode == ir::OpCode::kParameter) {
-            if (operation.results.size() != 1 || operation.operands.size() != 1) {
-                fail(&operation, "malformed parameter operation");
-                return std::nullopt;
-            }
-            values[operation.results.front()] = expression_for(operation.operands.front());
+            bind_parameter(operation);
             return std::nullopt;
         }
 
@@ -5578,6 +5582,17 @@ struct AstLowerer {
             }
         }
         predeclared_ssa_storage = true;
+        // A parameter load can dominate a use in a block that appears earlier
+        // in PTX source order. Dispatcher cases are emitted in that source
+        // order, so bind immutable kernel arguments before lowering any case.
+        for (const ir::BasicBlock& block : function.blocks) {
+            for (const ir::Operation& operation : block.operations) {
+                if (operation.opcode == ir::OpCode::kParameter &&
+                    !bind_parameter(operation)) {
+                    return result;
+                }
+            }
+        }
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::Operation& operation : block.operations) {
                 if (operation.opcode == ir::OpCode::kParameter) continue;
