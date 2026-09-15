@@ -426,17 +426,164 @@ struct PointerLoadRewrite {
     std::string target;
 };
 
+// Passing a table address is allowed only when every use of that helper
+// parameter is a read or a forwarding call with the same proven property.
+class ReadOnlyTableCalls {
+public:
+    explicit ReadOnlyTableCalls(const cumetal::ptx::ModuleInfo& module) : module_(module) {}
+
+    bool forwards_to_reader(const cumetal::ptx::EntryFunction& caller, std::size_t index) {
+        const auto& store = caller.instructions[index];
+        if ((store.opcode != "st.param.u64" && store.opcode != "st.param.b64") ||
+            !store.predicate.empty() || store.operands.size() != 2) return false;
+        const auto slot = parameter_name_from_operand(store.operands[0]);
+        if (slot.empty() || !registers_in(slot).empty() ||
+            trim(store.operands[0]) != "[" + slot + "]") return false;
+        if (!only_staged_uses(caller, slot)) return false;
+        // Bind this store to one straight-line call site, not every later
+        // call that happens to reuse the same parameter-slot spelling.
+        for (std::size_t i = index + 1; i < caller.instructions.size() && i <= index + 64; ++i) {
+            const auto& instruction = caller.instructions[i];
+            if (instruction.opcode == "ptx.label" || is_terminating_instruction(instruction)) return false;
+            if (root_opcode(instruction.opcode) == "call") {
+                const auto name = direct_call_target(instruction);
+                if (!name || !instruction.predicate.empty()) return false;
+                const auto callee = std::find_if(module_.functions.begin(), module_.functions.end(),
+                    [&](const auto& function) { return function.name == *name; });
+                if (callee == module_.functions.end()) return false;
+                const auto arguments = grouped_names(instruction.operands.back());
+                if (arguments.size() != callee->params.size()) return false;
+                bool consumed = false;
+                for (std::size_t p = 0; p < arguments.size(); ++p) {
+                    if (arguments[p] != slot) continue;
+                    consumed = true;
+                    if (!parameter_is_read_only(*callee, p)) return false;
+                }
+                return consumed;
+            }
+            for (const auto& operand : instruction.operands) {
+                std::unordered_set<std::string> symbols;
+                collect_operand_symbols(operand, &symbols);
+                if (symbols.contains(slot)) return false;
+            }
+        }
+        return false;
+    }
+
+private:
+    bool only_staged_uses(const cumetal::ptx::EntryFunction& function, const std::string& slot) {
+        const std::string key = function.name + "#" + slot;
+        if (const auto known = staging_.find(key); known != staging_.end()) return known->second;
+        // Input/return parameters are observable beyond a local call's staging.
+        for (const auto& parameter : function.params) if (parameter.name == slot) return false;
+        for (const auto& parameter : function.return_params) if (parameter.name == slot) return false;
+        const auto exact_store = [&](const Instruction& instruction) {
+            return (instruction.opcode == "st.param.u64" || instruction.opcode == "st.param.b64") &&
+                instruction.predicate.empty() && instruction.operands.size() == 2 &&
+                trim(instruction.operands[0]) == "[" + slot + "]";
+        };
+        for (std::size_t i = 0; i < function.instructions.size(); ++i) {
+            if (++instructions_ > 4194304) return false;
+            const auto& instruction = function.instructions[i];
+            bool used = false;
+            for (const auto& operand : instruction.operands) {
+                std::unordered_set<std::string> symbols;
+                collect_operand_symbols(operand, &symbols);
+                used |= symbols.contains(slot);
+            }
+            if (!used || exact_store(instruction)) continue;
+            if (!direct_call_target(instruction) || !instruction.predicate.empty())
+                return staging_[key] = false;
+            if (instruction.operands.size() == 3)
+                for (const auto& result : grouped_names(instruction.operands[0]))
+                    if (result == slot) return staging_[key] = false;
+            const auto arguments = grouped_names(instruction.operands.back());
+            if (std::find(arguments.begin(), arguments.end(), slot) == arguments.end())
+                return staging_[key] = false;
+            bool defined = false;
+            for (std::size_t j = i; j > 0 && i - j < 64;) {
+                const auto& before = function.instructions[--j];
+                if (exact_store(before)) { defined = true; break; }
+                if (before.opcode == "ptx.label" || is_terminating_instruction(before) ||
+                    root_opcode(before.opcode) == "call") break;
+            }
+            if (!defined) return staging_[key] = false;
+        }
+        return staging_[key] = true;
+    }
+
+    bool parameter_is_read_only(const cumetal::ptx::EntryFunction& function, std::size_t parameter) {
+        const auto& input = function.params[parameter];
+        if ((input.type != ".u64" && input.type != ".b64") || input.byte_size != 8) return false;
+        const std::string key = function.name + "#" + std::to_string(parameter);
+        if (const auto result = proven_.find(key); result != proven_.end()) return result->second;
+        if (active_.contains(key) || active_.size() >= 32 || proven_.size() >= 512) return false;
+        active_.insert(key);
+        const bool safe = inspect_parameter(function, input.name);
+        active_.erase(key);
+        proven_[key] = safe;
+        return safe;
+    }
+
+    bool inspect_parameter(const cumetal::ptx::EntryFunction& function, const std::string& parameter) {
+        std::unordered_set<std::string> addresses;
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (std::size_t i = 0; i < function.instructions.size(); ++i) {
+                if (++instructions_ > 4194304) return false;
+                const auto& instruction = function.instructions[i];
+                bool reads_parameter = false;
+                for (const auto& operand : instruction.operands) {
+                    std::unordered_set<std::string> symbols;
+                    collect_operand_symbols(operand, &symbols);
+                    reads_parameter |= symbols.contains(parameter);
+                }
+                const bool input_load = reads_parameter && instruction.operands.size() == 2 &&
+                    (instruction.opcode == "ld.param.u64" || instruction.opcode == "ld.param.b64") &&
+                    trim(instruction.operands[1]) == "[" + parameter + "]";
+                if (reads_parameter && !input_load) return false;
+                bool address_use = false;
+                for (const auto& source : source_registers(instruction))
+                    address_use |= addresses.contains(source);
+                const auto root = root_opcode(instruction.opcode);
+                // Opaque operations need all operands checked: e.g. `red`
+                // writes its first operand rather than defining a register.
+                if (root != "ld" && root != "mov" && root != "add" && root != "sub" &&
+                    root != "mad" && root != "cvta" && root != "selp")
+                    for (const auto& operand : instruction.operands)
+                        for (const auto& reg : registers_in(operand))
+                            address_use |= addresses.contains(reg);
+                if (address_use && root != "ld" && root != "mov" && root != "add" &&
+                    root != "sub" && root != "mad" && root != "cvta" && root != "selp" &&
+                    !forwards_to_reader(function, i)) return false;
+                if (input_load || (address_use && root != "ld"))
+                    for (const auto& destination : destination_registers(instruction))
+                        changed |= addresses.insert(destination).second;
+            }
+        }
+        return true;
+    }
+
+    const cumetal::ptx::ModuleInfo& module_;
+    std::unordered_map<std::string, bool> proven_;
+    std::unordered_map<std::string, bool> staging_;
+    std::unordered_set<std::string> active_;
+    std::size_t instructions_ = 0;
+};
+
 bool plan_table_reads(cumetal::ptx::EntryFunction& function,
                       const InitializedByteArray& alias, const InitializedByteArray& target,
-                      std::vector<PointerLoadRewrite>* rewrites, std::string* error) {
+                      ReadOnlyTableCalls& calls, std::vector<PointerLoadRewrite>* rewrites, std::string* error) {
     // Conservative register dataflow across the whole function (including
     // loop backedges). A table address may only feed address arithmetic
-    // and reads; storing/passing it would defeat the read-only proof.
+    // and reads, or scalar argument staging for a proven read-only helper.
     std::unordered_set<std::string> table_addresses;
     bool changed = true;
     while (changed) {
         changed = false;
-        for (const auto& instruction : function.instructions) {
+        for (std::size_t i = 0; i < function.instructions.size(); ++i) {
+            const auto& instruction = function.instructions[i];
             bool address_use = false;
             bool alias_load = false;
             for (const auto& operand : instruction.operands) {
@@ -449,9 +596,14 @@ bool plan_table_reads(cumetal::ptx::EntryFunction& function,
                 address_use |= table_addresses.contains(source);
             }
             const std::string root = root_opcode(instruction.opcode);
+            if (root != "ld" && root != "mov" && root != "add" && root != "sub" &&
+                root != "mad" && root != "cvta" && root != "selp")
+                for (const auto& operand : instruction.operands)
+                    for (const auto& reg : registers_in(operand))
+                        address_use |= table_addresses.contains(reg);
             if (address_use && root != "ld" && root != "mov" &&
                 root != "add" && root != "sub" && root != "mad" &&
-                root != "cvta" && root != "selp") {
+                root != "cvta" && root != "selp" && !calls.forwards_to_reader(function, i)) {
                 *error = "PTX relocated table address may escape or be written: " + target.name;
                 return false;
             }
@@ -494,6 +646,7 @@ bool resolve_immutable_table_pointers(cumetal::ptx::ModuleInfo& module,
     // Validate all uses before changing any instruction. A rejected relocation
     // leaves the parsed module untouched, including other kernels and helpers.
     std::vector<PointerLoadRewrite> rewrites;
+    ReadOnlyTableCalls calls(module);
     for (const auto& alias : initialized_arrays.arrays) {
         if (alias.pointer_target.empty()) continue;
         if (alias.bytes.size() != 8 || alias.alignment < 8 ||
@@ -522,8 +675,8 @@ bool resolve_immutable_table_pointers(cumetal::ptx::ModuleInfo& module,
                 return false;
             }
         }
-        for (auto& function : module.entries) if (!plan_table_reads(function, alias, *target, &rewrites, error)) return false;
-        for (auto& function : module.functions) if (!plan_table_reads(function, alias, *target, &rewrites, error)) return false;
+        for (auto& function : module.entries) if (!plan_table_reads(function, alias, *target, calls, &rewrites, error)) return false;
+        for (auto& function : module.functions) if (!plan_table_reads(function, alias, *target, calls, &rewrites, error)) return false;
     }
     for (const auto& rewrite : rewrites) {
         rewrite.instruction->opcode = "mov.u64";

@@ -99,3 +99,7 @@ After incoming-register validation, trivial block arguments with one distinct,
 type-identical input are folded, including loop self-references. Differing
 definitions remain block arguments. This is not general loop optimization or
 elimination of mutually dependent groups of block arguments.
+Relocated immutable table pointers may pass through direct device helper
+parameters when a bounded read-only proof covers every use, including forwarding
+chains. Writes, pointer escapes, unknown/recursive calls, and ambiguous argument
+staging still reject. This does not provide mutable global relocation support.

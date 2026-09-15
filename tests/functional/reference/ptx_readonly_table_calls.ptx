@@ -1,0 +1,46 @@
+.version 7.1
+.target sm_80
+.address_size 64
+.global .align 4 .b8 table[16] = {42,0,0,0,17,0,0,0,99,0,0,0,5,0,0,0};
+.global .align 8 .u64 alias[1] = {table};
+.func (.param .u32 result) read_table(.param .u64 address, .param .u32 index) {
+.reg .b64 %rd<4>;
+.reg .b32 %r<3>;
+ld.param.u64 %rd1, [address];
+ld.param.u32 %r1, [index];
+mul.wide.u32 %rd2, %r1, 4;
+add.u64 %rd3, %rd1, %rd2;
+ld.global.u32 %r2, [%rd3];
+st.param.u32 [result], %r2;
+ret;
+}
+.visible .entry table_probe(.param .u64 input, .param .u64 output, .param .u32 count) {
+.reg .b64 %rd<6>;
+.reg .b32 %r<8>;
+.reg .pred %p1;
+.param .u64 argument;
+.param .u32 index;
+.param .u32 result;
+ld.param.u64 %rd0, [input];
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r0, [count];
+mov.u32 %r3, %ctaid.x;
+mov.u32 %r4, %ntid.x;
+mov.u32 %r5, %tid.x;
+mad.lo.u32 %r3, %r3, %r4, %r5;
+setp.ge.u32 %p1, %r3, %r0;
+@%p1 bra DONE;
+mul.wide.u32 %rd2, %r3, 4;
+add.u64 %rd3, %rd0, %rd2;
+add.u64 %rd4, %rd1, %rd2;
+ld.global.u32 %r1, [%rd3];
+and.b32 %r1, %r1, 3;
+ld.global.u64 %rd5, [alias];
+st.param.u64 [argument], %rd5;
+st.param.u32 [index], %r1;
+call.uni (result), read_table, (argument, index);
+ld.param.u32 %r2, [result];
+st.global.u32 [%rd4], %r2;
+DONE:
+ret;
+}
