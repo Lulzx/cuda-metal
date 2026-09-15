@@ -1776,6 +1776,21 @@ struct AstLowerer {
             return MslExpression::identifier(operand.text, lower_type(operand.type));
         }
         std::string spelling = operand.text == "null" ? "nullptr" : operand.text;
+        if (operand.type.is_pointer()) {
+            const MslType pointer_type = lower_type(operand.type);
+            if (spelling == "nullptr") {
+                return MslExpression::literal("nullptr", pointer_type);
+            }
+            // PTX pointer values occupy 64-bit registers, and Rust uses
+            // nonzero dangling addresses for empty slices. The IR has already
+            // established the pointer type and concrete address space; carry
+            // those exact address bits into Metal instead of printing an
+            // untyped C++ integer in a pointer expression.
+            const MslExpr address = MslExpression::cast(
+                MslType::uint(64),
+                MslExpression::literal(std::move(spelling), MslType::uint(64)));
+            return MslExpression::cast(pointer_type, address, true);
+        }
         if (operand.type.kind == ir::TypeKind::kFloat &&
             operand.type.bit_width == 64 && spelling.starts_with("0d")) {
             spelling = "0x" + spelling.substr(2) + "ul";

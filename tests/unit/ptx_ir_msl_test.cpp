@@ -1818,6 +1818,37 @@ ret;
                  "typed PTX propagates device pointers through selp and pointer arithmetic");
     if (!pointer_select.ok) std::cerr << pointer_select.error << "\n";
 
+    const std::string pointer_literal_select_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry pointer_literal_select(
+    .param .u64 input, .param .u64 output, .param .u32 choose_literal) {
+    .reg .pred %p<3>;
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<6>;
+    ld.param.u64 %rd1, [input];
+    ld.param.u64 %rd2, [output];
+    ld.param.u32 %r1, [choose_literal];
+    setp.ne.u32 %p1, %r1, 0;
+    selp.b64 %rd3, 1, %rd1, %p1;
+    ld.global.u64 %rd5, [%rd3];
+    selp.u64 %rd4, 2, 3, %p1;
+    st.global.u64 [%rd2], %rd4;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult pointer_literal_select =
+        metal::compile_ptx_to_msl(pointer_literal_select_ptx);
+    ok &= expect(pointer_literal_select.ok &&
+                     pointer_literal_select.source.find(
+                         "reinterpret_cast<device cm_alias_uchar*>(ulong(1))") !=
+                         std::string::npos &&
+                     pointer_literal_select.source.find("? 2 : 3") !=
+                         std::string::npos,
+                 "typed PTX pointer literals retain address bits while scalar literals stay integers");
+    if (!pointer_literal_select.ok) std::cerr << pointer_literal_select.error << "\n";
+
     const std::string signed_narrow_load_ptx = R"ptx(
 .version 8.0
 .target sm_80

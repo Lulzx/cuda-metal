@@ -89,6 +89,11 @@ Literal-zero integer definitions passed to pointer block arguments are
 materialized as typed nulls at the receiving edge. Nonzero integer inputs
 to pointer block arguments are rejected; this does not provide general
 integer-to-pointer conversion or repair unrelated scalar-offset joins.
+An immediate that the typed importer has already assigned a concrete pointer
+type is emitted with its exact 64-bit address and Metal address-space qualifier.
+This covers nonzero dangling pointers selected inside one instruction; it does
+not infer pointers from integer width, accept nonzero scalar/pointer block
+arguments, or resolve conflicting address spaces.
 Bounded guard specialization also follows literal predicate flags through
 incoming branches and fallthroughs, including inversion. Predicate liveness
 removes facts after their final possible use, so dead constants do not exhaust
