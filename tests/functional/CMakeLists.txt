@@ -2910,6 +2910,10 @@ if(APPLE)
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_deep_guarded_payload.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_deep_guarded_payload PROPERTIES TIMEOUT 120)
 
+    add_test(NAME functional_ptx_masked_optional_payload
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_masked_optional_payload.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_masked_optional_payload PROPERTIES TIMEOUT 240)
+
     add_test(NAME functional_ptx_null_edges
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_null_edges.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_null_edges PROPERTIES TIMEOUT 120)

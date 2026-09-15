@@ -356,6 +356,12 @@ struct GuardedPaths {
             if ((a && *a) || (b && *b)) return true;
             if (a && b) return false;
         }
+        if (instruction.operands.size() == 3 && instruction.opcode == "and.pred") {
+            auto a = lookup(instruction.operands[1]);
+            auto b = lookup(instruction.operands[2]);
+            if ((a && !*a) || (b && !*b)) return false;
+            if (a && b) return true;
+        }
         return std::nullopt;
     }
 
@@ -495,6 +501,408 @@ struct GuardedPaths {
             }
         }
         return entries;
+    }
+
+    // Generated Option equality first computes an otherwise undefined payload,
+    // then absorbs its comparison with a false presence predicate. Retain the
+    // alternatives explicitly until the predicate is no longer live.
+    enum class MaskState : unsigned char { Unknown, False, True };
+
+    static unsigned state_bit(MaskState state) {
+        return 1u << static_cast<unsigned>(state);
+    }
+
+    MaskState transfer_mask(const RawBlock& block, const std::string& mask,
+                            MaskState state) const {
+        for (const auto* instruction : block.instructions) {
+            if (root_opcode(instruction->opcode) == "call" && state != MaskState::Unknown) {
+                std::map<std::string, bool> facts{{mask, state == MaskState::True}};
+                invalidate_call(*instruction, facts);
+                if (!facts.contains(mask)) state = MaskState::Unknown;
+            }
+            const auto written = destination_registers(*instruction);
+            if (std::find(written.begin(), written.end(), mask) == written.end()) continue;
+            std::map<std::string, bool> known;
+            if (state != MaskState::Unknown) known[mask] = state == MaskState::True;
+            const auto value = predicate_value(*instruction, known);
+            state = value ? (*value ? MaskState::True : MaskState::False)
+                          : MaskState::Unknown;
+        }
+        return state;
+    }
+
+    std::optional<MaskState> transfer_mask_edge(const RawBlock& block,
+                                                const std::string& mask,
+                                                MaskState state,
+                                                std::size_t edge) const {
+        state = transfer_mask(block, mask, state);
+        if (block.instructions.empty() || block.successors.size() != 2) return state;
+        const auto* tail = block.instructions.back();
+        if (root_opcode(tail->opcode) != "bra" || tail->predicate.empty()) return state;
+        const auto [predicate, inverted] = normalized_predicate(tail->predicate);
+        if (predicate != mask) return state;
+        const bool edge_value = (edge == 0) != inverted;
+        if (state != MaskState::Unknown && (state == MaskState::True) != edge_value)
+            return std::nullopt;
+        return edge_value ? MaskState::True : MaskState::False;
+    }
+
+    std::optional<std::vector<bool>> mask_liveness(const std::string& mask) const {
+        std::vector<bool> uses(raw_blocks.size(), false);
+        std::vector<bool> definitions(raw_blocks.size(), false);
+        std::size_t budget = 16777216;
+        for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+            bool defined = false;
+            for (const auto* instruction : raw_blocks[b].instructions) {
+                if (budget == 0) return std::nullopt;
+                --budget;
+                const auto sources = source_registers(*instruction);
+                if (!defined && std::find(sources.begin(), sources.end(), mask) != sources.end())
+                    uses[b] = true;
+                const auto written = destination_registers(*instruction);
+                if (std::find(written.begin(), written.end(), mask) != written.end()) {
+                    definitions[b] = true;
+                    defined = true;
+                }
+            }
+        }
+        std::vector<bool> live_in(raw_blocks.size(), false);
+        std::deque<std::size_t> pending;
+        std::vector<bool> queued(raw_blocks.size(), true);
+        for (std::size_t b = raw_blocks.size(); b-- > 0;) pending.push_back(b);
+        while (!pending.empty()) {
+            if (budget == 0) return std::nullopt;
+            --budget;
+            const auto b = pending.front();
+            pending.pop_front();
+            queued[b] = false;
+            const bool live_out = std::any_of(
+                raw_blocks[b].successors.begin(), raw_blocks[b].successors.end(),
+                [&](std::size_t successor) { return live_in[successor]; });
+            const bool next = uses[b] || (live_out && !definitions[b]);
+            if (next == live_in[b]) continue;
+            live_in[b] = next;
+            for (const auto predecessor : raw_blocks[b].predecessors) {
+                if (!queued[predecessor]) {
+                    pending.push_back(predecessor);
+                    queued[predecessor] = true;
+                }
+            }
+        }
+        return live_in;
+    }
+
+    // This deliberately is not a general purity classifier. These are the
+    // exact register-only operations emitted by the observed comparison; every
+    // memory access, call, trap, synchronization, and unknown opcode is a root.
+    static bool removable_mask_operation(const Instruction& instruction) {
+        if (!instruction.predicate.empty()) return false;
+        if (destination_registers(instruction).size() != 1) return false;
+        if (instruction.opcode == "mov.pred" || instruction.opcode == "cvt.u16.u32")
+            return instruction.operands.size() == 2;
+        if (instruction.opcode == "and.pred" || instruction.opcode == "setp.eq.b16" ||
+            instruction.opcode == "setp.eq.u32" || instruction.opcode == "and.b16")
+            return instruction.operands.size() == 3;
+        return instruction.opcode == "prmt.b32" && instruction.operands.size() == 4;
+    }
+
+    void remove_dead_mask_operations(const std::unordered_set<std::size_t>& specialized) {
+        using Registers = std::unordered_set<std::string>;
+        Registers tracked;
+        for (const auto b : specialized)
+            for (const auto* instruction : raw_blocks[b].instructions)
+                if (removable_mask_operation(*instruction))
+                    for (const auto& reg : destination_registers(*instruction)) tracked.insert(reg);
+        if (tracked.empty()) return;
+        struct Access { Registers reads, writes; bool removable = false; };
+        std::vector<std::vector<Access>> accesses(raw_blocks.size());
+        for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+            for (const auto* instruction : raw_blocks[b].instructions) {
+                Access access;
+                access.removable = specialized.contains(b) &&
+                                   removable_mask_operation(*instruction);
+                for (const auto& reg : source_registers(*instruction))
+                    if (tracked.contains(reg)) access.reads.insert(reg);
+                for (const auto& reg : destination_registers(*instruction))
+                    if (tracked.contains(reg)) access.writes.insert(reg);
+                accesses[b].push_back(std::move(access));
+            }
+        }
+        std::vector<Registers> live_in(raw_blocks.size());
+        std::deque<std::size_t> pending;
+        std::vector<bool> queued(raw_blocks.size(), true);
+        for (std::size_t b = raw_blocks.size(); b-- > 0;) pending.push_back(b);
+        std::size_t budget = 16777216;
+        while (!pending.empty()) {
+            if (budget == 0) return;
+            --budget;
+            const auto b = pending.front();
+            pending.pop_front();
+            queued[b] = false;
+            Registers live;
+            for (const auto successor : raw_blocks[b].successors) {
+                if (live_in[successor].size() > budget) return;
+                budget -= live_in[successor].size();
+                live.insert(live_in[successor].begin(), live_in[successor].end());
+            }
+            for (std::size_t i = accesses[b].size(); i-- > 0;) {
+                const auto& access = accesses[b][i];
+                const bool dead = access.removable &&
+                    std::none_of(access.writes.begin(), access.writes.end(),
+                                 [&](const auto& reg) { return live.contains(reg); });
+                if (dead) continue;
+                for (const auto& reg : access.writes) live.erase(reg);
+                live.insert(access.reads.begin(), access.reads.end());
+            }
+            if (live == live_in[b]) continue;
+            live_in[b] = std::move(live);
+            for (const auto predecessor : raw_blocks[b].predecessors) {
+                if (!queued[predecessor]) {
+                    pending.push_back(predecessor);
+                    queued[predecessor] = true;
+                }
+            }
+        }
+        for (const auto b : specialized) {
+            Registers live;
+            for (const auto successor : raw_blocks[b].successors)
+                live.insert(live_in[successor].begin(), live_in[successor].end());
+            auto& instructions = raw_blocks[b].instructions;
+            for (std::size_t i = instructions.size(); i-- > 0;) {
+                const auto& access = accesses[b][i];
+                if (access.removable &&
+                    std::none_of(access.writes.begin(), access.writes.end(),
+                                 [&](const auto& reg) { return live.contains(reg); })) {
+                    instructions[i] = nullptr;
+                    continue;
+                }
+                for (const auto& reg : access.writes) live.erase(reg);
+                live.insert(access.reads.begin(), access.reads.end());
+            }
+            std::erase(instructions, nullptr);
+        }
+    }
+
+    // Split only blocks reached with both literal mask states. The existing
+    // blocks become the true version; copied instructions form the false
+    // version, where AND absorption can expose dead pure comparison work.
+    bool specialize_mask(const std::string& mask) {
+        if (raw_blocks.empty()) return false;
+        const auto liveness = mask_liveness(mask);
+        if (!liveness) return false;
+        const std::size_t original_count = raw_blocks.size();
+        std::vector<unsigned char> states(original_count, 0);
+        std::deque<std::pair<std::size_t, MaskState>> pending;
+        const auto enqueue = [&](std::size_t block, MaskState state) {
+            const auto bit = static_cast<unsigned char>(state_bit(state));
+            if (states[block] & bit) return;
+            states[block] |= bit;
+            pending.emplace_back(block, state);
+        };
+        enqueue(0, MaskState::Unknown);
+        std::size_t budget = 16777216;
+        while (!pending.empty()) {
+            const auto [block, state] = pending.front();
+            pending.pop_front();
+            if (raw_blocks[block].instructions.size() > budget) return false;
+            budget -= raw_blocks[block].instructions.size();
+            for (std::size_t edge = 0; edge < raw_blocks[block].successors.size(); ++edge) {
+                const auto outgoing = transfer_mask_edge(raw_blocks[block], mask, state, edge);
+                if (outgoing) enqueue(raw_blocks[block].successors[edge], *outgoing);
+            }
+        }
+
+        std::vector<bool> mixed(original_count, false);
+        std::size_t clone_instructions = 0;
+        for (std::size_t b = 0; b < original_count; ++b) {
+            if (!(*liveness)[b]) continue;
+            const bool unknown = states[b] & state_bit(MaskState::Unknown);
+            const bool absent = states[b] & state_bit(MaskState::False);
+            const bool present = states[b] & state_bit(MaskState::True);
+            if (unknown && (absent || present)) {
+                return false;
+            }
+            if (!absent || !present) continue;
+            mixed[b] = true;
+            clone_instructions += raw_blocks[b].instructions.size();
+        }
+        const auto mixed_count = std::count(mixed.begin(), mixed.end(), true);
+        if (mixed_count == 0 || cloned_blocks + mixed_count > 4096 ||
+            clone_instructions > 131072 - cloned_instructions) return false;
+
+        std::vector<std::vector<std::size_t>> original_successors;
+        original_successors.reserve(original_count);
+        for (std::size_t b = 0; b < original_count; ++b)
+            original_successors.push_back(raw_blocks[b].successors);
+
+        struct EdgePlan { bool reachable = false; bool false_version = false; };
+        std::vector<std::vector<EdgePlan>> plans(original_count);
+        for (std::size_t b = 0; b < original_count; ++b) {
+            plans[b].resize(original_successors[b].size());
+            const unsigned char inputs = mixed[b]
+                ? static_cast<unsigned char>(state_bit(MaskState::True)) : states[b];
+            for (std::size_t edge = 0; edge < original_successors[b].size(); ++edge) {
+                std::optional<bool> false_version;
+                for (const auto state : {MaskState::Unknown, MaskState::False, MaskState::True}) {
+                    if (!(inputs & state_bit(state))) continue;
+                    const auto outgoing = transfer_mask_edge(raw_blocks[b], mask, state, edge);
+                    if (!outgoing) continue;
+                    const auto target = original_successors[b][edge];
+                    if (mixed[target] && *outgoing == MaskState::Unknown) {
+                        return false;
+                    }
+                    const bool use_false = mixed[target] && *outgoing == MaskState::False;
+                    if (false_version && *false_version != use_false) {
+                        return false;
+                    }
+                    false_version = use_false;
+                }
+                if (false_version) plans[b][edge] = {true, *false_version};
+            }
+        }
+
+        std::vector<std::size_t> false_clones(original_count, raw_blocks.size());
+        std::unordered_set<std::size_t> specialized;
+        for (std::size_t b = 0; b < original_count; ++b) {
+            if (!mixed[b]) continue;
+            RawBlock clone;
+            clone.id = builder.next_block();
+            clone.name = raw_blocks[b].name + "_mask_false_" + std::to_string(raw_blocks.size());
+            for (const auto* instruction : raw_blocks[b].instructions) {
+                storage.push_back(*instruction);
+                clone.instructions.push_back(&storage.back());
+            }
+            clone.successors = raw_blocks[b].successors;
+            false_clones[b] = raw_blocks.size();
+            specialized.insert(raw_blocks.size());
+            raw_blocks.push_back(std::move(clone));
+        }
+        cloned_blocks += mixed_count;
+        cloned_instructions += clone_instructions;
+
+        const auto mapped = [&](std::size_t target, bool use_false) {
+            return use_false ? false_clones[target] : target;
+        };
+        for (std::size_t b = 0; b < original_count; ++b) {
+            if (states[b] == 0) continue;
+            std::vector<std::size_t> successors;
+            for (std::size_t edge = 0; edge < original_successors[b].size(); ++edge)
+                if (plans[b][edge].reachable)
+                    successors.push_back(mapped(original_successors[b][edge],
+                                                plans[b][edge].false_version));
+            raw_blocks[b].successors = std::move(successors);
+        }
+        for (std::size_t b = 0; b < original_count; ++b) {
+            if (!mixed[b]) continue;
+            auto& clone = raw_blocks[false_clones[b]];
+            auto source = raw_blocks[b];
+            source.successors = original_successors[b];
+            std::vector<std::size_t> successors;
+            for (std::size_t edge = 0; edge < original_successors[b].size(); ++edge) {
+                const auto outgoing = transfer_mask_edge(source, mask,
+                                                         MaskState::False, edge);
+                if (!outgoing) continue;
+                const auto target = original_successors[b][edge];
+                successors.push_back(mapped(target, mixed[target] &&
+                                                   *outgoing == MaskState::False));
+            }
+            clone.successors = std::move(successors);
+        }
+
+        for (const auto index : specialized) {
+            auto& block = raw_blocks[index];
+            std::map<std::string, bool> known{{mask, false}};
+            for (auto*& instruction : block.instructions) {
+                const auto written = destination_registers(*instruction);
+                const auto value = predicate_value(*instruction, known);
+                for (const auto& reg : written) known.erase(reg);
+                if (root_opcode(instruction->opcode) == "call")
+                    invalidate_call(*instruction, known);
+                if (!value || written.size() != 1) continue;
+                Instruction replacement = *instruction;
+                replacement.opcode = "mov.pred";
+                replacement.operands = {written[0], *value ? "1" : "0"};
+                replacement.predicate.clear();
+                storage.push_back(std::move(replacement));
+                instruction = &storage.back();
+                known[written[0]] = *value;
+            }
+            if (!block.successors.empty() && !block.instructions.empty()) {
+                const auto* tail = block.instructions.back();
+                if (root_opcode(tail->opcode) == "bra" && !tail->predicate.empty()) {
+                    const auto [predicate, inverted] = normalized_predicate(tail->predicate);
+                    const auto outcome = known.find(predicate);
+                    if (outcome != known.end()) {
+                        const auto successor = block.successors.size() == 1
+                            ? block.successors[0]
+                            : block.successors[(outcome->second != inverted) ? 0 : 1];
+                        Instruction branch = *tail;
+                        branch.predicate.clear();
+                        branch.operands = {raw_blocks[successor].name};
+                        storage.push_back(std::move(branch));
+                        block.instructions.back() = &storage.back();
+                        block.successors = {successor};
+                    }
+                }
+            }
+        }
+        for (auto& block : raw_blocks) block.predecessors.clear();
+        for (std::size_t b = 0; b < raw_blocks.size(); ++b)
+            for (const auto successor : raw_blocks[b].successors)
+                raw_blocks[successor].predecessors.push_back(b);
+        remove_dead_mask_operations(specialized);
+        return true;
+    }
+
+    // Limit candidates to predicates assigned both literals and consumed by an
+    // AND chain. A bounded transitive score prioritizes the large generated
+    // comparisons while the shared clone budgets limit cumulative growth.
+    void specialize_masked_predicates() {
+        std::map<std::string, unsigned> literal_writes;
+        std::unordered_map<std::string, std::vector<std::string>> absorbed_by;
+        for (const auto& block : raw_blocks) {
+            for (const auto* instruction : block.instructions) {
+                const auto written = destination_registers(*instruction);
+                if (instruction->opcode == "mov.pred" && instruction->predicate.empty() &&
+                    instruction->operands.size() == 2 && written.size() == 1) {
+                    const auto value = trim(instruction->operands[1]);
+                    if (value == "0") literal_writes[written[0]] |= 1;
+                    if (value == "1" || value == "-1") literal_writes[written[0]] |= 2;
+                }
+                if (instruction->opcode != "and.pred" || !instruction->predicate.empty() ||
+                    instruction->operands.size() != 3 || written.size() != 1) continue;
+                for (const std::size_t operand : {1u, 2u}) {
+                    const auto source = trim(instruction->operands[operand]);
+                    if (first_register(source) == source)
+                        absorbed_by[source].push_back(written[0]);
+                }
+            }
+        }
+        std::vector<std::pair<std::size_t, std::string>> candidates;
+        for (const auto& [mask, writes] : literal_writes) {
+            if (writes != 3 || !absorbed_by.contains(mask)) continue;
+            std::unordered_set<std::string> closure{mask};
+            std::deque<std::string> pending{mask};
+            while (!pending.empty()) {
+                const auto current = pending.front();
+                pending.pop_front();
+                const auto found = absorbed_by.find(current);
+                if (found == absorbed_by.end()) continue;
+                for (const auto& next : found->second)
+                    if (closure.insert(next).second) pending.push_back(next);
+                if (closure.size() > 1024) break;
+            }
+            if (closure.size() > 1024) continue;
+            candidates.emplace_back(closure.size(), mask);
+        }
+        std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+            if (a.first != b.first) return a.first > b.first;
+            return a.second < b.second;
+        });
+        for (const auto& [score, mask] : candidates) {
+            (void)score;
+            specialize_mask(mask);
+        }
     }
 
     // Duplicate only a bounded chain of successors whose branch is implied by
@@ -905,6 +1313,11 @@ void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
                             std::deque<Instruction>& storage,
                             const cumetal::ptx::EntryFunction* function) {
     GuardedPaths paths{blocks, builder, storage, function};
+    paths.specialize_masked_predicates();
+    for (auto& block : blocks) block.predecessors.clear();
+    for (std::size_t index = 0; index < blocks.size(); ++index)
+        for (auto successor : blocks[index].successors)
+            blocks[successor].predecessors.push_back(index);
     paths.thread_threshold_edges();
     // Threshold specialization rewires edges and appends clones. The next
     // proof consumes predecessor topology, so refresh it before proceeding.

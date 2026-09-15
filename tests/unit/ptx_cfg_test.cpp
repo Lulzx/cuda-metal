@@ -128,6 +128,35 @@ ret;
                               "mov.pred %p0, 1;\n");
     ok &= expect(!metal::compile_ptx_to_msl(invalid_deep_guard).ok,
                  "deep specialization does not invent an undefined payload");
+    const std::string masked_payload = fixture("ptx_masked_optional_payload.ptx");
+    const auto masked = metal::compile_ptx_to_msl(masked_payload);
+    ok &= expect(masked.ok,
+                 "absent 128-byte payload is absorbed by its false mask: " + masked.error);
+    auto commuted_mask = masked_payload;
+    commuted_mask.replace(commuted_mask.find("and.pred %p4, %p0, %p3;"),
+                          std::string("and.pred %p4, %p0, %p3;").size(),
+                          "and.pred %p4, %p3, %p0;");
+    ok &= expect(metal::compile_ptx_to_msl(commuted_mask).ok,
+                 "AND absorption is independent of operand order");
+    auto called_mask = masked_payload;
+    called_mask.insert(called_mask.find(".visible .entry"),
+                       ".func helper() { ret; }\n");
+    called_mask.insert(called_mask.find("JOIN:\n") + 6,
+                       "call.uni helper, ();\n");
+    ok &= expect(metal::compile_ptx_to_msl(called_mask).ok,
+                 "direct calls preserve caller-local payload masks");
+    for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+        {"ld.param.u32 %r3, [last];",
+         "ld.param.u32 %r3, [last];\nsetp.eq.u32 %p0, %r3, 42;"},
+        {"ld.param.u32 %r3, [last];",
+         "ld.param.u32 %r3, [last];\ncvt.u32.u16 %r5, %rs0;\n"
+         "st.global.u32 [%rd0+8], %r5;"}}) {
+        auto invalid_mask = masked_payload;
+        invalid_mask.replace(invalid_mask.find(from), from.size(), to);
+        const auto rejected = metal::compile_ptx_to_msl(invalid_mask);
+        ok &= expect(!rejected.ok && rejected.error.find("undefined") != std::string::npos,
+                     "overwritten masks and escaped payload values remain rejected");
+    }
     auto exhausted_constants = carried_constant;
     exhausted_constants.insert(exhausted_constants.find(".reg .pred"),
                                ".reg .pred %q<129>;\n");
@@ -274,6 +303,40 @@ ret;
                  "guard specialization has a bounded shared clone budget");
     ok &= expect(blocks[incoming_count - 1].successors[0] == incoming_count,
                  "budget exhaustion retains the original edge");
+    // A mask region larger than the shared instruction budget must be left
+    // untouched for strict SSA validation; the pass cannot partially clone it.
+    detail::Instruction split, absent, present, jump, absorbed;
+    split.opcode = "bra";
+    split.predicate = "%selector";
+    split.operands = {"present"};
+    absent.opcode = "mov.pred";
+    absent.operands = {"%mask", "0"};
+    present.opcode = "mov.pred";
+    present.operands = {"%mask", "1"};
+    jump.opcode = "bra";
+    jump.operands = {"join"};
+    absorbed.opcode = "and.pred";
+    absorbed.operands = {"%combined", "%mask", "%other"};
+    Builder mask_builder;
+    std::vector<detail::RawBlock> oversized(4);
+    for (std::size_t i = 0; i < oversized.size(); ++i) {
+        oversized[i].id = mask_builder.next_block();
+        oversized[i].name = "mask_budget_" + std::to_string(i);
+    }
+    oversized[0].instructions = {&split};
+    oversized[0].successors = {2, 1};
+    oversized[1].instructions = {&absent, &jump};
+    oversized[1].successors = {3};
+    oversized[1].predecessors = {0};
+    oversized[2].instructions = {&present, &jump};
+    oversized[2].successors = {3};
+    oversized[2].predecessors = {0};
+    oversized[3].instructions.assign(131073, &absorbed);
+    oversized[3].predecessors = {1, 2};
+    std::deque<detail::Instruction> mask_storage;
+    detail::simplify_guarded_paths(oversized, mask_builder, mask_storage);
+    ok &= expect(oversized.size() == 4 && mask_storage.empty(),
+                 "masked payload growth budget retains the original CFG");
     // Check liveness for forms rejected by later lowering as well: this pass
     // must not erase a copy feeding an address or a predicated overwrite.
     for (const auto& root : {std::string("st.global.u32"), std::string("red.global.add.u32"),

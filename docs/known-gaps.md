@@ -134,6 +134,13 @@ Predicate threading has no separate eight-block depth cutoff. It follows a
 cycle-free path until the existing 256-instruction inspection limit or shared
 clone budgets stop the proof. Exhausting any bound still leaves SSA to reject
 an unproven read; this does not initialize optional payloads.
+Predicates assigned both literal presence states can also split a bounded live
+region into true and false versions when they feed an absorbing `and.pred`
+chain. The false version folds that chain and removes only dead, unpredicated
+register operations from an exact integer/predicate whitelist. Loads, stores,
+calls, traps, synchronization, unknown operations, escaped payload values, and
+overwritten masks remain subject to strict SSA validation. The unchanged RSA
+modulus self-test now emits MSL; its full Apple-GPU numerical run remains open.
 Repeated unchanged branch predicates use the known incoming edge value even
 when their producing comparison is outside that bounded operand analysis.
 Self-select guards can also use matching or complementary integer equality
