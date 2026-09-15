@@ -6,6 +6,45 @@ Build
 Source builds require CMake, LLVM 18 or newer, and the LZ4 and Zstd development
 libraries. On Homebrew these are `llvm`, `lz4`, and `zstd`.
 
+On Apple Silicon, the Nix development shell pins LLVM/Clang 21, macOS SDK 15, CMake, Ninja,
+Bash, Python, LZ4 and Zstd. It sets LLVM discovery and both CUDA Clang variables
+used by the compiler and tests. Use a fresh build directory to avoid cached
+Homebrew or Apple compiler paths:
+
+```bash
+nix develop
+cmake -S . -B build-nix -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_SYSROOT="$SDKROOT" \
+  -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
+  -DCUMETAL_ENABLE_BINARY_SHIM=OFF
+cmake --build build-nix -j2
+BUILD_DIR="$PWD/build-nix" bash scripts/generate_reference_metallib.sh
+ctest --test-dir build-nix --output-on-failure -j2
+```
+
+Apple's command-line Metal tools are installed separately. The shell uses
+Apple's `xcrun` and the installation selected by `xcode-select`, while retaining
+Nix's SDK for host compilation. To select a different Xcode for Metal, export
+`DEVELOPER_DIR` after entering the shell. Modern Xcode also provides
+`xcodebuild -downloadComponent metalToolchain`. Verify that
+`/usr/bin/xcrun --find metal` and `/usr/bin/xcrun --find metallib` succeed before
+running the AOT tests. The shell reports missing tools but remains usable for
+host builds and runtime Metal compilation. Without these tools, the fixture
+script produces only an experimental fixture, not `reference.metallib`.
+The Apple tool wrappers clear `SDKROOT` for their subprocesses so Apple's host
+linker can find its SDK libraries. Let CMake discover those wrappers from `PATH`.
+Direct Nix compiler calls receive the pinned sysroot through `NIX_CFLAGS_COMPILE`.
+The shell also selects macOS `mktemp`, matching the test scripts' BSD `-t` syntax.
+
+For Debug/shim-on validation, configure another fresh directory with
+`-DCMAKE_BUILD_TYPE=Debug -DCUMETAL_ENABLE_BINARY_SHIM=ON`. The default shell
+provides Clang 21; the optional Clang 21/22/23 matrix requires the other two
+compilers separately.
+The module-scanning option avoids `clang-scan-deps` bypassing Nix's compiler
+wrapper and losing its C++ header paths; this project does not use C++ modules.
+The CUDA compiler wrapper also supplies the pinned SDK's C headers after libc++
+headers, since the NVPTX device pass does not inherit Darwin's implicit search.
+
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
