@@ -93,3 +93,5 @@ Bounded guard specialization also follows literal predicate flags through
 incoming branches and fallthroughs, including inversion. Overwrites and calls
 invalidate these facts; exhausted proof budgets still leave SSA to reject
 unproven reads. This is not general path-sensitive register analysis.
+Repeated unchanged branch predicates use the known incoming edge value even
+when their producing comparison is outside that bounded operand analysis.

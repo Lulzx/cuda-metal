@@ -240,7 +240,10 @@ struct GuardedPaths {
                     combined = instruction.opcode == "or.pred" && instruction.predicate.empty();
                 }
             }
-            if (!comparison && !combined && constants.empty()) continue;
+            // Taking an edge establishes its predicate independently of the
+            // comparison that produced it. Operand facts still require their
+            // separate proof; a repeated unchanged predicate does not.
+            if (!comparison && !combined && constants.empty() && !conditional) continue;
             for (std::size_t edge = 0; edge < source.successors.size(); ++edge) {
                 auto known = constants;
                 if (conditional) known[pred] = (edge == 0) != inverted;

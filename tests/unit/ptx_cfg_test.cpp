@@ -22,6 +22,17 @@ int main(int argc, char** argv) {
     };
     namespace metal = cumetal::metal;
     bool ok = true;
+    const auto repeated_predicate = fixture("ptx_repeated_predicate.ptx");
+    const auto repeated = metal::compile_ptx_to_msl(repeated_predicate);
+    ok &= expect(repeated.ok, "repeated 16-bit predicate guards the load: " + repeated.error);
+    for (const std::string insertion : {
+        "not.pred %p0, %p0;\n",
+        "st.global.u32 [%rd3], %r1;\n"}) {
+        auto invalid = repeated_predicate;
+        invalid.insert(invalid.find("JOIN:\n") + 6, insertion);
+        ok &= expect(!metal::compile_ptx_to_msl(invalid).ok,
+                     "repeated predicate proof cannot hide overwritten guards or undefined reads");
+    }
     const std::string constant_guard = fixture("ptx_constant_predicate.ptx");
     const auto guarded_constant = metal::compile_ptx_to_msl(constant_guard);
     ok &= expect(guarded_constant.ok,
