@@ -103,3 +103,10 @@ Relocated immutable table pointers may pass through direct device helper
 parameters when a bounded read-only proof covers every use, including forwarding
 chains. Writes, pointer escapes, unknown/recursive calls, and ambiguous argument
 staging still reject. This does not provide mutable global relocation support.
+
+Repeated unsigned 32/64-bit register comparisons can now establish bounded
+load/use path proofs before register SSA, including exact complements and
+reversed operands. Writes and calls invalidate those facts. This does not prove
+relations between different registers holding equivalent calculations, or extend
+the proof to signed/floating comparisons. Full RSA-PSS compilation still encounters
+other guarded-SSA cases.

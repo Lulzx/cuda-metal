@@ -113,13 +113,13 @@ struct GuardedPaths {
         }
     }
 
-    struct EqualityFact {
-        std::string left, right, type;
-        bool equal;
+    struct ComparisonFact {
+        std::string left, right, type, relation;
+        bool positive;
     };
 
-    static std::optional<EqualityFact> equality_predicate(const Instruction& instruction) {
-        static const std::regex comparison(R"(^setp\.(eq|ne)\.([bu](32|64))$)");
+    static std::optional<ComparisonFact> comparison_predicate(const Instruction& instruction) {
+        static const std::regex comparison(R"(^setp\.(eq|ne|lt|le|gt|ge)\.([bu](32|64))$)");
         std::smatch match;
         if (!instruction.predicate.empty() || instruction.operands.size() != 3 ||
             !std::regex_match(instruction.opcode, match, comparison)) return std::nullopt;
@@ -130,8 +130,15 @@ struct GuardedPaths {
         // and other comparison semantics remain the responsibility of the importer.
         if (left.empty() || right.empty() || first_register(left) != left ||
             first_register(right) != right) return std::nullopt;
-        if (right < left) std::swap(left, right);
-        return EqualityFact{left, right, match[2], match[1] == "eq"};
+        const std::string operation = match[1];
+        const bool equality = operation == "eq" || operation == "ne";
+        // Canonicalize to equality or unsigned less-than. Operand order matters
+        // for inequalities; complements share a fact but invert its polarity.
+        if (!equality && match[2].str()[0] != 'u') return std::nullopt;
+        if ((equality && right < left) || operation == "gt" || operation == "le")
+            std::swap(left, right);
+        return ComparisonFact{left, right, match[2], equality ? "eq" : "lt",
+                              operation == "eq" || operation == "lt" || operation == "gt"};
     }
 
     static std::optional<bool> predicate_value(
@@ -220,7 +227,7 @@ struct GuardedPaths {
             const bool conditional = root_opcode(branch->opcode) == "bra" &&
                                      !branch->predicate.empty();
             const auto [pred, inverted] = normalized_predicate(branch->predicate);
-            std::optional<EqualityFact> comparison;
+            std::optional<ComparisonFact> comparison;
             bool combined = false;
             auto constants = entry_constants[index];
             for (std::size_t j = 0; j < source.instructions.size(); ++j) {
@@ -236,7 +243,7 @@ struct GuardedPaths {
                 if (root_opcode(instruction.opcode) == "call") comparison.reset();
                 if (std::find(written.begin(), written.end(), pred) != written.end()) combined = false;
                 if (written.size() == 1 && written[0] == pred) {
-                    comparison = equality_predicate(instruction);
+                    comparison = comparison_predicate(instruction);
                     combined = instruction.opcode == "or.pred" && instruction.predicate.empty();
                 }
             }
@@ -248,7 +255,7 @@ struct GuardedPaths {
                 auto known = constants;
                 if (conditional) known[pred] = (edge == 0) != inverted;
                 auto fact = comparison;
-                if (fact) fact->equal = known[pred] == fact->equal;
+                if (fact) fact->positive = known[pred] == fact->positive;
                 auto parent = index;
                 auto parent_edge = edge;
                 auto current = source.successors[edge];
@@ -264,9 +271,10 @@ struct GuardedPaths {
                         const auto written = destination_registers(instruction);
                         auto value = predicate_value(instruction, known);
                         if (instruction.predicate.empty()) {
-                            const auto next = equality_predicate(instruction);
+                            const auto next = comparison_predicate(instruction);
                             if (next && fact && next->left == fact->left && next->right == fact->right &&
-                                next->type == fact->type) value = next->equal == fact->equal;
+                                next->type == fact->type && next->relation == fact->relation)
+                                value = next->positive == fact->positive;
                         }
                         for (const auto& reg : written) {
                             known.erase(reg);
