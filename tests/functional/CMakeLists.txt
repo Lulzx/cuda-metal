@@ -2862,6 +2862,9 @@ add_test(NAME functional_ptx_msl_abi
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx)
 
 if(APPLE)
+    add_test(NAME functional_ptx_unobserved_copies
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_unobserved_copies.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_unobserved_copies PROPERTIES TIMEOUT 180)
     add_test(NAME functional_ptx_repeated_relation
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_repeated_relation.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_repeated_relation PROPERTIES TIMEOUT 180)

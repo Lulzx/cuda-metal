@@ -93,6 +93,14 @@ Bounded guard specialization also follows literal predicate flags through
 incoming branches and fallthroughs, including inversion. Overwrites and calls
 invalidate these facts; exhausted proof budgets still leave SSA to reject
 unproven reads. This is not general path-sensitive register analysis.
+That proof can cross bounded straight-line prefixes before a known branch,
+preserving their memory operations. A separate bounded demand analysis removes
+unobserved full-width scalar `mov.b16/b32/b64` chains, including retry cycles;
+it does not remove other operations or initialize an undefined value. Copies
+feeding stores, addresses, branches, or other retained operations remain live.
+The P-256 public-key self-test now reaches the existing trap-expansion limit.
+The signature self-test still requires further guarded-SSA work; neither full
+module has numerical Apple-GPU validation.
 Repeated unchanged branch predicates use the known incoming edge value even
 when their producing comparison is outside that bounded operand analysis.
 After incoming-register validation, trivial block arguments with one distinct,

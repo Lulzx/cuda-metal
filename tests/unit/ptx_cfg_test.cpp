@@ -257,5 +257,33 @@ ret;
                  "guard specialization has a bounded shared clone budget");
     ok &= expect(blocks[incoming_count - 1].successors[0] == incoming_count,
                  "budget exhaustion retains the original edge");
+    // Check liveness for forms rejected by later lowering as well: this pass
+    // must not erase a copy feeding an address or a predicated overwrite.
+    for (const auto& root : {std::string("st.global.u32"), std::string("red.global.add.u32"),
+                             std::string("ld.global.u32"), std::string("predicated")}) {
+        std::deque<detail::Instruction> owned;
+        auto add = [&](std::string opcode, std::vector<std::string> operands,
+                       std::string predicate = {}) {
+            detail::Instruction instruction;
+            instruction.opcode = std::move(opcode);
+            instruction.operands = std::move(operands);
+            instruction.predicate = std::move(predicate);
+            owned.push_back(std::move(instruction));
+        };
+        add("mov.b32", {"%r1", "%r2"});
+        const auto* copy = &owned.back();
+        if (root == "predicated") {
+            add("mov.u32", {"%r1", "0"}, "%p0");
+            add("st.global.u32", {"[%rd0]", "%r1"});
+        } else if (root == "ld.global.u32") add(root, {"%r3", "[%r1]"});
+        else add(root, {"[%r1]", "1"});
+        std::vector<detail::RawBlock> one(1);
+        one[0].id = builder.next_block();
+        one[0].name = "observe";
+        for (const auto& instruction : owned) one[0].instructions.push_back(&instruction);
+        detail::simplify_guarded_paths(one, builder, owned);
+        ok &= expect(!one[0].instructions.empty() && one[0].instructions.front() == copy,
+                     "retain observed copy before " + root);
+    }
     return ok ? 0 : 1;
 }

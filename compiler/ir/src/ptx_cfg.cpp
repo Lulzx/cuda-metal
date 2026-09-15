@@ -19,19 +19,28 @@ struct GuardedPaths {
     // a proof or budget is exhausted: subsequent SSA construction still checks it.
     std::optional<std::size_t> clone_edge(std::size_t parent, std::size_t edge,
                                          const RawBlock& target, std::size_t successor) {
-        if (cloned_blocks >= 4096 ||
-            target.instructions.size() > 131072 - cloned_instructions) return std::nullopt;
+        const bool has_branch = !target.instructions.empty() &&
+            root_opcode(target.instructions.back()->opcode) == "bra";
+        const auto count = target.instructions.size() + (has_branch ? 0 : 1);
+        if (cloned_blocks >= 4096 || count > 131072 - cloned_instructions) return std::nullopt;
         RawBlock clone;
         clone.id = builder.next_block();
         clone.name = target.name + "_guard_" + std::to_string(raw_blocks.size());
         clone.successors = {successor};
         for (std::size_t j = 0; j < target.instructions.size(); ++j) {
             auto instruction = *target.instructions[j];
-            if (j + 1 == target.instructions.size()) {
+            if (has_branch && j + 1 == target.instructions.size()) {
                 instruction.predicate.clear();
                 instruction.operands = {raw_blocks[successor].name};
             }
             storage.push_back(std::move(instruction));
+            clone.instructions.push_back(&storage.back());
+        }
+        if (!has_branch) {
+            Instruction branch;
+            branch.opcode = "bra";
+            branch.operands = {raw_blocks[successor].name};
+            storage.push_back(std::move(branch));
             clone.instructions.push_back(&storage.back());
         }
         const auto index = raw_blocks.size();
@@ -260,13 +269,19 @@ struct GuardedPaths {
                 auto parent_edge = edge;
                 auto current = source.successors[edge];
                 std::unordered_set<std::size_t> visited{index};
+                std::vector<RawBlock> prefix;
+                std::size_t inspected = 0;
                 for (unsigned depth = 0; depth < 8 && visited.insert(current).second; ++depth) {
                     const RawBlock target = raw_blocks[current];
-                    if (target.instructions.empty() || target.instructions.size() > 32 ||
-                        target.successors.size() != 2) break;
+                    if (target.instructions.empty() || target.instructions.size() > 256 - inspected ||
+                        target.successors.empty() || target.successors.size() > 2) break;
+                    inspected += target.instructions.size();
                     const auto* tail = target.instructions.back();
-                    if (root_opcode(tail->opcode) != "bra" || tail->predicate.empty()) break;
-                    for (std::size_t j = 0; j + 1 < target.instructions.size(); ++j) {
+                    const bool conditional_tail = target.successors.size() == 2 &&
+                        root_opcode(tail->opcode) == "bra" && !tail->predicate.empty();
+                    if (target.successors.size() == 2 && !conditional_tail) break;
+                    const auto body_size = target.instructions.size() - (conditional_tail ? 1 : 0);
+                    for (std::size_t j = 0; j < body_size; ++j) {
                         const auto& instruction = *target.instructions[j];
                         const auto written = destination_registers(instruction);
                         auto value = predicate_value(instruction, known);
@@ -283,10 +298,26 @@ struct GuardedPaths {
                         if (root_opcode(instruction.opcode) == "call") { known.clear(); fact.reset(); }
                         if (value && written.size() == 1) known[written[0]] = *value;
                     }
+                    if (target.successors.size() == 1) {
+                        prefix.push_back(target);
+                        current = target.successors[0];
+                        continue;
+                    }
                     const auto [tail_pred, tail_inverted] = normalized_predicate(tail->predicate);
                     const auto outcome = known.find(tail_pred);
                     if (outcome == known.end()) break;
                     const auto successor = target.successors[(outcome->second != tail_inverted) ? 0 : 1];
+                    // Do not clone a straight-line prefix until it leads to a
+                    // proven branch. Preserve every operation along that path.
+                    bool exhausted = false;
+                    for (const auto& straight : prefix) {
+                        const auto cloned = clone_edge(parent, parent_edge, straight, straight.successors[0]);
+                        if (!cloned) { exhausted = true; break; }
+                        parent = *cloned;
+                        parent_edge = 0;
+                    }
+                    if (exhausted) break;
+                    prefix.clear();
                     const auto cloned = clone_edge(parent, parent_edge, target, successor);
                     if (!cloned) break;
                     parent = *cloned;
@@ -384,6 +415,133 @@ struct GuardedPaths {
         }
     }
 
+    // Ordinary register liveness treats every mov source as a use, even when
+    // its destination only feeds another discarded copy. Compute demand from
+    // non-copy instructions instead so an unobserved loop-carried copy cycle
+    // does not require an invented initial SSA value.
+    void remove_unobserved_copies() {
+        struct Access {
+            std::vector<std::string> reads;
+            std::vector<std::string> writes;
+            bool copy = false;
+        };
+        std::vector<std::vector<Access>> accesses(raw_blocks.size());
+        std::unordered_set<std::string> copy_destinations;
+        for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+            for (const auto* instruction : raw_blocks[b].instructions) {
+                Access access{source_registers(*instruction), destination_registers(*instruction)};
+                const auto root = root_opcode(instruction->opcode);
+                // Reduction addresses are inputs, not register definitions.
+                if (root == "red") {
+                    access.writes.clear();
+                    for (const auto& operand : instruction->operands) {
+                        const auto regs = registers_in(operand);
+                        access.reads.insert(access.reads.end(), regs.begin(), regs.end());
+                    }
+                }
+                if (instruction->predicate.empty() && instruction->operands.size() == 2 &&
+                    access.writes.size() == 1 && access.reads.size() == 1) {
+                    const auto width = ptx_register_container_bits(access.writes[0]);
+                    access.copy = (width == 16 || width == 32 || width == 64) &&
+                        instruction->opcode == "mov.b" + std::to_string(width) &&
+                        trim(instruction->operands[0]) == access.writes[0] &&
+                        trim(instruction->operands[1]) == access.reads[0] &&
+                        ptx_register_container_bits(access.reads[0]) == width;
+                }
+                if (!instruction->predicate.empty()) access.writes.clear();
+                if (access.copy) copy_destinations.insert(access.writes[0]);
+                accesses[b].push_back(std::move(access));
+            }
+        }
+        if (copy_destinations.empty()) return;
+        // Only registers defined by a removable copy affect a deletion decision.
+        // Other instructions remain roots even when their results are unused;
+        // their reads still demand every relevant copy operand.
+        for (auto& block : accesses) {
+            for (auto& access : block) {
+                std::erase_if(access.reads, [&](const auto& reg) { return !copy_destinations.contains(reg); });
+                std::erase_if(access.writes, [&](const auto& reg) { return !copy_destinations.contains(reg); });
+            }
+        }
+        using Registers = std::unordered_set<std::string>;
+        struct Summary {
+            Registers roots;
+            std::unordered_map<std::string, std::optional<std::string>> origins;
+        };
+        std::vector<Summary> summaries(raw_blocks.size());
+        for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+            auto& summary = summaries[b];
+            const auto origin = [&](const std::string& reg) -> std::optional<std::string> {
+                const auto found = summary.origins.find(reg);
+                return found == summary.origins.end() ? std::optional<std::string>(reg) : found->second;
+            };
+            for (const auto& access : accesses[b]) {
+                if (access.copy) {
+                    summary.origins[access.writes[0]] = access.reads.empty() ? std::nullopt : origin(access.reads[0]);
+                } else {
+                    for (const auto& reg : access.reads)
+                        if (const auto input = origin(reg)) summary.roots.insert(*input);
+                    for (const auto& reg : access.writes) summary.origins[reg] = std::nullopt;
+                }
+            }
+        }
+        std::vector<Registers> live_in(raw_blocks.size());
+        auto transfer = [](Registers& live, const Access& access) {
+            if (access.copy && !live.contains(access.writes[0])) return;
+            for (const auto& reg : access.writes) live.erase(reg);
+            live.insert(access.reads.begin(), access.reads.end());
+        };
+        // Summarize each block once: a copy either forwards one block input or
+        // a locally defined value. Iteration need not rescan large crypto bodies.
+        // Bound work and storage independently; this analysis never clones code.
+        std::size_t budget = 4194304;
+        std::size_t stored_registers = 0;
+        std::deque<std::size_t> pending;
+        std::vector<bool> queued(raw_blocks.size(), true);
+        for (std::size_t b = raw_blocks.size(); b-- > 0;) pending.push_back(b);
+        while (!pending.empty()) {
+            const auto b = pending.front();
+            pending.pop_front();
+            queued[b] = false;
+            Registers live = summaries[b].roots;
+            if (live.size() >= budget) return;
+            budget -= live.size() + 1;
+            for (const auto successor : raw_blocks[b].successors) {
+                if (live_in[successor].size() > budget) return;
+                budget -= live_in[successor].size();
+                for (const auto& reg : live_in[successor]) {
+                    const auto found = summaries[b].origins.find(reg);
+                    if (found == summaries[b].origins.end()) live.insert(reg);
+                    else if (found->second) live.insert(*found->second);
+                }
+            }
+            if (live != live_in[b]) {
+                stored_registers -= live_in[b].size();
+                stored_registers += live.size();
+                if (stored_registers > 1048576) return;
+                live_in[b] = std::move(live);
+                for (const auto predecessor : raw_blocks[b].predecessors) {
+                    if (!queued[predecessor]) {
+                        pending.push_back(predecessor);
+                        queued[predecessor] = true;
+                    }
+                }
+            }
+        }
+        for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+            Registers live;
+            for (const auto successor : raw_blocks[b].successors)
+                live.insert(live_in[successor].begin(), live_in[successor].end());
+            auto& instructions = raw_blocks[b].instructions;
+            for (std::size_t i = accesses[b].size(); i-- > 0;) {
+                const auto& access = accesses[b][i];
+                if (access.copy && !live.contains(access.writes[0])) instructions[i] = nullptr;
+                else transfer(live, access);
+            }
+            std::erase(instructions, nullptr);
+        }
+    }
+
 };
 
 }  // namespace
@@ -430,6 +588,7 @@ void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
         for (auto successor : blocks[index].successors)
             blocks[successor].predecessors.push_back(index);
     paths.remove_unobserved_self_selects();
+    paths.remove_unobserved_copies();
 }
 
 }  // namespace cumetal::ir::detail
