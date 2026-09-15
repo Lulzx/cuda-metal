@@ -127,8 +127,16 @@ ret;
     for (unsigned i = 0; i < 129; ++i)
         flags += "mov.pred %q" + std::to_string(i) + ", -1;\n";
     exhausted_constants.insert(exhausted_constants.find("bra CHECK;"), flags);
-    ok &= expect(!metal::compile_ptx_to_msl(exhausted_constants).ok,
-                 "constant fact budget exhaustion does not invent SSA definitions");
+    ok &= expect(metal::compile_ptx_to_msl(exhausted_constants).ok,
+                 "dead constant facts are pruned before the live-fact limit");
+    auto live_exhausted_constants = exhausted_constants;
+    std::string flag_uses;
+    for (unsigned i = 1; i < 129; ++i)
+        flag_uses += "or.pred %q0, %q0, %q" + std::to_string(i) + ";\n";
+    live_exhausted_constants.insert(live_exhausted_constants.find("CHECK:\n") + 7,
+                                    flag_uses);
+    ok &= expect(!metal::compile_ptx_to_msl(live_exhausted_constants).ok,
+                 "live constant fact budget exhaustion does not invent SSA definitions");
     const std::string guarded_select = fixture("ptx_guarded_self_select.ptx");
     const auto selected = metal::compile_ptx_to_msl(guarded_select);
     ok &= expect(selected.ok, "unobserved loop-carried select arm is eliminated: " + selected.error);

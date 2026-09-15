@@ -90,8 +90,11 @@ materialized as typed nulls at the receiving edge. Nonzero integer inputs
 to pointer block arguments are rejected; this does not provide general
 integer-to-pointer conversion or repair unrelated scalar-offset joins.
 Bounded guard specialization also follows literal predicate flags through
-incoming branches and fallthroughs, including inversion. Direct `call`/`call.uni`
-preserves caller predicates declared at function-body scope (including ranges),
+incoming branches and fallthroughs, including inversion. Predicate liveness
+removes facts after their final possible use, so dead constants do not exhaust
+the 128-live-fact limit; exceeding that live limit still disables the proof.
+Direct `call`/`call.uni` preserves caller predicates declared at function-body
+scope (including ranges),
 except explicit return registers. Unknown/indirect call forms and undeclared
 predicates remain conservative; nested declarations do not prove function-wide
 locality. Overwrites invalidate these facts; exhausted

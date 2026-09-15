@@ -6,6 +6,7 @@
 #include <cctype>
 #include <map>
 #include <regex>
+#include <unordered_map>
 
 namespace cumetal::ir::detail {
 namespace {
@@ -358,6 +359,85 @@ struct GuardedPaths {
         return std::nullopt;
     }
 
+    struct PredicateLiveness {
+        using Registers = std::unordered_set<std::string>;
+        std::vector<Registers> live_in;
+        std::vector<Registers> live_out;
+        std::vector<std::unordered_map<std::string, std::size_t>> last_use;
+    };
+
+    // Constant propagation needs only predicate values that can still be read.
+    // Compute that set from instruction semantics rather than register names:
+    // these are exactly the destinations the constant evaluator can create.
+    std::optional<PredicateLiveness> predicate_liveness() const {
+        using Registers = PredicateLiveness::Registers;
+        Registers candidates;
+        for (const auto& block : raw_blocks) {
+            for (const auto* instruction : block.instructions) {
+                if (instruction->opcode != "mov.pred" && instruction->opcode != "not.pred" &&
+                    instruction->opcode != "or.pred") continue;
+                const auto written = destination_registers(*instruction);
+                if (written.size() == 1) candidates.insert(written[0]);
+            }
+        }
+
+        PredicateLiveness result;
+        result.live_in.resize(raw_blocks.size());
+        result.live_out.resize(raw_blocks.size());
+        result.last_use.resize(raw_blocks.size());
+        std::vector<Registers> uses(raw_blocks.size()), definitions(raw_blocks.size());
+        std::size_t budget = 16777216;
+        for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+            for (std::size_t i = 0; i < raw_blocks[b].instructions.size(); ++i) {
+                const auto& instruction = *raw_blocks[b].instructions[i];
+                for (const auto& source : source_registers(instruction)) {
+                    if (!candidates.contains(source)) continue;
+                    if (budget == 0) return std::nullopt;
+                    --budget;
+                    result.last_use[b][source] = i;
+                    if (!definitions[b].contains(source)) uses[b].insert(source);
+                }
+                for (const auto& written : destination_registers(instruction)) {
+                    if (candidates.contains(written)) definitions[b].insert(written);
+                }
+            }
+        }
+
+        std::deque<std::size_t> pending;
+        std::vector<bool> queued(raw_blocks.size(), true);
+        for (std::size_t b = raw_blocks.size(); b-- > 0;) pending.push_back(b);
+        std::size_t stored = 0;
+        while (!pending.empty()) {
+            if (budget == 0) return std::nullopt;
+            --budget;
+            const auto b = pending.front();
+            pending.pop_front();
+            queued[b] = false;
+            Registers live_out;
+            for (const auto successor : raw_blocks[b].successors) {
+                if (result.live_in[successor].size() > budget) return std::nullopt;
+                budget -= result.live_in[successor].size();
+                live_out.insert(result.live_in[successor].begin(), result.live_in[successor].end());
+            }
+            Registers live_in = uses[b];
+            for (const auto& reg : live_out)
+                if (!definitions[b].contains(reg)) live_in.insert(reg);
+            if (live_in == result.live_in[b] && live_out == result.live_out[b]) continue;
+            stored -= result.live_in[b].size() + result.live_out[b].size();
+            stored += live_in.size() + live_out.size();
+            if (stored > 1048576) return std::nullopt;
+            result.live_in[b] = std::move(live_in);
+            result.live_out[b] = std::move(live_out);
+            for (const auto predecessor : raw_blocks[b].predecessors) {
+                if (!queued[predecessor]) {
+                    pending.push_back(predecessor);
+                    queued[predecessor] = true;
+                }
+            }
+        }
+        return result;
+    }
+
     // Reachable predecessor states meet by intersection. An unvisited edge is
     // not an unknown value: ignoring it until visited preserves loop-invariant
     // flags, while later conflicting edges remove the fact and requeue users.
@@ -365,6 +445,8 @@ struct GuardedPaths {
         using Facts = std::map<std::string, bool>;
         std::vector<Facts> entries(raw_blocks.size());
         if (raw_blocks.empty()) return entries;
+        const auto liveness = predicate_liveness();
+        if (!liveness) return entries;
         std::vector<bool> visited(raw_blocks.size(), false), queued(raw_blocks.size(), false);
         std::deque<std::size_t> pending{0};
         visited[0] = queued[0] = true;
@@ -375,22 +457,32 @@ struct GuardedPaths {
             pending.pop_front();
             queued[index] = false;
             auto outgoing = entries[index];
-            for (const auto* instruction : raw_blocks[index].instructions) {
+            for (std::size_t i = 0; i < raw_blocks[index].instructions.size(); ++i) {
+                const auto* instruction = raw_blocks[index].instructions[i];
                 if (++instructions > 4194304) return std::vector<Facts>(raw_blocks.size());
                 const auto value = predicate_value(*instruction, outgoing);
                 const auto written = destination_registers(*instruction);
                 for (const auto& reg : written) outgoing.erase(reg);
                 if (root_opcode(instruction->opcode) == "call") invalidate_call(*instruction, outgoing);
                 if (value && written.size() == 1) outgoing[written[0]] = *value;
+                std::erase_if(outgoing, [&](const auto& item) {
+                    const auto last = liveness->last_use[index].find(item.first);
+                    return !liveness->live_out[index].contains(item.first) &&
+                        (last == liveness->last_use[index].end() || last->second <= i);
+                });
                 if (outgoing.size() > 128) return std::vector<Facts>(raw_blocks.size());
             }
             for (const auto successor : raw_blocks[index].successors) {
-                auto merged = outgoing;
+                auto transferred = outgoing;
+                std::erase_if(transferred, [&](const auto& item) {
+                    return !liveness->live_in[successor].contains(item.first);
+                });
+                auto merged = transferred;
                 if (visited[successor]) {
                     merged = entries[successor];
                     std::erase_if(merged, [&](const auto& item) {
-                        const auto found = outgoing.find(item.first);
-                        return found == outgoing.end() || found->second != item.second;
+                        const auto found = transferred.find(item.first);
+                        return found == transferred.end() || found->second != item.second;
                     });
                 }
                 if (visited[successor] && merged == entries[successor]) continue;
