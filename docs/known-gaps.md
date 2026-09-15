@@ -122,10 +122,12 @@ staging still reject. This does not provide mutable global relocation support.
 
 Repeated unsigned 32/64-bit register comparisons can now establish bounded
 load/use path proofs before register SSA, including exact complements and
-reversed operands. Writes and calls invalidate those facts. This does not prove
-relations between different registers holding equivalent calculations, or extend
-the proof to signed/floating comparisons. Full RSA-PSS compilation still encounters
-other guarded-SSA cases.
+reversed operands. A bounded table also relates identical single `add.u32/s32/u64/s64`
+and `cvt.u64.u32` expressions in different registers. It keeps at most 64 expressions;
+operand/result writes, predication, calls, and eviction conservatively lose proof.
+It preserves the computations and memory operations, and does not fold in-place
+updates, recursive expressions, signed comparisons, or floating arithmetic. Full
+RSA-PSS and P-256 signature compilation still encounter other guarded-SSA cases.
 
 IR verification computes immediate dominators and queries their tree intervals
 instead of storing a hash set of dominators per block. Storage is linear in CFG

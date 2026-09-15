@@ -2862,6 +2862,9 @@ add_test(NAME functional_ptx_msl_abi
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx)
 
 if(APPLE)
+    add_test(NAME functional_ptx_equivalent_expressions
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_equivalent_expressions.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_equivalent_expressions PROPERTIES TIMEOUT 180)
     add_test(NAME functional_ptx_caller_predicate
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_caller_predicate.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_caller_predicate PROPERTIES TIMEOUT 180)

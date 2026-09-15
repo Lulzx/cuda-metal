@@ -163,6 +163,7 @@ struct GuardedPaths {
     struct ComparisonFact {
         std::string left, right, type, relation;
         bool positive;
+        std::vector<std::string> dependencies{};
     };
 
     static std::optional<ComparisonFact> comparison_predicate(const Instruction& instruction) {
@@ -186,6 +187,71 @@ struct GuardedPaths {
             std::swap(left, right);
         return ComparisonFact{left, right, match[2], equality ? "eq" : "lt",
                               operation == "eq" || operation == "lt" || operation == "gt"};
+    }
+
+
+    // Track single pure expressions without rewriting their computations.
+    // Writes invalidate both aliases and snapshots used by a guard proof.
+    struct Expressions {
+        struct Value { std::string key; std::vector<std::string> dependencies{}; };
+        std::map<std::string, Value> values;
+        std::deque<std::string> order;
+        void observe(const Instruction& instruction) {
+            const auto writes = destination_registers(instruction);
+            for (const auto& reg : writes) {
+                std::erase_if(values, [&](const auto& item) {
+                    return item.first == reg || std::find(item.second.dependencies.begin(),
+                        item.second.dependencies.end(), reg) != item.second.dependencies.end();
+                });
+            }
+            std::erase_if(order, [&](const auto& reg) { return !values.contains(reg); });
+            if (root_opcode(instruction.opcode) == "call") { values.clear(); order.clear(); return; }
+            if (!instruction.predicate.empty() || writes.size() != 1) return;
+            const bool add = instruction.opcode == "add.u32" || instruction.opcode == "add.s32" ||
+                instruction.opcode == "add.u64" || instruction.opcode == "add.s64";
+            const bool convert = instruction.opcode == "cvt.u64.u32";
+            if ((!add && !convert) || instruction.operands.size() != (add ? 3u : 2u)) return;
+            const auto destination = trim(instruction.operands[0]);
+            const unsigned width = instruction.opcode.ends_with("32") && add ? 32 : 64;
+            if (first_register(destination) != destination ||
+                ptx_register_container_bits(destination) != width) return;
+            Value value{instruction.opcode, {}};
+            static const std::regex integer(R"(^-?[0-9]+$)");
+            for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
+                const auto operand = trim(instruction.operands[i]);
+                if (first_register(operand) == operand && !operand.empty() &&
+                    ptx_register_container_bits(operand) == (convert ? 32 : width)) {
+                    // In-place expressions require a versioned value proof.
+                    if (operand == destination) return;
+                    value.dependencies.push_back(operand);
+                } else if (!std::regex_match(operand, integer)) return;
+                value.key += "|" + operand;
+            }
+            // Forget the oldest expression when the proof reaches its bound.
+            // Eviction only loses an alias; it cannot manufacture a value.
+            if (values.size() >= 64) { values.erase(order.front()); order.pop_front(); }
+            order.push_back(destination);
+            values[destination] = std::move(value);
+        }
+        std::optional<ComparisonFact> comparison(const Instruction& instruction) const {
+            auto fact = comparison_predicate(instruction);
+            if (!fact) return fact;
+            fact->dependencies = {fact->left, fact->right};
+            auto key = [&](const std::string& reg) {
+                const auto found = values.find(reg);
+                if (found == values.end()) return "reg|" + reg;
+                fact->dependencies.insert(fact->dependencies.end(), found->second.dependencies.begin(),
+                                           found->second.dependencies.end());
+                return "expr|" + found->second.key;
+            };
+            fact->left = key(fact->left);
+            fact->right = key(fact->right);
+            if (fact->relation == "eq" && fact->right < fact->left) std::swap(fact->left, fact->right);
+            return fact;
+        }
+    };
+    static bool writes_fact(const std::string& reg, const ComparisonFact& fact) {
+        return std::find(fact.dependencies.begin(), fact.dependencies.end(), reg) != fact.dependencies.end();
     }
 
     static std::optional<bool> predicate_value(
@@ -275,6 +341,7 @@ struct GuardedPaths {
                                      !branch->predicate.empty();
             const auto [pred, inverted] = normalized_predicate(branch->predicate);
             std::optional<ComparisonFact> comparison;
+            Expressions expressions;
             bool combined = false;
             auto constants = entry_constants[index];
             for (std::size_t j = 0; j < source.instructions.size(); ++j) {
@@ -285,12 +352,13 @@ struct GuardedPaths {
                 if (root_opcode(instruction.opcode) == "call") invalidate_call(instruction, constants);
                 if (value && written.size() == 1) constants[written[0]] = *value;
                 for (const auto& reg : written)
-                    if (comparison && (reg == pred || reg == comparison->left || reg == comparison->right))
+                    if (comparison && (reg == pred || writes_fact(reg, *comparison)))
                         comparison.reset();
                 if (root_opcode(instruction.opcode) == "call") comparison.reset();
                 if (std::find(written.begin(), written.end(), pred) != written.end()) combined = false;
+                expressions.observe(instruction);
                 if (written.size() == 1 && written[0] == pred) {
-                    comparison = comparison_predicate(instruction);
+                    comparison = expressions.comparison(instruction);
                     combined = instruction.opcode == "or.pred" && instruction.predicate.empty();
                 }
             }
@@ -302,6 +370,7 @@ struct GuardedPaths {
                 auto known = constants;
                 if (conditional) known[pred] = (edge == 0) != inverted;
                 auto fact = comparison;
+                auto edge_expressions = expressions;
                 if (fact) fact->positive = known[pred] == fact->positive;
                 auto parent = index;
                 auto parent_edge = edge;
@@ -324,16 +393,17 @@ struct GuardedPaths {
                         const auto written = destination_registers(instruction);
                         auto value = predicate_value(instruction, known);
                         if (instruction.predicate.empty()) {
-                            const auto next = comparison_predicate(instruction);
+                            const auto next = edge_expressions.comparison(instruction);
                             if (next && fact && next->left == fact->left && next->right == fact->right &&
                                 next->type == fact->type && next->relation == fact->relation)
                                 value = next->positive == fact->positive;
                         }
                         for (const auto& reg : written) {
                             known.erase(reg);
-                            if (fact && (reg == fact->left || reg == fact->right)) fact.reset();
+                            if (fact && writes_fact(reg, *fact)) fact.reset();
                         }
                         if (root_opcode(instruction.opcode) == "call") { invalidate_call(instruction, known); fact.reset(); }
+                        edge_expressions.observe(instruction);
                         if (value && written.size() == 1) known[written[0]] = *value;
                     }
                     if (target.successors.size() == 1) {
