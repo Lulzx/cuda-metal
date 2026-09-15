@@ -250,6 +250,32 @@ struct GuardedPaths {
             return fact;
         }
     };
+
+    // Seed expression identities from a bounded, unambiguous predecessor
+    // chain. A cycle supplies no first execution, and a merge may supply a
+    // different register value, so neither is used as evidence.
+    Expressions expressions_before(std::size_t index) const {
+        std::vector<std::size_t> prefix;
+        std::unordered_set<std::size_t> visited{index};
+        std::size_t instructions = 0;
+        for (unsigned depth = 0; depth < 8; ++depth) {
+            if (raw_blocks[index].predecessors.size() != 1) break;
+            const auto predecessor = raw_blocks[index].predecessors.front();
+            if (!visited.insert(predecessor).second) return {};
+            const auto count = raw_blocks[predecessor].instructions.size();
+            if (count > 256 - instructions) break;
+            instructions += count;
+            prefix.push_back(predecessor);
+            index = predecessor;
+        }
+        std::reverse(prefix.begin(), prefix.end());
+        Expressions expressions;
+        for (const auto block : prefix)
+            for (const auto* instruction : raw_blocks[block].instructions)
+                expressions.observe(*instruction);
+        return expressions;
+    }
+
     static bool writes_fact(const std::string& reg, const ComparisonFact& fact) {
         return std::find(fact.dependencies.begin(), fact.dependencies.end(), reg) != fact.dependencies.end();
     }
@@ -341,7 +367,7 @@ struct GuardedPaths {
                                      !branch->predicate.empty();
             const auto [pred, inverted] = normalized_predicate(branch->predicate);
             std::optional<ComparisonFact> comparison;
-            Expressions expressions;
+            auto expressions = expressions_before(index);
             bool combined = false;
             auto constants = entry_constants[index];
             for (std::size_t j = 0; j < source.instructions.size(); ++j) {
@@ -735,6 +761,12 @@ void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
                             const cumetal::ptx::EntryFunction* function) {
     GuardedPaths paths{blocks, builder, storage, function};
     paths.thread_threshold_edges();
+    // Threshold specialization rewires edges and appends clones. The next
+    // proof consumes predecessor topology, so refresh it before proceeding.
+    for (auto& block : blocks) block.predecessors.clear();
+    for (std::size_t index = 0; index < blocks.size(); ++index)
+        for (auto successor : blocks[index].successors)
+            blocks[successor].predecessors.push_back(index);
     paths.thread_predicate_edges();
     for (auto& block : blocks) block.predecessors.clear();
     for (std::size_t index = 0; index < blocks.size(); ++index)

@@ -125,8 +125,10 @@ load/use path proofs before register SSA, including exact complements and
 reversed operands. A bounded table also relates identical single `add.u32/s32/u64/s64`
 and `cvt.u64.u32` expressions in different registers. It keeps at most 64 expressions;
 operand/result writes, predication, calls, and eviction conservatively lose proof.
-It preserves the computations and memory operations, and does not fold in-place
-updates, recursive expressions, signed comparisons, or floating arithmetic. Full
+It can carry identities through at most eight unambiguous predecessor blocks and
+256 instructions; merges and cycles stop that predecessor proof. It preserves the
+computations and memory operations, and does not fold in-place updates, recursive
+expressions, signed comparisons, or floating arithmetic. Full
 RSA-PSS and P-256 signature compilation still encounter other guarded-SSA cases.
 
 IR verification computes immediate dominators and queries their tree intervals

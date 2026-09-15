@@ -12,7 +12,7 @@ if '--gpu-child' not in sys.argv:
     if result.returncode:
         raise SystemExit(result.returncode)
     launches = [line for line in result.stderr.splitlines() if 'CUMETAL_PROVENANCE event=kernel_launch' in line]
-    assert len(launches) == 7, launches
+    assert len(launches) == 9, launches
     assert all('device=apple_gpu' in line and 'launch_success=true' in line and
                'provenance=generic_ptx_lowering' in line for line in launches), launches
     raise SystemExit(0)
@@ -31,6 +31,18 @@ convert=convert.replace('setp.ge.u32 %p0, %r8, %r7;', 'setp.ge.u64 %p0, %rd6, %r
 convert=convert.replace('setp.ge.u32 %p1, %r9, %r7;', 'setp.ge.u64 %p1, %rd7, %rd8;')
 run_integer_case(build,convert,[v for p in pairs for v in p], [99 if a>=b else a for a,b in pairs],
                  'repeated cvt.u64.u32',entry='guarded_relation',word_bits=32,input_words=2,output_words=1)
+def split_predecessors(count):
+    blocks=''.join(f'bra CONVERT_CHECK_{index};\nCONVERT_CHECK_{index}:\n'
+                   for index in range(count))
+    return convert.replace('setp.ge.u64 %p0, %rd6, %rd8;',
+                           blocks+'setp.ge.u64 %p0, %rd6, %rd8;')
+predecessor_convert=split_predecessors(1)
+run_integer_case(build,predecessor_convert,[v for p in pairs for v in p],
+                 [99 if a>=b else a for a,b in pairs],
+                 'predecessor cvt.u64.u32',entry='guarded_relation',word_bits=32,input_words=2,output_words=1)
+run_integer_case(build,split_predecessors(8),[v for p in pairs for v in p],
+                 [99 if a>=b else a for a,b in pairs],
+                 '8-block predecessor boundary',entry='guarded_relation',word_bits=32,input_words=2,output_words=1)
 wide=source.replace('.reg .b64 %rd<6>;', '.reg .b64 %rd<11>;')
 for a,b in [('%r6','%rd6'),('%r7','%rd7'),('%r8','%rd8'),('%r9','%rd9'),('%r1','%rd10')]:
  wide=wide.replace(a,b)
@@ -73,6 +85,10 @@ for label,case in [
  ('predicated second expression',source.replace('add.u32 %r9', '@%p0 add.u32 %r9')),
  ('in-place source expression',source.replace('add.u32 %r8, %r6, 3;', 'add.u32 %r6, %r6, 3;').replace('%p0, %r8, %r7;', '%p0, %r6, %r7;')),
  ('call',source.replace('.visible .entry','.func noop() { ret; }\n.visible .entry').replace('JOIN:\n','JOIN:\ncall.uni noop, ();\n')),
+ ('predecessor input overwrite',predecessor_convert.replace('CONVERT_CHECK_0:\n', 'CONVERT_CHECK_0:\nmov.u32 %r6, 0;\n')),
+ ('predecessor merge',predecessor_convert.replace('cvt.u64.u32 %rd6, %r6;',
+    'setp.eq.u32 %p3, %r6, 0;\n@%p3 bra CONVERT_CHECK_0;\ncvt.u64.u32 %rd6, %r6;')),
+ ('predecessor depth exhausted',split_predecessors(9)),
 ]:
  expect_compile_failure(build,case,'guarded_relation','PTX register')
  print('REJECTED '+label)
