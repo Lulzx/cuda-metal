@@ -22,6 +22,40 @@ int main(int argc, char** argv) {
     };
     namespace metal = cumetal::metal;
     bool ok = true;
+    const std::string constant_guard = fixture("ptx_constant_predicate.ptx");
+    const auto guarded_constant = metal::compile_ptx_to_msl(constant_guard);
+    ok &= expect(guarded_constant.ok,
+                 "constant predicate guards a conditionally defined value: " + guarded_constant.error);
+    for (const std::string replacement : {
+        "JOIN:\n@%p0 mov.pred %p1, 0;\n",
+        "JOIN:\nsetp.ne.u32 %p1, %r0, 0;\n",
+        "JOIN:\nst.global.u32 [%rd3], %r1;\n"}) {
+        auto invalid = constant_guard;
+        invalid.replace(invalid.find("JOIN:\n"), 6, replacement);
+        ok &= expect(!metal::compile_ptx_to_msl(invalid).ok,
+                     "constant facts cannot hide overwritten guards or undefined reads");
+    }
+    auto call_kills_constant = constant_guard;
+    call_kills_constant.insert(call_kills_constant.find(".visible .entry"),
+                              ".func opaque_helper() { ret; }\n");
+    call_kills_constant.insert(call_kills_constant.find("@%p0 bra JOIN;"),
+                              "call.uni opaque_helper, ();\n");
+    ok &= expect(!metal::compile_ptx_to_msl(call_kills_constant).ok,
+                 "calls invalidate constant predicate facts");
+    auto carried_constant = constant_guard;
+    carried_constant.insert(carried_constant.find("@%p0 bra JOIN;"),
+                            "bra CHECK;\nCHECK:\n");
+    ok &= expect(metal::compile_ptx_to_msl(carried_constant).ok,
+                 "constant flags propagate across an intervening block");
+    auto exhausted_constants = carried_constant;
+    exhausted_constants.insert(exhausted_constants.find(".reg .pred"),
+                               ".reg .pred %q<129>;\n");
+    std::string flags;
+    for (unsigned i = 0; i < 129; ++i)
+        flags += "mov.pred %q" + std::to_string(i) + ", -1;\n";
+    exhausted_constants.insert(exhausted_constants.find("bra CHECK;"), flags);
+    ok &= expect(!metal::compile_ptx_to_msl(exhausted_constants).ok,
+                 "constant fact budget exhaustion does not invent SSA definitions");
     const std::string guarded_select = fixture("ptx_guarded_self_select.ptx");
     const auto selected = metal::compile_ptx_to_msl(guarded_select);
     ok &= expect(selected.ok, "unobserved loop-carried select arm is eliminated: " + selected.error);

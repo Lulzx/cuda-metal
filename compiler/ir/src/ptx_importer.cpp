@@ -4019,6 +4019,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         next.infer_register_types();
         next.build_cfg();
         detail::simplify_guarded_paths(next.raw_blocks, next.builder, next.normalized_instructions);
+        detail::remove_unreachable_blocks(next.raw_blocks);
         detail::remove_discarded_pack_halves(next.raw_blocks, next.normalized_instructions);
         next.allocate_values();
         if (!next.construct_ssa() || !next.materialize_function()) {

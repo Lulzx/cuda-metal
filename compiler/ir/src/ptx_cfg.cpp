@@ -134,22 +134,102 @@ struct GuardedPaths {
         return EqualityFact{left, right, match[2], match[1] == "eq"};
     }
 
+    static std::optional<bool> predicate_value(
+        const Instruction& instruction, const std::map<std::string, bool>& known) {
+        if (!instruction.predicate.empty()) return std::nullopt;
+        auto lookup = [&](const std::string& operand) -> std::optional<bool> {
+            const auto text = trim(operand);
+            if (text == "0") return false;
+            if (text == "1" || text == "-1") return true;
+            const auto found = known.find(text);
+            return found == known.end() ? std::nullopt : std::optional<bool>(found->second);
+        };
+        if (instruction.operands.size() == 2 &&
+            (instruction.opcode == "mov.pred" || instruction.opcode == "not.pred")) {
+            auto value = lookup(instruction.operands[1]);
+            if (value && instruction.opcode == "not.pred") value = !*value;
+            return value;
+        }
+        if (instruction.operands.size() == 3 && instruction.opcode == "or.pred") {
+            auto a = lookup(instruction.operands[1]);
+            auto b = lookup(instruction.operands[2]);
+            if ((a && *a) || (b && *b)) return true;
+            if (a && b) return false;
+        }
+        return std::nullopt;
+    }
+
+    // Reachable predecessor states meet by intersection. An unvisited edge is
+    // not an unknown value: ignoring it until visited preserves loop-invariant
+    // flags, while later conflicting edges remove the fact and requeue users.
+    std::vector<std::map<std::string, bool>> constant_entries() const {
+        using Facts = std::map<std::string, bool>;
+        std::vector<Facts> entries(raw_blocks.size());
+        if (raw_blocks.empty()) return entries;
+        std::vector<bool> visited(raw_blocks.size(), false), queued(raw_blocks.size(), false);
+        std::deque<std::size_t> pending{0};
+        visited[0] = queued[0] = true;
+        std::size_t steps = 0, instructions = 0;
+        while (!pending.empty()) {
+            if (++steps > 131072) return std::vector<Facts>(raw_blocks.size());
+            const auto index = pending.front();
+            pending.pop_front();
+            queued[index] = false;
+            auto outgoing = entries[index];
+            for (const auto* instruction : raw_blocks[index].instructions) {
+                if (++instructions > 4194304) return std::vector<Facts>(raw_blocks.size());
+                const auto value = predicate_value(*instruction, outgoing);
+                const auto written = destination_registers(*instruction);
+                for (const auto& reg : written) outgoing.erase(reg);
+                if (root_opcode(instruction->opcode) == "call") outgoing.clear();
+                if (value && written.size() == 1) outgoing[written[0]] = *value;
+                if (outgoing.size() > 128) return std::vector<Facts>(raw_blocks.size());
+            }
+            for (const auto successor : raw_blocks[index].successors) {
+                auto merged = outgoing;
+                if (visited[successor]) {
+                    merged = entries[successor];
+                    std::erase_if(merged, [&](const auto& item) {
+                        const auto found = outgoing.find(item.first);
+                        return found == outgoing.end() || found->second != item.second;
+                    });
+                }
+                if (visited[successor] && merged == entries[successor]) continue;
+                visited[successor] = true;
+                entries[successor] = std::move(merged);
+                if (!queued[successor]) {
+                    pending.push_back(successor);
+                    queued[successor] = true;
+                }
+            }
+        }
+        return entries;
+    }
+
     // Duplicate only a bounded chain of successors whose branch is implied by
     // the incoming edge. Retain every non-branch instruction, including guarded
     // loads: this exposes infeasible paths to SSA without inventing definitions.
-    void thread_equality_edges() {
+    void thread_predicate_edges() {
         const auto original_count = raw_blocks.size();
+        const auto entry_constants = constant_entries();
         for (std::size_t index = 0; index < original_count; ++index) {
             const RawBlock source = raw_blocks[index];
-            if (source.instructions.empty() || source.successors.size() != 2) continue;
+            if (source.instructions.empty() || source.successors.empty() ||
+                source.successors.size() > 2) continue;
             const auto* branch = source.instructions.back();
-            if (root_opcode(branch->opcode) != "bra" || branch->predicate.empty()) continue;
+            const bool conditional = root_opcode(branch->opcode) == "bra" &&
+                                     !branch->predicate.empty();
             const auto [pred, inverted] = normalized_predicate(branch->predicate);
             std::optional<EqualityFact> comparison;
             bool combined = false;
-            for (std::size_t j = 0; j + 1 < source.instructions.size(); ++j) {
+            auto constants = entry_constants[index];
+            for (std::size_t j = 0; j < source.instructions.size(); ++j) {
                 const auto& instruction = *source.instructions[j];
                 const auto written = destination_registers(instruction);
+                const auto value = predicate_value(instruction, constants);
+                for (const auto& reg : written) constants.erase(reg);
+                if (root_opcode(instruction.opcode) == "call") constants.clear();
+                if (value && written.size() == 1) constants[written[0]] = *value;
                 for (const auto& reg : written)
                     if (comparison && (reg == pred || reg == comparison->left || reg == comparison->right))
                         comparison.reset();
@@ -160,9 +240,10 @@ struct GuardedPaths {
                     combined = instruction.opcode == "or.pred" && instruction.predicate.empty();
                 }
             }
-            if (!comparison && !combined) continue;
-            for (std::size_t edge = 0; edge < 2; ++edge) {
-                std::map<std::string, bool> known{{pred, (edge == 0) != inverted}};
+            if (!comparison && !combined && constants.empty()) continue;
+            for (std::size_t edge = 0; edge < source.successors.size(); ++edge) {
+                auto known = constants;
+                if (conditional) known[pred] = (edge == 0) != inverted;
                 auto fact = comparison;
                 if (fact) fact->equal = known[pred] == fact->equal;
                 auto parent = index;
@@ -178,27 +259,11 @@ struct GuardedPaths {
                     for (std::size_t j = 0; j + 1 < target.instructions.size(); ++j) {
                         const auto& instruction = *target.instructions[j];
                         const auto written = destination_registers(instruction);
-                        std::optional<bool> value;
-                        auto lookup = [&](const std::string& operand) -> std::optional<bool> {
-                            auto found = known.find(trim(operand));
-                            if (found == known.end()) return std::nullopt;
-                            return found->second;
-                        };
+                        auto value = predicate_value(instruction, known);
                         if (instruction.predicate.empty()) {
                             const auto next = equality_predicate(instruction);
                             if (next && fact && next->left == fact->left && next->right == fact->right &&
                                 next->type == fact->type) value = next->equal == fact->equal;
-                            if (instruction.operands.size() == 2 &&
-                                (instruction.opcode == "mov.pred" || instruction.opcode == "not.pred")) {
-                                value = lookup(instruction.operands[1]);
-                                if (value && instruction.opcode == "not.pred") value = !*value;
-                            }
-                            if (instruction.operands.size() == 3 && instruction.opcode == "or.pred") {
-                                auto a = lookup(instruction.operands[1]);
-                                auto b = lookup(instruction.operands[2]);
-                                if ((a && *a) || (b && *b)) value = true;
-                                else if (a && b) value = false;
-                            }
                         }
                         for (const auto& reg : written) {
                             known.erase(reg);
@@ -312,11 +377,43 @@ struct GuardedPaths {
 
 }  // namespace
 
+void remove_unreachable_blocks(std::vector<RawBlock>& blocks) {
+    // Once every incoming edge was specialized, the original join can become
+    // unreachable. Do not ask register SSA to invent definitions for that dead
+    // copy. Remap only CFG indices; block IDs and instruction ownership survive.
+    if (!blocks.empty()) {
+        std::vector<bool> reachable(blocks.size(), false);
+        std::vector<std::size_t> pending{0};
+        while (!pending.empty()) {
+            const auto index = pending.back();
+            pending.pop_back();
+            if (reachable[index]) continue;
+            reachable[index] = true;
+            pending.insert(pending.end(), blocks[index].successors.begin(),
+                           blocks[index].successors.end());
+        }
+        std::vector<std::size_t> remap(blocks.size());
+        std::vector<RawBlock> kept;
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+            if (!reachable[i]) continue;
+            remap[i] = kept.size();
+            kept.push_back(std::move(blocks[i]));
+        }
+        for (auto& block : kept)
+            for (auto& successor : block.successors) successor = remap[successor];
+        blocks = std::move(kept);
+    }
+    for (auto& block : blocks) block.predecessors.clear();
+    for (std::size_t index = 0; index < blocks.size(); ++index)
+        for (auto successor : blocks[index].successors)
+            blocks[successor].predecessors.push_back(index);
+}
+
 void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
                             std::deque<Instruction>& storage) {
     GuardedPaths paths{blocks, builder, storage};
     paths.thread_threshold_edges();
-    paths.thread_equality_edges();
+    paths.thread_predicate_edges();
     for (auto& block : blocks) block.predecessors.clear();
     for (std::size_t index = 0; index < blocks.size(); ++index)
         for (auto successor : blocks[index].successors)

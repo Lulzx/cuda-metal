@@ -89,3 +89,7 @@ Literal-zero integer definitions passed to pointer block arguments are
 materialized as typed nulls at the receiving edge. Nonzero integer inputs
 to pointer block arguments are rejected; this does not provide general
 integer-to-pointer conversion or repair unrelated scalar-offset joins.
+Bounded guard specialization also follows literal predicate flags through
+incoming branches and fallthroughs, including inversion. Overwrites and calls
+invalidate these facts; exhausted proof budgets still leave SSA to reject
+unproven reads. This is not general path-sensitive register analysis.

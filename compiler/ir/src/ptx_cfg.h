@@ -17,6 +17,8 @@ struct RawBlock {
     std::unordered_set<std::string> uses_before_definition;
 };
 
+void remove_unreachable_blocks(std::vector<RawBlock>& blocks);
+
 // Called before SSA allocation. Storage owns rewritten instructions until the
 // importer finishes materializing the function; deque preserves their addresses.
 void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
