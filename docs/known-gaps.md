@@ -95,3 +95,7 @@ invalidate these facts; exhausted proof budgets still leave SSA to reject
 unproven reads. This is not general path-sensitive register analysis.
 Repeated unchanged branch predicates use the known incoming edge value even
 when their producing comparison is outside that bounded operand analysis.
+After incoming-register validation, trivial block arguments with one distinct,
+type-identical input are folded, including loop self-references. Differing
+definitions remain block arguments. This is not general loop optimization or
+elimination of mutually dependent groups of block arguments.

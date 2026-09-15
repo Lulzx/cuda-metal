@@ -2865,6 +2865,9 @@ if(APPLE)
     add_test(NAME functional_ptx_repeated_predicate
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_repeated_predicate.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_repeated_predicate PROPERTIES TIMEOUT 120)
+    add_test(NAME functional_ptx_trivial_block_arguments
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trivial_block_arguments.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_trivial_block_arguments PROPERTIES TIMEOUT 120)
 
     add_test(NAME functional_ptx_constant_predicate
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_constant_predicate.py ${CMAKE_BINARY_DIR})

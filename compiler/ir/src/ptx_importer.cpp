@@ -1380,7 +1380,7 @@ struct Importer {
         // these arguments also breaks loop-header cycles: the backedge can
         // immediately refer to the header argument while the preheader carries
         // the dominating definition.  Redundant arguments where all incoming
-        // values happen to match are valid SSA and can be folded later.
+        // values happen to match are folded after checking every incoming edge.
         for (std::size_t block_index = 0; block_index < raw_blocks.size(); ++block_index) {
             if (raw_blocks[block_index].predecessors.size() < 2) continue;
             for (const std::string& name : live_in[block_index]) {
@@ -1445,7 +1445,57 @@ struct Importer {
                 }
             }
         }
+        fold_trivial_block_arguments();
         return true;
+    }
+
+    void fold_trivial_block_arguments() {
+        std::unordered_map<ValueId, ValueId> aliases;
+        const auto resolve = [&](ValueId value) {
+            ValueId root = value;
+            while (aliases.contains(root)) root = aliases.at(root);
+            while (aliases.contains(value)) {
+                const ValueId next = aliases.at(value);
+                aliases[value] = root;
+                value = next;
+            }
+            return root;
+        };
+        // An argument with one distinct incoming value (ignoring itself) is
+        // that value, even on a loop backedge. Never fold differing definitions
+        // or types, and never use folding to make an undefined edge valid.
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+                for (const auto& [name, argument] : block_arguments[b]) {
+                    if (aliases.contains(argument)) continue;
+                    std::optional<ValueId> replacement;
+                    bool same = true;
+                    for (const auto predecessor : raw_blocks[b].predecessors) {
+                        const ValueId value = resolve(outgoing[predecessor].at(name));
+                        if (value == argument) continue;
+                        if (value_types.at(value) != value_types.at(argument) ||
+                            (replacement && *replacement != value)) {
+                            same = false;
+                            break;
+                        }
+                        replacement = value;
+                    }
+                    if (same && replacement) {
+                        aliases[argument] = *replacement;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+            std::erase_if(block_arguments[b], [&](const auto& entry) {
+                return aliases.contains(entry.second);
+            });
+            for (auto& [name, value] : incoming[b]) value = resolve(value);
+            for (auto& [name, value] : outgoing[b]) value = resolve(value);
+        }
     }
 
     Operand operand_for(std::string_view token,

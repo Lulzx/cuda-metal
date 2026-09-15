@@ -1,4 +1,5 @@
 #include "cumetal/metal/lower_to_msl.h"
+#include "cumetal/ir/ptx_importer.h"
 #include "ptx_cfg.h"
 #include <filesystem>
 #include <fstream>
@@ -22,6 +23,66 @@ int main(int argc, char** argv) {
     };
     namespace metal = cumetal::metal;
     bool ok = true;
+    const auto invariant_loop = cumetal::ir::import_ptx(fixture("ptx_trivial_block_arguments.ptx"));
+    ok &= expect(invariant_loop.ok, "invariant-loop import: " + invariant_loop.error);
+    if (invariant_loop.ok) {
+        bool found_loop = false;
+        for (const auto& function : invariant_loop.module.functions) {
+            for (const auto& block : function.blocks) {
+                if (block.name != "LOOP") continue;
+                found_loop = true;
+                ok &= expect(block.arguments.size() == 1 && block.arguments.front().name == "%r2",
+                             "only the changing induction value remains a loop argument");
+            }
+        }
+        ok &= expect(found_loop, "invariant-loop fixture retains its loop");
+    }
+    const std::string diamond = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry diamond(.param .u64 output, .param .u32 input) {
+.reg .b64 %rd1;
+.reg .b32 %r<4>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [input];
+setp.eq.u32 %p1, %r1, 0;
+@%p1 bra OTHER;
+mov.u32 %r2, 7;
+bra JOIN;
+OTHER:
+mov.u32 %r2, 11;
+JOIN:
+add.u32 %r3, %r1, %r2;
+st.global.u32 [%rd1], %r3;
+ret;
+}
+)ptx";
+    for (const bool different_pointer : {false, true}) {
+        auto source = diamond;
+        if (different_pointer)
+            source.insert(source.find("OTHER:\n") + 7, "add.u64 %rd1, %rd1, 4;\n");
+        const auto imported = cumetal::ir::import_ptx(source);
+        ok &= expect(imported.ok, "diamond import: " + imported.error);
+        bool found_join = false;
+        for (const auto& function : imported.module.functions) {
+            for (const auto& block : function.blocks) {
+                if (block.name != "JOIN") continue;
+                found_join = true;
+                ok &= expect(block.arguments.size() == (different_pointer ? 2u : 1u),
+                             "identical join inputs fold; differing scalars and pointers remain");
+                for (const auto& argument : block.arguments)
+                    if (argument.name == "%rd1")
+                        ok &= expect(argument.type.is_pointer(), "pointer join retains pointer type");
+            }
+        }
+        ok &= expect(found_join, "diamond fixture retains its join");
+    }
+    auto undefined_loop = fixture("ptx_trivial_block_arguments.ptx");
+    undefined_loop.erase(undefined_loop.find("mov.u32 %r2, 0;"), 16);
+    ok &= expect(!cumetal::ir::import_ptx(undefined_loop).ok,
+                 "folding does not invent a missing loop entry value");
     const auto repeated_predicate = fixture("ptx_repeated_predicate.ptx");
     const auto repeated = metal::compile_ptx_to_msl(repeated_predicate);
     ok &= expect(repeated.ok, "repeated 16-bit predicate guards the load: " + repeated.error);
