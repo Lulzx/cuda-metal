@@ -103,6 +103,10 @@ The signature self-test still requires further guarded-SSA work; neither full
 module has numerical Apple-GPU validation.
 Repeated unchanged branch predicates use the known incoming edge value even
 when their producing comparison is outside that bounded operand analysis.
+Self-select guards can also use matching or complementary integer equality
+comparisons from the preceding 64 instructions. Types and operands must match;
+operand/predicate writes and calls discard these facts. Dynamic timer/counter
+reads are excluded. This does not establish arbitrary predicate equivalence.
 After incoming-register validation, trivial block arguments with one distinct,
 type-identical input are folded, including loop self-references. Differing
 definitions remain block arguments. This is not general loop optimization or

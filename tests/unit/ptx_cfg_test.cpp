@@ -7,6 +7,7 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 bool expect(bool condition, const std::string& message) {
@@ -284,6 +285,44 @@ ret;
         detail::simplify_guarded_paths(one, builder, owned);
         ok &= expect(!one[0].instructions.empty() && one[0].instructions.front() == copy,
                      "retain observed copy before " + root);
+    }
+    // Timer/counter reads need not retain their value between comparisons.
+    // Also verify that the bounded prefix does not consume an older predicate.
+    for (const auto& [operand, padding, rewritten] :
+         std::vector<std::tuple<std::string, unsigned, bool>>{
+             {"%clock64", 0, false}, {"%globaltimer", 0, false},
+             {"%globaltimer_lo", 0, false}, {"%globaltimer_hi", 0, false},
+             {"%pm0", 0, false}, {"%pm0_64", 0, false},
+             {"%rd8", 62, true}, {"%rd8", 63, false}}) {
+        std::deque<detail::Instruction> owned;
+        auto add = [&](std::string opcode, std::vector<std::string> operands,
+                       std::string predicate = {}) {
+            detail::Instruction instruction;
+            instruction.opcode = std::move(opcode);
+            instruction.operands = std::move(operands);
+            instruction.predicate = std::move(predicate);
+            owned.push_back(std::move(instruction));
+        };
+        add("setp.eq.u64", {"%p1", operand, "1"});
+        for (unsigned i = 0; i < padding; ++i) add("mov.u32", {"%r3", "0"});
+        add("setp.ne.u64", {"%p2", operand, "1"});
+        const auto select_index = owned.size();
+        add("selp.b64", {"%rd7", "%rd6", "%rd7", "%p2"});
+        add("bra", {"retry"}, "%p1");
+        std::vector<detail::RawBlock> cfg(2);
+        cfg[0].id = builder.next_block();
+        cfg[0].name = "retry";
+        cfg[0].successors = {0, 1};
+        for (const auto& instruction : owned) cfg[0].instructions.push_back(&instruction);
+        cfg[1].id = builder.next_block();
+        cfg[1].name = "exit";
+        add("st.global.u64", {"[%rd0]", "%rd7"});
+        cfg[1].instructions.push_back(&owned.back());
+        add("ret", {});
+        cfg[1].instructions.push_back(&owned.back());
+        detail::simplify_guarded_paths(cfg, builder, owned);
+        ok &= expect(cfg[0].instructions[select_index]->opcode == (rewritten ? "mov.b64" : "selp.b64"),
+                     "comparison alias eligibility: " + operand + "/" + std::to_string(padding));
     }
     return ok ? 0 : 1;
 }

@@ -328,6 +328,50 @@ struct GuardedPaths {
         }
     }
 
+    // Seed the select proof from a bounded local history of integer comparisons.
+    // Equal inputs and types establish predicate equality or complementation;
+    // writes and calls discard facts before any rewrite is considered.
+    static std::map<std::string, bool> comparison_aliases_before(
+        const RawBlock& block, std::size_t index, const std::string& selected) {
+        static const std::regex comparison(R"(^setp\.(eq|ne)\.([bu](16|32|64))$)");
+        static const std::regex integer(R"(^-?[0-9]+$)");
+        std::map<std::string, ComparisonFact> facts;
+        for (std::size_t i = index > 64 ? index - 64 : 0; i < index; ++i) {
+            const auto& instruction = *block.instructions[i];
+            for (const auto& written : destination_registers(instruction)) {
+                std::erase_if(facts, [&](const auto& item) {
+                    return item.first == written || item.second.left == written || item.second.right == written;
+                });
+            }
+            if (root_opcode(instruction.opcode) == "call") facts.clear();
+            std::smatch match;
+            if (!instruction.predicate.empty() || instruction.operands.size() != 3 ||
+                !std::regex_match(instruction.opcode, match, comparison)) continue;
+            const auto predicate = trim(instruction.operands[0]);
+            if (predicate.empty() || first_register(predicate) != predicate) continue;
+            auto left = trim(instruction.operands[1]);
+            auto right = trim(instruction.operands[2]);
+            const auto sources = source_registers(instruction);
+            const auto scalar = [&](const std::string& operand) {
+                return std::regex_match(operand, integer) ||
+                    (!operand.empty() && first_register(operand) == operand &&
+                     std::find(sources.begin(), sources.end(), operand) != sources.end() &&
+                     !operand.starts_with("%globaltimer") && !operand.starts_with("%pm"));
+            };
+            if (!scalar(left) || !scalar(right)) continue;
+            if (right < left) std::swap(left, right);
+            facts[predicate] = ComparisonFact{left, right, match[2], "eq", match[1] == "eq"};
+        }
+        std::map<std::string, bool> aliases{{selected, true}};
+        const auto found = facts.find(selected);
+        if (found == facts.end()) return aliases;
+        for (const auto& [predicate, fact] : facts) {
+            if (fact.left == found->second.left && fact.right == found->second.right && fact.type == found->second.type)
+                aliases[predicate] = fact.positive == found->second.positive;
+        }
+        return aliases;
+    }
+
     void remove_unobserved_self_selects() {
         for (RawBlock& block : raw_blocks) {
             if (block.instructions.empty() || block.successors.size() != 2) continue;
@@ -351,7 +395,7 @@ struct GuardedPaths {
                     trim(select->operands[2]) != destination ||
                     trim(select->operands[1]) == destination) continue;
                 const std::string select_predicate = trim(select->operands[3]);
-                std::map<std::string, bool> predicate_aliases{{select_predicate, true}};
+                auto predicate_aliases = comparison_aliases_before(block, index, select_predicate);
                 bool safe = true;
                 for (std::size_t i = index + 1; i + 1 < block.instructions.size(); ++i) {
                     const auto sources = source_registers(*block.instructions[i]);

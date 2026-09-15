@@ -2862,6 +2862,9 @@ add_test(NAME functional_ptx_msl_abi
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx)
 
 if(APPLE)
+    add_test(NAME functional_ptx_select_comparisons
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_select_comparisons.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_select_comparisons PROPERTIES TIMEOUT 180)
     add_test(NAME functional_ptx_unobserved_copies
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_unobserved_copies.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_unobserved_copies PROPERTIES TIMEOUT 180)
