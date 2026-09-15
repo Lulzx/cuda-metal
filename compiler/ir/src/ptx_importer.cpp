@@ -2137,7 +2137,7 @@ struct Importer {
             operation.opcode = OpCode::kConvert;
             operation.operands.push_back(
                 bit_container_operand(1, operation.result_types.front()));
-            if (trim(instruction.operands[1]) == "0") {
+            if (instruction.predicate.empty() && trim(instruction.operands[1]) == "0") {
                 integer_zero_values.insert(operation.results.begin(), operation.results.end());
             }
         } else if (root == "cvta") {
@@ -3463,6 +3463,39 @@ struct Importer {
                 if (!is_kernel && function.return_type.kind != TypeKind::kVoid) {
                     return fail(last,
                                 "non-void PTX device function falls through without a return value");
+                }
+            }
+            block.operations.push_back(std::move(terminator));
+        }
+
+        // A PTX zero register can feed a pointer PHI without becoming a pointer
+        // at its definition (it may also have integer uses). Materialize a typed
+        // null on that edge, after every definition has been translated, so
+        // backedges work as well as forward branches.
+        for (BasicBlock& block : function.blocks) {
+            Operation terminator = std::move(block.operations.back());
+            block.operations.pop_back();
+            for (Successor& successor : terminator.successors) {
+                const BasicBlock* target = function.find_block(successor.block);
+                for (std::size_t i = 0; i < successor.arguments.size(); ++i) {
+                    ValueId& incoming_value = successor.arguments[i];
+                    const Type& target_type = target->arguments[i].type;
+                    const Type& source_type = value_types.at(incoming_value);
+                    if (!target_type.is_pointer() ||
+                        source_type.kind != TypeKind::kInteger) continue;
+                    if (!integer_zero_values.contains(incoming_value)) {
+                        return fail(nullptr, "PTX pointer branch argument requires a pointer or proven null");
+                    }
+                    Operation null;
+                    null.opcode = OpCode::kConvert;
+                    null.location = terminator.location;
+                    null.results = {builder.next_value()};
+                    null.result_types = {target_type};
+                    null.operands = {Operand::immediate("null", target_type)};
+                    incoming_value = null.results.front();
+                    value_types[incoming_value] = target_type;
+                    function.generic_null_pointer_values.insert(incoming_value);
+                    block.operations.push_back(std::move(null));
                 }
             }
             block.operations.push_back(std::move(terminator));

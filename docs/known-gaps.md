@@ -85,3 +85,7 @@ so a register reused as a pointer does not retroactively retype earlier scalar
 offsets. Block arguments and instructions synthesized during CFG normalization
 retain the existing register-wide type seed. General scalar/pointer register
 reuse across control-flow joins remains unsupported.
+Literal-zero integer definitions passed to pointer block arguments are
+materialized as typed nulls at the receiving edge. Nonzero integer inputs
+to pointer block arguments are rejected; this does not provide general
+integer-to-pointer conversion or repair unrelated scalar-offset joins.
