@@ -30,7 +30,8 @@ def main():
         if '--calls' in sys.argv:
             generated = msl.read_text()
             assert 'finite(' in generated and 'finite_leaf(' in generated
-            assert 'spin(' not in generated and 'store_then_trap(' not in generated
+            assert 'spin__cm_trap_guarded(' in generated
+            assert 'store_then_trap__cm_trap_guarded(' in generated
         subprocess.run([str(build / 'tests/functional/cumetal_trap_binding_test'), str(msl)], check=True)
         api('cuModuleLoad', [c.POINTER(ptr), c.c_char_p], c.byref(module), os.fsencode(msl))
         api('cuModuleGetFunction', [c.POINTER(ptr), ptr, c.c_char_p], c.byref(function), module, b'trap_probe')

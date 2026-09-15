@@ -104,9 +104,13 @@ retain device pointer type when a later device-memory access proves that exact
 definition is an address. This covers pointer fields in compiler-generated
 private records; ordinary scalar fields remain integers. Reused, predicated,
 narrow, and otherwise ambiguous loaded definitions remain conservative.
-The Bitcoin self-test advances past its private-record pointer mismatches and
-now reaches the existing trap-expansion limit (`calls=4`, `blocks=3409`,
-`operations=317308`); it does not yet have full Apple-GPU validation.
+The Bitcoin self-test advances past its private-record pointer mismatches.
+Trap-capable device helpers now share the kernel's hidden status binding instead
+of being duplicated into one large kernel CFG. Helpers with cyclic CFGs poll
+that status at loop boundaries, and callers stop before consuming a cancelled
+return value. The exact Bitcoin module now translates to a 19.8-MB Metal source,
+but a fresh Apple Metal compilation exceeded 10 minutes and 3.0 GB RSS. No full
+Bitcoin self-test numerical pass is claimed.
 Bounded guard specialization also follows literal predicate flags through
 incoming branches and fallthroughs, including inversion. Predicate liveness
 removes facts after their final possible use, so dead constants do not exhaust
@@ -123,7 +127,7 @@ preserving their memory operations. A separate bounded demand analysis removes
 unobserved full-width scalar `mov.b16/b32/b64` chains, including retry cycles;
 it does not remove other operations or initialize an undefined value. Copies
 feeding stores, addresses, branches, or other retained operations remain live.
-The P-256 public-key self-test now reaches the existing trap-expansion limit.
+The P-256 public-key self-test now emits MSL through the guarded helper ABI.
 The signature self-test still requires further guarded-SSA work; neither full
 module has numerical Apple-GPU validation.
 Repeated unchanged branch predicates use the known incoming edge value even

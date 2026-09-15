@@ -1,5 +1,5 @@
 #include "cumetal/ir/ptx_importer.h"
-#include "trap_call_expansion.h"
+#include "trap_reporting.h"
 #include "cumetal/metal/lower_to_msl.h"
 #include <filesystem>
 #include <fstream>
@@ -12,6 +12,16 @@
 bool expect(bool condition, const std::string& message) {
     if (!condition) std::cerr << "FAIL: " << message << '\n';
     return condition;
+}
+
+std::size_t count_occurrences(const std::string& source,
+                              const std::string& needle) {
+    std::size_t count = 0;
+    for (std::size_t at = 0; (at = source.find(needle, at)) != std::string::npos;
+         at += needle.size()) {
+        ++count;
+    }
+    return count;
 }
 
 int main(int argc, char** argv) {
@@ -48,8 +58,14 @@ call.uni helper, ();
 ret;
 }
 )ptx");
-    ok &= expect(helper_trap.ok && helper_trap.source.find("atomic_fetch_or_explicit(cm_trap_status") != std::string::npos,
-                 "helper trap expands into kernel cancellation CFG: " + helper_trap.error);
+    ok &= expect(helper_trap.ok &&
+                     helper_trap.source.find("helper__cm_trap_guarded") !=
+                         std::string::npos &&
+                     helper_trap.source.find(
+                         "atomic_fetch_or_explicit(cm_trap_status") !=
+                         std::string::npos,
+                 "helper trap uses the shared cancellation ABI: " +
+                     helper_trap.error);
     const std::string nested_barrier = R"ptx(
 .version 7.1
 .target sm_80
@@ -67,8 +83,12 @@ ret;
 }
 )ptx";
     const auto rejected_barrier = metal::compile_ptx_to_msl(nested_barrier);
-    ok &= expect(!rejected_barrier.ok && rejected_barrier.error.find("without barriers or collectives") != std::string::npos,
-                 "barriers in expanded call graphs remain rejected: " + rejected_barrier.error);
+    ok &= expect(!rejected_barrier.ok &&
+                     rejected_barrier.error.find(
+                         "barriers, collectives, or printf") !=
+                         std::string::npos,
+                 "barriers in guarded call graphs remain rejected: " +
+                     rejected_barrier.error);
     std::string oversized = R"ptx(
 .version 7.1
 .target sm_80
@@ -88,16 +108,11 @@ trap;
 )ptx";
     for (int i = 0; i < 1025; ++i) oversized += "st.param.u32 [flag], 0;\ncall.uni noop, (flag);\n";
     oversized += "trap;\n}\n";
-    auto imported = cumetal::ir::import_ptx(oversized);
-    ok &= expect(imported.ok, "oversized call graph is valid GPU IR");
-    if (imported.ok) {
-        const auto original = cumetal::ir::print(imported.module);
-        std::string error;
-        ok &= expect(!metal::expand_trap_call_graphs(&imported.module, &error) &&
-                     error.find("bounded CFG size") != std::string::npos,
-                     "trap call expansion refuses excessive code growth: " + error);
-        ok &= expect(cumetal::ir::print(imported.module) == original,
-                     "rejected expansion leaves the original module intact");
-    }
+    const auto large_graph = metal::compile_ptx_to_msl(oversized);
+    ok &= expect(large_graph.ok && large_graph.source.size() < 1000000 &&
+                     count_occurrences(large_graph.source,
+                                       "void noop__cm_trap_guarded(") == 2,
+                 "repeated trap-capable calls preserve one guarded helper: " +
+                     large_graph.error);
     return ok ? 0 : 1;
 }

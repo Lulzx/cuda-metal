@@ -1,4 +1,4 @@
-#include "trap_call_expansion.h"
+#include "trap_reporting.h"
 #include "cumetal/metal/lower_to_msl.h"
 #include "integer_arithmetic.h"
 #include "cumetal/common/kernel_abi.h"
@@ -1638,7 +1638,7 @@ struct AstLowerer {
     const BuiltinUsageMap& builtin_usage;
     const SharedUsageMap& shared_usage;
     const WideAtomicUsageMap& wide_atomic_usage;
-    const std::unordered_set<std::string>& bounded_trap_helpers;
+    const std::unordered_set<std::string>& guarded_trap_helpers;
     LowerToMslResult result;
     MslFunction output;
     std::unordered_map<ir::ValueId, MslExpr> values;
@@ -1668,6 +1668,7 @@ struct AstLowerer {
     bool predeclared_ssa_storage = false;
     bool force_cfg_dispatcher = false;
     bool barrier_in_call_graph = false;
+    bool trap_guarded = false;
     std::size_t edge_temporary_index = 0;
     std::size_t loop_escape_index = 0;
     std::optional<ir::AddressSpace> pointer_specialization;
@@ -1676,7 +1677,8 @@ struct AstLowerer {
                const BuiltinUsageMap& input_builtin_usage,
                const SharedUsageMap& input_shared_usage,
                const WideAtomicUsageMap& input_wide_atomic_usage,
-               const std::unordered_set<std::string>& input_bounded_trap_helpers,
+               const std::unordered_set<std::string>& input_guarded_trap_helpers,
+               bool input_trap_guarded,
                bool force_dispatcher = false,
                std::optional<ir::AddressSpace> specialization = std::nullopt,
                bool has_barrier = false)
@@ -1685,9 +1687,10 @@ struct AstLowerer {
           builtin_usage(input_builtin_usage),
           shared_usage(input_shared_usage),
           wide_atomic_usage(input_wide_atomic_usage),
-          bounded_trap_helpers(input_bounded_trap_helpers),
+          guarded_trap_helpers(input_guarded_trap_helpers),
           force_cfg_dispatcher(force_dispatcher),
           barrier_in_call_graph(has_barrier),
+          trap_guarded(input_trap_guarded),
           pointer_specialization(specialization) {
         const BuiltinUsage& required = builtin_usage.at(function.name);
         needs_thread_position = required.thread_position;
@@ -3083,6 +3086,12 @@ struct AstLowerer {
                 [&](const ir::Function& candidate) {
                     return candidate.name == callee->second;
                 });
+            const bool guarded_callee =
+                trap_guarded && callee_function != module.functions.end() &&
+                guarded_trap_helpers.contains(callee->second);
+            const std::string direct_callee =
+                guarded_callee ? guarded_trap_helper_name(callee->second)
+                               : callee->second;
             if (callee_function != module.functions.end()) {
                 const std::size_t count =
                     std::min(arguments.size(), callee_function->arguments.size());
@@ -3157,6 +3166,12 @@ struct AstLowerer {
                         "cm_lane_id", MslType::uint()));
                 }
             }
+            if (guarded_callee) {
+                arguments.push_back(MslExpression::identifier(
+                    abi::kTrapStatusName,
+                    MslType::pointer(atomic_uint_type(),
+                                     MslAddressSpace::kDevice)));
+            }
             const bool polymorphic_callee =
                 callee_function != module.functions.end() &&
                 !callee_function->mixed_pointer_address_spaces.empty();
@@ -3199,10 +3214,10 @@ struct AstLowerer {
                     return result;
                 };
                 const MslExpr device_call = MslExpression::call(
-                    specialized_callee(callee->second, ir::AddressSpace::kDevice),
+                    specialized_callee(direct_callee, ir::AddressSpace::kDevice),
                     specialized_arguments(ir::AddressSpace::kDevice), return_type);
                 const MslExpr threadgroup_call = MslExpression::call(
-                    specialized_callee(callee->second, ir::AddressSpace::kThreadgroup),
+                    specialized_callee(direct_callee, ir::AddressSpace::kThreadgroup),
                     specialized_arguments(ir::AddressSpace::kThreadgroup), return_type);
                 const ir::ValueId mixed_value =
                     operation.operands[*mixed_argument].value;
@@ -3269,7 +3284,7 @@ struct AstLowerer {
                         callee_return_type = lower_type(specialized);
                     }
                     MslExpr call = MslExpression::call(
-                        specialized_callee(callee->second,
+                        specialized_callee(direct_callee,
                                            *concrete_specialization),
                         std::move(arguments), callee_return_type);
                     if (!(callee_return_type == return_type)) {
@@ -3281,7 +3296,7 @@ struct AstLowerer {
                     return declare_result(operation, std::move(call));
                 }
             }
-            MslExpr call = MslExpression::call(callee->second, std::move(arguments), return_type);
+            MslExpr call = MslExpression::call(direct_callee, std::move(arguments), return_type);
             if (operation.results.empty()) return MslStatement::expression(std::move(call));
             return declare_result(operation, std::move(call));
         }
@@ -4155,6 +4170,33 @@ struct AstLowerer {
         return std::nullopt;
     }
 
+    bool calls_guarded_helper(const ir::Operation& operation) const {
+        if (operation.opcode != ir::OpCode::kCall ||
+            !operation.attributes.contains("callee")) {
+            return false;
+        }
+        return guarded_trap_helpers.contains(
+            operation.attributes.at("callee"));
+    }
+
+    MslStmt trap_cancel_return() const {
+        if (output.return_type.kind == MslTypeKind::kVoid) {
+            return MslStatement::return_statement();
+        }
+        return MslStatement::return_statement(
+            MslExpression::aggregate_init(output.return_type, {}));
+    }
+
+    MslExpr trap_status_is_set() const {
+        return MslExpression::call(
+            "atomic_load_explicit",
+            {MslExpression::identifier(
+                 abi::kTrapStatusName,
+                 MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice)),
+             MslExpression::identifier("memory_order_relaxed", MslType::uint())},
+            MslType::uint());
+    }
+
     bool emit_operations(const ir::BasicBlock& block, std::vector<MslStmt>* statements) {
         for (const ir::Operation& operation : block.operations) {
             if (operation.is_terminator()) continue;
@@ -4311,6 +4353,10 @@ struct AstLowerer {
             const std::optional<MslStmt> lowered = lower_operation(operation);
             if (!result.error.empty()) return false;
             if (lowered.has_value()) statements->push_back(*lowered);
+            if (trap_guarded && calls_guarded_helper(operation)) {
+                statements->push_back(MslStatement::if_statement(
+                    trap_status_is_set(), {trap_cancel_return()}));
+            }
         }
         return true;
     }
@@ -4949,6 +4995,10 @@ struct AstLowerer {
         } escape_guard{&loop_escape_stack, exits_enclosing_loop};
 
         std::vector<MslStmt> loop_statements;
+        if (trap_guarded) {
+            loop_statements.push_back(MslStatement::if_statement(
+                trap_status_is_set(), {trap_cancel_return()}));
+        }
         if (!emit_operations(header, &loop_statements)) return false;
         const ir::Operation& terminator = header.operations.back();
         if (!body_and_exit) {
@@ -5241,24 +5291,34 @@ struct AstLowerer {
             });
         }
         std::vector<MslStmt> iteration;
-        if (reports_traps) {
-            const MslExpr at_trap = MslExpression::binary("==", state,
-                MslExpression::literal(std::to_string(function.blocks.size()) + "u", MslType::uint()),
-                MslType::boolean());
-            // Publish before entering divergent switch arms. The SIMD vote
-            // keeps a spinning arm from starving a sibling's pending trap arm.
-            iteration.push_back(MslStatement::expression(MslExpression::call(
-                "atomic_fetch_or_explicit",
-                {MslExpression::identifier(abi::kTrapStatusName, MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice)),
-                 MslExpression::cast(MslType::uint(), MslExpression::call("simd_any", {at_trap}, MslType::boolean())),
-                 MslExpression::identifier("memory_order_relaxed", MslType::uint())}, MslType::uint())));
+        if (trap_guarded) {
+            if (reports_traps) {
+                const MslExpr at_trap = MslExpression::binary(
+                    "==", state,
+                    MslExpression::literal(
+                        std::to_string(function.blocks.size()) + "u",
+                        MslType::uint()),
+                    MslType::boolean());
+                // Publish before entering divergent switch arms. The SIMD vote
+                // keeps a spinning arm from starving a sibling's pending trap arm.
+                iteration.push_back(MslStatement::if_statement(
+                    MslExpression::call("simd_any", {at_trap},
+                                        MslType::boolean()),
+                    {MslStatement::expression(MslExpression::call(
+                        "atomic_fetch_or_explicit",
+                        {MslExpression::identifier(
+                             abi::kTrapStatusName,
+                             MslType::pointer(atomic_uint_type(),
+                                              MslAddressSpace::kDevice)),
+                         MslExpression::literal("1u", MslType::uint()),
+                         MslExpression::identifier("memory_order_relaxed",
+                                                   MslType::uint())},
+                        MslType::uint()))}));
+            }
             // Poll at every CFG block boundary, including backedges, so a
             // sibling lane cannot spin indefinitely after a trapping lane exits.
             iteration.push_back(MslStatement::if_statement(
-                MslExpression::call("atomic_load_explicit",
-                    {MslExpression::identifier(abi::kTrapStatusName, MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice)),
-                     MslExpression::identifier("memory_order_relaxed", MslType::uint())}, MslType::uint()),
-                {MslStatement::return_statement()}));
+                trap_status_is_set(), {trap_cancel_return()}));
         }
         iteration.push_back(MslStatement::switch_statement(state, std::move(cases)));
         statements->push_back(MslStatement::while_statement(
@@ -5377,33 +5437,16 @@ struct AstLowerer {
     }
 
     LowerToMslResult run() {
+        reports_traps = false;
         for (const auto& block : function.blocks)
             for (const auto& operation : block.operations)
                 reports_traps |= operation.opcode == ir::OpCode::kTrap;
-        if (reports_traps) {
-            if (!function.is_kernel) {
-                fail(nullptr, "trap reporting does not yet support device helpers");
-                return result;
-            }
-            for (const auto& block : function.blocks) {
-                for (const auto& operation : block.operations) {
-                    if ((operation.opcode == ir::OpCode::kCall && !is_bounded_trap_builtin(operation) &&
-                         (!operation.attributes.contains("callee") ||
-                          !bounded_trap_helpers.contains(operation.attributes.at("callee")))) ||
-                        operation.opcode == ir::OpCode::kMetalBarrier ||
-                        operation.opcode == ir::OpCode::kMetalShuffle ||
-                        operation.opcode == ir::OpCode::kMetalBallot ||
-                        operation.opcode == ir::OpCode::kMetalVote ||
-                        operation.opcode == ir::OpCode::kMetalReduction ||
-                        operation.opcode == ir::OpCode::kPrintf) {
-                        fail(&operation, "trap reporting requires expanded or bounded calls, without barriers or collectives");
-                        return result;
-                    }
-                }
-            }
+        if (trap_guarded) {
             for (std::size_t i = 0; i < function.arguments.size(); ++i) {
-                bool collision = i == abi::kTrapStatusBindingIndex;
-                if (function.kernel_abi && i < function.kernel_abi->arguments.size()) {
+                bool collision = function.is_kernel &&
+                                 i == abi::kTrapStatusBindingIndex;
+                if (function.is_kernel && function.kernel_abi &&
+                    i < function.kernel_abi->arguments.size()) {
                     const auto& bindings = function.kernel_abi->arguments[i].binding_indices;
                     if (!bindings.empty()) collision = std::find(bindings.begin(), bindings.end(), abi::kTrapStatusBindingIndex) != bindings.end();
                 }
@@ -5412,15 +5455,15 @@ struct AstLowerer {
                     return result;
                 }
             }
-            output.parameters.push_back({
-                .type = MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice),
-                .name = abi::kTrapStatusName,
-                .attributes = {MslAttribute{.name = "buffer", .index = abi::kTrapStatusBindingIndex}},
-            });
         }
+        const std::string emitted_name =
+            trap_guarded && !function.is_kernel
+                ? guarded_trap_helper_name(function.name)
+                : function.name;
         output.name = pointer_specialization.has_value()
-                          ? specialized_callee(function.name, *pointer_specialization)
-                          : function.name;
+                          ? specialized_callee(emitted_name,
+                                               *pointer_specialization)
+                          : emitted_name;
         if (function.mixed_pointer_return_spaces != 0 && function.return_type.is_pointer()) {
             ir::Type specialized = function.return_type;
             specialized.address_space =
@@ -5685,6 +5728,21 @@ struct AstLowerer {
                 .attributes = builtin_attributes("thread_index_in_simdgroup"),
             });
         }
+        if (trap_guarded) {
+            std::vector<MslAttribute> attributes;
+            if (function.is_kernel) {
+                attributes.push_back(MslAttribute{
+                    .name = "buffer",
+                    .index = abi::kTrapStatusBindingIndex,
+                });
+            }
+            output.parameters.push_back({
+                .type = MslType::pointer(atomic_uint_type(),
+                                         MslAddressSpace::kDevice),
+                .name = abi::kTrapStatusName,
+                .attributes = std::move(attributes),
+            });
+        }
 
         result.ast.functions.push_back(std::move(output));
         const MslPrintResult printed = print_msl(result.ast);
@@ -5782,15 +5840,6 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     }
     result.module = module;
     prune_functions_unreachable_from_kernels(&result.module);
-    if (!expand_trap_call_graphs(&result.module, &result.error)) return result;
-    prune_functions_unreachable_from_kernels(&result.module);
-    const ir::VerifyResult expanded_verification = ir::verify(result.module);
-    if (!expanded_verification.ok) {
-        result.error = "trap call expansion produced invalid GPU IR";
-        for (const auto& diagnostic : expanded_verification.diagnostics)
-            result.error += "\n" + diagnostic.location.str() + ": " + diagnostic.message;
-        return result;
-    }
     const AddressSpaceResolution address_spaces =
         resolve_generic_address_spaces(&result.module);
     if (!address_spaces.ok) {
@@ -5924,6 +5973,10 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     }
     if (metal_module.functions.empty()) {
         result.error = "MSL lowering requires at least one function";
+        return result;
+    }
+    TrapCallGraph trap_graph;
+    if (!analyze_trap_call_graph(metal_module, &trap_graph, &result.error)) {
         return result;
     }
     const auto provenance = metal_module.attributes.find("provenance");
@@ -6064,7 +6117,6 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     result.ast.functions.insert(result.ast.functions.end(),
                                 wide_atomic_helper_functions.begin(),
                                 wide_atomic_helper_functions.end());
-    const auto bounded_trap_helpers = find_bounded_trap_helpers(metal_module);
     const BuiltinUsageMap builtin_usage = analyze_builtin_usage(metal_module);
     const SharedUsageMap shared_usage = analyze_shared_usage(metal_module);
     const BarrierUsageMap barrier_usage = analyze_barrier_usage(metal_module);
@@ -6105,52 +6157,69 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                 }
             }
         }
-        for (const std::optional<ir::AddressSpace> specialization : specializations) {
-            AstLowerer lowerer(metal_module, function, builtin_usage, shared_usage,
-                               wide_atomic_usage, bounded_trap_helpers, false, specialization,
-                               barrier_usage.at(function.name));
-            LowerToMslResult function_result = lowerer.run();
-            const bool structurization_failure =
-                !function_result.ok &&
-                (function_result.error.find("revisits block") != std::string::npos ||
-                 function_result.error.find("no forward reconvergence") !=
-                     std::string::npos ||
-                 function_result.error.find("nested loop conditional") !=
-                     std::string::npos ||
-                 function_result.error.find("loop structurization") !=
-                     std::string::npos);
-            if (structurization_failure) {
-                const std::string structurization_error = function_result.error;
-                if (barrier_usage.at(function.name)) {
-                    function_result.error =
-                        "cannot lower function '" + function.name +
-                        "': structured CFG lowering failed for a barrier-containing "
-                        "call graph: " + structurization_error;
-                    return function_result;
+        std::vector<bool> trap_modes;
+        if (function.is_kernel) {
+            trap_modes.push_back(trap_graph.guarded.contains(function.name));
+        } else {
+            if (trap_graph.ordinary.contains(function.name)) trap_modes.push_back(false);
+            if (trap_graph.guarded.contains(function.name)) trap_modes.push_back(true);
+        }
+        for (const bool trap_guarded : trap_modes) {
+            for (const std::optional<ir::AddressSpace> specialization :
+                 specializations) {
+                AstLowerer lowerer(
+                    metal_module, function, builtin_usage, shared_usage,
+                    wide_atomic_usage, trap_graph.guarded, trap_guarded,
+                    trap_graph.dispatch.contains(function.name), specialization,
+                    barrier_usage.at(function.name));
+                LowerToMslResult function_result = lowerer.run();
+                const bool structurization_failure =
+                    !function_result.ok &&
+                    (function_result.error.find("revisits block") !=
+                         std::string::npos ||
+                     function_result.error.find("no forward reconvergence") !=
+                         std::string::npos ||
+                     function_result.error.find("nested loop conditional") !=
+                         std::string::npos ||
+                     function_result.error.find("loop structurization") !=
+                         std::string::npos);
+                if (structurization_failure) {
+                    const std::string structurization_error =
+                        function_result.error;
+                    if (barrier_usage.at(function.name)) {
+                        function_result.error =
+                            "cannot lower function '" + function.name +
+                            "': structured CFG lowering failed for a "
+                            "barrier-containing call graph: " +
+                            structurization_error;
+                        return function_result;
+                    }
+                    AstLowerer dispatcher_lowerer(
+                        metal_module, function, builtin_usage, shared_usage,
+                        wide_atomic_usage, trap_graph.guarded, trap_guarded,
+                        true, specialization, barrier_usage.at(function.name));
+                    function_result = dispatcher_lowerer.run();
+                    if (!function_result.ok) {
+                        function_result.error =
+                            "structured CFG lowering failed: " +
+                            structurization_error +
+                            "; CFG dispatcher fallback failed" +
+                            (function_result.error.empty()
+                                 ? std::string{}
+                                 : ": " + function_result.error);
+                    }
                 }
-                AstLowerer dispatcher_lowerer(metal_module, function, builtin_usage,
-                                              shared_usage, wide_atomic_usage, bounded_trap_helpers, true,
-                                              specialization,
-                                              barrier_usage.at(function.name));
-                function_result = dispatcher_lowerer.run();
                 if (!function_result.ok) {
                     function_result.error =
-                        "structured CFG lowering failed: " + structurization_error +
-                        "; CFG dispatcher fallback failed" +
-                        (function_result.error.empty()
-                             ? std::string{}
-                             : ": " + function_result.error);
+                        "cannot lower function '" + function.name + "': " +
+                        function_result.error;
+                    return function_result;
                 }
+                result.ast.functions.insert(
+                    result.ast.functions.end(),
+                    function_result.ast.functions.begin(),
+                    function_result.ast.functions.end());
             }
-            if (!function_result.ok) {
-                function_result.error =
-                    "cannot lower function '" + function.name + "': " +
-                    function_result.error;
-                return function_result;
-            }
-            result.ast.functions.insert(result.ast.functions.end(),
-                                        function_result.ast.functions.begin(),
-                                        function_result.ast.functions.end());
         }
     }
     const MslPrintResult printed = print_msl(result.ast);
