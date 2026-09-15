@@ -8,6 +8,10 @@ namespace cumetal::ir::detail {
 
 struct PointerInference {
     std::unordered_set<std::string> promoted_global_registers;
+    // Exact scalar loads whose single-definition result is subsequently
+    // required as a device address. This preserves pointer-valued fields in
+    // compiler-generated private records without guessing from 64-bit width.
+    std::unordered_set<const ptx::EntryFunction::Instruction*> device_pointer_loads;
 };
 
 // Bounded pre-SSA pointer recovery; unsupported/reused register paths remain

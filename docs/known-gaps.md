@@ -99,6 +99,14 @@ emitted. This permits a parameter load in a textually later block to serve a use
 that it dominates in the CFG. Existing SSA validation still rejects paths that
 bypass the load; this does not hoist ordinary instructions or repair undefined
 registers.
+Single-definition, unpredicated 64-bit values loaded inside a device helper
+retain device pointer type when a later device-memory access proves that exact
+definition is an address. This covers pointer fields in compiler-generated
+private records; ordinary scalar fields remain integers. Reused, predicated,
+narrow, and otherwise ambiguous loaded definitions remain conservative.
+The Bitcoin self-test advances past its private-record pointer mismatches and
+now reaches the existing trap-expansion limit (`calls=4`, `blocks=3409`,
+`operations=317308`); it does not yet have full Apple-GPU validation.
 Bounded guard specialization also follows literal predicate flags through
 incoming branches and fallthroughs, including inversion. Predicate liveness
 removes facts after their final possible use, so dead constants do not exhaust

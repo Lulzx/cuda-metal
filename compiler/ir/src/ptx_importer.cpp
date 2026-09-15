@@ -1676,6 +1676,8 @@ struct Importer {
                 } else if (const auto loaded = loaded_pointer_types.find(&instruction);
                            loaded != loaded_pointer_types.end()) {
                     inferred = loaded->second;
+                } else if (pointer_evidence.device_pointer_loads.contains(&instruction)) {
+                    inferred = Type::pointer(Type::integer(8), AddressSpace::kDevice);
                 } else if (starts_with(instruction.opcode, "ld.") &&
                            has_signed_integer_type(instruction.opcode) &&
                            !destinations.empty()) {

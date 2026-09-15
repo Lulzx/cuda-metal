@@ -1,0 +1,59 @@
+.version 8.0
+.target sm_80
+.address_size 64
+
+// Rust-CUDA lowers a borrowed record as private storage containing device
+// pointer fields. The helper's record parameter itself has no .ptr annotation.
+.func copy_from_record(.param .b64 record_address) {
+    .reg .b64 %rd<8>;
+    .reg .pred %p0;
+    ld.param.b64 %rd0, [record_address];
+    cvta.to.local.u64 %rd1, %rd0;
+    ld.local.u64 %rd2, [%rd1];
+    ld.local.u64 %rd3, [%rd1+8];
+    ld.local.u64 %rd6, [%rd1+16];
+    setp.eq.u64 %p0, %rd6, 0;
+    @%p0 bra READ_FIRST;
+    ld.global.u64 %rd4, [%rd2+8];
+    bra STORE;
+READ_FIRST:
+    ld.global.u64 %rd4, [%rd2];
+STORE:
+    st.global.u64 [%rd3], %rd4;
+    ret;
+}
+
+.visible .entry integer_probe(
+    .param .u64 input,
+    .param .u64 output,
+    .param .u32 count
+) {
+    .local .align 8 .b8 record[24];
+    .reg .b64 %rd<10>;
+    .reg .b32 %r<6>;
+    .reg .pred %p0;
+    ld.param.u64 %rd0, [input];
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r2, [count];
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mov.u32 %r5, %tid.x;
+    mad.lo.u32 %r0, %r3, %r4, %r5;
+    setp.ge.u32 %p0, %r0, %r2;
+    @%p0 bra DONE;
+    mul.wide.u32 %rd2, %r0, 8;
+    add.u64 %rd3, %rd0, %rd2;
+    add.u64 %rd4, %rd1, %rd2;
+    mov.u64 %rd5, record;
+    st.local.u64 [%rd5], %rd3;
+    st.local.u64 [%rd5+8], %rd4;
+    and.b32 %r1, %r0, 1;
+    cvt.u64.u32 %rd7, %r1;
+    st.local.u64 [%rd5+16], %rd7;
+    cvta.local.u64 %rd6, %rd5;
+    .param .b64 argument;
+    st.param.b64 [argument], %rd6;
+    call.uni copy_from_record, (argument);
+DONE:
+    ret;
+}

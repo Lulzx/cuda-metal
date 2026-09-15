@@ -1410,6 +1410,51 @@ ret;
         std::cerr << inferred_pointer_device_call.error << "\n";
     }
 
+    const std::string private_record_pointer_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.func read_record(.param .b64 record_address) {
+    .reg .b64 %rd<7>;
+    ld.param.b64 %rd0, [record_address];
+    cvta.to.local.u64 %rd1, %rd0;
+    ld.local.u64 %rd2, [%rd1];
+    ld.local.u64 %rd3, [%rd1+8];
+    ld.local.u64 %rd4, [%rd1+16];
+    ld.global.u64 %rd5, [%rd2];
+    add.u64 %rd5, %rd5, %rd4;
+    st.global.u64 [%rd3], %rd5;
+    ret;
+}
+.visible .entry private_record_pointer(
+    .param .u64 input, .param .u64 output, .param .u64 scalar) {
+    .local .align 8 .b8 record[24];
+    .reg .b64 %rd<6>;
+    ld.param.u64 %rd0, [input];
+    ld.param.u64 %rd1, [output];
+    ld.param.u64 %rd2, [scalar];
+    mov.u64 %rd3, record;
+    st.local.u64 [%rd3], %rd0;
+    st.local.u64 [%rd3+8], %rd1;
+    st.local.u64 [%rd3+16], %rd2;
+    cvta.local.u64 %rd4, %rd3;
+    .param .b64 argument;
+    st.param.b64 [argument], %rd4;
+    call.uni read_record, (argument);
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult private_record_pointer =
+        metal::compile_ptx_to_msl(private_record_pointer_ptx);
+    ok &= expect(private_record_pointer.ok &&
+                     private_record_pointer.source.find("device uchar* thread*") !=
+                         std::string::npos &&
+                     private_record_pointer.source.find("thread cm_alias_ulong*") !=
+                         std::string::npos,
+                 "typed PTX preserves demanded device pointers loaded from private records "
+                 "while scalar fields stay integers");
+    if (!private_record_pointer.ok) std::cerr << private_record_pointer.error << "\n";
+
     const std::string aggregate_device_call_ptx = R"ptx(
 .version 7.0
 .target sm_80

@@ -5,6 +5,27 @@
 
 namespace cumetal::ir::detail {
 
+namespace {
+
+bool is_scalar_64_bit_load(const Instruction& instruction) {
+    if (root_opcode(instruction.opcode) != "ld" ||
+        starts_with(instruction.opcode, "ld.param") ||
+        instruction.operands.size() != 2) {
+        return false;
+    }
+    for (const std::string_view type : {".b64", ".u64", ".s64"}) {
+        std::size_t position = instruction.opcode.find(type);
+        while (position != std::string::npos) {
+            const std::size_t end = position + type.size();
+            if (end == instruction.opcode.size() || instruction.opcode[end] == '.') return true;
+            position = instruction.opcode.find(type, position + 1);
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, const Module& module,
     bool is_kernel, const std::unordered_set<std::string>& pointer_symbols,
     const std::unordered_set<std::string>& promoted_global_symbols,
@@ -146,6 +167,18 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
                 pointer_sources = {right && !left ? 2U : 1U};
             } else if (root == "selp") {
                 pointer_sources = {1, 2};
+            }
+            // A demanded device pointer may itself be stored in an ordinary
+            // 64-bit memory field. Preserve the loaded value's type, but only
+            // when this instruction is its sole, unconditional definition.
+            // The load address is storage for the pointer bits and does not
+            // inherit the loaded pointer's device address space.
+            if (!is_kernel &&
+                destinations.size() == 1 &&
+                definitions[destinations.front()] == 1 &&
+                instruction.predicate.empty() &&
+                is_scalar_64_bit_load(instruction)) {
+                evidence.device_pointer_loads.insert(&instruction);
             }
             for (const std::size_t source_index : pointer_sources) {
                 if (instruction.operands.size() <= source_index) continue;
