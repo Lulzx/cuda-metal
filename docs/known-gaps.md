@@ -110,3 +110,9 @@ reversed operands. Writes and calls invalidate those facts. This does not prove
 relations between different registers holding equivalent calculations, or extend
 the proof to signed/floating comparisons. Full RSA-PSS compilation still encounters
 other guarded-SSA cases.
+
+IR verification computes immediate dominators and queries their tree intervals
+instead of storing a hash set of dominators per block. Storage is linear in CFG
+blocks and edges; the existing dominance relation is preserved, including the
+convention for closed unreachable components. This reduces verifier overhead,
+not the size of imported IR or the separate costs of PTX parsing/register SSA.

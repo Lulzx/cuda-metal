@@ -25,6 +25,11 @@ add_executable(cumetal_ir_test
     ir_test.cpp
 )
 
+add_executable(cumetal_dominance_test dominance_test.cpp)
+target_include_directories(cumetal_dominance_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_link_libraries(cumetal_dominance_test PRIVATE cumetal_ir)
+target_compile_options(cumetal_dominance_test PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(cumetal_msl_ast_test
     msl_ast_test.cpp
 )
@@ -416,6 +421,8 @@ add_test(
 
 add_test(NAME unit_nvrtc_options COMMAND cumetal_nvrtc_options_test)
 add_test(NAME unit_cumetal_ir COMMAND cumetal_ir_test)
+add_test(NAME unit_dominance COMMAND cumetal_dominance_test)
+set_tests_properties(unit_dominance PROPERTIES TIMEOUT 30)
 add_test(NAME unit_msl_ast COMMAND cumetal_msl_ast_test)
 add_test(NAME unit_ptx_ir_msl COMMAND cumetal_ptx_ir_msl_test)
 add_test(NAME unit_nvvm_ir_msl COMMAND cumetal_nvvm_ir_msl_test)

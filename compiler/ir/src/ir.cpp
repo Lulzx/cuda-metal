@@ -1,4 +1,5 @@
 #include "cumetal/ir/ir.h"
+#include "dominance.h"
 
 #include <algorithm>
 #include <functional>
@@ -380,36 +381,7 @@ VerifyResult verify(const Module& module) {
             }
         }
 
-        std::vector<std::unordered_set<std::size_t>> dominators(block_count);
-        for (std::size_t i = 0; i < block_count; ++i) {
-            if (i == 0) {
-                dominators[i].insert(0);
-            } else {
-                for (std::size_t j = 0; j < block_count; ++j) {
-                    dominators[i].insert(j);
-                }
-            }
-        }
-        bool changed = true;
-        while (changed) {
-            changed = false;
-            for (std::size_t i = 1; i < block_count; ++i) {
-                std::unordered_set<std::size_t> next;
-                if (!predecessors[i].empty()) {
-                    next = dominators[predecessors[i].front()];
-                    for (std::size_t predecessor : predecessors[i]) {
-                        std::erase_if(next, [&](std::size_t candidate) {
-                            return !dominators[predecessor].contains(candidate);
-                        });
-                    }
-                }
-                next.insert(i);
-                if (next != dominators[i]) {
-                    dominators[i] = std::move(next);
-                    changed = true;
-                }
-            }
-        }
+        const detail::Dominance dominators(predecessors);
 
         std::unordered_map<ValueId, ValueDefinition> definitions;
         for (const FunctionArgument& argument : function.arguments) {
@@ -492,7 +464,7 @@ VerifyResult verify(const Module& module) {
                                            "value %" + std::to_string(operand.value) +
                                                " is used before its definition");
                         }
-                    } else if (!dominators[block_index].contains(definition_block->second)) {
+                    } else if (!dominators.dominates(definition_block->second, block_index)) {
                         add_diagnostic(&result, operation.location,
                                        "value %" + std::to_string(operand.value) +
                                            " does not dominate its use");
