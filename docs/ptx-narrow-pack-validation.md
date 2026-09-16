@@ -71,10 +71,19 @@ Input hashes match before and after both 300-second translation attempts.
   `operand type ptr<device, i8> does not match value %197406 type i64`.
   No Metal source is emitted, and no full Bitcoin GPU execution is claimed.
 
-The first next pointer comes from a heterogeneous `ld.local.v2.b64` pointer/length
-reload; #118 is being checked as its owner. Later diagnostics are not all
-attributed from their wording alone. A separate pointer fix and normal consumer
-GPU acceptance remain necessary before downstream #30 can close.
+The next mismatches involve heterogeneous vector record reloads. The first group
+uses `ld.local.v2.b64 {%rd78,%rd79}, [%rd5+16]` at line 32160. Its producer stores
+`{1,0}` for an empty suffix, and a zero-length guard bypasses every byte read;
+**the literal 1 is not a proven device pointer and must not be retagged as one**.
+The sibling prefix reload at line 32159 has a real initialized-global pointer
+and length 4; its mismatches directly match #118's per-lane typing gap. The
+144 reported mismatches span matching, prefix/suffix and length-boundary helpers.
+
+[#118](https://github.com/Lulzx/cuda-metal/issues/118) owns the confirmed mixed
+pointer/length reload gap. Correctly handling the empty-slice sentinel still
+needs its guarded-use proof; preserving the proven pointer lanes alone is not
+claimed to fix that first group or the full module. A separate pointer correction
+and normal consumer GPU acceptance remain necessary before downstream #30 closes.
 
 These elapsed values are bounded acceptance observations, not isolated compiler
 performance benchmarks; the candidate attempt overlapped the independent Debug
