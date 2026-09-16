@@ -2965,6 +2965,11 @@ if(APPLE)
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_discarded_halves.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_discarded_halves PROPERTIES TIMEOUT 120)
 
+    add_test(NAME functional_ptx_narrow_pack
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_narrow_pack.py ${CMAKE_BINARY_DIR})
+    # Twelve GPU children have 90-second deadlines; 44 rejections compile only.
+    set_tests_properties(functional_ptx_narrow_pack PROPERTIES TIMEOUT 2600)
+
     add_test(NAME functional_ptx_packed_loop
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_packed_loop.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_packed_loop PROPERTIES TIMEOUT 120)

@@ -44,8 +44,18 @@ Pre-SSA tuple normalization can remove one unobserved 32-bit half of a
 one source occurrence in the function; both instructions must be unpredicated
 and in the same block, with no intervening call or write to the observed source.
 The discarded extraction destination must be `_` or a named register with no
-source occurrences anywhere in the function. Other partial-definedness cases
-remain subject to ordinary SSA validation; undefined bits are never initialized.
+source occurrences anywhere in the function.
+
+The #134 extension also recognizes a sole exact `cvt.u16.u64` or `cvt.u32.u64`
+consumer. It removes the pack and converts the unchanged low32 source directly,
+preserving unsigned narrowing and any wider destination container's extension.
+Register declarations establish all widths; spelling does not imply a type.
+Predication, calls, multiple packed uses/definitions, changed selected sources,
+ambiguous declarations and other conversions retain ordinary SSA validation.
+Whole-function counts and source-write generations are bounded; replacements
+are staged and budget exhaustion leaves the function unchanged. Rejected
+out-of-scope shapes are not necessarily semantically invalid PTX. This is not
+general partial-value analysis, and undefined bits are never initialized.
 
 Unannotated 64-bit PTX parameters now require address-use evidence to be
 classified as pointers; unused or ambiguous parameters remain scalars in the

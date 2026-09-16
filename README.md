@@ -69,6 +69,9 @@ Before register SSA, scalar zero-marker facts can prove that an absent payload
 is bypassed. Edge clones also discard a known unselected scalar-select arm while
 preserving observable operations; overwritten or unknown guards retain strict
 definedness checks.
+A single-use 64-bit pack followed by unsigned 16/32-bit narrowing can discard
+its unobserved high half when declared widths and an unchanged low source prove
+the replacement. Other uses retain their original definedness requirements.
 See [known gaps](docs/known-gaps.md) for memory-provenance and legacy-backend
 limits, and
 [compiler architecture](docs/compiler-architecture.md) for backend details.

@@ -66,6 +66,12 @@ target_include_directories(cumetal_ptx_scalar_zero_guards_test PRIVATE ${CMAKE_S
 target_compile_options(cumetal_ptx_scalar_zero_guards_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME unit_ptx_scalar_zero_guards COMMAND cumetal_ptx_scalar_zero_guards_test)
 
+add_executable(cumetal_ptx_narrow_pack_test ptx_narrow_pack_test.cpp)
+target_link_libraries(cumetal_ptx_narrow_pack_test PRIVATE cumetal_metal_codegen)
+target_include_directories(cumetal_ptx_narrow_pack_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_narrow_pack_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_narrow_pack COMMAND cumetal_ptx_narrow_pack_test)
+
 add_executable(cumetal_ptx_pointer_ranges_test ptx_pointer_ranges_test.cpp)
 target_link_libraries(cumetal_ptx_pointer_ranges_test PRIVATE cumetal_ir)
 target_include_directories(cumetal_ptx_pointer_ranges_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
