@@ -2643,6 +2643,12 @@ struct Importer {
                         llvm::isa<llvm::FPToSIInst>(cast) ? "f64_to_signed"
                                                         : "f64_to_unsigned";
                 }
+                if (llvm::isa<llvm::FPToSIInst>(cast) || llvm::isa<llvm::FPToUIInst>(cast)) {
+                    // LLVM integer types are signless; the conversion opcode
+                    // supplies signedness and always rounds toward zero.
+                    operation.attributes["rounding_mode"] = "1u";
+                    if (llvm::isa<llvm::FPToSIInst>(cast)) operation.attributes["signed_output"] = "true";
+                }
             }
         } else if (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&instruction)) {
             constexpr unsigned kPointerBits = 64;
@@ -2992,6 +2998,62 @@ struct Importer {
             for (const llvm::Instruction& instruction : block) {
                 if (!import_instruction(instruction, block, &state, &output_block)) return false;
             }
+        }
+        // LLVM opaque-pointer PHIs have byte-pointer contracts, while alloca
+        // and zero-offset GEP import can retain an aggregate pointee. Normalize
+        // that representation with explicit predecessor values after every
+        // definition is materialized, including forward-layout loop backedges.
+        // Keep each source's address space; generic PHI specialization owns
+        // address-space resolution, not this pointee-only bitcast.
+        std::unordered_map<ValueId, Type> edge_types;
+        for (const FunctionArgument& argument : state.output.arguments)
+            edge_types[argument.value] = argument.type;
+        for (const BasicBlock& block : state.output.blocks) {
+            for (const BlockArgument& argument : block.arguments)
+                edge_types[argument.value] = argument.type;
+            for (const Operation& operation : block.operations)
+                for (std::size_t i = 0; i < operation.results.size() &&
+                                        i < operation.result_types.size(); ++i)
+                    edge_types[operation.results[i]] = operation.result_types[i];
+        }
+        for (BasicBlock& block : state.output.blocks) {
+            if (block.operations.empty()) continue;
+            Operation terminator = std::move(block.operations.back());
+            block.operations.pop_back();
+            for (Successor& successor : terminator.successors) {
+                const BasicBlock* target = state.output.find_block(successor.block);
+                if (target == nullptr) continue;
+                for (std::size_t i = 0; i < successor.arguments.size() &&
+                                        i < target->arguments.size(); ++i) {
+                    const ValueId source = successor.arguments[i];
+                    const auto found = edge_types.find(source);
+                    const Type& desired = target->arguments[i].type;
+                    if (found == edge_types.end() || !found->second.is_pointer() ||
+                        !desired.is_pointer()) continue;
+                    Type converted = desired;
+                    converted.address_space = found->second.address_space;
+                    if (converted == found->second) continue;
+                    const ValueId value = builder.next_value();
+                    Operation cast;
+                    cast.opcode = OpCode::kConvert;
+                    cast.results = {value};
+                    cast.result_types = {converted};
+                    cast.operands = {Operand::value_ref(source, found->second)};
+                    cast.attributes["bitcast"] = "true";
+                    cast.location = terminator.location;
+                    block.operations.push_back(std::move(cast));
+                    edge_types[value] = converted;
+                    state.value_types[value] = converted;
+                    if (state.output.generic_pointer_values.contains(source) ||
+                        state.output.generic_pointer_values.contains(target->arguments[i].value))
+                        state.output.generic_pointer_values.insert(value);
+                    if (const auto provenance = state.output.pointer_provenance.find(source);
+                        provenance != state.output.pointer_provenance.end())
+                        state.output.pointer_provenance[value] = provenance->second;
+                    successor.arguments[i] = value;
+                }
+            }
+            block.operations.push_back(std::move(terminator));
         }
         result.module.functions.push_back(std::move(state.output));
         return true;

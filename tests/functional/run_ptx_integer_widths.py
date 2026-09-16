@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """PTX instruction widths are distinct from register widths and literal spelling."""
 from pathlib import Path
+import math
 import random
+import struct
 import subprocess
 import sys
 import tempfile
@@ -98,6 +100,215 @@ cvt.u64.u{width} %rd8, {register};'''
             expected += [signed & mask64, low]
         run_integer_case(build, template.replace('BODY', body), values, expected,
                  f'signed/unsigned {width}-bit cvt in {container}-bit register')
+
+    conversion_paths(build)
+
+
+def type_path_cases():
+    """Frozen-seed numerical fixtures, also usable for baseline compiler replay.
+
+    Expected results use Python integers and closed-form expressions rather than
+    an implementation of the importer's type rules. Large values are arithmetic
+    operands only; address offsets are derived solely from the bounded lane ID.
+    """
+    rng = random.Random(760032)
+    mask32, mask64 = (1 << 32) - 1, (1 << 64) - 1
+    values = [0, 1, 64, 0x7fffffff, 0x80000000, mask32, 1 << 32,
+              (1 << 32) + 1, 1 << 63, mask64, 0xdeadbeef01234567]
+    values += [rng.getrandbits(64) for _ in range(65 - len(values))]
+    template = TEMPLATE.replace('.reg .b64 %rd<10>;', '.reg .b64 %rd<12>;')
+    template = template.replace('.reg .pred %p1;', '.reg .pred %p<4>;')
+
+    def diamond(prefix, even, odd, suffix, reverse=False):
+        arms = [('EVEN_VALUE', even), ('ODD_VALUE', odd)]
+        if reverse:
+            arms.reverse()
+        body = prefix + '''
+and.b32 %r6, %r2, 1;
+setp.eq.u32 %p2, %r6, 0;
+@%p2 bra EVEN_VALUE;
+bra ODD_VALUE;
+'''
+        for label, instructions in arms:
+            body += label + ':\n' + instructions + '\nbra VALUE_READY;\n'
+        return body + 'VALUE_READY:\n' + suffix
+
+    def variants(label, prefix, even, odd, suffix, expected):
+        for reverse in (False, True):
+            source = template.replace('BODY', diamond(prefix, even, odd, suffix, reverse))
+            yield label + (' reversed blocks' if reverse else ''), source, values, expected
+        renamed = source
+        for old, new in (('%rd', '%word'), ('%rs', '%half'),
+                         ('%r', '%lane'), ('%p', '%condition')):
+            renamed = renamed.replace(old, new)
+        yield label + ' renamed registers', renamed, values, expected
+
+    # Reproduce a cvt-derived operand joining with another i64 definition before
+    # mul.hi, including nonzero high product bits and poisoned upper input bits.
+    multiplier = 0xfedcba9876543211
+    expected = [word for value in values for word in
+                (value & mask32, ((value & mask32) * multiplier) >> 64)]
+    yield from variants(
+        'conversion/copy join into mul.hi.u64',
+        'ld.global.u64 %rd9, [%rd5];\ncvt.u32.u64 %r5, %rd9;\n',
+        'cvt.u64.u32 %rd10, %r5;\nmov.b64 %rd7, %rd10;',
+        f'and.b64 %rd7, %rd9, {mask32};',
+        f'mul.hi.u64 %rd8, %rd7, {multiplier};', expected)
+
+    # A scalar join is copied, used for pointer subtraction, then the same
+    # register is reused as a pointer and finally as a scalar. The address
+    # subtract/add round trip must reload this lane, never a neighbour or guard.
+    expected = [word for value in values for word in (value & mask32, value)]
+    yield from variants(
+        'joined scalar/pointer/scalar round trip', '',
+        'cvt.u64.u32 %rd7, %r2;\nshl.b64 %rd7, %rd7, 3;',
+        'mul.wide.u32 %rd7, %r2, 8;',
+        '''mov.b64 %rd10, %rd7;
+sub.u64 %rd11, %rd5, %rd10;
+add.u64 %rd7, %rd11, %rd7;
+ld.global.u64 %rd8, [%rd7];
+cvt.u32.u64 %r5, %rd8;
+cvt.u64.u32 %rd7, %r5;''', expected)
+
+    # Exercise every input with zero, one, two and three iterations. Each
+    # iteration narrows after incrementing and then re-extends with the stated
+    # signedness; wrapping across the sign boundary is observable in the result.
+    loop_values = [value for value in values for _ in range(4)]
+    for width in (8, 16, 32):
+        mask = (1 << width) - 1
+        expected = []
+        for value in values:
+            for count in range(4):
+                low = (value + count) & mask
+                signed = low if low < 1 << (width - 1) else low - (1 << width)
+                expected += [signed & mask64, low]
+        body = f'''ld.global.u64 %rd9, [%rd5];
+cvt.s64.s{width} %rd7, %rd9;
+cvt.u64.u{width} %rd8, %rd9;
+and.b32 %r5, %r2, 3;
+mov.u32 %r6, 0;
+CONVERSION_LOOP:
+setp.ge.u32 %p2, %r6, %r5;
+@%p2 bra CONVERSION_DONE;
+add.u64 %rd7, %rd7, 1;
+add.u64 %rd8, %rd8, 1;
+cvt.s64.s{width} %rd7, %rd7;
+cvt.u64.u{width} %rd8, %rd8;
+add.u32 %r6, %r6, 1;
+bra CONVERSION_LOOP;
+CONVERSION_DONE:
+'''
+        yield (f'signed/unsigned {width}-bit conversion loop',
+               template.replace('BODY', body), loop_values, expected)
+
+    yield from float_path_cases()
+
+
+def float_path_cases():
+    """Exact binary32 conversion bits across joins and integer/float reuse.
+
+    struct.pack supplies an independent round-to-nearest/even binary32 reference.
+    Reverse cases start from explicit binary32 encodings and Python's rounding
+    operations. All operands and rounded results remain finite and in range;
+    unsigned cases use nonnegative inputs.
+    Every boundary appears on both branch arms, plus an odd final lane to retain
+    a partial launch. No FP64 operation is present in the generated PTX.
+    """
+    mask32 = (1 << 32) - 1
+    template = TEMPLATE.replace('.reg .pred %p1;',
+                                '.reg .pred %p<3>;\n.reg .f32 %f<2>;')
+
+    def f32_bits(value):
+        return struct.unpack('<I', struct.pack('<f', value))[0]
+
+    def variants(label, prefix, even, odd, suffix, values, expected):
+        for reverse in (False, True):
+            arms = [('EVEN_CONVERSION', even), ('ODD_CONVERSION', odd)]
+            if reverse:
+                arms.reverse()
+            body = prefix + '''
+and.b32 %r6, %r2, 1;
+setp.eq.u32 %p2, %r6, 0;
+@%p2 bra EVEN_CONVERSION;
+bra ODD_CONVERSION;
+'''
+            for label_name, instructions in arms:
+                body += label_name + ':\n' + instructions + '\nbra CONVERSION_READY;\n'
+            body += 'CONVERSION_READY:\n' + suffix
+            yield (label + (' reversed blocks' if reverse else ''),
+                   template.replace('BODY', body), values, expected)
+
+    # 2^24+1 and 2^24+3 are halfway cases with different even-neighbour choices.
+    # Around 2^31/2^32, binary32 spacing is much larger than one: retain the
+    # original integer separately so numeric conversion cannot masquerade as a
+    # bit reinterpretation or discard the original register assignment.
+    integer_boundaries = {
+        'u32': [0, 1, 64, (1 << 24) - 1, 1 << 24, (1 << 24) + 1,
+                (1 << 24) + 2, (1 << 24) + 3, 0x7fffff80, 0x7fffffff,
+                0x80000000, 0x80000001, 0xffffff00, 0xffffff7f, 0xffffff80, mask32],
+        's32': [-(1 << 31), -(1 << 31) + 1, -(1 << 24) - 3,
+                -(1 << 24) - 1, -(1 << 24), -(1 << 24) + 1, -65, -1,
+                0, 1, 64, (1 << 24) - 1, (1 << 24) + 1, (1 << 24) + 3,
+                0x7fffff80, 0x7fffffff],
+    }
+    for source_type, boundaries in integer_boundaries.items():
+        numbers = [number for number in boundaries for _ in range(2)] + [boundaries[-1]]
+        values = [number & mask32 for number in numbers]
+        expected = [word for number in numbers
+                    for word in (f32_bits(number), number & mask32)]
+        yield from variants(
+            f'{source_type}-to-f32 nearest-even copied join and register reuse',
+            f'ld.global.u32 %r5, [%rd5];\ncvt.rn.f32.{source_type} %r7, %r5;\n',
+            'mov.f32 %f1, %r7;',
+            'mov.b32 %r8, %r7;\nmov.f32 %f1, %r8;',
+            '''mov.b32 %r8, %f1;
+cvt.u64.u32 %rd7, %r8;
+mov.u32 %r7, %r5;
+cvt.u64.u32 %rd8, %r7;''', values, expected)
+
+    # Signed zero, fractions on either side of integer/halfway boundaries, ties
+    # with both even-neighbour choices, and large exactly representable inputs.
+    # 0x4affffff is 8388607.5, the last positive half below the integer-only
+    # binary32 range; 0x4f7fffff is the largest binary32 below 2^32.
+    signed_encodings = [0x00000000, 0x80000000, 0x3effffff, 0x3f000000,
+                        0x3f000001, 0x3f7fffff, 0x3fc00000, 0x3fffffff,
+                        0x40200000, 0x40600000, 0xbf000000, 0xbf000001,
+                        0xbf7fffff, 0xbfc00000, 0xbfffffff, 0xc0200000,
+                        0xc0600000, 0x477fffc0, 0xc77fffc0, 0x4affffff,
+                        0xcaffffff, 0x4b7fffff, 0xcb7fffff, 0x4b800000,
+                        0xcb800000, 0x4effffff, 0xcf000000]
+    unsigned_encodings = [bits for bits in signed_encodings if not bits >> 31]
+    unsigned_encodings += [0x4f000000, 0x4f000001, 0x4f7fffff]
+    modes = [('rni', 'nearest-even', round), ('rzi', 'truncation', int),
+             ('rmi', 'floor', math.floor), ('rpi', 'ceil', math.ceil)]
+    for destination, encodings, minimum, maximum in (
+            ('s32', signed_encodings, -(1 << 31), (1 << 31) - 1),
+            ('u32', unsigned_encodings, 0, mask32)):
+        values = [bits for bits in encodings for _ in range(2)] + [encodings[-1]]
+        for modifier, mode_name, reference in modes:
+            expected = []
+            for bits in values:
+                number = struct.unpack('<f', struct.pack('<I', bits))[0]
+                rounded = reference(number)
+                assert math.isfinite(number) and minimum <= number <= maximum
+                assert minimum <= rounded <= maximum
+                expected += [rounded & mask32, bits]
+            yield from variants(
+                f'f32-to-{destination} {mode_name} copied join and register reuse',
+                f'ld.global.f32 %f0, [%rd5];\ncvt.{modifier}.{destination}.f32 %r7, %f0;\n',
+                'mov.u32 %r8, %r7;',
+                'mov.b32 %r6, %r7;\nmov.u32 %r8, %r6;',
+                '''cvt.u64.u32 %rd7, %r8;
+mov.f32 %r7, %f0;
+mov.b32 %r5, %r7;
+cvt.u64.u32 %rd8, %r5;''', values, expected)
+
+
+def conversion_paths(build, case_generator=type_path_cases):
+    abi = ['CUMETAL_ABI_V2', 'kernel integer_probe', 'shared 0',
+           'arg buffer 8', 'arg buffer 8', 'arg bytes 4']
+    for label, source, values, expected in case_generator():
+        run_integer_case(build, source, values, expected, label, abi_lines=abi)
 
 
 def fixture(width):
@@ -208,5 +419,6 @@ cvt.u64.u{container} %rd8, {second};"""
 
 if __name__ == '__main__':
     cases = dict(widening=widening, conversions=conversions, parameters=parameters,
-                 stores=stores, loads=loads)
+                 stores=stores, loads=loads, type_paths=conversion_paths,
+                 float_paths=lambda build: conversion_paths(build, float_path_cases))
     cases[sys.argv[2]](Path(sys.argv[1]).resolve())

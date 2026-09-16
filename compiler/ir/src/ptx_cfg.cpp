@@ -16,6 +16,7 @@ struct GuardedPaths {
     Builder& builder;
     std::deque<Instruction>& storage;
     const cumetal::ptx::EntryFunction* function;
+    InstructionOrigins* origins;
 
     bool local_predicate(const std::string& reg) const {
         if (!function) return false;
@@ -73,6 +74,7 @@ struct GuardedPaths {
                 instruction.operands = {raw_blocks[successor].name};
             }
             storage.push_back(std::move(instruction));
+            record_instruction_origin(origins, &storage.back(), target.instructions[j]);
             clone.instructions.push_back(&storage.back());
         }
         if (!has_branch) {
@@ -770,6 +772,7 @@ struct GuardedPaths {
             clone.name = raw_blocks[b].name + "_mask_false_" + std::to_string(raw_blocks.size());
             for (const auto* instruction : raw_blocks[b].instructions) {
                 storage.push_back(*instruction);
+                record_instruction_origin(origins, &storage.back(), instruction);
                 clone.instructions.push_back(&storage.back());
             }
             clone.successors = raw_blocks[b].successors;
@@ -824,6 +827,7 @@ struct GuardedPaths {
                 replacement.operands = {written[0], *value ? "1" : "0"};
                 replacement.predicate.clear();
                 storage.push_back(std::move(replacement));
+                record_instruction_origin(origins, &storage.back(), instruction);
                 instruction = &storage.back();
                 known[written[0]] = *value;
             }
@@ -840,6 +844,7 @@ struct GuardedPaths {
                         branch.predicate.clear();
                         branch.operands = {raw_blocks[successor].name};
                         storage.push_back(std::move(branch));
+                        record_instruction_origin(origins, &storage.back(), tail);
                         block.instructions.back() = &storage.back();
                         block.successors = {successor};
                     }
@@ -1141,6 +1146,7 @@ struct GuardedPaths {
                 replacement.opcode = select->opcode == "selp.b32" ? "mov.b32" : "mov.b64";
                 replacement.operands = {select->operands[0], select->operands[1]};
                 storage.push_back(std::move(replacement));
+                record_instruction_origin(origins, &storage.back(), select);
                 block.instructions[index] = &storage.back();
             }
         }
@@ -1311,8 +1317,9 @@ void remove_unreachable_blocks(std::vector<RawBlock>& blocks) {
 
 void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
                             std::deque<Instruction>& storage,
-                            const cumetal::ptx::EntryFunction* function) {
-    GuardedPaths paths{blocks, builder, storage, function};
+                            const cumetal::ptx::EntryFunction* function,
+                            InstructionOrigins* origins) {
+    GuardedPaths paths{blocks, builder, storage, function, origins};
     paths.specialize_masked_predicates();
     for (auto& block : blocks) block.predecessors.clear();
     for (std::size_t index = 0; index < blocks.size(); ++index)

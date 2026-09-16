@@ -8,11 +8,395 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 bool expect(bool condition, const std::string& message) {
     if (!condition) std::cerr << "FAIL: " << message << '\n';
     return condition;
+}
+
+// Check the public SSA contract, independently of how the importer solves it.
+// In particular, an operation must not retain an operand type copied before its
+// incoming definition or loop argument acquired its final type.
+bool expect_ssa_types(const cumetal::ir::Module& module, const std::string& context) {
+    namespace ir = cumetal::ir;
+    bool ok = expect(ir::verify(module).ok, context + ": imported IR verifies");
+    for (const auto& function : module.functions) {
+        std::unordered_map<ir::ValueId, ir::Type> definitions;
+        const auto define = [&](ir::ValueId value, const ir::Type& type) {
+            ok &= expect(value != ir::kInvalidValue && definitions.emplace(value, type).second,
+                         context + ": every result has a distinct SSA identity");
+        };
+        for (const auto& argument : function.arguments) define(argument.value, argument.type);
+        for (const auto& block : function.blocks) {
+            for (const auto& argument : block.arguments) define(argument.value, argument.type);
+            for (const auto& operation : block.operations) {
+                ok &= expect(operation.results.size() == operation.result_types.size(),
+                             context + ": complete per-destination types");
+                for (std::size_t i = 0; i < operation.results.size() &&
+                                        i < operation.result_types.size(); ++i)
+                    define(operation.results[i], operation.result_types[i]);
+            }
+        }
+        for (const auto& block : function.blocks) {
+            for (const auto& operation : block.operations) {
+                for (const auto& operand : operation.operands) {
+                    if (operand.kind != ir::OperandKind::kValue) continue;
+                    const auto definition = definitions.find(operand.value);
+                    ok &= expect(definition != definitions.end() && definition->second == operand.type,
+                                 context + ": use type agrees with its actual definition");
+                }
+                for (const auto& successor : operation.successors) {
+                    const auto* target = function.find_block(successor.block);
+                    ok &= expect(target && successor.arguments.size() == target->arguments.size(),
+                                 context + ": edge supplies every block argument");
+                    if (!target) continue;
+                    for (std::size_t i = 0; i < successor.arguments.size() &&
+                                            i < target->arguments.size(); ++i) {
+                        const auto definition = definitions.find(successor.arguments[i]);
+                        ok &= expect(definition != definitions.end() &&
+                                         definition->second == target->arguments[i].type,
+                                     context + ": incoming definition agrees with block argument");
+                    }
+                }
+            }
+        }
+    }
+    return ok;
+}
+
+bool expect_block_argument(const cumetal::ir::Module& module, const std::string& block_name,
+                           const std::string& name, const cumetal::ir::Type& type) {
+    for (const auto& function : module.functions)
+        for (const auto& block : function.blocks)
+            if (block.name == block_name)
+                for (const auto& argument : block.arguments)
+                    if (argument.name == name)
+                        return expect(argument.type == type,
+                                      block_name + ": " + name + " has type " + type.str());
+    return expect(false, block_name + ": expected nontrivial argument " + name);
+}
+
+bool test_definition_type_cfg() {
+    namespace ir = cumetal::ir;
+    bool ok = true;
+    const std::string prefix = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry converted_join(.param .u64 .ptr output, .param .u32 index,
+                              .param .u32 choice) {
+.reg .b64 %rd<4>;
+.reg .b32 %r<4>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [index];
+ld.param.u32 %r2, [choice];
+setp.ne.u32 %p1, %r2, 0;
+@%p1 bra LEFT;
+bra RIGHT;
+)ptx";
+    const std::string left = "LEFT:\ncvt.u64.u32 %rd2, %r1;\nbra JOIN;\n";
+    const std::string right =
+        "RIGHT:\nadd.u32 %r3, %r1, 1;\ncvt.u64.u32 %rd2, %r3;\nbra JOIN;\n";
+    const std::string join = R"ptx(JOIN:
+mov.b64 %rd3, %rd2;
+selp.b64 %rd3, %rd3, 8, %p1;
+shl.b64 %rd3, %rd3, 2;
+sub.u64 %rd2, %rd1, %rd3;
+st.global.u32 [%rd2], %r1;
+ret;
+)ptx";
+    // Neither textual block order nor a register's spelling may determine the
+    // join's type. The same mutable register becomes a pointer only after JOIN.
+    for (unsigned layout = 0; layout < 3; ++layout) {
+        for (const bool rename : {false, true}) {
+            std::string source = prefix +
+                (layout == 0 ? left + right + join :
+                 layout == 1 ? join + right + left : right + join + left) + "}\n";
+            if (rename) {
+                for (const auto& [from, to] :
+                     std::vector<std::pair<std::string, std::string>>{
+                         {"%rd", "%wide"}, {"%r", "%word"}, {"%p", "%flag"}}) {
+                    std::size_t cursor = 0;
+                    while ((cursor = source.find(from, cursor)) != std::string::npos) {
+                        source.replace(cursor, from.size(), to);
+                        cursor += to.size();
+                    }
+                }
+            }
+            const std::string context = "converted join layout " + std::to_string(layout) +
+                                        (rename ? " renamed" : "");
+            const auto imported = ir::import_ptx(source);
+            ok &= expect(imported.ok, context + ": " + imported.error);
+            if (!imported.ok) continue;
+            ok &= expect_ssa_types(imported.module, context);
+            ok &= expect_block_argument(imported.module, "JOIN", rename ? "%wide2" : "%rd2",
+                                        ir::Type::integer(64));
+        }
+    }
+
+    const std::string loop_prefix = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry converted_loop(.param .u64 .ptr output, .param .u32 start,
+                              .param .u32 count) {
+.reg .b64 %rd<4>;
+.reg .b32 %r<4>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [start];
+ld.param.u32 %r2, [count];
+cvt.u64.u32 %rd2, %r1;
+mov.u32 %r3, 0;
+bra HEADER;
+)ptx";
+    const std::string loop_body = R"ptx(HEADER:
+setp.ge.u32 %p1, %r3, %r2;
+@%p1 bra EXIT;
+bra BODY;
+BODY:
+mov.b64 %rd3, %rd2;
+shl.b64 %rd3, %rd3, 2;
+add.u64 %rd3, %rd1, %rd3;
+st.global.u32 [%rd3], %r3;
+add.u64 %rd2, %rd2, 1;
+add.u32 %r3, %r3, 1;
+bra HEADER;
+)ptx";
+    const std::string loop_exit = R"ptx(EXIT:
+sub.u64 %rd2, %rd1, %rd2;
+st.global.u32 [%rd2], %r3;
+ret;
+)ptx";
+    for (const bool exit_first : {false, true}) {
+        const auto imported = ir::import_ptx(loop_prefix +
+            (exit_first ? loop_exit + loop_body : loop_body + loop_exit) + "}\n");
+        const std::string context = exit_first ? "loop with exit before header" : "loop offset reuse";
+        ok &= expect(imported.ok, context + ": " + imported.error);
+        if (!imported.ok) continue;
+        ok &= expect_ssa_types(imported.module, context);
+        ok &= expect_block_argument(imported.module, "HEADER", "%rd2", ir::Type::integer(64));
+        ok &= expect_block_argument(imported.module, "HEADER", "%r3", ir::Type::integer(32));
+    }
+    auto missing_seed = loop_prefix;
+    const std::string seed = "cvt.u64.u32 %rd2, %r1;\n";
+    missing_seed.erase(missing_seed.find(seed), seed.size());
+    const auto unseeded = ir::import_ptx(missing_seed + loop_body + loop_exit + "}\n");
+    ok &= expect(!unseeded.ok && unseeded.error.find("undefined") != std::string::npos,
+                 "loop backedge cannot invent the missing entry value: " + unseeded.error);
+
+    auto undefined_arm = right;
+    const std::string definition = "cvt.u64.u32 %rd2, %r3;\n";
+    undefined_arm.erase(undefined_arm.find(definition), definition.size());
+    const auto undefined = ir::import_ptx(prefix + left + undefined_arm + join + "}\n");
+    ok &= expect(!undefined.ok && undefined.error.find("undefined") != std::string::npos,
+                 "typed join still rejects an undefined incoming definition: " + undefined.error);
+
+    // A concrete, nonzero integer is not evidence of a pointer. This must not
+    // be repaired by taking the register's pointer type from the other arm.
+    const std::string pointer_left = "LEFT:\nmov.b64 %rd2, %rd1;\nbra JOIN;\n";
+    const std::string null_right = "RIGHT:\nmov.u64 %rd2, 0;\nbra JOIN;\n";
+    const std::string null_join = R"ptx(JOIN:
+setp.eq.u64 %p1, %rd2, 0;
+@%p1 bra DONE;
+st.global.u32 [%rd2], %r1;
+DONE:
+ret;
+)ptx";
+    const auto nullable = ir::import_ptx(prefix + pointer_left + null_right + null_join + "}\n");
+    ok &= expect(nullable.ok, "pointer/known-zero join: " + nullable.error);
+    if (nullable.ok) ok &= expect_ssa_types(nullable.module, "pointer/known-zero join");
+    const auto nonzero = ir::import_ptx(prefix + pointer_left +
+        "RIGHT:\nmov.u64 %rd2, 7;\nbra JOIN;\n" + null_join + "}\n");
+    ok &= expect(!nonzero.ok, "pointer/nonzero-integer join remains rejected");
+    const auto packed_nonzero = ir::import_ptx(prefix + pointer_left +
+        "RIGHT:\nmov.u32 %r2, 0;\nmov.u32 %r3, 1;\n"
+        "mov.b64 %rd2, {%r2, %r3};\nbra JOIN;\n" + null_join + "}\n");
+    ok &= expect(!packed_nonzero.ok,
+                 "a zero low half cannot prove a packed nonzero 64-bit value is null");
+    auto zero_loop_prefix = loop_prefix;
+    zero_loop_prefix.replace(zero_loop_prefix.find(seed), seed.size(), "mov.u64 %rd2, 0;\n");
+    const auto zero_loop = ir::import_ptx(zero_loop_prefix +
+        "HEADER:\nsetp.ge.u32 %p1, %r3, %r2;\n@%p1 bra EXIT;\n"
+        "mov.u64 %rd2, 0;\nadd.u32 %r3, %r3, 1;\nbra HEADER;\n"
+        "EXIT:\nst.global.u64 [%rd1], %rd2;\nret;\n}\n");
+    ok &= expect(zero_loop.ok, "all-zero loop joins resolve to an integer type: " + zero_loop.error);
+    if (zero_loop.ok) {
+        ok &= expect_ssa_types(zero_loop.module, "all-zero loop joins");
+        ok &= expect_block_argument(zero_loop.module, "HEADER", "%rd2", ir::Type::integer(64));
+    }
+    auto local_prefix = prefix;
+    local_prefix.insert(local_prefix.find(".reg .b64"), ".local .align 8 .b8 scratch[8];\n");
+    const auto wrong_space = cumetal::metal::compile_ptx_to_msl(local_prefix + pointer_left +
+        "RIGHT:\nmov.u64 %rd2, scratch;\nbra JOIN;\n"
+        "JOIN:\ncvta.to.global.u64 %rd3, %rd2;\nst.global.u32 [%rd3], %r1;\nret;\n}\n");
+    ok &= expect(!wrong_space.ok, "joining a private pointer cannot authorize a global-only cast");
+    auto pointer_loop = loop_prefix;
+    pointer_loop.replace(pointer_loop.find(seed), seed.size(), "mov.b64 %rd2, %rd1;\n");
+    const auto invalid_backedge = ir::import_ptx(pointer_loop +
+        "HEADER:\nsetp.ge.u32 %p1, %r3, %r2;\n@%p1 bra EXIT;\n"
+        "mov.u64 %rd2, 7;\nadd.u32 %r3, %r3, 1;\nbra HEADER;\n"
+        "EXIT:\nst.global.u32 [%rd2], %r3;\nret;\n}\n");
+    ok &= expect(!invalid_backedge.ok, "pointer/integer loop backedges remain rejected");
+    return ok;
+}
+
+bool test_context_dependent_clones() {
+    namespace ir = cumetal::ir;
+    bool ok = true;
+    const std::string source = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry cloned_copy(.param .u64 .ptr input, .param .u64 .ptr output,
+                           .param .u32 choice) {
+.reg .b64 %rd<6>;
+.reg .b32 %r1;
+.reg .pred %p<2>;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd5, [output];
+ld.param.u32 %r1, [choice];
+setp.eq.u32 %p0, %r1, 0;
+@%p0 bra POINTER;
+mov.u64 %rd2, 7;
+mov.pred %p1, 0;
+bra JOIN;
+POINTER:
+mov.u64 %rd2, %rd1;
+mov.pred %p1, 1;
+bra JOIN;
+JOIN:
+mov.b64 %rd3, %rd2;
+@%p1 bra USE_POINTER;
+st.global.u64 [%rd5], %rd3;
+ret;
+USE_POINTER:
+ld.global.u64 %rd4, [%rd3];
+st.global.u64 [%rd5], %rd4;
+ret;
+}
+)ptx";
+    const auto imported = ir::import_ptx(source);
+    ok &= expect(imported.ok, "cloned mov consumes each path's actual reaching value: " + imported.error);
+    if (imported.ok) {
+        ok &= expect_ssa_types(imported.module, "context-dependent cloned mov");
+        bool scalar_copy = false, pointer_copy = false;
+        std::unordered_set<ir::ValueId> inputs;
+        std::unordered_set<std::uint32_t> source_lines;
+        unsigned copies = 0;
+        for (const auto& function : imported.module.functions)
+            for (const auto& block : function.blocks)
+                for (const auto& operation : block.operations) {
+                    const auto opcode = operation.attributes.find("ptx_opcode");
+                    if (opcode == operation.attributes.end() || opcode->second != "mov.b64") continue;
+                    ++copies;
+                    source_lines.insert(operation.location.line);
+                    if (operation.operands.size() != 1 || operation.result_types.size() != 1) continue;
+                    inputs.insert(operation.operands[0].value);
+                    scalar_copy |= operation.operands[0].type == ir::Type::integer(64) &&
+                                   operation.result_types[0] == ir::Type::integer(64);
+                    pointer_copy |= operation.operands[0].type.is_pointer() &&
+                                    operation.result_types[0] == operation.operands[0].type;
+                }
+        ok &= expect(copies >= 2 && inputs.size() >= 2 && source_lines.size() == 1 &&
+                         scalar_copy && pointer_copy,
+                     "one original mov becomes distinct integer and pointer definitions after specialization");
+    }
+    auto conflicting = source;
+    conflicting.insert(conflicting.find("JOIN:\n") + 6, "setp.eq.u32 %p1, %r1, 42;\n");
+    ok &= expect(!ir::import_ptx(conflicting).ok,
+                 "overwriting the guard cannot authorize incompatible incoming copy types");
+    return ok;
+}
+
+bool test_coupled_phi_types() {
+    namespace ir = cumetal::ir;
+    bool ok = true;
+    const std::string prefix = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry three_way_join(.param .u64 .ptr output, .param .u32 choice) {
+.reg .b64 %rd<4>;
+.reg .b32 %r1;
+.reg .pred %p1;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [choice];
+setp.eq.u32 %p1, %r1, 0;
+@%p1 bra LEFT;
+setp.eq.u32 %p1, %r1, 1;
+@%p1 bra MIDDLE;
+bra RIGHT;
+)ptx";
+    const std::string arms =
+        "LEFT:\ncvt.u64.u32 %rd2, %r1;\nbra JOIN;\n"
+        "MIDDLE:\nmul.wide.u32 %rd2, %r1, 4;\nbra JOIN;\n"
+        "RIGHT:\nmov.u64 %rd2, 4294967296;\nbra JOIN;\n";
+    const std::string join =
+        "JOIN:\nmov.b64 %rd3, %rd2;\nsub.u64 %rd2, %rd1, %rd3;\n"
+        "st.global.u32 [%rd2], %r1;\nret;\n";
+    for (const bool join_first : {false, true}) {
+        const auto imported = ir::import_ptx(prefix + (join_first ? join + arms : arms + join) + "}\n");
+        ok &= expect(imported.ok, "three different incoming definitions converge: " + imported.error);
+        if (!imported.ok) continue;
+        ok &= expect_ssa_types(imported.module, "three-predecessor converted offset");
+        ok &= expect_block_argument(imported.module, "JOIN", "%rd2", ir::Type::integer(64));
+        unsigned incoming_edges = 0;
+        for (const auto& function : imported.module.functions)
+            for (const auto& block : function.blocks)
+                for (const auto& operation : block.operations)
+                    for (const auto& successor : operation.successors) {
+                        const auto* target = function.find_block(successor.block);
+                        incoming_edges += target != nullptr && target->name == "JOIN";
+                    }
+        ok &= expect(incoming_edges == 3, "three-predecessor regression retains all three incoming edges");
+    }
+
+    const std::string coupled = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry coupled_loop(.param .u64 .ptr output, .param .u32 count) {
+.reg .b64 %rd<5>;
+.reg .b32 %r<3>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [count];
+mov.u64 %rd2, 0;
+cvt.u64.u32 %rd3, %r1;
+mov.u32 %r2, 0;
+bra HEADER;
+HEADER:
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra EXIT;
+mov.b64 %rd4, %rd2;
+mov.b64 %rd2, %rd3;
+add.u64 %rd3, %rd4, 1;
+add.u32 %r2, %r2, 1;
+bra HEADER;
+EXIT:
+add.u64 %rd2, %rd1, %rd2;
+st.global.u64 [%rd2], %rd3;
+ret;
+}
+)ptx";
+    const auto imported = ir::import_ptx(coupled);
+    ok &= expect(imported.ok, "mutually dependent loop arguments converge: " + imported.error);
+    if (imported.ok) {
+        ok &= expect_ssa_types(imported.module, "mutually dependent loop arguments");
+        ok &= expect_block_argument(imported.module, "HEADER", "%rd2", ir::Type::integer(64));
+        ok &= expect_block_argument(imported.module, "HEADER", "%rd3", ir::Type::integer(64));
+    }
+    auto conflicting = coupled;
+    const std::string update = "add.u64 %rd3, %rd4, 1;";
+    conflicting.replace(conflicting.find(update), update.size(), "mov.u64 %rd3, %rd1;");
+    ok &= expect(!ir::import_ptx(conflicting).ok,
+                 "coupled loop cannot absorb an incompatible pointer backedge into its integer cycle");
+    return ok;
 }
 
 int main(int argc, char** argv) {
@@ -24,6 +408,9 @@ int main(int argc, char** argv) {
     };
     namespace metal = cumetal::metal;
     bool ok = true;
+    ok &= test_definition_type_cfg();
+    ok &= test_context_dependent_clones();
+    ok &= test_coupled_phi_types();
     const auto invariant_loop = cumetal::ir::import_ptx(fixture("ptx_trivial_block_arguments.ptx"));
     ok &= expect(invariant_loop.ok, "invariant-loop import: " + invariant_loop.error);
     if (invariant_loop.ok) {
@@ -99,6 +486,34 @@ ret;
     const auto guarded_constant = metal::compile_ptx_to_msl(constant_guard);
     ok &= expect(guarded_constant.ok,
                  "constant predicate guards a conditionally defined value: " + guarded_constant.error);
+    auto cloned_conversion = constant_guard;
+    cloned_conversion.replace(cloned_conversion.find(".reg .b64 %rd<5>;"),
+                              std::string(".reg .b64 %rd<5>;").size(), ".reg .b64 %rd<6>;");
+    cloned_conversion.insert(cloned_conversion.find("JOIN:\n") + 6,
+                             "cvt.u64.u32 %rd5, %r0;\n");
+    cloned_conversion.insert(cloned_conversion.find("st.global.u32 [%rd3], 99;"),
+                             "st.global.u64 [%rd3+8], %rd5;\n");
+    cloned_conversion.insert(cloned_conversion.find("DONE:\n"),
+        "st.global.u64 [%rd3+8], %rd5;\n"
+        "add.u64 %rd5, %rd0, %rd5;\nld.global.u8 %r1, [%rd5];\n"
+        "st.global.u8 [%rd3+16], %r1;\n");
+    const auto cloned = cumetal::ir::import_ptx(cloned_conversion);
+    ok &= expect(cloned.ok, "guard-specialized conversion retains its own result type: " + cloned.error);
+    if (cloned.ok) {
+        ok &= expect_ssa_types(cloned.module, "guard-specialized conversion");
+        unsigned conversions = 0;
+        for (const auto& function : cloned.module.functions)
+            for (const auto& block : function.blocks)
+                for (const auto& operation : block.operations) {
+                    const auto opcode = operation.attributes.find("ptx_opcode");
+                    if (opcode == operation.attributes.end() || opcode->second != "cvt.u64.u32") continue;
+                    ++conversions;
+                    ok &= expect(operation.result_types ==
+                                     std::vector<cumetal::ir::Type>{cumetal::ir::Type::integer(64)},
+                                 "every normalized conversion remains an integer before pointer reuse");
+                }
+        ok &= expect(conversions >= 2, "guard specialization actually exercises multiple conversion definitions");
+    }
     for (const std::string replacement : {
         "JOIN:\n@%p0 mov.pred %p1, 0;\n",
         "JOIN:\nsetp.ne.u32 %p1, %r0, 0;\n",

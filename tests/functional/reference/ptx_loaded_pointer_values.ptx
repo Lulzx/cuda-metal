@@ -104,3 +104,54 @@ SUB_LOOP:
 SUB_DONE:
     ret;
 }
+
+// A sixteen-iteration scalar write loop must not invalidate a disjoint pointer
+// cell in the same depot. Both the input value and the cell survive the loop.
+.visible .entry bounded_numeric_write_probe(
+    .param .u64 .ptr input,
+    .param .u64 .ptr output,
+    .param .u32 count
+) {
+    .local .align 8 .b8 depot[512];
+    .reg .b64 %input, %output, %lane_bytes, %value;
+    .reg .b64 %base, %table, %data, %scratch, %index, %offset, %write, %loaded;
+    .reg .b32 %block, %threads, %thread, %lane, %count;
+    .reg .pred %outside, %done;
+    ld.param.u64 %input, [input];
+    ld.param.u64 %output, [output];
+    ld.param.u32 %count, [count];
+    mov.u32 %block, %ctaid.x;
+    mov.u32 %threads, %ntid.x;
+    mov.u32 %thread, %tid.x;
+    mad.lo.u32 %lane, %block, %threads, %thread;
+    setp.ge.u32 %outside, %lane, %count;
+    @%outside bra NUMERIC_DONE;
+    mul.wide.u32 %lane_bytes, %lane, 8;
+    add.u64 %input, %input, %lane_bytes;
+    add.u64 %output, %output, %lane_bytes;
+    ld.global.u64 %value, [%input];
+    mov.u64 %base, depot;
+    add.u64 %table, %base, 256;
+    add.u64 %data, %base, 480;
+    add.u64 %scratch, %base, 320;
+    st.local.u64 [%data], %value;
+    st.local.u64 [%table], %data;
+    mov.u64 %index, 0;
+    bra WRITE_LOOP;
+WRITE_LOOP:
+    shl.b64 %offset, %index, 3;
+    add.u64 %write, %scratch, %offset;
+    st.local.u64 [%write], %index;
+    add.u64 %index, %index, 1;
+    setp.eq.u64 %done, %index, 16;
+    @%done bra READ_CELL;
+    bra WRITE_LOOP;
+READ_CELL:
+    ld.local.u64 %loaded, [%table];
+    ld.u64 %value, [%loaded];
+    ld.local.u64 %offset, [%scratch+120];
+    add.u64 %value, %value, %offset;
+    st.global.u64 [%output], %value;
+NUMERIC_DONE:
+    ret;
+}

@@ -49,7 +49,11 @@ CUDA C++ / PTX → CuMetal compiler → Metal Shading Language → Apple tools �
 Source recompilation is the primary path. Direct CUDA C++ compilation uses
 typed CuMetal IR and embeds the compiled Metal library in the executable,
 with no first-launch PTX JIT. CuMetal uses no private Apple APIs.
-See [compiler architecture](docs/compiler-architecture.md) for backend details.
+PTX import resolves each definition and branch/loop argument from its reaching
+SSA values, with checked result and edge types; supported register reuse does not
+inherit the type of a later assignment. See [known gaps](docs/known-gaps.md) for
+memory-provenance and legacy-backend limits, and
+[compiler architecture](docs/compiler-architecture.md) for backend details.
 
 ## Limits
 

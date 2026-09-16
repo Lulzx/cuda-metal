@@ -38,6 +38,66 @@ The new backend never falls back to legacy lowering. Unsupported opcodes,
 intrinsics, memory semantics, CFG shapes, or MSL constructs are compile-time
 errors.
 
+## PTX definition and edge types
+
+The PTX importer constructs and normalizes the control-flow graph, assigns a
+separate SSA value to each destination, and connects reaching definitions before
+resolving semantic types. A register declaration describes storage; the register
+name never supplies the type of its last assignment to an earlier use.
+
+- Fixed result contracts distinguish conversion source and destination types,
+  widened products, predicate outputs, tuple lanes and load/container widths.
+- Dependent contracts consume reaching SSA operands for copies, selects,
+  parameter-address loads and supported pointer arithmetic.
+- Call-return ABI slots participate in the same SSA graph. A reused lexical
+  name such as `retval0` does not tie unrelated calls to one type; `ld.param`
+  consumes its reaching call result and retains the ABI load contract.
+- Pre-SSA argument-slot pointer evidence requires consistent call signatures
+  and unconditional stores of the same single-definition source. Overwritten
+  scalar stores cannot borrow a later pointer call's contract.
+- Aggregate address representation follows actual SSA address uses. Copies of
+  a materialized private aggregate retain its allocation and any mutations;
+  indirect parameter loads do not reread the original by-value argument.
+- Join constraints inspect incoming definitions, including loop backedges.
+  Zero may seed an integer type before a loop is resolved; proof that a value is
+  null remains a separate obligation. Unseeded cycles remain errors.
+- CFG clones have distinct result values. Origin records carry intrinsic memory
+  evidence only when the relevant opcode and operands remain unchanged.
+- Conservative local-memory proofs consume solved definition types. Discovering
+  another pointer-valued load re-solves affected contracts from those proven
+  facts; no whole-register last-assignment summary participates.
+- Generic dereferencing establishes pointer-ness without assuming Device
+  storage. Concrete cell evidence may refine that demand. Candidate local-cell
+  facts are checked against reaching stores on the normalized CFG after types
+  stabilize, including cloned loads. Finite masked indices use their reaching
+  SSA expressions. Small literal-initialized loops also have a finite range
+  when their sole increment and every backedge satisfy the checked exit bound.
+  Fallback address summaries must be closed over every definition; bounded
+  discovery alone is insufficient. Incompatible paths and unsupported memory effects fail
+  explicitly rather than selecting a store by source layout.
+  Calls preserve a cell proof only when their imported body proves that they
+  cannot write caller memory. Backward pointer-demand discovery stops at reused
+  or predicated aliases instead of mixing their assignments.
+
+Materialization consumes frozen imported result types and checks emitted results
+against them. New conversions and temporary values receive fresh IDs. Typed null
+and compatible pointer edge conversions do not retag the original definition.
+Unsupported operations, conflicting incoming types and missing definitions have
+explicit diagnostics; the importer does not manufacture values to satisfy an edge.
+
+The IR verifier checks edge values, dominance and argument types. NVVM's existing
+tracked CUDA-generic pointer representation is stage-sensitive: GPU IR may carry
+explicitly marked generic destinations, and legalized mixed pointers must satisfy
+their declared address-space masks. Untracked mismatches remain errors. Opaque
+pointer pointee changes use explicit edge casts.
+
+The focused regressions live in `ptx_cfg_test.cpp`, `ptx_ir_msl_test.cpp` and
+`ir_test.cpp`. Numerical PTX checks in `run_ptx_register_reuse.py` and
+`run_ptx_integer_widths.py` cover source-order and identifier changes, converted
+joins, bounded loops, high bits, input preservation and output guards. These
+checks complement full downstream PTX replay; MSL emission alone does not prove
+Apple compilation or GPU execution.
+
 ## Backend selection
 
 During the compatibility release:

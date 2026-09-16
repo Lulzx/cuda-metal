@@ -44,6 +44,40 @@ struct ValueDefinition {
     bool block_argument = false;
 };
 
+bool successor_type_matches(const Module& module, const Function& function,
+                            ValueId source_value, const Type& source,
+                            const BlockArgument& target) {
+    const bool mixed_target = module.stage == IrStage::kMetalLegalized &&
+        function.mixed_pointer_address_spaces.contains(target.value);
+    if (source == target.type && !mixed_target) return true;
+    if (!source.is_pointer() || !target.type.is_pointer()) return false;
+    Type same_shape = source;
+    same_shape.address_space = target.type.address_space;
+    if (same_shape != target.type) return false;
+
+    // Generic pointer PHIs have an explicitly tracked, provisional address
+    // space in GPU IR. Their concrete alternatives are resolved together with
+    // helper call sites during Metal legalization. Only address space may
+    // differ here; pointee/width differences still need explicit edge values.
+    if (module.stage == IrStage::kGpuSemantic)
+        return function.generic_pointer_values.contains(target.value);
+
+    // Legalization represents a mixed pointer with an address-space tag. An
+    // incoming concrete (or mixed) pointer must fit the destination's declared
+    // alternatives. Generic metadata alone no longer authorizes a mismatch.
+    const auto target_spaces = function.mixed_pointer_address_spaces.find(target.value);
+    if (target.type.address_space != AddressSpace::kNone ||
+        target_spaces == function.mixed_pointer_address_spaces.end()) return false;
+    std::uint8_t source_spaces = 0;
+    if (source.address_space != AddressSpace::kNone) {
+        source_spaces = static_cast<std::uint8_t>(1u << static_cast<unsigned>(source.address_space));
+    } else if (const auto mixed = function.mixed_pointer_address_spaces.find(source_value);
+               mixed != function.mixed_pointer_address_spaces.end()) {
+        source_spaces = mixed->second;
+    }
+    return source_spaces != 0 && (source_spaces & ~target_spaces->second) == 0;
+}
+
 }  // namespace
 
 Type Type::void_type() {
@@ -468,6 +502,54 @@ VerifyResult verify(const Module& module) {
                         add_diagnostic(&result, operation.location,
                                        "value %" + std::to_string(operand.value) +
                                            " does not dominate its use");
+                    }
+                }
+
+                // Successor arguments are SSA uses at the branch, even though
+                // they are stored outside operation.operands. Any conversion
+                // (including a typed null or pointee conversion) must have its
+                // own value before the edge. Explicitly tracked generic/mixed
+                // pointer spaces follow their staged specialization contract.
+                for (const Successor& successor : operation.successors) {
+                    const auto target = block_indices.find(successor.block);
+                    if (target == block_indices.end()) continue;
+                    const BasicBlock& target_block = function.blocks[target->second];
+                    for (std::size_t i = 0; i < successor.arguments.size(); ++i) {
+                        const ValueId value = successor.arguments[i];
+                        const auto context = [&] {
+                            return "edge from block '" + block.name + "' to block '" +
+                                target_block.name + "' argument " + std::to_string(i);
+                        };
+                        const auto definition = definitions.find(value);
+                        if (definition == definitions.end()) {
+                            add_diagnostic(&result, operation.location,
+                                           context() + " uses undefined value %" + std::to_string(value));
+                            continue;
+                        }
+                        if (i < target_block.arguments.size() &&
+                            !successor_type_matches(module, function, value, definition->second.type,
+                                                    target_block.arguments[i])) {
+                            add_diagnostic(&result, operation.location,
+                                           context() + " passes value %" + std::to_string(value) +
+                                               " type " + definition->second.type.str() +
+                                               " to block argument type " +
+                                               target_block.arguments[i].type.str());
+                        }
+                        if (definition->second.function_argument) continue;
+                        const auto definition_block = block_indices.find(definition->second.block);
+                        if (definition_block == block_indices.end()) continue;
+                        if (definition_block->second == block_index) {
+                            if (!definition->second.block_argument &&
+                                definition->second.operation_index >= op_index) {
+                                add_diagnostic(&result, operation.location,
+                                               context() + " uses value %" + std::to_string(value) +
+                                                   " before its definition");
+                            }
+                        } else if (!dominators.dominates(definition_block->second, block_index)) {
+                            add_diagnostic(&result, operation.location,
+                                           context() + " uses value %" + std::to_string(value) +
+                                               " that does not dominate the edge");
+                        }
                     }
                 }
 

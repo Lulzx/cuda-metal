@@ -1,8 +1,11 @@
 #include "cumetal/ir/ir.h"
+#include "cumetal/ir/ptx_importer.h"
 #include "cumetal/metal/lower_to_msl.h"
 
+#include <algorithm>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -54,11 +57,1090 @@ DONE:
 }
 )ptx";
 
+bool test_instruction_result_contracts() {
+    using namespace cumetal;
+    bool ok = true;
+    struct ConversionCase {
+        const char* opcode;
+        const char* source_spelling;
+        const char* destination_spelling;
+        ir::Type source_type;
+        ir::Type result_type;
+    };
+    // Place the join before both definitions in source order. Materialization
+    // cannot repair a conversion's result after the join has consumed its type.
+    const std::vector<ConversionCase> conversions = {
+        {"cvt.u64.u32", "u32", "u64", ir::Type::integer(32), ir::Type::integer(64)},
+        {"cvt.u64.s32", "s32", "u64", ir::Type::integer(32), ir::Type::integer(64)},
+        {"cvt.u32.u64", "u64", "u32", ir::Type::integer(64), ir::Type::integer(32)},
+        {"cvt.s32.s16", "s16", "s32", ir::Type::integer(16), ir::Type::integer(32)},
+        {"cvt.u32.u16", "u16", "u32", ir::Type::integer(16), ir::Type::integer(32)},
+        {"cvt.rn.f32.u32", "u32", "f32", ir::Type::integer(32), ir::Type::floating(32)},
+        {"cvt.rzi.u32.f32", "f32", "u32", ir::Type::floating(32), ir::Type::integer(32)},
+        {"cvt.f64.f32", "f32", "f64", ir::Type::floating(32), ir::Type::floating(64)},
+        {"cvt.rn.f32.f64", "f64", "f32", ir::Type::floating(64), ir::Type::floating(32)},
+    };
+    for (const auto& test : conversions) {
+        const std::string source_type = test.source_spelling;
+        const std::string destination_type = test.destination_spelling;
+        const std::string opcode = test.opcode;
+        const std::string source =
+            ".version 7.1\n.target sm_80\n.address_size 64\n"
+            ".visible .entry conversion_contract(.param .u64 .ptr output, .param ." +
+            source_type + " lhs, .param ." + source_type + " rhs, .param .u32 choice) {\n"
+            ".reg .b64 %rd1;\n.reg .u32 %r1;\n.reg .pred %p1;\n.reg ." +
+            source_type + " %source<2>;\n.reg ." + destination_type + " %value;\n"
+            "ld.param.u64 %rd1, [output];\nld.param.u32 %r1, [choice];\nld.param." +
+            source_type + " %source0, [lhs];\nld.param." + source_type + " %source1, [rhs];\n"
+            "setp.ne.u32 %p1, %r1, 0;\n@%p1 bra LEFT;\nbra RIGHT;\n"
+            "JOIN:\nst.global." + destination_type + " [%rd1], %value;\nret;\n"
+            "RIGHT:\n" + opcode + " %value, %source1;\nbra JOIN;\n"
+            "LEFT:\n" + opcode + " %value, %source0;\nbra JOIN;\n}\n";
+        const auto imported = ir::import_ptx(source);
+        ok &= expect(imported.ok, opcode + " through reordered join: " + imported.error);
+        if (!imported.ok) continue;
+        ok &= expect(ir::verify(imported.module).ok, opcode + " produces verified IR");
+        unsigned definitions = 0;
+        bool joined = false;
+        for (const auto& function : imported.module.functions) {
+            for (const auto& block : function.blocks) {
+                for (const auto& argument : block.arguments) {
+                    if (block.name == "JOIN" && argument.name == "%value") {
+                        joined = true;
+                        ok &= expect(argument.type == test.result_type,
+                                     opcode + " join uses destination, not source, type");
+                    }
+                }
+                for (const auto& operation : block.operations) {
+                    const auto origin = operation.attributes.find("ptx_opcode");
+                    if (origin == operation.attributes.end() || origin->second != opcode) continue;
+                    ++definitions;
+                    ok &= expect(operation.result_types == std::vector<ir::Type>{test.result_type},
+                                 opcode + " has the specified result type");
+                    ok &= expect(operation.operands.size() == 1 &&
+                                     operation.operands.front().type == test.source_type,
+                                 opcode + " retains its independent source type");
+                }
+            }
+        }
+        ok &= expect(definitions == 2 && joined, opcode + " checks both definitions and their join");
+    }
+
+    for (const std::string opcode : {"mul.wide.u32", "mul.wide.s32", "mad.wide.u32"}) {
+        const std::string operands = opcode.starts_with("mad") ? ", 4, 4294967296" : ", 4";
+        const std::string source = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry wide_contract(.param .u64 .ptr output, .param .u32 index) {
+.reg .b64 %rd<3>;
+.reg .b32 %r<3>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [index];
+setp.ne.u32 %p1, %r1, 0;
+@%p1 bra LEFT;
+bra RIGHT;
+JOIN:
+st.global.u64 [%rd1], %rd2;
+ret;
+LEFT:
+)ptx" + opcode + " %rd2, %r1" + operands + ";\nbra JOIN;\n"
+            "RIGHT:\nadd.u32 %r2, %r1, 1;\n" + opcode + " %rd2, %r2" + operands +
+            ";\nbra JOIN;\n}\n";
+        const auto imported = ir::import_ptx(source);
+        ok &= expect(imported.ok, opcode + " through reordered join: " + imported.error);
+        if (!imported.ok) continue;
+        bool joined = false;
+        unsigned definitions = 0;
+        for (const auto& function : imported.module.functions)
+            for (const auto& block : function.blocks) {
+                for (const auto& argument : block.arguments)
+                    if (block.name == "JOIN" && argument.name == "%rd2") {
+                        joined = true;
+                        ok &= expect(argument.type == ir::Type::integer(64),
+                                     opcode + " wide join is 64 bits before emission");
+                    }
+                for (const auto& operation : block.operations) {
+                    const auto origin = operation.attributes.find("ptx_opcode");
+                    if (origin == operation.attributes.end() || origin->second != opcode) continue;
+                    ++definitions;
+                    ok &= expect(operation.result_types == std::vector<ir::Type>{ir::Type::integer(64)},
+                                 opcode + " wide result is 64 bits");
+                }
+            }
+        ok &= expect(joined && definitions == 2 && ir::verify(imported.module).ok,
+                     opcode + " checks both wide definitions and verified joined IR");
+    }
+
+    const std::string double_predicate = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry double_predicate(.param .u64 .ptr output, .param .f64 lhs, .param .f64 rhs) {
+.reg .b64 %rd1;
+.reg .f64 %fd<3>;
+.reg .b32 %r1;
+.reg .pred %p1;
+ld.param.u64 %rd1, [output];
+ld.param.f64 %fd1, [lhs];
+ld.param.f64 %fd2, [rhs];
+setp.lt.f64 %p1, %fd1, %fd2;
+selp.u32 %r1, 1, 0, %p1;
+st.global.u32 [%rd1], %r1;
+ret;
+}
+)ptx";
+    const auto compared = ir::import_ptx(double_predicate);
+    ok &= expect(compared.ok, "f64 comparison produces a predicate: " + compared.error);
+    bool predicate_result = false;
+    if (compared.ok)
+        for (const auto& function : compared.module.functions)
+            for (const auto& block : function.blocks)
+                for (const auto& operation : block.operations)
+                    if (operation.opcode == ir::OpCode::kCompare)
+                        predicate_result |= operation.result_types ==
+                            std::vector<ir::Type>{ir::Type::predicate()} &&
+                            operation.operands.size() == 2 &&
+                            operation.operands[0].type == ir::Type::floating(64) &&
+                            operation.operands[1].type == ir::Type::floating(64);
+    ok &= expect(predicate_result, "comparison result category does not follow operand f64 category");
+
+    for (const std::string tuple : {"{%r3, %r4}", "{%r3, _}", "{_, %r3}"}) {
+        const bool both_lanes = tuple == "{%r3, %r4}";
+        const std::string second_store = both_lanes ? "st.global.u32 [%rd1+4], %r4;\n" : "";
+        const std::string source = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry tuple_contract(.param .u64 .ptr output, .param .u64 lhs,
+                              .param .u64 rhs, .param .u32 choice) {
+.reg .b64 %rd<4>;
+.reg .b32 %r<5>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [output];
+ld.param.u64 %rd2, [lhs];
+ld.param.u64 %rd3, [rhs];
+ld.param.u32 %r1, [choice];
+setp.ne.u32 %p1, %r1, 0;
+@%p1 bra LEFT;
+bra RIGHT;
+JOIN:
+st.global.u32 [%rd1], %r3;
+)ptx" + second_store + "ret;\nLEFT:\nmov.b64 " + tuple +
+            ", %rd2;\nbra JOIN;\nRIGHT:\nmov.b64 " + tuple + ", %rd3;\nbra JOIN;\n}\n";
+        const auto imported = ir::import_ptx(source);
+        ok &= expect(imported.ok, "tuple destinations through reordered join " + tuple + ": " + imported.error);
+        if (!imported.ok) continue;
+        unsigned joined_lanes = 0;
+        for (const auto& function : imported.module.functions)
+            for (const auto& block : function.blocks)
+                if (block.name == "JOIN")
+                    for (const auto& argument : block.arguments)
+                        if (argument.name == "%r3" || argument.name == "%r4") {
+                            ++joined_lanes;
+                            ok &= expect(argument.type == ir::Type::integer(32),
+                                         "tuple lane retains its own 32-bit result type " + tuple);
+                        }
+        ok &= expect(joined_lanes == (both_lanes ? 2u : 1u) && ir::verify(imported.module).ok,
+                     "tuple metadata count and lane order survive normalization " + tuple);
+    }
+    return ok;
+}
+
+bool test_float_to_integer_contracts() {
+    using namespace cumetal;
+    bool ok = true;
+    struct Rounding { const char* ptx; const char* mode; const char* metal; };
+    const Rounding roundings[] = {
+        {"rni", "0u", "rint"}, {"rzi", "1u", "trunc"},
+        {"rmi", "2u", "floor"}, {"rpi", "3u", "ceil"},
+    };
+    for (const auto& rounding : roundings) {
+        for (const bool signed_destination : {true, false}) {
+            const std::string destination = signed_destination ? "s32" : "u32";
+            const std::string opcode = "cvt." + std::string(rounding.ptx) + "." + destination + ".f32";
+            const std::string source =
+                ".version 7.1\n.target sm_80\n.address_size 64\n"
+                ".visible .entry float_to_integer(.param .f32 input, .param .u64 .ptr output) {\n"
+                ".reg .f32 %f1;\n.reg .b32 %r1;\n.reg .b64 %rd1;\n"
+                "ld.param.f32 %f1, [input];\nld.param.u64 %rd1, [output];\n" +
+                opcode + " %r1, %f1;\nst.global.b32 [%rd1], %r1;\nret;\n}\n";
+            const auto compiled = metal::compile_ptx_to_msl(source);
+            ok &= expect(compiled.ok, opcode + " compiles: " + compiled.error);
+            if (!compiled.ok) continue;
+            bool checked = false;
+            for (const auto& function : compiled.gpu_ir.functions) {
+                for (const auto& block : function.blocks) {
+                    for (const auto& operation : block.operations) {
+                        const auto spelling = operation.attributes.find("ptx_opcode");
+                        if (spelling == operation.attributes.end() || spelling->second != opcode) continue;
+                        const auto mode = operation.attributes.find("rounding_mode");
+                        const auto sign = operation.attributes.find("signed_output");
+                        checked = operation.opcode == ir::OpCode::kConvert &&
+                            operation.result_types == std::vector<ir::Type>{ir::Type::integer(32)} &&
+                            mode != operation.attributes.end() && mode->second == rounding.mode &&
+                            (signed_destination ? sign != operation.attributes.end() && sign->second == "true"
+                                                : sign == operation.attributes.end());
+                    }
+                }
+            }
+            ok &= expect(checked, opcode + " retains destination signedness and integer rounding in signless IR");
+            const std::string expected = (signed_destination ? "as_type<uint>(int(" : "uint(") +
+                std::string(rounding.metal) + "(";
+            ok &= expect(compiled.source.find(expected) != std::string::npos,
+                         opcode + " rounds, converts numerically, then retains the result bits");
+        }
+    }
+    return ok;
+}
+
+bool test_call_return_slot_definitions() {
+    using namespace cumetal;
+    bool ok = true;
+    const std::string helpers = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.func (.param .b32 returned) make_word() {
+    st.param.b32 [returned], 11;
+    ret;
+}
+.func (.param .b32 returned) make_other_word() {
+    st.param.b32 [returned], 29;
+    ret;
+}
+.func (.param .b64 returned) make_wide() {
+    st.param.b64 [returned], 4294967297;
+    ret;
+}
+.func (.param .f32 returned) make_float() {
+    st.param.f32 [returned], 0f40800000;
+    ret;
+}
+)ptx";
+    const auto reused = ir::import_ptx(helpers + R"ptx(
+.visible .entry reused_return_slot(.param .u64 .ptr output) {
+    .reg .b64 %rd_output, %rd_wide, %rd_float;
+    .reg .b32 %r_word;
+    .param .b64 retval0;
+    ld.param.u64 %rd_output, [output];
+    call.uni (retval0), make_word, ();
+    ld.param.b32 %r_word, [retval0];
+    st.global.b32 [%rd_output], %r_word;
+    call.uni (retval0), make_wide, ();
+    ld.param.b64 %rd_wide, [retval0];
+    st.global.b64 [%rd_output+8], %rd_wide;
+    call.uni (retval0), make_float, ();
+    ld.param.b64 %rd_float, [retval0];
+    st.global.f32 [%rd_output+16], %rd_float;
+    ret;
+}
+)ptx");
+    ok &= expect(reused.ok, "one return slot accepts distinct successive call signatures: " + reused.error);
+    if (reused.ok) {
+        ok &= expect(ir::verify(reused.module).ok, "reused return slot has verified def-use types");
+        unsigned matched_loads = 0;
+        for (const auto& function : reused.module.functions) {
+            if (!function.is_kernel) continue;
+            for (const auto& block : function.blocks) {
+                ir::ValueId last_call = ir::kInvalidValue;
+                ir::Type last_type;
+                for (const auto& operation : block.operations) {
+                    if (operation.opcode == ir::OpCode::kCall && operation.results.size() == 1) {
+                        last_call = operation.results.front();
+                        last_type = operation.result_types.front();
+                    }
+                    const auto opcode = operation.attributes.find("ptx_opcode");
+                    if (opcode == operation.attributes.end() || !opcode->second.starts_with("ld.param.b")) continue;
+                    ok &= expect(operation.opcode == ir::OpCode::kConvert && operation.operands.size() == 1 &&
+                        operation.operands.front().kind == ir::OperandKind::kValue &&
+                        operation.operands.front().value == last_call &&
+                        operation.result_types == std::vector<ir::Type>{last_type},
+                        "return load uses its reaching call result, including f32 through b64 ABI");
+                    ++matched_loads;
+                }
+            }
+        }
+        ok &= expect(matched_loads == 3, "all three reused return-slot loads are checked");
+    }
+
+    const std::string prefix = helpers + R"ptx(
+.visible .entry joined_return_slot(.param .u64 .ptr output, .param .u32 choice) {
+    .reg .b64 %rd_output;
+    .reg .b32 %r_choice, %r_value;
+    .reg .pred %p;
+    .param .b64 retval0;
+    ld.param.u64 %rd_output, [output];
+    ld.param.u32 %r_choice, [choice];
+    setp.ne.u32 %p, %r_choice, 0;
+    @%p bra LEFT;
+    bra RIGHT;
+)ptx";
+    const std::string join = R"ptx(
+JOIN:
+    ld.param.b32 %r_value, [retval0];
+    st.global.b32 [%rd_output], %r_value;
+    ret;
+)ptx";
+    const std::string calls = R"ptx(
+LEFT:
+    call.uni (retval0), make_word, ();
+    bra JOIN;
+RIGHT:
+    call.uni (retval0), make_other_word, ();
+    bra JOIN;
+)ptx";
+    for (const bool join_first : {true, false}) {
+        const auto imported = ir::import_ptx(prefix + (join_first ? join + calls : calls + join) + "}\n");
+        ok &= expect(imported.ok, "return-slot join is independent of block source order: " + imported.error);
+        if (!imported.ok) continue;
+        ok &= expect(ir::verify(imported.module).ok, "joined call return dominates its parameter load");
+        bool reads_join = false;
+        for (const auto& function : imported.module.functions) {
+            if (!function.is_kernel) continue;
+            for (const auto& block : function.blocks) {
+                if (block.name != "JOIN") continue;
+                for (const auto& argument : block.arguments) {
+                    if (argument.name != "return-slot:retval0") continue;
+                    for (const auto& operation : block.operations) {
+                        reads_join |= operation.opcode == ir::OpCode::kConvert &&
+                            operation.operands.size() == 1 &&
+                            operation.operands.front().kind == ir::OperandKind::kValue &&
+                            operation.operands.front().value == argument.value;
+                    }
+                }
+            }
+        }
+        ok &= expect(reads_join, "ld.param consumes the SSA join of the two call results");
+    }
+    std::string conflicting = calls;
+    conflicting.replace(conflicting.find("make_other_word"), std::string("make_other_word").size(), "make_wide");
+    const auto rejected = ir::import_ptx(prefix + join + conflicting + "}\n");
+    ok &= expect(!rejected.ok && rejected.error.find("conflicting PTX incoming type") != std::string::npos,
+                 "incompatible reaching return-slot types remain rejected: " + rejected.error);
+    std::string undefined = calls;
+    const std::string right_call = "call.uni (retval0), make_other_word, ();";
+    undefined.erase(undefined.find(right_call), right_call.size());
+    const auto missing = ir::import_ptx(prefix + join + undefined + "}\n");
+    ok &= expect(!missing.ok && missing.error.find("undefined on an incoming edge") != std::string::npos,
+                 "return-slot load with an undefined incoming call remains rejected: " + missing.error);
+    return ok;
+}
+
+bool test_local_pointer_memory_proof_paths() {
+    using namespace cumetal;
+    bool ok = true;
+    const std::string head = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry pointer_cell_probe(
+    .param .u64 .ptr input, .param .u64 .ptr output, .param .u32 choice
+) {
+    .reg .b64 %rd<8>;
+    .reg .b32 %r<3>;
+    .reg .pred %p0;
+    .local .align 8 .b8 slot[8];
+    .local .align 8 .b8 data[8];
+    ld.param.u64 %rd0, [input];
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r0, [choice];
+    mov.u64 %rd2, slot;
+    mov.u64 %rd3, data;
+    st.local.u32 [%rd3], 37;
+    cvta.local.u64 %rd4, %rd3;
+    setp.eq.u32 %p0, %r0, 0;
+    @%p0 bra PRIVATE_STORE;
+    bra DEVICE_STORE;
+)ptx";
+    const std::string join = R"ptx(
+JOIN:
+    ld.local.u64 %rd5, [%rd2];
+    ld.u32 %r1, [%rd5];
+    st.global.u32 [%rd1], %r1;
+    ret;
+)ptx";
+    const std::vector<std::vector<unsigned>> layouts = {
+        {0, 2, 1}, {1, 2, 0}, {0, 1, 2}, {1, 0, 2},
+    };
+    for (const std::string mode : {"mixed", "private", "device"}) {
+        const std::vector<std::string> blocks = {
+            "PRIVATE_STORE:\nst.local.u64 [%rd2], " + std::string(mode == "device" ? "%rd0" : "%rd4") + ";\nbra JOIN;\n",
+            "DEVICE_STORE:\nst.local.u64 [%rd2], " + std::string(mode == "private" ? "%rd4" : "%rd0") + ";\nbra JOIN;\n",
+            join,
+        };
+        for (const auto& layout : layouts) {
+            std::string fixture = head;
+            for (const auto block : layout) fixture += blocks[block];
+            fixture += "}\n";
+            const auto imported = ir::import_ptx(fixture);
+            if (mode == "mixed") {
+                ok &= expect(!imported.ok && imported.error.find("conflicting local pointer memory proof") != std::string::npos,
+                             "mixed reaching pointer stores reject independently of block layout: " + imported.error);
+            } else {
+                ok &= expect(imported.ok, "uniform " + mode + " pointer stores prove every incoming path: " + imported.error);
+                if (imported.ok) {
+                    bool proven = false;
+                    const auto expected = mode == "private" ? ir::AddressSpace::kPrivate : ir::AddressSpace::kDevice;
+                    for (const auto& function : imported.module.functions)
+                        for (const auto& block : function.blocks)
+                            for (const auto& operation : block.operations)
+                                if (operation.opcode == ir::OpCode::kLoad && operation.result_types.size() == 1 &&
+                                    operation.result_types.front().is_pointer())
+                                    proven |= operation.result_types.front().address_space == expected;
+                    ok &= expect(proven && ir::verify(imported.module).ok, "uniform reaching stores preserve verified concrete pointer type");
+                }
+            }
+        }
+    }
+    for (const std::string alternate : {"", "st.local.u32 [%rd2], 7;\n"}) {
+        const auto imported = ir::import_ptx(head +
+            "PRIVATE_STORE:\nst.local.u64 [%rd2], %rd4;\nbra JOIN;\n" + join +
+            "DEVICE_STORE:\n" + alternate + "bra JOIN;\n}\n");
+        ok &= expect(!imported.ok && imported.error.find("unsupported local pointer memory proof") != std::string::npos,
+                     "missing or partial incoming initialization cannot prove a pointer cell: " + imported.error);
+    }
+    return ok;
+}
+
+bool test_pointer_memory_bounded_loops() {
+    using namespace cumetal;
+    bool ok = true;
+    const auto fixture = [](int scratch_offset, bool reversed_layout, bool inverted_guard,
+                            int step = 1, int limit = 16, bool bypass = false) {
+        const std::string prefix = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry bounded_pointer_cell(.param .u64 .ptr output, .param .u32 choice) {
+    .local .align 8 .b8 depot[512];
+    .reg .b64 %base, %table, %data, %scratch, %index, %offset, %write, %loaded, %output;
+    .reg .b32 %word, %choice;
+    .reg .pred %done, %bypass;
+    ld.param.u64 %output, [output];
+    ld.param.u32 %choice, [choice];
+    mov.u64 %base, depot;
+    add.u64 %table, %base, 256;
+    add.u64 %data, %base, 480;
+    st.local.u32 [%data], 42;
+    st.local.u64 [%table], %data;
+    add.u64 %scratch, %base, )ptx" + std::to_string(scratch_offset) + R"ptx(;
+    mov.u64 %index, 0;
+    setp.ne.u32 %bypass, %choice, 0;
+    bra BODY;
+)ptx";
+        const std::string body = R"ptx(
+BODY:
+    shl.b64 %offset, %index, 3;
+    add.u64 %write, %scratch, %offset;
+    st.local.u64 [%write], 1;
+    add.u64 %index, %index, )ptx" + std::to_string(step) + ";\n" +
+            (bypass ? "    @%bypass bra BODY;\n" : "") +
+            "    setp." + (inverted_guard ? std::string("ne") : std::string("eq")) +
+            ".u64 %done, %index, " + std::to_string(limit) + ";\n" +
+            (inverted_guard ? "    @%done bra BODY;\n    bra EXIT;\n" :
+                              "    @%done bra EXIT;\n    bra BODY;\n");
+        const std::string exit = R"ptx(
+EXIT:
+    ld.local.u64 %loaded, [%table];
+    ld.u32 %word, [%loaded];
+    st.global.u32 [%output], %word;
+    ret;
+)ptx";
+        return prefix + (reversed_layout ? exit + body : body + exit) + "}\n";
+    };
+    for (const int offset : {0, 320}) for (const bool reverse : {false, true})
+        for (const bool inverted : {false, true}) {
+            const auto source = fixture(offset, reverse, inverted);
+            const auto imported = ir::import_ptx(source);
+            ok &= expect(imported.ok, "bounded same-depot writes preserve a disjoint pointer cell: " + imported.error);
+            if (imported.ok) ok &= expect(ir::verify(imported.module).ok, "bounded pointer-cell loop verifies");
+            const auto compiled = metal::compile_ptx_to_msl(source);
+            ok &= expect(compiled.ok, "bounded pointer-cell loop emits Metal: " + compiled.error);
+        }
+    for (const auto& source : {
+            fixture(192, false, false), // [192,320) overlaps the pointer cell at 256.
+            fixture(0, false, false, 2, 15), // The equality exit cannot bound this recurrence.
+            fixture(0, false, false, 1, 16, true)}) { // A backedge bypasses the bound.
+        const auto imported = ir::import_ptx(source);
+        ok &= expect(!imported.ok, "overlapping or unproved loop writes cannot preserve pointer-cell evidence");
+    }
+    const std::string narrowed_source = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry narrowed_pointer_overwrite(.param .u64 .ptr output) {
+    .local .align 8 .b8 depot[512];
+    .reg .b64 %base, %cell, %data, %large, %offset, %write, %loaded, %output;
+    ld.param.u64 %output, [output];
+    mov.u64 %base, depot;
+    add.u64 %cell, %base, 256;
+    add.u64 %data, %base, 384;
+    st.local.u64 [%cell], %data;
+    mov.u64 %large, 65536;
+    cvt.u64.u16 %offset, %large;
+    add.u64 %write, %cell, %offset;
+    st.local.u32 [%write], 7;
+    ld.local.u64 %loaded, [%cell];
+    st.global.u64 [%output], %loaded;
+    ret;
+}
+)ptx";
+    const auto narrowed = ir::import_ptx(narrowed_source);
+    // The source interpretation is u16, so the actual offset is zero. A
+    // name-wide summary treating cvt as a copy would miss this partial write.
+    bool claims_pointer_load = false;
+    if (narrowed.ok) for (const auto& function : narrowed.module.functions)
+        for (const auto& block : function.blocks) for (const auto& operation : block.operations)
+            if (operation.opcode == ir::OpCode::kLoad)
+                for (const auto& type : operation.result_types) claims_pointer_load |= type.is_pointer();
+    ok &= expect(!narrowed.ok || !claims_pointer_load,
+                 "narrow conversion cannot supply a pointer type after an overlapping scalar write");
+    auto predicated_source = narrowed_source;
+    const std::string index_sequence = "mov.u64 %large, 65536;\n    cvt.u64.u16 %offset, %large;\n    add.u64 %write, %cell, %offset;";
+    predicated_source.replace(predicated_source.find(index_sequence), index_sequence.size(),
+        "mov.u64 %write, %cell;\n    mov.u32 %lane, %tid.x;\n    setp.ne.u32 %skip, %lane, 0;\n"
+        "    @%skip add.u64 %write, %base, 0;");
+    predicated_source.insert(predicated_source.find(".reg .b64"), ".reg .b32 %lane;\n    .reg .pred %skip;\n    ");
+    const auto predicated = ir::import_ptx(predicated_source);
+    claims_pointer_load = false;
+    if (predicated.ok) for (const auto& function : predicated.module.functions)
+        for (const auto& block : function.blocks) for (const auto& operation : block.operations)
+            if (operation.opcode == ir::OpCode::kLoad)
+                for (const auto& type : operation.result_types) claims_pointer_load |= type.is_pointer();
+    ok &= expect(!predicated.ok || !claims_pointer_load,
+                 "a skipped address update cannot hide an overlapping scalar write");
+    return ok;
+}
+
+bool test_named_tuple_register_contracts() {
+    using namespace cumetal;
+    const std::string source = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry named_tuple(.param .u64 .ptr output) {
+    .reg .b64 %address;
+    .reg .b16 %half<4>;
+    .reg .b32 %packed;
+    ld.param.u64 %address, [output];
+    mov.u16 %half0, 4660;
+    mov.u16 %half1, 43981;
+    mov.b32 %packed, {%half0, %half1};
+    mov.b32 {%half2, %half3}, %packed;
+    st.global.u16 [%address], %half2;
+    st.global.u16 [%address+2], %half3;
+    ret;
+}
+)ptx";
+    const auto compiled = metal::compile_ptx_to_msl(source);
+    bool ok = expect(compiled.ok, "tuple lane/container widths come from declarations, not register names: " + compiled.error);
+    auto invalid = source;
+    invalid.replace(invalid.find(".reg .b16 %half<4>"), std::string(".reg .b16 %half<4>").size(), ".reg .b32 %half<4>");
+    for (std::size_t at = 0; (at = invalid.find("%half", at)) != std::string::npos; at += 3)
+        invalid.replace(at, 5, "%rs");
+    ok &= expect(!metal::compile_ptx_to_msl(invalid).ok,
+                 "conventional 16-bit register names do not override 32-bit declarations in tuple operands");
+    return ok;
+}
+
+bool test_call_argument_slot_evidence() {
+    using namespace cumetal;
+    bool ok = true;
+    const std::string helpers = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.func (.param .b64 retval) scalar_identity(.param .u64 value) {
+    .reg .b64 %value;
+    ld.param.u64 %value, [value];
+    st.param.b64 [retval], %value;
+    ret;
+}
+.func (.param .b64 retval) pointer_read(.param .u64 .ptr input) {
+    .reg .b64 %address, %value;
+    ld.param.u64 %address, [input];
+    ld.u64 %value, [%address];
+    st.param.b64 [retval], %value;
+    ret;
+}
+)ptx";
+    const auto mixed_source = helpers + R"ptx(
+.visible .entry mixed_argument_slot(
+    .param .u64 scalar, .param .u64 .ptr input, .param .u64 .ptr output
+) {
+    .reg .b64 %scalar, %input, %output, %first, %second;
+    .param .b64 argument;
+    .param .b64 returned;
+    ld.param.u64 %scalar, [scalar];
+    ld.param.u64 %input, [input];
+    ld.param.u64 %output, [output];
+    st.param.b64 [argument], %scalar;
+    call.uni (returned), scalar_identity, (argument);
+    ld.param.b64 %first, [returned];
+    st.param.b64 [argument], %input;
+    call.uni (returned), pointer_read, (argument);
+    ld.param.b64 %second, [returned];
+    st.global.u64 [%output], %first;
+    st.global.u64 [%output+8], %second;
+    ret;
+}
+)ptx";
+    const auto mixed = ir::import_ptx(mixed_source);
+    ok &= expect(mixed.ok, "reused argument slot keeps distinct scalar/pointer call roles: " + mixed.error);
+    bool scalar_preserved = false;
+    if (mixed.ok) for (const auto& function : mixed.module.functions)
+        if (function.name == "mixed_argument_slot") for (const auto& argument : function.arguments)
+            if (argument.name == "scalar") scalar_preserved = argument.type == ir::Type::integer(64);
+    ok &= expect(scalar_preserved, "a later pointer call does not turn the earlier scalar parameter into a pointer");
+    const auto mixed_msl = metal::compile_ptx_to_msl(mixed_source);
+    ok &= expect(mixed_msl.ok, "sequential scalar/pointer argument-slot reuse emits Metal: " + mixed_msl.error);
+
+    auto overwritten_source = mixed_source;
+    const std::string first_call = "call.uni (returned), scalar_identity, (argument);\n    ld.param.b64 %first, [returned];";
+    overwritten_source.replace(overwritten_source.find(first_call), first_call.size(), "mov.u64 %first, %scalar;");
+    const auto overwritten = ir::import_ptx(overwritten_source);
+    ok &= expect(overwritten.ok, "overwritten scalar argument store does not borrow the sole pointer call's role: " + overwritten.error);
+    scalar_preserved = false;
+    if (overwritten.ok) for (const auto& function : overwritten.module.functions)
+        if (function.name == "mixed_argument_slot") for (const auto& argument : function.arguments)
+            if (argument.name == "scalar") scalar_preserved = argument.type == ir::Type::integer(64);
+    ok &= expect(scalar_preserved, "dead earlier argument-slot store cannot reclassify its scalar source");
+    const auto overwritten_msl = metal::compile_ptx_to_msl(overwritten_source);
+    ok &= expect(overwritten_msl.ok, "overwritten scalar slot followed by a pointer call emits Metal: " + overwritten_msl.error);
+
+    const auto stable_source = helpers + R"ptx(
+.func (.param .b64 retval) forward_slot(.param .u64 input) {
+    .reg .b64 %input, %first, %second;
+    .param .b64 argument;
+    .param .b64 returned;
+    ld.param.u64 %input, [input];
+    st.param.b64 [argument], %input;
+    call.uni (returned), pointer_read, (argument);
+    ld.param.b64 %first, [returned];
+    st.param.b64 [argument], %input;
+    call.uni (returned), pointer_read, (argument);
+    ld.param.b64 %second, [returned];
+    st.param.b64 [retval], %second;
+    ret;
+}
+.visible .entry stable_argument_slot(.param .u64 .ptr input, .param .u64 .ptr output) {
+    .reg .b64 %input, %output, %value;
+    .param .b64 argument;
+    .param .b64 returned;
+    ld.param.u64 %input, [input];
+    ld.param.u64 %output, [output];
+    st.param.b64 [argument], %input;
+    call.uni (returned), forward_slot, (argument);
+    ld.param.b64 %value, [returned];
+    st.global.u64 [%output], %value;
+    ret;
+}
+)ptx";
+    const auto stable = ir::import_ptx(stable_source);
+    ok &= expect(stable.ok, "matching pointer call signatures retain forwarding evidence: " + stable.error);
+    bool pointer_inferred = false;
+    if (stable.ok) for (const auto& function : stable.module.functions)
+        if (function.name == "forward_slot") for (const auto& argument : function.arguments)
+            if (argument.name == "input") pointer_inferred = argument.type.is_pointer();
+    ok &= expect(pointer_inferred, "consistent pointer-only call slots recover an unannotated forwarded pointer");
+    const auto stable_msl = metal::compile_ptx_to_msl(stable_source);
+    ok &= expect(stable_msl.ok, "consistent reused pointer slot emits Metal: " + stable_msl.error);
+    return ok;
+}
+
+bool test_pointer_memory_call_effects() {
+    using namespace cumetal;
+    bool ok = true;
+    const std::string helpers = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.func own_stack_write(.param .u64 .ptr input) {
+    .local .align 1 .b8 own[1];
+    .reg .b64 %address;
+    .reg .b32 %value;
+    mov.u64 %address, own;
+    add.u64 %address, %address, 0;
+    st.local.u8 [%address], 7;
+    ld.volatile.local.u8 %value, [%address];
+    ret;
+}
+.func read_only(.param .u64 .ptr input) {
+    .reg .b64 %address;
+    .reg .b32 %value;
+    ld.param.u64 %address, [input];
+    ld.u32 %value, [%address];
+    ret;
+}
+.func caller_write(.param .u64 .ptr input) {
+    .reg .b64 %address;
+    ld.param.u64 %address, [input];
+    st.u32 [%address], 7;
+    ret;
+}
+.func nested_write(.param .u64 .ptr input) {
+    .reg .b64 %address;
+    .param .b64 forwarded;
+    ld.param.u64 %address, [input];
+    st.param.b64 [forwarded], %address;
+    call.uni caller_write, (forwarded);
+    ret;
+}
+.visible .entry pointer_cell_call(.param .u64 .ptr output, .param .u32 choice) {
+    .local .align 8 .b8 slot[8];
+    .local .align 4 .b8 data[4];
+    .reg .b64 %slot, %data, %loaded, %output, %argument;
+    .reg .b32 %word, %choice;
+    .reg .pred %select;
+    .param .b64 argument;
+    ld.param.u64 %output, [output];
+    ld.param.u32 %choice, [choice];
+    mov.u64 %slot, slot;
+    mov.u64 %data, data;
+    st.local.u32 [%data], 42;
+    st.local.u64 [%slot], %data;
+)ptx";
+    for (const std::string callee : {"own_stack_write", "read_only", "caller_write", "nested_write"}) {
+        const bool preserves = callee == "own_stack_write" || callee == "read_only";
+        // The may-write cases select an alias which can reach the pointer
+        // cell. Existing name-wide escape discovery cannot identify one
+        // depot for that alias; the call-effect guard must still reject it.
+        const std::string argument = preserves ? "st.param.b64 [argument], %data;\n"
+            : "setp.eq.u32 %select, %choice, 0;\nselp.u64 %argument, %slot, %data, %select;\nst.param.b64 [argument], %argument;\n";
+        const std::string source = helpers + argument + "call.uni " + callee + R"ptx(, (argument);
+    ld.local.u64 %loaded, [%slot];
+    ld.u32 %word, [%loaded];
+    st.global.u32 [%output], %word;
+    ret;
+}
+)ptx";
+        const auto imported = ir::import_ptx(source);
+        if (preserves) {
+            ok &= expect(imported.ok, "proven caller-memory-preserving helper retains pointer cell proof: " + callee + ": " + imported.error);
+            if (imported.ok) ok &= expect(ir::verify(imported.module).ok, "preserved pointer-cell call IR verifies");
+            const auto compiled = metal::compile_ptx_to_msl(source);
+            ok &= expect(compiled.ok, "safe helper call across a proven pointer cell emits Metal: " + callee + ": " + compiled.error);
+        } else {
+            ok &= expect(!imported.ok && imported.error.find("intervening call may modify the cell") != std::string::npos,
+                         "direct and nested writes through caller pointers invalidate the proof: " + callee + ": " + imported.error);
+        }
+    }
+    return ok;
+}
+
+bool test_pointer_demand_alias_definitions() {
+    using namespace cumetal;
+    bool ok = true;
+    for (const bool overwrite : {false, true}) {
+        const std::string source = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.func (.param .b64 retval) pointer_alias(.param .u64 .ptr input) {
+    .reg .b64 %base, %loaded, %alias, %widened;
+    .reg .b32 %word;
+    ld.param.u64 %base, [input];
+    ld.global.u64 %loaded, [%base];
+    mov.u64 %alias, %loaded;
+)ptx" + std::string(overwrite ? "mov.u64 %alias, %base;\n" : "") + R"ptx(
+    ld.global.u32 %word, [%alias];
+    cvt.u64.u32 %widened, %word;
+    st.param.b64 [retval], )ptx" + (overwrite ? "%loaded" : "%widened") + R"ptx(;
+    ret;
+}
+.visible .entry alias_probe(.param .u64 .ptr input, .param .u64 .ptr output) {
+    .reg .b64 %base, %out, %answer;
+    .param .b64 argument;
+    .param .b64 returned;
+    ld.param.u64 %base, [input];
+    ld.param.u64 %out, [output];
+    st.param.b64 [argument], %base;
+    call.uni (returned), pointer_alias, (argument);
+    ld.param.b64 %answer, [returned];
+    st.global.u64 [%out], %answer;
+    ret;
+}
+)ptx";
+        const auto imported = ir::import_ptx(source);
+        ok &= expect(imported.ok, "pointer demand follows only a unique alias definition: " + imported.error);
+        if (!imported.ok) continue;
+        bool checked_load = false;
+        for (const auto& function : imported.module.functions)
+            if (function.name == "pointer_alias")
+                for (const auto& block : function.blocks)
+                    for (const auto& operation : block.operations)
+                        if (operation.opcode == ir::OpCode::kLoad && operation.result_types.size() == 1 &&
+                            (operation.result_types.front().is_pointer() || operation.result_types.front() == ir::Type::integer(64))) {
+                            checked_load = true;
+                            ok &= expect(overwrite ? operation.result_types.front() == ir::Type::integer(64)
+                                                   : operation.result_types.front().is_pointer(),
+                                         overwrite ? "overwritten alias does not contaminate the earlier scalar field load"
+                                                   : "unique alias retains proven pointer field demand");
+                        }
+        ok &= expect(checked_load && ir::verify(imported.module).ok, "alias-demand fixture checks the field load in verified IR");
+        const auto compiled = metal::compile_ptx_to_msl(source);
+        ok &= expect(compiled.ok, "unique and overwritten pointer aliases emit Metal: " + compiled.error);
+    }
+    return ok;
+}
+
+bool test_pointer_load_address_constraints() {
+    using namespace cumetal;
+    bool ok = true;
+    const std::string source = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.func (.param .b32 retval) local_pointer_field() {
+    .local .align 8 .b8 depot[16];
+    .reg .b64 %addr<4>;
+    .reg .b32 %word;
+    mov.u64 %addr0, depot;
+    add.u64 %addr1, %addr0, 8;
+    st.local.u64 [%addr0], %addr1;
+    st.local.u32 [%addr1], 42;
+    ld.local.u64 %addr2, [%addr0];
+    ld.u32 %word, [%addr2];
+    st.param.b32 [retval], %word;
+    ret;
+}
+.visible .entry pointer_field(.param .u64 .ptr .global output) {
+    .reg .b64 %out;
+    .reg .b32 %value;
+    .param .b32 returned;
+    ld.param.u64 %out, [output];
+    call.uni (returned), local_pointer_field, ();
+    ld.param.b32 %value, [returned];
+    st.global.u32 [%out], %value;
+    ret;
+}
+)ptx";
+    for (const bool conventional_names : {false, true}) {
+        std::string fixture = source;
+        if (conventional_names) {
+            for (std::size_t at = 0; (at = fixture.find("%addr", at)) != std::string::npos; at += 3)
+                fixture.replace(at, 5, "%rd");
+        }
+        const auto imported = ir::import_ptx(fixture);
+        ok &= expect(imported.ok, "generic dereference preserves a private pointer field with declared register widths: " + imported.error);
+        if (imported.ok) {
+            bool private_pointer_load = false;
+            for (const auto& function : imported.module.functions)
+                if (function.name == "local_pointer_field")
+                    for (const auto& block : function.blocks)
+                        for (const auto& operation : block.operations)
+                            if (operation.opcode == ir::OpCode::kLoad && operation.result_types.size() == 1 &&
+                                operation.result_types.front().is_pointer())
+                                private_pointer_load |= operation.result_types.front().address_space == ir::AddressSpace::kPrivate;
+            ok &= expect(private_pointer_load, "local field load has a proven private address space, independent of register spelling");
+            ok &= expect(ir::verify(imported.module).ok, "refined pointer field IR verifies");
+        }
+        const auto compiled = metal::compile_ptx_to_msl(fixture);
+        ok &= expect(compiled.ok, "refined private pointer field emits Metal: " + compiled.error);
+    }
+    // A generic use must not erase an independent explicit global constraint.
+    // The same field cannot simultaneously prove private and device storage.
+    auto conflicting = source;
+    const std::string generic_load = "ld.u32 %word, [%addr2];";
+    conflicting.replace(conflicting.find(generic_load), generic_load.size(),
+        generic_load + "\nld.global.u32 %word, [%addr2];");
+    const auto invalid = ir::import_ptx(conflicting);
+    ok &= expect(!invalid.ok && invalid.error.find("conflicting proven pointer load types") != std::string::npos,
+                 "explicit global address demand still rejects a proven private pointer: " + invalid.error);
+    return ok;
+}
+
+bool test_mutated_aggregate_pointer_copy() {
+    using namespace cumetal;
+    bool ok = true;
+    for (const std::string load : {"ld.local.u32", "ld.param.u32"}) {
+        const std::string source = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry aggregate_copy(.param .align 4 .b8 packed[8], .param .u64 .ptr output) {
+    .reg .b64 %address, %alias, %output;
+    .reg .b32 %value;
+    ld.param.u64 %output, [output];
+    mov.b64 %address, packed;
+    st.local.u32 [%address], 99;
+    mov.b64 %alias, %address;
+)ptx" + load + R"ptx( %value, [%alias];
+    st.global.u32 [%output], %value;
+    ret;
+}
+)ptx";
+        const auto imported = ir::import_ptx(source);
+        ok &= expect(imported.ok, "copy of a mutated aggregate retains its private allocation: " + load + ": " + imported.error);
+        if (!imported.ok) continue;
+        unsigned allocations = 0, initializations = 0;
+        ir::ValueId allocation = ir::kInvalidValue, alias = ir::kInvalidValue;
+        std::vector<ir::ValueId> aliases;
+        bool reads_copy = false;
+        for (const auto& function : imported.module.functions)
+            for (const auto& block : function.blocks)
+                for (const auto& operation : block.operations) {
+                    if (operation.opcode == ir::OpCode::kAlloca) {
+                        ++allocations;
+                        allocation = operation.results.front();
+                    }
+                    if (operation.opcode == ir::OpCode::kStore && operation.operands.size() == 2 &&
+                        operation.operands[1].type.kind == ir::TypeKind::kAggregate) ++initializations;
+                    if (operation.opcode == ir::OpCode::kConvert && operation.operands.size() == 1 &&
+                        operation.operands[0].kind == ir::OperandKind::kValue && operation.operands[0].value == allocation &&
+                        !operation.result_types.empty() && operation.result_types.front().is_pointer()) {
+                        alias = operation.results.front();
+                        aliases.push_back(alias);
+                    }
+                    if ((operation.opcode == ir::OpCode::kAddressSpaceCast || operation.opcode == ir::OpCode::kPointerOffset) &&
+                        !operation.operands.empty() && operation.operands[0].kind == ir::OperandKind::kValue &&
+                        std::find(aliases.begin(), aliases.end(), operation.operands[0].value) != aliases.end())
+                        aliases.insert(aliases.end(), operation.results.begin(), operation.results.end());
+                    if (operation.opcode == ir::OpCode::kLoad && !operation.operands.empty() &&
+                        operation.operands[0].kind == ir::OperandKind::kValue)
+                        reads_copy |= std::find(aliases.begin(), aliases.end(), operation.operands[0].value) != aliases.end();
+                }
+        ok &= expect(allocations == 1 && initializations == 1 && alias != ir::kInvalidValue && reads_copy,
+                     "aggregate address copy reads the existing mutation without allocating or initializing again: " + load);
+        ok &= expect(ir::verify(imported.module).ok, "mutated aggregate pointer copy IR verifies");
+        const auto compiled = metal::compile_ptx_to_msl(source);
+        ok &= expect(compiled.ok, "mutated aggregate pointer copy emits Metal: " + load + ": " + compiled.error);
+    }
+    return ok;
+}
+
+bool test_joined_aggregate_parameter_addresses() {
+    using namespace cumetal;
+    bool ok = true;
+    const std::string prefix = R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry joined_aggregate_parameters(
+    .param .align 4 .b8 parameter_a[8],
+    .param .align 4 .b8 parameter_b[8],
+    .param .u64 .ptr output,
+    .param .u32 choice
+) {
+    .reg .b64 %rd_output, %rd_selected, %rd_intermediate;
+    .reg .b32 %r_choice, %r_result;
+    .reg .pred %p_outer, %p_inner;
+    ld.param.u64 %rd_output, [output];
+    ld.param.u32 %r_choice, [choice];
+    setp.eq.u32 %p_outer, %r_choice, 0;
+    setp.eq.u32 %p_inner, %r_choice, 1;
+    @%p_outer bra EARLY_A;
+    bra DISPATCH_B;
+)ptx";
+    const std::string outer = R"ptx(
+OUTER_JOIN:
+    ld.param.u32 %r_result, [%rd_selected+4];
+    st.global.u32 [%rd_output], %r_result;
+    ret;
+EARLY_A:
+    mov.b64 %rd_selected, parameter_a;
+    bra OUTER_JOIN;
+)ptx";
+    const std::string inner = R"ptx(
+INNER_JOIN:
+    mov.b64 %rd_selected, %rd_intermediate;
+    bra OUTER_JOIN;
+B_LEFT:
+    mov.b64 %rd_intermediate, parameter_b;
+    bra INNER_JOIN;
+B_RIGHT:
+    mov.b64 %rd_intermediate, parameter_b;
+    bra INNER_JOIN;
+DISPATCH_B:
+    @%p_inner bra B_LEFT;
+    bra B_RIGHT;
+)ptx";
+    // In the first ordering the outer join sees A before its B input can
+    // resolve through the inner join. An early cached parameter-name alias
+    // would survive resolution and incorrectly extract A on every path.
+    for (const bool outer_first : {true, false}) for (const bool later_local_reuse : {false, true}) {
+        std::string source = prefix + (outer_first ? outer + inner : inner + outer) + "}\n";
+        if (later_local_reuse) {
+            source.insert(source.find(".reg .b64"), ".local .align 4 .b8 scratch[4];\n");
+            const std::string result_store = "st.global.u32 [%rd_output], %r_result;";
+            source.insert(source.find(result_store) + result_store.size(),
+                "\nmov.u64 %rd_selected, scratch;\nst.local.u32 [%rd_selected], 42;\n"
+                "ld.local.u32 %r_result, [%rd_selected];\nst.global.u32 [%rd_output+4], %r_result;\n");
+        }
+        const auto imported = ir::import_ptx(source);
+        const std::string context = std::string(outer_first ? "outer-first" : "inner-first") +
+            (later_local_reuse ? " with later local-pointer reuse" : "");
+        ok &= expect(imported.ok, context + " aggregate address joins import: " + imported.error);
+        if (!imported.ok) continue;
+        ok &= expect(ir::verify(imported.module).ok, context + " aggregate address joins verify");
+        bool reads_joined_value = false;
+        for (const auto& function : imported.module.functions) {
+            for (const auto& block : function.blocks) {
+                if (block.name != "OUTER_JOIN") continue;
+                ir::ValueId selected = ir::kInvalidValue;
+                for (const auto& argument : block.arguments) {
+                    if (argument.name == "%rd_selected" && argument.type.kind == ir::TypeKind::kAggregate)
+                        selected = argument.value;
+                }
+                for (const auto& operation : block.operations) {
+                    if (operation.opcode != ir::OpCode::kAggregateExtract || operation.operands.size() != 2) continue;
+                    reads_joined_value |= selected != ir::kInvalidValue &&
+                        operation.operands[0].kind == ir::OperandKind::kValue &&
+                        operation.operands[0].value == selected &&
+                        operation.operands[1].kind == ir::OperandKind::kImmediate &&
+                        operation.operands[1].text == "1";
+                }
+            }
+        }
+        ok &= expect(reads_joined_value, context + " indirect ld.param reads the joined aggregate, not a cached parameter");
+    }
+    const auto same_space = ir::import_ptx(R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry local_aggregate_address(
+    .param .align 4 .b8 packed[8], .param .u32 choice, .param .u64 .ptr output
+) {
+    .reg .b64 %rd_selected, %rd_output;
+    .reg .b32 %r_choice, %r_value;
+    .reg .pred %p;
+    ld.param.u64 %rd_output, [output];
+    ld.param.u32 %r_choice, [choice];
+    mov.b64 %rd_selected, packed;
+    setp.ne.u32 %p, %r_choice, 0;
+    @%p bra JOIN;
+    cvta.local.u64 %rd_selected, %rd_selected;
+JOIN:
+    ld.local.u32 %r_value, [%rd_selected];
+    st.global.u32 [%rd_output], %r_value;
+    ret;
+}
+)ptx");
+    ok &= expect(same_space.ok, "same-space cvta retains the aggregate allocation pointee at a join: " + same_space.error);
+    if (same_space.ok) ok &= expect(ir::verify(same_space.module).ok,
+        "same-space aggregate pointer join has exact incoming types");
+    return ok;
+}
+
 }  // namespace
 
 int main() {
     using namespace cumetal;
     bool ok = true;
+    ok &= test_instruction_result_contracts();
+    ok &= test_float_to_integer_contracts();
+    ok &= test_call_return_slot_definitions();
+    ok &= test_local_pointer_memory_proof_paths();
+    ok &= test_pointer_memory_bounded_loops();
+    ok &= test_named_tuple_register_contracts();
+    ok &= test_call_argument_slot_evidence();
+    ok &= test_pointer_memory_call_effects();
+    ok &= test_pointer_demand_alias_definitions();
+    ok &= test_pointer_load_address_constraints();
+    ok &= test_mutated_aggregate_pointer_copy();
+    ok &= test_joined_aggregate_parameter_addresses();
 
     const std::string reused_register = R"ptx(
 .version 7.0

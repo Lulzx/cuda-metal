@@ -9,7 +9,8 @@ namespace cumetal::ir::detail {
 // the function and an unchanged selected source; otherwise keep normal SSA
 // validation. No undefined bits are materialized or initialized.
 void remove_discarded_pack_halves(std::vector<RawBlock>& raw_blocks,
-                                  std::deque<Instruction>& storage) {
+                                  std::deque<Instruction>& storage,
+                                  InstructionOrigins* origins) {
     const auto scalar32 = [](const std::string& operand) {
         return !operand.empty() && first_register(operand) == operand &&
                ptx_register_container_bits(operand) == 32;
@@ -67,6 +68,7 @@ void remove_discarded_pack_halves(std::vector<RawBlock>& raw_blocks,
             replacement.opcode = "mov.b32";
             replacement.operands = {lanes[selected], halves[selected]};
             storage.push_back(std::move(replacement));
+            record_instruction_origin(origins, &storage.back(), extract);
             *end = &storage.back();
             block.instructions.erase(block.instructions.begin() + i);
             --i;

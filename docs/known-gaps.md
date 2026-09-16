@@ -80,15 +80,48 @@ including predicated writes and register reuse. Stores through a helper pointer
 that resolves to constant storage are rejected; interprocedural mutation-based
 reclassification of private globals is not yet implemented.
 
-SSA allocation retains the inferred type of each PTX instruction definition,
-so a register reused as a pointer does not retroactively retype earlier scalar
-offsets. Block arguments and instructions synthesized during CFG normalization
-retain the existing register-wide type seed. General scalar/pointer register
-reuse across control-flow joins remains unsupported.
-Literal-zero integer definitions passed to pointer block arguments are
-materialized as typed nulls at the receiving edge. Nonzero integer inputs
-to pointer block arguments are rejected; this does not provide general
-integer-to-pointer conversion or repair unrelated scalar-offset joins.
+PTX result types are resolved over the normalized SSA graph before materialization.
+Conversions decode their destination independently of the source, wide arithmetic
+uses its widened result, and predicate and tuple results retain per-lane contracts.
+Copies, pointer arithmetic, branches and loops consume the actual reaching values;
+a later assignment to the same register cannot seed an earlier definition or join.
+Normalization records instruction origins for applicable memory proofs, while
+clones keep distinct result identities. Imported result types are checked against
+emission, and the IR verifier checks incoming edge types and dominance.
+
+Proven scalar zero definitions and copies may become typed nulls on pointer edges.
+A packed tuple is not proved zero from its first lane. Concrete pointer inputs to
+a generic pointer join receive explicit conversion values. Nonzero integer/pointer
+joins, conflicting address spaces, undefined edges and unresolved cycles remain
+errors. Memory pointer recovery separates generic pointer demand from concrete
+address-space evidence. Local-cell candidates must pass a CFG reaching-store
+check using final SSA operands; a store on another incoming path cannot supply
+the load's type. Finite masked indices and small literal-initialized increment
+loops with proven exit guards are supported. Bypassed bounds, unmodeled
+conversions and incomplete discovery summaries supply no finite proof. Unresolved dynamic
+addresses, partial writes, conflicting spaces and missing initialization remain
+conservative proof limits. A call may preserve the proof when its imported body
+is read-only or writes solely through addresses derived from its own private
+allocations. Unknown, nested and external call effects remain barriers.
+Backward pointer-demand discovery crosses only unique, unpredicated 64-bit
+scalar aliases; reused aliases cannot reclassify an earlier scalar load.
+Additional mixed-vector provenance is separate work. Call-return slots
+also have per-definition SSA values: a reused slot name can hold different return
+types on successive calls. Undefined or incompatible return values at an actual
+join remain errors.
+Argument-slot pointer recovery requires all associated signatures and stores to
+agree; ambiguous reuse supplies no name-wide pointer evidence. Aggregate address
+copies follow the reaching SSA value, preserving private storage and mutations.
+
+The issue #76 regressions cover reordered/renamed diamonds, zero-seeded and bounded
+loops, guarded clones, conversions, wide products, tuples and rejected joins.
+The legacy PTX backend still cannot emit MSL for the joined ReLU fixtures; those
+legacy numerical cells are reported as untested rather than successful. Passing
+these focused tests does not establish full downstream compilation or GPU success.
+Signed float-to-integer conversion retains destination signedness and integer
+rounding mode in Metal emission. The new numerical conversion checks cover
+finite, in-range values; they do not establish exceptional-value, saturation or
+all wider-container semantics.
 An immediate that the typed importer has already assigned a concrete pointer
 type is emitted with its exact 64-bit address and Metal address-space qualifier.
 This covers nonzero dangling pointers selected inside one instruction; it does

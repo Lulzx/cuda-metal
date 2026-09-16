@@ -3,9 +3,27 @@
 #include "cumetal/ir/ir.h"
 #include "ptx_instruction.h"
 #include <deque>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace cumetal::ir::detail {
+
+// Normalized instructions retain their original source identity, including
+// across repeated copies. Origin alone does not preserve a result type: a
+// rewrite may change the opcode, operands, or result layout.
+using InstructionOrigins = std::unordered_map<const Instruction*, const Instruction*>;
+
+inline void record_instruction_origin(InstructionOrigins* origins,
+                                      const Instruction* instruction,
+                                      const Instruction* source) {
+    if (origins == nullptr) return;
+    for (;;) {
+        const auto previous = origins->find(source);
+        if (previous == origins->end()) break;
+        source = previous->second;
+    }
+    origins->emplace(instruction, source);
+}
 
 struct RawBlock {
     BlockId id = kInvalidBlock;
@@ -23,6 +41,7 @@ void remove_unreachable_blocks(std::vector<RawBlock>& blocks);
 // importer finishes materializing the function; deque preserves their addresses.
 void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
                             std::deque<Instruction>& storage,
-                            const cumetal::ptx::EntryFunction* function = nullptr);
+                            const cumetal::ptx::EntryFunction* function = nullptr,
+                            InstructionOrigins* origins = nullptr);
 
 }  // namespace cumetal::ir::detail

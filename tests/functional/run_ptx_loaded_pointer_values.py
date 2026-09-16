@@ -13,7 +13,7 @@ if '--gpu-child' not in sys.argv:
         raise SystemExit(result.returncode)
     launches = [line for line in result.stderr.splitlines()
                 if 'CUMETAL_PROVENANCE event=kernel_launch' in line]
-    assert len(launches) == 5, launches
+    assert len(launches) == 9, launches
     assert all('device=apple_gpu' in line and 'launch_success=true' in line and
                'provenance=generic_ptx_lowering' in line for line in launches), launches
     raise SystemExit(0)
@@ -50,6 +50,22 @@ run_integer_case(build, vector_load, values, [23] * len(values),
 run_integer_case(build, source, values, [value for _ in values for value in (208, 212)],
                  'mixed stack depot pointer suballocation with bounded loop',
                  entry='suballocation_probe', output_words=2)
+
+# A bounded numeric loop writes below or above the pointer cell in the same
+# allocation. The pointer cell and its separately stored input must survive.
+for scratch_offset in (0, 320):
+    for inverted in (False, True):
+        loop_source = source.replace('add.u64 %scratch, %base, 320;',
+                                     f'add.u64 %scratch, %base, {scratch_offset};')
+        if inverted:
+            loop_source = loop_source.replace(
+                'setp.eq.u64 %done, %index, 16;\n    @%done bra READ_CELL;\n    bra WRITE_LOOP;',
+                'setp.ne.u64 %done, %index, 16;\n    @%done bra WRITE_LOOP;\n    bra READ_CELL;')
+        run_integer_case(build, loop_source, values, [value + 15 for value in values],
+                         f'bounded numeric writes preserve pointer cell: offset={scratch_offset}, inverted={inverted}',
+                         entry='bounded_numeric_write_probe', output_words=1,
+                         abi_lines=['CUMETAL_ABI_V2', 'kernel bounded_numeric_write_probe', 'shared 0',
+                                    'arg buffer 8', 'arg buffer 8', 'arg bytes 4'])
 
 for label, invalid in [
     ('mixed private and device pointers', source.replace(

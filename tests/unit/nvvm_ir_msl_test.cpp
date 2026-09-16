@@ -1901,6 +1901,11 @@ int main() {
                      mixed_device_threadgroup_phi.source.find(
                          "reinterpret_cast<threadgroup cm_alias_uchar*>(v7)") != std::string::npos,
                  "mixed CUDA generic-pointer PHIs dispatch concrete device and threadgroup helper specializations");
+    if (mixed_device_threadgroup_phi.ok) {
+        ok &= expect(ir::verify(mixed_device_threadgroup_phi.gpu_ir).ok &&
+                         ir::verify(mixed_device_threadgroup_phi.metal_ir).ok,
+                     "generic-pointer edges verify before specialization and with explicit mixed tags afterward");
+    }
 
     const metal::NvvmToMslResult malformed_phi =
         metal::compile_nvvm_to_msl(kNvvmMalformedPhi, "malformed-phi.ll",
@@ -2258,6 +2263,45 @@ int main() {
         std::cerr << signed_narrow_to_float.error << "\n";
     }
 
+    for (const unsigned width : {8u, 16u, 32u, 64u}) {
+        for (const bool signed_destination : {true, false}) {
+            const std::string opcode = signed_destination ? "fptosi" : "fptoui";
+            const std::string integer = "i" + std::to_string(width);
+            const std::string source =
+                "target datalayout = \"e-p:64:64-i64:64-n16:32:64\"\n"
+                "target triple = \"nvptx64-nvidia-cuda\"\n"
+                "define ptx_kernel void @float_to_integer(ptr %out, float %input) {\nentry:\n"
+                "  %converted = " + opcode + " float %input to " + integer + "\n"
+                "  store " + integer + " %converted, ptr %out\n  ret void\n}\n";
+            const auto conversion = metal::compile_nvvm_to_msl(source, "float-to-integer.ll", "float_to_integer");
+            const std::string description = opcode + " " + integer;
+            ok &= expect(conversion.ok, description + " imports: " + conversion.error);
+            if (!conversion.ok) continue;
+            bool checked = false;
+            for (const auto& function : conversion.gpu_ir.functions)
+                for (const auto& block : function.blocks)
+                    for (const auto& operation : block.operations) {
+                        if (operation.opcode != ir::OpCode::kConvert || operation.operands.size() != 1 ||
+                            operation.operands.front().type != ir::Type::floating(32) ||
+                            operation.result_types.size() != 1 ||
+                            operation.result_types.front() != ir::Type::integer(width)) continue;
+                        const auto mode = operation.attributes.find("rounding_mode");
+                        const auto sign = operation.attributes.find("signed_output");
+                        checked = mode != operation.attributes.end() && mode->second == "1u" &&
+                            (signed_destination ? sign != operation.attributes.end() && sign->second == "true"
+                                                : sign == operation.attributes.end());
+                    }
+            ok &= expect(checked, description + " preserves truncation and destination signedness");
+            const std::string signed_type = width == 8 ? "char" : width == 16 ? "short" : width == 32 ? "int" : "long";
+            const std::string unsigned_type = width == 8 ? "uchar" : width == 16 ? "ushort" : width == 32 ? "uint" : "ulong";
+            const std::string expected = signed_destination
+                ? "as_type<" + unsigned_type + ">(" + signed_type + "(trunc("
+                : unsigned_type + "(trunc(";
+            ok &= expect(conversion.source.find(expected) != std::string::npos,
+                         description + " emits the numeric conversion before storing signless bits");
+        }
+    }
+
     const metal::NvvmToMslResult natural_loop = metal::compile_nvvm_to_msl(
         kNvvmNaturalLoop, "natural-loop.ll", "natural_loop");
     ok &= expect(natural_loop.ok &&
@@ -2277,6 +2321,32 @@ int main() {
                          "reinterpret_cast<thread cm_alias_uchar*>") != std::string::npos,
                  "opaque-pointer loop PHIs normalize inferred aggregate pointees to byte pointers");
     if (!opaque_pointer_loop.ok) std::cerr << opaque_pointer_loop.error << "\n";
+    if (opaque_pointer_loop.ok) {
+        bool explicit_edge_cast = false;
+        for (const auto& function : opaque_pointer_loop.gpu_ir.functions)
+            for (const auto& block : function.blocks)
+                for (const auto& operation : block.operations) {
+                    if (operation.opcode != ir::OpCode::kConvert ||
+                        !operation.attributes.contains("bitcast") ||
+                        operation.results.size() != 1 || operation.result_types.size() != 1 ||
+                        operation.operands.size() != 1) continue;
+                    const auto& source = operation.operands[0].type;
+                    const auto& target = operation.result_types[0];
+                    if (!source.is_pointer() || source.pointee() == nullptr ||
+                        source.pointee()->kind != ir::TypeKind::kAggregate ||
+                        target != ir::Type::pointer(ir::Type::integer(8), source.address_space)) continue;
+                    for (const auto& successor : block.operations.back().successors) {
+                        const auto* destination = function.find_block(successor.block);
+                        if (!destination) continue;
+                        for (std::size_t i = 0; i < successor.arguments.size() &&
+                                                i < destination->arguments.size(); ++i)
+                            explicit_edge_cast |= successor.arguments[i] == operation.results[0] &&
+                                                  destination->arguments[i].type == target;
+                    }
+                }
+        ok &= expect(explicit_edge_cast && ir::verify(opaque_pointer_loop.gpu_ir).ok,
+                     "opaque pointer PHI receives an explicit same-space aggregate-to-byte pointer value");
+    }
 
     const metal::NvvmToMslResult multi_target_exit_loop =
         metal::compile_nvvm_to_msl(kNvvmMultiTargetExitLoop,

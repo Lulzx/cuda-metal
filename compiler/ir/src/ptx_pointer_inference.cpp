@@ -2,26 +2,29 @@
 #include "ptx_instruction.h"
 #include "ptx_text.h"
 #include <algorithm>
+#include <cctype>
+#include <optional>
 
 namespace cumetal::ir::detail {
 
 namespace {
 
-bool is_scalar_64_bit_load(const Instruction& instruction) {
-    if (root_opcode(instruction.opcode) != "ld" ||
-        starts_with(instruction.opcode, "ld.param") ||
-        instruction.operands.size() != 2) {
-        return false;
-    }
+bool has_integer_64_bit_type(std::string_view opcode) {
     for (const std::string_view type : {".b64", ".u64", ".s64"}) {
-        std::size_t position = instruction.opcode.find(type);
+        std::size_t position = opcode.find(type);
         while (position != std::string::npos) {
             const std::size_t end = position + type.size();
-            if (end == instruction.opcode.size() || instruction.opcode[end] == '.') return true;
-            position = instruction.opcode.find(type, position + 1);
+            if (end == opcode.size() || opcode[end] == '.') return true;
+            position = opcode.find(type, position + 1);
         }
     }
     return false;
+}
+
+bool is_scalar_64_bit_load(const Instruction& instruction) {
+    return root_opcode(instruction.opcode) == "ld" &&
+        !starts_with(instruction.opcode, "ld.param") &&
+        instruction.operands.size() == 2 && has_integer_64_bit_type(instruction.opcode);
 }
 
 }  // namespace
@@ -33,14 +36,30 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
     PointerInference evidence;
     // Preserve established pointer evidence before backward recovery. Only
     // single-definition, unpredicated 64-bit registers participate in this proof.
-    std::unordered_set<std::string> declared64;
-    for (const auto& declaration : entry.register_declarations) {
-        if (declaration.type == "b64" || declaration.type == "u64" || declaration.type == "s64")
-            declared64.insert(declaration.name);
-    }
+    const auto is_declared64 = [&](const std::string& name) {
+        const auto is_integer64 = [](const std::string& type) {
+            return type == "b64" || type == "u64" || type == "s64";
+        };
+        for (const auto& declaration : entry.register_declarations)
+            if (declaration.name == name) return is_integer64(declaration.type);
+        for (const auto& range : entry.register_ranges) {
+            if (!starts_with(name, range.prefix)) continue;
+            const std::string suffix = name.substr(range.prefix.size());
+            if (suffix.empty() || !std::all_of(suffix.begin(), suffix.end(),
+                    [](unsigned char c) { return std::isdigit(c); })) continue;
+            try {
+                if (std::stoull(suffix) < range.count) return is_integer64(range.type);
+            } catch (...) {}
+        }
+        return false;
+    };
     std::unordered_map<std::string, std::size_t> definitions;
+    std::unordered_map<std::string, const Instruction*> defining_instructions;
     for (const auto& instruction : entry.instructions)
-        for (const auto& destination : destination_registers(instruction)) ++definitions[destination];
+        for (const auto& destination : destination_registers(instruction)) {
+            ++definitions[destination];
+            defining_instructions[destination] = &instruction;
+        }
     std::unordered_set<std::string> known_pointers;
     bool known_changed = true;
     for (int iteration = 0; iteration < 12 && known_changed; ++iteration) {
@@ -49,8 +68,7 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
             const auto destinations = destination_registers(instruction);
             if (destinations.size() != 1 || definitions[destinations.front()] != 1 ||
                 !instruction.predicate.empty() || instruction.operands.size() < 2 ||
-                (ptx_register_container_bits(destinations.front()) != 64 &&
-             !declared64.contains(destinations.front()))) continue;
+                !is_declared64(destinations.front())) continue;
             const auto root = root_opcode(instruction.opcode);
             const auto known = [&](std::size_t index) {
                 return instruction.operands.size() > index &&
@@ -93,29 +111,58 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
     // This is deliberately bounded to direct dataflow through the common
     // mov/ld.param, add, and selp forms; ambiguous integer-only values stay
     // integers instead of being guessed as pointers.
-    std::unordered_set<std::string> required_device_pointers;
-    // Reachable helpers are imported before their callers. Forwarding a
-    // scalar parameter slot to a proven pointer argument is pointer evidence
-    // even if this function never dereferences the address itself.
-    std::unordered_set<std::string> pointer_slots;
-    for (const Instruction& instruction : entry.instructions) {
-        const auto callee = direct_call_target(instruction);
-        if (!callee) continue;
-        const auto imported = std::find_if(module.functions.begin(), module.functions.end(),
-            [&](const Function& function) { return function.name == *callee; });
-        if (imported == module.functions.end()) continue;
-        const auto arguments = grouped_names(instruction.operands.back());
-        for (std::size_t i = 0; i < arguments.size() && i < imported->arguments.size(); ++i) {
-            if (imported->arguments[i].type.is_pointer()) pointer_slots.insert(arguments[i]);
+    std::unordered_map<std::string, AddressSpace> required_pointers;
+    const auto require_pointer = [&](const std::string& name, AddressSpace space) {
+        if (name.empty()) return false;
+        const auto [found, inserted] = required_pointers.emplace(name, space);
+        if (inserted) return true;
+        if (found->second == AddressSpace::kNone && space != AddressSpace::kNone) {
+            found->second = space;
+            return true;
         }
+        return false;
+    };
+    // Reachable helpers are imported before their callers. A parameter slot
+    // supplies pointer evidence only when every use of that slot name agrees
+    // on the pointer contract. PTX reuses lexical argument-slot names across
+    // unrelated calls; a later pointer call must not retag an earlier scalar.
+    std::unordered_map<std::string, std::optional<Type>> pointer_slots;
+    for (const Instruction& instruction : entry.instructions) {
+        if (root_opcode(instruction.opcode) != "call" || instruction.operands.empty()) continue;
+        const auto callee = direct_call_target(instruction);
+        const auto imported = std::find_if(module.functions.begin(), module.functions.end(),
+            [&](const Function& function) { return callee && function.name == *callee; });
+        const auto arguments = grouped_names(instruction.operands.back());
+        for (std::size_t i = 0; i < arguments.size(); ++i) {
+            std::optional<Type> contract;
+            if (imported != module.functions.end() && i < imported->arguments.size() &&
+                imported->arguments[i].type.is_pointer()) contract = imported->arguments[i].type;
+            const auto [slot, inserted] = pointer_slots.emplace(arguments[i], contract);
+            if (!inserted && slot->second != contract) slot->second.reset();
+        }
+    }
+    std::unordered_map<std::string, std::optional<std::string>> slot_sources;
+    for (const Instruction& instruction : entry.instructions) {
+        if (!starts_with(instruction.opcode, "st.param") || instruction.operands.size() < 2) continue;
+        const auto slot = parameter_name_from_operand(instruction.operands[0]);
+        if (!pointer_slots.contains(slot) || !pointer_slots.at(slot)) continue;
+        const auto source = first_register(instruction.operands[1]);
+        std::optional<std::string> evidence;
+        if ((instruction.opcode == "st.param.b64" || instruction.opcode == "st.param.u64") &&
+            instruction.predicate.empty() && trim(instruction.operands[0]) == "[" + slot + "]" &&
+            !source.empty() && trim(instruction.operands[1]) == source && definitions[source] == 1 &&
+            defining_instructions.at(source)->predicate.empty() && is_declared64(source)) evidence = source;
+        const auto [known, inserted] = slot_sources.emplace(slot, evidence);
+        if (!inserted && known->second != evidence) known->second.reset();
     }
     for (const Instruction& instruction : entry.instructions) {
         if ((instruction.opcode == "st.param.b64" || instruction.opcode == "st.param.u64") &&
             instruction.operands.size() == 2) {
             const auto slot = parameter_name_from_operand(instruction.operands[0]);
-            if (pointer_slots.contains(slot) && trim(instruction.operands[0]) == "[" + slot + "]") {
+            if (pointer_slots.contains(slot) && pointer_slots.at(slot) && slot_sources.contains(slot) && slot_sources.at(slot) &&
+                trim(instruction.operands[0]) == "[" + slot + "]") {
                 const auto source = first_register(instruction.operands[1]);
-                if (!source.empty()) required_device_pointers.insert(source);
+                require_pointer(source, AddressSpace::kNone);
             }
         }
     }
@@ -128,7 +175,7 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
         if (!is_kernel && instruction.opcode == "cvta.to.local.u64" &&
             instruction.operands.size() == 2) {
             const std::string source = first_register(instruction.operands[1]);
-            if (!source.empty()) required_device_pointers.insert(source);
+            require_pointer(source, AddressSpace::kNone);
         }
         if (root != "ld" && root != "st") continue;
         if (instruction.opcode.find(".param") != std::string::npos ||
@@ -141,7 +188,8 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
         if (instruction.operands.size() <= memory_index) continue;
         const std::string base =
             first_register(instruction.operands[memory_index]);
-        if (!base.empty()) required_device_pointers.insert(base);
+        require_pointer(base, instruction.opcode.find(".global") != std::string::npos
+            ? AddressSpace::kDevice : AddressSpace::kNone);
     }
     bool pointer_changed = true;
     for (int iteration = 0; iteration < 12 && pointer_changed; ++iteration) {
@@ -151,13 +199,28 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
                 destination_registers(instruction);
             if (std::none_of(destinations.begin(), destinations.end(),
                              [&](const std::string& destination) {
-                                 return required_device_pointers.contains(destination);
+                                 return required_pointers.contains(destination);
                              })) {
                 continue;
             }
+            // This pre-SSA recovery can attach a name-wide demand only when
+            // the name denotes one unconditional definition. In particular,
+            // a later pointer assignment must not retag an earlier scalar
+            // source copied into the same mutable PTX register.
+            if (destinations.size() != 1 || definitions[destinations.front()] != 1 ||
+                !instruction.predicate.empty() || !is_declared64(destinations.front()) ||
+                !has_integer_64_bit_type(instruction.opcode)) continue;
+            AddressSpace required_space = AddressSpace::kNone;
+            for (const auto& destination : destinations) {
+                const auto required = required_pointers.find(destination);
+                if (required != required_pointers.end() && required->second != AddressSpace::kNone)
+                    required_space = required->second;
+            }
             const std::string root = root_opcode(instruction.opcode);
             std::vector<std::size_t> pointer_sources;
-            if (root == "mov" || starts_with(instruction.opcode, "ld.param")) {
+            if ((root == "mov" && instruction.operands.size() == 2 &&
+                 instruction.operands[1].find('{') == std::string::npos) ||
+                starts_with(instruction.opcode, "ld.param")) {
                 pointer_sources = {1};
             } else if (root == "add") {
                 const bool right = instruction.operands.size() > 2 &&
@@ -168,24 +231,19 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
             } else if (root == "selp") {
                 pointer_sources = {1, 2};
             }
-            // A demanded device pointer may itself be stored in an ordinary
+            // A demanded pointer may itself be stored in an ordinary
             // 64-bit memory field. Preserve the loaded value's type, but only
             // when this instruction is its sole, unconditional definition.
             // The load address is storage for the pointer bits and does not
             // inherit the loaded pointer's device address space.
-            if (!is_kernel &&
-                destinations.size() == 1 &&
-                definitions[destinations.front()] == 1 &&
-                instruction.predicate.empty() &&
-                is_scalar_64_bit_load(instruction)) {
-                evidence.device_pointer_loads.insert(&instruction);
+            if (!is_kernel && is_scalar_64_bit_load(instruction)) {
+                evidence.pointer_loads[&instruction] = required_space;
             }
             for (const std::size_t source_index : pointer_sources) {
                 if (instruction.operands.size() <= source_index) continue;
                 const std::string source =
                     first_register(instruction.operands[source_index]);
-                if (!source.empty() &&
-                    required_device_pointers.insert(source).second) {
+                if (require_pointer(source, required_space)) {
                     pointer_changed = true;
                 }
                 const std::string parameter = parameter_name_from_operand(

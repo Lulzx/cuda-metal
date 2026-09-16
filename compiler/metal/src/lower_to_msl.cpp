@@ -3542,6 +3542,28 @@ struct AstLowerer {
                                    lower_result_type(operation)));
             }
             MslExpr input = expression_for(operation.operands.front());
+            if (operation.operands.front().type.kind == ir::TypeKind::kFloat &&
+                operation.result_types.front().kind == ir::TypeKind::kInteger) {
+                const std::string rounding = operation.attributes.contains("rounding_mode")
+                    ? operation.attributes.at("rounding_mode") : "1u";
+                const char* rounder = rounding == "0u" ? "rint" : rounding == "1u" ? "trunc"
+                    : rounding == "2u" ? "floor" : rounding == "3u" ? "ceil" : nullptr;
+                if (rounder == nullptr) {
+                    fail(&operation, "unknown float-to-integer conversion rounding mode");
+                    return std::nullopt;
+                }
+                input = MslExpression::call(rounder, {input}, input->type);
+                const bool signed_output = operation.attributes.contains("signed_output") &&
+                    operation.attributes.at("signed_output") == "true";
+                const MslType numeric_type = signed_output
+                    ? MslType::sint(operation.result_types.front().bit_width) : lower_result_type(operation);
+                const MslExpr converted = MslExpression::cast(numeric_type, input);
+                // Converting a negative float directly to uint loses the
+                // signed result. Perform the signed numeric conversion first,
+                // then retain its bits in the IR's unsigned storage type.
+                return declare_result(operation, signed_output
+                    ? MslExpression::bitcast(lower_result_type(operation), converted) : converted);
+            }
             if (operation.attributes.contains("signed_input") &&
                 operation.attributes.at("signed_input") == "true" &&
                 operation.operands.front().type.kind == ir::TypeKind::kInteger) {
