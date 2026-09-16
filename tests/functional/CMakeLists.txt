@@ -3,6 +3,18 @@ if(NOT APPLE)
     return()
 endif()
 
+find_program(CUMETAL_TRACE_PYTHON3_EXECUTABLE python3)
+if(CUMETAL_TRACE_PYTHON3_EXECUTABLE)
+    add_test(
+        NAME functional_compile_trace
+        COMMAND ${CUMETAL_TRACE_PYTHON3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_compile_trace_test.py
+                $<TARGET_FILE:cumetal_runtime>
+    )
+    set_tests_properties(functional_compile_trace PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 180 LABELS "gpu")
+endif()
+
 add_executable(cumetal_runtime_vector_add_test
     runtime_vector_add_test.cpp
 )

@@ -511,6 +511,16 @@ add_test(
 
 find_program(CUMETAL_PYTHON3_EXECUTABLE python3)
 if(CUMETAL_PYTHON3_EXECUTABLE)
+add_executable(cumetal_compile_trace_probe compile_trace_probe.cpp)
+target_link_libraries(cumetal_compile_trace_probe PRIVATE cumetal_common)
+target_compile_options(cumetal_compile_trace_probe PRIVATE -Wall -Wextra -Wpedantic)
+add_test(
+    NAME unit_compile_trace
+    COMMAND ${CUMETAL_PYTHON3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_compile_trace_test.py
+            $<TARGET_FILE:cumetal_compile_trace_probe>
+            $<TARGET_FILE:cumetalc>
+)
 add_test(
     NAME unit_llama_ngl_sweep_classifier
         COMMAND ${CUMETAL_PYTHON3_EXECUTABLE}

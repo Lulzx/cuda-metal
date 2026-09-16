@@ -2,6 +2,14 @@
 
 [Known-gaps index](../known-gaps.md) · [Compiler status](../status/compiler.md)
 
+## Compilation diagnostics
+
+[Stage tracing](../compiler-performance.md#compilation-stage-tracing) covers
+typed PTX translation and runtime Metal source/function/pipeline creation.
+NVVM/legacy translation, precompiled-library loads, cache hits, and lock waits
+remain untraced. Timings do not resolve compiler memory/scalability limits or
+prove downstream kernel correctness.
+
 ## Typed CuMetal IR migration
 
 With CUDA Clang 21-23, the reviewed production-metallib matrix is:
