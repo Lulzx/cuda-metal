@@ -54,6 +54,9 @@ SSA values, with checked result and edge types; supported register reuse does no
 inherit the type of a later assignment. PTX memory addresses use byte pointers
 in their actual storage address space; the final Metal dereference uses the
 resolved value type. Metal IR rejects unresolved nested pointer address spaces.
+Before pointer lowering, bounded SSA analysis can cancel a common address base
+from 64-bit arithmetic, including loop-carried cursors, and retain the resulting
+wrapping scalar count. It never materializes a Metal pointer as an integer.
 See [known gaps](docs/known-gaps.md) for memory-provenance and legacy-backend
 limits, and
 [compiler architecture](docs/compiler-architecture.md) for backend details.

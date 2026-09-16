@@ -63,10 +63,28 @@ the address operand during backward inference. The proof is bounded to twelve
 passes through single-definition, unpredicated 64-bit register paths rooted
 in known pointer parameters, address conversions, or local/shared/global symbols.
 Unknown or reused paths retain the existing operand-one recovery fallback; this
-is not a general register-provenance solver. Integer-minus-pointer forms remain
-rejected. Parser inference does not attribute combined addresses to a scalar
+is not a general register-provenance solver. Parser inference does not attribute combined addresses to a scalar
 parameter when another source has known symbol-address provenance; ordinary
 untracked thread-index arithmetic retains its existing classification.
+
+A separate SSA pass on complete PTX functions recovers scalar counts when
+64-bit `mov`, `add`, `sub`, `neg`, and `selp` paths provably cancel the same address
+base. Branch and loop joins must agree on that base and its coefficient; shadow
+integer offsets preserve wrapping arithmetic and register reuse. This includes
+`base + (1 - cursor - length) + 30` when `cursor = base + written`, which becomes
+`31 - length - written`. The pass retains actual pointer accesses and rejects
+observable negative-base intermediates, unrelated bases, narrowing, and use of
+the recovered scalar as a memory address without a proven pointer base.
+After a successful rewrite, memory and call consumers must still receive a
+proven pointer where their contract requires one; spilling a scalar count does
+not grant it pointer provenance. Address conversions establish opaque roots:
+equality of Metal address spaces
+does not prove equality of PTX address bits across a conversion. Inline PTX with
+external SSA bindings is outside this pass. Proof budgets bound analyzed values,
+offset values, scalar-use traversal, liveness work, and generated names;
+exhaustion leaves the original
+unsupported expression rejected. General integer-minus-pointer expressions and
+numeric pointer representations remain unsupported.
 
 A translation-unit-private PTX `.global` already proven immutable and promoted
 to Metal constant storage retains that physical storage through supported global

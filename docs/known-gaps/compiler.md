@@ -246,8 +246,13 @@ distinct installations and runtime-load results.
 PTX helpers can accept generic pointers proven by `cvta.to.local.u64`; call-site
 specialization must establish a compatible concrete address space before Metal
 legalization completes. Pointer subtraction supports a pointer minus a 64-bit
-integer byte offset, including local-buffer loops. Pointer differences,
-integer-minus-pointer, and narrow pointer arithmetic remain unsupported.
+integer byte offset, including local-buffer loops. A bounded SSA pass also
+recovers scalar differences and cancelling integer-minus-pointer intermediates
+when their complete 64-bit affine paths prove a common address base, including
+branches and loop-carried cursors. It tracks integer offsets rather than numeric
+Metal pointers; see [the proof limits](../known-gaps.md). Unrelated pointer
+differences, observable negative-base intermediates, scalar-to-address escapes,
+and narrow pointer arithmetic remain unsupported.
 Unused pointer truncations are removed during legalization; observed truncations
 remain rejected because Metal cannot faithfully represent their numeric result.
 

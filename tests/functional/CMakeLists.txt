@@ -2862,6 +2862,10 @@ add_test(NAME functional_ptx_msl_abi
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx)
 
 if(APPLE)
+    add_test(NAME functional_ptx_address_cancellation
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_address_cancellation.py ${CMAKE_BINARY_DIR})
+    # Eight children each own a 90-second deadline and process-group cleanup.
+    set_tests_properties(functional_ptx_address_cancellation PROPERTIES TIMEOUT 800)
     add_test(NAME functional_ptx_pointer_record_fields
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_pointer_record_fields.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_pointer_record_fields PROPERTIES TIMEOUT 180)

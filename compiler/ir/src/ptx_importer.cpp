@@ -13,6 +13,7 @@
 #include "ptx_parameters.h"
 #include "ptx_pointer_inference.h"
 #include "ptx_tuple_normalization.h"
+#include "ptx_address_cancellation.h"
 
 #include <algorithm>
 #include <cctype>
@@ -906,6 +907,8 @@ struct Importer {
     std::unordered_map<const Instruction*, std::vector<ValueId>> instruction_results;
     std::unordered_map<const Instruction*, std::vector<Type>> definition_types;
     std::unordered_map<ValueId, Type> value_types;
+    bool normalized_address_cancellation = false;
+    bool address_cancellation_applied = false;
     std::unordered_set<ValueId> integer_zero_values;
     std::vector<RawBlock> raw_blocks;
     std::deque<Instruction> normalized_instructions;
@@ -943,6 +946,12 @@ struct Importer {
         }
         result.error = std::move(message);
         return false;
+    }
+
+    bool proven_pointer_or_null(const Operand& operand) const {
+        return operand.type.is_pointer() ||
+            (operand.kind == OperandKind::kValue && integer_zero_values.contains(operand.value)) ||
+            (operand.kind == OperandKind::kImmediate && (operand.text == "0" || operand.text == "null"));
     }
 
     std::optional<Operand> materialize_aggregate(
@@ -1013,6 +1022,11 @@ struct Importer {
                 return std::nullopt;
             }
             Operand value = field->second;
+            if (address_cancellation_applied && element_type.is_pointer() &&
+                !proven_pointer_or_null(value)) {
+                fail(instruction, "aggregate pointer field has an unproven scalar address after cancellation");
+                return std::nullopt;
+            }
             if (!(value.type == element_type)) {
                 Operation conversion;
                 conversion.opcode = OpCode::kConvert;
@@ -1557,8 +1571,40 @@ struct Importer {
         for (const auto& [name, depot] : local_depots) pointer_symbols.insert(name);
         for (const auto& [name, symbol] : module_initialized_symbols) pointer_symbols.insert(name);
         for (const auto& symbol : module_global_symbols) pointer_symbols.insert(symbol.name);
-        const auto pointer_evidence = detail::infer_entry_pointer_types(
-            *entry, result.module, is_kernel, pointer_symbols, promoted_global_symbols, parameter_types);
+        // Rebuilt SSA must recover provenance from the rewritten instructions,
+        // not from address-valued assignments that cancellation removed. Keep
+        // the original path for functions that did not change.
+        std::vector<const Instruction*> proof_instructions;
+        std::optional<cumetal::ptx::EntryFunction> proof_entry;
+        if (address_cancellation_applied) {
+            proof_entry = *entry;
+            proof_entry->instructions.clear();
+            for (const auto& block : raw_blocks)
+                for (const auto* instruction : block.instructions) {
+                    proof_instructions.push_back(instruction);
+                    proof_entry->instructions.push_back(*instruction);
+                }
+        } else {
+            for (const auto& instruction : entry->instructions)
+                proof_instructions.push_back(&instruction);
+        }
+        const auto proof_key = [&](const Instruction* instruction) {
+            const auto found = instruction_origins.find(instruction);
+            return found != instruction_origins.end() &&
+                found->second->opcode == instruction->opcode &&
+                found->second->operands == instruction->operands ? found->second : instruction;
+        };
+        auto pointer_evidence = detail::infer_entry_pointer_types(
+            proof_entry ? *proof_entry : *entry, result.module, is_kernel,
+            pointer_symbols, promoted_global_symbols, parameter_types);
+        if (proof_entry) {
+            decltype(pointer_evidence.pointer_loads) remapped;
+            for (const auto& [instruction, space] : pointer_evidence.pointer_loads) {
+                const auto index = static_cast<std::size_t>(instruction - proof_entry->instructions.data());
+                remapped.emplace(proof_key(proof_instructions.at(index)), space);
+            }
+            pointer_evidence.pointer_loads = std::move(remapped);
+        }
 
         // PTX represents pointers as ordinary 64-bit values. Recover pointer
         // values loaded from local-memory tables without treating an entire
@@ -1569,7 +1615,8 @@ struct Importer {
         constexpr std::size_t kMaxFiniteValues = 16;
         std::unordered_map<std::string, std::vector<const Instruction*>>
             register_definitions;
-        for (const Instruction& instruction : entry->instructions) {
+        for (const Instruction* proof_instruction : proof_instructions) {
+            const Instruction& instruction = *proof_instruction;
             for (const std::string& destination : destination_registers(instruction)) {
                 register_definitions[destination].push_back(&instruction);
             }
@@ -1668,7 +1715,8 @@ struct Importer {
         bool constants_changed = true;
         for (int iteration = 0; iteration < 16 && constants_changed; ++iteration) {
             constants_changed = false;
-            for (const Instruction& instruction : entry->instructions) {
+            for (const Instruction* proof_instruction : proof_instructions) {
+                const Instruction& instruction = *proof_instruction;
                 const auto destinations = destination_registers(instruction);
                 const auto values = instruction_values(instruction);
                 if (destinations.size() != 1 || !values ||
@@ -1822,7 +1870,8 @@ struct Importer {
         bool addresses_changed = true;
         for (int iteration = 0; iteration < 16 && addresses_changed; ++iteration) {
             addresses_changed = false;
-            for (const Instruction& instruction : entry->instructions) {
+            for (const Instruction* proof_instruction : proof_instructions) {
+                const Instruction& instruction = *proof_instruction;
                 const auto destinations = destination_registers(instruction);
                 const auto address = instruction_address(instruction);
                 if (destinations.size() != 1 || !address ||
@@ -1894,7 +1943,8 @@ struct Importer {
         };
         std::vector<const Instruction*> local_pointer_events;
         std::unordered_set<std::string> local_stored_registers;
-        for (const Instruction& instruction : entry->instructions) {
+        for (const Instruction* proof_instruction : proof_instructions) {
+            const Instruction& instruction = *proof_instruction;
             const std::string root = root_opcode(instruction.opcode);
             const bool local_load = root == "ld" &&
                 instruction.opcode.find(".local") != std::string::npos &&
@@ -2631,8 +2681,9 @@ struct Importer {
             if (!solve_value_types(false)) return false;
             bool added = false;
             for (const auto& [instruction, type] : local_pointer_load_types()) {
-                local_load_proofs[instruction] = type;
-                const auto [it, inserted] = pointer_load_types.emplace(instruction, type);
+                const auto* key = proof_key(instruction);
+                local_load_proofs[key] = type;
+                const auto [it, inserted] = pointer_load_types.emplace(key, type);
                 added |= inserted;
                 if (!inserted && it->second != type) {
                     if (it->second.is_pointer() && type.is_pointer() &&
@@ -2648,11 +2699,75 @@ struct Importer {
                 }
             }
             if (!added) {
+                // The provisional graph can contain integer-minus-address
+                // intermediates whose common roots cancel later. Recover
+                // their integer residuals before assigning final SSA types;
+                // their current pointer contracts are deliberately discarded.
+                // Inline PTX has external SSA bindings and emits its original
+                // instruction block; this CFG normalization applies only to
+                // complete functions whose graph will be materialized here.
+                if (!normalized_address_cancellation && external_types.empty() &&
+                    !raw_blocks.empty() && raw_blocks.front().id != kInvalidBlock) {
+                    normalized_address_cancellation = true;
+                    if (detail::cancel_same_base_addresses(raw_blocks, incoming, outgoing,
+                            block_arguments, instruction_results, value_types,
+                            parameter_types, pointer_symbols,
+                            [&](const std::string& name) { return register_contract(name).has_value(); },
+                            normalized_instructions,
+                            &instruction_origins)) {
+                        address_cancellation_applied = true;
+                        instruction_results.clear();
+                        definition_types.clear();
+                        value_types.clear();
+                        pointer_load_types.clear();
+                        integer_zero_values.clear();
+                        aggregate_parameter_addresses.clear();
+                        implicit_values.clear();
+                        incoming.clear();
+                        outgoing.clear();
+                        block_arguments.clear();
+                        for (auto& block : raw_blocks) {
+                            block.last_definitions.clear();
+                            block.uses_before_definition.clear();
+                        }
+                        allocate_values();
+                        if (!construct_ssa()) return false;
+                        return resolve_types();
+                    }
+                }
                 value_types = external_types;
                 definition_types.clear();
                 integer_zero_values.clear();
                 aggregate_parameter_addresses.clear();
                 if (!solve_value_types(true)) return false;
+                if (address_cancellation_applied) {
+                    // Demand from a later memory use is not proof that a
+                    // private cell stores pointer bits. Recheck every such
+                    // load against its current reaching stores, including
+                    // generic loads and evidence recovered from helper uses.
+                    for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+                        auto environment = incoming[b];
+                        for (const auto* instruction : raw_blocks[b].instructions) {
+                            const auto& values = instruction_results.at(instruction);
+                            if (root_opcode(instruction->opcode) == "ld" &&
+                                !starts_with(instruction->opcode, "ld.param") &&
+                                instruction->operands.size() >= 2 && !values.empty() &&
+                                value_types.at(values.front()).is_pointer()) {
+                                const auto address = environment.find(first_register(instruction->operands[1]));
+                                const bool private_symbol = local_depots.contains(
+                                    parameter_name_from_operand(instruction->operands[1]));
+                                const bool private_value = address != environment.end() && value_types.contains(address->second) &&
+                                    value_types.at(address->second).is_pointer() &&
+                                    value_types.at(address->second).address_space == AddressSpace::kPrivate;
+                                if (private_symbol || private_value)
+                                    local_load_proofs[proof_key(instruction)] = value_types.at(values.front());
+                            }
+                            const auto destinations = ssa_destinations(*instruction);
+                            for (std::size_t i = 0; i < destinations.size(); ++i)
+                                environment[destinations[i]] = values[i];
+                        }
+                    }
+                }
                 if (!validate_local_load_proofs(local_load_proofs)) return false;
                 break;
             }
@@ -2927,6 +3042,26 @@ struct Importer {
         if (printf_scaffold_lines.contains(instruction.line)) return true;
         if (!instruction.supported) {
             return fail(&instruction, "unsupported PTX opcode '" + instruction.opcode + "'");
+        }
+
+        if (address_cancellation_applied) {
+            // This function now contains real integer differences where the
+            // provisional graph contained pointer-shaped values. A scalar
+            // spill/reload or opaque arithmetic must not regain pointer-ness
+            // through the memory emitter's fallback cast.
+            std::optional<std::size_t> address;
+            if (root == "ld" || root == "atom" || root == "cvta") address = 1;
+            else if (root == "st" || root == "red") address = 0;
+            if (address && *address < instruction.operands.size()) {
+                const auto source = environment->find(first_register(instruction.operands[*address]));
+                if (source != environment->end() && value_types.contains(source->second)) {
+                    const auto& type = value_types.at(source->second);
+                    const bool parameter_value = starts_with(instruction.opcode, "ld.param") &&
+                                                 type.kind == TypeKind::kAggregate;
+                    if (!type.is_pointer() && !parameter_value)
+                        return fail(&instruction, "memory address requires proven pointer provenance after cancellation");
+                }
+            }
         }
 
         Operation operation;
@@ -4256,6 +4391,9 @@ struct Importer {
                     }
                     argument = slot->second;
                 }
+                if (address_cancellation_applied && signature->argument_types[i].is_pointer() &&
+                    !proven_pointer_or_null(argument))
+                    return fail(&instruction, "pointer call argument has an unproven scalar address after cancellation");
                 if (!(argument.type == signature->argument_types[i])) {
                     if (type_size(argument.type) != type_size(signature->argument_types[i])) {
                         return fail(&instruction, "PTX call parameter value does not fit its declared argument type");
