@@ -90,10 +90,11 @@ bool test_definition_type_cfg() {
                               .param .u32 choice) {
 .reg .b64 %rd<4>;
 .reg .b32 %r<4>;
-.reg .pred %p1;
+.reg .pred %p1, %p2;
 ld.param.u64 %rd1, [output];
 ld.param.u32 %r1, [index];
 ld.param.u32 %r2, [choice];
+setp.ne.u32 %p2, %r1, 0;
 setp.ne.u32 %p1, %r2, 0;
 @%p1 bra LEFT;
 bra RIGHT;
@@ -103,7 +104,7 @@ bra RIGHT;
         "RIGHT:\nadd.u32 %r3, %r1, 1;\ncvt.u64.u32 %rd2, %r3;\nbra JOIN;\n";
     const std::string join = R"ptx(JOIN:
 mov.b64 %rd3, %rd2;
-selp.b64 %rd3, %rd3, 8, %p1;
+selp.b64 %rd3, %rd3, 8, %p2;
 shl.b64 %rd3, %rd3, 2;
 sub.u64 %rd2, %rd1, %rd3;
 st.global.u32 [%rd2], %r1;
@@ -111,6 +112,8 @@ ret;
 )ptx";
     // Neither textual block order nor a register's spelling may determine the
     // join's type. The same mutable register becomes a pointer only after JOIN.
+    // The select uses an independent predicate so edge specialization cannot
+    // remove the join or make its missing-arm negative unobservable.
     for (unsigned layout = 0; layout < 3; ++layout) {
         for (const bool rename : {false, true}) {
             std::string source = prefix +

@@ -170,6 +170,22 @@ caller-memory writes across helpers.
 
 The issue #76 regressions cover reordered/renamed diamonds, zero-seeded and bounded
 loops, guarded clones, conversions, wide products, tuples and rejected joins.
+
+The #130 zero-marker proof carries exact unpredicated scalar zero moves/copies
+into signed/unsigned/bitwise equality and inequality tests before register SSA.
+Facts require unambiguous function-local 16/32/64-bit integer declarations with
+matching instruction widths. Predicated writes, incompatible widths, unknown
+calls and conflicting joins discard facts. A dynamic or private-address marker
+does not imply nonzero: only the established zero path is specialized.
+Known scalar-select predicates on an incoming edge can replace `selp.b32/b64`
+with the selected move on that edge's clone, including a terminal block. Both
+arms must have valid scalar forms/widths. Staged replacements use the same proof
+that selected the edge; other paths, stores, loads and calls retain their order.
+Declaration lookup, live facts, inspected paths and total clone growth are
+bounded. Unsupported or exhausted proofs keep ordinary undefined-value
+validation. These focused contracts are not arbitrary scalar constant
+propagation, complete predication support or full downstream GPU acceptance.
+
 The legacy PTX backend still cannot emit MSL for the joined ReLU fixtures; those
 legacy numerical cells are reported as untested rather than successful. Passing
 these focused tests does not establish full downstream compilation or GPU success.

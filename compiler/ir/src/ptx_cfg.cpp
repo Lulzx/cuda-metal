@@ -18,6 +18,82 @@ struct GuardedPaths {
     const cumetal::ptx::EntryFunction* function;
     InstructionOrigins* origins;
 
+    struct ConstantFacts {
+        std::map<std::string, bool> predicates;
+        std::map<std::string, unsigned> scalar_zeros;
+        bool empty() const { return predicates.empty() && scalar_zeros.empty(); }
+        std::size_t size() const { return predicates.size() + scalar_zeros.size(); }
+        void erase(const std::string& name) { predicates.erase(name); scalar_zeros.erase(name); }
+        bool operator==(const ConstantFacts&) const = default;
+        template <class Predicate> void erase_if(Predicate predicate) {
+            std::erase_if(predicates, predicate);
+            std::erase_if(scalar_zeros, predicate);
+        }
+        void intersect(const ConstantFacts& other) {
+            const auto meet = [](auto& values, const auto& incoming) {
+                std::erase_if(values, [&](const auto& item) {
+                    const auto found = incoming.find(item.first);
+                    return found == incoming.end() || found->second != item.second;
+                });
+            };
+            meet(predicates, other.predicates);
+            meet(scalar_zeros, other.scalar_zeros);
+        }
+    };
+
+    static unsigned scalar_integer_width(std::string_view type) {
+        if (type == "b16" || type == "u16" || type == "s16") return 16;
+        if (type == "b32" || type == "u32" || type == "s32") return 32;
+        if (type == "b64" || type == "u64" || type == "s64") return 64;
+        return 0;
+    }
+
+    // Resolve only used declarations; ranges stay compact even for enormous
+    // counts. Duplicate/scoped bindings and exhausted lookups provide no fact.
+    mutable bool scalar_declarations_indexed = false;
+    mutable bool scalar_declarations_valid = false;
+    mutable std::size_t scalar_declaration_work = 4194304;
+    mutable std::unordered_map<std::string, unsigned> scalar_declarations{};
+    mutable std::unordered_map<std::string, unsigned> scalar_width_cache{};
+
+    unsigned local_scalar_width(const std::string& name) const {
+        if (!function) return 0;
+        if (const auto found = scalar_width_cache.find(name); found != scalar_width_cache.end())
+            return found->second;
+        if (scalar_width_cache.size() >= 65536) return 0;
+        if (!scalar_declarations_indexed) {
+            scalar_declarations_indexed = true;
+            if (function->register_declarations.size() > 65536) return 0;
+            for (const auto& declaration : function->register_declarations) {
+                if (scalar_declaration_work == 0) { scalar_declarations.clear(); return 0; }
+                --scalar_declaration_work;
+                const auto [found, inserted] = scalar_declarations.emplace(declaration.name,
+                    declaration.function_scope ? scalar_integer_width(declaration.type) : 0);
+                if (!inserted) found->second = 0;
+            }
+            scalar_declarations_valid = true;
+        }
+        if (!scalar_declarations_valid) return 0;
+        const auto exact = scalar_declarations.find(name);
+        bool matched = exact != scalar_declarations.end();
+        unsigned width = matched ? exact->second : 0;
+        for (const auto& range : function->register_ranges) {
+            if (scalar_declaration_work == 0) return 0;
+            --scalar_declaration_work;
+            if (!name.starts_with(range.prefix)) continue;
+            const auto digits = std::string_view(name).substr(range.prefix.size());
+            if (digits.empty() || (digits.size() > 1 && digits.front() == '0')) continue;
+            std::size_t index = 0;
+            const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), index);
+            if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() ||
+                index >= range.count) continue;
+            width = !matched && range.function_scope ? scalar_integer_width(range.type) : 0;
+            matched = true;
+        }
+        scalar_width_cache.emplace(name, width);
+        return width;
+    }
+
     bool local_predicate(const std::string& reg) const {
         if (!function) return false;
         for (const auto& declaration : function->register_declarations)
@@ -34,14 +110,17 @@ struct GuardedPaths {
         return false;
     }
 
-    void invalidate_call(const Instruction& instruction, std::map<std::string, bool>& facts) const {
+    static bool direct_call(const Instruction& instruction) {
         const auto target = direct_call_target(instruction);
-        const bool direct = (instruction.opcode == "call" || instruction.opcode == "call.uni") &&
+        return (instruction.opcode == "call" || instruction.opcode == "call.uni") &&
             target && !target->empty() && target->front() != '%' &&
             std::all_of(target->begin(), target->end(), [](unsigned char c) {
                 return std::isalnum(c) || c == '_' || c == '$' || c == '.';
             });
-        if (!direct) { facts.clear(); return; }
+    }
+
+    void invalidate_call(const Instruction& instruction, std::map<std::string, bool>& facts) const {
+        if (!direct_call(instruction)) { facts.clear(); return; }
         // Callees cannot address caller-local registers. Explicit return
         // registers are still writes, including predicated call outputs.
         const auto outputs = instruction.operands.size() == 3
@@ -52,35 +131,88 @@ struct GuardedPaths {
         });
     }
 
+    void invalidate_call(const Instruction& instruction, ConstantFacts& facts) const {
+        invalidate_call(instruction, facts.predicates);
+        if (!direct_call(instruction)) { facts.scalar_zeros.clear(); return; }
+        const auto outputs = instruction.operands.size() == 3
+            ? registers_in(instruction.operands.front()) : std::vector<std::string>{};
+        std::erase_if(facts.scalar_zeros, [&](const auto& item) {
+            return local_scalar_width(item.first) != item.second ||
+                std::find(outputs.begin(), outputs.end(), item.first) != outputs.end();
+        });
+    }
+
     std::size_t cloned_blocks = 0;
     std::size_t cloned_instructions = 0;
 
     // A bounded proof may decline to simplify. Never invent a definition when
     // a proof or budget is exhausted: subsequent SSA construction still checks it.
+    bool fold_known_select(Instruction& instruction, const ConstantFacts& known) const {
+        const unsigned width = instruction.opcode == "selp.b32" ? 32 :
+                               instruction.opcode == "selp.b64" ? 64 : 0;
+        if (!width || !instruction.predicate.empty() || instruction.operands.size() != 4)
+            return false;
+        const auto destination = trim(instruction.operands[0]);
+        const auto predicate = trim(instruction.operands[3]);
+        const auto found = known.predicates.find(predicate);
+        if (found == known.predicates.end() || first_register(predicate) != predicate ||
+            first_register(destination) != destination || local_scalar_width(destination) != width)
+            return false;
+        const auto scalar = [&](const std::string& operand) {
+            const auto value = trim(operand);
+            if (value.empty()) return false;
+            if (first_register(value) == value) return local_scalar_width(value) == width;
+            auto digits = std::string_view(value);
+            const bool negative = digits.front() == '-';
+            if (negative) digits.remove_prefix(1);
+            if (digits.empty()) return false;
+            std::uint64_t magnitude = 0;
+            const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), magnitude);
+            if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size()) return false;
+            const auto limit = negative ? (std::uint64_t{1} << (width - 1)) :
+                               width == 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << width) - 1;
+            return magnitude <= limit;
+        };
+        // Validate both arms before discarding either; malformed tuple/width
+        // operands must not become a valid move merely because the edge is known.
+        if (!scalar(instruction.operands[1]) || !scalar(instruction.operands[2])) return false;
+        const auto selected = instruction.operands[found->second ? 1 : 2];
+        instruction.opcode = width == 32 ? "mov.b32" : "mov.b64";
+        instruction.operands = {instruction.operands[0], selected};
+        return true;
+    }
+
+    using SelectRewrites = std::map<std::size_t, Instruction>;
+
     std::optional<std::size_t> clone_edge(std::size_t parent, std::size_t edge,
-                                         const RawBlock& target, std::size_t successor) {
+                                         const RawBlock& target, std::optional<std::size_t> successor,
+                                         const SelectRewrites* rewrites = nullptr) {
         const bool has_branch = !target.instructions.empty() &&
             root_opcode(target.instructions.back()->opcode) == "bra";
-        const auto count = target.instructions.size() + (has_branch ? 0 : 1);
+        const auto count = target.instructions.size() + (successor && !has_branch ? 1 : 0);
         if (cloned_blocks >= 4096 || count > 131072 - cloned_instructions) return std::nullopt;
         RawBlock clone;
         clone.id = builder.next_block();
         clone.name = target.name + "_guard_" + std::to_string(raw_blocks.size());
-        clone.successors = {successor};
+        clone.successors = successor ? std::vector<std::size_t>{*successor} : target.successors;
         for (std::size_t j = 0; j < target.instructions.size(); ++j) {
             auto instruction = *target.instructions[j];
-            if (has_branch && j + 1 == target.instructions.size()) {
+            if (rewrites) {
+                const auto found = rewrites->find(j);
+                if (found != rewrites->end()) instruction = found->second;
+            }
+            if (successor && has_branch && j + 1 == target.instructions.size()) {
                 instruction.predicate.clear();
-                instruction.operands = {raw_blocks[successor].name};
+                instruction.operands = {raw_blocks[*successor].name};
             }
             storage.push_back(std::move(instruction));
             record_instruction_origin(origins, &storage.back(), target.instructions[j]);
             clone.instructions.push_back(&storage.back());
         }
-        if (!has_branch) {
+        if (successor && !has_branch) {
             Instruction branch;
             branch.opcode = "bra";
-            branch.operands = {raw_blocks[successor].name};
+            branch.operands = {raw_blocks[*successor].name};
             storage.push_back(std::move(branch));
             clone.instructions.push_back(&storage.back());
         }
@@ -367,6 +499,63 @@ struct GuardedPaths {
         return std::nullopt;
     }
 
+    static unsigned scalar_move_width(const Instruction& instruction) {
+        return instruction.opcode.starts_with("mov.")
+            ? scalar_integer_width(std::string_view(instruction.opcode).substr(4)) : 0;
+    }
+
+    static unsigned zero_comparison_width(const Instruction& instruction) {
+        return instruction.opcode.starts_with("setp.eq.") || instruction.opcode.starts_with("setp.ne.")
+            ? scalar_integer_width(std::string_view(instruction.opcode).substr(8)) : 0;
+    }
+
+    std::optional<unsigned> scalar_zero_value(const Instruction& instruction,
+                                               const ConstantFacts& known) const {
+        const auto width = scalar_move_width(instruction);
+        if (!width || !instruction.predicate.empty() || instruction.operands.size() != 2)
+            return std::nullopt;
+        const auto destination = trim(instruction.operands[0]);
+        if (destination.empty() || first_register(destination) != destination ||
+            local_scalar_width(destination) != width) return std::nullopt;
+        const auto source = trim(instruction.operands[1]);
+        if (source == "0") return width;
+        const auto found = known.scalar_zeros.find(source);
+        if (found == known.scalar_zeros.end() || found->second != width ||
+            local_scalar_width(source) != width) return std::nullopt;
+        return width;
+    }
+
+    std::optional<bool> predicate_value(const Instruction& instruction,
+                                         const ConstantFacts& known) const {
+        if (const auto value = predicate_value(instruction, known.predicates)) return value;
+        const auto width = zero_comparison_width(instruction);
+        if (!width || !instruction.predicate.empty() || instruction.operands.size() != 3)
+            return std::nullopt;
+        const auto destination = trim(instruction.operands[0]);
+        if (destination.empty() || first_register(destination) != destination) return std::nullopt;
+        auto source = trim(instruction.operands[1]);
+        auto zero = trim(instruction.operands[2]);
+        if (source == "0") std::swap(source, zero);
+        const auto found = known.scalar_zeros.find(source);
+        if (zero != "0" || found == known.scalar_zeros.end() || found->second != width ||
+            local_scalar_width(source) != width) return std::nullopt;
+        return instruction.opcode.starts_with("setp.eq.");
+    }
+
+    // Facts describe the value at this instruction, not aliases to a mutable
+    // source register. Evaluate a copy before killing all written destinations.
+    void transfer_constants(const Instruction& instruction, ConstantFacts& known,
+                            std::optional<bool> comparison_value = std::nullopt) const {
+        const auto predicate = comparison_value ? comparison_value : predicate_value(instruction, known);
+        const auto zero = scalar_zero_value(instruction, known);
+        const auto written = destination_registers(instruction);
+        for (const auto& name : written) known.erase(name);
+        if (root_opcode(instruction.opcode) == "call") invalidate_call(instruction, known);
+        if (written.size() != 1) return;
+        if (predicate) known.predicates[written[0]] = *predicate;
+        if (zero) known.scalar_zeros[written[0]] = *zero;
+    }
+
     struct PredicateLiveness {
         using Registers = std::unordered_set<std::string>;
         std::vector<Registers> live_in;
@@ -374,18 +563,30 @@ struct GuardedPaths {
         std::vector<std::unordered_map<std::string, std::size_t>> last_use;
     };
 
-    // Constant propagation needs only predicate values that can still be read.
+    // Constant propagation needs only predicate/zero values that can still be read.
     // Compute that set from instruction semantics rather than register names:
     // these are exactly the destinations the constant evaluator can create.
     std::optional<PredicateLiveness> predicate_liveness() const {
         using Registers = PredicateLiveness::Registers;
         Registers candidates;
+        std::size_t budget = 16777216;
         for (const auto& block : raw_blocks) {
             for (const auto* instruction : block.instructions) {
+                if (budget == 0) return std::nullopt;
+                --budget;
+                // An incoming branch edge can establish a predicate even if
+                // its producer is not one of the constant-foldable operations.
+                if (!instruction->predicate.empty()) {
+                    const auto predicate = first_register(instruction->predicate);
+                    if (!predicate.empty()) candidates.insert(predicate);
+                    if (candidates.size() > 1048576) return std::nullopt;
+                }
                 if (instruction->opcode != "mov.pred" && instruction->opcode != "not.pred" &&
-                    instruction->opcode != "or.pred") continue;
+                    instruction->opcode != "or.pred" && instruction->opcode != "and.pred" &&
+                    !scalar_move_width(*instruction) && !zero_comparison_width(*instruction)) continue;
                 const auto written = destination_registers(*instruction);
                 if (written.size() == 1) candidates.insert(written[0]);
+                if (candidates.size() > 1048576) return std::nullopt;
             }
         }
 
@@ -394,7 +595,6 @@ struct GuardedPaths {
         result.live_out.resize(raw_blocks.size());
         result.last_use.resize(raw_blocks.size());
         std::vector<Registers> uses(raw_blocks.size()), definitions(raw_blocks.size());
-        std::size_t budget = 16777216;
         for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
             for (std::size_t i = 0; i < raw_blocks[b].instructions.size(); ++i) {
                 const auto& instruction = *raw_blocks[b].instructions[i];
@@ -405,9 +605,9 @@ struct GuardedPaths {
                     result.last_use[b][source] = i;
                     if (!definitions[b].contains(source)) uses[b].insert(source);
                 }
-                for (const auto& written : destination_registers(instruction)) {
-                    if (candidates.contains(written)) definitions[b].insert(written);
-                }
+                if (instruction.predicate.empty())
+                    for (const auto& written : destination_registers(instruction))
+                        if (candidates.contains(written)) definitions[b].insert(written);
             }
         }
 
@@ -446,14 +646,22 @@ struct GuardedPaths {
         return result;
     }
 
+    static void prune_constants(ConstantFacts& facts, const PredicateLiveness& liveness,
+                                std::size_t block, std::size_t instruction) {
+        facts.erase_if([&](const auto& item) {
+            const auto last = liveness.last_use[block].find(item.first);
+            return !liveness.live_out[block].contains(item.first) &&
+                (last == liveness.last_use[block].end() || last->second <= instruction);
+        });
+    }
+
     // Reachable predecessor states meet by intersection. An unvisited edge is
     // not an unknown value: ignoring it until visited preserves loop-invariant
     // flags, while later conflicting edges remove the fact and requeue users.
-    std::vector<std::map<std::string, bool>> constant_entries() const {
-        using Facts = std::map<std::string, bool>;
+    std::vector<ConstantFacts> constant_entries(const PredicateLiveness* liveness) const {
+        using Facts = ConstantFacts;
         std::vector<Facts> entries(raw_blocks.size());
         if (raw_blocks.empty()) return entries;
-        const auto liveness = predicate_liveness();
         if (!liveness) return entries;
         std::vector<bool> visited(raw_blocks.size(), false), queued(raw_blocks.size(), false);
         std::deque<std::size_t> pending{0};
@@ -468,30 +676,19 @@ struct GuardedPaths {
             for (std::size_t i = 0; i < raw_blocks[index].instructions.size(); ++i) {
                 const auto* instruction = raw_blocks[index].instructions[i];
                 if (++instructions > 4194304) return std::vector<Facts>(raw_blocks.size());
-                const auto value = predicate_value(*instruction, outgoing);
-                const auto written = destination_registers(*instruction);
-                for (const auto& reg : written) outgoing.erase(reg);
-                if (root_opcode(instruction->opcode) == "call") invalidate_call(*instruction, outgoing);
-                if (value && written.size() == 1) outgoing[written[0]] = *value;
-                std::erase_if(outgoing, [&](const auto& item) {
-                    const auto last = liveness->last_use[index].find(item.first);
-                    return !liveness->live_out[index].contains(item.first) &&
-                        (last == liveness->last_use[index].end() || last->second <= i);
-                });
+                transfer_constants(*instruction, outgoing);
+                prune_constants(outgoing, *liveness, index, i);
                 if (outgoing.size() > 128) return std::vector<Facts>(raw_blocks.size());
             }
             for (const auto successor : raw_blocks[index].successors) {
                 auto transferred = outgoing;
-                std::erase_if(transferred, [&](const auto& item) {
+                transferred.erase_if([&](const auto& item) {
                     return !liveness->live_in[successor].contains(item.first);
                 });
                 auto merged = transferred;
                 if (visited[successor]) {
                     merged = entries[successor];
-                    std::erase_if(merged, [&](const auto& item) {
-                        const auto found = transferred.find(item.first);
-                        return found == transferred.end() || found->second != item.second;
-                    });
+                    merged.intersect(transferred);
                 }
                 if (visited[successor] && merged == entries[successor]) continue;
                 visited[successor] = true;
@@ -915,7 +1112,8 @@ struct GuardedPaths {
     // loads: this exposes infeasible paths to SSA without inventing definitions.
     void thread_predicate_edges() {
         const auto original_count = raw_blocks.size();
-        const auto entry_constants = constant_entries();
+        const auto liveness = predicate_liveness();
+        const auto entry_constants = constant_entries(liveness ? &*liveness : nullptr);
         for (std::size_t index = 0; index < original_count; ++index) {
             const RawBlock source = raw_blocks[index];
             if (source.instructions.empty() || source.successors.empty() ||
@@ -928,13 +1126,13 @@ struct GuardedPaths {
             auto expressions = expressions_before(index);
             bool combined = false;
             auto constants = entry_constants[index];
+            bool within_fact_budget = true;
             for (std::size_t j = 0; j < source.instructions.size(); ++j) {
                 const auto& instruction = *source.instructions[j];
                 const auto written = destination_registers(instruction);
-                const auto value = predicate_value(instruction, constants);
-                for (const auto& reg : written) constants.erase(reg);
-                if (root_opcode(instruction.opcode) == "call") invalidate_call(instruction, constants);
-                if (value && written.size() == 1) constants[written[0]] = *value;
+                transfer_constants(instruction, constants);
+                if (liveness) prune_constants(constants, *liveness, index, j);
+                if (constants.size() > 128) { within_fact_budget = false; break; }
                 for (const auto& reg : written)
                     if (comparison && (reg == pred || writes_fact(reg, *comparison)))
                         comparison.reset();
@@ -946,26 +1144,34 @@ struct GuardedPaths {
                     combined = instruction.opcode == "or.pred" && instruction.predicate.empty();
                 }
             }
+            if (!within_fact_budget) continue;
             // Taking an edge establishes its predicate independently of the
             // comparison that produced it. Operand facts still require their
             // separate proof; a repeated unchanged predicate does not.
             if (!comparison && !combined && constants.empty() && !conditional) continue;
             for (std::size_t edge = 0; edge < source.successors.size(); ++edge) {
+                within_fact_budget = true;
                 auto known = constants;
-                if (conditional) known[pred] = (edge == 0) != inverted;
+                if (conditional) known.predicates[pred] = (edge == 0) != inverted;
+                if (known.size() > 128) continue;
                 auto fact = comparison;
                 auto edge_expressions = expressions;
-                if (fact) fact->positive = known[pred] == fact->positive;
+                if (fact) fact->positive = known.predicates[pred] == fact->positive;
                 auto parent = index;
                 auto parent_edge = edge;
                 auto current = source.successors[edge];
                 std::unordered_set<std::size_t> visited{index};
-                std::vector<RawBlock> prefix;
+                struct PrefixBlock { RawBlock block; SelectRewrites rewrites; };
+                std::vector<PrefixBlock> prefix;
+                bool prefix_select_rewritten = false;
                 std::size_t inspected = 0;
                 while (visited.insert(current).second) {
-                    const RawBlock target = raw_blocks[current];
-                    if (target.instructions.empty() || target.instructions.size() > 256 - inspected ||
-                        target.successors.empty() || target.successors.size() > 2) break;
+                    const auto& candidate = raw_blocks[current];
+                    if (candidate.instructions.empty() || candidate.instructions.size() > 256 - inspected ||
+                        candidate.successors.size() > 2) break;
+                    const RawBlock target = candidate;
+                    SelectRewrites rewrites;
+                    bool select_rewritten = false;
                     inspected += target.instructions.size();
                     const auto* tail = target.instructions.back();
                     const bool conditional_tail = target.successors.size() == 2 &&
@@ -973,48 +1179,62 @@ struct GuardedPaths {
                     if (target.successors.size() == 2 && !conditional_tail) break;
                     const auto body_size = target.instructions.size() - (conditional_tail ? 1 : 0);
                     for (std::size_t j = 0; j < body_size; ++j) {
-                        const auto& instruction = *target.instructions[j];
+                        auto instruction = *target.instructions[j];
+                        if (fold_known_select(instruction, known)) {
+                            select_rewritten = true;
+                            rewrites.emplace(j, instruction);
+                        }
                         const auto written = destination_registers(instruction);
-                        auto value = predicate_value(instruction, known);
+                        std::optional<bool> comparison_value;
                         if (instruction.predicate.empty()) {
                             const auto next = edge_expressions.comparison(instruction);
                             if (next && fact && next->left == fact->left && next->right == fact->right &&
                                 next->type == fact->type && next->relation == fact->relation)
-                                value = next->positive == fact->positive;
+                                comparison_value = next->positive == fact->positive;
                         }
                         for (const auto& reg : written) {
-                            known.erase(reg);
                             if (fact && writes_fact(reg, *fact)) fact.reset();
                         }
-                        if (root_opcode(instruction.opcode) == "call") { invalidate_call(instruction, known); fact.reset(); }
+                        transfer_constants(instruction, known, comparison_value);
+                        if (root_opcode(instruction.opcode) == "call") fact.reset();
                         edge_expressions.observe(instruction);
-                        if (value && written.size() == 1) known[written[0]] = *value;
+                        if (liveness && current < liveness->live_in.size())
+                            prune_constants(known, *liveness, current, j);
+                        if (known.size() > 128) { within_fact_budget = false; break; }
                     }
+                    if (!within_fact_budget) break;
                     if (target.successors.size() == 1) {
-                        prefix.push_back(target);
+                        prefix.push_back({target, std::move(rewrites)});
+                        prefix_select_rewritten |= select_rewritten;
                         current = target.successors[0];
                         continue;
                     }
                     const auto [tail_pred, tail_inverted] = normalized_predicate(tail->predicate);
-                    const auto outcome = known.find(tail_pred);
-                    if (outcome == known.end()) break;
-                    const auto successor = target.successors[(outcome->second != tail_inverted) ? 0 : 1];
-                    // Do not clone a straight-line prefix until it leads to a
-                    // proven branch. Preserve every operation along that path.
+                    const auto outcome = known.predicates.find(tail_pred);
+                    std::optional<std::size_t> successor;
+                    if (conditional_tail && outcome != known.predicates.end())
+                        successor = target.successors[(outcome->second != tail_inverted) ? 0 : 1];
+                    if (!successor && !select_rewritten && !prefix_select_rewritten) break;
+                    // A proven branch or known select arm justifies this edge
+                    // clone. Unknown branches/returns retain their successors;
+                    // all observable instructions remain in their original order.
                     bool exhausted = false;
                     for (const auto& straight : prefix) {
-                        const auto cloned = clone_edge(parent, parent_edge, straight, straight.successors[0]);
+                        const auto cloned = clone_edge(parent, parent_edge, straight.block,
+                                                       straight.block.successors[0], &straight.rewrites);
                         if (!cloned) { exhausted = true; break; }
                         parent = *cloned;
                         parent_edge = 0;
                     }
                     if (exhausted) break;
                     prefix.clear();
-                    const auto cloned = clone_edge(parent, parent_edge, target, successor);
+                    prefix_select_rewritten = false;
+                    const auto cloned = clone_edge(parent, parent_edge, target, successor, &rewrites);
                     if (!cloned) break;
+                    if (!successor) break;
                     parent = *cloned;
                     parent_edge = 0;
-                    current = successor;
+                    current = *successor;
                 }
             }
         }

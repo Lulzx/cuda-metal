@@ -65,6 +65,10 @@ initialization and possible overlaps reject within that proof. Escaped-cell
 discovery still has a separate validation gap documented below.
 Scalar conversions retain both their instruction format and wider
 declared register storage, including the required destination extension.
+Before register SSA, scalar zero-marker facts can prove that an absent payload
+is bypassed. Edge clones also discard a known unselected scalar-select arm while
+preserving observable operations; overwritten or unknown guards retain strict
+definedness checks.
 See [known gaps](docs/known-gaps.md) for memory-provenance and legacy-backend
 limits, and
 [compiler architecture](docs/compiler-architecture.md) for backend details.
