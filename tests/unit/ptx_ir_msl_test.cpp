@@ -17,6 +17,143 @@ bool expect(bool condition, const std::string& message) {
     return true;
 }
 
+bool expect_concrete_pointer_type(const cumetal::ir::Type& type,
+                                  const std::string& context) {
+    using namespace cumetal;
+    bool ok = true;
+    if (type.is_pointer()) {
+        ok &= expect(type.address_space != ir::AddressSpace::kNone,
+                     context + " has a concrete pointer address space: " + type.str());
+        ok &= expect(type.pointee() != nullptr,
+                     context + " has a pointer pointee");
+    }
+    for (const auto& element : type.elements)
+        ok &= expect_concrete_pointer_type(element, context + " element");
+    return ok;
+}
+
+bool expect_concrete_metal_pointer_types(const cumetal::ir::Module& module,
+                                         const std::string& context) {
+    bool ok = true;
+    // A correct load result alone is insufficient: the old legalization left
+    // generic pointers nested in earlier casts, offsets, and their operands.
+    for (const auto& function : module.functions) {
+        const std::string where = context + " in " + function.name;
+        ok &= expect_concrete_pointer_type(function.return_type, where + " return");
+        for (const auto& argument : function.arguments)
+            ok &= expect_concrete_pointer_type(argument.type, where + " argument");
+        if (function.kernel_abi) {
+            for (const auto& argument : function.kernel_abi->arguments)
+                ok &= expect_concrete_pointer_type(argument.type, where + " ABI argument");
+            for (const auto& binding : function.kernel_abi->bindings)
+                ok &= expect_concrete_pointer_type(binding.type, where + " ABI binding");
+        }
+        for (const auto& block : function.blocks) {
+            for (const auto& argument : block.arguments)
+                ok &= expect_concrete_pointer_type(argument.type, where + " block argument");
+            for (const auto& operation : block.operations) {
+                for (const auto& type : operation.result_types)
+                    ok &= expect_concrete_pointer_type(type, where + " operation result");
+                for (const auto& operand : operation.operands)
+                    ok &= expect_concrete_pointer_type(operand.type, where + " operation operand");
+            }
+        }
+    }
+    return ok;
+}
+
+bool test_private_record_pointer_qualifiers(const std::string& source) {
+    using namespace cumetal;
+    bool ok = true;
+    for (const std::string variant : {"explicit u64", "generic u64", "generic u8",
+                                      "generic store", "generic nonzero offsets"}) {
+        auto fixture = source;
+        const auto replace = [&](const std::string& from, const std::string& to) {
+            fixture.replace(fixture.find(from), from.size(), to);
+        };
+        if (variant == "generic u64") replace("ld.global.u64", "ld.u64");
+        if (variant == "generic u8") {
+            replace(".reg .b64 %rd<7>;", ".reg .b64 %rd<7>;\n    .reg .b32 %r0;");
+            replace("ld.global.u64 %rd5, [%rd2];",
+                    "ld.u8 %r0, [%rd2];\n    cvt.u64.u32 %rd5, %r0;");
+        }
+        if (variant == "generic store") replace("st.global.u64", "st.u64");
+        if (variant == "generic nonzero offsets") {
+            replace("record[24]", "record[32]");
+            replace("ld.local.u64 %rd2, [%rd1];", "ld.local.u64 %rd2, [%rd1+24];");
+            replace("st.local.u64 [%rd3], %rd0;", "st.local.u64 [%rd3+24], %rd0;");
+            replace("ld.global.u64 %rd5, [%rd2];", "ld.u64 %rd5, [%rd2+8];");
+            replace("st.global.u64 [%rd3], %rd5;", "st.u64 [%rd3+8], %rd5;");
+        }
+        const auto compiled = metal::compile_ptx_to_msl(fixture);
+        const auto context = "private record " + variant;
+        ok &= expect(compiled.ok, context + " emits Metal: " + compiled.error);
+        if (!compiled.ok) continue;
+        ok &= expect(ir::verify(compiled.metal_ir).ok, context + " Metal IR verifies");
+        ok &= expect_concrete_metal_pointer_types(compiled.metal_ir, context);
+        unsigned device_fields = 0, scalar_fields = 0;
+        for (const auto& function : compiled.metal_ir.functions) {
+            if (function.name != "read_record") continue;
+            for (const auto& block : function.blocks) {
+                for (const auto& operation : block.operations) {
+                    if (operation.opcode != ir::OpCode::kLoad ||
+                        operation.result_types.size() != 1 || operation.operands.empty()) continue;
+                    const auto& address = operation.operands[0].type;
+                    const auto& result = operation.result_types[0];
+                    if (!address.is_pointer() || address.address_space != ir::AddressSpace::kPrivate)
+                        continue;
+                    if (result.is_pointer()) {
+                        ++device_fields;
+                        ok &= expect(result.address_space == ir::AddressSpace::kDevice,
+                                     context + " pointer field resolves to device storage");
+                        ok &= expect(address.pointee() &&
+                                         (*address.pointee() == ir::Type::integer(8) ||
+                                          *address.pointee() == result),
+                                     context + " pointer-field address is a byte view or resolved typed view");
+                    } else if (result == ir::Type::integer(64)) {
+                        ++scalar_fields;
+                    }
+                }
+            }
+        }
+        ok &= expect(device_fields == 2 && scalar_fields == 1,
+                     context + " preserves both pointer fields and the independent scalar field");
+        if (variant == "explicit u64") {
+            // Concrete semantic pointer-to-pointer views remain legal. Only
+            // unresolved nested address spaces must fail the Metal IR gate.
+            auto concrete_view = compiled.metal_ir;
+            for (auto& function : concrete_view.functions) {
+                if (function.name != "read_record" || function.arguments.empty()) continue;
+                ir::ValueId next = 1;
+                for (const auto& argument : function.arguments) next = std::max(next, argument.value + 1);
+                for (const auto& block : function.blocks) {
+                    for (const auto& argument : block.arguments) next = std::max(next, argument.value + 1);
+                    for (const auto& operation : block.operations)
+                        for (const auto value : operation.results) next = std::max(next, value + 1);
+                }
+                ir::Operation cast;
+                cast.opcode = ir::OpCode::kConvert;
+                cast.results = {next};
+                cast.result_types = {ir::Type::pointer(
+                    ir::Type::pointer(ir::Type::integer(8), ir::AddressSpace::kDevice),
+                    ir::AddressSpace::kPrivate)};
+                cast.operands = {ir::Operand::value_ref(function.arguments.front().value,
+                                                       function.arguments.front().type)};
+                cast.attributes["kind"] = "bitcast";
+                auto& operations = function.blocks.front().operations;
+                operations.insert(operations.end() - 1, cast);
+                ok &= expect(ir::verify(concrete_view).ok,
+                             "a concrete semantic pointer-to-pointer view verifies");
+                operations[operations.size() - 2].result_types.front().elements.front().address_space =
+                    ir::AddressSpace::kNone;
+                ok &= expect(!ir::verify(concrete_view).ok,
+                             "Metal IR rejects an unresolved nested pointer in a cast result");
+            }
+        }
+    }
+    return ok;
+}
+
 constexpr const char* kVectorAddPtx = R"ptx(
 .version 7.0
 .target sm_80
@@ -939,6 +1076,31 @@ bool test_pointer_load_address_constraints() {
         }
         const auto compiled = metal::compile_ptx_to_msl(fixture);
         ok &= expect(compiled.ok, "refined private pointer field emits Metal: " + compiled.error);
+        if (compiled.ok)
+            ok &= expect_concrete_metal_pointer_types(compiled.metal_ir,
+                                                     "proven private pointer field");
+    }
+    auto constant_source = source;
+    constant_source.insert(constant_source.find(".func"),
+                           ".const .align 4 .b8 constant_data[4] = {42, 0, 0, 0};\n");
+    const std::string local_address = "add.u64 %addr1, %addr0, 8;";
+    constant_source.replace(constant_source.find(local_address), local_address.size(),
+                            "mov.u64 %addr1, constant_data;");
+    const std::string local_write = "st.local.u32 [%addr1], 42;";
+    constant_source.erase(constant_source.find(local_write), local_write.size());
+    const auto constant = metal::compile_ptx_to_msl(constant_source);
+    ok &= expect(constant.ok, "generic dereference retains a proven constant pointer field: " + constant.error);
+    if (constant.ok) {
+        ok &= expect_concrete_metal_pointer_types(constant.metal_ir, "proven constant pointer field");
+        bool constant_pointer_load = false;
+        for (const auto& function : constant.metal_ir.functions)
+            if (function.name == "local_pointer_field")
+                for (const auto& block : function.blocks)
+                    for (const auto& operation : block.operations)
+                        if (operation.opcode == ir::OpCode::kLoad && operation.result_types.size() == 1)
+                            constant_pointer_load |= operation.result_types.front().is_pointer() &&
+                                operation.result_types.front().address_space == ir::AddressSpace::kConstant;
+        ok &= expect(constant_pointer_load, "constant pointer field does not default to device storage");
     }
     // A generic use must not erase an independent explicit global constraint.
     // The same field cannot simultaneously prove private and device storage.
@@ -2526,16 +2688,7 @@ ret;
     ret;
 }
 )ptx";
-    const metal::PtxToMslResult private_record_pointer =
-        metal::compile_ptx_to_msl(private_record_pointer_ptx);
-    ok &= expect(private_record_pointer.ok &&
-                     private_record_pointer.source.find("device uchar* thread*") !=
-                         std::string::npos &&
-                     private_record_pointer.source.find("thread cm_alias_ulong*") !=
-                         std::string::npos,
-                 "typed PTX preserves demanded device pointers loaded from private records "
-                 "while scalar fields stay integers");
-    if (!private_record_pointer.ok) std::cerr << private_record_pointer.error << "\n";
+    ok &= test_private_record_pointer_qualifiers(private_record_pointer_ptx);
 
     const std::string aggregate_device_call_ptx = R"ptx(
 .version 7.0

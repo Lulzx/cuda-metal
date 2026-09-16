@@ -89,6 +89,19 @@ Normalization records instruction origins for applicable memory proofs, while
 clones keep distinct result identities. Imported result types are checked against
 emission, and the IR verifier checks incoming edge types and dominance.
 
+PTX memory-address intermediates use byte pointers in the address's actual
+storage space. Loads and stores retain their independent value types, and the
+Metal emitter constructs the final typed dereference from those resolved types.
+This avoids copying a provisional generic pointer field type into an earlier
+address cast or offset, which could leave an unqualified nested pointer in MSL
+after the field itself had resolved to device storage. The Metal IR verifier
+recursively rejects unresolved nested pointer address spaces; concrete nested
+pointer types and the existing tagged representation for top-level mixed
+pointers remain supported. Focused unit coverage includes generic byte and
+64-bit reads, generic stores, nonzero offsets, scalar fields, and proven private
+and constant pointer fields. Full downstream compilation and GPU validation
+remain separate gates. The memory-proof limits below still apply.
+
 Proven scalar zero definitions and copies may become typed nulls on pointer edges.
 A packed tuple is not proved zero from its first lane. Concrete pointer inputs to
 a generic pointer join receive explicit conversion values. Nonzero integer/pointer

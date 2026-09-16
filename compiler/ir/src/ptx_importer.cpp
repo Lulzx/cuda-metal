@@ -2964,10 +2964,17 @@ struct Importer {
             return bit_container_of(source_operand(index, expected), expected);
         };
         const auto memory_address_operand = [&](std::size_t index,
-                                                const Type& fallback_pointer) {
+                                                AddressSpace address_space) {
+            // PTX memory operands are byte addresses. In particular, a load's
+            // result may itself be a pointer whose space is resolved later.
+            // Copying that provisional type into an address cast would leave a
+            // stale nested generic pointer after legalization. Keep the address
+            // byte-typed; Metal loads/stores form their typed dereference from
+            // the resolved value type and the address's actual storage space.
+            const Type fallback_pointer = Type::pointer(Type::integer(8), address_space);
             Operand base = source_operand(index, fallback_pointer);
             if (index >= instruction.operands.size()) return base;
-            if (base.type.is_pointer() && fallback_pointer.is_pointer() &&
+            if (base.type.is_pointer() &&
                 base.type.address_space != AddressSpace::kNone &&
                 !(base.type == fallback_pointer)) {
                 Type pointer_type = fallback_pointer;
@@ -3422,8 +3429,7 @@ struct Importer {
                             static_cast<std::uint64_t>(offset) + size > type_size(*indirect_type.pointee()))
                             return fail(&instruction, "indirect private aggregate parameter load exceeds the object");
                         operation.opcode = OpCode::kLoad;
-                        operation.operands = {memory_address_operand(1,
-                            Type::pointer(operation.result_types.front(), indirect_type.address_space))};
+                        operation.operands = {memory_address_operand(1, indirect_type.address_space)};
                         operation.attributes["memory_bit_width"] = std::to_string(ptx_scalar_type(instruction.opcode).bit_width);
                         operation.attributes["alignment"] = "1";
                         if (has_signed_integer_type(instruction.opcode)) operation.attributes["signed"] = "true";
@@ -3625,8 +3631,7 @@ struct Importer {
                     : instruction.opcode.find(".const") != std::string::npos
                         ? AddressSpace::kConstant
                         : AddressSpace::kDevice;
-                const Operand base = memory_address_operand(
-                    1, Type::pointer(element_type, lane_space));
+                const Operand base = memory_address_operand(1, lane_space);
                 for (std::size_t lane = 1; lane < lanes; ++lane) {
                     Operation offset;
                     offset.opcode = OpCode::kPointerOffset;
@@ -3699,9 +3704,7 @@ struct Importer {
                     : instruction.opcode.find(".const") != std::string::npos
                         ? AddressSpace::kConstant
                         : AddressSpace::kDevice;
-                operation.operands.push_back(memory_address_operand(
-                    1, Type::pointer(operation.result_types.front(),
-                                     load_address_space)));
+                operation.operands.push_back(memory_address_operand(1, load_address_space));
             }
             operation.attributes["address"] = instruction.operands[1];
             const Type memory_type = ptx_scalar_type(instruction.opcode);
@@ -3727,8 +3730,7 @@ struct Importer {
             const auto store_value = [&](Operand input) {
                 return expressions.low_integer_bits(bit_container_of(input, element_type), element_type);
             };
-            const Operand base = memory_address_operand(
-                0, Type::pointer(element_type, store_address_space));
+            const Operand base = memory_address_operand(0, store_address_space);
             // Vector stores: `st.global.v2.b32 [addr], {%r1, 0}` writes each
             // register or literal to consecutive elements. Clang emits these for adjacent
             // struct fields at -O2, and storing only the first lane silently
@@ -3875,9 +3877,7 @@ struct Importer {
                 instruction.opcode.find(".shared.") != std::string::npos
                     ? AddressSpace::kThreadgroup
                     : AddressSpace::kDevice;
-            operation.operands.push_back(memory_address_operand(
-                1, Type::pointer(ptx_scalar_type(instruction.opcode),
-                                 atomic_address_space)));
+            operation.operands.push_back(memory_address_operand(1, atomic_address_space));
             for (std::size_t i = 2; i < instruction.operands.size(); ++i) {
                 operation.operands.push_back(
                     source_operand(i, ptx_scalar_type(instruction.opcode)));

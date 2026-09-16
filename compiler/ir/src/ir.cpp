@@ -36,6 +36,13 @@ void add_diagnostic(VerifyResult* result, const SourceLocation& location, std::s
     result->diagnostics.push_back({.location = location, .message = std::move(message)});
 }
 
+bool has_unresolved_nested_pointer(const Type& type) {
+    return std::any_of(type.elements.begin(), type.elements.end(), [](const Type& element) {
+        return (element.is_pointer() && element.address_space == AddressSpace::kNone) ||
+               has_unresolved_nested_pointer(element);
+    });
+}
+
 struct ValueDefinition {
     Type type;
     BlockId block = kInvalidBlock;
@@ -341,6 +348,15 @@ std::string_view opcode_name(OpCode opcode) {
 VerifyResult verify(const Module& module) {
     VerifyResult result;
     std::unordered_set<std::string> function_names;
+    const auto verify_nested_pointer_spaces = [&](const Type& type, const SourceLocation& location) {
+        // Top-level mixed pointers have an explicit tagged representation.
+        // Nested pointer types do not: every inner pointer must have a concrete
+        // Metal address space before MSL declarations and casts are emitted.
+        if (module.stage == IrStage::kMetalLegalized && has_unresolved_nested_pointer(type)) {
+            add_diagnostic(&result, location,
+                           "Metal IR type contains an unresolved nested pointer address space: " + type.str());
+        }
+    };
 
     for (const Function& function : module.functions) {
         if (function.name.empty() || !function_names.insert(function.name).second) {
@@ -351,6 +367,13 @@ VerifyResult verify(const Module& module) {
     std::unordered_map<std::string, std::unordered_set<std::string>> call_graph;
     for (const Function& function : module.functions) {
         if (function.name.empty()) continue;
+        verify_nested_pointer_spaces(function.return_type, {});
+        if (function.kernel_abi) {
+            for (const auto& argument : function.kernel_abi->arguments)
+                verify_nested_pointer_spaces(argument.type, {});
+            for (const auto& binding : function.kernel_abi->bindings)
+                verify_nested_pointer_spaces(binding.type, {});
+        }
         if (function.blocks.empty()) {
             add_diagnostic(&result, {}, "function '" + function.name + "' has no basic blocks");
             continue;
@@ -363,6 +386,7 @@ VerifyResult verify(const Module& module) {
         }
 
         for (const FunctionArgument& argument : function.arguments) {
+            verify_nested_pointer_spaces(argument.type, {});
             if (argument.type.is_pointer() &&
                 !function.pointer_provenance.contains(argument.value)) {
                 add_diagnostic(&result, {},
@@ -428,6 +452,7 @@ VerifyResult verify(const Module& module) {
         }
         for (const BasicBlock& block : function.blocks) {
             for (const BlockArgument& argument : block.arguments) {
+                verify_nested_pointer_spaces(argument.type, {});
                 if (argument.value == kInvalidValue ||
                     !definitions.emplace(argument.value,
                                          ValueDefinition{
@@ -444,6 +469,8 @@ VerifyResult verify(const Module& module) {
                 if (operation.results.size() != operation.result_types.size()) {
                     add_diagnostic(&result, operation.location, "operation result/type arity mismatch");
                 }
+                for (const Type& type : operation.result_types)
+                    verify_nested_pointer_spaces(type, operation.location);
                 for (std::size_t result_index = 0; result_index < operation.results.size(); ++result_index) {
                     const ValueId value = operation.results[result_index];
                     const Type type = result_index < operation.result_types.size()
@@ -468,6 +495,7 @@ VerifyResult verify(const Module& module) {
             for (std::size_t op_index = 0; op_index < block.operations.size(); ++op_index) {
                 const Operation& operation = block.operations[op_index];
                 for (const Operand& operand : operation.operands) {
+                    verify_nested_pointer_spaces(operand.type, operation.location);
                     if (operand.kind != OperandKind::kValue) {
                         continue;
                     }

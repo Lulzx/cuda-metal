@@ -51,8 +51,11 @@ typed CuMetal IR and embeds the compiled Metal library in the executable,
 with no first-launch PTX JIT. CuMetal uses no private Apple APIs.
 PTX import resolves each definition and branch/loop argument from its reaching
 SSA values, with checked result and edge types; supported register reuse does not
-inherit the type of a later assignment. See [known gaps](docs/known-gaps.md) for
-memory-provenance and legacy-backend limits, and
+inherit the type of a later assignment. PTX memory addresses use byte pointers
+in their actual storage address space; the final Metal dereference uses the
+resolved value type. Metal IR rejects unresolved nested pointer address spaces.
+See [known gaps](docs/known-gaps.md) for memory-provenance and legacy-backend
+limits, and
 [compiler architecture](docs/compiler-architecture.md) for backend details.
 
 ## Limits
