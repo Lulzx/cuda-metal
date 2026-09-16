@@ -43,6 +43,51 @@ target_link_libraries(cumetal_ptx_address_cancellation_test PRIVATE cumetal_meta
 target_compile_options(cumetal_ptx_address_cancellation_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME unit_ptx_address_cancellation COMMAND cumetal_ptx_address_cancellation_test)
 
+add_executable(cumetal_ptx_address_alignment_test ptx_address_alignment_test.cpp)
+target_link_libraries(cumetal_ptx_address_alignment_test PRIVATE cumetal_metal_codegen)
+target_include_directories(cumetal_ptx_address_alignment_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_address_alignment_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_address_alignment COMMAND cumetal_ptx_address_alignment_test)
+
+add_executable(cumetal_ptx_type_proof_bounds_test ptx_type_proof_bounds_test.cpp)
+target_link_libraries(cumetal_ptx_type_proof_bounds_test PRIVATE cumetal_ir)
+target_compile_options(cumetal_ptx_type_proof_bounds_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_type_proof_bounds COMMAND cumetal_ptx_type_proof_bounds_test)
+
+add_executable(cumetal_ptx_scalar_ranges_test ptx_scalar_ranges_test.cpp)
+target_link_libraries(cumetal_ptx_scalar_ranges_test PRIVATE cumetal_ir)
+target_include_directories(cumetal_ptx_scalar_ranges_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_scalar_ranges_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_scalar_ranges COMMAND cumetal_ptx_scalar_ranges_test)
+
+add_executable(cumetal_ptx_pointer_ranges_test ptx_pointer_ranges_test.cpp)
+target_link_libraries(cumetal_ptx_pointer_ranges_test PRIVATE cumetal_ir)
+target_include_directories(cumetal_ptx_pointer_ranges_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_pointer_ranges_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_pointer_ranges COMMAND cumetal_ptx_pointer_ranges_test)
+
+add_executable(cumetal_ptx_local_memory_ranges_test ptx_local_memory_ranges_test.cpp)
+target_link_libraries(cumetal_ptx_local_memory_ranges_test PRIVATE cumetal_ir)
+target_include_directories(cumetal_ptx_local_memory_ranges_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_local_memory_ranges_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_local_memory_ranges COMMAND cumetal_ptx_local_memory_ranges_test)
+
+add_executable(cumetal_ptx_pointer_cell_refinement_test ptx_pointer_cell_refinement_test.cpp)
+target_link_libraries(cumetal_ptx_pointer_cell_refinement_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_pointer_cell_refinement_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_pointer_cell_refinement COMMAND cumetal_ptx_pointer_cell_refinement_test)
+
+add_executable(cumetal_ptx_legacy_register_width_test ptx_legacy_register_width_test.cpp)
+target_link_libraries(cumetal_ptx_legacy_register_width_test PRIVATE cumetal_ptx_codegen)
+target_compile_options(cumetal_ptx_legacy_register_width_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_legacy_register_width COMMAND cumetal_ptx_legacy_register_width_test)
+if(EXISTS "${LLVM_TOOLS_BINARY_DIR}/llvm-as")
+    add_test(NAME unit_ptx_legacy_register_width_assembly
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_legacy_register_width.py
+            $<TARGET_FILE:cumetalc> ${LLVM_TOOLS_BINARY_DIR}/llvm-as
+            --unit-binary $<TARGET_FILE:cumetal_ptx_legacy_register_width_test>)
+endif()
+
 add_executable(cumetal_ptx_global_reachability_test ptx_global_reachability_test.cpp)
 target_include_directories(cumetal_ptx_global_reachability_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
 target_link_libraries(cumetal_ptx_global_reachability_test PRIVATE cumetal_metal_codegen)

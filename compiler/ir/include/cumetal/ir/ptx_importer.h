@@ -3,6 +3,7 @@
 #include "cumetal/ir/ir.h"
 
 #include <string>
+#include <cstddef>
 #include <string_view>
 #include <vector>
 
@@ -13,6 +14,10 @@ struct PtxImportOptions {
     std::string entry_name;
     std::string source_name;
     std::string fp64_mode = "fast48";
+    // Optional tighter per-function SSA type-proof work limit. Zero retains
+    // the size-derived default. Exhaustion rejects the import; it never
+    // materializes a partially solved graph.
+    std::size_t type_solver_step_limit = 0;
 };
 
 struct PtxImportResult {

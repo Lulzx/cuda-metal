@@ -144,15 +144,52 @@ Argument-slot pointer recovery requires all associated signatures and stores to
 agree; ambiguous reuse supplies no name-wide pointer evidence. Aggregate address
 copies follow the reaching SSA value, preserving private storage and mutations.
 
+Private-address `or.b64` is normalized to addition only when allocation-derived
+known low bits prove the mask cannot carry. Copies, joins, selects and anchored
+loops retain that proof; missing alignment, unrelated roots and exhausted
+budgets supply no pointer evidence. Reaching-store validation can refine a
+generic pointer load to one concrete space only after every incoming path and
+overlapping store agrees. A later reuse of the cell-address register cannot
+retag the earlier load.
+
+Local-store disjointness also consumes unsigned guard bounds and bounded scalar
+induction. A separate bounded prefix analysis tracks initialized scalar bytes
+beside pointer cells and finite pointer loops. It explores unknown paths and
+keeps local addresses symbolic. Unknown effects invalidate facts; incomplete
+exploration discards all observed bounds. These ranges establish disjointness,
+not pointer contents or missing initialization. Arbitrary dynamic aliasing and
+unbounded loops remain unsupported.
+
+Passing a private pointer-cell address through a helper argument can suppress
+candidate discovery before reaching-store validation. Without address
+normalization, an overlapping byte-write control still emits an integer reload
+and an invalid unqualified MSL pointer cast. The normalized path rejects that
+control. This preexisting discovery gap is not a verified GPU result; escaped
+cells need unconditional demand validation, separately from proving disjoint
+caller-memory writes across helpers.
+
 The issue #76 regressions cover reordered/renamed diamonds, zero-seeded and bounded
 loops, guarded clones, conversions, wide products, tuples and rejected joins.
 The legacy PTX backend still cannot emit MSL for the joined ReLU fixtures; those
 legacy numerical cells are reported as untested rather than successful. Passing
 these focused tests does not establish full downstream compilation or GPU success.
-Signed float-to-integer conversion retains destination signedness and integer
-rounding mode in Metal emission. The new numerical conversion checks cover
-finite, in-range values; they do not establish exceptional-value, saturation or
-all wider-container semantics.
+Legacy LLVM lowering now uses declared register storage widths, including compact
+register ranges, independently of register spelling or later opcode hints. Its
+LLVM output passes the six ReLU assembly checks; this is not native legacy GPU
+acceptance. Direct legacy MSL still lacks those general CFG forms, and the native
+AIR/metallib route additionally requires the offline Apple toolchain.
+Generic f16/f32-to-integer conversion retains destination signedness and integer
+rounding mode, clamps to destination bounds, and handles NaN and subnormal bits
+before any numeric cast. GPU fixtures cover all four integer rounding modes,
+signed/unsigned 16/32/64-bit formats, direct/joined definitions and f32 FTZ.
+Wider conversion destinations first produce the
+instruction-format result, then sign-extend signed integer formats or
+zero-extend other formats into declared integer storage. Wider integer source
+containers are chopped before floating reinterpretation, including memory
+stores. The numerical storage fixtures cover direct, copied and joined integer
+results, f32 bit storage/round trips and f16 extraction. Saturating modifiers and
+directed integer-to-f32 rounding beyond RN reject explicitly. The separate full
+FP64 conversion matrix remains outside this measured gate.
 An immediate that the typed importer has already assigned a concrete pointer
 type is emitted with its exact 64-bit address and Metal address-space qualifier.
 This covers nonzero dangling pointers selected inside one instruction; it does

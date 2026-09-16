@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -1238,6 +1239,9 @@ class GenericLlvmEmitter {
             result.error = "internal error: missing param vectors";
             return result;
         }
+        for (const auto& declaration : entry_.register_declarations) {
+            register_declarations_[declaration.name].push_back(&declaration);
+        }
         if (kernel_mode_ && !append_required_builtin_params()) {
             result.error = error_;
             return result;
@@ -1261,7 +1265,7 @@ class GenericLlvmEmitter {
             result.error = error_;
             return result;
         }
-        if (!emit_body()) {
+        if (!emit_body() || !error_.empty()) {
             result.error = error_;
             return result;
         }
@@ -1291,6 +1295,14 @@ class GenericLlvmEmitter {
         int bits = 0;
         std::string slot_name;
     };
+
+    // Keep compact ranges compact: only registers used by instructions need a
+    // storage contract. A work limit also bounds many overlapping declarations.
+    static constexpr std::size_t kRegisterContractWorkLimit = 64'000'000;
+    std::size_t register_contract_work_ = 0;
+    std::unordered_map<std::string,
+                       std::vector<const cumetal::ptx::EntryFunction::RegisterDeclaration*>>
+        register_declarations_;
 
     struct Value {
         std::string ir;
@@ -1409,12 +1421,77 @@ class GenericLlvmEmitter {
         return "%cm_reg_" + base + "_" + std::to_string(slot_id_++);
     }
 
+    int declared_register_bit_width(const std::string& reg) {
+        int bits = 0;
+        std::size_t matches = 0;
+        bool scoped = false;
+        const auto fail_contract = [&](const std::string& reason) {
+            if (error_.empty()) error_ = reason + " for register '" + reg + "'";
+        };
+        const auto take_work = [&]() {
+            if (++register_contract_work_ > kRegisterContractWorkLimit) {
+                fail_contract("legacy LLVM register declaration work limit exceeded");
+                return false;
+            }
+            return true;
+        };
+        const auto merge = [&](const std::string& type, bool function_scope) {
+            // Do not use opcode suffix parsing: e.g. stoi("16x2") accepts 16,
+            // which is not the storage width of a packed type.
+            int declared = 0;
+            if (type == "pred") declared = 1;
+            else if (type == "b8" || type == "u8" || type == "s8") declared = 8;
+            else if (type == "b16" || type == "u16" || type == "s16" || type == "f16") declared = 16;
+            else if (type == "b32" || type == "u32" || type == "s32" || type == "f32") declared = 32;
+            else if (type == "b64" || type == "u64" || type == "s64" || type == "f64") declared = 64;
+            if (declared == 0) {
+                fail_contract("unsupported legacy LLVM declared register type '" + type + "'");
+                return;
+            }
+            if (bits != 0 && bits != declared) {
+                fail_contract("conflicting legacy LLVM declared register widths");
+            }
+            // The parser does not retain lexical scope identity. Sharing a
+            // slot across same-named scoped declarations can alias live values
+            // even when their widths agree, so do not guess a scope winner.
+            if (matches != 0 && (scoped || !function_scope)) {
+                fail_contract("ambiguous scoped legacy LLVM register declarations");
+            }
+            bits = declared;
+            ++matches;
+            scoped = scoped || !function_scope;
+        };
+        if (const auto found = register_declarations_.find(reg);
+            found != register_declarations_.end()) {
+            for (const auto* declaration : found->second) {
+                if (!take_work()) return 0;
+                merge(declaration->type, declaration->function_scope);
+            }
+        }
+        for (const auto& range : entry_.register_ranges) {
+            if (!take_work()) return 0;
+            if (!starts_with(reg, range.prefix)) continue;
+            const std::string_view suffix = std::string_view(reg).substr(range.prefix.size());
+            if (suffix.empty() || (suffix.size() > 1 && suffix.front() == '0')) continue;
+            std::size_t index = 0;
+            const auto parsed = std::from_chars(suffix.data(), suffix.data() + suffix.size(), index);
+            if (parsed.ec != std::errc{} || parsed.ptr != suffix.data() + suffix.size() ||
+                index >= range.count) continue;
+            merge(range.type, range.function_scope);
+        }
+        return bits;
+    }
+
     RegSlot& ensure_reg_slot(const std::string& reg, int bits_hint = 0) {
         auto it = reg_slots_.find(reg);
         if (it != reg_slots_.end()) {
             return it->second;
         }
-        int bits = bits_hint;
+        // PTX declarations define register storage. Instruction widths may
+        // differ (narrow loads, wide multiplies, conversions, tuple moves), and
+        // conventional register spelling is only a fallback for undeclared PTX.
+        int bits = declared_register_bit_width(reg);
+        if (bits <= 0) bits = bits_hint;
         if (bits <= 0) {
             bits = register_bit_width_from_name(reg);
         }
@@ -1438,6 +1515,14 @@ class GenericLlvmEmitter {
 
     std::string emit_load_reg_bits(std::ostringstream& os, const std::string& reg, int bits_hint = 0) {
         RegSlot& slot = ensure_reg_slot(reg, bits_hint);
+        // Raw callers emit a consumer of exactly bits_hint, unlike the typed
+        // operand decoders which explicitly convert from the storage width.
+        // Decline unsupported combinations instead of emitting mismatched IR.
+        if (bits_hint > 0 && slot.bits != bits_hint && error_.empty()) {
+            error_ = "legacy LLVM raw register load width mismatch for register '" + reg +
+                     "': storage i" + std::to_string(slot.bits) + ", required i" +
+                     std::to_string(bits_hint);
+        }
         const std::string tmp = next_tmp("ld");
         os << "  " << tmp << " = load " << llvm_int_type(slot.bits) << ", " << llvm_int_type(slot.bits)
            << "* " << slot.slot_name << ", align " << std::max(1, slot.bits / 8) << "\n";

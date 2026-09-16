@@ -2866,6 +2866,21 @@ if(APPLE)
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_address_cancellation.py ${CMAKE_BINARY_DIR})
     # Eight children each own a 90-second deadline and process-group cleanup.
     set_tests_properties(functional_ptx_address_cancellation PROPERTIES TIMEOUT 800)
+    add_test(NAME functional_ptx_address_alignment
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_address_alignment.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_address_alignment PROPERTIES TIMEOUT 500)
+    add_test(NAME functional_ptx_memory_ranges
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_memory_ranges.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_memory_ranges PROPERTIES TIMEOUT 600)
+    add_test(NAME functional_ptx_pointer_cell_refinement
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_pointer_cell_refinement.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_pointer_cell_refinement PROPERTIES TIMEOUT 300)
+    add_test(NAME functional_ptx_cvt_storage
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_cvt_storage.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_cvt_storage PROPERTIES TIMEOUT 2400)
+    add_test(NAME functional_ptx_float_integer
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_float_integer.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_float_integer PROPERTIES TIMEOUT 600)
     add_test(NAME functional_ptx_pointer_record_fields
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_pointer_record_fields.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_pointer_record_fields PROPERTIES TIMEOUT 180)

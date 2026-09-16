@@ -1,5 +1,7 @@
 """Shared launch/cleanup support; numerical expectations belong to each test."""
 import ctypes as c
+from contextlib import nullcontext
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -33,7 +35,8 @@ def expect_compile_failure(build, source, entry, diagnostic):
 
 def run_integer_case(build, ptx_source, values, expected, label, entry="integer_probe",
                      word_bits=64, input_words=1, output_words=2,
-                     backend="cumetal-ir", emit="msl", abi_lines=None, argument_order=(0, 1, 2)):
+                     backend="cumetal-ir", emit="msl", abi_lines=None, argument_order=(0, 1, 2),
+                     artifacts_dir=None):
     """Run a two-buffer/count kernel with integer inputs and expected outputs."""
     os.environ['CUMETAL_TRACE_GPU'] = '1'
     os.environ['CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS'] = '0'
@@ -54,13 +57,24 @@ def run_integer_case(build, ptx_source, values, expected, label, entry="integer_
     api('cuInit', [u32], 0)
     api('cuCtxCreate', [c.POINTER(ptr), u32, c.c_int], c.byref(context), 0, 0)
     try:
-        with tempfile.TemporaryDirectory(prefix='cumetal-ptx-') as work:
+        if artifacts_dir is None:
+            workspace = tempfile.TemporaryDirectory(prefix='cumetal-ptx-')
+        else:
+            artifacts_dir = Path(artifacts_dir).resolve()
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            workspace = nullcontext(artifacts_dir)
+        with workspace as work:
             ptx, msl = Path(work) / 'test.ptx', Path(work) / ('test.metallib' if emit == 'metallib' else 'test.metal')
             ptx.write_text(ptx_source)
-            compiled = subprocess.run(
-                [str(build / 'cumetalc'), str(ptx), '--backend=' + backend,
-                 '--ptx-strict', '--entry', entry, '--emit=' + emit, '-o', str(msl)],
-                capture_output=True, text=True)
+            command = [str(build / 'cumetalc'), str(ptx), '--backend=' + backend,
+                       '--ptx-strict', '--entry', entry, '--emit=' + emit, '-o', str(msl)]
+            if artifacts_dir is not None:
+                command.append('--overwrite')
+            compiled = subprocess.run(command, capture_output=True, text=True)
+            if artifacts_dir is not None:
+                (artifacts_dir / 'compiler-command.json').write_text(json.dumps(command, indent=2) + '\n')
+                (artifacts_dir / 'compiler-stdout.log').write_text(compiled.stdout)
+                (artifacts_dir / 'compiler-stderr.log').write_text(compiled.stderr)
             if compiled.returncode:
                 raise RuntimeError(f'{label}: PTX compilation failed\n{compiled.stderr}')
             if abi_lines is not None:

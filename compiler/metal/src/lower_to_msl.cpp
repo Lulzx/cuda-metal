@@ -3552,9 +3552,88 @@ struct AstLowerer {
                     fail(&operation, "unknown float-to-integer conversion rounding mode");
                     return std::nullopt;
                 }
-                input = MslExpression::call(rounder, {input}, input->type);
                 const bool signed_output = operation.attributes.contains("signed_output") &&
                     operation.attributes.at("signed_output") == "true";
+                const auto source_bits = operation.operands.front().type.bit_width;
+                const auto destination_bits = operation.result_types.front().bit_width;
+                if (source_bits == 16 || source_bits == 32) {
+                    if (destination_bits != 8 && destination_bits != 16 &&
+                        destination_bits != 32 && destination_bits != 64) {
+                        fail(&operation, "unsupported float-to-integer destination width");
+                        return std::nullopt;
+                    }
+                    // PTX clamps before the wider register-container extension.
+                    // Never round MAXINT to a float: for s32/s64/u32/u64 it can
+                    // become the first out-of-range power of two. That exact
+                    // power is instead an exclusive upper conversion bound.
+                    const MslType result_type = lower_result_type(operation);
+                    const auto result_bits = [&](std::uint64_t bits) {
+                        return MslExpression::cast(result_type, MslExpression::literal(
+                            std::to_string(bits) + "ul", MslType::uint(64)));
+                    };
+                    const auto integer_literal = [](std::uint32_t bits) {
+                        return MslExpression::literal(std::to_string(bits) + "u", MslType::uint());
+                    };
+                    const auto compare = [](const char* op, MslExpr left, MslExpr right) {
+                        return MslExpression::binary(op, std::move(left), std::move(right),
+                                                     MslType::boolean());
+                    };
+                    const MslExpr raw = MslExpression::cast(MslType::uint(),
+                        MslExpression::bitcast(MslType::uint(source_bits), input));
+                    const std::uint32_t sign_bit = source_bits == 16 ? 0x8000u : 0x80000000u;
+                    const std::uint32_t infinity = source_bits == 16 ? 0x7c00u : 0x7f800000u;
+                    const std::uint32_t minimum_normal = source_bits == 16 ? 0x400u : 0x800000u;
+                    const MslExpr magnitude = MslExpression::binary(
+                        "&", raw, integer_literal(sign_bit - 1), MslType::uint());
+                    const MslExpr negative = compare("!=", MslExpression::binary(
+                        "&", raw, integer_literal(sign_bit), MslType::uint()), integer_literal(0));
+                    const MslExpr subnormal = MslExpression::binary("&&",
+                        compare(">", magnitude, integer_literal(0)),
+                        compare("<", magnitude, integer_literal(minimum_normal)), MslType::boolean());
+                    const bool flush_subnormal = source_bits == 32 &&
+                        operation.attributes.contains("flush_subnormal") &&
+                        operation.attributes.at("flush_subnormal") == "true";
+                    const std::uint64_t sign_result = std::uint64_t{1} << (destination_bits - 1);
+                    const std::uint64_t maximum = signed_output ? sign_result - 1 :
+                        destination_bits == 64 ? std::numeric_limits<std::uint64_t>::max() :
+                        (std::uint64_t{1} << destination_bits) - 1;
+                    const MslExpr zero = result_bits(0);
+                    MslExpr subnormal_result = zero;
+                    // Bit classification also preserves directed rounding when
+                    // the target's arithmetic would flush a subnormal operand.
+                    if (!flush_subnormal && rounding == "2u" && signed_output)
+                        subnormal_result = MslExpression::conditional(
+                            negative, result_bits(maximum * 2 + 1), zero, result_type);
+                    else if (!flush_subnormal && rounding == "3u")
+                        subnormal_result = MslExpression::conditional(
+                            negative, zero, result_bits(1), result_type);
+                    const auto upper_power = signed_output ? destination_bits - 1 : destination_bits;
+                    const std::string upper = upper_power == 64 ? "18446744073709551616" :
+                        std::to_string(std::uint64_t{1} << upper_power);
+                    const MslType f32 = MslType::floating();
+                    const MslExpr rounded = MslExpression::call(rounder,
+                        {MslExpression::cast(f32, input)}, f32);
+                    const MslExpr below = compare("<=", rounded, MslExpression::literal(
+                        signed_output ? "-" + upper + ".0f" : "0.0f", f32));
+                    const MslExpr above = compare(">=", rounded,
+                        MslExpression::literal(upper + ".0f", f32));
+                    MslExpr converted = MslExpression::cast(signed_output
+                        ? MslType::sint(destination_bits) : result_type, rounded);
+                    if (signed_output) converted = MslExpression::bitcast(result_type, converted);
+                    // Scalar ?: evaluates only its selected branch. In
+                    // particular, neither NaN nor an out-of-range value may
+                    // reach the numeric cast (Metal select() would be eager).
+                    const MslExpr clamped = MslExpression::conditional(below,
+                        result_bits(signed_output ? sign_result : 0),
+                        MslExpression::conditional(above, result_bits(maximum), converted, result_type),
+                        result_type);
+                    return declare_result(operation, MslExpression::conditional(
+                        compare(">", magnitude, integer_literal(infinity)),
+                        result_bits(destination_bits == 64 ? sign_result : 0),
+                        MslExpression::conditional(subnormal, subnormal_result, clamped, result_type),
+                        result_type));
+                }
+                input = MslExpression::call(rounder, {input}, input->type);
                 const MslType numeric_type = signed_output
                     ? MslType::sint(operation.result_types.front().bit_width) : lower_result_type(operation);
                 const MslExpr converted = MslExpression::cast(numeric_type, input);

@@ -57,6 +57,14 @@ resolved value type. Metal IR rejects unresolved nested pointer address spaces.
 Before pointer lowering, bounded SSA analysis can cancel a common address base
 from 64-bit arithmetic, including loop-carried cursors, and retain the resulting
 wrapping scalar count. It never materializes a Metal pointer as an integer.
+Aligned private-address ORs become byte offsets only when actual allocation
+alignment and reaching values prove every selected bit is zero. Local pointer
+fields admitted to reaching-store validation use bounded guard/range and
+initialized-prefix proofs to exclude intervening disjoint writes; missing
+initialization and possible overlaps reject within that proof. Escaped-cell
+discovery still has a separate validation gap documented below.
+Scalar conversions retain both their instruction format and wider
+declared register storage, including the required destination extension.
 See [known gaps](docs/known-gaps.md) for memory-provenance and legacy-backend
 limits, and
 [compiler architecture](docs/compiler-architecture.md) for backend details.

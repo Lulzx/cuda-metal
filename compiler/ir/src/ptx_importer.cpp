@@ -14,6 +14,10 @@
 #include "ptx_pointer_inference.h"
 #include "ptx_tuple_normalization.h"
 #include "ptx_address_cancellation.h"
+#include "ptx_address_alignment.h"
+#include "ptx_scalar_ranges.h"
+#include "ptx_pointer_ranges.h"
+#include "ptx_local_memory_ranges.h"
 
 #include <algorithm>
 #include <cctype>
@@ -909,6 +913,9 @@ struct Importer {
     std::unordered_map<ValueId, Type> value_types;
     bool normalized_address_cancellation = false;
     bool address_cancellation_applied = false;
+    bool normalized_address_alignment = false;
+    bool address_alignment_applied = false;
+    std::size_t type_solver_step_limit = 0;
     std::unordered_set<ValueId> integer_zero_values;
     std::vector<RawBlock> raw_blocks;
     std::deque<Instruction> normalized_instructions;
@@ -1335,9 +1342,12 @@ struct Importer {
         // when an input changes. The bound diagnoses bugs, never accepts a
         // partially inferred function.
         std::size_t steps = 0;
-        const std::size_t budget = std::max<std::size_t>(1024, count * 64);
+        const auto default_budget = std::max<std::size_t>(1024, count * 64);
+        const std::size_t budget = type_solver_step_limit
+            ? std::min(default_budget, type_solver_step_limit) : default_budget;
         while (!pending.empty()) {
-            if (++steps > budget) return fail(nullptr, "PTX SSA type constraints did not converge");
+            if (++steps > budget) return fail(nullptr, "PTX SSA type proof budget exhausted (limit=" +
+                std::to_string(budget) + ")");
             const auto node = pending.front(); pending.pop_front(); queued[node] = false;
             if (node >= definitions.size()) {
                 const auto& join = joins[node - definitions.size()];
@@ -1495,6 +1505,17 @@ struct Importer {
             for (std::size_t i = 0; i < results.size(); ++i) {
                 auto type = inferred;
                 if (root == "shfl" && i == 1) type = Type::predicate();
+                if (root == "cvt") {
+                    const auto storage = register_contract(destinations[i]);
+                    if (storage && storage->kind == TypeKind::kInteger &&
+                        (type.kind == TypeKind::kInteger || type.kind == TypeKind::kFloat) &&
+                        storage->bit_width > type.bit_width) {
+                        // Conversion rounds/chops to its format, then extends
+                        // into the declared register. That complete value is
+                        // what later copies, joins and wide stores consume.
+                        type = *storage;
+                    }
+                }
                 if (root == "ld" && !starts_with(instruction.opcode, "ld.param") && type.kind == TypeKind::kInteger) {
                     const auto storage = register_contract(destinations[i]);
                     if (storage) type = Type::integer(std::max(type.bit_width, storage->bit_width));
@@ -1576,7 +1597,7 @@ struct Importer {
         // the original path for functions that did not change.
         std::vector<const Instruction*> proof_instructions;
         std::optional<cumetal::ptx::EntryFunction> proof_entry;
-        if (address_cancellation_applied) {
+        if (address_cancellation_applied || address_alignment_applied) {
             proof_entry = *entry;
             proof_entry->instructions.clear();
             for (const auto& block : raw_blocks)
@@ -2147,7 +2168,7 @@ struct Importer {
         // The bounded table scan above only discovers candidates. Its textual
         // store order is not a proof that a store reaches a load. Validate each
         // candidate on the normalized CFG, using the final SSA store operands.
-        const auto validate_local_load_proofs = [&](const auto& candidates) {
+        const auto validate_local_load_proofs = [&](const auto& candidates, auto& refined) {
             if (candidates.empty()) return true;
             std::unordered_map<std::string, bool> call_preserves_memory;
             const auto preserves_caller_memory = [&](const Instruction& call) {
@@ -2557,6 +2578,131 @@ struct Importer {
                 }
                 return operand_address(instruction->operands[index]);
             };
+            detail::ScalarRanges scalar_ranges(raw_blocks, incoming, outgoing,
+                block_arguments, instruction_results, value_types);
+            std::unordered_map<std::string, std::uint64_t> depot_sizes;
+            for (const auto& [name, depot] : local_depots) depot_sizes[name] = depot.byte_size;
+            detail::PointerRanges pointer_ranges(raw_blocks, incoming, outgoing,
+                block_arguments, instruction_results,
+                [&](ValueId value, const Instruction*) -> std::optional<detail::ExactLocalAddress> {
+                    const auto address = value_address(value_address, value);
+                    if (!address || !address->offsets || address->offsets->size() != 1 ||
+                        !depot_sizes.contains(address->depot)) return std::nullopt;
+                    const __int128 offset = static_cast<__int128>(address->base) + *address->offsets->begin();
+                    if (offset < 0 || offset > INT64_MAX || offset > depot_sizes.at(address->depot))
+                        return std::nullopt;
+                    return detail::ExactLocalAddress{address->depot, static_cast<std::int64_t>(offset),
+                        depot_sizes.at(address->depot)};
+                }, [&](ValueId value, const Instruction* at) { return scalar_ranges.get(value, at); });
+            std::map<std::pair<ValueId, const Instruction*>, std::optional<detail::LocalPointerRange>>
+                pointer_range_cache;
+            detail::LocalMemoryRanges memory_ranges(raw_blocks, depot_sizes, preserves_caller_memory);
+            std::unordered_map<const Instruction*, detail::LocalMemoryRangeProof> prefix_proofs;
+            const auto prefix_disjoint_store = [&](const Instruction* load, const Instruction* store,
+                                                    const LocalAddress& loaded, __int128 cell) {
+                if (!prefix_proofs.contains(load)) prefix_proofs.emplace(load, memory_ranges.prove_before(load));
+                const auto& proof = prefix_proofs.at(load);
+                if (!proof.complete || !proof.stores.contains(store)) return false;
+                const auto& range = proof.stores.at(store);
+                if (range.depot != loaded.depot) return true;
+                const auto bytes = static_cast<__int128>(ptx_scalar_type(store->opcode).bit_width / 8) *
+                    memory_vector_width(store->opcode);
+                return bytes > 0 && (static_cast<__int128>(range.lower) >= cell + 8 ||
+                    static_cast<__int128>(range.upper) + bytes <= cell);
+            };
+            struct AddressRange {
+                std::string depot;
+                std::int64_t lower = 0, upper = 0;
+            };
+            // Intervals may discharge disjointness only. They never establish
+            // an initializing pointer store, nor replace the exact cell proof.
+            const auto disjoint_store = [&](const Instruction* event, const LocalAddress& loaded,
+                                            __int128 cell) {
+                std::unordered_set<ValueId> active;
+                std::unordered_map<ValueId, std::optional<AddressRange>> cache;
+                std::size_t work = 0;
+                const auto range = [&](auto&& self, ValueId value) -> std::optional<AddressRange> {
+                    if (++work > 16384 || active.size() > 256) return std::nullopt;
+                    if (cache.contains(value)) return cache.at(value);
+                    if (!active.insert(value).second) return std::nullopt;
+                    const auto evaluate = [&]() -> std::optional<AddressRange> {
+                        if (joined_values.contains(value)) {
+                            const auto forwarded = forwarded_definition(value);
+                            if (forwarded && *forwarded != value) return self(self, *forwarded);
+                            std::optional<AddressRange> merged;
+                            for (auto input : joined_values.at(value)) {
+                                const auto next = self(self, input);
+                                if (!next || (merged && next->depot != merged->depot)) return std::nullopt;
+                                if (!merged) merged = next;
+                                else {
+                                    merged->lower = std::min(merged->lower, next->lower);
+                                    merged->upper = std::max(merged->upper, next->upper);
+                                }
+                            }
+                            return merged;
+                        }
+                        if (!definitions.contains(value)) return std::nullopt;
+                        const auto* definition = definitions.at(value);
+                        if (!definition->predicate.empty() ||
+                            destination_registers(*definition).size() != 1) return std::nullopt;
+                        const auto input = [&](std::size_t index) -> std::optional<AddressRange> {
+                            const auto symbol = parameter_name_from_operand(definition->operands[index]);
+                            if (local_depots.contains(symbol)) return AddressRange{symbol};
+                            const auto source = source_value(definition, definition->operands[index]);
+                            return source ? self(self, *source) : std::nullopt;
+                        };
+                        if ((definition->opcode == "mov.b64" || definition->opcode == "mov.u64" ||
+                             definition->opcode == "mov.s64" || definition->opcode == "cvta.local.u64" ||
+                             definition->opcode == "cvta.to.local.u64") && definition->operands.size() == 2 &&
+                            definition->operands[1].find('{') == std::string::npos) return input(1);
+                        const bool subtract = definition->opcode == "sub.s64" || definition->opcode == "sub.u64";
+                        if (definition->operands.size() != 3 ||
+                            (!subtract && definition->opcode != "add.s64" && definition->opcode != "add.u64"))
+                            return std::nullopt;
+                        for (std::size_t index : {1U, 2U}) {
+                            if (subtract && index == 2) break;
+                            const auto base = input(index);
+                            if (!base) continue;
+                            const auto number = integer_literal(definition->operands[3-index]);
+                            const auto source = source_value(definition, definition->operands[3-index]);
+                            const auto offset = number ? std::optional(detail::ScalarRange{*number,*number})
+                                : source ? scalar_ranges.get(*source,event) : std::nullopt;
+                            if (!offset) continue;
+                            const __int128 lo = static_cast<__int128>(base->lower) +
+                                (subtract ? -static_cast<__int128>(offset->upper) : offset->lower);
+                            const __int128 hi = static_cast<__int128>(base->upper) +
+                                (subtract ? -static_cast<__int128>(offset->lower) : offset->upper);
+                            if (lo < INT64_MIN || hi > INT64_MAX) return std::nullopt;
+                            return AddressRange{base->depot,static_cast<std::int64_t>(lo),static_cast<std::int64_t>(hi)};
+                        }
+                        return std::nullopt;
+                    };
+                    auto result = evaluate();
+                    if (!result) {
+                        const auto key = std::make_pair(value, event);
+                        constexpr std::size_t kMaxPointerRangeQueries = 65536;
+                        if (!pointer_range_cache.contains(key) && pointer_range_cache.size() < kMaxPointerRangeQueries)
+                            pointer_range_cache.emplace(key, pointer_ranges.get(value, event));
+                        if (const auto found = pointer_range_cache.find(key); found != pointer_range_cache.end())
+                            if (const auto& iterator = found->second)
+                                result = AddressRange{iterator->depot, iterator->lower, iterator->upper};
+                    }
+                    active.erase(value);
+                    cache[value] = result;
+                    return result;
+                };
+                const auto source = source_value(event,event->operands[0]);
+                if (!source) return false;
+                const auto written = range(range,*source);
+                if (!written || work > 16384) return false;
+                if (written->depot != loaded.depot) return true;
+                const auto bytes = static_cast<__int128>(ptx_scalar_type(event->opcode).bit_width / 8) *
+                    memory_vector_width(event->opcode);
+                if (bytes <= 0) return false;
+                const auto displacement = memory_operand_offset(event->operands[0]);
+                return static_cast<__int128>(written->lower) + displacement >= cell + 8 ||
+                    static_cast<__int128>(written->upper) + displacement + bytes <= cell;
+            };
             for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
                 for (std::size_t index = 0; index < raw_blocks[b].instructions.size(); ++index) {
                     const auto* load = raw_blocks[b].instructions[index];
@@ -2568,6 +2714,7 @@ struct Importer {
                     const auto address = proven_address(load, 1);
                     if (!address || !address->offsets)
                         return fail(load, "unsupported local pointer memory proof: unresolved load address");
+                    Type proven_type = refined.contains(origin) ? refined.at(origin) : candidate->second;
                     for (const auto offset : *address->offsets) {
                         for (std::size_t lane = 0; lane < memory_vector_width(load->opcode); ++lane) {
                             const __int128 cell = static_cast<__int128>(address->base) + offset +
@@ -2588,10 +2735,16 @@ struct Importer {
                                     const auto root = root_opcode(event->opcode);
                                     if (root == "call") {
                                         if (preserves_caller_memory(*event)) continue;
-                                        return fail(load, "unsupported local pointer memory proof: intervening call may modify the cell");
+                                        return fail(load, "unsupported local pointer memory proof: intervening call at line " +
+                                            std::to_string(event->line) + " (" + direct_call_target(*event).value_or("indirect") +
+                                            ") may modify the cell");
                                     }
                                     if (root != "st" || event->operands.size() < 2 || starts_with(event->opcode, "st.param")) continue;
                                     const auto written = proven_address(event, 0);
+                                    if (!written || !written->offsets) {
+                                        if (disjoint_store(event, *address, cell)) continue;
+                                        if (prefix_disjoint_store(load, event, *address, cell)) continue;
+                                    }
                                     if (!written) {
                                         const auto type = store_address_types.at(event);
                                         if (event->opcode.find(".global") != std::string::npos ||
@@ -2599,7 +2752,10 @@ struct Importer {
                                             event->opcode.find(".const") != std::string::npos ||
                                             (type.is_pointer() && type.address_space != AddressSpace::kNone &&
                                              type.address_space != AddressSpace::kPrivate)) continue;
-                                        return fail(load, "unsupported local pointer memory proof: unresolved potentially overlapping store");
+                                        const auto& prefix = prefix_proofs.at(load);
+                                        return fail(load, "unsupported local pointer memory proof: unresolved potentially overlapping store at line " +
+                                            std::to_string(event->line) + " (" + event->operands[0] + "); prefix " +
+                                            (prefix.complete ? "has no address bound" : prefix.reason));
                                     }
                                     if (written->depot != address->depot) continue;
                                     if (!written->offsets)
@@ -2622,8 +2778,12 @@ struct Importer {
                                             if (written_lane >= types.size() || !types[written_lane].is_pointer() ||
                                                 types[written_lane].address_space == AddressSpace::kNone)
                                                 return fail(load, "unsupported local pointer memory proof: reaching store has no concrete pointer type");
-                                            if (types[written_lane].address_space != candidate->second.address_space)
-                                                return fail(load, "conflicting local pointer memory proof: reaching stores have different address spaces");
+                                            if (proven_type.address_space == AddressSpace::kNone)
+                                                proven_type = types[written_lane];
+                                            else if (types[written_lane].address_space != proven_type.address_space)
+                                                return fail(load, "conflicting local pointer memory proof: reaching store at line " +
+                                                    std::to_string(event->line) + " has type " + types[written_lane].str() +
+                                                    ", candidate " + proven_type.str());
                                         }
                                     }
                                     if (overlaps && written->offsets->size() == 1 && event->predicate.empty()) {
@@ -2646,6 +2806,7 @@ struct Importer {
                                 return fail(load, "unsupported local pointer memory proof: uninitialized memory cycle");
                         }
                     }
+                    refined[origin] = proven_type;
                 }
             }
             return true;
@@ -2699,6 +2860,37 @@ struct Importer {
                 }
             }
             if (!added) {
+                const auto rebuild_type_inputs = [&]() {
+                    instruction_results.clear();
+                    definition_types.clear();
+                    value_types.clear();
+                    pointer_load_types.clear();
+                    integer_zero_values.clear();
+                    aggregate_parameter_addresses.clear();
+                    implicit_values.clear();
+                    incoming.clear();
+                    outgoing.clear();
+                    block_arguments.clear();
+                    for (auto& block : raw_blocks) {
+                        block.last_definitions.clear();
+                        block.uses_before_definition.clear();
+                    }
+                    allocate_values();
+                    return construct_ssa() && resolve_types();
+                };
+                if (!normalized_address_alignment && external_types.empty() &&
+                    !raw_blocks.empty() && raw_blocks.front().id != kInvalidBlock) {
+                    normalized_address_alignment = true;
+                    const auto aligned = detail::legalize_aligned_local_address_ors(
+                        raw_blocks, incoming, outgoing, block_arguments, instruction_results,
+                        value_types, local_depots, normalized_instructions, &instruction_origins);
+                    if (aligned.budget_exhausted)
+                        return fail(nullptr, "PTX local-address alignment proof budget exhausted");
+                    if (aligned.rewritten) {
+                        address_alignment_applied = true;
+                        return rebuild_type_inputs();
+                    }
+                }
                 // The provisional graph can contain integer-minus-address
                 // intermediates whose common roots cancel later. Recover
                 // their integer residuals before assigning final SSA types;
@@ -2716,23 +2908,7 @@ struct Importer {
                             normalized_instructions,
                             &instruction_origins)) {
                         address_cancellation_applied = true;
-                        instruction_results.clear();
-                        definition_types.clear();
-                        value_types.clear();
-                        pointer_load_types.clear();
-                        integer_zero_values.clear();
-                        aggregate_parameter_addresses.clear();
-                        implicit_values.clear();
-                        incoming.clear();
-                        outgoing.clear();
-                        block_arguments.clear();
-                        for (auto& block : raw_blocks) {
-                            block.last_definitions.clear();
-                            block.uses_before_definition.clear();
-                        }
-                        allocate_values();
-                        if (!construct_ssa()) return false;
-                        return resolve_types();
+                        return rebuild_type_inputs();
                     }
                 }
                 value_types = external_types;
@@ -2740,35 +2916,136 @@ struct Importer {
                 integer_zero_values.clear();
                 aggregate_parameter_addresses.clear();
                 if (!solve_value_types(true)) return false;
-                if (address_cancellation_applied) {
+                if (address_cancellation_applied || address_alignment_applied) {
+                    // Generic PTX memory syntax still requires an address.
+                    // Recover that demand from actual SSA consumers and plain
+                    // copies/joins. This requests a cell proof; it does not
+                    // assign pointer bits or an address space by itself.
+                    std::unordered_set<ValueId> address_demands;
+                    std::unordered_map<ValueId, std::vector<ValueId>> address_copies;
+                    constexpr std::size_t demand_work_limit = 1'000'000;
+                    std::size_t demand_work = 0;
+                    const auto charge_demand_work = [&](std::size_t count, const char* phase) {
+                        if (count > demand_work_limit - demand_work)
+                            return fail(nullptr, "PTX memory-address demand proof budget exhausted (" +
+                                std::string(phase) + ": " + std::to_string(demand_work) +
+                                " used, " + std::to_string(count) + " requested, limit " +
+                                std::to_string(demand_work_limit) + ")");
+                        demand_work += count;
+                        return true;
+                    };
+                    for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+                        if (!charge_demand_work(1, "block construction")) return false;
+                        for (const auto& [name, value] : block_arguments[b]) {
+                            for (const auto predecessor : raw_blocks[b].predecessors) {
+                                if (!charge_demand_work(1, "join edge construction")) return false;
+                                address_copies[value].push_back(outgoing[predecessor].at(name));
+                            }
+                        }
+                        if (!charge_demand_work(incoming[b].size(), "environment copy")) return false;
+                        auto environment = incoming[b];
+                        for (const auto* instruction : raw_blocks[b].instructions) {
+                            if (!charge_demand_work(1, "instruction scan")) return false;
+                            const auto root = root_opcode(instruction->opcode);
+                            const auto& values = instruction_results.at(instruction);
+                            std::optional<std::size_t> address_index;
+                            if ((root == "ld" || root == "atom") &&
+                                !starts_with(instruction->opcode, "ld.param")) address_index = 1;
+                            else if (root == "st" || root == "red") address_index = 0;
+                            if (address_index && *address_index < instruction->operands.size()) {
+                                const auto found = environment.find(first_register(instruction->operands[*address_index]));
+                                if (found != environment.end()) {
+                                    if (!charge_demand_work(1, "demand seed insertion")) return false;
+                                    address_demands.insert(found->second);
+                                }
+                            }
+                            if (values.size() == 1 && instruction->predicate.empty() &&
+                                instruction->operands.size() == 2 &&
+                                (instruction->opcode == "mov.b64" || instruction->opcode == "mov.u64" ||
+                                 instruction->opcode == "mov.s64" || root == "cvta") &&
+                                instruction->operands[1].find('{') == std::string::npos) {
+                                const auto found = environment.find(first_register(instruction->operands[1]));
+                                if (found != environment.end()) {
+                                    if (!charge_demand_work(1, "copy edge construction")) return false;
+                                    address_copies[values.front()].push_back(found->second);
+                                }
+                            }
+                            const auto destinations = ssa_destinations(*instruction);
+                            if (!charge_demand_work(destinations.size(), "environment update")) return false;
+                            for (std::size_t i = 0; i < destinations.size(); ++i) environment[destinations[i]] = values[i];
+                        }
+                    }
+                    if (!charge_demand_work(address_demands.size(), "initial demand queue")) return false;
+                    std::vector<ValueId> pending_addresses(address_demands.begin(), address_demands.end());
+                    while (!pending_addresses.empty()) {
+                        if (!charge_demand_work(1, "demand node visit")) return false;
+                        const auto value = pending_addresses.back();
+                        pending_addresses.pop_back();
+                        if (!address_copies.contains(value)) continue;
+                        for (const auto input : address_copies.at(value)) {
+                            if (!charge_demand_work(1, "demand edge visit")) return false;
+                            if (!address_demands.contains(input)) {
+                                if (!charge_demand_work(2, "discovered demand insertion and queue")) return false;
+                                address_demands.insert(input);
+                                pending_addresses.push_back(input);
+                            }
+                        }
+                    }
                     // Demand from a later memory use is not proof that a
                     // private cell stores pointer bits. Recheck every such
                     // load against its current reaching stores, including
                     // generic loads and evidence recovered from helper uses.
                     for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+                        if (!charge_demand_work(1, "proof block scan") ||
+                            !charge_demand_work(incoming[b].size(), "proof environment copy")) return false;
                         auto environment = incoming[b];
                         for (const auto* instruction : raw_blocks[b].instructions) {
+                            if (!charge_demand_work(1, "proof instruction scan")) return false;
                             const auto& values = instruction_results.at(instruction);
                             if (root_opcode(instruction->opcode) == "ld" &&
                                 !starts_with(instruction->opcode, "ld.param") &&
                                 instruction->operands.size() >= 2 && !values.empty() &&
-                                value_types.at(values.front()).is_pointer()) {
+                                (value_types.at(values.front()).is_pointer() ||
+                                 (values.size() == 1 && ptx_scalar_type(instruction->opcode) == Type::integer(64) &&
+                                  address_demands.contains(values.front())))) {
                                 const auto address = environment.find(first_register(instruction->operands[1]));
                                 const bool private_symbol = local_depots.contains(
                                     parameter_name_from_operand(instruction->operands[1]));
                                 const bool private_value = address != environment.end() && value_types.contains(address->second) &&
                                     value_types.at(address->second).is_pointer() &&
                                     value_types.at(address->second).address_space == AddressSpace::kPrivate;
-                                if (private_symbol || private_value)
-                                    local_load_proofs[proof_key(instruction)] = value_types.at(values.front());
+                                if (private_symbol || private_value) {
+                                    const auto type = value_types.at(values.front());
+                                    if (!charge_demand_work(1, "load proof insertion")) return false;
+                                    local_load_proofs[proof_key(instruction)] = type.is_pointer() ? type
+                                        : Type::pointer(Type::integer(8), AddressSpace::kNone);
+                                }
                             }
                             const auto destinations = ssa_destinations(*instruction);
+                            if (!charge_demand_work(destinations.size(), "proof environment update")) return false;
                             for (std::size_t i = 0; i < destinations.size(); ++i)
                                 environment[destinations[i]] = values[i];
                         }
                     }
                 }
-                if (!validate_local_load_proofs(local_load_proofs)) return false;
+                // A generic use proves pointer-ness only. Every reaching
+                // initializing/overlapping store must agree before that fact
+                // can be refined to a concrete address space. Publish nothing
+                // until all candidate paths have passed validation.
+                std::unordered_map<const Instruction*, Type> refined;
+                if (!validate_local_load_proofs(local_load_proofs, refined)) return false;
+                for (const auto& [key, type] : refined) {
+                    const auto found = pointer_load_types.find(key);
+                    if (found == pointer_load_types.end() || found->second.address_space == AddressSpace::kNone) {
+                        if (found == pointer_load_types.end() || found->second != type) {
+                            pointer_load_types[key] = type;
+                            added = true;
+                        }
+                    } else if (found->second != type) {
+                        return fail(key, "conflicting validated pointer load types");
+                    }
+                }
+                if (added) continue;
                 break;
             }
         }
@@ -3044,7 +3321,7 @@ struct Importer {
             return fail(&instruction, "unsupported PTX opcode '" + instruction.opcode + "'");
         }
 
-        if (address_cancellation_applied) {
+        if (address_cancellation_applied || address_alignment_applied) {
             // This function now contains real integer differences where the
             // provisional graph contained pointer-shaped values. A scalar
             // spill/reload or opaque arithmetic must not regain pointer-ness
@@ -4086,6 +4363,17 @@ struct Importer {
                 operation.operands.push_back(source_operand(i, ptx_scalar_type(instruction.opcode)));
             }
         } else if (root == "cvt") {
+            // Never silently ignore modifiers whose semantics this lowering
+            // does not implement. Check the instruction format, not a wider
+            // destination register's eventual storage type.
+            if (instruction.opcode.find(".sat.") != std::string::npos)
+                return fail(&instruction, "unsupported saturating PTX conversion modifier");
+            if (ptx_cvt_result_type(instruction.opcode) == Type::floating(32) &&
+                ptx_cvt_source_type(instruction.opcode).kind == TypeKind::kInteger &&
+                (instruction.opcode.find(".rz.") != std::string::npos ||
+                 instruction.opcode.find(".rm.") != std::string::npos ||
+                 instruction.opcode.find(".rp.") != std::string::npos))
+                return fail(&instruction, "unsupported directed integer-to-f32 conversion rounding");
             operation.opcode = OpCode::kConvert;
             operation.result_types.front() = ptx_cvt_result_type(instruction.opcode);
 
@@ -4098,6 +4386,9 @@ struct Importer {
             if (ptx_cvt_source_type(instruction.opcode).kind == TypeKind::kFloat &&
                 operation.result_types.front().kind == TypeKind::kInteger) {
                 operation.attributes["rounding_mode"] = cvt_rounding_mode(instruction.opcode);
+                if (ptx_cvt_source_type(instruction.opcode) == Type::floating(32) &&
+                    instruction.opcode.find(".ftz.") != std::string::npos)
+                    operation.attributes["flush_subnormal"] = "true";
             }
             if (instruction.opcode.find(".f32.f32") != std::string::npos &&
                 (instruction.opcode.find(".rni.") != std::string::npos ||
@@ -4568,7 +4859,37 @@ struct Importer {
         }
 
         if (!append_guard(&operation, instruction, *environment)) return false;
-        block->operations.push_back(std::move(operation));
+        if (root == "cvt" && operation.results.size() == 1 &&
+            operation.result_types.size() == 1 &&
+            value_types.at(operation.results.front()) != operation.result_types.front()) {
+            const auto destination = operation.results.front();
+            const auto storage = value_types.at(destination);
+            const auto format = operation.result_types.front();
+            if (storage.kind != TypeKind::kInteger || storage.bit_width <= format.bit_width ||
+                (format.kind != TypeKind::kInteger && format.kind != TypeKind::kFloat))
+                return fail(&instruction, "unsupported PTX conversion destination container");
+            const auto converted = builder.next_value();
+            const auto conversion_location = operation.location;
+            operation.results = {converted};
+            value_types[converted] = format;
+            block->operations.push_back(std::move(operation));
+            auto bits = Operand::value_ref(converted, format);
+            if (format.kind == TypeKind::kFloat)
+                bits = expressions.bit_container(bits, Type::integer(format.bit_width));
+            Operation extension;
+            extension.opcode = OpCode::kConvert;
+            extension.location = conversion_location;
+            extension.results = {destination};
+            extension.result_types = {storage};
+            extension.operands = {bits};
+            extension.attributes["ptx_opcode"] = instruction.opcode;
+            if (format.kind == TypeKind::kInteger && cvt_has_signed_destination(instruction.opcode))
+                extension.attributes["signed_input"] = "true";
+            if (!append_guard(&extension, instruction, *environment)) return false;
+            block->operations.push_back(std::move(extension));
+        } else {
+            block->operations.push_back(std::move(operation));
+        }
         for (std::size_t i = 0; i < destinations.size(); ++i) {
             if (i < instruction_results[&instruction].size()) {
                 (*environment)[destinations[i]] = instruction_results[&instruction][i];
@@ -5263,6 +5584,7 @@ InlineAsmResult lower_inline_ptx_asm(const InlineAsmRequest& request, Builder* b
 
 PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options) {
     Importer importer;
+    importer.type_solver_step_limit = options.type_solver_step_limit;
     importer.result.module.source_name =
         options.source_name.empty() ? std::string("<ptx>") : options.source_name;
     importer.result.module.stage = IrStage::kGpuSemantic;
@@ -5508,6 +5830,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     const auto import_function = [&](const cumetal::ptx::EntryFunction* function,
                                      bool is_kernel) -> bool {
         Importer next;
+        next.type_solver_step_limit = importer.type_solver_step_limit;
         next.builder = importer.builder;
         next.result = std::move(importer.result);
         next.entry = function;

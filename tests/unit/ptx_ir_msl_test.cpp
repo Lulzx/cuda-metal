@@ -960,7 +960,8 @@ bool test_pointer_memory_call_effects() {
             const auto compiled = metal::compile_ptx_to_msl(source);
             ok &= expect(compiled.ok, "safe helper call across a proven pointer cell emits Metal: " + callee + ": " + compiled.error);
         } else {
-            ok &= expect(!imported.ok && imported.error.find("intervening call may modify the cell") != std::string::npos,
+            ok &= expect(!imported.ok && imported.error.find("intervening call") != std::string::npos &&
+                             imported.error.find("may modify the cell") != std::string::npos,
                          "direct and nested writes through caller pointers invalidate the proof: " + callee + ": " + imported.error);
         }
     }
