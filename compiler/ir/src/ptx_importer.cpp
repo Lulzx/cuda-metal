@@ -21,6 +21,7 @@
 #include "ptx_scalar_ranges.h"
 #include "ptx_pointer_ranges.h"
 #include "ptx_local_memory_ranges.h"
+#include "ptx_local_zero_guards.h"
 
 #include <algorithm>
 #include <cctype>
@@ -919,6 +920,7 @@ struct Importer {
     bool address_cancellation_applied = false;
     bool normalized_address_alignment = false;
     bool address_alignment_applied = false;
+    bool local_zero_guards_applied = false;
     std::size_t type_solver_step_limit = 0;
     std::unordered_set<ValueId> integer_zero_values;
     std::vector<RawBlock> raw_blocks;
@@ -1681,7 +1683,7 @@ struct Importer {
         // the original path for functions that did not change.
         std::vector<const Instruction*> proof_instructions;
         std::optional<cumetal::ptx::EntryFunction> proof_entry;
-        if (address_cancellation_applied || address_alignment_applied) {
+        if (address_cancellation_applied || address_alignment_applied || local_zero_guards_applied) {
             proof_entry = *entry;
             proof_entry->instructions.clear();
             for (const auto& block : raw_blocks)
@@ -2971,22 +2973,7 @@ struct Importer {
             }
             if (!added) {
                 const auto rebuild_type_inputs = [&]() {
-                    instruction_results.clear();
-                    definition_types.clear();
-                    value_types.clear();
-                    pointer_load_types.clear();
-                    integer_zero_values.clear();
-                    aggregate_parameter_addresses.clear();
-                    implicit_values.clear();
-                    incoming.clear();
-                    outgoing.clear();
-                    block_arguments.clear();
-                    for (auto& block : raw_blocks) {
-                        block.last_definitions.clear();
-                        block.uses_before_definition.clear();
-                    }
-                    allocate_values();
-                    return construct_ssa() && resolve_types();
+                    return rebuild_ssa() && resolve_types();
                 };
                 if (!normalized_address_alignment && external_types.empty() &&
                     !raw_blocks.empty() && raw_blocks.front().id != kInvalidBlock) {
@@ -3095,6 +3082,37 @@ struct Importer {
             }
         }
         return true;
+    }
+
+    bool rebuild_ssa() {
+        instruction_results.clear();
+        definition_types.clear();
+        value_types.clear();
+        pointer_load_types.clear();
+        integer_zero_values.clear();
+        aggregate_parameter_addresses.clear();
+        implicit_values.clear();
+        incoming.clear();
+        outgoing.clear();
+        block_arguments.clear();
+        for (auto& block : raw_blocks) {
+            block.last_definitions.clear();
+            block.uses_before_definition.clear();
+        }
+        allocate_values();
+        return construct_ssa();
+    }
+
+    bool simplify_local_zero_guards() {
+        const auto proof = detail::prove_local_zero_loads(raw_blocks, incoming, outgoing,
+            block_arguments, instruction_results, local_depots, *entry, result.module);
+        if (proof.loads.empty()) return true;
+        if (!detail::simplify_local_zero_guards(raw_blocks, builder, normalized_instructions,
+                *entry, &instruction_origins, proof.loads)) return true;
+        local_zero_guards_applied = true;
+        // Rebuild both SSA and later pointer demand from surviving instructions.
+        // The original sentinel loads/stores remain integer operations.
+        return rebuild_ssa();
     }
 
     void allocate_values() {
@@ -6051,6 +6069,13 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
             common::CompileTrace trace("ptx_ssa", 0, function->name);
             next.allocate_values();
             if (!next.construct_ssa()) {
+                importer = std::move(next);
+                return false;
+            }
+        }
+        {
+            common::CompileTrace trace("ptx_local_zero_guards", 0, function->name);
+            if (!next.simplify_local_zero_guards()) {
                 importer = std::move(next);
                 return false;
             }

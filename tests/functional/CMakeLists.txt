@@ -2941,6 +2941,10 @@ if(APPLE)
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_constant_predicate.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_constant_predicate PROPERTIES TIMEOUT 120)
 
+    add_test(NAME functional_ptx_empty_slice_guards
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_empty_slice_guards.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_empty_slice_guards PROPERTIES TIMEOUT 900)
+
     add_test(NAME functional_ptx_scalar_zero_guards
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_scalar_zero_guards.py ${CMAKE_BINARY_DIR})
     # Each of sixteen numerical children owns a 90-second deadline; rejection

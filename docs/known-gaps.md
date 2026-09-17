@@ -193,9 +193,14 @@ excluded. No second copy/join index or per-edge register-name lookup is required
 and `.v4` 64-bit loads preserve pointer provenance independently per lane when
 every reaching write proves that cell's contents; scalar metadata stays integer.
 Partial, missing, conflicting and unsupported helper writes remain refusals.
-Narrow vector lanes cannot supply full pointers. Guarded empty-slice `{1,0}`
-records and dynamically indexed heterogeneous tables remain unsupported; an
-unused integer sentinel is not pointer provenance.
+Narrow vector lanes cannot supply full pointers. A bounded scalar analysis can
+prove complete zero-length local cells before pointer demand, including exact
+copies, agreeing incoming paths and unsigned `min(0,x)`. It removes only proved
+impossible branch edges and rebuilds SSA; loads, stores and observable integer
+sentinel bits remain unchanged. Unknown, partial or overlapping writes, missing
+initializers, unsupported calls and exhausted analysis supply no facts. Correlated
+pointer/length alternatives and dynamically indexed heterogeneous tables remain
+outside this proof; an unused integer sentinel is not pointer provenance.
 
 Scalar disjointness queries intersect dominating comparison bounds, trim excluded
 interval endpoints, and relate plain 64-bit copy/add/sub siblings when their

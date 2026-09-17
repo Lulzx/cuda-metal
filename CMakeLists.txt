@@ -128,6 +128,7 @@ add_library(cumetal_ir STATIC
     compiler/ir/src/ptx_scalar_ranges.cpp
     compiler/ir/src/ptx_pointer_ranges.cpp
     compiler/ir/src/ptx_local_memory_ranges.cpp
+    compiler/ir/src/ptx_local_zero_guards.cpp
     compiler/ir/src/ptx_parameters.cpp
     compiler/ir/src/ptx_tail_calls.cpp
     compiler/ir/src/ptx_pointer_inference.cpp

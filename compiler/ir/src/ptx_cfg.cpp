@@ -17,6 +17,7 @@ struct GuardedPaths {
     std::deque<Instruction>& storage;
     const cumetal::ptx::EntryFunction* function;
     InstructionOrigins* origins;
+    const ScalarZeroLoads* zero_loads = nullptr;
 
     struct ConstantFacts {
         std::map<std::string, bool> predicates;
@@ -504,25 +505,47 @@ struct GuardedPaths {
             ? scalar_integer_width(std::string_view(instruction.opcode).substr(4)) : 0;
     }
 
-    static unsigned zero_comparison_width(const Instruction& instruction) {
-        return instruction.opcode.starts_with("setp.eq.") || instruction.opcode.starts_with("setp.ne.")
-            ? scalar_integer_width(std::string_view(instruction.opcode).substr(8)) : 0;
+    unsigned zero_comparison_width(const Instruction& instruction) const {
+        if (instruction.opcode.starts_with("setp.eq.") || instruction.opcode.starts_with("setp.ne."))
+            return scalar_integer_width(std::string_view(instruction.opcode).substr(8));
+        if (zero_loads && (instruction.opcode.starts_with("setp.lt.u") || instruction.opcode.starts_with("setp.le.u") ||
+                          instruction.opcode.starts_with("setp.gt.u") || instruction.opcode.starts_with("setp.ge.u")))
+            return scalar_integer_width(std::string_view(instruction.opcode).substr(8));
+        return 0;
+    }
+
+    unsigned zero_arithmetic_width(const Instruction& instruction) const {
+        if (!zero_loads) return 0;
+        if (instruction.opcode.starts_with("min.u") || instruction.opcode.starts_with("add.u") ||
+            instruction.opcode.starts_with("sub.u") || instruction.opcode.starts_with("add.s") ||
+            instruction.opcode.starts_with("sub.s"))
+            return scalar_integer_width(std::string_view(instruction.opcode).substr(4));
+        return 0;
+    }
+
+    bool scalar_is_zero(std::string_view operand, unsigned width, const ConstantFacts& known) const {
+        const auto text = trim(operand);
+        if (const auto literal = integer_literal_bits(text)) return *literal == 0;
+        const auto found = known.scalar_zeros.find(text);
+        return found != known.scalar_zeros.end() && found->second == width && local_scalar_width(text) == width;
     }
 
     std::optional<unsigned> scalar_zero_value(const Instruction& instruction,
                                                const ConstantFacts& known) const {
-        const auto width = scalar_move_width(instruction);
-        if (!width || !instruction.predicate.empty() || instruction.operands.size() != 2)
+        const auto move_width = scalar_move_width(instruction);
+        const auto width = move_width ? move_width : zero_arithmetic_width(instruction);
+        if (!width || !instruction.predicate.empty() || instruction.operands.size() != (move_width ? 2 : 3))
             return std::nullopt;
         const auto destination = trim(instruction.operands[0]);
         if (destination.empty() || first_register(destination) != destination ||
             local_scalar_width(destination) != width) return std::nullopt;
-        const auto source = trim(instruction.operands[1]);
-        if (source == "0") return width;
-        const auto found = known.scalar_zeros.find(source);
-        if (found == known.scalar_zeros.end() || found->second != width ||
-            local_scalar_width(source) != width) return std::nullopt;
-        return width;
+        const bool left = scalar_is_zero(instruction.operands[1], width, known);
+        if (move_width) return left ? std::optional(width) : std::nullopt;
+        const bool right = scalar_is_zero(instruction.operands[2], width, known);
+        // Unsigned minimum has an absolute lower bound of zero. Signed min
+        // lacks that property; zero-minus-unknown likewise remains unknown.
+        const bool zero = instruction.opcode.starts_with("min.u") ? left || right : left && right;
+        return zero ? std::optional(width) : std::nullopt;
     }
 
     std::optional<bool> predicate_value(const Instruction& instruction,
@@ -533,13 +556,22 @@ struct GuardedPaths {
             return std::nullopt;
         const auto destination = trim(instruction.operands[0]);
         if (destination.empty() || first_register(destination) != destination) return std::nullopt;
-        auto source = trim(instruction.operands[1]);
-        auto zero = trim(instruction.operands[2]);
-        if (source == "0") std::swap(source, zero);
-        const auto found = known.scalar_zeros.find(source);
-        if (zero != "0" || found == known.scalar_zeros.end() || found->second != width ||
-            local_scalar_width(source) != width) return std::nullopt;
-        return instruction.opcode.starts_with("setp.eq.");
+        const auto scalar = [&](const std::string& operand) -> std::optional<std::uint64_t> {
+            if (scalar_is_zero(operand, width, known)) return 0;
+            if (!zero_loads) return std::nullopt;
+            const auto literal = integer_literal_bits(trim(operand));
+            if (!literal) return std::nullopt;
+            return width == 64 ? *literal : *literal & ((std::uint64_t{1} << width) - 1);
+        };
+        const auto left = scalar(instruction.operands[1]), right = scalar(instruction.operands[2]);
+        if (!left || !right) return std::nullopt;
+        if (instruction.opcode.starts_with("setp.eq.")) return *left == *right;
+        if (instruction.opcode.starts_with("setp.ne.")) return *left != *right;
+        if (instruction.opcode.starts_with("setp.lt.u")) return *left < *right;
+        if (instruction.opcode.starts_with("setp.le.u")) return *left <= *right;
+        if (instruction.opcode.starts_with("setp.gt.u")) return *left > *right;
+        if (instruction.opcode.starts_with("setp.ge.u")) return *left >= *right;
+        return std::nullopt;
     }
 
     // Facts describe the value at this instruction, not aliases to a mutable
@@ -551,6 +583,13 @@ struct GuardedPaths {
         const auto written = destination_registers(instruction);
         for (const auto& name : written) known.erase(name);
         if (root_opcode(instruction.opcode) == "call") invalidate_call(instruction, known);
+        if (zero_loads && instruction.predicate.empty()) {
+            if (const auto found = zero_loads->find(&instruction); found != zero_loads->end()) {
+                for (const auto& [lane, width] : found->second)
+                    if (lane < written.size() && local_scalar_width(written[lane]) == width)
+                        known.scalar_zeros[written[lane]] = width;
+            }
+        }
         if (written.size() != 1) return;
         if (predicate) known.predicates[written[0]] = *predicate;
         if (zero) known.scalar_zeros[written[0]] = *zero;
@@ -583,9 +622,11 @@ struct GuardedPaths {
                 }
                 if (instruction->opcode != "mov.pred" && instruction->opcode != "not.pred" &&
                     instruction->opcode != "or.pred" && instruction->opcode != "and.pred" &&
-                    !scalar_move_width(*instruction) && !zero_comparison_width(*instruction)) continue;
+                    !scalar_move_width(*instruction) && !zero_comparison_width(*instruction) &&
+                    !zero_arithmetic_width(*instruction) && (!zero_loads || !zero_loads->contains(instruction))) continue;
                 const auto written = destination_registers(*instruction);
-                if (written.size() == 1) candidates.insert(written[0]);
+                if (written.size() == 1 || (zero_loads && zero_loads->contains(instruction)))
+                    candidates.insert(written.begin(), written.end());
                 if (candidates.size() > 1048576) return std::nullopt;
             }
         }
@@ -700,6 +741,39 @@ struct GuardedPaths {
             }
         }
         return entries;
+    }
+
+    std::size_t fold_local_zero_branches() {
+        const auto liveness = predicate_liveness();
+        if (!liveness) return 0;
+        const auto entries = constant_entries(&*liveness);
+        std::size_t rewritten = 0;
+        for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+            auto& block = raw_blocks[b];
+            if (block.instructions.empty() || block.successors.size() != 2) continue;
+            const auto* branch = block.instructions.back();
+            if (!is_conditional_branch(*branch)) continue;
+            auto known = entries[b];
+            bool bounded = true;
+            for (std::size_t i = 0; i + 1 < block.instructions.size(); ++i) {
+                transfer_constants(*block.instructions[i], known);
+                prune_constants(known, *liveness, b, i);
+                if (known.size() > 128) { bounded = false; break; }
+            }
+            const auto [name, inverted] = normalized_predicate(branch->predicate);
+            const auto predicate = known.predicates.find(name);
+            if (!bounded || predicate == known.predicates.end()) continue;
+            const auto successor = block.successors[predicate->second != inverted ? 0 : 1];
+            auto replacement = *branch;
+            replacement.predicate.clear();
+            replacement.operands = {raw_blocks[successor].name};
+            storage.push_back(std::move(replacement));
+            record_instruction_origin(origins, &storage.back(), branch);
+            block.instructions.back() = &storage.back();
+            block.successors = {successor};
+            ++rewritten;
+        }
+        return rewritten;
     }
 
     // Generated Option equality first computes an otherwise undefined payload,
@@ -1559,6 +1633,16 @@ void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
             blocks[successor].predecessors.push_back(index);
     paths.remove_unobserved_self_selects();
     paths.remove_unobserved_copies();
+}
+
+std::size_t simplify_local_zero_guards(std::vector<RawBlock>& blocks, Builder& builder,
+    std::deque<Instruction>& storage, const cumetal::ptx::EntryFunction& function,
+    InstructionOrigins* origins, const ScalarZeroLoads& zero_loads) {
+    if (zero_loads.empty()) return 0;
+    GuardedPaths paths{blocks, builder, storage, &function, origins, &zero_loads};
+    const auto rewritten = paths.fold_local_zero_branches();
+    if (rewritten) remove_unreachable_blocks(blocks);
+    return rewritten;
 }
 
 }  // namespace cumetal::ir::detail

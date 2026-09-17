@@ -3,6 +3,7 @@
 #include "cumetal/ir/ir.h"
 #include "ptx_instruction.h"
 #include <deque>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -36,6 +37,17 @@ struct RawBlock {
 };
 
 void remove_unreachable_blocks(std::vector<RawBlock>& blocks);
+
+// Per-instruction scalar facts, never pointer type evidence. The lane index
+// refers to the unchanged load's destination tuple; the value is its bit width.
+using ScalarZeroLoads = std::unordered_map<const Instruction*, std::map<std::size_t, unsigned>>;
+
+// Use independently proven local-load zero bits to remove impossible branch
+// edges. Instructions other than those branches retain their values/order.
+// The caller must rebuild SSA and type evidence when this returns nonzero.
+std::size_t simplify_local_zero_guards(std::vector<RawBlock>& blocks, Builder& builder,
+    std::deque<Instruction>& storage, const cumetal::ptx::EntryFunction& function,
+    InstructionOrigins* origins, const ScalarZeroLoads& zero_loads);
 
 // Called before SSA allocation. Storage owns rewritten instructions until the
 // importer finishes materializing the function; deque preserves their addresses.
