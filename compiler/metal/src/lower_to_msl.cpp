@@ -4,6 +4,7 @@
 #include "cumetal/common/kernel_abi.h"
 
 #include "cumetal/ir/ptx_importer.h"
+#include "cumetal/ir/call_write_effects.h"
 #include "cumetal/ir/nvvm_importer.h"
 
 #include <algorithm>
@@ -657,9 +658,12 @@ public:
     };
     using StorageMask = std::function<std::uint8_t(const ir::Operand&)>;
     using Bind = std::function<bool(ir::ValueId, const ir::Operand&)>;
+    using BindKernelAddress = std::function<bool(ir::ValueId)>;
 
-    PrivateRecordFieldProof(const ir::Module& module, StorageMask storage, Bind bind)
+    PrivateRecordFieldProof(const ir::Module& module, StorageMask storage, Bind bind,
+                            BindKernelAddress bind_kernel_address)
         : module_(module), storage_(std::move(storage)), bind_(std::move(bind)),
+          bind_kernel_address_(std::move(bind_kernel_address)),
           predecessors_(module.functions.size()), callers_(module.functions.size()) {
         std::unordered_map<std::string, std::size_t> names;
         for (std::size_t f = 0; f < module.functions.size(); ++f) names[module.functions[f].name] = f;
@@ -716,7 +720,10 @@ public:
                     // Importer-owned local proofs already validate loads from
                     // this function's own allocations. This boundary handles
                     // fields reached through a helper parameter.
-                    if (address && allocations_.contains(address->root)) continue;
+                    // Dynamic table indices can have one allocation without
+                    // one constant offset; their finite cell/range proof also
+                    // belongs to the importer, not this helper-field proof.
+                    if (mask == private_bit && allocation_root_of(load.operands.front())) continue;
                     if (mask != private_bit || !address || !arguments_.contains(address->root))
                         return diagnostic(load, "unresolved private record address");
                     if (!prove({f, b, i}, *address, load.results.front()))
@@ -732,15 +739,18 @@ private:
     const ir::Module& module_;
     StorageMask storage_;
     Bind bind_;
+    BindKernelAddress bind_kernel_address_;
     std::unordered_map<ir::ValueId, Location> definitions_, joins_;
     std::unordered_map<ir::ValueId, std::pair<std::size_t, std::size_t>> arguments_;
     std::unordered_set<ir::ValueId> allocations_, active_addresses_;
     std::unordered_map<ir::ValueId, std::optional<Address>> addresses_;
     std::unordered_map<ir::ValueId, std::optional<ir::ValueId>> allocation_roots_;
+    std::unordered_map<ir::ValueId, std::optional<ir::ValueId>> kernel_address_roots_;
+    std::unordered_set<ir::ValueId> active_kernel_addresses_;
     std::unordered_map<const ir::Operation*, std::size_t> callees_;
     std::vector<std::vector<std::vector<std::size_t>>> predecessors_;
     std::vector<std::vector<Location>> callers_;
-    std::unordered_map<std::size_t, bool> read_only_;
+    std::unordered_map<std::size_t, ir::detail::CallEffectSummary> call_effects_;
     std::size_t work_ = 0;
     std::string error_;
 
@@ -754,6 +764,47 @@ private:
     }
     static std::string diagnostic(const ir::Operation& load, const std::string& reason) {
         return "private helper pointer field proof at " + load.location.str() + ": " + reason;
+    }
+    std::optional<ir::ValueId> kernel_address_root(const ir::Operand& operand, unsigned depth = 0) {
+        if (!charge() || depth > 32 || operand.kind != ir::OperandKind::kValue ||
+            operand.type != ir::Type::integer(64)) return std::nullopt;
+        const auto value = operand.value;
+        if (kernel_address_roots_.contains(value)) return kernel_address_roots_.at(value);
+        if (!active_kernel_addresses_.insert(value).second) return std::nullopt;
+        std::optional<ir::ValueId> root;
+        if (const auto argument = arguments_.find(value); argument != arguments_.end()) {
+            if (module_.functions[argument->second.first].is_kernel) root = value;
+        } else if (const auto definition = definitions_.find(value); definition != definitions_.end()) {
+            const auto& operation = operation_at(definition->second);
+            const auto opcode = operation.attributes.find("ptx_opcode");
+            if (!operation.attributes.contains("guard_operand") && operation.result_types.size() == 1 &&
+                operation.result_types.front() == ir::Type::integer(64) && opcode != operation.attributes.end()) {
+                const auto& spelling = opcode->second;
+                const bool copy = operation.opcode == ir::OpCode::kConvert &&
+                    (spelling == "mov.b64" || spelling == "mov.u64" || spelling == "mov.s64");
+                const bool parameter = operation.opcode == ir::OpCode::kParameter &&
+                    (spelling == "ld.param.b64" || spelling == "ld.param.u64" || spelling == "ld.param.s64");
+                if ((copy || parameter) && operation.operands.size() == 1) {
+                    root = kernel_address_root(operation.operands.front(), depth + 1);
+                } else if (operation.operands.size() == 2 &&
+                           operation.operands[0].type == ir::Type::integer(64) &&
+                           operation.operands[1].type == ir::Type::integer(64)) {
+                    const bool add = operation.opcode == ir::OpCode::kAdd &&
+                        (spelling == "add.u64" || spelling == "add.s64");
+                    const bool sub = operation.opcode == ir::OpCode::kSub &&
+                        (spelling == "sub.u64" || spelling == "sub.s64");
+                    if (add || sub) {
+                        const auto left = kernel_address_root(operation.operands[0], depth + 1);
+                        const auto right = kernel_address_root(operation.operands[1], depth + 1);
+                        if (left && !right) root = left;
+                        else if (add && right && !left) root = right;
+                    }
+                }
+            }
+        }
+        active_kernel_addresses_.erase(value);
+        kernel_address_roots_[value] = root;
+        return root;
     }
     std::optional<std::int64_t> literal(const ir::Operand& operand, unsigned depth = 0) {
         if (!charge() || depth > 16) return std::nullopt;
@@ -913,22 +964,36 @@ private:
         if (reaches_root.size() == visited.size()) cached = root;
         return cached;
     }
-    bool preserves_caller_memory(std::size_t function) {
-        if (read_only_.contains(function)) return read_only_.at(function);
-        read_only_[function] = false; // A recursive/unknown summary is never a proof.
-        for (const auto& block : module_.functions[function].blocks) {
-            for (const auto& operation : block.operations) {
-                if (!charge()) return false;
-                if (operation.opcode == ir::OpCode::kStore || operation.opcode == ir::OpCode::kAtomic ||
-                    operation.opcode == ir::OpCode::kMetalAtomic) {
-                    if (operation.operands.empty()) return false;
-                    if (!allocation_root_of(operation.operands.front())) return false;
-                } else if (operation.opcode == ir::OpCode::kCall) {
-                    if (!callees_.contains(&operation) || !preserves_caller_memory(callees_.at(&operation))) return false;
-                }
+    bool call_preserves_field(const ir::Operation& call, ir::ValueId root, std::int64_t offset) {
+        if (ir::detail::is_read_only_scalar_builtin(call)) return true;
+        if (!callees_.contains(&call)) return false;
+        const auto callee = callees_.at(&call);
+        if (!call_effects_.contains(callee))
+            call_effects_.emplace(callee, ir::detail::summarize_call_effects(
+                module_, module_.functions[callee].name));
+        const auto& summary = call_effects_.at(callee);
+        if (!summary.complete) return false;
+        constexpr auto private_bit = std::uint8_t(1u << unsigned(ir::AddressSpace::kPrivate));
+        for (const auto& effect : summary.writes) {
+            if (!charge() || effect.argument >= call.operands.size() || !effect.bytes) return false;
+            const auto& actual = call.operands[effect.argument];
+            const auto mask = storage_(actual);
+            if (mask != 0 && !(mask & private_bit)) continue;
+            const auto address = address_of(actual);
+            if (!address) {
+                const auto allocation = allocation_root_of(actual);
+                if (allocation && *allocation != root) continue;
+                return false;
             }
+            if (address->root != root) {
+                if (allocations_.contains(address->root) || allocations_.contains(root)) continue;
+                return false;
+            }
+            const __int128 start = static_cast<__int128>(address->offset) + effect.offset;
+            if (start < static_cast<__int128>(offset) + 8 &&
+                static_cast<__int128>(offset) < start + effect.bytes) return false;
         }
-        return read_only_[function] = true;
+        return true;
     }
     bool prove(Location start, Address field, ir::ValueId loaded) {
         using State = std::tuple<std::size_t, std::size_t, std::size_t, ir::ValueId, std::int64_t>;
@@ -947,7 +1012,7 @@ private:
                 if (!charge()) return false;
                 const auto& event = block.operations[i - 1];
                 if (event.opcode == ir::OpCode::kCall) {
-                    if (callees_.contains(&event) && preserves_caller_memory(callees_.at(&event))) continue;
+                    if (call_preserves_field(event, root, offset)) continue;
                     const auto callee = event.attributes.find("callee");
                     error_ = "intervening call at " + event.location.str() + " (" +
                         (callee == event.attributes.end() ? "indirect" : callee->second) +
@@ -1000,8 +1065,22 @@ private:
                 const __int128 lo = written->offset, hi = lo + bytes;
                 if (lo >= static_cast<__int128>(offset) + 8 || hi <= offset) continue;
                 if (lo != offset || bytes != 8) { error_ = "partial overlapping store"; return false; }
-                if (!source.type.is_pointer()) { error_ = "reaching store has no pointer type"; return false; }
-                if (!bind_(loaded, source)) { error_ = "conflicting pointer field producer"; return false; }
+                // Legacy unannotated PTX kernel parameters transport device
+                // address bits through the scalar bytes ABI. A downstream
+                // field dereference supplies address demand, while this
+                // bounded chain identifies the kernel argument that supplies
+                // those bits. Preserve its scalar ABI and operations. Local
+                // constants, loaded integers and lossy conversions do not
+                // acquire pointer provenance from a 64-bit width alone.
+                const bool kernel_address = !source.type.is_pointer() && kernel_address_root(source).has_value();
+                if (!source.type.is_pointer() && !kernel_address) {
+                    error_ = "reaching store has no pointer type";
+                    return false;
+                }
+                if (!(kernel_address ? bind_kernel_address_(loaded) : bind_(loaded, source))) {
+                    error_ = "conflicting pointer field producer";
+                    return false;
+                }
                 found_store = true;
                 if (!event.attributes.contains("guard_operand")) { initialized = true; break; }
             }
@@ -1304,20 +1383,26 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
         }
     }
 
-    if (!constraints.solve()) {
+    // Field ownership needs propagated storage masks, but propagating the main
+    // graph here would leak call-site masks into its later specialization pass.
+    auto field_storage_constraints = constraints;
+    if (!field_storage_constraints.solve()) {
         return {false, "directional pointer flow reaches a conflicting concrete address space"};
     }
     std::unordered_set<ir::ValueId> private_helper_field_loads;
     PrivateRecordFieldProof private_fields(*module,
         [&](const ir::Operand& operand) -> std::uint8_t {
             if (operand.kind == ir::OperandKind::kValue && value_nodes.contains(operand.value))
-                return constraints.mask(value_nodes.at(operand.value));
+                return field_storage_constraints.mask(value_nodes.at(operand.value));
             if (operand.type.is_pointer() && operand.type.address_space != ir::AddressSpace::kNone)
                 return std::uint8_t(1u << unsigned(operand.type.address_space));
             return 0;
         },
         [&](ir::ValueId loaded, const ir::Operand& source) {
             return constrain_operand(value_nodes.at(loaded), source);
+        },
+        [&](ir::ValueId loaded) {
+            return constraints.seed(value_nodes.at(loaded), ir::AddressSpace::kDevice);
         });
     if (const auto error = private_fields.run(private_helper_field_loads)) return {false, *error};
 

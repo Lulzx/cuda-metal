@@ -91,6 +91,18 @@ bool test_private_record_pointer_qualifiers(const std::string& source) {
         if (!compiled.ok) continue;
         ok &= expect(ir::verify(compiled.metal_ir).ok, context + " Metal IR verifies");
         ok &= expect_concrete_metal_pointer_types(compiled.metal_ir, context);
+        for (const auto& function : compiled.metal_ir.functions) {
+            if (!function.is_kernel) continue;
+            ok &= expect(function.kernel_abi && function.kernel_abi->arguments.size() == 3,
+                         context + " retains three legacy ABI arguments");
+            if (!function.kernel_abi || function.kernel_abi->arguments.size() != 3) continue;
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto& argument = function.kernel_abi->arguments[i];
+                ok &= expect(function.arguments[i].type == ir::Type::integer(64) &&
+                                 argument.kind == ir::ArgumentKind::kScalar && argument.size == 8,
+                             context + " preserves raw address bits and scalar bytes ABI");
+            }
+        }
         unsigned device_fields = 0, scalar_fields = 0;
         for (const auto& function : compiled.metal_ir.functions) {
             if (function.name != "read_record") continue;
@@ -150,6 +162,22 @@ bool test_private_record_pointer_qualifiers(const std::string& source) {
                              "Metal IR rejects an unresolved nested pointer in a cast result");
             }
         }
+    }
+    for (const std::string invalid : {"literal", "truncated", "two-addresses"}) {
+        auto fixture = source;
+        const auto store = fixture.find("st.local.u64 [%rd3], %rd0;");
+        if (invalid == "literal") {
+            fixture.replace(store, std::string("st.local.u64 [%rd3], %rd0;").size(),
+                            "st.local.u64 [%rd3], 1;");
+        } else if (invalid == "truncated") {
+            fixture.insert(store, ".reg .b32 %narrow;\n    cvt.u32.u64 %narrow, %rd0;\n"
+                                  "    cvt.u64.u32 %rd0, %narrow;\n    ");
+        } else {
+            fixture.insert(store, "add.u64 %rd0, %rd0, %rd1;\n    ");
+        }
+        const auto rejected = metal::compile_ptx_to_msl(fixture);
+        ok &= expect(!rejected.ok && rejected.error.find("private helper pointer field proof") != std::string::npos,
+                     "private record rejects " + invalid + " scalar producer: " + rejected.error);
     }
     return ok;
 }

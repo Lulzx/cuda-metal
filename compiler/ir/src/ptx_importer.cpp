@@ -1,4 +1,5 @@
 #include "cumetal/ir/ptx_importer.h"
+#include "cumetal/ir/call_write_effects.h"
 
 #include "cumetal/common/compile_trace.h"
 #include "cumetal/passes/printf_lower.h"
@@ -2106,7 +2107,7 @@ struct Importer {
                     continue;
                 }
                 if (root == "st" && instruction.opcode.find(".local") == std::string::npos &&
-                    instruction.operands.size() >= 2) {
+                    !starts_with(instruction.opcode, "st.param") && instruction.operands.size() >= 2) {
                     for (const std::string& source : registers_in(instruction.operands[1])) {
                         const auto address = local_addresses.find(source);
                         if (address == local_addresses.end()) continue;
@@ -2222,55 +2223,19 @@ struct Importer {
         // candidate on the normalized CFG, using the final SSA store operands.
         const auto validate_local_load_proofs = [&](const auto& candidates, auto& refined) {
             if (candidates.empty()) return true;
-            std::unordered_map<std::string, bool> call_preserves_memory;
-            const auto preserves_caller_memory = [&](const Instruction& call) {
+            std::unordered_map<std::string, detail::CallEffectSummary> call_effects;
+            const auto effects_for = [&](const Instruction& call) -> const detail::CallEffectSummary* {
                 const auto target = direct_call_target(call);
-                if (!target) return false;
-                if (call_preserves_memory.contains(*target)) return call_preserves_memory.at(*target);
-                const auto callee = std::find_if(result.module.functions.begin(), result.module.functions.end(),
-                    [&](const Function& function) { return function.name == *target; });
-                if (callee == result.module.functions.end() || callee->blocks.empty())
-                    return call_preserves_memory[*target] = false;
-                // A helper may write its own stack without modifying any
-                // caller object. Derive that ownership from SSA allocations,
-                // never from `.local` spelling or a helper's name: a private
-                // pointer parameter can still address the caller's stack.
-                std::unordered_set<ValueId> owned_addresses;
-                bool changed = true;
-                while (changed) {
-                    changed = false;
-                    for (const auto& block : callee->blocks) {
-                        for (const auto& operation : block.operations) {
-                            const bool owns = operation.opcode == OpCode::kAlloca ||
-                                ((operation.opcode == OpCode::kConvert || operation.opcode == OpCode::kAddressSpaceCast ||
-                                  operation.opcode == OpCode::kPointerOffset) && !operation.operands.empty() &&
-                                 operation.operands.front().kind == OperandKind::kValue &&
-                                 owned_addresses.contains(operation.operands.front().value));
-                            if (!owns) continue;
-                            for (std::size_t i = 0; i < operation.results.size(); ++i)
-                                if (operation.result_types[i].is_pointer() &&
-                                    operation.result_types[i].address_space == AddressSpace::kPrivate)
-                                    changed |= owned_addresses.insert(operation.results[i]).second;
-                        }
-                    }
-                }
-                for (const auto& block : callee->blocks) {
-                    for (const auto& operation : block.operations) {
-                        if (operation.opcode == OpCode::kStore) {
-                            if (operation.operands.empty() || operation.operands.front().kind != OperandKind::kValue ||
-                                !owned_addresses.contains(operation.operands.front().value))
-                                return call_preserves_memory[*target] = false;
-                        } else if (operation.opcode == OpCode::kCall || operation.opcode == OpCode::kAtomic ||
-                                   operation.opcode == OpCode::kMetalAtomic || operation.opcode == OpCode::kPrintf ||
-                                   operation.opcode == OpCode::kInvalid) {
-                            // No effect summary is established for nested or
-                            // indirect calls, atomics, or external effects.
-                            return call_preserves_memory[*target] = false;
-                        }
-                    }
-                }
-                return call_preserves_memory[*target] = true;
+                if (!target) return nullptr;
+                if (!call_effects.contains(*target))
+                    call_effects.emplace(*target, detail::summarize_call_effects(result.module, *target));
+                return &call_effects.at(*target);
             };
+            const auto preserves_caller_memory = [&](const Instruction& call) {
+                const auto* effects = effects_for(call);
+                return effects && effects->complete && effects->writes.empty();
+            };
+            std::unordered_map<const Instruction*, std::pair<std::size_t, std::size_t>> positions;
             std::unordered_map<const Instruction*, std::vector<Type>> stored_types;
             std::unordered_map<const Instruction*, Type> store_address_types;
             std::unordered_map<const Instruction*, std::unordered_map<std::string, ValueId>> sources;
@@ -2286,7 +2251,9 @@ struct Importer {
                         joined_values[value].push_back(outgoing[predecessor].at(name));
                 }
                 auto environment = incoming[b];
+                std::size_t index = 0;
                 for (const auto* instruction : raw_blocks[b].instructions) {
+                    positions[instruction] = {b, index++};
                     for (const auto& name : source_registers(*instruction))
                         if (environment.contains(name)) sources[instruction][name] = environment.at(name);
                     if (root_opcode(instruction->opcode) == "setp") {
@@ -2630,6 +2597,50 @@ struct Importer {
                 }
                 return operand_address(instruction->operands[index]);
             };
+            // Bind a summary to the SSA value staged for this particular
+            // call. A slot from another block, a predicated/partial write, or
+            // a preceding call is not a complete argument-staging proof.
+            const auto call_is_disjoint = [&](const Instruction* call, const LocalAddress& loaded,
+                                               __int128 cell) {
+                const auto* effects = effects_for(*call);
+                if (!effects || !effects->complete || !positions.contains(call)) return false;
+                if (effects->writes.empty()) return true;
+                if (call->operands.size() != 2 && call->operands.size() != 3) return false;
+                const auto names = grouped_names(call->operands.back());
+                const auto [block, before] = positions.at(call);
+                for (const auto& effect : effects->writes) {
+                    if (effect.argument >= names.size() || !effect.bytes) return false;
+                    const Instruction* staged = nullptr;
+                    for (std::size_t i = before; i > 0; --i) {
+                        const auto* prior = raw_blocks[block].instructions[i - 1];
+                        if (root_opcode(prior->opcode) == "call") break;
+                        if (!starts_with(prior->opcode, "st.param") || prior->operands.size() < 2 ||
+                            parameter_name_from_operand(prior->operands[0]) != names[effect.argument]) continue;
+                        if (!prior->predicate.empty() || memory_vector_width(prior->opcode) != 1 ||
+                            ptx_scalar_type(prior->opcode) != Type::integer(64) ||
+                            memory_operand_offset(prior->operands[0]) != 0) return false;
+                        staged = prior;
+                        break;
+                    }
+                    if (!staged) return false;
+                    const auto actual = proven_address(staged, 1);
+                    if (!actual || !actual->offsets) {
+                        const auto value = source_value(staged, staged->operands[1]);
+                        if (value && value_types.contains(*value)) {
+                            const auto& type = value_types.at(*value);
+                            if (type.is_pointer() && type.address_space != AddressSpace::kNone &&
+                                type.address_space != AddressSpace::kPrivate) continue;
+                        }
+                        return false;
+                    }
+                    if (actual->depot != loaded.depot) continue;
+                    for (const auto offset : *actual->offsets) {
+                        const __int128 start = static_cast<__int128>(actual->base) + offset + effect.offset;
+                        if (start < cell + 8 && cell < start + effect.bytes) return false;
+                    }
+                }
+                return true;
+            };
             detail::ScalarRanges scalar_ranges(raw_blocks, incoming, outgoing,
                 block_arguments, instruction_results, value_types);
             std::unordered_map<std::string, std::uint64_t> depot_sizes;
@@ -2790,10 +2801,12 @@ struct Importer {
                                     const auto* event = raw_blocks[block].instructions[i - 1];
                                     const auto root = root_opcode(event->opcode);
                                     if (root == "call") {
-                                        if (preserves_caller_memory(*event)) continue;
+                                        if (call_is_disjoint(event, *address, cell)) continue;
                                         return fail(load, "unsupported local pointer memory proof: intervening call at line " +
                                             std::to_string(event->line) + " (" + direct_call_target(*event).value_or("indirect") +
-                                            ") may modify the cell");
+                                            ") may modify the cell; " +
+                                            (effects_for(*event) && !effects_for(*event)->complete
+                                                ? effects_for(*event)->reason : "actual write argument is unresolved or overlapping"));
                                     }
                                     if (root != "st" || event->operands.size() < 2 || starts_with(event->opcode, "st.param")) continue;
                                     const auto written = proven_address(event, 0);
@@ -4186,6 +4199,8 @@ struct Importer {
                 store.operands.push_back(Operand::value_ref(pointer, base.type));
                 store.operands.push_back(store_value(
                     operand_for(lane_operands[lane], *environment, element_type)));
+                if (store.operands.back().type.is_pointer() && element_type.bit_width != 64)
+                    return fail(&instruction, "narrow PTX store cannot preserve a pointer-typed source");
                 store.attributes["alignment"] = std::to_string(type_size(element_type));
                 if (!append_guard(&store, instruction, *environment)) return false;
                 block->operations.push_back(std::move(store));
@@ -4195,6 +4210,8 @@ struct Importer {
                 lanes > 1
                     ? store_value(operand_for(lane_operands[0], *environment, element_type))
                     : store_value(source_operand(1, element_type)));
+            if (operation.operands.back().type.is_pointer() && element_type.bit_width != 64)
+                return fail(&instruction, "narrow PTX store cannot preserve a pointer-typed source");
             operation.attributes["address"] = instruction.operands[0];
             operation.attributes["alignment"] =
                 std::to_string(type_size(ptx_scalar_type(instruction.opcode)));

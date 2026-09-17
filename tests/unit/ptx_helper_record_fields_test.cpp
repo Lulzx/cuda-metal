@@ -16,14 +16,35 @@ std::string fixture(const std::string& kind, const std::string& mode = {}) {
     const bool shifted = mode == "offset-copy";
     const bool scratch_loop = mode == "helper-loop-scratch";
     const bool scratch_write = mode == "helper-dynamic-scratch" || scratch_loop;
+    const bool intervening_scratch = mode == "intervening-scratch-loop";
     const bool record_write = mode == "helper-unknown-alias";
     const std::string offset = shifted ? "24" : "0";
     std::string source = R"ptx(.version 7.1
 .target sm_80
 .address_size 64
 .const .align 8 .b8 bytes[8] = {97,0,1,127,128,254,255,19};
-.func (.param .b32 result) read_record(.param .b64 request) {
 )ptx";
+    if (intervening_scratch) source += R"ptx(.func scratch_only(.param .u64 seed) {
+ .local .align 16 .b8 scratch[32];
+ .reg .b64 %base, %cursor, %seed;
+ .reg .b32 %iteration;
+ .reg .pred %more;
+ ld.param.u64 %seed, [seed];
+ and.b64 %seed, %seed, 7;
+ mov.u64 %base, scratch;
+ add.u64 %cursor, %base, %seed;
+ mov.u32 %iteration, 0;
+LOOP:
+ st.local.u8 [%cursor], 0;
+ add.u64 %cursor, %cursor, 1;
+ add.u32 %iteration, %iteration, 1;
+ setp.lt.u32 %more, %iteration, 2;
+ @%more bra LOOP;
+ ret;
+}
+)ptx";
+    source += ".func (.param .b32 result) read_record(.param .b64 request) {\n";
+    if (intervening_scratch) source += " .param .u64 scratch_argument;\n";
     if (scratch_write) source += " .local .align 16 .b8 scratch[32];\n";
     if (scratch_write || record_write) {
         source += " .reg .b64 %scratch_base, %write_address, %write_offset;\n";
@@ -37,6 +58,12 @@ std::string fixture(const std::string& kind, const std::string& mode = {}) {
  cvta.to.local.u64 %record, %base;
  ld.local.b64 %length, [%record+16];
 )ptx";
+    if (intervening_scratch) {
+        // This call lies between caller initialization and the helper's field
+        // reload, exercising the shared summary at the Metal proof boundary.
+        source += " st.param.u64 [scratch_argument], %length;\n";
+        source += " call.uni scratch_only, (scratch_argument);\n";
+    }
     if (scratch_write || record_write) {
         source += " and.b64 %write_offset, %length, 7;\n";
         if (scratch_write) {
@@ -208,7 +235,8 @@ bool positive(const std::string& kind, const std::string& mode = {}) {
 bool negative(const std::string& mode) {
     const auto source = mode == "entry-backedge" ? entry_backedge_fixture() : fixture("private", mode);
     const auto result = metal::compile_ptx_to_msl(source, {.entry_name = "probe"});
-    return expect(!result.ok && result.error.find("private helper pointer field proof") != std::string::npos,
+    const auto diagnostic = mode == "narrow-pointer-store" ? "narrow PTX store" : "private helper pointer field proof";
+    return expect(!result.ok && result.error.find(diagnostic) != std::string::npos,
                   mode + " refuses unproved private field: " + result.error);
 }
 } // namespace
@@ -223,6 +251,7 @@ int main() {
     ok &= positive("private", "second-record");
     ok &= positive("private", "helper-dynamic-scratch");
     ok &= positive("private", "helper-loop-scratch");
+    ok &= positive("private", "intervening-scratch-loop");
     for (const std::string mode : {"missing", "integer", "partial", "narrow-pointer-store", "predicated", "unknown-alias",
                                    "branch-conflict", "callsite-conflict", "truncated-overlap",
                                    "entry-backedge", "helper-unknown-alias"}) ok &= negative(mode);

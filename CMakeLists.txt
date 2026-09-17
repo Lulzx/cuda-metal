@@ -119,6 +119,7 @@ target_compile_options(cumetal_printf_pass
 
 add_library(cumetal_ir STATIC
     compiler/ir/src/ir.cpp
+    compiler/ir/src/call_write_effects.cpp
     compiler/ir/src/nvvm_importer.cpp
     compiler/ir/src/ptx_importer.cpp
     compiler/ir/src/ptx_address_cancellation.cpp

@@ -71,6 +71,16 @@ target_link_libraries(cumetal_ptx_clz_test PRIVATE cumetal_metal_codegen)
 target_compile_options(cumetal_ptx_clz_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME unit_ptx_clz COMMAND cumetal_ptx_clz_test)
 
+add_executable(cumetal_ptx_call_effects_test ptx_call_effects_test.cpp)
+target_link_libraries(cumetal_ptx_call_effects_test PRIVATE cumetal_ir)
+target_compile_options(cumetal_ptx_call_effects_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_call_effects COMMAND cumetal_ptx_call_effects_test)
+
+add_executable(cumetal_ptx_call_write_footprints_test ptx_call_write_footprints_test.cpp)
+target_link_libraries(cumetal_ptx_call_write_footprints_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_call_write_footprints_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_call_write_footprints COMMAND cumetal_ptx_call_write_footprints_test)
+
 add_executable(cumetal_ptx_type_proof_bounds_test ptx_type_proof_bounds_test.cpp)
 target_link_libraries(cumetal_ptx_type_proof_bounds_test PRIVATE cumetal_ir)
 target_compile_options(cumetal_ptx_type_proof_bounds_test PRIVATE -Wall -Wextra -Wpedantic)

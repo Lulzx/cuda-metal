@@ -24,7 +24,12 @@ def run_case(build, case):
                                     'st.u64 [%rd3], %rd4;')
             label = 'generic store through private record field with implicit entry ABI'
         run_integer_case(build, source, values, expected,
-                         label, output_words=1)
+                         label, output_words=1,
+                         # The legacy unannotated entry transports exact device
+                         # address bits through scalar arguments. Keep its ABI;
+                         # the explicit-pointer controls below use buffers.
+                         abi_lines=['CUMETAL_ABI_V2', 'kernel integer_probe', 'shared 0',
+                                    'arg bytes 8', 'arg bytes 8', 'arg bytes 4'])
     elif case in ('generic-u64', 'generic-u8'):
         source = (Path(__file__).parent /
                   'reference/ptx_generic_pointer_record_fields.ptx').read_text()
