@@ -28,6 +28,7 @@ class ScalarRanges {
                  const std::unordered_map<const Instruction*, std::vector<ValueId>>& results,
                  const std::unordered_map<ValueId, Type>& types, ScalarRangeLimits limits = {});
     ~ScalarRanges();
+    bool budget_exhausted() const;
     std::optional<ScalarRange> get(ValueId value, const Instruction* at);
     // A pointer captures its scalar offset at creation. Later guards may
     // refine that offset only while its SSA dependencies retain those values.

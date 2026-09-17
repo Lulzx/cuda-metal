@@ -184,7 +184,9 @@ separately bounded origins through anchored copy/join cycles. Arithmetic
 recurrences are not copies. Later scalar guards refine a captured offset only
 when its SSA dependencies cannot change between creation and use; bounded
 constant left shifts retain nonnegative intervals only without representational
-overflow. The analysis keeps the existing work budget. These facts prove disjoint
+overflow. Guard matching reuses affine origins before walking copy/join identities;
+distinct concrete computations need no identity traversal. Unknown or exhausted
+proofs remain conservative. The analysis keeps the existing work budget. These facts prove disjoint
 writes only, never pointer-cell contents. The LLVM7 Ethereum self-test clears its recorded byte-store
 range refusal with this correction, then still rejects an unproved reaching
 pointer store; this is not full-module or GPU acceptance.

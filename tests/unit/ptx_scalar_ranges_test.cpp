@@ -345,6 +345,7 @@ bool cached_bounds_survive_exhaustion() {
             ok &= expect(!ranges.get(static_cast<ir::ValueId>(100 + i), query),
                          "unrelated unknown inputs remain unknown");
     ok &= expect(!ranges.get(2, queries.front()), "an uncached question fails closed after exhaustion");
+    ok &= expect(ranges.budget_exhausted(), "exhausted range analysis exposes its diagnostic status");
     ok &= known(ranges.get(1, queries.front()), 0, 255,
                 "completed cached proof remains valid after unrelated budget exhaustion");
     return ok;
@@ -419,6 +420,80 @@ bool direct_guard_with_unrelated_guards(unsigned variant) {
         return expect(!result || result->upper >= 534,
                       "a later addition cannot borrow its source's unmodified upper bound");
     return expect(!result, "bypassed, conflicting, or stale loop values cannot borrow the direct guard");
+}
+
+bool guarded_join_relay(bool conflicting) {
+    Graph graph(9);
+    graph.add(0, "ld.param.u64", {"%left", "[left]"}, {1});
+    graph.add(0, "ld.param.u64", {"%right", "[right]"}, {2});
+    graph.add(0, "setp.ne.u64", {"%choice", "%left", "0"}, {3});
+    graph.add(0, "bra", {"B1"}, {}, "%choice");
+    graph.edge(0, 1); graph.edge(0, 2);
+    for (std::size_t block : {1U, 2U}) {
+        graph.incoming[block][block == 1 ? "%left" : "%right"] = block;
+        graph.add(block, "mov.u64", {"%joined", block == 1 ? "%left" : "%right"},
+                  {static_cast<ir::ValueId>(block + 3)});
+        graph.add(block, "bra", {"B3"});
+        graph.edge(block, 3);
+        graph.outgoing[block]["%joined"] = block + 3;
+    }
+    graph.phi(3, "%joined", 6);
+    graph.add(3, "setp.le.u64", {"%fits", "%joined", "31"}, {7});
+    graph.add(3, "bra", {"B4"}, {}, "%fits");
+    graph.edge(3, 4); graph.edge(3, 8);
+    graph.incoming[4]["%choice"] = 3;
+    graph.add(4, "bra", {"B5"}, {}, "%choice");
+    graph.edge(4, 5); graph.edge(4, 6);
+    for (std::size_t block : {5U, 6U}) {
+        graph.incoming[block] = {{"%joined", 6}, {"%right", 2}};
+        graph.add(block, "mov.u64", {"%relay", conflicting && block == 6 ? "%right" : "%joined"},
+                  {static_cast<ir::ValueId>(block + 3)});
+        graph.add(block, "bra", {"B7"});
+        graph.edge(block, 7);
+        graph.outgoing[block]["%relay"] = block + 3;
+    }
+    graph.phi(7, "%relay", 10);
+    const auto* query = graph.add(7, "ret");
+    graph.add(8, "ret");
+    auto ranges = graph.ranges();
+    const auto result = ranges.get(10, query);
+    return conflicting ? expect(!result, "a conflicting relay cannot borrow a join's bound")
+                       : known(result, 0, 31, "distinct multi-origin joins can relay the same bounded value");
+}
+
+bool many_independent_bounded_values() {
+    // Many local store offsets have their own nearby bounds. Unrelated guards
+    // must not consume the proof budget before later offsets are queried.
+    constexpr std::size_t count = 128, exit = count * 2;
+    Graph graph(exit + 1);
+    std::vector<std::pair<ir::ValueId, const detail::Instruction*>> queries;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto block = i * 2;
+        const auto value = static_cast<ir::ValueId>(i * 3 + 1);
+        const auto name = "%index" + std::to_string(i);
+        graph.add(block, "ld.param.u64", {name, "[index]"}, {value});
+        graph.add(block, "setp.le.u64", {"%fits", name, "31"}, {value + 1});
+        graph.add(block, "bra", {"B" + std::to_string(block + 1)}, {}, "%fits");
+        graph.edge(block, block + 1);
+        graph.edge(block, exit);
+        queries.emplace_back(value, graph.add(block + 1, "nop"));
+        graph.add(block + 1, "bra", {"B" + std::to_string(block + 2)});
+        graph.edge(block + 1, block + 2);
+    }
+    const auto* after_merge = graph.add(exit, "ret");
+    auto ranges = graph.ranges(detail::ScalarRangeLimits{.work = 175000});
+    bool ok = true;
+    for (const auto& [value, query] : queries) {
+        if (!known(ranges.get(value, query), 0, 31, "independent guarded offsets fit bounded analysis")) {
+            ok = false;
+            break;
+        }
+    }
+    // Every guard has an unbounded alternative into the exit. An affine origin
+    // must never substitute for actual edge dominance.
+    ok &= expect(!ranges.get(queries.back().first, after_merge),
+                 "unbounded incoming edge remains unknown after affine matching");
+    return ok;
 }
 
 bool excluded_endpoint_bounds() {
@@ -823,6 +898,9 @@ int main() {
     ok &= cached_bounds_survive_exhaustion();
     for (unsigned variant = 0; variant < 5; ++variant)
         ok &= direct_guard_with_unrelated_guards(variant);
+    ok &= guarded_join_relay(false);
+    ok &= guarded_join_relay(true);
+    ok &= many_independent_bounded_values();
     ok &= excluded_endpoint_bounds();
     for (unsigned variant = 0; variant < 14; ++variant)
         ok &= affine_sibling_bounds(variant);

@@ -302,11 +302,35 @@ struct ScalarRanges::Impl {
         return result;
     }
     std::optional<std::int64_t> relative_offset(ValueId value, ValueId compared) {
-        if (value == compared || forwards(value, compared) || forwards(compared, value))
-            return 0;
+        if (value == compared) return 0;
+        // Most comparisons concern different concrete computations. Resolve
+        // cached affine origins before considering copy/join reachability;
+        // walking both identity graphs for every unrelated guard consumes the
+        // proof budget quadratically in large generated functions.
         const auto a = affine(value), b = affine(compared);
-        if (!a || !b || (a->base != b->base && !forwards(a->base, b->base) && !forwards(b->base, a->base)))
-            return std::nullopt;
+        const auto may_forward = [&](ValueId from, ValueId to) {
+            if (from == to) return true;
+            const auto definition = definitions.find(from);
+            if (!joins.contains(from) &&
+                (definition == definitions.end() || !copy64(*definition->second))) return false;
+            return forwards(from, to);
+        };
+        if (!a || !b) {
+            // Affine overflow can leave an otherwise exact copy unmodelled.
+            // Do not lose that identity, and never turn failed range analysis
+            // into evidence that different definitions are equal.
+            return may_forward(value, compared) || may_forward(compared, value)
+                ? std::optional<std::int64_t>{0} : std::nullopt;
+        }
+        if (a->base != b->base) {
+            // A successful affine origin has already followed its exact
+            // copies and any single-terminal join. Different origins can
+            // still relay one another only when both are unresolved joins
+            // (for example phi(other_join, other_join)). A concrete terminal
+            // cannot be equal to an unresolved multi-terminal/cyclic join.
+            if (!joins.contains(a->base) || !joins.contains(b->base)) return std::nullopt;
+            if (!may_forward(a->base, b->base) && !may_forward(b->base, a->base)) return std::nullopt;
+        }
         const __int128 delta = static_cast<__int128>(a->offset) - b->offset;
         return delta < INT64_MIN || delta > INT64_MAX ? std::nullopt
                                                       : std::optional(static_cast<std::int64_t>(delta));
@@ -743,6 +767,7 @@ ScalarRanges::ScalarRanges(const std::vector<RawBlock>& blocks,
                            const std::unordered_map<ValueId, Type>& types, ScalarRangeLimits limits)
     : impl_(std::make_unique<Impl>(blocks, incoming, outgoing, arguments, results, types, limits)) {}
 ScalarRanges::~ScalarRanges() = default;
+bool ScalarRanges::budget_exhausted() const { return impl_->work > impl_->kMaxWork; }
 std::optional<ScalarRange> ScalarRanges::get(ValueId value, const Instruction* at) {
     auto location = impl_->locations.find(at);
     if (location == impl_->locations.end())

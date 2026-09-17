@@ -2944,14 +2944,16 @@ struct Importer {
                                         const auto& prefix = prefix_proofs.at(load);
                                         return fail(load, "unsupported local pointer memory proof: unresolved potentially overlapping store at line " +
                                             std::to_string(event->line) + " (" + event->operands[0] + "); prefix " +
-                                            (prefix.complete ? "has no address bound" : prefix.reason));
+                                            (prefix.complete ? "has no address bound" : prefix.reason) +
+                                            (scalar_ranges.budget_exhausted() ? "; scalar range budget exhausted" : ""));
                                     }
                                     if (written->depot != address->depot) continue;
                                     if (!written->offsets)
                                         return fail(load, "unsupported local pointer memory proof: unresolved store offset at line " +
                                             std::to_string(event->line) + " (" + event->operands[0] +
                                             ", base " + std::to_string(written->base) + ") for loaded cell " +
-                                            std::to_string(static_cast<std::int64_t>(cell)));
+                                            std::to_string(static_cast<std::int64_t>(cell)) +
+                                            (scalar_ranges.budget_exhausted() ? "; scalar range budget exhausted" : ""));
                                     const std::size_t lanes = memory_vector_width(event->opcode);
                                     const std::int64_t bytes = ptx_scalar_type(event->opcode).bit_width / 8;
                                     bool overlaps = false;
