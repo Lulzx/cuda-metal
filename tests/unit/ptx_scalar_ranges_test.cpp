@@ -422,6 +422,42 @@ bool direct_guard_with_unrelated_guards(unsigned variant) {
     return expect(!result, "bypassed, conflicting, or stale loop values cannot borrow the direct guard");
 }
 
+bool conditional_unit_increment(unsigned variant) {
+    Graph graph(3);
+    graph.add(0, variant == 4 ? "ld.param.u64" : "mov.u64",
+              {"%initial", variant == 4 ? "[initial]" : "1"}, {1});
+    graph.add(0, "ld.param.u64", {"%choice", "[choice]"}, {8});
+    graph.add(0, "setp.ne.u64", {"%other", "%choice", "0"}, {9});
+    graph.add(0, "bra", {"B1"});
+    graph.edge(0, 1);
+    graph.outgoing[0]["%index"] = 1;
+    graph.phi(1, "%index", 2);
+    graph.incoming[1]["%other"] = 9;
+    graph.incoming[1]["%choice"] = 8;
+    const auto* query = graph.add(1, "nop");
+    graph.add(1, variant == 5 ? "setp.ge.u64" : "setp.lt.u64", {"%fits", "%index", "2"}, {3});
+    graph.add(1, "selp.u64", {"%step", variant == 1 || variant == 5 ? "0" : "1",
+                             variant == 1 || variant == 5 ? "1" : variant == 9 ? "99" : "0", "%fits"}, {4});
+    graph.add(1, "add.u64", {"%next", "%index", variant == 3 ? "2" : "%step"}, {5});
+    if (variant == 6) graph.add(1, "setp.ne.u64", {"%fits", "%choice", "0"}, {6});
+    if (variant == 7 || variant == 8)
+        graph.add(1, variant == 7 ? "and.pred" : "or.pred", {"%combined", "%fits", "%other"}, {7});
+    const auto condition = variant == 2 ? "%other" : variant == 5 ? "!%fits" :
+        variant == 7 || variant == 8 ? "%combined" : "%fits";
+    graph.add(1, "bra", {"B1"}, {}, condition);
+    graph.edge(1, 1);
+    graph.edge(1, 2);
+    graph.outgoing[1]["%index"] = 5;
+    graph.add(2, "ret");
+    auto ranges = graph.ranges();
+    const auto result = ranges.get(2, query);
+    if (variant == 3)
+        return expect(!result || result->upper >= 3, "a two-step increment cannot borrow the unit-step bound");
+    return variant == 0 || variant == 5 || variant == 7 || variant == 9
+        ? known(result, 1, 2, "backedge proves the selected induction increment is one (" + std::to_string(variant) + ")")
+        : expect(!result, "unknown step, stale predicate, bypass or dynamic seed cannot prove induction (" + std::to_string(variant) + ")");
+}
+
 bool guarded_join_relay(bool conflicting) {
     Graph graph(9);
     graph.add(0, "ld.param.u64", {"%left", "[left]"}, {1});
@@ -898,6 +934,8 @@ int main() {
     ok &= cached_bounds_survive_exhaustion();
     for (unsigned variant = 0; variant < 5; ++variant)
         ok &= direct_guard_with_unrelated_guards(variant);
+    for (unsigned variant = 0; variant < 10; ++variant)
+        ok &= conditional_unit_increment(variant);
     ok &= guarded_join_relay(false);
     ok &= guarded_join_relay(true);
     ok &= many_independent_bounded_values();

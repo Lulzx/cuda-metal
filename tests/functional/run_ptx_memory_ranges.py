@@ -645,6 +645,43 @@ COUNT_READY:
     for name, source in guarded_origins_negatives():
         expect_compile_failure(build, source, 'integer_probe', 'pointer memory proof')
         print('NEGATIVE_PASS', name)
+    conditional = fixture('''
+ add.u64 %rd6,%rd4,128;
+ st.local.u64 [%rd4+128],0;
+ st.local.u64 [%rd4+136],0;
+ mov.u64 %rd7,1;
+CONDITIONAL_LOOP:
+ xor.b64 %rd10,%rd3,%rd7;
+ st.local.u64 [%rd6],%rd10;
+ shl.b64 %rd11,%rd7,3;
+ add.u64 %rd6,%rd4,%rd11;
+ add.u64 %rd6,%rd6,128;
+ setp.lt.u64 %p3,%rd7,2;
+ selp.u64 %rd12,1,0,%p3;
+ add.u64 %rd7,%rd7,%rd12;
+ setp.ne.u64 %p4,%rd3,0;
+ and.pred %p5,%p4,%p3;
+ @%p5 bra CONDITIONAL_LOOP;
+''').replace(' add.u64 %rd1,%rd1,%rd2;',
+              ' mul.wide.u32 %rd17,%r4,24;\n add.u64 %rd1,%rd1,%rd17;').replace(
+                  ' st.global.u64 [%rd1],%rd9;',
+                  ' st.global.u64 [%rd1],%rd9;\n ld.local.u64 %rd10,[%rd4+128];\n'
+                  ' ld.local.u64 %rd11,[%rd4+136];\n st.global.u64 [%rd1+8],%rd10;\n'
+                  ' st.global.u64 [%rd1+16],%rd11;')
+    conditional_expected = [word for value in values for word in
+                            (value, value ^ 1, (value ^ 2) if value else 0)]
+    for inverted in (False, True):
+        source = conditional
+        if inverted:
+            source = source.replace('setp.lt.u64 %p3', 'setp.ge.u64 %p3').replace(
+                'selp.u64 %rd12,1,0,%p3;', 'selp.u64 %rd12,0,1,%p3;').replace(
+                'and.pred %p5,%p4,%p3;', 'not.pred %p2,%p3;\n and.pred %p5,%p4,%p2;')
+        run_integer_case(build, source, values, conditional_expected,
+                         'conditional induction increment' + (' inverted' if inverted else ''), output_words=3)
+    overlap = conditional.replace('%rd4,128;', '%rd4,0;').replace(
+        '%rd6,%rd6,128;', '%rd6,%rd6,0;').replace('%rd7,2;', '%rd7,16;')
+    expect_compile_failure(build, overlap, 'integer_probe', 'pointer memory proof')
+    print('NEGATIVE_PASS conditional induction overlaps pointer cell')
     shifted = fixture('''
  setp.ge.u64 %p1,%rd3,16;
  @%p1 bra LOAD;

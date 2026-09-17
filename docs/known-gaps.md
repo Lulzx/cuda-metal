@@ -172,7 +172,9 @@ overlapping store agrees. A later reuse of the cell-address register cannot
 retag the earlier load.
 
 Local-store disjointness also consumes unsigned guard bounds and bounded scalar
-induction. A separate bounded prefix analysis tracks initialized scalar bytes
+induction. Unit increments selected by a predicate are supported when every
+backedge proves the selected value is one; unrelated or overwritten predicates,
+OR-true branches, unknown seeds and unproved increments remain conservative. A separate bounded prefix analysis tracks initialized scalar bytes
 beside pointer cells and finite pointer loops. It explores unknown paths and
 keeps local addresses symbolic. Unknown effects invalidate facts; incomplete
 exploration discards all observed bounds. These ranges establish disjointness,

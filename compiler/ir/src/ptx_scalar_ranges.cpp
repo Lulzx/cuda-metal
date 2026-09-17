@@ -464,6 +464,32 @@ struct ScalarRanges::Impl {
         }
         return merged;
     }
+    bool unit_step_on_edge(const Instruction* update, std::size_t operand,
+                           std::size_t predecessor, std::size_t header) {
+        if (literal(update->operands[operand]) == std::optional<std::int64_t>{1}) return true;
+        const auto step = source(update, update->operands[operand]);
+        if (!step || !definitions.contains(*step)) return false;
+        const auto* select = definitions.at(*step);
+        if (!select->predicate.empty() || select->operands.size() != 4 ||
+            (select->opcode != "selp.u64" && select->opcode != "selp.s64" && select->opcode != "selp.b64"))
+            return false;
+        if (trim(select->operands[3]) != first_register(select->operands[3])) return false;
+        const auto predicate = source(select, select->operands[3]);
+        if (!predicate || !definitions.contains(*predicate)) return false;
+        const auto* condition = definitions.at(*predicate);
+        // Use facts on this backedge, never facts from the loop's other exit.
+        // Compound branch conditions already expose only logically necessary
+        // comparisons (AND true / OR false). A replaced predicate has a
+        // different reaching SSA definition and cannot justify the increment.
+        for (auto index : guards_by_block[predecessor]) {
+            if (++work > kMaxWork) return false;
+            const auto& guard = guards[index];
+            if (guard.successor == header && guard.comparison == condition &&
+                literal(select->operands[guard.truth ? 1 : 2]) == std::optional<std::int64_t>{1})
+                return true;
+        }
+        return false;
+    }
     std::optional<ScalarRange> induction(ValueId header) {
         if (!joins.contains(header))
             return std::nullopt;
@@ -487,8 +513,9 @@ struct ScalarRanges::Impl {
                     }
                 if (definition->predicate.empty() && definition->operands.size() == 3 &&
                     (definition->opcode == "add.u64" || definition->opcode == "add.s64")) {
-                    bool right = literal(definition->operands[2]) == std::optional<std::int64_t>{1};
-                    bool left = literal(definition->operands[1]) == std::optional<std::int64_t>{1};
+                    const auto predecessor = blocks[block].predecessors[i];
+                    bool right = unit_step_on_edge(definition, 2, predecessor, block);
+                    bool left = unit_step_on_edge(definition, 1, predecessor, block);
                     auto prior = source(definition, definition->operands[right ? 1 : 2]);
                     if ((right || left) && prior && forwards(*prior, header) &&
                         (!update || *update == input)) {
