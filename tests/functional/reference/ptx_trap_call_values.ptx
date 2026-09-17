@@ -3,7 +3,8 @@
 .target sm_80
 .address_size 64
 .func (.param .align 8 .b8 result[16]) pair(.param .u64 input, .param .u64 local_ptr) {
-.reg .b64 %rd<6>;
+.reg .b64 %rd<7>;
+.reg .b32 %bits<3>;
 .reg .pred %p1;
 ld.param.u64 %rd1, [input];
 ld.param.u64 %rd2, [local_ptr];
@@ -12,6 +13,11 @@ setp.eq.u64 %p1, %rd1, -1;
 @%p1 bra FAIL;
 ld.local.u64 %rd3, [%rd2];
 add.u64 %rd4, %rd1, 5;
+clz.b64 %bits0, %rd1;
+popc.b64 %bits1, %rd1;
+add.u32 %bits2, %bits0, %bits1;
+cvt.u64.u32 %rd6, %bits2;
+add.u64 %rd4, %rd4, %rd6;
 add.u64 %rd5, %rd3, 1;
 st.local.u64 [%rd2], %rd5;
 st.param.u64 [result], %rd4;

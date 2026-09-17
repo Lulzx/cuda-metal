@@ -86,6 +86,14 @@ bool run(const std::string& root) {
     };
     ok &= check("b32 register", "OP.b32 %answer, %low;");
     ok &= check("b64 register", "OP.b64 %answer, %data;");
+    ok &= check("inside a trap-capable function", R"ptx(
+ @%choose bra FAULT;
+ OP.b64 %answer, %data;
+ bra DONE;
+FAULT:
+ trap;
+DONE:
+)ptx");
     ok &= check("b32 low bits of wider storage", "OP.b32 %answer, %data;");
     ok &= check("zero b32", "OP.b32 %answer, 0;");
     ok &= check("zero b64", "OP.b64 %answer, 0;");
