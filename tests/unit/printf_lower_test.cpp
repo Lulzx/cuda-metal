@@ -27,6 +27,51 @@ bool contains_warning(const std::vector<std::string>& warnings, const std::strin
 }  // namespace
 
 int main() {
+    const std::string mixed_module_ptx = R"PTX(
+.version 8.0
+.target sm_90
+.global .align 1 .b8 unused_format[3] = {79, 75, 0};
+.visible .entry no_printf() {
+    mov.b64 %vprintf, vprintf;
+    call.uni (%r0), helper, ("printf", %r1);
+    call.uni (%r2), %vprintf, (%r3), prototype0;
+    call.uni (%r4), printf_wrapper, (%r5);
+    ret;
+}
+.visible .entry direct_printf() {
+    call vprintf, ("plain");
+    @%p0 call.uni (%r0), @PrInTf, ("value=%d", %r1);
+    ret;
+}
+)PTX";
+    const auto mixed_module = cumetal::ptx::parse_ptx(mixed_module_ptx);
+    if (!expect(mixed_module.ok && mixed_module.module.entries.size() == 2,
+                "parse module with direct and indirect calls")) return 1;
+    cumetal::passes::PrintfLowerOptions mixed_options;
+    mixed_options.ptx_source = mixed_module_ptx;
+    for (const bool strict : {false, true}) {
+        mixed_options.strict = strict;
+        const auto no_printf = cumetal::passes::lower_printf_calls(
+            mixed_module.module.entries[0], mixed_options);
+        if (!expect(no_printf.ok && no_printf.calls.empty() && no_printf.formats.empty() &&
+                        no_printf.warnings.empty() && no_printf.error.empty(),
+                    "indirect calls and printf references do not lower as direct printf calls")) {
+            return 1;
+        }
+        const auto empty = cumetal::passes::lower_printf_calls({}, mixed_options);
+        if (!expect(empty.ok && empty.calls.empty() && empty.formats.empty() &&
+                        empty.warnings.empty() && empty.error.empty(),
+                    "empty function succeeds with no printf output")) return 1;
+    }
+    const auto direct_printf = cumetal::passes::lower_printf_calls(
+        mixed_module.module.entries[1], mixed_options);
+    if (!expect(direct_printf.ok && direct_printf.calls.size() == 2 &&
+                    direct_printf.formats.size() == 2 &&
+                    direct_printf.formats[0].token == "plain" &&
+                    direct_printf.formats[1].token == "value=%d" &&
+                    direct_printf.calls[1].arguments == std::vector<std::string>{"%r1"},
+                "direct and predicated printf calls retain accepted callee spellings")) return 1;
+
     const std::string ptx = R"PTX(
 .version 8.0
 .target sm_90
@@ -120,6 +165,7 @@ int main() {
     const std::string malformed_ptx = R"PTX(
 .version 8.0
 .target sm_90
+.global .align 1 .b8 unused_format[3] = {79, 75, 0};
 .visible .entry malformed(
     .param .u64 p0
 )
@@ -134,7 +180,10 @@ int main() {
         return 1;
     }
 
-    const auto tolerant = cumetal::passes::lower_printf_calls(malformed_parsed.module.entries[0]);
+    cumetal::passes::PrintfLowerOptions malformed_options;
+    malformed_options.ptx_source = malformed_ptx;
+    const auto tolerant = cumetal::passes::lower_printf_calls(
+        malformed_parsed.module.entries[0], malformed_options);
     if (!expect(tolerant.ok, "tolerant printf lowering keeps malformed call as warning")) {
         return 1;
     }
@@ -143,9 +192,9 @@ int main() {
         return 1;
     }
 
-    cumetal::passes::PrintfLowerOptions strict_options;
-    strict_options.strict = true;
-    const auto strict = cumetal::passes::lower_printf_calls(malformed_parsed.module.entries[0], strict_options);
+    malformed_options.strict = true;
+    const auto strict = cumetal::passes::lower_printf_calls(
+        malformed_parsed.module.entries[0], malformed_options);
     if (!expect(!strict.ok, "strict printf lowering rejects malformed call")) {
         return 1;
     }
