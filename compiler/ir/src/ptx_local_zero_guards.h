@@ -11,6 +11,8 @@ struct LocalZeroLimits {
     std::size_t work = 1'000'000;
     std::size_t states = 16384;
     std::size_t depth = 128;
+    // Independent shared scalar and pointer analysis caps; created lazily.
+    std::size_t range_work = 4'000'000;
 };
 
 struct LocalZeroResult {
@@ -22,8 +24,9 @@ struct LocalZeroResult {
 // Prove scalar zero bits before pointer demand is collected. Each accepted
 // lane is a full 64-bit cell in a named local allocation, initialized to zero
 // on every reaching path. Exact SSA copies/joins and constant byte offsets
-// establish cell identity; unknown/partial writes and unresolved calls stop
-// the proof. No pointer types or replacement program values are produced.
+// establish cell identity. Shared scalar/pointer ranges can prove intervening
+// stores disjoint, without supplying contents. Unknown/partial writes and
+// unresolved calls stop the proof. No pointer types or replacement program values are produced.
 // Exhaustion discards all facts. The input SSA and instructions are unchanged.
 LocalZeroResult prove_local_zero_loads(
     const std::vector<RawBlock>& blocks,

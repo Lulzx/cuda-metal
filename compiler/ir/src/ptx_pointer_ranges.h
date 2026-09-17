@@ -37,6 +37,11 @@ class PointerRanges {
                   AddressQuery address, ScalarQuery scalar, PointerRangeLimits limits = {});
     ~PointerRanges();
     std::optional<LocalPointerRange> get(ValueId value, const Instruction* at);
+    // Prove a store cannot touch an eight-byte cell. Captured scalar offsets
+    // and anchored copy/join origins share the same proof for all consumers.
+    bool disjoint(ValueId value, const Instruction* at, std::int64_t displacement,
+                  std::uint64_t bytes, const std::string& depot, __int128 cell,
+                  ScalarRanges& scalar_ranges);
 
   private:
     struct Impl;

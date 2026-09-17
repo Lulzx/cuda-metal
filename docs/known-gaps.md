@@ -224,8 +224,14 @@ copies, agreeing incoming paths and unsigned `min(0,x)`. It removes only proved
 impossible branch edges and rebuilds SSA; loads, stores and observable integer
 sentinel bits remain unchanged. It recomputes guard facts after CFG pruning until
 stable, with all rounds sharing a bounded analysis budget; a dead predecessor
-cannot permanently hide a later zero-length guard. Unknown, partial or overlapping writes, missing
-initializers, unsupported calls and exhausted analysis supply no facts. Correlated
+cannot permanently hide a later zero-length guard. Local zero and pointer-field
+checks share bounded store-range disjointness, including captured scalar offsets;
+variable-address writes must remain inside their named allocation and outside the
+loaded cell. Range indices are created only when exact addresses do not suffice.
+Unknown, partial or overlapping writes, missing initializers, unsupported calls
+and exhausted analysis supply no facts. Full LLVM7 Solana/Bitcoin/Ethereum inputs
+still need additional proof coverage; passing small copy fixtures is not full
+workload acceptance. Correlated
 pointer/length alternatives and dynamically indexed heterogeneous tables remain
 outside this proof; an unused integer sentinel is not pointer provenance.
 

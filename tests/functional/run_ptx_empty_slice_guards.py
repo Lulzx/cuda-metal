@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Empty local slices preserve sentinel bits while their dereference is skipped.
 
-Five 65-lane configurations use exact CPU references, ABI checks, guarded buffers
+Seven 65-lane configurations use exact CPU references, ABI checks, guarded buffers
 and Apple-GPU provenance. Hazardous controls only translate and must refuse.
 """
 import argparse
@@ -17,11 +17,11 @@ import tempfile
 
 MASK = (1 << 64) - 1
 ENTRY = 'empty_slice_guards'
-CASES = ('direct-eq0', 'min8-eq0', 'minunknown-lt64', 'concrete-empty', 'pruned-loop')
+CASES = ('direct-eq0', 'min8-eq0', 'minunknown-lt64', 'concrete-empty', 'pruned-loop', 'bounded-copy', 'captured-offset')
 NEGATIVES = ('nonzero-length', 'overwritten-length', 'missing-initializer',
              'predicated-initializer', 'backedge-only-zero', 'partial-write',
              'overlapping-write', 'unknown-helper-clobber', 'unguarded-sentinel',
-             'signed-min-negative')
+             'signed-min-negative', 'ranged-overlap', 'ranged-unbounded', 'ranged-out-of-bounds')
 ABI = ['CUMETAL_ABI_V2', 'kernel ' + ENTRY, 'shared 0',
        'arg buffer 8', 'arg buffer 8', 'arg bytes 4']
 
@@ -37,8 +37,10 @@ def inputs():
 def expected(case, values):
     # Concrete pointers have process-dependent address bits; that control
     # observes the reloaded zero length instead of publishing the address.
-    return [word for value in values[::2]
-            for word in (0, 0 if case == 'concrete-empty' else 1, value)]
+    return [word for value, length in zip(values[::2], values[1::2])
+            for word in ((47 * min(length, 32) if case == 'captured-offset' else
+                          47 * length if case == 'bounded-copy' and length <= 32 else 0),
+                         0 if case == 'concrete-empty' else 1, value)]
 
 
 def fixture(case, negative=None):
@@ -97,6 +99,36 @@ def fixture(case, negative=None):
         lines.extend((' st.param.b64 [clobber_record], %record;',
                       ' st.param.b64 [clobber_offset], %unknown;',
                       ' call.uni clobber, (clobber_record, clobber_offset);'))
+    if case in ('bounded-copy', 'captured-offset') or negative and negative.startswith('ranged-'):
+        # Keep pointer/length at 96/104 and copy bytes in the same allocation.
+        lines = [line.replace('record[16]', 'record[192]') for line in lines]
+        pos = lines.index(' mov.u64 %record, record;') + 1
+        lines.insert(pos, ' add.u64 %record, %record, 96;')
+        lines.extend((' .reg .b64 %scratch, %index, %write, %sum_address;',
+                      ' .reg .b32 %byte;', ' .reg .pred %limit, %again;',
+                      ' mov.u64 %scratch, record;',
+                      ' st.local.v4.u64 [%scratch], {0, 0, 0, 0};'))
+        if negative == 'ranged-overlap':
+            lines.append(' add.u64 %scratch, %scratch, 104;')
+        elif negative == 'ranged-out-of-bounds':
+            lines.append(' add.u64 %scratch, %scratch, 184;')
+        lines.extend((' setp.gt.u64 %limit, %unknown, 32;',))
+        if negative != 'ranged-unbounded' and case != 'captured-offset':
+            lines.append(' @%limit bra COPY_DONE;')
+        lines.extend((' setp.eq.u64 %limit, %unknown, 0;', ' @%limit bra COPY_DONE;',
+                      ' mov.u64 %index, 0;', 'COPY_BYTES:',
+                      ' add.u64 %write, %scratch, %index;'))
+        if case == 'captured-offset':
+            # A later guard can refine a captured offset only while its SSA
+            # dependencies still denote the same dynamic values.
+            lines.extend((' setp.ge.u64 %limit, %index, 32;', ' @%limit bra COPY_DONE;'))
+        lines.extend((' st.local.u8 [%write], 47;', ' add.u64 %index, %index, 1;',
+                      ' setp.lt.u64 %again, %index, %unknown;', ' @%again bra COPY_BYTES;',
+                      'COPY_DONE:', ' mov.u64 %index, 0;', 'SUM_BYTES:',
+                      ' add.u64 %sum_address, %scratch, %index;',
+                      ' ld.local.u8 %byte, [%sum_address];', ' add.u32 %value, %value, %byte;',
+                      ' add.u64 %index, %index, 1;', ' setp.lt.u64 %again, %index, 32;',
+                      ' @%again bra SUM_BYTES;'))
     suffix = 'u64' if case.startswith('min') else 'b64'
     lines.append(f' ld.local.v2.{suffix} {{%pointer, %length}}, [%record];')
     if negative == 'signed-min-negative':

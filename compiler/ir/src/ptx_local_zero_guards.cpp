@@ -2,6 +2,7 @@
 
 #include "cumetal/ir/call_write_effects.h"
 #include "ptx_text.h"
+#include "ptx_pointer_ranges.h"
 
 #include <algorithm>
 #include <bit>
@@ -76,6 +77,42 @@ struct Proof {
     std::unordered_map<std::string, CallEffectSummary> effects;
     std::vector<ValueId> guard_inputs;
     std::unordered_set<ValueId> guard_values;
+    std::unordered_map<ValueId, Type> scalar_types;
+    std::unique_ptr<ScalarRanges> scalar_ranges;
+    std::unique_ptr<PointerRanges> pointer_ranges;
+
+    bool disjoint_store(const Instruction* store, const Fact& cell, std::uint64_t bytes) {
+        const auto parsed = address_operand(store->operands[0]);
+        if (!parsed || !bytes) return false;
+        const auto value = source(store, parsed->first);
+        if (!value) return false;
+        if (!scalar_ranges) {
+            // This pass precedes pointer/type inference. Describe only the
+            // declared 64-bit register containers to the scalar proof; its
+            // opcode checks still reject unsupported definitions and narrowing.
+            // These internal bit widths never become program pointer types.
+            for (const auto& [value, definition] : definitions) {
+                if (!charge()) return false;
+                if (width(definition.name) == 64) scalar_types[value] = Type::integer(64);
+            }
+            for (const auto& block : arguments) for (const auto& [name, value] : block) {
+                if (!charge()) return false;
+                if (width(name) == 64) scalar_types[value] = Type::integer(64);
+            }
+            scalar_ranges = std::make_unique<ScalarRanges>(blocks, incoming, outgoing,
+                arguments, results, scalar_types, ScalarRangeLimits{limits.range_work});
+            pointer_ranges = std::make_unique<PointerRanges>(blocks, incoming, outgoing,
+                arguments, results,
+                [&](ValueId value, const Instruction*) -> std::optional<ExactLocalAddress> {
+                    const auto known = fact(value);
+                    if (!known || !known->local || !in_bounds(*known, 1)) return std::nullopt;
+                    return ExactLocalAddress{known->depot, known->offset, depots.at(known->depot).byte_size};
+                }, [&](ValueId value, const Instruction* at) { return scalar_ranges->get(value, at); },
+                PointerRangeLimits{limits.range_work});
+        }
+        return pointer_ranges->disjoint(*value, store, parsed->second,
+                                        bytes, cell.depot, cell.offset, *scalar_ranges);
+    }
 
     bool charge(std::size_t count = 1) {
         if (count > limits.work - result.work) {
@@ -295,7 +332,7 @@ struct Proof {
         return answer;
     }
 
-    std::optional<Fact> address(const Instruction* at, std::string text) {
+    static std::optional<std::pair<std::string, std::int64_t>> address_operand(std::string text) {
         text = trim(text);
         if (text.starts_with('[')) {
             if (!text.ends_with(']')) return std::nullopt;
@@ -303,16 +340,23 @@ struct Proof {
         }
         const auto sign = text.find_first_of("+-", 1);
         const auto base = trim(std::string_view(text).substr(0, sign));
-        auto result = operand(at, base);
-        if (!result || !result->local) return std::nullopt;
+        std::int64_t displacement = 0;
         if (sign != std::string::npos) {
             const auto literal = integer_literal_bits(trim(std::string_view(text).substr(sign + 1)));
             if (!literal || *literal > INT64_MAX) return std::nullopt;
-            const __int128 offset = static_cast<__int128>(result->offset) +
-                (text[sign] == '-' ? -static_cast<__int128>(*literal) : *literal);
-            if (offset < INT64_MIN || offset > INT64_MAX) return std::nullopt;
-            result->offset = static_cast<std::int64_t>(offset);
+            displacement = static_cast<std::int64_t>(*literal) * (text[sign] == '-' ? -1 : 1);
         }
+        return std::make_pair(base, displacement);
+    }
+
+    std::optional<Fact> address(const Instruction* at, std::string text) {
+        const auto parsed = address_operand(std::move(text));
+        if (!parsed) return std::nullopt;
+        auto result = operand(at, parsed->first);
+        if (!result || !result->local) return std::nullopt;
+        const __int128 offset = static_cast<__int128>(result->offset) + parsed->second;
+        if (offset < INT64_MIN || offset > INT64_MAX) return std::nullopt;
+        result->offset = static_cast<std::int64_t>(offset);
         return result;
     }
 
@@ -399,7 +443,10 @@ struct Proof {
                 const auto written = address(event, event->operands[0]);
                 const auto bytes = memory_width(*event) / 8;
                 const auto lanes = memory_vector_width(event->opcode);
-                if (!written || !in_bounds(*written, bytes * lanes)) return false;
+                if (!written || !in_bounds(*written, bytes * lanes)) {
+                    if (disjoint_store(event, cell, bytes * lanes)) continue;
+                    return false;
+                }
                 if (!overlaps(*written, bytes * lanes, cell)) continue;
                 if (bytes != 8 || written->depot != cell.depot || cell.offset < written->offset ||
                     (cell.offset - written->offset) % 8 != 0) return false;

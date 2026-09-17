@@ -223,6 +223,42 @@ std::string staged_helper_fixture(bool overlap) {
     return source;
 }
 
+// The length cell is zero, but a variable-address copy intervenes. This
+// requires the same scalar/loop disjointness proof as pointer-field recovery.
+std::string ranged_store_fixture(const std::string& kind) {
+    auto source = fixture(false, "observable");
+    source = replace(source, "record[16]", "record[192]");
+    source = replace(source, " mov.u64 %record, record;",
+        " mov.u64 %record, record;\n add.u64 %record, %record, 96;");
+    source = replace(source, " .reg .b32 %value;",
+        " .reg .b64 %scratch, %unknown, %index, %write;\n"
+        " .reg .pred %limit, %again;\n .reg .b32 %value;");
+    std::string body = R"ptx(
+ mov.u64 %scratch, record;
+ ld.global.u64 %unknown, [%input];
+ setp.gt.u64 %limit, %unknown, 32;
+ @%limit bra READ;
+ setp.eq.u64 %limit, %unknown, 0;
+ @%limit bra READ;
+ mov.u64 %index, 0;
+COPY:
+ add.u64 %write, %scratch, %index;
+ st.local.u8 [%write], 47;
+ add.u64 %index, %index, 1;
+ setp.lt.u64 %again, %index, %unknown;
+ @%again bra COPY;
+READ:
+)ptx";
+    if (kind == "overlap") body = replace(body, "mov.u64 %scratch, record;",
+        "mov.u64 %scratch, record;\n add.u64 %scratch, %scratch, 104;");
+    if (kind == "out-of-bounds") body = replace(body, "mov.u64 %scratch, record;",
+        "mov.u64 %scratch, record;\n add.u64 %scratch, %scratch, 184;");
+    if (kind == "unbounded") body = replace(body, " @%limit bra READ;\n", "");
+    source = replace(source, " ld.local.v2.b64 {%pointer, %length}, [%record];",
+        body + " ld.local.v2.b64 {%pointer, %length}, [%record];");
+    return source;
+}
+
 bool rejects_source(const std::string& source, const std::string& kind) {
     const auto result = metal::compile_ptx_to_msl(source, {.entry_name = "probe"});
     const bool proof_error = result.error.find("pointer memory proof") != std::string::npos ||
@@ -235,6 +271,9 @@ bool rejects_source(const std::string& source, const std::string& kind) {
 
 int main() {
     bool ok = preflight_budget();
+    ok &= accepts(ranged_store_fixture("disjoint"), "zero length across bounded copy", true, true);
+    for (const std::string kind : {"overlap", "unbounded", "out-of-bounds"})
+        ok &= rejects_source(ranged_store_fixture(kind), "zero length refuses " + kind + " copy");
     const std::string rounds = R"ptx(.version 7.1
 .target sm_80
 .address_size 64
