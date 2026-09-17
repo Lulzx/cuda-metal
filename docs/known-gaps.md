@@ -229,10 +229,16 @@ checks share bounded store-range disjointness, including captured scalar offsets
 variable-address writes must remain inside their named allocation and outside the
 loaded cell. Range indices are created only when exact addresses do not suffice.
 Unknown, partial or overlapping writes, missing initializers, unsupported calls
-and exhausted analysis supply no facts. Full LLVM7 Solana/Bitcoin/Ethereum inputs
-still need additional proof coverage; passing small copy fixtures is not full
-workload acceptance. Correlated
-pointer/length alternatives and dynamically indexed heterogeneous tables remain
+and exhausted analysis supply no facts. The retained LLVM7 Solana self-test
+module now emits MSL; Apple compilation and full GPU acceptance remain unverified.
+Ethereum and Bitcoin clear their empty private-key patterns but reach later
+range/undefined-value failures. Small GPU fixtures are not full workload acceptance. Explicit parameter slots with `+0` preserve the same
+staged argument identity as an undisplaced slot. Once a zero length is proved,
+unsigned comparisons can remove an empty iteration even when the index itself
+is unknown; signed comparisons cannot borrow those identities. Register-width
+lookups and completed exact-address facts are shared/reused within immutable
+analysis, without relaxing budgets or reusing cell contents across writes.
+Correlated pointer/length alternatives and dynamically indexed heterogeneous tables remain
 outside this proof; an unused integer sentinel is not pointer provenance.
 
 Scalar disjointness queries intersect dominating comparison bounds, trim excluded
@@ -242,6 +248,12 @@ base from a modulo-wrapping sibling. Necessary facts from true AND, false OR,
 predicate copies and negation are supported; opposite outcomes remain unknown.
 Pointer iterators may use a positive literal length in the same allocation or
 observe a selected zero marker as nonzero to prove the end was not reached.
+Single-block fixed-stride pointer loops can also use a synchronized scalar
+counter with a literal endpoint. Initial values, direction, every backedge,
+no-wrap arithmetic and allocation bounds must be proved; equality endpoints
+cannot be skipped. Unit-step scalar induction supports literal disequality
+termination when every backedge observes the same update. Low-bit OR of a local
+address is exact only within the allocation's declared alignment bits.
 All-edge identity, overflow, entry and backedge checks remain required. Cached
 completed scalar proofs survive later query-budget exhaustion; incomplete new
 proofs remain unknown. That query limit does not bound the pre-existing scalar

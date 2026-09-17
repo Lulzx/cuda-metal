@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Empty local slices preserve sentinel bits while their dereference is skipped.
 
-Seven 65-lane configurations use exact CPU references, ABI checks, guarded buffers
+Thirteen 65-lane configurations use exact CPU references, ABI checks, guarded buffers
 and Apple-GPU provenance. Hazardous controls only translate and must refuse.
 """
 import argparse
@@ -17,11 +17,12 @@ import tempfile
 
 MASK = (1 << 64) - 1
 ENTRY = 'empty_slice_guards'
-CASES = ('direct-eq0', 'min8-eq0', 'minunknown-lt64', 'concrete-empty', 'pruned-loop', 'bounded-copy', 'captured-offset')
+CASES = ('direct-eq0', 'min8-eq0', 'minunknown-lt64', 'concrete-empty', 'pruned-loop', 'bounded-copy', 'captured-offset', 'aligned-base', 'zero-offset-call',
+         'unsigned-lt-zero', 'unsigned-ge-zero', 'zero-le-unsigned', 'zero-gt-unsigned')
 NEGATIVES = ('nonzero-length', 'overwritten-length', 'missing-initializer',
              'predicated-initializer', 'backedge-only-zero', 'partial-write',
              'overlapping-write', 'unknown-helper-clobber', 'unguarded-sentinel',
-             'signed-min-negative', 'ranged-overlap', 'ranged-unbounded', 'ranged-out-of-bounds')
+             'signed-min-negative', 'ranged-overlap', 'ranged-unbounded', 'ranged-out-of-bounds', 'ranged-unaligned-or', 'ranged-high-bit-or', 'staged-overlap')
 ABI = ['CUMETAL_ABI_V2', 'kernel ' + ENTRY, 'shared 0',
        'arg buffer 8', 'arg buffer 8', 'arg bytes 4']
 
@@ -38,8 +39,8 @@ def expected(case, values):
     # Concrete pointers have process-dependent address bits; that control
     # observes the reloaded zero length instead of publishing the address.
     return [word for value, length in zip(values[::2], values[1::2])
-            for word in ((47 * min(length, 32) if case == 'captured-offset' else
-                          47 * length if case == 'bounded-copy' and length <= 32 else 0),
+            for word in ((47 if case == 'zero-offset-call' else 47 * min(length, 32) if case == 'captured-offset' else
+                          47 * length if case in ('bounded-copy', 'aligned-base') and length <= 32 else 0),
                          0 if case == 'concrete-empty' else 1, value)]
 
 
@@ -58,6 +59,15 @@ def fixture(case, negative=None):
  ret;
 }
 ''' if negative == 'unknown-helper-clobber' else ''
+    if case == 'zero-offset-call' or negative == 'staged-overlap':
+        helper = """.func write_byte(.param .b64 address) {
+ .reg .b64 %raw, %pointer;
+ ld.param.b64 %raw, [address];
+ cvta.to.local.u64 %pointer, %raw;
+ st.local.u8 [%pointer], 47;
+ ret;
+}
+"""
     lines = ['.version 7.1', '.target sm_80', '.address_size 64', helper,
              f'.visible .entry {ENTRY}(.param .u64 .ptr .global input,',
              ' .param .u64 .ptr .global output, .param .u32 count) {',
@@ -99,7 +109,7 @@ def fixture(case, negative=None):
         lines.extend((' st.param.b64 [clobber_record], %record;',
                       ' st.param.b64 [clobber_offset], %unknown;',
                       ' call.uni clobber, (clobber_record, clobber_offset);'))
-    if case in ('bounded-copy', 'captured-offset') or negative and negative.startswith('ranged-'):
+    if case in ('bounded-copy', 'captured-offset', 'aligned-base') or negative and negative.startswith('ranged-'):
         # Keep pointer/length at 96/104 and copy bytes in the same allocation.
         lines = [line.replace('record[16]', 'record[192]') for line in lines]
         pos = lines.index(' mov.u64 %record, record;') + 1
@@ -108,6 +118,11 @@ def fixture(case, negative=None):
                       ' .reg .b32 %byte;', ' .reg .pred %limit, %again;',
                       ' mov.u64 %scratch, record;',
                       ' st.local.v4.u64 [%scratch], {0, 0, 0, 0};'))
+        if case == 'aligned-base' or negative in ('ranged-unaligned-or', 'ranged-high-bit-or'):
+            lines.append(' st.local.u64 [%scratch+32], 0;')
+            lines.append(' or.b64 %scratch, %scratch, ' + ('16;' if negative == 'ranged-high-bit-or' else '1;'))
+            if negative == 'ranged-unaligned-or':
+                lines = [line.replace('.align 16', '.align 1') for line in lines]
         if negative == 'ranged-overlap':
             lines.append(' add.u64 %scratch, %scratch, 104;')
         elif negative == 'ranged-out-of-bounds':
@@ -129,6 +144,13 @@ def fixture(case, negative=None):
                       ' ld.local.u8 %byte, [%sum_address];', ' add.u32 %value, %value, %byte;',
                       ' add.u64 %index, %index, 1;', ' setp.lt.u64 %again, %index, 32;',
                       ' @%again bra SUM_BYTES;'))
+    if case == 'zero-offset-call' or negative == 'staged-overlap':
+        lines = [line.replace('record[16]', 'record[32]') for line in lines]
+        offset = 8 if negative == 'staged-overlap' else 16
+        lines.extend((' .reg .b64 %actual;', f' add.u64 %actual, %record, {offset};',
+                      ' st.param.b64 [clobber_record+0], %actual;',
+                      ' call.uni write_byte, (clobber_record);',
+                      ' ld.local.u8 %value, [%actual];'))
     suffix = 'u64' if case.startswith('min') else 'b64'
     lines.append(f' ld.local.v2.{suffix} {{%pointer, %length}}, [%record];')
     if negative == 'signed-min-negative':
@@ -145,10 +167,18 @@ def fixture(case, negative=None):
                       ' setp.ne.u64 %maybe, %length, 0;', ' @%maybe bra CONFLICTING_LOOP;',
                       'AFTER_LOOP:', ' mov.b64 %extent, %length;'))
     lines.append(' st.global.u64 [%output+8], ' + ('%length;' if case == 'concrete-empty' else '%pointer;'))
-    lines.append(' setp.lt.u64 %empty, %extent, 64;' if case == 'minunknown-lt64' else
+    comparisons = {
+        'unsigned-lt-zero': 'setp.lt.u64 %empty, %unknown, %extent;',
+        'unsigned-ge-zero': 'setp.ge.u64 %empty, %unknown, %extent;',
+        'zero-le-unsigned': 'setp.le.u64 %empty, %extent, %unknown;',
+        'zero-gt-unsigned': 'setp.gt.u64 %empty, %extent, %unknown;',
+    }
+    lines.append(' ' + comparisons[case] if case in comparisons else
+                 ' setp.lt.u64 %empty, %extent, 64;' if case == 'minunknown-lt64' else
                  ' setp.eq.u64 %empty, %extent, 0;')
     if negative != 'unguarded-sentinel':
-        lines.append(' @%empty bra EMPTY;')
+        lines.append(' @!%empty bra EMPTY;' if case in ('unsigned-lt-zero', 'zero-gt-unsigned') else
+                     ' @%empty bra EMPTY;')
     lines.append(' ld.u8 %value, [%pointer];')
     if negative == 'backedge-only-zero':
         lines.extend((' st.local.u64 [%record+8], 0;', ' bra READ_SLICE;'))

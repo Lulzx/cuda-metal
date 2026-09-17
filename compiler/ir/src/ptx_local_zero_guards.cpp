@@ -3,6 +3,7 @@
 #include "cumetal/ir/call_write_effects.h"
 #include "ptx_text.h"
 #include "ptx_pointer_ranges.h"
+#include "ptx_registers.h"
 
 #include <algorithm>
 #include <bit>
@@ -73,7 +74,7 @@ struct Proof {
     std::unordered_map<ValueId, std::vector<ValueId>> joins;
     std::unordered_map<ValueId, std::optional<Fact>> facts;
     std::unordered_set<ValueId> active;
-    std::unordered_map<std::string, unsigned> widths;
+    RegisterWidths widths;
     std::unordered_map<std::string, CallEffectSummary> effects;
     std::vector<ValueId> guard_inputs;
     std::unordered_set<ValueId> guard_values;
@@ -124,29 +125,7 @@ struct Proof {
     }
 
     unsigned width(const std::string& name) {
-        if (const auto found = widths.find(name); found != widths.end()) return found->second;
-        unsigned value = 0;
-        bool matched = false;
-        for (const auto& declaration : function.register_declarations) {
-            if (!charge()) return 0;
-            if (declaration.name != name) continue;
-            value = !matched && declaration.function_scope ? integer_width(declaration.type) : 0;
-            matched = true;
-        }
-        for (const auto& range : function.register_ranges) {
-            if (!charge()) return 0;
-            if (!name.starts_with(range.prefix)) continue;
-            const auto digits = std::string_view(name).substr(range.prefix.size());
-            if (digits.empty() || (digits.size() > 1 && digits.front() == '0')) continue;
-            std::size_t index = 0;
-            const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), index);
-            if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || index >= range.count)
-                continue;
-            value = !matched && range.function_scope ? integer_width(range.type) : 0;
-            matched = true;
-        }
-        widths.emplace(name, value);
-        return value;
+        return widths.get(name, function, [&] { return charge(); });
     }
 
     std::optional<ValueId> source(const Instruction* instruction, const std::string& name) const {
@@ -254,6 +233,19 @@ struct Proof {
             const auto address = operand(instruction, instruction->operands[1]);
             return address && address->local ? address : std::nullopt;
         }
+        if (op == "or.b64" && instruction->operands.size() == 3) {
+            auto a = operand(instruction, instruction->operands[1]);
+            auto b = operand(instruction, instruction->operands[2]);
+            if (!a || !b) return std::nullopt;
+            if (!a->local && b->local) std::swap(a, b);
+            if (!a->local || b->local || a->offset < 0 || !depots.contains(a->depot)) return std::nullopt;
+            const auto alignment = depots.at(a->depot).alignment;
+            // Only bits below a proven allocation alignment may be changed.
+            // They belong to the offset, independent of the unknown base bits.
+            if (!std::has_single_bit(alignment) || b->bits >= alignment) return std::nullopt;
+            a->offset = static_cast<std::int64_t>(static_cast<std::uint64_t>(a->offset) | b->bits);
+            return a;
+        }
         const bool subtract = op == "sub.u64" || op == "sub.s64";
         if ((!subtract && op != "add.u64" && op != "add.s64") || instruction->operands.size() != 3)
             return std::nullopt;
@@ -293,6 +285,15 @@ struct Proof {
             const auto current = pending.back();
             pending.pop_back();
             if (!visited.insert(current).second) continue;
+            // A completed fact is an anchored leaf even when its definition
+            // is a copy/join. Rewalking that already-proved relay for each
+            // alias makes otherwise linear zero-field queries quadratic.
+            if (const auto cached = facts.find(current); cached != facts.end()) {
+                if (!cached->second || (answer && *answer != *cached->second)) { valid = false; break; }
+                answer = cached->second;
+                leaves.push_back(current);
+                continue;
+            }
             std::vector<ValueId> inputs;
             if (joins.contains(current)) inputs = joins.at(current);
             else if (definitions.contains(current)) {
@@ -396,8 +397,9 @@ struct Proof {
                 if (root_opcode(prior->opcode) == "call") break;
                 if (!prior->opcode.starts_with("st.param.") || prior->operands.size() != 2 ||
                     parameter_name_from_operand(prior->operands[0]) != names[write.argument]) continue;
+                const auto slot = address_operand(prior->operands[0]);
                 if (!prior->predicate.empty() || memory_vector_width(prior->opcode) != 1 || memory_width(*prior) != 64 ||
-                    trim(prior->operands[0]) != "[" + names[write.argument] + "]") return false;
+                    !slot || slot->first != names[write.argument] || slot->second != 0) return false;
                 staged = prior;
                 break;
             }

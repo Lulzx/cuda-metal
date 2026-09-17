@@ -223,6 +223,44 @@ POINTER_LOOP:
 ''' + source[end:]
 
 
+def counted_pointer_fixture(reverse=False):
+    """Four-byte steps with a separate countdown, plus post-loop tail writes."""
+    source = reversal_fixture()
+    start, end = source.index('REVERSE:\n'), source.index('LOAD:\n')
+    if reverse:
+        setup = """ st.local.u8 [%rd6+61],47;
+ st.local.v2.u8 [%rd6+62],{47,47};
+ add.u64 %rd10,%rd6,60;
+"""
+        stores = """ st.local.u8 [%rd10],47;
+ st.local.v2.u8 [%rd10-2],{47,47};
+ st.local.u8 [%rd10-3],47;
+ sub.u64 %rd10,%rd10,4;
+"""
+        tail = ' st.local.u8 [%rd10],47;\n'
+    else:
+        setup = ' st.local.u8 [%rd6],47;\n mov.u64 %rd10,%rd6;\n'
+        stores = """ st.local.u8 [%rd10+1],47;
+ st.local.v2.u8 [%rd10+2],{47,47};
+ st.local.u8 [%rd10+4],47;
+ add.u64 %rd10,%rd10,4;
+"""
+        tail = """ mov.u64 %rd12,1;
+TAIL:
+ add.u64 %rd13,%rd10,%rd12;
+ st.local.u8 [%rd13],47;
+ add.u64 %rd12,%rd12,1;
+ setp.ne.u64 %p4,%rd12,4;
+ @%p4 bra TAIL;
+"""
+    return source[:start] + setup + """ mov.u64 %rd11,60;
+COUNTED:
+""" + stores + """ sub.u64 %rd11,%rd11,4;
+ setp.ne.u64 %p3,%rd11,0;
+ @%p3 bra COUNTED;
+""" + tail + source[end:]
+
+
 def scalar_dynamic_start_fixture():
     source = reversal_fixture()
     start, end = source.index('REVERSE:\n'), source.index('LOAD:\n')
@@ -594,6 +632,26 @@ def main(build):
     reversal_values, reversal_expected = reversal_inputs_and_expected()
     run_integer_case(build, reversal_fixture(), reversal_values, reversal_expected,
                      'bounded array reversal and pointer cell', output_words=65)
+    counted_expected = [word for value in reversal_values for word in
+                        ([value] + ([47] * 64 if value <= 64 else list(range(64))))]
+    for reverse in (False, True):
+        run_integer_case(build, counted_pointer_fixture(reverse), reversal_values, counted_expected,
+                         'countdown pointer stride ' + ('backward' if reverse else 'forward with tail'),
+                         output_words=65)
+    count_up = counted_pointer_fixture().replace('mov.u64 %rd11,60;', 'mov.u64 %rd11,0;').replace(
+        'sub.u64 %rd11,%rd11,4;', 'add.u64 %rd11,%rd11,1;').replace(
+        'setp.ne.u64 %p3,%rd11,0;', 'setp.lt.u64 %p3,%rd11,15;')
+    run_integer_case(build, count_up, reversal_values, counted_expected,
+                     'count-up pointer stride with scalar tail', output_words=65)
+    for name, source in [
+        ('countdown unknown seed', counted_pointer_fixture().replace('mov.u64 %rd11,60;', 'mov.u64 %rd11,%rd3;')),
+        ('countdown misses zero', counted_pointer_fixture().replace('mov.u64 %rd11,60;', 'mov.u64 %rd11,61;')),
+        ('countdown zero seed', counted_pointer_fixture().replace('mov.u64 %rd11,60;', 'mov.u64 %rd11,0;')),
+        ('countdown wrong direction', counted_pointer_fixture().replace('sub.u64 %rd11,%rd11,4;', 'add.u64 %rd11,%rd11,4;')),
+        ('countdown pointer overlap', counted_pointer_fixture().replace('add.u64 %rd6,%rd4,64;', 'add.u64 %rd6,%rd4,208;')),
+    ]:
+        expect_compile_failure(build, source, 'integer_probe', 'pointer memory proof')
+        print('NEGATIVE_PASS', name)
     iterator_expected = []
     for length in reversal_values:
         array = list(range(64))

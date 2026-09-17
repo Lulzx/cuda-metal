@@ -1,4 +1,5 @@
 #include "ptx_cfg.h"
+#include "ptx_registers.h"
 #include "ptx_text.h"
 
 #include <algorithm>
@@ -49,50 +50,17 @@ struct GuardedPaths {
         return 0;
     }
 
-    // Resolve only used declarations; ranges stay compact even for enormous
-    // counts. Duplicate/scoped bindings and exhausted lookups provide no fact.
-    mutable bool scalar_declarations_indexed = false;
-    mutable bool scalar_declarations_valid = false;
+    mutable RegisterWidths scalar_widths{};
     mutable std::size_t scalar_declaration_work = 4194304;
-    mutable std::unordered_map<std::string, unsigned> scalar_declarations{};
-    mutable std::unordered_map<std::string, unsigned> scalar_width_cache{};
 
     unsigned local_scalar_width(const std::string& name) const {
         if (!function) return 0;
-        if (const auto found = scalar_width_cache.find(name); found != scalar_width_cache.end())
-            return found->second;
-        if (scalar_width_cache.size() >= 65536) return 0;
-        if (!scalar_declarations_indexed) {
-            scalar_declarations_indexed = true;
-            if (function->register_declarations.size() > 65536) return 0;
-            for (const auto& declaration : function->register_declarations) {
-                if (scalar_declaration_work == 0) { scalar_declarations.clear(); return 0; }
-                --scalar_declaration_work;
-                const auto [found, inserted] = scalar_declarations.emplace(declaration.name,
-                    declaration.function_scope ? scalar_integer_width(declaration.type) : 0);
-                if (!inserted) found->second = 0;
-            }
-            scalar_declarations_valid = true;
-        }
-        if (!scalar_declarations_valid) return 0;
-        const auto exact = scalar_declarations.find(name);
-        bool matched = exact != scalar_declarations.end();
-        unsigned width = matched ? exact->second : 0;
-        for (const auto& range : function->register_ranges) {
-            if (scalar_declaration_work == 0) return 0;
+        const auto width = scalar_widths.get(name, *function, [&] {
+            if (scalar_declaration_work == 0) return false;
             --scalar_declaration_work;
-            if (!name.starts_with(range.prefix)) continue;
-            const auto digits = std::string_view(name).substr(range.prefix.size());
-            if (digits.empty() || (digits.size() > 1 && digits.front() == '0')) continue;
-            std::size_t index = 0;
-            const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), index);
-            if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() ||
-                index >= range.count) continue;
-            width = !matched && range.function_scope ? scalar_integer_width(range.type) : 0;
-            matched = true;
-        }
-        scalar_width_cache.emplace(name, width);
-        return width;
+            return true;
+        });
+        return width == 8 ? 0 : width;
     }
 
     bool local_predicate(const std::string& reg) const {
@@ -564,6 +532,22 @@ struct GuardedPaths {
             return width == 64 ? *literal : *literal & ((std::uint64_t{1} << width) - 1);
         };
         const auto left = scalar(instruction.operands[1]), right = scalar(instruction.operands[2]);
+        const auto integer_operand = [&](const std::string& text) {
+            return integer_literal_bits(trim(text)).has_value() ||
+                (first_register(text) == trim(text) && local_scalar_width(trim(text)) == width);
+        };
+        // A loop index need not be constant to prove an empty unsigned range.
+        // x < 0 and 0 > x are impossible for every unsigned bit pattern;
+        // x >= 0 and 0 <= x are correspondingly true. Signed comparisons do
+        // not have these identities and remain unknown here.
+        if (zero_loads && right && *right == 0 && integer_operand(instruction.operands[1])) {
+            if (instruction.opcode.starts_with("setp.lt.u")) return false;
+            if (instruction.opcode.starts_with("setp.ge.u")) return true;
+        }
+        if (zero_loads && left && *left == 0 && integer_operand(instruction.operands[2])) {
+            if (instruction.opcode.starts_with("setp.gt.u")) return false;
+            if (instruction.opcode.starts_with("setp.le.u")) return true;
+        }
         if (!left || !right) return std::nullopt;
         if (instruction.opcode.starts_with("setp.eq.")) return *left == *right;
         if (instruction.opcode.starts_with("setp.ne.")) return *left != *right;

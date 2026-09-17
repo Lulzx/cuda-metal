@@ -536,6 +536,27 @@ struct ScalarRanges::Impl {
                 bounded = guard_bound(header, guard, guard.block);
                 prior = true;
             }
+            if (!bounded) {
+                // With a proved unit recurrence, a necessary != literal test
+                // on every backedge gives an endpoint: the update cannot skip
+                // it. Disequality alone, a seed already beyond it, or a stale
+                // comparison never supplies an interval.
+                const auto& op = guard.comparison->opcode;
+                const bool unequal = guard.truth
+                    ? (op == "setp.ne.u64" || op == "setp.ne.s64" || op == "setp.ne.b64")
+                    : (op == "setp.eq.u64" || op == "setp.eq.s64" || op == "setp.eq.b64");
+                const bool each_backedge = !backedges.empty() && std::all_of(backedges.begin(), backedges.end(),
+                    [&](std::size_t edge) { return guard.block == edge && guard.successor == block; });
+                if (unequal && each_backedge) for (std::size_t index : {1U, 2U}) {
+                    const auto endpoint = literal(guard.comparison->operands[3-index]);
+                    const auto input = source(guard.comparison, guard.comparison->operands[index]);
+                    if (!endpoint || !input || *endpoint < 0 || *endpoint >= INT64_MAX - 1) continue;
+                    if (*start < *endpoint && forwards(*input, *update))
+                        return ScalarRange{*start, *endpoint - 1};
+                    if (*start <= *endpoint && forwards(*input, header))
+                        return ScalarRange{*start, *endpoint};
+                }
+            }
             if (!bounded || bounded->upper >= INT64_MAX - 1)
                 continue;
             bool guarded = true;

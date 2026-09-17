@@ -2,6 +2,8 @@
 #include "ptx_local_zero_guards.h"
 
 #include <iostream>
+#include <deque>
+#include <tuple>
 #include <stdexcept>
 #include <string>
 
@@ -52,6 +54,50 @@ bool preflight_budget() {
         ok &= expect(exhausted.loads.empty() && exhausted.budget_exhausted && exhausted.work == budget,
                      "preflight and SSA indexing share one cap without partial facts");
     }
+    return ok;
+}
+
+bool shared_address_facts(bool unrelated_declarations) {
+    namespace detail = cumetal::ir::detail;
+    constexpr unsigned count = 256;
+    std::deque<detail::Instruction> instructions;
+    std::vector<detail::RawBlock> blocks(1);
+    std::vector<std::unordered_map<std::string, ir::ValueId>> incoming(1), outgoing(1);
+    std::vector<std::map<std::string, ir::ValueId>> arguments(1);
+    std::unordered_map<const detail::Instruction*, std::vector<ir::ValueId>> results;
+    std::unordered_map<std::string, detail::LocalDepot> depots{{"record", {"record", 16, 16}}};
+    cumetal::ptx::EntryFunction function;
+    function.register_ranges = {{"%a", "b64", count+1, true}, {"%l", "b64", count+1, true},
+                                {"%p", "pred", count+1, true}};
+    if (unrelated_declarations)
+        for (unsigned i = 0; i < 1024; ++i)
+            function.register_declarations.push_back({"%unrelated" + std::to_string(i), "b32", true});
+    ir::Module module;
+    ir::ValueId next = 1;
+    const auto add = [&](const std::string& opcode, std::vector<std::string> operands, bool writes) {
+        instructions.push_back({{}, opcode, std::move(operands), 1, true});
+        const auto* instruction = &instructions.back();
+        blocks.front().instructions.push_back(instruction);
+        results[instruction] = writes ? std::vector<ir::ValueId>{next++} : std::vector<ir::ValueId>{};
+        return instruction;
+    };
+    add("mov.u64", {"%a0", "record"}, true);
+    std::vector<const detail::Instruction*> loads;
+    for (unsigned i = 1; i <= count; ++i) {
+        const auto address = "%a" + std::to_string(i);
+        const auto length = "%l" + std::to_string(i);
+        add("mov.u64", {address, "%a" + std::to_string(i-1)}, true);
+        add("st.local.u64", {"[" + address + "]", i % 17 == 0 ? "1" : "0"}, false);
+        loads.push_back(add("ld.local.u64", {length, "[" + address + "]"}, true));
+        add("setp.eq.u64", {"%p" + std::to_string(i), length, "0"}, true);
+    }
+    const auto proof = detail::prove_local_zero_loads(blocks, incoming, outgoing, arguments, results,
+        depots, function, module, {.work = 35000});
+    bool ok = expect(!proof.budget_exhausted && proof.work <= 35000,
+                     "shared exact address facts stay within the unchanged work allowance");
+    for (unsigned i = 1; i <= count; ++i)
+        ok &= expect(proof.loads.contains(loads[i-1]) == (i % 17 != 0),
+                     "address reuse cannot reuse an older cell content at load " + std::to_string(i));
     return ok;
 }
 
@@ -249,6 +295,12 @@ COPY:
  @%again bra COPY;
 READ:
 )ptx";
+    if (kind == "aligned-or" || kind == "unaligned-or" || kind == "high-bit-or") {
+        body = replace(body, "mov.u64 %scratch, record;",
+            "mov.u64 %scratch, record;\n or.b64 %scratch, %scratch, " +
+                std::string(kind == "high-bit-or" ? "16;" : "1;"));
+        if (kind == "unaligned-or") source = replace(source, ".align 16", ".align 1");
+    }
     if (kind == "overlap") body = replace(body, "mov.u64 %scratch, record;",
         "mov.u64 %scratch, record;\n add.u64 %scratch, %scratch, 104;");
     if (kind == "out-of-bounds") body = replace(body, "mov.u64 %scratch, record;",
@@ -271,8 +323,23 @@ bool rejects_source(const std::string& source, const std::string& kind) {
 
 int main() {
     bool ok = preflight_budget();
+    ok &= shared_address_facts(false);
+    ok &= shared_address_facts(true);
+    for (const auto& [op, order, invert] : std::vector<std::tuple<std::string, bool, bool>>{
+             {"lt", false, true}, {"ge", false, false}, {"le", true, false}, {"gt", true, true}}) {
+        auto source = replace(fixture(false, "observable"), " .reg .b32 %value;",
+                              " .reg .b64 %unknown;\n .reg .b32 %value;");
+        source = replace(source, " setp.eq.u64 %empty, %count, 0;",
+            " ld.global.u64 %unknown, [%input];\n setp." + op + ".u64 %empty, " +
+            (order ? "%count, %unknown;" : "%unknown, %count;"));
+        if (invert) source = replace(source, " @%empty bra DONE;", " @!%empty bra DONE;");
+        ok &= accepts(source, "unsigned unknown/zero identity " + op, true, true);
+        ok &= rejects_source(replace(source, "setp." + op + ".u64", "setp." + op + ".s64"),
+                             "signed comparison cannot borrow an unsigned zero identity");
+    }
     ok &= accepts(ranged_store_fixture("disjoint"), "zero length across bounded copy", true, true);
-    for (const std::string kind : {"overlap", "unbounded", "out-of-bounds"})
+    ok &= accepts(ranged_store_fixture("aligned-or"), "aligned allocation low-bit OR", true, true);
+    for (const std::string kind : {"overlap", "unbounded", "out-of-bounds", "unaligned-or", "high-bit-or"})
         ok &= rejects_source(ranged_store_fixture(kind), "zero length refuses " + kind + " copy");
     const std::string rounds = R"ptx(.version 7.1
 .target sm_80
@@ -329,6 +396,15 @@ DONE:
                                    "overlapping-write", "unknown-helper-clobber", "unguarded-sentinel",
                                    "signed-min-negative"}) ok &= rejects_source(rejection(kind), kind);
     ok &= accepts(staged_helper_fixture(false), "disjoint staged helper actual survives register overwrite", true, true);
+    for (const std::string offset : {"+0", "+0x0"}) {
+        const auto with_offset = [&](bool overlap) {
+            return replace(staged_helper_fixture(overlap), "[write_actual]", "[write_actual" + offset + "]");
+        };
+        ok &= accepts(with_offset(false), "zero-offset parameter slot " + offset, true, true);
+        ok &= rejects_source(with_offset(true), "zero-offset slot cannot hide an overlapping helper write");
+    }
+    ok &= rejects_source(replace(staged_helper_fixture(false), "[write_actual]", "[write_actual+8]"),
+                         "nonzero parameter slot displacement cannot supply the argument");
     ok &= rejects_source(staged_helper_fixture(true), "overlapping staged helper actual survives register overwrite");
     return ok ? 0 : 1;
 }

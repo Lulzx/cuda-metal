@@ -1,4 +1,5 @@
 #include "ptx_scalar_ranges.h"
+#include "ptx_pointer_ranges.h"
 
 #include <deque>
 #include <iostream>
@@ -915,10 +916,84 @@ bool captured_offset_guards() {
     return ok;
 }
 
+bool equality_terminated_counter(unsigned variant) {
+    Graph graph(3);
+    graph.add(0, "mov.u64", {"%i", variant == 2 ? "4" : variant == 3 ? "5" : "1"}, {1});
+    graph.add(0, "bra", {"B1"});
+    graph.edge(0, 1);
+    graph.outgoing[0]["%i"] = 1;
+    graph.phi(1, "%i", 2);
+    const auto* query = graph.add(1, "add.u64", {"%next", "%i", variant == 4 ? "2" : "1"}, {3});
+    graph.add(1, variant == 1 ? "setp.eq.u64" : "setp.ne.u64",
+              {"%again", variant == 5 ? "%i" : "%next", "4"}, {4});
+    if (variant == 6) graph.add(1, "setp.ne.u64", {"%again", "%next", "0"}, {5});
+    graph.add(1, "bra", {"B1"}, {}, variant == 1 ? "!%again" : "%again");
+    graph.edge(1, 1);
+    graph.edge(1, 2);
+    graph.outgoing[1]["%i"] = 3;
+    graph.add(2, "ret");
+    auto ranges = graph.ranges();
+    const auto range = ranges.get(2, query);
+    if (variant == 0 || variant == 1 || variant == 5)
+        return known(range, 1, variant == 5 ? 4 : 3,
+                     "unit counter reaches its equality endpoint on every backedge");
+    return expect(!range, "endpoint guard cannot bound a skipped/redefined/wrapping endpoint");
+}
+
+bool counted_pointer_loop(unsigned variant) {
+    Graph graph(3);
+    graph.add(0, "mov.u64", {"%pointer", "scratch"}, {1});
+    const bool up = variant == 12 || variant == 13 || variant == 14 || variant == 19 || variant == 20;
+    graph.add(0, variant == 7 ? "ld.param.u64" : "mov.u64",
+              {"%remaining", variant == 20 ? "9223372036854775805" : up ? "0" :
+                  variant == 3 ? "61" : variant == 4 ? "0" : variant == 7 ? "[unknown]" : "60"}, {2});
+    graph.add(0, "bra", {"B1"});
+    graph.edge(0, 1);
+    if (variant == 5) graph.edge(0, 2);
+    graph.outgoing[0] = {{"%pointer", 1}, {"%remaining", 2}};
+    graph.phi(1, "%pointer", 3);
+    graph.phi(1, "%remaining", 4);
+    graph.add(1, variant == 6 ? "add.u32" : "add.u64",
+              {"%pointer", "%pointer", variant == 1 ? "-4" : "4"}, {5});
+    graph.add(1, up ? "add.u64" : "sub.u64",
+              {"%remaining", "%remaining", variant == 19 ? "2" : up && variant != 20 ? "1" : "4"}, {6});
+    const auto comparison = variant == 2 ? "setp.eq.u64" : variant == 12 || variant == 19 || variant == 20
+        ? "setp.lt.u64" : variant == 14 ? "setp.le.u64" : variant == 15 || variant == 18 ? "setp.gt.u64"
+        : variant == 16 || variant == 17 ? "setp.ge.u64" : "setp.ne.u64";
+    const auto limit = variant == 20 ? "9223372036854775806" : variant == 19 ? "29" : variant == 12 || variant == 13
+        ? "15" : variant == 14 ? "14" : variant == 16 ? "4" : variant == 8 || variant == 18 ? "1" : "0";
+    graph.add(1, comparison, {"%again", "%remaining", limit}, {7});
+    if (variant == 9) graph.add(1, "setp.ne.u64", {"%again", "%pointer", "0"}, {8});
+    graph.add(1, "bra", {"B1"}, {}, variant == 2 ? "!%again" : "%again");
+    graph.edge(1, 1);
+    graph.edge(1, 2);
+    graph.outgoing[1] = {{"%pointer", 5}, {"%remaining", variant == 10 ? 4u : 6u}};
+    const auto* use = graph.add(2, "ret");
+    auto scalars = graph.ranges();
+    const auto base = variant == 1 ? 128 : variant == 11 ? 224 : 32;
+    detail::PointerRanges pointers(graph.blocks, graph.incoming, graph.outgoing, graph.arguments,
+        graph.results,
+        [&](ir::ValueId value, const detail::Instruction*) -> std::optional<detail::ExactLocalAddress> {
+            if (value == 1) return detail::ExactLocalAddress{"scratch", base, 256};
+            return std::nullopt;
+        }, [&](ir::ValueId value, const detail::Instruction* at) { return scalars.get(value, at); });
+    const auto range = pointers.get(3, use);
+    const auto label = "counted pointer variant " + std::to_string(variant);
+    if (variant <= 2 || (variant >= 12 && variant <= 19 && variant != 17)) {
+        const auto lo = variant == 1 ? 72 : 32;
+        const auto hi = variant == 1 ? 128 : 88;
+        return expect(range && range->depot == "scratch" && range->lower == lo && range->upper == hi,
+                      label + " bounds the phi over all finite trips");
+    }
+    return expect(!range, label + " refuses an unproved trip count, update, guard or allocation extent");
+}
+
 } // namespace
 
 int main() {
     bool ok = branch_bounds();
+    for (unsigned variant = 0; variant < 7; ++variant) ok &= equality_terminated_counter(variant);
+    for (unsigned variant = 0; variant < 21; ++variant) ok &= counted_pointer_loop(variant);
     ok &= guarded_dynamic_seed();
     ok &= shifted_reverse_indices();
     ok &= guarded_forwarded_copy();

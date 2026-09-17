@@ -532,6 +532,160 @@ struct PointerRanges::Impl {
         }
         return found;
     }
+    // A single-block loop may advance a pointer by a fixed stride while an
+    // independent scalar reaches a literal bound. Both updates must occur exactly
+    // once per backedge; equality endpoints must be reached without skipping.
+    std::optional<LocalPointerRange> counted_loop(ValueId pointer, const Instruction* at) {
+        if (!joins.contains(pointer) || !locations.contains(at)) return std::nullopt;
+        const auto& join = joins.at(pointer);
+        const auto header = join.block;
+        if (header == 0 || blocks[header].instructions.empty() || blocks[header].successors.size() != 2)
+            return std::nullopt;
+        const auto& successors = blocks[header].successors;
+        if ((successors[0] == header) == (successors[1] == header)) return std::nullopt;
+        const auto* branch = blocks[header].instructions.back();
+        if (!is_conditional_branch(*branch)) return std::nullopt;
+        const auto bypass = reachable(0, header);
+        if (bypass.empty() || bypass[locations.at(at)]) return std::nullopt;
+        // A path from the exit back to an external predecessor would add an
+        // unmodelled outer recurrence. Keep this proof's entry seeds invariant.
+        const auto after = reachable(successors[0] == header ? successors[1] : successors[0], header);
+        if (after.empty()) return std::nullopt;
+        for (const auto predecessor : blocks[header].predecessors)
+            if (predecessor != header && after[predecessor]) return std::nullopt;
+        const auto [predicate_name, inverted] = normalized_predicate(branch->predicate);
+        const auto predicate = source(branch, predicate_name);
+        const auto predicate_origin = predicate ? terminal(*predicate) : std::nullopt;
+        if (!predicate_origin || !definitions.contains(*predicate_origin)) return std::nullopt;
+        const auto compare_definition = definitions.at(*predicate_origin);
+        const auto* compare = compare_definition.instruction;
+        const bool truth = (successors[0] == header) != inverted;
+        if (compare_definition.block != header || !single(compare) || compare->operands.size() != 3)
+            return std::nullopt;
+        std::string relation;
+        for (const auto* op : {"eq", "ne", "lt", "le", "gt", "ge"})
+            if (compare->opcode == std::string("setp.") + op + ".u64" ||
+                ((std::string(op) == "eq" || std::string(op) == "ne") &&
+                 compare->opcode == std::string("setp.") + op + ".s64")) relation = op;
+        if (relation.empty()) return std::nullopt;
+        std::optional<ValueId> next_count;
+        std::optional<std::int64_t> endpoint;
+        for (std::size_t i : {1U, 2U}) {
+            const auto limit = literal(compare->operands[3-i]);
+            const auto input = source(compare, compare->operands[i]);
+            if (!limit || !input) continue;
+            next_count = terminal(*input);
+            endpoint = limit;
+            if (i == 2) {
+                if (relation == "lt") relation = "gt";
+                else if (relation == "le") relation = "ge";
+                else if (relation == "gt") relation = "lt";
+                else if (relation == "ge") relation = "le";
+            }
+            break;
+        }
+        if (!truth) {
+            if (relation == "eq") relation = "ne";
+            else if (relation == "ne") relation = "eq";
+            else if (relation == "lt") relation = "ge";
+            else if (relation == "le") relation = "gt";
+            else if (relation == "gt") relation = "le";
+            else if (relation == "ge") relation = "lt";
+        }
+        if (!endpoint || *endpoint < 0) return std::nullopt;
+        if (!next_count || !definitions.contains(*next_count)) return std::nullopt;
+        const auto count_definition = definitions.at(*next_count);
+        const auto* count_update = count_definition.instruction;
+        if (count_definition.block != header || !single(count_update) || count_update->operands.size() != 3)
+            return std::nullopt;
+        const bool subtract = count_update->opcode == "sub.s64" || count_update->opcode == "sub.u64";
+        if (!subtract && count_update->opcode != "add.s64" && count_update->opcode != "add.u64")
+            return std::nullopt;
+        const auto decrement = literal(count_update->operands[2]);
+        const auto count_input = source(count_update, count_update->operands[1]);
+        if (!decrement || !count_input || *decrement == INT64_MIN) return std::nullopt;
+        const std::int64_t step = subtract ? -*decrement : *decrement;
+        if (step == 0) return std::nullopt;
+        std::optional<ValueId> counter;
+        for (const auto candidate : ancestor_joins(*count_input))
+            if (joins.at(candidate).block == header && forwards(*count_input, candidate)) counter = candidate;
+        if (!counter) return std::nullopt;
+        std::optional<std::int64_t> trips;
+        bool count_backedge = false;
+        for (const auto& input : joins.at(*counter).inputs) {
+            if (!charge()) return std::nullopt;
+            if (input.predecessor == header) {
+                if (!forwards(input.value, *next_count)) return std::nullopt;
+                count_backedge = true;
+            } else {
+                const auto* site = blocks[input.predecessor].instructions.empty() ? nullptr
+                    : blocks[input.predecessor].instructions.back();
+                if (!site) return std::nullopt;
+                const auto seed = scalar(input.value, site);
+                if (!seed || seed->lower != seed->upper || seed->lower < 0) return std::nullopt;
+                __int128 count = 0;
+                const __int128 start = seed->lower, end = *endpoint, delta = step;
+                if (relation == "ne") {
+                    const auto distance = end - start;
+                    if (distance == 0 || (distance > 0) != (delta > 0) || distance % delta != 0)
+                        return std::nullopt;
+                    count = distance / delta;
+                } else if ((relation == "lt" || relation == "le") && delta > 0) {
+                    const auto stop = end + (relation == "le" ? 1 : 0);
+                    if (start >= stop) return std::nullopt;
+                    count = (stop - start + delta - 1) / delta;
+                } else if ((relation == "gt" || relation == "ge") && delta < 0) {
+                    const auto stop = end - (relation == "ge" ? 1 : 0);
+                    if (start <= stop) return std::nullopt;
+                    count = (start - stop - delta - 1) / -delta;
+                } else return std::nullopt;
+                const auto last_count = start + count * delta;
+                if (count <= 0 || count > INT64_MAX || last_count < 0 || last_count > INT64_MAX)
+                    return std::nullopt;
+                if (trips && *trips != count) return std::nullopt;
+                trips = static_cast<std::int64_t>(count);
+            }
+        }
+        if (!count_backedge || !trips) return std::nullopt;
+        std::optional<ExactLocalAddress> base;
+        std::optional<std::int64_t> stride;
+        for (const auto& input : join.inputs) {
+            if (!charge()) return std::nullopt;
+            if (input.predecessor == header) {
+                const auto origin = terminal(input.value);
+                if (!origin || !definitions.contains(*origin)) return std::nullopt;
+                const auto definition = definitions.at(*origin);
+                const auto* update = definition.instruction;
+                if (definition.block != header || !single(update) || update->operands.size() != 3 ||
+                    (update->opcode != "add.s64" && update->opcode != "add.u64" &&
+                     update->opcode != "sub.s64" && update->opcode != "sub.u64")) return std::nullopt;
+                const auto amount = literal(update->operands[2]);
+                const auto prior = source(update, update->operands[1]);
+                if (!amount || !prior || !forwards(*prior, pointer) || *amount == INT64_MIN)
+                    return std::nullopt;
+                const auto offset = root_opcode(update->opcode) == "sub" ? -*amount : *amount;
+                if (stride && *stride != offset) return std::nullopt;
+                stride = offset;
+            } else {
+                const auto candidate = address(input.value, at);
+                if (!candidate || candidate->offset < 0 ||
+                    (base && (base->depot != candidate->depot || base->offset != candidate->offset ||
+                              base->allocation_size != candidate->allocation_size))) return std::nullopt;
+                base = candidate;
+            }
+        }
+        if (!base || !stride || exhausted) return std::nullopt;
+        const __int128 last = static_cast<__int128>(base->offset) + (*trips - 1) * static_cast<__int128>(*stride);
+        const auto lower = std::min<__int128>(base->offset, last);
+        const auto upper = std::max<__int128>(base->offset, last);
+        // Include the final update in the no-wrap check even though the phi
+        // sees only pre-update values. Its result can be used after the loop.
+        const __int128 end = last + *stride;
+        if (lower < 0 || upper >= base->allocation_size || upper > INT64_MAX ||
+            end < 0 || end > base->allocation_size || end > INT64_MAX) return std::nullopt;
+        return LocalPointerRange{base->depot, static_cast<std::int64_t>(lower), static_cast<std::int64_t>(upper)};
+    }
+
     std::optional<LocalPointerRange> get(ValueId value, const Instruction* at) {
         if (exhausted || !locations.contains(at))
             return std::nullopt;
@@ -540,6 +694,7 @@ struct PointerRanges::Impl {
         for (const auto previous : ancestor_joins(value)) {
             if (!charge() || !forwards(value, previous))
                 continue;
+            if (const auto counted = counted_loop(previous, at)) return counted;
             const auto& join = joins.at(previous);
             const auto iteration = reachable(join.block, join.block);
             if (iteration.empty())
