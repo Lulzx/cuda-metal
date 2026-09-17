@@ -2883,6 +2883,9 @@ if(APPLE)
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_vector_pointer_lanes.py ${CMAKE_BINARY_DIR})
     # Seventeen numerical children (90 s each) and 24 compile-only refusals (45 s).
     set_tests_properties(functional_ptx_vector_pointer_lanes PROPERTIES TIMEOUT 2700)
+    add_test(NAME functional_ptx_reused_local_cells
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_reused_local_cells.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_reused_local_cells PROPERTIES TIMEOUT 180)
     add_test(NAME functional_ptx_helper_record_fields
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_helper_record_fields.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_helper_record_fields PROPERTIES TIMEOUT 1200)

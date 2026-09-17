@@ -190,11 +190,15 @@ instructions enter the collector; it uses one insertion lookup per demand and
 borrows exact-copy and complete join edges from the same validated source index.
 Memory observations and retained proof edges consume the unchanged work budget;
 collectors are discarded when SSA is rebuilt. Other arithmetic entries remain
-excluded. Concrete pointer values end demand traversal only after type validation;
-address-conversion sources are independently seeded, so scalar load recovery is
-not hidden behind a conversion. Applicable pointer-load candidates retain their
-reaching-store checks. No second copy/join index or per-edge register-name lookup
-is required. Fixed local `.v2`
+excluded. Concrete pointer values end demand traversal, but every address-conversion
+source is independently seeded and applicable pointer-load candidates still undergo
+reaching-store validation;
+integer and generic-pointer paths retain their required edges. No second copy/join
+index or per-edge register-name lookup is required. Provisional local-cell type hints
+are invalidated by generic stores, so a former pointer cell
+can subsequently hold scalar data. SSA reaching-store validation remains required
+for later address uses, including scalar loads after hint invalidation. General
+escaped-cell proof activation remains a separate limitation (#137). Fixed local `.v2`
 and `.v4` 64-bit loads preserve pointer provenance independently per lane when
 every reaching write proves that cell's contents; scalar metadata stays integer.
 Partial, missing, conflicting and unsupported helper writes remain refusals.

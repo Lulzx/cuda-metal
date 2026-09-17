@@ -2083,6 +2083,7 @@ struct Importer {
                 }
             }
         }
+        bool invalidated_local_cell_hints = false;
         const auto local_pointer_load_types = [&]() {
             std::unordered_map<std::string, LocalContent> register_contents;
             for (const std::string& stored_register : local_stored_registers) {
@@ -2166,6 +2167,18 @@ struct Importer {
                         escaped.insert(key);
                         homogeneous[key].ambiguous = true;
                         cells[key].clear();
+                    }
+                    if (instruction.opcode.find(".global") == std::string::npos &&
+                        instruction.opcode.find(".shared") == std::string::npos &&
+                        instruction.opcode.find(".const") == std::string::npos) {
+                        // A generic store may overwrite private storage. This
+                        // provisional, name-based table cannot prove its alias
+                        // range; retain no earlier cell/content hints across it.
+                        // Actual address demands are recovered and checked by
+                        // the SSA reaching-store proof below.
+                        invalidated_local_cell_hints |= !homogeneous.empty() || !cells.empty();
+                        homogeneous.clear();
+                        cells.clear();
                     }
                 }
                 if (root == "st" && instruction.opcode.find(".local") != std::string::npos &&
@@ -3031,9 +3044,13 @@ struct Importer {
                             });
                     });
                 const bool needs_address_demands = address_cancellation_applied ||
-                    address_alignment_applied || has_vector_load;
+                    address_alignment_applied || has_vector_load || invalidated_local_cell_hints;
                 detail::AddressDemandResult demand;
-                if (!solve_value_types(true, needs_address_demands ? &demand : nullptr)) return false;
+                // After invalidation, recover demanded loads before requiring
+                // their joins to have final pointer types. Provisional solves
+                // cannot use concrete-pointer traversal cutoffs.
+                if (!solve_value_types(!invalidated_local_cell_hints,
+                                       needs_address_demands ? &demand : nullptr)) return false;
                 if (needs_address_demands) {
                     // Address demand does not establish pointer provenance.
                     // Only demanded joins expand; scalar live-in values need
@@ -3044,7 +3061,8 @@ struct Importer {
                     for (const auto& candidate : demand.loads) {
                         const auto* instruction = candidate.instruction;
                         const auto& values = instruction_results.at(instruction);
-                        const bool normalized = address_cancellation_applied || address_alignment_applied;
+                        const bool normalized = address_cancellation_applied || address_alignment_applied ||
+                            invalidated_local_cell_hints;
                         if (values.empty() || (!normalized && memory_vector_width(instruction->opcode) == 1))
                             continue;
                         const bool private_symbol = local_depots.contains(
@@ -3087,6 +3105,7 @@ struct Importer {
                     }
                 }
                 if (added) continue;
+                if (invalidated_local_cell_hints && !solve_value_types(true)) return false;
                 break;
             }
         }

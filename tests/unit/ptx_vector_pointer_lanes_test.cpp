@@ -1,5 +1,7 @@
 #include "cumetal/metal/lower_to_msl.h"
 
+#include <fstream>
+#include <iterator>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -201,10 +203,81 @@ bool narrow_payload(std::size_t width, unsigned bits) {
     return expect(!compiled.ok, "v" + std::to_string(width) + " b" + std::to_string(bits) +
                                     " cannot recover a full pointer from a narrow lane: " + compiled.error);
 }
+bool reused_scalar_cells(std::string source, bool scalar) {
+    if (scalar) {
+        const std::string vector = "ld.local.v2.u64 {%x, %y}, [%cell];";
+        while (source.find(vector) != std::string::npos)
+            if (!replace_once(source, vector, "ld.local.u64 %x, [%cell];\n ld.local.u64 %y, [%cell+8];"))
+                return false;
+    }
+    const auto compiled = metal::compile_ptx_to_msl(source, {.entry_name = "probe"});
+    if (!expect(compiled.ok, "reused local cell is scalar after generic writes: " + compiled.error)) return false;
+    bool ok = expect(ir::verify(compiled.gpu_ir).ok && ir::verify(compiled.metal_ir).ok,
+                     "reused local cell verifies at both IR boundaries");
+    // Observing the old pointer before the overwrite is valid; dereferencing
+    // the new scalar after it still requires pointer evidence and must refuse.
+    if (!replace_once(source, "mul.lo.u64 %result, %x, 5;", "ld.u64 %result, [%x];")) return false;
+    const auto refused = metal::compile_ptx_to_msl(source, {.entry_name = "probe"});
+    ok &= expect(!refused.ok && refused.error.find("pointer memory proof") != std::string::npos,
+                 "overwritten scalar cannot be dereferenced: " + refused.error);
+    return ok;
+}
+
+bool invalidated_cell_join() {
+    const std::string source = R"ptx(.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry cell_join(.param .u64 .ptr .global input,
+                         .param .u64 .ptr .global output,
+                         .param .u32 choice) {
+ .local .align 8 .b8 scratch[16];
+ .reg .b64 %input, %output, %cell, %loaded, %joined;
+ .reg .b32 %choice, %value;
+ .reg .pred %pick;
+ ld.param.u64 %input, [input];
+ ld.param.u64 %output, [output];
+ ld.param.u32 %choice, [choice];
+ setp.ne.u32 %pick, %choice, 0;
+ mov.b64 %cell, scratch;
+ st.local.u64 [%cell], %input;
+ // Device storage is disjoint from the private pointer cell.
+ st.u32 [%output+8], 0;
+ ld.local.u64 %loaded, [%cell];
+ @%pick bra FROM_INPUT;
+ mov.b64 %joined, %loaded;
+ bra JOIN;
+FROM_INPUT:
+ mov.b64 %joined, %input;
+JOIN:
+ ld.global.u32 %value, [%joined];
+ st.global.u32 [%output], %value;
+ ret;
+}
+)ptx";
+    const auto compiled = metal::compile_ptx_to_msl(source, {.entry_name = "cell_join"});
+    bool ok = expect(compiled.ok, "recover invalidated cell before pointer join: " + compiled.error);
+    if (compiled.ok) ok &= expect(ir::verify(compiled.gpu_ir).ok && ir::verify(compiled.metal_ir).ok,
+                                "recovered pointer join verifies");
+    for (bool overlap : {false, true}) {
+        std::string negative = source;
+        if (overlap) replace_once(negative, "st.u32 [%output+8], 0;", "st.u32 [%cell+4], 0;");
+        else replace_once(negative, "st.local.u64 [%cell], %input;", "st.local.u64 [%cell], 1;");
+        const auto refused = metal::compile_ptx_to_msl(negative, {.entry_name = "cell_join"});
+        ok &= expect(!refused.ok, "invalidated cell join retains proof refusal");
+    }
+    return ok;
+}
+
 } // namespace
 
-int main() {
-    bool ok = true;
+int main(int argc, char** argv) {
+    if (argc != 2) return 2;
+    std::ifstream input(argv[1]);
+    if (!input) return 2;
+    const std::string reused((std::istreambuf_iterator<char>(input)), {});
+    bool ok = invalidated_cell_join();
+    ok &= reused_scalar_cells(reused, false);
+    ok &= reused_scalar_cells(reused, true);
     for (std::size_t width : {2U, 4U})
         for (std::size_t lane = 0; lane < width; ++lane) {
             ok &= positive(width, lane, false, false);
