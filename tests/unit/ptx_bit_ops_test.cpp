@@ -8,6 +8,62 @@ bool expect(bool condition, const std::string& message) {
     if (!condition) std::cerr << "FAIL: " << message << "\n";
     return condition;
 }
+
+bool permutation_shape(const std::string& selector, bool compact,
+                       const std::string& a = "%a", const std::string& b = "%b") {
+    namespace ir = cumetal::ir;
+    const auto source = R"ptx(.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry permutation(.param .u64 .ptr .global output,
+                            .param .b32 first, .param .b32 second) {
+ .reg .b64 %address, %wide;
+ .reg .b32 %a, %b, %selector, %answer;
+ ld.param.u64 %address, [output];
+ ld.param.b32 %a, [first];
+ ld.param.b32 %b, [second];
+ mov.u32 %selector, %tid.x;
+ cvt.u64.u32 %wide, %a;
+ or.b64 %wide, %wide, 18446744069414584320;
+ prmt.b32 %answer, )ptx" + a + ", " + b + ", " + selector + R"ptx(;
+ st.global.b32 [%address], %answer;
+ ret;
+}
+)ptx";
+    const auto compiled = cumetal::metal::compile_ptx_to_msl(source, {.entry_name = "permutation"});
+    if (!expect(compiled.ok, "prmt selector " + selector + " compiles: " + compiled.error)) return false;
+    bool ok = expect(ir::verify(compiled.gpu_ir).ok && ir::verify(compiled.metal_ir).ok,
+                     "prmt verifies before and after legalization");
+    unsigned line = 0;
+    for (const auto& function : compiled.gpu_ir.functions)
+        for (const auto& block : function.blocks)
+            for (const auto& operation : block.operations)
+                if (operation.attributes.contains("ptx_opcode") &&
+                    operation.attributes.at("ptx_opcode") == "prmt.b32") line = operation.location.line;
+    unsigned operations = 0;
+    for (const auto& function : compiled.gpu_ir.functions) {
+        for (const auto& block : function.blocks) {
+            for (const auto& operation : block.operations) {
+                if (line == 0 || operation.location.line != line) continue;
+                ++operations;
+                if (compact) {
+                    ok &= expect(operation.result_types == std::vector<ir::Type>{ir::Type::integer(32)},
+                                 "immediate prmt uses only 32-bit intermediate results");
+                    if (operation.opcode == ir::OpCode::kShiftLeft ||
+                        operation.opcode == ir::OpCode::kShiftRight) {
+                        const auto& shift = operation.operands.at(1);
+                        ok &= expect(shift.kind == ir::OperandKind::kImmediate &&
+                                         std::stoul(shift.text) < 32,
+                                     "immediate prmt uses defined constant shift distances");
+                    }
+                }
+            }
+        }
+    }
+    ok &= expect(compact ? (operations > 0 && operations <= 21) : operations == 66,
+                 "prmt " + selector + " operation count: " + std::to_string(operations));
+    return ok;
+}
 }  // namespace
 
 int main() {
@@ -56,6 +112,22 @@ int main() {
         ok &= expect(compiled.ok == (std::string(opcode) == "prmt.b32"),
                      "only generic prmt.b32 is supported");
     }
+
+    // Retained RSA selectors, every sign-copy nibble, and PTX literal spellings.
+    for (const auto* selector : {"0x0123U", "0x7771U", "0x7772U", "0x7773U",
+                                 "0x7770U", "0x3340U", "0x5410U", "0x7600U",
+                                 "0x8888", "0x9999", "0xaaaa", "0xbbbb",
+                                 "0xcccc", "0xdddd", "0xeeee", "0xffff",
+                                 "0xabcd5410U", "21520", "052020", "0b0101010000010000U",
+                                 "0XFFFF5410u", "+21520", "-1", "-0xABEF",
+                                 "0", "18446744073709551615U"}) {
+        ok &= permutation_shape(selector, true);
+    }
+    ok &= permutation_shape("0x7543", true, "%wide", "%b");
+    ok &= permutation_shape("0xfedc", true, "-1", "0x80000000U");
+    ok &= permutation_shape("%selector", false);
+    // Valid constant expressions outside the literal fast path stay generic.
+    ok &= permutation_shape("(0x5400 | 0x10)", false);
 
 
     const auto bfi_module = [](const std::string& instruction) {
