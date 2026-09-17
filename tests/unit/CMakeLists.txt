@@ -55,6 +55,12 @@ target_include_directories(cumetal_ptx_address_demands_test PRIVATE ${CMAKE_SOUR
 target_compile_options(cumetal_ptx_address_demands_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME unit_ptx_address_demands COMMAND cumetal_ptx_address_demands_test)
 
+add_executable(cumetal_ptx_module_scans_test ptx_module_scans_test.cpp)
+target_link_libraries(cumetal_ptx_module_scans_test PRIVATE cumetal_ir)
+target_include_directories(cumetal_ptx_module_scans_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_module_scans_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_module_scans COMMAND cumetal_ptx_module_scans_test)
+
 add_executable(cumetal_ptx_type_proof_bounds_test ptx_type_proof_bounds_test.cpp)
 target_link_libraries(cumetal_ptx_type_proof_bounds_test PRIVATE cumetal_ir)
 target_compile_options(cumetal_ptx_type_proof_bounds_test PRIVATE -Wall -Wextra -Wpedantic)

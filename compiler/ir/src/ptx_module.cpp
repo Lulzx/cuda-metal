@@ -8,6 +8,26 @@
 #include <stdexcept>
 
 namespace cumetal::ir::detail {
+namespace {
+
+template <typename Callback>
+void for_each_regex_candidate(std::string_view source, std::string_view prefix,
+                              const std::regex& expression, Callback callback) {
+    std::size_t cursor = 0;
+    while ((cursor = source.find(prefix, cursor)) != std::string_view::npos) {
+        std::match_results<std::string_view::const_iterator> match;
+        if (std::regex_search(source.begin() + cursor, source.end(), match, expression,
+                              std::regex_constants::match_continuous)) {
+            callback(match);
+            cursor += static_cast<std::size_t>(match.length());
+        } else {
+            // Failed candidates can overlap, notably the // marker in ///.
+            ++cursor;
+        }
+    }
+}
+
+}  // namespace
 
 // Collect whole PTX identifier tokens, not substrings. Besides direct symbols,
 // operands can contain addresses, offsets, tuples, or generic(symbol) forms.
@@ -42,56 +62,52 @@ void collect_operand_symbols(std::string_view operand,
 }
 
 std::vector<GlobalThreadgroup> scan_threadgroup_globals(std::string_view ptx) {
-    const std::string source(ptx);
     const std::regex declaration(
         R"((?:\.extern\s+)?\.shared\s+\.align\s+([0-9]+)\s+\.(?:b|u|s|f)(8|16|32|64)\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*(?:\[\s*([0-9]*)\s*\])?\s*;)"
     );
+    // Optional visibility/linkage prefixes do not contribute captured fields.
+    // Start at the storage directive, preserving raw-source and multiline matches.
     std::vector<GlobalThreadgroup> globals;
-    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
-         iterator != end; ++iterator) {
+    for_each_regex_candidate(ptx, ".shared", declaration, [&](const auto& match) {
         const std::uint64_t element_bytes =
-            static_cast<std::uint64_t>(std::stoul((*iterator)[2].str())) / 8;
-        const bool has_array_extent = (*iterator)[4].matched;
-        const std::string extent = (*iterator)[4].str();
+            static_cast<std::uint64_t>(std::stoul(match[2].str())) / 8;
+        const bool has_array_extent = match[4].matched;
+        const std::string extent = match[4].str();
         const bool is_dynamic = has_array_extent && extent.empty();
         const std::uint64_t element_count =
             !has_array_extent ? 1 : (is_dynamic ? 0 : std::stoull(extent));
         globals.push_back({
-            .name = (*iterator)[3].str(),
+            .name = match[3].str(),
             .byte_size = element_bytes * element_count,
-            .alignment = static_cast<std::uint32_t>(std::stoul((*iterator)[1].str())),
+            .alignment = static_cast<std::uint32_t>(std::stoul(match[1].str())),
             .is_dynamic = is_dynamic,
         });
-    }
+    });
     return globals;
 }
 
 
 std::vector<LocalDepot> scan_local_depots(std::string_view ptx) {
-    const std::string source(ptx);
     const std::regex declaration(
         R"(\.local\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*;)"
     );
     std::vector<LocalDepot> depots;
-    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
-         iterator != end; ++iterator) {
+    for_each_regex_candidate(ptx, ".local", declaration, [&](const auto& match) {
         depots.push_back({
-            .name = (*iterator)[2].str(),
-            .byte_size = std::stoull((*iterator)[3].str()),
-            .alignment = static_cast<std::uint32_t>(std::stoul((*iterator)[1].str())),
+            .name = match[2].str(),
+            .byte_size = std::stoull(match[3].str()),
+            .alignment = static_cast<std::uint32_t>(std::stoul(match[1].str())),
         });
-    }
+    });
     return depots;
 }
 
 std::unordered_set<std::string> scan_implicit_definitions(std::string_view ptx) {
-    const std::string source(ptx);
     const std::regex marker(R"(//\s*implicit-def:\s*(%[A-Za-z0-9_.$]+))");
     std::unordered_set<std::string> definitions;
-    for (std::sregex_iterator iterator(source.begin(), source.end(), marker), end;
-         iterator != end; ++iterator) {
-        definitions.insert((*iterator)[1].str());
-    }
+    for_each_regex_candidate(ptx, "//", marker, [&](const auto& match) {
+        definitions.insert(match[1].str());
+    });
     return definitions;
 }
 
@@ -326,45 +342,41 @@ InitializedByteArrayScan scan_initialized_byte_arrays(
 }
 
 std::vector<ModuleConstantSymbol> scan_module_constant_symbols(std::string_view ptx) {
-    const std::string source(ptx);
     const std::regex declaration(
         R"((?:\.visible\s+|\.extern\s+)?\.const\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*;)"
     );
     std::vector<ModuleConstantSymbol> symbols;
     std::uint64_t cursor = 0;
-    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
-         iterator != end; ++iterator) {
+    for_each_regex_candidate(ptx, ".const", declaration, [&](const auto& match) {
         const std::uint32_t alignment =
-            static_cast<std::uint32_t>(std::stoul((*iterator)[1].str()));
+            static_cast<std::uint32_t>(std::stoul(match[1].str()));
         cursor = (cursor + alignment - 1) / alignment * alignment;
-        const std::uint64_t size = std::stoull((*iterator)[3].str());
+        const std::uint64_t size = std::stoull(match[3].str());
         symbols.push_back({
-            .name = (*iterator)[2].str(),
+            .name = match[2].str(),
             .offset = cursor,
             .byte_size = size,
             .alignment = alignment,
         });
         cursor += size;
-    }
+    });
     return symbols;
 }
 
 std::vector<ModuleConstantSymbol> scan_module_global_symbols(std::string_view ptx) {
-    const std::string source(ptx);
     const std::regex declaration(
         R"((?:\.visible\s+|\.extern\s+)?\.global\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*;)"
     );
     std::vector<ModuleConstantSymbol> symbols;
-    for (std::sregex_iterator iterator(source.begin(), source.end(), declaration), end;
-         iterator != end; ++iterator) {
+    for_each_regex_candidate(ptx, ".global", declaration, [&](const auto& match) {
         symbols.push_back({
-            .name = (*iterator)[2].str(),
+            .name = match[2].str(),
             .offset = 0,
-            .byte_size = std::stoull((*iterator)[3].str()),
+            .byte_size = std::stoull(match[3].str()),
             .alignment = static_cast<std::uint32_t>(
-                std::stoul((*iterator)[1].str())),
+                std::stoul(match[1].str())),
         });
-    }
+    });
     return symbols;
 }
 
