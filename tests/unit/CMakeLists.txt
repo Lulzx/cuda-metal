@@ -61,6 +61,11 @@ target_include_directories(cumetal_ptx_module_scans_test PRIVATE ${CMAKE_SOURCE_
 target_compile_options(cumetal_ptx_module_scans_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME unit_ptx_module_scans COMMAND cumetal_ptx_module_scans_test)
 
+add_executable(cumetal_ptx_helper_record_fields_test ptx_helper_record_fields_test.cpp)
+target_link_libraries(cumetal_ptx_helper_record_fields_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_helper_record_fields_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_helper_record_fields COMMAND cumetal_ptx_helper_record_fields_test)
+
 add_executable(cumetal_ptx_type_proof_bounds_test ptx_type_proof_bounds_test.cpp)
 target_link_libraries(cumetal_ptx_type_proof_bounds_test PRIVATE cumetal_ir)
 target_compile_options(cumetal_ptx_type_proof_bounds_test PRIVATE -Wall -Wextra -Wpedantic)

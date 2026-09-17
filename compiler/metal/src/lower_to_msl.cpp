@@ -9,8 +9,11 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <map>
 #include <queue>
+#include <set>
 #include <sstream>
+#include <tuple>
 #include <unordered_map>
 #include <cstdio>
 #include <cstdlib>
@@ -638,6 +641,399 @@ private:
     std::vector<std::pair<std::size_t, std::size_t>> flows_;
 };
 
+// Address-space flow is not alias identity. In particular, a helper argument
+// can receive two different private records without making those records the
+// same object. Resolve private field reads against actual call arguments and
+// reaching stores before allowing the generic-pointer default to apply.
+class PrivateRecordFieldProof {
+public:
+    struct Location {
+        std::size_t function, block, operation;
+    };
+    struct Address {
+        ir::ValueId root;
+        std::int64_t offset;
+        bool operator==(const Address&) const = default;
+    };
+    using StorageMask = std::function<std::uint8_t(const ir::Operand&)>;
+    using Bind = std::function<bool(ir::ValueId, const ir::Operand&)>;
+
+    PrivateRecordFieldProof(const ir::Module& module, StorageMask storage, Bind bind)
+        : module_(module), storage_(std::move(storage)), bind_(std::move(bind)),
+          predecessors_(module.functions.size()), callers_(module.functions.size()) {
+        std::unordered_map<std::string, std::size_t> names;
+        for (std::size_t f = 0; f < module.functions.size(); ++f) names[module.functions[f].name] = f;
+        for (std::size_t f = 0; f < module.functions.size(); ++f) {
+            const auto& function = module.functions[f];
+            for (std::size_t a = 0; a < function.arguments.size(); ++a)
+                arguments_[function.arguments[a].value] = {f, a};
+            std::unordered_map<ir::BlockId, std::size_t> blocks;
+            predecessors_[f].resize(function.blocks.size());
+            for (std::size_t b = 0; b < function.blocks.size(); ++b) blocks[function.blocks[b].id] = b;
+            for (std::size_t b = 0; b < function.blocks.size(); ++b) {
+                const auto& block = function.blocks[b];
+                for (std::size_t a = 0; a < block.arguments.size(); ++a)
+                    joins_[block.arguments[a].value] = {f, b, a};
+                for (std::size_t i = 0; i < block.operations.size(); ++i) {
+                    const auto& operation = block.operations[i];
+                    for (const auto value : operation.results) definitions_[value] = {f, b, i};
+                    if (operation.opcode == ir::OpCode::kAlloca)
+                        for (const auto value : operation.results) allocations_.insert(value);
+                    if (operation.opcode == ir::OpCode::kCall) {
+                        const auto name = operation.attributes.find("callee");
+                        if (name != operation.attributes.end() && names.contains(name->second)) {
+                            const auto callee = names.at(name->second);
+                            callees_[&operation] = callee;
+                            callers_[callee].push_back({f, b, i});
+                        }
+                    }
+                    for (const auto& successor : operation.successors)
+                        if (blocks.contains(successor.block))
+                            predecessors_[f][blocks.at(successor.block)].push_back(b);
+                }
+            }
+        }
+    }
+
+    std::optional<std::string> run(std::unordered_set<ir::ValueId>& handled) {
+        constexpr auto private_bit = std::uint8_t(1u << unsigned(ir::AddressSpace::kPrivate));
+        for (std::size_t f = 0; f < module_.functions.size(); ++f) {
+            const auto& function = module_.functions[f];
+            for (std::size_t b = 0; b < function.blocks.size(); ++b) {
+                const auto& block = function.blocks[b];
+                for (std::size_t i = 0; i < block.operations.size(); ++i) {
+                    const auto& load = block.operations[i];
+                    if (load.opcode != ir::OpCode::kLoad || load.results.size() != 1 ||
+                        load.result_types.size() != 1 || !load.result_types.front().is_pointer() ||
+                        load.operands.empty()) continue;
+                    // PTX records carry raw fields. NVVM's typed aggregate and
+                    // host-populated descriptor contracts use the layout path
+                    // below and are not inferred from these raw-memory proofs.
+                    if (!load.attributes.contains("ptx_opcode")) continue;
+                    const auto mask = storage_(load.operands.front());
+                    if (!(mask & private_bit)) continue;
+                    const auto address = address_of(load.operands.front());
+                    // Importer-owned local proofs already validate loads from
+                    // this function's own allocations. This boundary handles
+                    // fields reached through a helper parameter.
+                    if (address && allocations_.contains(address->root)) continue;
+                    if (mask != private_bit || !address || !arguments_.contains(address->root))
+                        return diagnostic(load, "unresolved private record address");
+                    if (!prove({f, b, i}, *address, load.results.front()))
+                        return diagnostic(load, error_);
+                    handled.insert(load.results.front());
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+private:
+    const ir::Module& module_;
+    StorageMask storage_;
+    Bind bind_;
+    std::unordered_map<ir::ValueId, Location> definitions_, joins_;
+    std::unordered_map<ir::ValueId, std::pair<std::size_t, std::size_t>> arguments_;
+    std::unordered_set<ir::ValueId> allocations_, active_addresses_;
+    std::unordered_map<ir::ValueId, std::optional<Address>> addresses_;
+    std::unordered_map<ir::ValueId, std::optional<ir::ValueId>> allocation_roots_;
+    std::unordered_map<const ir::Operation*, std::size_t> callees_;
+    std::vector<std::vector<std::vector<std::size_t>>> predecessors_;
+    std::vector<std::vector<Location>> callers_;
+    std::unordered_map<std::size_t, bool> read_only_;
+    std::size_t work_ = 0;
+    std::string error_;
+
+    bool charge() {
+        if (++work_ <= 262144) return true;
+        error_ = "proof budget exhausted";
+        return false;
+    }
+    const ir::Operation& operation_at(Location at) const {
+        return module_.functions[at.function].blocks[at.block].operations[at.operation];
+    }
+    static std::string diagnostic(const ir::Operation& load, const std::string& reason) {
+        return "private helper pointer field proof at " + load.location.str() + ": " + reason;
+    }
+    std::optional<std::int64_t> literal(const ir::Operand& operand, unsigned depth = 0) {
+        if (!charge() || depth > 16) return std::nullopt;
+        if (operand.kind == ir::OperandKind::kImmediate && operand.type == ir::Type::integer(64)) {
+            try {
+                std::size_t used = 0;
+                const auto value = std::stoll(operand.text, &used, 0);
+                if (used == operand.text.size()) return value;
+            } catch (...) {}
+        } else if (operand.kind == ir::OperandKind::kValue && definitions_.contains(operand.value)) {
+            const auto& operation = operation_at(definitions_.at(operand.value));
+            if (operation.operands.size() == 1 && operation.result_types.size() == 1 &&
+                !operation.attributes.contains("guard_operand")) {
+                const auto& source = operation.operands.front();
+                const auto opcode = operation.attributes.find("ptx_opcode");
+                const bool scalar_copy = operation.opcode == ir::OpCode::kConvert &&
+                    source.type == ir::Type::integer(64) && source.type == operation.result_types.front() &&
+                    opcode != operation.attributes.end() &&
+                    (opcode->second == "mov.b64" || opcode->second == "mov.u64" || opcode->second == "mov.s64");
+                // A conversion is not a copy: narrowing, sign extension and
+                // saturation can all change the offset. Leave those values
+                // unknown until their complete integer semantics are evaluated.
+                const bool constant = operation.opcode == ir::OpCode::kConstant &&
+                    source.type == ir::Type::integer(64) && source.type == operation.result_types.front();
+                if (constant || scalar_copy)
+                    return literal(source, depth + 1);
+            }
+        }
+        return std::nullopt;
+    }
+    std::optional<Address> address_of(const ir::Operand& operand) {
+        if (!charge() || operand.kind != ir::OperandKind::kValue || !operand.type.is_pointer())
+            return std::nullopt;
+        const auto value = operand.value;
+        if (addresses_.contains(value)) return addresses_.at(value);
+        if (!active_addresses_.insert(value).second) return std::nullopt;
+        std::optional<Address> result;
+        if (arguments_.contains(value) || allocations_.contains(value)) {
+            result = Address{value, 0};
+        } else if (definitions_.contains(value)) {
+            const auto& operation = operation_at(definitions_.at(value));
+            if (!operation.attributes.contains("guard_operand") && !operation.operands.empty()) {
+                if (operation.opcode == ir::OpCode::kConvert || operation.opcode == ir::OpCode::kAddressSpaceCast ||
+                    operation.opcode == ir::OpCode::kParameter) {
+                    result = address_of(operation.operands.front());
+                } else if (operation.opcode == ir::OpCode::kPointerOffset && operation.operands.size() == 2) {
+                    const auto base = address_of(operation.operands.front());
+                    const auto offset = literal(operation.operands[1]);
+                    const auto* pointee = operation.operands.front().type.pointee();
+                    const bool bytes = (operation.attributes.contains("offset_unit") &&
+                        operation.attributes.at("offset_unit") == "bytes") ||
+                        (pointee && pointee->kind == ir::TypeKind::kInteger && pointee->bit_width == 8);
+                    if (base && offset && bytes) {
+                        const bool subtract = operation.attributes.contains("offset_direction") &&
+                            operation.attributes.at("offset_direction") == "subtract";
+                        const __int128 sum = static_cast<__int128>(base->offset) +
+                            (subtract ? -static_cast<__int128>(*offset) : *offset);
+                        if (sum >= INT64_MIN && sum <= INT64_MAX) result = Address{base->root, std::int64_t(sum)};
+                    }
+                } else if (operation.opcode == ir::OpCode::kSelect && operation.operands.size() == 3) {
+                    const auto left = address_of(operation.operands[1]);
+                    const auto right = address_of(operation.operands[2]);
+                    if (left && right && *left == *right) result = left;
+                }
+            }
+        } else if (joins_.contains(value)) {
+            const auto join = joins_.at(value);
+            bool agrees = !predecessors_[join.function][join.block].empty();
+            const auto& function = module_.functions[join.function];
+            for (const auto predecessor : predecessors_[join.function][join.block]) {
+                for (const auto& edge : function.blocks[predecessor].operations.back().successors) {
+                    if (edge.block != function.blocks[join.block].id || join.operation >= edge.arguments.size()) continue;
+                    const auto incoming = address_of(ir::Operand::value_ref(edge.arguments[join.operation], operand.type));
+                    if (!incoming || (result && *result != *incoming)) agrees = false;
+                    else result = incoming;
+                }
+            }
+            if (!agrees) result.reset();
+        }
+        active_addresses_.erase(value);
+        addresses_[value] = result;
+        return result;
+    }
+    std::optional<ir::ValueId> allocation_root_of(const ir::Operand& operand) {
+        if (!charge() || operand.kind != ir::OperandKind::kValue || !operand.type.is_pointer())
+            return std::nullopt;
+        if (allocation_roots_.contains(operand.value)) return allocation_roots_.at(operand.value);
+        auto& cached = allocation_roots_[operand.value];
+        std::vector<ir::ValueId> pending{operand.value};
+        std::unordered_set<ir::ValueId> visited;
+        std::unordered_map<ir::ValueId, std::vector<ir::ValueId>> reverse;
+        std::optional<ir::ValueId> root;
+        while (!pending.empty()) {
+            if (!charge()) return std::nullopt;
+            const auto value = pending.back();
+            pending.pop_back();
+            if (!visited.insert(value).second) continue;
+            if (allocations_.contains(value)) {
+                if (root && *root != value) return std::nullopt;
+                root = value;
+                continue;
+            }
+            std::vector<ir::ValueId> inputs;
+            if (definitions_.contains(value)) {
+                const auto& operation = operation_at(definitions_.at(value));
+                if (operation.attributes.contains("guard_operand")) return std::nullopt;
+                const bool preserving = operation.opcode == ir::OpCode::kConvert ||
+                    operation.opcode == ir::OpCode::kAddressSpaceCast || operation.opcode == ir::OpCode::kParameter ||
+                    operation.opcode == ir::OpCode::kPointerOffset;
+                const auto add_input = [&](const ir::Operand& source) {
+                    if (source.kind != ir::OperandKind::kValue || !source.type.is_pointer()) return false;
+                    inputs.push_back(source.value);
+                    return true;
+                };
+                if (preserving && !operation.operands.empty()) {
+                    if (!add_input(operation.operands.front())) return std::nullopt;
+                } else if (operation.opcode == ir::OpCode::kSelect && operation.operands.size() == 3) {
+                    if (!add_input(operation.operands[1]) || !add_input(operation.operands[2])) return std::nullopt;
+                } else {
+                    return std::nullopt;
+                }
+            } else if (joins_.contains(value)) {
+                const auto join = joins_.at(value);
+                const auto& function = module_.functions[join.function];
+                for (const auto predecessor : predecessors_[join.function][join.block]) {
+                    for (const auto& edge : function.blocks[predecessor].operations.back().successors) {
+                        if (edge.block != function.blocks[join.block].id) continue;
+                        if (join.operation >= edge.arguments.size()) return std::nullopt;
+                        inputs.push_back(edge.arguments[join.operation]);
+                    }
+                }
+            } else {
+                // Incoming parameters, integer round-trips and loaded pointers
+                // cannot establish ownership by this function's allocation.
+                return std::nullopt;
+            }
+            if (inputs.empty()) return std::nullopt;
+            for (const auto input : inputs) {
+                if (!charge()) return std::nullopt;
+                reverse[input].push_back(value);
+                pending.push_back(input);
+            }
+        }
+        if (!root) return std::nullopt;
+        // A loop-carried pointer is owned only if every node reaches the same
+        // allocation seed. An independent uninitialized cycle is not evidence.
+        std::unordered_set<ir::ValueId> reaches_root;
+        pending = {*root};
+        while (!pending.empty()) {
+            if (!charge()) return std::nullopt;
+            const auto value = pending.back();
+            pending.pop_back();
+            if (!reaches_root.insert(value).second) continue;
+            if (reverse.contains(value))
+                for (const auto user : reverse.at(value)) pending.push_back(user);
+        }
+        if (reaches_root.size() == visited.size()) cached = root;
+        return cached;
+    }
+    bool preserves_caller_memory(std::size_t function) {
+        if (read_only_.contains(function)) return read_only_.at(function);
+        read_only_[function] = false; // A recursive/unknown summary is never a proof.
+        for (const auto& block : module_.functions[function].blocks) {
+            for (const auto& operation : block.operations) {
+                if (!charge()) return false;
+                if (operation.opcode == ir::OpCode::kStore || operation.opcode == ir::OpCode::kAtomic ||
+                    operation.opcode == ir::OpCode::kMetalAtomic) {
+                    if (operation.operands.empty()) return false;
+                    if (!allocation_root_of(operation.operands.front())) return false;
+                } else if (operation.opcode == ir::OpCode::kCall) {
+                    if (!callees_.contains(&operation) || !preserves_caller_memory(callees_.at(&operation))) return false;
+                }
+            }
+        }
+        return read_only_[function] = true;
+    }
+    bool prove(Location start, Address field, ir::ValueId loaded) {
+        using State = std::tuple<std::size_t, std::size_t, std::size_t, ir::ValueId, std::int64_t>;
+        std::vector<State> pending{{start.function, start.block, start.operation, field.root, field.offset}};
+        std::set<State> visited;
+        bool found_store = false;
+        while (!pending.empty()) {
+            if (!charge()) return false;
+            const auto state = pending.back();
+            pending.pop_back();
+            if (!visited.insert(state).second) continue;
+            const auto [f, b, before, root, offset] = state;
+            bool initialized = false;
+            const auto& block = module_.functions[f].blocks[b];
+            for (std::size_t i = before; i > 0; --i) {
+                if (!charge()) return false;
+                const auto& event = block.operations[i - 1];
+                if (event.opcode == ir::OpCode::kCall) {
+                    if (callees_.contains(&event) && preserves_caller_memory(callees_.at(&event))) continue;
+                    const auto callee = event.attributes.find("callee");
+                    error_ = "intervening call at " + event.location.str() + " (" +
+                        (callee == event.attributes.end() ? "indirect" : callee->second) +
+                        ") may modify the field";
+                    return false;
+                }
+                const bool store = event.opcode == ir::OpCode::kStore;
+                if (!store && event.opcode != ir::OpCode::kAtomic && event.opcode != ir::OpCode::kMetalAtomic) continue;
+                if (event.operands.empty()) { error_ = "unknown memory write"; return false; }
+                constexpr auto private_bit = std::uint8_t(1u << unsigned(ir::AddressSpace::kPrivate));
+                const auto mask = storage_(event.operands.front());
+                if (mask != 0 && !(mask & private_bit)) continue;
+                const auto written = address_of(event.operands.front());
+                if (!written) {
+                    // Dynamic scratch offsets need no range proof when their
+                    // allocation is distinct from the incoming record. The
+                    // same object's unknown offsets remain potential clobbers.
+                    const auto allocation = allocation_root_of(event.operands.front());
+                    if (allocation && *allocation != root) continue;
+                    error_ = "unresolved potentially overlapping write at " + event.location.str();
+                    return false;
+                }
+                if (written->root != root) {
+                    // Distinct allocations, including an allocation and an
+                    // incoming parameter, cannot denote the same object.
+                    if (allocations_.contains(written->root) || allocations_.contains(root)) continue;
+                    error_ = "unresolved alias between record parameters";
+                    return false;
+                }
+                if (!store || event.operands.size() < 2) { error_ = "unsupported overlapping memory write"; return false; }
+                const auto& source = event.operands[1];
+                auto bytes = source.type.is_pointer() ? 8u : source.type.bit_width / 8;
+                if (const auto opcode = event.attributes.find("ptx_opcode");
+                    opcode != event.attributes.end()) {
+                    // A wide register may supply a narrow PTX store. Pointer
+                    // provenance cannot turn that partial write into an
+                    // eight-byte initializer. Vector lanes are separate ops.
+                    const auto dot = opcode->second.rfind('.');
+                    const auto suffix = dot == std::string::npos ? std::string{} : opcode->second.substr(dot + 1);
+                    bytes = 0;
+                    if (suffix.size() >= 2 && std::string("busf").find(suffix.front()) != std::string::npos) {
+                        const auto bits = suffix.substr(1);
+                        if (bits == "8") bytes = 1;
+                        else if (bits == "16") bytes = 2;
+                        else if (bits == "32") bytes = 4;
+                        else if (bits == "64") bytes = 8;
+                    }
+                }
+                if (!bytes) { error_ = "unknown store width"; return false; }
+                const __int128 lo = written->offset, hi = lo + bytes;
+                if (lo >= static_cast<__int128>(offset) + 8 || hi <= offset) continue;
+                if (lo != offset || bytes != 8) { error_ = "partial overlapping store"; return false; }
+                if (!source.type.is_pointer()) { error_ = "reaching store has no pointer type"; return false; }
+                if (!bind_(loaded, source)) { error_ = "conflicting pointer field producer"; return false; }
+                found_store = true;
+                if (!event.attributes.contains("guard_operand")) { initialized = true; break; }
+            }
+            if (initialized) continue;
+            if (!predecessors_[f][b].empty()) {
+                for (const auto predecessor : predecessors_[f][b])
+                    pending.emplace_back(f, predecessor, module_.functions[f].blocks[predecessor].operations.size(), root, offset);
+                if (b != 0) continue;
+            }
+            // Block zero has a first-entry edge from its caller even when a
+            // backedge also targets it. A store on that backedge cannot prove
+            // initialization for the first invocation of this load.
+            if (!arguments_.contains(root) || arguments_.at(root).first != f || callers_[f].empty()) {
+                error_ = "incoming path has no initializing pointer store";
+                return false;
+            }
+            const auto argument = arguments_.at(root).second;
+            for (const auto caller : callers_[f]) {
+                const auto& call = operation_at(caller);
+                if (argument >= call.operands.size()) { error_ = "missing record call argument"; return false; }
+                const auto actual = address_of(call.operands[argument]);
+                if (!actual) { error_ = "unresolved record call argument"; return false; }
+                const __int128 sum = static_cast<__int128>(actual->offset) + offset;
+                if (sum < INT64_MIN || sum > INT64_MAX) { error_ = "record field offset overflow"; return false; }
+                pending.emplace_back(caller.function, caller.block, caller.operation, actual->root, std::int64_t(sum));
+            }
+        }
+        if (!found_store) error_ = "uninitialized memory cycle";
+        return found_store;
+    }
+};
+
 AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
     AddressSpaceConstraints constraints;
     std::unordered_map<ir::ValueId, std::size_t> value_nodes;
@@ -908,6 +1304,23 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
         }
     }
 
+    if (!constraints.solve()) {
+        return {false, "directional pointer flow reaches a conflicting concrete address space"};
+    }
+    std::unordered_set<ir::ValueId> private_helper_field_loads;
+    PrivateRecordFieldProof private_fields(*module,
+        [&](const ir::Operand& operand) -> std::uint8_t {
+            if (operand.kind == ir::OperandKind::kValue && value_nodes.contains(operand.value))
+                return constraints.mask(value_nodes.at(operand.value));
+            if (operand.type.is_pointer() && operand.type.address_space != ir::AddressSpace::kNone)
+                return std::uint8_t(1u << unsigned(operand.type.address_space));
+            return 0;
+        },
+        [&](ir::ValueId loaded, const ir::Operand& source) {
+            return constrain_operand(value_nodes.at(loaded), source);
+        });
+    if (const auto error = private_fields.run(private_helper_field_loads)) return {false, *error};
+
     // CUDA permits generic pointers to be stored in ordinary structs. Connect
     // pointer loads and stores through an exact base+constant-offset memory slot.
     // The base uses the already unified interprocedural pointer component, so a
@@ -971,6 +1384,9 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                            !operation.result_types.empty() &&
                            operation.result_types.front().is_pointer() &&
                            !operation.operands.empty()) {
+                    // These reads have exact caller-object proofs. An unrelated
+                    // type-layout/default slot must not add another producer.
+                    if (private_helper_field_loads.contains(operation.results.front())) continue;
                     const auto slot = slot_for(operation.operands[0]);
                     if (slot.has_value()) {
                         constraints.flow(*slot,
@@ -1107,6 +1523,10 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
     if (!constraints.solve()) {
         return {false,
                 "directional pointer flow reaches a conflicting concrete address space"};
+    }
+    for (const auto loaded : private_helper_field_loads) {
+        if (!constraints.space(value_nodes.at(loaded)))
+            return {false, "private helper pointer field proof: unresolved or conflicting pointee spaces across call sites"};
     }
 
     // Totality rule. After the fixed point, a pointer component that no
