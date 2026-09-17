@@ -1,5 +1,6 @@
 #include "cumetal/ir/ptx_importer.h"
 
+#include "cumetal/common/compile_trace.h"
 #include "cumetal/passes/printf_lower.h"
 #include "cumetal/ptx/parser.h"
 #include "ptx_inline_asm.h"
@@ -5537,6 +5538,7 @@ InlineAsmResult lower_inline_ptx_asm(const InlineAsmRequest& request, Builder* b
 }  // namespace detail
 
 PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options) {
+    common::CompileTrace import_trace("ptx_import", ptx.size());
     Importer importer;
     importer.type_solver_step_limit = options.type_solver_step_limit;
     importer.result.module.source_name =
@@ -5552,20 +5554,32 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         return importer.result;
     }
     importer.result.module.attributes["fp64_mode"] = options.fp64_mode;
-    importer.result.module.global_threadgroups = scan_threadgroup_globals(ptx);
+    importer.result.module.global_threadgroups = [&] {
+        common::CompileTrace trace("ptx_scan_threadgroup_globals", ptx.size());
+        return scan_threadgroup_globals(ptx);
+    }();
     for (const GlobalThreadgroup& global : importer.result.module.global_threadgroups) {
         importer.threadgroup_symbols.insert(global.name);
     }
-    for (LocalDepot depot : scan_local_depots(ptx)) {
+    for (LocalDepot depot : [&] {
+             common::CompileTrace trace("ptx_scan_local_depots", ptx.size());
+             return scan_local_depots(ptx);
+         }()) {
         importer.local_depots.emplace(depot.name, std::move(depot));
     }
-    importer.implicit_definitions = scan_implicit_definitions(ptx);
+    importer.implicit_definitions = [&] {
+        common::CompileTrace trace("ptx_scan_implicit_definitions", ptx.size());
+        return scan_implicit_definitions(ptx);
+    }();
 
     cumetal::ptx::ParseOptions parse_options;
     // Parse the module first; strict opcode checks apply to the selected entry
     // and its reachable helpers, not unrelated kernels in the same PTX file.
     parse_options.strict = false;
-    auto parsed = cumetal::ptx::parse_ptx(ptx, parse_options);
+    auto parsed = [&] {
+        common::CompileTrace trace("ptx_parse", ptx.size());
+        return cumetal::ptx::parse_ptx(ptx, parse_options);
+    }();
     if (!parsed.ok) {
         importer.result.error = parsed.error;
         return importer.result;
@@ -5573,10 +5587,14 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     importer.result.warnings = parsed.warnings;
     // Normalize copies before capturing pointers into the parsed function list.
     for (auto& function : parsed.module.functions) {
+        common::CompileTrace trace("ptx_normalize_function", 0, function.name);
         detail::normalize_tail_calls(function, importer.local_depots);
         detail::normalize_vector_parameter_transfers(&function);
     }
-    for (auto& entry : parsed.module.entries) detail::normalize_vector_parameter_transfers(&entry);
+    for (auto& entry : parsed.module.entries) {
+        common::CompileTrace trace("ptx_normalize_function", 0, entry.name);
+        detail::normalize_vector_parameter_transfers(&entry);
+    }
     if (!importer.select_entry(parsed, options)) return importer.result;
     const cumetal::ptx::EntryFunction* selected_entry = importer.entry;
     for (const cumetal::ptx::EntryFunction& function : parsed.module.functions) {
@@ -5625,12 +5643,16 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         }
         return uses_printf;
     };
-    if (!visit_call_graph(visit_call_graph, *selected_entry).has_value()) {
+    if (![&] {
+            common::CompileTrace trace("ptx_call_graph", 0, selected_entry->name);
+            return visit_call_graph(visit_call_graph, *selected_entry).has_value();
+        }()) {
         return importer.result;
     }
     std::unordered_set<int> decoded_printf_scaffold_lines;
     const auto collect_printf_scaffold = [&](
         const cumetal::ptx::EntryFunction& function) {
+        common::CompileTrace trace("ptx_printf_scaffold", ptx.size(), function.name);
         const cumetal::passes::PrintfLowerResult lowered =
             cumetal::passes::lower_printf_calls(
                 function, {.strict = options.strict, .ptx_source = ptx});
@@ -5646,6 +5668,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     std::unordered_set<std::string> referenced_symbols;
     std::unordered_set<std::string> non_printf_referenced_symbols;
     const auto collect_function_symbols = [&](const cumetal::ptx::EntryFunction& function) {
+        common::CompileTrace trace("ptx_collect_symbols", 0, function.name);
         for (const Instruction& instruction : function.instructions) {
             for (const std::string& operand : instruction.operands) {
                 collect_operand_symbols(operand, &referenced_symbols);
@@ -5658,8 +5681,10 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     collect_function_symbols(*selected_entry);
     for (const auto* helper : reachable_helpers) collect_function_symbols(*helper);
 
-    const InitializedByteArrayScan initialized_arrays =
-        scan_initialized_byte_arrays(ptx, referenced_symbols);
+    const InitializedByteArrayScan initialized_arrays = [&] {
+        common::CompileTrace trace("ptx_scan_initialized_arrays", ptx.size());
+        return scan_initialized_byte_arrays(ptx, referenced_symbols);
+    }();
     if (!initialized_arrays.error.empty()) {
         importer.result.error = initialized_arrays.error;
         return importer.result;
@@ -5676,8 +5701,11 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
                                                       : non_printf_referenced_symbols;
         return symbols.contains(std::string(symbol));
     };
-    if (!detail::resolve_immutable_table_pointers(parsed.module, initialized_arrays,
-                                                 &importer.result.error)) return importer.result;
+    if (![&] {
+            common::CompileTrace trace("ptx_resolve_immutable_tables");
+            return detail::resolve_immutable_table_pointers(
+                parsed.module, initialized_arrays, &importer.result.error);
+        }()) return importer.result;
     for (const InitializedByteArray& array : initialized_arrays.arrays) {
         if (!array.pointer_target.empty()) continue;
         if (!symbol_is_referenced(array.name, !array.module_private)) continue;
@@ -5730,7 +5758,10 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
                 .alignment = array.alignment,
             });
     }
-    for (const ModuleConstantSymbol& symbol : scan_module_constant_symbols(ptx)) {
+    for (const ModuleConstantSymbol& symbol : [&] {
+             common::CompileTrace trace("ptx_scan_module_constants", ptx.size());
+             return scan_module_constant_symbols(ptx);
+         }()) {
         importer.module_constant_buffer_size =
             std::max(importer.module_constant_buffer_size,
                      symbol.offset + symbol.byte_size);
@@ -5763,7 +5794,10 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         importer.result.error = "external PTX constant buffer exceeds CUDA's 64 KB module limit";
         return importer.result;
     }
-    for (const ModuleConstantSymbol& symbol : scan_module_global_symbols(ptx)) {
+    for (const ModuleConstantSymbol& symbol : [&] {
+             common::CompileTrace trace("ptx_scan_module_globals", ptx.size());
+             return scan_module_global_symbols(ptx);
+         }()) {
         const auto references_symbol = [&](const Instruction& instruction) {
             return std::any_of(
                 instruction.operands.begin(), instruction.operands.end(),
@@ -5783,6 +5817,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
 
     const auto import_function = [&](const cumetal::ptx::EntryFunction* function,
                                      bool is_kernel) -> bool {
+        common::CompileTrace function_trace("ptx_import_function", 0, function->name);
         Importer next;
         next.type_solver_step_limit = importer.type_solver_step_limit;
         next.builder = importer.builder;
@@ -5800,9 +5835,11 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         next.module_global_symbols = importer.module_global_symbols;
         next.module_initialized_symbols = importer.module_initialized_symbols;
 
-        const cumetal::passes::PrintfLowerResult printf_lowered =
-            cumetal::passes::lower_printf_calls(
+        const cumetal::passes::PrintfLowerResult printf_lowered = [&] {
+            common::CompileTrace trace("ptx_printf_lower", ptx.size(), function->name);
+            return cumetal::passes::lower_printf_calls(
                 *function, {.strict = options.strict, .ptx_source = ptx});
+        }();
         next.result.warnings.insert(next.result.warnings.end(),
                                     printf_lowered.warnings.begin(),
                                     printf_lowered.warnings.end());
@@ -5844,20 +5881,36 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
             next.printf_scaffold_lines.erase(call.source_line);
         }
 
-        next.build_cfg();
-        detail::simplify_guarded_paths(next.raw_blocks, next.builder, next.normalized_instructions, next.entry, &next.instruction_origins);
-        detail::remove_unreachable_blocks(next.raw_blocks);
-        detail::remove_discarded_pack_halves(next.raw_blocks, next.normalized_instructions,
-                                           next.entry, &next.instruction_origins);
-        next.allocate_values();
-        if (!next.construct_ssa() || !next.resolve_types()) {
-            importer = std::move(next);
-            return false;
+        {
+            common::CompileTrace trace("ptx_cfg_normalization", 0, function->name);
+            next.build_cfg();
+            detail::simplify_guarded_paths(next.raw_blocks, next.builder, next.normalized_instructions, next.entry, &next.instruction_origins);
+            detail::remove_unreachable_blocks(next.raw_blocks);
+            detail::remove_discarded_pack_halves(next.raw_blocks, next.normalized_instructions,
+                                               next.entry, &next.instruction_origins);
         }
-        next.fold_trivial_block_arguments();
-        if (!next.materialize_function()) {
-            importer = std::move(next);
-            return false;
+        {
+            common::CompileTrace trace("ptx_ssa", 0, function->name);
+            next.allocate_values();
+            if (!next.construct_ssa()) {
+                importer = std::move(next);
+                return false;
+            }
+        }
+        {
+            common::CompileTrace trace("ptx_resolve_types", 0, function->name);
+            if (!next.resolve_types()) {
+                importer = std::move(next);
+                return false;
+            }
+        }
+        {
+            common::CompileTrace trace("ptx_materialization", 0, function->name);
+            next.fold_trivial_block_arguments();
+            if (!next.materialize_function()) {
+                importer = std::move(next);
+                return false;
+            }
         }
         importer = std::move(next);
         return true;
@@ -5868,7 +5921,10 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     }
     if (!import_function(selected_entry, true)) return importer.result;
 
-    const VerifyResult verification = verify(importer.result.module);
+    const VerifyResult verification = [&] {
+        common::CompileTrace trace("ptx_verify");
+        return verify(importer.result.module);
+    }();
     if (!verification.ok) {
         std::ostringstream error;
         error << "CuMetal IR verification failed";

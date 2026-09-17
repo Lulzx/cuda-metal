@@ -3,6 +3,10 @@ if(NOT APPLE)
     return()
 endif()
 
+add_test(NAME functional_ptx_compile_trace
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_compile_trace.py ${CMAKE_BINARY_DIR})
+set_tests_properties(functional_ptx_compile_trace PROPERTIES TIMEOUT 30 LABELS "hosted;functional")
+
 add_executable(cumetal_runtime_vector_add_test
     runtime_vector_add_test.cpp
 )

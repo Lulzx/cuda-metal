@@ -146,6 +146,8 @@ target_link_libraries(cumetal_ir
     PUBLIC
         cumetal_ptx
         cumetal_printf_pass
+    PRIVATE
+        cumetal_common
 )
 
 find_package(LLVM CONFIG QUIET
