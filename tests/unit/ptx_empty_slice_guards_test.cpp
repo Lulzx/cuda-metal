@@ -235,6 +235,37 @@ bool rejects_source(const std::string& source, const std::string& kind) {
 
 int main() {
     bool ok = preflight_budget();
+    const std::string rounds = R"ptx(.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry probe(.param .u64 .ptr .global output) {
+ .local .align 16 .b8 record[16];
+ .reg .b64 %record, %output, %pointer, %length, %count;
+ .reg .b32 %value;
+ .reg .pred %empty, %again;
+ mov.u64 %record, record;
+ ld.param.u64 %output, [output];
+ mov.u32 %value, 7;
+ st.local.v2.b64 [%record], {1, 0};
+ ld.local.u64 %pointer, [%record];
+ ld.local.u64 %length, [%record+8];
+ min.u64 %count, %length, 8;
+ setp.eq.u64 %empty, %count, 0;
+ @%empty bra AFTER;
+LOOP:
+ sub.u64 %length, %length, 1;
+ setp.ne.u64 %again, %length, 0;
+ @%again bra LOOP;
+AFTER:
+ setp.eq.u64 %empty, %length, 0;
+ @%empty bra DONE;
+ ld.u8 %value, [%pointer];
+DONE:
+ st.global.u32 [%output], %value;
+ ret;
+}
+)ptx";
+    ok &= accepts(rounds, "later zero guard after pruning a conflicting loop", true, false);
     for (const bool derived : {false, true}) {
         for (const std::string kind : {"guarded", "observable", "concrete"})
             ok &= accepts(fixture(derived, kind), std::string(derived ? "llvm7/" : "llvm21/") + kind,

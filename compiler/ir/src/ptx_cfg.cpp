@@ -595,6 +595,13 @@ struct GuardedPaths {
         if (zero) known.scalar_zeros[written[0]] = *zero;
     }
 
+    struct SharedWorkCharge {
+        std::size_t& remaining;
+        std::size_t initial;
+        std::size_t* shared;
+        ~SharedWorkCharge() { if (shared) *shared -= initial - remaining; }
+    };
+
     struct PredicateLiveness {
         using Registers = std::unordered_set<std::string>;
         std::vector<Registers> live_in;
@@ -605,10 +612,11 @@ struct GuardedPaths {
     // Constant propagation needs only predicate/zero values that can still be read.
     // Compute that set from instruction semantics rather than register names:
     // these are exactly the destinations the constant evaluator can create.
-    std::optional<PredicateLiveness> predicate_liveness() const {
+    std::optional<PredicateLiveness> predicate_liveness(std::size_t* shared_work = nullptr) const {
         using Registers = PredicateLiveness::Registers;
         Registers candidates;
-        std::size_t budget = 16777216;
+        std::size_t budget = shared_work ? std::min<std::size_t>(*shared_work, 16777216) : 16777216;
+        SharedWorkCharge charge{budget, budget, shared_work};
         for (const auto& block : raw_blocks) {
             for (const auto* instruction : block.instructions) {
                 if (budget == 0) return std::nullopt;
@@ -699,7 +707,8 @@ struct GuardedPaths {
     // Reachable predecessor states meet by intersection. An unvisited edge is
     // not an unknown value: ignoring it until visited preserves loop-invariant
     // flags, while later conflicting edges remove the fact and requeue users.
-    std::vector<ConstantFacts> constant_entries(const PredicateLiveness* liveness) const {
+    std::vector<ConstantFacts> constant_entries(const PredicateLiveness* liveness,
+                                                std::size_t* shared_work = nullptr) const {
         using Facts = ConstantFacts;
         std::vector<Facts> entries(raw_blocks.size());
         if (raw_blocks.empty()) return entries;
@@ -708,15 +717,19 @@ struct GuardedPaths {
         std::deque<std::size_t> pending{0};
         visited[0] = queued[0] = true;
         std::size_t steps = 0, instructions = 0;
+        std::size_t budget = shared_work ? std::min<std::size_t>(*shared_work, 4325376) : 4325376;
+        SharedWorkCharge charge{budget, budget, shared_work};
         while (!pending.empty()) {
-            if (++steps > 131072) return std::vector<Facts>(raw_blocks.size());
+            if (++steps > 131072 || budget == 0) return std::vector<Facts>(raw_blocks.size());
+            --budget;
             const auto index = pending.front();
             pending.pop_front();
             queued[index] = false;
             auto outgoing = entries[index];
             for (std::size_t i = 0; i < raw_blocks[index].instructions.size(); ++i) {
                 const auto* instruction = raw_blocks[index].instructions[i];
-                if (++instructions > 4194304) return std::vector<Facts>(raw_blocks.size());
+                if (++instructions > 4194304 || budget == 0) return std::vector<Facts>(raw_blocks.size());
+                --budget;
                 transfer_constants(*instruction, outgoing);
                 prune_constants(outgoing, *liveness, index, i);
                 if (outgoing.size() > 128) return std::vector<Facts>(raw_blocks.size());
@@ -743,10 +756,10 @@ struct GuardedPaths {
         return entries;
     }
 
-    std::size_t fold_local_zero_branches() {
-        const auto liveness = predicate_liveness();
+    std::size_t fold_local_zero_branches(std::size_t& work) {
+        const auto liveness = predicate_liveness(&work);
         if (!liveness) return 0;
-        const auto entries = constant_entries(&*liveness);
+        const auto entries = constant_entries(&*liveness, &work);
         std::size_t rewritten = 0;
         for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
             auto& block = raw_blocks[b];
@@ -756,6 +769,8 @@ struct GuardedPaths {
             auto known = entries[b];
             bool bounded = true;
             for (std::size_t i = 0; i + 1 < block.instructions.size(); ++i) {
+                if (work == 0) return rewritten;
+                --work;
                 transfer_constants(*block.instructions[i], known);
                 prune_constants(known, *liveness, b, i);
                 if (known.size() > 128) { bounded = false; break; }
@@ -1640,9 +1655,18 @@ std::size_t simplify_local_zero_guards(std::vector<RawBlock>& blocks, Builder& b
     InstructionOrigins* origins, const ScalarZeroLoads& zero_loads) {
     if (zero_loads.empty()) return 0;
     GuardedPaths paths{blocks, builder, storage, &function, origins, &zero_loads};
-    const auto rewritten = paths.fold_local_zero_branches();
-    if (rewritten) remove_unreachable_blocks(blocks);
-    return rewritten;
+    // Pruning one impossible edge can remove a conflicting predecessor of a
+    // later zero guard. Recompute facts on the new CFG until stable. Every
+    // rewrite removes a conditional edge; all rounds share one work budget.
+    // Exhaustion retains only already proved rewrites, never assumed facts.
+    std::size_t work = 20971520, total = 0;
+    while (work != 0) {
+        const auto rewritten = paths.fold_local_zero_branches(work);
+        if (!rewritten) break;
+        total += rewritten;
+        remove_unreachable_blocks(blocks);
+    }
+    return total;
 }
 
 }  // namespace cumetal::ir::detail

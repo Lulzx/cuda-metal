@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Empty local slices preserve sentinel bits while their dereference is skipped.
 
-Four 65-lane configurations use exact CPU references, ABI checks, guarded buffers
+Five 65-lane configurations use exact CPU references, ABI checks, guarded buffers
 and Apple-GPU provenance. Hazardous controls only translate and must refuse.
 """
 import argparse
@@ -17,7 +17,7 @@ import tempfile
 
 MASK = (1 << 64) - 1
 ENTRY = 'empty_slice_guards'
-CASES = ('direct-eq0', 'min8-eq0', 'minunknown-lt64', 'concrete-empty')
+CASES = ('direct-eq0', 'min8-eq0', 'minunknown-lt64', 'concrete-empty', 'pruned-loop')
 NEGATIVES = ('nonzero-length', 'overwritten-length', 'missing-initializer',
              'predicated-initializer', 'backedge-only-zero', 'partial-write',
              'overlapping-write', 'unknown-helper-clobber', 'unguarded-sentinel',
@@ -107,6 +107,11 @@ def fixture(case, negative=None):
         lines.append(' min.u64 %extent, %length, %unknown;')
     else:
         lines.append(' mov.b64 %extent, %length;')
+    if case == 'pruned-loop':
+        lines.extend((' setp.eq.u64 %empty, %length, 0;', ' @%empty bra AFTER_LOOP;',
+                      'CONFLICTING_LOOP:', ' sub.u64 %length, %length, 1;',
+                      ' setp.ne.u64 %maybe, %length, 0;', ' @%maybe bra CONFLICTING_LOOP;',
+                      'AFTER_LOOP:', ' mov.b64 %extent, %length;'))
     lines.append(' st.global.u64 [%output+8], ' + ('%length;' if case == 'concrete-empty' else '%pointer;'))
     lines.append(' setp.lt.u64 %empty, %extent, 64;' if case == 'minunknown-lt64' else
                  ' setp.eq.u64 %empty, %extent, 0;')

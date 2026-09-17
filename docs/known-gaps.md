@@ -206,7 +206,9 @@ Narrow vector lanes cannot supply full pointers. A bounded scalar analysis can
 prove complete zero-length local cells before pointer demand, including exact
 copies, agreeing incoming paths and unsigned `min(0,x)`. It removes only proved
 impossible branch edges and rebuilds SSA; loads, stores and observable integer
-sentinel bits remain unchanged. Unknown, partial or overlapping writes, missing
+sentinel bits remain unchanged. It recomputes guard facts after CFG pruning until
+stable, with all rounds sharing a bounded analysis budget; a dead predecessor
+cannot permanently hide a later zero-length guard. Unknown, partial or overlapping writes, missing
 initializers, unsupported calls and exhausted analysis supply no facts. Correlated
 pointer/length alternatives and dynamically indexed heterogeneous tables remain
 outside this proof; an unused integer sentinel is not pointer provenance.
