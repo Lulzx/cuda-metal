@@ -747,6 +747,8 @@ private:
     std::unordered_map<ir::ValueId, std::optional<ir::ValueId>> allocation_roots_;
     std::unordered_map<ir::ValueId, std::optional<ir::ValueId>> kernel_address_roots_;
     std::unordered_set<ir::ValueId> active_kernel_addresses_;
+    std::unordered_map<ir::ValueId, bool> scalar_offsets_;
+    std::unordered_set<ir::ValueId> active_scalar_offsets_;
     std::unordered_map<const ir::Operation*, std::size_t> callees_;
     std::vector<std::vector<std::vector<std::size_t>>> predecessors_;
     std::vector<std::vector<Location>> callers_;
@@ -764,6 +766,69 @@ private:
     }
     static std::string diagnostic(const ir::Operation& load, const std::string& reason) {
         return "private helper pointer field proof at " + load.location.str() + ": " + reason;
+    }
+    bool scalar_offset(const ir::Operand& operand, unsigned depth = 0) {
+        if (!charge() || depth > 32) return false;
+        const bool integer = operand.type.kind == ir::TypeKind::kInteger &&
+            operand.type.bit_width > 0 && operand.type.bit_width <= 64;
+        if (!integer && operand.type.kind != ir::TypeKind::kPredicate) return false;
+        if (operand.kind == ir::OperandKind::kImmediate) {
+            try {
+                std::size_t used = 0;
+                (void)std::stoull(operand.text, &used, 0);
+                return used == operand.text.size();
+            } catch (...) { return false; }
+        }
+        if (operand.kind != ir::OperandKind::kValue) return false;
+        const auto value = operand.value;
+        if (scalar_offsets_.contains(value)) return scalar_offsets_.at(value);
+        if (!active_scalar_offsets_.insert(value).second) return false;
+        bool scalar = false;
+        if (const auto argument = arguments_.find(value); argument != arguments_.end()) {
+            // Unannotated 64-bit arguments may transport addresses. Neither
+            // they nor transformations of their bits prove an integer offset.
+            scalar = module_.functions[argument->second.first].is_kernel &&
+                integer && operand.type.bit_width <= 32;
+        } else if (const auto definition = definitions_.find(value); definition != definitions_.end()) {
+            const auto& operation = operation_at(definition->second);
+            if (!operation.attributes.contains("guard_operand") && operation.result_types.size() == 1 &&
+                operation.result_types.front() == operand.type) {
+                switch (operation.opcode) {
+                    case ir::OpCode::kThreadId:
+                    case ir::OpCode::kThreadgroupId:
+                    case ir::OpCode::kThreadgroupSize:
+                    case ir::OpCode::kGridSize:
+                    case ir::OpCode::kLaneId:
+                        scalar = operation.operands.empty();
+                        break;
+                    case ir::OpCode::kConstant:
+                    case ir::OpCode::kParameter:
+                    case ir::OpCode::kConvert:
+                    case ir::OpCode::kAdd:
+                    case ir::OpCode::kSub:
+                    case ir::OpCode::kMul:
+                    case ir::OpCode::kDiv:
+                    case ir::OpCode::kRemainder:
+                    case ir::OpCode::kBitAnd:
+                    case ir::OpCode::kBitOr:
+                    case ir::OpCode::kBitXor:
+                    case ir::OpCode::kShiftLeft:
+                    case ir::OpCode::kShiftRight:
+                    case ir::OpCode::kCompare:
+                    case ir::OpCode::kSelect:
+                        scalar = !operation.operands.empty() &&
+                            std::all_of(operation.operands.begin(), operation.operands.end(),
+                                [&](const auto& source) { return scalar_offset(source, depth + 1); });
+                        break;
+                    default: break;
+                }
+            }
+        }
+        // Loads, calls, joins, cycles and unknown expressions remain unknown;
+        // a failed address proof is never itself evidence of a scalar offset.
+        active_scalar_offsets_.erase(value);
+        scalar_offsets_[value] = scalar;
+        return scalar;
     }
     std::optional<ir::ValueId> kernel_address_root(const ir::Operand& operand, unsigned depth = 0) {
         if (!charge() || depth > 32 || operand.kind != ir::OperandKind::kValue ||
@@ -796,8 +861,8 @@ private:
                     if (add || sub) {
                         const auto left = kernel_address_root(operation.operands[0], depth + 1);
                         const auto right = kernel_address_root(operation.operands[1], depth + 1);
-                        if (left && !right) root = left;
-                        else if (add && right && !left) root = right;
+                        if (left && scalar_offset(operation.operands[1])) root = left;
+                        else if (add && right && scalar_offset(operation.operands[0])) root = right;
                     }
                 }
             }

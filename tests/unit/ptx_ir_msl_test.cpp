@@ -163,7 +163,8 @@ bool test_private_record_pointer_qualifiers(const std::string& source) {
             }
         }
     }
-    for (const std::string invalid : {"literal", "truncated", "two-addresses"}) {
+    for (const std::string invalid : {"literal", "truncated", "two-addresses", "cancelled-address",
+                                     "ambiguous-offset", "truncated-offset"}) {
         auto fixture = source;
         const auto store = fixture.find("st.local.u64 [%rd3], %rd0;");
         if (invalid == "literal") {
@@ -172,8 +173,17 @@ bool test_private_record_pointer_qualifiers(const std::string& source) {
         } else if (invalid == "truncated") {
             fixture.insert(store, ".reg .b32 %narrow;\n    cvt.u32.u64 %narrow, %rd0;\n"
                                   "    cvt.u64.u32 %rd0, %narrow;\n    ");
-        } else {
+        } else if (invalid == "two-addresses") {
             fixture.insert(store, "add.u64 %rd0, %rd0, %rd1;\n    ");
+        } else if (invalid == "cancelled-address") {
+            // The stored value is exactly one. A failed proof for 1-address
+            // must not let the outer add treat it as an independent offset.
+            fixture.insert(store, "sub.u64 %rd5, 1, %rd0;\n    add.u64 %rd0, %rd0, %rd5;\n    ");
+        } else if (invalid == "ambiguous-offset") {
+            fixture.insert(store, "sub.u64 %rd5, %rd0, %rd1;\n    add.u64 %rd0, %rd0, %rd5;\n    ");
+        } else if (invalid == "truncated-offset") {
+            fixture.insert(store, ".reg .b32 %narrow;\n    cvt.u32.u64 %narrow, %rd1;\n"
+                                  "    cvt.u64.u32 %rd5, %narrow;\n    add.u64 %rd0, %rd0, %rd5;\n    ");
         }
         const auto rejected = metal::compile_ptx_to_msl(fixture);
         ok &= expect(!rejected.ok && rejected.error.find("private helper pointer field proof") != std::string::npos,

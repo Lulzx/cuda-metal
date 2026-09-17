@@ -255,6 +255,11 @@ retain device pointer type when a later device-memory access proves that exact
 definition is an address. This covers pointer fields in compiler-generated
 private records; ordinary scalar fields remain integers. Reused, predicated,
 narrow, and otherwise ambiguous loaded definitions remain conservative.
+Implicit kernel-address fields require a proven scalar offset for address
+arithmetic. A failed address proof does not establish a scalar: cancellation,
+two-address expressions and truncated address-derived offsets are rejected.
+This preserves the existing scalar-byte argument ABI without admitting an
+arbitrary integer as a pointer through a private helper record.
 The Bitcoin self-test advances past its private-record pointer mismatches.
 Trap-capable device helpers now share the kernel's hidden status binding instead
 of being duplicated into one large kernel CFG. Helpers with cyclic CFGs poll
