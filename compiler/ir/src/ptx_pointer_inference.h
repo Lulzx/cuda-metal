@@ -1,6 +1,7 @@
 #pragma once
 #include "cumetal/ir/ir.h"
 #include "cumetal/ptx/parser.h"
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -8,11 +9,11 @@ namespace cumetal::ir::detail {
 
 struct PointerInference {
     std::unordered_set<std::string> promoted_global_registers;
-    // Exact scalar loads whose single-definition result is subsequently
+    // Exact load lanes whose single-definition result is subsequently
     // required as an address. A generic memory use establishes pointer-ness,
     // not a concrete address space; an explicit global use requires device
     // storage. Keep that distinction when stronger memory-cell proofs arrive.
-    std::unordered_map<const ptx::EntryFunction::Instruction*, AddressSpace> pointer_loads;
+    std::unordered_map<const ptx::EntryFunction::Instruction*, std::map<std::size_t, AddressSpace>> pointer_loads;
 };
 
 // Bounded pre-SSA pointer recovery; unsupported/reused register paths remain

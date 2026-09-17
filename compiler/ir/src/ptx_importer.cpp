@@ -908,7 +908,8 @@ struct Importer {
     // Declaration / inline binding contracts only. Never a last-assignment cache.
     std::unordered_map<std::string, Type> register_contracts;
     detail::InstructionOrigins instruction_origins;
-    std::unordered_map<const Instruction*, Type> pointer_load_types;
+    using PointerLoadTypes = std::unordered_map<const Instruction*, std::map<std::size_t, Type>>;
+    PointerLoadTypes pointer_load_types;
     std::unordered_map<const Instruction*, std::vector<ValueId>> instruction_results;
     std::unordered_map<const Instruction*, std::vector<Type>> definition_types;
     std::unordered_map<ValueId, Type> value_types;
@@ -1497,14 +1498,16 @@ struct Importer {
             if (instruction_origins.contains(origin)) origin = instruction_origins.at(origin);
             // Origin only carries an intrinsic memory proof when the load and
             // its address operands have not been rewritten.
-            if (root == "ld" && pointer_load_types.contains(origin) && instruction.opcode == origin->opcode &&
-                instruction.operands == origin->operands) inferred = pointer_load_types.at(origin);
+            const auto load_proofs = pointer_load_types.find(origin);
+            const bool unchanged_load = root == "ld" && load_proofs != pointer_load_types.end() &&
+                instruction.opcode == origin->opcode && instruction.operands == origin->operands;
             const bool zero = root == "mov" && instruction.predicate.empty() && instruction.operands.size() == 2 &&
                 instruction.operands[0].find('{') == std::string::npos && instruction.operands[1].find('{') == std::string::npos &&
                 (trim(instruction.operands[1]) == "0" ||
                  (source_value(1) && integer_zero_values.contains(*source_value(1))));
             for (std::size_t i = 0; i < results.size(); ++i) {
                 auto type = inferred;
+                if (unchanged_load && load_proofs->second.contains(i)) type = load_proofs->second.at(i);
                 if (root == "shfl" && i == 1) type = Type::predicate();
                 if (root == "cvt") {
                     const auto storage = register_contract(destinations[i]);
@@ -1621,9 +1624,17 @@ struct Importer {
             pointer_symbols, promoted_global_symbols, parameter_types);
         if (proof_entry) {
             decltype(pointer_evidence.pointer_loads) remapped;
-            for (const auto& [instruction, space] : pointer_evidence.pointer_loads) {
+            for (const auto& [instruction, lanes] : pointer_evidence.pointer_loads) {
                 const auto index = static_cast<std::size_t>(instruction - proof_entry->instructions.data());
-                remapped.emplace(proof_key(proof_instructions.at(index)), space);
+                auto& known = remapped[proof_key(proof_instructions.at(index))];
+                for (const auto& [lane, space] : lanes) {
+                    const auto [found, inserted] = known.emplace(lane, space);
+                    if (!inserted && found->second != space) {
+                        if (found->second == AddressSpace::kNone) found->second = space;
+                        else if (space != AddressSpace::kNone)
+                            return fail(instruction, "conflicting normalized pointer load lane demands");
+                    }
+                }
             }
             pointer_evidence.pointer_loads = std::move(remapped);
         }
@@ -2041,7 +2052,7 @@ struct Importer {
             std::unordered_map<std::string, LocalContent> homogeneous;
             std::unordered_map<std::string, std::map<std::int64_t, LocalContent>> cells;
             std::unordered_set<std::string> escaped;
-            std::unordered_map<const Instruction*, Type> loads;
+            PointerLoadTypes loads;
             for (const Instruction* event : local_pointer_events) {
                 const Instruction& instruction = *event;
                 const std::string root = root_opcode(instruction.opcode);
@@ -2130,38 +2141,39 @@ struct Importer {
                 if (!address) continue;
                 const std::string key = subobject_key(*address);
                 if (escaped.contains(key)) continue;
-                std::optional<Type> loaded_type;
-                bool exact = address->offsets.has_value();
-                if (exact) {
-                    const std::int64_t static_offset =
-                        memory_operand_offset(instruction.operands[1]);
-                    const std::size_t lanes = memory_vector_width(instruction.opcode);
-                    for (const std::int64_t dynamic_offset : *address->offsets) {
-                        for (std::size_t lane = 0; lane < lanes; ++lane) {
-                            const std::int64_t offset = dynamic_offset + static_offset +
-                                static_cast<std::int64_t>(lane) * 8;
-                            const auto cell = cells[key].find(offset);
+                // A tuple is storage syntax, not a shared pointee contract.
+                // Every alternative address for one lane must agree, but
+                // adjacent lanes may be ordinary integers or other pointers.
+                for (std::size_t lane = 0; lane < memory_vector_width(instruction.opcode); ++lane) {
+                    std::optional<Type> loaded_type;
+                    bool exact = address->offsets.has_value();
+                    if (exact) {
+                        const std::int64_t static_offset = memory_operand_offset(instruction.operands[1]);
+                        for (const std::int64_t dynamic_offset : *address->offsets) {
+                            const __int128 offset = static_cast<__int128>(dynamic_offset) + static_offset +
+                                static_cast<__int128>(lane) * 8;
+                            if (offset < INT64_MIN || offset > INT64_MAX) {
+                                exact = false;
+                                break;
+                            }
+                            const auto cell = cells[key].find(static_cast<std::int64_t>(offset));
                             if (cell == cells[key].end() || cell->second.ambiguous ||
                                 !cell->second.pointer_type ||
-                                (loaded_type && !(loaded_type.value() ==
-                                                  cell->second.pointer_type.value()))) {
+                                (loaded_type && *loaded_type != *cell->second.pointer_type)) {
                                 exact = false;
                                 break;
                             }
                             loaded_type = cell->second.pointer_type;
                         }
-                        if (!exact) break;
                     }
-                }
-                if (!exact) {
-                    const auto summary = homogeneous.find(key);
-                    if (summary == homogeneous.end() || summary->second.ambiguous ||
-                        !summary->second.pointer_type) {
-                        continue;
+                    if (!exact) {
+                        const auto summary = homogeneous.find(key);
+                        if (summary == homogeneous.end() || summary->second.ambiguous ||
+                            !summary->second.pointer_type) continue;
+                        loaded_type = summary->second.pointer_type;
                     }
-                    loaded_type = summary->second.pointer_type;
+                    if (loaded_type) loads[&instruction][lane] = *loaded_type;
                 }
-                if (loaded_type) loads.emplace(&instruction, *loaded_type);
             }
             return loads;
         };
@@ -2715,9 +2727,13 @@ struct Importer {
                     const auto address = proven_address(load, 1);
                     if (!address || !address->offsets)
                         return fail(load, "unsupported local pointer memory proof: unresolved load address");
-                    Type proven_type = refined.contains(origin) ? refined.at(origin) : candidate->second;
-                    for (const auto offset : *address->offsets) {
-                        for (std::size_t lane = 0; lane < memory_vector_width(load->opcode); ++lane) {
+                    for (const auto& [lane, candidate_type] : candidate->second) {
+                        if (lane >= memory_vector_width(load->opcode) ||
+                            ptx_scalar_type(load->opcode).bit_width != 64)
+                            return fail(load, "invalid local pointer memory proof lane");
+                        Type proven_type = refined.contains(origin) && refined.at(origin).contains(lane)
+                            ? refined.at(origin).at(lane) : candidate_type;
+                        for (const auto offset : *address->offsets) {
                             const __int128 cell = static_cast<__int128>(address->base) + offset +
                                 memory_operand_offset(load->operands[1]) + static_cast<__int128>(lane) * 8;
                             std::deque<std::pair<std::size_t, std::size_t>> pending{{b, index}};
@@ -2806,8 +2822,8 @@ struct Importer {
                             if (!found_store)
                                 return fail(load, "unsupported local pointer memory proof: uninitialized memory cycle");
                         }
+                        refined[origin][lane] = proven_type;
                     }
-                    refined[origin] = proven_type;
                 }
             }
             return true;
@@ -2827,14 +2843,14 @@ struct Importer {
             }
         }
 
-        for (const auto& [instruction, space] : pointer_evidence.pointer_loads) {
-            pointer_load_types[instruction] = Type::pointer(Type::integer(8), space);
-        }
+        for (const auto& [instruction, lanes] : pointer_evidence.pointer_loads)
+            for (const auto& [lane, space] : lanes)
+                pointer_load_types[instruction][lane] = Type::pointer(Type::integer(8), space);
         // Memory-cell proofs consume solved definitions, never the last type
         // assigned to a register name. Each round can add only a proven load;
         // dependent SSA contracts are then solved afresh from those facts.
         const auto external_types = value_types;
-        std::unordered_map<const Instruction*, Type> local_load_proofs;
+        PointerLoadTypes local_load_proofs;
         for (;;) {
             value_types = external_types;
             definition_types.clear();
@@ -2842,21 +2858,22 @@ struct Importer {
             aggregate_parameter_addresses.clear();
             if (!solve_value_types(false)) return false;
             bool added = false;
-            for (const auto& [instruction, type] : local_pointer_load_types()) {
+            for (const auto& [instruction, lanes] : local_pointer_load_types()) {
                 const auto* key = proof_key(instruction);
-                local_load_proofs[key] = type;
-                const auto [it, inserted] = pointer_load_types.emplace(key, type);
-                added |= inserted;
-                if (!inserted && it->second != type) {
-                    if (it->second.is_pointer() && type.is_pointer() &&
-                        it->second.elements == type.elements &&
-                        it->second.address_space == AddressSpace::kNone) {
-                        // Generic address use only proves pointer-ness. A
-                        // concrete memory-cell proof may refine that fact.
-                        it->second = type;
-                        added = true;
-                    } else {
-                        return fail(instruction, "conflicting proven pointer load types");
+                for (const auto& [lane, type] : lanes) {
+                    local_load_proofs[key][lane] = type;
+                    const auto [it, inserted] = pointer_load_types[key].emplace(lane, type);
+                    added |= inserted;
+                    if (!inserted && it->second != type) {
+                        if (it->second.is_pointer() && type.is_pointer() &&
+                            it->second.elements == type.elements &&
+                            it->second.address_space == AddressSpace::kNone) {
+                            // Generic use proves only this lane's pointer-ness.
+                            it->second = type;
+                            added = true;
+                        } else {
+                            return fail(instruction, "conflicting proven pointer load types");
+                        }
                     }
                 }
             }
@@ -2917,7 +2934,16 @@ struct Importer {
                 integer_zero_values.clear();
                 aggregate_parameter_addresses.clear();
                 if (!solve_value_types(true)) return false;
-                if (address_cancellation_applied || address_alignment_applied) {
+                const bool has_vector_load = std::any_of(raw_blocks.begin(), raw_blocks.end(),
+                    [](const RawBlock& block) {
+                        return std::any_of(block.instructions.begin(), block.instructions.end(),
+                            [](const Instruction* instruction) {
+                                return root_opcode(instruction->opcode) == "ld" &&
+                                    !starts_with(instruction->opcode, "ld.param") &&
+                                    memory_vector_width(instruction->opcode) > 1;
+                            });
+                    });
+                if (address_cancellation_applied || address_alignment_applied || has_vector_load) {
                     // Address demand does not establish pointer provenance.
                     // Only demanded joins expand; scalar live-in values need
                     // no predecessor cross-product or environment copies.
@@ -2931,18 +2957,24 @@ struct Importer {
                     for (const auto& candidate : demand.loads) {
                         const auto* instruction = candidate.instruction;
                         const auto& values = instruction_results.at(instruction);
-                        if (values.empty() ||
-                            (!value_types.at(values.front()).is_pointer() &&
-                             !(values.size() == 1 && ptx_scalar_type(instruction->opcode) == Type::integer(64) &&
-                               demand.values.contains(values.front())))) continue;
+                        const bool normalized = address_cancellation_applied || address_alignment_applied;
+                        if (values.empty() || (!normalized && memory_vector_width(instruction->opcode) == 1))
+                            continue;
                         const bool private_symbol = local_depots.contains(
                             parameter_name_from_operand(instruction->operands[1]));
                         const bool private_value = candidate.address && value_types.contains(*candidate.address) &&
                             value_types.at(*candidate.address).is_pointer() &&
                             value_types.at(*candidate.address).address_space == AddressSpace::kPrivate;
-                        if (private_symbol || private_value) {
-                            const auto type = value_types.at(values.front());
-                            local_load_proofs[proof_key(instruction)] = type.is_pointer() ? type
+                        if (!private_symbol && !private_value) continue;
+                        for (std::size_t lane = 0; lane < values.size(); ++lane) {
+                            const auto type = value_types.at(values[lane]);
+                            if (demand.values.contains(values[lane]) &&
+                                ptx_scalar_type(instruction->opcode) != Type::integer(64))
+                                return fail(instruction, "unsupported local pointer memory proof: vector lane does not contain a full 64-bit pointer");
+                            if (!type.is_pointer() &&
+                                !(ptx_scalar_type(instruction->opcode) == Type::integer(64) &&
+                                  demand.values.contains(values[lane]))) continue;
+                            local_load_proofs[proof_key(instruction)][lane] = type.is_pointer() ? type
                                 : Type::pointer(Type::integer(8), AddressSpace::kNone);
                         }
                     }
@@ -2951,17 +2983,20 @@ struct Importer {
                 // initializing/overlapping store must agree before that fact
                 // can be refined to a concrete address space. Publish nothing
                 // until all candidate paths have passed validation.
-                std::unordered_map<const Instruction*, Type> refined;
+                PointerLoadTypes refined;
                 if (!validate_local_load_proofs(local_load_proofs, refined)) return false;
-                for (const auto& [key, type] : refined) {
-                    const auto found = pointer_load_types.find(key);
-                    if (found == pointer_load_types.end() || found->second.address_space == AddressSpace::kNone) {
-                        if (found == pointer_load_types.end() || found->second != type) {
-                            pointer_load_types[key] = type;
-                            added = true;
+                for (const auto& [key, lanes] : refined) {
+                    for (const auto& [lane, type] : lanes) {
+                        auto& known = pointer_load_types[key];
+                        const auto found = known.find(lane);
+                        if (found == known.end() || found->second.address_space == AddressSpace::kNone) {
+                            if (found == known.end() || found->second != type) {
+                                known[lane] = type;
+                                added = true;
+                            }
+                        } else if (found->second != type) {
+                            return fail(key, "conflicting validated pointer load types");
                         }
-                    } else if (found->second != type) {
-                        return fail(key, "conflicting validated pointer load types");
                     }
                 }
                 if (added) continue;

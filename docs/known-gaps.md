@@ -174,8 +174,13 @@ Address-demand discovery indexes SSA joins and expands their incoming edges only
 when a memory-address use demands them. It preserves pre-write definitions, all
 demanded predecessors and independently pointer-typed helper-load candidates;
 exhaustion discards partial demand sets. This reduces irrelevant join work without
-raising the existing limit or supplying pointer provenance. Mixed-vector lanes
-remain separately unsupported.
+raising the existing limit or supplying pointer provenance. Fixed local `.v2`
+and `.v4` 64-bit loads preserve pointer provenance independently per lane when
+every reaching write proves that cell's contents; scalar metadata stays integer.
+Partial, missing, conflicting and unsupported helper writes remain refusals.
+Narrow vector lanes cannot supply full pointers. Guarded empty-slice `{1,0}`
+records and dynamically indexed heterogeneous tables remain unsupported; an
+unused integer sentinel is not pointer provenance.
 
 Scalar disjointness queries intersect dominating comparison bounds, trim excluded
 interval endpoints, and relate plain 64-bit copy/add/sub siblings when their

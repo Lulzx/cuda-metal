@@ -21,7 +21,7 @@ bool has_integer_64_bit_type(std::string_view opcode) {
     return false;
 }
 
-bool is_scalar_64_bit_load(const Instruction& instruction) {
+bool is_64_bit_load(const Instruction& instruction) {
     return root_opcode(instruction.opcode) == "ld" &&
         !starts_with(instruction.opcode, "ld.param") &&
         instruction.operands.size() == 2 && has_integer_64_bit_type(instruction.opcode);
@@ -203,6 +203,21 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
                              })) {
                 continue;
             }
+            // Each vector destination is an independent SSA value. Address
+            // demand for a pointer lane says nothing about adjacent lengths
+            // or pointers in a different address space. Keep the same unique,
+            // unconditional-definition boundary as scalar load recovery.
+            // The cell address does not inherit its payload's address space.
+            if (!is_kernel && is_64_bit_load(instruction) && instruction.predicate.empty()) {
+                for (std::size_t lane = 0; lane < destinations.size(); ++lane) {
+                    const auto& destination = destinations[lane];
+                    const auto required = required_pointers.find(destination);
+                    if (required != required_pointers.end() && definitions[destination] == 1 &&
+                        is_declared64(destination))
+                        evidence.pointer_loads[&instruction][lane] = required->second;
+                }
+                continue;
+            }
             // This pre-SSA recovery can attach a name-wide demand only when
             // the name denotes one unconditional definition. In particular,
             // a later pointer assignment must not retag an earlier scalar
@@ -230,14 +245,6 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
                 pointer_sources = {right && !left ? 2U : 1U};
             } else if (root == "selp") {
                 pointer_sources = {1, 2};
-            }
-            // A demanded pointer may itself be stored in an ordinary
-            // 64-bit memory field. Preserve the loaded value's type, but only
-            // when this instruction is its sole, unconditional definition.
-            // The load address is storage for the pointer bits and does not
-            // inherit the loaded pointer's device address space.
-            if (!is_kernel && is_scalar_64_bit_load(instruction)) {
-                evidence.pointer_loads[&instruction] = required_space;
             }
             for (const std::size_t source_index : pointer_sources) {
                 if (instruction.operands.size() <= source_index) continue;
