@@ -448,11 +448,143 @@ def affine_endpoint_negative_fixtures():
     ]
 
 
+def guarded_origins_fixture(copied=False):
+    """Two bounded pointer origins carried through nested loops (#76)."""
+    body = '''
+ mov.u64 %rd14,0;
+INITIALIZE:
+ add.u64 %rd15,%rd4,%rd14;
+ st.local.u8 [%rd15],0;
+ add.u64 %rd14,%rd14,1;
+ setp.lt.u64 %p5,%rd14,64;
+ @%p5 bra INITIALIZE;
+ shr.u64 %rd11,%rd3,32;
+ setp.gt.u64 %p1,%rd11,32;
+ @%p1 bra LOAD;
+ add.u64 %rd10,%rd4,%rd11;
+ mov.u32 %r5,0;
+OUTER:
+ and.b64 %rd12,%rd3,255;
+ setp.gt.u64 %p2,%rd12,32;
+ @%p2 bra LOAD;
+ setp.eq.u64 %p2,%rd12,0;
+ @%p2 bra NEXT;
+ mov.u64 %rd7,0;
+INNER:
+ add.u64 %rd6,%rd10,%rd7;
+ st.local.u8 [%rd6],47;
+ add.u64 %rd7,%rd7,1;
+ setp.lt.u64 %p3,%rd7,%rd12;
+ @%p3 bra INNER;
+NEXT:
+ add.u32 %r5,%r5,1;
+ setp.ge.u32 %p4,%r5,2;
+ @%p4 bra LOAD;
+ shr.u64 %rd13,%rd3,8;
+ and.b64 %rd11,%rd13,255;
+ setp.gt.u64 %p1,%rd11,32;
+ @%p1 bra LOAD;
+ add.u64 %rd10,%rd4,%rd11;
+ bra OUTER;
+'''
+    if copied:
+        body = body.replace('INNER:\n', '''INNER:
+ mov.u64 %rd17,%rd10;
+ setp.eq.u32 %p5,%r5,0;
+ @%p5 bra COPIED;
+ mov.u64 %rd10,%rd17;
+COPIED:
+''')
+    source = fixture(body).replace(' add.u64 %rd1,%rd1,%rd2;',
+        ' mul.wide.u32 %rd2,%r4,520;\n add.u64 %rd1,%rd1,%rd2;')
+    return source.replace(' st.global.u64 [%rd1],%rd9;', ''' st.global.u64 [%rd1],%rd9;
+ mov.u64 %rd14,0;
+OUTPUT:
+ add.u64 %rd15,%rd4,%rd14;
+ ld.local.u8 %r5,[%rd15];
+ cvt.u64.u32 %rd16,%r5;
+ mul.lo.u64 %rd15,%rd14,8;
+ add.u64 %rd15,%rd1,%rd15;
+ st.global.u64 [%rd15+8],%rd16;
+ add.u64 %rd14,%rd14,1;
+ setp.lt.u64 %p5,%rd14,64;
+ @%p5 bra OUTPUT;''')
+
+
+def guarded_origins_inputs():
+    triples = [(a, b, n) for a, b in ((0, 32), (32, 0), (1, 31), (32, 32),
+                                    (33, 0), (0, 33), (96, 0), (0, 96))
+               for n in (0, 1, 31, 32, 33)]
+    triples += [(i % 33, (i * 13) % 33, (i * 7) % 33) for i in range(25)]
+    values, expected = [], []
+    for initial, replacement, length in triples:
+        value = (initial << 32) | (replacement << 8) | length
+        array = [0] * 64
+        if initial <= 32 and length <= 32:
+            array[initial:initial + length] = [47] * length
+            if replacement <= 32:
+                array[replacement:replacement + length] = [47] * length
+        values.append(value)
+        expected.extend([value] + array)
+    return values, expected
+
+
+def guarded_origins_negatives():
+    source = guarded_origins_fixture()
+    guard = ' setp.gt.u64 %p1,%rd11,32;\n @%p1 bra LOAD;\n'
+    creation = ' add.u64 %rd10,%rd4,%rd11;'
+    yield 'initial origin unbounded', source.replace(guard, '', 1)
+    index = source.rfind(guard)
+    yield 'replacement origin unbounded', source[:index] + source[index:].replace(guard, '', 1)
+    yield 'origin guard bypass', source.replace(guard, guard.replace(' @%p1 bra LOAD;\n', ''), 1)
+    yield 'overlapping origin', source.replace(creation, ' add.u64 %rd10,%rd4,96;', 1)
+    index = source.rfind(creation)
+    yield 'overlapping replacement', source[:index] + source[index:].replace(
+        creation, ' add.u64 %rd10,%rd4,96;', 1)
+    yield 'arithmetic recurrence', source[:index] + source[index:].replace(
+        creation, ' add.u64 %rd10,%rd10,64;', 1)
+    yield 'overlapping displacement', source.replace('st.local.u8 [%rd6],47;',
+                                                    'st.local.u8 [%rd6+96],47;')
+    yield 'overlapping width', source.replace('st.local.u8 [%rd6],47;',
+        'st.local.v2.u64 [%rd6+32],{47,47};')
+    # A guard on a newer loop value must not bound the old value captured by
+    # the remembered pointer. Rejected before dispatch for arbitrary inputs.
+    yield 'changed captured scalar', fixture('''
+ mov.u64 %rd11,%rd3;
+ mov.u64 %rd10,%rd4;
+ mov.u32 %r5,0;
+REMEMBER:
+ setp.eq.u32 %p1,%r5,0;
+ @!%p1 bra WRITE;
+ add.u64 %rd10,%rd4,%rd11;
+ mov.u64 %rd11,0;
+ mov.u32 %r5,1;
+ bra REMEMBER;
+WRITE:
+ setp.gt.u64 %p2,%rd11,32;
+ @%p2 bra LOAD;
+ st.local.u8 [%rd10],47;
+''')
+
+
 def main(build):
     values=list(range(34))+[95,96,97,127,128,(1<<63),(1<<64)-1]
     rng=random.Random(76)
     values += [rng.getrandbits(64) for _ in range(65-len(values))]
     for name,body in [('guard',SINGLE),('bounded loop',LOOP),
+                      ('guard after pointer creation', '''
+ add.u64 %rd6,%rd4,%rd3;
+ setp.lt.u64 %p1,%rd3,33;
+ @!%p1 bra LOAD;
+ st.local.u8 [%rd6],47;
+'''),
+                      ('late guard tightens captured mask', '''
+ and.b64 %rd10,%rd3,255;
+ add.u64 %rd6,%rd4,%rd10;
+ setp.lt.u64 %p1,%rd10,33;
+ @!%p1 bra LOAD;
+ st.local.u8 [%rd6],47;
+'''),
                       ('initialized pointer loop',PREFIX),
                       ('four-byte pointer loop',PREFIX.replace('],10;','],12;').replace('%rd12,1;','%rd12,4;')),
                       ('conditional early exit',PREFIX.replace('setp.ne.u64 %p3', 'setp.eq.u64 %p4,%rd3,0;\n @%p4 bra LOAD;\n setp.ne.u64 %p3')),
@@ -506,6 +638,29 @@ COUNT_READY:
         run_endpoint_case(build, copied_pointer)
     run_endpoint_case(build, affine=True)
     run_endpoint_case(build, affine=True, compound=True)
+    origin_values, origin_expected = guarded_origins_inputs()
+    for copied in (False, True):
+        run_integer_case(build, guarded_origins_fixture(copied), origin_values, origin_expected,
+                         'bounded pointer origins' + (' with copies' if copied else ''), output_words=65)
+    for name, source in guarded_origins_negatives():
+        expect_compile_failure(build, source, 'integer_probe', 'pointer memory proof')
+        print('NEGATIVE_PASS', name)
+    shifted = fixture('''
+ setp.ge.u64 %p1,%rd3,16;
+ @%p1 bra LOAD;
+ shl.b64 %rd10,%rd3,3;
+ add.u64 %rd11,%rd4,128;
+ add.u64 %rd6,%rd11,%rd10;
+ st.local.u64 [%rd6],47;
+''').replace('scratch[192]', 'scratch[320]')
+    run_integer_case(build, shifted, values, values, 'bounded shifted element offset', output_words=1)
+    for name, source in [
+        ('shifted offset unbounded', shifted.replace(' @%p1 bra LOAD;\n', '')),
+        ('shifted offset overlaps cell', shifted.replace('%rd4,128;', '%rd4,0;')),
+        ('shifted offset may overflow', shifted.replace('%rd3,3;', '%rd3,63;')),
+    ]:
+        expect_compile_failure(build, source, 'integer_probe', 'pointer memory proof')
+        print('NEGATIVE_PASS', name)
     for name,body in [
         ('unguarded',SINGLE.replace('@!%p1 bra LOAD;','')),
         ('overwritten',SINGLE.replace('add.u64 %rd6', 'mov.u64 %rd3,96;\n add.u64 %rd6')),

@@ -29,6 +29,10 @@ class ScalarRanges {
                  const std::unordered_map<ValueId, Type>& types, ScalarRangeLimits limits = {});
     ~ScalarRanges();
     std::optional<ScalarRange> get(ValueId value, const Instruction* at);
+    // A pointer captures its scalar offset at creation. Later guards may
+    // refine that offset only while its SSA dependencies retain those values.
+    std::optional<ScalarRange> captured(ValueId value, const Instruction* creation,
+                                        const Instruction* use);
 
   private:
     struct Impl;

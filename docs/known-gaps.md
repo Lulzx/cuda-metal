@@ -179,6 +179,16 @@ exploration discards all observed bounds. These ranges establish disjointness,
 not pointer contents or missing initialization. Arbitrary dynamic aliasing and
 unbounded loops remain unsupported.
 
+Store-range proofs retain bounds captured when a pointer is formed and merge
+separately bounded origins through anchored copy/join cycles. Arithmetic
+recurrences are not copies. Later scalar guards refine a captured offset only
+when its SSA dependencies cannot change between creation and use; bounded
+constant left shifts retain nonnegative intervals only without representational
+overflow. The analysis keeps the existing work budget. These facts prove disjoint
+writes only, never pointer-cell contents. The LLVM7 Ethereum self-test clears its recorded byte-store
+range refusal with this correction, then still rejects an unproved reaching
+pointer store; this is not full-module or GPU acceptance.
+
 Address-demand discovery reuses the type solver's validated join index and
 expands incoming edges only when a memory-address use demands them. It preserves pre-write definitions, all
 demanded predecessors and independently pointer-typed helper-load candidates;

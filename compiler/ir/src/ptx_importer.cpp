@@ -2748,6 +2748,7 @@ struct Importer {
                 std::unordered_set<ValueId> active;
                 std::unordered_map<ValueId, std::optional<AddressRange>> cache;
                 std::size_t work = 0;
+                bool refine_at_use = false;
                 const auto range = [&](auto&& self, ValueId value) -> std::optional<AddressRange> {
                     if (++work > 16384 || active.size() > 256) return std::nullopt;
                     if (cache.contains(value)) return cache.at(value);
@@ -2756,8 +2757,54 @@ struct Importer {
                         if (joined_values.contains(value)) {
                             const auto forwarded = forwarded_definition(value);
                             if (forwarded && *forwarded != value) return self(self, *forwarded);
+                            // A loop may carry several independently bounded
+                            // pointer origins through copy-only joins. Collect
+                            // all concrete origins without treating an arithmetic
+                            // recurrence as another copy of its initial value.
+                            std::vector<ValueId> pending{value}, origins;
+                            std::unordered_set<ValueId> visited;
+                            std::unordered_map<ValueId, std::vector<ValueId>> reverse;
+                            while (!pending.empty()) {
+                                if (++work > 16384) return std::nullopt;
+                                const auto current = pending.back();
+                                pending.pop_back();
+                                if (!visited.insert(current).second) continue;
+                                std::vector<ValueId> inputs;
+                                if (joined_values.contains(current)) {
+                                    inputs = joined_values.at(current);
+                                    if (inputs.empty()) return std::nullopt;
+                                } else if (definitions.contains(current)) {
+                                    const auto* copy = definitions.at(current);
+                                    if (copy->predicate.empty() && copy->operands.size() == 2 &&
+                                        (copy->opcode == "mov.b64" || copy->opcode == "mov.u64" ||
+                                         copy->opcode == "mov.s64") &&
+                                        copy->operands[1].find('{') == std::string::npos) {
+                                        if (const auto input = source_value(copy, copy->operands[1]))
+                                            inputs.push_back(*input);
+                                    }
+                                }
+                                if (inputs.empty()) origins.push_back(current);
+                                for (const auto input : inputs) {
+                                    if (++work > 16384) return std::nullopt;
+                                    reverse[input].push_back(current);
+                                    pending.push_back(input);
+                                }
+                            }
+                            // Every relay must be anchored. A separate cycle
+                            // with no concrete incoming value remains unknown.
+                            pending = origins;
+                            std::unordered_set<ValueId> anchored;
+                            while (!pending.empty()) {
+                                if (++work > 16384) return std::nullopt;
+                                const auto current = pending.back();
+                                pending.pop_back();
+                                if (!anchored.insert(current).second) continue;
+                                if (reverse.contains(current))
+                                    for (const auto user : reverse.at(current)) pending.push_back(user);
+                            }
+                            if (anchored.size() != visited.size()) return std::nullopt;
                             std::optional<AddressRange> merged;
-                            for (auto input : joined_values.at(value)) {
+                            for (auto input : origins) {
                                 const auto next = self(self, input);
                                 if (!next || (merged && next->depot != merged->depot)) return std::nullopt;
                                 if (!merged) merged = next;
@@ -2793,7 +2840,8 @@ struct Importer {
                             const auto number = integer_literal(definition->operands[3-index]);
                             const auto source = source_value(definition, definition->operands[3-index]);
                             const auto offset = number ? std::optional(detail::ScalarRange{*number,*number})
-                                : source ? scalar_ranges.get(*source,event) : std::nullopt;
+                                : source ? (refine_at_use ? scalar_ranges.captured(*source,definition,event)
+                                                        : scalar_ranges.get(*source,definition)) : std::nullopt;
                             if (!offset) continue;
                             const __int128 lo = static_cast<__int128>(base->lower) +
                                 (subtract ? -static_cast<__int128>(offset->upper) : offset->lower);
@@ -2820,15 +2868,23 @@ struct Importer {
                 };
                 const auto source = source_value(event,event->operands[0]);
                 if (!source) return false;
-                const auto written = range(range,*source);
-                if (!written || work > 16384) return false;
-                if (written->depot != loaded.depot) return true;
                 const auto bytes = static_cast<__int128>(ptx_scalar_type(event->opcode).bit_width / 8) *
                     memory_vector_width(event->opcode);
                 if (bytes <= 0) return false;
                 const auto displacement = memory_operand_offset(event->operands[0]);
-                return static_cast<__int128>(written->lower) + displacement >= cell + 8 ||
-                    static_cast<__int128>(written->upper) + displacement + bytes <= cell;
+                const auto disjoint = [&](const std::optional<AddressRange>& written) {
+                    return written && work <= 16384 && (written->depot != loaded.depot ||
+                        static_cast<__int128>(written->lower) + displacement >= cell + 8 ||
+                        static_cast<__int128>(written->upper) + displacement + bytes <= cell);
+                };
+                if (disjoint(range(range,*source))) return true;
+                // Most captured intervals already separate these cells. Only
+                // pay for later guards and their lifetime proof when needed.
+                // Both attempts share the existing per-store work allowance.
+                if (work > 16384) return false;
+                refine_at_use = true;
+                cache.clear();
+                return disjoint(range(range,*source));
             };
             for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
                 for (std::size_t index = 0; index < raw_blocks[b].instructions.size(); ++index) {

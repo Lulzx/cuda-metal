@@ -720,6 +720,90 @@ bool cyclic_predicate_cannot_reuse_entry_fact() {
     return expect(!ranges.get(1, query), "a predicate join/backedge cannot borrow only the entry fact");
 }
 
+bool bounded_left_shifts() {
+    bool ok = true;
+    for (unsigned shift : {0U, 3U, 59U, 60U, 63U, 64U}) {
+        Graph graph(3);
+        graph.add(0, "ld.param.u64", {"%index", "[index]"}, {1});
+        graph.add(0, "setp.lt.u64", {"%fits", "%index", "16"}, {2});
+        graph.add(0, "bra", {"B1"}, {}, "%fits");
+        graph.edge(0, 1);
+        graph.edge(0, 2);
+        graph.incoming[1]["%index"] = 1;
+        graph.add(1, "shl.b64", {"%offset", "%index", std::to_string(shift)}, {3});
+        const auto* query = graph.add(1, "ret");
+        graph.add(2, "ret");
+        auto ranges = graph.ranges();
+        if (shift <= 59)
+            ok &= known(ranges.get(3, query), 0, static_cast<std::int64_t>(15ULL << shift),
+                        "bounded left shift preserves its representable interval");
+        else
+            ok &= expect(!ranges.get(3, query), "wrapping or out-of-range left shifts stay unknown");
+    }
+    Graph unknown(1);
+    unknown.add(0, "ld.param.u64", {"%index", "[index]"}, {1});
+    unknown.add(0, "shl.b64", {"%offset", "%index", "3"}, {2});
+    const auto* query = unknown.add(0, "ret");
+    auto ranges = unknown.ranges();
+    ok &= expect(!ranges.get(2, query), "left shift alone does not establish a bound");
+    return ok;
+}
+
+bool captured_offset_guards() {
+    bool ok = true;
+    for (const bool masked : {false, true}) {
+        Graph graph(3);
+        graph.add(0, "ld.param.u64", {"%input", "[input]"}, {1});
+        graph.add(0, masked ? "and.b64" : "mov.u64",
+                  masked ? std::vector<std::string>{"%index", "%input", "255"}
+                         : std::vector<std::string>{"%index", "%input"}, {2});
+        const auto* creation = graph.add(0, "add.u64", {"%pointer", "%base", "%index"}, {3});
+        graph.add(0, "setp.le.u64", {"%fits", "%index", "32"}, {4});
+        graph.add(0, "bra", {"B1"}, {}, "%fits");
+        graph.edge(0, 1);
+        graph.edge(0, 2);
+        const auto* use = graph.add(1, "st.local.u8", {"[%pointer]", "47"});
+        graph.add(2, "ret");
+        auto ranges = graph.ranges();
+        ok &= known(ranges.captured(2, creation, use), 0, 32,
+                    "a later guard refines an unchanged captured scalar");
+        auto exhausted = graph.ranges({.work = 0});
+        ok &= expect(!exhausted.captured(2, creation, use),
+                     "exhausted capture analysis does not invent a bound");
+    }
+    // The pointer keeps an older iteration's phi value. A guard on the next
+    // iteration's value cannot constrain that captured offset.
+    Graph graph(6);
+    graph.add(0, "ld.param.u64", {"%index", "[index]"}, {1});
+    graph.add(0, "bra", {"B1"});
+    graph.edge(0, 1);
+    graph.outgoing[0]["%index"] = 1;
+    graph.phi(1, "%index", 2);
+    graph.add(1, "ld.param.u64", {"%choice", "[choice]"}, {3});
+    graph.add(1, "setp.eq.u64", {"%capture", "%choice", "0"}, {4});
+    graph.add(1, "bra", {"B2"}, {}, "%capture");
+    graph.edge(1, 2);
+    graph.edge(1, 3);
+    graph.incoming[2]["%index"] = 2;
+    const auto* creation = graph.add(2, "add.u64", {"%pointer", "%base", "%index"}, {5});
+    graph.add(2, "mov.u64", {"%index", "0"}, {6});
+    graph.add(2, "bra", {"B1"});
+    graph.edge(2, 1);
+    graph.outgoing[2]["%index"] = 6;
+    graph.incoming[3]["%index"] = 2;
+    graph.add(3, "setp.le.u64", {"%fits", "%index", "32"}, {7});
+    graph.add(3, "bra", {"B4"}, {}, "%fits");
+    graph.edge(3, 4);
+    graph.edge(3, 5);
+    const auto* use = graph.add(4, "st.local.u8", {"[%pointer]", "47"});
+    graph.add(5, "ret");
+    auto ranges = graph.ranges();
+    ok &= known(ranges.get(2, use), 0, 32, "current loop value has the guard's bound");
+    ok &= expect(!ranges.captured(2, creation, use),
+                 "the current loop bound cannot constrain a remembered older pointer");
+    return ok;
+}
+
 } // namespace
 
 int main() {
@@ -748,5 +832,7 @@ int main() {
     ok &= boolean_guard_redefinitions();
     ok &= nested_predicate_copies();
     ok &= cyclic_predicate_cannot_reuse_entry_fact();
+    ok &= captured_offset_guards();
+    ok &= bounded_left_shifts();
     return ok ? 0 : 1;
 }

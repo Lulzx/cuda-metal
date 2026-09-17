@@ -50,6 +50,7 @@ struct ScalarRanges::Impl {
     std::unordered_map<ValueId, const Instruction*> definitions;
     std::unordered_map<const Instruction*, std::unordered_map<std::string, ValueId>> sources;
     std::unordered_map<const Instruction*, std::size_t> locations;
+    std::unordered_map<const Instruction*, std::size_t> ordinals;
     std::unordered_map<ValueId, std::vector<ValueId>> joins;
     std::unordered_map<ValueId, std::size_t> join_blocks;
     struct Guard {
@@ -79,8 +80,10 @@ struct ScalarRanges::Impl {
                     joins[id].push_back(outgoing[predecessor].at(name));
             }
             auto environment = incoming[block];
+            std::size_t ordinal = 0;
             for (const auto* instruction : blocks[block].instructions) {
                 locations[instruction] = block;
+                ordinals[instruction] = ordinal++;
                 for (const auto& name : source_registers(*instruction))
                     if (environment.contains(name))
                         sources[instruction][name] = environment.at(name);
@@ -530,6 +533,86 @@ struct ScalarRanges::Impl {
         }
         return range;
     }
+    // Check the dynamic lifetime, not just the register name or static SSA
+    // identity: a loop phi can execute again while a pointer retains its old
+    // offset. Only changes on a path from creation to a use, without another
+    // execution of creation, invalidate a later guard for that captured value.
+    bool unchanged_since(ValueId value, const Instruction* creation, const Instruction* use) {
+        const auto capture_block = locations.at(creation), capture_index = ordinals.at(creation);
+        std::vector<std::set<std::size_t>> changes(blocks.size());
+        std::vector<bool> changes_at_entry(blocks.size(), false);
+        std::vector<ValueId> dependencies{value};
+        std::set<ValueId> seen_values;
+        while (!dependencies.empty()) {
+            if (++work > kMaxWork) return false;
+            const auto current = dependencies.back();
+            dependencies.pop_back();
+            if (!seen_values.insert(current).second) continue;
+            if (joins.contains(current)) {
+                changes_at_entry[join_blocks.at(current)] = true;
+                for (auto input : joins.at(current)) dependencies.push_back(input);
+            } else if (definitions.contains(current)) {
+                const auto* definition = definitions.at(current);
+                changes[locations.at(definition)].insert(ordinals.at(definition));
+                // Loads snapshot their result. The addresses used by an older
+                // load need not remain unchanged after that load completes.
+                if (root_opcode(definition->opcode) != "ld" && sources.contains(definition))
+                    for (const auto& [name, input] : sources.at(definition)) dependencies.push_back(input);
+            } else {
+                return false;
+            }
+        }
+        using Point = std::pair<std::size_t, std::size_t>;
+        // Instruction intervals from which the use is reachable without
+        // crossing creation. Keep the initial partial block separate from a
+        // full backedge visit; creation may lie between the two intervals.
+        std::vector<std::vector<Point>> before_use(blocks.size());
+        std::vector<bool> entry_before_use(blocks.size(), false);
+        std::vector<Point> pending{{locations.at(use), ordinals.at(use)}};
+        std::set<Point> visited;
+        while (!pending.empty()) {
+            if (++work > kMaxWork) return false;
+            const auto [block, end] = pending.back();
+            pending.pop_back();
+            if (!visited.emplace(block, end).second) continue;
+            const bool cut = block == capture_block && capture_index < end;
+            before_use[block].emplace_back(cut ? capture_index + 1 : 0, end);
+            if (!cut) {
+                entry_before_use[block] = true;
+                for (auto predecessor : blocks[block].predecessors)
+                    pending.emplace_back(predecessor, blocks[predecessor].instructions.size());
+            }
+        }
+        pending = {{capture_block, capture_index + 1}};
+        visited.clear();
+        while (!pending.empty()) {
+            if (++work > kMaxWork) return false;
+            const auto [block, begin] = pending.back();
+            pending.pop_back();
+            if (!visited.emplace(block, begin).second) continue;
+            const bool cut = block == capture_block && begin <= capture_index;
+            const auto end = cut ? capture_index : blocks[block].instructions.size();
+            if (begin == 0 && entry_before_use[block] && changes_at_entry[block]) return false;
+            for (auto changed = changes[block].lower_bound(begin);
+                 changed != changes[block].end() && *changed < end; ++changed) {
+                if (++work > kMaxWork) return false;
+                for (const auto& [lo, hi] : before_use[block])
+                    if (lo <= *changed && *changed < hi) return false;
+            }
+            if (!cut)
+                for (auto successor : blocks[block].successors) pending.emplace_back(successor, 0);
+        }
+        return work <= kMaxWork;
+    }
+    std::optional<ScalarRange> captured(ValueId value, const Instruction* creation, const Instruction* use) {
+        if (!locations.contains(creation) || !locations.contains(use)) return std::nullopt;
+        const auto original = get(value, locations.at(creation));
+        if (creation == use || work > kMaxWork) return original;
+        const auto later = get(value, locations.at(use));
+        if (!later || (original && later->lower <= original->lower && later->upper >= original->upper))
+            return original;
+        return unchanged_since(value, creation, use) ? intersect(original, later) : original;
+    }
     std::optional<ScalarRange> get(ValueId value, std::size_t at) {
         if (!types.contains(value) || types.at(value) != Type::integer(64))
             return std::nullopt;
@@ -604,7 +687,18 @@ struct ScalarRanges::Impl {
                             ScalarRange{static_cast<std::int64_t>(lower), static_cast<std::int64_t>(upper)};
                 }
             } else if (instruction->predicate.empty() && instruction->operands.size() == 3) {
-                if (instruction->opcode == "shr.u64") {
+                if (instruction->opcode == "shl.b64") {
+                    const auto shift = literal(instruction->operands[2]);
+                    const auto input = operand(instruction, 1, at);
+                    if (shift && *shift >= 0 && *shift < 64 && input && input->lower >= 0) {
+                        const __int128 scale = static_cast<__int128>(1) << *shift;
+                        const __int128 lower = static_cast<__int128>(input->lower) * scale;
+                        const __int128 upper = static_cast<__int128>(input->upper) * scale;
+                        if (upper <= INT64_MAX)
+                            result = ScalarRange{static_cast<std::int64_t>(lower),
+                                                 static_cast<std::int64_t>(upper)};
+                    }
+                } else if (instruction->opcode == "shr.u64") {
                     const auto shift = literal(instruction->operands[2]);
                     const auto input = operand(instruction, 1, at);
                     if (shift && *shift >= 0 && *shift < 64 && input && input->lower >= 0)
@@ -654,5 +748,10 @@ std::optional<ScalarRange> ScalarRanges::get(ValueId value, const Instruction* a
     if (location == impl_->locations.end())
         return std::nullopt;
     return impl_->get(value, location->second);
+}
+
+std::optional<ScalarRange> ScalarRanges::captured(ValueId value, const Instruction* creation,
+                                                const Instruction* use) {
+    return impl_->captured(value, creation, use);
 }
 } // namespace cumetal::ir::detail
