@@ -38,6 +38,8 @@ bool AddressDemandCollector::charge(std::size_t count, const char* phase) {
                  << " blocks=" << blocks_
                  << " reused_joins=" << reused_joins_
                  << " definition_lookups=" << definition_lookups_
+                 << " type_lookups=" << type_lookups_
+                 << " pointer_cutoffs=" << result_.pointer_cutoffs
                  << " expanded_joins=" << result_.expanded_joins
                  << " join_edges=" << result_.join_edges << ']';
         result_.reason += counters.str();
@@ -97,10 +99,15 @@ bool AddressDemandCollector::observe_memory(
     return true;
 }
 AddressDemandResult AddressDemandCollector::finish(
-    const SourceLookup& sources, std::size_t reused_joins, std::size_t blocks) {
+    const SourceLookup& sources, const PointerPredicate& is_concrete_pointer,
+    std::size_t reused_joins, std::size_t blocks) {
     if (!result_.reason.empty()) return std::move(result_);
     if (!sources) {
         invalid("missing source lookup");
+        return std::move(result_);
+    }
+    if (!is_concrete_pointer) {
+        invalid("missing validated pointer lookup");
         return std::move(result_);
     }
     reused_joins_ = reused_joins;
@@ -111,6 +118,12 @@ AddressDemandResult AddressDemandCollector::finish(
         ++nodes_started_;
         const auto value = pending_.back();
         pending_.pop_back();
+        if (!charge(1, "validated type lookup")) return std::move(result_);
+        ++type_lookups_;
+        if (is_concrete_pointer(value)) {
+            ++result_.pointer_cutoffs;
+            continue;
+        }
         if (!charge(1, "definition lookup")) return std::move(result_);
         ++definition_lookups_;
         const auto definition = sources(value);

@@ -1308,7 +1308,7 @@ struct Importer {
                     if (destinations.size() != results.size())
                         return fail(nullptr, "invalid PTX memory-address demand SSA: instruction destination/result count mismatch");
                     if ((root == "ld" && !instruction->opcode.starts_with("ld.param")) ||
-                        root == "atom" || root == "st" || root == "red") {
+                        root == "atom" || root == "st" || root == "red" || root == "cvta") {
                         const auto memory_index = root == "st" || root == "red" ? 0 : 1;
                         if (!demand_collector.observe_memory(*instruction, results, environment,
                                                              memory_index, root == "ld"))
@@ -1544,7 +1544,8 @@ struct Importer {
                 const auto source = source_type(1);
                 if (!source) ready = false;
                 const auto space = instruction.opcode.find(".shared") != std::string::npos ? AddressSpace::kThreadgroup
-                    : instruction.opcode.find(".local") != std::string::npos ? AddressSpace::kPrivate : AddressSpace::kDevice;
+                    : instruction.opcode.find(".local") != std::string::npos ? AddressSpace::kPrivate
+                    : instruction.opcode.find(".const") != std::string::npos ? AddressSpace::kConstant : AddressSpace::kDevice;
                 inferred = Type::pointer(Type::integer(8), space);
                 // A same-space address conversion does not change the pointed
                 // object. Retain aggregate allocation pointees across joins.
@@ -1648,13 +1649,21 @@ struct Importer {
         for (const auto* origin : ambiguous_origins) definition_types.erase(origin);
         if (address_demands) {
             // The type solver already indexed joins and instruction sources.
-            // Demand follows only joins and exact copies; arithmetic sources are
-            // not pointer-content evidence and must not become demand edges.
+            // Exact copies preserve types, and validated pointer joins contain
+            // only compatible pointers or proven null. Applicable pointer-typed
+            // load candidates are checked independently by resolve_types. cvta is the
+            // type-changing exception: its source was seeded above, so cutting
+            // a concrete pointer never hides a scalar load behind a conversion.
+            // Arithmetic sources remain excluded from pointer-content demand.
             *address_demands = demand_collector.finish(
                 [&](ValueId value) -> detail::AddressDemandSources {
                     const auto found = address_sources.find(value);
                     if (found == address_sources.end()) return {};
                     return {found->second.kind, &found->second.inputs};
+                }, [&](ValueId value) {
+                    const auto found = value_types.find(value);
+                    return validate && found != value_types.end() && found->second.is_pointer() &&
+                        found->second.address_space != AddressSpace::kNone;
                 }, joins.size(), raw_blocks.size());
             if (!address_demands->complete) return fail(nullptr, address_demands->reason);
         }

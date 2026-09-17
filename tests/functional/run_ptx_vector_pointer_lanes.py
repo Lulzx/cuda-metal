@@ -43,6 +43,10 @@ CASES = tuple(
          vector_store=True, layout='offset32'),
     dict(name='v2-private-cursor', kinds=('private', 'scalar'),
          vector_store=False, layout='cursor'),
+) + tuple(
+    dict(name=f'v2-{kind}-converted-join', kinds=(kind, 'scalar'),
+         vector_store=False, layout='joined', conversion=True)
+    for kind in ('private', 'device', 'constant')
 )
 CASE_NAMES = tuple(case['name'] for case in CASES)
 NEGATIVE_KINDS = ('missing-store', 'predicated-store', 'overlap-byte',
@@ -106,6 +110,7 @@ def fixture(case, negative=None, bad_lane=None):
              ' .reg .b64 %constant, %constant_alt, %table, %selection, %selection_alt;',
              ' .reg .b64 %private_value, %private_alt_value, %control, %call_cell;',
              ' .reg .b64 %loaded<4>, %copy<4>, %answer<4>;',
+             ' .reg .b64 %staged<4>;',
              ' .reg .b64 %cursor, %cursor_sum, %cursor_value;',
              ' .reg .b32 %cursor_step;', ' .reg .pred %cursor_more;',
              ' .reg .b32 %lane, %block, %threads, %count, %parity, %byte;',
@@ -148,12 +153,25 @@ def fixture(case, negative=None, bad_lane=None):
                 continue
             if lane == bad_lane and negative == 'scalar-source':
                 value = '%length'
+            converted = case.get('conversion', False) and case['kinds'][lane] != 'scalar'
+            if converted:
+                result.append(f' mov.b64 %staged{lane}, {value};')
+                value = f'%staged{lane}'
             predicate = '@%choice ' if lane == bad_lane and negative == 'predicated-store' else ''
             result.append(f' {predicate}st.local.b64 [%cell_copy+{lane * 8}], {value};')
+            if converted:
+                # Reusing the name for scalar storage defeats name-wide pointer
+                # discovery; the earlier store still has its own SSA pointer.
+                result.append(f' mov.b64 %staged{lane}, 1;')
         return result
 
     def load_and_consume():
         result = [f' ld.local.v{width}.b64 {{{", ".join(f"%loaded{i}" for i in range(width))}}}, [%cell_copy];']
+        if case.get('conversion', False):
+            for lane, kind in enumerate(case['kinds']):
+                if kind != 'scalar':
+                    space = {'private': 'local', 'device': 'global', 'constant': 'const'}[kind]
+                    result.append(f' cvta.to.{space}.u64 %loaded{lane}, %loaded{lane};')
         if case['layout'] == 'joined':
             result.append(' @%choice bra COPY_EVEN;')
             result.extend(f' mov.b64 %copy{i}, %loaded{i};' for i in range(width))
