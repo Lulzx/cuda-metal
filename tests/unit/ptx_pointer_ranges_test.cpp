@@ -48,6 +48,7 @@ enum class Case {
     step_two,
     overwritten_end,
     conflicting_base,
+    foreign_end,
     missing_positive_length,
     past_allocation,
     opposite_guard,
@@ -59,10 +60,30 @@ enum class Case {
     repeated_outer_phi
 };
 
-bool test(Case kind, std::int64_t upper = 64) {
+enum class Guard {
+    direct,
+    select_zero,
+    select_swapped,
+    select_inverted,
+    select_copy,
+    select_eq_false,
+    select_not,
+    select_nonzero_sentinel,
+    select_both_zero,
+    select_wrong_arm,
+    select_narrow,
+    select_predicated,
+    select_overwritten,
+    select_zero_observed
+};
+
+bool test(Case kind, std::int64_t upper = 64, Guard guard = Guard::direct, bool literal_length = false,
+          bool commuted_length = false) {
     const bool joined_length = kind == Case::outer_phi || kind == Case::repeated_outer_phi;
     Graph graph(joined_length ? 9 : 6);
     graph.add(0, "mov.u64", {"%base", "depot"}, {1});
+    if (kind == Case::foreign_end)
+        graph.add(0, "mov.u64", {"%foreign", "other"}, {33});
     graph.add(0, "ld.param.u64", {"%length", "[length]"}, {2});
     const std::size_t preheader = joined_length ? 8 : 0;
     if (joined_length) {
@@ -88,7 +109,10 @@ bool test(Case kind, std::int64_t upper = 64) {
         graph.add(preheader, "selp.b64", {"%seed", "%base", "%first", "%empty"}, {5});
     else
         graph.add(preheader, "mov.u64", {"%seed", "%first"}, {5});
-    graph.add(preheader, "add.u64", {"%end", "%base", "%length"}, {6});
+    const std::string count = literal_length ? std::to_string(upper) : "%length";
+    const std::string end_base = kind == Case::foreign_end ? "%foreign" : "%base";
+    graph.add(preheader, "add.u64",
+              {"%end", commuted_length ? count : end_base, commuted_length ? end_base : count}, {6});
     graph.add(preheader, "bra", {"B1"});
     graph.edge(preheader, 1);
     graph.outgoing[preheader]["%previous"] = 1;
@@ -117,8 +141,38 @@ bool test(Case kind, std::int64_t upper = 64) {
     graph.add(3, "setp.eq.s64", {"%last", "%end", "%next"}, {11});
     graph.add(3, "add.s64", {"%incremented", "%next", kind == Case::step_two ? "2" : "1"}, {12});
     graph.add(3, "selp.b64", {"%updated", "%next", "%incremented", "%last"}, {13});
-    graph.add(3, "setp.ne.s64", {"%nonnull", "%next", "0"}, {14});
-    graph.add(3, "and.pred", {"%continue", "%nonnull", "%more"}, {15});
+    if (guard == Guard::direct) {
+        graph.add(3, "setp.ne.s64", {"%nonnull", "%next", "0"}, {14});
+        graph.add(3, "and.pred", {"%continue", "%nonnull", "%more"}, {15});
+    } else {
+        std::vector<std::string> operands{"%selected", "0", "%next", "%last"};
+        if (guard == Guard::select_swapped)
+            operands = {"%selected", "%next", "0", "%more"};
+        if (guard == Guard::select_inverted)
+            operands = {"%selected", "%next", "0", "!%last"};
+        if (guard == Guard::select_nonzero_sentinel)
+            operands[1] = "1";
+        if (guard == Guard::select_both_zero)
+            operands[2] = "0";
+        if (guard == Guard::select_wrong_arm)
+            std::swap(operands[1], operands[2]);
+        graph.add(3, guard == Guard::select_narrow ? "selp.b32" : "selp.b64", operands, {30},
+                  guard == Guard::select_predicated ? "%choice" : "");
+        std::string tested = "%selected";
+        if (guard == Guard::select_copy) {
+            graph.add(3, "mov.u64", {"%alias", "%selected"}, {31});
+            tested = "%alias";
+        }
+        if (guard == Guard::select_overwritten)
+            graph.add(3, "mov.u64", {"%selected", "1"}, {31});
+        const bool equality = guard == Guard::select_eq_false || guard == Guard::select_not ||
+                              guard == Guard::select_zero_observed;
+        graph.add(3, equality ? "setp.eq.u64" : "setp.ne.s64",
+                  {guard == Guard::select_not ? "%stop" : "%continue", tested, "0"},
+                  {guard == Guard::select_not ? 32U : 15U});
+        if (guard == Guard::select_not)
+            graph.add(3, "not.pred", {"%continue", "%stop"}, {15});
+    }
     if (kind == Case::predicate_overwrite)
         graph.add(3, "mov.pred", {"%continue", "%unknown"}, {19});
     graph.add(3, "mov.u64", {"%advanced", "%next"}, {16});
@@ -127,7 +181,8 @@ bool test(Case kind, std::int64_t upper = 64) {
     if (kind == Case::bypass)
         graph.edge(3, 4);
     graph.incoming[2] = {{"%continue", kind == Case::predicate_overwrite ? 19U : 15U}};
-    graph.add(2, "bra", {"B1"}, {}, kind == Case::opposite_guard ? "!%continue" : "%continue");
+    graph.add(2, "bra", {"B1"}, {},
+              kind == Case::opposite_guard || guard == Guard::select_eq_false ? "!%continue" : "%continue");
     graph.edge(2, 1);
     graph.edge(2, 5);
     graph.outgoing[2] = {{"%previous", 16}, {"%next", 13}};
@@ -152,6 +207,8 @@ bool test(Case kind, std::int64_t upper = 64) {
                        const detail::Instruction*) -> std::optional<detail::ExactLocalAddress> {
         if (value == 1)
             return detail::ExactLocalAddress{"depot", 64, 256};
+        if (value == 33)
+            return detail::ExactLocalAddress{"other", 64, 256};
         if (value == 4)
             return detail::ExactLocalAddress{kind == Case::conflicting_base ? "other" : "depot",
                                              kind == Case::beyond_end ? 130 : 65, 256};
@@ -166,13 +223,20 @@ bool test(Case kind, std::int64_t upper = 64) {
     detail::PointerRanges ranges(graph.blocks, graph.incoming, graph.outgoing, graph.arguments, graph.results,
                                  address, scalar, {kind == Case::exhausted ? 8U : 100000U});
     const auto result = ranges.get(queried, query);
-    const bool positive =
-        kind == Case::plain || kind == Case::selected_seed || kind == Case::copied || kind == Case::outer_phi;
+    const bool supported_guard = guard == Guard::direct || guard == Guard::select_zero ||
+                                 guard == Guard::select_swapped || guard == Guard::select_inverted ||
+                                 guard == Guard::select_copy || guard == Guard::select_eq_false ||
+                                 guard == Guard::select_not;
+    const bool positive = supported_guard && (!literal_length || (upper >= 1 && upper <= 192)) &&
+                          (kind == Case::plain || kind == Case::selected_seed || kind == Case::copied ||
+                           kind == Case::outer_phi);
     const bool ok =
         positive ? result && result->depot == "depot" && result->lower == 64 && result->upper == 64 + upper
                  : !result;
     if (!ok)
-        std::cerr << "FAIL: pointer iterator case " << static_cast<int>(kind) << " upper=" << upper << '\n';
+        std::cerr << "FAIL: pointer iterator case " << static_cast<int>(kind) << " upper=" << upper
+                  << " guard=" << static_cast<int>(guard) << " literal=" << literal_length
+                  << " commuted=" << commuted_length << '\n';
     return ok;
 }
 } // namespace
@@ -182,10 +246,29 @@ int main() {
     for (auto kind : {Case::plain, Case::selected_seed, Case::copied, Case::outer_phi})
         for (auto upper : {1, 17, 64, 192})
             ok &= test(kind, upper);
-    for (auto kind : {Case::bypass, Case::beyond_end, Case::step_two, Case::overwritten_end,
-                      Case::conflicting_base, Case::missing_positive_length, Case::past_allocation,
-                      Case::opposite_guard, Case::predicate_overwrite, Case::dual_comparison,
-                      Case::undefined_entry, Case::exhausted, Case::repeated_outer_phi})
+    for (auto kind :
+         {Case::bypass, Case::beyond_end, Case::step_two, Case::overwritten_end, Case::conflicting_base,
+          Case::foreign_end, Case::missing_positive_length, Case::past_allocation, Case::opposite_guard,
+          Case::predicate_overwrite, Case::dual_comparison, Case::undefined_entry, Case::exhausted,
+          Case::repeated_outer_phi})
         ok &= test(kind);
+    // The real iterator uses end=base+65 and a selected zero sentinel. Cover
+    // both changes independently and together, with branch/select polarity,
+    // copy, allocation, overflow, and every-backedge refusal controls.
+    for (auto guard : {Guard::direct, Guard::select_zero, Guard::select_swapped, Guard::select_inverted,
+                       Guard::select_copy, Guard::select_eq_false, Guard::select_not}) {
+        ok &= test(Case::plain, 65, guard);
+        for (auto upper : std::initializer_list<std::int64_t>{1, 65, 192, 0, -1, 193, INT64_MAX})
+            for (bool commuted : {false, true})
+                ok &= test(Case::plain, upper, guard, true, commuted);
+    }
+    for (auto guard : {Guard::select_nonzero_sentinel, Guard::select_both_zero, Guard::select_wrong_arm,
+                       Guard::select_narrow, Guard::select_predicated, Guard::select_overwritten,
+                       Guard::select_zero_observed})
+        ok &= test(Case::plain, 65, guard, true);
+    for (auto kind : {Case::bypass, Case::beyond_end, Case::step_two, Case::overwritten_end,
+                      Case::conflicting_base, Case::foreign_end, Case::opposite_guard,
+                      Case::predicate_overwrite, Case::undefined_entry, Case::exhausted})
+        ok &= test(kind, 65, Guard::select_zero, true);
     return ok ? 0 : 1;
 }

@@ -63,15 +63,15 @@ struct ScalarRanges::Impl {
     std::map<std::pair<ValueId, std::size_t>, std::optional<ScalarRange>> cache;
     std::set<std::pair<ValueId, std::size_t>> active;
     std::size_t work = 0;
-    static constexpr std::size_t kMaxWork = 4'000'000;
+    const std::size_t kMaxWork;
 
     Impl(const std::vector<RawBlock>& b,
          const std::vector<std::unordered_map<std::string, ValueId>>& incoming,
          const std::vector<std::unordered_map<std::string, ValueId>>& outgoing,
          const std::vector<std::map<std::string, ValueId>>& arguments,
          const std::unordered_map<const Instruction*, std::vector<ValueId>>& r,
-         const std::unordered_map<ValueId, Type>& t)
-        : blocks(b), types(t), results(r), guards_by_block(b.size()) {
+         const std::unordered_map<ValueId, Type>& t, ScalarRangeLimits limits)
+        : blocks(b), types(t), results(r), guards_by_block(b.size()), kMaxWork(limits.work) {
         for (std::size_t block = 0; block < blocks.size(); ++block) {
             for (const auto& [name, id] : arguments[block]) {
                 join_blocks[id] = block;
@@ -102,18 +102,60 @@ struct ScalarRanges::Impl {
             if (!is_conditional_branch(*branch))
                 continue;
             const auto [name, inverted] = normalized_predicate(branch->predicate);
-            auto predicate = source(branch, name);
-            if (!predicate || !definitions.contains(*predicate))
-                continue;
-            const auto* comparison = definitions.at(*predicate);
-            if (root_opcode(comparison->opcode) != "setp" || !comparison->predicate.empty() ||
-                comparison->operands.size() != 3 || !results.contains(comparison) ||
-                results.at(comparison).size() != 1)
+            const auto predicate = source(branch, name);
+            if (!predicate)
                 continue;
             for (std::size_t edge = 0; edge < 2; ++edge) {
-                guards_by_block[block].push_back(guards.size());
-                guards.push_back(
-                    {block, blocks[block].successors[edge], comparison, (edge == 0) != inverted});
+                const bool truth = (edge == 0) != inverted;
+                std::vector<std::pair<ValueId, bool>> pending{{*predicate, truth}};
+                std::set<std::pair<ValueId, bool>> visited;
+                std::vector<Guard> derived;
+                constexpr std::size_t kMaxConditionValues = 512;
+                bool complete = true;
+                while (!pending.empty()) {
+                    if (++work > kMaxWork || visited.size() >= kMaxConditionValues) {
+                        complete = false;
+                        break;
+                    }
+                    const auto condition = pending.back();
+                    pending.pop_back();
+                    if (!visited.insert(condition).second)
+                        continue;
+                    const auto found = definitions.find(condition.first);
+                    if (found == definitions.end())
+                        continue;
+                    const auto* definition = found->second;
+                    if (!definition->predicate.empty() || !results.contains(definition) ||
+                        results.at(definition).size() != 1)
+                        continue;
+                    if (root_opcode(definition->opcode) == "setp" && definition->operands.size() == 3) {
+                        derived.push_back(
+                            {block, blocks[block].successors[edge], definition, condition.second});
+                        continue;
+                    }
+                    const auto follow = [&](std::size_t operand, bool value) {
+                        if (const auto input = source(definition, definition->operands[operand]))
+                            pending.emplace_back(*input, value);
+                    };
+                    if (definition->operands.size() == 2 &&
+                        (definition->opcode == "mov.pred" || definition->opcode == "not.pred")) {
+                        follow(1, definition->opcode == "not.pred" ? !condition.second : condition.second);
+                    } else if (definition->operands.size() == 3 &&
+                               ((definition->opcode == "and.pred" && condition.second) ||
+                                (definition->opcode == "or.pred" && !condition.second))) {
+                        // AND true requires both operands true; OR false
+                        // requires both false. The opposite outcomes imply
+                        // neither individual fact and are left unknown.
+                        follow(1, condition.second);
+                        follow(2, condition.second);
+                    }
+                }
+                if (!complete)
+                    continue;
+                for (const auto& guard : derived) {
+                    guards_by_block[block].push_back(guards.size());
+                    guards.push_back(guard);
+                }
             }
         }
     }
@@ -197,6 +239,75 @@ struct ScalarRanges::Impl {
         }
         return result && forwards(value, *result) ? result : std::nullopt;
     }
+    struct Affine {
+        ValueId base;
+        std::int64_t offset;
+    };
+    std::unordered_map<ValueId, std::optional<Affine>> affine_cache;
+    std::unordered_set<ValueId> affine_active;
+
+    std::optional<Affine> affine(ValueId value) {
+        if (const auto found = affine_cache.find(value); found != affine_cache.end())
+            return found->second;
+        if (++work > kMaxWork || !types.contains(value) || types.at(value) != Type::integer(64) ||
+            affine_active.size() >= 256 || !affine_active.insert(value).second)
+            return std::nullopt;
+        // Exact 64-bit add/sub identities are congruences modulo 2^64. A
+        // range is transferred only when its shifted signed representative
+        // stays representable; no claim is made about the original base range.
+        std::optional<Affine> result = Affine{value, 0};
+        if (joins.contains(value)) {
+            const auto origin = terminal(value);
+            if (origin && *origin != value)
+                result = affine(*origin);
+        } else if (const auto found = definitions.find(value); found != definitions.end()) {
+            const auto* instruction = found->second;
+            if (copy64(*instruction)) {
+                const auto input = source(instruction, instruction->operands[1]);
+                if (input)
+                    result = affine(*input);
+            } else if (instruction->predicate.empty() && instruction->operands.size() == 3 &&
+                       (instruction->opcode == "add.u64" || instruction->opcode == "add.s64" ||
+                        instruction->opcode == "sub.u64" || instruction->opcode == "sub.s64")) {
+                const bool subtract = root_opcode(instruction->opcode) == "sub";
+                for (std::size_t index : {1U, 2U}) {
+                    if (subtract && index == 2)
+                        break;
+                    const auto constant = literal(instruction->operands[3 - index]);
+                    const auto input = source(instruction, instruction->operands[index]);
+                    if (!constant || !input)
+                        continue;
+                    const auto base = affine(*input);
+                    if (!base) {
+                        result.reset();
+                        break;
+                    }
+                    const __int128 offset = static_cast<__int128>(base->offset) +
+                                            (subtract ? -static_cast<__int128>(*constant) : *constant);
+                    if (offset < INT64_MIN || offset > INT64_MAX)
+                        result.reset();
+                    else
+                        result = Affine{base->base, static_cast<std::int64_t>(offset)};
+                    break;
+                }
+            }
+        }
+        affine_active.erase(value);
+        if (work > kMaxWork)
+            return std::nullopt;
+        affine_cache.emplace(value, result);
+        return result;
+    }
+    std::optional<std::int64_t> relative_offset(ValueId value, ValueId compared) {
+        if (value == compared || forwards(value, compared) || forwards(compared, value))
+            return 0;
+        const auto a = affine(value), b = affine(compared);
+        if (!a || !b || (a->base != b->base && !forwards(a->base, b->base) && !forwards(b->base, a->base)))
+            return std::nullopt;
+        const __int128 delta = static_cast<__int128>(a->offset) - b->offset;
+        return delta < INT64_MIN || delta > INT64_MAX ? std::nullopt
+                                                      : std::optional(static_cast<std::int64_t>(delta));
+    }
     bool dominates(const Guard& guard, std::size_t block) {
         auto key = std::make_pair(guard.block, guard.successor);
         if (!edge_reachable.contains(key)) {
@@ -230,8 +341,12 @@ struct ScalarRanges::Impl {
         const auto* comparison = guard.comparison;
         for (std::size_t index : {1U, 2U}) {
             auto input = source(comparison, comparison->operands[index]);
-            if (!input || (!forwards(*input, value) && !forwards(value, *input)))
+            const auto delta = input ? relative_offset(value, *input) : std::nullopt;
+            if (!delta)
                 continue;
+            const auto shifted = [&](ScalarRange bound) {
+                return arithmetic(bound, ScalarRange{*delta, *delta}, false);
+            };
             auto limit = operand(comparison, 3 - index, at);
             if (!limit || limit->lower < 0)
                 continue;
@@ -270,11 +385,11 @@ struct ScalarRanges::Impl {
                     relation = "eq";
             }
             if (relation == "lt" && limit->upper > 0)
-                return ScalarRange{0, limit->upper - 1};
+                return shifted(ScalarRange{0, limit->upper - 1});
             if (relation == "le")
-                return ScalarRange{0, limit->upper};
+                return shifted(ScalarRange{0, limit->upper});
             if (relation == "eq")
-                return limit;
+                return shifted(*limit);
             // A lower unsigned bound alone cannot exclude values > INT64_MAX.
         }
         return std::nullopt;
@@ -369,37 +484,62 @@ struct ScalarRanges::Impl {
         }
         return std::nullopt;
     }
-    std::optional<ScalarRange> exclude_zero(ValueId value, std::size_t at, std::optional<ScalarRange> range) {
-        // Unsigned !=0 alone still admits high-bit values. Tighten the lower
-        // endpoint only after an independent proof bounds the value to a
-        // nonnegative signed interval.
-        if (!range || range->lower != 0 || range->upper <= 0)
+    std::optional<ScalarRange> exclude_endpoints(ValueId value, std::size_t at,
+                                                 std::optional<ScalarRange> range) {
+        if (!range)
             return range;
+        // A disequality removes a point, not a whole side of the number line.
+        // It tightens an interval only when that point is an endpoint. Gather
+        // all proven exclusions before trimming so CFG/source order cannot
+        // hide successive excluded endpoints. Interior holes remain in the
+        // conservative enclosing interval.
+        std::set<std::int64_t> excluded;
         for (const auto& guard : guards) {
+            if (++work > kMaxWork)
+                return std::nullopt;
             const auto* comparison = guard.comparison;
-            const auto& opcode = comparison->opcode;
-            const bool eq = opcode == "setp.eq.u64" || opcode == "setp.eq.s64" || opcode == "setp.eq.b64";
-            const bool ne = opcode == "setp.ne.u64" || opcode == "setp.ne.s64" || opcode == "setp.ne.b64";
+            const auto& op = comparison->opcode;
+            const bool eq = op == "setp.eq.u64" || op == "setp.eq.s64" || op == "setp.eq.b64";
+            const bool ne = op == "setp.ne.u64" || op == "setp.ne.s64" || op == "setp.ne.b64";
             if ((!eq || guard.truth) && (!ne || !guard.truth))
                 continue;
             for (std::size_t index : {1U, 2U}) {
-                if (literal(comparison->operands[3 - index]) != std::optional<std::int64_t>{0})
-                    continue;
+                const auto point = literal(comparison->operands[3 - index]);
                 const auto input = source(comparison, comparison->operands[index]);
-                if (input && (forwards(*input, value) || forwards(value, *input)) && dominates(guard, at)) {
-                    range->lower = 1;
-                    return range;
-                }
+                if (!point || !input)
+                    continue;
+                const auto delta = relative_offset(value, *input);
+                if (!delta)
+                    continue;
+                const __int128 shifted = static_cast<__int128>(*point) + *delta;
+                if (shifted < range->lower || shifted > range->upper)
+                    continue;
+                if (dominates(guard, at))
+                    excluded.insert(static_cast<std::int64_t>(shifted));
             }
+        }
+        while (excluded.contains(range->lower)) {
+            if (range->lower == range->upper)
+                return std::nullopt;
+            ++range->lower;
+        }
+        while (excluded.contains(range->upper)) {
+            if (range->lower == range->upper)
+                return std::nullopt;
+            --range->upper;
         }
         return range;
     }
     std::optional<ScalarRange> get(ValueId value, std::size_t at) {
-        if (++work > kMaxWork || !types.contains(value) || types.at(value) != Type::integer(64))
+        if (!types.contains(value) || types.at(value) != Type::integer(64))
             return std::nullopt;
         const auto key = std::make_pair(value, at);
+        // A completed fact is immutable for this SSA graph. Exhaustion limits
+        // new proof work; it does not invalidate a previously proved answer.
         if (cache.contains(key))
             return cache.at(key);
+        if (++work > kMaxWork)
+            return std::nullopt;
         if (active.size() > 256 || !active.insert(key).second)
             return std::nullopt;
         std::optional<ScalarRange> result;
@@ -411,16 +551,18 @@ struct ScalarRanges::Impl {
             const auto left = source(guard.comparison, guard.comparison->operands[1]);
             const auto right = source(guard.comparison, guard.comparison->operands[2]);
             const auto same = [&](std::optional<ValueId> input) {
-                return input && (forwards(*input, value) || forwards(value, *input));
+                return input && relative_offset(value, *input).has_value();
             };
-            if ((same(left) || same(right)) && dominates(guard, at)) {
-                const auto bound = exclude_zero(value, at, guard_bound(value, guard, at));
-                if (bound && work <= kMaxWork) {
-                    active.erase(key);
-                    cache[key] = bound;
-                    return bound;
-                }
-            }
+            if ((same(left) || same(right)) && dominates(guard, at))
+                result = intersect(result, guard_bound(value, guard, at));
+        }
+        if (result && work <= kMaxWork) {
+            result = exclude_endpoints(value, at, result);
+            active.erase(key);
+            if (work > kMaxWork)
+                return std::nullopt;
+            cache[key] = result;
+            return result;
         }
         if (joins.contains(value)) {
             auto identity = terminal(value);
@@ -485,13 +627,12 @@ struct ScalarRanges::Impl {
             // Avoid computing reachability for guards unrelated to this value.
             auto left = source(guard.comparison, guard.comparison->operands[1]);
             auto right = source(guard.comparison, guard.comparison->operands[2]);
-            if ((!left || (!forwards(*left, value) && !forwards(value, *left))) &&
-                (!right || (!forwards(*right, value) && !forwards(value, *right))))
+            if ((!left || !relative_offset(value, *left)) && (!right || !relative_offset(value, *right)))
                 continue;
             if (dominates(guard, at))
                 result = intersect(result, guard_bound(value, guard, at));
         }
-        result = exclude_zero(value, at, result);
+        result = exclude_endpoints(value, at, result);
         active.erase(key);
         if (work > kMaxWork)
             return std::nullopt;
@@ -505,8 +646,8 @@ ScalarRanges::ScalarRanges(const std::vector<RawBlock>& blocks,
                            const std::vector<std::unordered_map<std::string, ValueId>>& outgoing,
                            const std::vector<std::map<std::string, ValueId>>& arguments,
                            const std::unordered_map<const Instruction*, std::vector<ValueId>>& results,
-                           const std::unordered_map<ValueId, Type>& types)
-    : impl_(std::make_unique<Impl>(blocks, incoming, outgoing, arguments, results, types)) {}
+                           const std::unordered_map<ValueId, Type>& types, ScalarRangeLimits limits)
+    : impl_(std::make_unique<Impl>(blocks, incoming, outgoing, arguments, results, types, limits)) {}
 ScalarRanges::~ScalarRanges() = default;
 std::optional<ScalarRange> ScalarRanges::get(ValueId value, const Instruction* at) {
     auto location = impl_->locations.find(at);

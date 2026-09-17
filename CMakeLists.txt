@@ -123,6 +123,7 @@ add_library(cumetal_ir STATIC
     compiler/ir/src/ptx_importer.cpp
     compiler/ir/src/ptx_address_cancellation.cpp
     compiler/ir/src/ptx_address_alignment.cpp
+    compiler/ir/src/ptx_address_demands.cpp
     compiler/ir/src/ptx_scalar_ranges.cpp
     compiler/ir/src/ptx_pointer_ranges.cpp
     compiler/ir/src/ptx_local_memory_ranges.cpp

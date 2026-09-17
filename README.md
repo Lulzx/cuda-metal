@@ -63,6 +63,13 @@ fields admitted to reaching-store validation use bounded guard/range and
 initialized-prefix proofs to exclude intervening disjoint writes; missing
 initialization and possible overlaps reject within that proof. Escaped-cell
 discovery still has a separate validation gap documented below.
+Address-demand discovery expands only joins reached from memory uses, retaining
+every demanded incoming edge within the same work limit. Range proofs can use
+excluded comparison endpoints, bounded related offsets and necessary Boolean
+conditions, including pointer iterators with a literal end length or a selected
+zero stop marker. Unproved writes remain barriers to pointer recovery.
+See [the proof-scaling validation](docs/ptx-memory-proof-scaling-validation.md)
+for numerical checks, remaining full-input blockers and proof limits.
 Scalar conversions retain both their instruction format and wider
 declared register storage, including the required destination extension.
 Before register SSA, scalar zero-marker facts can prove that an absent payload

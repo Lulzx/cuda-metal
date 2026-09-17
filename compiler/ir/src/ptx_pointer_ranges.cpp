@@ -244,6 +244,40 @@ struct PointerRanges::Impl {
         return (equal_operand(i, 1, next) && equal_operand(i, 2, end)) ||
                (equal_operand(i, 2, next) && equal_operand(i, 1, end));
     }
+    // If a selected integer is observed nonzero, a literal-zero arm could not
+    // have been selected. This implies the selector's truth value without
+    // assigning any pointer meaning to the other arm. In particular, a loop
+    // may encode its end test as select(end == next, 0, next) != 0.
+    std::optional<std::pair<ValueId, bool>> nonzero_selection(const Instruction* comparison, bool truth) {
+        if (!single(comparison) || comparison->operands.size() != 3 ||
+            (comparison->opcode != "setp.ne.s64" && comparison->opcode != "setp.ne.u64" &&
+             comparison->opcode != "setp.eq.s64" && comparison->opcode != "setp.eq.u64"))
+            return std::nullopt;
+        const bool equal = comparison->opcode.find(".eq.") != std::string::npos;
+        if (truth == equal)
+            return std::nullopt;
+        for (std::size_t index : {1U, 2U}) {
+            if (literal(comparison->operands[3 - index]) != 0)
+                continue;
+            const auto input = source(comparison, comparison->operands[index]);
+            const auto selected = input ? terminal(*input) : std::nullopt;
+            if (!selected || !definitions.contains(*selected))
+                continue;
+            const auto* select = definitions.at(*selected).instruction;
+            if (!single(select) || select->operands.size() != 4 ||
+                (select->opcode != "selp.b64" && select->opcode != "selp.u64" &&
+                 select->opcode != "selp.s64"))
+                continue;
+            const bool first_zero = literal(select->operands[1]) == 0;
+            const bool second_zero = literal(select->operands[2]) == 0;
+            if (first_zero == second_zero)
+                continue;
+            const auto [name, inverted] = normalized_predicate(select->operands[3]);
+            if (const auto selector = source(select, name))
+                return std::pair{*selector, second_zero != inverted};
+        }
+        return std::nullopt;
+    }
     bool implies_unequal(ValueId predicate, bool truth, ValueId next, ValueId end,
                          std::unordered_set<ValueId>& active) {
         if (!charge() || active.size() > 128 || !active.insert(predicate).second)
@@ -254,6 +288,8 @@ struct PointerRanges::Impl {
             const auto* i = definitions.at(*resolved).instruction;
             if (comparison(i, next, end, !truth))
                 result = true;
+            else if (const auto selected = nonzero_selection(i, truth))
+                result = implies_unequal(selected->first, selected->second, next, end, active);
             else if (single(i) && i->operands.size() == 3 &&
                      ((i->opcode == "and.pred" && truth) || (i->opcode == "or.pred" && !truth))) {
                 for (std::size_t index : {1U, 2U})
@@ -416,22 +452,29 @@ struct PointerRanges::Impl {
         for (std::size_t index : {1U, 2U}) {
             const auto pointer = source(end_i, end_i->operands[index]);
             const auto count = source(end_i, end_i->operands[3 - index]);
-            if (!pointer || !count)
+            const auto constant_count = literal(end_i->operands[3 - index]);
+            if (!pointer || (!count && !constant_count))
                 continue;
             const auto candidate = address(*pointer, at);
+            if (!candidate || candidate->depot != base->depot || candidate->offset != base->offset ||
+                candidate->allocation_size != base->allocation_size)
+                continue;
             // E captures this SSA value once. A completed outer-loop phi can
             // have several origins while remaining fixed throughout this loop.
             // Reject only values whose actual defining/join block may execute
             // again in the header-cut iteration; their current bound could
             // describe a newer value than the one captured by E.
-            const auto count_block = definitions.contains(*count) ? definitions.at(*count).block
-                                     : joins.contains(*count)     ? joins.at(*count).block
-                                                                  : SIZE_MAX;
-            if (!candidate || candidate->depot != base->depot || candidate->offset != base->offset ||
-                candidate->allocation_size != base->allocation_size || count_block >= iteration.size() ||
-                iteration[count_block])
-                continue;
-            const auto bound = scalar(*count, at);
+            std::optional<ScalarRange> bound;
+            if (constant_count) {
+                bound = ScalarRange{*constant_count, *constant_count};
+            } else {
+                const auto count_block = definitions.contains(*count) ? definitions.at(*count).block
+                                         : joins.contains(*count)     ? joins.at(*count).block
+                                                                      : SIZE_MAX;
+                if (count_block >= iteration.size() || iteration[count_block])
+                    continue;
+                bound = scalar(*count, at);
+            }
             if (!bound || bound->lower < 1 || bound->upper < bound->lower ||
                 static_cast<__int128>(base->offset) + bound->upper > base->allocation_size ||
                 static_cast<__int128>(base->offset) + bound->upper > INT64_MAX)

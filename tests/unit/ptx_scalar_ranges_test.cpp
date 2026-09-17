@@ -34,7 +34,9 @@ struct Graph {
         if (!values.empty()) {
             results.emplace(instruction, values);
             for (const auto value : values)
-                types[value] = opcode.starts_with("setp.") ? ir::Type::predicate() : ir::Type::integer(64);
+                types[value] = opcode.starts_with("setp.") || opcode.ends_with(".pred")
+                                   ? ir::Type::predicate()
+                                   : ir::Type::integer(64);
         }
         return instruction;
     }
@@ -47,8 +49,8 @@ struct Graph {
         incoming[block][name] = value;
         types[value] = ir::Type::integer(64);
     }
-    detail::ScalarRanges ranges() {
-        return detail::ScalarRanges(blocks, incoming, outgoing, arguments, results, types);
+    detail::ScalarRanges ranges(detail::ScalarRangeLimits limits = {}) {
+        return detail::ScalarRanges(blocks, incoming, outgoing, arguments, results, types, limits);
     }
 };
 
@@ -303,6 +305,421 @@ bool guarded_dynamic_seed() {
     return ok;
 }
 
+bool cached_bounds_survive_exhaustion() {
+    // The two dynamic values have independent valid bounds at each query.
+    // Proving one of them must not be undone when subsequent, unrelated
+    // questions consume the finite analysis budget.
+    constexpr std::size_t positions = 64, unknowns = 32;
+    constexpr std::size_t exit = positions + 2;
+    Graph graph(exit + 1);
+    graph.add(0, "ld.param.u64", {"%index", "[index]"}, {1});
+    graph.add(0, "ld.param.u64", {"%other", "[other]"}, {2});
+    for (std::size_t i = 0; i < unknowns; ++i)
+        graph.add(0, "ld.param.u64", {"%unknown" + std::to_string(i), "[unknown]"},
+                  {static_cast<ir::ValueId>(100 + i)});
+    graph.add(0, "setp.le.u64", {"%fits", "%index", "255"}, {3});
+    graph.add(0, "bra", {"B1"}, {}, "%fits");
+    graph.edge(0, 1);
+    graph.edge(0, exit);
+    graph.incoming[1]["%other"] = 2;
+    graph.add(1, "setp.le.u64", {"%other_fits", "%other", "15"}, {4});
+    graph.add(1, "bra", {"B2"}, {}, "%other_fits");
+    graph.edge(1, 2);
+    graph.edge(1, exit);
+    std::vector<const detail::Instruction*> queries;
+    for (std::size_t i = 0; i < positions; ++i) {
+        const auto block = i + 2;
+        queries.push_back(graph.add(block, "nop"));
+        graph.add(block, "bra", {"B" + std::to_string(block + 1)});
+        graph.edge(block, block + 1);
+    }
+    graph.add(exit, "ret");
+
+    // The initial proof is small; the distinct unknown queries deliberately
+    // outnumber the work limit. Nothing about an unknown input's value is
+    // inferred from reaching a budget boundary.
+    auto ranges = graph.ranges(detail::ScalarRangeLimits{.work = 1024});
+    bool ok = known(ranges.get(1, queries.front()), 0, 255, "initial dynamic bound is proved");
+    for (const auto* query : queries)
+        for (std::size_t i = 0; i < unknowns; ++i)
+            ok &= expect(!ranges.get(static_cast<ir::ValueId>(100 + i), query),
+                         "unrelated unknown inputs remain unknown");
+    ok &= expect(!ranges.get(2, queries.front()), "an uncached question fails closed after exhaustion");
+    ok &= known(ranges.get(1, queries.front()), 0, 255,
+                "completed cached proof remains valid after unrelated budget exhaustion");
+    return ok;
+}
+
+bool direct_guard_with_unrelated_guards(unsigned variant) {
+    // Hundreds of comparisons concern different dynamic values. The final
+    // comparison directly bounds index, including copies through a diamond
+    // and an anchored phi cycle. Those unrelated guards must not obscure it.
+    constexpr std::size_t unrelated = 512;
+    constexpr std::size_t bound = unrelated, split = bound + 1, left = bound + 2, right = bound + 3,
+                          join = bound + 4, body = bound + 5, exit = bound + 6;
+    Graph graph(exit + 1);
+    graph.add(0, "ld.param.u64", {"%index", "[index]"}, {1});
+    graph.add(0, "ld.param.u64", {"%choice", "[choice]"}, {2});
+    graph.add(0, "ld.param.u64", {"%foreign", "[foreign]"}, {3});
+    graph.add(0, "setp.ne.u64", {"%choose", "%choice", "0"}, {5});
+    for (std::size_t block = 0; block < unrelated; ++block) {
+        const auto name = "%noise" + std::to_string(block);
+        const auto pred = "%test" + std::to_string(block);
+        graph.add(block, "ld.param.u64", {name, "[noise]"}, {static_cast<ir::ValueId>(100 + 2 * block)});
+        graph.add(block, "setp.ne.u64", {pred, name, "0"}, {static_cast<ir::ValueId>(101 + 2 * block)});
+        graph.add(block, "bra", {"B" + std::to_string(block + 1)}, {}, pred);
+        graph.edge(block, block + 1);
+        // A bypass into the same copy path must defeat the final bound even
+        // though all register names and copy instructions remain unchanged.
+        graph.edge(block, variant == 1 && block == 0 ? left : exit);
+    }
+    graph.incoming[bound]["%index"] = 1;
+    graph.add(bound, "setp.gt.u64", {"%too_large", "%index", "255"}, {4});
+    graph.add(bound, "bra", {"B" + std::to_string(exit)}, {}, "%too_large");
+    graph.edge(bound, exit);
+    graph.edge(bound, split);
+    graph.incoming[split]["%choose"] = 5;
+    graph.add(split, "bra", {"B" + std::to_string(left)}, {}, "%choose");
+    graph.edge(split, left);
+    graph.edge(split, right);
+    graph.incoming[left]["%index"] = 1;
+    if (variant == 2)
+        graph.add(left, "add.u64", {"%index", "%index", "279"}, {6});
+    else
+        graph.add(left, "mov.u64", {"%copy_left", "%index"}, {6});
+    graph.add(left, "bra", {"B" + std::to_string(join)});
+    graph.edge(left, join);
+    graph.outgoing[left]["%merged"] = 6;
+    graph.incoming[right]["%index"] = 1;
+    graph.incoming[right]["%foreign"] = 3;
+    graph.add(right, "mov.u64", {"%copy_right", variant == 3 ? "%foreign" : "%index"}, {7});
+    graph.add(right, "bra", {"B" + std::to_string(join)});
+    graph.edge(right, join);
+    graph.outgoing[right]["%merged"] = 7;
+    graph.phi(join, "%merged", 8);
+    graph.incoming[join]["%choose"] = 5;
+    graph.add(join, "mov.u64", {"%query", "%merged"}, {9});
+    const auto* query = graph.add(join, "nop");
+    graph.add(join, "bra", {"B" + std::to_string(body)}, {}, "%choose");
+    graph.edge(join, body);
+    graph.edge(join, exit);
+    graph.incoming[body]["%merged"] = 8;
+    if (variant == 4)
+        graph.add(body, "add.u64", {"%merged", "%merged", "1"}, {10});
+    graph.add(body, "bra", {"B" + std::to_string(join)});
+    graph.edge(body, join);
+    graph.outgoing[body]["%merged"] = variant == 4 ? 10 : 8;
+    graph.add(exit, "ret");
+
+    auto ranges = graph.ranges();
+    const auto result = ranges.get(9, query);
+    if (variant == 0)
+        return known(result, 0, 255, "direct guard survives unrelated guards and copy/phi identities");
+    if (variant == 2)
+        return expect(!result || result->upper >= 534,
+                      "a later addition cannot borrow its source's unmodified upper bound");
+    return expect(!result, "bypassed, conflicting, or stale loop values cannot borrow the direct guard");
+}
+
+bool excluded_endpoint_bounds() {
+    bool ok = true;
+    for (const std::string format : {"u64", "s64", "b64"}) {
+        for (bool not_equal : {false, true}) {
+            for (bool reverse : {false, true}) {
+                // Variants 0/1 exclude upper/interior values; 2 bypasses the
+                // exclusion, and 3 replaces its predicate before the branch.
+                for (unsigned variant = 0; variant < 4; ++variant) {
+                    Graph graph(4);
+                    graph.add(0, "ld.param.u64", {"%index", "[index]"}, {1});
+                    graph.add(0, "ld.param.u64", {"%unknown", "[unknown]"}, {2});
+                    graph.add(0, "setp.gt.u64", {"%too_large", "%index", "255"}, {3});
+                    graph.add(0, "bra", {"B3"}, {}, "%too_large");
+                    graph.edge(0, 3);
+                    graph.edge(0, 1);
+                    graph.incoming[1]["%index"] = 1;
+                    graph.incoming[1]["%unknown"] = 2;
+                    const std::string excluded = variant == 1 ? "254" : "255";
+                    graph.add(1, "setp." + std::string(not_equal ? "ne." : "eq.") + format,
+                              {"%test", reverse ? excluded : "%index", reverse ? "%index" : excluded}, {4});
+                    if (variant == 3)
+                        graph.add(1, "setp.ne.u64", {"%test", "%unknown", "0"}, {5});
+                    if (variant == 2) {
+                        graph.add(1, "bra", {"B2"});
+                        graph.edge(1, 2);
+                    } else {
+                        graph.add(1, "bra", {not_equal ? "B2" : "B3"}, {}, "%test");
+                        graph.edge(1, not_equal ? 2 : 3);
+                        graph.edge(1, not_equal ? 3 : 2);
+                    }
+                    const auto* query = graph.add(2, "ret");
+                    graph.add(3, "ret");
+                    auto ranges = graph.ranges();
+                    ok &= known(
+                        ranges.get(1, query), 0, variant == 0 ? 254 : 255,
+                        variant == 0
+                            ? "excluding the bounded upper endpoint tightens its interval"
+                            : "interior, bypassed, or overwritten tests do not remove the upper endpoint");
+                }
+            }
+        }
+    }
+
+    // Endpoint removal is not a special zero rule. The arithmetic establishes
+    // a separate 100..115 interval before a dominating comparison excludes 100.
+    Graph graph(5);
+    graph.add(0, "ld.param.u64", {"%input", "[input]"}, {1});
+    graph.add(0, "setp.le.u64", {"%fits", "%input", "15"}, {2});
+    graph.add(0, "bra", {"B1"}, {}, "%fits");
+    graph.edge(0, 1);
+    graph.edge(0, 4);
+    graph.incoming[1]["%input"] = 1;
+    graph.add(1, "add.u64", {"%index", "%input", "100"}, {3});
+    graph.add(1, "setp.eq.u64", {"%endpoint", "%index", "100"}, {4});
+    graph.add(1, "bra", {"B4"}, {}, "%endpoint");
+    graph.edge(1, 4);
+    graph.edge(1, 2);
+    graph.incoming[2]["%index"] = 3;
+    graph.add(2, "mov.u64", {"%copy", "%index"}, {5});
+    graph.add(2, "bra", {"B3"});
+    graph.edge(2, 3);
+    const auto* query = graph.add(3, "ret");
+    graph.add(4, "ret");
+    auto ranges = graph.ranges();
+    ok &= known(ranges.get(5, query), 101, 115,
+                "excluding a nonzero lower endpoint tightens an independently established interval");
+    return ok;
+}
+
+bool affine_sibling_bounds(unsigned variant) {
+    // x+2 <=254 bounds the sibling x+3 to 1..255 even when x+2 itself
+    // wrapped modulo 2^64. The proof relates actual SSA values, not names.
+    enum : unsigned {
+        plain,
+        bypass,
+        replaced_guard,
+        different_base,
+        replaced_base,
+        narrow_guard,
+        narrow_query,
+        predicated_guard,
+        predicated_query,
+        overflowing_interval,
+        negative_offsets,
+        wrapped_base,
+        subtraction,
+        literal_left,
+    };
+    Graph graph(4);
+    if (variant == wrapped_base)
+        graph.add(0, "mov.u64", {"%base", "-2"}, {1});
+    else
+        graph.add(0, "ld.param.u64", {"%base", "[base]"}, {1});
+    graph.add(0, "ld.param.u64", {"%foreign", "[foreign]"}, {2});
+    graph.add(0, "setp.ne.u64", {"%choose", "%foreign", "0"}, {3});
+    if (variant == bypass) {
+        graph.add(0, "bra", {"B2"}, {}, "%choose");
+        graph.edge(0, 2);
+        graph.edge(0, 1);
+    } else {
+        graph.add(0, "bra", {"B1"});
+        graph.edge(0, 1);
+    }
+    graph.incoming[1] = {{"%base", 1}, {"%foreign", 2}, {"%choose", 3}};
+    graph.add(1, "mov.u64", {"%bounded", "%foreign"}, {4});
+    const std::string guard_delta = variant == negative_offsets ? "-2" : "2";
+    graph.add(1,
+              variant == narrow_guard  ? "add.u32"
+              : variant == subtraction ? "sub.u64"
+                                       : "add.u64",
+              {"%bounded", variant == literal_left ? guard_delta : "%base",
+               variant == literal_left ? "%base" : guard_delta},
+              {5}, variant == predicated_guard ? "%choose" : "");
+    if (variant == replaced_guard)
+        graph.add(1, "mov.u64", {"%bounded", "%foreign"}, {6});
+    graph.add(1, "setp.le.u64", {"%fits", "%bounded", "254"}, {7});
+    graph.add(1, "bra", {"B2"}, {}, "%fits");
+    graph.edge(1, 2);
+    graph.edge(1, 3);
+    graph.incoming[2] = {{"%base", 1}, {"%foreign", 2}, {"%choose", 3}};
+    if (variant == replaced_base)
+        graph.add(2, "ld.param.u64", {"%base", "[replacement]"}, {8});
+    graph.add(2, "mov.u64", {"%query", "%foreign"}, {9});
+    const std::string delta = variant == overflowing_interval ? "9223372036854775807"
+                              : variant == negative_offsets   ? "-1"
+                              : variant == subtraction        ? "1"
+                                                              : "3";
+    const std::string query_base = variant == different_base ? "%foreign" : "%base";
+    graph.add(2,
+              variant == narrow_query  ? "add.u32"
+              : variant == subtraction ? "sub.u64"
+                                       : "add.u64",
+              {"%query", variant == literal_left ? delta : query_base,
+               variant == literal_left ? query_base : delta},
+              {10}, variant == predicated_query ? "%choose" : "");
+    graph.add(2, "mov.u64", {"%copy", "%query"}, {11});
+    const auto* query = graph.add(2, "ret");
+    graph.add(3, "ret");
+    auto ranges = graph.ranges();
+    const auto result = ranges.get(11, query);
+    if (variant == plain || variant == negative_offsets || variant == subtraction || variant == literal_left)
+        return known(result, 1, 255, "a guarded affine sibling bounds the queried value");
+    if (variant == wrapped_base)
+        return expect(result && result->lower == 1 && result->upper >= 1 && result->upper <= 255,
+                      "modulo64 wrap in the shared base does not break a valid small sibling interval");
+    return expect(
+        !result,
+        "unrelated, bypassed, overwritten, unsupported-width, predicated or overflowing affine case " +
+            std::to_string(variant) + " remains unknown");
+}
+
+bool affine_joined_bases(bool conflicting) {
+    Graph graph(6);
+    graph.add(0, "ld.param.u64", {"%base", "[base]"}, {1});
+    graph.add(0, "ld.param.u64", {"%foreign", "[foreign]"}, {2});
+    graph.add(0, "setp.ne.u64", {"%choose", "%foreign", "0"}, {3});
+    graph.add(0, "bra", {"B1"}, {}, "%choose");
+    graph.edge(0, 1);
+    graph.edge(0, 2);
+    graph.incoming[1]["%base"] = 1;
+    graph.add(1, "mov.u64", {"%joined", "%base"}, {4});
+    graph.add(1, "bra", {"B3"});
+    graph.edge(1, 3);
+    graph.outgoing[1]["%joined"] = 4;
+    graph.incoming[2] = {{"%base", 1}, {"%foreign", 2}};
+    graph.add(2, "mov.u64", {"%joined", conflicting ? "%foreign" : "%base"}, {5});
+    graph.add(2, "bra", {"B3"});
+    graph.edge(2, 3);
+    graph.outgoing[2]["%joined"] = 5;
+    graph.phi(3, "%joined", 6);
+    graph.add(3, "add.u64", {"%bounded", "%joined", "2"}, {7});
+    graph.add(3, "mov.u64", {"%bound_copy", "%bounded"}, {8});
+    graph.add(3, "setp.le.u64", {"%fits", "%bound_copy", "254"}, {9});
+    graph.add(3, "bra", {"B4"}, {}, "%fits");
+    graph.edge(3, 4);
+    graph.edge(3, 5);
+    // Deliberately query a sibling of the original value, not of the join.
+    // Only agreement on every join edge permits transferring the bound.
+    graph.incoming[4]["%base"] = 1;
+    graph.add(4, "add.s64", {"%query", "%base", "3"}, {10});
+    const auto* query = graph.add(4, "ret");
+    graph.add(5, "ret");
+    auto ranges = graph.ranges();
+    const auto result = ranges.get(10, query);
+    return conflicting
+               ? expect(!result, "a different incoming base defeats affine identity through the join")
+               : known(result, 1, 255, "all-edge copy identities relate affine siblings across a join");
+}
+
+bool boolean_guard_truth_table() {
+    bool ok = true;
+    for (bool conjunction : {false, true}) {
+        for (bool truth : {false, true}) {
+            for (bool inverted : {false, true}) {
+                for (bool reverse : {false, true}) {
+                    Graph graph(3);
+                    graph.add(0, "ld.param.u64", {"%index", "[index]"}, {1});
+                    graph.add(0, "ld.param.u64", {"%other", "[other]"}, {2});
+                    graph.add(0, conjunction ? "setp.le.u64" : "setp.gt.u64", {"%bound", "%index", "255"},
+                              {3});
+                    graph.add(0, "setp.ne.u64", {"%unrelated", "%other", "0"}, {4});
+                    graph.add(
+                        0, conjunction ? "and.pred" : "or.pred",
+                        {"%combined", reverse ? "%unrelated" : "%bound", reverse ? "%bound" : "%unrelated"},
+                        {5});
+                    const bool taken = truth != inverted;
+                    graph.add(0, "bra", {taken ? "B1" : "B2"}, {}, inverted ? "!%combined" : "%combined");
+                    graph.edge(0, taken ? 1 : 2);
+                    graph.edge(0, taken ? 2 : 1);
+                    const auto* query = graph.add(1, "ret");
+                    graph.add(2, "ret");
+                    auto ranges = graph.ranges();
+                    const auto bound = ranges.get(1, query);
+                    if (conjunction == truth)
+                        ok &= known(bound, 0, 255,
+                                    "AND true / OR false imply each necessary comparison, including inverted "
+                                    "branches");
+                    else
+                        ok &= expect(!bound,
+                                     "AND false / OR true cannot choose which comparison controls the edge");
+                }
+            }
+        }
+    }
+    return ok;
+}
+
+bool boolean_guard_redefinitions() {
+    bool ok = true;
+    for (unsigned variant = 0; variant < 4; ++variant) {
+        Graph graph(3);
+        graph.add(0, "ld.param.u64", {"%index", "[index]"}, {1});
+        graph.add(0, "ld.param.u64", {"%other", "[other]"}, {2});
+        graph.add(0, "setp.gt.u64", {"%bound", "%index", "255"}, {3});
+        graph.add(0, "setp.ne.u64", {"%unrelated", "%other", "0"}, {4});
+        if (variant == 1)
+            graph.add(0, "mov.pred", {"%bound", "%unrelated"}, {5});
+        graph.add(0, "mov.pred", {"%combined", "%unrelated"}, {6});
+        graph.add(0, variant == 3 ? "xor.pred" : "or.pred", {"%combined", "%bound", "%unrelated"}, {7},
+                  variant == 2 ? "%unrelated" : "");
+        if (variant == 0)
+            graph.add(0, "mov.pred", {"%combined", "%unrelated"}, {8});
+        graph.add(0, "bra", {"B2"}, {}, "%combined");
+        graph.edge(0, 2);
+        graph.edge(0, 1);
+        const auto* query = graph.add(1, "ret");
+        graph.add(2, "ret");
+        auto ranges = graph.ranges();
+        ok &= expect(!ranges.get(1, query), "unrelated/redefined/predicated/unsupported predicate case " +
+                                                std::to_string(variant) +
+                                                " cannot retain a stale comparison fact");
+    }
+    return ok;
+}
+
+bool nested_predicate_copies() {
+    Graph graph(3);
+    graph.add(0, "ld.param.u64", {"%index", "[index]"}, {1});
+    graph.add(0, "ld.param.u64", {"%other", "[other]"}, {2});
+    graph.add(0, "setp.gt.u64", {"%over", "%index", "255"}, {3});
+    graph.add(0, "setp.ne.u64", {"%unrelated", "%other", "0"}, {4});
+    graph.add(0, "mov.pred", {"%copy", "%over"}, {5});
+    graph.add(0, "not.pred", {"%fits", "%copy"}, {6});
+    graph.add(0, "and.pred", {"%both", "%fits", "%unrelated"}, {7});
+    graph.add(0, "mov.pred", {"%again", "%both"}, {8});
+    graph.add(0, "not.pred", {"%skip", "%again"}, {9});
+    graph.add(0, "bra", {"B2"}, {}, "%skip");
+    graph.edge(0, 2);
+    graph.edge(0, 1);
+    const auto* query = graph.add(1, "ret");
+    graph.add(2, "ret");
+    auto ranges = graph.ranges();
+    return known(ranges.get(1, query), 0, 255, "nested NOT/MOV preserves the required comparison polarity");
+}
+
+bool cyclic_predicate_cannot_reuse_entry_fact() {
+    // When the entry comparison is false, the backedge toggles it and the
+    // queried block is reached next. Its index therefore need not be <=255.
+    Graph graph(4);
+    graph.add(0, "ld.param.u64", {"%index", "[index]"}, {1});
+    graph.add(0, "setp.le.u64", {"%carried", "%index", "255"}, {2});
+    graph.add(0, "bra", {"B1"});
+    graph.edge(0, 1);
+    graph.outgoing[0]["%carried"] = 2;
+    graph.phi(1, "%carried", 3);
+    graph.types[3] = ir::Type::predicate();
+    graph.add(1, "bra", {"B2"}, {}, "%carried");
+    graph.edge(1, 2);
+    graph.edge(1, 3);
+    const auto* query = graph.add(2, "ret");
+    graph.incoming[3]["%carried"] = 3;
+    graph.add(3, "not.pred", {"%carried", "%carried"}, {4});
+    graph.add(3, "bra", {"B1"});
+    graph.edge(3, 1);
+    graph.outgoing[3]["%carried"] = 4;
+    auto ranges = graph.ranges();
+    return expect(!ranges.get(1, query), "a predicate join/backedge cannot borrow only the entry fact");
+}
+
 } // namespace
 
 int main() {
@@ -319,5 +736,17 @@ int main() {
     ok &= induction_bounds(1, false, true);
     ok &= induction_bounds(1, true, true);
     ok &= stale_loop_predicate();
+    ok &= cached_bounds_survive_exhaustion();
+    for (unsigned variant = 0; variant < 5; ++variant)
+        ok &= direct_guard_with_unrelated_guards(variant);
+    ok &= excluded_endpoint_bounds();
+    for (unsigned variant = 0; variant < 14; ++variant)
+        ok &= affine_sibling_bounds(variant);
+    ok &= affine_joined_bases(false);
+    ok &= affine_joined_bases(true);
+    ok &= boolean_guard_truth_table();
+    ok &= boolean_guard_redefinitions();
+    ok &= nested_predicate_copies();
+    ok &= cyclic_predicate_cannot_reuse_entry_fact();
     return ok ? 0 : 1;
 }

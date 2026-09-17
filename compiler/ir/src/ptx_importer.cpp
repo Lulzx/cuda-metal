@@ -15,6 +15,7 @@
 #include "ptx_tuple_normalization.h"
 #include "ptx_address_cancellation.h"
 #include "ptx_address_alignment.h"
+#include "ptx_address_demands.h"
 #include "ptx_scalar_ranges.h"
 #include "ptx_pointer_ranges.h"
 #include "ptx_local_memory_ranges.h"
@@ -2917,114 +2918,32 @@ struct Importer {
                 aggregate_parameter_addresses.clear();
                 if (!solve_value_types(true)) return false;
                 if (address_cancellation_applied || address_alignment_applied) {
-                    // Generic PTX memory syntax still requires an address.
-                    // Recover that demand from actual SSA consumers and plain
-                    // copies/joins. This requests a cell proof; it does not
-                    // assign pointer bits or an address space by itself.
-                    std::unordered_set<ValueId> address_demands;
-                    std::unordered_map<ValueId, std::vector<ValueId>> address_copies;
-                    constexpr std::size_t demand_work_limit = 1'000'000;
-                    std::size_t demand_work = 0;
-                    const auto charge_demand_work = [&](std::size_t count, const char* phase) {
-                        if (count > demand_work_limit - demand_work)
-                            return fail(nullptr, "PTX memory-address demand proof budget exhausted (" +
-                                std::string(phase) + ": " + std::to_string(demand_work) +
-                                " used, " + std::to_string(count) + " requested, limit " +
-                                std::to_string(demand_work_limit) + ")");
-                        demand_work += count;
-                        return true;
-                    };
-                    for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
-                        if (!charge_demand_work(1, "block construction")) return false;
-                        for (const auto& [name, value] : block_arguments[b]) {
-                            for (const auto predecessor : raw_blocks[b].predecessors) {
-                                if (!charge_demand_work(1, "join edge construction")) return false;
-                                address_copies[value].push_back(outgoing[predecessor].at(name));
-                            }
-                        }
-                        if (!charge_demand_work(incoming[b].size(), "environment copy")) return false;
-                        auto environment = incoming[b];
-                        for (const auto* instruction : raw_blocks[b].instructions) {
-                            if (!charge_demand_work(1, "instruction scan")) return false;
-                            const auto root = root_opcode(instruction->opcode);
-                            const auto& values = instruction_results.at(instruction);
-                            std::optional<std::size_t> address_index;
-                            if ((root == "ld" || root == "atom") &&
-                                !starts_with(instruction->opcode, "ld.param")) address_index = 1;
-                            else if (root == "st" || root == "red") address_index = 0;
-                            if (address_index && *address_index < instruction->operands.size()) {
-                                const auto found = environment.find(first_register(instruction->operands[*address_index]));
-                                if (found != environment.end()) {
-                                    if (!charge_demand_work(1, "demand seed insertion")) return false;
-                                    address_demands.insert(found->second);
-                                }
-                            }
-                            if (values.size() == 1 && instruction->predicate.empty() &&
-                                instruction->operands.size() == 2 &&
-                                (instruction->opcode == "mov.b64" || instruction->opcode == "mov.u64" ||
-                                 instruction->opcode == "mov.s64" || root == "cvta") &&
-                                instruction->operands[1].find('{') == std::string::npos) {
-                                const auto found = environment.find(first_register(instruction->operands[1]));
-                                if (found != environment.end()) {
-                                    if (!charge_demand_work(1, "copy edge construction")) return false;
-                                    address_copies[values.front()].push_back(found->second);
-                                }
-                            }
-                            const auto destinations = ssa_destinations(*instruction);
-                            if (!charge_demand_work(destinations.size(), "environment update")) return false;
-                            for (std::size_t i = 0; i < destinations.size(); ++i) environment[destinations[i]] = values[i];
-                        }
-                    }
-                    if (!charge_demand_work(address_demands.size(), "initial demand queue")) return false;
-                    std::vector<ValueId> pending_addresses(address_demands.begin(), address_demands.end());
-                    while (!pending_addresses.empty()) {
-                        if (!charge_demand_work(1, "demand node visit")) return false;
-                        const auto value = pending_addresses.back();
-                        pending_addresses.pop_back();
-                        if (!address_copies.contains(value)) continue;
-                        for (const auto input : address_copies.at(value)) {
-                            if (!charge_demand_work(1, "demand edge visit")) return false;
-                            if (!address_demands.contains(input)) {
-                                if (!charge_demand_work(2, "discovered demand insertion and queue")) return false;
-                                address_demands.insert(input);
-                                pending_addresses.push_back(input);
-                            }
-                        }
-                    }
-                    // Demand from a later memory use is not proof that a
-                    // private cell stores pointer bits. Recheck every such
-                    // load against its current reaching stores, including
-                    // generic loads and evidence recovered from helper uses.
-                    for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
-                        if (!charge_demand_work(1, "proof block scan") ||
-                            !charge_demand_work(incoming[b].size(), "proof environment copy")) return false;
-                        auto environment = incoming[b];
-                        for (const auto* instruction : raw_blocks[b].instructions) {
-                            if (!charge_demand_work(1, "proof instruction scan")) return false;
-                            const auto& values = instruction_results.at(instruction);
-                            if (root_opcode(instruction->opcode) == "ld" &&
-                                !starts_with(instruction->opcode, "ld.param") &&
-                                instruction->operands.size() >= 2 && !values.empty() &&
-                                (value_types.at(values.front()).is_pointer() ||
-                                 (values.size() == 1 && ptx_scalar_type(instruction->opcode) == Type::integer(64) &&
-                                  address_demands.contains(values.front())))) {
-                                const auto address = environment.find(first_register(instruction->operands[1]));
-                                const bool private_symbol = local_depots.contains(
-                                    parameter_name_from_operand(instruction->operands[1]));
-                                const bool private_value = address != environment.end() && value_types.contains(address->second) &&
-                                    value_types.at(address->second).is_pointer() &&
-                                    value_types.at(address->second).address_space == AddressSpace::kPrivate;
-                                if (private_symbol || private_value) {
-                                    const auto type = value_types.at(values.front());
-                                    if (!charge_demand_work(1, "load proof insertion")) return false;
-                                    local_load_proofs[proof_key(instruction)] = type.is_pointer() ? type
-                                        : Type::pointer(Type::integer(8), AddressSpace::kNone);
-                                }
-                            }
-                            const auto destinations = ssa_destinations(*instruction);
-                            if (!charge_demand_work(destinations.size(), "proof environment update")) return false;
-                            for (std::size_t i = 0; i < destinations.size(); ++i)
-                                environment[destinations[i]] = values[i];
+                    // Address demand does not establish pointer provenance.
+                    // Only demanded joins expand; scalar live-in values need
+                    // no predecessor cross-product or environment copies.
+                    const auto demand = detail::compute_address_demands(
+                        raw_blocks, incoming, outgoing, block_arguments, instruction_results,
+                        [&](const Instruction& instruction) { return ssa_destinations(instruction); });
+                    if (!demand.complete) return fail(nullptr, demand.reason);
+                    // Independently pointer-typed helper loads still require
+                    // the same reaching-store proof, even without a direct
+                    // memory-address consumer in this function.
+                    for (const auto& candidate : demand.loads) {
+                        const auto* instruction = candidate.instruction;
+                        const auto& values = instruction_results.at(instruction);
+                        if (values.empty() ||
+                            (!value_types.at(values.front()).is_pointer() &&
+                             !(values.size() == 1 && ptx_scalar_type(instruction->opcode) == Type::integer(64) &&
+                               demand.values.contains(values.front())))) continue;
+                        const bool private_symbol = local_depots.contains(
+                            parameter_name_from_operand(instruction->operands[1]));
+                        const bool private_value = candidate.address && value_types.contains(*candidate.address) &&
+                            value_types.at(*candidate.address).is_pointer() &&
+                            value_types.at(*candidate.address).address_space == AddressSpace::kPrivate;
+                        if (private_symbol || private_value) {
+                            const auto type = value_types.at(values.front());
+                            local_load_proofs[proof_key(instruction)] = type.is_pointer() ? type
+                                : Type::pointer(Type::integer(8), AddressSpace::kNone);
                         }
                     }
                 }

@@ -170,6 +170,25 @@ exploration discards all observed bounds. These ranges establish disjointness,
 not pointer contents or missing initialization. Arbitrary dynamic aliasing and
 unbounded loops remain unsupported.
 
+Address-demand discovery indexes SSA joins and expands their incoming edges only
+when a memory-address use demands them. It preserves pre-write definitions, all
+demanded predecessors and independently pointer-typed helper-load candidates;
+exhaustion discards partial demand sets. This reduces irrelevant join work without
+raising the existing limit or supplying pointer provenance. Mixed-vector lanes
+remain separately unsupported.
+
+Scalar disjointness queries intersect dominating comparison bounds, trim excluded
+interval endpoints, and relate plain 64-bit copy/add/sub siblings when their
+shifted interval is representable. They do not bound the unobserved original
+base from a modulo-wrapping sibling. Necessary facts from true AND, false OR,
+predicate copies and negation are supported; opposite outcomes remain unknown.
+Pointer iterators may use a positive literal length in the same allocation or
+observe a selected zero marker as nonzero to prove the end was not reached.
+All-edge identity, overflow, entry and backedge checks remain required. Cached
+completed scalar proofs survive later query-budget exhaustion; incomplete new
+proofs remain unknown. That query limit does not bound the pre-existing scalar
+constructor's SSA indexing work.
+
 Passing a private pointer-cell address through a helper argument can suppress
 candidate discovery before reaching-store validation. Without address
 normalization, an overlapping byte-write control still emits an integer reload

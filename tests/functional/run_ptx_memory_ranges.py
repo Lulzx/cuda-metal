@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Numerical local-pointer-cell checks after bounded byte writes."""
 from pathlib import Path
+import os
 import random
+import signal
+import subprocess
 import sys
+import tempfile
 from ptx_test_support import expect_compile_failure, run_integer_case
 
 
@@ -235,6 +239,215 @@ SCALAR_LOOP:
 ''' + source[end:]
 
 
+def sentinel_iterator_fixture(literal_end=False):
+    """A zero selected at the end controls whether the cursor loops again."""
+    source = pointer_iterator_fixture().replace(
+        ' setp.ne.u64 %p5,%rd11,%rd12;\n',
+        ' selp.b64 %rd22,0,%rd11,%p4;\n setp.ne.u64 %p5,%rd22,0;\n')
+    if literal_end:
+        source = source.replace(' add.u64 %rd12,%rd6,%rd3;\n',
+                                ' add.u64 %rd12,%rd6,64;\n')
+    return source
+
+
+def endpoint_fixture(copied_pointer=False):
+    """A saved pointer at 256 survives writes admitted by both scalar guards.
+
+    Each lane returns the two original input words through the saved pointer,
+    the byte actually read back from scratch, and whether the write executed.
+    The no-write path returns 511, outside the possible byte-result range.
+    """
+    pointer_use = ' mov.u64 %rd12,%rd9;\n'
+    if copied_pointer:
+        pointer_use = '''
+ and.b64 %rd15,%rd3,1;
+ setp.ne.u64 %p3,%rd15,0;
+ @%p3 bra COPY_RIGHT;
+ mov.u64 %rd12,%rd9;
+ bra POINTER_READY;
+COPY_RIGHT:
+ mov.u64 %rd13,%rd9;
+ mov.u64 %rd12,%rd13;
+POINTER_READY:
+'''
+    return r'''.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry integer_probe(.param .u64 .ptr .global input,
+ .param .u64 .ptr .global output, .param .u32 count) {
+ .local .align 16 .b8 scratch[272];
+ .reg .b64 %rd<18>;
+ .reg .b32 %r<6>;
+ .reg .b16 %rs<2>;
+ .reg .pred %p<6>;
+ ld.param.u64 %rd0,[input];
+ ld.param.u64 %rd1,[output];
+ ld.param.u32 %r0,[count];
+ mov.u32 %r1,%ctaid.x;
+ mov.u32 %r2,%ntid.x;
+ mov.u32 %r3,%tid.x;
+ mad.lo.u32 %r4,%r1,%r2,%r3;
+ setp.ge.u32 %p0,%r4,%r0;
+ @%p0 bra DONE;
+ mul.wide.u32 %rd2,%r4,16;
+ add.u64 %rd0,%rd0,%rd2;
+ mul.wide.u32 %rd2,%r4,32;
+ add.u64 %rd1,%rd1,%rd2;
+ ld.global.u64 %rd3,[%rd0];
+ ld.global.u64 %rd4,[%rd0+8];
+ mov.u64 %rd5,scratch;
+ add.u64 %rd6,%rd5,256;
+ st.local.u64 [%rd6],%rd0;
+ mov.u64 %rd10,511;
+ mov.u64 %rd11,0;
+ setp.gt.u64 %p1,%rd3,255;
+ @%p1 bra LOAD;
+ setp.eq.s64 %p2,%rd3,255;
+ @%p2 bra LOAD;
+WRITE:
+ add.u64 %rd7,%rd5,%rd3;
+ cvt.u16.u64 %rs0,%rd4;
+ st.local.u8 [%rd7+1],%rs0;
+ ld.local.u8 %rs1,[%rd7+1];
+ cvt.u64.u16 %rd10,%rs1;
+ mov.u64 %rd11,1;
+LOAD:
+ ld.local.u64 %rd9,[%rd6];
+''' + pointer_use + r'''
+ ld.global.u64 %rd14,[%rd12];
+ ld.global.u64 %rd16,[%rd12+8];
+ st.global.u64 [%rd1],%rd14;
+ st.global.u64 [%rd1+8],%rd16;
+ st.global.u64 [%rd1+16],%rd10;
+ st.global.u64 [%rd1+24],%rd11;
+DONE:
+ ret;
+}
+'''
+
+
+def affine_endpoint_fixture(compound=False):
+    """The compared and written offsets are different modulo64 siblings."""
+    source = endpoint_fixture()
+    source = source.replace(''' setp.gt.u64 %p1,%rd3,255;
+ @%p1 bra LOAD;
+ setp.eq.s64 %p2,%rd3,255;
+ @%p2 bra LOAD;
+WRITE:
+ add.u64 %rd7,%rd5,%rd3;
+''', ''' add.u64 %rd17,%rd3,2;
+ setp.gt.u64 %p1,%rd17,254;
+ @%p1 bra LOAD;
+WRITE:
+ add.u64 %rd15,%rd3,3;
+ add.u64 %rd7,%rd5,%rd15;
+''')
+    source = source.replace('[%rd7+1]', '[%rd7]')
+    if compound:
+        source = source.replace(' setp.gt.u64 %p1,%rd17,254;\n', ''' setp.gt.u64 %p1,%rd17,254;
+ and.b64 %rd8,%rd4,1;
+ setp.ne.u64 %p4,%rd8,0;
+ or.pred %p1,%p1,%p4;
+''')
+    return source
+
+
+def endpoint_inputs_and_expected(affine=False, compound=False):
+    maximum = (1 << 64) - 1
+    indices = [0, 1, 2, 127, 128, 253, 254, 255, 256, 257, 279, 280,
+               (1 << 32) - 1, 1 << 32, (1 << 63) - 1, 1 << 63,
+               maximum - 1, maximum]
+    while len(indices) < 65:
+        lane = len(indices)
+        indices.append((lane * 37) % 255 if lane % 3 == 0 else
+                       255 if lane % 3 == 1 else (1 << 63) + lane)
+    values, expected = [], []
+    for lane, index in enumerate(indices):
+        payload = ((lane + 1) * 0x9e3779b97f4a7c15 ^ 0x6b8b4567327b23c6) & maximum
+        if lane < 5:
+            payload = (payload & ~255) | [0, 1, 127, 128, 255][lane]
+        written = ((index + 2) & maximum) <= 254 if affine else index < 255
+        if compound:
+            written = written and not (payload & 1)
+        values.extend((index, payload))
+        expected.extend((index, payload, payload & 255 if written else 511, int(written)))
+    return values, expected
+
+
+def endpoint_worker(build, copied_pointer, artifacts, affine=False, compound=False):
+    values, expected = endpoint_inputs_and_expected(affine, compound)
+    source = affine_endpoint_fixture(compound) if affine else endpoint_fixture(copied_pointer)
+    label = 'compound affine sibling guard' if compound else 'affine sibling endpoint guard' if affine else (
+        'endpoint guard with ' + ('copied pointer' if copied_pointer else 'direct pointer'))
+    run_integer_case(build, source, values, expected, label,
+                     input_words=2, output_words=4,
+                     abi_lines=['CUMETAL_ABI_V2', 'kernel integer_probe', 'shared 0',
+                                'arg buffer 8', 'arg buffer 8', 'arg bytes 4'],
+                     artifacts_dir=artifacts)
+
+
+def run_endpoint_case(build, copied_pointer=False, affine=False, compound=False):
+    # Keep the normal fixture harness, while checking actual launch provenance
+    # from an isolated child. Neither rejected variants nor input references
+    # invoke the GPU. Retained source must equal the source selected here.
+    with tempfile.TemporaryDirectory(prefix='cumetal-endpoint-memory-') as directory:
+        child = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), str(build), '--endpoint-worker',
+             'compound' if compound else 'affine' if affine else 'copied' if copied_pointer else 'direct', directory],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+            env=dict(os.environ, CUMETAL_TRACE_GPU='1', CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS='0'))
+        try:
+            stdout, stderr = child.communicate(timeout=90)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.communicate(timeout=5)
+            raise AssertionError('endpoint memory fixture exceeded 90 seconds')
+        print(stdout, end='')
+        print(stderr, end='', file=sys.stderr)
+        launches = [line for line in stderr.splitlines()
+                    if 'CUMETAL_PROVENANCE event=kernel_launch' in line]
+        assert child.returncode == 0, 'endpoint memory fixture failed'
+        assert len(launches) == 1 and all(token in launches[0] for token in (
+            'kernel="integer_probe"', 'device=apple_gpu ', 'launch_success=true ',
+            'source=generic_ptx ', 'provenance=generic_ptx_lowering ', 'semantic_quality=exact '
+        )), 'endpoint memory fixture lacks exact generic Apple GPU provenance'
+        assert '65 inputs, output values, guards' in stdout
+        source = affine_endpoint_fixture(compound) if affine else endpoint_fixture(copied_pointer)
+        assert (Path(directory) / 'test.ptx').read_text() == source
+
+
+def endpoint_negative_fixtures():
+    source = endpoint_fixture()
+    return [
+        ('endpoint missing upper bound', source.replace(' @%p1 bra LOAD;\n', '')),
+        ('endpoint missing exclusion', source.replace(' @%p2 bra LOAD;\n', '')),
+        ('endpoint guard bypass', source.replace(
+            ' setp.gt.u64 %p1,%rd3,255;\n',
+            ' setp.eq.u64 %p4,%rd3,255;\n @%p4 bra WRITE;\n'
+            ' setp.gt.u64 %p1,%rd3,255;\n')),
+        ('endpoint overwritten index', source.replace('WRITE:\n', 'WRITE:\n mov.u64 %rd3,255;\n')),
+        ('endpoint overlapping displacement', source.replace('[%rd7+1]', '[%rd7+2]')),
+        ('endpoint overwritten predicate', source.replace(
+            ' @%p2 bra LOAD;\n', ' setp.eq.u64 %p2,%rd4,0;\n @%p2 bra LOAD;\n')),
+    ]
+
+
+def affine_endpoint_negative_fixtures():
+    source = affine_endpoint_fixture()
+    return [
+        ('affine endpoint guard bypass', source.replace(
+            ' add.u64 %rd17,%rd3,2;\n',
+            ' setp.eq.u64 %p4,%rd3,253;\n @%p4 bra WRITE;\n add.u64 %rd17,%rd3,2;\n')),
+        ('affine endpoint foreign base', source.replace(' add.u64 %rd15,%rd3,3;\n',
+                                                       ' add.u64 %rd15,%rd4,3;\n')),
+        ('affine endpoint overlapping offset', source.replace(' add.u64 %rd15,%rd3,3;\n',
+                                                             ' add.u64 %rd15,%rd3,4;\n')),
+    ]
+
+
 def main(build):
     values=list(range(34))+[95,96,97,127,128,(1<<63),(1<<64)-1]
     rng=random.Random(76)
@@ -257,6 +470,14 @@ def main(build):
         iterator_expected.extend([length] + array)
     run_integer_case(build, pointer_iterator_fixture(), reversal_values, iterator_expected,
                      'bounded pointer iterator and pointer cell', output_words=65)
+    run_integer_case(build, sentinel_iterator_fixture(), reversal_values, iterator_expected,
+                     'zero-sentinel pointer iterator', output_words=65)
+    literal_iterator_expected = []
+    for length in reversal_values:
+        array = [47] * 64 if 0 < length <= 64 else list(range(64))
+        literal_iterator_expected.extend([length] + array)
+    run_integer_case(build, sentinel_iterator_fixture(True), reversal_values, literal_iterator_expected,
+                     'literal-end zero-sentinel pointer iterator', output_words=65)
     joined_iterator = pointer_iterator_fixture().replace('ITERATOR:\n', '''ITERATOR:
  and.b64 %rd21,%rd3,1;
  setp.eq.u64 %p8,%rd21,0;
@@ -281,6 +502,10 @@ COUNT_READY:
         dynamic_start_expected.extend([start] + array)
     run_integer_case(build, scalar_dynamic_start_fixture(), reversal_values, dynamic_start_expected,
                      'bounded dynamic scalar loop start', output_words=65)
+    for copied_pointer in (False, True):
+        run_endpoint_case(build, copied_pointer)
+    run_endpoint_case(build, affine=True)
+    run_endpoint_case(build, affine=True, compound=True)
     for name,body in [
         ('unguarded',SINGLE.replace('@!%p1 bra LOAD;','')),
         ('overwritten',SINGLE.replace('add.u64 %rd6', 'mov.u64 %rd3,96;\n add.u64 %rd6')),
@@ -297,7 +522,22 @@ COUNT_READY:
     for name, source in reversal_negative_fixtures():
         expect_compile_failure(build, source, 'integer_probe', 'pointer memory proof')
         print('NEGATIVE_PASS', name)
+    for name, source in endpoint_negative_fixtures():
+        expect_compile_failure(build, source, 'integer_probe', 'pointer memory proof')
+        print('NEGATIVE_PASS', name)
+    for name, source in affine_endpoint_negative_fixtures():
+        expect_compile_failure(build, source, 'integer_probe', 'pointer memory proof')
+        print('NEGATIVE_PASS', name)
     for name, source in [
+        ('iterator nonzero end sentinel', sentinel_iterator_fixture().replace(
+            'selp.b64 %rd22,0,%rd11,%p4;', 'selp.b64 %rd22,1,%rd11,%p4;')),
+        ('iterator sentinel overwritten', sentinel_iterator_fixture().replace(
+            ' setp.ne.u64 %p5,%rd22,0;', ' mov.u64 %rd22,1;\n setp.ne.u64 %p5,%rd22,0;')),
+        ('iterator sentinel bypassed backedge guard', sentinel_iterator_fixture().replace(
+            ' @%p5 bra POINTER_LOOP;',
+            ' setp.eq.u64 %p8,%rd3,3;\n @%p8 bra POINTER_LOOP;\n @%p5 bra POINTER_LOOP;')),
+        ('iterator sentinel skips end', sentinel_iterator_fixture().replace(
+            'add.u64 %rd13,%rd11,1;', 'add.u64 %rd13,%rd11,2;')),
         ('iterator missing bound', pointer_iterator_fixture().replace(' @%p2 bra LOAD;\n', '')),
         ('iterator zero-length bypass', pointer_iterator_fixture().replace(' @%p3 bra LOAD;\n', '')),
         ('iterator skips end', pointer_iterator_fixture().replace('add.u64 %rd13,%rd11,1;',
@@ -307,4 +547,10 @@ COUNT_READY:
         expect_compile_failure(build, source, 'integer_probe', 'pointer memory proof')
         print('NEGATIVE_PASS', name)
 
-if __name__=='__main__': main(Path(sys.argv[1]).resolve())
+if __name__ == '__main__':
+    build = Path(sys.argv[1]).resolve()
+    if len(sys.argv) > 2 and sys.argv[2] == '--endpoint-worker':
+        endpoint_worker(build, sys.argv[3] == 'copied', Path(sys.argv[4]),
+                        sys.argv[3] in ('affine', 'compound'), sys.argv[3] == 'compound')
+    else:
+        main(build)
