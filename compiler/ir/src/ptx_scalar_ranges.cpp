@@ -169,9 +169,21 @@ struct ScalarRanges::Impl {
         const auto value = found->second.find(first_register(operand));
         return value == found->second.end() ? std::nullopt : std::optional(value->second);
     }
+    std::map<std::pair<ValueId, ValueId>, bool> forward_cache;
+    // Identity depends only on this immutable SSA graph, not the query's use
+    // block. Reuse completed positive and negative proofs across store offsets.
+    // The cap bounds retained facts; exhaustion must never be memoized as a
+    // semantic refusal. This cache lives for one ScalarRanges instance only.
+    bool forwards(ValueId value, ValueId target) {
+        const auto key = std::make_pair(value, target);
+        if (const auto found = forward_cache.find(key); found != forward_cache.end()) return found->second;
+        const bool result = prove_forwarding(value, target);
+        if (work <= kMaxWork && forward_cache.size() < 65536) forward_cache.emplace(key, result);
+        return result;
+    }
     // Identity is proved through all incoming edges, including anchored copy
     // cycles. A different concrete definition or disconnected cycle fails.
-    bool forwards(ValueId value, ValueId target) {
+    bool prove_forwarding(ValueId value, ValueId target) {
         std::vector<ValueId> pending{value};
         std::unordered_set<ValueId> visited;
         std::unordered_map<ValueId, std::vector<ValueId>> reverse;
