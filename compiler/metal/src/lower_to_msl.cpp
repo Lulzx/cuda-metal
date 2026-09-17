@@ -1,4 +1,5 @@
 #include "trap_reporting.h"
+#include "record_contexts.h"
 #include "cumetal/metal/lower_to_msl.h"
 #include "integer_arithmetic.h"
 #include "cumetal/common/kernel_abi.h"
@@ -21,6 +22,7 @@
 #include <unordered_set>
 
 namespace cumetal::metal {
+void prune_functions_unreachable_from_kernels(ir::Module* module);
 namespace {
 
 MslAddressSpace lower_address_space(ir::AddressSpace address_space) {
@@ -726,13 +728,66 @@ public:
                     if (mask == private_bit && allocation_root_of(load.operands.front())) continue;
                     if (mask != private_bit || !address || !arguments_.contains(address->root))
                         return diagnostic(load, "unresolved private record address");
-                    if (!prove({f, b, i}, *address, load.results.front()))
+                    if (!prove({f, b, i}, *address, load.results.front())) {
+                        failed_function = f;
                         return diagnostic(load, error_);
+                    }
                     handled.insert(load.results.front());
                 }
             }
         }
         return std::nullopt;
+    }
+
+    std::optional<std::size_t> failed_function;
+
+    std::vector<detail::RecordContext> zero_contexts(std::size_t f) {
+        std::vector<detail::RecordContext> contexts;
+        const auto& function = module_.functions[f];
+        if (function.is_kernel || callers_[f].empty() || callers_[f].size() > 128) return contexts;
+        struct Candidate { Location location; Address address; ir::ValueId result; };
+        std::vector<Candidate> candidates;
+        for (std::size_t b = 0; b < function.blocks.size(); ++b) {
+            for (std::size_t i = 0; i < function.blocks[b].operations.size(); ++i) {
+                if (!charge()) return {};
+                const auto& load = function.blocks[b].operations[i];
+                if (load.opcode != ir::OpCode::kLoad || load.results.size() != 1 ||
+                    load.result_types != std::vector{ir::Type::integer(64)} || load.operands.size() != 1 ||
+                    load.attributes.contains("guard_operand") || load.memory_ordering != ir::MemoryOrdering::kNone)
+                    continue;
+                const auto ptx = load.attributes.find("ptx_opcode");
+                if (ptx == load.attributes.end() || ptx->second.find("volatile") != std::string::npos ||
+                    ptx->second.find("acquire") != std::string::npos) continue;
+                const auto address = address_of(load.operands[0]);
+                if (!address || !arguments_.contains(address->root) || arguments_.at(address->root).first != f) continue;
+                candidates.push_back({{f, b, i}, *address, load.results[0]});
+                if (candidates.size() > 128) return {};
+            }
+        }
+        for (const auto caller : callers_[f]) {
+            detail::RecordContext context{caller.function, caller.block, caller.operation, f, {}};
+            const auto& call = operation_at(caller);
+            if (call.attributes.contains("guard_operand")) continue;
+            for (const auto& candidate : candidates) {
+                const auto argument = arguments_.at(candidate.address.root).second;
+                if (argument >= call.operands.size()) continue;
+                const auto actual = address_of(call.operands[argument]);
+                if (!actual || !allocations_.contains(actual->root)) continue;
+                const __int128 offset = static_cast<__int128>(actual->offset) + candidate.address.offset;
+                const auto& allocation = operation_at(definitions_.at(actual->root));
+                if (!allocation.attributes.contains("byte_size")) continue;
+                std::uint64_t size = 0;
+                try { size = std::stoull(allocation.attributes.at("byte_size")); } catch (...) { continue; }
+                if (offset < 0 || offset > INT64_MAX || offset + 8 > size) continue;
+                // Reject nonzero/unknown caller fields before scanning a large
+                // helper prefix. Then validate that complete prefix as well.
+                if (!prove(caller, {actual->root, std::int64_t(offset)}, 0, {}, true)) continue;
+                if (prove(candidate.location, candidate.address, 0, caller, true))
+                    context.zero_loads.push_back(candidate.result);
+            }
+            if (!context.zero_loads.empty()) contexts.push_back(std::move(context));
+        }
+        return work_ > 262144 ? std::vector<detail::RecordContext>{} : contexts;
     }
 
 private:
@@ -1060,7 +1115,8 @@ private:
         }
         return true;
     }
-    bool prove(Location start, Address field, ir::ValueId loaded) {
+    bool prove(Location start, Address field, ir::ValueId loaded,
+               std::optional<Location> selected_caller = {}, bool require_zero = false) {
         using State = std::tuple<std::size_t, std::size_t, std::size_t, ir::ValueId, std::int64_t>;
         std::vector<State> pending{{start.function, start.block, start.operation, field.root, field.offset}};
         std::set<State> visited;
@@ -1137,14 +1193,19 @@ private:
                 // those bits. Preserve its scalar ABI and operations. Local
                 // constants, loaded integers and lossy conversions do not
                 // acquire pointer provenance from a 64-bit width alone.
-                const bool kernel_address = !source.type.is_pointer() && kernel_address_root(source).has_value();
-                if (!source.type.is_pointer() && !kernel_address) {
-                    error_ = "reaching store has no pointer type";
-                    return false;
-                }
-                if (!(kernel_address ? bind_kernel_address_(loaded) : bind_(loaded, source))) {
-                    error_ = "conflicting pointer field producer";
-                    return false;
+                if (require_zero) {
+                    if (event.attributes.contains("guard_operand") || source.type != ir::Type::integer(64) ||
+                        literal(source) != std::optional<std::int64_t>{0}) return false;
+                } else {
+                    const bool kernel_address = !source.type.is_pointer() && kernel_address_root(source).has_value();
+                    if (!source.type.is_pointer() && !kernel_address) {
+                        error_ = "reaching store has no pointer type";
+                        return false;
+                    }
+                    if (!(kernel_address ? bind_kernel_address_(loaded) : bind_(loaded, source))) {
+                        error_ = "conflicting pointer field producer";
+                        return false;
+                    }
                 }
                 found_store = true;
                 if (!event.attributes.contains("guard_operand")) { initialized = true; break; }
@@ -1164,6 +1225,9 @@ private:
             }
             const auto argument = arguments_.at(root).second;
             for (const auto caller : callers_[f]) {
+                if (selected_caller && f == start.function &&
+                    (caller.function != selected_caller->function || caller.block != selected_caller->block ||
+                     caller.operation != selected_caller->operation)) continue;
                 const auto& call = operation_at(caller);
                 if (argument >= call.operands.size()) { error_ = "missing record call argument"; return false; }
                 const auto actual = address_of(call.operands[argument]);
@@ -1178,7 +1242,7 @@ private:
     }
 };
 
-AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
+AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module, unsigned context_rounds = 2) {
     AddressSpaceConstraints constraints;
     std::unordered_map<ir::ValueId, std::size_t> value_nodes;
     std::unordered_map<ir::ValueId, ir::AddressSpace> concrete_value_spaces;
@@ -1455,7 +1519,7 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
         return {false, "directional pointer flow reaches a conflicting concrete address space"};
     }
     std::unordered_set<ir::ValueId> private_helper_field_loads;
-    PrivateRecordFieldProof private_fields(*module,
+    const auto make_private_fields = [&] { return PrivateRecordFieldProof(*module,
         [&](const ir::Operand& operand) -> std::uint8_t {
             if (operand.kind == ir::OperandKind::kValue && value_nodes.contains(operand.value))
                 return field_storage_constraints.mask(value_nodes.at(operand.value));
@@ -1468,8 +1532,22 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
         },
         [&](ir::ValueId loaded) {
             return constraints.seed(value_nodes.at(loaded), ir::AddressSpace::kDevice);
-        });
-    if (const auto error = private_fields.run(private_helper_field_loads)) return {false, *error};
+        }); };
+    auto private_fields = make_private_fields();
+    if (const auto error = private_fields.run(private_helper_field_loads)) {
+        if (context_rounds && private_fields.failed_function) {
+            auto context_proof = make_private_fields();
+            const auto contexts = context_proof.zero_contexts(*private_fields.failed_function);
+            if (detail::specialize_record_contexts(*module, contexts)) {
+                prune_functions_unreachable_from_kernels(module);
+                const auto checked = ir::verify(*module);
+                if (!checked.ok) return {false, "record-context specialization produced invalid IR: " +
+                    (checked.diagnostics.empty() ? std::string{} : checked.diagnostics.front().message)};
+                return resolve_generic_address_spaces(module, context_rounds - 1);
+            }
+        }
+        return {false, *error};
+    }
 
     // CUDA permits generic pointers to be stored in ordinary structs. Connect
     // pointer loads and stores through an exact base+constant-offset memory slot.
@@ -2417,6 +2495,18 @@ struct AstLowerer {
         if (operation.attributes.contains("guard_operand")) {
             fail(&operation, "predicated non-branch operations require structured guard lowering");
             return std::nullopt;
+        }
+
+        if (operation.opcode == ir::OpCode::kConstant) {
+            if (operation.results.size() != 1 || operation.result_types.size() != 1 ||
+                operation.operands.size() != 1 || operation.operands[0].kind != ir::OperandKind::kImmediate ||
+                operation.operands[0].type != operation.result_types[0] ||
+                (operation.result_types[0].kind != ir::TypeKind::kInteger &&
+                 operation.result_types[0].kind != ir::TypeKind::kPredicate)) {
+                fail(&operation, "unsupported scalar constant");
+                return std::nullopt;
+            }
+            return declare_result(operation, expression_for(operation.operands[0]));
         }
 
         if (operation.opcode == ir::OpCode::kParameter) {

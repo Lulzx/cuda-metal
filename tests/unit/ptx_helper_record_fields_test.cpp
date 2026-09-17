@@ -1,6 +1,7 @@
 #include "cumetal/metal/lower_to_msl.h"
 
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -245,10 +246,70 @@ bool negative(const std::string& mode) {
     return expect(!result.ok && result.error.find(diagnostic) != std::string::npos,
                   mode + " refuses unproved private field: " + result.error);
 }
+bool record_contexts() {
+    bool ok = true;
+    const auto change = [](std::string text, const std::string& from, const std::string& to) {
+        const auto at = text.find(from);
+        if (at == std::string::npos) throw std::runtime_error("missing fixture text: " + from);
+        text.replace(at, from.size(), to);
+        return text;
+    };
+    const auto empty = change(fixture("private", "integer"),
+        "st.local.b64 [%copy+16], 1;", "st.local.b64 [%copy+16], 0;");
+    const auto inspect = [&](const std::string& source, const std::string& name) {
+        const auto compiled = metal::compile_ptx_to_msl(source, {.entry_name = "probe"});
+        bool valid = expect(compiled.ok, name + ": " + compiled.error);
+        if (!compiled.ok) return valid;
+        valid &= expect(ir::verify(compiled.metal_ir).ok, name + " verified");
+        unsigned specialized = 0;
+        for (const auto& f : compiled.metal_ir.functions) if (f.name.starts_with("read_record__cm_record_zero_")) {
+            ++specialized;
+            for (const auto& b : f.blocks) for (const auto& op : b.operations)
+                valid &= expect(!(op.opcode == ir::OpCode::kLoad && op.result_types.front().is_pointer()),
+                                name + " no sentinel pointer materialized");
+        }
+        return expect(specialized == 1, name + " exactly one specialized context") && valid;
+    };
+    ok &= inspect(empty, "all-empty helper record");
+    auto mixed = fixture("private", "second-record");
+    mixed = change(mixed, "st.local.b64 [%other+8], %payload;", "st.local.b64 [%other+8], 1;");
+    mixed = change(mixed, "st.local.b64 [%other+16], 1;", "st.local.b64 [%other+16], 0;");
+    ok &= inspect(mixed, "same helper used for concrete and sentinel records");
+    ok &= inspect(change(empty, "st.local.b64 [%copy+16], 0;",
+        "@%p bra ZERO_RIGHT;\n st.local.b64 [%copy+16], 0;\n bra ZERO_JOIN;\n"
+        "ZERO_RIGHT:\n st.local.b64 [%copy+16], 0;\nZERO_JOIN:"), "zero on both caller paths");
+    ok &= inspect(change(mixed, "st.local.b64 [%copy+16], 1;",
+        "st.local.b64 [%copy+16], 0;"), "multiple empty calls share one clone");
+    std::vector<std::pair<std::string, std::string>> negatives;
+    negatives.emplace_back("nonzero length", change(empty, "st.local.b64 [%copy+16], 0;", "st.local.b64 [%copy+16], 1;"));
+    negatives.emplace_back("overwritten byte", change(empty, "st.param.b64 [argument], %copy;", "st.local.u8 [%copy+16], 1;\n st.param.b64 [argument], %copy;"));
+    negatives.emplace_back("missing length", change(empty, "st.local.b64 [%copy+16], 0;", ""));
+    negatives.emplace_back("volatile length", change(empty, "ld.local.b64 %length, [%record+16];", "ld.volatile.local.b64 %length, [%record+16];"));
+    negatives.emplace_back("helper clobber", change(empty, "ld.local.b64 %length, [%record+16];", "st.local.b64 [%record+16], 1;\n ld.local.b64 %length, [%record+16];"));
+    negatives.emplace_back("observable sentinel", change(empty, "mov.u32 %value, 0;", "cvt.u32.u64 %value, %pointer;"));
+    negatives.emplace_back("unguarded read", change(empty, "@%empty bra DONE;", ""));
+    negatives.emplace_back("changed predicate", change(empty, "@%empty bra DONE;", "mov.pred %empty, 0;\n @%empty bra DONE;"));
+    negatives.emplace_back("computed nonzero length", change(empty, "mov.u32 %value, 0;", "add.u64 %length, %length, 1;\n mov.u32 %value, 0;"));
+    negatives.emplace_back("volatile pointer field", change(empty, "ld.local.b64 %pointer, [%record+8];", "ld.volatile.local.b64 %pointer, [%record+8];"));
+    negatives.emplace_back("predicated zero initializer", change(empty, "st.local.b64 [%copy+16], 0;", "@%p st.local.b64 [%copy+16], 0;"));
+    negatives.emplace_back("clobber through unknown offset", change(empty, "st.param.b64 [argument], %copy;", "cvt.u64.u32 %dynamic, %choice;\n add.u64 %dynamic, %record, %dynamic;\n st.local.u8 [%dynamic], 1;\n st.param.b64 [argument], %copy;"));
+    negatives.emplace_back("one nonzero caller path", change(empty, "st.local.b64 [%copy+16], 0;",
+        "@%p bra ZERO_RIGHT;\n st.local.b64 [%copy+16], 0;\n bra ZERO_JOIN;\n"
+        "ZERO_RIGHT:\n st.local.b64 [%copy+16], 1;\nZERO_JOIN:"));
+    negatives.emplace_back("initializer after call", change(change(empty, "st.local.b64 [%copy+16], 0;", ""),
+        "ld.param.b32 %value, [answer];", "st.local.b64 [%copy+16], 0;\n ld.param.b32 %value, [answer];"));
+    for (const auto& [name, source] : negatives) {
+        const auto compiled = metal::compile_ptx_to_msl(source, {.entry_name = "probe"});
+        ok &= expect(!compiled.ok && compiled.error.find("private helper pointer field proof") != std::string::npos,
+                     name + " cannot bypass pointer proof: " + compiled.error);
+    }
+    return ok;
+}
+
 } // namespace
 
 int main() {
-    bool ok = true;
+    bool ok = record_contexts();
     for (const std::string kind : {"private", "device", "constant"}) {
         ok &= positive(kind);
         ok &= positive(kind, "offset-copy");

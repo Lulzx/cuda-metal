@@ -189,6 +189,7 @@ add_library(cumetal_metal_codegen STATIC
     compiler/metal/src/trap_reporting.cpp
     compiler/metal/src/integer_arithmetic.cpp
     compiler/metal/src/lower_to_msl.cpp
+    compiler/metal/src/record_contexts.cpp
 )
 
 target_include_directories(cumetal_metal_codegen

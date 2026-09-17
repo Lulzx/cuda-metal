@@ -29,6 +29,7 @@ CASES = (
     'copied-offset-record', 'two-private-records', 'two-device-records',
     'direct-private-pointer', 'inline-private-field', 'zero-length-private-field',
     'ordered-helper-scratch', 'commuted-helper-scratch',
+    'sentinel-empty-record', 'mixed-sentinel-records', 'sentinel-constant-predicate',
 )
 NEGATIVES = ('partial-overwrite', 'unknown-alias', 'missing-field',
              'conflicting-field', 'cross-space-calls')
@@ -124,14 +125,17 @@ def expected(case, values):
     for a, b, length in zip(values[::3], values[1::3], values[2::3]):
         first = (a if case in ('device-field', 'two-device-records') else
                  CONSTANTS[length & 3] if case == 'constant-field' else a ^ PRIVATE_XOR)
-        if length == 0 or case == 'zero-length-private-field':
+        if length == 0 or case in ('zero-length-private-field', 'sentinel-empty-record', 'sentinel-constant-predicate'):
             first = 0
+        if case == 'sentinel-constant-predicate':
+            first = 1
         if case in ('ordered-helper-scratch', 'commuted-helper-scratch'):
             first ^= 90
         second = b ^ ALTERNATE_XOR if case == 'two-private-records' else b
         # These controls are computed from immutable inputs, independently of
         # the helper's field reloads and returned value.
-        result.extend((first, second, length ^ SCALAR_XOR, a))
+        result.extend((first, 0 if case == 'mixed-sentinel-records' else second,
+                       length ^ SCALAR_XOR, 1 if case in ('sentinel-empty-record', 'mixed-sentinel-records', 'sentinel-constant-predicate') else a))
     return result
 
 
@@ -163,6 +167,8 @@ HELPER_DONE:
  ret;
 }}
 '''
+    if case == 'sentinel-constant-predicate':
+        helper = helper.replace('HELPER_DONE:\n', 'HELPER_DONE:\n setp.eq.u64 %empty, %length, 0;\n selp.u64 %value, 1, %value, %empty;\n')
     if case in ('ordered-helper-scratch', 'commuted-helper-scratch'):
         helper = helper.replace(' .reg .pred %empty;', ''' .reg .pred %empty;
  .local .align 16 .b8 scratch[16];
@@ -218,9 +224,9 @@ HELPER_DONE:
              ' and.b64 %selection, %length, 3;', ' shl.b64 %selection, %selection, 3;',
              ' add.u64 %constant, %table, %selection;',
              ' st.local.u64 [%record], %b;',
-             ' st.local.u64 [%record+16], ' + ('0;' if case == 'zero-length-private-field' else '%length;'),
+             ' st.local.u64 [%record+16], ' + ('0;' if case in ('zero-length-private-field', 'sentinel-empty-record', 'sentinel-constant-predicate') else '%length;'),
              ' mov.b64 %second, %b;']
-    pointer = {'private': '%private', 'device': '%input', 'constant': '%constant'}[kind]
+    pointer = '1' if case in ('sentinel-empty-record', 'sentinel-constant-predicate') else {'private': '%private', 'device': '%input', 'constant': '%constant'}[kind]
     if negative != 'missing-field':
         lines.append(f' st.local.b64 [%record+8], {pointer};')
     if negative == 'partial-overwrite':
@@ -251,6 +257,12 @@ HELPER_DONE:
             lines.extend((' st.param.b64 [argument], %other_copy;',
                           ' call.uni (result), read_record, (argument);',
                           ' ld.param.b64 %second, [result];'))
+    if case == 'mixed-sentinel-records':
+        lines.extend((' st.local.b64 [%record+8], 1;', ' st.local.b64 [%record+16], 0;',
+                      ' st.param.b64 [argument], %copy;', ' call.uni (result), read_record, (argument);',
+                      ' ld.param.b64 %second, [result];'))
+    if case in ('sentinel-empty-record', 'mixed-sentinel-records', 'sentinel-constant-predicate'):
+        lines.append(' ld.local.u64 %a, [%record+8];')
     lines.extend((' st.global.u64 [%output], %answer;', ' st.global.u64 [%output+8], %second;',
                   f' xor.b64 %control, %length, {SCALAR_XOR};',
                   ' st.global.u64 [%output+16], %control;', ' st.global.u64 [%output+24], %a;',

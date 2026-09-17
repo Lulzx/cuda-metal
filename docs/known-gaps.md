@@ -331,6 +331,19 @@ arithmetic. A failed address proof does not establish a scalar: cancellation,
 two-address expressions and truncated address-derived offsets are rejected.
 This preserves the existing scalar-byte argument ABI without admitting an
 arbitrary integer as a pointer through a private helper record.
+Private helper records with empty sentinel fields can use a bounded call-specific
+zero context. An ordinary 64-bit load must have an exact in-bounds caller
+allocation and a complete zero initializer on every incoming path, without an
+intervening overlapping store or call. Identical proven contexts share a helper
+clone; executable-edge scalar propagation removes only dead payload demands.
+The sentinel's integer bits and live memory effects remain unchanged. Nonzero,
+unknown, volatile, predicated, partially overwritten and observably used pointer
+fields retain the original pointer proof. This is not general interprocedural
+constant propagation: at most two rounds, 128 call contexts, 16 variants and
+500,000 cloned operations are attempted, with bounded proof/transform work.
+Small mixed empty/nonempty records pass numerical GPU checks. The unchanged
+LLVM21 Solana self-test now emits MSL; full Apple preparation and numerical
+acceptance remain pending for this correction.
 The Bitcoin self-test advances past its private-record pointer mismatches.
 Trap-capable device helpers now share the kernel's hidden status binding instead
 of being duplicated into one large kernel CFG. Helpers with cyclic CFGs poll
