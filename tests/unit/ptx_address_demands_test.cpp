@@ -16,6 +16,19 @@ bool expect(bool condition, const std::string& message) {
     return condition;
 }
 
+// Model the existing producer's opcode classification. Non-memory operations
+// never enter the collector, and parameter loads are not pointer-cell loads.
+bool observe_memory(detail::AddressDemandCollector& collector, const detail::Instruction& instruction,
+                    const std::vector<ValueId>& values,
+                    const std::unordered_map<std::string, ValueId>& environment) {
+    const auto root = detail::root_opcode(instruction.opcode);
+    if ((root == "ld" && !instruction.opcode.starts_with("ld.param")) ||
+        root == "atom" || root == "st" || root == "red")
+        return collector.observe_memory(instruction, values, environment,
+                                        root == "st" || root == "red" ? 0 : 1, root == "ld");
+    return true;
+}
+
 struct Graph {
     std::deque<detail::Instruction> storage;
     std::vector<detail::RawBlock> blocks;
@@ -43,19 +56,27 @@ struct Graph {
 
     detail::AddressDemandResult run(std::size_t budget = 1'000'000) const {
         detail::AddressDemandCollector collector({budget});
-        // This fixture supplies the complete join index already available in
+        // This fixture supplies the tagged source index already available in
         // the production type solver. Graph validation belongs to that caller.
-        std::unordered_map<ValueId, std::vector<ValueId>> joins;
+        struct Sources {
+            std::vector<ValueId> inputs;
+            detail::AddressDemandKind kind = detail::AddressDemandKind::kOther;
+        };
+        std::unordered_map<ValueId, Sources> sources;
+        std::size_t joins = 0;
         for (std::size_t b = 0; b < blocks.size(); ++b) {
             for (const auto& [name, value] : arguments[b]) {
-                auto& inputs = joins[value];
+                auto& entry = sources[value];
+                entry.kind = detail::AddressDemandKind::kJoin;
+                ++joins;
                 for (const auto predecessor : blocks[b].predecessors)
-                    inputs.push_back(outgoing.at(predecessor).at(name));
+                    entry.inputs.push_back(outgoing.at(predecessor).at(name));
             }
         }
-        const auto lookup = [&](ValueId value) -> const std::vector<ValueId>* {
-            const auto found = joins.find(value);
-            return found == joins.end() ? nullptr : &found->second;
+        const auto lookup = [&](ValueId value) -> detail::AddressDemandSources {
+            const auto found = sources.find(value);
+            if (found == sources.end()) return {};
+            return {found->second.kind, &found->second.inputs};
         };
         // The production caller already maintains this pre-write environment
         // while solving types. Feed precisely the same reaching SSA values.
@@ -63,13 +84,21 @@ struct Graph {
             auto environment = incoming[b];
             for (const auto* instruction : blocks[b].instructions) {
                 const auto& values = results.at(instruction);
-                if (!collector.observe(*instruction, values, environment))
-                    return collector.finish(lookup, joins.size(), blocks.size());
+                if (!observe_memory(collector, *instruction, values, environment))
+                    return collector.finish(lookup, joins, blocks.size());
+                if (values.size() == 1 && instruction->predicate.empty() && instruction->operands.size() == 2 &&
+                    (instruction->opcode == "mov.b64" || instruction->opcode == "mov.u64" ||
+                     instruction->opcode == "mov.s64" || detail::root_opcode(instruction->opcode) == "cvta") &&
+                    instruction->operands[1].find('{') == std::string::npos) {
+                    const auto source = environment.find(detail::first_register(instruction->operands[1]));
+                    if (source != environment.end())
+                        sources[values.front()] = {{source->second}, detail::AddressDemandKind::kCopy};
+                }
                 const auto& writes = destinations.at(instruction);
                 for (std::size_t i = 0; i < writes.size(); ++i) environment[writes[i]] = values[i];
             }
         }
-        return collector.finish(lookup, joins.size(), blocks.size());
+        return collector.finish(lookup, joins, blocks.size());
     }
 };
 
@@ -94,8 +123,8 @@ bool copies_and_loop_joins() {
     bool ok = expect(proof.complete, "copy/loop closure completes: " + proof.reason);
     ok &= expect(proof.values == std::unordered_set<ValueId>{1, 2, 3, 5, 6, 7},
                  "demand follows the captured source and all copy-cycle inputs, not a later overwrite");
-    ok &= expect(proof.expanded_joins == 1 && proof.join_edges == 2,
-                 "loop join expands each incoming edge once");
+    ok &= expect(proof.expanded_joins == 1 && proof.join_edges == 2 && proof.copy_edges == 3,
+                 "loop join and exact copies expand each incoming edge once");
     ok &= expect(proof.loads.size() == 1 && proof.loads[0].instruction == load && proof.loads[0].address == 1,
                  "load candidate retains its original memory address");
     return ok;
@@ -170,9 +199,9 @@ bool unused_scalar_joins_are_not_expanded() {
     for (std::size_t i = 0; i < scalar_joins; ++i)
         graph.add(join, "st.u32",
                   {"[%address+" + std::to_string(4 * (i + 1)) + "]", "%scalar" + std::to_string(i)});
-    const auto proof = graph.run(700);
+    const auto proof = graph.run(650);
     bool ok = expect(proof.complete, "bounded lazy join expansion: " + proof.reason);
-    ok &= expect(proof.work <= 700 && proof.expanded_joins == 1 &&
+    ok &= expect(proof.work <= 650 && proof.expanded_joins == 1 &&
                      proof.join_edges == predecessors && proof.values == std::unordered_set<ValueId>{1, 2},
                  "only the demanded join expands, not the 16384 scalar incoming edges");
     return ok;
@@ -180,15 +209,15 @@ bool unused_scalar_joins_are_not_expanded() {
 
 bool shared_scan_scales_with_scalar_definitions() {
     // The retained RSA-PSS kernel has this many raw instructions. A separate
-    // scan charging a result lookup, destination decode and environment write
-    // for each scalar definition exceeds the unchanged one-million-unit cap.
+    // scan or collector call per scalar definition is unnecessary: the type
+    // solver already classifies each opcode and indexes its sources.
     constexpr std::size_t scalars = 308214;
     detail::AddressDemandCollector collector;
     std::unordered_map<std::string, ValueId> environment = {{"%cell", 1}, {"%scratch", 2}};
     const detail::Instruction load{"", "ld.local.v2.u64", {"{%loaded,%length}", "[%cell]"}, 1, true};
     const detail::Instruction arithmetic{"", "add.u64", {"%scratch", "%scratch", "1"}, 2, true};
     const detail::Instruction store{"", "st.u32", {"[%loaded]", "%scratch"}, 3, true};
-    if (!expect(collector.observe(load, {3, 4}, environment), "collect vector load before scalar work"))
+    if (!expect(observe_memory(collector, load, {3, 4}, environment), "collect vector load before scalar work"))
         return false;
     environment["%loaded"] = 3;
     environment["%length"] = 4;
@@ -196,19 +225,19 @@ bool shared_scan_scales_with_scalar_definitions() {
     // collector must not retain another index of these unrelated operations.
     for (std::size_t i = 0; i < scalars; ++i) {
         const auto value = static_cast<ValueId>(100 + i);
-        if (!collector.observe(arithmetic, {value}, environment))
+        if (!observe_memory(collector, arithmetic, {value}, environment))
             return expect(false, "shared scalar scan remains bounded: " + collector.reason());
         environment["%scratch"] = value;
     }
-    if (!expect(collector.observe(store, {}, environment), "collect address after scalar work")) return false;
-    const auto proof = collector.finish([](ValueId) -> const std::vector<ValueId>* { return nullptr; }, 0, 1);
+    if (!expect(observe_memory(collector, store, {}, environment), "collect address after scalar work")) return false;
+    const auto proof = collector.finish([](ValueId) { return detail::AddressDemandSources{}; }, 0, 1);
     bool ok = expect(proof.complete && proof.values == std::unordered_set<ValueId>{1, 3} &&
                          proof.loads.size() == 1 && proof.loads.front().instruction == &load &&
                          proof.loads.front().address == 1,
                      "large unrelated scalar stream preserves exact vector/address demands: " + proof.reason);
-    ok &= expect(proof.work >= scalars && proof.work <= scalars + 32 &&
+    ok &= expect(proof.work <= 16 &&
                      proof.copy_edges == 0 && proof.expanded_joins == 0,
-                 "one observation per scalar definition, no duplicate scalar environment work");
+                 "scalar definitions add no collector observation, index or closure work");
     return ok;
 }
 
@@ -216,19 +245,23 @@ bool inconsistent_indices_discard_partial_results() {
     Graph graph(1);
     graph.incoming[0] = {{"%cell", 1}};
     graph.add(0, "ld.local.u64", {"%loaded", "[%cell]"}, {2});
-    graph.add(0, "mov.b64", {"%copy", "%loaded"}, {3});
-    graph.add(0, "mov.b64", {"%duplicate", "%loaded"}, {3});
-    const auto duplicate = graph.run();
-    bool ok = expect(!duplicate.complete && !duplicate.budget_exhausted && duplicate.values.empty() &&
-                         duplicate.loads.empty() && duplicate.reason.find("duplicate copy result") != std::string::npos,
-                     "duplicate copy results discard the previously collected load and address");
     detail::AddressDemandCollector collector;
-    ok &= expect(collector.observe(*graph.blocks[0].instructions[0], {2}, graph.incoming[0]),
-                 "seed before missing join lookup");
+    bool ok = expect(observe_memory(collector, *graph.blocks[0].instructions[0], {2}, graph.incoming[0]),
+                     "seed before missing source lookup");
     const auto invalid = collector.finish({}, 0, 1);
     ok &= expect(!invalid.complete && invalid.values.empty() && invalid.loads.empty() &&
-                     invalid.reason.find("missing join lookup") != std::string::npos,
-                 "missing join lookup publishes no collected candidates");
+                     invalid.reason.find("missing source lookup") != std::string::npos,
+                 "missing source lookup publishes no collected candidates");
+    for (const std::vector<ValueId> inputs : {std::vector<ValueId>{}, std::vector<ValueId>{3, 4}}) {
+        detail::AddressDemandCollector bad_copy;
+        ok &= expect(observe_memory(bad_copy, *graph.blocks[0].instructions[0], {2}, graph.incoming[0]),
+                     "seed before malformed copy source vector");
+        const auto invalid_copy = bad_copy.finish(
+            [&](ValueId) { return detail::AddressDemandSources{detail::AddressDemandKind::kCopy, &inputs}; }, 0, 1);
+        ok &= expect(!invalid_copy.complete && !invalid_copy.budget_exhausted && invalid_copy.values.empty() &&
+                         invalid_copy.loads.empty() && invalid_copy.reason.find("one source") != std::string::npos,
+                     "empty or multiple-source copy publishes no partial demand or load candidates");
+    }
     Graph empty_join(1);
     empty_join.incoming[0] = {{"%address", 1}};
     empty_join.arguments[0] = {{"%address", 1}};

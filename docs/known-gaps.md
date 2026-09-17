@@ -184,11 +184,12 @@ demanded predecessors and independently pointer-typed helper-load candidates;
 exhaustion discards partial demand sets. This reduces irrelevant join work without
 raising the existing limit or supplying pointer provenance. Demand collection
 shares the type solver's existing SSA walk, avoiding a second whole-function
-result lookup, destination decode and environment rewrite. Instruction visits
-and retained proof edges still consume the unchanged work budget; collectors
-are discarded when SSA is rebuilt. Join inputs are borrowed during the final
-validated type solve; non-join arithmetic entries remain excluded. No second
-join index or per-edge register-name lookup is required. Fixed local `.v2`
+result lookup, destination decode and environment rewrite. Only memory
+instructions enter the collector; it uses one insertion lookup per demand and
+borrows exact-copy and complete join edges from the same validated source index.
+Memory observations and retained proof edges consume the unchanged work budget;
+collectors are discarded when SSA is rebuilt. Other arithmetic entries remain
+excluded. No second copy/join index or per-edge register-name lookup is required. Fixed local `.v2`
 and `.v4` 64-bit loads preserve pointer provenance independently per lane when
 every reaching write proves that cell's contents; scalar metadata stays integer.
 Partial, missing, conflicting and unsupported helper writes remain refusals.

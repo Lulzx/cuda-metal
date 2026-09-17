@@ -32,30 +32,40 @@ struct AddressDemandResult {
     std::vector<AddressDemandLoad> loads;
 };
 
+enum class AddressDemandKind { kOther, kJoin, kCopy };
+struct AddressDemandSources {
+    AddressDemandKind kind = AddressDemandKind::kOther;
+    const std::vector<ValueId>* inputs = nullptr;
+};
+
 // Collect during the caller's existing walk of validated SSA, before updating
 // the environment with each instruction's results. No second environment walk
-// or destination decoding is needed. Every observed instruction and retained
+// or destination decoding is needed. Observe only memory instructions selected
+// by the caller's existing opcode classification. Every observation and retained
 // edge consumes work. The collector belongs to one graph revision and must be
 // discarded whenever SSA is rebuilt.
 //
 // Demand is not proof of pointer contents or address space. The caller must
 // validate any local load selected by this result against its reaching stores,
 // and must also validate independently pointer-typed loads in `loads`.
-// finish() reuses the caller's join index and expands every predecessor/backedge
-// of each demanded join. On exhaustion or inconsistent SSA it publishes no partial
-// values or load candidates. All inputs remain unchanged.
+// finish() reuses the caller's source index and expands every predecessor/backedge
+// of each demanded join and every exact copy. On exhaustion or inconsistent SSA
+// it publishes no partial values or load candidates. All inputs remain unchanged.
 class AddressDemandCollector {
 public:
-    using JoinLookup = std::function<const std::vector<ValueId>*(ValueId)>;
+    using SourceLookup = std::function<AddressDemandSources(ValueId)>;
     explicit AddressDemandCollector(AddressDemandLimits limits = {}) : limits_(limits) {}
 
-    [[nodiscard]] bool observe(const Instruction& instruction, const std::vector<ValueId>& results,
-                               const std::unordered_map<std::string, ValueId>& environment);
+    [[nodiscard]] bool observe_memory(const Instruction& instruction, const std::vector<ValueId>& results,
+                                      const std::unordered_map<std::string, ValueId>& environment,
+                                      std::size_t address_index, bool is_load);
     [[nodiscard]] const std::string& reason() const { return result_.reason; }
     // Reuse an index the SSA solver has already built and validated. Return
-    // null for non-joins; a join must expose every incoming edge, including
-    // duplicates and backedges. Referenced vectors outlive this call.
-    [[nodiscard]] AddressDemandResult finish(const JoinLookup& join_inputs,
+    // kOther for unrelated definitions; a join must expose every incoming edge,
+    // including duplicates and backedges. A copy has exactly one source and is
+    // an unpredicated, scalar mov.b64/u64/s64 or cvta with two operands. Referenced
+    // vectors outlive this call.
+    [[nodiscard]] AddressDemandResult finish(const SourceLookup& sources,
                                              std::size_t reused_joins, std::size_t blocks);
 
 private:
@@ -67,7 +77,6 @@ private:
 
     AddressDemandLimits limits_;
     AddressDemandResult result_;
-    std::unordered_map<ValueId, ValueId> copies_;
     std::vector<ValueId> pending_;
     Phase phase_ = Phase::kObservation;
     std::array<std::size_t, 2> phase_work_{};
@@ -77,9 +86,7 @@ private:
     std::size_t demand_calls_ = 0;
     std::size_t repeated_demands_ = 0;
     std::size_t nodes_started_ = 0;
-    std::size_t copy_lookups_ = 0;
-    std::size_t copy_hits_ = 0;
-    std::size_t join_lookups_ = 0;
+    std::size_t definition_lookups_ = 0;
     std::size_t blocks_ = 0;
     std::size_t reused_joins_ = 0;
 };

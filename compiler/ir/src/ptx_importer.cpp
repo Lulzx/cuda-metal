@@ -1305,8 +1305,13 @@ struct Importer {
                 if (address_demands) {
                     if (destinations.size() != results.size())
                         return fail(nullptr, "invalid PTX memory-address demand SSA: instruction destination/result count mismatch");
-                    if (!demand_collector.observe(*instruction, results, environment))
-                        return fail(nullptr, demand_collector.reason());
+                    if ((root == "ld" && !instruction->opcode.starts_with("ld.param")) ||
+                        root == "atom" || root == "st" || root == "red") {
+                        const auto memory_index = root == "st" || root == "red" ? 0 : 1;
+                        if (!demand_collector.observe_memory(*instruction, results, environment,
+                                                             memory_index, root == "ld"))
+                            return fail(nullptr, demand_collector.reason());
+                    }
                 }
                 for (std::size_t i = 0; i < destinations.size(); ++i) environment[destinations[i]] = results[i];
                 if (!results.empty()) definitions.push_back(std::move(definition));
@@ -1325,23 +1330,37 @@ struct Importer {
         // Aggregate parameter addresses need a private copy only for the
         // actual values used as local addresses. A later unrelated assignment
         // to the same PTX name cannot change an earlier aggregate's contract.
-        struct AddressSources { std::vector<ValueId> inputs; bool is_join = false; };
+        struct AddressSources {
+            std::vector<ValueId> inputs;
+            detail::AddressDemandKind kind = detail::AddressDemandKind::kOther;
+        };
         std::unordered_map<ValueId, AddressSources> address_sources;
-        for (const auto& join : joins) address_sources[join.result] = {join.inputs, true};
+        for (const auto& join : joins)
+            address_sources[join.result] = {join.inputs, detail::AddressDemandKind::kJoin};
         for (const auto& definition : definitions) {
             const auto& instruction = *definition.instruction;
             const auto& results = instruction_results.at(&instruction);
             if (results.size() != 1) continue;
             const auto root = root_opcode(instruction.opcode);
             std::vector<std::size_t> indices;
+            bool exact_copy = false;
             if ((root == "mov" && instruction.operands.size() == 2 &&
-                 instruction.operands[1].find('{') == std::string::npos) || root == "cvta") indices = {1};
-            else if (root == "add" || root == "sub" || root == "selp") indices = {1, 2};
+                 instruction.operands[1].find('{') == std::string::npos) || root == "cvta") {
+                indices = {1};
+                exact_copy = instruction.predicate.empty() && instruction.operands.size() == 2 &&
+                    (instruction.opcode == "mov.b64" || instruction.opcode == "mov.u64" ||
+                     instruction.opcode == "mov.s64" || root == "cvta") &&
+                    instruction.operands[1].find('{') == std::string::npos;
+            } else if (root == "add" || root == "sub" || root == "selp") indices = {1, 2};
             else if (root == "mad") indices = {3};
             for (const auto index : indices) {
                 if (instruction.operands.size() <= index) continue;
                 const auto source = definition.sources.find(first_register(instruction.operands[index]));
-                if (source != definition.sources.end()) address_sources[results.front()].inputs.push_back(source->second);
+                if (source != definition.sources.end()) {
+                    auto& sources = address_sources[results.front()];
+                    sources.inputs.push_back(source->second);
+                    if (exact_copy) sources.kind = detail::AddressDemandKind::kCopy;
+                }
             }
         }
         std::deque<ValueId> address_pending(local_address_values.begin(), local_address_values.end());
@@ -1626,14 +1645,14 @@ struct Importer {
         for (auto& [origin, types] : origin_types) definition_types[origin] = std::move(types);
         for (const auto* origin : ambiguous_origins) definition_types.erase(origin);
         if (address_demands) {
-            // The type solver already indexed complete incoming SSA vectors.
-            // Demand follows only joins here; arithmetic address sources are
+            // The type solver already indexed joins and instruction sources.
+            // Demand follows only joins and exact copies; arithmetic sources are
             // not pointer-content evidence and must not become demand edges.
             *address_demands = demand_collector.finish(
-                [&](ValueId value) -> const std::vector<ValueId>* {
+                [&](ValueId value) -> detail::AddressDemandSources {
                     const auto found = address_sources.find(value);
-                    return found != address_sources.end() && found->second.is_join
-                        ? &found->second.inputs : nullptr;
+                    if (found == address_sources.end()) return {};
+                    return {found->second.kind, &found->second.inputs};
                 }, joins.size(), raw_blocks.size());
             if (!address_demands->complete) return fail(nullptr, address_demands->reason);
         }
