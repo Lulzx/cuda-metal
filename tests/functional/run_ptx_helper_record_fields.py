@@ -28,6 +28,7 @@ CASES = (
     'retained-private-field', 'private-field', 'device-field', 'constant-field',
     'copied-offset-record', 'two-private-records', 'two-device-records',
     'direct-private-pointer', 'inline-private-field', 'zero-length-private-field',
+    'ordered-helper-scratch', 'commuted-helper-scratch',
 )
 NEGATIVES = ('partial-overwrite', 'unknown-alias', 'missing-field',
              'conflicting-field', 'cross-space-calls')
@@ -125,6 +126,8 @@ def expected(case, values):
                  CONSTANTS[length & 3] if case == 'constant-field' else a ^ PRIVATE_XOR)
         if length == 0 or case == 'zero-length-private-field':
             first = 0
+        if case in ('ordered-helper-scratch', 'commuted-helper-scratch'):
+            first ^= 90
         second = b ^ ALTERNATE_XOR if case == 'two-private-records' else b
         # These controls are computed from immutable inputs, independently of
         # the helper's field reloads and returned value.
@@ -160,6 +163,22 @@ HELPER_DONE:
  ret;
 }}
 '''
+    if case in ('ordered-helper-scratch', 'commuted-helper-scratch'):
+        helper = helper.replace(' .reg .pred %empty;', ''' .reg .pred %empty;
+ .local .align 16 .b8 scratch[16];
+ .reg .b64 %scratch_base, %scratch_offset, %scratch_address, %scratch_value;''')
+        operands = ('%scratch_offset, %scratch_base' if case == 'commuted-helper-scratch'
+                    else '%scratch_base, %scratch_offset')
+        # Same helper-owned array and byte index, with both legal add orders.
+        # The store is observed in the return value and cannot be dropped.
+        helper = helper.replace(' ld.local.b64 %payload, [%record+8];', f''' ld.local.b64 %length, [%record+16];
+ mov.u64 %scratch_base, scratch;
+ and.b64 %scratch_offset, %length, 7;
+ add.u64 %scratch_address, {operands};
+ st.local.u8 [%scratch_address], 90;
+ ld.local.u8 %scratch_value, [%scratch_address];
+ ld.local.b64 %payload, [%record+8];''')
+        helper = helper.replace('HELPER_DONE:\n', 'HELPER_DONE:\n xor.b64 %value, %value, %scratch_value;\n')
     constant_bytes = ','.join(str(byte) for value in CONSTANTS for byte in value.to_bytes(8, 'little'))
     lines = ['.version 7.1', '.target sm_80', '.address_size 64',
              f'.const .align 8 .b8 table[32] = {{{constant_bytes}}};', helper,

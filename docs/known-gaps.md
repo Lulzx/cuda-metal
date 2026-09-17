@@ -135,6 +135,8 @@ pointers remain supported. Focused unit coverage includes generic byte and
 64-bit reads, generic stores, nonzero offsets, scalar fields, and proven private
 and constant pointer fields. Full downstream compilation and GPU validation
 remain separate gates. The memory-proof limits below still apply.
+Pointer addition normalizes its sole pointer operand first, so both PTX operand
+orders retain the same allocation identity in subsequent memory proofs.
 
 Proven scalar zero definitions and copies may become typed nulls on pointer edges.
 A packed tuple is not proved zero from its first lane. Concrete pointer inputs to

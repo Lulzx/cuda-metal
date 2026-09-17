@@ -4888,6 +4888,11 @@ struct Importer {
                     std::any_of(operation.operands.begin(), operation.operands.end(), [](const Operand& operand) {
                         return !operand.type.is_pointer() && operand.type != Type::integer(64);
                     })) return fail(&instruction, "pointer addition requires one pointer and a 64-bit integer byte offset");
+                // PTX addition is commutative. Keep the base first in the IR
+                // so every downstream offset/provenance consumer sees the
+                // same representation for offset+base and base+offset.
+                if (operation.operands[1].type.is_pointer())
+                    std::swap(operation.operands[0], operation.operands[1]);
             }
             if (root == "sub" && std::any_of(operation.operands.begin(), operation.operands.end(),
                                                [](const Operand& operand) { return operand.type.is_pointer(); })) {

@@ -15,9 +15,10 @@ bool expect(bool condition, const std::string& message) {
 std::string fixture(const std::string& kind, const std::string& mode = {}) {
     const bool shifted = mode == "offset-copy";
     const bool scratch_loop = mode == "helper-loop-scratch";
-    const bool scratch_write = mode == "helper-dynamic-scratch" || scratch_loop;
+    const bool commuted = mode == "helper-commuted-scratch" || mode == "helper-commuted-alias";
+    const bool scratch_write = mode == "helper-dynamic-scratch" || mode == "helper-commuted-scratch" || scratch_loop;
     const bool intervening_scratch = mode == "intervening-scratch-loop";
-    const bool record_write = mode == "helper-unknown-alias";
+    const bool record_write = mode == "helper-unknown-alias" || mode == "helper-commuted-alias";
     const std::string offset = shifted ? "24" : "0";
     std::string source = R"ptx(.version 7.1
 .target sm_80
@@ -70,12 +71,14 @@ LOOP:
             // Every cursor starts in the helper's own allocation. The variable
             // offset prevents an exact (root, byte offset) identity proof.
             source += " mov.u64 %scratch_base, scratch;\n";
-            source += " add.u64 %write_address, %scratch_base, %write_offset;\n";
+            source += commuted ? " add.u64 %write_address, %write_offset, %scratch_base;\n"
+                               : " add.u64 %write_address, %scratch_base, %write_offset;\n";
         } else {
             // The same bounded dynamic write can overlap the incoming pointer
             // field at any byte from +8 through +15 and must remain a refusal.
             source += " add.u64 %write_offset, %write_offset, 8;\n";
-            source += " add.u64 %write_address, %record, %write_offset;\n";
+            source += commuted ? " add.u64 %write_address, %write_offset, %record;\n"
+                               : " add.u64 %write_address, %record, %write_offset;\n";
         }
         if (scratch_loop) source += " mov.u32 %scratch_step, 0;\nSCRATCH_LOOP:\n";
         source += " st.local.u8 [%write_address], 0;\n";
@@ -213,6 +216,9 @@ bool positive(const std::string& kind, const std::string& mode = {}) {
     for (const auto& function : result.metal_ir.functions) {
         if (function.name != "read_record") continue;
         for (const auto& block : function.blocks) for (const auto& operation : block.operations) {
+            if (operation.opcode == ir::OpCode::kPointerOffset)
+                ok &= expect(!operation.operands.empty() && operation.operands.front().type.is_pointer(),
+                             label + " pointer offset has its base first");
             const auto opcode = operation.attributes.find("ptx_opcode");
             if (operation.opcode != ir::OpCode::kLoad || opcode == operation.attributes.end() ||
                 opcode->second != "ld.local.b64") continue;
@@ -250,10 +256,11 @@ int main() {
     ok &= positive("private", "empty");
     ok &= positive("private", "second-record");
     ok &= positive("private", "helper-dynamic-scratch");
+    ok &= positive("private", "helper-commuted-scratch");
     ok &= positive("private", "helper-loop-scratch");
     ok &= positive("private", "intervening-scratch-loop");
     for (const std::string mode : {"missing", "integer", "partial", "narrow-pointer-store", "predicated", "unknown-alias",
                                    "branch-conflict", "callsite-conflict", "truncated-overlap",
-                                   "entry-backedge", "helper-unknown-alias"}) ok &= negative(mode);
+                                   "entry-backedge", "helper-unknown-alias", "helper-commuted-alias"}) ok &= negative(mode);
     return ok ? 0 : 1;
 }
