@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Numerical scalar-zero guards without inventing an absent payload.
 
-Sixteen fixtures cover literal/dynamic 32/64-bit markers and private-pointer
+Fixtures cover literal/dynamic 32/64-bit markers and private-pointer
 markers, copies, signed/unsigned eq/ne, commuted operands and reordered blocks.
 Four also select between a default and the conditional scalar payload, including
-a terminal block without a later conditional branch.
+a terminal block without a later conditional branch. Six additional scalar
+fixtures preserve zero markers through bitwise masks and reconstructed bytes.
 Each executes 65 independent inputs and checks three output words: an observable
 pre-guard write, a scalar payload and a value read through a payload pointer.
 Unsafe variants are compiler-only rejection controls and are never launched.
@@ -57,11 +58,17 @@ def specifications():
         cases.append(dict(kind=kind, width=width, relation=relation, signed=signed,
                           copied=True, reverse=reverse, commuted=reverse,
                           select=True, terminal=terminal))
+    for width in (32, 64):
+        for operation in ('and', 'or', 'split-join'):
+            cases.append(dict(kind='dynamic', width=width, relation='eq', signed=False,
+                              copied=True, reverse=False, commuted=False, bitwise=operation))
     for case in cases:
         fmt = ('s' if case['signed'] else 'u') + str(case['width'])
         case['name'] = '-'.join((case['kind'], fmt, case['relation'],
                                 'copy' if case['copied'] else 'direct',
                                 'reordered' if case['reverse'] else 'forward'))
+        if case.get('bitwise'):
+            case['name'] = case['bitwise'] + '-' + case['name']
         if case.get('select'):
             case['name'] = ('terminal-select-' if case['terminal'] else 'select-') + case['name']
     return cases
@@ -93,7 +100,7 @@ def test_inputs():
 
 def expected_values(case, values):
     expected = []
-    marker_mask = (1 << case['width']) - 1
+    marker_mask = 255 if case.get('bitwise') == 'and' else (1 << case['width']) - 1
     for offset in range(0, len(values), 3):
         selector, word, marker = values[offset:offset + 3]
         selected = bool(selector & 1)
@@ -174,6 +181,17 @@ def fixture_source(case, negative=None):
     compared = '%marker'
     if case['copied']:
         lines.append(f' mov.b{width} %copied, %marker;')
+        compared = '%copied'
+    if case.get('bitwise') == 'and':
+        lines.append(f' and.b{width} %copied, {compared}, 255;')
+        compared = '%copied'
+    elif case.get('bitwise') == 'or':
+        lines.append(f' or.b{width} %copied, 0, {compared};')
+        compared = '%copied'
+    elif case.get('bitwise') == 'split-join':
+        lines.extend((f' and.b{width} %converted, {compared}, 255;',
+                      f' and.b{width} %copied, {compared}, -256;',
+                      f' or.b{width} %copied, %copied, %converted;'))
         compared = '%copied'
     operands = f'0, {compared}' if case['commuted'] else f'{compared}, 0'
     lines.append(f' setp.{case["relation"]}.{fmt} %guard, {operands};')

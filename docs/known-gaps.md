@@ -230,9 +230,15 @@ variable-address writes must remain inside their named allocation and outside th
 loaded cell. Range indices are created only when exact addresses do not suffice.
 Unknown, partial or overlapping writes, missing initializers, unsupported calls
 and exhausted analysis supply no facts. The retained LLVM7 Solana self-test
-module now emits MSL; Apple compilation and full GPU acceptance remain unverified.
+module passes all 79 CPU/GPU checks with the matched `684bb03` package.
+LLVM21 still rejects the separate helper-record proof; both-version acceptance
+remains incomplete.
 Ethereum and Bitcoin clear their empty private-key patterns but reach later
-range/undefined-value failures. Small GPU fixtures are not full workload acceptance. Explicit parameter slots with `+0` preserve the same
+range/pointer-join failures. Zero markers survive scalar bitwise AND masks and
+OR joins before SSA; a nonzero operand prevents an OR zero fact. The retained
+Bitcoin LLVM7 input clears its masked-marker undefined value but still rejects
+a later pointer/scalar branch argument. Small GPU fixtures are not full workload
+acceptance. Explicit parameter slots with `+0` preserve the same
 staged argument identity as an undisplaced slot. Once a zero length is proved,
 unsigned comparisons can remove an empty iteration even when the index itself
 is unknown; signed comparisons cannot borrow those identities. Register-width

@@ -483,6 +483,9 @@ struct GuardedPaths {
     }
 
     unsigned zero_arithmetic_width(const Instruction& instruction) const {
+        if (instruction.opcode.starts_with("and.b") || instruction.opcode.starts_with("or.b"))
+            return scalar_integer_width(std::string_view(instruction.opcode).substr(
+                instruction.opcode.starts_with("and.") ? 4 : 3));
         if (!zero_loads) return 0;
         if (instruction.opcode.starts_with("min.u") || instruction.opcode.starts_with("add.u") ||
             instruction.opcode.starts_with("sub.u") || instruction.opcode.starts_with("add.s") ||
@@ -512,7 +515,9 @@ struct GuardedPaths {
         const bool right = scalar_is_zero(instruction.operands[2], width, known);
         // Unsigned minimum has an absolute lower bound of zero. Signed min
         // lacks that property; zero-minus-unknown likewise remains unknown.
-        const bool zero = instruction.opcode.starts_with("min.u") ? left || right : left && right;
+        const bool absorbing_zero = instruction.opcode.starts_with("min.u") ||
+                                    instruction.opcode.starts_with("and.b");
+        const bool zero = absorbing_zero ? left || right : left && right;
         return zero ? std::optional(width) : std::nullopt;
     }
 

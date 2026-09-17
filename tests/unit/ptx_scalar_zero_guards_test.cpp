@@ -315,6 +315,38 @@ JOIN:
     return ok;
 }
 
+bool bitwise_zero_markers() {
+    bool ok = true;
+    for (const unsigned width : {16U, 32U, 64U}) {
+        const auto suffix = "b" + std::to_string(width);
+        const auto compare = " setp.eq." + suffix + " %absent, %marker, 0;";
+        for (const bool commute : {false, true}) {
+            for (const auto* operation : {"and", "or"}) {
+                const auto other = std::string(operation) == "and" ? "255" : "0";
+                const auto operands = commute ? other + std::string(", %marker") : "%marker, " + std::string(other);
+                const auto transfer = " " + std::string(operation) + "." + suffix + " %snapshot, " + operands + ";\n";
+                const auto guard = " setp.eq." + suffix + " %absent, %snapshot, 0;";
+                const auto label = std::string(operation) + " zero marker " + std::to_string(width) + (commute ? " commuted" : "");
+                const auto source = replace(fixture(width), compare, transfer + guard);
+                ok &= accepts(source, label);
+                ok &= rejects(replace(source, guard, " mov." + suffix + " %snapshot, 1;\n" + guard),
+                              label + " overwritten result");
+                ok &= rejects(replace(source, " mov." + suffix + " %marker, 0;", " mov." + suffix + " %marker, 1;"),
+                              label + " nonzero absent marker");
+            }
+        }
+        const auto guard = " setp.eq." + suffix + " %absent, %snapshot, 0;";
+        ok &= accepts(replace(fixture(width), compare,
+            " and." + suffix + " %zero, %marker, 255;\n and." + suffix + " %snapshot, %marker, -256;\n"
+            " or." + suffix + " %snapshot, %snapshot, %zero;\n" + guard),
+            "masked marker reconstruction " + std::to_string(width));
+        ok &= rejects(replace(fixture(width), compare,
+            " or." + suffix + " %snapshot, %marker, 1;\n" + guard),
+            "OR nonzero operand cannot establish zero " + std::to_string(width));
+    }
+    return ok;
+}
+
 bool budgets() {
     bool ok = true;
     for (const bool live : {false, true}) {
@@ -388,6 +420,7 @@ int main() {
     ok &= conditional_select_payloads();
     ok &= loop_meets();
     ok &= budgets();
+    ok &= bitwise_zero_markers();
     if (ok) std::cout << "PASS scalar zero guards: " << checks << " checks\n";
     return ok ? 0 : 1;
 }
