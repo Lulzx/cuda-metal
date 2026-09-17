@@ -2,8 +2,8 @@
 
 #include "ptx_cfg.h"
 
+#include <array>
 #include <functional>
-#include <map>
 #include <optional>
 #include <string>
 
@@ -25,7 +25,6 @@ struct AddressDemandResult {
     bool budget_exhausted = false;
     std::string reason;
     std::size_t work = 0;
-    std::size_t indexed_joins = 0;
     std::size_t expanded_joins = 0;
     std::size_t join_edges = 0;
     std::size_t copy_edges = 0;
@@ -33,24 +32,56 @@ struct AddressDemandResult {
     std::vector<AddressDemandLoad> loads;
 };
 
-// Recover demand from real memory-address operands through exact scalar
-// 64-bit copies/cvta and SSA joins. The graph is already reachable and has
-// validated reaching definitions. Joins are indexed once; only demanded joins
-// expand their incoming edges, including every predecessor and backedge.
+// Collect during the caller's existing walk of validated SSA, before updating
+// the environment with each instruction's results. No second environment walk
+// or destination decoding is needed. Every observed instruction and retained
+// edge consumes work. The collector belongs to one graph revision and must be
+// discarded whenever SSA is rebuilt.
 //
 // Demand is not proof of pointer contents or address space. The caller must
 // validate any local load selected by this result against its reaching stores,
 // and must also validate independently pointer-typed loads in `loads`.
-// `ssa_destinations` must match the callback used to build `results`, including
-// importer-specific call-return slots. Inputs are never changed. On exhaustion
-// or inconsistent SSA, no partial values or load candidates are returned.
-AddressDemandResult
-compute_address_demands(const std::vector<RawBlock>& blocks,
-                        const std::vector<std::unordered_map<std::string, ValueId>>& incoming,
-                        const std::vector<std::unordered_map<std::string, ValueId>>& outgoing,
-                        const std::vector<std::map<std::string, ValueId>>& arguments,
-                        const std::unordered_map<const Instruction*, std::vector<ValueId>>& results,
-                        const std::function<std::vector<std::string>(const Instruction&)>& ssa_destinations,
-                        AddressDemandLimits limits = {});
+// finish() reuses the caller's join index and expands every predecessor/backedge
+// of each demanded join. On exhaustion or inconsistent SSA it publishes no partial
+// values or load candidates. All inputs remain unchanged.
+class AddressDemandCollector {
+public:
+    using JoinLookup = std::function<const std::vector<ValueId>*(ValueId)>;
+    explicit AddressDemandCollector(AddressDemandLimits limits = {}) : limits_(limits) {}
+
+    [[nodiscard]] bool observe(const Instruction& instruction, const std::vector<ValueId>& results,
+                               const std::unordered_map<std::string, ValueId>& environment);
+    [[nodiscard]] const std::string& reason() const { return result_.reason; }
+    // Reuse an index the SSA solver has already built and validated. Return
+    // null for non-joins; a join must expose every incoming edge, including
+    // duplicates and backedges. Referenced vectors outlive this call.
+    [[nodiscard]] AddressDemandResult finish(const JoinLookup& join_inputs,
+                                             std::size_t reused_joins, std::size_t blocks);
+
+private:
+    enum class Phase : std::size_t { kObservation, kClosure };
+    bool charge(std::size_t count, const char* phase);
+    bool demand(ValueId value);
+    bool invalid(const std::string& reason);
+    void discard_partial();
+
+    AddressDemandLimits limits_;
+    AddressDemandResult result_;
+    std::unordered_map<ValueId, ValueId> copies_;
+    std::vector<ValueId> pending_;
+    Phase phase_ = Phase::kObservation;
+    std::array<std::size_t, 2> phase_work_{};
+    std::size_t observations_ = 0;
+    std::size_t memory_operands_ = 0;
+    std::size_t source_lookups_ = 0;
+    std::size_t demand_calls_ = 0;
+    std::size_t repeated_demands_ = 0;
+    std::size_t nodes_started_ = 0;
+    std::size_t copy_lookups_ = 0;
+    std::size_t copy_hits_ = 0;
+    std::size_t join_lookups_ = 0;
+    std::size_t blocks_ = 0;
+    std::size_t reused_joins_ = 0;
+};
 
 } // namespace cumetal::ir::detail

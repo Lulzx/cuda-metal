@@ -1275,7 +1275,8 @@ struct Importer {
     // Solve the connected, normalized SSA graph. Missing entries are unknown;
     // they are never an implicit i32. A known generic pointer is a concrete
     // contract. Proven zero is a separate fact, including on pointer joins.
-    bool solve_value_types(bool validate) {
+    bool solve_value_types(bool validate, detail::AddressDemandResult* address_demands = nullptr) {
+        detail::AddressDemandCollector demand_collector;
         struct Definition {
             const Instruction* instruction;
             std::unordered_map<std::string, ValueId> sources;
@@ -1301,6 +1302,12 @@ struct Importer {
                 }
                 const auto& results = instruction_results.at(instruction);
                 const auto destinations = ssa_destinations(*instruction);
+                if (address_demands) {
+                    if (destinations.size() != results.size())
+                        return fail(nullptr, "invalid PTX memory-address demand SSA: instruction destination/result count mismatch");
+                    if (!demand_collector.observe(*instruction, results, environment))
+                        return fail(nullptr, demand_collector.reason());
+                }
                 for (std::size_t i = 0; i < destinations.size(); ++i) environment[destinations[i]] = results[i];
                 if (!results.empty()) definitions.push_back(std::move(definition));
             }
@@ -1318,8 +1325,9 @@ struct Importer {
         // Aggregate parameter addresses need a private copy only for the
         // actual values used as local addresses. A later unrelated assignment
         // to the same PTX name cannot change an earlier aggregate's contract.
-        std::unordered_map<ValueId, std::vector<ValueId>> address_sources;
-        for (const auto& join : joins) address_sources[join.result] = join.inputs;
+        struct AddressSources { std::vector<ValueId> inputs; bool is_join = false; };
+        std::unordered_map<ValueId, AddressSources> address_sources;
+        for (const auto& join : joins) address_sources[join.result] = {join.inputs, true};
         for (const auto& definition : definitions) {
             const auto& instruction = *definition.instruction;
             const auto& results = instruction_results.at(&instruction);
@@ -1333,7 +1341,7 @@ struct Importer {
             for (const auto index : indices) {
                 if (instruction.operands.size() <= index) continue;
                 const auto source = definition.sources.find(first_register(instruction.operands[index]));
-                if (source != definition.sources.end()) address_sources[results.front()].push_back(source->second);
+                if (source != definition.sources.end()) address_sources[results.front()].inputs.push_back(source->second);
             }
         }
         std::deque<ValueId> address_pending(local_address_values.begin(), local_address_values.end());
@@ -1342,7 +1350,7 @@ struct Importer {
             address_pending.pop_front();
             const auto sources = address_sources.find(value);
             if (sources == address_sources.end()) continue;
-            for (const auto source : sources->second)
+            for (const auto source : sources->second.inputs)
                 if (local_address_values.insert(source).second) address_pending.push_back(source);
         }
         const std::size_t count = definitions.size() + joins.size();
@@ -1617,6 +1625,18 @@ struct Importer {
         }
         for (auto& [origin, types] : origin_types) definition_types[origin] = std::move(types);
         for (const auto* origin : ambiguous_origins) definition_types.erase(origin);
+        if (address_demands) {
+            // The type solver already indexed complete incoming SSA vectors.
+            // Demand follows only joins here; arithmetic address sources are
+            // not pointer-content evidence and must not become demand edges.
+            *address_demands = demand_collector.finish(
+                [&](ValueId value) -> const std::vector<ValueId>* {
+                    const auto found = address_sources.find(value);
+                    return found != address_sources.end() && found->second.is_join
+                        ? &found->second.inputs : nullptr;
+                }, joins.size(), raw_blocks.size());
+            if (!address_demands->complete) return fail(nullptr, address_demands->reason);
+        }
         return true;
     }
 
@@ -2986,7 +3006,6 @@ struct Importer {
                 definition_types.clear();
                 integer_zero_values.clear();
                 aggregate_parameter_addresses.clear();
-                if (!solve_value_types(true)) return false;
                 const bool has_vector_load = std::any_of(raw_blocks.begin(), raw_blocks.end(),
                     [](const RawBlock& block) {
                         return std::any_of(block.instructions.begin(), block.instructions.end(),
@@ -2996,14 +3015,14 @@ struct Importer {
                                     memory_vector_width(instruction->opcode) > 1;
                             });
                     });
-                if (address_cancellation_applied || address_alignment_applied || has_vector_load) {
+                const bool needs_address_demands = address_cancellation_applied ||
+                    address_alignment_applied || has_vector_load;
+                detail::AddressDemandResult demand;
+                if (!solve_value_types(true, needs_address_demands ? &demand : nullptr)) return false;
+                if (needs_address_demands) {
                     // Address demand does not establish pointer provenance.
                     // Only demanded joins expand; scalar live-in values need
                     // no predecessor cross-product or environment copies.
-                    const auto demand = detail::compute_address_demands(
-                        raw_blocks, incoming, outgoing, block_arguments, instruction_results,
-                        [&](const Instruction& instruction) { return ssa_destinations(instruction); });
-                    if (!demand.complete) return fail(nullptr, demand.reason);
                     // Independently pointer-typed helper loads still require
                     // the same reaching-store proof, even without a direct
                     // memory-address consumer in this function.

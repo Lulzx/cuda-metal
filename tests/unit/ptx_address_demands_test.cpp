@@ -3,6 +3,7 @@
 
 #include <deque>
 #include <iostream>
+#include <map>
 #include <string>
 
 namespace {
@@ -41,9 +42,34 @@ struct Graph {
     }
 
     detail::AddressDemandResult run(std::size_t budget = 1'000'000) const {
-        return detail::compute_address_demands(
-            blocks, incoming, outgoing, arguments, results,
-            [&](const detail::Instruction& instruction) { return destinations.at(&instruction); }, {budget});
+        detail::AddressDemandCollector collector({budget});
+        // This fixture supplies the complete join index already available in
+        // the production type solver. Graph validation belongs to that caller.
+        std::unordered_map<ValueId, std::vector<ValueId>> joins;
+        for (std::size_t b = 0; b < blocks.size(); ++b) {
+            for (const auto& [name, value] : arguments[b]) {
+                auto& inputs = joins[value];
+                for (const auto predecessor : blocks[b].predecessors)
+                    inputs.push_back(outgoing.at(predecessor).at(name));
+            }
+        }
+        const auto lookup = [&](ValueId value) -> const std::vector<ValueId>* {
+            const auto found = joins.find(value);
+            return found == joins.end() ? nullptr : &found->second;
+        };
+        // The production caller already maintains this pre-write environment
+        // while solving types. Feed precisely the same reaching SSA values.
+        for (std::size_t b = 0; b < blocks.size(); ++b) {
+            auto environment = incoming[b];
+            for (const auto* instruction : blocks[b].instructions) {
+                const auto& values = results.at(instruction);
+                if (!collector.observe(*instruction, values, environment))
+                    return collector.finish(lookup, joins.size(), blocks.size());
+                const auto& writes = destinations.at(instruction);
+                for (std::size_t i = 0; i < writes.size(); ++i) environment[writes[i]] = values[i];
+            }
+        }
+        return collector.finish(lookup, joins.size(), blocks.size());
     }
 };
 
@@ -68,7 +94,7 @@ bool copies_and_loop_joins() {
     bool ok = expect(proof.complete, "copy/loop closure completes: " + proof.reason);
     ok &= expect(proof.values == std::unordered_set<ValueId>{1, 2, 3, 5, 6, 7},
                  "demand follows the captured source and all copy-cycle inputs, not a later overwrite");
-    ok &= expect(proof.indexed_joins == 1 && proof.expanded_joins == 1 && proof.join_edges == 2,
+    ok &= expect(proof.expanded_joins == 1 && proof.join_edges == 2,
                  "loop join expands each incoming edge once");
     ok &= expect(proof.loads.size() == 1 && proof.loads[0].instruction == load && proof.loads[0].address == 1,
                  "load candidate retains its original memory address");
@@ -144,16 +170,73 @@ bool unused_scalar_joins_are_not_expanded() {
     for (std::size_t i = 0; i < scalar_joins; ++i)
         graph.add(join, "st.u32",
                   {"[%address+" + std::to_string(4 * (i + 1)) + "]", "%scalar" + std::to_string(i)});
-    const auto proof = graph.run(1600);
+    const auto proof = graph.run(700);
     bool ok = expect(proof.complete, "bounded lazy join expansion: " + proof.reason);
-    ok &= expect(proof.indexed_joins == scalar_joins + 1 && proof.expanded_joins == 1 &&
+    ok &= expect(proof.work <= 700 && proof.expanded_joins == 1 &&
                      proof.join_edges == predecessors && proof.values == std::unordered_set<ValueId>{1, 2},
                  "only the demanded join expands, not the 16384 scalar incoming edges");
-    // Indexing itself remains bounded even when no address reaches a join.
-    const auto exhausted = graph.run(graph.blocks.size());
-    ok &= expect(!exhausted.complete && exhausted.budget_exhausted && exhausted.values.empty() &&
-                     exhausted.loads.empty() && exhausted.reason.find("join index") != std::string::npos,
-                 "unused scalar joins still consume bounded indexing work");
+    return ok;
+}
+
+bool shared_scan_scales_with_scalar_definitions() {
+    // The retained RSA-PSS kernel has this many raw instructions. A separate
+    // scan charging a result lookup, destination decode and environment write
+    // for each scalar definition exceeds the unchanged one-million-unit cap.
+    constexpr std::size_t scalars = 308214;
+    detail::AddressDemandCollector collector;
+    std::unordered_map<std::string, ValueId> environment = {{"%cell", 1}, {"%scratch", 2}};
+    const detail::Instruction load{"", "ld.local.v2.u64", {"{%loaded,%length}", "[%cell]"}, 1, true};
+    const detail::Instruction arithmetic{"", "add.u64", {"%scratch", "%scratch", "1"}, 2, true};
+    const detail::Instruction store{"", "st.u32", {"[%loaded]", "%scratch"}, 3, true};
+    if (!expect(collector.observe(load, {3, 4}, environment), "collect vector load before scalar work"))
+        return false;
+    environment["%loaded"] = 3;
+    environment["%length"] = 4;
+    // Model the existing SSA producer supplying fresh definitions. The
+    // collector must not retain another index of these unrelated operations.
+    for (std::size_t i = 0; i < scalars; ++i) {
+        const auto value = static_cast<ValueId>(100 + i);
+        if (!collector.observe(arithmetic, {value}, environment))
+            return expect(false, "shared scalar scan remains bounded: " + collector.reason());
+        environment["%scratch"] = value;
+    }
+    if (!expect(collector.observe(store, {}, environment), "collect address after scalar work")) return false;
+    const auto proof = collector.finish([](ValueId) -> const std::vector<ValueId>* { return nullptr; }, 0, 1);
+    bool ok = expect(proof.complete && proof.values == std::unordered_set<ValueId>{1, 3} &&
+                         proof.loads.size() == 1 && proof.loads.front().instruction == &load &&
+                         proof.loads.front().address == 1,
+                     "large unrelated scalar stream preserves exact vector/address demands: " + proof.reason);
+    ok &= expect(proof.work >= scalars && proof.work <= scalars + 32 &&
+                     proof.copy_edges == 0 && proof.expanded_joins == 0,
+                 "one observation per scalar definition, no duplicate scalar environment work");
+    return ok;
+}
+
+bool inconsistent_indices_discard_partial_results() {
+    Graph graph(1);
+    graph.incoming[0] = {{"%cell", 1}};
+    graph.add(0, "ld.local.u64", {"%loaded", "[%cell]"}, {2});
+    graph.add(0, "mov.b64", {"%copy", "%loaded"}, {3});
+    graph.add(0, "mov.b64", {"%duplicate", "%loaded"}, {3});
+    const auto duplicate = graph.run();
+    bool ok = expect(!duplicate.complete && !duplicate.budget_exhausted && duplicate.values.empty() &&
+                         duplicate.loads.empty() && duplicate.reason.find("duplicate copy result") != std::string::npos,
+                     "duplicate copy results discard the previously collected load and address");
+    detail::AddressDemandCollector collector;
+    ok &= expect(collector.observe(*graph.blocks[0].instructions[0], {2}, graph.incoming[0]),
+                 "seed before missing join lookup");
+    const auto invalid = collector.finish({}, 0, 1);
+    ok &= expect(!invalid.complete && invalid.values.empty() && invalid.loads.empty() &&
+                     invalid.reason.find("missing join lookup") != std::string::npos,
+                 "missing join lookup publishes no collected candidates");
+    Graph empty_join(1);
+    empty_join.incoming[0] = {{"%address", 1}};
+    empty_join.arguments[0] = {{"%address", 1}};
+    empty_join.add(0, "ld.local.u64", {"%loaded", "[%address]"}, {2});
+    const auto empty = empty_join.run();
+    ok &= expect(!empty.complete && !empty.budget_exhausted && empty.values.empty() && empty.loads.empty() &&
+                     empty.reason.find("no incoming edge") != std::string::npos,
+                 "empty demanded join cannot prove an address and publishes no load candidates");
     return ok;
 }
 
@@ -188,12 +271,6 @@ bool every_predecessor_and_transactional_limits() {
     ok &= expect(graph.incoming == original_incoming && graph.outgoing == original_outgoing &&
                      graph.arguments == original_arguments && graph.results == original_results,
                  "all SSA inputs remain unchanged after success and exhaustion");
-    graph.outgoing[2].erase("%joined");
-    const auto invalid = graph.run();
-    ok &= expect(!invalid.complete && !invalid.budget_exhausted && invalid.values.empty() &&
-                     invalid.loads.empty() &&
-                     invalid.reason.find("missing incoming definition") != std::string::npos,
-                 "a missing last predecessor cannot be replaced with the other values");
     return ok;
 }
 
@@ -298,6 +375,32 @@ bool importer_memory_proof_controls() {
     }
     return ok;
 }
+
+bool shared_index_excludes_arithmetic_sources() {
+    const auto compiled = cumetal::metal::compile_ptx_to_msl(R"ptx(
+.version 8.8
+.target sm_89
+.address_size 64
+.visible .entry scalar_offset(.param .u64 .ptr .global input,
+                              .param .u64 .ptr .global output) {
+ .local .align 16 .b8 depot[16];
+ .reg .b64 %cell, %offset, %metadata, %input, %output, %address;
+ .reg .b32 %value;
+ ld.param.u64 %input, [input];
+ ld.param.u64 %output, [output];
+ mov.b64 %cell, depot;
+ st.local.v2.b64 [%cell], {4, 5};
+ ld.local.v2.b64 {%offset, %metadata}, [%cell];
+ add.u64 %address, %input, %offset;
+ ld.global.u32 %value, [%address];
+ st.global.u32 [%output], %value;
+ st.global.u64 [%output+8], %metadata;
+ ret;
+}
+)ptx");
+    return expect(compiled.ok && verify(compiled.gpu_ir).ok && verify(compiled.metal_ir).ok,
+                  "arithmetic source entries do not turn scalar vector lanes into pointer demands: " + compiled.error);
+}
 } // namespace
 
 int main() {
@@ -305,8 +408,11 @@ int main() {
     ok &= sparse_environment_and_helper_candidates();
     ok &= exact_copy_boundary();
     ok &= unused_scalar_joins_are_not_expanded();
+    ok &= shared_scan_scales_with_scalar_definitions();
+    ok &= inconsistent_indices_discard_partial_results();
     ok &= every_predecessor_and_transactional_limits();
     ok &= importer_memory_proof_controls();
+    ok &= shared_index_excludes_arithmetic_sources();
     if (!ok)
         return 1;
     std::cout << "PTX address-demand tests passed\n";

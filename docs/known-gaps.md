@@ -176,11 +176,17 @@ exploration discards all observed bounds. These ranges establish disjointness,
 not pointer contents or missing initialization. Arbitrary dynamic aliasing and
 unbounded loops remain unsupported.
 
-Address-demand discovery indexes SSA joins and expands their incoming edges only
-when a memory-address use demands them. It preserves pre-write definitions, all
+Address-demand discovery reuses the type solver's validated join index and
+expands incoming edges only when a memory-address use demands them. It preserves pre-write definitions, all
 demanded predecessors and independently pointer-typed helper-load candidates;
 exhaustion discards partial demand sets. This reduces irrelevant join work without
-raising the existing limit or supplying pointer provenance. Fixed local `.v2`
+raising the existing limit or supplying pointer provenance. Demand collection
+shares the type solver's existing SSA walk, avoiding a second whole-function
+result lookup, destination decode and environment rewrite. Instruction visits
+and retained proof edges still consume the unchanged work budget; collectors
+are discarded when SSA is rebuilt. Join inputs are borrowed during the final
+validated type solve; non-join arithmetic entries remain excluded. No second
+join index or per-edge register-name lookup is required. Fixed local `.v2`
 and `.v4` 64-bit loads preserve pointer provenance independently per lane when
 every reaching write proves that cell's contents; scalar metadata stays integer.
 Partial, missing, conflicting and unsupported helper writes remain refusals.
