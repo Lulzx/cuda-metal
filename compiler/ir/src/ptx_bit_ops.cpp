@@ -1,6 +1,6 @@
 #include "ptx_bit_ops.h"
+#include "ptx_text.h"
 
-#include <charconv>
 #include <optional>
 
 namespace cumetal::ir::detail {
@@ -9,31 +9,9 @@ namespace {
 std::optional<std::uint16_t> immediate_permutation_selector(const Operand& operand) {
     if (operand.kind != OperandKind::kImmediate || operand.type.kind != TypeKind::kInteger)
         return std::nullopt;
-    std::string_view text = operand.text;
-    bool negative = false;
-    if (!text.empty() && (text.front() == '-' || text.front() == '+')) {
-        negative = text.front() == '-';
-        text.remove_prefix(1);
-    }
-    if (!text.empty() && (text.back() == 'U' || text.back() == 'u')) text.remove_suffix(1);
-    int base = 10;
-    if (text.size() > 1 && text.front() == '0') {
-        base = 8;
-        if (text[1] == 'x' || text[1] == 'X') {
-            base = 16;
-            text.remove_prefix(2);
-        } else if (text[1] == 'b' || text[1] == 'B') {
-            base = 2;
-            text.remove_prefix(2);
-        }
-    }
-    if (text.empty()) return std::nullopt;
-    std::uint64_t value = 0;
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value, base);
     // Other constant expressions and unrecognized literals retain the generic path.
-    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) return std::nullopt;
-    if (negative) value = std::uint64_t{0} - value;
-    return static_cast<std::uint16_t>(value);
+    const auto value = integer_literal_bits(operand.text);
+    return value ? std::optional(static_cast<std::uint16_t>(*value)) : std::nullopt;
 }
 
 }  // namespace

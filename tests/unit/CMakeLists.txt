@@ -66,10 +66,10 @@ target_link_libraries(cumetal_ptx_helper_record_fields_test PRIVATE cumetal_meta
 target_compile_options(cumetal_ptx_helper_record_fields_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME unit_ptx_helper_record_fields COMMAND cumetal_ptx_helper_record_fields_test)
 
-add_executable(cumetal_ptx_clz_test ptx_clz_test.cpp)
-target_link_libraries(cumetal_ptx_clz_test PRIVATE cumetal_metal_codegen)
-target_compile_options(cumetal_ptx_clz_test PRIVATE -Wall -Wextra -Wpedantic)
-add_test(NAME unit_ptx_clz COMMAND cumetal_ptx_clz_test)
+add_executable(cumetal_ptx_bit_counts_test ptx_bit_counts_test.cpp)
+target_link_libraries(cumetal_ptx_bit_counts_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_bit_counts_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_bit_counts COMMAND cumetal_ptx_bit_counts_test)
 
 add_executable(cumetal_ptx_call_effects_test ptx_call_effects_test.cpp)
 target_link_libraries(cumetal_ptx_call_effects_test PRIVATE cumetal_ir)

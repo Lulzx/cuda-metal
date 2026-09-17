@@ -117,6 +117,12 @@ Normalization records instruction origins for applicable memory proofs, while
 clones keep distinct result identities. Imported result types are checked against
 emission, and the IR verifier checks incoming edge types and dominance.
 
+Direct PTX `clz.b32/b64` and `popc.b32/b64` retain their logical u32
+destination through copies, joins and predicated updates. The 64-bit forms
+combine two unsigned 32-bit Metal builtin results. Source bits, including
+floating-register containers and integer literals, are preserved; unsupported
+widths, modifiers and malformed operands reject explicitly.
+
 PTX memory-address intermediates use byte pointers in the address's actual
 storage space. Loads and stores retain their independent value types, and the
 Metal emitter constructs the final typed dereference from those resolved types.

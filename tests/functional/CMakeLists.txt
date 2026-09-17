@@ -2886,8 +2886,8 @@ if(APPLE)
     add_test(NAME functional_ptx_helper_record_fields
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_helper_record_fields.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_helper_record_fields PROPERTIES TIMEOUT 1200)
-    add_test(NAME functional_ptx_clz COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_clz.py ${CMAKE_BINARY_DIR})
-    set_tests_properties(functional_ptx_clz PROPERTIES TIMEOUT 120)
+    add_test(NAME functional_ptx_bit_counts COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_bit_counts.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_bit_counts PROPERTIES TIMEOUT 120)
     add_test(NAME functional_ptx_call_write_footprints
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_call_write_footprints.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_call_write_footprints PROPERTIES TIMEOUT 600)

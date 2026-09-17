@@ -1088,16 +1088,17 @@ struct Importer {
 
     void build_cfg() {
         const auto& instructions = entry->instructions;
-        const auto guarded_clz = [](const Instruction& instruction) {
+        const auto guarded_bit_count = [](const Instruction& instruction) {
             return !instruction.predicate.empty() &&
-                   (instruction.opcode == "clz.b32" || instruction.opcode == "clz.b64");
+                   (instruction.opcode == "clz.b32" || instruction.opcode == "clz.b64" ||
+                    instruction.opcode == "popc.b32" || instruction.opcode == "popc.b64");
         };
         std::set<std::size_t> leaders = {0};
         for (std::size_t i = 0; i < instructions.size(); ++i) {
             if (instructions[i].opcode == "ptx.label") {
                 leaders.insert(i);
             }
-            if ((is_terminating_instruction(instructions[i]) || guarded_clz(instructions[i])) &&
+            if ((is_terminating_instruction(instructions[i]) || guarded_bit_count(instructions[i])) &&
                 i + 1 < instructions.size()) {
                 leaders.insert(i + 1);
             }
@@ -1144,24 +1145,24 @@ struct Importer {
                 }
             }
         }
-        // Turn predicated clz into ordinary branches before SSA. The merge then
+        // Turn predicated bit counts into ordinary branches before SSA. The merge then
         // retains the incoming destination when the predicate is false, even
         // when its previous definition lives in another block or a loop.
         const std::size_t original_blocks = raw_blocks.size();
         for (std::size_t i = 0; i < original_blocks; ++i) {
             if (raw_blocks[i].instructions.empty()) continue;
             const Instruction* instruction = raw_blocks[i].instructions.back();
-            if (!guarded_clz(*instruction)) continue;
+            if (!guarded_bit_count(*instruction)) continue;
             if (raw_blocks[i].successors.empty()) {
                 RawBlock continuation;
                 continuation.id = builder.next_block();
-                continuation.name = "clz_continue_" + std::to_string(continuation.id);
+                continuation.name = "bit_count_continue_" + std::to_string(continuation.id);
                 raw_blocks[i].successors = {raw_blocks.size()};
                 raw_blocks.push_back(std::move(continuation));
             }
             RawBlock taken;
             taken.id = builder.next_block();
-            taken.name = "clz_taken_" + std::to_string(taken.id);
+            taken.name = "bit_count_taken_" + std::to_string(taken.id);
             taken.successors = raw_blocks[i].successors;
             normalized_instructions.push_back(*instruction);
             normalized_instructions.back().predicate.clear();
@@ -1462,7 +1463,7 @@ struct Importer {
                     inferred = signature->return_type;
                 }
                 if (inferred.kind == TypeKind::kVoid) return fail(&instruction, "void PTX call has a return slot");
-            } else if (root == "clz") inferred = Type::integer(32);
+            } else if (root == "clz" || root == "popc") inferred = Type::integer(32);
             else if (root == "cvt") inferred = ptx_cvt_result_type(instruction.opcode);
             else if (root == "setp") inferred = Type::predicate();
             else if (root == "vote") inferred = instruction.opcode.find(".ballot.") != std::string::npos
@@ -4304,62 +4305,64 @@ struct Importer {
                 operation.operands.push_back(
                     source_operand(i, ptx_scalar_type(instruction.opcode)));
             }
-        } else if (root == "clz") {
-            if ((instruction.opcode != "clz.b32" && instruction.opcode != "clz.b64") ||
+        } else if (root == "clz" || root == "popc") {
+            if ((instruction.opcode != root + ".b32" && instruction.opcode != root + ".b64") ||
                 instruction.operands.size() != 2 || destinations.size() != 1 ||
                 operation.results.size() != 1 ||
                 trim(instruction.operands[0]) != destinations.front()) {
-                return fail(&instruction, "typed PTX clz requires clz.b32/b64 with one destination and one source");
+                return fail(&instruction, "typed PTX " + root + " requires " + root + ".b32/b64 with one destination and one source");
             }
             const std::string source_token = trim(instruction.operands[1]);
             const std::string source_register = first_register(source_token);
+            std::optional<std::uint64_t> literal;
             if (!source_register.empty()) {
                 if (source_token != source_register)
-                    return fail(&instruction, "typed PTX clz requires a scalar register or integer source");
+                    return fail(&instruction, "typed PTX " + root + " requires a scalar register or integer source");
             } else {
-                try {
-                    std::size_t consumed = 0;
-                    (void)std::stoull(source_token, &consumed, 0);
-                    if (consumed != source_token.size())
-                        return fail(&instruction, "typed PTX clz requires an integer immediate source");
-                } catch (...) {
-                    return fail(&instruction, "typed PTX clz requires a scalar register or integer source");
-                }
+                literal = detail::integer_literal_bits(source_token);
+                if (!literal)
+                    return fail(&instruction, "typed PTX " + root + " requires a scalar register or integer source");
             }
             const Type u32 = Type::integer(32);
             const Type source_type = ptx_scalar_type(instruction.opcode);
-            Operand input = expressions.low_integer_bits(
-                bit_container_operand(1, source_type), source_type);
+            Operand input = literal ? Operand::immediate(std::to_string(*literal), source_type)
+                : expressions.low_integer_bits(bit_container_operand(1, source_type), source_type);
             if (input.type != source_type)
-                return fail(&instruction, "typed PTX clz source width does not match its bit format");
+                return fail(&instruction, "typed PTX " + root + " source width does not match its bit format");
             // A literal's IR type does not type its emitted C++ token. Bind it
             // to the instruction width before overload selection or shifting.
             if (input.kind == OperandKind::kImmediate)
                 input = expressions.emit(OpCode::kConvert, source_type, {input});
+            const std::string builtin = root == "clz" ? "clz" : "popcount";
             if (source_type == u32) {
                 operation.opcode = OpCode::kCall;
                 operation.attributes["builtin"] = "true";
-                operation.attributes["callee"] = "clz";
+                operation.attributes["callee"] = builtin;
                 operation.operands = {input};
             } else {
-                // PTX clz.b64 returns u32. Count two u32 halves so every
-                // builtin has that result type, including clz(0) == 32.
+                // Both PTX bit counts return u32, including their b64 forms.
+                // Use u32 Metal builtins and combine the two halves explicitly.
                 const Operand low = expressions.emit(OpCode::kConvert, u32, {input});
                 const Operand shifted = expressions.emit(OpCode::kShiftRight, source_type,
                     {input, Operand::immediate("32", source_type)});
                 const Operand high = expressions.emit(OpCode::kConvert, u32, {shifted});
                 const auto count = [&](const Operand& value) {
                     return expressions.emit(OpCode::kCall, u32, {value},
-                        {{"builtin", "true"}, {"callee", "clz"}});
+                        {{"builtin", "true"}, {"callee", builtin}});
                 };
                 const Operand low_count = count(low);
                 const Operand high_count = count(high);
-                const Operand total = expressions.emit(OpCode::kAdd, u32,
-                    {Operand::immediate("32", u32), low_count});
-                const Operand high_zero = expressions.emit(OpCode::kCompare, Type::predicate(),
-                    {high, Operand::immediate("0", u32)}, {{"predicate", "eq"}});
-                operation.opcode = OpCode::kSelect;
-                operation.operands = {high_zero, total, high_count};
+                if (root == "popc") {
+                    operation.opcode = OpCode::kAdd;
+                    operation.operands = {low_count, high_count};
+                } else {
+                    const Operand total = expressions.emit(OpCode::kAdd, u32,
+                        {Operand::immediate("32", u32), low_count});
+                    const Operand high_zero = expressions.emit(OpCode::kCompare, Type::predicate(),
+                        {high, Operand::immediate("0", u32)}, {{"predicate", "eq"}});
+                    operation.opcode = OpCode::kSelect;
+                    operation.operands = {high_zero, total, high_count};
+                }
             }
         } else if (root == "shf" || root == "prmt") {
             const bool left = instruction.opcode == "shf.l.wrap.b32";
