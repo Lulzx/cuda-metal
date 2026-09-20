@@ -203,6 +203,8 @@ target_include_directories(cumetal_metal_codegen
 target_link_libraries(cumetal_metal_codegen
     PUBLIC
         cumetal_ir
+    PRIVATE
+        cumetal_common
 )
 
 target_compile_options(cumetal_metal_codegen

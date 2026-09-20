@@ -1,4 +1,53 @@
-# Bounded private-array optimization
+# Compiler timing and optimization
+
+## Compilation stage tracing
+
+Set `CUMETAL_TRACE_COMPILE=1` to write wall-clock spans to stderr for typed
+PTX import, Metal legalization, MSL generation, and the runtime calls that
+create a Metal source library, function, and compute pipeline:
+
+```sh
+CUMETAL_TRACE_COMPILE=1 ./build/cumetalc input.ptx --backend=cumetal-ir \
+  --emit=msl -o output.metal 2>compile.log
+```
+
+For runtime compilation, set the same variable on the application loading
+`libcumetal`. Only the exact value `1` enables tracing. Tracing is otherwise
+silent and does not scan source text for diagnostic byte counts.
+
+Each span flushes a begin record before entering the stage, then emits elapsed
+milliseconds when its scope exits. An interrupted process can leave an open
+span, identifying the call it entered. Match records by process ID and span ID,
+including when threads interleave the same stage. Span IDs do not associate
+nested stages with a particular concurrent top-level compilation. Input sizes
+describe PTX or UTF-8 MSL bytes; zero means the stage has no recorded input size.
+Source text, arguments, filenames, and kernel names are not logged.
+
+```text
+CUMETAL_COMPILE event=begin pid=123 span=1 stage=ptx_import input_bytes=456
+CUMETAL_COMPILE event=end pid=123 span=1 stage=ptx_import elapsed_ms=1.234
+```
+
+An end record means the call returned or its scope unwound, **not that it
+succeeded**. Inspect the operation's error/exit status separately. Preparation
+does not prove a kernel was dispatched or that its result is correct. Set
+`CUMETAL_TRACE_GPU=1` for the separate execution/provenance records and verify
+numerical results. Compilation spans use CPU wall time, not GPU duration.
+
+This initial tracing covers the typed PTX-to-MSL path and runtime source/pipeline
+creation only. NVVM translation, legacy compilation, precompiled-metallib loads,
+cache hits, source reads, and lock waiting have no spans. Runtime cache hits
+therefore produce no additional creation spans. The total PTX span includes its
+nested stages and intervening work; do not add it to its children. Apple's own
+compiler caches can affect timings even when a creation call is recorded.
+Tracing measures these stages; it does not fix slow compilation or compiler
+allocation failures.
+
+Focused checks are `unit_compile_trace` (host-only pairing, opt-in, interruption,
+and successful/failed PTX compilation) and `functional_compile_trace` (real Metal
+preparation, cache reuse, errors, GPU values, and guards).
+
+## Bounded private-array optimization
 
 CuMetal can improve generated GPU code without changing a CUDA kernel or
 substituting MPS. The NVVM importer now selectively unrolls tiny loops over

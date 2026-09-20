@@ -2,6 +2,11 @@
 
 [Status index](../status.md) · [Known compiler gaps](../known-gaps/compiler.md)
 
+Opt-in [compilation stage tracing](../compiler-performance.md#compilation-stage-tracing)
+reports typed PTX translation and runtime Metal source/function/pipeline wall
+times. Its begin/end records diagnose progress; they do not certify success or
+GPU correctness, and cache hits and the NVVM/legacy compiler paths are untraced.
+
 ## Production paths
 
 - `cumetalc file.cu -o program` builds a native-AOT source executable with an

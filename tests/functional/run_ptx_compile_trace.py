@@ -135,7 +135,12 @@ def main():
             spans = records(compiled.stderr)
             if setting == '1':
                 assert spans and spans[0]['event'] == 'begin', spans
-                assert spans[-1]['event'] == 'end' and spans[-1]['stage'] == 'ptx_import', spans
+                # The outermost scope opens first and closes last, whatever it
+                # is: `ptx_to_msl_total` wraps `ptx_import` once the Metal
+                # stages are traced too. Pin the nesting, not the stage name.
+                assert spans[-1]['event'] == 'end', spans
+                assert spans[-1]['span'] == spans[0]['span'], spans
+                assert any(record['stage'] == 'ptx_import' for record in spans), spans
                 assert any(record['stage'] == 'ptx_call_graph' and
                            record.get('function') == quote(ENTRY, safe='') for record in spans)
             else:

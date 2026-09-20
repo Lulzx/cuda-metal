@@ -1,5 +1,6 @@
 #include "cumetal/common/kernel_abi.h"
 #include "metal_backend.h"
+#include "cumetal/common/compile_trace.h"
 #include "cumetal/ptx/lower_to_llvm.h"
 #include "metal_math_mode.h"
 
@@ -1128,7 +1129,13 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
 #pragma clang diagnostic pop
             }
             NSError* libErr = nil;
-            id<MTLLibrary> srcLib = [backend.device newLibraryWithSource:src options:compileOpts error:&libErr];
+            id<MTLLibrary> srcLib = [&] {
+                // Avoid traversing a large NSString when tracing is disabled.
+                const std::size_t input_bytes = common::CompileTrace::enabled()
+                    ? [src lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : 0;
+                common::CompileTrace trace("metal_new_library_with_source", input_bytes);
+                return [backend.device newLibraryWithSource:src options:compileOpts error:&libErr];
+            }();
             if (srcLib == nil) {
                 if (libErr != nil) {
                     fprintf(stderr, "CUMETAL MSL COMPILE ERROR for %s: %s\n", metallib_path.c_str(), [[libErr localizedDescription] UTF8String]);
@@ -1214,7 +1221,10 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
 
     @autoreleasepool {
         NSString* function_name = [NSString stringWithUTF8String:kernel_name.c_str()];
-        id<MTLFunction> function = [library newFunctionWithName:function_name];
+        id<MTLFunction> function = [&] {
+            common::CompileTrace trace("metal_new_function");
+            return [library newFunctionWithName:function_name];
+        }();
         if (function == nil) {
             if (error_message != nullptr) {
                 *error_message = "failed to find kernel function: " + kernel_name;
@@ -1228,11 +1238,13 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
 
         NSError* pipeline_error = nil;
         MTLComputePipelineReflection* reflection = nil;
-        id<MTLComputePipelineState> pipeline =
-            [backend.device newComputePipelineStateWithFunction:function
-                                                        options:MTLPipelineOptionBindingInfo
-                                                     reflection:&reflection
-                                                          error:&pipeline_error];
+        id<MTLComputePipelineState> pipeline = [&] {
+            common::CompileTrace trace("metal_new_compute_pipeline");
+            return [backend.device newComputePipelineStateWithFunction:function
+                                                              options:MTLPipelineOptionBindingInfo
+                                                           reflection:&reflection
+                                                                error:&pipeline_error];
+        }();
         if (pipeline == nil) {
             if (error_message != nullptr) {
                 *error_message = "failed to create compute pipeline for function: " + kernel_name;

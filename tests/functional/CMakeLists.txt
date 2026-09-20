@@ -3,9 +3,24 @@ if(NOT APPLE)
     return()
 endif()
 
+# PTX import stages, measured through cumetalc.
 add_test(NAME functional_ptx_compile_trace
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_compile_trace.py ${CMAKE_BINARY_DIR})
 set_tests_properties(functional_ptx_compile_trace PROPERTIES TIMEOUT 30 LABELS "hosted;functional")
+
+# Metal legalization, MSL emission and pipeline creation, measured through the
+# runtime. Complementary to the above: neither covers the other's stages.
+find_program(CUMETAL_TRACE_PYTHON3_EXECUTABLE python3)
+if(CUMETAL_TRACE_PYTHON3_EXECUTABLE)
+    add_test(
+        NAME functional_compile_trace
+        COMMAND ${CUMETAL_TRACE_PYTHON3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_compile_trace_test.py
+                $<TARGET_FILE:cumetal_runtime>
+    )
+    set_tests_properties(functional_compile_trace PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 180 LABELS "gpu")
+endif()
 
 add_executable(cumetal_runtime_vector_add_test
     runtime_vector_add_test.cpp

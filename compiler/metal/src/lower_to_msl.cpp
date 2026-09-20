@@ -2,6 +2,7 @@
 #include "record_contexts.h"
 #include "cumetal/metal/lower_to_msl.h"
 #include "integer_arithmetic.h"
+#include "cumetal/common/compile_trace.h"
 #include "cumetal/common/kernel_abi.h"
 
 #include "cumetal/ir/ptx_importer.h"
@@ -7091,12 +7092,16 @@ extern "C" int cm_libdevice_ilogb(float);
 }
 
 PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& options) {
+    common::CompileTrace total_trace("ptx_to_msl_total", ptx.size());
     PtxToMslResult result;
     ir::PtxImportOptions import_options;
     import_options.strict = options.strict;
     import_options.entry_name = options.entry_name;
     import_options.source_name = options.source_name;
     import_options.fp64_mode = options.fp64_mode;
+    // import_ptx opens its own "ptx_import" span, and covers callers that do
+    // not come through here; wrapping it again only emitted a duplicate nested
+    // span with the same name and byte count.
     ir::PtxImportResult imported = ir::import_ptx(ptx, import_options);
     result.warnings = imported.warnings;
     result.printf_formats = imported.printf_formats;
@@ -7106,14 +7111,20 @@ PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& o
     }
     result.gpu_ir = imported.module;
     result.gpu_ir.attributes["provenance"] = "generic_ptx_lowering";
-    MetalLegalizeResult legalized = legalize_for_metal(result.gpu_ir);
+    MetalLegalizeResult legalized = [&] {
+        common::CompileTrace trace("metal_legalization");
+        return legalize_for_metal(result.gpu_ir);
+    }();
     result.warnings.insert(result.warnings.end(), legalized.warnings.begin(), legalized.warnings.end());
     if (!legalized.ok) {
         result.error = legalized.error;
         return result;
     }
     result.metal_ir = legalized.module;
-    LowerToMslResult lowered = lower_to_msl(result.metal_ir);
+    LowerToMslResult lowered = [&] {
+        common::CompileTrace trace("msl_generation");
+        return lower_to_msl(result.metal_ir);
+    }();
     result.warnings.insert(result.warnings.end(), lowered.warnings.begin(), lowered.warnings.end());
     if (!lowered.ok) {
         result.error = lowered.error;

@@ -38,6 +38,13 @@ diagnostics. Bit-field lowering bounds every shift, including discarded arms.
 Integer min/max explicitly types MSL operands to preserve signed comparisons
 and select the correct overload for literals. Signed and unsigned 64-bit
 `mul.hi` use exact 32-bit partial products; mixed operand widths remain invalid.
+## Compilation diagnostics
+
+[Stage tracing](../compiler-performance.md#compilation-stage-tracing) covers
+typed PTX translation and runtime Metal source/function/pipeline creation.
+NVVM/legacy translation, precompiled-library loads, cache hits, and lock waits
+remain untraced. Timings do not resolve compiler memory/scalability limits or
+prove downstream kernel correctness.
 
 ## Typed CuMetal IR migration
 
