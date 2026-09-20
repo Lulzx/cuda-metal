@@ -3036,6 +3036,11 @@ if(APPLE)
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_indexed_helper.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_indexed_helper PROPERTIES TIMEOUT 120)
 
+    add_test(NAME functional_ptx_driver_device_global
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_driver_device_global.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_driver_device_global
+        PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+
     add_test(NAME functional_ptx_commuted_pointer
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_commuted_pointer.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_commuted_pointer PROPERTIES TIMEOUT 120)

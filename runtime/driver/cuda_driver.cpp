@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <new>
 #include <string>
@@ -36,10 +37,24 @@ struct CUctx_st {
 
 struct CUfunc_st;
 
+// A promoted module global is a hidden Metal buffer the caller never passes.
+// Under the driver API nothing registers it, so the module itself has to own
+// the storage: allocate once, seed it with the compiler-recorded initializer,
+// and bind the same allocation on every launch so GPU writes persist.
+struct DriverGlobalSymbol {
+    std::string name;
+    std::uint32_t size = 0;
+    std::uint32_t alignment = 1;
+    std::vector<std::uint8_t> initializer;
+};
+
 struct CUmod_st {
     std::string metallib_path;
     bool owns_metallib_path = false;
     std::vector<CUfunc_st*> functions;
+    // One allocation per symbol per module: two kernels in the same module that
+    // reference the same device global must see the same storage.
+    std::map<std::string, std::pair<void*, std::uint32_t>> global_storage;
 };
 
 struct CUfunc_st {
@@ -48,6 +63,7 @@ struct CUfunc_st {
     std::uint32_t argument_count = 0;
     bool has_argument_count = false;
     std::vector<cumetalKernelArgInfo_t> argument_info;
+    std::vector<DriverGlobalSymbol> global_symbols;
 };
 
 namespace {
@@ -265,6 +281,7 @@ void load_function_argument_count(CUfunc_st* function) {
         i += 2;
 
         std::vector<cumetalKernelArgInfo_t> info;
+        std::vector<DriverGlobalSymbol> globals;
         bool valid = true;
         for (; i < tokens.size() && tokens[i] != "kernel";) {
             if (tokens[i] == "shared") {
@@ -275,6 +292,50 @@ void load_function_argument_count(CUfunc_st* function) {
                     break;
                 }
                 i += 2;
+                continue;
+            }
+            if (tokens[i] == "global") {
+                // global <name> <size> <alignment> <hex-initializer|->
+                unsigned long long size = 0;
+                unsigned long long alignment = 0;
+                if (i + 4 >= tokens.size() ||
+                    !parse_unsigned(tokens[i + 2], 64ull * 1024ull, &size) || size == 0 ||
+                    !parse_unsigned(tokens[i + 3], 256, &alignment) || alignment == 0) {
+                    valid = false;
+                    break;
+                }
+                DriverGlobalSymbol symbol{
+                    .name = tokens[i + 1],
+                    .size = static_cast<std::uint32_t>(size),
+                    .alignment = static_cast<std::uint32_t>(alignment),
+                };
+                const std::string& encoded = tokens[i + 4];
+                if (encoded != "-") {
+                    if (encoded.size() != size * 2) {
+                        valid = false;
+                        break;
+                    }
+                    const auto nibble = [](char value) -> int {
+                        if (value >= '0' && value <= '9') return value - '0';
+                        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+                        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+                        return -1;
+                    };
+                    symbol.initializer.reserve(size);
+                    for (std::size_t byte = 0; byte < encoded.size(); byte += 2) {
+                        const int high = nibble(encoded[byte]);
+                        const int low = nibble(encoded[byte + 1]);
+                        if (high < 0 || low < 0) {
+                            valid = false;
+                            break;
+                        }
+                        symbol.initializer.push_back(
+                            static_cast<std::uint8_t>((high << 4) | low));
+                    }
+                    if (!valid) break;
+                }
+                globals.push_back(std::move(symbol));
+                i += 5;
                 continue;
             }
             unsigned long long size = 0;
@@ -296,6 +357,7 @@ void load_function_argument_count(CUfunc_st* function) {
             function->argument_count = static_cast<std::uint32_t>(info.size());
             function->has_argument_count = true;
             function->argument_info = std::move(info);
+            function->global_symbols = std::move(globals);
             return;
         }
     }
@@ -1420,13 +1482,85 @@ CUresult cuEventElapsedTime(float* pMilliseconds, CUevent hStart, CUevent hEnd) 
                                                reinterpret_cast<cudaEvent_t>(hEnd)));
 }
 
-// cuModuleGetGlobal — global device variable lookup.
-// CuMetal doesn't support runtime-addressable __device__ globals; return NOT_FOUND.
+// Module-owned storage for a promoted device global: allocated on first use,
+// seeded with the compiler-recorded initializer, and shared by every kernel in
+// the module that references the same symbol.
+CUresult ensure_module_global_storage(CUmod_st* module,
+                                      const DriverGlobalSymbol& symbol,
+                                      void** out_storage) {
+    DriverState& state = driver_state();
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        const auto existing = module->global_storage.find(symbol.name);
+        if (existing != module->global_storage.end()) {
+            if (existing->second.second != symbol.size) {
+                return CUDA_ERROR_INVALID_VALUE;
+            }
+            *out_storage = existing->second.first;
+            return CUDA_SUCCESS;
+        }
+    }
+
+    void* storage = nullptr;
+    if (cudaMalloc(&storage, symbol.size) != cudaSuccess || storage == nullptr) {
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    // CUDA zero-initializes a `__device__` variable with no initializer; an
+    // initialized one starts at its source value.
+    const cudaError_t seeded =
+        symbol.initializer.size() == symbol.size
+            ? cudaMemcpy(storage, symbol.initializer.data(), symbol.size,
+                         cudaMemcpyHostToDevice)
+            : cudaMemset(storage, 0, symbol.size);
+    if (seeded != cudaSuccess) {
+        cudaFree(storage);
+        return map_cuda_error(seeded);
+    }
+
+    void* surplus = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        const auto [entry, inserted] = module->global_storage.emplace(
+            symbol.name, std::make_pair(storage, symbol.size));
+        // Another thread may have won the race; keep one allocation per symbol.
+        if (!inserted) surplus = storage;
+        *out_storage = entry->second.first;
+    }
+    if (surplus != nullptr) cudaFree(surplus);
+    return CUDA_SUCCESS;
+}
+
+// cuModuleGetGlobal — global device variable lookup. A promoted module global
+// has module-owned storage, so the address and size are real; anything the
+// compiler did not record stays NOT_FOUND.
 CUresult cuModuleGetGlobal(CUdeviceptr* dptr, size_t* bytes,
-                            CUmodule /*hmod*/, const char* name) {
+                            CUmodule hmod, const char* name) {
     if (name == nullptr) return CUDA_ERROR_INVALID_VALUE;
     if (dptr)  *dptr  = 0;
     if (bytes) *bytes = 0;
+    if (hmod == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    {
+        DriverState& state = driver_state();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!is_valid_module_locked(state, hmod)) {
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+    }
+    for (const CUfunc_st* function : hmod->functions) {
+        for (const DriverGlobalSymbol& symbol : function->global_symbols) {
+            if (symbol.name != name) continue;
+            void* storage = nullptr;
+            const CUresult ready =
+                ensure_module_global_storage(hmod, symbol, &storage);
+            if (ready != CUDA_SUCCESS) return ready;
+            if (dptr) {
+                *dptr = static_cast<CUdeviceptr>(
+                    reinterpret_cast<std::uintptr_t>(storage));
+            }
+            if (bytes) *bytes = symbol.size;
+            return CUDA_SUCCESS;
+        }
+    }
     return CUDA_ERROR_NOT_FOUND;
 }
 
@@ -1548,6 +1682,7 @@ CUresult cuModuleUnload(CUmodule module) {
     DriverState& state = driver_state();
     std::string owned_path;
     bool remove_owned_path = false;
+    std::vector<void*> released_globals;
     {
         std::lock_guard<std::mutex> lock(state.mutex);
         if (!is_valid_module_locked(state, module)) {
@@ -1559,12 +1694,21 @@ CUresult cuModuleUnload(CUmodule module) {
             delete function;
         }
         module->functions.clear();
+        for (const auto& [name, storage] : module->global_storage) {
+            (void)name;
+            released_globals.push_back(storage.first);
+        }
+        module->global_storage.clear();
         if (module->owns_metallib_path) {
             owned_path = module->metallib_path;
             remove_owned_path = true;
         }
         state.modules.erase(module);
     }
+
+    // Module-owned device-global storage dies with the module, exactly as a
+    // registered `__device__` variable does when its fat binary unregisters.
+    for (void* storage : released_globals) cudaFree(storage);
 
     delete module;
     if (remove_owned_path) {
@@ -1757,6 +1901,34 @@ CUresult cuLaunchKernel(CUfunction f,
                     .size_bytes = is_pointer ? 0u : (value <= 0xFFFFFFFFull ? 4u : 8u),
                 });
             }
+        }
+    }
+
+    // Hidden promoted-global buffers follow the caller's arguments in the same
+    // declaration order the compiler bound them in. The module owns them, so
+    // the allocation is made once and reused: that is what makes a device
+    // global keep its value from one launch to the next.
+    std::vector<std::uintptr_t> global_words;
+    if (!f->global_symbols.empty()) {
+        global_words.reserve(f->global_symbols.size());
+        launch_params.reserve(launch_params.size() + f->global_symbols.size());
+        arg_info.reserve(arg_info.size() + f->global_symbols.size());
+        if (arg_info.size() + f->global_symbols.size() > 31) {
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        for (const DriverGlobalSymbol& symbol : f->global_symbols) {
+            void* storage = nullptr;
+            const CUresult ready =
+                ensure_module_global_storage(f->module, symbol, &storage);
+            if (ready != CUDA_SUCCESS) return ready;
+            global_words.push_back(reinterpret_cast<std::uintptr_t>(storage));
+        }
+        for (std::uintptr_t& word : global_words) {
+            launch_params.push_back(&word);
+            arg_info.push_back(cumetalKernelArgInfo_t{
+                .kind = CUMETAL_ARG_BUFFER,
+                .size_bytes = 0,
+            });
         }
     }
 

@@ -108,6 +108,17 @@ including predicated writes and register reuse. Stores through a helper pointer
 that resolves to constant storage are rejected; interprocedural mutation-based
 reclassification of private globals is not yet implemented.
 
+Promoted module globals are described in the `.cumetal-abi` sidecar as `global`
+records, separately from the public argument list so a caller's argument count
+is unchanged. A driver-API `cuModuleLoad` has no registration to own that
+storage, so the module owns it: one allocation per symbol per module, seeded
+with the compiler-recorded initializer (zero when the source had none),
+reused by every launch so GPU writes persist, addressable through
+`cuModuleGetGlobal`, and released on `cuModuleUnload`. Symbols the compiler did
+not record remain `CUDA_ERROR_NOT_FOUND`. The typed backend emits one entry per
+metallib, so cross-kernel sharing of a symbol within one module is implemented
+but not exercised by the corpus.
+
 A mutable module global referenced inside a reachable device helper is threaded
 through that helper's signature as a hidden trailing pointer parameter and
 passed at every direct call from the kernel, in module declaration order. The

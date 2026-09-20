@@ -60,7 +60,10 @@ run_integer_case(build, reordered, values, expected, 'scalar-first argument orde
                  abi_lines=abi[:3] + ['arg bytes 4', 'arg buffer 8', 'arg buffer 8'])
 
 # Metadata checks supplement numerical tests with unused scalars, static memory,
-# and a hidden module-global buffer (which is not a user launch argument).
+# and a hidden module-global buffer. The hidden buffer is not a user launch
+# argument, so it must not appear in the `arg` list -- but it is described
+# separately, because a driver-API caller has no registration to own that
+# storage and would otherwise leave the binding unpopulated.
 def check_metadata(source, expected_abi, backend="cumetal-ir"):
     with tempfile.TemporaryDirectory(prefix='cumetal-abi-layout-') as work:
         ptx = Path(work) / 'input.ptx'
@@ -80,5 +83,11 @@ shared = shared.replace('DONE:\nret;', 'DONE:\nmov.u64 %rd9, scratch;\nst.shared
 check_metadata(shared, abi[:2] + ['shared 32'] + abi[3:])
 hidden = base.replace('.visible .entry', '.global .align 4 .u32 hidden;\n.visible .entry')
 hidden = hidden.replace('DONE:\nret;', 'DONE:\nmov.u64 %rd9, hidden;\nst.global.u32 [%rd9], 7;\nret;')
-check_metadata(hidden, abi)
+check_metadata(hidden, abi + ['global hidden 4 4 -'])
+
+# An initialized device global carries its source bytes, so a module-owned
+# allocation can start at the right value instead of zero.
+seeded = base.replace('.visible .entry', '.global .align 4 .u32 seeded = 5;\n.visible .entry')
+seeded = seeded.replace('DONE:\nret;', 'DONE:\nmov.u64 %rd9, seeded;\nst.global.u32 [%rd9], 7;\nret;')
+check_metadata(seeded, abi + ['global seeded 4 4 05000000'])
 print('PASS: ordered arguments, unused scalar, static shared memory, hidden buffer metadata')

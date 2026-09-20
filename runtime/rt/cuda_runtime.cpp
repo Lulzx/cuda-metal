@@ -126,6 +126,23 @@ bool load_inline_static_shared_bytes_uncached(const char* metallib_path,
             }
             continue;
         }
+        // Hidden promoted-global storage. Only the driver binds it, but this
+        // parser validates the whole file, so the record has to be accepted
+        // here or an otherwise valid sidecar is rejected wholesale.
+        if (keyword == "global") {
+            std::string name;
+            std::string initializer;
+            unsigned long size = 0;
+            unsigned long alignment = 0;
+            std::string extra;
+            if (!(record >> name >> size >> alignment >> initializer) ||
+                (record >> extra) || name.empty() || size == 0 ||
+                size > 64ull * 1024ull || alignment == 0 || alignment > 256 ||
+                (initializer != "-" && initializer.size() != size * 2)) {
+                return false;
+            }
+            continue;
+        }
         return false;
     }
     // A sidecar that never names this kernel is not an error: it describes a
