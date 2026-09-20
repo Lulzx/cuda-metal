@@ -327,6 +327,15 @@ std::string extract_param_name_from_operand(const std::string& operand) {
 
 bool is_memory_opcode(const std::string& opcode) {
     const std::string root = opcode_root(opcode);
+    // `txq`/`suq` dereference their object operand: a texture or surface
+    // handle is a device pointer to the descriptor whose dimensions they
+    // read. Leaving them out of the address-use scan made the only pointer
+    // use of such a parameter invisible, and once width alone stopped
+    // implying a pointer the ABI sidecar labelled the buffer as eight
+    // by-value bytes -- every query then returned zero.
+    if (root == "txq" || root == "suq") {
+        return true;
+    }
     if (root != "ld" && root != "st" && root != "atom") {
         return false;
     }

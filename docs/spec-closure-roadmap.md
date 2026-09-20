@@ -19,8 +19,8 @@ compatibility claim. Implemented surfaces and detailed limitations remain in
   not substitute for a recurring verification mechanism or a commissioned GPU
   lane. GitHub Actions workflows are intentionally absent.
 - The typed shared-IR migration gate is not closed. With CUDA Clang 21-23, the
-  reviewed 39-file production-metallib matrix is 39/39 for direct `.cu` and 36/39 for PTX
-  through `cumetal-ir`, while the legacy PTX backend is 35/39 because it rejects
+  reviewed 40-file production-metallib matrix is 40/40 for direct `.cu` and 37/40 for PTX
+  through `cumetal-ir`, while the legacy PTX backend is 36/40 because it rejects
   the flat and nested aggregate device-call ABIs. The authoritative reviewed manifest and gates are
   `tests/cuda_projects/backend_matrix_manifest.txt` and
   `conformance_compiler_backend_matrix{,_versions}`. The matrix is compile

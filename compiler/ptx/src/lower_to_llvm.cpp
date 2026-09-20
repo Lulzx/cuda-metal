@@ -1451,10 +1451,19 @@ class GenericLlvmEmitter {
             if (bits != 0 && bits != declared) {
                 fail_contract("conflicting legacy LLVM declared register widths");
             }
-            // The parser does not retain lexical scope identity. Sharing a
-            // slot across same-named scoped declarations can alias live values
-            // even when their widths agree, so do not guess a scope winner.
-            if (matches != 0 && (scoped || !function_scope)) {
+            // The parser does not retain lexical scope identity, so a name
+            // that is declared both at function scope and inside a block is a
+            // genuine shadow this cannot resolve, and two function-scope
+            // declarations are a redeclaration. Both stay refused.
+            //
+            // Repeated *inner* declarations of one name are different: PTX
+            // scoping means every use sits inside some declaring block, and the
+            // name is dead at that block's end, so the live ranges are disjoint
+            // and one slot serves them all. Clang emits exactly this for each
+            // `{ .reg .b32 tmp; mov.b64 {tmp, %rN}, %rdM; }` tuple split, so
+            // refusing it made any kernel with two of them unlowerable -- which
+            // is every AMReX-style `long` warp shuffle.
+            if (matches != 0 && (function_scope || !scoped)) {
                 fail_contract("ambiguous scoped legacy LLVM register declarations");
             }
             bits = declared;

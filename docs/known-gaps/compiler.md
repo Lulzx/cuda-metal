@@ -45,8 +45,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/39 | **39/39** |
-| PTX / `--cuda-device` | **35/39** | **36/39** |
+| direct `.cu` | 0/40 | **40/40** |
+| PTX / `--cuda-device` | **36/40** | **37/40** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
@@ -255,6 +255,27 @@ differences, observable negative-base intermediates, scalar-to-address escapes,
 and narrow pointer arithmetic remain unsupported.
 Unused pointer truncations are removed during legalization; observed truncations
 remain rejected because Metal cannot faithfully represent their numeric result.
+
+A join that receives a pointer on one edge and a non-zero integer on another is
+still refused. Same-width *scalar* disagreement is resolved through the
+register's declared bit container and bitcast on the edge, which is what a
+`.b32` holding a float accumulator means, but no equivalent exists for a
+pointer: Metal has no flat address space to reconstruct one from an arbitrary
+integer, so the integer side has to be proven a pointer instead. `ggml_output_ops`
+compiled with CUDA Clang 21 hits this -- one edge carries a `cvta.global.u64`
+result and the other a null that loses its proven-zero fact across an
+intermediate join -- and is the one `conformance_compiler_backend_matrix_versions`
+cell that does not hold across all three Clang versions. CUDA Clang 22 and 23
+compile the same source without producing the join. Tracked upstream as issue
+\#76.
+
+## Native AOT linkage
+
+`cumetalc` builds a native AOT executable by generating a separate registration
+translation unit that names each kernel's host stub. A `__global__` function
+with internal linkage -- one declared in an anonymous namespace, or `static` --
+therefore fails to link, because the generated unit cannot reference the symbol.
+Give such kernels external linkage; the registration path itself is unaffected.
 
 ## Guarded PTX definitions
 

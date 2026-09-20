@@ -1658,7 +1658,14 @@ struct Importer {
             for (const auto value : values) value_origins.emplace(value, instruction);
         const auto describe_origin = [&](ValueId value) -> std::string {
             const auto found = value_origins.find(value);
-            if (found == value_origins.end() || found->second == nullptr) return "";
+            if (found == value_origins.end() || found->second == nullptr) {
+                for (std::size_t b = 0; b < block_arguments.size(); ++b)
+                    for (const auto& [argument_name, argument] : block_arguments[b])
+                        if (argument == value)
+                            return " (block argument '" + argument_name + "' of '" +
+                                   raw_blocks[b].name + "')";
+                return "";
+            }
             std::string text = " (" + found->second->opcode;
             for (const auto& operand : found->second->operands) text += " " + trim(operand);
             return text + ")";

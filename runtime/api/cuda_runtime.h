@@ -1870,6 +1870,19 @@ static inline CUMETAL_SYMBOL_BY_REF(T) cudaGetSymbolAddress(void** devPtr, const
 #include <type_traits>
 #include <utility>
 
+// libc++ 21 in C++20 mode leaves <cmath> with the C macros from <math.h>
+// removed, so a .cu that writes INFINITY or NAN -- which every CUDA source may,
+// since nvcc's headers always leave them visible -- stops compiling on that
+// toolchain alone. cumetalc force-includes this header and defaults to C++20,
+// so restore them here rather than making each source work around a libc++
+// version.
+#ifndef INFINITY
+#define INFINITY __builtin_inff()
+#endif
+#ifndef NAN
+#define NAN __builtin_nanf("")
+#endif
+
 #include <__clang_cuda_builtin_vars.h>
 #include <__clang_cuda_libdevice_declares.h>
 #include <__clang_cuda_device_functions.h>

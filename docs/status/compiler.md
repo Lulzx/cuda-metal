@@ -13,13 +13,13 @@
   production libraries.
 - Direct AIR generation remains tooling/research only.
 
-With CUDA Clang 21-23, the reviewed manifest-controlled 39-file
+With CUDA Clang 21-23, the reviewed manifest-controlled 40-file
 production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/39 | **39/39** |
-| PTX / `--cuda-device` | **35/39** | **36/39** |
+| direct `.cu` | 0/40 | **40/40** |
+| PTX / `--cuda-device` | **36/40** | **37/40** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler

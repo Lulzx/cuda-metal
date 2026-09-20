@@ -364,17 +364,24 @@ std::vector<ModuleConstantSymbol> scan_module_constant_symbols(std::string_view 
 }
 
 std::vector<ModuleConstantSymbol> scan_module_global_symbols(std::string_view ptx) {
+    // Uninitialized module-scope device storage of any declared width, scalar
+    // or array. Matching only `.b8 name[N]` left `.global .align 4 .u32 hidden;`
+    // with no hidden-buffer ABI, so a reference to it reached Metal as an
+    // undeclared identifier rather than a bound buffer. The trailing `;` keeps
+    // initialized declarations, which carry `=`, on the byte-array scan.
     const std::regex declaration(
-        R"((?:\.visible\s+|\.extern\s+)?\.global\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*;)"
+        R"((?:\.visible\s+|\.extern\s+|\.weak\s+)?\.global\s+(?:\.align\s+([0-9]+)\s+)?\.[busf](8|16|32|64)\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*(?:\[\s*([0-9]+)\s*\])?\s*;)"
     );
     std::vector<ModuleConstantSymbol> symbols;
     for_each_regex_candidate(ptx, ".global", declaration, [&](const auto& match) {
+        const std::uint64_t element_bytes = std::stoull(match[2].str()) / 8;
+        const std::uint64_t count = match[4].matched ? std::stoull(match[4].str()) : 1;
         symbols.push_back({
-            .name = match[2].str(),
+            .name = match[3].str(),
             .offset = 0,
-            .byte_size = std::stoull(match[3].str()),
+            .byte_size = element_bytes * count,
             .alignment = static_cast<std::uint32_t>(
-                std::stoul(match[1].str())),
+                match[1].matched ? std::stoul(match[1].str()) : element_bytes),
         });
     });
     return symbols;
