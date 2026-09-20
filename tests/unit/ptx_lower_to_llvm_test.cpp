@@ -1,3 +1,4 @@
+#include "cumetal/common/air_target.h"
 #include "cumetal/ptx/lower_to_llvm.h"
 
 #include <cstdint>
@@ -118,7 +119,11 @@ int main() {
     if (!expect(contains(lowered.llvm_ir, "\"air.kernel\""), "air.kernel attribute emitted")) {
         return 1;
     }
-    if (!expect(contains(lowered.llvm_ir, "\"air.version\"=\"2.8\""), "air.version emitted")) {
+    // The AIR version tracks the installed Metal Toolchain: air-lld refuses a
+    // module whose version is not the one it was built for.
+    const std::string expected_air_version =
+        "\"air.version\"=\"" + cumetal::common::detected_air_target().version_string() + "\"";
+    if (!expect(contains(lowered.llvm_ir, expected_air_version), "air.version emitted")) {
         return 1;
     }
     if (!expect(contains(lowered.llvm_ir, "!llvm.module.flags") &&

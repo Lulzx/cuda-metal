@@ -10571,8 +10571,8 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     //
     // Deleting them costs nothing: the generic path lowers all of it. Caught by ptx_sweep_numeric.
     //
-    int air_major = 2;
-    int air_minor = 8;
+    int air_major = cumetal::common::detected_air_target().major;
+    int air_minor = cumetal::common::detected_air_target().minor;
     if (const auto it = fields.find("air.version"); it != fields.end()) {
         (void)parse_major_minor(it->second, &air_major, &air_minor);
     }

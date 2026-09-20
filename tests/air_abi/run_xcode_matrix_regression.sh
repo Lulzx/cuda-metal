@@ -94,14 +94,19 @@ run_for_toolchain() {
       "^Magic: MTLB" \
       "^Function count: 1$" \
       "\\[kernel 0\\] vector_add" \
-      "air.version=2.8" \
-      "language.version=4.0"; do
+      "air\\.version=2\\.[0-9]+" \
+      "language\\.version=[0-9]+\\.[0-9]+"; do
     if ! rg -q "$check" "$out_txt"; then
       echo "FAIL: ${label} failed ABI invariant check: ${check}"
       echo "      toolchain: $(metal_version_for "$developer_dir")"
       exit 1
     fi
   done
+
+  # The exact numbers move with the toolchain (Xcode 27 emits air 2.9 /
+  # language 4.1 where Xcode 26 emitted 2.8 / 4.0), so record them rather than
+  # pin them; the drift this test guards is structural.
+  echo "INFO: ${label} emitted $(rg -o "air\\.version=[0-9.]+" "$out_txt" | head -1), $(rg -o "language\\.version=[0-9.]+" "$out_txt" | head -1)"
 }
 
 declare -a HASHES=()

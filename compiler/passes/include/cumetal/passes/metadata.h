@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cumetal/common/air_target.h"
 #include "cumetal/ptx/parser.h"
 
 #include <string>
@@ -18,7 +19,8 @@ struct KernelMetadata {
 };
 
 struct MetadataOptions {
-    std::string air_version = "2.8";
+    // Matches the installed Metal Toolchain; air-lld rejects a mismatch.
+    std::string air_version = cumetal::common::detected_air_target().version_string();
     std::string language_version = "4.0";
 };
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cumetal/common/air_target.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -53,7 +55,7 @@ struct LowerToLlvmOptions {
     bool strict = false;
     std::string entry_name;
     std::string module_id = "cumetal.ptx.module";
-    std::string target_triple = "air64_v28-apple-macosx26.0.0";
+    std::string target_triple = cumetal::common::detected_air_target().triple;
     // Offline cumetalc PTX tools still default to native; runtime JIT overrides via
     // fp64_mode_from_env().
     Fp64Mode fp64_mode = Fp64Mode::kNative;

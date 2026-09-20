@@ -65,6 +65,7 @@ if(CUMETAL_ENABLE_BINARY_SHIM AND NOT CUMETAL_ENABLE_CUDA_REGISTRATION)
 endif()
 
 add_library(cumetal_common STATIC
+    compiler/common/src/air_target.cpp
     compiler/common/src/metallib.cpp
 )
 
@@ -203,6 +204,7 @@ target_include_directories(cumetal_passes
 
 target_link_libraries(cumetal_passes
     PUBLIC
+        cumetal_common
         cumetal_ptx
         cumetal_printf_pass
 )
