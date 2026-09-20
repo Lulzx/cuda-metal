@@ -79,6 +79,13 @@ std::uint32_t ptx_type_bits(std::string_view type) {
     return 32;
 }
 
+// `.b8/.b16/.b32/.b64` are untyped bit containers, not a numeric format.
+bool ptx_type_is_bits(std::string_view spelling) {
+    for (const std::string_view token : {".b8", ".b16", ".b32", ".b64"})
+        if (spelling.find(token) != std::string_view::npos) return true;
+    return false;
+}
+
 Type ptx_scalar_type(std::string_view spelling) {
     if (spelling.find(".pred") != std::string_view::npos) {
         return Type::predicate();
@@ -170,6 +177,9 @@ std::uint32_t type_size(const Type& type) {
 
 struct BuiltinSignature {
     std::string metal_name;
+    // Extra operation attributes the emission site must carry, e.g. the
+    // high-half/signedness pair that turns a kMul into a 64-bit mul.hi.
+    std::vector<std::pair<std::string, std::string>> attributes;
     Type return_type;
     std::vector<Type> argument_types;
     bool tolerance_bounded = false;
@@ -544,6 +554,21 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
             .argument_types = {Type::floating(is_double ? 64 : 32)},
             .tolerance_bounded = name == "__nv_frsqrt_rn",
         };
+    }
+    // __umul64hi / __mul64hi are the top half of a 64x64 product. They are on
+    // the hot path of every 3-D AMReX ParallelFor through FastDivmodU64, and
+    // the typed backend already owns a 64-bit high product for PTX mul.hi; ride
+    // that rather than emitting a call Metal has no 64-bit builtin for.
+    if (name == "__nv_umul64hi" || name == "__nv_mul64hi") {
+        const bool is_signed = name == "__nv_mul64hi";
+        BuiltinSignature signature{
+            .return_type = Type::integer(64),
+            .argument_types = {Type::integer(64), Type::integer(64)},
+            .opcode = OpCode::kMul,
+        };
+        signature.attributes.push_back({"high_half", "true"});
+        if (is_signed) signature.attributes.push_back({"signed", "true"});
+        return signature;
     }
     if (name == "__nv_fsqrt_rn") {
         return BuiltinSignature{
@@ -1213,6 +1238,22 @@ struct Importer {
         return std::nullopt;
     }
 
+    // The common container for two same-width scalar incomings of a join.
+    // Returns nothing when the pair is not a bit-compatible float/integer mix.
+    std::optional<Type> scalar_join_container(const std::string& name, const Type& left,
+                                              const Type& right) const {
+        if (left.is_pointer() || right.is_pointer()) return std::nullopt;
+        if (left.kind == TypeKind::kPredicate || right.kind == TypeKind::kPredicate) return std::nullopt;
+        const bool scalar = (left.kind == TypeKind::kInteger || left.kind == TypeKind::kFloat) &&
+                            (right.kind == TypeKind::kInteger || right.kind == TypeKind::kFloat);
+        if (!scalar || left.bit_width != right.bit_width) return std::nullopt;
+        if (const auto declared = register_contract(name);
+            declared && !declared->is_pointer() && declared->bit_width == left.bit_width &&
+            (declared->kind == TypeKind::kInteger || declared->kind == TypeKind::kFloat))
+            return *declared;
+        return Type::integer(left.bit_width);
+    }
+
     std::optional<BuiltinSignature> call_signature(const Instruction& instruction,
                                                   const std::string& callee) {
         if (auto builtin = cuda_builtin_signature(callee)) return builtin;
@@ -1439,6 +1480,17 @@ struct Importer {
                             if (merged->is_pointer() && type.is_pointer() && merged->elements == type.elements &&
                                 (merged->address_space == AddressSpace::kNone || type.address_space == AddressSpace::kNone))
                                 merged->address_space = AddressSpace::kNone;
+                            // A `.b32`/`.b64` register is a bit container, and
+                            // NVPTX routinely reaches one through both float
+                            // and integer definitions -- a float accumulator
+                            // seeded by `mov.b32 %r39, 0f00000000` and stepped
+                            // by `fma.rn.f32 %r39, ...` is the common shape.
+                            // Neither incoming is wrong, so resolve the join to
+                            // the register's declared container and bitcast the
+                            // edges that disagree; refusing the kernel here
+                            // dropped six corpus projects to "unsupported".
+                            else if (const auto container = scalar_join_container(join.name, *merged, type))
+                                merged = *container;
                             else {
                                 // Diagnose after the worklist settles: another
                                 // input may still refine a zero-only argument.
@@ -1598,6 +1650,19 @@ struct Importer {
                 assign(results[i], type, zero && type.kind == TypeKind::kInteger);
             }
         }
+        // Name the instruction each incoming value came from. A bare
+        // "%107=f32 %52=i32" says a join disagreed but not which PTX produced
+        // the disagreement, which is the only thing that locates the defect.
+        std::unordered_map<ValueId, const Instruction*> value_origins;
+        if (validate) for (const auto& [instruction, values] : instruction_results)
+            for (const auto value : values) value_origins.emplace(value, instruction);
+        const auto describe_origin = [&](ValueId value) -> std::string {
+            const auto found = value_origins.find(value);
+            if (found == value_origins.end() || found->second == nullptr) return "";
+            std::string text = " (" + found->second->opcode;
+            for (const auto& operand : found->second->operands) text += " " + trim(operand);
+            return text + ")";
+        };
         if (validate) for (const auto& join : joins) {
             std::string evidence;
             bool has_pointer = false, has_nonzero_scalar = false;
@@ -1605,7 +1670,7 @@ struct Importer {
                 if (!value_types.contains(value)) return fail(nullptr, "unresolved PTX incoming type for '" + join.name +
                     "' in block '" + raw_blocks[join.block].name + "', value %" + std::to_string(value));
                 const auto& source = value_types.at(value);
-                evidence += " %" + std::to_string(value) + "=" + source.str();
+                evidence += " %" + std::to_string(value) + "=" + source.str() + describe_origin(value);
                 has_pointer |= source.is_pointer();
                 has_nonzero_scalar |= !source.is_pointer() && !integer_zero_values.contains(value);
             }
@@ -1622,6 +1687,9 @@ struct Importer {
                 if (source == target || (target.is_pointer() && integer_zero_values.contains(value))) continue;
                 if (source.is_pointer() && target.is_pointer() && source.elements == target.elements &&
                     target.address_space == AddressSpace::kNone) continue;
+                // Same-width scalar disagreement is a bit-container join; the
+                // branch edge bitcasts it in make_successor.
+                if (scalar_join_container(join.name, source, target) == target) continue;
                 return fail(nullptr, "conflicting PTX incoming type for '" + join.name + "' in block '" + raw_blocks[join.block].name +
                     "': value %" + std::to_string(value) + " has " + source.str() + ", expected " + target.str());
             }
@@ -3062,7 +3130,13 @@ struct Importer {
         for (const auto& block : raw_blocks)
             for (const auto* instruction : block.instructions)
                 if (const auto slot = defined_return_slot(*instruction)) call_return_slot_names.insert(*slot);
+        // The `// implicit-def:` scan runs over the whole module, so it also
+        // returns registers belonging to other entries. A register this entry
+        // does not declare cannot be one of its values; adopting it anyway
+        // failed the import with "no declaration contract" for a name that was
+        // never in this kernel.
         for (const std::string& name : implicit_definitions) {
+            if (!register_contract(name)) continue;
             const ValueId value = builder.next_value();
             implicit_values[name] = value;
         }
@@ -3638,7 +3712,14 @@ struct Importer {
             if (!instruction.predicate.empty()) {
                 return fail(&instruction, "predicated b64 tuple unpack is unsupported");
             }
-            const Operand packed = source_operand(1, Type::integer(64));
+            // `mov.b64 {lo, hi}, %rdN` splits the 64 bits of the register. The
+            // register may hold a double -- NVPTX shuffles an f64 accumulator by
+            // splitting it into two 32-bit halves -- so read it through its bit
+            // container. Shifting the float value directly emitted `shr` on an
+            // f64 and a float-to-int `trunc` for each half, which Metal rejected
+            // as an ambiguous call.
+            const Operand packed =
+                bit_container_of(source_operand(1, Type::integer(64)), Type::integer(64));
             operation.opcode = OpCode::kConvert;
             operation.results = {instruction_results[&instruction][0]};
             operation.result_types = {Type::integer(32)};
@@ -4535,6 +4616,21 @@ struct Importer {
                 operation.operands.front() = expressions.low_integer_bits(
                     operation.operands.front(), ptx_cvt_source_type(instruction.opcode));
             }
+        } else if (root == "sqrt" || root == "rsqrt") {
+            // PTX emits `sqrt.rn.f32` directly rather than a libdevice call
+            // whenever the source spells std::sqrt, which is how AMReX writes
+            // every ParallelFor body. Only binary32 has a Metal builtin with
+            // the right semantics; binary64 must say so instead of quietly
+            // evaluating at float precision.
+            const Type type = ptx_scalar_type(instruction.opcode);
+            if (type != Type::floating(32))
+                return fail(&instruction, "PTX opcode '" + instruction.opcode +
+                                              "' is only supported for binary32");
+            operation.opcode = OpCode::kCall;
+            operation.result_types.front() = Type::floating(32);
+            operation.operands.push_back(bit_container_operand(1, Type::floating(32)));
+            operation.attributes["builtin"] = "true";
+            operation.attributes["callee"] = root == "sqrt" ? "sqrt" : "rsqrt";
         } else if (root == "rcp") {
             operation.opcode = OpCode::kDiv;
             operation.operands.push_back(
@@ -4702,6 +4798,8 @@ struct Importer {
                 operation.attributes["callee"] = signature->metal_name;
                 if (builtin_call) operation.attributes["builtin"] = "true";
             }
+            for (const auto& [key, value] : signature->attributes)
+                operation.attributes[key] = value;
             if (!signature->fp64_conversion.empty()) {
                 operation.attributes["fp64_conversion"] =
                     signature->fp64_conversion;
@@ -4972,12 +5070,35 @@ struct Importer {
         return true;
     }
 
-    Successor make_successor(std::size_t source_index, std::size_t target_index) {
+    Successor make_successor(std::size_t source_index, std::size_t target_index,
+                             BasicBlock* block = nullptr) {
         Successor successor;
         successor.block = raw_blocks[target_index].id;
-        for (const auto& [name, value] : block_arguments[target_index]) {
-            (void)value;
-            successor.arguments.push_back(outgoing[source_index].at(name));
+        for (const auto& [name, argument] : block_arguments[target_index]) {
+            ValueId incoming_value = outgoing[source_index].at(name);
+            // A bit-container join resolves to one type; an edge carrying the
+            // other reading of the same 32/64 bits is bitcast here rather than
+            // rejected, which is what a `.b32` register means.
+            const auto argument_type = value_types.find(argument);
+            const auto incoming_type = value_types.find(incoming_value);
+            if (block != nullptr && argument_type != value_types.end() &&
+                incoming_type != value_types.end() && argument_type->second != incoming_type->second &&
+                !argument_type->second.is_pointer() && !incoming_type->second.is_pointer() &&
+                argument_type->second.bit_width == incoming_type->second.bit_width &&
+                scalar_join_container(name, incoming_type->second, argument_type->second) ==
+                    argument_type->second) {
+                Operation conversion;
+                conversion.opcode = OpCode::kConvert;
+                conversion.results = {builder.next_value()};
+                conversion.result_types = {argument_type->second};
+                conversion.operands.push_back(
+                    Operand::value_ref(incoming_value, incoming_type->second));
+                conversion.attributes["bitcast"] = "true";
+                value_types[conversion.results.front()] = argument_type->second;
+                incoming_value = conversion.results.front();
+                block->operations.push_back(std::move(conversion));
+            }
+            successor.arguments.push_back(incoming_value);
         }
         return successor;
     }
@@ -5303,12 +5424,12 @@ struct Importer {
                         Operand::value_ref(predicate->second, value_types[predicate->second]));
                     terminator.attributes["inverted"] = inverted ? "true" : "false";
                     for (std::size_t target : raw_blocks[block_index].successors) {
-                        terminator.successors.push_back(make_successor(block_index, target));
+                        terminator.successors.push_back(make_successor(block_index, target, &block));
                     }
                 } else {
                     terminator.opcode = OpCode::kBranch;
                     terminator.successors.push_back(
-                        make_successor(block_index, raw_blocks[block_index].successors.front()));
+                        make_successor(block_index, raw_blocks[block_index].successors.front(), &block));
                 }
                 terminator.location = {
                     .file = result.module.source_name,
@@ -5382,7 +5503,7 @@ struct Importer {
             } else if (!raw_blocks[block_index].successors.empty()) {
                 terminator.opcode = OpCode::kBranch;
                 terminator.successors.push_back(
-                    make_successor(block_index, raw_blocks[block_index].successors.front()));
+                    make_successor(block_index, raw_blocks[block_index].successors.front(), &block));
             } else {
                 terminator.opcode = OpCode::kReturn;
                 if (!is_kernel && function.return_type.kind != TypeKind::kVoid) {

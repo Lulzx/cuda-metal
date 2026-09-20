@@ -2442,13 +2442,20 @@ struct AstLowerer {
                 MslExpression::literal(std::move(spelling), MslType::uint(64)));
             return MslExpression::cast(pointer_type, address, true);
         }
-        if (operand.type.kind == ir::TypeKind::kFloat &&
-            operand.type.bit_width == 64 && spelling.starts_with("0d")) {
+        // `0f`/`0d` spell a raw bit pattern, and PTX puts them in `.b32`/`.b64`
+        // bit containers as readily as in float registers. Keying the rewrite
+        // on a float operand type let a container-typed literal through
+        // verbatim, and `v12 = 0d0000000000000000;` is an octal constant to the
+        // Metal compiler, not a double.
+        const bool scalar_operand = operand.type.kind == ir::TypeKind::kFloat ||
+                                    operand.type.kind == ir::TypeKind::kInteger;
+        if (scalar_operand && operand.type.bit_width == 64 && spelling.starts_with("0d")) {
             spelling = "0x" + spelling.substr(2) + "ul";
         }
-        if (operand.type.kind == ir::TypeKind::kFloat && operand.type.bit_width == 32 &&
-            is_ptx_hex_float_literal(spelling)) {
-            spelling = "as_type<float>(0x" + spelling.substr(2) + "u)";
+        if (scalar_operand && operand.type.bit_width == 32 && is_ptx_hex_float_literal(spelling)) {
+            spelling = operand.type.kind == ir::TypeKind::kFloat
+                           ? "as_type<float>(0x" + spelling.substr(2) + "u)"
+                           : "0x" + spelling.substr(2) + "u";
         }
         return MslExpression::literal(std::move(spelling), lower_type(operand.type));
     }

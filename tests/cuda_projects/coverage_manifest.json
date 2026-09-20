@@ -271,6 +271,14 @@
       "backends": [
         "native-aot"
       ]
+    },
+    {
+      "name": "amrex_device_idioms",
+      "subdir": "amrex_device_idioms",
+      "source": "amrex_device_idioms.cu",
+      "binary": "amrex_device_idioms",
+      "harness": "strict",
+      "expect_pattern": "PASS: AMReX device idioms match host references on Apple GPU"
     }
   ]
 }

@@ -232,7 +232,14 @@ private:
                     }
                     out_ << "}";
                 } else if constexpr (std::is_same_v<Node, MslCast>) {
-                    if (node.bitcast) {
+                    // Metal rejects `as_type` between pointer types. A bitcast
+                    // that lands on a pointer is a reinterpretation of the
+                    // address, which is what reinterpret_cast spells.
+                    if (node.bitcast && node.target.kind == MslTypeKind::kPointer) {
+                        out_ << "reinterpret_cast<" << may_alias_spelling(node.target) << ">(";
+                        print_expression(node.operand);
+                        out_ << ")";
+                    } else if (node.bitcast) {
                         out_ << "as_type<" << node.target.str() << ">(";
                         print_expression(node.operand);
                         out_ << ")";

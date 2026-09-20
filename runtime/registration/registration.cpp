@@ -1091,7 +1091,11 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     const auto lowered_metal =
         cumetal::ptx::lower_ptx_to_metal_source(ptx_source, lower_to_metal_options);
     if (!lowered_metal.ok) {
-        REG_DEBUG("lower_ptx_to_metal_source failed for kernel '%s'", kernel_name.c_str());
+        // Carry the lowering diagnostic. Without it a refused kernel reports
+        // only "registered kernel missing metallib", which reads as a missing
+        // artifact rather than the compiler declining to lower this PTX.
+        REG_DEBUG("lower_ptx_to_metal_source failed for kernel '%s': %s", kernel_name.c_str(),
+                  lowered_metal.error.empty() ? "no diagnostic" : lowered_metal.error.c_str());
         return false;
     }
     RegistrationCacheMetadata metadata{

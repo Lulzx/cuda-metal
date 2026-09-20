@@ -1725,6 +1725,19 @@ struct Importer {
             }
             return true;
         }
+        // The top half of a 64x64 product. The typed backend already lowers
+        // this for PTX mul.hi, and a libdevice mapping has to reach every
+        // frontend: supporting it only on the PTX path left the direct .cu
+        // frontend refusing every AMReX ParallelFor.
+        if (name == "__nv_umul64hi" || name == "__nv_mul64hi") {
+            operation->opcode = OpCode::kMul;
+            operation->attributes["high_half"] = "true";
+            if (name == "__nv_mul64hi") operation->attributes["signed"] = "true";
+            for (const llvm::Use& argument : call.args()) {
+                operation->operands.push_back(import_operand(*argument.get(), *state));
+            }
+            return true;
+        }
         // __nv_<src>2double_<mode> / __nv_double2<dst>_<mode> are real
         // conversions: they become kConvert ops carrying the software-FP64
         // conversion kind and the encoded rounding mode (0=rne, 1=rtz,
