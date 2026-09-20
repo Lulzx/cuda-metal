@@ -168,11 +168,16 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
     }
     for (const Instruction& instruction : entry.instructions) {
         const std::string root = root_opcode(instruction.opcode);
-        // A helper's explicit generic-to-local address conversion proves
-        // pointer-ness even when all subsequent accesses are ld.local.
-        // Keep its argument generic; call-site specialization determines
+        // A helper's explicit generic-to-concrete address conversion proves
+        // pointer-ness even when the converted value is only ever indexed and
+        // loaded through, so backward recovery would otherwise stop at the
+        // cvta. Keep its argument generic; call-site specialization determines
         // the actual address space rather than guessing from integer width.
-        if (!is_kernel && instruction.opcode == "cvta.to.local.u64" &&
+        // Rust-CUDA emits exactly this for an `#[inline(never)]` indexed slice
+        // read, with the base and index arriving as separate `.b64` parameters.
+        if (!is_kernel &&
+            (instruction.opcode == "cvta.to.local.u64" ||
+             instruction.opcode == "cvta.to.global.u64") &&
             instruction.operands.size() == 2) {
             const std::string source = first_register(instruction.operands[1]);
             require_pointer(source, AddressSpace::kNone);

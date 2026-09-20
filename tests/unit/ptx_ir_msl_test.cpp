@@ -2057,6 +2057,156 @@ BODY:
                   << initialized_writable_global.source << "\n";
     }
 
+    // Rust-CUDA emits an `#[inline(never)]` indexed slice read as a helper
+    // whose pointer base and index arrive as separate `.b64` parameters. The
+    // helper's own `cvta.to.global` is the only pointer evidence, and backward
+    // recovery used to stop there, leaving the base an integer and the cast
+    // unverifiable.
+    const std::string indexed_helper_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .func (.param .b32 result) read_byte(
+    .param .b64 address,
+    .param .b64 length,
+    .param .b64 index
+)
+{
+    .reg .b64 %rd<6>;
+    .reg .b32 %r<2>;
+    .reg .pred %p<2>;
+    ld.param.b64 %rd1, [address];
+    ld.param.b64 %rd3, [length];
+    ld.param.b64 %rd2, [index];
+    setp.ge.u64 %p1, %rd2, %rd3;
+    @%p1 bra TRAP;
+    cvta.to.global.u64 %rd4, %rd1;
+    add.s64 %rd5, %rd4, %rd2;
+    ld.global.b8 %r1, [%rd5];
+    st.param.b32 [result], %r1;
+    ret;
+TRAP:
+    trap;
+}
+.visible .entry indexed_helper(.param .u64 input, .param .u64 output) {
+    .reg .b64 %rd<9>;
+    .reg .b32 %r<3>;
+    .param .b64 base_slot;
+    .param .b64 length_slot;
+    .param .b64 index_slot;
+    .param .b32 result_slot;
+    ld.param.u64 %rd1, [input];
+    ld.param.u64 %rd2, [output];
+    cvta.to.global.u64 %rd3, %rd2;
+    mov.u32 %r1, %tid.x;
+    cvt.u64.u32 %rd4, %r1;
+    and.b64 %rd5, %rd4, 7;
+    mov.u64 %rd7, 8;
+    st.param.b64 [base_slot], %rd1;
+    st.param.b64 [length_slot], %rd7;
+    st.param.b64 [index_slot], %rd5;
+    call.uni (result_slot), read_byte, (base_slot, length_slot, index_slot);
+    ld.param.b32 %r2, [result_slot];
+    add.s64 %rd6, %rd3, %rd4;
+    st.global.b8 [%rd6], %r2;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult indexed_helper =
+        metal::compile_ptx_to_msl(indexed_helper_ptx);
+    const bool indexed_helper_valid =
+        indexed_helper.ok &&
+        indexed_helper.source.find("device uchar* address") != std::string::npos &&
+        indexed_helper.source.find("ulong index") != std::string::npos &&
+        // The bounds check and its trap must survive the retyping.
+        indexed_helper.source.find("index >= length") != std::string::npos &&
+        indexed_helper.source.find("cm_trap_status") != std::string::npos;
+    ok &= expect(indexed_helper_valid,
+                 "a helper's own cvta.to.global recovers its generic pointer parameter");
+    if (!indexed_helper_valid) {
+        std::cerr << indexed_helper.error << "\n" << indexed_helper.source << "\n";
+    }
+
+    // A promoted global referenced inside a device helper has no storage of
+    // its own: the raw PTX spelling reached Metal as an undeclared identifier.
+    // The kernel's hidden buffer must be threaded through the call chain.
+    const std::string helper_global_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .global .align 4 .u32 helper_state = 5;
+.visible .global .align 4 .u32 unreached_state;
+.visible .func (.param .b32 rv) leaf()
+{
+    .reg .b64 %rd<2>;
+    .reg .b32 %r<3>;
+    mov.b64 %rd1, helper_state;
+    ld.global.u32 %r1, [%rd1];
+    add.u32 %r2, %r1, 7;
+    st.global.u32 [%rd1], %r2;
+    st.param.b32 [rv], %r2;
+    ret;
+}
+.visible .func (.param .b32 rv) bump(.param .b32 a)
+{
+    .reg .b32 %r<3>;
+    ld.param.b32 %r1, [a];
+    add.u32 %r2, %r1, 1;
+    st.param.b32 [rv], %r2;
+    ret;
+}
+.visible .func (.param .b32 rv) wrapper()
+{
+    .reg .b32 %r<3>;
+    .param .b32 inner;
+    .param .b32 forwarded;
+    .param .b32 bumped;
+    call.uni (inner), leaf, ();
+    ld.param.b32 %r1, [inner];
+    st.param.b32 [forwarded], %r1;
+    call.uni (bumped), bump, (forwarded);
+    ld.param.b32 %r2, [bumped];
+    st.param.b32 [rv], %r2;
+    ret;
+}
+.visible .entry helper_only_global(.param .u64 output) {
+    .reg .b64 %rd<3>;
+    .reg .b32 %r<2>;
+    .param .b32 slot;
+    ld.param.u64 %rd1, [output];
+    cvta.to.global.u64 %rd2, %rd1;
+    call.uni (slot), wrapper, ();
+    ld.param.b32 %r1, [slot];
+    st.global.u32 [%rd2], %r1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult helper_global =
+        metal::compile_ptx_to_msl(helper_global_ptx);
+    const bool helper_global_valid =
+        helper_global.ok &&
+        helper_global.source.find("private$") == std::string::npos &&
+        helper_global.source.find("helper_state)") != std::string::npos &&
+        helper_global.source.find(
+            "uint leaf(device uchar* cm___cumetal_global_helper_state)") !=
+            std::string::npos &&
+        helper_global.source.find(
+            "uint wrapper(device uchar* cm___cumetal_global_helper_state)") !=
+            std::string::npos &&
+        helper_global.source.find(
+            "wrapper(cm___cumetal_global_helper_state)") != std::string::npos &&
+        helper_global.source.find(
+            "leaf(cm___cumetal_global_helper_state)") != std::string::npos &&
+        // An unrelated helper keeps its original signature, and an unreferenced
+        // global stays out of the ABI entirely.
+        helper_global.source.find("uint bump(uint a)") != std::string::npos &&
+        helper_global.source.find("unreached_state") == std::string::npos;
+    ok &= expect(helper_global_valid,
+                 "promoted PTX globals thread through device helper calls");
+    if (!helper_global_valid) {
+        std::cerr << helper_global.error << "\n" << helper_global.source << "\n";
+    }
+
     const std::string private_initialized_global_ptx = R"ptx(
 .version 7.0
 .target sm_80

@@ -484,6 +484,10 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
         runtime_registration_var_symbol_test.cpp
     )
 
+    add_executable(cumetal_runtime_registration_helper_global_test
+        runtime_registration_helper_global_test.cpp
+    )
+
     add_executable(cumetal_runtime_registration_printf_test
         runtime_registration_printf_test.cpp
     )
@@ -1200,6 +1204,11 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
 
     target_link_libraries(cumetal_runtime_registration_fatbinary2_symbols_test
+        PRIVATE
+            cumetal_runtime
+    )
+
+    target_link_libraries(cumetal_runtime_registration_helper_global_test
         PRIVATE
             cumetal_runtime
     )
@@ -2074,6 +2083,13 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
 
     target_compile_options(cumetal_runtime_registration_fatbin_ptx_test
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+
+    target_compile_options(cumetal_runtime_registration_helper_global_test
         PRIVATE
             -Wall
             -Wextra
@@ -3016,6 +3032,10 @@ if(APPLE)
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_promoted_global.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_promoted_global PROPERTIES TIMEOUT 120)
 
+    add_test(NAME functional_ptx_indexed_helper
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_indexed_helper.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_indexed_helper PROPERTIES TIMEOUT 120)
+
     add_test(NAME functional_ptx_commuted_pointer
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_commuted_pointer.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_commuted_pointer PROPERTIES TIMEOUT 120)
@@ -3397,6 +3417,16 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
 
     set_tests_properties(functional_runtime_registration_fatbin_ptx PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_runtime_registration_helper_global
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_registration_helper_global.sh
+                $<TARGET_FILE:cumetal_runtime_registration_helper_global_test>
+    )
+
+    set_tests_properties(functional_runtime_registration_helper_global
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
 
     add_test(
         NAME functional_runtime_registration_jit_cache

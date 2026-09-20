@@ -10331,13 +10331,103 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
 
 }  // namespace
 
+namespace {
+
+// Direct `.func` target of a PTX call statement, if it has one. Accepts both
+// `call.uni target, (args);` and `call.uni (retval), target, (args);`.
+std::optional<std::string> statement_call_target(std::string_view statement) {
+    const std::size_t call = statement.find("call");
+    if (call == std::string_view::npos) return std::nullopt;
+    if (call != 0 && (std::isalnum(static_cast<unsigned char>(statement[call - 1])) != 0 ||
+                      statement[call - 1] == '_' || statement[call - 1] == '.' ||
+                      statement[call - 1] == '$')) {
+        return std::nullopt;
+    }
+    std::size_t pos = call + 4;
+    while (pos < statement.size() && statement[pos] != ' ' && statement[pos] != '\t') {
+        // Skip the `.uni` / `.param` modifier suffix on the opcode itself.
+        if (statement[pos] != '.' &&
+            std::isalnum(static_cast<unsigned char>(statement[pos])) == 0) {
+            return std::nullopt;
+        }
+        ++pos;
+    }
+    const auto skip_space = [&] {
+        while (pos < statement.size() &&
+               std::isspace(static_cast<unsigned char>(statement[pos])) != 0) {
+            ++pos;
+        }
+    };
+    skip_space();
+    if (pos < statement.size() && statement[pos] == '(') {
+        std::size_t depth = 0;
+        for (; pos < statement.size(); ++pos) {
+            if (statement[pos] == '(') ++depth;
+            else if (statement[pos] == ')' && --depth == 0) { ++pos; break; }
+        }
+        skip_space();
+        if (pos >= statement.size() || statement[pos] != ',') return std::nullopt;
+        ++pos;
+        skip_space();
+    }
+    const std::size_t begin = pos;
+    while (pos < statement.size() &&
+           (std::isalnum(static_cast<unsigned char>(statement[pos])) != 0 ||
+            statement[pos] == '_' || statement[pos] == '$' || statement[pos] == '.')) {
+        ++pos;
+    }
+    if (pos == begin) return std::nullopt;
+    return std::string(statement.substr(begin, pos - begin));
+}
+
+// The typed compiler gives the selected kernel a hidden buffer binding for a
+// promoted global referenced anywhere in its reachable helper graph, not just
+// in its own body. Registration metadata must describe the same closure, or the
+// binding is left unpopulated and the kernel silently reads zeroed storage.
+std::string extract_reachable_bodies(std::string_view ptx,
+                                     std::string_view entry_name) {
+    std::string combined = extract_entry_body(ptx, entry_name);
+    if (combined.empty()) return combined;
+    std::vector<std::string> pending{std::string(entry_name)};
+    std::unordered_set<std::string> visited{std::string(entry_name)};
+    std::size_t scanned = 0;
+    while (scanned < pending.size()) {
+        const std::string body = scanned == 0
+                                     ? combined
+                                     : extract_callable_body(ptx, pending[scanned]);
+        ++scanned;
+        std::size_t begin = 0;
+        while (begin < body.size()) {
+            const std::size_t end = body.find(';', begin);
+            const std::string_view statement(
+                body.data() + begin,
+                (end == std::string::npos ? body.size() : end) - begin);
+            if (const std::optional<std::string> target =
+                    statement_call_target(statement);
+                target.has_value() && visited.insert(*target).second) {
+                const std::string callee_body = extract_callable_body(ptx, *target);
+                if (!callee_body.empty()) {
+                    pending.push_back(*target);
+                    combined += "\n";
+                    combined += callee_body;
+                }
+            }
+            if (end == std::string::npos) break;
+            begin = end + 1;
+        }
+    }
+    return combined;
+}
+
+}  // namespace
+
 static std::vector<ExternalConstantSymbol> find_referenced_external_symbols(
     std::string_view ptx,
     std::string_view entry_name,
     std::string_view state_space) {
     std::vector<ExternalConstantSymbol> out;
     const bool include_all = entry_name.empty();
-    const std::string body = extract_entry_body(ptx, entry_name);
+    const std::string body = extract_reachable_bodies(ptx, entry_name);
     if (!include_all && body.empty()) {
         return out;
     }

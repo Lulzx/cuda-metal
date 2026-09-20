@@ -1252,6 +1252,74 @@ $L_done:
         return 1;
     }
 
+    // A global reached only through a device helper still gets a hidden kernel
+    // binding from the typed compiler; registration metadata must describe the
+    // same reachable closure or the binding stays unpopulated.
+    const std::string helper_only_global_ptx = R"PTX(
+.version 8.0
+.target sm_80
+.visible .global .align 4 .u32 helper_state = 5;
+.visible .global .align 4 .u32 unreached_state;
+.visible .const .align 4 .u32 helper_table[4];
+.visible .func (.param .b32 rv) leaf()
+{
+    .reg .b64 %rd<2>;
+    .reg .b32 %r<3>;
+    mov.b64 %rd1, helper_state;
+    ld.global.u32 %r1, [%rd1];
+    add.u32 %r2, %r1, 7;
+    st.global.u32 [%rd1], %r2;
+    ld.const.u32 %r3, [helper_table];
+    st.param.b32 [rv], %r2;
+    ret;
+}
+.visible .func (.param .b32 rv) wrapper()
+{
+    .reg .b32 %r<2>;
+    .param .b32 slot;
+    call.uni (slot), leaf, ();
+    ld.param.b32 %r1, [slot];
+    st.param.b32 [rv], %r1;
+    ret;
+}
+.visible .func (.param .b32 rv) never_called()
+{
+    .reg .b64 %rd<2>;
+    mov.b64 %rd1, unreached_state;
+    st.param.b32 [rv], 0;
+    ret;
+}
+.visible .entry kernel_helper_only(.param .u64 output) {
+    .reg .b64 %rd<3>;
+    .reg .b32 %r<2>;
+    .param .b32 slot;
+    ld.param.u64 %rd1, [output];
+    cvta.to.global.u64 %rd2, %rd1;
+    call.uni (slot), wrapper, ();
+    ld.param.b32 %r1, [slot];
+    st.global.u32 [%rd2], %r1;
+    ret;
+}
+)PTX";
+    const auto helper_only_globals =
+        cumetal::ptx::find_referenced_external_global_symbols(
+            helper_only_global_ptx, "kernel_helper_only");
+    if (!expect(helper_only_globals.size() == 1 &&
+                    helper_only_globals.front().name == "helper_state" &&
+                    helper_only_globals.front().size_bytes == 4,
+                "external global scan follows the reachable helper graph")) {
+        return 1;
+    }
+    const auto helper_only_constants =
+        cumetal::ptx::find_referenced_external_constant_symbols(
+            helper_only_global_ptx, "kernel_helper_only");
+    if (!expect(helper_only_constants.size() == 1 &&
+                    helper_only_constants.front().name == "helper_table" &&
+                    helper_only_constants.front().size_bytes == 16,
+                "external constant scan follows the reachable helper graph")) {
+        return 1;
+    }
+
     const std::string initialized_global_ptx = R"PTX(
 .version 8.0
 .target sm_80

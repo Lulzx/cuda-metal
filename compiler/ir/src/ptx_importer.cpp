@@ -969,6 +969,9 @@ struct Importer {
     std::optional<Operand> module_constant_buffer;
     std::vector<ModuleConstantSymbol> module_global_symbols;
     std::unordered_map<std::string, Operand> module_global_values;
+    // Promoted module globals each reachable device helper needs threaded in,
+    // keyed by PTX function name and listed in module declaration order.
+    std::unordered_map<std::string, std::vector<std::string>> helper_global_uses;
     std::unordered_map<std::string, ModuleConstantSymbol>
         module_initialized_symbols;
     std::unordered_map<int, cumetal::passes::PrintfLoweredCall> printf_calls;
@@ -4879,6 +4882,22 @@ struct Importer {
                 call_parameter_slots.erase(argument_name);
                 call_parameter_slot_fields.erase(argument_name);
             }
+            // Hidden trailing arguments follow the same order the callee's
+            // definition builds them in: promoted globals first, printf last.
+            if (!builtin_call) {
+                if (const auto helper_uses = helper_global_uses.find(callee);
+                    helper_uses != helper_global_uses.end()) {
+                    for (const std::string& name : helper_uses->second) {
+                        const auto binding = module_global_values.find(name);
+                        if (binding == module_global_values.end()) {
+                            return fail(&instruction,
+                                        "missing promoted CUDA device global '" + name +
+                                            "' for PTX device helper '" + callee + "'");
+                        }
+                        operation.operands.push_back(binding->second);
+                    }
+                }
+            }
             if (!builtin_call && printf_functions.contains(callee)) {
                 if (!printf_buffer.has_value() || !printf_capacity.has_value()) {
                     return fail(&instruction,
@@ -5222,6 +5241,40 @@ struct Importer {
                     .alignment = symbol.alignment,
                     .hidden_role = hidden_role,
                 });
+            }
+        } else if (const auto helper_uses = helper_global_uses.find(entry->name);
+                   helper_uses != helper_global_uses.end()) {
+            // A device helper gets the same hidden pointers as plain trailing
+            // parameters. The kernel owns the buffer; the helper only borrows
+            // it, so nothing is added to the host-visible ABI.
+            for (const std::string& name : helper_uses->second) {
+                const auto symbol = std::find_if(
+                    module_global_symbols.begin(), module_global_symbols.end(),
+                    [&](const ModuleConstantSymbol& candidate) {
+                        return candidate.name == name;
+                    });
+                if (symbol == module_global_symbols.end()) {
+                    return fail(nullptr, "promoted CUDA device global '" + name +
+                                             "' is missing from the module layout");
+                }
+                const Type pointer_type =
+                    Type::pointer(Type::integer(8), AddressSpace::kDevice);
+                const ValueId value = builder.next_value();
+                value_types[value] = pointer_type;
+                const std::string argument_name = "__cumetal_global_" + name;
+                module_global_values.emplace(
+                    name, Operand::value_ref(value, pointer_type));
+                function.arguments.push_back({
+                    .value = value,
+                    .name = argument_name,
+                    .type = pointer_type,
+                });
+                function.pointer_provenance[value] = {
+                    .base_kind = PointerBaseKind::kAllocation,
+                    .base_name = argument_name,
+                    .known_byte_offset = 0,
+                    .alignment = symbol->alignment,
+                };
             }
         }
 
@@ -6062,6 +6115,44 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         if (referenced) importer.module_global_symbols.push_back(symbol);
     }
 
+    // A promoted module global becomes a hidden buffer argument on the kernel.
+    // A device helper referencing the same symbol has no such storage, so the
+    // raw PTX spelling would reach Metal as an undeclared identifier. Work out
+    // which reachable helpers need the buffer -- directly or through their own
+    // calls -- so the definition and every call site can thread it through.
+    // `reachable_helpers` is in call-graph post-order, so a callee's uses are
+    // already known by the time its caller is visited.
+    if (!importer.module_global_symbols.empty()) {
+        std::unordered_map<std::string, std::unordered_set<std::string>> uses;
+        for (const auto* helper : reachable_helpers) {
+            std::unordered_set<std::string>& used = uses[helper->name];
+            for (const Instruction& instruction : helper->instructions) {
+                for (const ModuleConstantSymbol& symbol : importer.module_global_symbols) {
+                    const bool references = std::any_of(
+                        instruction.operands.begin(), instruction.operands.end(),
+                        [&](const std::string& operand) {
+                            return parameter_name_from_operand(operand) == symbol.name;
+                        });
+                    if (references) used.insert(symbol.name);
+                }
+                const std::optional<std::string> target = direct_call_target(instruction);
+                if (!target.has_value() || *target == helper->name) continue;
+                const auto callee = uses.find(*target);
+                if (callee != uses.end())
+                    used.insert(callee->second.begin(), callee->second.end());
+            }
+        }
+        for (const auto* helper : reachable_helpers) {
+            std::vector<std::string> ordered;
+            for (const ModuleConstantSymbol& symbol : importer.module_global_symbols) {
+                if (uses[helper->name].contains(symbol.name))
+                    ordered.push_back(symbol.name);
+            }
+            if (!ordered.empty())
+                importer.helper_global_uses.emplace(helper->name, std::move(ordered));
+        }
+    }
+
     const auto import_function = [&](const cumetal::ptx::EntryFunction* function,
                                      bool is_kernel) -> bool {
         common::CompileTrace function_trace("ptx_import_function", 0, function->name);
@@ -6080,6 +6171,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         next.module_constant_symbols = importer.module_constant_symbols;
         next.module_constant_buffer_size = importer.module_constant_buffer_size;
         next.module_global_symbols = importer.module_global_symbols;
+        next.helper_global_uses = importer.helper_global_uses;
         next.module_initialized_symbols = importer.module_initialized_symbols;
 
         const cumetal::passes::PrintfLowerResult printf_lowered = [&] {

@@ -108,6 +108,16 @@ including predicated writes and register reuse. Stores through a helper pointer
 that resolves to constant storage are rejected; interprocedural mutation-based
 reclassification of private globals is not yet implemented.
 
+A mutable module global referenced inside a reachable device helper is threaded
+through that helper's signature as a hidden trailing pointer parameter and
+passed at every direct call from the kernel, in module declaration order. The
+raw PTX symbol spelling is never emitted into Metal. Registration metadata
+discovers `.const` and `.global` symbols over the same reachable direct-call
+closure, so the kernel's hidden binding is backed by the registered host shadow
+instead of reading zeroed storage. Helpers that do not reference a global keep
+their original signature; unreachable functions contribute nothing. Recursive
+and indirect call graphs remain refusals.
+
 PTX result types are resolved over the normalized SSA graph before materialization.
 Conversions decode their destination independently of the source, wide arithmetic
 uses its widened result, and predicate and tuple results retain per-lane contracts.
@@ -321,6 +331,12 @@ emitted. This permits a parameter load in a textually later block to serve a use
 that it dominates in the CFG. Existing SSA validation still rejects paths that
 bypass the load; this does not hoist ordinary instructions or repair undefined
 registers.
+A device helper's own `cvta.to.global` or `cvta.to.local` proves its source is
+a pointer, so a base arriving as a plain `.b64` parameter alongside a separate
+integer index is recovered rather than guessed from 64-bit width. Bounds
+branches and traps around the conversion are preserved, and conversions to a
+conflicting address space remain refusals.
+
 Single-definition, unpredicated 64-bit values loaded inside a device helper
 retain device pointer type when a later device-memory access proves that exact
 definition is an address. This covers pointer fields in compiler-generated
