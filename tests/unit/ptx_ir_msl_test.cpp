@@ -2057,6 +2057,66 @@ BODY:
                   << initialized_writable_global.source << "\n";
     }
 
+    // A loop-carried pointer whose other incoming edge is a null seed. The
+    // solver used to commit the latch join to the seed's i64 before the
+    // pointer edge was known, after which the header could never accept the
+    // pointer and the cycle deadlocked at the wrong type. Clang 21 produces
+    // exactly this for a guarded optional buffer read inside a loop.
+    const std::string null_seeded_loop_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry null_seeded_loop(.param .u64 in, .param .u64 out, .param .u32 n) {
+    .reg .b64 %rd<20>;
+    .reg .b32 %r<20>;
+    .reg .f32 %f<8>;
+    .reg .pred %p<8>;
+    ld.param.u64 %rd1, [in];
+    ld.param.u64 %rd2, [out];
+    ld.param.u32 %r1, [n];
+    cvta.to.global.u64 %rd3, %rd2;
+    setp.eq.b32 %p1, %r1, 0;
+    mov.b64 %rd19, 0;
+    mov.b64 %rd15, %rd19;
+    @%p1 bra $L__JOIN;
+    cvta.global.u64 %rd15, %rd1;
+$L__JOIN:
+    setp.eq.b64 %p2, %rd15, 0;
+    mov.u32 %r3, 0;
+    bra.uni $L__HEAD;
+$L__LATCH:
+    add.s32 %r3, %r3, 1;
+    setp.lt.s32 %p4, %r3, %r1;
+    @%p4 bra $L__HEAD;
+    bra.uni $L__DONE;
+$L__HEAD:
+    mov.f32 %f1, 0f00000000;
+    @%p2 bra $L__LATCH;
+    cvt.s64.s32 %rd16, %r3;
+    shl.b64 %rd17, %rd16, 2;
+    add.s64 %rd18, %rd15, %rd17;
+    ld.b32 %f1, [%rd18];
+    bra.uni $L__LATCH;
+$L__DONE:
+    st.global.b32 [%rd3], %f1;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult null_seeded_loop =
+        metal::compile_ptx_to_msl(null_seeded_loop_ptx);
+    const bool null_seeded_loop_valid =
+        null_seeded_loop.ok &&
+        // The loop-carried value stays a device pointer across the backedge ...
+        null_seeded_loop.source.find("device uchar* const cm_edge_") != std::string::npos &&
+        // ... and the null edge still materializes a null pointer rather than
+        // dragging the join down to an integer.
+        null_seeded_loop.source.find("= nullptr;") != std::string::npos;
+    ok &= expect(null_seeded_loop_valid,
+                 "a null-seeded loop-carried join resolves to its pointer edge");
+    if (!null_seeded_loop_valid) {
+        std::cerr << null_seeded_loop.error << "\n" << null_seeded_loop.source << "\n";
+    }
+
     // Rust-CUDA emits an `#[inline(never)]` indexed slice read as a helper
     // whose pointer base and index arrive as separate `.b64` parameters. The
     // helper's own `cvta.to.global` is the only pointer evidence, and backward

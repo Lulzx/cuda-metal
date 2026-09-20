@@ -1432,6 +1432,9 @@ struct Importer {
                 pending.push_back(user);
             }
         };
+        // Join results whose only evidence so far is a null seed. Kept out of
+        // conflict detection until a real incoming type settles them.
+        std::unordered_set<ValueId> provisional_zero_seeds;
         const auto assign = [&](ValueId value, const Type& type, bool zero = false) {
             bool changed = !value_types.contains(value) || value_types.at(value) != type;
             value_types[value] = type;
@@ -1475,9 +1478,15 @@ struct Importer {
                     if (!value_types.contains(value)) { all_known = false; all_zero = false; continue; }
                     const auto& type = value_types.at(value);
                     const bool zero = integer_zero_values.contains(value);
+                    // A join that itself only has a null seed so far carries no
+                    // real evidence yet. Treat it like the zero it came from,
+                    // or a loop deadlocks: the latch commits to the seed's i64,
+                    // and the header can then never accept the pointer edge
+                    // that would have resolved both.
+                    const bool deferred = zero || provisional_zero_seeds.contains(value);
                     all_zero &= zero;
-                    if (zero) zero_seed = type;
-                    if (!zero) {
+                    if (deferred) zero_seed = type;
+                    if (!deferred) {
                         if (!merged) merged = type;
                         else if (*merged != type) {
                             if (merged->is_pointer() && type.is_pointer() && merged->elements == type.elements &&
@@ -1507,9 +1516,18 @@ struct Importer {
                     else same_aggregate &= *aggregate == alias->second;
                 }
                 // A zero is still a typed integer seed for a loop. Its
-                // null proof does not propagate until every input proves zero.
-                if (!merged && zero_seed) merged = zero_seed;
-                if (merged) assign(join.result, *merged, all_zero && all_known);
+                // null proof does not propagate until every input proves zero,
+                // and the seeded type stays revisable until real evidence
+                // arrives on some edge.
+                bool provisional = false;
+                if (!merged && zero_seed) { merged = zero_seed; provisional = true; }
+                if (merged) {
+                    const bool was_provisional = provisional_zero_seeds.contains(join.result);
+                    if (provisional) provisional_zero_seeds.insert(join.result);
+                    else provisional_zero_seeds.erase(join.result);
+                    assign(join.result, *merged, all_zero && all_known);
+                    if (was_provisional != provisional) enqueue_users(join.result);
+                }
                 if (all_known && same_aggregate && aggregate && !aggregate_parameter_addresses.contains(join.result)) {
                     aggregate_parameter_addresses[join.result] = *aggregate;
                     enqueue_users(join.result);
@@ -1678,7 +1696,8 @@ struct Importer {
             bool has_pointer = false, has_nonzero_scalar = false;
             for (const auto value : join.inputs) {
                 if (!value_types.contains(value)) return fail(nullptr, "unresolved PTX incoming type for '" + join.name +
-                    "' in block '" + raw_blocks[join.block].name + "', value %" + std::to_string(value));
+                    "' in block '" + raw_blocks[join.block].name + "', value %" + std::to_string(value) +
+                    describe_origin(value));
                 const auto& source = value_types.at(value);
                 evidence += " %" + std::to_string(value) + "=" + source.str() + describe_origin(value);
                 has_pointer |= source.is_pointer();

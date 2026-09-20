@@ -331,6 +331,14 @@ emitted. This permits a parameter load in a textually later block to serve a use
 that it dominates in the CFG. Existing SSA validation still rejects paths that
 bypass the load; this does not hoist ordinary instructions or repair undefined
 registers.
+A join whose only evidence is a null seed keeps that type provisionally and
+stays out of conflict detection until a real incoming type settles it. Without
+that, a loop-carried pointer whose other edge is a null constant deadlocked: the
+latch committed to the seed's integer type before the pointer edge was known,
+after which the header could never accept the pointer. The null proof still does
+not propagate until every input proves zero, and a genuine non-zero integer
+joined with a pointer remains a refusal once the provisional type resolves.
+
 A device helper's own `cvta.to.global` or `cvta.to.local` proves its source is
 a pointer, so a base arriving as a plain `.b64` parameter alongside a separate
 integer index is recovered rather than guessed from 64-bit width. Bounds
