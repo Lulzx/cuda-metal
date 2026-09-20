@@ -832,6 +832,18 @@ CUresult cuOccupancyMaxPotentialBlockSize(int* minGridSize,
                                           CUfunction func,
                                           size_t dynamicSMemSize,
                                           int blockSizeLimit);
+// Explicit function preparation. cuModuleGetFunction resolves a handle
+// lazily, so a successful lookup does not prove the kernel compiled; these let
+// a caller draw that boundary itself and report a compilation failure before
+// interpreting any later result. See docs/known-gaps/runtime.md.
+typedef enum CUfunctionLoadingState {
+    CU_FUNCTION_LOADING_STATE_UNLOADED = 0,
+    CU_FUNCTION_LOADING_STATE_LOADED = 1,
+    CU_FUNCTION_LOADING_STATE_MAX = 2,
+} CUfunctionLoadingState;
+
+CUresult cuFuncLoad(CUfunction function);
+CUresult cuFuncIsLoaded(CUfunctionLoadingState* state, CUfunction function);
 CUresult cuFuncGetAttribute(int* pi, CUfunc_attribute attrib, CUfunction hfunc);
 CUresult cuFuncSetCacheConfig(CUfunction hfunc, CUfunc_cache config);
 CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunc_attribute attrib, int value);

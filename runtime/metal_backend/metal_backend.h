@@ -88,6 +88,19 @@ cudaError_t query_kernel_properties(const std::string& metallib_path,
                                     const std::string& kernel_name,
                                     KernelProperties* out_properties,
                                     std::string* error_message);
+// Compiles/loads the library, resolves the entry and creates its pipeline
+// without dispatching anything. Idempotent: a prepared kernel returns
+// immediately, whichever path prepared it.
+cudaError_t prepare_kernel_pipeline(const std::string& metallib_path,
+                                    const std::string& kernel_name,
+                                    std::string* error_message);
+// Query-only readiness for an already-prepared pipeline. Deliberately does not
+// take the backend mutex: that mutex is held across Apple's compiler, so a
+// query that waited on it would block behind the very compilation it exists to
+// observe. Reports preparation done through any path, including launches and
+// attribute queries.
+bool kernel_pipeline_is_ready(const std::string& metallib_path,
+                              const std::string& kernel_name);
 cudaError_t allocate_buffer(std::size_t size,
                             std::shared_ptr<Buffer>* out_buffer,
                             std::string* error_message);

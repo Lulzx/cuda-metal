@@ -46,6 +46,8 @@ typedef CUresult (CUDAAPI *PFN_cuEventRecord_v2000)(CUevent hEvent, CUstream hSt
 typedef CUresult (CUDAAPI *PFN_cuEventRecordWithFlags_v11010)(CUevent hEvent, CUstream hStream, unsigned int flags);
 typedef CUresult (CUDAAPI *PFN_cuEventSynchronize_v2000)(CUevent hEvent);
 typedef CUresult (CUDAAPI *PFN_cuFuncSetAttribute_v9000)(CUfunction hfunc, CUfunc_attribute attrib, int value);
+typedef CUresult (CUDAAPI *PFN_cuFuncLoad_v12000)(CUfunction function);
+typedef CUresult (CUDAAPI *PFN_cuFuncIsLoaded_v12000)(CUfunctionLoadingState* state, CUfunction function);
 typedef CUresult (CUDAAPI *PFN_cuGetErrorName_v6000)(CUresult error, const char** pStr);
 typedef CUresult (CUDAAPI *PFN_cuGetErrorString_v6000)(CUresult error, const char** pStr);
 typedef CUresult (CUDAAPI *PFN_cuGetProcAddress_v12000)(const char* symbol, void** pfn, int cudaVersion, uint64_t flags, CUdriverProcAddressQueryResult* symbolStatus);
@@ -144,6 +146,8 @@ typedef CUresult (CUDAAPI *PFN_cuTexObjectDestroy_v5000)(CUtexObject texObject);
 #define PFN_cuEventRecordWithFlags  PFN_cuEventRecordWithFlags_v11010
 #define PFN_cuEventSynchronize  PFN_cuEventSynchronize_v2000
 #define PFN_cuFuncSetAttribute  PFN_cuFuncSetAttribute_v9000
+#define PFN_cuFuncLoad          PFN_cuFuncLoad_v12000
+#define PFN_cuFuncIsLoaded      PFN_cuFuncIsLoaded_v12000
 #define PFN_cuGetErrorName  PFN_cuGetErrorName_v6000
 #define PFN_cuGetErrorString  PFN_cuGetErrorString_v6000
 #define PFN_cuGetProcAddress  PFN_cuGetProcAddress_v12000

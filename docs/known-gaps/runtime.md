@@ -20,6 +20,32 @@
   quantum. They preserve wait-loop progress and unsigned wraparound behavior,
   but values are not GPU cycles and cannot be used for cycle-accurate timing.
 
+## Function preparation
+
+`cuFuncLoad` prepares a function through the same path launches and attribute
+queries use: it compiles or loads the library, resolves the entry, creates the
+pipeline and runs the existing reflection checks, without dispatching. It is
+idempotent, and concurrent preparation of one kernel coalesces on the backend
+mutex rather than compiling twice.
+
+`cuFuncIsLoaded` is query-only. It never starts a compilation, and it does not
+take the backend mutex -- that mutex is held across Apple's compiler, so a
+query that waited on it would block behind the compilation it exists to
+observe. It reports preparation performed through any path.
+
+Two boundaries worth stating. Readiness is a property of a live function in the
+current context: an unloaded module destroys its functions, so a stale handle
+returns `CUDA_ERROR_INVALID_HANDLE` rather than reporting loaded because the
+process-wide pipeline cache still holds the same path and name. But a *new*
+handle to the same metallib does report loaded without being prepared again,
+because the artifact is immutable and the pipeline genuinely is ready for it.
+
+There is no public "preparing" or "failed" state: CUDA defines only unloaded
+and loaded, and CuMetal does not invent more. A preparation failure is reported
+by `cuFuncLoad`'s return code, with the failing stage -- library compilation,
+entry lookup or pipeline creation -- carried in a one-time `CUMETAL WARNING`
+rather than collapsed into a bare `CUDA_ERROR_INVALID_VALUE`.
+
 ## Graphs and allocators
 
 Tested graph capture/replay includes an event-linked two-stream dependency with

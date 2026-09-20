@@ -684,6 +684,12 @@ struct BackendState {
     std::unordered_map<std::string, std::string> library_lowering_source;
     std::unordered_map<std::string, std::string> library_math_mode;
     std::unordered_map<std::string, id<MTLComputePipelineState>> pipeline_cache;
+    // Readiness, published under its own short-lived lock. `mutex` is held
+    // across Apple's compiler for the duration of a pipeline build, so a
+    // readiness query taking it would wait on the compilation it is meant to
+    // observe. Written only after every preparation stage has succeeded.
+    std::mutex ready_mutex;
+    std::unordered_set<std::string> ready_pipelines;
     // Which pipelines declare the 64-bit atomic lock bank, and the one bank
     // they all share. Read off the compiled function's own bindings rather than
     // carried alongside it: the metallib is the only thing that knows for
@@ -1299,6 +1305,10 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
         backend.pipeline_uses_grid_barrier[cache_key] = uses_grid_barrier;
         backend.pipeline_uses_grid_y_offset[cache_key] = uses_grid_y_offset;
         backend.pipeline_cache.emplace(cache_key, pipeline);
+        {
+            std::lock_guard<std::mutex> ready_lock(backend.ready_mutex);
+            backend.ready_pipelines.insert(cache_key);
+        }
         return pipeline;
     }
 }
@@ -1710,6 +1720,42 @@ cudaError_t query_device_properties(DeviceProperties* out_properties, std::strin
 
     *out_properties = std::move(props);
     return cudaSuccess;
+}
+
+cudaError_t prepare_kernel_pipeline(const std::string& metallib_path,
+                                    const std::string& kernel_name,
+                                    std::string* error_message) {
+    if (metallib_path.empty() || kernel_name.empty()) {
+        if (error_message != nullptr) {
+            *error_message = "prepare_kernel_pipeline invalid argument";
+        }
+        return cudaErrorInvalidValue;
+    }
+    if (kernel_pipeline_is_ready(metallib_path, kernel_name)) {
+        return cudaSuccess;
+    }
+    if (!ensure_initialized(error_message)) {
+        return cudaErrorInitializationError;
+    }
+    BackendState& backend = state();
+    std::lock_guard<std::mutex> lock(backend.mutex);
+    // Concurrent preparation of one kernel coalesces here: the loser of the
+    // race takes the cache hit inside load_pipeline_locked rather than
+    // compiling a second time.
+    if (load_pipeline_locked(backend, metallib_path, kernel_name, error_message) == nil) {
+        return cudaErrorInvalidValue;
+    }
+    return cudaSuccess;
+}
+
+bool kernel_pipeline_is_ready(const std::string& metallib_path,
+                              const std::string& kernel_name) {
+    if (metallib_path.empty() || kernel_name.empty()) {
+        return false;
+    }
+    BackendState& backend = state();
+    std::lock_guard<std::mutex> lock(backend.ready_mutex);
+    return backend.ready_pipelines.contains(metallib_path + "::" + kernel_name);
 }
 
 cudaError_t query_kernel_properties(const std::string& metallib_path,

@@ -2962,6 +2962,61 @@ CUresult cuOccupancyMaxPotentialBlockSize(int* minGridSize,
     return CUDA_SUCCESS;
 }
 
+CUresult cuFuncLoad(CUfunction function) {
+    std::string metallib_path;
+    std::string kernel_name;
+    {
+        DriverState& state = driver_state();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!state.initialized) return CUDA_ERROR_NOT_INITIALIZED;
+        if (!has_current_context_locked(state)) return CUDA_ERROR_INVALID_CONTEXT;
+        if (!is_valid_function_locked(state, function) || function->module == nullptr)
+            return CUDA_ERROR_INVALID_HANDLE;
+        metallib_path = function->module->metallib_path;
+        kernel_name = function->kernel_name;
+    }
+    // The driver mutex is released before preparation: Apple's compiler runs
+    // inside this call, and holding the driver lock across it would stall every
+    // other driver entry point, cuFuncIsLoaded included.
+    std::string error;
+    const cudaError_t prepared = cumetal::metal_backend::prepare_kernel_pipeline(
+        metallib_path, kernel_name, &error);
+    if (prepared != cudaSuccess && !error.empty()) {
+        // Preserve which stage failed. Collapsing library compilation, entry
+        // lookup and pipeline creation into a bare CUDA_ERROR_INVALID_VALUE is
+        // what made a failed launch look like an argument-binding problem.
+        cumetal::warn_once("cuFuncLoad:" + metallib_path + "::" + kernel_name,
+                           "cuFuncLoad failed to prepare '" + kernel_name + "': " + error);
+    }
+    return map_cuda_error(prepared);
+}
+
+CUresult cuFuncIsLoaded(CUfunctionLoadingState* state_out, CUfunction function) {
+    if (state_out == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    std::string metallib_path;
+    std::string kernel_name;
+    {
+        DriverState& state = driver_state();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!state.initialized) return CUDA_ERROR_NOT_INITIALIZED;
+        if (!has_current_context_locked(state)) return CUDA_ERROR_INVALID_CONTEXT;
+        // Readiness is a property of a live function in the current context,
+        // not of the process-wide pipeline cache. An unloaded module destroys
+        // its functions, so a stale handle fails here rather than reporting
+        // loaded because the same path and name are still cached.
+        if (!is_valid_function_locked(state, function) || function->module == nullptr)
+            return CUDA_ERROR_INVALID_HANDLE;
+        metallib_path = function->module->metallib_path;
+        kernel_name = function->kernel_name;
+    }
+    // Query only: this must not start a compilation, so it asks the backend
+    // whether one already finished rather than routing through preparation.
+    *state_out = cumetal::metal_backend::kernel_pipeline_is_ready(metallib_path, kernel_name)
+                     ? CU_FUNCTION_LOADING_STATE_LOADED
+                     : CU_FUNCTION_LOADING_STATE_UNLOADED;
+    return CUDA_SUCCESS;
+}
+
 CUresult cuFuncGetAttribute(int* pi, CUfunc_attribute attrib, CUfunction hfunc) {
     if (pi == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
