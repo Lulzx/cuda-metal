@@ -48,6 +48,16 @@ cumetal_cuda_device_flags() {
         # idiom; deterministic device-only initialization gives Clang the same
         # observable behavior without changing ordinary host compilation.
         -Xarch_device -ftrivial-auto-var-init=zero
+        # NVCC does not apply type-based alias analysis to device code, and a
+        # large amount of real CUDA relies on that: reinterpreting a struct as
+        # an array of 32-bit words to shuffle it a word at a time is the
+        # standard way to warp-reduce a tuple, and it is what AMReX, CUB and
+        # Thrust all do. It is formally UB, so Clang's TBAA is free to conclude
+        # the punned stores cannot alias the struct and drop them -- silently,
+        # and only at -O2 and above. AMReX's every GPU min/max reduction
+        # returned zero because of it. Device-only: nvcc leaves the host
+        # compiler's own aliasing rules alone, and so does this.
+        -Xarch_device -fno-strict-aliasing
     )
     local ptx_flags
     ptx_flags="$(cumetal_cuda_ptx_feature_flags "${arch}")"

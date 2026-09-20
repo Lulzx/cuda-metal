@@ -6135,6 +6135,99 @@ class GenericLlvmEmitter {
             return store_ret_bits(hi, 32);
         }
 
+        // Signed 32x32 -> high 32. The unsigned sibling above widens with zext;
+        // the only difference here is sign extension and an arithmetic shift.
+        if (callee == "__nv_mulhi") {
+            if (arg_names.size() < 2) return fail(instr, "__nv_mulhi expects 2 args");
+            auto a = load_call_slot_value(os, arg_names[0], 32);
+            auto b = load_call_slot_value(os, arg_names[1], 32);
+            if (!a || !b) return fail(instr, "__nv_mulhi args missing call slots");
+            const std::string a64 = next_tmp("mulhi_a");
+            const std::string b64 = next_tmp("mulhi_b");
+            os << "  " << a64 << " = sext i32 " << *a << " to i64\n";
+            os << "  " << b64 << " = sext i32 " << *b << " to i64\n";
+            const std::string prod = next_tmp("mulhi_mul");
+            os << "  " << prod << " = mul i64 " << a64 << ", " << b64 << "\n";
+            const std::string shr = next_tmp("mulhi_shr");
+            os << "  " << shr << " = ashr i64 " << prod << ", 32\n";
+            const std::string hi = next_tmp("mulhi_hi");
+            os << "  " << hi << " = trunc i64 " << shr << " to i32\n";
+            return store_ret_bits(hi, 32);
+        }
+
+        // 64x64 -> high 64. Computed from 32-bit limbs rather than by widening
+        // to i128: Metal has no 128-bit integer type, so an i128 multiply would
+        // have to survive legalization all the way through the AIR backend.
+        // This is the same limb decomposition a compiler-rt __umulti3 uses.
+        //
+        // These two are not exotic. AMReX's FastDivmodU64 -- the
+        // multiply-and-shift that replaces the 64-bit division in every 3D
+        // ParallelFor's index decomposition -- is built on __umul64hi, so this
+        // is on the hot path of every AMReX GPU kernel.
+        if (callee == "__nv_umul64hi" || callee == "__nv_mul64hi") {
+            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
+            auto a = load_call_slot_value(os, arg_names[0], 64);
+            auto b = load_call_slot_value(os, arg_names[1], 64);
+            if (!a || !b) return fail(instr, callee + " args missing call slots");
+
+            const std::string alo = next_tmp("mul64hi_alo");
+            const std::string ahi = next_tmp("mul64hi_ahi");
+            const std::string blo = next_tmp("mul64hi_blo");
+            const std::string bhi = next_tmp("mul64hi_bhi");
+            os << "  " << alo << " = and i64 " << *a << ", 4294967295\n";
+            os << "  " << ahi << " = lshr i64 " << *a << ", 32\n";
+            os << "  " << blo << " = and i64 " << *b << ", 4294967295\n";
+            os << "  " << bhi << " = lshr i64 " << *b << ", 32\n";
+
+            const std::string t0 = next_tmp("mul64hi_t0");        // alo*blo
+            const std::string t0hi = next_tmp("mul64hi_t0hi");
+            os << "  " << t0 << " = mul i64 " << alo << ", " << blo << "\n";
+            os << "  " << t0hi << " = lshr i64 " << t0 << ", 32\n";
+
+            const std::string m1 = next_tmp("mul64hi_m1");        // ahi*blo + carry
+            const std::string t1 = next_tmp("mul64hi_t1");
+            os << "  " << m1 << " = mul i64 " << ahi << ", " << blo << "\n";
+            os << "  " << t1 << " = add i64 " << m1 << ", " << t0hi << "\n";
+            const std::string t1lo = next_tmp("mul64hi_t1lo");
+            const std::string t1hi = next_tmp("mul64hi_t1hi");
+            os << "  " << t1lo << " = and i64 " << t1 << ", 4294967295\n";
+            os << "  " << t1hi << " = lshr i64 " << t1 << ", 32\n";
+
+            const std::string m2 = next_tmp("mul64hi_m2");        // alo*bhi + t1lo
+            const std::string t2 = next_tmp("mul64hi_t2");
+            const std::string t2hi = next_tmp("mul64hi_t2hi");
+            os << "  " << m2 << " = mul i64 " << alo << ", " << bhi << "\n";
+            os << "  " << t2 << " = add i64 " << m2 << ", " << t1lo << "\n";
+            os << "  " << t2hi << " = lshr i64 " << t2 << ", 32\n";
+
+            const std::string m3 = next_tmp("mul64hi_m3");        // ahi*bhi
+            const std::string s1 = next_tmp("mul64hi_s1");
+            std::string hi = next_tmp("mul64hi_hi");
+            os << "  " << m3 << " = mul i64 " << ahi << ", " << bhi << "\n";
+            os << "  " << s1 << " = add i64 " << m3 << ", " << t1hi << "\n";
+            os << "  " << hi << " = add i64 " << s1 << ", " << t2hi << "\n";
+
+            if (callee == "__nv_mul64hi") {
+                // Signed result from the unsigned one: subtract b from the high
+                // word when a is negative and a when b is negative. The mask is
+                // the arithmetic shift of the sign bit, so this stays branchless.
+                const std::string amask = next_tmp("mul64hi_amask");
+                const std::string bmask = next_tmp("mul64hi_bmask");
+                const std::string cb = next_tmp("mul64hi_cb");
+                const std::string ca = next_tmp("mul64hi_ca");
+                const std::string adj1 = next_tmp("mul64hi_adj1");
+                const std::string signed_hi = next_tmp("mul64hi_signed");
+                os << "  " << amask << " = ashr i64 " << *a << ", 63\n";
+                os << "  " << bmask << " = ashr i64 " << *b << ", 63\n";
+                os << "  " << cb << " = and i64 " << amask << ", " << *b << "\n";
+                os << "  " << ca << " = and i64 " << bmask << ", " << *a << "\n";
+                os << "  " << adj1 << " = sub i64 " << hi << ", " << cb << "\n";
+                os << "  " << signed_hi << " = sub i64 " << adj1 << ", " << ca << "\n";
+                hi = signed_hi;
+            }
+            return store_ret_bits(hi, 64);
+        }
+
         if (callee == "__nv_mul24" || callee == "__nv_umul24") {
             if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
             auto a = load_call_slot_value(os, arg_names[0], 32);
@@ -6247,6 +6340,23 @@ class GenericLlvmEmitter {
             const std::string out = next_tmp("fabs_bits");
             os << "  " << out << " = and i64 " << *bits
                << ", 9223372036854775807\n";
+            return store_ret_bits(out, 64);
+        }
+
+        // copysign on the binary64 storage word. Like __nv_fabs above, this is
+        // pure bit manipulation of the sign bit, so it is exact in every FP64
+        // mode -- the FP32-pair emulation never has to represent the value.
+        if (callee == "__nv_copysign") {
+            if (arg_names.size() < 2) return fail(instr, "__nv_copysign expects 2 args");
+            auto mag = load_call_slot_value(os, arg_names[0], 64);
+            auto sgn = load_call_slot_value(os, arg_names[1], 64);
+            if (!mag || !sgn) return fail(instr, "__nv_copysign args missing call slots");
+            const std::string mag_abs = next_tmp("copysign_mag");
+            const std::string sign_bit = next_tmp("copysign_sign");
+            const std::string out = next_tmp("copysign_bits");
+            os << "  " << mag_abs << " = and i64 " << *mag << ", 9223372036854775807\n";
+            os << "  " << sign_bit << " = and i64 " << *sgn << ", -9223372036854775808\n";
+            os << "  " << out << " = or i64 " << mag_abs << ", " << sign_bit << "\n";
             return store_ret_bits(out, 64);
         }
 

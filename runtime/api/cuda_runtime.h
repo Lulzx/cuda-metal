@@ -1827,6 +1827,21 @@ static inline CUMETAL_SYMBOL_BY_REF(T) cudaGetSymbolAddress(void** devPtr, const
 
 #if defined(__cplusplus) && defined(__clang__) && defined(__CUDA__)
 
+// nvcc's `--extended-lambda` mode gives __device__ lambdas a distinct closure
+// type that cannot be invoked on the host, and exposes this compiler builtin so
+// libraries can detect one. CuMetal compiles device code with Clang, whose
+// __device__ lambdas are ordinary closure types, so the answer is `false` for
+// every type. It must still be spelled as an expression that depends on T:
+// AMReX feeds it to `std::enable_if_t` in a partial specialization, and a
+// non-dependent `false` there is a hard error rather than a substitution
+// failure. CuMetal defines __NVCC__ for source compatibility, which is what
+// leads a library here at all: AMReX gates MaybeHostDeviceRunnable on
+// `defined(AMREX_USE_CUDA) && defined(__NVCC__)` and would otherwise fail to
+// compile on an undeclared identifier rather than on anything semantic.
+#if !defined(__nv_is_extended_device_lambda_closure_type)
+#define __nv_is_extended_device_lambda_closure_type(T) (sizeof(T) == 0)
+#endif
+
 // Every SDK header device-visible code commonly pulls in is included here,
 // ahead of anything a --device-as-default-execution-space region could cover.
 // Their declarations therefore keep their host execution space, and a later
@@ -1994,6 +2009,193 @@ static __host__ __device__ __forceinline__ double min(float a, double b) {
 static __host__ __device__ __forceinline__ double min(double a, float b) {
     return __builtin_fmin(a, (double) b);
 }
+
+// ── C++ math overlay: binary32 overloads, promotions, and the `std::` names ──
+//
+// Clang's standalone CUDA math header declares the C surface -- `double log(double)`
+// and `float logf(float)` -- in the global namespace only. Three things portable
+// CUDA C++ depends on are missing, and NVIDIA's own C++ overlay supplies all of
+// them:
+//
+//   1. Unsuffixed binary32 overloads. Without `float log(float)`, an unqualified
+//      `log(x)` on a float promotes to binary64 -- which Metal has no hardware
+//      for, so a hot kernel silently runs through software FP64 and rounds the
+//      result through a wider type.
+//   2. C++'s usual arithmetic promotions for <cmath>: if every argument is float
+//      the result is float, and otherwise -- including any integral argument --
+//      everything promotes to double. Without these, `std::pow(2, n)` is not
+//      merely unpromoted, it is ambiguous between the float and double
+//      overloads and fails to compile.
+//   3. The `std::` names. libc++ only ever nominated the __host__ declarations,
+//      so `std::sqrt(x)` inside a __device__ function fails to compile outright.
+//      Frameworks that write one source for host and device -- AMReX's
+//      ParallelFor bodies are `std::`-qualified throughout -- cannot compile at
+//      all without this.
+//
+// sqrt, fabs, abs, fma, rsqrt, min and max already have their binary32 overloads
+// above; they pick up promotions and the `std` re-export here.
+
+template <class T>
+using __cumetal_math_if_integral = ::std::enable_if_t<::std::is_integral<T>::value>;
+
+// Everything except (float, float) and (double, double), which already have an
+// exact overload. Pairs containing an integral type land here too.
+template <class T, class U>
+using __cumetal_math_if_promote2 = ::std::enable_if_t<
+    ::std::is_arithmetic<T>::value && ::std::is_arithmetic<U>::value &&
+    !(::std::is_same<T, float>::value && ::std::is_same<U, float>::value) &&
+    !(::std::is_same<T, double>::value && ::std::is_same<U, double>::value)>;
+
+#define CUMETAL_DEVICE_MATH_PROMOTE1(name)                                     \
+    template <class T, class = __cumetal_math_if_integral<T>>                  \
+    static __device__ __forceinline__ double name(T x) {                       \
+        return name(static_cast<double>(x));                                   \
+    }
+
+#define CUMETAL_DEVICE_MATH_F1(name)                                           \
+    static __device__ __forceinline__ float name(float x) { return name##f(x); } \
+    CUMETAL_DEVICE_MATH_PROMOTE1(name)
+
+#define CUMETAL_DEVICE_MATH_F2(name)                                           \
+    static __device__ __forceinline__ float name(float x, float y) {           \
+        return name##f(x, y);                                                  \
+    }                                                                          \
+    template <class T, class U, class = __cumetal_math_if_promote2<T, U>>      \
+    static __device__ __forceinline__ double name(T x, U y) {                  \
+        return name(static_cast<double>(x), static_cast<double>(y));           \
+    }
+
+CUMETAL_DEVICE_MATH_F1(acos)
+CUMETAL_DEVICE_MATH_F1(acosh)
+CUMETAL_DEVICE_MATH_F1(asin)
+CUMETAL_DEVICE_MATH_F1(asinh)
+CUMETAL_DEVICE_MATH_F1(atan)
+CUMETAL_DEVICE_MATH_F1(atanh)
+CUMETAL_DEVICE_MATH_F1(cbrt)
+CUMETAL_DEVICE_MATH_F1(ceil)
+CUMETAL_DEVICE_MATH_F1(cos)
+CUMETAL_DEVICE_MATH_F1(cosh)
+CUMETAL_DEVICE_MATH_F1(erf)
+CUMETAL_DEVICE_MATH_F1(erfc)
+CUMETAL_DEVICE_MATH_F1(exp)
+CUMETAL_DEVICE_MATH_F1(exp10)
+CUMETAL_DEVICE_MATH_F1(exp2)
+CUMETAL_DEVICE_MATH_F1(expm1)
+CUMETAL_DEVICE_MATH_F1(floor)
+CUMETAL_DEVICE_MATH_F1(lgamma)
+CUMETAL_DEVICE_MATH_F1(log)
+CUMETAL_DEVICE_MATH_F1(log10)
+CUMETAL_DEVICE_MATH_F1(log1p)
+CUMETAL_DEVICE_MATH_F1(log2)
+CUMETAL_DEVICE_MATH_F1(logb)
+CUMETAL_DEVICE_MATH_F1(nearbyint)
+CUMETAL_DEVICE_MATH_F1(rint)
+CUMETAL_DEVICE_MATH_F1(round)
+CUMETAL_DEVICE_MATH_F1(sin)
+CUMETAL_DEVICE_MATH_F1(sinh)
+CUMETAL_DEVICE_MATH_F1(tan)
+CUMETAL_DEVICE_MATH_F1(tanh)
+CUMETAL_DEVICE_MATH_F1(tgamma)
+CUMETAL_DEVICE_MATH_F1(trunc)
+
+CUMETAL_DEVICE_MATH_F2(atan2)
+CUMETAL_DEVICE_MATH_F2(copysign)
+CUMETAL_DEVICE_MATH_F2(fdim)
+CUMETAL_DEVICE_MATH_F2(fmax)
+CUMETAL_DEVICE_MATH_F2(fmin)
+CUMETAL_DEVICE_MATH_F2(fmod)
+CUMETAL_DEVICE_MATH_F2(hypot)
+CUMETAL_DEVICE_MATH_F2(nextafter)
+CUMETAL_DEVICE_MATH_F2(pow)
+CUMETAL_DEVICE_MATH_F2(remainder)
+
+CUMETAL_DEVICE_MATH_PROMOTE1(fabs)
+CUMETAL_DEVICE_MATH_PROMOTE1(sqrt)
+
+#undef CUMETAL_DEVICE_MATH_F1
+#undef CUMETAL_DEVICE_MATH_F2
+#undef CUMETAL_DEVICE_MATH_PROMOTE1
+
+// Clang declares abs(int), labs(long) and llabs(long long); CuMetal adds the
+// two floating-point overloads above. `abs` on a long is then ambiguous between
+// the int and the floating overloads rather than picking labs.
+static __device__ __forceinline__ long abs(long x) { return labs(x); }
+static __device__ __forceinline__ long long abs(long long x) { return llabs(x); }
+
+static __device__ __forceinline__ float ldexp(float x, int e) { return ldexpf(x, e); }
+static __device__ __forceinline__ float scalbn(float x, int e) { return scalbnf(x, e); }
+static __device__ __forceinline__ float scalbln(float x, long e) { return scalblnf(x, e); }
+static __device__ __forceinline__ float frexp(float x, int* e) { return frexpf(x, e); }
+static __device__ __forceinline__ float modf(float x, float* i) { return modff(x, i); }
+static __device__ __forceinline__ float remquo(float x, float y, int* q) { return remquof(x, y, q); }
+static __device__ __forceinline__ int ilogb(float x) { return ilogbf(x); }
+static __device__ __forceinline__ long lrint(float x) { return lrintf(x); }
+static __device__ __forceinline__ long lround(float x) { return lroundf(x); }
+static __device__ __forceinline__ long long llrint(float x) { return llrintf(x); }
+static __device__ __forceinline__ long long llround(float x) { return llroundf(x); }
+
+// Re-export into `std`. These name the entities libc++ already nominated plus
+// the __device__ overloads above; CUDA treats a __host__ and a __device__
+// declaration of one signature as distinct functions, so both survive and
+// ordinary host compilation is unaffected.
+namespace std {
+using ::abs;
+using ::acos;
+using ::acosh;
+using ::asin;
+using ::asinh;
+using ::atan;
+using ::atan2;
+using ::atanh;
+using ::cbrt;
+using ::ceil;
+using ::copysign;
+using ::cos;
+using ::cosh;
+using ::erf;
+using ::erfc;
+using ::exp;
+using ::exp2;
+using ::expm1;
+using ::fabs;
+using ::fdim;
+using ::floor;
+using ::fma;
+using ::fmax;
+using ::fmin;
+using ::fmod;
+using ::frexp;
+using ::hypot;
+using ::ilogb;
+using ::ldexp;
+using ::lgamma;
+using ::llrint;
+using ::llround;
+using ::log;
+using ::log10;
+using ::log1p;
+using ::log2;
+using ::logb;
+using ::lrint;
+using ::lround;
+using ::modf;
+using ::nearbyint;
+using ::nextafter;
+using ::pow;
+using ::remainder;
+using ::remquo;
+using ::rint;
+using ::round;
+using ::scalbln;
+using ::scalbn;
+using ::sin;
+using ::sinh;
+using ::sqrt;
+using ::tan;
+using ::tanh;
+using ::tgamma;
+using ::trunc;
+}  // namespace std
 
 template <typename T>
 static __device__ __forceinline__ T __ldcs(const T* ptr) {
@@ -2539,6 +2741,40 @@ static __device__ __forceinline__ double __shfl_xor_sync(
     return out;
 }
 
+// `long` overloads. CUDA's headers declare the shuffle family for long as well
+// as long long, and on LP64 -- every Apple target -- those are distinct types of
+// the same width. Without these, a shuffle of a `long` is ambiguous between the
+// int and the long long overloads rather than narrowing or widening; AMReX's
+// warpReduce over a `long` counter hits exactly that.
+static __device__ __forceinline__ long __shfl_sync(unsigned int mask, long val, int srcLane, int width = 32) {
+    return static_cast<long>(__shfl_sync(mask, static_cast<long long>(val), srcLane, width));
+}
+static __device__ __forceinline__ unsigned long __shfl_sync(unsigned int mask, unsigned long val, int srcLane, int width = 32) {
+    return static_cast<unsigned long>(
+        __shfl_sync(mask, static_cast<unsigned long long>(val), srcLane, width));
+}
+static __device__ __forceinline__ long __shfl_down_sync(unsigned int mask, long val, unsigned int delta, int width = 32) {
+    return static_cast<long>(__shfl_down_sync(mask, static_cast<long long>(val), delta, width));
+}
+static __device__ __forceinline__ unsigned long __shfl_down_sync(unsigned int mask, unsigned long val, unsigned int delta, int width = 32) {
+    return static_cast<unsigned long>(
+        __shfl_down_sync(mask, static_cast<unsigned long long>(val), delta, width));
+}
+static __device__ __forceinline__ long __shfl_up_sync(unsigned int mask, long val, unsigned int delta, int width = 32) {
+    return static_cast<long>(__shfl_up_sync(mask, static_cast<long long>(val), delta, width));
+}
+static __device__ __forceinline__ unsigned long __shfl_up_sync(unsigned int mask, unsigned long val, unsigned int delta, int width = 32) {
+    return static_cast<unsigned long>(
+        __shfl_up_sync(mask, static_cast<unsigned long long>(val), delta, width));
+}
+static __device__ __forceinline__ long __shfl_xor_sync(unsigned int mask, long val, int laneMask, int width = 32) {
+    return static_cast<long>(__shfl_xor_sync(mask, static_cast<long long>(val), laneMask, width));
+}
+static __device__ __forceinline__ unsigned long __shfl_xor_sync(unsigned int mask, unsigned long val, int laneMask, int width = 32) {
+    return static_cast<unsigned long>(
+        __shfl_xor_sync(mask, static_cast<unsigned long long>(val), laneMask, width));
+}
+
 // Warp vote intrinsics (spec §5.3).
 static __device__ __forceinline__ int __any_sync(unsigned int mask, int predicate) {
     return __nvvm_vote_any_sync(mask, predicate);
@@ -2750,6 +2986,15 @@ static __device__ __forceinline__ double __cumetal_nan(const char*) {
 }
 #define nan __cumetal_nan
 #endif
+
+// sm_70's `nanosleep.u32`: a backoff hint used inside device-side spin loops
+// (AMReX's FillBoundary lock loop is one). Metal exposes no sleep or yield
+// instruction, so the delay itself cannot be honoured. The empty asm still
+// carries its weight: it is an optimization barrier, so the spin loop around
+// the call keeps its iterations instead of being collapsed or hoisted.
+static __device__ __forceinline__ void __nanosleep(unsigned int) {
+    __asm__ __volatile__("" ::: "memory");
+}
 
 // Integer dot-product intrinsic (4x int8 -> int32 accumulate). Clang's CUDA
 // headers may not provide __dp4a in CUDA mode without NVIDIA headers.

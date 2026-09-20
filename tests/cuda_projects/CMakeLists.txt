@@ -402,6 +402,29 @@ cumetal_add_cuda_project_test(
     async_memcpy async_memcpy_hazard.cu async_memcpy_hazard
 )
 
+# Device-code idioms AMReX's CUDA backend depends on, each pinned against a host
+# reference computed in the same process. Every one of these failed silently --
+# with a wrong number, not an error -- when AMReX was first built against
+# CuMetal; see demos/amrex/README.md.
+add_test(
+    NAME functional_cuda_projects_amrex_device_idioms
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        amrex_device_idioms
+        amrex_device_idioms.cu
+        amrex_device_idioms
+        "PASS: AMReX device idioms match host references on Apple GPU"
+)
+set_tests_properties(
+    functional_cuda_projects_amrex_device_idioms
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
 # Measures every mapped libdevice math function against the host libm. Strict:
 # a mis-mapped builtin computes the wrong function silently, and a newly
 # unsupported one means a lowering regression.

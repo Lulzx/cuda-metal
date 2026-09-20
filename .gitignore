@@ -22,6 +22,8 @@ demos/diffusion/out/
 demos/highs/out/
 # GROMACS demo artifacts (fetched benchmark inputs, .tpr, per-run logs)
 demos/gromacs/out/
+# AMReX demo artifacts (build logs, generated inputs, plotfiles, fcompare output)
+demos/amrex/out/
 __pycache__/
 demos/highs/lpfeas/lps/
 demos/highs/lpfeas/results/

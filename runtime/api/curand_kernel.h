@@ -35,6 +35,11 @@ struct curandStateXORWOW {
     uint32_t v[5];
     int boxmuller_flag;
     float boxmuller_extra;
+    // Box-Muller produces a pair; the binary64 generators cache their spare in
+    // its own slot so a mixed float/double call sequence cannot hand back a
+    // narrowed value from the other precision's cache.
+    int boxmuller_flag_double;
+    double boxmuller_extra_double;
 };
 
 typedef curandStateXORWOW curandState_t;
@@ -48,6 +53,8 @@ struct curandStatePhilox4_32_10 {
     int STATE;
     int boxmuller_flag;
     float boxmuller_extra;
+    int boxmuller_flag_double;
+    double boxmuller_extra_double;
 };
 
 typedef curandStatePhilox4_32_10 curandStatePhilox4_32_10_t;
@@ -86,6 +93,8 @@ void curand_init(unsigned long long seed, unsigned long long sequence,
     }
     state->boxmuller_flag = 0;
     state->boxmuller_extra = 0.0f;
+    state->boxmuller_flag_double = 0;
+    state->boxmuller_extra_double = 0.0;
 }
 
 static __host__ __device__ __forceinline__
@@ -100,6 +109,8 @@ void curand_init(unsigned long long seed, unsigned long long sequence,
     state->STATE = 0;
     state->boxmuller_flag = 0;
     state->boxmuller_extra = 0.0f;
+    state->boxmuller_flag_double = 0;
+    state->boxmuller_extra_double = 0.0;
 }
 
 // --- Core generation ---
@@ -179,12 +190,25 @@ float curand_uniform(curandStatePhilox4_32_10_t* state) {
     return (float)(curand(state) & 0x7FFFFFFFu) / (float)2147483648.0f;
 }
 
+// Built from the bit pattern rather than by converting the 53-bit integer:
+// `(double)(u64)` lowers to PTX `cvt.rn.f64.u64`, which CuMetal's FP32-pair FP64
+// emulation has no primitive for, so the integer-divide spelling made the whole
+// kernel unlowerable. Setting the exponent to 1.0 and filling the 52-bit
+// mantissa gives [1,2) directly; subtracting one lands in [0,1) with uniform
+// 2^-52 spacing and no integer-to-float conversion at all.
+static __host__ __device__ __forceinline__
+double __cumetal_curand_bits_to_unit_double(uint64_t bits) {
+    const uint64_t pattern = 0x3FF0000000000000ULL | (bits >> 12);
+    double value;
+    __builtin_memcpy(&value, &pattern, sizeof(value));
+    return value - 1.0;
+}
+
 static __host__ __device__ __forceinline__
 double curand_uniform_double(curandState_t* state) {
     uint32_t a = curand(state);
     uint32_t b = curand(state);
-    uint64_t combined = ((uint64_t)a << 32) | b;
-    return (double)(combined >> 11) / (double)(1ULL << 53);
+    return __cumetal_curand_bits_to_unit_double(((uint64_t)a << 32) | b);
 }
 
 // --- Normal distribution (Box-Muller) ---
@@ -228,6 +252,60 @@ float curand_log_normal(curandState_t* state, float mean, float stddev) {
     return expf(mean + stddev * curand_normal(state));
 }
 
+static __host__ __device__ __forceinline__
+double curand_uniform_double(curandStatePhilox4_32_10_t* state) {
+    uint32_t a = curand(state);
+    uint32_t b = curand(state);
+    return __cumetal_curand_bits_to_unit_double(((uint64_t)a << 32) | b);
+}
+
+// --- Normal distribution, binary64 (Box-Muller) ---
+//
+// Drawn from curand_uniform_double, not from the binary32 stream: taking the
+// float path and widening would leave the low 29 bits of every sample zero,
+// which shows up as a visible lattice in a Gaussian tail and defeats the point
+// of asking for a double.
+#define CUMETAL_CURAND_NORMAL_DOUBLE_BODY(state)                             \
+    if ((state)->boxmuller_flag_double) {                                    \
+        (state)->boxmuller_flag_double = 0;                                  \
+        return (state)->boxmuller_extra_double;                              \
+    }                                                                        \
+    double u1 = curand_uniform_double(state);                                \
+    double u2 = curand_uniform_double(state);                                \
+    if (u1 < 1e-300) u1 = 1e-300;                                            \
+    double r = sqrt(-2.0 * log(u1));                                         \
+    double theta = 2.0 * 3.14159265358979323846 * u2;                        \
+    (state)->boxmuller_flag_double = 1;                                      \
+    (state)->boxmuller_extra_double = r * sin(theta);                        \
+    return r * cos(theta);
+
+static __host__ __device__ __forceinline__
+double curand_normal_double(curandState_t* state) {
+    CUMETAL_CURAND_NORMAL_DOUBLE_BODY(state)
+}
+
+static __host__ __device__ __forceinline__
+double curand_normal_double(curandStatePhilox4_32_10_t* state) {
+    CUMETAL_CURAND_NORMAL_DOUBLE_BODY(state)
+}
+
+#undef CUMETAL_CURAND_NORMAL_DOUBLE_BODY
+
+static __host__ __device__ __forceinline__
+float curand_log_normal(curandStatePhilox4_32_10_t* state, float mean, float stddev) {
+    return expf(mean + stddev * curand_normal(state));
+}
+
+static __host__ __device__ __forceinline__
+double curand_log_normal_double(curandState_t* state, double mean, double stddev) {
+    return exp(mean + stddev * curand_normal_double(state));
+}
+
+static __host__ __device__ __forceinline__
+double curand_log_normal_double(curandStatePhilox4_32_10_t* state, double mean, double stddev) {
+    return exp(mean + stddev * curand_normal_double(state));
+}
+
 // --- Poisson (inverse transform for small lambda, normal approx for large) ---
 
 static __host__ __device__ __forceinline__
@@ -247,6 +325,23 @@ unsigned int curand_poisson(curandState_t* state, double lambda) {
         int result = (int)(lambda + sqrt(lambda) * n + 0.5);
         return result < 0 ? 0 : (unsigned int)result;
     }
+}
+
+static __host__ __device__ __forceinline__
+unsigned int curand_poisson(curandStatePhilox4_32_10_t* state, double lambda) {
+    if (lambda < 30.0) {
+        double L = exp(-lambda);
+        unsigned int k = 0;
+        double p = 1.0;
+        do {
+            k++;
+            p *= curand_uniform(state);
+        } while (p > L);
+        return k - 1;
+    }
+    float n = curand_normal(state);
+    int result = (int)(lambda + sqrt(lambda) * n + 0.5);
+    return result < 0 ? 0 : (unsigned int)result;
 }
 
 // --- Convenience: skip ahead ---

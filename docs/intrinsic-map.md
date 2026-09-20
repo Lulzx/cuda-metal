@@ -46,7 +46,7 @@ Complete CUDA/PTX → AIR intrinsic mapping table for the CuMetal intrinsic lowe
 | `fence.sc.cta` | `air.mem.barrier.threadgroup` | Ampere+ fine-grained CTA fence (ISA 7.0+) |
 | `fence.sc.gpu` | `air.mem.barrier.device` | Ampere+ fine-grained GPU-scope fence |
 | `fence.sc.sys` | `air.mem.barrier.device` | Ampere+ fine-grained system-scope fence |
-| `nanosleep.u32 ns` | `air.nanosleep` | Thread sleep hint — no-op on Apple Silicon (UMA/scheduler handles it) |
+| `nanosleep.u32 ns` | dropped | Thread sleep hint. Metal exposes no sleep or yield instruction, so the delay is not honoured; the `__nanosleep()` header entry point is an empty `asm volatile` so the spin loop around it keeps its iterations. |
 | `trap` | `llvm.trap` | Abnormal kernel termination |
 | `exit` | `air.exit` | Normal kernel thread exit |
 | `prefetch.global.{L1,L2} [addr]` | `air.prefetch.noop` | Cache prefetch hint — no-op on UMA (prefetch is automatic) |
@@ -180,6 +180,17 @@ half-warp shared-memory ordering is covered by a production GPU test.
 | `cos.approx.f32` | `llvm.cos` | Cosine; precision may differ ≤1 ULP from NVIDIA |
 
 ---
+
+### Libdevice calls lowered without a PTX opcode
+
+Clang emits these as `call.uni` to a libdevice symbol rather than as an
+instruction, so they are lowered by name.
+
+| Libdevice call | Lowering | Notes |
+| --- | --- | --- |
+| `__nv_umul64hi` / `__nv_mul64hi` | 32-bit limb decomposition | 64x64 → high 64. Not widened to `i128`: Metal has no 128-bit integer type. Signed form corrects the unsigned high word by the two sign masks. AMReX's `FastDivmodU64` is built on the unsigned one. |
+| `__nv_umulhi` / `__nv_mulhi` | widen to `i64`, shift, truncate | 32x32 → high 32, zero- and sign-extending respectively. |
+| `__nv_fabs` / `__nv_copysign` | sign-bit masking of the binary64 storage word | Exact in every FP64 mode; the FP32-pair emulation never has to represent the value. |
 
 ## Memory
 

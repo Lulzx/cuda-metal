@@ -2837,6 +2837,31 @@ CUresult cuPointerGetAttribute(void* data, CUpointer_attribute attribute, CUdevi
     }
 }
 
+// cuPointerGetAttributes — the batch form. CUDA's contract differs from the
+// singular one in a way callers depend on: an attribute that does not apply to
+// the pointer leaves its slot untouched and does *not* fail the call, so a
+// caller asking only for IS_MANAGED about a plain host pointer expects
+// CUDA_SUCCESS with the value it pre-initialized. AMReX::isManaged() is written
+// exactly that way, and returning an error for an ordinary host pointer would
+// make it report every allocation as unmanaged.
+CUresult cuPointerGetAttributes(unsigned int numAttributes,
+                                CUpointer_attribute* attributes,
+                                void** data,
+                                CUdeviceptr ptr) {
+    if (numAttributes == 0) return CUDA_SUCCESS;
+    if (attributes == nullptr || data == nullptr) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) return ready;
+    for (unsigned int i = 0; i < numAttributes; ++i) {
+        if (data[i] == nullptr) continue;
+        // A per-attribute failure is not a call failure here.
+        (void) cuPointerGetAttribute(data[i], attributes[i], ptr);
+    }
+    return CUDA_SUCCESS;
+}
+
 // Compute capability — synthetic 8.0 (Ampere-equivalent, spec §6.8).
 CUresult cuDeviceComputeCapability(int* major, int* minor, CUdevice dev) {
     if (major == nullptr || minor == nullptr || dev != 0) {

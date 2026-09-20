@@ -2672,6 +2672,106 @@ $L_done:
         return 1;
     }
 
+    // 64x64 -> high 64. AMReX's FastDivmodU64 turns the 64-bit division in every
+    // 3-D ParallelFor's index decomposition into a multiply-and-shift on
+    // __umul64hi, so an unsupported call target here makes the whole framework
+    // unlowerable. The high word is built from 32-bit limbs because Metal has
+    // no 128-bit integer type; assert that no i128 reaches the backend.
+    const std::string mul64hi_ptx = R"PTX(
+.visible .entry hi_mul(
+	.param .u64 .ptr .align 1 hi_mul_param_0
+)
+{
+	.local .align 8 .b8 	__local_depot0[24];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .b64 	%rd<9>;
+
+	mov.b64 	%SPL, __local_depot0;
+	cvta.local.u64 	%SP, %SPL;
+	ld.param.b64 	%rd1, [hi_mul_param_0];
+	st.b64 	[%SP+16], %rd1;
+	ld.b64 	%rd2, [%SP+16];
+	ld.b64 	%rd3, [%rd2];
+	ld.b64 	%rd4, [%rd2+8];
+	st.b64 	[%SP], %rd3;
+	st.b64 	[%SP+8], %rd4;
+	ld.b64 	%rd5, [%SP];
+	ld.b64 	%rd6, [%SP+8];
+	{ // callseq 0, 0
+	.param .b64 	param0;
+	.param .b64 	param1;
+	.param .b64 	retval0;
+	st.param.b64 	[param1], %rd6;
+	st.param.b64 	[param0], %rd5;
+	call.uni (retval0), __nv_umul64hi, (param0, param1);
+	ld.param.b64 	%rd7, [retval0];
+	} // callseq 0
+	ld.b64 	%rd8, [%SP+16];
+	st.b64 	[%rd8], %rd7;
+	ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions mul64hi_options;
+    mul64hi_options.entry_name = "hi_mul";
+    const auto mul64hi_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(mul64hi_ptx, mul64hi_options);
+    if (!expect(mul64hi_lowered.ok, "__nv_umul64hi lowers")) {
+        std::fprintf(stderr, "  error: %s\n", mul64hi_lowered.error.c_str());
+        return 1;
+    }
+    if (!expect(!contains(mul64hi_lowered.llvm_ir, "i128"),
+                "__nv_umul64hi avoids i128, which Metal has no type for")) {
+        return 1;
+    }
+
+    // copysign on a double is pure sign-bit manipulation of the binary64
+    // storage word, so it is exact in every FP64 mode and must not be refused
+    // the way an unimplemented transcendental is.
+    const std::string copysign_ptx = R"PTX(
+.visible .entry cs(
+	.param .u64 .ptr .align 1 cs_param_0
+)
+{
+	.local .align 8 .b8 	__local_depot0[24];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .b64 	%rd<9>;
+
+	mov.b64 	%SPL, __local_depot0;
+	cvta.local.u64 	%SP, %SPL;
+	ld.param.b64 	%rd1, [cs_param_0];
+	st.b64 	[%SP+16], %rd1;
+	ld.b64 	%rd2, [%SP+16];
+	ld.b64 	%rd3, [%rd2];
+	ld.b64 	%rd4, [%rd2+8];
+	st.b64 	[%SP], %rd3;
+	st.b64 	[%SP+8], %rd4;
+	ld.b64 	%rd5, [%SP];
+	ld.b64 	%rd6, [%SP+8];
+	{ // callseq 0, 0
+	.param .b64 	param0;
+	.param .b64 	param1;
+	.param .b64 	retval0;
+	st.param.b64 	[param1], %rd6;
+	st.param.b64 	[param0], %rd5;
+	call.uni (retval0), __nv_copysign, (param0, param1);
+	ld.param.b64 	%rd7, [retval0];
+	} // callseq 0
+	ld.b64 	%rd8, [%SP+16];
+	st.b64 	[%rd8], %rd7;
+	ret;
+}
+)PTX";
+    cumetal::ptx::LowerToLlvmOptions copysign_options;
+    copysign_options.entry_name = "cs";
+    const auto copysign_lowered =
+        cumetal::ptx::lower_ptx_to_llvm_ir(copysign_ptx, copysign_options);
+    if (!expect(copysign_lowered.ok, "__nv_copysign lowers")) {
+        std::fprintf(stderr, "  error: %s\n", copysign_lowered.error.c_str());
+        return 1;
+    }
+
     std::printf("PASS: ptx lower-to-llvm unit tests\n");
     return 0;
 }

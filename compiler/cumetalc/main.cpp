@@ -503,7 +503,10 @@ int run_legacy_executable_driver(const ExecutableDriverOptions& options,
     const std::string path = layout.toolchain_dir.string() + ":" +
         (existing_path != nullptr ? existing_path : "/usr/bin:/bin");
     std::string compile_prefix = "PATH=" + quote_shell(path) + " " +
-        quote_shell(compiler.string()) + " -x cuda -std=c++17 -O2 --cuda-gpu-arch=" +
+        // -fno-strict-aliasing is device-only, matching nvcc: see
+        // scripts/cumetal_cuda_flags.sh for why device code needs it.
+        quote_shell(compiler.string()) +
+        " -x cuda -std=c++17 -O2 -Xarch_device -fno-strict-aliasing --cuda-gpu-arch=" +
         quote_shell(options.cuda_arch) +
         (ptx_feature_for_arch(options.cuda_arch).empty()
              ? std::string{}
@@ -1604,7 +1607,7 @@ int main(int argc, char** argv) {
         std::string command =
             quote_shell(compiler.string()) +
             " -x cuda --cuda-device-only -S -std=" + cuda_std + " -O1 -fno-jump-tables"
-            " -ftrivial-auto-var-init=zero"
+            " -ftrivial-auto-var-init=zero -fno-strict-aliasing"
             " --cuda-gpu-arch=" +
             quote_shell(cuda_arch) +
             " -Xclang -target-feature -Xclang +ptx70"
@@ -1871,6 +1874,7 @@ int main(int argc, char** argv) {
             std::string command =
                 quote_shell(clang.string()) +
                 " -x cuda --cuda-device-only -std=" + cuda_std + " -O0 "
+                "-fno-strict-aliasing "
                 "-Xclang -disable-O0-optnone -S -emit-llvm "
                 "-gline-tables-only -nocudainc -nocudalib "
                 "--cuda-gpu-arch=" + quote_shell(arch) + " ";

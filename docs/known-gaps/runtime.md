@@ -69,6 +69,19 @@ fire-and-forget graph semantics are not implemented.
   carveout attributes are validated advisory calls only; they cannot change a
   Metal pipeline's cache or bank organization.
 - Memory-pool attributes exceed the allocator's current reuse behavior.
+- A kernel that dereferences a device pointer it *loaded from device memory*,
+  rather than received as a launch argument, needs
+  `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`. Without it the load silently reads
+  zeros for any allocation larger than a few KiB: no error is raised, because
+  from Metal's side nothing invalid happened -- the allocation simply was not
+  resident for that dispatch. This affects every framework that keeps a
+  device-side table of pointers, which is the normal way to express a
+  multi-buffer kernel: PhysX's descriptor structs
+  ([feasibility notes](../physx-feasibility.md)) and AMReX's per-box `Array4`
+  array ([AMReX demo](../../demos/amrex/README.md)) both hit it. The mode marks
+  every live allocation resident on every dispatch, which costs cross-stream
+  concurrency, so it is opt-in. Detecting the pattern at lowering time and
+  warning is open work.
 
 ## Textures, surfaces, and printf
 

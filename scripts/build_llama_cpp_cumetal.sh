@@ -287,8 +287,26 @@ for arg in "\$@"; do
         # nvcc response-file syntax; clang understands @file directly
         --options-file|-optf)                  OPTIONS_FILE_NEXT=1; continue ;;
         --options-file=*|-optf=*)              ARGS+=("@\${arg#*=}"); continue ;;
-        # nvcc language/feature toggles not needed for clang CUDA mode
+        # nvcc language/feature toggles not needed for clang CUDA mode.
+        # Clang in CUDA mode already accepts __device__ lambdas and relaxed
+        # constexpr; AMReX passes the nvcc spellings unconditionally.
         -extended-lambda|--extended-lambda)    continue ;;
+        -expt-extended-lambda|--expt-extended-lambda) continue ;;
+        -expt-relaxed-constexpr|--expt-relaxed-constexpr) continue ;;
+        # nvcc register-allocation and lambda-capture diagnostics. ptxas is a
+        # shim here and Metal does its own register allocation, so the cap has
+        # no meaning; the warning has no clang equivalent.
+        -maxrregcount|--maxrregcount)          SKIP_NEXT=1; continue ;;
+        -maxrregcount=*|--maxrregcount=*)      continue ;;
+        --Wext-lambda-captures-this|-Wext-lambda-captures-this) continue ;;
+        --Wno-deprecated-gpu-targets|-Wno-deprecated-gpu-targets) continue ;;
+        # Device-side debug line tables: nvcc embeds them in the PTX, which
+        # CuMetal's PTX path does not consume.
+        -lineinfo|--generate-line-info)        continue ;;
+        # nvcc's fast math is device-only. -ffast-math here would also relax the
+        # host compile, so restrict it to the device side; CuMetal separately
+        # selects the MSL math mode via CUMETAL_MSL_MATH_MODE.
+        -use_fast_math|--use_fast_math)        ARGS+=(-Xarch_device -ffast-math); continue ;;
         # nvcc compiler-identification / temp-file flags (cmake passes these)
         --keep)                               continue ;;
         --keep-dir)                           SKIP_NEXT=1; continue ;;

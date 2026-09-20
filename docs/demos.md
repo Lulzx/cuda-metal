@@ -130,6 +130,42 @@ that describes a padded grid, and then a Metal implementation of the transform
 itself. See
 [the GROMACS guide](../demos/gromacs/README.md).
 
+## AMReX block-structured AMR
+
+AMReX 25.09's CUDA GPU backend builds unmodified against CuMetal. The demo
+builds AMReX twice from one source tree -- `AMReX_GPU_BACKEND=CUDA` against
+CuMetal and `AMReX_GPU_BACKEND=NONE` as the reference -- and runs the
+`HeatEquation_EX0_C` tutorial through both:
+
+```bash
+bash demos/amrex/run.sh --quick    # 20 steps
+bash demos/amrex/run.sh            # 200 steps
+```
+
+The Gaussian initial condition, the three-direction flux computation, the
+flux-divergence update, and the ghost-cell exchange are all `amrex::ParallelFor`
+kernels on the Apple GPU. The gate compares the two builds' plotfiles with
+AMReX's own `fcompare` at step 0 and at the final step -- separately, because
+the initial condition isolates CuMetal's FP64 transcendentals while the final
+field is what a wrong stencil or a dropped launch moves. The recorded results on
+an M4 Pro are a maximum relative difference of `2.22e-08` at step 0 and
+`5.53e-09` after 200 steps, against a `1e-6` gate; the same binary without the
+required address mode lands at `1.0`, so the gate has eight orders of magnitude
+of margin.
+
+AMReX needs `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`, because its reductions and
+fused multi-box kernels dereference `Array4` pointers held in device memory
+rather than passed as launch arguments -- the same requirement PhysX has.
+
+Building it exposed seven CuMetal defects, all silent: `std::`-qualified math
+was not usable in device code at all; Clang's strict aliasing deleted the punned
+word-wise shuffles behind every AMReX GPU min/max reduction, which returned zero
+instead; `__umul64hi` and `copysign(double)` were unsupported lowering targets;
+the warp shuffle family had no `long` overloads; `cuPointerGetAttributes` and
+`__nanosleep` were missing; and `curand_uniform_double` could not be lowered.
+See [the AMReX guide](../demos/amrex/README.md) for the scope limits, the
+measured FP64 accuracy, and what the demo does not claim.
+
 ## Run one sample
 
 ```bash

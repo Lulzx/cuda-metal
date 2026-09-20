@@ -290,6 +290,13 @@ in the [GROMACS guide](../demos/gromacs/README.md).
 - A reduced PhysX 5.6 GRB path runs selected sphere, box, convex, and triangle
   mesh contacts on the GPU. It is a selected-shape conformance target, not
   general PhysX GPU support.
+- AMReX 25.09's CUDA GPU backend builds unmodified and runs the
+  `HeatEquation_EX0_C` tutorial on the Apple GPU. Against a CPU build of the
+  same source, the maximum relative field difference is `2.22e-08` at step 0 and
+  `5.53e-09` after 200 steps on an M4 Pro. It requires
+  `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`, is a single tutorial at one refinement
+  level with MPI off, and says nothing about AMReX's AMR, particle, embedded
+  boundary, or linear-solver paths. See [the AMReX demo](../demos/amrex/README.md).
 
 Exact commands, models, tolerances, provenance requirements, and scope
 boundaries live in [the Apple-GPU execution record](apple-gpu-execution.md),

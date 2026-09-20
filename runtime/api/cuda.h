@@ -777,6 +777,10 @@ typedef enum CUpointer_attribute_enum {
 } CUpointer_attribute;
 
 CUresult cuPointerGetAttribute(void* data, CUpointer_attribute attribute, CUdeviceptr ptr);
+CUresult cuPointerGetAttributes(unsigned int numAttributes,
+                                CUpointer_attribute* attributes,
+                                void** data,
+                                CUdeviceptr ptr);
 
 // ── CUDA Graphs (Driver API) ─────────────────────────────────────────────────
 CUresult cuGraphCreate(CUgraph* phGraph, unsigned int flags);

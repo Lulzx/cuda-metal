@@ -242,6 +242,55 @@ static void test_cu_pointer_get_attribute() {
     cudaFree(ptr);
 }
 
+// ── cuPointerGetAttributes (the batch form) ──────────────────────────────────
+// AMReX::isManaged() asks only for IS_MANAGED and reads the value it
+// pre-initialized, relying on CUDA's rule that the batch form leaves a slot
+// untouched and still returns success when an attribute does not apply. A batch
+// query that failed on an ordinary host pointer would make it report every
+// allocation as unmanaged.
+static void test_cu_pointer_get_attributes_batch() {
+    printf("[cuPointerGetAttributes]\n");
+    void* ptr = nullptr;
+    cudaMalloc(&ptr, 128);
+    CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(ptr);
+
+    CUpointer_attribute attribs[3] = {
+        CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+        CU_POINTER_ATTRIBUTE_IS_MANAGED,
+        CU_POINTER_ATTRIBUTE_DEVICE_POINTER,
+    };
+    unsigned int mem_type = 99;
+    unsigned int is_managed = 0;
+    CUdeviceptr dev_ptr = 0;
+    void* data[3] = {&mem_type, &is_managed, &dev_ptr};
+
+    CUresult r = cuPointerGetAttributes(3, attribs, data, dptr);
+    CHECK(r == CUDA_SUCCESS, "cuPointerGetAttributes success");
+    CHECK(mem_type == CU_MEMORYTYPE_UNIFIED, "cuPointerGetAttributes MEMORY_TYPE = UNIFIED");
+    CHECK(dev_ptr == dptr, "cuPointerGetAttributes DEVICE_POINTER == input");
+
+    // A plain host allocation: the query must still succeed, and IS_MANAGED
+    // must come back false rather than the caller's sentinel.
+    int host_object = 0;
+    unsigned int host_managed = 7;
+    CUpointer_attribute one[1] = {CU_POINTER_ATTRIBUTE_IS_MANAGED};
+    void* one_data[1] = {&host_managed};
+    CUresult rh = cuPointerGetAttributes(1, one, one_data,
+                                         reinterpret_cast<CUdeviceptr>(&host_object));
+    CHECK(rh == CUDA_SUCCESS, "cuPointerGetAttributes on a host pointer succeeds");
+    CHECK(host_managed == 0, "cuPointerGetAttributes host pointer is not managed");
+
+    // Degenerate and invalid forms.
+    CHECK(cuPointerGetAttributes(0, attribs, data, dptr) == CUDA_SUCCESS,
+          "cuPointerGetAttributes with zero attributes succeeds");
+    CHECK(cuPointerGetAttributes(1, nullptr, data, dptr) == CUDA_ERROR_INVALID_VALUE,
+          "cuPointerGetAttributes rejects a null attribute list");
+    CHECK(cuPointerGetAttributes(1, attribs, nullptr, dptr) == CUDA_ERROR_INVALID_VALUE,
+          "cuPointerGetAttributes rejects a null data list");
+
+    cudaFree(ptr);
+}
+
 // ── cublasSrotm / cublasDrotm ─────────────────────────────────────────────────
 static void test_cublas_rotm() {
     printf("[cublasSrotm / cublasDrotm]\n");
@@ -342,6 +391,7 @@ int main() {
     test_cu_memset_d2d_async();
     test_cu_mem_get_address_range();
     test_cu_pointer_get_attribute();
+    test_cu_pointer_get_attributes_batch();
     test_cublas_rotm();
     test_cublas_rotmg();
 
