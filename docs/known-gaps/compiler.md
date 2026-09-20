@@ -2,6 +2,43 @@
 
 [Known-gaps index](../known-gaps.md) · [Compiler status](../status/compiler.md)
 
+## Runtime-compiled PTX output
+
+Both PTX backends emit a `.cumetal-abi` sidecar with `--emit=msl`. Keep it
+beside the generated MSL when loading the module so the runtime can recover
+argument layout. A sidecar write failure fails compilation; this metadata does
+not extend the set of supported PTX instructions or argument forms.
+
+Integer loads retain their destination register width while accessing the
+instruction's memory width. Integer memory/parameter stores and `cvt` source
+operands discard high register bits when required by their instruction width;
+unsigned widening preserves the source bit pattern even for negative-spelled
+literals. These rules do not relax argument or return ABI byte-width checks.
+
+Strict opcode checks and initializer decoding follow the selected entry's
+reachable helpers and symbols. Unselected unsupported instructions or unused
+initializers do not block that entry; unidentifiable declarations still fail.
+Module-wide writes remain relevant when deciding whether storage is immutable.
+Multiline PTX calls preserve operand tuples, register scopes, and source lines;
+unterminated or unbalanced calls are rejected. This does not add new call ABI
+forms or permit recursive device-call graphs.
+
+Private immutable table pointers support complete byte-encoded relocations and
+typed 64-bit symbolic initializers. Resolution requires explicit 64-bit
+addressing, aligned whole-pointer loads, a private numeric target, and a proof
+that the table address is neither written nor allowed to escape. Mutable,
+partial, mixed, and escaping relocations remain unsupported.
+
+The typed PTX path supports `shf.{l,r}.wrap.b32`, generic `prmt.b32`,
+unpredicated `bfi.b32/b64`, and two-halfword `mov.b32` packing/unpacking
+(including single unpack sinks). Vector memory stores accept literal lanes.
+Other permutation modes, funnel widths, and tuple shapes remain explicit
+diagnostics. Bit-field lowering bounds every shift, including discarded arms.
+
+Integer min/max explicitly types MSL operands to preserve signed comparisons
+and select the correct overload for literals. Signed and unsigned 64-bit
+`mul.hi` use exact 32-bit partial products; mixed operand widths remain invalid.
+
 ## Typed CuMetal IR migration
 
 With CUDA Clang 21-23, the reviewed production-metallib matrix is:
@@ -203,3 +240,60 @@ Production output depends on Apple's public Metal compiler. `air_inspect`,
 `air_validate`, and direct AIR container generation do not constitute a stable
 private AIR compiler. Cross-Xcode evidence is incomplete without genuinely
 distinct installations and runtime-load results.
+
+## Pointer lowering
+
+PTX helpers can accept generic pointers proven by `cvta.to.local.u64`; call-site
+specialization must establish a compatible concrete address space before Metal
+legalization completes. Pointer subtraction supports a pointer minus a 64-bit
+integer byte offset, including local-buffer loops. A bounded SSA pass also
+recovers scalar differences and cancelling integer-minus-pointer intermediates
+when their complete 64-bit affine paths prove a common address base, including
+branches and loop-carried cursors. It tracks integer offsets rather than numeric
+Metal pointers; see [the proof limits](../known-gaps.md). Unrelated pointer
+differences, observable negative-base intermediates, scalar-to-address escapes,
+and narrow pointer arithmetic remain unsupported.
+Unused pointer truncations are removed during legalization; observed truncations
+remain rejected because Metal cannot faithfully represent their numeric result.
+
+## Guarded PTX definitions
+
+Before register SSA, bounded unsigned-threshold and repeated-equality proofs can
+remove infeasible branch edges, including predicate aliases and OR guards. A
+self-select may become a move only when its old value is unobserved on every
+false path until an unconditional overwrite or the same select. Writes invalidate
+tracked facts; unsupported comparisons and observable undefined values remain
+rejected. Specialization retains non-branch instructions, explores at most eight
+successors per chain, and shares limits of 4,096 cloned blocks / 131,072
+instructions per function. Reaching a limit leaves the original path for SSA
+validation; this is not general predicate optimization.
+
+## PTX parameter storage and tail calls
+
+Complete integer words can populate byte-array aggregate returns without losing
+their upper halves. Exact aligned `ld.param.v2.b64` / `st.param.v2.b64` transfers
+expand before SSA so both lanes participate in the normal ABI checks; malformed,
+partial, overlapping, misaligned and predicated transfers remain rejected.
+
+Tail-self-call elimination is limited to one scalar 64-bit argument with a
+16-byte forwarded result, or a proven 16-byte local-frame read-all/replace-all
+diamond. Recognition validates the complete continuation before rewriting.
+Memory-dependent scalar recursion, escaping local addresses, partial frame reads
+or writes, and general recursion remain unsupported. The transformed loop has
+no artificial iteration limit.
+
+## PTX trap completion
+
+Supported trap-capable kernels publish a per-launch atomic status and poll it at
+CFG boundaries so trapping lanes can cancel spinning peers. Required helper
+calls expand into this CFG; finite acyclic helper chains without traps, atomics,
+barriers or collectives may remain calls. Expansion is transactional and limited
+to 1,024 calls, 4,096 blocks and 262,144 operations per kernel.
+
+The compiler/runtime ABI is a reflected `cm_trap_status` buffer at binding 25.
+The runtime keeps each status word until completion and reports launch failure
+through stream/event synchronization and queries, including repeated queries.
+This does not implement CUDA context-wide abort. Trap-capable launches bypass
+batching; timed launches, conflicting bindings, user barriers and collectives
+remain unsupported. Stripped or renamed precompiled trap parameters need durable
+metadata support before this reflection-based contract can cover them.

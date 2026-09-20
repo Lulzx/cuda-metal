@@ -1,0 +1,41 @@
+
+.version 8.0
+.target sm_90
+.address_size 64
+.visible .entry clamp_relu(
+    .param .u64 clamp_relu_param_0,
+    .param .u64 clamp_relu_param_1,
+    .param .u32 clamp_relu_param_2
+) {
+    .reg .u64  %rd<4>;
+    .reg .f32  %f<3>;
+    .reg .u32  %r<8>;
+    .reg .pred %p<2>;
+
+    ld.param.u64 %rd0, [clamp_relu_param_0];
+    ld.param.u64 %rd1, [clamp_relu_param_1];
+    ld.param.u32 %r0,  [clamp_relu_param_2];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r4, %r1, %r2, %r3;
+
+    setp.ge.u32 %p0, %r4, %r0;
+    @%p0 bra DONE;
+
+    cvt.u64.u32 %rd2, %r4;
+    shl.b64     %rd2, %rd2, 2;
+    add.u64     %rd2, %rd0, %rd2;
+    ld.global.f32 %f0, [%rd2];
+
+    max.f32 %f1, %f0, 0.0;
+
+    cvt.u64.u32 %rd3, %r4;
+    shl.b64     %rd3, %rd3, 2;
+    add.u64     %rd3, %rd1, %rd3;
+    st.global.f32 [%rd3], %f1;
+
+DONE:
+    ret;
+}

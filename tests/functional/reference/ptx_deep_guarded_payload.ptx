@@ -1,0 +1,236 @@
+.version 7.1
+.target sm_80
+.address_size 64
+
+.visible .entry deep_guarded_payload(
+    .param .u64 input,
+    .param .u64 output,
+    .param .u32 count
+) {
+    .reg .b64 %rd<7>;
+    .reg .b32 %r<7>;
+    .reg .pred %p<13>;
+
+    ld.param.u64 %rd0, [input];
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r6, [count];
+    mov.u32 %r4, %ctaid.x;
+    mov.u32 %r5, %ntid.x;
+    mov.u32 %r0, %tid.x;
+    mad.lo.u32 %r0, %r4, %r5, %r0;
+    setp.ge.u32 %p12, %r0, %r6;
+    @%p12 bra DONE;
+    mul.wide.u32 %rd4, %r0, 4;
+    add.u64 %rd5, %rd0, %rd4;
+    add.u64 %rd6, %rd1, %rd4;
+    ld.global.u32 %r1, [%rd5];
+    setp.eq.u32 %p11, %r1, 0;
+    @%p11 bra ABSENT;
+    bra SELECT0;
+
+SELECT0:
+    setp.eq.u32 %p11, %r1, 1;
+    @%p11 bra PRESENT0;
+    bra SELECT1;
+PRESENT0:
+    mov.pred %p0, 1;
+    mov.u32 %r2, 7;
+    mov.pred %p1, 0;
+    mov.pred %p2, 0;
+    mov.pred %p3, 0;
+    mov.pred %p4, 0;
+    mov.pred %p5, 0;
+    mov.pred %p6, 0;
+    mov.pred %p7, 0;
+    mov.pred %p8, 0;
+    mov.pred %p9, 0;
+    bra STEP0;
+
+SELECT1:
+    setp.eq.u32 %p11, %r1, 2;
+    @%p11 bra PRESENT1;
+    bra SELECT2;
+PRESENT1:
+    mov.pred %p0, 1;
+    mov.u32 %r2, 7;
+    mov.pred %p1, 0;
+    mov.pred %p2, 0;
+    mov.pred %p3, 0;
+    mov.pred %p4, 0;
+    mov.pred %p5, 0;
+    mov.pred %p6, 0;
+    mov.pred %p7, 0;
+    mov.pred %p8, 0;
+    mov.pred %p9, 0;
+    bra STEP1;
+
+SELECT2:
+    setp.eq.u32 %p11, %r1, 3;
+    @%p11 bra PRESENT2;
+    bra SELECT3;
+PRESENT2:
+    mov.pred %p0, 1;
+    mov.u32 %r2, 7;
+    mov.pred %p1, 0;
+    mov.pred %p2, 0;
+    mov.pred %p3, 0;
+    mov.pred %p4, 0;
+    mov.pred %p5, 0;
+    mov.pred %p6, 0;
+    mov.pred %p7, 0;
+    mov.pred %p8, 0;
+    mov.pred %p9, 0;
+    bra STEP2;
+
+SELECT3:
+    setp.eq.u32 %p11, %r1, 4;
+    @%p11 bra PRESENT3;
+    bra SELECT4;
+PRESENT3:
+    mov.pred %p0, 1;
+    mov.u32 %r2, 7;
+    mov.pred %p1, 0;
+    mov.pred %p2, 0;
+    mov.pred %p3, 0;
+    mov.pred %p4, 0;
+    mov.pred %p5, 0;
+    mov.pred %p6, 0;
+    mov.pred %p7, 0;
+    mov.pred %p8, 0;
+    mov.pred %p9, 0;
+    bra STEP3;
+
+SELECT4:
+    setp.eq.u32 %p11, %r1, 5;
+    @%p11 bra PRESENT4;
+    bra SELECT5;
+PRESENT4:
+    mov.pred %p0, 1;
+    mov.u32 %r2, 7;
+    mov.pred %p1, 0;
+    mov.pred %p2, 0;
+    mov.pred %p3, 0;
+    mov.pred %p4, 0;
+    mov.pred %p5, 0;
+    mov.pred %p6, 0;
+    mov.pred %p7, 0;
+    mov.pred %p8, 0;
+    mov.pred %p9, 0;
+    bra STEP4;
+
+SELECT5:
+    setp.eq.u32 %p11, %r1, 6;
+    @%p11 bra PRESENT5;
+    bra SELECT6;
+PRESENT5:
+    mov.pred %p0, 1;
+    mov.u32 %r2, 7;
+    mov.pred %p1, 0;
+    mov.pred %p2, 0;
+    mov.pred %p3, 0;
+    mov.pred %p4, 0;
+    mov.pred %p5, 0;
+    mov.pred %p6, 0;
+    mov.pred %p7, 0;
+    mov.pred %p8, 0;
+    mov.pred %p9, 0;
+    bra STEP5;
+
+SELECT6:
+    setp.eq.u32 %p11, %r1, 7;
+    @%p11 bra PRESENT6;
+    bra SELECT7;
+PRESENT6:
+    mov.pred %p0, 1;
+    mov.u32 %r2, 7;
+    mov.pred %p1, 0;
+    mov.pred %p2, 0;
+    mov.pred %p3, 0;
+    mov.pred %p4, 0;
+    mov.pred %p5, 0;
+    mov.pred %p6, 0;
+    mov.pred %p7, 0;
+    mov.pred %p8, 0;
+    mov.pred %p9, 0;
+    bra STEP6;
+
+SELECT7:
+    setp.eq.u32 %p11, %r1, 8;
+    @%p11 bra PRESENT7;
+    bra SELECT8;
+PRESENT7:
+    mov.pred %p0, 1;
+    mov.u32 %r2, 7;
+    mov.pred %p1, 0;
+    mov.pred %p2, 0;
+    mov.pred %p3, 0;
+    mov.pred %p4, 0;
+    mov.pred %p5, 0;
+    mov.pred %p6, 0;
+    mov.pred %p7, 0;
+    mov.pred %p8, 0;
+    mov.pred %p9, 0;
+    bra STEP7;
+
+SELECT8:
+    bra PRESENT8;
+PRESENT8:
+    mov.pred %p0, 1;
+    mov.u32 %r2, 7;
+    mov.pred %p1, 0;
+    mov.pred %p2, 0;
+    mov.pred %p3, 0;
+    mov.pred %p4, 0;
+    mov.pred %p5, 0;
+    mov.pred %p6, 0;
+    mov.pred %p7, 0;
+    mov.pred %p8, 0;
+    mov.pred %p9, 0;
+    bra STEP8;
+
+ABSENT:
+    mov.pred %p0, 0;
+    mov.pred %p1, 0;
+    mov.pred %p2, 0;
+    mov.pred %p3, 0;
+    mov.pred %p4, 0;
+    mov.pred %p5, 0;
+    mov.pred %p6, 0;
+    mov.pred %p7, 0;
+    mov.pred %p8, 0;
+    mov.pred %p9, 0;
+    bra STEP0;
+
+STEP0:
+    @%p1 bra DEAD;
+STEP1:
+    @%p2 bra DEAD;
+STEP2:
+    @%p3 bra DEAD;
+STEP3:
+    @%p4 bra DEAD;
+STEP4:
+    @%p5 bra DEAD;
+STEP5:
+    @%p6 bra DEAD;
+STEP6:
+    @%p7 bra DEAD;
+STEP7:
+    @%p8 bra DEAD;
+STEP8:
+    @%p9 bra DEAD;
+    bra MERGE;
+
+MERGE:
+    @%p0 bra USE;
+    mov.u32 %r3, 99;
+    bra STORE;
+USE:
+    mov.u32 %r3, %r2;
+STORE:
+    st.global.u32 [%rd6], %r3;
+DONE:
+    ret;
+DEAD:
+    ret;
+}

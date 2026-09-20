@@ -186,6 +186,8 @@ enum class OpCode : std::uint16_t {
     kConvert,
     kAddressSpaceCast,
     kAlloca,
+    // Base pointer plus offset by default; offset_direction="subtract" selects
+    // subtraction. offset_unit="bytes" prevents pointee-size scaling.
     kPointerOffset,
     kLoad,
     kStore,

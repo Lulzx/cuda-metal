@@ -1,0 +1,75 @@
+.version 8.0
+.target sm_80
+.address_size 64
+
+// LLVM7 also emits generic loads through device pointers stored in a private
+// record. The record itself starts eight bytes into the local allocation and
+// alternates scalar and pointer fields. Neither those scalar neighbors nor the
+// pointer's data offset may change its address space.
+// Entry parameters explicitly identify device allocations; the helper's record
+// parameter has no pointer annotation. This isolates nested-pointer legalization
+// from inference of unannotated entry parameters through offset record fields.
+.func copy_from_offset_record(.param .b64 record_address) {
+    .reg .b64 %rd<9>;
+    .reg .b32 %r0;
+    .reg .pred %p0;
+    ld.param.b64 %rd0, [record_address];
+    cvta.to.local.u64 %rd1, %rd0;
+    ld.local.u64 %rd2, [%rd1+8];
+    ld.local.u64 %rd3, [%rd1+24];
+    ld.local.u64 %rd6, [%rd1+32];
+    ld.local.u64 %rd7, [%rd1];
+    ld.local.u64 %rd8, [%rd1+16];
+    setp.eq.u64 %p0, %rd6, 0;
+    @%p0 bra OFFSET_READ_FIRST;
+    ld.u64 %rd4, [%rd2+8];
+    bra OFFSET_STORE;
+OFFSET_READ_FIRST:
+    ld.u64 %rd4, [%rd2];
+OFFSET_STORE:
+    add.u64 %rd4, %rd4, %rd7;
+    add.u64 %rd4, %rd4, %rd8;
+    st.global.u64 [%rd3], %rd4;
+    ret;
+}
+
+.visible .entry offset_record_probe(
+    .param .u64 .ptr .global input,
+    .param .u64 .ptr .global output,
+    .param .u32 count
+) {
+    .local .align 8 .b8 record[48];
+    .reg .b64 %rd<12>;
+    .reg .b32 %r<6>;
+    .reg .pred %p0;
+    ld.param.u64 %rd0, [input];
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r2, [count];
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mov.u32 %r5, %tid.x;
+    mad.lo.u32 %r0, %r3, %r4, %r5;
+    setp.ge.u32 %p0, %r0, %r2;
+    @%p0 bra OFFSET_DONE;
+    mul.wide.u32 %rd2, %r0, 16;
+    add.u64 %rd3, %rd0, %rd2;
+    mul.wide.u32 %rd9, %r0, 8;
+    add.u64 %rd4, %rd1, %rd9;
+    mov.u64 %rd11, record;
+    add.u64 %rd5, %rd11, 8;
+    st.local.u64 [%rd5], 0x0102030405060708;
+    st.local.u64 [%rd5+8], %rd3;
+    mul.wide.u32 %rd10, %r0, 17;
+    add.u64 %rd10, %rd10, 5;
+    st.local.u64 [%rd5+16], %rd10;
+    st.local.u64 [%rd5+24], %rd4;
+    and.b32 %r1, %r0, 1;
+    cvt.u64.u32 %rd7, %r1;
+    st.local.u64 [%rd5+32], %rd7;
+    cvta.local.u64 %rd6, %rd5;
+    .param .b64 argument;
+    st.param.b64 [argument], %rd6;
+    call.uni copy_from_offset_record, (argument);
+OFFSET_DONE:
+    ret;
+}

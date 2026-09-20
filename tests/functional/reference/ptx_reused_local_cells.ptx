@@ -1,0 +1,56 @@
+.version 7.1
+.target sm_80
+.address_size 64
+.global .align 1 .b8 bytes[1] = {7};
+.visible .entry probe(.param .u64 .ptr .global input, .param .u64 .ptr .global output, .param .u32 count) {
+ .local .align 16 .b8 depot[32];
+ .reg .b64 %base, %generic, %cell, %pointer, %length, %output, %x, %y, %result, %cursor, %input, %offset, %number, %witness;
+ .reg .b32 %choose, %value, %index, %block, %threads, %lane, %count;
+ .reg .pred %alternate, %more, %outside;
+ ld.param.u64 %input, [input];
+ ld.param.u64 %output, [output];
+ ld.param.u32 %count, [count];
+ mov.u32 %lane, %tid.x;
+ mov.u32 %block, %ctaid.x;
+ mov.u32 %threads, %ntid.x;
+ mad.lo.u32 %lane, %block, %threads, %lane;
+ setp.ge.u32 %outside, %lane, %count;
+ @%outside bra DONE;
+ mul.wide.u32 %offset, %lane, 8;
+ add.u64 %input, %input, %offset;
+ ld.global.u64 %number, [%input];
+ mul.wide.u32 %offset, %lane, 16;
+ add.u64 %output, %output, %offset;
+ mov.u64 %base, depot;
+ cvta.local.u64 %generic, %base;
+ add.u64 %cell, %base, 16;
+ mov.u64 %pointer, bytes;
+ st.local.v2.u64 [%cell], {%pointer, 1};
+ ld.local.v2.u64 {%pointer, %length}, [%cell];
+ ld.u8 %value, [%pointer];
+ cvt.u64.u32 %witness, %value;
+ st.global.u64 [%output+8], %witness;
+ and.b32 %choose, %lane, 1;
+ setp.ne.u32 %alternate, %choose, 0;
+ @%alternate bra OTHER;
+ add.u64 %cursor, %generic, 16;
+ mov.u32 %index, 0;
+LOOP:
+ st.u64 [%cursor], %number;
+ add.u64 %cursor, %cursor, 8;
+ add.u32 %index, %index, 1;
+ setp.lt.u32 %more, %index, 2;
+ @%more bra LOOP;
+ add.u64 %cell, %base, 16;
+ ld.local.v2.u64 {%x, %y}, [%cell];
+ bra JOIN;
+OTHER:
+ st.local.v2.u64 [%cell], {%number, %number};
+ add.u64 %cell, %generic, 16;
+ ld.local.v2.u64 {%x, %y}, [%cell];
+JOIN:
+ mul.lo.u64 %result, %x, 5;
+ st.global.u64 [%output], %result;
+DONE:
+ ret;
+}

@@ -1,0 +1,43 @@
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry guarded_load(.param .u64 input, .param .u64 output, .param .u32 count) {
+.reg .b64 %rd<12>;
+.reg .b32 %r<10>;
+.reg .pred %p<8>;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd3, %r2, 4;
+add.u64 %rd4, %rd1, %rd3;
+add.u64 %rd5, %rd2, %rd3;
+ld.global.u32 %r5, [%rd4];
+and.b32 %r6, %r5, 1;
+cvt.u64.u32 %rd6, %r6;
+mov.u64 %rd7, 0;
+mov.u32 %r7, 99;
+mov.u64 %rd10, 0;
+setp.eq.b64 %p2, %rd6, %rd7;
+@%p2 bra CHECK;
+mov.u64 %rd10, %rd4;
+ld.global.u32 %r8, [%rd10];
+CHECK:
+setp.eq.b64 %p3, %rd6, %rd7;
+setp.lt.u32 %p4, %r5, 8;
+or.pred %p5, %p3, %p4;
+@%p5 bra SECOND;
+mov.u32 %r9, %r8;
+SECOND:
+@%p5 bra STORE;
+add.u32 %r7, %r9, 1;
+STORE:
+st.global.u32 [%rd5], %r7;
+DONE:
+ret;
+}

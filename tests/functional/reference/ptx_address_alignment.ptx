@@ -1,0 +1,89 @@
+.version 8.8
+.target sm_89
+.address_size 64
+
+.visible .entry alignment_probe(
+    .param .u64 .ptr .global input,
+    .param .u64 .ptr .global output,
+    .param .u32 count
+) {
+    .local .align 16 .b8 scratch[128];
+    .reg .pred %p<5>;
+    .reg .b32 %r<24>;
+    .reg .b64 %rd<32>;
+
+    ld.param.u64 %rd0, [input];
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r0, [count];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mad.lo.u32 %r1, %r2, %r3, %r1;
+    setp.ge.u32 %p0, %r1, %r0;
+    @%p0 bra done;
+    mul.wide.u32 %rd2, %r1, 16;
+    add.u64 %rd3, %rd0, %rd2;
+    ld.global.u64 %rd4, [%rd3];
+    ld.global.u64 %rd5, [%rd3+8];
+    cvt.u32.u64 %r4, %rd4;
+    mov.u64 %rd6, scratch;
+
+    // Distinct byte contents make an incorrect address numerically observable.
+    mov.u32 %r5, 0;
+    mov.u64 %rd8, %rd6;
+initialize:
+    mad.lo.u32 %r6, %r5, 17, %r4;
+    st.local.u8 [%rd8], %r6;
+    add.u64 %rd8, %rd8, 1;
+    add.u32 %r5, %r5, 1;
+    setp.lt.u32 %p1, %r5, 128;
+    @%p1 bra initialize;
+
+    // The runner replaces this definition to exercise other reaching values.
+    mov.u64 %rd7, %rd6;
+    or.b64 %rd10, %rd7, 1;
+    add.u64 %rd11, %rd7, 1;
+    or.b64 %rd12, %rd7, 4;
+    add.u64 %rd13, %rd7, 4;
+    ld.local.u8 %r10, [%rd10];
+    ld.local.u8 %r11, [%rd11];
+    ld.local.u8 %r12, [%rd12];
+    ld.local.u8 %r13, [%rd13];
+
+    // Check OR stores using explicit-add loads.
+    xor.b32 %r14, %r4, 0x5a;
+    xor.b32 %r15, %r4, 0xc3;
+    st.local.u8 [%rd10], %r14;
+    st.local.u8 [%rd12], %r15;
+    ld.local.u8 %r16, [%rd11];
+    ld.local.u8 %r17, [%rd13];
+
+    // Check explicit-add stores using OR loads.
+    add.u32 %r18, %r4, 0x71;
+    add.u32 %r19, %r4, 0xb6;
+    st.local.u8 [%rd11], %r18;
+    st.local.u8 [%rd13], %r19;
+    ld.local.u8 %r20, [%rd10];
+    ld.local.u8 %r21, [%rd12];
+
+    cvt.u64.u32 %rd20, %r10;
+    cvt.u64.u32 %rd21, %r11;
+    cvt.u64.u32 %rd22, %r12;
+    cvt.u64.u32 %rd23, %r13;
+    cvt.u64.u32 %rd24, %r16;
+    cvt.u64.u32 %rd25, %r17;
+    cvt.u64.u32 %rd26, %r20;
+    cvt.u64.u32 %rd27, %r21;
+    mul.wide.u32 %rd28, %r1, 64;
+    add.u64 %rd29, %rd1, %rd28;
+    st.global.u64 [%rd29], %rd20;
+    st.global.u64 [%rd29+8], %rd21;
+    st.global.u64 [%rd29+16], %rd22;
+    st.global.u64 [%rd29+24], %rd23;
+    st.global.u64 [%rd29+32], %rd24;
+    st.global.u64 [%rd29+40], %rd25;
+    st.global.u64 [%rd29+48], %rd26;
+    st.global.u64 [%rd29+56], %rd27;
+done:
+    ret;
+}

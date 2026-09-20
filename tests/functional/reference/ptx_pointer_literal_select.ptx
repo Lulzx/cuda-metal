@@ -1,0 +1,42 @@
+.version 8.0
+.target sm_80
+.address_size 64
+
+// Rust uses address one as the non-null dangling pointer carried by an empty
+// slice. The pointer must retain that exact bit pattern, but is never
+// dereferenced when the corresponding length is zero.
+.visible .entry integer_probe(
+    .param .u64 input,
+    .param .u64 output,
+    .param .u32 count
+) {
+    .reg .b64 %rd<8>;
+    .reg .b32 %r<6>;
+    .reg .pred %p<4>;
+
+    ld.param.u64 %rd0, [input];
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r2, [count];
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mov.u32 %r5, %tid.x;
+    mad.lo.u32 %r0, %r3, %r4, %r5;
+    setp.ge.u32 %p0, %r0, %r2;
+    @%p0 bra DONE;
+
+    mul.wide.u32 %rd2, %r0, 8;
+    add.u64 %rd3, %rd0, %rd2;
+    add.u64 %rd4, %rd1, %rd2;
+    ld.global.u64 %rd5, [%rd3];
+    and.b64 %rd5, %rd5, 1;
+    setp.eq.u64 %p1, %rd5, 0;
+    selp.b64 %rd6, 1, %rd3, %p1;
+    @%p1 bra DANGLING;
+    ld.global.u64 %rd7, [%rd6];
+    st.global.u64 [%rd4], %rd7;
+    bra DONE;
+DANGLING:
+    st.global.u64 [%rd4], %rd6;
+DONE:
+    ret;
+}

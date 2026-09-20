@@ -49,7 +49,39 @@ CUDA C++ / PTX → CuMetal compiler → Metal Shading Language → Apple tools �
 Source recompilation is the primary path. Direct CUDA C++ compilation uses
 typed CuMetal IR and embeds the compiled Metal library in the executable,
 with no first-launch PTX JIT. CuMetal uses no private Apple APIs.
-See [compiler architecture](docs/compiler-architecture.md) for backend details.
+PTX import resolves each definition and branch/loop argument from its reaching
+SSA values, with checked result and edge types; supported register reuse does not
+inherit the type of a later assignment. PTX memory addresses use byte pointers
+in their actual storage address space; the final Metal dereference uses the
+resolved value type. Metal IR rejects unresolved nested pointer address spaces.
+Before pointer lowering, bounded SSA analysis can cancel a common address base
+from 64-bit arithmetic, including loop-carried cursors, and retain the resulting
+wrapping scalar count. It never materializes a Metal pointer as an integer.
+Aligned private-address ORs become byte offsets only when actual allocation
+alignment and reaching values prove every selected bit is zero. Local pointer
+fields admitted to reaching-store validation use bounded guard/range and
+initialized-prefix proofs to exclude intervening disjoint writes; missing
+initialization and possible overlaps reject within that proof. Escaped-cell
+discovery still has a separate validation gap documented below.
+Address-demand discovery expands only joins reached from memory uses, retaining
+every demanded incoming edge within the same work limit. Range proofs can use
+excluded comparison endpoints, bounded related offsets and necessary Boolean
+conditions, including pointer iterators with a literal end length or a selected
+zero stop marker. Unproved writes remain barriers to pointer recovery.
+See [the proof-scaling validation](docs/ptx-memory-proof-scaling-validation.md)
+for numerical checks, remaining full-input blockers and proof limits.
+Scalar conversions retain both their instruction format and wider
+declared register storage, including the required destination extension.
+Before register SSA, scalar zero-marker facts can prove that an absent payload
+is bypassed. Edge clones also discard a known unselected scalar-select arm while
+preserving observable operations; overwritten or unknown guards retain strict
+definedness checks.
+A single-use 64-bit pack followed by unsigned 16/32-bit narrowing can discard
+its unobserved high half when declared widths and an unchanged low source prove
+the replacement. Other uses retain their original definedness requirements.
+See [known gaps](docs/known-gaps.md) for memory-provenance and legacy-backend
+limits, and
+[compiler architecture](docs/compiler-architecture.md) for backend details.
 
 ## Limits
 

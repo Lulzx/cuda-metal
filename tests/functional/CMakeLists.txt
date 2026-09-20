@@ -3,6 +3,10 @@ if(NOT APPLE)
     return()
 endif()
 
+add_test(NAME functional_ptx_compile_trace
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_compile_trace.py ${CMAKE_BINARY_DIR})
+set_tests_properties(functional_ptx_compile_trace PROPERTIES TIMEOUT 30 LABELS "hosted;functional")
+
 add_executable(cumetal_runtime_vector_add_test
     runtime_vector_add_test.cpp
 )
@@ -2854,6 +2858,207 @@ add_test(
 )
 set_tests_properties(functional_cumetalc_ptx_aggregate_abi PROPERTIES
     SKIP_RETURN_CODE 77)
+
+# Checks emitted metadata without an offline Metal toolchain or GPU.
+add_test(NAME functional_ptx_msl_abi
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_msl_abi.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/vector_add.ptx)
+
+if(APPLE)
+    add_test(NAME functional_ptx_address_cancellation
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_address_cancellation.py ${CMAKE_BINARY_DIR})
+    # Eight children each own a 90-second deadline and process-group cleanup.
+    set_tests_properties(functional_ptx_address_cancellation PROPERTIES TIMEOUT 800)
+    add_test(NAME functional_ptx_address_alignment
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_address_alignment.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_address_alignment PROPERTIES TIMEOUT 500)
+    add_test(NAME functional_ptx_memory_ranges
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_memory_ranges.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_memory_ranges PROPERTIES TIMEOUT 600)
+    add_test(NAME functional_ptx_pointer_cell_refinement
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_pointer_cell_refinement.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_pointer_cell_refinement PROPERTIES TIMEOUT 300)
+    add_test(NAME functional_ptx_vector_pointer_lanes
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_vector_pointer_lanes.py ${CMAKE_BINARY_DIR})
+    # Seventeen numerical children (90 s each) and 24 compile-only refusals (45 s).
+    set_tests_properties(functional_ptx_vector_pointer_lanes PROPERTIES TIMEOUT 2700)
+    add_test(NAME functional_ptx_reused_local_cells
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_reused_local_cells.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_reused_local_cells PROPERTIES TIMEOUT 180)
+    add_test(NAME functional_ptx_helper_record_fields
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_helper_record_fields.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_helper_record_fields PROPERTIES TIMEOUT 1200)
+    add_test(NAME functional_ptx_bit_counts COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_bit_counts.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_bit_counts PROPERTIES TIMEOUT 120)
+    add_test(NAME functional_ptx_call_write_footprints
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_call_write_footprints.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_call_write_footprints PROPERTIES TIMEOUT 600)
+    add_test(NAME functional_ptx_cvt_storage
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_cvt_storage.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_cvt_storage PROPERTIES TIMEOUT 2400)
+    add_test(NAME functional_ptx_float_integer
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_float_integer.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_float_integer PROPERTIES TIMEOUT 600)
+    add_test(NAME functional_ptx_pointer_record_fields
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_pointer_record_fields.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_pointer_record_fields PROPERTIES TIMEOUT 180)
+    add_test(NAME functional_ptx_out_of_order_parameters
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_out_of_order_parameters.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_out_of_order_parameters PROPERTIES TIMEOUT 180)
+    add_test(NAME functional_ptx_pointer_literal_select
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_pointer_literal_select.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_pointer_literal_select PROPERTIES TIMEOUT 180)
+    add_test(NAME functional_ptx_loaded_pointer_values
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_loaded_pointer_values.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_loaded_pointer_values PROPERTIES TIMEOUT 180)
+    add_test(NAME functional_ptx_live_predicate_facts
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_live_predicate_facts.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_live_predicate_facts PROPERTIES TIMEOUT 180)
+    add_test(NAME functional_ptx_equivalent_expressions
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_equivalent_expressions.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_equivalent_expressions PROPERTIES TIMEOUT 180)
+    add_test(NAME functional_ptx_caller_predicate
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_caller_predicate.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_caller_predicate PROPERTIES TIMEOUT 180)
+    add_test(NAME functional_ptx_select_comparisons
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_select_comparisons.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_select_comparisons PROPERTIES TIMEOUT 180)
+    add_test(NAME functional_ptx_unobserved_copies
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_unobserved_copies.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_unobserved_copies PROPERTIES TIMEOUT 180)
+    add_test(NAME functional_ptx_repeated_relation
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_repeated_relation.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_repeated_relation PROPERTIES TIMEOUT 180)
+    add_test(NAME functional_ptx_repeated_predicate
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_repeated_predicate.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_repeated_predicate PROPERTIES TIMEOUT 120)
+    add_test(NAME functional_ptx_trivial_block_arguments
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trivial_block_arguments.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_trivial_block_arguments PROPERTIES TIMEOUT 120)
+    add_test(NAME functional_ptx_readonly_table_calls
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_readonly_table_calls.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_readonly_table_calls PROPERTIES TIMEOUT 120)
+
+    add_test(NAME functional_ptx_constant_predicate
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_constant_predicate.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_constant_predicate PROPERTIES TIMEOUT 120)
+
+    add_test(NAME functional_ptx_empty_slice_guards
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_empty_slice_guards.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_empty_slice_guards PROPERTIES TIMEOUT 900)
+
+    add_test(NAME functional_ptx_scalar_zero_guards
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_scalar_zero_guards.py ${CMAKE_BINARY_DIR})
+    # Each of sixteen numerical children owns a 90-second deadline; rejection
+    # controls have separate 30-second compiler-only deadlines.
+    set_tests_properties(functional_ptx_scalar_zero_guards PROPERTIES TIMEOUT 3300)
+
+    add_test(NAME functional_ptx_deep_guarded_payload
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_deep_guarded_payload.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_deep_guarded_payload PROPERTIES TIMEOUT 120)
+
+    add_test(NAME functional_ptx_masked_optional_payload
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_masked_optional_payload.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_masked_optional_payload PROPERTIES TIMEOUT 240)
+
+    add_test(NAME functional_ptx_null_edges
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_null_edges.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_null_edges PROPERTIES TIMEOUT 120)
+
+    add_test(NAME functional_ptx_register_reuse
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_register_reuse.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_register_reuse PROPERTIES TIMEOUT 120)
+
+    add_test(NAME functional_ptx_promoted_global
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_promoted_global.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_promoted_global PROPERTIES TIMEOUT 120)
+
+    add_test(NAME functional_ptx_commuted_pointer
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_commuted_pointer.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_commuted_pointer PROPERTIES TIMEOUT 120)
+
+    foreach(emit IN ITEMS msl metallib)
+        add_test(NAME functional_ptx_typed_abi_${emit}
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_typed_abi.py ${CMAKE_BINARY_DIR} ${emit})
+        set_tests_properties(functional_ptx_typed_abi_${emit} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+    endforeach()
+
+    add_test(NAME functional_ptx_discarded_halves
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_discarded_halves.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_discarded_halves PROPERTIES TIMEOUT 120)
+
+    add_test(NAME functional_ptx_narrow_pack
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_narrow_pack.py ${CMAKE_BINARY_DIR})
+    # Twelve GPU children have 90-second deadlines; 44 rejections compile only.
+    set_tests_properties(functional_ptx_narrow_pack PROPERTIES TIMEOUT 2600)
+
+    add_test(NAME functional_ptx_packed_loop
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_packed_loop.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_packed_loop PROPERTIES TIMEOUT 120)
+
+    add_test(NAME functional_ptx_store_provenance
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_store_provenance.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_store_provenance PROPERTIES TIMEOUT 120)
+
+    add_test(NAME functional_ptx_pointers
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_pointers.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_pointers PROPERTIES TIMEOUT 120)
+    add_test(NAME functional_ptx_provenance
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_provenance.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_provenance PROPERTIES TIMEOUT 45)
+    add_executable(cumetal_trap_binding_test trap_binding_test.cpp)
+    target_link_libraries(cumetal_trap_binding_test PRIVATE cumetal_runtime)
+    add_test(NAME functional_ptx_trap_reporting
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR})
+    add_test(NAME functional_ptx_trap_reporting_trace
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --trace)
+    add_test(NAME functional_ptx_trap_calls
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --calls)
+    add_test(NAME functional_ptx_trap_calls_trace
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --calls --trace)
+    add_test(NAME functional_ptx_trap_call_values
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_call_values.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_trap_reporting functional_ptx_trap_reporting_trace
+        functional_ptx_trap_calls functional_ptx_trap_calls_trace functional_ptx_trap_call_values
+        PROPERTIES TIMEOUT 45)
+    foreach(guard_case guarded_self_select bounded_self_select guarded_load)
+        add_test(NAME functional_ptx_${guard_case}
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_guarded_paths.py
+                    ${CMAKE_BINARY_DIR} ${guard_case})
+        set_tests_properties(functional_ptx_${guard_case} PROPERTIES TIMEOUT 120)
+    endforeach()
+    foreach(tail_case scalar local)
+        add_test(NAME functional_ptx_${tail_case}_tail_calls
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_tail_calls.py
+                    ${CMAKE_BINARY_DIR} ${tail_case})
+        set_tests_properties(functional_ptx_${tail_case}_tail_calls PROPERTIES TIMEOUT 120)
+    endforeach()
+    foreach(arithmetic_case integer_minmax mul_hi_64)
+        add_test(NAME functional_ptx_${arithmetic_case}
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_integer_arithmetic.py
+                    ${CMAKE_BINARY_DIR} ${arithmetic_case})
+        set_tests_properties(functional_ptx_${arithmetic_case} PROPERTIES TIMEOUT 120)
+    endforeach()
+    foreach(bit_case bit_permutation bit_insert tuple_move)
+        add_test(NAME functional_ptx_${bit_case}
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_bit_ops.py
+                    ${CMAKE_BINARY_DIR} ${bit_case})
+        set_tests_properties(functional_ptx_${bit_case} PROPERTIES TIMEOUT 120)
+    endforeach()
+    foreach(encoding byte typed)
+        add_test(NAME functional_ptx_table_${encoding}
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_relocated_table.py
+                    ${CMAKE_BINARY_DIR} ${encoding})
+        set_tests_properties(functional_ptx_table_${encoding} PROPERTIES TIMEOUT 120)
+    endforeach()
+    foreach(width_case widening conversions parameters stores loads)
+        add_test(NAME functional_ptx_width_${width_case}
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_integer_widths.py
+                    ${CMAKE_BINARY_DIR} ${width_case})
+        set_tests_properties(functional_ptx_width_${width_case} PROPERTIES TIMEOUT 120)
+    endforeach()
+endif()
 
 add_test(
     NAME functional_driver_launch_extra_scalar

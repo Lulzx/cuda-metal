@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <regex>
 #include <sstream>
 #include <unordered_map>
@@ -31,6 +32,7 @@ std::string strip_comments(std::string_view text) {
         }
 
         if (state == State::kBlockComment) {
+            if (c == '\n') out.push_back(c);
             if (c == '*' && next == '/') {
                 state = State::kNormal;
                 ++i;
@@ -46,6 +48,7 @@ std::string strip_comments(std::string_view text) {
 
         if (c == '/' && next == '*') {
             state = State::kBlockComment;
+            out.push_back(' '); // Comments separate tokens rather than joining them.
             ++i;
             continue;
         }
@@ -133,7 +136,7 @@ bool is_supported_opcode(const std::string& opcode) {
         "ld",        "lg2",        "lop3",      "mad",   "match", "max",      "membar","min",
         "mov",       "mul",        "nanosleep", "neg",   "not",   "or",       "popc",  "prmt",
         "rcp",       "redux",      "rem",       "ret",   "rsqrt", "sad",      "selp",  "set",
-        "setp",      "shl",        "shr",       "shfl",  "sin",   "sqrt",     "st",    "sub",
+        "setp",      "shl",        "shr",       "shf",   "shfl",  "sin",   "sqrt",     "st",    "sub",
         "fence",     "prefetch",   "prefetchu", "red",   "suq",   "testp",    "trap",  "txq",
         "vote",      "xor",
     };
@@ -355,6 +358,7 @@ void infer_pointer_parameters(EntryFunction* entry) {
     }
 
     std::unordered_map<std::string, std::string> register_to_param;
+    std::unordered_set<std::string> non_parameter_addresses;
     for (const auto& instruction : entry->instructions) {
         if (starts_with(instruction.opcode, "ld.param") && instruction.operands.size() >= 2) {
             const std::string dest_register = extract_register_name(instruction.operands[0]);
@@ -391,9 +395,26 @@ void infer_pointer_parameters(EntryFunction* entry) {
             }
         }
 
-        if (!starts_with(instruction.opcode, "ld.param") && !instruction.operands.empty()) {
+        // A store reads its address; it does not define that register.
+        if (!starts_with(instruction.opcode, "ld.param") &&
+            opcode_root(instruction.opcode) != "st" && !instruction.operands.empty()) {
             const std::string dest_register = extract_register_name(instruction.operands[0]);
             if (!dest_register.empty()) {
+                const auto root = opcode_root(instruction.opcode);
+                bool address = root == "cvta";
+                if (root == "mov" && instruction.operands.size() == 2) {
+                    const auto source = trim(instruction.operands[1]);
+                    address |= !source.empty() &&
+                        (std::isalpha(static_cast<unsigned char>(source.front())) ||
+                         source.front() == '_' || source.front() == '$') &&
+                        !param_names.contains(source);
+                }
+                if (root == "mov" || root == "add" || root == "sub") {
+                    for (std::size_t i = 1; i < instruction.operands.size(); ++i)
+                        address |= non_parameter_addresses.contains(extract_register_name(instruction.operands[i]));
+                }
+                if (address) non_parameter_addresses.insert(dest_register);
+                else if (instruction.predicate.empty()) non_parameter_addresses.erase(dest_register);
                 std::string mapped_param;
                 bool ambiguous = false;
                 for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
@@ -403,6 +424,13 @@ void infer_pointer_parameters(EntryFunction* entry) {
                     }
                     const auto reg_it = register_to_param.find(src_register);
                     if (reg_it == register_to_param.end()) {
+                        // A known symbol-derived address must not attribute a
+                        // combined address solely to its scalar offset. Keep
+                        // ordinary untracked thread-index arithmetic compatible.
+                        if (non_parameter_addresses.contains(src_register)) {
+                            ambiguous = true;
+                            break;
+                        }
                         continue;
                     }
                     if (mapped_param.empty()) {
@@ -466,8 +494,9 @@ void infer_pointer_parameters(EntryFunction* entry) {
             continue;
         }
 
-        // Preserve historical behavior for unannotated .u64 params unless proven scalar.
-        param.is_pointer = true;
+        // Integer width alone is not pointer evidence. The typed importer can
+        // recover omitted annotations from address uses beyond this classifier.
+        param.is_pointer = false;
     }
 }
 
@@ -538,9 +567,23 @@ void parse_instructions(const std::string& body,
             const std::size_t comma = names.find(',', start);
             const std::string name = trim(names.substr(
                 start, comma == std::string::npos ? std::string::npos : comma - start));
+            const auto open = name.find('<');
+            if (!name.empty() && name[0] == '%' && open > 1 &&
+                open != std::string::npos && name.back() == '>') {
+                const auto digits = std::string_view(name).substr(open + 1, name.size() - open - 2);
+                std::size_t count = 0;
+                const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), count);
+                const auto prefix = name.substr(0, open);
+                if (parsed.ec == std::errc{} && parsed.ptr == digits.data() + digits.size() &&
+                    count != 0 && std::all_of(prefix.begin() + 1, prefix.end(), [](unsigned char c) {
+                        return std::isalnum(c) || c == '_' || c == '$';
+                    })) {
+                    entry->register_ranges.push_back({prefix, type, count, scope_depth == 0});
+                }
+            }
             if (!name.empty() && name.find('<') == std::string::npos) {
                 if (name[0] == '%') {
-                    entry->register_declarations.push_back({name, type});
+                    entry->register_declarations.push_back({name, type, scope_depth == 0});
                 } else {
                     // The legacy backend types a register by its NVPTX name
                     // prefix (%p predicate, %rs 16-bit, %r/%f 32-bit, %rd/%fd
@@ -557,7 +600,7 @@ void parse_instructions(const std::string& body,
                                                                               : "%r_cm_";
                     const std::string renamed = prefix + name;
                     bare_registers.push_back({name, renamed, scope_depth});
-                    entry->register_declarations.push_back({renamed, type});
+                    entry->register_declarations.push_back({renamed, type, scope_depth == 0});
                 }
             }
             if (comma == std::string::npos) break;
@@ -596,8 +639,18 @@ void parse_instructions(const std::string& body,
 
     std::istringstream stream(body);
     std::string raw_line;
-    while (std::getline(stream, raw_line)) {
-        const int current_line = line++;
+    std::string remainder;
+    int remainder_line = 0;
+    while (true) {
+        int current_line;
+        if (!remainder.empty()) {
+            raw_line = std::move(remainder);
+            remainder.clear();
+            current_line = remainder_line;
+        } else {
+            if (!std::getline(stream, raw_line)) break;
+            current_line = line++;
+        }
         std::string line_text = trim(raw_line);
         if (line_text.empty()) {
             continue;
@@ -688,6 +741,48 @@ void parse_instructions(const std::string& body,
         if (line_text.empty()) {
             continue;
         }
+        // A physical newline is whitespace inside a PTX call. Rust/LLVM emits
+        // the return tuple, callee and argument tuple on separate lines. Assemble
+        // through the semicolon before operand splitting or register renaming.
+        std::string call_head = line_text;
+        if (call_head.front() == '@') {
+            const auto predicate_end = call_head.find_first_of(" \t");
+            if (predicate_end != std::string::npos) {
+                call_head = trim(call_head.substr(predicate_end + 1));
+            }
+        }
+        const std::string candidate_opcode = call_head.substr(0, call_head.find_first_of(" \t"));
+        std::string assembly_error;
+        if (candidate_opcode == "call" || starts_with(candidate_opcode, "call.")) {
+            int last_line = current_line;
+            std::size_t semi = line_text.find(';');
+            while (semi == std::string::npos && std::getline(stream, raw_line)) {
+                last_line = line++;
+                line_text += " " + trim(raw_line);
+                semi = line_text.find(';');
+            }
+            if (semi == std::string::npos) {
+                assembly_error = "unterminated PTX call at line " + std::to_string(current_line);
+            } else {
+                remainder = trim(line_text.substr(semi + 1));
+                remainder_line = last_line;
+                if (!remainder.empty()) {
+                    // Braces stripped from the original physical line close
+                    // only after its remaining instructions have been parsed.
+                    remainder += std::string(pending_closes, '}');
+                    pending_closes = 0;
+                }
+                line_text.resize(semi + 1);
+                int parentheses = 0;
+                for (char ch : line_text) {
+                    if (ch == '(') ++parentheses;
+                    if (ch == ')' && --parentheses < 0) break;
+                }
+                if (parentheses != 0) {
+                    assembly_error = "unbalanced PTX call parentheses at line " + std::to_string(current_line);
+                }
+            }
+        }
         line_text = rename_bare_registers(line_text);
 
         // `name : .callprototype (...) _ (...);` declares the signature of an
@@ -759,12 +854,28 @@ void parse_instructions(const std::string& body,
             instruction.operands = split_operands(line_text.substr(ws + 1));
         }
 
-        instruction.supported = !is_explicitly_unsupported(instruction.opcode) &&
+        if (opcode_root(instruction.opcode) == "call" && assembly_error.empty()) {
+            // Do not absorb a following instruction when a call's semicolon
+            // is missing: top-level operands are single names or complete tuples.
+            for (const auto& operand : instruction.operands) {
+                if ((operand.front() == '(' && operand.back() != ')') ||
+                    (operand.front() != '(' && operand.find_first_of(" \t") != std::string::npos)) {
+                    assembly_error = "malformed PTX call operand at line " + std::to_string(current_line);
+                    break;
+                }
+            }
+            if (instruction.operands.empty()) {
+                assembly_error = "missing PTX call target at line " + std::to_string(current_line);
+            }
+        }
+        instruction.supported = assembly_error.empty() &&
+                                !is_explicitly_unsupported(instruction.opcode) &&
                                 is_supported_opcode(instruction.opcode);
         if (!instruction.supported) {
             const std::string targeted = targeted_unsupported_message(instruction.opcode);
-            warnings->push_back(!targeted.empty()
-                                     ? targeted
+            warnings->push_back(!assembly_error.empty()
+                                     ? assembly_error
+                                     : !targeted.empty() ? targeted
                                      : "unsupported opcode '" + instruction.opcode + "' at line " +
                                            std::to_string(instruction.line));
         }

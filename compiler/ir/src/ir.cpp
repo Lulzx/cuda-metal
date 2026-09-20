@@ -1,4 +1,5 @@
 #include "cumetal/ir/ir.h"
+#include "dominance.h"
 
 #include <algorithm>
 #include <functional>
@@ -35,6 +36,13 @@ void add_diagnostic(VerifyResult* result, const SourceLocation& location, std::s
     result->diagnostics.push_back({.location = location, .message = std::move(message)});
 }
 
+bool has_unresolved_nested_pointer(const Type& type) {
+    return std::any_of(type.elements.begin(), type.elements.end(), [](const Type& element) {
+        return (element.is_pointer() && element.address_space == AddressSpace::kNone) ||
+               has_unresolved_nested_pointer(element);
+    });
+}
+
 struct ValueDefinition {
     Type type;
     BlockId block = kInvalidBlock;
@@ -42,6 +50,40 @@ struct ValueDefinition {
     bool function_argument = false;
     bool block_argument = false;
 };
+
+bool successor_type_matches(const Module& module, const Function& function,
+                            ValueId source_value, const Type& source,
+                            const BlockArgument& target) {
+    const bool mixed_target = module.stage == IrStage::kMetalLegalized &&
+        function.mixed_pointer_address_spaces.contains(target.value);
+    if (source == target.type && !mixed_target) return true;
+    if (!source.is_pointer() || !target.type.is_pointer()) return false;
+    Type same_shape = source;
+    same_shape.address_space = target.type.address_space;
+    if (same_shape != target.type) return false;
+
+    // Generic pointer PHIs have an explicitly tracked, provisional address
+    // space in GPU IR. Their concrete alternatives are resolved together with
+    // helper call sites during Metal legalization. Only address space may
+    // differ here; pointee/width differences still need explicit edge values.
+    if (module.stage == IrStage::kGpuSemantic)
+        return function.generic_pointer_values.contains(target.value);
+
+    // Legalization represents a mixed pointer with an address-space tag. An
+    // incoming concrete (or mixed) pointer must fit the destination's declared
+    // alternatives. Generic metadata alone no longer authorizes a mismatch.
+    const auto target_spaces = function.mixed_pointer_address_spaces.find(target.value);
+    if (target.type.address_space != AddressSpace::kNone ||
+        target_spaces == function.mixed_pointer_address_spaces.end()) return false;
+    std::uint8_t source_spaces = 0;
+    if (source.address_space != AddressSpace::kNone) {
+        source_spaces = static_cast<std::uint8_t>(1u << static_cast<unsigned>(source.address_space));
+    } else if (const auto mixed = function.mixed_pointer_address_spaces.find(source_value);
+               mixed != function.mixed_pointer_address_spaces.end()) {
+        source_spaces = mixed->second;
+    }
+    return source_spaces != 0 && (source_spaces & ~target_spaces->second) == 0;
+}
 
 }  // namespace
 
@@ -306,6 +348,15 @@ std::string_view opcode_name(OpCode opcode) {
 VerifyResult verify(const Module& module) {
     VerifyResult result;
     std::unordered_set<std::string> function_names;
+    const auto verify_nested_pointer_spaces = [&](const Type& type, const SourceLocation& location) {
+        // Top-level mixed pointers have an explicit tagged representation.
+        // Nested pointer types do not: every inner pointer must have a concrete
+        // Metal address space before MSL declarations and casts are emitted.
+        if (module.stage == IrStage::kMetalLegalized && has_unresolved_nested_pointer(type)) {
+            add_diagnostic(&result, location,
+                           "Metal IR type contains an unresolved nested pointer address space: " + type.str());
+        }
+    };
 
     for (const Function& function : module.functions) {
         if (function.name.empty() || !function_names.insert(function.name).second) {
@@ -316,6 +367,13 @@ VerifyResult verify(const Module& module) {
     std::unordered_map<std::string, std::unordered_set<std::string>> call_graph;
     for (const Function& function : module.functions) {
         if (function.name.empty()) continue;
+        verify_nested_pointer_spaces(function.return_type, {});
+        if (function.kernel_abi) {
+            for (const auto& argument : function.kernel_abi->arguments)
+                verify_nested_pointer_spaces(argument.type, {});
+            for (const auto& binding : function.kernel_abi->bindings)
+                verify_nested_pointer_spaces(binding.type, {});
+        }
         if (function.blocks.empty()) {
             add_diagnostic(&result, {}, "function '" + function.name + "' has no basic blocks");
             continue;
@@ -328,6 +386,7 @@ VerifyResult verify(const Module& module) {
         }
 
         for (const FunctionArgument& argument : function.arguments) {
+            verify_nested_pointer_spaces(argument.type, {});
             if (argument.type.is_pointer() &&
                 !function.pointer_provenance.contains(argument.value)) {
                 add_diagnostic(&result, {},
@@ -380,36 +439,7 @@ VerifyResult verify(const Module& module) {
             }
         }
 
-        std::vector<std::unordered_set<std::size_t>> dominators(block_count);
-        for (std::size_t i = 0; i < block_count; ++i) {
-            if (i == 0) {
-                dominators[i].insert(0);
-            } else {
-                for (std::size_t j = 0; j < block_count; ++j) {
-                    dominators[i].insert(j);
-                }
-            }
-        }
-        bool changed = true;
-        while (changed) {
-            changed = false;
-            for (std::size_t i = 1; i < block_count; ++i) {
-                std::unordered_set<std::size_t> next;
-                if (!predecessors[i].empty()) {
-                    next = dominators[predecessors[i].front()];
-                    for (std::size_t predecessor : predecessors[i]) {
-                        std::erase_if(next, [&](std::size_t candidate) {
-                            return !dominators[predecessor].contains(candidate);
-                        });
-                    }
-                }
-                next.insert(i);
-                if (next != dominators[i]) {
-                    dominators[i] = std::move(next);
-                    changed = true;
-                }
-            }
-        }
+        const detail::Dominance dominators(predecessors);
 
         std::unordered_map<ValueId, ValueDefinition> definitions;
         for (const FunctionArgument& argument : function.arguments) {
@@ -422,6 +452,7 @@ VerifyResult verify(const Module& module) {
         }
         for (const BasicBlock& block : function.blocks) {
             for (const BlockArgument& argument : block.arguments) {
+                verify_nested_pointer_spaces(argument.type, {});
                 if (argument.value == kInvalidValue ||
                     !definitions.emplace(argument.value,
                                          ValueDefinition{
@@ -438,6 +469,8 @@ VerifyResult verify(const Module& module) {
                 if (operation.results.size() != operation.result_types.size()) {
                     add_diagnostic(&result, operation.location, "operation result/type arity mismatch");
                 }
+                for (const Type& type : operation.result_types)
+                    verify_nested_pointer_spaces(type, operation.location);
                 for (std::size_t result_index = 0; result_index < operation.results.size(); ++result_index) {
                     const ValueId value = operation.results[result_index];
                     const Type type = result_index < operation.result_types.size()
@@ -462,6 +495,7 @@ VerifyResult verify(const Module& module) {
             for (std::size_t op_index = 0; op_index < block.operations.size(); ++op_index) {
                 const Operation& operation = block.operations[op_index];
                 for (const Operand& operand : operation.operands) {
+                    verify_nested_pointer_spaces(operand.type, operation.location);
                     if (operand.kind != OperandKind::kValue) {
                         continue;
                     }
@@ -492,19 +526,91 @@ VerifyResult verify(const Module& module) {
                                            "value %" + std::to_string(operand.value) +
                                                " is used before its definition");
                         }
-                    } else if (!dominators[block_index].contains(definition_block->second)) {
+                    } else if (!dominators.dominates(definition_block->second, block_index)) {
                         add_diagnostic(&result, operation.location,
                                        "value %" + std::to_string(operand.value) +
                                            " does not dominate its use");
                     }
                 }
 
+                // Successor arguments are SSA uses at the branch, even though
+                // they are stored outside operation.operands. Any conversion
+                // (including a typed null or pointee conversion) must have its
+                // own value before the edge. Explicitly tracked generic/mixed
+                // pointer spaces follow their staged specialization contract.
+                for (const Successor& successor : operation.successors) {
+                    const auto target = block_indices.find(successor.block);
+                    if (target == block_indices.end()) continue;
+                    const BasicBlock& target_block = function.blocks[target->second];
+                    for (std::size_t i = 0; i < successor.arguments.size(); ++i) {
+                        const ValueId value = successor.arguments[i];
+                        const auto context = [&] {
+                            return "edge from block '" + block.name + "' to block '" +
+                                target_block.name + "' argument " + std::to_string(i);
+                        };
+                        const auto definition = definitions.find(value);
+                        if (definition == definitions.end()) {
+                            add_diagnostic(&result, operation.location,
+                                           context() + " uses undefined value %" + std::to_string(value));
+                            continue;
+                        }
+                        if (i < target_block.arguments.size() &&
+                            !successor_type_matches(module, function, value, definition->second.type,
+                                                    target_block.arguments[i])) {
+                            add_diagnostic(&result, operation.location,
+                                           context() + " passes value %" + std::to_string(value) +
+                                               " type " + definition->second.type.str() +
+                                               " to block argument type " +
+                                               target_block.arguments[i].type.str());
+                        }
+                        if (definition->second.function_argument) continue;
+                        const auto definition_block = block_indices.find(definition->second.block);
+                        if (definition_block == block_indices.end()) continue;
+                        if (definition_block->second == block_index) {
+                            if (!definition->second.block_argument &&
+                                definition->second.operation_index >= op_index) {
+                                add_diagnostic(&result, operation.location,
+                                               context() + " uses value %" + std::to_string(value) +
+                                                   " before its definition");
+                            }
+                        } else if (!dominators.dominates(definition_block->second, block_index)) {
+                            add_diagnostic(&result, operation.location,
+                                           context() + " uses value %" + std::to_string(value) +
+                                               " that does not dominate the edge");
+                        }
+                    }
+                }
+
+                if (operation.opcode == OpCode::kPointerOffset &&
+                    operation.attributes.contains("offset_direction")) {
+                    const auto& direction = operation.attributes.at("offset_direction");
+                    if (direction != "add" && direction != "subtract") {
+                        add_diagnostic(&result, operation.location, "invalid pointer offset direction");
+                    } else if (direction == "subtract" &&
+                               (operation.operands.size() != 2 || operation.result_types.size() != 1 ||
+                                !operation.operands[0].type.is_pointer() ||
+                                operation.operands[1].type != Type::integer(64) ||
+                                operation.result_types[0] != operation.operands[0].type ||
+                                !operation.attributes.contains("offset_unit") ||
+                                operation.attributes.at("offset_unit") != "bytes" ||
+                                operation.attributes.contains("combined"))) {
+                        add_diagnostic(&result, operation.location,
+                                       "pointer subtraction requires a same-space pointer and 64-bit byte offset");
+                    }
+                }
                 if (operation.opcode == OpCode::kAddressSpaceCast &&
                     (!operation.operands.empty() && !operation.result_types.empty())) {
                     const Type& source = operation.operands.front().type;
                     const Type& target = operation.result_types.front();
+                    // Generic helper parameters are explicitly tracked until
+                    // call-site specialization. Permit only that source in GPU
+                    // IR; legalized IR must have concrete spaces on both sides.
+                    const bool pending_generic_source =
+                        module.stage == IrStage::kGpuSemantic && source.is_pointer() &&
+                        operation.operands.front().kind == OperandKind::kValue &&
+                        function.generic_pointer_values.contains(operation.operands.front().value);
                     if (!source.is_pointer() || !target.is_pointer() ||
-                        source.address_space == AddressSpace::kNone ||
+                        (source.address_space == AddressSpace::kNone && !pending_generic_source) ||
                         target.address_space == AddressSpace::kNone) {
                         add_diagnostic(&result, operation.location,
                                        "address-space casts require explicit pointer address spaces");

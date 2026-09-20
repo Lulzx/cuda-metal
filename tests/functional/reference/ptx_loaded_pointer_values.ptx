@@ -1,0 +1,157 @@
+.version 8.0
+.target sm_80
+.address_size 64
+
+.visible .entry integer_probe(
+    .param .u64 input,
+    .param .u64 output,
+    .param .u32 count
+) {
+    .reg .b64 %rd<14>;
+    .reg .b32 %r<6>;
+    .reg .pred %p0;
+    .local .align 8 .b8 values[32];
+    .local .align 8 .b8 pointers[16];
+
+    ld.param.u64 %rd0, [input];
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r2, [count];
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mov.u32 %r5, %tid.x;
+    mad.lo.u32 %r0, %r3, %r4, %r5;
+    setp.ge.u32 %p0, %r0, %r2;
+    @%p0 bra DONE;
+
+    mul.wide.u32 %rd2, %r0, 8;
+    add.u64 %rd3, %rd0, %rd2;
+    add.u64 %rd4, %rd1, %rd2;
+    ld.global.u64 %rd5, [%rd3];
+    and.b64 %rd5, %rd5, 1;
+    mov.u64 %rd6, values;
+    mov.u64 %rd7, pointers;
+    st.local.u64 [%rd6], 17;
+    st.local.u64 [%rd6+8], 29;
+    st.local.u64 [%rd6+16], 23;
+    st.local.u64 [%rd6+24], 31;
+    cvta.local.u64 %rd8, %rd6;
+    add.u64 %rd9, %rd8, 16;
+    st.local.v2.u64 [%rd7], {%rd8, %rd9};
+    shl.b64 %rd10, %rd5, 3;
+    add.u64 %rd11, %rd7, %rd10;
+    ld.local.u64 %rd12, [%rd11];
+    ld.u64 %rd13, [%rd12+8];
+    st.global.u64 [%rd4], %rd13;
+DONE:
+    ret;
+}
+
+// Mirrors the Rust-CUDA RSA-PSS shape: ordinary scalar fields and a pointer
+// table share one compiler stack depot, while a two-iteration loop selects
+// adjacent vector entries from the pointer-only subobject.
+.visible .entry suballocation_probe(
+    .param .u64 input,
+    .param .u64 output,
+    .param .u32 count
+) {
+    .reg .b64 %rd<20>;
+    .reg .b32 %r<7>;
+    .reg .pred %p<2>;
+    .local .align 16 .b8 stack[128];
+
+    ld.param.u64 %rd0, [input];
+    ld.param.u64 %rd1, [output];
+    ld.param.u32 %r2, [count];
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mov.u32 %r5, %tid.x;
+    mad.lo.u32 %r0, %r3, %r4, %r5;
+    setp.ge.u32 %p0, %r0, %r2;
+    @%p0 bra SUB_DONE;
+
+    mov.u64 %rd2, stack;
+    cvta.local.u64 %rd3, %rd2;
+    add.u64 %rd4, %rd2, 16;
+    add.u64 %rd5, %rd3, 64;
+    add.u64 %rd6, %rd3, 80;
+    add.u64 %rd7, %rd3, 72;
+    add.u64 %rd8, %rd3, 88;
+    st.local.v2.u64 [%rd4], {0, 2};
+    st.local.v2.u64 [%rd4+16], {%rd5, %rd6};
+    st.local.v2.u64 [%rd4+32], {%rd7, %rd8};
+    st.local.u64 [%rd5], 101;
+    st.local.u64 [%rd7], 103;
+    st.local.u64 [%rd6], 107;
+    st.local.u64 [%rd8], 109;
+    mov.u64 %rd9, 0;
+SUB_LOOP:
+    shl.b64 %rd10, %rd9, 4;
+    add.u64 %rd11, %rd4, %rd10;
+    ld.local.v2.u64 {%rd12, %rd13}, [%rd11+16];
+    ld.u64 %rd14, [%rd12];
+    ld.u64 %rd15, [%rd13];
+    add.u64 %rd16, %rd14, %rd15;
+    mul.wide.u32 %rd17, %r0, 16;
+    shl.b64 %rd18, %rd9, 3;
+    add.u64 %rd17, %rd1, %rd17;
+    add.u64 %rd17, %rd17, %rd18;
+    st.global.u64 [%rd17], %rd16;
+    add.u64 %rd19, %rd9, 1;
+    setp.eq.u64 %p1, %rd19, 2;
+    mov.u64 %rd9, 1;
+    @%p1 bra SUB_DONE;
+    bra SUB_LOOP;
+SUB_DONE:
+    ret;
+}
+
+// A sixteen-iteration scalar write loop must not invalidate a disjoint pointer
+// cell in the same depot. Both the input value and the cell survive the loop.
+.visible .entry bounded_numeric_write_probe(
+    .param .u64 .ptr input,
+    .param .u64 .ptr output,
+    .param .u32 count
+) {
+    .local .align 8 .b8 depot[512];
+    .reg .b64 %input, %output, %lane_bytes, %value;
+    .reg .b64 %base, %table, %data, %scratch, %index, %offset, %write, %loaded;
+    .reg .b32 %block, %threads, %thread, %lane, %count;
+    .reg .pred %outside, %done;
+    ld.param.u64 %input, [input];
+    ld.param.u64 %output, [output];
+    ld.param.u32 %count, [count];
+    mov.u32 %block, %ctaid.x;
+    mov.u32 %threads, %ntid.x;
+    mov.u32 %thread, %tid.x;
+    mad.lo.u32 %lane, %block, %threads, %thread;
+    setp.ge.u32 %outside, %lane, %count;
+    @%outside bra NUMERIC_DONE;
+    mul.wide.u32 %lane_bytes, %lane, 8;
+    add.u64 %input, %input, %lane_bytes;
+    add.u64 %output, %output, %lane_bytes;
+    ld.global.u64 %value, [%input];
+    mov.u64 %base, depot;
+    add.u64 %table, %base, 256;
+    add.u64 %data, %base, 480;
+    add.u64 %scratch, %base, 320;
+    st.local.u64 [%data], %value;
+    st.local.u64 [%table], %data;
+    mov.u64 %index, 0;
+    bra WRITE_LOOP;
+WRITE_LOOP:
+    shl.b64 %offset, %index, 3;
+    add.u64 %write, %scratch, %offset;
+    st.local.u64 [%write], %index;
+    add.u64 %index, %index, 1;
+    setp.eq.u64 %done, %index, 16;
+    @%done bra READ_CELL;
+    bra WRITE_LOOP;
+READ_CELL:
+    ld.local.u64 %loaded, [%table];
+    ld.u64 %value, [%loaded];
+    ld.local.u64 %offset, [%scratch+120];
+    add.u64 %value, %value, %offset;
+    st.global.u64 [%output], %value;
+NUMERIC_DONE:
+    ret;
+}

@@ -16,6 +16,44 @@ bool expect(bool condition, const char* message) {
 }  // namespace
 
 int main() {
+    // Explicit scalar use isolates store provenance from width-based defaults.
+    const auto stores = cumetal::ptx::parse_ptx(R"PTX(
+.version 7.0
+.target sm_80
+.visible .entry stores(.param .u64 output, .param .u64 length) {
+ld.param.u64 %rd1, [output];
+ld.param.u64 %rd2, [length];
+mul.lo.u64 %rd3, %rd2, 3;
+st.global.u64 [%rd1], %rd3;
+st.global.u64 [%rd1+8], %rd2;
+st.global.u8 [%rd1+16], 7;
+ret;
+}
+)PTX");
+    if (!expect(stores.ok && stores.module.entries.size() == 1 &&
+                stores.module.entries[0].params[0].is_pointer &&
+                !stores.module.entries[0].params[1].is_pointer,
+                "stores preserve address provenance without promoting stored scalars")) return 1;
+
+    const auto classification = cumetal::ptx::parse_ptx(R"PTX(
+.version 7.0
+.target sm_80
+.visible .entry classify(.param .u64 unused, .param .u64 length,
+                        .param .u64 output, .param .u64 .ptr explicit_pointer) {
+ld.param.u64 %rd1, [output];
+ld.param.u64 %rd2, [length];
+sub.u64 %rd3, 31, %rd2;
+st.global.u64 [%rd1], %rd3;
+ret;
+}
+)PTX");
+    if (!expect(classification.ok && classification.module.entries.size() == 1,
+                "parse scalar and pointer classification")) return 1;
+    const auto& parameters = classification.module.entries[0].params;
+    if (!expect(!parameters[0].is_pointer && !parameters[1].is_pointer &&
+                parameters[2].is_pointer && parameters[3].is_pointer,
+                "width alone is scalar; actual address uses and explicit annotations remain pointers")) return 1;
+
     const std::string sample_ptx = R"PTX(
 // vector ops
 .version 8.0
@@ -463,6 +501,62 @@ $L_one:
         return 1;
     }
 
+
+    std::vector<std::string> call_warnings;
+    const auto calls = cumetal::ptx::parse_instruction_block(
+        ".reg .b32 arg;\n"
+        "@%p1 call.uni (result), // return slot\n"
+        "helper, /* comment\n spanning lines */\n"
+        "(arg,\n 7); ret;\n"
+        "call\n no_args;\n", 100, &call_warnings);
+    if (!expect(call_warnings.empty() && calls.instructions.size() == 3,
+                "multiline calls assemble once and retain trailing instructions") ||
+        !expect(calls.instructions[0].opcode == "call.uni" &&
+                calls.instructions[0].predicate == "@%p1" &&
+                calls.instructions[0].line == 101 &&
+                calls.instructions[0].operands == std::vector<std::string>({"(result)", "helper", "(%r_cm_arg, 7)"}),
+                "call preserves predicate, return slot, callee, argument tuple and start line") ||
+        !expect(calls.instructions[1].opcode == "ret" && calls.instructions[1].line == 105 &&
+                calls.instructions[2].opcode == "call" && calls.instructions[2].line == 106 &&
+                calls.instructions[2].operands == std::vector<std::string>({"no_args"}),
+                "trailing and subsequent statements retain physical source lines")) return 1;
+
+    call_warnings.clear();
+    const auto call_scope = cumetal::ptx::parse_instruction_block(
+        "{ .reg .b32 arg; call helper, (arg); call helper, (arg); }\n"
+        "call helper, (arg);\n", 1, &call_warnings);
+    if (!expect(call_warnings.empty() && call_scope.instructions.size() == 3 &&
+                call_scope.instructions[0].operands[1] == "(%r_cm_arg)" &&
+                call_scope.instructions[1].operands[1] == "(%r_cm_arg)" &&
+                call_scope.instructions[2].operands[1] == "(arg)",
+                "call remainders keep bare register scopes until the closing brace")) return 1;
+    for (const auto* text : {"call.uni (r),\nhelper,\n(a)", "call helper,\n(a;", "call helper,\na);", "call helper,\n(a)\nret;", "call;"}) {
+        call_warnings.clear();
+        const auto invalid = cumetal::ptx::parse_instruction_block(text, 20, &call_warnings);
+        if (!expect(!call_warnings.empty() && invalid.instructions.size() == 1 &&
+                    !invalid.instructions[0].supported && invalid.instructions[0].line == 20,
+                    "unterminated/unbalanced calls are explicit unsupported instructions")) return 1;
+    }
+    const auto ranges = cumetal::ptx::parse_instruction_block(
+        ".reg .pred %p<7400>, %q<1>;\n.reg .b64 %rd<16>;\n"
+        ".reg .pred %bad<0>, %overflow<999999999999999999999999999999>, %bad2<-1>;\n",
+        1, nullptr);
+    if (!expect(ranges.register_ranges.size() == 3 &&
+                ranges.register_ranges[0].prefix == "%p" &&
+                ranges.register_ranges[0].type == "pred" &&
+                ranges.register_ranges[0].count == 7400 &&
+                ranges.register_ranges[1].count == 1 &&
+                ranges.register_ranges[2].type == "b64" &&
+                ranges.register_declarations.empty(),
+                "local register ranges retain compact metadata without expansion or overflow")) return 1;
+    const auto nested_registers = cumetal::ptx::parse_instruction_block(
+        "{\n.reg .pred %p<8>;\n.reg .pred %flag;\n}\n.reg .pred %outer;\n", 1, nullptr);
+    if (!expect(nested_registers.register_ranges.size() == 1 &&
+                !nested_registers.register_ranges[0].function_scope &&
+                nested_registers.register_declarations.size() == 2 &&
+                !nested_registers.register_declarations[0].function_scope &&
+                nested_registers.register_declarations[1].function_scope,
+                "nested declarations do not prove function-wide register locality")) return 1;
     std::printf("PASS: ptx parser unit tests\n");
     return 0;
 }

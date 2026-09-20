@@ -25,6 +25,11 @@ add_executable(cumetal_ir_test
     ir_test.cpp
 )
 
+add_executable(cumetal_dominance_test dominance_test.cpp)
+target_include_directories(cumetal_dominance_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_link_libraries(cumetal_dominance_test PRIVATE cumetal_ir)
+target_compile_options(cumetal_dominance_test PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(cumetal_msl_ast_test
     msl_ast_test.cpp
 )
@@ -32,6 +37,140 @@ add_executable(cumetal_msl_ast_test
 add_executable(cumetal_ptx_ir_msl_test
     ptx_ir_msl_test.cpp
 )
+
+add_executable(cumetal_ptx_address_cancellation_test ptx_address_cancellation_test.cpp)
+target_link_libraries(cumetal_ptx_address_cancellation_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_address_cancellation_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_address_cancellation COMMAND cumetal_ptx_address_cancellation_test)
+
+add_executable(cumetal_ptx_address_alignment_test ptx_address_alignment_test.cpp)
+target_link_libraries(cumetal_ptx_address_alignment_test PRIVATE cumetal_metal_codegen)
+target_include_directories(cumetal_ptx_address_alignment_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_address_alignment_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_address_alignment COMMAND cumetal_ptx_address_alignment_test)
+
+add_executable(cumetal_ptx_address_demands_test ptx_address_demands_test.cpp)
+target_link_libraries(cumetal_ptx_address_demands_test PRIVATE cumetal_metal_codegen)
+target_include_directories(cumetal_ptx_address_demands_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_address_demands_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_address_demands COMMAND cumetal_ptx_address_demands_test)
+
+add_executable(cumetal_ptx_module_scans_test ptx_module_scans_test.cpp)
+target_link_libraries(cumetal_ptx_module_scans_test PRIVATE cumetal_ir)
+target_include_directories(cumetal_ptx_module_scans_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_module_scans_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_module_scans COMMAND cumetal_ptx_module_scans_test)
+
+add_executable(cumetal_ptx_helper_record_fields_test ptx_helper_record_fields_test.cpp)
+target_link_libraries(cumetal_ptx_helper_record_fields_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_helper_record_fields_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_helper_record_fields COMMAND cumetal_ptx_helper_record_fields_test)
+
+add_executable(cumetal_ptx_bit_counts_test ptx_bit_counts_test.cpp)
+target_link_libraries(cumetal_ptx_bit_counts_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_bit_counts_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_bit_counts COMMAND cumetal_ptx_bit_counts_test)
+
+add_executable(cumetal_ptx_call_effects_test ptx_call_effects_test.cpp)
+target_link_libraries(cumetal_ptx_call_effects_test PRIVATE cumetal_ir)
+target_compile_options(cumetal_ptx_call_effects_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_call_effects COMMAND cumetal_ptx_call_effects_test)
+
+add_executable(cumetal_ptx_call_write_footprints_test ptx_call_write_footprints_test.cpp)
+target_link_libraries(cumetal_ptx_call_write_footprints_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_call_write_footprints_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_call_write_footprints COMMAND cumetal_ptx_call_write_footprints_test)
+
+add_executable(cumetal_ptx_type_proof_bounds_test ptx_type_proof_bounds_test.cpp)
+target_link_libraries(cumetal_ptx_type_proof_bounds_test PRIVATE cumetal_ir)
+target_compile_options(cumetal_ptx_type_proof_bounds_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_type_proof_bounds COMMAND cumetal_ptx_type_proof_bounds_test)
+
+add_executable(cumetal_ptx_scalar_ranges_test ptx_scalar_ranges_test.cpp)
+target_link_libraries(cumetal_ptx_scalar_ranges_test PRIVATE cumetal_ir)
+target_include_directories(cumetal_ptx_scalar_ranges_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_scalar_ranges_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_scalar_ranges COMMAND cumetal_ptx_scalar_ranges_test)
+
+add_executable(cumetal_ptx_empty_slice_guards_test ptx_empty_slice_guards_test.cpp)
+target_link_libraries(cumetal_ptx_empty_slice_guards_test PRIVATE cumetal_metal_codegen)
+target_include_directories(cumetal_ptx_empty_slice_guards_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_empty_slice_guards_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_empty_slice_guards COMMAND cumetal_ptx_empty_slice_guards_test)
+
+add_executable(cumetal_ptx_scalar_zero_guards_test ptx_scalar_zero_guards_test.cpp)
+target_link_libraries(cumetal_ptx_scalar_zero_guards_test PRIVATE cumetal_metal_codegen)
+target_include_directories(cumetal_ptx_scalar_zero_guards_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_scalar_zero_guards_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_scalar_zero_guards COMMAND cumetal_ptx_scalar_zero_guards_test)
+
+add_executable(cumetal_ptx_narrow_pack_test ptx_narrow_pack_test.cpp)
+target_link_libraries(cumetal_ptx_narrow_pack_test PRIVATE cumetal_metal_codegen)
+target_include_directories(cumetal_ptx_narrow_pack_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_narrow_pack_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_narrow_pack COMMAND cumetal_ptx_narrow_pack_test)
+
+add_executable(cumetal_ptx_pointer_ranges_test ptx_pointer_ranges_test.cpp)
+target_link_libraries(cumetal_ptx_pointer_ranges_test PRIVATE cumetal_ir)
+target_include_directories(cumetal_ptx_pointer_ranges_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_pointer_ranges_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_pointer_ranges COMMAND cumetal_ptx_pointer_ranges_test)
+
+add_executable(cumetal_ptx_local_memory_ranges_test ptx_local_memory_ranges_test.cpp)
+target_link_libraries(cumetal_ptx_local_memory_ranges_test PRIVATE cumetal_ir)
+target_include_directories(cumetal_ptx_local_memory_ranges_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_compile_options(cumetal_ptx_local_memory_ranges_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_local_memory_ranges COMMAND cumetal_ptx_local_memory_ranges_test)
+
+add_executable(cumetal_ptx_pointer_cell_refinement_test ptx_pointer_cell_refinement_test.cpp)
+target_link_libraries(cumetal_ptx_pointer_cell_refinement_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_pointer_cell_refinement_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_pointer_cell_refinement COMMAND cumetal_ptx_pointer_cell_refinement_test)
+
+add_executable(cumetal_ptx_vector_pointer_lanes_test ptx_vector_pointer_lanes_test.cpp)
+target_link_libraries(cumetal_ptx_vector_pointer_lanes_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_vector_pointer_lanes_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_vector_pointer_lanes COMMAND cumetal_ptx_vector_pointer_lanes_test
+    ${CMAKE_SOURCE_DIR}/tests/functional/reference/ptx_reused_local_cells.ptx)
+
+add_executable(cumetal_ptx_legacy_register_width_test ptx_legacy_register_width_test.cpp)
+target_link_libraries(cumetal_ptx_legacy_register_width_test PRIVATE cumetal_ptx_codegen)
+target_compile_options(cumetal_ptx_legacy_register_width_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_legacy_register_width COMMAND cumetal_ptx_legacy_register_width_test)
+if(EXISTS "${LLVM_TOOLS_BINARY_DIR}/llvm-as")
+    add_test(NAME unit_ptx_legacy_register_width_assembly
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_legacy_register_width.py
+            $<TARGET_FILE:cumetalc> ${LLVM_TOOLS_BINARY_DIR}/llvm-as
+            --unit-binary $<TARGET_FILE:cumetal_ptx_legacy_register_width_test>)
+endif()
+
+add_executable(cumetal_ptx_global_reachability_test ptx_global_reachability_test.cpp)
+target_include_directories(cumetal_ptx_global_reachability_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_link_libraries(cumetal_ptx_global_reachability_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_global_reachability_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_global_reachability COMMAND cumetal_ptx_global_reachability_test)
+
+add_executable(cumetal_ptx_bit_ops_test ptx_bit_ops_test.cpp)
+target_link_libraries(cumetal_ptx_bit_ops_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_bit_ops_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_bit_ops COMMAND cumetal_ptx_bit_ops_test)
+add_executable(cumetal_ptx_cfg_test ptx_cfg_test.cpp)
+add_executable(cumetal_ptx_tail_calls_test ptx_tail_calls_test.cpp)
+add_executable(cumetal_ptx_traps_test ptx_traps_test.cpp)
+target_include_directories(cumetal_ptx_traps_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/metal/src)
+target_link_libraries(cumetal_ptx_traps_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_traps_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_traps COMMAND cumetal_ptx_traps_test
+    ${CMAKE_SOURCE_DIR}/tests/functional/reference)
+target_link_libraries(cumetal_ptx_tail_calls_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_tail_calls_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_tail_calls COMMAND cumetal_ptx_tail_calls_test
+    ${CMAKE_SOURCE_DIR}/tests/functional/reference)
+target_include_directories(cumetal_ptx_cfg_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
+target_link_libraries(cumetal_ptx_cfg_test PRIVATE cumetal_metal_codegen)
+target_compile_options(cumetal_ptx_cfg_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_cfg COMMAND cumetal_ptx_cfg_test
+    ${CMAKE_SOURCE_DIR}/tests/functional/reference)
 
 add_executable(cumetal_nvvm_ir_msl_test
     nvvm_ir_msl_test.cpp
@@ -388,6 +527,8 @@ add_test(
 
 add_test(NAME unit_nvrtc_options COMMAND cumetal_nvrtc_options_test)
 add_test(NAME unit_cumetal_ir COMMAND cumetal_ir_test)
+add_test(NAME unit_dominance COMMAND cumetal_dominance_test)
+set_tests_properties(unit_dominance PROPERTIES TIMEOUT 30)
 add_test(NAME unit_msl_ast COMMAND cumetal_msl_ast_test)
 add_test(NAME unit_ptx_ir_msl COMMAND cumetal_ptx_ir_msl_test)
 add_test(NAME unit_nvvm_ir_msl COMMAND cumetal_nvvm_ir_msl_test)

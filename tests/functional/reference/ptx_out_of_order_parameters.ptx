@@ -1,0 +1,45 @@
+.version 8.0
+.target sm_80
+.address_size 64
+
+// LOAD_PARAMETER dominates READ in the CFG but follows it in source order.
+// The reachable trap forces dispatcher emission without being taken.
+.visible .entry integer_probe(
+    .param .u64 input,
+    .param .u64 output,
+    .param .u32 count
+) {
+    .reg .b64 %rd<7>;
+    .reg .b32 %r<6>;
+    .reg .pred %p<3>;
+
+    ld.param.u64 %rd0, [output];
+    ld.param.u32 %r2, [count];
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mov.u32 %r5, %tid.x;
+    mad.lo.u32 %r0, %r3, %r4, %r5;
+    setp.ge.u32 %p0, %r0, %r2;
+    @%p0 bra DONE;
+    setp.eq.u32 %p1, %r2, 0;
+    @%p1 bra TRAP;
+    bra LOAD_PARAMETER;
+
+READ:
+    mul.wide.u32 %rd2, %r0, 8;
+    add.u64 %rd3, %rd1, %rd2;
+    add.u64 %rd4, %rd0, %rd2;
+    ld.global.u64 %rd5, [%rd3];
+    st.global.u64 [%rd4], %rd5;
+    bra DONE;
+
+TRAP:
+    trap;
+
+LOAD_PARAMETER:
+    ld.param.u64 %rd1, [input];
+    bra READ;
+
+DONE:
+    ret;
+}

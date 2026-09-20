@@ -1,0 +1,36 @@
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry trap_probe(.param .u64 output, .param .u32 mode) {
+.reg .b64 %rd<4>;
+.reg .b32 %r<5>;
+.reg .pred %p<4>;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [mode];
+mov.u32 %r2, %tid.x;
+setp.eq.u32 %p1, %r1, 4;
+@%p1 bra WRITE_THEN_TRAP;
+setp.eq.u32 %p1, %r1, 3;
+@%p1 bra SPIN_MODE;
+setp.eq.u32 %p1, %r1, 1;
+@%p1 bra FAULT;
+setp.eq.u32 %p2, %r1, 2;
+and.b32 %r3, %r2, 1;
+setp.ne.u32 %p3, %r3, 0;
+and.pred %p1, %p2, %p3;
+@%p1 bra FAULT;
+mul.wide.u32 %rd2, %r2, 4;
+add.u64 %rd3, %rd1, %rd2;
+st.global.u32 [%rd3], 1;
+ret;
+SPIN_MODE:
+setp.eq.u32 %p1, %r2, 0;
+@%p1 bra FAULT;
+SPIN:
+bra SPIN;
+WRITE_THEN_TRAP:
+st.global.u32 [%rd1], 2;
+trap;
+FAULT:
+trap;
+}

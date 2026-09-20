@@ -1,0 +1,42 @@
+
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry guarded_select(.param .u64 input, .param .u64 output, .param .u32 count) {
+.reg .b64 %rd<6>;
+.reg .b32 %r<12>;
+.reg .pred %p<4>;
+ld.param.u64 %rd1, [input];
+ld.param.u64 %rd2, [output];
+ld.param.u32 %r1, [count];
+mov.u32 %r2, %ctaid.x;
+mov.u32 %r3, %ntid.x;
+mov.u32 %r4, %tid.x;
+mad.lo.u32 %r2, %r2, %r3, %r4;
+setp.ge.u32 %p1, %r2, %r1;
+@%p1 bra DONE;
+mul.wide.u32 %rd3, %r2, 4;
+add.u64 %rd4, %rd1, %rd3;
+add.u64 %rd5, %rd2, %rd3;
+ld.global.u32 %r5, [%rd4];
+and.b32 %r5, %r5, 7;
+mov.u32 %r6, 0;
+mov.u32 %r7, 0;
+HEAD:
+setp.lt.u32 %p2, %r6, %r5;
+@%p2 bra SELECT;
+st.global.u32 [%rd5], %r7;
+bra DONE;
+SELECT:
+and.b32 %r8, %r6, 1;
+setp.ne.u32 %p3, %r8, 0;
+selp.b32 %r9, %r6, %r9, %p3;
+add.u32 %r6, %r6, 1;
+@%p3 bra USE;
+bra HEAD;
+USE:
+add.u32 %r7, %r7, %r9;
+bra HEAD;
+DONE:
+ret;
+}

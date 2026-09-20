@@ -1,0 +1,39 @@
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry tuple_move(.param .u64 input, .param .u64 output, .param .u32 count) {
+ .reg .b64 %rd<7>;
+ .reg .b32 %r<12>;
+ .reg .b16 %rs<7>;
+ .reg .pred %p1;
+ ld.param.u64 %rd1, [input];
+ ld.param.u64 %rd2, [output];
+ ld.param.u32 %r1, [count];
+ mov.u32 %r2, %ctaid.x;
+ mov.u32 %r3, %ntid.x;
+ mov.u32 %r4, %tid.x;
+ mad.lo.u32 %r5, %r2, %r3, %r4;
+ setp.ge.u32 %p1, %r5, %r1;
+ @%p1 bra DONE;
+ mul.wide.u32 %rd3, %r5, 4;
+ add.u64 %rd4, %rd1, %rd3;
+ mul.wide.u32 %rd6, %r5, 16;
+ add.u64 %rd5, %rd2, %rd6;
+ ld.global.u32 %r6, [%rd4];
+ cvt.u16.u32 %rs1, %r6;
+ shr.u32 %r7, %r6, 16;
+ cvt.u16.u32 %rs2, %r7;
+ mov.b32 %r8, {%rs1, %rs2};
+ st.global.u32 [%rd5], %r8;
+ mov.b32 {%rs3, %rs4}, %r6;
+ cvt.u32.u16 %r9, %rs3;
+ cvt.u32.u16 %r10, %rs4;
+ st.global.u32 [%rd5+4], %r9;
+ st.global.u32 [%rd5+8], %r10;
+ mov.b32 {_, %rs5}, %r6;
+ mov.b32 {%rs6, _}, %r6;
+ mov.b32 %r11, {%rs5, %rs6};
+ st.global.u32 [%rd5+12], %r11;
+DONE:
+ ret;
+}

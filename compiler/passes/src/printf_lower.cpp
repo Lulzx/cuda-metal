@@ -497,10 +497,22 @@ std::optional<PrintfLowerResult> lower_clang_vprintf_abi(
 
 PrintfLowerResult lower_printf_calls(const cumetal::ptx::EntryFunction& entry,
                                      const PrintfLowerOptions& options) {
+    PrintfLowerResult result;
+    // Check the current function before copying and scanning the complete PTX
+    // module for ABI globals. Keep the same call matching as both lowering paths
+    // so malformed printf calls still reach their existing diagnostics.
+    if (std::none_of(entry.instructions.begin(), entry.instructions.end(),
+                     [](const auto& instruction) {
+                         return instruction.opcode.rfind("call", 0) == 0 &&
+                                find_printf_callee_index(instruction.operands) !=
+                                    instruction.operands.size();
+                     })) {
+        result.ok = true;
+        return result;
+    }
     if (auto clang_abi = lower_clang_vprintf_abi(entry, options)) {
         return std::move(*clang_abi);
     }
-    PrintfLowerResult result;
 
     std::map<std::string, std::uint32_t> format_ids;
 

@@ -120,8 +120,24 @@ target_compile_options(cumetal_printf_pass
 
 add_library(cumetal_ir STATIC
     compiler/ir/src/ir.cpp
+    compiler/ir/src/call_write_effects.cpp
     compiler/ir/src/nvvm_importer.cpp
     compiler/ir/src/ptx_importer.cpp
+    compiler/ir/src/ptx_address_cancellation.cpp
+    compiler/ir/src/ptx_address_alignment.cpp
+    compiler/ir/src/ptx_address_demands.cpp
+    compiler/ir/src/ptx_scalar_ranges.cpp
+    compiler/ir/src/ptx_pointer_ranges.cpp
+    compiler/ir/src/ptx_local_memory_ranges.cpp
+    compiler/ir/src/ptx_local_zero_guards.cpp
+    compiler/ir/src/ptx_parameters.cpp
+    compiler/ir/src/ptx_tail_calls.cpp
+    compiler/ir/src/ptx_pointer_inference.cpp
+    compiler/ir/src/ptx_tuple_normalization.cpp
+    compiler/ir/src/ptx_cfg.cpp
+    compiler/ir/src/ptx_module.cpp
+    compiler/ir/src/ptx_instruction.cpp
+    compiler/ir/src/ptx_bit_ops.cpp
 )
 
 target_include_directories(cumetal_ir
@@ -133,6 +149,8 @@ target_link_libraries(cumetal_ir
     PUBLIC
         cumetal_ptx
         cumetal_printf_pass
+    PRIVATE
+        cumetal_common
 )
 
 find_package(LLVM CONFIG QUIET
@@ -169,12 +187,17 @@ target_compile_options(cumetal_ir
 
 add_library(cumetal_metal_codegen STATIC
     compiler/metal/src/msl_ast.cpp
+    compiler/metal/src/trap_reporting.cpp
+    compiler/metal/src/integer_arithmetic.cpp
     compiler/metal/src/lower_to_msl.cpp
+    compiler/metal/src/record_contexts.cpp
 )
 
 target_include_directories(cumetal_metal_codegen
     PUBLIC
         compiler/metal/include
+    PRIVATE
+        compiler/common/include
 )
 
 target_link_libraries(cumetal_metal_codegen

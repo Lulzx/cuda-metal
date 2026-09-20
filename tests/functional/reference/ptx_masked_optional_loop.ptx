@@ -1,0 +1,35 @@
+.version 7.1
+.target sm_80
+.address_size 64
+
+.visible .entry masked_optional_loop(.param .u64 output) {
+    .reg .b64 %rd0;
+    .reg .b32 %r<5>;
+    .reg .pred %p<5>;
+
+    ld.param.u64 %rd0, [output];
+    mov.u32 %r0, 0;
+    mov.u32 %r1, 0;
+HEAD:
+    setp.ge.u32 %p4, %r0, 3;
+    @%p4 bra DONE;
+    setp.eq.u32 %p0, %r0, 1;
+    @%p0 bra ABSENT;
+    mov.u32 %r2, 7;
+    mov.pred %p1, 1;
+    bra JOIN;
+ABSENT:
+    mov.pred %p1, 0;
+JOIN:
+    setp.eq.u32 %p2, %r2, 7;
+    and.pred %p3, %p1, %p2;
+    selp.u32 %r3, 1, 0, %p3;
+    add.u32 %r1, %r1, %r3;
+    add.u32 %r0, %r0, 1;
+    bra CONTINUE;
+CONTINUE:
+    bra HEAD;
+DONE:
+    st.global.u32 [%rd0], %r1;
+    ret;
+}

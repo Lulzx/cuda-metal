@@ -1,19 +1,28 @@
+#include "trap_reporting.h"
+#include "record_contexts.h"
 #include "cumetal/metal/lower_to_msl.h"
+#include "integer_arithmetic.h"
+#include "cumetal/common/kernel_abi.h"
 
 #include "cumetal/ir/ptx_importer.h"
+#include "cumetal/ir/call_write_effects.h"
 #include "cumetal/ir/nvvm_importer.h"
 
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <map>
 #include <queue>
+#include <set>
 #include <sstream>
+#include <tuple>
 #include <unordered_map>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_set>
 
 namespace cumetal::metal {
+void prune_functions_unreachable_from_kernels(ir::Module* module);
 namespace {
 
 MslAddressSpace lower_address_space(ir::AddressSpace address_space) {
@@ -635,7 +644,605 @@ private:
     std::vector<std::pair<std::size_t, std::size_t>> flows_;
 };
 
-AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
+// Address-space flow is not alias identity. In particular, a helper argument
+// can receive two different private records without making those records the
+// same object. Resolve private field reads against actual call arguments and
+// reaching stores before allowing the generic-pointer default to apply.
+class PrivateRecordFieldProof {
+public:
+    struct Location {
+        std::size_t function, block, operation;
+    };
+    struct Address {
+        ir::ValueId root;
+        std::int64_t offset;
+        bool operator==(const Address&) const = default;
+    };
+    using StorageMask = std::function<std::uint8_t(const ir::Operand&)>;
+    using Bind = std::function<bool(ir::ValueId, const ir::Operand&)>;
+    using BindKernelAddress = std::function<bool(ir::ValueId)>;
+
+    PrivateRecordFieldProof(const ir::Module& module, StorageMask storage, Bind bind,
+                            BindKernelAddress bind_kernel_address)
+        : module_(module), storage_(std::move(storage)), bind_(std::move(bind)),
+          bind_kernel_address_(std::move(bind_kernel_address)),
+          predecessors_(module.functions.size()), callers_(module.functions.size()) {
+        std::unordered_map<std::string, std::size_t> names;
+        for (std::size_t f = 0; f < module.functions.size(); ++f) names[module.functions[f].name] = f;
+        for (std::size_t f = 0; f < module.functions.size(); ++f) {
+            const auto& function = module.functions[f];
+            for (std::size_t a = 0; a < function.arguments.size(); ++a)
+                arguments_[function.arguments[a].value] = {f, a};
+            std::unordered_map<ir::BlockId, std::size_t> blocks;
+            predecessors_[f].resize(function.blocks.size());
+            for (std::size_t b = 0; b < function.blocks.size(); ++b) blocks[function.blocks[b].id] = b;
+            for (std::size_t b = 0; b < function.blocks.size(); ++b) {
+                const auto& block = function.blocks[b];
+                for (std::size_t a = 0; a < block.arguments.size(); ++a)
+                    joins_[block.arguments[a].value] = {f, b, a};
+                for (std::size_t i = 0; i < block.operations.size(); ++i) {
+                    const auto& operation = block.operations[i];
+                    for (const auto value : operation.results) definitions_[value] = {f, b, i};
+                    if (operation.opcode == ir::OpCode::kAlloca)
+                        for (const auto value : operation.results) allocations_.insert(value);
+                    if (operation.opcode == ir::OpCode::kCall) {
+                        const auto name = operation.attributes.find("callee");
+                        if (name != operation.attributes.end() && names.contains(name->second)) {
+                            const auto callee = names.at(name->second);
+                            callees_[&operation] = callee;
+                            callers_[callee].push_back({f, b, i});
+                        }
+                    }
+                    for (const auto& successor : operation.successors)
+                        if (blocks.contains(successor.block))
+                            predecessors_[f][blocks.at(successor.block)].push_back(b);
+                }
+            }
+        }
+    }
+
+    std::optional<std::string> run(std::unordered_set<ir::ValueId>& handled) {
+        constexpr auto private_bit = std::uint8_t(1u << unsigned(ir::AddressSpace::kPrivate));
+        for (std::size_t f = 0; f < module_.functions.size(); ++f) {
+            const auto& function = module_.functions[f];
+            for (std::size_t b = 0; b < function.blocks.size(); ++b) {
+                const auto& block = function.blocks[b];
+                for (std::size_t i = 0; i < block.operations.size(); ++i) {
+                    const auto& load = block.operations[i];
+                    if (load.opcode != ir::OpCode::kLoad || load.results.size() != 1 ||
+                        load.result_types.size() != 1 || !load.result_types.front().is_pointer() ||
+                        load.operands.empty()) continue;
+                    // PTX records carry raw fields. NVVM's typed aggregate and
+                    // host-populated descriptor contracts use the layout path
+                    // below and are not inferred from these raw-memory proofs.
+                    if (!load.attributes.contains("ptx_opcode")) continue;
+                    const auto mask = storage_(load.operands.front());
+                    if (!(mask & private_bit)) continue;
+                    const auto address = address_of(load.operands.front());
+                    // Importer-owned local proofs already validate loads from
+                    // this function's own allocations. This boundary handles
+                    // fields reached through a helper parameter.
+                    // Dynamic table indices can have one allocation without
+                    // one constant offset; their finite cell/range proof also
+                    // belongs to the importer, not this helper-field proof.
+                    if (mask == private_bit && allocation_root_of(load.operands.front())) continue;
+                    if (mask != private_bit || !address || !arguments_.contains(address->root))
+                        return diagnostic(load, "unresolved private record address");
+                    if (!prove({f, b, i}, *address, load.results.front())) {
+                        failed_function = f;
+                        return diagnostic(load, error_);
+                    }
+                    handled.insert(load.results.front());
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<std::size_t> failed_function;
+
+    std::vector<detail::RecordContext> zero_contexts(std::size_t f) {
+        std::vector<detail::RecordContext> contexts;
+        const auto& function = module_.functions[f];
+        if (function.is_kernel || callers_[f].empty() || callers_[f].size() > 128) return contexts;
+        struct Candidate { Location location; Address address; ir::ValueId result; };
+        std::vector<Candidate> candidates;
+        for (std::size_t b = 0; b < function.blocks.size(); ++b) {
+            for (std::size_t i = 0; i < function.blocks[b].operations.size(); ++i) {
+                if (!charge()) return {};
+                const auto& load = function.blocks[b].operations[i];
+                if (load.opcode != ir::OpCode::kLoad || load.results.size() != 1 ||
+                    load.result_types != std::vector{ir::Type::integer(64)} || load.operands.size() != 1 ||
+                    load.attributes.contains("guard_operand") || load.memory_ordering != ir::MemoryOrdering::kNone)
+                    continue;
+                const auto ptx = load.attributes.find("ptx_opcode");
+                if (ptx == load.attributes.end() || ptx->second.find("volatile") != std::string::npos ||
+                    ptx->second.find("acquire") != std::string::npos) continue;
+                const auto address = address_of(load.operands[0]);
+                if (!address || !arguments_.contains(address->root) || arguments_.at(address->root).first != f) continue;
+                candidates.push_back({{f, b, i}, *address, load.results[0]});
+                if (candidates.size() > 128) return {};
+            }
+        }
+        for (const auto caller : callers_[f]) {
+            detail::RecordContext context{caller.function, caller.block, caller.operation, f, {}};
+            const auto& call = operation_at(caller);
+            if (call.attributes.contains("guard_operand")) continue;
+            for (const auto& candidate : candidates) {
+                const auto argument = arguments_.at(candidate.address.root).second;
+                if (argument >= call.operands.size()) continue;
+                const auto actual = address_of(call.operands[argument]);
+                if (!actual || !allocations_.contains(actual->root)) continue;
+                const __int128 offset = static_cast<__int128>(actual->offset) + candidate.address.offset;
+                const auto& allocation = operation_at(definitions_.at(actual->root));
+                if (!allocation.attributes.contains("byte_size")) continue;
+                std::uint64_t size = 0;
+                try { size = std::stoull(allocation.attributes.at("byte_size")); } catch (...) { continue; }
+                if (offset < 0 || offset > INT64_MAX || offset + 8 > size) continue;
+                // Reject nonzero/unknown caller fields before scanning a large
+                // helper prefix. Then validate that complete prefix as well.
+                if (!prove(caller, {actual->root, std::int64_t(offset)}, 0, {}, true)) continue;
+                if (prove(candidate.location, candidate.address, 0, caller, true))
+                    context.zero_loads.push_back(candidate.result);
+            }
+            if (!context.zero_loads.empty()) contexts.push_back(std::move(context));
+        }
+        return work_ > 262144 ? std::vector<detail::RecordContext>{} : contexts;
+    }
+
+private:
+    const ir::Module& module_;
+    StorageMask storage_;
+    Bind bind_;
+    BindKernelAddress bind_kernel_address_;
+    std::unordered_map<ir::ValueId, Location> definitions_, joins_;
+    std::unordered_map<ir::ValueId, std::pair<std::size_t, std::size_t>> arguments_;
+    std::unordered_set<ir::ValueId> allocations_, active_addresses_;
+    std::unordered_map<ir::ValueId, std::optional<Address>> addresses_;
+    std::unordered_map<ir::ValueId, std::optional<ir::ValueId>> allocation_roots_;
+    std::unordered_map<ir::ValueId, std::optional<ir::ValueId>> kernel_address_roots_;
+    std::unordered_set<ir::ValueId> active_kernel_addresses_;
+    std::unordered_map<ir::ValueId, bool> scalar_offsets_;
+    std::unordered_set<ir::ValueId> active_scalar_offsets_;
+    std::unordered_map<const ir::Operation*, std::size_t> callees_;
+    std::vector<std::vector<std::vector<std::size_t>>> predecessors_;
+    std::vector<std::vector<Location>> callers_;
+    std::unordered_map<std::size_t, ir::detail::CallEffectSummary> call_effects_;
+    std::size_t work_ = 0;
+    std::string error_;
+
+    bool charge() {
+        if (++work_ <= 262144) return true;
+        error_ = "proof budget exhausted";
+        return false;
+    }
+    const ir::Operation& operation_at(Location at) const {
+        return module_.functions[at.function].blocks[at.block].operations[at.operation];
+    }
+    static std::string diagnostic(const ir::Operation& load, const std::string& reason) {
+        return "private helper pointer field proof at " + load.location.str() + ": " + reason;
+    }
+    bool scalar_offset(const ir::Operand& operand, unsigned depth = 0) {
+        if (!charge() || depth > 32) return false;
+        const bool integer = operand.type.kind == ir::TypeKind::kInteger &&
+            operand.type.bit_width > 0 && operand.type.bit_width <= 64;
+        if (!integer && operand.type.kind != ir::TypeKind::kPredicate) return false;
+        if (operand.kind == ir::OperandKind::kImmediate) {
+            try {
+                std::size_t used = 0;
+                (void)std::stoull(operand.text, &used, 0);
+                return used == operand.text.size();
+            } catch (...) { return false; }
+        }
+        if (operand.kind != ir::OperandKind::kValue) return false;
+        const auto value = operand.value;
+        if (scalar_offsets_.contains(value)) return scalar_offsets_.at(value);
+        if (!active_scalar_offsets_.insert(value).second) return false;
+        bool scalar = false;
+        if (const auto argument = arguments_.find(value); argument != arguments_.end()) {
+            // Unannotated 64-bit arguments may transport addresses. Neither
+            // they nor transformations of their bits prove an integer offset.
+            scalar = module_.functions[argument->second.first].is_kernel &&
+                integer && operand.type.bit_width <= 32;
+        } else if (const auto definition = definitions_.find(value); definition != definitions_.end()) {
+            const auto& operation = operation_at(definition->second);
+            if (!operation.attributes.contains("guard_operand") && operation.result_types.size() == 1 &&
+                operation.result_types.front() == operand.type) {
+                switch (operation.opcode) {
+                    case ir::OpCode::kThreadId:
+                    case ir::OpCode::kThreadgroupId:
+                    case ir::OpCode::kThreadgroupSize:
+                    case ir::OpCode::kGridSize:
+                    case ir::OpCode::kLaneId:
+                        scalar = operation.operands.empty();
+                        break;
+                    case ir::OpCode::kConstant:
+                    case ir::OpCode::kParameter:
+                    case ir::OpCode::kConvert:
+                    case ir::OpCode::kAdd:
+                    case ir::OpCode::kSub:
+                    case ir::OpCode::kMul:
+                    case ir::OpCode::kDiv:
+                    case ir::OpCode::kRemainder:
+                    case ir::OpCode::kBitAnd:
+                    case ir::OpCode::kBitOr:
+                    case ir::OpCode::kBitXor:
+                    case ir::OpCode::kShiftLeft:
+                    case ir::OpCode::kShiftRight:
+                    case ir::OpCode::kCompare:
+                    case ir::OpCode::kSelect:
+                        scalar = !operation.operands.empty() &&
+                            std::all_of(operation.operands.begin(), operation.operands.end(),
+                                [&](const auto& source) { return scalar_offset(source, depth + 1); });
+                        break;
+                    default: break;
+                }
+            }
+        }
+        // Loads, calls, joins, cycles and unknown expressions remain unknown;
+        // a failed address proof is never itself evidence of a scalar offset.
+        active_scalar_offsets_.erase(value);
+        scalar_offsets_[value] = scalar;
+        return scalar;
+    }
+    std::optional<ir::ValueId> kernel_address_root(const ir::Operand& operand, unsigned depth = 0) {
+        if (!charge() || depth > 32 || operand.kind != ir::OperandKind::kValue ||
+            operand.type != ir::Type::integer(64)) return std::nullopt;
+        const auto value = operand.value;
+        if (kernel_address_roots_.contains(value)) return kernel_address_roots_.at(value);
+        if (!active_kernel_addresses_.insert(value).second) return std::nullopt;
+        std::optional<ir::ValueId> root;
+        if (const auto argument = arguments_.find(value); argument != arguments_.end()) {
+            if (module_.functions[argument->second.first].is_kernel) root = value;
+        } else if (const auto definition = definitions_.find(value); definition != definitions_.end()) {
+            const auto& operation = operation_at(definition->second);
+            const auto opcode = operation.attributes.find("ptx_opcode");
+            if (!operation.attributes.contains("guard_operand") && operation.result_types.size() == 1 &&
+                operation.result_types.front() == ir::Type::integer(64) && opcode != operation.attributes.end()) {
+                const auto& spelling = opcode->second;
+                const bool copy = operation.opcode == ir::OpCode::kConvert &&
+                    (spelling == "mov.b64" || spelling == "mov.u64" || spelling == "mov.s64");
+                const bool parameter = operation.opcode == ir::OpCode::kParameter &&
+                    (spelling == "ld.param.b64" || spelling == "ld.param.u64" || spelling == "ld.param.s64");
+                if ((copy || parameter) && operation.operands.size() == 1) {
+                    root = kernel_address_root(operation.operands.front(), depth + 1);
+                } else if (operation.operands.size() == 2 &&
+                           operation.operands[0].type == ir::Type::integer(64) &&
+                           operation.operands[1].type == ir::Type::integer(64)) {
+                    const bool add = operation.opcode == ir::OpCode::kAdd &&
+                        (spelling == "add.u64" || spelling == "add.s64");
+                    const bool sub = operation.opcode == ir::OpCode::kSub &&
+                        (spelling == "sub.u64" || spelling == "sub.s64");
+                    if (add || sub) {
+                        const auto left = kernel_address_root(operation.operands[0], depth + 1);
+                        const auto right = kernel_address_root(operation.operands[1], depth + 1);
+                        if (left && scalar_offset(operation.operands[1])) root = left;
+                        else if (add && right && scalar_offset(operation.operands[0])) root = right;
+                    }
+                }
+            }
+        }
+        active_kernel_addresses_.erase(value);
+        kernel_address_roots_[value] = root;
+        return root;
+    }
+    std::optional<std::int64_t> literal(const ir::Operand& operand, unsigned depth = 0) {
+        if (!charge() || depth > 16) return std::nullopt;
+        if (operand.kind == ir::OperandKind::kImmediate && operand.type == ir::Type::integer(64)) {
+            try {
+                std::size_t used = 0;
+                const auto value = std::stoll(operand.text, &used, 0);
+                if (used == operand.text.size()) return value;
+            } catch (...) {}
+        } else if (operand.kind == ir::OperandKind::kValue && definitions_.contains(operand.value)) {
+            const auto& operation = operation_at(definitions_.at(operand.value));
+            if (operation.operands.size() == 1 && operation.result_types.size() == 1 &&
+                !operation.attributes.contains("guard_operand")) {
+                const auto& source = operation.operands.front();
+                const auto opcode = operation.attributes.find("ptx_opcode");
+                const bool scalar_copy = operation.opcode == ir::OpCode::kConvert &&
+                    source.type == ir::Type::integer(64) && source.type == operation.result_types.front() &&
+                    opcode != operation.attributes.end() &&
+                    (opcode->second == "mov.b64" || opcode->second == "mov.u64" || opcode->second == "mov.s64");
+                // A conversion is not a copy: narrowing, sign extension and
+                // saturation can all change the offset. Leave those values
+                // unknown until their complete integer semantics are evaluated.
+                const bool constant = operation.opcode == ir::OpCode::kConstant &&
+                    source.type == ir::Type::integer(64) && source.type == operation.result_types.front();
+                if (constant || scalar_copy)
+                    return literal(source, depth + 1);
+            }
+        }
+        return std::nullopt;
+    }
+    std::optional<Address> address_of(const ir::Operand& operand) {
+        if (!charge() || operand.kind != ir::OperandKind::kValue || !operand.type.is_pointer())
+            return std::nullopt;
+        const auto value = operand.value;
+        if (addresses_.contains(value)) return addresses_.at(value);
+        if (!active_addresses_.insert(value).second) return std::nullopt;
+        std::optional<Address> result;
+        if (arguments_.contains(value) || allocations_.contains(value)) {
+            result = Address{value, 0};
+        } else if (definitions_.contains(value)) {
+            const auto& operation = operation_at(definitions_.at(value));
+            if (!operation.attributes.contains("guard_operand") && !operation.operands.empty()) {
+                if (operation.opcode == ir::OpCode::kConvert || operation.opcode == ir::OpCode::kAddressSpaceCast ||
+                    operation.opcode == ir::OpCode::kParameter) {
+                    result = address_of(operation.operands.front());
+                } else if (operation.opcode == ir::OpCode::kPointerOffset && operation.operands.size() == 2) {
+                    const auto base = address_of(operation.operands.front());
+                    const auto offset = literal(operation.operands[1]);
+                    const auto* pointee = operation.operands.front().type.pointee();
+                    const bool bytes = (operation.attributes.contains("offset_unit") &&
+                        operation.attributes.at("offset_unit") == "bytes") ||
+                        (pointee && pointee->kind == ir::TypeKind::kInteger && pointee->bit_width == 8);
+                    if (base && offset && bytes) {
+                        const bool subtract = operation.attributes.contains("offset_direction") &&
+                            operation.attributes.at("offset_direction") == "subtract";
+                        const __int128 sum = static_cast<__int128>(base->offset) +
+                            (subtract ? -static_cast<__int128>(*offset) : *offset);
+                        if (sum >= INT64_MIN && sum <= INT64_MAX) result = Address{base->root, std::int64_t(sum)};
+                    }
+                } else if (operation.opcode == ir::OpCode::kSelect && operation.operands.size() == 3) {
+                    const auto left = address_of(operation.operands[1]);
+                    const auto right = address_of(operation.operands[2]);
+                    if (left && right && *left == *right) result = left;
+                }
+            }
+        } else if (joins_.contains(value)) {
+            const auto join = joins_.at(value);
+            bool agrees = !predecessors_[join.function][join.block].empty();
+            const auto& function = module_.functions[join.function];
+            for (const auto predecessor : predecessors_[join.function][join.block]) {
+                for (const auto& edge : function.blocks[predecessor].operations.back().successors) {
+                    if (edge.block != function.blocks[join.block].id || join.operation >= edge.arguments.size()) continue;
+                    const auto incoming = address_of(ir::Operand::value_ref(edge.arguments[join.operation], operand.type));
+                    if (!incoming || (result && *result != *incoming)) agrees = false;
+                    else result = incoming;
+                }
+            }
+            if (!agrees) result.reset();
+        }
+        active_addresses_.erase(value);
+        addresses_[value] = result;
+        return result;
+    }
+    std::optional<ir::ValueId> allocation_root_of(const ir::Operand& operand) {
+        if (!charge() || operand.kind != ir::OperandKind::kValue || !operand.type.is_pointer())
+            return std::nullopt;
+        if (allocation_roots_.contains(operand.value)) return allocation_roots_.at(operand.value);
+        auto& cached = allocation_roots_[operand.value];
+        std::vector<ir::ValueId> pending{operand.value};
+        std::unordered_set<ir::ValueId> visited;
+        std::unordered_map<ir::ValueId, std::vector<ir::ValueId>> reverse;
+        std::optional<ir::ValueId> root;
+        while (!pending.empty()) {
+            if (!charge()) return std::nullopt;
+            const auto value = pending.back();
+            pending.pop_back();
+            if (!visited.insert(value).second) continue;
+            if (allocations_.contains(value)) {
+                if (root && *root != value) return std::nullopt;
+                root = value;
+                continue;
+            }
+            std::vector<ir::ValueId> inputs;
+            if (definitions_.contains(value)) {
+                const auto& operation = operation_at(definitions_.at(value));
+                if (operation.attributes.contains("guard_operand")) return std::nullopt;
+                const bool preserving = operation.opcode == ir::OpCode::kConvert ||
+                    operation.opcode == ir::OpCode::kAddressSpaceCast || operation.opcode == ir::OpCode::kParameter ||
+                    operation.opcode == ir::OpCode::kPointerOffset;
+                const auto add_input = [&](const ir::Operand& source) {
+                    if (source.kind != ir::OperandKind::kValue || !source.type.is_pointer()) return false;
+                    inputs.push_back(source.value);
+                    return true;
+                };
+                if (preserving && !operation.operands.empty()) {
+                    if (!add_input(operation.operands.front())) return std::nullopt;
+                } else if (operation.opcode == ir::OpCode::kSelect && operation.operands.size() == 3) {
+                    if (!add_input(operation.operands[1]) || !add_input(operation.operands[2])) return std::nullopt;
+                } else {
+                    return std::nullopt;
+                }
+            } else if (joins_.contains(value)) {
+                const auto join = joins_.at(value);
+                const auto& function = module_.functions[join.function];
+                for (const auto predecessor : predecessors_[join.function][join.block]) {
+                    for (const auto& edge : function.blocks[predecessor].operations.back().successors) {
+                        if (edge.block != function.blocks[join.block].id) continue;
+                        if (join.operation >= edge.arguments.size()) return std::nullopt;
+                        inputs.push_back(edge.arguments[join.operation]);
+                    }
+                }
+            } else {
+                // Incoming parameters, integer round-trips and loaded pointers
+                // cannot establish ownership by this function's allocation.
+                return std::nullopt;
+            }
+            if (inputs.empty()) return std::nullopt;
+            for (const auto input : inputs) {
+                if (!charge()) return std::nullopt;
+                reverse[input].push_back(value);
+                pending.push_back(input);
+            }
+        }
+        if (!root) return std::nullopt;
+        // A loop-carried pointer is owned only if every node reaches the same
+        // allocation seed. An independent uninitialized cycle is not evidence.
+        std::unordered_set<ir::ValueId> reaches_root;
+        pending = {*root};
+        while (!pending.empty()) {
+            if (!charge()) return std::nullopt;
+            const auto value = pending.back();
+            pending.pop_back();
+            if (!reaches_root.insert(value).second) continue;
+            if (reverse.contains(value))
+                for (const auto user : reverse.at(value)) pending.push_back(user);
+        }
+        if (reaches_root.size() == visited.size()) cached = root;
+        return cached;
+    }
+    bool call_preserves_field(const ir::Operation& call, ir::ValueId root, std::int64_t offset) {
+        if (ir::detail::is_read_only_scalar_builtin(call)) return true;
+        if (!callees_.contains(&call)) return false;
+        const auto callee = callees_.at(&call);
+        if (!call_effects_.contains(callee))
+            call_effects_.emplace(callee, ir::detail::summarize_call_effects(
+                module_, module_.functions[callee].name));
+        const auto& summary = call_effects_.at(callee);
+        if (!summary.complete) return false;
+        constexpr auto private_bit = std::uint8_t(1u << unsigned(ir::AddressSpace::kPrivate));
+        for (const auto& effect : summary.writes) {
+            if (!charge() || effect.argument >= call.operands.size() || !effect.bytes) return false;
+            const auto& actual = call.operands[effect.argument];
+            const auto mask = storage_(actual);
+            if (mask != 0 && !(mask & private_bit)) continue;
+            const auto address = address_of(actual);
+            if (!address) {
+                const auto allocation = allocation_root_of(actual);
+                if (allocation && *allocation != root) continue;
+                return false;
+            }
+            if (address->root != root) {
+                if (allocations_.contains(address->root) || allocations_.contains(root)) continue;
+                return false;
+            }
+            const __int128 start = static_cast<__int128>(address->offset) + effect.offset;
+            if (start < static_cast<__int128>(offset) + 8 &&
+                static_cast<__int128>(offset) < start + effect.bytes) return false;
+        }
+        return true;
+    }
+    bool prove(Location start, Address field, ir::ValueId loaded,
+               std::optional<Location> selected_caller = {}, bool require_zero = false) {
+        using State = std::tuple<std::size_t, std::size_t, std::size_t, ir::ValueId, std::int64_t>;
+        std::vector<State> pending{{start.function, start.block, start.operation, field.root, field.offset}};
+        std::set<State> visited;
+        bool found_store = false;
+        while (!pending.empty()) {
+            if (!charge()) return false;
+            const auto state = pending.back();
+            pending.pop_back();
+            if (!visited.insert(state).second) continue;
+            const auto [f, b, before, root, offset] = state;
+            bool initialized = false;
+            const auto& block = module_.functions[f].blocks[b];
+            for (std::size_t i = before; i > 0; --i) {
+                if (!charge()) return false;
+                const auto& event = block.operations[i - 1];
+                if (event.opcode == ir::OpCode::kCall) {
+                    if (call_preserves_field(event, root, offset)) continue;
+                    const auto callee = event.attributes.find("callee");
+                    error_ = "intervening call at " + event.location.str() + " (" +
+                        (callee == event.attributes.end() ? "indirect" : callee->second) +
+                        ") may modify the field";
+                    return false;
+                }
+                const bool store = event.opcode == ir::OpCode::kStore;
+                if (!store && event.opcode != ir::OpCode::kAtomic && event.opcode != ir::OpCode::kMetalAtomic) continue;
+                if (event.operands.empty()) { error_ = "unknown memory write"; return false; }
+                constexpr auto private_bit = std::uint8_t(1u << unsigned(ir::AddressSpace::kPrivate));
+                const auto mask = storage_(event.operands.front());
+                if (mask != 0 && !(mask & private_bit)) continue;
+                const auto written = address_of(event.operands.front());
+                if (!written) {
+                    // Dynamic scratch offsets need no range proof when their
+                    // allocation is distinct from the incoming record. The
+                    // same object's unknown offsets remain potential clobbers.
+                    const auto allocation = allocation_root_of(event.operands.front());
+                    if (allocation && *allocation != root) continue;
+                    error_ = "unresolved potentially overlapping write at " + event.location.str();
+                    return false;
+                }
+                if (written->root != root) {
+                    // Distinct allocations, including an allocation and an
+                    // incoming parameter, cannot denote the same object.
+                    if (allocations_.contains(written->root) || allocations_.contains(root)) continue;
+                    error_ = "unresolved alias between record parameters";
+                    return false;
+                }
+                if (!store || event.operands.size() < 2) { error_ = "unsupported overlapping memory write"; return false; }
+                const auto& source = event.operands[1];
+                auto bytes = source.type.is_pointer() ? 8u : source.type.bit_width / 8;
+                if (const auto opcode = event.attributes.find("ptx_opcode");
+                    opcode != event.attributes.end()) {
+                    // A wide register may supply a narrow PTX store. Pointer
+                    // provenance cannot turn that partial write into an
+                    // eight-byte initializer. Vector lanes are separate ops.
+                    const auto dot = opcode->second.rfind('.');
+                    const auto suffix = dot == std::string::npos ? std::string{} : opcode->second.substr(dot + 1);
+                    bytes = 0;
+                    if (suffix.size() >= 2 && std::string("busf").find(suffix.front()) != std::string::npos) {
+                        const auto bits = suffix.substr(1);
+                        if (bits == "8") bytes = 1;
+                        else if (bits == "16") bytes = 2;
+                        else if (bits == "32") bytes = 4;
+                        else if (bits == "64") bytes = 8;
+                    }
+                }
+                if (!bytes) { error_ = "unknown store width"; return false; }
+                const __int128 lo = written->offset, hi = lo + bytes;
+                if (lo >= static_cast<__int128>(offset) + 8 || hi <= offset) continue;
+                if (lo != offset || bytes != 8) { error_ = "partial overlapping store"; return false; }
+                // Legacy unannotated PTX kernel parameters transport device
+                // address bits through the scalar bytes ABI. A downstream
+                // field dereference supplies address demand, while this
+                // bounded chain identifies the kernel argument that supplies
+                // those bits. Preserve its scalar ABI and operations. Local
+                // constants, loaded integers and lossy conversions do not
+                // acquire pointer provenance from a 64-bit width alone.
+                if (require_zero) {
+                    if (event.attributes.contains("guard_operand") || source.type != ir::Type::integer(64) ||
+                        literal(source) != std::optional<std::int64_t>{0}) return false;
+                } else {
+                    const bool kernel_address = !source.type.is_pointer() && kernel_address_root(source).has_value();
+                    if (!source.type.is_pointer() && !kernel_address) {
+                        error_ = "reaching store has no pointer type";
+                        return false;
+                    }
+                    if (!(kernel_address ? bind_kernel_address_(loaded) : bind_(loaded, source))) {
+                        error_ = "conflicting pointer field producer";
+                        return false;
+                    }
+                }
+                found_store = true;
+                if (!event.attributes.contains("guard_operand")) { initialized = true; break; }
+            }
+            if (initialized) continue;
+            if (!predecessors_[f][b].empty()) {
+                for (const auto predecessor : predecessors_[f][b])
+                    pending.emplace_back(f, predecessor, module_.functions[f].blocks[predecessor].operations.size(), root, offset);
+                if (b != 0) continue;
+            }
+            // Block zero has a first-entry edge from its caller even when a
+            // backedge also targets it. A store on that backedge cannot prove
+            // initialization for the first invocation of this load.
+            if (!arguments_.contains(root) || arguments_.at(root).first != f || callers_[f].empty()) {
+                error_ = "incoming path has no initializing pointer store";
+                return false;
+            }
+            const auto argument = arguments_.at(root).second;
+            for (const auto caller : callers_[f]) {
+                if (selected_caller && f == start.function &&
+                    (caller.function != selected_caller->function || caller.block != selected_caller->block ||
+                     caller.operation != selected_caller->operation)) continue;
+                const auto& call = operation_at(caller);
+                if (argument >= call.operands.size()) { error_ = "missing record call argument"; return false; }
+                const auto actual = address_of(call.operands[argument]);
+                if (!actual) { error_ = "unresolved record call argument"; return false; }
+                const __int128 sum = static_cast<__int128>(actual->offset) + offset;
+                if (sum < INT64_MIN || sum > INT64_MAX) { error_ = "record field offset overflow"; return false; }
+                pending.emplace_back(caller.function, caller.block, caller.operation, actual->root, std::int64_t(sum));
+            }
+        }
+        if (!found_store) error_ = "uninitialized memory cycle";
+        return found_store;
+    }
+};
+
+AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module, unsigned context_rounds = 2) {
     AddressSpaceConstraints constraints;
     std::unordered_map<ir::ValueId, std::size_t> value_nodes;
     std::unordered_map<ir::ValueId, ir::AddressSpace> concrete_value_spaces;
@@ -736,6 +1343,9 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
     };
     std::vector<PendingCallResult> pending_call_results;
 
+    constexpr unsigned kPromotedGlobalOrigin = 1;
+    constexpr unsigned kOtherConstantOrigin = 2;
+    std::unordered_map<std::size_t, unsigned> constant_origins;
     auto constrain_operand = [&](std::size_t node, const ir::Operand& operand) {
         if (operand.kind == ir::OperandKind::kValue &&
             value_nodes.contains(operand.value)) {
@@ -743,6 +1353,11 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
             return true;
         }
         if (operand.kind == ir::OperandKind::kSymbol && operand.type.is_pointer()) {
+            if (operand.type.address_space == ir::AddressSpace::kConstant) {
+                const auto promoted = module->attributes.find("ptx_promoted_global:" + operand.text);
+                constant_origins[node] |= promoted != module->attributes.end() && promoted->second == "true"
+                    ? kPromotedGlobalOrigin : kOtherConstantOrigin;
+            }
             return constraints.seed(node, operand.type.address_space);
         }
         return true;
@@ -897,6 +1512,43 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
         }
     }
 
+    // Field ownership needs propagated storage masks, but propagating the main
+    // graph here would leak call-site masks into its later specialization pass.
+    auto field_storage_constraints = constraints;
+    if (!field_storage_constraints.solve()) {
+        return {false, "directional pointer flow reaches a conflicting concrete address space"};
+    }
+    std::unordered_set<ir::ValueId> private_helper_field_loads;
+    const auto make_private_fields = [&] { return PrivateRecordFieldProof(*module,
+        [&](const ir::Operand& operand) -> std::uint8_t {
+            if (operand.kind == ir::OperandKind::kValue && value_nodes.contains(operand.value))
+                return field_storage_constraints.mask(value_nodes.at(operand.value));
+            if (operand.type.is_pointer() && operand.type.address_space != ir::AddressSpace::kNone)
+                return std::uint8_t(1u << unsigned(operand.type.address_space));
+            return 0;
+        },
+        [&](ir::ValueId loaded, const ir::Operand& source) {
+            return constrain_operand(value_nodes.at(loaded), source);
+        },
+        [&](ir::ValueId loaded) {
+            return constraints.seed(value_nodes.at(loaded), ir::AddressSpace::kDevice);
+        }); };
+    auto private_fields = make_private_fields();
+    if (const auto error = private_fields.run(private_helper_field_loads)) {
+        if (context_rounds && private_fields.failed_function) {
+            auto context_proof = make_private_fields();
+            const auto contexts = context_proof.zero_contexts(*private_fields.failed_function);
+            if (detail::specialize_record_contexts(*module, contexts)) {
+                prune_functions_unreachable_from_kernels(module);
+                const auto checked = ir::verify(*module);
+                if (!checked.ok) return {false, "record-context specialization produced invalid IR: " +
+                    (checked.diagnostics.empty() ? std::string{} : checked.diagnostics.front().message)};
+                return resolve_generic_address_spaces(module, context_rounds - 1);
+            }
+        }
+        return {false, *error};
+    }
+
     // CUDA permits generic pointers to be stored in ordinary structs. Connect
     // pointer loads and stores through an exact base+constant-offset memory slot.
     // The base uses the already unified interprocedural pointer component, so a
@@ -960,6 +1612,9 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                            !operation.result_types.empty() &&
                            operation.result_types.front().is_pointer() &&
                            !operation.operands.empty()) {
+                    // These reads have exact caller-object proofs. An unrelated
+                    // type-layout/default slot must not add another producer.
+                    if (private_helper_field_loads.contains(operation.results.front())) continue;
                     const auto slot = slot_for(operation.operands[0]);
                     if (slot.has_value()) {
                         constraints.flow(*slot,
@@ -1097,6 +1752,10 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
         return {false,
                 "directional pointer flow reaches a conflicting concrete address space"};
     }
+    for (const auto loaded : private_helper_field_loads) {
+        if (!constraints.space(value_nodes.at(loaded)))
+            return {false, "private helper pointer field proof: unresolved or conflicting pointee spaces across call sites"};
+    }
 
     // Totality rule. After the fixed point, a pointer component that no
     // concrete producer in the reachable module flows into can only hold an
@@ -1125,6 +1784,61 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module) {
                 "a pointer with no in-module producer (defaulted to device memory) "
                 "reaches a conflicting concrete address space"};
     }
+    // Propagate constant origins once over the same directional graph used for
+    // address spaces. Each node gains at most two bits, bounding work by graph
+    // size rather than retracing every helper conversion independently.
+    const unsigned device_mask = 1U << static_cast<unsigned>(ir::AddressSpace::kDevice);
+    const unsigned constant_mask = 1U << static_cast<unsigned>(ir::AddressSpace::kConstant);
+    std::vector<std::vector<std::size_t>> origin_users(constraints.size());
+    std::vector<bool> has_constant_predecessor(constraints.size(), false);
+    for (const auto& [source, target] : constraints.flows()) {
+        if ((constraints.mask(source) & constant_mask) && (constraints.mask(target) & constant_mask)) {
+            origin_users[source].push_back(target);
+            has_constant_predecessor[target] = true;
+        }
+    }
+    std::vector<unsigned> origins(constraints.size(), 0);
+    std::vector<std::size_t> pending_origins;
+    for (std::size_t node = 0; node < constraints.size(); ++node) {
+        if ((constraints.mask(node) & constant_mask) == 0) continue;
+        origins[node] = constant_origins[node];
+        if (!origins[node] && !has_constant_predecessor[node]) origins[node] = kOtherConstantOrigin;
+        if (origins[node]) pending_origins.push_back(node);
+    }
+    while (!pending_origins.empty()) {
+        const auto source = pending_origins.back();
+        pending_origins.pop_back();
+        for (const auto target : origin_users[source]) {
+            const auto combined = origins[target] | origins[source];
+            if (combined == origins[target]) continue;
+            origins[target] = combined;
+            pending_origins.push_back(target);
+        }
+    }
+    for (const auto& function : module->functions) {
+        for (const auto& block : function.blocks) {
+            for (const auto& operation : block.operations) {
+                if ((operation.opcode == ir::OpCode::kStore || operation.opcode == ir::OpCode::kAtomic) &&
+                    !operation.operands.empty()) {
+                    const auto& address = operation.operands.front();
+                    const auto node = value_nodes.find(address.value);
+                    if ((address.kind == ir::OperandKind::kValue && node != value_nodes.end() &&
+                         (constraints.mask(node->second) & constant_mask)) ||
+                        (address.type.is_pointer() && address.type.address_space == ir::AddressSpace::kConstant))
+                        return {false, "write reaches read-only constant storage at " + operation.location.str()};
+                }
+                if (!operation.attributes.contains("ptx_global_address") || operation.results.empty()) continue;
+                const auto node = value_nodes.find(operation.results.front());
+                if (node == value_nodes.end()) continue;
+                const auto spaces = constraints.mask(node->second);
+                if ((spaces & ~(device_mask | constant_mask)) != 0)
+                    return {false, "PTX global address conversion reaches non-global storage at " + operation.location.str()};
+                if ((spaces & constant_mask) && origins[node->second] != kPromotedGlobalOrigin)
+                    return {false, "PTX global address conversion has an unproven constant-storage origin at " + operation.location.str()};
+            }
+        }
+    }
+
     if (!defaulted_nodes.empty() && std::getenv("CUMETAL_DEBUG_ADDRESS_SPACES") != nullptr) {
         const std::unordered_set<std::size_t> defaulted(defaulted_nodes.begin(),
                                                         defaulted_nodes.end());
@@ -1572,6 +2286,7 @@ struct AstLowerer {
     const BuiltinUsageMap& builtin_usage;
     const SharedUsageMap& shared_usage;
     const WideAtomicUsageMap& wide_atomic_usage;
+    const std::unordered_set<std::string>& guarded_trap_helpers;
     LowerToMslResult result;
     MslFunction output;
     std::unordered_map<ir::ValueId, MslExpr> values;
@@ -1594,12 +2309,14 @@ struct AstLowerer {
     bool needs_threadgroups_per_grid = false;
     bool needs_lane_id = false;
     bool needs_wide_atomic_lock_bank = false;
+    bool reports_traps = false;
     bool needs_device_clock = false;
     bool needs_grid_barrier = false;
     bool cfg_dispatcher_mode = false;
     bool predeclared_ssa_storage = false;
     bool force_cfg_dispatcher = false;
     bool barrier_in_call_graph = false;
+    bool trap_guarded = false;
     std::size_t edge_temporary_index = 0;
     std::size_t loop_escape_index = 0;
     std::optional<ir::AddressSpace> pointer_specialization;
@@ -1608,6 +2325,8 @@ struct AstLowerer {
                const BuiltinUsageMap& input_builtin_usage,
                const SharedUsageMap& input_shared_usage,
                const WideAtomicUsageMap& input_wide_atomic_usage,
+               const std::unordered_set<std::string>& input_guarded_trap_helpers,
+               bool input_trap_guarded,
                bool force_dispatcher = false,
                std::optional<ir::AddressSpace> specialization = std::nullopt,
                bool has_barrier = false)
@@ -1616,8 +2335,10 @@ struct AstLowerer {
           builtin_usage(input_builtin_usage),
           shared_usage(input_shared_usage),
           wide_atomic_usage(input_wide_atomic_usage),
+          guarded_trap_helpers(input_guarded_trap_helpers),
           force_cfg_dispatcher(force_dispatcher),
           barrier_in_call_graph(has_barrier),
+          trap_guarded(input_trap_guarded),
           pointer_specialization(specialization) {
         const BuiltinUsage& required = builtin_usage.at(function.name);
         needs_thread_position = required.thread_position;
@@ -1706,6 +2427,21 @@ struct AstLowerer {
             return MslExpression::identifier(operand.text, lower_type(operand.type));
         }
         std::string spelling = operand.text == "null" ? "nullptr" : operand.text;
+        if (operand.type.is_pointer()) {
+            const MslType pointer_type = lower_type(operand.type);
+            if (spelling == "nullptr") {
+                return MslExpression::literal("nullptr", pointer_type);
+            }
+            // PTX pointer values occupy 64-bit registers, and Rust uses
+            // nonzero dangling addresses for empty slices. The IR has already
+            // established the pointer type and concrete address space; carry
+            // those exact address bits into Metal instead of printing an
+            // untyped C++ integer in a pointer expression.
+            const MslExpr address = MslExpression::cast(
+                MslType::uint(64),
+                MslExpression::literal(std::move(spelling), MslType::uint(64)));
+            return MslExpression::cast(pointer_type, address, true);
+        }
         if (operand.type.kind == ir::TypeKind::kFloat &&
             operand.type.bit_width == 64 && spelling.starts_with("0d")) {
             spelling = "0x" + spelling.substr(2) + "ul";
@@ -1742,6 +2478,14 @@ struct AstLowerer {
         return MslStatement::variable(type, value_name(value), std::move(initializer), true);
     }
 
+    bool bind_parameter(const ir::Operation& operation) {
+        if (operation.results.size() != 1 || operation.operands.size() != 1) {
+            return fail(&operation, "malformed parameter operation");
+        }
+        values[operation.results.front()] = expression_for(operation.operands.front());
+        return true;
+    }
+
     std::optional<MslStmt> lower_operation(const ir::Operation& operation) {
         if (operation.opcode == ir::OpCode::kReturn ||
             operation.opcode == ir::OpCode::kBranch ||
@@ -1753,12 +2497,20 @@ struct AstLowerer {
             return std::nullopt;
         }
 
-        if (operation.opcode == ir::OpCode::kParameter) {
-            if (operation.results.size() != 1 || operation.operands.size() != 1) {
-                fail(&operation, "malformed parameter operation");
+        if (operation.opcode == ir::OpCode::kConstant) {
+            if (operation.results.size() != 1 || operation.result_types.size() != 1 ||
+                operation.operands.size() != 1 || operation.operands[0].kind != ir::OperandKind::kImmediate ||
+                operation.operands[0].type != operation.result_types[0] ||
+                (operation.result_types[0].kind != ir::TypeKind::kInteger &&
+                 operation.result_types[0].kind != ir::TypeKind::kPredicate)) {
+                fail(&operation, "unsupported scalar constant");
                 return std::nullopt;
             }
-            values[operation.results.front()] = expression_for(operation.operands.front());
+            return declare_result(operation, expression_for(operation.operands[0]));
+        }
+
+        if (operation.opcode == ir::OpCode::kParameter) {
+            bind_parameter(operation);
             return std::nullopt;
         }
 
@@ -1794,7 +2546,10 @@ struct AstLowerer {
                 MslExpression::identifier("cm_lane_id", MslType::uint()));
         }
 
-        const std::string binary = binary_spelling(operation.opcode);
+        const std::string binary = operation.opcode == ir::OpCode::kPointerOffset &&
+                                           operation.attributes.contains("offset_direction") &&
+                                           operation.attributes.at("offset_direction") == "subtract"
+                                       ? "-" : binary_spelling(operation.opcode);
         if (!binary.empty()) {
             if (operation.results.size() != 1 || operation.operands.size() < 2) {
                 fail(&operation, "malformed binary operation");
@@ -1810,15 +2565,19 @@ struct AstLowerer {
                     operation.operands[0].type.bit_width;
                 if (operation.operands[0].type.kind != ir::TypeKind::kInteger ||
                     operation.operands[1].type.kind != ir::TypeKind::kInteger ||
-                    operand_bits == 0 || operand_bits > 32 ||
+                    (operand_bits != 8 && operand_bits != 16 && operand_bits != 32 && operand_bits != 64) ||
                     operation.operands[1].type.bit_width != operand_bits) {
                     fail(&operation,
-                         "typed Metal mul.hi requires matching 8-, 16-, or 32-bit integer operands");
+                         "typed Metal mul.hi requires matching 8-, 16-, 32-, or 64-bit integer operands");
                     return std::nullopt;
                 }
                 const bool is_signed =
                     operation.attributes.contains("signed") &&
                     operation.attributes.at("signed") == "true";
+                if (operand_bits == 64) {
+                    return declare_result(operation, MslExpression::cast(expression_type,
+                        detail::integer_high_product_64(left, right, is_signed)));
+                }
                 const MslType wide_type = is_signed
                                               ? MslType::sint(operand_bits * 2)
                                               : MslType::uint(operand_bits * 2);
@@ -1882,7 +2641,7 @@ struct AstLowerer {
                 !is_mixed_pointer(operation.results.front())) {
                 // CuMetal pointer offsets are byte offsets even when the source
                 // pointer originated from an aggregate alloca. Cast before the
-                // addition so C++/MSL cannot scale the offset by the aggregate's
+                // arithmetic so C++/MSL cannot scale the offset by the aggregate's
                 // sizeof (for example, `&vec3_storage + 4`).
                 const MslAddressSpace address_space =
                     expression_type.kind == MslTypeKind::kPointer
@@ -2501,6 +3260,30 @@ struct AstLowerer {
                     operation, MslExpression::call(
                                    target, std::move(arguments), MslType::uint(64)));
             }
+            if ((callee->second == "min" || callee->second == "max") &&
+                operation.attributes.contains("builtin") &&
+                operation.result_types.size() == 1 &&
+                operation.result_types.front().kind == ir::TypeKind::kInteger) {
+                if (operation.operands.size() != 2) {
+                    fail(&operation, "malformed integer min/max builtin");
+                    return std::nullopt;
+                }
+                const auto width = operation.result_types.front().bit_width;
+                const bool is_signed = operation.attributes.contains("signed") &&
+                                       operation.attributes.at("signed") == "true";
+                const MslType argument_type = is_signed ? MslType::sint(width)
+                                                       : MslType::uint(width);
+                // Literal AST types alone do not type the emitted C++ token.
+                // Cast both operands to select the exact Metal overload and
+                // preserve PTX signed comparisons over integer bit containers.
+                std::vector<MslExpr> arguments;
+                for (const auto& operand : operation.operands) {
+                    arguments.push_back(MslExpression::cast(argument_type, expression_for(operand)));
+                }
+                return declare_result(operation, MslExpression::cast(
+                    lower_result_type(operation), MslExpression::call(
+                        callee->second, std::move(arguments), argument_type)));
+            }
             if (callee->second == "__cumetal_signed_abs") {
                 if (operation.results.empty() || operation.operands.size() != 1) {
                     fail(&operation, "malformed CUDA signed abs builtin");
@@ -2963,6 +3746,12 @@ struct AstLowerer {
                 [&](const ir::Function& candidate) {
                     return candidate.name == callee->second;
                 });
+            const bool guarded_callee =
+                trap_guarded && callee_function != module.functions.end() &&
+                guarded_trap_helpers.contains(callee->second);
+            const std::string direct_callee =
+                guarded_callee ? guarded_trap_helper_name(callee->second)
+                               : callee->second;
             if (callee_function != module.functions.end()) {
                 const std::size_t count =
                     std::min(arguments.size(), callee_function->arguments.size());
@@ -3037,6 +3826,12 @@ struct AstLowerer {
                         "cm_lane_id", MslType::uint()));
                 }
             }
+            if (guarded_callee) {
+                arguments.push_back(MslExpression::identifier(
+                    abi::kTrapStatusName,
+                    MslType::pointer(atomic_uint_type(),
+                                     MslAddressSpace::kDevice)));
+            }
             const bool polymorphic_callee =
                 callee_function != module.functions.end() &&
                 !callee_function->mixed_pointer_address_spaces.empty();
@@ -3079,10 +3874,10 @@ struct AstLowerer {
                     return result;
                 };
                 const MslExpr device_call = MslExpression::call(
-                    specialized_callee(callee->second, ir::AddressSpace::kDevice),
+                    specialized_callee(direct_callee, ir::AddressSpace::kDevice),
                     specialized_arguments(ir::AddressSpace::kDevice), return_type);
                 const MslExpr threadgroup_call = MslExpression::call(
-                    specialized_callee(callee->second, ir::AddressSpace::kThreadgroup),
+                    specialized_callee(direct_callee, ir::AddressSpace::kThreadgroup),
                     specialized_arguments(ir::AddressSpace::kThreadgroup), return_type);
                 const ir::ValueId mixed_value =
                     operation.operands[*mixed_argument].value;
@@ -3149,7 +3944,7 @@ struct AstLowerer {
                         callee_return_type = lower_type(specialized);
                     }
                     MslExpr call = MslExpression::call(
-                        specialized_callee(callee->second,
+                        specialized_callee(direct_callee,
                                            *concrete_specialization),
                         std::move(arguments), callee_return_type);
                     if (!(callee_return_type == return_type)) {
@@ -3161,7 +3956,7 @@ struct AstLowerer {
                     return declare_result(operation, std::move(call));
                 }
             }
-            MslExpr call = MslExpression::call(callee->second, std::move(arguments), return_type);
+            MslExpr call = MslExpression::call(direct_callee, std::move(arguments), return_type);
             if (operation.results.empty()) return MslStatement::expression(std::move(call));
             return declare_result(operation, std::move(call));
         }
@@ -3292,6 +4087,13 @@ struct AstLowerer {
                 fail(&operation, "malformed conversion");
                 return std::nullopt;
             }
+            if (operation.opcode == ir::OpCode::kConvert &&
+                operation.operands.front().type.is_pointer() &&
+                operation.result_types.front().kind == ir::TypeKind::kInteger &&
+                operation.result_types.front().bit_width < 64) {
+                fail(&operation, "observable pointer-to-integer conversion has no faithful MSL representation");
+                return std::nullopt;
+            }
             const bool reinterpret =
                 operation.opcode == ir::OpCode::kAddressSpaceCast &&
                 operation.operands.front().type.is_pointer();
@@ -3400,11 +4202,119 @@ struct AstLowerer {
                                    lower_result_type(operation)));
             }
             MslExpr input = expression_for(operation.operands.front());
+            if (operation.operands.front().type.kind == ir::TypeKind::kFloat &&
+                operation.result_types.front().kind == ir::TypeKind::kInteger) {
+                const std::string rounding = operation.attributes.contains("rounding_mode")
+                    ? operation.attributes.at("rounding_mode") : "1u";
+                const char* rounder = rounding == "0u" ? "rint" : rounding == "1u" ? "trunc"
+                    : rounding == "2u" ? "floor" : rounding == "3u" ? "ceil" : nullptr;
+                if (rounder == nullptr) {
+                    fail(&operation, "unknown float-to-integer conversion rounding mode");
+                    return std::nullopt;
+                }
+                const bool signed_output = operation.attributes.contains("signed_output") &&
+                    operation.attributes.at("signed_output") == "true";
+                const auto source_bits = operation.operands.front().type.bit_width;
+                const auto destination_bits = operation.result_types.front().bit_width;
+                if (source_bits == 16 || source_bits == 32) {
+                    if (destination_bits != 8 && destination_bits != 16 &&
+                        destination_bits != 32 && destination_bits != 64) {
+                        fail(&operation, "unsupported float-to-integer destination width");
+                        return std::nullopt;
+                    }
+                    // PTX clamps before the wider register-container extension.
+                    // Never round MAXINT to a float: for s32/s64/u32/u64 it can
+                    // become the first out-of-range power of two. That exact
+                    // power is instead an exclusive upper conversion bound.
+                    const MslType result_type = lower_result_type(operation);
+                    const auto result_bits = [&](std::uint64_t bits) {
+                        return MslExpression::cast(result_type, MslExpression::literal(
+                            std::to_string(bits) + "ul", MslType::uint(64)));
+                    };
+                    const auto integer_literal = [](std::uint32_t bits) {
+                        return MslExpression::literal(std::to_string(bits) + "u", MslType::uint());
+                    };
+                    const auto compare = [](const char* op, MslExpr left, MslExpr right) {
+                        return MslExpression::binary(op, std::move(left), std::move(right),
+                                                     MslType::boolean());
+                    };
+                    const MslExpr raw = MslExpression::cast(MslType::uint(),
+                        MslExpression::bitcast(MslType::uint(source_bits), input));
+                    const std::uint32_t sign_bit = source_bits == 16 ? 0x8000u : 0x80000000u;
+                    const std::uint32_t infinity = source_bits == 16 ? 0x7c00u : 0x7f800000u;
+                    const std::uint32_t minimum_normal = source_bits == 16 ? 0x400u : 0x800000u;
+                    const MslExpr magnitude = MslExpression::binary(
+                        "&", raw, integer_literal(sign_bit - 1), MslType::uint());
+                    const MslExpr negative = compare("!=", MslExpression::binary(
+                        "&", raw, integer_literal(sign_bit), MslType::uint()), integer_literal(0));
+                    const MslExpr subnormal = MslExpression::binary("&&",
+                        compare(">", magnitude, integer_literal(0)),
+                        compare("<", magnitude, integer_literal(minimum_normal)), MslType::boolean());
+                    const bool flush_subnormal = source_bits == 32 &&
+                        operation.attributes.contains("flush_subnormal") &&
+                        operation.attributes.at("flush_subnormal") == "true";
+                    const std::uint64_t sign_result = std::uint64_t{1} << (destination_bits - 1);
+                    const std::uint64_t maximum = signed_output ? sign_result - 1 :
+                        destination_bits == 64 ? std::numeric_limits<std::uint64_t>::max() :
+                        (std::uint64_t{1} << destination_bits) - 1;
+                    const MslExpr zero = result_bits(0);
+                    MslExpr subnormal_result = zero;
+                    // Bit classification also preserves directed rounding when
+                    // the target's arithmetic would flush a subnormal operand.
+                    if (!flush_subnormal && rounding == "2u" && signed_output)
+                        subnormal_result = MslExpression::conditional(
+                            negative, result_bits(maximum * 2 + 1), zero, result_type);
+                    else if (!flush_subnormal && rounding == "3u")
+                        subnormal_result = MslExpression::conditional(
+                            negative, zero, result_bits(1), result_type);
+                    const auto upper_power = signed_output ? destination_bits - 1 : destination_bits;
+                    const std::string upper = upper_power == 64 ? "18446744073709551616" :
+                        std::to_string(std::uint64_t{1} << upper_power);
+                    const MslType f32 = MslType::floating();
+                    const MslExpr rounded = MslExpression::call(rounder,
+                        {MslExpression::cast(f32, input)}, f32);
+                    const MslExpr below = compare("<=", rounded, MslExpression::literal(
+                        signed_output ? "-" + upper + ".0f" : "0.0f", f32));
+                    const MslExpr above = compare(">=", rounded,
+                        MslExpression::literal(upper + ".0f", f32));
+                    MslExpr converted = MslExpression::cast(signed_output
+                        ? MslType::sint(destination_bits) : result_type, rounded);
+                    if (signed_output) converted = MslExpression::bitcast(result_type, converted);
+                    // Scalar ?: evaluates only its selected branch. In
+                    // particular, neither NaN nor an out-of-range value may
+                    // reach the numeric cast (Metal select() would be eager).
+                    const MslExpr clamped = MslExpression::conditional(below,
+                        result_bits(signed_output ? sign_result : 0),
+                        MslExpression::conditional(above, result_bits(maximum), converted, result_type),
+                        result_type);
+                    return declare_result(operation, MslExpression::conditional(
+                        compare(">", magnitude, integer_literal(infinity)),
+                        result_bits(destination_bits == 64 ? sign_result : 0),
+                        MslExpression::conditional(subnormal, subnormal_result, clamped, result_type),
+                        result_type));
+                }
+                input = MslExpression::call(rounder, {input}, input->type);
+                const MslType numeric_type = signed_output
+                    ? MslType::sint(operation.result_types.front().bit_width) : lower_result_type(operation);
+                const MslExpr converted = MslExpression::cast(numeric_type, input);
+                // Converting a negative float directly to uint loses the
+                // signed result. Perform the signed numeric conversion first,
+                // then retain its bits in the IR's unsigned storage type.
+                return declare_result(operation, signed_output
+                    ? MslExpression::bitcast(lower_result_type(operation), converted) : converted);
+            }
             if (operation.attributes.contains("signed_input") &&
                 operation.attributes.at("signed_input") == "true" &&
                 operation.operands.front().type.kind == ir::TypeKind::kInteger) {
                 input = MslExpression::cast(
                     MslType::sint(operation.operands.front().type.bit_width), input);
+            } else if (operation.operands.front().type.kind == ir::TypeKind::kInteger &&
+                       operation.result_types.front().kind == ir::TypeKind::kInteger &&
+                       operation.result_types.front().bit_width > operation.operands.front().type.bit_width) {
+                // Literal spelling is not its IR width: ulong(-1) sign-extends
+                // the C++ literal, whereas widening a u32 -1 requires
+                // ulong(uint(-1)). Establish the source bit pattern first.
+                input = MslExpression::cast(lower_type(operation.operands.front().type), input);
             }
             return declare_result(
                 operation,
@@ -3451,7 +4361,12 @@ struct AstLowerer {
             }
             const MslType value_type = lower_result_type(operation);
             MslType memory_type = value_type;
-            if (operation.attributes.contains("memory_bit_width")) {
+            // A PTX pointer is stored in a .u64/.b64 slot, but Metal must load
+            // it through an address-space-qualified pointer-to-pointer. Loading
+            // an ulong first and applying a C++ functional cast emits invalid
+            // MSL and loses the pointee address space.
+            if (!operation.result_types.front().is_pointer() &&
+                operation.attributes.contains("memory_bit_width")) {
                 const std::uint32_t bits = static_cast<std::uint32_t>(
                     std::stoul(operation.attributes.at("memory_bit_width")));
                 const bool is_signed = operation.attributes.contains("signed") &&
@@ -4016,6 +4931,33 @@ struct AstLowerer {
         return std::nullopt;
     }
 
+    bool calls_guarded_helper(const ir::Operation& operation) const {
+        if (operation.opcode != ir::OpCode::kCall ||
+            !operation.attributes.contains("callee")) {
+            return false;
+        }
+        return guarded_trap_helpers.contains(
+            operation.attributes.at("callee"));
+    }
+
+    MslStmt trap_cancel_return() const {
+        if (output.return_type.kind == MslTypeKind::kVoid) {
+            return MslStatement::return_statement();
+        }
+        return MslStatement::return_statement(
+            MslExpression::aggregate_init(output.return_type, {}));
+    }
+
+    MslExpr trap_status_is_set() const {
+        return MslExpression::call(
+            "atomic_load_explicit",
+            {MslExpression::identifier(
+                 abi::kTrapStatusName,
+                 MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice)),
+             MslExpression::identifier("memory_order_relaxed", MslType::uint())},
+            MslType::uint());
+    }
+
     bool emit_operations(const ir::BasicBlock& block, std::vector<MslStmt>* statements) {
         for (const ir::Operation& operation : block.operations) {
             if (operation.is_terminator()) continue;
@@ -4172,6 +5114,10 @@ struct AstLowerer {
             const std::optional<MslStmt> lowered = lower_operation(operation);
             if (!result.error.empty()) return false;
             if (lowered.has_value()) statements->push_back(*lowered);
+            if (trap_guarded && calls_guarded_helper(operation)) {
+                statements->push_back(MslStatement::if_statement(
+                    trap_status_is_set(), {trap_cancel_return()}));
+            }
         }
         return true;
     }
@@ -4810,6 +5756,10 @@ struct AstLowerer {
         } escape_guard{&loop_escape_stack, exits_enclosing_loop};
 
         std::vector<MslStmt> loop_statements;
+        if (trap_guarded) {
+            loop_statements.push_back(MslStatement::if_statement(
+                trap_status_is_set(), {trap_cancel_return()}));
+        }
         if (!emit_operations(header, &loop_statements)) return false;
         const ir::Operation& terminator = header.operations.back();
         if (!body_and_exit) {
@@ -5088,8 +6038,10 @@ struct AstLowerer {
                     condition, std::move(first), std::move(second)));
                 body.push_back(MslStatement::break_statement());
             } else if (terminator.opcode == ir::OpCode::kTrap) {
-                return fail(&terminator,
-                            "trap has no faithful MSL source representation");
+                // Execute this block's operations before announcing its trap.
+                body.push_back(MslStatement::assignment(state,
+                    MslExpression::literal(std::to_string(function.blocks.size()) + "u", MslType::uint())));
+                body.push_back(MslStatement::break_statement());
             } else {
                 return fail(&terminator, "malformed dispatcher terminator");
             }
@@ -5099,9 +6051,39 @@ struct AstLowerer {
                 .statements = std::move(body),
             });
         }
+        std::vector<MslStmt> iteration;
+        if (trap_guarded) {
+            if (reports_traps) {
+                const MslExpr at_trap = MslExpression::binary(
+                    "==", state,
+                    MslExpression::literal(
+                        std::to_string(function.blocks.size()) + "u",
+                        MslType::uint()),
+                    MslType::boolean());
+                // Publish before entering divergent switch arms. The SIMD vote
+                // keeps a spinning arm from starving a sibling's pending trap arm.
+                iteration.push_back(MslStatement::if_statement(
+                    MslExpression::call("simd_any", {at_trap},
+                                        MslType::boolean()),
+                    {MslStatement::expression(MslExpression::call(
+                        "atomic_fetch_or_explicit",
+                        {MslExpression::identifier(
+                             abi::kTrapStatusName,
+                             MslType::pointer(atomic_uint_type(),
+                                              MslAddressSpace::kDevice)),
+                         MslExpression::literal("1u", MslType::uint()),
+                         MslExpression::identifier("memory_order_relaxed",
+                                                   MslType::uint())},
+                        MslType::uint()))}));
+            }
+            // Poll at every CFG block boundary, including backedges, so a
+            // sibling lane cannot spin indefinitely after a trapping lane exits.
+            iteration.push_back(MslStatement::if_statement(
+                trap_status_is_set(), {trap_cancel_return()}));
+        }
+        iteration.push_back(MslStatement::switch_statement(state, std::move(cases)));
         statements->push_back(MslStatement::while_statement(
-            MslExpression::literal("true", MslType::boolean()),
-            {MslStatement::switch_statement(state, std::move(cases))}));
+            MslExpression::literal("true", MslType::boolean()), std::move(iteration)));
         return true;
     }
 
@@ -5216,9 +6198,33 @@ struct AstLowerer {
     }
 
     LowerToMslResult run() {
+        reports_traps = false;
+        for (const auto& block : function.blocks)
+            for (const auto& operation : block.operations)
+                reports_traps |= operation.opcode == ir::OpCode::kTrap;
+        if (trap_guarded) {
+            for (std::size_t i = 0; i < function.arguments.size(); ++i) {
+                bool collision = function.is_kernel &&
+                                 i == abi::kTrapStatusBindingIndex;
+                if (function.is_kernel && function.kernel_abi &&
+                    i < function.kernel_abi->arguments.size()) {
+                    const auto& bindings = function.kernel_abi->arguments[i].binding_indices;
+                    if (!bindings.empty()) collision = std::find(bindings.begin(), bindings.end(), abi::kTrapStatusBindingIndex) != bindings.end();
+                }
+                if (collision || function.arguments[i].name == abi::kTrapStatusName) {
+                    fail(nullptr, "trap status binding or name conflicts with a kernel argument");
+                    return result;
+                }
+            }
+        }
+        const std::string emitted_name =
+            trap_guarded && !function.is_kernel
+                ? guarded_trap_helper_name(function.name)
+                : function.name;
         output.name = pointer_specialization.has_value()
-                          ? specialized_callee(function.name, *pointer_specialization)
-                          : function.name;
+                          ? specialized_callee(emitted_name,
+                                               *pointer_specialization)
+                          : emitted_name;
         if (function.mixed_pointer_return_spaces != 0 && function.return_type.is_pointer()) {
             ir::Type specialized = function.return_type;
             specialized.address_space =
@@ -5380,6 +6386,17 @@ struct AstLowerer {
             }
         }
         predeclared_ssa_storage = true;
+        // A parameter load can dominate a use in a block that appears earlier
+        // in PTX source order. Dispatcher cases are emitted in that source
+        // order, so bind immutable kernel arguments before lowering any case.
+        for (const ir::BasicBlock& block : function.blocks) {
+            for (const ir::Operation& operation : block.operations) {
+                if (operation.opcode == ir::OpCode::kParameter &&
+                    !bind_parameter(operation)) {
+                    return result;
+                }
+            }
+        }
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::Operation& operation : block.operations) {
                 if (operation.opcode == ir::OpCode::kParameter) continue;
@@ -5423,7 +6440,7 @@ struct AstLowerer {
             }
         }
 
-        if (force_cfg_dispatcher || requires_cfg_dispatcher()) {
+        if (reports_traps || force_cfg_dispatcher || requires_cfg_dispatcher()) {
             if (!emit_cfg_dispatcher(&output.statements)) return result;
         } else if (!emit_from(0, &output.statements)) {
             return result;
@@ -5470,6 +6487,21 @@ struct AstLowerer {
                 .type = MslType::uint(),
                 .name = "cm_lane_id",
                 .attributes = builtin_attributes("thread_index_in_simdgroup"),
+            });
+        }
+        if (trap_guarded) {
+            std::vector<MslAttribute> attributes;
+            if (function.is_kernel) {
+                attributes.push_back(MslAttribute{
+                    .name = "buffer",
+                    .index = abi::kTrapStatusBindingIndex,
+                });
+            }
+            output.parameters.push_back({
+                .type = MslType::pointer(atomic_uint_type(),
+                                         MslAddressSpace::kDevice),
+                .name = abi::kTrapStatusName,
+                .attributes = std::move(attributes),
             });
         }
 
@@ -5533,6 +6565,33 @@ void prune_functions_unreachable_from_kernels(ir::Module* module) {
     module->functions = std::move(kept);
 }
 
+// Remove only pure, unobserved pointer truncations. A single conservative use
+// scan includes guards, terminators and successor arguments; it deliberately
+// does not infer that chains or unreachable blocks are unobservable.
+static void remove_unused_pointer_truncations(ir::Function& function) {
+    std::unordered_set<ir::ValueId> used;
+    for (const auto& block : function.blocks) {
+        for (const auto& operation : block.operations) {
+            for (const auto& operand : operation.operands) {
+                if (operand.kind == ir::OperandKind::kValue) used.insert(operand.value);
+            }
+            for (const auto& successor : operation.successors) {
+                used.insert(successor.arguments.begin(), successor.arguments.end());
+            }
+        }
+    }
+    for (auto& block : function.blocks) {
+        std::erase_if(block.operations, [&](const ir::Operation& operation) {
+            return operation.opcode == ir::OpCode::kConvert &&
+                   operation.results.size() == 1 && operation.result_types.size() == 1 &&
+                   operation.operands.size() == 1 && operation.operands[0].type.is_pointer() &&
+                   operation.result_types[0].kind == ir::TypeKind::kInteger &&
+                   operation.result_types[0].bit_width < 64 &&
+                   !used.contains(operation.results[0]);
+        });
+    }
+}
+
 MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     MetalLegalizeResult result;
     const ir::VerifyResult input_verification = ir::verify(module);
@@ -5552,6 +6611,7 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     result.module.stage = ir::IrStage::kMetalLegalized;
 
     for (ir::Function& function : result.module.functions) {
+        remove_unused_pointer_truncations(function);
         for (ir::BasicBlock& block : function.blocks) {
             for (ir::Operation& operation : block.operations) {
                 switch (operation.opcode) {
@@ -5674,6 +6734,10 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     }
     if (metal_module.functions.empty()) {
         result.error = "MSL lowering requires at least one function";
+        return result;
+    }
+    TrapCallGraph trap_graph;
+    if (!analyze_trap_call_graph(metal_module, &trap_graph, &result.error)) {
         return result;
     }
     const auto provenance = metal_module.attributes.find("provenance");
@@ -5854,52 +6918,69 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                 }
             }
         }
-        for (const std::optional<ir::AddressSpace> specialization : specializations) {
-            AstLowerer lowerer(metal_module, function, builtin_usage, shared_usage,
-                               wide_atomic_usage, false, specialization,
-                               barrier_usage.at(function.name));
-            LowerToMslResult function_result = lowerer.run();
-            const bool structurization_failure =
-                !function_result.ok &&
-                (function_result.error.find("revisits block") != std::string::npos ||
-                 function_result.error.find("no forward reconvergence") !=
-                     std::string::npos ||
-                 function_result.error.find("nested loop conditional") !=
-                     std::string::npos ||
-                 function_result.error.find("loop structurization") !=
-                     std::string::npos);
-            if (structurization_failure) {
-                const std::string structurization_error = function_result.error;
-                if (barrier_usage.at(function.name)) {
-                    function_result.error =
-                        "cannot lower function '" + function.name +
-                        "': structured CFG lowering failed for a barrier-containing "
-                        "call graph: " + structurization_error;
-                    return function_result;
+        std::vector<bool> trap_modes;
+        if (function.is_kernel) {
+            trap_modes.push_back(trap_graph.guarded.contains(function.name));
+        } else {
+            if (trap_graph.ordinary.contains(function.name)) trap_modes.push_back(false);
+            if (trap_graph.guarded.contains(function.name)) trap_modes.push_back(true);
+        }
+        for (const bool trap_guarded : trap_modes) {
+            for (const std::optional<ir::AddressSpace> specialization :
+                 specializations) {
+                AstLowerer lowerer(
+                    metal_module, function, builtin_usage, shared_usage,
+                    wide_atomic_usage, trap_graph.guarded, trap_guarded,
+                    trap_graph.dispatch.contains(function.name), specialization,
+                    barrier_usage.at(function.name));
+                LowerToMslResult function_result = lowerer.run();
+                const bool structurization_failure =
+                    !function_result.ok &&
+                    (function_result.error.find("revisits block") !=
+                         std::string::npos ||
+                     function_result.error.find("no forward reconvergence") !=
+                         std::string::npos ||
+                     function_result.error.find("nested loop conditional") !=
+                         std::string::npos ||
+                     function_result.error.find("loop structurization") !=
+                         std::string::npos);
+                if (structurization_failure) {
+                    const std::string structurization_error =
+                        function_result.error;
+                    if (barrier_usage.at(function.name)) {
+                        function_result.error =
+                            "cannot lower function '" + function.name +
+                            "': structured CFG lowering failed for a "
+                            "barrier-containing call graph: " +
+                            structurization_error;
+                        return function_result;
+                    }
+                    AstLowerer dispatcher_lowerer(
+                        metal_module, function, builtin_usage, shared_usage,
+                        wide_atomic_usage, trap_graph.guarded, trap_guarded,
+                        true, specialization, barrier_usage.at(function.name));
+                    function_result = dispatcher_lowerer.run();
+                    if (!function_result.ok) {
+                        function_result.error =
+                            "structured CFG lowering failed: " +
+                            structurization_error +
+                            "; CFG dispatcher fallback failed" +
+                            (function_result.error.empty()
+                                 ? std::string{}
+                                 : ": " + function_result.error);
+                    }
                 }
-                AstLowerer dispatcher_lowerer(metal_module, function, builtin_usage,
-                                              shared_usage, wide_atomic_usage, true,
-                                              specialization,
-                                              barrier_usage.at(function.name));
-                function_result = dispatcher_lowerer.run();
                 if (!function_result.ok) {
                     function_result.error =
-                        "structured CFG lowering failed: " + structurization_error +
-                        "; CFG dispatcher fallback failed" +
-                        (function_result.error.empty()
-                             ? std::string{}
-                             : ": " + function_result.error);
+                        "cannot lower function '" + function.name + "': " +
+                        function_result.error;
+                    return function_result;
                 }
+                result.ast.functions.insert(
+                    result.ast.functions.end(),
+                    function_result.ast.functions.begin(),
+                    function_result.ast.functions.end());
             }
-            if (!function_result.ok) {
-                function_result.error =
-                    "cannot lower function '" + function.name + "': " +
-                    function_result.error;
-                return function_result;
-            }
-            result.ast.functions.insert(result.ast.functions.end(),
-                                        function_result.ast.functions.begin(),
-                                        function_result.ast.functions.end());
         }
     }
     const MslPrintResult printed = print_msl(result.ast);
