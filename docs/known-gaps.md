@@ -342,6 +342,13 @@ emitted. This permits a parameter load in a textually later block to serve a use
 that it dominates in the CFG. Existing SSA validation still rejects paths that
 bypass the load; this does not hoist ordinary instructions or repair undefined
 registers.
+An immediate `prmt.b32` selector with no nibble asking for sign replication is
+a byte shuffle of the operand pair, and lowers to a single Metal vector swizzle
+rather than the general arithmetic expansion. Selectors drawing every byte from
+one operand become one swizzle (`as_type<uchar4>(x).wzyx`); mixed ones become a
+four-component construction. Any nibble with bit three set still needs sign
+replication and keeps the arithmetic path, as does a register selector.
+
 A join whose only evidence is a null seed keeps that type provisionally and
 stays out of conflict detection until a real incoming type settles it. Without
 that, a loop-carried pointer whose other edge is a null constant deadlocked: the

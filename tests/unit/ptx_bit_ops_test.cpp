@@ -10,6 +10,7 @@ bool expect(bool condition, const std::string& message) {
 }
 
 bool permutation_shape(const std::string& selector, bool compact,
+                       bool sign_replicating = true,
                        const std::string& a = "%a", const std::string& b = "%b") {
     namespace ir = cumetal::ir;
     const auto source = R"ptx(.version 7.1
@@ -62,6 +63,27 @@ bool permutation_shape(const std::string& selector, bool compact,
     }
     ok &= expect(compact ? (operations > 0 && operations <= 21) : operations == 66,
                  "prmt " + selector + " operation count: " + std::to_string(operations));
+    if (compact && !sign_replicating) {
+        // No nibble asks for sign replication, so the instruction is a byte
+        // shuffle: one call, lowered to a Metal swizzle rather than the
+        // fifteen-value arithmetic expansion.
+        // One call, plus a conversion for any operand that is not already a
+        // 32-bit value (a wider PTX register container, for instance).
+        const std::size_t conversions =
+            (a == "%a" ? 0u : 1u) + (b == "%b" ? 0u : 1u);
+        ok &= expect(operations <= 1 + conversions,
+                     "sign-free immediate prmt " + selector + " is one operation plus " +
+                         std::to_string(conversions) + " conversion(s), got " +
+                         std::to_string(operations));
+        ok &= expect(compiled.source.find("as_type<uchar4>") != std::string::npos,
+                     "sign-free immediate prmt " + selector + " emits a byte swizzle");
+    }
+    if (compact && sign_replicating) {
+        ok &= expect(operations > 1 &&
+                         compiled.source.find("as_type<uchar4>") == std::string::npos,
+                     "sign-replicating prmt " + selector +
+                         " keeps the arithmetic expansion");
+    }
     return ok;
 }
 }  // namespace
@@ -121,10 +143,35 @@ int main() {
                                  "0xabcd5410U", "21520", "052020", "0b0101010000010000U",
                                  "0XFFFF5410u", "+21520", "-1", "-0xABEF",
                                  "0", "18446744073709551615U"}) {
-        ok &= permutation_shape(selector, true);
+        // A selector whose low four nibbles are all below eight is a pure byte
+        // shuffle; anything with bit three set still needs sign replication.
+        unsigned long long value = 0;
+        bool literal = true;
+        try {
+            std::string text = selector;
+            while (!text.empty() && (text.back() == 'U' || text.back() == 'u')) text.pop_back();
+            std::size_t consumed = 0;
+            const bool negative = !text.empty() && text.front() == '-';
+            if (negative) text.erase(text.begin());
+            if (text.rfind("0b", 0) == 0 || text.rfind("0B", 0) == 0) {
+                value = std::stoull(text.substr(2), &consumed, 2);
+                literal = consumed + 2 == text.size();
+            } else {
+                value = std::stoull(text, &consumed, 0);
+                literal = consumed == text.size();
+            }
+            if (negative) value = static_cast<unsigned long long>(-static_cast<long long>(value));
+        } catch (...) {
+            literal = false;
+        }
+        bool sign_replicating = !literal;
+        for (unsigned lane = 0; lane < 4 && literal; ++lane) {
+            if (((value >> (lane * 4)) & 8ull) != 0) sign_replicating = true;
+        }
+        ok &= permutation_shape(selector, true, sign_replicating);
     }
-    ok &= permutation_shape("0x7543", true, "%wide", "%b");
-    ok &= permutation_shape("0xfedc", true, "-1", "0x80000000U");
+    ok &= permutation_shape("0x7543", true, false, "%wide", "%b");
+    ok &= permutation_shape("0xfedc", true, true, "-1", "0x80000000U");
     ok &= permutation_shape("%selector", false);
     // Valid constant expressions outside the literal fast path stay generic.
     ok &= permutation_shape("(0x5400 | 0x10)", false);

@@ -3292,6 +3292,60 @@ struct AstLowerer {
                     lower_result_type(operation), MslExpression::call(
                         callee->second, std::move(arguments), argument_type)));
             }
+            if (callee->second == "__cumetal_byte_permute") {
+                const auto selector_text =
+                    operation.attributes.find("byte_permute_selector");
+                if (operation.results.empty() || operation.operands.size() != 2 ||
+                    selector_text == operation.attributes.end()) {
+                    fail(&operation, "malformed byte permute builtin");
+                    return std::nullopt;
+                }
+                const unsigned selector =
+                    static_cast<unsigned>(std::stoul(selector_text->second));
+                // PTX numbers the bytes of the pair {a, b} from the least
+                // significant end, which is exactly how `as_type<uchar4>`
+                // indexes a word on this target.
+                const MslType byte_vector = MslType::vector(MslType::uint(8), 4);
+                static constexpr char kComponents[] = "xyzw";
+                const MslExpr sources[2] = {
+                    MslExpression::bitcast(byte_vector,
+                                           expression_for(operation.operands[0])),
+                    MslExpression::bitcast(byte_vector,
+                                           expression_for(operation.operands[1])),
+                };
+                unsigned nibbles[4] = {0, 0, 0, 0};
+                bool single_source = true;
+                for (unsigned lane = 0; lane < 4; ++lane) {
+                    nibbles[lane] = (selector >> (lane * 4)) & 7u;
+                    if ((nibbles[lane] & 4u) != (nibbles[0] & 4u)) single_source = false;
+                }
+                MslExpr permuted;
+                if (single_source) {
+                    // One swizzle: `as_type<uchar4>(x).zyxw` and friends.
+                    std::string swizzle;
+                    for (const unsigned nibble : nibbles) {
+                        swizzle.push_back(kComponents[nibble & 3u]);
+                    }
+                    permuted = MslExpression::member(
+                        sources[(nibbles[0] & 4u) != 0 ? 1 : 0], std::move(swizzle),
+                        byte_vector);
+                } else {
+                    std::vector<MslExpr> lanes;
+                    lanes.reserve(4);
+                    for (const unsigned nibble : nibbles) {
+                        lanes.push_back(MslExpression::member(
+                            sources[(nibble & 4u) != 0 ? 1 : 0],
+                            std::string(1, kComponents[nibble & 3u]),
+                            MslType::uint(8)));
+                    }
+                    permuted = MslExpression::call("uchar4", std::move(lanes),
+                                                   byte_vector);
+                }
+                return declare_result(
+                    operation,
+                    MslExpression::bitcast(lower_result_type(operation),
+                                           std::move(permuted)));
+            }
             if (callee->second == "__cumetal_signed_abs") {
                 if (operation.results.empty() || operation.operands.size() != 1) {
                     fail(&operation, "malformed CUDA signed abs builtin");

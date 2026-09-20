@@ -24,9 +24,34 @@ void lower_bit_permutation(PtxValueBuilder& values, Operation& operation,
     if (const auto selector = permute ? immediate_permutation_selector(count) : std::nullopt) {
         const auto imm = [&](unsigned n) { return Operand::immediate(std::to_string(n), u32); };
         // Bind both inputs as unsigned 32-bit values before shifting, including
-        // signed literals and wider PTX register containers.
-        a = values.emit(OpCode::kConvert, u32, {a});
-        b = values.emit(OpCode::kConvert, u32, {b});
+        // signed literals and wider PTX register containers. An operand already
+        // in that form needs no conversion: emitting one costs a value and an
+        // identity copy per operand, which is pure noise at thousands of sites.
+        const auto bind_u32 = [&](const Operand& operand) {
+            return operand.type == u32 ? operand
+                                       : values.emit(OpCode::kConvert, u32, {operand});
+        };
+        a = bind_u32(a);
+        b = bind_u32(b);
+        // With no nibble asking for sign replication the whole instruction is a
+        // byte shuffle of the 8-byte pair, which Metal expresses directly as a
+        // vector swizzle. The general arithmetic expansion below costs about
+        // fifteen values per instruction; a module with thousands of immediate
+        // selectors pays that in emitted source for no reason.
+        bool sign_replication = false;
+        for (unsigned lane = 0; lane < 4; ++lane) {
+            if (((*selector >> (lane * 4)) & 8) != 0) sign_replication = true;
+        }
+        if (!sign_replication) {
+            operation.opcode = OpCode::kCall;
+            operation.attributes["builtin"] = "true";
+            operation.attributes["callee"] = "__cumetal_byte_permute";
+            operation.attributes["byte_permute_selector"] =
+                std::to_string(*selector & 0x7777u);
+            operation.result_types = {u32};
+            operation.operands = {a, b};
+            return;
+        }
         Operand result;
         for (unsigned lane = 0; lane < 4; ++lane) {
             const unsigned nibble = (*selector >> (lane * 4)) & 15;
