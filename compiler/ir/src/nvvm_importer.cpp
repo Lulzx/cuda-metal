@@ -2854,6 +2854,13 @@ struct Importer {
                 operation.attributes["atomic_op"] = "add";
             } else if (atomic->getOperation() == llvm::AtomicRMWInst::FSub) {
                 operation.attributes["atomic_op"] = "sub";
+            } else if (atomic->getOperation() == llvm::AtomicRMWInst::UMax) {
+                // LLVM names the unsigned forms "umax"/"umin"; the backend
+                // spells them "max"/"min" and reads signedness off the
+                // pointer's atomic type, which is already unsigned here.
+                operation.attributes["atomic_op"] = "max";
+            } else if (atomic->getOperation() == llvm::AtomicRMWInst::UMin) {
+                operation.attributes["atomic_op"] = "min";
             }
             if (atomic->getOperation() == llvm::AtomicRMWInst::Max ||
                 atomic->getOperation() == llvm::AtomicRMWInst::Min) {

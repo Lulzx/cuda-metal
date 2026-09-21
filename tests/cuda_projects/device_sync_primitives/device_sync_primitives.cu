@@ -37,6 +37,15 @@ __global__ void all_atomics(int *o) {
     atomicXor(&o[9], 0);
 }
 
+
+// Unsigned min/max take LLVM's umax/umin atomicrmw spellings, which the
+// importer once passed through under names the Metal backend rejected.
+__global__ void unsigned_atomics(unsigned int *o) {
+    const unsigned int tid = blockDim.x * blockIdx.x + threadIdx.x;
+    atomicMax(&o[0], tid);
+    atomicMin(&o[1], NTOTAL - tid);
+}
+
 __global__ void threadfence_kernel(int *o) {
     const unsigned int tid = blockDim.x * blockIdx.x + threadIdx.x;
     o[tid] = (int)tid;
@@ -110,6 +119,23 @@ int main() {
     expect("atomicOr", h[7], 1);
     expect("atomicAnd", h[8], -2);
     expect("atomicXor", h[9], 0);
+
+
+    unsigned int hu[2] = {0u, 0xffffffffu};
+    unsigned int *d_unsigned = nullptr;
+    cudaMalloc(&d_unsigned, sizeof(hu));
+    cudaMemcpy(d_unsigned, hu, sizeof(hu), cudaMemcpyHostToDevice);
+    unsigned_atomics<<<NB, NT>>>(d_unsigned);
+    if (cudaError_t e = cudaGetLastError(); e != cudaSuccess) {
+        std::printf("FAIL: unsigned_atomics launch: %s\n", cudaGetErrorString(e));
+        return 1;
+    }
+    cudaDeviceSynchronize();
+    cudaMemcpy(hu, d_unsigned, sizeof(hu), cudaMemcpyDeviceToHost);
+    cudaFree(d_unsigned);
+
+    expect("atomicMax(unsigned)", hu[0], NTOTAL - 1);
+    expect("atomicMin(unsigned)", hu[1], 1);
 
     int *d_fence = nullptr;
     cudaMalloc(&d_fence, (NTOTAL + 1) * sizeof(int));
