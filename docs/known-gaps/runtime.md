@@ -15,6 +15,14 @@
   vote, shuffle, barrier-ordering, binary/labeled partition, and divergent
   coalesced-group tests. Arbitrary mask/topology interactions remain narrower
   than CUDA's complete surface.
+- Kernel arguments bind sequentially at Metal buffer indices 0-30, the device
+  maximum. Hidden arguments for grid Y offset, grid barrier, device clock,
+  atomic lock bank, constant store and trap status occupy fixed reserved
+  indices (25-30), so a kernel that uses one of those features loses the
+  corresponding user-argument slots -- the lowering rejects the combination
+  at compile time. Kernels that use none of them may bind all 31 slots; the
+  runtime detects a launch argument occupying a reserved index and skips the
+  hidden binding rather than overwriting the caller's buffer.
 - Stream priorities are reported as zero and are not Metal priority queues.
 - CUDA device clocks use a device-wide atomic counter with a fixed monotonic
   quantum. They preserve wait-loop progress and unsigned wraparound behavior,

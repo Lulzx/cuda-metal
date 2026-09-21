@@ -37,7 +37,6 @@ __global__ void all_atomics(int *o) {
     atomicXor(&o[9], 0);
 }
 
-
 // Unsigned min/max take LLVM's umax/umin atomicrmw spellings, which the
 // importer once passed through under names the Metal backend rejected.
 __global__ void unsigned_atomics(unsigned int *o) {
@@ -80,6 +79,35 @@ __global__ void shared_mixed(unsigned *out, const unsigned *in) {
     out[pos] = scalar_slot + array_slot[threadIdx.x];
 }
 
+// Buffer indices 26-29 are reserved for hidden arguments (grid Y offset,
+// grid barrier, device clock, atomic lock bank) and index 25 for trap
+// status. The reflection that detects those features matched on index alone,
+// so a kernel with enough of its own arguments tripped every flag, and the
+// hidden buffers then overwrote the user bindings at dispatch: writes through
+// arguments 26-29 silently landed in the hidden buffers and the caller read
+// back zeros. Every argument here must deliver its own store.
+#define N_WIDE_ARGS 31
+__global__ void wide_args(unsigned *a0, unsigned *a1, unsigned *a2,
+                          unsigned *a3, unsigned *a4, unsigned *a5,
+                          unsigned *a6, unsigned *a7, unsigned *a8,
+                          unsigned *a9, unsigned *a10, unsigned *a11,
+                          unsigned *a12, unsigned *a13, unsigned *a14,
+                          unsigned *a15, unsigned *a16, unsigned *a17,
+                          unsigned *a18, unsigned *a19, unsigned *a20,
+                          unsigned *a21, unsigned *a22, unsigned *a23,
+                          unsigned *a24, unsigned *a25, unsigned *a26,
+                          unsigned *a27, unsigned *a28, unsigned *a29,
+                          unsigned *a30) {
+    unsigned *slots[N_WIDE_ARGS] = {a0,  a1,  a2,  a3,  a4,  a5,  a6,  a7,
+                                    a8,  a9,  a10, a11, a12, a13, a14, a15,
+                                    a16, a17, a18, a19, a20, a21, a22, a23,
+                                    a24, a25, a26, a27, a28, a29, a30};
+    const unsigned pos = blockIdx.x * blockDim.x + threadIdx.x;
+    for (int i = 0; i < N_WIDE_ARGS; ++i) {
+        slots[i][pos] = 0xC000u + (unsigned)i;
+    }
+}
+
 static int failures = 0;
 
 static void expect(const char *what, long long got, long long want) {
@@ -119,7 +147,6 @@ int main() {
     expect("atomicOr", h[7], 1);
     expect("atomicAnd", h[8], -2);
     expect("atomicXor", h[9], 0);
-
 
     unsigned int hu[2] = {0u, 0xffffffffu};
     unsigned int *d_unsigned = nullptr;
@@ -207,10 +234,37 @@ int main() {
     }
     delete[] h_out;
 
+    unsigned *d_wide[N_WIDE_ARGS];
+    for (int i = 0; i < N_WIDE_ARGS; ++i) {
+        cudaMalloc(&d_wide[i], NT * sizeof(unsigned));
+        cudaMemset(d_wide[i], 0, NT * sizeof(unsigned));
+    }
+    wide_args<<<1, NT>>>(d_wide[0],  d_wide[1],  d_wide[2],  d_wide[3],
+                         d_wide[4],  d_wide[5],  d_wide[6],  d_wide[7],
+                         d_wide[8],  d_wide[9],  d_wide[10], d_wide[11],
+                         d_wide[12], d_wide[13], d_wide[14], d_wide[15],
+                         d_wide[16], d_wide[17], d_wide[18], d_wide[19],
+                         d_wide[20], d_wide[21], d_wide[22], d_wide[23],
+                         d_wide[24], d_wide[25], d_wide[26], d_wide[27],
+                         d_wide[28], d_wide[29], d_wide[30]);
+    if (cudaError_t e = cudaGetLastError(); e != cudaSuccess) {
+        std::printf("FAIL: wide_args launch: %s\n", cudaGetErrorString(e));
+        return 1;
+    }
+    cudaDeviceSynchronize();
+    for (int i = 0; i < N_WIDE_ARGS; ++i) {
+        unsigned h_wide = 0xffffffffu;
+        cudaMemcpy(&h_wide, d_wide[i], sizeof(h_wide), cudaMemcpyDeviceToHost);
+        char what[64];
+        std::snprintf(what, sizeof(what), "wide_args arg %d (buffer index %d)", i, i);
+        expect(what, h_wide, 0xC000u + (unsigned)i);
+        cudaFree(d_wide[i]);
+    }
+
     if (failures != 0) {
         std::printf("FAIL: %d device sync primitive check(s) failed\n", failures);
         return 1;
     }
-    std::printf("PASS: atomics, __threadfence, and scalar __shared__ all correct\n");
+    std::printf("PASS: atomics, __threadfence, scalar __shared__, and wide args all correct\n");
     return 0;
 }

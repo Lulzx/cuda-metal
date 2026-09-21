@@ -2825,6 +2825,29 @@ cudaError_t blit_copy(const std::shared_ptr<Buffer>& dst_buffer,
     }
 }
 
+// The hidden buffers for grid Y offset, cooperative grid barrier, device
+// clock and atomic lock bank bind at fixed reserved indices (26-29). The
+// pipeline reflection that sets the corresponding needs_* flags matches on
+// index alone -- precompiled libraries may strip parameter names -- so a
+// kernel whose own arguments reach those indices is misdetected: a user
+// argument at e.g. buffer(28) reads as a device-clock request and the hidden
+// buffer then overwrites the caller's binding. The lowering refuses to place
+// a hidden argument where launch arguments already reach (lower_to_llvm.cpp
+// checks params.size() against each reserved index before appending), so an
+// argument in this launch's own list bound to a reserved index proves the
+// flag spurious and it must be cleared rather than clobber the argument.
+static bool launch_arg_binds_index(const std::vector<KernelArg>& args,
+                                   std::size_t index) {
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const std::size_t binding =
+            args[i].binding_index == std::numeric_limits<std::size_t>::max()
+                ? i
+                : args[i].binding_index;
+        if (binding == index) return true;
+    }
+    return false;
+}
+
 cudaError_t launch_kernel(const std::string& metallib_path,
                           const std::string& kernel_name,
                           const LaunchConfig& config,
@@ -2914,6 +2937,22 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             stream_impl = backend.default_stream;
         }
         queue = stream_impl != nullptr ? stream_impl->queue() : backend.queue;
+    }
+    if (needs_lock_bank &&
+        launch_arg_binds_index(args, cumetal::ptx::kAtomicLockBankBindingIndex)) {
+        needs_lock_bank = false;
+    }
+    if (needs_device_clock &&
+        launch_arg_binds_index(args, cumetal::ptx::kDeviceClockBindingIndex)) {
+        needs_device_clock = false;
+    }
+    if (needs_grid_barrier &&
+        launch_arg_binds_index(args, cumetal::ptx::kGridBarrierBindingIndex)) {
+        needs_grid_barrier = false;
+    }
+    if (needs_grid_y_offset &&
+        launch_arg_binds_index(args, cumetal::ptx::kGridYOffsetBindingIndex)) {
+        needs_grid_y_offset = false;
     }
     if (needs_trap_status) {
         for (std::size_t i = 0; i < args.size(); ++i) {
@@ -3521,6 +3560,22 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
         needs_grid_barrier = backend.pipeline_uses_grid_barrier[pipeline_cache_key];
         needs_grid_y_offset = backend.pipeline_uses_grid_y_offset[pipeline_cache_key];
         queue = backend.queue;
+    }
+    if (needs_lock_bank &&
+        launch_arg_binds_index(args, cumetal::ptx::kAtomicLockBankBindingIndex)) {
+        needs_lock_bank = false;
+    }
+    if (needs_device_clock &&
+        launch_arg_binds_index(args, cumetal::ptx::kDeviceClockBindingIndex)) {
+        needs_device_clock = false;
+    }
+    if (needs_grid_barrier &&
+        launch_arg_binds_index(args, cumetal::ptx::kGridBarrierBindingIndex)) {
+        needs_grid_barrier = false;
+    }
+    if (needs_grid_y_offset &&
+        launch_arg_binds_index(args, cumetal::ptx::kGridYOffsetBindingIndex)) {
+        needs_grid_y_offset = false;
     }
     if (needs_lock_bank) {
         lock_bank = ensure_atomic_lock_bank(error_message);
