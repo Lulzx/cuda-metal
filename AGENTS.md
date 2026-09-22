@@ -82,7 +82,10 @@ cumetal/
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 
-# full test suite
+# inner loop: everything except external-project and whole-corpus replays
+ctest --test-dir build -LE slow --output-on-failure
+
+# full test suite (required before committing compiler/runtime changes)
 ctest --test-dir build --output-on-failure
 
 # binary-shim OFF validation
@@ -103,10 +106,27 @@ ctest --test-dir build-nosshim --output-on-failure
 
 Prioritize these when choosing follow-on implementation work:
 
-1. Expand fatbinary/PTX compatibility coverage in driver/registration paths and add focused tests.
-2. Close conformance gaps and reduce skip-only coverage where dependencies permit.
-3. Improve AIR ABI documentation from inspected reference outputs.
+1. Converge on the typed `cumetal-ir` backend. Every CUDA semantic currently has
+   to be right in up to three places (legacy PTX->MSL, legacy PTX->LLVM, typed
+   IR); fixes such as `cvt` rounding had to land more than once. Prefer closing a
+   typed-backend gap over patching the legacy path, and add legacy-only fixes
+   only for silent wrong answers.
+2. Measure general CUDA coverage with the Warp sweep and the cuda-samples
+   manifest, not the curated suite pass count.
+3. Expand fatbinary/PTX compatibility coverage in driver/registration paths and add focused tests.
 4. Keep Phase 4.5 shims behaviorally consistent with CUDA stream/error semantics.
+
+## Scope Policy
+
+The library surface (cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSOLVER, cuRAND, NCCL,
+NVML, thrust, CUB) is large enough. Every shim is semantic surface that must
+stay correct under stream, error and precision rules.
+
+- Do not add a new library shim or entry-point family unless a named external
+  workload needs it, and land it with that workload's gate.
+- Deepening correctness of an existing shim beats widening it.
+- A stub that returns success without doing the work is a wrong answer: refuse
+  with a CUDA error instead.
 
 ## Anti-Patterns to Avoid
 

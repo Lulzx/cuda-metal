@@ -645,6 +645,24 @@ if(CUMETAL_BUILD_TESTS)
     add_subdirectory(tests/ptx_sweep)
     add_subdirectory(tests/unit)
 
+    # `slow` marks tests that replay an external project or a whole corpus. Their
+    # cost is dominated by cold-cache Metal compilation, and any cumetalc change
+    # invalidates it (PhysX alone rebuilds for ~10 min). Everything else is the
+    # inner-loop tier: `ctest --test-dir build -LE slow`. The full suite remains
+    # the gate before committing compiler or runtime changes.
+    set(CUMETAL_SLOW_TEST_REGEX
+        "^conformance_(physx_|llama_cpp$|llmc|cuda_samples_sweep$|phase4_functional$|compiler_backend_matrix|cuda_projects_.*_corpus$)")
+    foreach(test_dir tests/air_abi tests/conformance tests/functional
+                     tests/cuda_projects tests/ptx_sweep tests/unit)
+        get_property(dir_tests DIRECTORY ${test_dir} PROPERTY TESTS)
+        foreach(test_name IN LISTS dir_tests)
+            if(test_name MATCHES "${CUMETAL_SLOW_TEST_REGEX}")
+                set_property(TEST ${test_name} DIRECTORY ${test_dir}
+                             APPEND PROPERTY LABELS slow)
+            endif()
+        endforeach()
+    endforeach()
+
     # Phase 5 performance benchmark test (skipped if xcrun is unavailable).
     # The gate measures host launch overhead as well as GPU execution and is a
     # release criterion; an unoptimized Debug runtime is not a comparable

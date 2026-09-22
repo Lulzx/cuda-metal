@@ -33,7 +33,7 @@ Memory intervals discharge **non-overlap only**. For discovered pointer-cell
 candidates, an initializing pointer store is checked separately against every
 incoming path. Unknown calls/writes, partial overlaps and conflicting concrete
 address spaces remain rejection cases within that proof. The separate escaped
-cell discovery omission is recorded in [known gaps](known-gaps.md).
+cell discovery omission is recorded in [the PTX proof contracts](ptx-proof-contracts.md).
 The prefix proof tracks known initialized scalar bytes and symbolic local
 addresses. It never reads absent bytes as zero or replaces program execution.
 Unknown branches are explored; incomplete exploration discards all observations.

@@ -27,6 +27,25 @@ Both supported build policies remain required:
 | Release + binary shim off | Shipping, source-first configuration |
 | Debug + binary shim on | Development and opt-in alias coverage |
 
+Inner-loop tier
+---------------
+
+Tests that replay an external project or a whole corpus (PhysX, llama.cpp,
+llm.c, the cuda-samples sweep, the backend matrices, the typed/native-AOT
+corpora, and the Phase 4 functional rollup) carry the `slow` label. Most of
+their cost is cold-cache Metal compilation, which any `cumetalc` change
+invalidates. Warm, the whole suite takes about three minutes, but after a
+compiler change it can take more than thirty.
+
+```bash
+ctest --test-dir build -LE slow --output-on-failure   # inner loop
+ctest --test-dir build --output-on-failure            # gate before commit
+```
+
+The `slow` set is a regex in the top-level `CMakeLists.txt`. It is not a
+quality tier: those tests are the strongest evidence in the suite and must run
+before a compiler or runtime change is committed.
+
 The Phase 5 `bench_phase5_all_kernels` performance gate is registered only in
 Release builds. It measures synchronized host launch overhead as well as GPU
 execution, so an unoptimized Debug runtime is not a comparable performance

@@ -15,6 +15,7 @@ describe current implementation and never override it.
 
 - [Build and installation](build.md)
 - [Compiler architecture](compiler-architecture.md)
+- [PTX proof contracts](ptx-proof-contracts.md)
 - [Intrinsic coverage](intrinsic-map.md)
 - [FP64 policy](fp64-policy.md)
 - [AIR/metallib notes](air-abi.md)
