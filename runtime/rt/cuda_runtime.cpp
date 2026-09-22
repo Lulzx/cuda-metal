@@ -1326,20 +1326,47 @@ bool is_device_pointer(const void* ptr) {
     return state.allocations.resolve(ptr, &resolved);
 }
 
+// Words scanned for embedded pointers are overwhelmingly plain data. Filtering
+// them against one interval snapshot avoids a locked map lookup (and a
+// shared_ptr copy) per word, which made large host/device copies take minutes.
+bool in_any_range(const std::vector<std::pair<std::uintptr_t, std::uintptr_t>>& ranges,
+                  std::uintptr_t address) {
+    // Hand-written rather than std::upper_bound: this runs once per scanned
+    // word, and unoptimized builds do not inline the iterator templates.
+    const std::pair<std::uintptr_t, std::uintptr_t>* data = ranges.data();
+    std::size_t count = ranges.size();
+    if (count == 0 || address < data[0].first || address >= data[count - 1].second) {
+        return false;
+    }
+    std::size_t lo = 0;
+    while (count > 1) {
+        const std::size_t half = count / 2;
+        if (data[lo + half].first <= address) {
+            lo += half;
+            count -= half;
+        } else {
+            count = half;
+        }
+    }
+    return address < data[lo].second;
+}
+
 void relocate_embedded_device_pointers(
-    std::vector<std::uint8_t>* bytes,
+    std::uint8_t* data, std::size_t size,
     std::vector<std::shared_ptr<cumetal::metal_backend::Buffer>>* resident_buffers = nullptr) {
-    if (bytes == nullptr || bytes->size() < sizeof(std::uintptr_t)) return;
+    if (data == nullptr || size < sizeof(std::uintptr_t)) return;
     RuntimeState& state = runtime_state();
+    const auto ranges = state.allocations.snapshot_ranges();
+    if (ranges.empty()) return;
     // CUDA permits aggregates passed by value to contain device pointers. The
     // public CuMetal pointer is normally the CPU mapping of a shared MTLBuffer,
     // while a pointer dereferenced inside Metal must be its GPU virtual address.
     // Pointer fields follow the platform ABI's natural pointer alignment.
-    for (std::size_t offset = 0; offset + sizeof(std::uintptr_t) <= bytes->size();
+    for (std::size_t offset = 0; offset + sizeof(std::uintptr_t) <= size;
          offset += alignof(std::uintptr_t)) {
         std::uintptr_t candidate = 0;
-        std::memcpy(&candidate, bytes->data() + offset, sizeof(candidate));
-        if (candidate == 0) continue;
+        std::memcpy(&candidate, data + offset, sizeof(candidate));
+        if (candidate == 0 || !in_any_range(ranges, candidate)) continue;
         cumetal::rt::AllocationTable::ResolvedAllocation resolved;
         if (!state.allocations.resolve(reinterpret_cast<void*>(candidate), &resolved) ||
             resolved.buffer == nullptr) {
@@ -1351,21 +1378,30 @@ void relocate_embedded_device_pointers(
             continue;
         }
         const std::uintptr_t relocated = gpu_base + resolved.offset;
-        std::memcpy(bytes->data() + offset, &relocated, sizeof(relocated));
+        std::memcpy(data + offset, &relocated, sizeof(relocated));
         if (resident_buffers != nullptr) {
             resident_buffers->push_back(resolved.buffer);
         }
     }
 }
 
-void restore_embedded_host_pointers(std::vector<std::uint8_t>* bytes) {
-    if (bytes == nullptr || bytes->size() < sizeof(std::uintptr_t)) return;
+void relocate_embedded_device_pointers(
+    std::vector<std::uint8_t>* bytes,
+    std::vector<std::shared_ptr<cumetal::metal_backend::Buffer>>* resident_buffers = nullptr) {
+    if (bytes == nullptr) return;
+    relocate_embedded_device_pointers(bytes->data(), bytes->size(), resident_buffers);
+}
+
+void restore_embedded_host_pointers(std::uint8_t* data, std::size_t size) {
+    if (data == nullptr || size < sizeof(std::uintptr_t)) return;
     RuntimeState& state = runtime_state();
-    for (std::size_t offset = 0; offset + sizeof(std::uintptr_t) <= bytes->size();
+    const auto ranges = state.allocations.snapshot_ranges();
+    if (ranges.empty()) return;
+    for (std::size_t offset = 0; offset + sizeof(std::uintptr_t) <= size;
          offset += alignof(std::uintptr_t)) {
         std::uintptr_t candidate = 0;
-        std::memcpy(&candidate, bytes->data() + offset, sizeof(candidate));
-        if (candidate == 0) continue;
+        std::memcpy(&candidate, data + offset, sizeof(candidate));
+        if (candidate == 0 || !in_any_range(ranges, candidate)) continue;
         cumetal::rt::AllocationTable::ResolvedAllocation resolved;
         if (!state.allocations.resolve(reinterpret_cast<void*>(candidate), &resolved) ||
             resolved.buffer == nullptr || resolved.buffer->contents() == nullptr) {
@@ -1377,7 +1413,7 @@ void restore_embedded_host_pointers(std::vector<std::uint8_t>* bytes) {
             continue;
         }
         const std::uintptr_t restored = host_base + resolved.offset;
-        std::memcpy(bytes->data() + offset, &restored, sizeof(restored));
+        std::memcpy(data + offset, &restored, sizeof(restored));
     }
 }
 
@@ -3453,18 +3489,14 @@ cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind 
         if (host_dst == nullptr || host_src == nullptr) {
             return fail(cudaErrorInvalidValue);
         }
+        // The device is synchronized above, so pointer fields are fixed up
+        // in the destination after a single copy; the caller's source is
+        // never modified.
+        std::memmove(host_dst, host_src, count);
         if (resolved_kind == cudaMemcpyHostToDevice) {
-            std::vector<std::uint8_t> staged(count);
-            std::memcpy(staged.data(), host_src, count);
-            relocate_embedded_device_pointers(&staged);
-            std::memcpy(host_dst, staged.data(), count);
+            relocate_embedded_device_pointers(static_cast<std::uint8_t*>(host_dst), count);
         } else if (resolved_kind == cudaMemcpyDeviceToHost) {
-            std::vector<std::uint8_t> staged(count);
-            std::memcpy(staged.data(), host_src, count);
-            restore_embedded_host_pointers(&staged);
-            std::memcpy(host_dst, staged.data(), count);
-        } else {
-            std::memcpy(host_dst, host_src, count);
+            restore_embedded_host_pointers(static_cast<std::uint8_t*>(host_dst), count);
         }
     }
 
@@ -3548,11 +3580,13 @@ cudaError_t cudaMemcpyAsync(void* dst,
     if ((host_dst == nullptr || host_src == nullptr) && count > 0) {
         return fail(cudaErrorInvalidValue);
     }
-    std::shared_ptr<std::vector<std::uint8_t>> staged_h2d;
+    // Uninitialized storage: a zero-filled vector cost as much as the copy
+    // itself in unoptimized builds.
+    std::shared_ptr<std::uint8_t[]> staged_h2d;
     if (count > 0 && resolved_kind == cudaMemcpyHostToDevice) {
-        staged_h2d = std::make_shared<std::vector<std::uint8_t>>(count);
-        std::memcpy(staged_h2d->data(), host_src, count);
-        relocate_embedded_device_pointers(staged_h2d.get());
+        staged_h2d.reset(new std::uint8_t[count]);
+        std::memcpy(staged_h2d.get(), host_src, count);
+        relocate_embedded_device_pointers(staged_h2d.get(), count);
     }
     // A pageable destination must hold the data when this call returns; a
     // pageable source has been staged above (host-to-device) or is covered by
@@ -3563,12 +3597,10 @@ cudaError_t cudaMemcpyAsync(void* dst,
         [host_dst, host_src, count, resolved_kind, staged_h2d]() {
             if (count == 0) return;
             if (staged_h2d != nullptr) {
-                std::memcpy(host_dst, staged_h2d->data(), count);
+                std::memcpy(host_dst, staged_h2d.get(), count);
             } else if (resolved_kind == cudaMemcpyDeviceToHost) {
-                std::vector<std::uint8_t> staged(count);
-                std::memcpy(staged.data(), host_src, count);
-                restore_embedded_host_pointers(&staged);
-                std::memcpy(host_dst, staged.data(), count);
+                std::memmove(host_dst, host_src, count);
+                restore_embedded_host_pointers(static_cast<std::uint8_t*>(host_dst), count);
             } else {
                 std::memcpy(host_dst, host_src, count);
             }

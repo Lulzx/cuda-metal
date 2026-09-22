@@ -106,6 +106,16 @@ bool AllocationTable::resolve(const void* ptr, ResolvedAllocation* resolved) con
     return true;
 }
 
+std::vector<std::pair<std::uintptr_t, std::uintptr_t>> AllocationTable::snapshot_ranges() const {
+    std::shared_lock lock(mutex_);
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> ranges;
+    ranges.reserve(entries_.size());
+    for (const auto& [base, entry] : entries_) {
+        ranges.emplace_back(base, base + entry.size);
+    }
+    return ranges;
+}
+
 std::size_t AllocationTable::total_allocated_size() const {
     std::shared_lock lock(mutex_);
     std::size_t total = 0;

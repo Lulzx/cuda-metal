@@ -9,6 +9,8 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace cumetal::rt {
 
@@ -36,6 +38,11 @@ public:
                 bool alias = false);
     bool erase(void* base);
     bool resolve(const void* ptr, ResolvedAllocation* resolved) const;
+    // Sorted, non-overlapping [base, end) intervals of the current entries.
+    // Bulk scans (pointer relocation in memcpy) take one snapshot and filter
+    // every word against it without the lock, calling resolve() only for words
+    // that actually fall inside an allocation.
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> snapshot_ranges() const;
     std::size_t total_allocated_size() const;
     void clear();
 

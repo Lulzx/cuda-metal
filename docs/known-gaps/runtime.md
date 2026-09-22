@@ -93,6 +93,16 @@ fire-and-forget graph semantics are not implemented.
   operation. Memsets targeting pageable host memory, which CUDA rejects and
   CuMetal accepts on unified memory, are completed before returning for the
   same reason.
+- A CuMetal device pointer is the CPU mapping of a shared buffer, but Metal
+  dereferences GPU virtual addresses. So that structures holding device pointers
+  survive `cudaMemcpy`, host-to-device copies rewrite every pointer-aligned
+  8-byte word that falls inside a live allocation to its GPU address, and
+  device-to-host copies reverse it. The rewrite is heuristic: integer data that
+  happens to equal such an address is rewritten too, so a kernel reading it as
+  an integer sees the GPU address. Each copy filters words against one
+  snapshot of the allocation intervals, so plain data costs a comparison
+  rather than a locked lookup, but the scan still visits every word of every
+  host/device copy.
 - Managed-memory API compatibility does not imply CUDA concurrent managed access
   or CPU/GPU atomics. Prefetch/advice/range-query/attach calls validate tracked
   spans and arguments and preserve prefetch stream ordering, but do not control
