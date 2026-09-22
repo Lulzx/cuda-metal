@@ -52,8 +52,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/40 | **40/40** |
-| PTX / `--cuda-device` | **36/40** | **37/40** |
+| direct `.cu` | 0/42 | **42/42** |
+| PTX / `--cuda-device` | **38/42** | **39/42** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
@@ -119,6 +119,50 @@ Remaining typed-path blockers include combinations of:
 
 The old direct legacy `.cu` path is textual qualifier stripping and fails this
 corpus. It is not a correctness fallback.
+
+### Registration default: what blocks `cumetal-ir`
+
+The registration JIT still defaults to `legacy`. Running the inner test tier
+(`ctest -LE slow`, 376 tests) with `CUMETAL_PTX_BACKEND=cumetal-ir` on
+2026-09-23 passed 370. The six failures, plus one from the typed corpus, are
+the checklist for flipping the default:
+
+| Blocker | Kind | Test |
+| --- | --- | --- |
+| device `malloc`/`free` (no typed PTX definition) | typed gap | `functional_device_heap` |
+| device-side kernel launch queue | typed gap | `functional_device_launch_queue` |
+| tf32 WMMA helper `__cumetal_wmma_f32_mma_8x8` | typed gap | `functional_wmma_numeric` |
+| pointer loaded from a local pointer array by an unrolled cursor loop | typed gap | `reserved_bindings` (enrolled for legacy and native AOT only) |
+| string literal passed directly as a `vprintf` argument | nonstandard fixture PTX | `functional_runtime_registration_{printf,metadata_cache}` |
+| `ret`-only PTX body served by a name-matched workload template | legacy-only fixture | `functional_runtime_rope_neox` |
+
+The first four are real typed-backend work. The last two are fixtures written
+for the legacy path and need real PTX before the flip. None of the six was a
+wrong answer on the typed backend.
+
+### Legacy direct PTX->MSL emitter
+
+The registration JIT's legacy backend first tries a pattern-based PTX->MSL
+emitter (`compiler/ptx/src/lower_to_metal.cpp`) and falls back to the PTX->LLVM
+path when the emitter declines. The emitter types each MSL variable by guessing
+from its register, so its contract is to decline rather than guess:
+
+- Integer arithmetic, shifts and comparisons cast operands to the type their
+  PTX suffix declares; `mul/mad .hi` use `mulhi` and `.wide` widen.
+- `mov.b32/b64` and `shfl.sync` preserve bits (`as_type`, source-typed
+  shuffle) instead of converting values.
+- Any predicated instruction other than a guard branch is declined, as is a
+  guard whose branch is negated or whose target is not the function exit.
+- A scalar structural register (thread id, scalar parameter) with more than
+  one definition is declined.
+- Global accesses of unknown width, or mixed widths on one buffer, are
+  declined. Sub-word accesses use `uchar`/`char`/`ushort`/`short` buffers.
+
+Before these rules, integer division by a constant, float warp shuffles,
+offset float atomics and `bool` stores compiled and silently returned wrong
+answers. `functional_cuda_projects_ptx_idioms_{legacy,cumetal_ir}` executes
+each of those idioms on the GPU for both backends. The typed backend never had
+these defects; the emitter is kept only for the legacy default.
 
 The exact 27-project in-tree numerical corpus passes both typed PTX and direct
 native AOT on Apple M4 Pro with workload specializations disabled. This closes
@@ -257,7 +301,7 @@ integer byte offset, including local-buffer loops. A bounded SSA pass also
 recovers scalar differences and cancelling integer-minus-pointer intermediates
 when their complete 64-bit affine paths prove a common address base, including
 branches and loop-carried cursors. It tracks integer offsets rather than numeric
-Metal pointers; see [the proof limits](../known-gaps.md). Unrelated pointer
+Metal pointers; see [the proof limits](../ptx-proof-contracts.md). Unrelated pointer
 differences, observable negative-base intermediates, scalar-to-address escapes,
 and narrow pointer arithmetic remain unsupported.
 Unused pointer truncations are removed during legalization; observed truncations

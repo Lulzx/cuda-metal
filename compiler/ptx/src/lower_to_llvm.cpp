@@ -4677,6 +4677,12 @@ class GenericLlvmEmitter {
                                                   : mem.base + "@" + std::to_string(mem.offset);
                 auto slot = get_param_slot(slot_name, ty.bits, true);
                 if (!slot) return fail(instr, "unable to allocate call param slot");
+                // Call slots are reused by name (clang spells every first
+                // argument `param0`), so a store without provenance must clear
+                // the previous call's facts rather than inherit them: a stale
+                // shared-space entry would retarget a later global pointer.
+                call_param_pointer_as_.erase(mem.base);
+                call_param_shared_origin_.erase(mem.base);
                 if (is_register_name(data_token)) {
                     if (const auto provenance = reg_pointer_as_.find(data_token);
                         provenance != reg_pointer_as_.end()) {

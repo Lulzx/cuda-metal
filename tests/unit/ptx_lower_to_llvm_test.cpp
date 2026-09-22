@@ -2845,6 +2845,72 @@ $L_done:
         return 1;
     }
 
+    // ── Reused call slots do not inherit a previous call's address space ─────
+    // Clang names every first call argument `param0`. A shared-memory pointer
+    // stored for f() must not decide the space of the untracked global pointer
+    // later stored for g(); g's store would otherwise target threadgroup memory.
+    {
+        const std::string slot_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+
+.func f(.param .b64 f_p)
+{
+    .reg .b64 %rd<2>;
+    .reg .b32 %r<2>;
+    ld.param.u64 %rd1, [f_p];
+    mov.u32 %r1, 1;
+    st.u32 [%rd1], %r1;
+    ret;
+}
+
+.func g(.param .b64 g_p)
+{
+    .reg .b64 %rd<2>;
+    .reg .b32 %r<2>;
+    ld.param.u64 %rd1, [g_p];
+    mov.u32 %r1, 2;
+    st.u32 [%rd1], %r1;
+    ret;
+}
+
+.visible .entry k(.param .u64 k_out)
+{
+    .reg .b64 %rd<8>;
+    .shared .align 16 .b8 sm[16];
+    mov.u64 %rd1, sm;
+    cvta.shared.u64 %rd2, %rd1;
+    {
+    .param .b64 param0;
+    st.param.b64 [param0], %rd2;
+    call.uni f, (param0);
+    }
+    ld.param.u64 %rd3, [k_out];
+    cvta.to.global.u64 %rd4, %rd3;
+    add.s64 %rd5, %rd4, 15;
+    and.b64 %rd6, %rd5, -16;
+    {
+    .param .b64 param0;
+    st.param.b64 [param0], %rd6;
+    call.uni g, (param0);
+    }
+    ret;
+}
+)PTX";
+        cumetal::ptx::LowerToLlvmOptions slot_options;
+        slot_options.entry_name = "k";
+        const auto slot = cumetal::ptx::lower_ptx_to_llvm_ir(slot_ptx, slot_options);
+        if (!expect(slot.ok, "reused call-slot kernel lowers")) return 1;
+        const std::size_t g_at = slot.llvm_ir.find("define internal void @g(");
+        if (!expect(g_at != std::string::npos, "helper g is emitted")) return 1;
+        const std::string g_body =
+            slot.llvm_ir.substr(g_at, slot.llvm_ir.find("\n}", g_at) - g_at);
+        if (!expect(contains(g_body, "i32 addrspace(1)*") &&
+                        !contains(g_body, "addrspace(3)"),
+                    "g writes device memory, not the shared space of f's argument")) return 1;
+    }
+
     std::printf("PASS: ptx lower-to-llvm unit tests\n");
     return 0;
 }

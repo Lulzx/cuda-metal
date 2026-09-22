@@ -99,6 +99,18 @@
       "harness": "standard"
     },
     {
+      "name": "reserved_bindings",
+      "subdir": "reserved_bindings",
+      "source": "reserved_bindings.cu",
+      "binary": "reserved_bindings",
+      "harness": "strict",
+      "expect_pattern": "PASS: all 31 argument buffers written, none clobbered",
+      "backends": [
+        "legacy",
+        "native-aot"
+      ]
+    },
+    {
       "name": "dynamic_cooperative_groups",
       "subdir": "dynamic_cooperative_groups",
       "source": "dynamic_cooperative_groups.cu",
@@ -183,6 +195,14 @@
       "source": "partial_lane_shuffle_guard.cu",
       "binary": "partial_lane_shuffle_guard",
       "harness": "standard"
+    },
+    {
+      "name": "ptx_idioms",
+      "subdir": "ptx_idioms",
+      "source": "ptx_idioms.cu",
+      "binary": "ptx_idioms",
+      "harness": "strict",
+      "expect_pattern": "PASS: all PTX idioms"
     },
     {
       "name": "raytracer",

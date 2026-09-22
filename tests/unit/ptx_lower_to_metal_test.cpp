@@ -1084,7 +1084,7 @@ DONE:
         return 1;
     if (!expect(contains(int_b32.metal_source, "int vr6 = a[gid]") &&
                     contains(int_b32.metal_source, "int vr7 = b[gid]") &&
-                    contains(int_b32.metal_source, "int vr8 = vr7 + vr6"),
+                    contains(int_b32.metal_source, "int vr8 = (int)(vr7) + (int)(vr6)"),
                 "integer .b32 loads and arithmetic remain integer"))
         return 1;
 
@@ -1301,6 +1301,227 @@ $L__BB0_2:
     if (!expect(!contains(struct_param.metal_source, "scale_by_struct_param_2[1]") &&
                     !contains(struct_param.metal_source, "constant uint& scale_by_struct_param_2"),
                 "no field aliases onto the wrong word")) return 1;
+
+    // ── Integer division by a constant (clang -O2 shape for `x / 3`) ─────────
+    // mul.hi must keep the upper product half, and shr.u32 must shift
+    // logically even though the value came from an `int` declaration. Both
+    // were silently wrong: the low product was kept, and the shift was
+    // arithmetic, so every quotient was garbage.
+    const std::string div_const_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry div3(
+	.param .u64 .ptr .align 1 div3_param_0,
+	.param .u64 .ptr .align 1 div3_param_1,
+	.param .u32 div3_param_2
+)
+{
+	.reg .pred 	%p<2>;
+	.reg .b32 	%r<10>;
+	.reg .b64 	%rd<8>;
+	ld.param.b64 	%rd3, [div3_param_0];
+	ld.param.b64 	%rd4, [div3_param_1];
+	cvta.to.global.u64 	%rd5, %rd4;
+	cvta.to.global.u64 	%rd6, %rd3;
+	ld.param.b32 	%r1, [div3_param_2];
+	mov.u32 	%r2, %ctaid.x;
+	mov.u32 	%r3, %ntid.x;
+	mov.u32 	%r4, %tid.x;
+	mad.lo.s32 	%r5, %r2, %r3, %r4;
+	setp.ge.s32 	%p1, %r5, %r1;
+	@%p1 bra 	$L__BB0_2;
+	mul.wide.u32 	%rd7, %r5, 4;
+	add.s64 	%rd1, %rd5, %rd7;
+	add.s64 	%rd2, %rd6, %rd7;
+	ld.global.b32 	%r6, [%rd2];
+	mul.hi.s32 	%r7, %r6, 1431655766;
+	shr.u32 	%r8, %r7, 31;
+	add.s32 	%r9, %r7, %r8;
+	st.global.b32 	[%rd1], %r9;
+$L__BB0_2:
+	ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions div_const_options;
+    div_const_options.entry_name = "div3";
+    const auto div_const =
+        cumetal::ptx::lower_ptx_to_metal_source(div_const_ptx, div_const_options);
+    if (!expect(div_const.ok && div_const.matched,
+                "division by a constant lowers through direct Metal")) return 1;
+    if (!expect(contains(div_const.metal_source, "mulhi((int)(vr6), (int)(1431655766))"),
+                "mul.hi.s32 keeps the signed upper product half")) return 1;
+    if (!expect(!contains(div_const.metal_source, "vr6 * 1431655766"),
+                "mul.hi is not lowered as the low product")) return 1;
+    if (!expect(contains(div_const.metal_source, "(uint)(vr7) >> (uint)(31)"),
+                "shr.u32 shifts logically regardless of the operand declaration")) return 1;
+
+    // ── Float warp shuffle through a .b32 register ───────────────────────────
+    // shfl.sync moves bits. Converting through the destination's register
+    // spelling (`(uint)simd_shuffle(float)`) truncated every float reduction.
+    const std::string shfl_float_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry shfl(
+	.param .u64 .ptr .align 1 shfl_param_0,
+	.param .u64 .ptr .align 1 shfl_param_1
+)
+{
+	.reg .b32 	%r<8>;
+	.reg .b64 	%rd<8>;
+	ld.param.b64 	%rd1, [shfl_param_0];
+	ld.param.b64 	%rd2, [shfl_param_1];
+	cvta.to.global.u64 	%rd3, %rd2;
+	cvta.to.global.u64 	%rd4, %rd1;
+	mov.u32 	%r1, %ctaid.x;
+	mov.u32 	%r2, %ntid.x;
+	mov.u32 	%r3, %tid.x;
+	mad.lo.s32 	%r4, %r1, %r2, %r3;
+	mul.wide.s32 	%rd5, %r4, 4;
+	add.s64 	%rd6, %rd4, %rd5;
+	ld.global.f32 	%r5, [%rd6];
+	shfl.sync.down.b32 	%r6, %r5, 1, 31, -1;
+	add.rn.f32 	%r7, %r5, %r6;
+	add.s64 	%rd7, %rd3, %rd5;
+	st.global.f32 	[%rd7], %r7;
+	ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions shfl_float_options;
+    shfl_float_options.entry_name = "shfl";
+    const auto shfl_float =
+        cumetal::ptx::lower_ptx_to_metal_source(shfl_float_ptx, shfl_float_options);
+    if (!expect(shfl_float.ok && shfl_float.matched,
+                "float shuffle lowers through direct Metal")) return 1;
+    if (!expect(!contains(shfl_float.metal_source, "(uint)simd_shuffle"),
+                "float shuffle is not value-converted to uint")) return 1;
+    if (!expect(contains(shfl_float.metal_source, "decltype(vr5) vr6"),
+                "shuffle result keeps its source's type")) return 1;
+
+    // ── Signed compare and not.pred ──────────────────────────────────────────
+    const std::string signed_cmp_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry signed_cmp(
+	.param .u64 .ptr .align 1 signed_cmp_param_0,
+	.param .u64 .ptr .align 1 signed_cmp_param_1
+)
+{
+	.reg .pred 	%p<3>;
+	.reg .b32 	%r<8>;
+	.reg .b64 	%rd<8>;
+	ld.param.b64 	%rd1, [signed_cmp_param_0];
+	ld.param.b64 	%rd2, [signed_cmp_param_1];
+	cvta.to.global.u64 	%rd3, %rd2;
+	cvta.to.global.u64 	%rd4, %rd1;
+	mov.u32 	%r1, %ctaid.x;
+	mov.u32 	%r2, %ntid.x;
+	mov.u32 	%r3, %tid.x;
+	mad.lo.s32 	%r4, %r1, %r2, %r3;
+	mul.wide.s32 	%rd5, %r4, 4;
+	add.s64 	%rd6, %rd4, %rd5;
+	ld.global.u32 	%r5, [%rd6];
+	setp.lt.s32 	%p1, %r5, 0;
+	not.pred 	%p2, %p1;
+	selp.u32 	%r6, 1, 0, %p2;
+	add.s64 	%rd7, %rd3, %rd5;
+	st.global.u32 	[%rd7], %r6;
+	ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions signed_cmp_options;
+    signed_cmp_options.entry_name = "signed_cmp";
+    const auto signed_cmp =
+        cumetal::ptx::lower_ptx_to_metal_source(signed_cmp_ptx, signed_cmp_options);
+    if (!expect(signed_cmp.ok && signed_cmp.matched,
+                "signed compare lowers through direct Metal")) return 1;
+    if (!expect(contains(signed_cmp.metal_source, "(int)(vr5) < (int)(0)"),
+                "setp.lt.s32 compares signed even for a .u32 load")) return 1;
+    if (!expect(contains(signed_cmp.metal_source, "bool vp2 = !vp1"),
+                "not.pred is a logical negation, not ~bool")) return 1;
+
+    // ── Predicated non-branch instructions are refused ───────────────────────
+    // Only guard branches are modeled; any other predicate would be dropped
+    // and the instruction would run for every thread.
+    std::string predicated_ptx = signed_cmp_ptx;
+    const std::string plain_store = "\tst.global.u32 \t[%rd7], %r6;";
+    const auto store_at = predicated_ptx.find(plain_store);
+    if (!expect(store_at != std::string::npos, "predicated fixture has a store")) return 1;
+    predicated_ptx.replace(store_at, plain_store.size(),
+                           "\t@%p1 st.global.u32 \t[%rd7], %r6;");
+    const auto predicated =
+        cumetal::ptx::lower_ptx_to_metal_source(predicated_ptx, signed_cmp_options);
+    if (!expect(predicated.ok && !predicated.matched,
+                "a predicated store is deferred, not emitted unconditionally")) return 1;
+
+    // ── A guard whose branch does not reach the exit is not an early return ──
+    // `if (i < n) {...}` followed by unconditional work: returning early would
+    // skip the tail for out-of-range threads.
+    std::string tail_ptx = div_const_ptx;
+    const std::string exit_label = "$L__BB0_2:\n\tret;";
+    const auto label_at = tail_ptx.find(exit_label);
+    if (!expect(label_at != std::string::npos, "tail fixture has an exit label")) return 1;
+    tail_ptx.replace(label_at, exit_label.size(),
+                     "$L__BB0_2:\n\tst.global.b32 \t[%rd5], %r1;\n\tret;");
+    const auto tail =
+        cumetal::ptx::lower_ptx_to_metal_source(tail_ptx, div_const_options);
+    if (!expect(tail.ok, "guarded-tail lowering returns ok")) return 1;
+    if (!expect(!tail.matched || !contains(tail.metal_source, ") return;"),
+                "a guard is not an early return when work follows its label")) return 1;
+
+    // ── A redefined scalar parameter is not its original value ───────────────
+    // `n` is substituted at every use of %r1; an in-place `add %r1, %r1, 1`
+    // would otherwise be dropped and the store would write n, not n + 1.
+    std::string bumped_ptx = div_const_ptx;
+    const std::string final_store = "\tst.global.b32 \t[%rd1], %r9;";
+    const auto final_store_at = bumped_ptx.find(final_store);
+    if (!expect(final_store_at != std::string::npos, "bump fixture has a store")) return 1;
+    bumped_ptx.replace(final_store_at, final_store.size(),
+                       "\tadd.s32 \t%r1, %r1, 1;\n\tst.global.b32 \t[%rd1], %r1;");
+    const auto bumped = cumetal::ptx::lower_ptx_to_metal_source(bumped_ptx, div_const_options);
+    if (!expect(bumped.ok, "redefined-parameter lowering returns ok")) return 1;
+    if (!expect(!bumped.matched ||
+                    !contains(bumped.metal_source, "div3_param_1[gid] = div3_param_2;"),
+                "an in-place update of a scalar parameter is not dropped")) return 1;
+
+    // The gid chain itself may reuse registers (%r0 = ctaid, ctaid*ntid, gid).
+    const std::string reused_gid_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry reuse_gid(
+    .param .u64 reuse_gid_param_0,
+    .param .u64 reuse_gid_param_1
+)
+{
+    .reg .u64 %rd<5>;
+    .reg .u32 %r<6>;
+    .reg .f32 %f<3>;
+    ld.param.u64 %rd0, [reuse_gid_param_0];
+    ld.param.u64 %rd1, [reuse_gid_param_1];
+    mov.u32 %r0, %ctaid.x;
+    mov.u32 %r1, %ntid.x;
+    mul.lo.u32 %r0, %r0, %r1;
+    mov.u32 %r1, %tid.x;
+    add.u32 %r0, %r0, %r1;
+    cvt.u64.u32 %rd3, %r0;
+    shl.b64 %rd3, %rd3, 2;
+    add.u64 %rd0, %rd0, %rd3;
+    add.u64 %rd1, %rd1, %rd3;
+    ld.global.f32 %f0, [%rd0];
+    add.f32 %f1, %f0, %f0;
+    st.global.f32 [%rd1], %f1;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions reused_gid_options;
+    reused_gid_options.entry_name = "reuse_gid";
+    const auto reused_gid =
+        cumetal::ptx::lower_ptx_to_metal_source(reused_gid_ptx, reused_gid_options);
+    if (!expect(reused_gid.ok && reused_gid.matched,
+                "a gid chain that reuses registers still lowers")) return 1;
 
     std::printf("PASS: ptx lower-to-metal unit tests\n");
     return 0;

@@ -142,6 +142,33 @@ set_tests_properties(
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
 )
 
+# Everyday idioms (division by a constant, float warp shuffle, offset atomics,
+# bool stores, guarded tails, signed ops) that the direct PTX->MSL emitter once
+# compiled into plausible wrong answers. Run on both registration backends so
+# neither can regress silently.
+foreach(ptx_backend legacy cumetal-ir)
+    string(REPLACE "-" "_" backend_suffix "${ptx_backend}")
+    add_test(
+        NAME functional_cuda_projects_ptx_idioms_${backend_suffix}
+        COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_standalone_cu.sh
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}
+            ptx_idioms
+            ptx_idioms.cu
+            ptx_idioms_${backend_suffix}
+            ${ptx_backend}
+    )
+    set_tests_properties(
+        functional_cuda_projects_ptx_idioms_${backend_suffix}
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            RUN_SERIAL TRUE
+            TIMEOUT 120
+            ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_CUDA_PROJECT_STRICT_CLASSIFICATION=1"
+    )
+endforeach()
+
 # Direct `.func` calls must retain pointer argument provenance, scalar returns,
 # loop-carried values, and early exits in the typed PTX path. This is a focused
 # numerical gate in addition to the exact manifest-controlled corpus.
@@ -262,6 +289,17 @@ cumetal_add_cuda_project_test(
     functional_cuda_projects_device_sync_primitives
     device_sync_primitives device_sync_primitives.cu device_sync_primitives
 )
+
+# Regression: a kernel whose own arguments reach the buffer indices reserved for
+# hidden bindings (25-30) had those arguments overwritten at dispatch. Runs on
+# the default (legacy) registration path; the typed PTX backend refuses it (see
+# the file header).
+cumetal_add_cuda_project_test(
+    functional_cuda_projects_reserved_bindings
+    reserved_bindings reserved_bindings.cu reserved_bindings
+)
+set_tests_properties(functional_cuda_projects_reserved_bindings PROPERTIES
+    ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_CUDA_PROJECT_STRICT_CLASSIFICATION=1")
 
 # Regression: __cudaRegisterVar used to map a __device__/__constant__ symbol onto
 # its device-side name string, and external PTX symbols were not bound into
