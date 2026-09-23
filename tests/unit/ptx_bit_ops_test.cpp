@@ -86,6 +86,22 @@ bool permutation_shape(const std::string& selector, bool compact,
     }
     return ok;
 }
+
+// IR operations the importer emitted for the single `opcode` instruction.
+unsigned instruction_operations(const cumetal::metal::PtxToMslResult& compiled,
+                                const std::string& opcode) {
+    unsigned line = 0, operations = 0;
+    for (const auto& function : compiled.gpu_ir.functions)
+        for (const auto& block : function.blocks)
+            for (const auto& operation : block.operations)
+                if (operation.attributes.contains("ptx_opcode") &&
+                    operation.attributes.at("ptx_opcode") == opcode) line = operation.location.line;
+    for (const auto& function : compiled.gpu_ir.functions)
+        for (const auto& block : function.blocks)
+            for (const auto& operation : block.operations)
+                if (line != 0 && operation.location.line == line) ++operations;
+    return operations;
+}
 }  // namespace
 
 int main() {
@@ -176,6 +192,34 @@ int main() {
     // Valid constant expressions outside the literal fast path stay generic.
     ok &= permutation_shape("(0x5400 | 0x10)", false);
 
+
+    // Constant counts and fields fold to a few 32/64-bit operations; the
+    // general forms clamp and widen at run time and cost several times more.
+    const auto shape_module = [](const std::string& instruction) {
+        return ".version 7.1\n.target sm_80\n.address_size 64\n"
+               ".visible .entry shape(.param .u64 input) {\n"
+               ".reg .b32 %r<4>;\n.reg .b64 %rd<3>;\n"
+               "ld.param.u64 %rd1, [input];\n"
+               "ld.global.u32 %r1, [%rd1];\nld.global.u32 %r2, [%rd1+4];\n"
+               "ld.global.u64 %rd2, [%rd1];\nmov.u32 %r3, 0;\n" + instruction +
+               "\nst.global.u32 [%rd1], %r3;\nst.global.u64 [%rd1+8], %rd2;\nret;\n}\n";
+    };
+    const struct { const char* instruction; const char* opcode; unsigned at_most; } shapes[] = {
+        {"shf.l.wrap.b32 %r3, %r1, %r2, 7;", "shf.l.wrap.b32", 3},
+        {"shf.r.wrap.b32 %r3, %r1, %r2, 39;", "shf.r.wrap.b32", 3},
+        {"shf.l.wrap.b32 %r3, %r1, %r2, 32;", "shf.l.wrap.b32", 1},
+        {"bfi.b32 %r3, %r1, %r2, 8, 16;", "bfi.b32", 4},
+        {"bfi.b64 %rd2, %rd2, %rd2, 40, 30;", "bfi.b64", 4},
+        {"bfi.b32 %r3, %r1, %r2, 40, 3;", "bfi.b32", 1},
+    };
+    for (const auto& shape : shapes) {
+        const auto compiled = metal::compile_ptx_to_msl(shape_module(shape.instruction));
+        const unsigned operations = compiled.ok ? instruction_operations(compiled, shape.opcode) : 0;
+        ok &= expect(compiled.ok && operations > 0 && operations <= shape.at_most,
+                     std::string(shape.instruction) + " folds to at most " +
+                         std::to_string(shape.at_most) + " operations, got " +
+                         std::to_string(operations) + " " + compiled.error);
+    }
 
     const auto bfi_module = [](const std::string& instruction) {
         return ".version 7.1\n.target sm_80\n.address_size 64\n"

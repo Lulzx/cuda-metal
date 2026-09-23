@@ -34,6 +34,9 @@ unpredicated `bfi.b32/b64`, and two-halfword `mov.b32` packing/unpacking
 (including single unpack sinks). Vector memory stores accept literal lanes.
 Other permutation modes, funnel widths, and tuple shapes remain explicit
 diagnostics. Bit-field lowering bounds every shift, including discarded arms.
+Constant funnel-shift counts and constant `bfi` fields fold to a few shifts and
+masks; register counts and fields keep the clamped general form, which costs
+three to four times more emitted source.
 
 Integer min/max explicitly types MSL operands to preserve signed comparisons
 and select the correct overload for literals. Signed and unsigned 64-bit

@@ -1,17 +1,18 @@
 #include "ptx_bit_ops.h"
 #include "ptx_text.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <optional>
 
 namespace cumetal::ir::detail {
 namespace {
 
-std::optional<std::uint16_t> immediate_permutation_selector(const Operand& operand) {
+std::optional<std::uint64_t> immediate_bits(const Operand& operand) {
     if (operand.kind != OperandKind::kImmediate || operand.type.kind != TypeKind::kInteger)
         return std::nullopt;
     // Other constant expressions and unrecognized literals retain the generic path.
-    const auto value = integer_literal_bits(operand.text);
-    return value ? std::optional(static_cast<std::uint16_t>(*value)) : std::nullopt;
+    return integer_literal_bits(operand.text);
 }
 
 }  // namespace
@@ -21,16 +22,43 @@ void lower_bit_permutation(PtxValueBuilder& values, Operation& operation,
     const bool left = opcode == "shf.l.wrap.b32";
     const bool permute = opcode == "prmt.b32";
     const Type u32 = Type::integer(32), u64 = Type::integer(64);
-    if (const auto selector = permute ? immediate_permutation_selector(count) : std::nullopt) {
-        const auto imm = [&](unsigned n) { return Operand::immediate(std::to_string(n), u32); };
-        // Bind both inputs as unsigned 32-bit values before shifting, including
-        // signed literals and wider PTX register containers. An operand already
-        // in that form needs no conversion: emitting one costs a value and an
-        // identity copy per operand, which is pure noise at thousands of sites.
-        const auto bind_u32 = [&](const Operand& operand) {
-            return operand.type == u32 ? operand
-                                       : values.emit(OpCode::kConvert, u32, {operand});
+    const auto imm = [&](unsigned n) { return Operand::immediate(std::to_string(n), u32); };
+    // Bind both inputs as unsigned 32-bit values before shifting, including
+    // signed literals and wider PTX register containers. An operand already
+    // in that form needs no conversion: emitting one costs a value and an
+    // identity copy per operand, which is pure noise at thousands of sites.
+    const auto bind_u32 = [&](const Operand& operand) {
+        return operand.type == u32 ? operand
+                                   : values.emit(OpCode::kConvert, u32, {operand});
+    };
+    const auto immediate = immediate_bits(count);
+    if (!permute && immediate) {
+        // A constant funnel shift is two 32-bit shifts and an or; the general
+        // path below widens to 64 bits and costs eight values. Hash kernels
+        // rotate by constants at every round, so this is the common form.
+        const unsigned n = static_cast<unsigned>(*immediate & 31);
+        // A literal's IR type does not type its emitted C++ token (`-1 >> n`
+        // would shift arithmetically), so bind literal inputs explicitly.
+        const auto bind_shift_input = [&](const Operand& operand) {
+            return operand.kind == OperandKind::kImmediate
+                       ? values.emit(OpCode::kConvert, u32, {operand})
+                       : bind_u32(operand);
         };
+        a = bind_shift_input(a);
+        b = bind_shift_input(b);
+        operation.result_types = {u32};
+        if (n == 0) {
+            operation.opcode = OpCode::kConvert;
+            operation.operands = {left ? b : a};
+            return;
+        }
+        const Operand high = values.emit(OpCode::kShiftLeft, u32, {b, imm(left ? n : 32 - n)});
+        const Operand low = values.emit(OpCode::kShiftRight, u32, {a, imm(left ? 32 - n : n)});
+        operation.opcode = OpCode::kBitOr;
+        operation.operands = {high, low};
+        return;
+    }
+    if (const auto selector = permute ? immediate : std::nullopt) {
         a = bind_u32(a);
         b = bind_u32(b);
         // With no nibble asking for sign replication the whole instruction is a
@@ -119,6 +147,42 @@ void lower_bit_insert(PtxValueBuilder& values, Operation& operation, const Type&
     const auto imm32 = [&](unsigned n) {
         return Operand::immediate(std::to_string(n), u32);
     };
+    const auto immediate_position = immediate_bits(position);
+    const auto immediate_length = immediate_bits(length);
+    if (immediate_position && immediate_length) {
+        // Constant fields fold the mask: an and, a shift, an and and an or,
+        // instead of the fifteen-value clamped general form below.
+        const unsigned pos = static_cast<unsigned>(*immediate_position & 255);
+        const unsigned len = static_cast<unsigned>(*immediate_length & 255);
+        operation.result_types = {type};
+        operation.opcode = OpCode::kConvert;
+        if (len == 0 || pos >= type.bit_width) {
+            operation.operands = {b};
+            return;
+        }
+        const unsigned width = std::min(len, type.bit_width - pos);
+        const std::uint64_t field =
+            width == 64 ? ~std::uint64_t{0} : ((std::uint64_t{1} << width) - 1);
+        const std::uint64_t type_mask =
+            type.bit_width == 64 ? ~std::uint64_t{0} : ((std::uint64_t{1} << type.bit_width) - 1);
+        const std::uint64_t mask = (field << pos) & type_mask;
+        const auto bits = [&](std::uint64_t n) {
+            return Operand::immediate(std::to_string(n), type);
+        };
+        const auto bind = [&](const Operand& operand) {
+            return operand.kind == OperandKind::kImmediate || !(operand.type == type)
+                       ? values.emit(OpCode::kConvert, type, {operand})
+                       : operand;
+        };
+        a = bind(a);
+        b = bind(b);
+        const Operand retained = values.emit(OpCode::kBitAnd, type, {b, bits(~mask & type_mask)});
+        const Operand shifted = pos == 0 ? a : values.emit(OpCode::kShiftLeft, type, {a, bits(pos)});
+        const Operand inserted = values.emit(OpCode::kBitAnd, type, {shifted, bits(mask)});
+        operation.opcode = OpCode::kBitOr;
+        operation.operands = {retained, inserted};
+        return;
+    }
     const Operand all = Operand::immediate(
         type.bit_width == 64 ? "18446744073709551615" : "4294967295", type);
     const Operand pos = values.emit(OpCode::kBitAnd, u32, {position, imm32(255)});
