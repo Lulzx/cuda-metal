@@ -2911,6 +2911,35 @@ $L_done:
                     "g writes device memory, not the shared space of f's argument")) return 1;
     }
 
+    {
+        // lop3's truth table must be an immediate. A register table used to be
+        // replaced by 0xf0 (return a), a silent wrong answer.
+        const auto lop3_module = [](const char* table) {
+            return std::string(R"PTX(.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry k(.param .u64 k_out, .param .u32 k_t)
+{
+    .reg .b32 %r<6>;
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [k_out];
+    ld.param.u32 %r1, [k_t];
+    lop3.b32 %r2, %r1, %r1, %r1, )PTX") + table + R"PTX(;
+    st.global.u32 [%rd1], %r2;
+    ret;
+}
+)PTX";
+        };
+        cumetal::ptx::LowerToLlvmOptions lop3_options;
+        lop3_options.entry_name = "k";
+        lop3_options.strict = true;
+        const auto immediate = cumetal::ptx::lower_ptx_to_llvm_ir(lop3_module("0x96"), lop3_options);
+        if (!expect(immediate.ok, "lop3 with an immediate table lowers")) return 1;
+        const auto dynamic = cumetal::ptx::lower_ptx_to_llvm_ir(lop3_module("%r1"), lop3_options);
+        if (!expect(!dynamic.ok && contains(dynamic.error, "immediate truth table"),
+                    "lop3 with a register table is refused, not guessed")) return 1;
+    }
+
     std::printf("PASS: ptx lower-to-llvm unit tests\n");
     return 0;
 }

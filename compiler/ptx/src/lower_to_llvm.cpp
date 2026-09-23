@@ -9073,7 +9073,9 @@ class GenericLlvmEmitter {
         auto c = emit_integer_from_any(os, instr.operands[3], 32, false);
         if (!a || !b || !c) return fail(instr, "lop3 sources unsupported");
         const auto lut_opt = parse_signed_immediate(instr.operands[4]);
-        const uint8_t lut = lut_opt ? static_cast<uint8_t>(*lut_opt & 0xff) : 0xf0;
+        // The table must be an immediate; guessing one computes a wrong answer.
+        if (!lut_opt) return fail(instr, "lop3 requires an immediate truth table");
+        const uint8_t lut = static_cast<uint8_t>(*lut_opt & 0xff);
         std::string accumulated = next_tmp("lop3_acc");
         os << "  " << accumulated << " = or i32 0, 0\n";
         for (int i = 0; i < 8; ++i) {
