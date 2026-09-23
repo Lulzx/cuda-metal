@@ -6,8 +6,41 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-23
+
 ### Fixed
 
+- **Promoted device globals had no storage on the driver path.** A mutable module `.global`
+  promoted to a hidden Metal buffer was bound only through registration, so `cuModuleLoad` +
+  `cuLaunchKernel` left it unpopulated: a counter initialized to 5 and bumped by 7 read back 7 on
+  every launch. The ABI sidecar now carries `global <name> <size> <align> <init>` records and the
+  module owns one allocation per symbol, seeded from the initializer. Promoted globals are also
+  threaded through the device helpers that reference them, and registration scans the reachable
+  helper closure rather than one entry body.
+- **User arguments at buffer indices 26-29 were clobbered by hidden bindings.** Pipeline
+  reflection flagged the reserved features on binding index alone, so a kernel with enough of its
+  own arguments had them overwritten at dispatch; writes landed in hidden buffers and reads came
+  back zero.
+- **The direct PTX->MSL emitter compiled everyday idioms into wrong answers.** `x / 3` (lowered
+  by clang to `mul.hi.s32` + `shr.u32`) kept the low product and shifted arithmetically; float warp
+  shuffles truncated through `uint`. Integer operations now cast operands to their PTX suffix
+  type, `.hi`/`.wide` use `mulhi` and widening, and the emitter declines anything it cannot type
+  instead of guessing.
+- **Unsigned `atomicMax`/`atomicMin` failed to compile** because LLVM's `umax`/`umin` spellings
+  reached the Metal backend unchanged.
+- **A loop-carried pointer with a null incoming edge deadlocked the PTX type solver.** Null-seeded
+  join results now stay provisional until real evidence arrives; a genuine integer/pointer
+  conflict is still refused.
+- **The generated-AIR path broke on Xcode 27**, whose `air-lld` expects AIR 2.9. The AIR version
+  and target triple are now probed from the installed toolchain instead of hardcoded.
+- **A non-immediate `lop3` table was replaced by `0xf0` on the legacy LLVM path**, silently
+  returning the first input. It is now refused.
+- **The typed PTX import stack merge (PRs #49-#167) regressed eight corpus kernels**, each a
+  silent refusal or zeroed result: same-width float/integer joins through one `.b32` container,
+  `mov.b64 {lo,hi}` on an f64, `0d` literals rewritten as octal, `txq`/`suq` missing from the
+  address-use scan (every dimension query read zero), a module-wide `implicit-def` scan leaking
+  other entries' registers, `.global` scalars getting no hidden buffer, and repeated block-scope
+  register declarations. All fixed; registration now forwards the compiler's refusal reason.
 - **Typed PTX vector stores wrote only their first lane.** `st.global.v2.b32 [addr], {%r1, %r2}`
   (Clang's spelling for two adjacent struct fields at `-O2`) stored `%r1` and silently dropped
   `%r2`; vector loads bound only their first destination. Both now expand to one memory operation
@@ -136,6 +169,23 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Added
 
+- **AMReX's CUDA backend runs on the Apple GPU unmodified.** The HeatEquation tutorial matches a CPU
+  build to 5.5e-09 relative after 200 steps. Getting there fixed `std::`-qualified device math and
+  compiled device code with `-fno-strict-aliasing`, as nvcc does, because Clang's TBAA was deleting
+  AMReX's punned warp reductions.
+- **PhysX PBD cloth, inflatable and frog scenes** run headless through CuMetal, gated on scene
+  invariants and on evidence that the named kernels dispatched to the GPU.
+- **The reachable libdevice math surface lowers** on the typed MSL and registration-JIT paths,
+  including exact directed-rounding interval intrinsics through the vf64 ALU and a support module
+  for helpers MSL lacks (`erfinv`, `tgamma`, `normcdfinv`, ...).
+- `cuFuncLoad` and `cuFuncIsLoaded`, so a caller can separate compilation failure from launch
+  failure (#126).
+- Stage tracing for Metal legalization, MSL emission, library, function and pipeline creation
+  (#128), alongside the PTX importer's phase timings.
+- The typed PTX importer handles `brev.b32/b64` and `lop3.b32` with an immediate table.
+- A pinned Apple Silicon Nix development shell (#92).
+- `ctest -LE slow` is the inner-loop tier: external-project and whole-corpus replays are labelled
+  `slow`.
 - `cudaTypedefs.h` now also spells each driver entry point unversioned
   (`PFN_cuGetProcAddress`), as NVIDIA's header does for the ABI the toolkit targets.
 - `cudaErrorCallRequiresNewerDriver`, and the `CUDA_ARRAY3D_*` and `CU_TRSF_*` flag names, for
@@ -145,6 +195,19 @@ All notable changes to CuMetal are documented here. Format follows
   `libwarp.dylib`: it picks a Python interpreter, passes `--cuda-path` (not `--cuda_path`) and
   `--no-use-libmathdx`, and the toolkit shim now carries a `libcumetal.dylib` name so `-lcuda`
   plus an rpath resolves the `@rpath`-relative install name.
+
+### Changed
+
+- **Generated Metal source is much smaller for bit-heavy kernels**, which is what Apple's compiler
+  time tracks (#115, #124, #133). Sign-free immediate `prmt.b32` is a byte swizzle (-80% source on
+  #124's selector mix); constant-count `shf.wrap` and constant `bfi` fold to a few shifts and masks;
+  64-bit `mul.hi`, `clz` and `popc` use Metal's 64-bit builtins. Per-instruction source for those
+  forms drops 3-5x.
+- `cudaMemcpy`'s embedded-pointer scan filters words against one snapshot of the allocation
+  intervals and fixes pointers up in place; cuda-samples `simpleStreams` went from 55 s to about
+  5 s in Debug.
+- `docs/known-gaps.md` lists refusals and semantic differences only; the PTX proof-contract detail
+  moved to `docs/ptx-proof-contracts.md`.
 
 ## [0.5.0] - 2026-09-05
 
