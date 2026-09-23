@@ -1,7 +1,6 @@
 #include "trap_reporting.h"
 #include "record_contexts.h"
 #include "cumetal/metal/lower_to_msl.h"
-#include "integer_arithmetic.h"
 #include "cumetal/common/compile_trace.h"
 #include "cumetal/common/kernel_abi.h"
 
@@ -2583,8 +2582,12 @@ struct AstLowerer {
                     operation.attributes.contains("signed") &&
                     operation.attributes.at("signed") == "true";
                 if (operand_bits == 64) {
+                    // MSL has no 128-bit type but does have a 64-bit mulhi.
+                    const MslType operand_type = is_signed ? MslType::sint(64) : MslType::uint(64);
                     return declare_result(operation, MslExpression::cast(expression_type,
-                        detail::integer_high_product_64(left, right, is_signed)));
+                        MslExpression::call("mulhi",
+                            {MslExpression::cast(operand_type, left),
+                             MslExpression::cast(operand_type, right)}, operand_type)));
                 }
                 const MslType wide_type = is_signed
                                               ? MslType::sint(operand_bits * 2)

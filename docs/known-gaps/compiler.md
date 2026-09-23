@@ -40,7 +40,7 @@ three to four times more emitted source.
 
 Integer min/max explicitly types MSL operands to preserve signed comparisons
 and select the correct overload for literals. Signed and unsigned 64-bit
-`mul.hi` use exact 32-bit partial products; mixed operand widths remain invalid.
+`mul.hi` lower to Metal's `mulhi`; mixed operand widths remain invalid.
 ## Compilation diagnostics
 
 [Stage tracing](../compiler-performance.md#compilation-stage-tracing) covers
