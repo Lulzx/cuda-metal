@@ -209,4 +209,57 @@ void lower_bit_insert(PtxValueBuilder& values, Operation& operation, const Type&
     operation.operands = {in_range, merged, b};
 }
 
+void lower_logic3(PtxValueBuilder& values, Operation& operation,
+                  const Operand inputs[3], std::uint8_t table) {
+    const Type u32 = Type::integer(32);
+    const Operand ones = Operand::immediate("4294967295", u32);
+    // Shannon-expand the truth table one input at a time, folding constant and
+    // repeated cofactors, so common tables stay a few operations: 0x96 is two
+    // xors and 0xe8 (majority) five, where a sum of minterms would need dozens.
+    struct Logic {
+        int constant = -1;  // 0 or 1 for an all-zeros or all-ones word
+        Operand value;
+    };
+    const auto emit = [&](bool top, OpCode opcode, std::vector<Operand> operands) {
+        if (!top) return Logic{-1, values.emit(opcode, u32, std::move(operands))};
+        operation.opcode = opcode;
+        operation.result_types = {u32};
+        operation.operands = std::move(operands);
+        return Logic{};
+    };
+    const auto invert = [&](const Operand& x, bool top) { return emit(top, OpCode::kBitXor, {x, ones}); };
+    const auto expand = [&](const auto& self, unsigned bits, unsigned vars, bool top) -> Logic {
+        const unsigned size = 1u << vars;
+        const unsigned mask = size == 32 ? ~0u : (1u << size) - 1;
+        bits &= mask;
+        if (bits == 0 || bits == mask) {
+            const Logic constant{bits == 0 ? 0 : 1, {}};
+            if (top) emit(true, OpCode::kConvert, {Operand::immediate(bits == 0 ? "0" : "4294967295", u32)});
+            return constant;
+        }
+        const unsigned half = size / 2, half_mask = (1u << half) - 1;
+        const unsigned low = bits & half_mask, high = bits >> half;
+        if (low == high) return self(self, low, vars - 1, top);
+        const Operand& x = inputs[3 - vars];
+        if (high == (~low & half_mask)) {
+            // f = x ? ~g : g, which is x ^ g.
+            const Logic g = self(self, low, vars - 1, false);
+            if (g.constant == 0) return top ? emit(true, OpCode::kConvert, {x}) : Logic{-1, x};
+            if (g.constant == 1) return invert(x, top);
+            return emit(top, OpCode::kBitXor, {x, g.value});
+        }
+        const Logic f1 = self(self, high, vars - 1, false);
+        const Logic f0 = self(self, low, vars - 1, false);
+        if (f1.constant == 1) return emit(top, OpCode::kBitOr, {x, f0.value});
+        if (f0.constant == 0) return emit(top, OpCode::kBitAnd, {x, f1.value});
+        if (f1.constant == 0) return emit(top, OpCode::kBitAnd, {invert(x, false).value, f0.value});
+        if (f0.constant == 1) return emit(top, OpCode::kBitOr, {invert(x, false).value, f1.value});
+        // Bit select without a complement: f0 ^ ((f0 ^ f1) & x).
+        const Operand differ = values.emit(OpCode::kBitXor, u32, {f0.value, f1.value});
+        const Operand chosen = values.emit(OpCode::kBitAnd, u32, {differ, x});
+        return emit(top, OpCode::kBitXor, {f0.value, chosen});
+    };
+    expand(expand, table, 3, true);
+}
+
 }  // namespace cumetal::ir::detail

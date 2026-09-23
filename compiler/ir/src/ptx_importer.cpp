@@ -4668,6 +4668,41 @@ struct Importer {
                     type.bit_width == 16 ? "65535" : "4294967295",
                     type));
             }
+        } else if (root == "brev") {
+            if ((instruction.opcode != "brev.b32" && instruction.opcode != "brev.b64") ||
+                instruction.operands.size() != 2 || destinations.size() != 1) {
+                return fail(&instruction, "typed PTX brev requires brev.b32/b64 with one source");
+            }
+            const Type type = ptx_scalar_type(instruction.opcode);
+            Operand input = bit_container_operand(1, type);
+            if (!(input.type == type))
+                return fail(&instruction, "typed PTX brev source width does not match its bit format");
+            // A literal's IR type does not type its emitted C++ token.
+            if (input.kind == OperandKind::kImmediate)
+                input = expressions.emit(OpCode::kConvert, type, {input});
+            operation.opcode = OpCode::kCall;
+            operation.attributes["builtin"] = "true";
+            operation.attributes["callee"] = "reverse_bits";
+            operation.result_types = {type};
+            operation.operands = {input};
+        } else if (root == "lop3") {
+            const auto table = instruction.operands.size() == 5
+                ? detail::integer_literal_bits(trim(instruction.operands[4])) : std::nullopt;
+            if (instruction.opcode != "lop3.b32" || destinations.size() != 1 || !table ||
+                *table > 255) {
+                return fail(&instruction, "typed PTX lop3 requires lop3.b32 with three sources and an immediate 8-bit table");
+            }
+            const Type u32 = Type::integer(32);
+            Operand inputs[3];
+            for (std::size_t i = 0; i < 3; ++i) {
+                inputs[i] = bit_container_operand(i + 1, u32);
+                if (!(inputs[i].type == u32))
+                    return fail(&instruction, "typed PTX lop3 source width does not match its bit format");
+                if (inputs[i].kind == OperandKind::kImmediate)
+                    inputs[i] = expressions.emit(OpCode::kConvert, u32, {inputs[i]});
+            }
+            detail::lower_logic3(expressions, operation, inputs,
+                                 static_cast<std::uint8_t>(*table));
         } else if (root == "bfi") {
             if ((instruction.opcode != "bfi.b32" && instruction.opcode != "bfi.b64") ||
                 instruction.operands.size() != 5 || destinations.size() != 1 ||

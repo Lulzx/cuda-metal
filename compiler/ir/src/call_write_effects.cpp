@@ -383,7 +383,7 @@ bool is_read_only_scalar_builtin(const Operation& operation) {
     static const std::unordered_set<std::string> known = {
         "sqrt", "rsqrt", "sin", "cos", "tan", "exp", "exp2", "log", "log2", "pow",
         "floor", "ceil", "trunc", "rint", "round", "fabs", "abs", "fma", "fmin", "fmax",
-        "min", "max", "clz", "popcount", "isnan", "isinf", "isfinite", "signbit", "copysign",
+        "min", "max", "clz", "popcount", "reverse_bits", "isnan", "isinf", "isfinite", "signbit", "copysign",
     };
     if (!known.contains(name)) return false;
     const auto scalar = [](const Type& type) {

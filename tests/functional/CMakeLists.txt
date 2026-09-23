@@ -3107,7 +3107,7 @@ if(APPLE)
                     ${CMAKE_BINARY_DIR} ${arithmetic_case})
         set_tests_properties(functional_ptx_${arithmetic_case} PROPERTIES TIMEOUT 120)
     endforeach()
-    foreach(bit_case bit_permutation bit_insert tuple_move)
+    foreach(bit_case bit_permutation bit_insert tuple_move logic3)
         add_test(NAME functional_ptx_${bit_case}
             COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_bit_ops.py
                     ${CMAKE_BINARY_DIR} ${bit_case})

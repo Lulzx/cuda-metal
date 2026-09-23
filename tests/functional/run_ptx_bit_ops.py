@@ -2,7 +2,7 @@
 """Independent integer-reference checks for PTX permutations, fields, and tuples."""
 from pathlib import Path
 import sys
-from ptx_test_support import run_integer_case
+from ptx_test_support import expect_compile_failure, run_integer_case
 
 REFERENCE = Path(__file__).parent / 'reference'
 
@@ -228,6 +228,60 @@ def constant_bit_insert(build):
                      output_words=len(cases) * 2)
 
 
+def logic3(build):
+    # Every truth table, plus literal inputs and bit reversal, against Python.
+    tables = list(range(256))
+    literal_cases = [('-1', '%b', '%a', 0xe8), ('%a', '0x0f0f0f0f', '%b', 0xca),
+                     ('%a', '%b', '0', 0x96)]
+    slots = len(tables) + len(literal_cases) + 1 + 2
+    kernel = KERNEL_HEAD.format(entry='logic3', stride=slots * 4)
+    kernel = kernel.replace('.reg .b32 %a, %b,', '.reg .b32 %c, %a, %b,')
+    kernel += ' xor.b32 %c, %a, 0x5a5a00ff;\n'
+    for slot, table in enumerate(tables):
+        kernel += (f' lop3.b32 %answer, %a, %b, %c, {table};\n'
+                   f' st.global.b32 [%outptr+{slot * 4}], %answer;\n')
+    slot = len(tables)
+    for x, y, z, table in literal_cases:
+        kernel += (f' lop3.b32 %answer, {x}, {y}, {z}, {hex(table)};\n'
+                   f' st.global.b32 [%outptr+{slot * 4}], %answer;\n')
+        slot += 1
+    kernel += (f' brev.b32 %answer, %a;\n st.global.b32 [%outptr+{slot * 4}], %answer;\n'
+               f' brev.b64 %wide, %wa;\n st.global.b64 [%outptr+{slot * 4 + 4}], %wide;\n')
+    kernel += KERNEL_TAIL
+
+    def lop3(x, y, z, table):
+        result = 0
+        for bit in range(32):
+            index = (((x >> bit) & 1) << 2) | (((y >> bit) & 1) << 1) | ((z >> bit) & 1)
+            result |= ((table >> index) & 1) << bit
+        return result
+
+    def reverse(value, width):
+        return int(format(value, f'0{width}b')[::-1], 2)
+
+    literal = {'-1': 0xffffffff, '0x0f0f0f0f': 0x0f0f0f0f, '0': 0}
+    values, expected = [], []
+    for a, b in pair_values():
+        values.extend((a, b))
+        c = a ^ 0x5a5a00ff
+        registers = {'%a': a, '%b': b}
+        expected.extend(lop3(a, b, c, table) for table in tables)
+        for x, y, z, table in literal_cases:
+            pick = lambda s: registers.get(s, literal.get(s))
+            expected.append(lop3(pick(x), pick(y), pick(z), table))
+        wide = reverse(a | (b << 32), 64)
+        expected.extend((reverse(a, 32), wide & 0xffffffff, wide >> 32))
+    run_integer_case(build, kernel, values, expected, 'logic3 and brev', entry='logic3',
+                     word_bits=32, input_words=2, output_words=slots)
+    # PTX requires a constant table; a register or predicate-output form refuses.
+    for bad in (' lop3.b32 %answer, %a, %b, %c, %n;\n',
+                ' lop3.or.b32 %answer, %a, %b, %c, 0x96;\n',
+                ' brev.b16 %answer, %a;\n'):
+        source = (KERNEL_HEAD.format(entry='bad', stride=4).replace('.reg .b32 %a,', '.reg .b32 %c, %a,')
+                  + ' mov.b32 %c, %a;\n' + bad + KERNEL_TAIL)
+        expect_compile_failure(build, source, 'bad', 'typed PTX')
+
+
 def bit_insert(build):
     # Independent bit-by-bit oracle following PTX's loop semantics.
     def insert(a, b, pos, length, width):
@@ -269,5 +323,6 @@ def tuple_move(build):
 
 
 if __name__ == '__main__':
-    cases = dict(bit_permutation=bit_permutation, bit_insert=bit_insert, tuple_move=tuple_move)
+    cases = dict(bit_permutation=bit_permutation, bit_insert=bit_insert, tuple_move=tuple_move,
+                 logic3=logic3)
     cases[sys.argv[2]](Path(sys.argv[1]).resolve())

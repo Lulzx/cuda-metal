@@ -30,13 +30,17 @@ that the table address is neither written nor allowed to escape. Mutable,
 partial, mixed, and escaping relocations remain unsupported.
 
 The typed PTX path supports `shf.{l,r}.wrap.b32`, generic `prmt.b32`,
-unpredicated `bfi.b32/b64`, and two-halfword `mov.b32` packing/unpacking
+unpredicated `bfi.b32/b64`, `brev.b32/b64`, `lop3.b32` with an immediate truth
+table (not the predicate-output `lop3.{and,or}` forms), and two-halfword
+`mov.b32` packing/unpacking
 (including single unpack sinks). Vector memory stores accept literal lanes.
 Other permutation modes, funnel widths, and tuple shapes remain explicit
 diagnostics. Bit-field lowering bounds every shift, including discarded arms.
 Constant funnel-shift counts and constant `bfi` fields fold to a few shifts and
 masks; register counts and fields keep the clamped general form, which costs
 three to four times more emitted source.
+Extended-precision carry chains (`add.cc`, `addc`, `sub.cc`, `subc`, `mad.cc`,
+`madc`) are not supported by any PTX backend and refuse the kernel.
 
 Integer min/max explicitly types MSL operands to preserve signed comparisons
 and select the correct overload for literals. Signed and unsigned 64-bit

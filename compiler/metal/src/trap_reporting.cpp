@@ -38,7 +38,7 @@ bool is_bounded_builtin(const ir::Operation& operation) {
     const std::string& name = operation.attributes.at("callee");
     const ir::Type& type = operation.result_types.front();
     const bool bit_count = name == "clz" || name == "popcount";
-    const bool unary = bit_count || name == "__cumetal_signed_abs";
+    const bool unary = bit_count || name == "reverse_bits" || name == "__cumetal_signed_abs";
     return (unary || name == "min" || name == "max") &&
            type.kind == ir::TypeKind::kInteger &&
            (!bit_count || type.bit_width == 32 || type.bit_width == 64) &&
