@@ -4450,28 +4450,11 @@ struct Importer {
                 operation.operands = {input};
             } else {
                 // Both PTX bit counts return u32, including their b64 forms.
-                // Use u32 Metal builtins and combine the two halves explicitly.
-                const Operand low = expressions.emit(OpCode::kConvert, u32, {input});
-                const Operand shifted = expressions.emit(OpCode::kShiftRight, source_type,
-                    {input, Operand::immediate("32", source_type)});
-                const Operand high = expressions.emit(OpCode::kConvert, u32, {shifted});
-                const auto count = [&](const Operand& value) {
-                    return expressions.emit(OpCode::kCall, u32, {value},
-                        {{"builtin", "true"}, {"callee", builtin}});
-                };
-                const Operand low_count = count(low);
-                const Operand high_count = count(high);
-                if (root == "popc") {
-                    operation.opcode = OpCode::kAdd;
-                    operation.operands = {low_count, high_count};
-                } else {
-                    const Operand total = expressions.emit(OpCode::kAdd, u32,
-                        {Operand::immediate("32", u32), low_count});
-                    const Operand high_zero = expressions.emit(OpCode::kCompare, Type::predicate(),
-                        {high, Operand::immediate("0", u32)}, {{"predicate", "eq"}});
-                    operation.opcode = OpCode::kSelect;
-                    operation.operands = {high_zero, total, high_count};
-                }
+                // Metal's 64-bit builtins count the whole word in one call.
+                const Operand count = expressions.emit(OpCode::kCall, source_type, {input},
+                    {{"builtin", "true"}, {"callee", builtin}});
+                operation.opcode = OpCode::kConvert;
+                operation.operands = {count};
             }
         } else if (root == "shf" || root == "prmt") {
             const bool left = instruction.opcode == "shf.l.wrap.b32";

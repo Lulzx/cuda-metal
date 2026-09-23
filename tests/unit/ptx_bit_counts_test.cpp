@@ -63,11 +63,14 @@ bool positive(const std::string& root, const std::string& label, const std::stri
                     if (operation.opcode == ir::OpCode::kCall &&
                         callee != operation.attributes.end() && callee->second == (root == "clz" ? "clz" : "popcount")) {
                         ++calls;
-                        ok &= expect(operation.operands.front().kind == ir::OperandKind::kValue &&
-                                         operation.operands.front().type == ir::Type::integer(32) &&
+                        // b64 counts call the 64-bit overload and narrow the result.
+                        const auto& input = operation.operands.front();
+                        ok &= expect(input.kind == ir::OperandKind::kValue &&
+                                         (input.type == ir::Type::integer(32) ||
+                                          input.type == ir::Type::integer(64)) &&
                                          operation.result_types.size() == 1 &&
-                                         operation.result_types.front() == ir::Type::integer(32),
-                                     label + " every Metal bit count uses the u32 overload");
+                                         operation.result_types.front() == input.type,
+                                     label + " every Metal bit count uses a bound, exactly typed overload");
                     }
                 }
             }

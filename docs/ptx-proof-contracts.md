@@ -121,9 +121,9 @@ emission, and the IR verifier checks incoming edge types and dominance.
 
 Direct PTX `clz.b32/b64` and `popc.b32/b64` retain their logical u32
 destination through copies, joins and predicated updates. The 64-bit forms
-combine two unsigned 32-bit Metal builtin results. Source bits, including
+use Metal's 64-bit builtins with a u32 result. Source bits, including
 floating-register containers and integer literals, are preserved; unsupported
-widths, modifiers and malformed operands reject explicitly. The generated u32
+widths, modifiers and malformed operands reject explicitly. The generated
 bit-count builtins are also accepted in trap-capable helper graphs.
 
 PTX memory-address intermediates use byte pointers in the address's actual
