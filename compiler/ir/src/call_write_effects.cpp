@@ -384,6 +384,7 @@ bool is_read_only_scalar_builtin(const Operation& operation) {
         "sqrt", "rsqrt", "sin", "cos", "tan", "exp", "exp2", "log", "log2", "pow",
         "floor", "ceil", "trunc", "rint", "round", "fabs", "abs", "fma", "fmin", "fmax",
         "min", "max", "clz", "popcount", "reverse_bits", "isnan", "isinf", "isfinite", "signbit", "copysign",
+        "__cumetal_byte_permute",
     };
     if (!known.contains(name)) return false;
     const auto scalar = [](const Type& type) {

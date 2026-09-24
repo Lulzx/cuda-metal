@@ -1325,6 +1325,79 @@ JOIN:
     return ok;
 }
 
+bool test_byte_permute_builtin_whitelists() {
+    using namespace cumetal;
+    bool ok = true;
+    // A sign-free immediate prmt lowers to one synthetic __cumetal_byte_permute
+    // builtin call. Every consumer that whitelists builtins by name must agree
+    // on it: the pointer-cell field proof, the call-effect summary of a helper
+    // containing one, and bounded-builtin trap reporting.
+    const std::string prefix = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.func helper_with_prmt() {
+    .reg .b32 %word;
+    mov.u32 %word, 7;
+    prmt.b32 %word, %word, 0, 0x3340U;
+    ret;
+}
+.visible .entry byte_permute_pointer_cell(.param .u64 .ptr output) {
+    .local .align 8 .b8 slot[8];
+    .local .align 4 .b8 data[4];
+    .reg .b64 %slot, %data, %loaded, %output;
+    .reg .b32 %word;
+    ld.param.u64 %output, [output];
+    mov.u64 %slot, slot;
+    mov.u64 %data, data;
+    st.local.u32 [%data], 42;
+    st.local.u64 [%slot], %data;
+    mov.u32 %word, 7;
+)ptx";
+    {
+        const std::string source = prefix + R"ptx(
+    prmt.b32 %word, %word, 0, 0x3340U;
+    ld.local.u64 %loaded, [%slot];
+    ld.u32 %word, [%loaded];
+    st.global.u32 [%output], %word;
+    ret;
+}
+)ptx";
+        const auto compiled = metal::compile_ptx_to_msl(source);
+        ok &= expect(compiled.ok,
+                     "sign-free immediate prmt does not invalidate a proven pointer cell: " +
+                         compiled.error);
+    }
+    {
+        const std::string source = prefix + R"ptx(
+    call.uni helper_with_prmt, ();
+    ld.local.u64 %loaded, [%slot];
+    ld.u32 %word, [%loaded];
+    st.global.u32 [%output], %word;
+    ret;
+}
+)ptx";
+        const auto compiled = metal::compile_ptx_to_msl(source);
+        ok &= expect(compiled.ok,
+                     "helper containing a sign-free immediate prmt preserves a proven pointer cell: " +
+                         compiled.error);
+    }
+    const auto trapped = metal::compile_ptx_to_msl(R"ptx(
+.version 7.1
+.target sm_80
+.visible .entry byte_permute_trap() {
+    .reg .b32 %word;
+    mov.u32 %word, 7;
+    prmt.b32 %word, %word, 0, 0x3340U;
+    trap;
+    ret;
+}
+)ptx");
+    ok &= expect(trapped.ok && trapped.source.find("cm_trap_status") != std::string::npos,
+                 "trap reporting accepts the byte_permute bounded builtin: " + trapped.error);
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -1342,6 +1415,7 @@ int main() {
     ok &= test_pointer_load_address_constraints();
     ok &= test_mutated_aggregate_pointer_copy();
     ok &= test_joined_aggregate_parameter_addresses();
+    ok &= test_byte_permute_builtin_whitelists();
 
     const std::string reused_register = R"ptx(
 .version 7.0

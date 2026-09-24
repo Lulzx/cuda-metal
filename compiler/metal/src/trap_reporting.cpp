@@ -39,7 +39,8 @@ bool is_bounded_builtin(const ir::Operation& operation) {
     const ir::Type& type = operation.result_types.front();
     const bool bit_count = name == "clz" || name == "popcount";
     const bool unary = bit_count || name == "reverse_bits" || name == "__cumetal_signed_abs";
-    return (unary || name == "min" || name == "max") &&
+    const bool binary = name == "min" || name == "max" || name == "__cumetal_byte_permute";
+    return (unary || binary) &&
            type.kind == ir::TypeKind::kInteger &&
            (!bit_count || type.bit_width == 32 || type.bit_width == 64) &&
            (type.bit_width == 8 || type.bit_width == 16 ||
