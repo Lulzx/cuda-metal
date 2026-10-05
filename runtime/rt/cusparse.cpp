@@ -130,11 +130,11 @@ struct cusparseDnMatDescr {
 // which skipped synchronization entirely for a handle left on the default
 // stream: the null stream is the default stream, not "no stream". An SpMV would
 // then read its input vector while the kernel producing it was still in flight
-// and quietly return zeros. cudaStreamSynchronize(nullptr) waits on the default
-// stream, which is what CUDA's semantics require here.
+// and quietly return zeros. On the default stream the call is also ordered
+// after every blocking stream (synchronize_for_host_library).
 static void synchronize_handle_stream(cusparseHandle_t handle) {
     if (handle == nullptr) return;
-    cudaStreamSynchronize(handle->stream);
+    cumetal::rt::synchronize_for_host_library(handle->stream);
 }
 
 static const void* scalar_pointer_for_mode_size(cusparsePointerMode_t mode,
@@ -1443,7 +1443,7 @@ static cusparseStatus_t spmv_dispatch(cudaStream_t stream,
         // Device scalars may be produced by earlier work in this stream. The
         // current kernels pass them as inline bytes, so make that dependency
         // visible before resolving their shared-memory contents.
-        if (cudaStreamSynchronize(stream) != cudaSuccess) {
+        if (cumetal::rt::synchronize_for_host_library(stream) != cudaSuccess) {
             return CUSPARSE_STATUS_EXECUTION_FAILED;
         }
     }
@@ -1471,7 +1471,7 @@ static cusparseStatus_t spmv_dispatch(cudaStream_t stream,
     }
 
     // Order this call after prior work on the stream before computing on the CPU.
-    cudaStreamSynchronize(stream);
+    cumetal::rt::synchronize_for_host_library(stream);
 
     const int base = (matA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
     const int* offsets = static_cast<const int*>(matA->rowOffsets);

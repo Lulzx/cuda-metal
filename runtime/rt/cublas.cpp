@@ -441,7 +441,7 @@ cublasStatus_t synchronize_handle_stream(cublasHandle_t handle) {
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
-    const cudaError_t status = cudaStreamSynchronize(handle->stream);
+    const cudaError_t status = cumetal::rt::synchronize_for_host_library(handle->stream);
     if (status != cudaSuccess) {
         if (debug_cublas_enabled()) {
             fprintf(stderr, "CUMETAL_DEBUG_CUBLAS: synchronize_handle_stream failed err=%d stream=%p\n",

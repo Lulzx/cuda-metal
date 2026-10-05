@@ -1,4 +1,5 @@
 #include "cusolverDn.h"
+#include "runtime_internal.h"
 #include "cusolverSp.h"
 #include "cusparse.h"
 #include "cuda_runtime.h"
@@ -56,7 +57,7 @@ cusolverStatus_t cusolverDnGetStream(cusolverDnHandle_t handle, cudaStream_t* st
 static cusolverStatus_t sync_stream(cusolverDnHandle_t handle) {
     if (handle == nullptr) return CUSOLVER_STATUS_NOT_INITIALIZED;
     // A null stream is CUDA's default stream, not an absence of ordering.
-    return cudaStreamSynchronize(handle->stream) == cudaSuccess
+    return cumetal::rt::synchronize_for_host_library(handle->stream) == cudaSuccess
                ? CUSOLVER_STATUS_SUCCESS
                : CUSOLVER_STATUS_EXECUTION_FAILED;
 }
@@ -480,7 +481,7 @@ cusolverStatus_t cusolverSpGetStream(cusolverSpHandle_t handle, cudaStream_t* st
 
 static cusolverStatus_t sync_sp_stream(cusolverSpHandle_t handle) {
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
-    return cudaStreamSynchronize(handle->stream) == cudaSuccess
+    return cumetal::rt::synchronize_for_host_library(handle->stream) == cudaSuccess
                ? CUSOLVER_STATUS_SUCCESS
                : CUSOLVER_STATUS_EXECUTION_FAILED;
 }

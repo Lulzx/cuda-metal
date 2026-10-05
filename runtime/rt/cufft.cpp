@@ -562,7 +562,7 @@ static cufftResult make_plan(cufftHandle h, int rank, const int* n, cufftType ty
 }
 
 cufftResult synchronize_plan_stream(const CufftPlanEntry& plan) {
-    return cudaStreamSynchronize(plan.stream) == cudaSuccess ? CUFFT_SUCCESS
+    return cumetal::rt::synchronize_for_host_library(plan.stream) == cudaSuccess ? CUFFT_SUCCESS
                                                               : CUFFT_EXEC_FAILED;
 }
 
@@ -582,6 +582,21 @@ cufftResult validate_execution_buffers(const CufftPlanEntry& plan, const void* i
         return CUFFT_INVALID_VALUE;
     }
     return CUFFT_SUCCESS;
+}
+
+// The CPU transforms read through the host mapping of the allocation. With
+// CUMETAL_USE_METAL_DEVICE_ADDRESSES a device pointer is the buffer's GPU
+// address, which the CPU cannot dereference; otherwise the two coincide.
+// Callers have validated the pointer, so it resolves.
+template <class T>
+T* host_view(T* pointer) {
+    cumetal::rt::AllocationTable::ResolvedAllocation allocation;
+    if (!cumetal::rt::resolve_allocation_for_pointer(pointer, &allocation) ||
+        allocation.buffer == nullptr || allocation.buffer->contents() == nullptr) {
+        return pointer;
+    }
+    return reinterpret_cast<T*>(static_cast<unsigned char*>(allocation.buffer->contents()) +
+                                allocation.offset);
 }
 
 // ── Metal dispatch ───────────────────────────────────────────────────────────
@@ -897,7 +912,7 @@ cufftResult cufftExecC2C(cufftHandle plan, cufftComplex* idata, cufftComplex* od
     }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_c2c_nd<float, cufftComplex>(*p, idata, odata, direction);
+    return exec_c2c_nd<float, cufftComplex>(*p, host_view(idata), host_view(odata), direction);
 }
 
 cufftResult cufftExecR2C(cufftHandle plan, cufftReal* idata, cufftComplex* odata) {
@@ -918,7 +933,7 @@ cufftResult cufftExecR2C(cufftHandle plan, cufftReal* idata, cufftComplex* odata
     }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_r2c_nd<float, cufftReal, cufftComplex>(*p, idata, odata);
+    return exec_r2c_nd<float, cufftReal, cufftComplex>(*p, host_view(idata), host_view(odata));
 }
 
 cufftResult cufftExecC2R(cufftHandle plan, cufftComplex* idata, cufftReal* odata) {
@@ -939,7 +954,7 @@ cufftResult cufftExecC2R(cufftHandle plan, cufftComplex* idata, cufftReal* odata
     }
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_c2r_nd<float, cufftReal, cufftComplex>(*p, idata, odata);
+    return exec_c2r_nd<float, cufftReal, cufftComplex>(*p, host_view(idata), host_view(odata));
 }
 
 cufftResult cufftExecZ2Z(cufftHandle plan, cufftDoubleComplex* idata,
@@ -961,7 +976,7 @@ cufftResult cufftExecZ2Z(cufftHandle plan, cufftDoubleComplex* idata,
     if (validation != CUFFT_SUCCESS) return validation;
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_c2c_nd<double, cufftDoubleComplex>(*p, idata, odata, direction);
+    return exec_c2c_nd<double, cufftDoubleComplex>(*p, host_view(idata), host_view(odata), direction);
 }
 
 cufftResult cufftExecD2Z(cufftHandle plan, cufftDoubleReal* idata,
@@ -980,7 +995,7 @@ cufftResult cufftExecD2Z(cufftHandle plan, cufftDoubleReal* idata,
     if (validation != CUFFT_SUCCESS) return validation;
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_r2c_nd<double, cufftDoubleReal, cufftDoubleComplex>(*p, idata, odata);
+    return exec_r2c_nd<double, cufftDoubleReal, cufftDoubleComplex>(*p, host_view(idata), host_view(odata));
 }
 
 cufftResult cufftExecZ2D(cufftHandle plan, cufftDoubleComplex* idata,
@@ -999,7 +1014,7 @@ cufftResult cufftExecZ2D(cufftHandle plan, cufftDoubleComplex* idata,
     if (validation != CUFFT_SUCCESS) return validation;
     const cufftResult sync_status = synchronize_plan_stream(*p);
     if (sync_status != CUFFT_SUCCESS) return sync_status;
-    return exec_c2r_nd<double, cufftDoubleReal, cufftDoubleComplex>(*p, idata, odata);
+    return exec_c2r_nd<double, cufftDoubleReal, cufftDoubleComplex>(*p, host_view(idata), host_view(odata));
 }
 
 // SetWorkArea — on UMA, vDSP manages its own scratch; no external workspace is used.

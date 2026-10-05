@@ -2739,6 +2739,13 @@ cudaError_t resolve_backend_stream(cudaStream_t stream,
     return resolve_runtime_stream(stream, out, nullptr);
 }
 
+cudaError_t synchronize_for_host_library(cudaStream_t stream) {
+    // Waiting for non-blocking streams as well is more than CUDA orders, but
+    // only costs time; missing a blocking stream reads data still in flight.
+    if (stream == nullptr || stream == cudaStreamLegacy) return cudaDeviceSynchronize();
+    return cudaStreamSynchronize(stream);
+}
+
 bool capture_library_call(cudaStream_t stream, std::function<cudaError_t(cudaStream_t)> op) {
     cudaGraph_t graph = get_capture_graph(stream);
     if (graph == nullptr || !op) {

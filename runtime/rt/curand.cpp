@@ -130,7 +130,7 @@ curandStatus_t curandDestroyGenerator(curandGenerator_t generator) {
         std::lock_guard<std::mutex> lock(generator->mutex);
         stream = generator->stream;
     }
-    if (!generator->host_generator && cudaStreamSynchronize(stream) != cudaSuccess) {
+    if (!generator->host_generator && cumetal::rt::synchronize_for_host_library(stream) != cudaSuccess) {
         return CURAND_STATUS_PREEXISTING_FAILURE;
     }
     delete generator;
@@ -155,7 +155,7 @@ curandStatus_t curandSetStream(curandGenerator_t generator, cudaStream_t stream)
         std::lock_guard<std::mutex> lock(generator->mutex);
         old_stream = generator->stream;
     }
-    if (!generator->host_generator && cudaStreamSynchronize(old_stream) != cudaSuccess) {
+    if (!generator->host_generator && cumetal::rt::synchronize_for_host_library(old_stream) != cudaSuccess) {
         return CURAND_STATUS_PREEXISTING_FAILURE;
     }
     std::lock_guard<std::mutex> lock(generator->mutex);
@@ -185,7 +185,7 @@ curandStatus_t curandSetPseudoRandomGeneratorSeed(curandGenerator_t generator,
         std::lock_guard<std::mutex> lock(generator->mutex);
         stream = generator->stream;
     }
-    if (!generator->host_generator && cudaStreamSynchronize(stream) != cudaSuccess) {
+    if (!generator->host_generator && cumetal::rt::synchronize_for_host_library(stream) != cudaSuccess) {
         return CURAND_STATUS_PREEXISTING_FAILURE;
     }
     std::lock_guard<std::mutex> lock(generator->mutex);
@@ -205,7 +205,7 @@ curandStatus_t curandSetGeneratorOffset(curandGenerator_t generator, unsigned lo
         std::lock_guard<std::mutex> lock(generator->mutex);
         stream = generator->stream;
     }
-    if (!generator->host_generator && cudaStreamSynchronize(stream) != cudaSuccess) {
+    if (!generator->host_generator && cumetal::rt::synchronize_for_host_library(stream) != cudaSuccess) {
         return CURAND_STATUS_PREEXISTING_FAILURE;
     }
     std::lock_guard<std::mutex> lock(generator->mutex);

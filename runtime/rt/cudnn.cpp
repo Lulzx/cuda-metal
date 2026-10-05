@@ -109,7 +109,7 @@ bool debug_cudnn() {
 
 cudnnStatus_t sync_handle(cudnnHandle_t handle) {
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
-    return cudaStreamSynchronize(handle->stream) == cudaSuccess
+    return cumetal::rt::synchronize_for_host_library(handle->stream) == cudaSuccess
                ? CUDNN_STATUS_SUCCESS
                : CUDNN_STATUS_EXECUTION_FAILED;
 }

@@ -571,7 +571,7 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
                                        element_size))) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
-    if (cudaStreamSynchronize(stream) != cudaSuccess) return CUBLAS_STATUS_EXECUTION_FAILED;
+    if (cumetal::rt::synchronize_for_host_library(stream) != cudaSuccess) return CUBLAS_STATUS_EXECUTION_FAILED;
 
     int m = static_cast<int>(Ddesc->rows);
     int n = static_cast<int>(Ddesc->cols);

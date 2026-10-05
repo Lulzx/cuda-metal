@@ -235,6 +235,14 @@ add_executable(cumetal_cufft_nd_test
     cufft_nd_test.cpp
 )
 
+add_executable(cumetal_cufft_z2z_batched_test
+    cufft_z2z_batched_test.cpp
+)
+
+add_executable(cumetal_cufft_blocking_stream_order_test
+    cufft_blocking_stream_order_test.cpp
+)
+
 add_executable(cumetal_runtime_occupancy_test
     runtime_occupancy_test.cpp
 )
@@ -896,6 +904,16 @@ target_link_libraries(cumetal_cufft_nd_test
 )
 
 target_link_libraries(cumetal_cufft_c2c_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cufft_z2z_batched_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cufft_blocking_stream_order_test
     PRIVATE
         cumetal_runtime
 )
@@ -2610,6 +2628,27 @@ add_test(
 set_tests_properties(
     functional_cufft_nd_metal
     PROPERTIES ENVIRONMENT "CUMETAL_FFT_METAL=1"
+)
+
+add_test(
+    NAME functional_cufft_z2z_batched
+    COMMAND cumetal_cufft_z2z_batched_test
+)
+
+# Device pointers are GPU addresses in this mode; the CPU transform crashed
+# dereferencing one (LAMMPS PPPM through FFT_KOKKOS=CUFFT).
+add_test(
+    NAME functional_cufft_z2z_batched_device_addresses
+    COMMAND cumetal_cufft_z2z_batched_test
+)
+set_tests_properties(
+    functional_cufft_z2z_batched_device_addresses
+    PROPERTIES ENVIRONMENT "CUMETAL_USE_METAL_DEVICE_ADDRESSES=1"
+)
+
+add_test(
+    NAME functional_cufft_blocking_stream_order
+    COMMAND cumetal_cufft_blocking_stream_order_test
 )
 
 add_test(

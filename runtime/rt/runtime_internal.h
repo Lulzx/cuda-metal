@@ -12,6 +12,13 @@ namespace cumetal::rt {
 bool resolve_allocation_for_pointer(const void* ptr, AllocationTable::ResolvedAllocation* out);
 cudaError_t enqueue_host_operation(cudaStream_t stream, std::function<void()> operation);
 
+// Wait for everything a library call issued on `stream` is ordered after,
+// before computing on the CPU. On the legacy default stream (null or
+// cudaStreamLegacy) that is all preceding work in every blocking stream, not
+// only the null stream's own queue: Kokkos launches on a blocking stream it
+// created, then calls cuFFT on stream 0.
+cudaError_t synchronize_for_host_library(cudaStream_t stream);
+
 // The backend stream serving a cudaStream_t. A null handle and the legacy
 // handles resolve to the default stream, so a library shim can pass whatever
 // stream its handle carries straight through to a backend enqueue.
