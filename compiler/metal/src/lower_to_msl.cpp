@@ -5729,8 +5729,14 @@ struct AstLowerer {
                                          function.blocks[block_index].name +
                                          "' without a backedge");
             }
-            return assign_loop_arguments(function.blocks[block_index], *incoming,
-                                         statements);
+            if (!assign_loop_arguments(function.blocks[block_index], *incoming,
+                                       statements)) {
+                return false;
+            }
+            // A backedge nested in a branch whose arms rejoin at the loop exit
+            // must not fall through into that join's break.
+            statements->push_back(MslStatement::continue_statement());
+            return true;
         }
         if (block_index == stop_index) {
             if (incoming == nullptr) return true;

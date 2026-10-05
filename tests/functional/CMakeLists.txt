@@ -492,6 +492,10 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
         runtime_registration_helper_global_test.cpp
     )
 
+    add_executable(cumetal_runtime_registration_loop_backedge_join_test
+        runtime_registration_loop_backedge_join_test.cpp
+    )
+
     add_executable(cumetal_runtime_registration_printf_test
         runtime_registration_printf_test.cpp
     )
@@ -1218,6 +1222,11 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
 
     target_link_libraries(cumetal_runtime_registration_helper_global_test
+        PRIVATE
+            cumetal_runtime
+    )
+
+    target_link_libraries(cumetal_runtime_registration_loop_backedge_join_test
         PRIVATE
             cumetal_runtime
     )
@@ -3469,6 +3478,16 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
 
     set_tests_properties(functional_runtime_registration_helper_global
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
+
+    add_test(
+        NAME functional_runtime_registration_loop_backedge_join
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_registration_loop_backedge_join.sh
+                $<TARGET_FILE:cumetal_runtime_registration_loop_backedge_join_test>
+    )
+
+    set_tests_properties(functional_runtime_registration_loop_backedge_join
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
 
     add_test(
