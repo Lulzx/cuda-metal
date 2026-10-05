@@ -42,6 +42,9 @@ enum class EmitStage {
     kCumetalIr,
     kMetalIr,
     kMsl,
+    // Clang's NVPTX output for a .cu input, before any CuMetal lowering. This
+    // is what NVRTC hands back for a virtual (compute_XX) architecture.
+    kPtx,
 };
 
 struct CommandResult {
@@ -232,7 +235,7 @@ void print_usage(const char* argv0) {
                  " [--cuda-inline-threshold value]"
                  " [-I path] [-D name[=value]] [--cuda-include path]"
                  " [--backend legacy|cumetal-ir]"
-                 " [--emit llvm|cumetal-ir|metal-ir|msl|metallib|exe]"
+                 " [--emit llvm|cumetal-ir|metal-ir|msl|metallib|ptx|exe]"
                  " [--link|--no-link] [--save-temps]"
                  " [--fp64=fast48|wide48|ieee64|native|emulate|warn]\n";
 }
@@ -487,6 +490,7 @@ std::string extension_for_stage(EmitStage stage) {
         case EmitStage::kMetalIr: return ".metalir";
         case EmitStage::kMsl: return ".metal";
         case EmitStage::kMetallib: return ".metallib";
+        case EmitStage::kPtx: return ".ptx";
     }
     return ".metallib";
 }
@@ -1440,6 +1444,7 @@ int main(int argc, char** argv) {
             else if (value == "metal-ir") emit_stage = EmitStage::kMetalIr;
             else if (value == "msl") emit_stage = EmitStage::kMsl;
             else if (value == "metallib") emit_stage = EmitStage::kMetallib;
+            else if (value == "ptx") emit_stage = EmitStage::kPtx;
             else {
                 std::cerr << "invalid --emit stage: " << value << "\n";
                 return 2;
@@ -1617,6 +1622,12 @@ int main(int argc, char** argv) {
         link_executable = true;
     }
 
+    if (emit_stage == EmitStage::kPtx && lower_ext(options.input) != ".cu") {
+        std::cerr << "cumetalc failed: --emit ptx requires a .cu input (got " << options.input
+                  << ")\n";
+        return 2;
+    }
+
     if (link_executable) {
         if (lower_ext(options.input) != ".cu") {
             std::cerr << "cumetalc failed: --link requires a .cu input (got " << options.input
@@ -1712,6 +1723,17 @@ int main(int argc, char** argv) {
             std::filesystem::remove(temp_stage_file, ec);
             std::cerr << "cumetalc failed: CUDA device frontend compilation failed\n";
             return 1;
+        }
+        if (emit_stage == EmitStage::kPtx) {
+            std::error_code ec;
+            std::filesystem::copy_file(temp_stage_file, options.output,
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+            std::filesystem::remove(temp_stage_file, ec);
+            if (ec) {
+                std::cerr << "cumetalc failed: could not write " << options.output << "\n";
+                return 1;
+            }
+            return 0;
         }
         temp_files.push_back(temp_stage_file);
         options.input = temp_stage_file;
@@ -1942,7 +1964,8 @@ int main(int argc, char** argv) {
             return 1;
         }
     } else if (input_ext == ".cu") {
-        if (backend == BackendKind::kCumetalIr || emit_stage == EmitStage::kLlvm) {
+        if (backend == BackendKind::kCumetalIr || emit_stage == EmitStage::kLlvm ||
+            emit_stage == EmitStage::kPtx) {
             const std::filesystem::path clang = find_cuda_clang(cuda_clang);
             if (clang.empty()) {
                 std::cerr << "cumetalc failed: stock Clang with CUDA support was not found; "
@@ -1961,12 +1984,17 @@ int main(int argc, char** argv) {
                 std::filesystem::path(CUMETAL_SOURCE_DIR) / "runtime" / "api";
             const std::string arch = cuda_arch;
             const std::string ptx_feature = ptx_feature_for_arch(arch);
+            const bool emit_ptx = emit_stage == EmitStage::kPtx;
+            // PTX is a deliverable, so it is optimized the way a PTX consumer
+            // expects; the LLVM path keeps -O0 IR for CuMetal's own pipeline.
             std::string command =
                 quote_shell(clang.string()) +
-                " -x cuda --cuda-device-only -std=" + cuda_std + " -O0 "
-                "-fno-strict-aliasing "
-                "-Xclang -disable-O0-optnone -S -emit-llvm "
-                "-gline-tables-only -nocudainc -nocudalib "
+                " -x cuda --cuda-device-only -std=" + cuda_std +
+                (emit_ptx ? " -O2 -fno-strict-aliasing -S "
+                          : " -O0 -fno-strict-aliasing "
+                            "-Xclang -disable-O0-optnone -S -emit-llvm "
+                            "-gline-tables-only ") +
+                "-nocudainc -nocudalib "
                 "--cuda-gpu-arch=" + quote_shell(arch) + " ";
             if (!ptx_feature.empty()) {
                 command += "-Xclang -target-feature -Xclang " +
@@ -1998,12 +2026,18 @@ int main(int argc, char** argv) {
                 command += quote_shell(extra) + " ";
             }
             command += quote_shell(original_input.string()) + " -o " +
-                       quote_shell(raw_device_ll.string()) + " 2>&1";
+                       quote_shell(emit_ptx ? options.output.string()
+                                            : raw_device_ll.string()) +
+                       " 2>&1";
             const CommandResult clang_result = run_command_capture(command);
             if (!clang_result.started || clang_result.exit_code != 0) {
                 if (!clang_result.output.empty()) std::cerr << clang_result.output;
                 std::cerr << "cumetalc failed: Clang CUDA device compilation failed\n";
                 return 1;
+            }
+            if (emit_ptx) {
+                if (!clang_result.output.empty()) std::cerr << clang_result.output;
+                return 0;
             }
             const std::filesystem::path llvm_opt = find_llvm_opt(clang);
             if (llvm_opt.empty()) {

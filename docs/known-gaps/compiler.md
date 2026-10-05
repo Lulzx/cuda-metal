@@ -296,13 +296,17 @@ unannotated functions `__host__ __device__` (Clang has no device-only
 default), so a function that also has an explicit `__host__` declaration in the
 SDK headers keeps that declaration; programs still see the macOS SDK headers
 rather than NVRTC's freestanding set. `--ftz`, `--prec-div` and `--prec-sqrt`
-have no Metal knob and are accepted as no-ops. Output is a metallib: `nvrtcGetPTX` and
-`nvrtcGetLTOIR` fail, and a `compute_XX` architecture request is rejected at
-compile time rather than served with bytes the caller would mis-handle. There is
-no `-dlto` path. `nvrtcGetLoweredName` answers only for `extern "C"` entry
-points, whose lowered name is the expression itself; template and namespace
-expressions return `NVRTC_ERROR_NAME_EXPRESSION_NOT_VALID` because the shim does
-not recover the device compiler's mangling. `nvPTXCompiler` is a pass-through,
+have no Metal knob and are accepted as no-ops. An `sm_XX` request produces a
+metallib, so `nvrtcGetPTX` fails for it. A `compute_XX` request produces Clang's
+NVPTX output (`cumetalc --emit ptx`), which `cuModuleLoadData` lowers at load
+time. That PTX comes from Clang, not NVIDIA's NVVM, so its text differs from what
+real NVRTC would print. `nvrtcGetLTOIR` fails and there is no `-dlto` path.
+
+Name expressions, including templates, namespaces and `&variable` forms, are
+resolved by an extra PTX-only compile. In it, each expression's address
+initializes a `__device__` variable whose PTX initializer names the mangled
+symbol. Programs that register name expressions therefore compile twice.
+`nvPTXCompiler` is a pass-through,
 not a PTX compiler: it returns its input, which the module loader then compiles.
 
 ## AIR and Apple tools

@@ -12,6 +12,7 @@
 
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -19,6 +20,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -34,10 +36,12 @@
 // per compile, which runtime compilation callers already amortise behind their
 // own module caches.
 //
-// The PTX surface is honest about what it cannot do: `cumetalc` lowers CUDA
-// source to AIR, never to PTX, so asking for a virtual architecture fails at
-// compile time with an explanation rather than at load time with a confusing
-// module error.
+// A virtual architecture (compute_XX) gets Clang's NVPTX output instead, and
+// cuModuleLoadData lowers that PTX at load time like any other PTX image.
+//
+// Name expressions are resolved by a second, PTX-only compile in which each
+// expression's address initializes a __device__ variable: the PTX initializer
+// spells out the symbol the device compiler chose, mangling included.
 
 namespace {
 
@@ -49,10 +53,14 @@ struct Program {
     std::string source;
     std::string log;
     std::vector<char> cubin;
+    // Clang's NVPTX output, NUL-terminated; filled only for compute_XX.
+    std::vector<char> ptx;
     bool compiled = false;
     // include name -> contents, as handed to nvrtcCreateProgram.
     std::vector<std::pair<std::string, std::string>> headers;
     std::vector<std::string> name_expressions;
+    // name expression -> symbol the device compiler emitted for it.
+    std::vector<std::pair<std::string, std::string>> lowered_names;
 };
 
 Program* as_program(nvrtcProgram prog) {
@@ -228,6 +236,72 @@ nvPTXCompileResult copy_log(const std::string& log, char* destination) {
     return NVPTXCOMPILE_SUCCESS;
 }
 
+// NVRTC accepts both `kernel<T>` and `&variable` spellings.
+std::string address_of_name_expression(const std::string& expression) {
+    std::size_t first = expression.find_first_not_of(" \t");
+    if (first != std::string::npos && expression[first] == '&') return "(void*)(" + expression + ")";
+    return "(void*)&" + expression;
+}
+
+// A __device__ variable whose initializer is the expression's address makes
+// the device compiler print the symbol it chose -- mangling included -- as
+// that variable's PTX initializer. Taking the address also instantiates a
+// template the source never names otherwise.
+std::string name_probe_suffix(const std::vector<std::string>& expressions) {
+    std::string suffix = "\n";
+    for (std::size_t i = 0; i < expressions.size(); ++i) {
+        suffix += "__device__ void* __cumetal_name_expr_" + std::to_string(i) + " = " +
+                  address_of_name_expression(expressions[i]) + ";\n";
+    }
+    return suffix;
+}
+
+// The compile that produces the module instantiates the same templates from
+// host scope, which emits the kernels without adding device globals to it.
+std::string name_reference_suffix(const std::vector<std::string>& expressions) {
+    std::string suffix = "\n";
+    for (std::size_t i = 0; i < expressions.size(); ++i) {
+        suffix += "static void* __cumetal_name_ref_" + std::to_string(i) +
+                  " __attribute__((unused)) = " + address_of_name_expression(expressions[i]) +
+                  ";\n";
+    }
+    return suffix;
+}
+
+// Reads `.global .align 8 .u64 __cumetal_name_expr_N = SYMBOL;` (variables
+// appear as `generic(SYMBOL)`) out of the probe PTX.
+bool parse_lowered_names(const std::string& ptx, std::size_t count,
+                         std::vector<std::string>* names) {
+    names->assign(count, std::string());
+    static constexpr std::string_view kTag = "__cumetal_name_expr_";
+    std::size_t pos = 0;
+    while ((pos = ptx.find(kTag, pos)) != std::string::npos) {
+        pos += kTag.size();
+        std::size_t end = pos;
+        while (end < ptx.size() && std::isdigit(static_cast<unsigned char>(ptx[end]))) ++end;
+        if (end == pos) continue;
+        const std::size_t index = std::stoul(ptx.substr(pos, end - pos));
+        std::size_t cursor = ptx.find_first_not_of(" \t", end);
+        if (cursor == std::string::npos || ptx[cursor] != '=' || index >= count) continue;
+        cursor = ptx.find_first_not_of(" \t", cursor + 1);
+        if (cursor == std::string::npos) continue;
+        if (ptx.compare(cursor, 8, "generic(") == 0) cursor += 8;
+        std::size_t symbol_end = cursor;
+        while (symbol_end < ptx.size() &&
+               (std::isalnum(static_cast<unsigned char>(ptx[symbol_end])) ||
+                ptx[symbol_end] == '_' || ptx[symbol_end] == '$' || ptx[symbol_end] == '.')) {
+            ++symbol_end;
+        }
+        if (symbol_end == cursor) continue;
+        (*names)[index] = ptx.substr(cursor, symbol_end - cursor);
+        pos = symbol_end;
+    }
+    for (const std::string& name : *names) {
+        if (name.empty()) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 extern "C" {
@@ -334,6 +408,7 @@ nvrtcResult nvrtcCompileProgram(nvrtcProgram prog, int numOptions, const char* c
 
     program->compiled = false;
     program->cubin.clear();
+    program->ptx.clear();
     std::string log;
 
     std::vector<std::string> option_strings;
@@ -350,15 +425,6 @@ nvrtcResult nvrtcCompileProgram(nvrtcProgram prog, int numOptions, const char* c
     }
     for (const std::string& option : translated.unrecognized) {
         log += "cumetal: unrecognized NVRTC option, ignored: " + option + "\n";
-    }
-
-    if (translated.ptx_requested) {
-        log +=
-            "cumetal: a virtual architecture (compute_XX) was requested, but CuMetal lowers CUDA "
-            "source to a Metal library and cannot emit PTX. Compile for a real architecture "
-            "(sm_XX) and read the result back with nvrtcGetCUBIN.\n";
-        program->log = std::move(log);
-        return NVRTC_ERROR_INVALID_OPTION;
     }
 
     const std::filesystem::path& compiler = cumetalc_path();
@@ -399,48 +465,104 @@ nvrtcResult nvrtcCompileProgram(nvrtcProgram prog, int numOptions, const char* c
         header_stream.write(contents.data(), static_cast<std::streamsize>(contents.size()));
     }
 
-    const std::filesystem::path source_path = workspace / (stem + ".cu");
-    const std::filesystem::path output_path = workspace / (stem + ".metallib");
-    {
-        std::ofstream source_stream(source_path, std::ios::binary);
-        if (!source_stream) {
-            log += "cumetal: could not write " + source_path.string() + "\n";
-            program->log = std::move(log);
-            cleanup();
+    // One cumetalc run: `source_text` at `stem.cu`, output at `output_path`.
+    const auto run_compile = [&](const std::string& source_text, const char* emit,
+                                 const std::filesystem::path& output_path) -> nvrtcResult {
+        const std::filesystem::path source_path = workspace / (stem + ".cu");
+        {
+            std::ofstream source_stream(source_path, std::ios::binary | std::ios::trunc);
+            if (!source_stream) {
+                log += "cumetal: could not write " + source_path.string() + "\n";
+                return NVRTC_ERROR_BUILTIN_OPERATION_FAILURE;
+            }
+            source_stream.write(source_text.data(),
+                                static_cast<std::streamsize>(source_text.size()));
+        }
+        std::string command = quote_shell(compiler.string());
+        command += " " + quote_shell(source_path.string());
+        command += " -o " + quote_shell(output_path.string());
+        command += std::string(" --emit ") + emit;
+        command += " -I " + quote_shell(workspace.string());
+        for (const std::string& arg : translated.compiler_args) {
+            command += " " + quote_shell(arg);
+        }
+        command += " 2>&1";
+
+        if (cumetal::diag_env_truthy("CUMETAL_NVRTC_VERBOSE")) {
+            std::fprintf(stderr, "CUMETAL: nvrtc compile: %s\n", command.c_str());
+        }
+
+        const CommandResult compile_result = run_command_capture(command);
+        log += compile_result.output;
+        if (!log.empty() && log.back() != '\n') log += '\n';
+        if (!compile_result.started) {
+            log += "cumetal: could not launch " + compiler.string() + "\n";
             return NVRTC_ERROR_BUILTIN_OPERATION_FAILURE;
         }
-        source_stream.write(program->source.data(),
-                            static_cast<std::streamsize>(program->source.size()));
+        return compile_result.exit_code == 0 ? NVRTC_SUCCESS : NVRTC_ERROR_COMPILATION;
+    };
+
+    program->lowered_names.clear();
+    std::string module_source = program->source;
+    if (!program->name_expressions.empty()) {
+        const std::filesystem::path probe_path = workspace / (stem + ".names.ptx");
+        const nvrtcResult probe =
+            run_compile(program->source + name_probe_suffix(program->name_expressions), "ptx",
+                        probe_path);
+        if (probe != NVRTC_SUCCESS) {
+            program->log = std::move(log);
+            cleanup();
+            return probe;
+        }
+        std::vector<char> probe_bytes;
+        std::vector<std::string> lowered;
+        if (!read_file_bytes(probe_path, &probe_bytes) ||
+            !parse_lowered_names(std::string(probe_bytes.begin(), probe_bytes.end()),
+                                 program->name_expressions.size(), &lowered)) {
+            log += "cumetal: could not recover the lowered names of the registered name "
+                   "expressions from the device compilation\n";
+            program->log = std::move(log);
+            cleanup();
+            return NVRTC_ERROR_COMPILATION;
+        }
+        for (std::size_t i = 0; i < lowered.size(); ++i) {
+            program->lowered_names.emplace_back(program->name_expressions[i], lowered[i]);
+        }
+        module_source += name_reference_suffix(program->name_expressions);
     }
 
-    std::string command = quote_shell(compiler.string());
-    command += " " + quote_shell(source_path.string());
-    command += " -o " + quote_shell(output_path.string());
-    command += " --emit metallib";
-    command += " -I " + quote_shell(workspace.string());
-    for (const std::string& arg : translated.compiler_args) {
-        command += " " + quote_shell(arg);
-    }
-    command += " 2>&1";
-
-    if (cumetal::diag_env_truthy("CUMETAL_NVRTC_VERBOSE")) {
-        std::fprintf(stderr, "CUMETAL: nvrtc compile: %s\n", command.c_str());
-    }
-
-    const CommandResult compile_result = run_command_capture(command);
-    log += compile_result.output;
-    if (!log.empty() && log.back() != '\n') log += '\n';
-
-    if (!compile_result.started) {
-        log += "cumetal: could not launch " + compiler.string() + "\n";
+    if (translated.ptx_requested) {
+        // A virtual architecture asks for PTX, which cuModuleLoadData lowers
+        // through CuMetal's PTX path at load time.
+        const std::filesystem::path ptx_path = workspace / (stem + ".ptx");
+        const nvrtcResult status = run_compile(module_source, "ptx", ptx_path);
+        std::vector<char> ptx_bytes;
+        if (status == NVRTC_SUCCESS &&
+            (!read_file_bytes(ptx_path, &ptx_bytes) || ptx_bytes.empty())) {
+            log += "cumetal: cumetalc reported success but produced no PTX\n";
+            program->log = std::move(log);
+            cleanup();
+            return NVRTC_ERROR_COMPILATION;
+        }
+        if (status != NVRTC_SUCCESS) {
+            program->log = std::move(log);
+            cleanup();
+            return status;
+        }
+        if (ptx_bytes.back() != '\0') ptx_bytes.push_back('\0');
+        program->ptx = std::move(ptx_bytes);
+        program->compiled = true;
         program->log = std::move(log);
         cleanup();
-        return NVRTC_ERROR_BUILTIN_OPERATION_FAILURE;
+        return NVRTC_SUCCESS;
     }
-    if (compile_result.exit_code != 0) {
+
+    const std::filesystem::path output_path = workspace / (stem + ".metallib");
+    const nvrtcResult compile_status = run_compile(module_source, "metallib", output_path);
+    if (compile_status != NVRTC_SUCCESS) {
         program->log = std::move(log);
         cleanup();
-        return NVRTC_ERROR_COMPILATION;
+        return compile_status;
     }
 
     std::vector<char> bytes;
@@ -496,20 +618,23 @@ nvrtcResult nvrtcGetPTXSize(nvrtcProgram prog, size_t* ptxSizeRet) {
     Program* program = as_program(prog);
     if (program == nullptr) return NVRTC_ERROR_INVALID_PROGRAM;
     if (ptxSizeRet == nullptr) return NVRTC_ERROR_INVALID_INPUT;
-    cumetal::warn_once("nvrtc-ptx",
-                       "nvrtcGetPTX is not available: CuMetal compiles CUDA source to a Metal "
-                       "library. Use nvrtcGetCUBIN, which cuModuleLoadDataEx accepts.");
-    return NVRTC_ERROR_INVALID_PROGRAM;
+    if (!program->compiled) return NVRTC_ERROR_INVALID_PROGRAM;
+    if (program->ptx.empty()) {
+        cumetal::warn_once("nvrtc-ptx",
+                           "nvrtcGetPTX: the program was compiled for a real architecture "
+                           "(sm_XX), which produces a Metal library. Compile for compute_XX to "
+                           "get PTX, or read the module with nvrtcGetCUBIN.");
+        return NVRTC_ERROR_INVALID_PROGRAM;
+    }
+    *ptxSizeRet = program->ptx.size();
+    return NVRTC_SUCCESS;
 }
 
 nvrtcResult nvrtcGetPTX(nvrtcProgram prog, char* ptx) {
-    (void)ptx;
     Program* program = as_program(prog);
     if (program == nullptr) return NVRTC_ERROR_INVALID_PROGRAM;
-    cumetal::warn_once("nvrtc-ptx",
-                       "nvrtcGetPTX is not available: CuMetal compiles CUDA source to a Metal "
-                       "library. Use nvrtcGetCUBIN, which cuModuleLoadDataEx accepts.");
-    return NVRTC_ERROR_INVALID_PROGRAM;
+    if (!program->compiled || program->ptx.empty()) return NVRTC_ERROR_INVALID_PROGRAM;
+    return copy_out(program->ptx, ptx);
 }
 
 nvrtcResult nvrtcGetLTOIRSize(nvrtcProgram prog, size_t* LTOIRSizeRet) {
@@ -565,19 +690,9 @@ nvrtcResult nvrtcGetLoweredName(nvrtcProgram prog,
     if (nameExpression == nullptr || loweredName == nullptr) return NVRTC_ERROR_INVALID_INPUT;
     if (!program->compiled) return NVRTC_ERROR_NO_LOWERED_NAMES_BEFORE_COMPILATION;
 
-    // CuMetal can answer this only for `extern "C"` entry points, whose lowered
-    // name is the expression itself. Anything with template or namespace syntax
-    // needs the mangling the device compiler chose, which this shim does not
-    // recover from the metallib, so say so rather than guess.
-    const std::string expression(nameExpression);
-    const bool plain_identifier =
-        !expression.empty() &&
-        expression.find_first_of("<>():&*, \t") == std::string::npos;
-    if (!plain_identifier) return NVRTC_ERROR_NAME_EXPRESSION_NOT_VALID;
-
-    for (const std::string& registered : program->name_expressions) {
-        if (registered == expression) {
-            *loweredName = registered.c_str();
+    for (const auto& [expression, lowered] : program->lowered_names) {
+        if (expression == nameExpression) {
+            *loweredName = lowered.c_str();
             return NVRTC_SUCCESS;
         }
     }

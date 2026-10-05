@@ -57,8 +57,8 @@ holds the exact boundary.
   pointer subtraction, numeric pointer representations, mutable relocations.
 - The `legacy` PTX backend (still the registration-JIT default) lacks general
   CFG forms that the typed `cumetal-ir` backend accepts.
-- NVRTC needs `cumetalc` and Xcode's Metal toolchain on disk; `nvrtcGetPTX`,
-  LTO-IR, and template name expressions are unavailable.
+- NVRTC needs `cumetalc` and Xcode's Metal toolchain on disk. LTO-IR is
+  unavailable, and PTX is produced only for `compute_XX` requests.
 
 **Runtime** ([details](known-gaps/runtime.md))
 

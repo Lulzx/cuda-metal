@@ -234,9 +234,9 @@ extern "C" __global__ void unannotated_kernel(float* out, const float* in, int c
         }
     }
 
-    // Asking for a virtual architecture means asking for PTX, which CuMetal
-    // cannot emit from CUDA source. Fail at compile time, with a log that says
-    // why, rather than handing back bytes the caller will mis-handle.
+    // A virtual architecture asks for PTX. It must be real NVPTX output for the
+    // kernel, loadable through cuModuleLoadData, and computing the right answer.
+    std::string ptx_text;
     {
         nvrtcProgram program = nullptr;
         if (!expect(nvrtcCreateProgram(&program, kKernelSource, "ptx_module", 0, nullptr,
@@ -246,16 +246,224 @@ extern "C" __global__ void unannotated_kernel(float* out, const float* in, int c
         }
         const char* const options[] = {"--gpu-architecture=compute_75"};
         const nvrtcResult compiled = nvrtcCompileProgram(program, 1, options);
-        const std::string log = program_log(program);
+        if (!expect(compiled == NVRTC_SUCCESS, "compute_XX compiles to PTX")) {
+            std::fprintf(stderr, "%s\n", program_log(program).c_str());
+            nvrtcDestroyProgram(&program);
+            return 1;
+        }
+        std::size_t size = 0;
+        if (!expect(nvrtcGetPTXSize(program, &size) == NVRTC_SUCCESS && size > 1,
+                    "nvrtcGetPTXSize reports the PTX")) {
+            nvrtcDestroyProgram(&program);
+            return 1;
+        }
+        std::vector<char> ptx(size);
+        if (!expect(nvrtcGetPTX(program, ptx.data()) == NVRTC_SUCCESS && ptx.back() == '\0',
+                    "nvrtcGetPTX returns NUL-terminated text")) {
+            nvrtcDestroyProgram(&program);
+            return 1;
+        }
         nvrtcDestroyProgram(&program);
-        if (!expect(compiled == NVRTC_ERROR_INVALID_OPTION,
-                    "compute_XX is rejected as an invalid option")) {
+        ptx_text = ptx.data();
+        if (!expect(ptx_text.find(".version") != std::string::npos &&
+                        ptx_text.find(".entry scale_kernel") != std::string::npos,
+                    "the PTX defines the kernel entry")) {
+            std::fprintf(stderr, "%s\n", ptx_text.c_str());
             return 1;
         }
-        if (!expect(log.find("cannot emit PTX") != std::string::npos,
-                    "the PTX rejection explains itself in the log")) {
+    }
+
+    // A real-architecture compile produces a Metal library, so there is no PTX
+    // to read; that is an error rather than empty output.
+    {
+        nvrtcProgram program = nullptr;
+        if (!expect(nvrtcCreateProgram(&program, kKernelSource, "ptx_query", 0, nullptr,
+                                       nullptr) == NVRTC_SUCCESS,
+                    "nvrtcCreateProgram for the PTX query")) {
             return 1;
         }
+        std::size_t size = 0;
+        const nvrtcResult before = nvrtcGetPTXSize(program, &size);
+        const nvrtcResult compiled = nvrtcCompileProgram(
+            program, static_cast<int>(kWarpLikeOptions.size()), kWarpLikeOptions.data());
+        const nvrtcResult after = nvrtcGetPTXSize(program, &size);
+        nvrtcDestroyProgram(&program);
+        if (!expect(before == NVRTC_ERROR_INVALID_PROGRAM && compiled == NVRTC_SUCCESS &&
+                        after == NVRTC_ERROR_INVALID_PROGRAM,
+                    "nvrtcGetPTXSize fails before compilation and for sm_XX")) {
+            return 1;
+        }
+    }
+
+    // Templated kernels are found through name expressions, which must map to
+    // the symbols the device compiler actually emitted.
+    const char* const kTemplateSource = R"(
+namespace ns {
+template <typename T, int Factor>
+__global__ void scale_t(T* out, const T* in, int count) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < count) out[index] = in[index] * T(Factor);
+}
+}
+__device__ float device_bias = 0.5f;
+extern "C" __global__ void plain_kernel(float* out) { out[0] = device_bias; }
+)";
+    const char* const kExpressions[] = {"ns::scale_t<float, 3>", "ns::scale_t<float, 5>",
+                                        "plain_kernel", "&device_bias"};
+    std::string lowered[4];
+    std::vector<char> template_image;
+    {
+        nvrtcProgram program = nullptr;
+        if (!expect(nvrtcCreateProgram(&program, kTemplateSource, "template_module", 0, nullptr,
+                                       nullptr) == NVRTC_SUCCESS,
+                    "nvrtcCreateProgram for name expressions")) {
+            return 1;
+        }
+        for (const char* expression : kExpressions) {
+            if (!expect(nvrtcAddNameExpression(program, expression) == NVRTC_SUCCESS,
+                        "nvrtcAddNameExpression")) {
+                return 1;
+            }
+        }
+        const char* name = nullptr;
+        if (!expect(nvrtcGetLoweredName(program, kExpressions[0], &name) ==
+                        NVRTC_ERROR_NO_LOWERED_NAMES_BEFORE_COMPILATION,
+                    "lowered names wait for compilation")) {
+            return 1;
+        }
+        const nvrtcResult compiled = nvrtcCompileProgram(
+            program, static_cast<int>(kWarpLikeOptions.size()), kWarpLikeOptions.data());
+        if (!expect(compiled == NVRTC_SUCCESS, "templated program compiles")) {
+            std::fprintf(stderr, "%s\n", program_log(program).c_str());
+            nvrtcDestroyProgram(&program);
+            return 1;
+        }
+        for (int i = 0; i < 4; ++i) {
+            if (!expect(nvrtcGetLoweredName(program, kExpressions[i], &name) == NVRTC_SUCCESS &&
+                            name != nullptr,
+                        "every registered expression has a lowered name")) {
+                nvrtcDestroyProgram(&program);
+                return 1;
+            }
+            lowered[i] = name;
+        }
+        if (!expect(nvrtcGetLoweredName(program, "ns::scale_t<float, 7>", &name) ==
+                        NVRTC_ERROR_NAME_EXPRESSION_NOT_VALID,
+                    "an unregistered expression has no lowered name")) {
+            return 1;
+        }
+        if (!expect(nvrtcAddNameExpression(program, "plain_kernel") ==
+                        NVRTC_ERROR_NO_NAME_EXPRESSIONS_AFTER_COMPILATION,
+                    "name expressions close at compilation")) {
+            return 1;
+        }
+        std::size_t size = 0;
+        if (nvrtcGetCUBINSize(program, &size) == NVRTC_SUCCESS && size > 0) {
+            template_image.resize(size);
+            nvrtcGetCUBIN(program, template_image.data());
+        }
+        nvrtcDestroyProgram(&program);
+        if (!expect(lowered[0] == "_ZN2ns7scale_tIfLi3EEEvPT_PKS1_i" &&
+                        lowered[1] == "_ZN2ns7scale_tIfLi5EEEvPT_PKS1_i" &&
+                        lowered[2] == "plain_kernel" && lowered[3] == "device_bias",
+                    "lowered names are the Itanium-mangled symbols")) {
+            for (const std::string& n : lowered) std::fprintf(stderr, "  %s\n", n.c_str());
+            return 1;
+        }
+        if (!expect(!template_image.empty(), "templated program produced a module")) return 1;
+    }
+
+    // A name expression that does not name anything is a compile error.
+    {
+        nvrtcProgram program = nullptr;
+        nvrtcCreateProgram(&program, kKernelSource, "bad_name", 0, nullptr, nullptr);
+        nvrtcAddNameExpression(program, "no_such_kernel<int>");
+        const nvrtcResult compiled = nvrtcCompileProgram(
+            program, static_cast<int>(kWarpLikeOptions.size()), kWarpLikeOptions.data());
+        nvrtcDestroyProgram(&program);
+        if (!expect(compiled == NVRTC_ERROR_COMPILATION, "an invalid name expression fails")) {
+            return 1;
+        }
+    }
+
+    // Both outputs must run: the PTX through the driver's PTX path, and the
+    // templated module through the mangled names NVRTC reported.
+    {
+        CUdevice device = 0;
+        CUcontext context = nullptr;
+        if (!expect(cuInit(0) == CUDA_SUCCESS && cuDeviceGet(&device, 0) == CUDA_SUCCESS &&
+                        cuCtxCreate(&context, 0, device) == CUDA_SUCCESS,
+                    "driver context")) {
+            return 1;
+        }
+        constexpr int kCount = 64;
+        CUdeviceptr in = 0, out = 0;
+        if (!expect(cuMemAlloc(&in, kCount * sizeof(float)) == CUDA_SUCCESS &&
+                        cuMemAlloc(&out, kCount * sizeof(float)) == CUDA_SUCCESS,
+                    "cuMemAlloc")) {
+            return 1;
+        }
+        std::vector<float> host(kCount);
+        for (int i = 0; i < kCount; ++i) host[i] = static_cast<float>(i) - 10.0f;
+        cuMemcpyHtoD(in, host.data(), kCount * sizeof(float));
+
+        const auto run = [&](CUmodule module, const char* kernel_name, float factor) -> bool {
+            CUfunction function = nullptr;
+            if (!expect(cuModuleGetFunction(&function, module, kernel_name) == CUDA_SUCCESS,
+                        "cuModuleGetFunction")) {
+                std::fprintf(stderr, "  kernel %s\n", kernel_name);
+                return false;
+            }
+            int count = kCount;
+            void* args[] = {&out, &in, &count};
+            cuMemsetD32(out, 0, kCount);
+            if (!expect(cuLaunchKernel(function, 1, 1, 1, kCount, 1, 1, 0, nullptr, args,
+                                       nullptr) == CUDA_SUCCESS &&
+                            cuCtxSynchronize() == CUDA_SUCCESS,
+                        "launch")) {
+                return false;
+            }
+            std::vector<float> result(kCount);
+            cuMemcpyDtoH(result.data(), out, kCount * sizeof(float));
+            for (int i = 0; i < kCount; ++i) {
+                if (result[i] != host[i] * factor) {
+                    std::fprintf(stderr, "FAIL: %s[%d] = %f, want %f\n", kernel_name, i,
+                                 result[i], host[i] * factor);
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        CUmodule ptx_module = nullptr;
+        if (!expect(cuModuleLoadData(&ptx_module, ptx_text.c_str()) == CUDA_SUCCESS,
+                    "cuModuleLoadData accepts NVRTC's PTX") ||
+            !run(ptx_module, "scale_kernel", 2.0f)) {
+            return 1;
+        }
+        CUmodule template_module = nullptr;
+        if (!expect(cuModuleLoadData(&template_module, template_image.data()) == CUDA_SUCCESS,
+                    "cuModuleLoadData accepts the templated module") ||
+            !run(template_module, lowered[0].c_str(), 3.0f) ||
+            !run(template_module, lowered[1].c_str(), 5.0f)) {
+            return 1;
+        }
+        CUdeviceptr bias = 0;
+        std::size_t bias_size = 0;
+        float bias_value = 0.0f;
+        if (!expect(cuModuleGetGlobal(&bias, &bias_size, template_module, lowered[3].c_str()) ==
+                            CUDA_SUCCESS &&
+                        bias_size == sizeof(float) &&
+                        cuMemcpyDtoH(&bias_value, bias, sizeof(float)) == CUDA_SUCCESS &&
+                        bias_value == 0.5f,
+                    "the lowered variable name resolves through cuModuleGetGlobal")) {
+            return 1;
+        }
+        cuModuleUnload(ptx_module);
+        cuModuleUnload(template_module);
+        cuMemFree(in);
+        cuMemFree(out);
+        cuCtxDestroy(context);
     }
 
     // A compile error must surface as NVRTC_ERROR_COMPILATION with the
@@ -280,23 +488,6 @@ extern "C" __global__ void unannotated_kernel(float* out, const float* in, int c
         if (!expect(!log.empty(), "a failed compile leaves diagnostics in the log")) return 1;
         if (!expect(sized == NVRTC_ERROR_INVALID_PROGRAM,
                     "a failed compile has no CUBIN to read")) {
-            return 1;
-        }
-    }
-
-    // PTX retrieval is unavailable, and says so rather than returning success
-    // with empty output.
-    {
-        nvrtcProgram program = nullptr;
-        if (!expect(nvrtcCreateProgram(&program, kKernelSource, "ptx_query", 0, nullptr,
-                                       nullptr) == NVRTC_SUCCESS,
-                    "nvrtcCreateProgram for the PTX query")) {
-            return 1;
-        }
-        std::size_t size = 0;
-        const nvrtcResult result = nvrtcGetPTXSize(program, &size);
-        nvrtcDestroyProgram(&program);
-        if (!expect(result == NVRTC_ERROR_INVALID_PROGRAM, "nvrtcGetPTXSize reports failure")) {
             return 1;
         }
     }

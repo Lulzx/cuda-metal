@@ -33,9 +33,8 @@ struct TranslatedOptions {
     std::vector<std::string> unrecognized;
 
     // Set when the caller asked for a virtual architecture (`compute_NN`),
-    // meaning it intends to read PTX back out. CuMetal cannot produce PTX from
-    // CUDA source, so `nvrtcCompileProgram` fails early with an explanation
-    // instead of handing back a metallib the caller will mis-handle.
+    // meaning it intends to read PTX back out: `nvrtcCompileProgram` then asks
+    // `cumetalc --emit ptx` for Clang's NVPTX output instead of a metallib.
     bool ptx_requested = false;
 
     // The `sm_NN` architecture `cumetalc` is asked to target. CuMetal presents a
