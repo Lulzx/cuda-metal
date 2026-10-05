@@ -18,13 +18,13 @@ GPU correctness, and cache hits and the NVVM/legacy compiler paths are untraced.
   production libraries.
 - Direct AIR generation remains tooling/research only.
 
-With CUDA Clang 21-23, the reviewed manifest-controlled 46-file
+With CUDA Clang 21-23, the reviewed manifest-controlled 47-file
 production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/46 | **46/46** |
-| PTX / `--cuda-device` | **41/46** | **44/46** |
+| direct `.cu` | 0/47 | **47/47** |
+| PTX / `--cuda-device` | **42/47** | **45/47** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler

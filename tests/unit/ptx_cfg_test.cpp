@@ -822,7 +822,9 @@ ret;
                      "comparison alias eligibility: " + operand + "/" + std::to_string(padding));
     }
     // Exercise call clobbers before SSA, including forms the importer may reject.
-    for (unsigned variant = 0; variant < 9; ++variant) {
+    // Variant 9 is variant 0 with a helper that synchronizes: cloning the call
+    // into the proven edge would give its barrier two static sites.
+    for (unsigned variant = 0; variant < 10; ++variant) {
         cumetal::ptx::EntryFunction function;
         function.register_ranges.push_back({"%p", "pred", variant == 4 ? 3u : 4u, variant != 8});
         std::deque<detail::Instruction> owned;
@@ -852,7 +854,10 @@ ret;
         cfg[1].successors = {2, 3};
         cfg[2].instructions = {add("ret", {})};
         cfg[3].instructions = {add("ret", {})};
-        detail::simplify_guarded_paths(cfg, builder, owned, variant == 6 ? nullptr : &function);
+        const std::unordered_set<std::string> synchronizing =
+            variant == 9 ? std::unordered_set<std::string>{"helper"} : std::unordered_set<std::string>{};
+        detail::simplify_guarded_paths(cfg, builder, owned, variant == 6 ? nullptr : &function,
+                                       nullptr, &synchronizing);
         const bool proven = variant == 0 || variant == 7;
         ok &= expect((cfg[0].successors[0] != 1) == proven,
                      "caller predicate scope and explicit output clobbers: " + std::to_string(variant));

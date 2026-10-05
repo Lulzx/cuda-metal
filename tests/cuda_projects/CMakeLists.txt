@@ -560,6 +560,29 @@ foreach(fp64_mode fast48 wide48 ieee64)
     )
 endforeach()
 
+# if (tid == 0) init; __syncthreads(); update; __syncthreads(); if (tid == 0)
+# read. Both guards share one predicate, and the PTX edge threader once cloned
+# the barrier region per edge; Metal paired the copies and lost lane 0's peers.
+add_test(
+    NAME functional_cuda_projects_barrier_edge_threading
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        barrier_edge_threading
+        barrier_edge_threading.cu
+        barrier_edge_threading
+        "PASS: guarded shared initialization survives barrier edge threading"
+)
+set_tests_properties(
+    functional_cuda_projects_barrier_edge_threading
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        ENVIRONMENT
+            "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir"
+)
+
 add_test(
     NAME functional_cuda_projects_ggml_output_ops
     COMMAND bash

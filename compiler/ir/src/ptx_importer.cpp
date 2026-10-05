@@ -926,6 +926,7 @@ struct Importer {
     std::unordered_map<std::string, const cumetal::ptx::EntryFunction*>
         device_functions;
     std::unordered_set<std::string> printf_functions;
+    std::unordered_set<std::string> synchronizing_functions;
     std::unordered_map<std::string, Type> parameter_types;
     std::unordered_map<std::string, ValueId> parameter_values;
     // Older CUDA Clang releases materialize the address of a by-value
@@ -6150,6 +6151,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     for (const cumetal::ptx::EntryFunction& function : parsed.module.functions) {
         importer.device_functions.emplace(function.name, &function);
     }
+    importer.synchronizing_functions = detail::synchronizing_functions(importer.device_functions);
 
     std::vector<const cumetal::ptx::EntryFunction*> reachable_helpers;
     std::unordered_set<std::string> visiting;
@@ -6482,7 +6484,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         {
             common::CompileTrace trace("ptx_cfg_normalization", 0, function->name);
             next.build_cfg();
-            detail::simplify_guarded_paths(next.raw_blocks, next.builder, next.normalized_instructions, next.entry, &next.instruction_origins);
+            detail::simplify_guarded_paths(next.raw_blocks, next.builder, next.normalized_instructions, next.entry, &next.instruction_origins, &next.synchronizing_functions);
             detail::remove_unreachable_blocks(next.raw_blocks);
             detail::remove_discarded_pack_halves(next.raw_blocks, next.normalized_instructions,
                                                next.entry, &next.instruction_origins);

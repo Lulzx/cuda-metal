@@ -7,6 +7,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -121,9 +122,13 @@ struct RawFixture {
         blocks[3].instructions = {add("ret", {})};
     }
 
+    // `helper` neither synchronizes nor calls anything that does.
+    std::unordered_set<std::string> synchronizing;
+
     bool specializes(bool with_function = true) {
         detail::simplify_guarded_paths(blocks, builder, instructions,
-                                      with_function ? &function : nullptr);
+                                      with_function ? &function : nullptr, nullptr,
+                                      &synchronizing);
         return blocks[0].successors[0] != 1;
     }
 };

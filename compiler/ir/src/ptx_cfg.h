@@ -54,6 +54,12 @@ std::size_t simplify_local_zero_guards(std::vector<RawBlock>& blocks, Builder& b
 void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
                             std::deque<Instruction>& storage,
                             const cumetal::ptx::EntryFunction* function = nullptr,
-                            InstructionOrigins* origins = nullptr);
+                            InstructionOrigins* origins = nullptr,
+                            const std::unordered_set<std::string>* synchronizing_callees = nullptr);
+
+// Device functions that reach a barrier or warp/CTA collective, directly or
+// through calls. Edge threading must not clone calls into them.
+std::unordered_set<std::string> synchronizing_functions(
+    const std::unordered_map<std::string, const cumetal::ptx::EntryFunction*>& functions);
 
 }  // namespace cumetal::ir::detail

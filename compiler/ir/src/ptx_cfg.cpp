@@ -12,6 +12,12 @@
 namespace cumetal::ir::detail {
 namespace {
 
+bool synchronizing_opcode(const Instruction& instruction) {
+    const auto root = root_opcode(instruction.opcode);
+    return root == "bar" || root == "barrier" || root == "shfl" || root == "vote" ||
+           root == "match" || root == "redux" || root == "activemask";
+}
+
 struct GuardedPaths {
     std::vector<RawBlock>& raw_blocks;
     Builder& builder;
@@ -19,6 +25,9 @@ struct GuardedPaths {
     const cumetal::ptx::EntryFunction* function;
     InstructionOrigins* origins;
     const ScalarZeroLoads* zero_loads = nullptr;
+    // Device functions that reach a barrier or collective; null when the
+    // caller cannot say, which makes every call count as synchronizing.
+    const std::unordered_set<std::string>* synchronizing_callees = nullptr;
 
     struct ConstantFacts {
         std::map<std::string, bool> predicates;
@@ -153,6 +162,14 @@ struct GuardedPaths {
 
     using SelectRewrites = std::map<std::size_t, Instruction>;
 
+    bool synchronizes(const Instruction& instruction) const {
+        if (synchronizing_opcode(instruction)) return true;
+        if (root_opcode(instruction.opcode) != "call") return false;
+        const auto target = direct_call_target(instruction);
+        return !target || synchronizing_callees == nullptr ||
+               synchronizing_callees->contains(*target);
+    }
+
     std::optional<std::size_t> clone_edge(std::size_t parent, std::size_t edge,
                                          const RawBlock& target, std::optional<std::size_t> successor,
                                          const SelectRewrites* rewrites = nullptr) {
@@ -160,6 +177,13 @@ struct GuardedPaths {
             root_opcode(target.instructions.back()->opcode) == "bra";
         const auto count = target.instructions.size() + (successor && !has_branch ? 1 : 0);
         if (cloned_blocks >= 4096 || count > 131072 - cloned_instructions) return std::nullopt;
+        // A clone sits on one incoming edge, and those edges may diverge
+        // within a block. Copying a barrier or collective there gives the two
+        // paths separate synchronization sites, which Metal still pairs: a
+        // lane on one copy is released by lanes at the other before its own
+        // arm has run. The same holds for a call into a function that does.
+        for (const auto* instruction : target.instructions)
+            if (synchronizes(*instruction)) return std::nullopt;
         RawBlock clone;
         clone.id = builder.next_block();
         clone.name = target.name + "_guard_" + std::to_string(raw_blocks.size());
@@ -1613,11 +1637,35 @@ void remove_unreachable_blocks(std::vector<RawBlock>& blocks) {
             blocks[successor].predecessors.push_back(index);
 }
 
+std::unordered_set<std::string> synchronizing_functions(
+    const std::unordered_map<std::string, const cumetal::ptx::EntryFunction*>& functions) {
+    std::unordered_set<std::string> result;
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (const auto& [name, function] : functions) {
+            if (result.contains(name)) continue;
+            for (const auto& instruction : function->instructions) {
+                const auto target = root_opcode(instruction.opcode) == "call"
+                                        ? direct_call_target(instruction)
+                                        : std::nullopt;
+                if (synchronizing_opcode(instruction) ||
+                    (target && result.contains(*target))) {
+                    changed |= result.insert(name).second;
+                    break;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
                             std::deque<Instruction>& storage,
                             const cumetal::ptx::EntryFunction* function,
-                            InstructionOrigins* origins) {
+                            InstructionOrigins* origins,
+                            const std::unordered_set<std::string>* synchronizing_callees) {
     GuardedPaths paths{blocks, builder, storage, function, origins};
+    paths.synchronizing_callees = synchronizing_callees;
     paths.specialize_masked_predicates();
     for (auto& block : blocks) block.predecessors.clear();
     for (std::size_t index = 0; index < blocks.size(); ++index)
