@@ -4,7 +4,7 @@
 application compiles, links, and completes the stock 32,000-atom, 100-step
 Lennard-Jones benchmark on Apple M4 Pro in both neighbour modes. The fixed
 `5e-4` CPU-double, cross-mode, and analytic initial-energy checks pass.
-Performance comparisons remain open.
+Warm performance estimates are recorded below; controlled comparisons remain open.
 
 The current target is unmodified LAMMPS `stable_30Sep2026`, commit
 `8de817dd79bfe4525d5d39246a212d833e6dee07`, with its bundled Kokkos 5.2.1.
@@ -28,6 +28,27 @@ minutes; total wall time was 9 minutes 14 seconds versus 18 seconds for full.
 All 396 CuMetal CTest gates passed with zero skips across the final partitioned
 runs, including the Clang 21/22/23 matrix, 83 enrolled CUDA samples, and typed
 PTX/native-AOT numerical corpora. The demo validator's 11 tests also pass.
+
+## Warm performance: 2026-10-05
+
+On Apple M4 Pro, Release builds with single precision complete the stock
+32,000-atom, 100-step benchmark with these warm simulation-loop medians:
+
+| Neighbour mode | CPU Serial, one thread | GPU | GPU speedup |
+| --- | ---: | ---: | ---: |
+| Full / Newton off | 1.780 s | 0.866 s | **2.06×** |
+| Half / Newton on | 0.853 s | 0.593 s | **1.44×** |
+
+Each median uses three measured runs after warmup. Timings exclude setup and
+JIT compilation, with diagnostic tracing disabled. Full mode alternates CPU
+and GPU runs; half mode resets and includes the unchanged stock benchmark
+within one process, discarding the first run as warmup. Every measured GPU
+trajectory remains within the `5e-4` CPU-double numerical tolerance.
+
+Other CPU-intensive jobs were active, so these are provisional local estimates.
+The baseline is one CPU thread; this does not establish a speedup against all
+CPU cores. See the [benchmark data](results/2026-10-05-m4-pro-warm.json) for
+individual timings, the exact CuMetal revision, and measurement method.
 
 ## Reproduce
 

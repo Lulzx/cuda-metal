@@ -1,0 +1,122 @@
+{
+  "revision": "121b208353a615f9b3700167f889510b59d9bc1d",
+  "hardware": "Apple M4 Pro",
+  "precision": "single",
+  "baseline": "Kokkos Serial, one CPU thread",
+  "atoms": 32000,
+  "steps": 100,
+  "repeats": 3,
+  "timing": "warm simulation loop, excluding setup/JIT",
+  "summary": {
+    "full": {
+      "cpu": 1.77973,
+      "gpu": 0.865527,
+      "gpu_speedup": 2.0562385691029856,
+      "gpu_slowdown": 0.48632489197799667
+    },
+    "half": {
+      "cpu": 0.853047,
+      "gpu": 0.592622,
+      "gpu_speedup": 1.4394453800230165,
+      "gpu_slowdown": 0.694712014695556
+    }
+  },
+  "rows": [
+    {
+      "mode": "full",
+      "device": "cpu",
+      "repeat": 1,
+      "loop_seconds": 1.74956
+    },
+    {
+      "mode": "full",
+      "device": "cpu",
+      "repeat": 2,
+      "loop_seconds": 1.77973
+    },
+    {
+      "mode": "full",
+      "device": "cpu",
+      "repeat": 3,
+      "loop_seconds": 1.82309
+    },
+    {
+      "mode": "full",
+      "device": "gpu",
+      "repeat": 1,
+      "loop_seconds": 0.865527
+    },
+    {
+      "mode": "full",
+      "device": "gpu",
+      "repeat": 2,
+      "loop_seconds": 0.9365
+    },
+    {
+      "mode": "full",
+      "device": "gpu",
+      "repeat": 3,
+      "loop_seconds": 0.836812
+    },
+    {
+      "mode": "half",
+      "device": "cpu",
+      "repeat": 0,
+      "warmup": true,
+      "loop_seconds": 0.94198
+    },
+    {
+      "mode": "half",
+      "device": "cpu",
+      "repeat": 1,
+      "warmup": false,
+      "loop_seconds": 0.868192
+    },
+    {
+      "mode": "half",
+      "device": "cpu",
+      "repeat": 2,
+      "warmup": false,
+      "loop_seconds": 0.84436
+    },
+    {
+      "mode": "half",
+      "device": "cpu",
+      "repeat": 3,
+      "warmup": false,
+      "loop_seconds": 0.853047
+    },
+    {
+      "mode": "half",
+      "device": "gpu",
+      "repeat": 0,
+      "warmup": true,
+      "loop_seconds": 1.11
+    },
+    {
+      "mode": "half",
+      "device": "gpu",
+      "repeat": 1,
+      "warmup": false,
+      "loop_seconds": 0.595198
+    },
+    {
+      "mode": "half",
+      "device": "gpu",
+      "repeat": 2,
+      "warmup": false,
+      "loop_seconds": 0.573048
+    },
+    {
+      "mode": "half",
+      "device": "gpu",
+      "repeat": 3,
+      "warmup": false,
+      "loop_seconds": 0.592622
+    }
+  ],
+  "method": "Full-mode paired alternating runs after warmup; half-mode repeated reset-and-include stock benchmark in one process, discarding warmup.",
+  "ambient_load": "Other CPU-intensive jobs active; estimates are not a controlled benchmark.",
+  "gpu_numerical_gate": "Every measured GPU trajectory remains within 5e-4 of CPU double.",
+  "date": "2026-10-05"
+}
