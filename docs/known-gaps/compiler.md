@@ -86,7 +86,15 @@ Remaining typed-path blockers include combinations of:
   of different address spaces, and a helper called with mixed-space arguments
   in *different* spaces at one call site (`f(local, device_elem)`), which the
   single-space clone cannot serve and is refused with `polymorphic helper call
-  has multiple concrete address spaces`;
+  has multiple concrete address spaces`. Inside one function, a register
+  that joins a private and a device pointer (a branch, or a `selp` turned into
+  one) gets a copy of the join block per address space; a join at a loop
+  header, where the pointer changes space across iterations, is refused with
+  `cannot split PTX block ... by incoming pointer address space`. A raw 64-bit
+  integer address (say, a pointer reloaded from a stack cell whose stored
+  value was never typed) is read as device memory, and is refused with `raw
+  integer address ... may name private memory` wherever a private pointer is
+  stored as data or converted to an integer in the module;
 - atomic scope/order/address-space combinations beyond the numerically proven
   32-bit direct/PTX family, lock-backed 64-bit typed-PTX family (integer
   operations, CAS, and binary64 add computed with the active FP64 mode's add),

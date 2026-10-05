@@ -57,6 +57,25 @@ void simplify_guarded_paths(std::vector<RawBlock>& blocks, Builder& builder,
                             InstructionOrigins* origins = nullptr,
                             const std::unordered_set<std::string>* synchronizing_callees = nullptr);
 
+// Give every predecessor group after the first its own copy of `block`, so a
+// register the groups feed with pointers in different address spaces no longer
+// joins. Refuses (returns false) for a loop header, which would gain a second
+// entry, and for a block that synchronizes, whose copies Metal would pair.
+// Refreshes predecessors; the caller must rebuild SSA.
+bool split_join_block(std::vector<RawBlock>& blocks, Builder& builder,
+                      std::deque<Instruction>& storage, InstructionOrigins* origins,
+                      const std::unordered_set<std::string>& synchronizing_callees,
+                      std::size_t block, const std::vector<std::vector<std::size_t>>& groups);
+
+// Turn `selp d, a, b, p` at `index` of `block` into `@p bra A; B: mov d, b`
+// / `A: mov d, a`, both continuing into a new block with the rest of the
+// original. A pointer select whose operands live in different address spaces
+// thereby becomes a join split_join_block can take apart. Refreshes
+// predecessors; the caller must rebuild SSA.
+bool split_pointer_select(std::vector<RawBlock>& blocks, Builder& builder,
+                          std::deque<Instruction>& storage, InstructionOrigins* origins,
+                          std::size_t block, std::size_t index);
+
 // Device functions that reach a barrier or warp/CTA collective, directly or
 // through calls. Edge threading must not clone calls into them.
 std::unordered_set<std::string> synchronizing_functions(

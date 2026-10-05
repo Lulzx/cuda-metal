@@ -1,0 +1,201 @@
+//
+// Generic addresses Kokkos pair styles produce (LAMMPS coul/long, coul/table).
+//
+.version 8.0
+.target sm_80
+.address_size 64
+
+// `p = tid < split ? private_row : device_row`, then a displaced generic load.
+// LAMMPS reads its per-type parameters this way: from the functor's stack copy
+// for small type counts, from the device view otherwise.
+.visible .entry space_join(
+	.param .u64 space_join_param_0,
+	.param .u64 space_join_param_1,
+	.param .u32 space_join_param_2
+)
+{
+	.local .align 4 .b8 	__local_depot0[64];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .pred 	%p<4>;
+	.reg .b32 	%r<10>;
+	.reg .b64 	%rd<20>;
+
+	mov.u64 	%SPL, __local_depot0;
+	cvta.local.u64 	%SP, %SPL;
+	mov.u32 	%r1, %tid.x;
+	mov.u32 	%r2, 0;
+$L__BB0_1:
+	add.s32 	%r3, %r2, 1000;
+	add.s32 	%r3, %r3, %r1;
+	mul.wide.u32 	%rd1, %r2, 4;
+	add.s64 	%rd2, %SPL, %rd1;
+	st.local.u32 	[%rd2], %r3;
+	add.s32 	%r2, %r2, 1;
+	setp.lt.u32 	%p1, %r2, 16;
+	@%p1 bra 	$L__BB0_1;
+	ld.param.u64 	%rd3, [space_join_param_1];
+	ld.param.u32 	%r4, [space_join_param_2];
+	and.b32 	%r5, %r1, 7;
+	setp.lt.u32 	%p2, %r1, %r4;
+	add.u64 	%rd10, %SP, 0;
+	mov.b64 	%rd11, %rd10;
+	@%p2 bra 	$L__BB0_3;
+	cvta.to.global.u64 	%rd4, %rd3;
+	mul.wide.u32 	%rd5, %r1, 64;
+	add.s64 	%rd6, %rd4, %rd5;
+	cvta.global.u64 	%rd11, %rd6;
+$L__BB0_3:
+	mul.wide.u32 	%rd7, %r5, 4;
+	add.s64 	%rd8, %rd11, %rd7;
+	ld.b32 	%r6, [%rd8+4];
+	ld.param.u64 	%rd12, [space_join_param_0];
+	cvta.to.global.u64 	%rd13, %rd12;
+	mul.wide.u32 	%rd14, %r1, 4;
+	add.s64 	%rd15, %rd13, %rd14;
+	st.global.u32 	[%rd15], %r6;
+	ret;
+}
+
+// A pointer field of a by-value record, copied to the stack bytewise, stored
+// to a second stack cell and reloaded each iteration as a raw address with a
+// negative displacement (a Kokkos reduction's final pass).
+.visible .entry cell_displacement(
+	.param .u64 cell_displacement_param_0,
+	.param .align 8 .b8 cell_displacement_param_1[16]
+)
+{
+	.local .align 8 .b8 	__local_depot1[24];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .pred 	%p<4>;
+	.reg .b16 	%rs<4>;
+	.reg .b32 	%r<10>;
+	.reg .b64 	%rd<30>;
+
+	mov.u64 	%SPL, __local_depot1;
+	cvta.local.u64 	%SP, %SPL;
+	mov.b64 	%rd10, cell_displacement_param_1;
+	add.u64 	%rd1, %SPL, 0;
+	mov.b64 	%rd20, 0;
+$L__BB1_1:
+	add.s64 	%rd11, %rd10, %rd20;
+	ld.param.b8 	%rs1, [%rd11];
+	add.s64 	%rd12, %rd1, %rd20;
+	st.local.b8 	[%rd12], %rs1;
+	add.s64 	%rd20, %rd20, 1;
+	setp.lt.u64 	%p1, %rd20, 16;
+	@%p1 bra 	$L__BB1_1;
+	ld.local.b64 	%rd2, [%rd1];
+	ld.local.b32 	%r1, [%rd1+8];
+	add.u64 	%rd5, %SP, 16;
+	add.u64 	%rd6, %SPL, 16;
+	st.local.b64 	[%rd6], %rd2;
+	mov.u32 	%r4, %tid.x;
+	mul.wide.u32 	%rd21, %r4, 4;
+	add.s64 	%rd21, %rd21, 8;
+	mov.b32 	%r2, 0;
+$L__BB1_2:
+	cvta.to.local.u64 	%rd7, %rd5;
+	ld.local.b64 	%rd8, [%rd7];
+	add.s64 	%rd9, %rd8, %rd21;
+	ld.b32 	%r3, [%rd9+-8];
+	add.s32 	%r2, %r2, %r3;
+	add.s64 	%rd21, %rd21, 256;
+	add.s32 	%r1, %r1, -1;
+	setp.ne.s32 	%p2, %r1, 0;
+	@%p2 bra 	$L__BB1_2;
+	ld.param.u64 	%rd22, [cell_displacement_param_0];
+	cvta.to.global.u64 	%rd23, %rd22;
+	mul.wide.u32 	%rd25, %r4, 4;
+	add.s64 	%rd24, %rd23, %rd25;
+	st.global.u32 	[%rd24], %r2;
+	ret;
+}
+
+// The same ternary as space_join, compiled to a select instead of a branch.
+.visible .entry space_select(
+	.param .u64 space_select_param_0,
+	.param .u64 space_select_param_1,
+	.param .u32 space_select_param_2
+)
+{
+	.local .align 4 .b8 	__local_depot2[64];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .pred 	%p<4>;
+	.reg .b32 	%r<10>;
+	.reg .b64 	%rd<20>;
+
+	mov.u64 	%SPL, __local_depot2;
+	cvta.local.u64 	%SP, %SPL;
+	mov.u32 	%r1, %tid.x;
+	mov.u32 	%r2, 0;
+$L__BB2_1:
+	add.s32 	%r3, %r2, 1000;
+	add.s32 	%r3, %r3, %r1;
+	mul.wide.u32 	%rd1, %r2, 4;
+	add.s64 	%rd2, %SPL, %rd1;
+	st.local.u32 	[%rd2], %r3;
+	add.s32 	%r2, %r2, 1;
+	setp.lt.u32 	%p1, %r2, 16;
+	@%p1 bra 	$L__BB2_1;
+	ld.param.u64 	%rd3, [space_select_param_1];
+	ld.param.u32 	%r4, [space_select_param_2];
+	and.b32 	%r5, %r1, 7;
+	setp.lt.u32 	%p2, %r1, %r4;
+	add.u64 	%rd10, %SP, 0;
+	cvta.to.global.u64 	%rd4, %rd3;
+	mul.wide.u32 	%rd5, %r1, 64;
+	add.s64 	%rd6, %rd4, %rd5;
+	cvta.global.u64 	%rd9, %rd6;
+	selp.b64 	%rd11, %rd10, %rd9, %p2;
+	mul.wide.u32 	%rd7, %r5, 4;
+	add.s64 	%rd8, %rd11, %rd7;
+	ld.b32 	%r6, [%rd8+4];
+	ld.param.u64 	%rd12, [space_select_param_0];
+	cvta.to.global.u64 	%rd13, %rd12;
+	mul.wide.u32 	%rd14, %r1, 4;
+	add.s64 	%rd15, %rd13, %rd14;
+	st.global.u32 	[%rd15], %r6;
+	ret;
+}
+
+// Negative path: the pointer is private on loop entry and device on the
+// backedge, so the join is the loop header. Copying a header would give the
+// loop a second entry; this must stay a refusal.
+.visible .entry loop_header_join(
+	.param .u64 loop_header_join_param_0,
+	.param .u64 loop_header_join_param_1
+)
+{
+	.local .align 4 .b8 	__local_depot3[16];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .pred 	%p<4>;
+	.reg .b32 	%r<10>;
+	.reg .b64 	%rd<20>;
+
+	mov.u64 	%SPL, __local_depot3;
+	cvta.local.u64 	%SP, %SPL;
+	mov.u32 	%r1, 7;
+	st.local.u32 	[%SPL], %r1;
+	ld.param.u64 	%rd3, [loop_header_join_param_1];
+	cvta.to.global.u64 	%rd4, %rd3;
+	cvta.global.u64 	%rd9, %rd4;
+	add.u64 	%rd10, %SP, 0;
+	mov.b64 	%rd11, %rd10;
+	mov.u32 	%r2, 0;
+	mov.u32 	%r3, 0;
+$L__BB3_1:
+	ld.b32 	%r6, [%rd11];
+	add.s32 	%r2, %r2, %r6;
+	mov.b64 	%rd11, %rd9;
+	add.s32 	%r3, %r3, 1;
+	setp.lt.u32 	%p1, %r3, 4;
+	@%p1 bra 	$L__BB3_1;
+	ld.param.u64 	%rd12, [loop_header_join_param_0];
+	cvta.to.global.u64 	%rd13, %rd12;
+	st.global.u32 	[%rd13], %r2;
+	ret;
+}

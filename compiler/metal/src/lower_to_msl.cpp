@@ -37,6 +37,17 @@ MslAddressSpace lower_address_space(ir::AddressSpace address_space) {
     return MslAddressSpace::kNone;
 }
 
+// The space a load or store dereferences. A raw 64-bit integer address can
+// only name device memory: private and threadgroup storage have no integer
+// spelling in Metal, and a pointer cast without a space is not valid MSL.
+MslAddressSpace raw_address_space(const MslExpr& address, const ir::Operand& operand) {
+    if (address->type.kind == MslTypeKind::kPointer) return address->type.address_space;
+    const MslAddressSpace space = lower_address_space(operand.type.address_space);
+    return space == MslAddressSpace::kNone && operand.type.kind == ir::TypeKind::kInteger
+               ? MslAddressSpace::kDevice
+               : space;
+}
+
 bool is_ptx_hex_float_literal(std::string_view spelling) {
     if (spelling.size() != 10 || spelling[0] != '0' ||
         (spelling[1] != 'f' && spelling[1] != 'F')) {
@@ -635,6 +646,7 @@ public:
                 const std::uint8_t combined = spaces_[target] | incoming;
                 if (!polymorphic_[target] && spaces_[target] != 0 &&
                     combined != spaces_[target]) {
+                    conflict_ = target;
                     return false;
                 }
                 if (combined != spaces_[target]) {
@@ -645,6 +657,9 @@ public:
         }
         return true;
     }
+
+    // The node whose spaces disagreed when solve() last failed.
+    std::size_t conflict() const { return conflict_; }
 
     std::size_t find(std::size_t node) {
         if (parents_[node] != node) parents_[node] = find(parents_[node]);
@@ -708,6 +723,7 @@ private:
     std::vector<std::uint8_t> ranks_;
     std::vector<std::uint8_t> spaces_;
     std::vector<bool> polymorphic_;
+    std::size_t conflict_ = 0;
     std::vector<std::pair<std::size_t, std::size_t>> flows_;
 };
 
@@ -1319,6 +1335,29 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module, unsign
     auto add_value = [&](ir::ValueId value) {
         if (!value_nodes.contains(value)) value_nodes[value] = constraints.add_node();
     };
+    // Name the value where two concrete spaces met, and its function.
+    const auto flow_conflict = [&] {
+        std::string text = "directional pointer flow reaches a conflicting concrete address space";
+        for (const auto& [value, node] : value_nodes) {
+            if (node != constraints.conflict()) continue;
+            text += " at %" + std::to_string(value);
+            for (const ir::Function& function : module->functions) {
+                bool found = false;
+                for (const ir::FunctionArgument& argument : function.arguments)
+                    found |= argument.value == value;
+                for (const ir::BasicBlock& block : function.blocks) {
+                    for (const ir::BlockArgument& argument : block.arguments)
+                        found |= argument.value == value;
+                    for (const ir::Operation& operation : block.operations)
+                        found |= std::find(operation.results.begin(), operation.results.end(),
+                                           value) != operation.results.end();
+                }
+                if (found) text += " in '" + function.name + "'";
+            }
+            break;
+        }
+        return text;
+    };
     for (std::size_t function_index = 0; function_index < module->functions.size();
          ++function_index) {
         ir::Function& function = module->functions[function_index];
@@ -1583,7 +1622,8 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module, unsign
     // graph here would leak call-site masks into its later specialization pass.
     auto field_storage_constraints = constraints;
     if (!field_storage_constraints.solve()) {
-        return {false, "directional pointer flow reaches a conflicting concrete address space"};
+        constraints = field_storage_constraints;
+        return {false, flow_conflict()};
     }
     std::unordered_set<ir::ValueId> private_helper_field_loads;
     const auto make_private_fields = [&] { return PrivateRecordFieldProof(*module,
@@ -1815,10 +1855,7 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module, unsign
         }
     }
 
-    if (!constraints.solve()) {
-        return {false,
-                "directional pointer flow reaches a conflicting concrete address space"};
-    }
+    if (!constraints.solve()) return {false, flow_conflict()};
     for (const auto loaded : private_helper_field_loads) {
         if (!constraints.space(value_nodes.at(loaded)))
             return {false, "private helper pointer field proof: unresolved or conflicting pointee spaces across call sites"};
@@ -4598,9 +4635,7 @@ struct AstLowerer {
             }
             const MslExpr source_pointer = expression_for(operation.operands.front());
             const MslAddressSpace address_space =
-                source_pointer->type.kind == MslTypeKind::kPointer
-                    ? source_pointer->type.address_space
-                    : lower_address_space(operation.operands.front().type.address_space);
+                raw_address_space(source_pointer, operation.operands.front());
             const MslType pointer_type = MslType::pointer(memory_type, address_space);
             const MslExpr pointer =
                 MslExpression::cast(pointer_type, source_pointer, true);
@@ -4633,9 +4668,7 @@ struct AstLowerer {
                     : stored_value->type;
             const MslExpr destination_pointer = expression_for(operation.operands.front());
             const MslAddressSpace address_space =
-                destination_pointer->type.kind == MslTypeKind::kPointer
-                    ? destination_pointer->type.address_space
-                    : lower_address_space(operation.operands.front().type.address_space);
+                raw_address_space(destination_pointer, operation.operands.front());
             const MslType pointer_type =
                 MslType::pointer(stored_type, address_space);
             const MslExpr pointer =
@@ -7065,6 +7098,44 @@ static void remove_unused_pointer_truncations(ir::Function& function) {
     }
 }
 
+// Loads and stores through a raw 64-bit integer read it as a device address
+// (see raw_address_space). An integer can only be something else if a private
+// pointer turned into one: stored as data or converted. Where any function
+// lets one escape, such an integer may name a thread's stack, so refuse every
+// raw address rather than read device memory at a private offset.
+std::optional<std::string> raw_address_refusal(const ir::Module& module) {
+    const auto is_private = [](const ir::Operand& operand) {
+        return operand.type.is_pointer() && operand.type.address_space == ir::AddressSpace::kPrivate;
+    };
+    const ir::Operation* raw = nullptr;
+    const ir::Function* raw_function = nullptr;
+    const ir::Operation* escape = nullptr;
+    for (const ir::Function& function : module.functions) {
+        for (const ir::BasicBlock& block : function.blocks) {
+            for (const ir::Operation& operation : block.operations) {
+                const bool memory = operation.opcode == ir::OpCode::kLoad ||
+                                    operation.opcode == ir::OpCode::kStore;
+                if (memory && !operation.operands.empty() &&
+                    operation.operands.front().type.kind == ir::TypeKind::kInteger && raw == nullptr) {
+                    raw = &operation;
+                    raw_function = &function;
+                }
+                if (operation.opcode == ir::OpCode::kStore && escape == nullptr &&
+                    std::any_of(operation.operands.begin() + 1, operation.operands.end(), is_private))
+                    escape = &operation;
+                if (operation.opcode == ir::OpCode::kConvert && escape == nullptr &&
+                    !operation.operands.empty() && is_private(operation.operands.front()) &&
+                    !operation.result_types.empty() && !operation.result_types.front().is_pointer())
+                    escape = &operation;
+            }
+        }
+    }
+    if (raw == nullptr || escape == nullptr) return std::nullopt;
+    return raw->location.str() + ": raw integer address in '" + raw_function->name +
+           "' may name private memory: a private pointer becomes an integer at " +
+           escape->location.str();
+}
+
 MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     MetalLegalizeResult result;
     const ir::VerifyResult input_verification = ir::verify(module);
@@ -7082,6 +7153,10 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
         return result;
     }
     result.module.stage = ir::IrStage::kMetalLegalized;
+    if (const auto error = raw_address_refusal(result.module)) {
+        result.error = *error;
+        return result;
+    }
 
     for (ir::Function& function : result.module.functions) {
         remove_unused_pointer_truncations(function);

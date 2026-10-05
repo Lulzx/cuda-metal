@@ -13,7 +13,7 @@ if '--gpu-child' not in sys.argv:
         raise SystemExit(result.returncode)
     launches = [line for line in result.stderr.splitlines()
                 if 'CUMETAL_PROVENANCE event=kernel_launch' in line]
-    assert len(launches) == 1, launches
+    assert len(launches) == 2, launches
     assert all('device=apple_gpu' in line and 'launch_success=true' in line and
                'provenance=generic_ptx_lowering' in line for line in launches), launches
     raise SystemExit(0)
@@ -27,10 +27,13 @@ run_integer_case(build, source, values,
                  [1 if value % 2 == 0 else value for value in values],
                  'device pointer or Rust empty-slice sentinel', output_words=1)
 
+# A select between a private slot and the device element is a join split per
+# space: even lanes read the slot, odd lanes the input.
 mixed = source.replace('.reg .b64 %rd<8>;',
-                       '.local .align 8 .b8 slot[8];\n    .reg .b64 %rd<9>;')
-mixed = mixed.replace('selp.b64 %rd6, 1, %rd3, %p1;',
-                      'mov.u64 %rd8, slot;\n    selp.b64 %rd6, %rd8, %rd3, %p1;')
-expect_compile_failure(build, mixed, 'integer_probe',
-                       'directional pointer flow reaches a conflicting concrete address space')
-print('REJECTED mixed private/device pointer select')
+                       '.local .align 8 .b8 slot[8];\n    .reg .b64 %rd<10>;')
+mixed = mixed.replace('selp.b64 %rd6, 1, %rd3, %p1;\n    @%p1 bra DANGLING;\n    ld.global.u64 %rd7, [%rd6];',
+                      'mov.u64 %rd8, slot;\n    st.local.u64 [%rd8], 7;\n    cvta.local.u64 %rd9, %rd8;\n'
+                      '    selp.b64 %rd6, %rd9, %rd3, %p1;\n    ld.u64 %rd7, [%rd6];')
+assert 'selp.b64 %rd6, %rd9' in mixed
+run_integer_case(build, mixed, values, [7 if value % 2 == 0 else value for value in values],
+                 'mixed private/device pointer select', output_words=1)

@@ -3143,6 +3143,9 @@ if(APPLE)
     set_tests_properties(functional_ptx_assert_reporting PROPERTIES TIMEOUT 45)
     add_test(NAME functional_ptx_trap_reporting_trace
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --trace)
+    add_test(NAME functional_ptx_generic_address_joins
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_generic_address_joins.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_generic_address_joins PROPERTIES TIMEOUT 60)
     add_test(NAME functional_ptx_trap_barrier
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_barrier.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_trap_barrier PROPERTIES TIMEOUT 60)

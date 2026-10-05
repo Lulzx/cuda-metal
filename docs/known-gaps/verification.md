@@ -49,17 +49,21 @@ workload, not general LAMMPS compatibility. See the
 LAMMPS' own force-style unit tests (`test_pair_style`, `test_bond_style`,
 `test_angle_style`, `test_dihedral_style`, `test_improper_style`,
 `test_fix_timestep`; MOLECULE, MANYBODY and KSPACE packages; `*kokkos*` cases)
-pass 708 of 716 yaml tests on the GPU build as of 2026-10-05 (the Kokkos/OpenMP
+pass 711 of 716 yaml tests on the GPU build as of 2026-10-05 (the Kokkos/OpenMP
 CPU control passes all 493 Kokkos cases). `KSpaceStyles` is not built. Run the
 tests serially: two test processes sharing one `CUMETAL_CACHE_DIR` produce
-spurious launch and Thrust failures. The 7 failures are compile refusals that
+spurious launch and Thrust failures. The 4 failures are compile refusals that
 Kokkos reports as `cudaErrorInvalidValue`, none of them a wrong answer:
 
 - PPPM (`pppm_tip4p`, `_nozforce`, `_slab`, `pppm_tri_slab`) uses the KISS FFT,
   whose `kf_work` recurses; Metal has no recursion, so the FFT kernel is
-  refused (the double atomic add in `make_rho_atomic` now lowers);
-- `coul_long`, `coul_table` and `hybrid-scaled` merge private and device
-  addresses in one register, which the generic-pointer legalizer refuses.
+  refused (the double atomic add in `make_rho_atomic` now lowers). The test
+  build chose KISS (`FFT_KOKKOS=KISS`); a build with `FFT_KOKKOS=CUFFT` would
+  route the FFT through CuMetal's cuFFT instead, and has not been tried.
+
+`coul_long`, `coul_table` and `hybrid-scaled` passed once a register joining
+the functor's stack copy and the device view (`itype < 13 ? m_params :
+params`) was split per address space.
 
 Before the fixes of 2026-10-05, 52 `FixTimestep` cases failed numerically because
 loops whose backedge sat inside a branch ran once (every GPU bond list kept only

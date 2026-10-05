@@ -81,5 +81,5 @@ for label, invalid in [
         'st.local.v2.u64 [%rd7], {%rd8, %rd9};',
         'st.global.u64 [%rd1], %rd7;\nst.local.v2.u64 [%rd7], {%rd8, %rd9};')),
 ]:
-    expect_compile_failure(build, invalid, 'integer_probe', 'operand type')
+    expect_compile_failure(build, invalid, 'integer_probe', 'may name private memory')
     print('REJECTED ' + label)

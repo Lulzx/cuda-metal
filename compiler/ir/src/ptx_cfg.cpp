@@ -3,6 +3,7 @@
 #include "ptx_text.h"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cctype>
 #include <map>
@@ -1635,6 +1636,125 @@ void remove_unreachable_blocks(std::vector<RawBlock>& blocks) {
     for (std::size_t index = 0; index < blocks.size(); ++index)
         for (auto successor : blocks[index].successors)
             blocks[successor].predecessors.push_back(index);
+}
+
+bool split_join_block(std::vector<RawBlock>& blocks, Builder& builder,
+                      std::deque<Instruction>& storage, InstructionOrigins* origins,
+                      const std::unordered_set<std::string>& synchronizing_callees,
+                      std::size_t block, const std::vector<std::vector<std::size_t>>& groups) {
+    if (block >= blocks.size() || groups.size() < 2) return false;
+    const RawBlock target = blocks[block];
+    for (const auto* instruction : target.instructions) {
+        if (synchronizing_opcode(*instruction)) return false;
+        if (root_opcode(instruction->opcode) != "call") continue;
+        const auto callee = direct_call_target(*instruction);
+        if (!callee || synchronizing_callees.contains(*callee)) return false;
+    }
+    // A predecessor the block dominates is a backedge: the block heads a
+    // loop. It dominates every predecessor the entry cannot reach without it.
+    if (block == 0) return false;
+    std::vector<bool> reached(blocks.size(), false);
+    reached[block] = true;
+    std::vector<std::size_t> pending{0};
+    while (!pending.empty()) {
+        const auto index = pending.back();
+        pending.pop_back();
+        if (reached[index]) continue;
+        reached[index] = true;
+        pending.insert(pending.end(), blocks[index].successors.begin(), blocks[index].successors.end());
+    }
+    for (const auto predecessor : target.predecessors)
+        if (predecessor == block || !reached[predecessor]) return false;
+    const bool has_branch = !target.instructions.empty() &&
+        root_opcode(target.instructions.back()->opcode) == "bra";
+    for (std::size_t g = 1; g < groups.size(); ++g) {
+        RawBlock clone;
+        clone.id = builder.next_block();
+        clone.name = target.name + "_space_" + std::to_string(blocks.size());
+        clone.successors = target.successors;
+        for (const auto* instruction : target.instructions) {
+            storage.push_back(*instruction);
+            record_instruction_origin(origins, &storage.back(), instruction);
+            clone.instructions.push_back(&storage.back());
+        }
+        // The copy is appended, so a fallthrough needs an explicit branch.
+        if (!has_branch && target.successors.size() == 1) {
+            Instruction branch;
+            branch.opcode = "bra";
+            branch.operands = {blocks[target.successors[0]].name};
+            storage.push_back(std::move(branch));
+            clone.instructions.push_back(&storage.back());
+        }
+        const auto index = blocks.size();
+        blocks.push_back(std::move(clone));
+        for (const auto predecessor : groups[g])
+            for (auto& successor : blocks[predecessor].successors)
+                if (successor == block) successor = index;
+    }
+    remove_unreachable_blocks(blocks);
+    return true;
+}
+
+bool split_pointer_select(std::vector<RawBlock>& blocks, Builder& builder,
+                          std::deque<Instruction>& storage, InstructionOrigins* origins,
+                          std::size_t block, std::size_t index) {
+    if (block >= blocks.size() || index >= blocks[block].instructions.size()) return false;
+    const Instruction* select = blocks[block].instructions[index];
+    if (root_opcode(select->opcode) != "selp" || !select->predicate.empty() ||
+        select->operands.size() != 4) return false;
+    const auto condition = trim(select->operands[3]);
+    if (condition.empty() || first_register(condition) != condition) return false;
+    const auto append = [&](RawBlock& to, Instruction instruction, const Instruction* source) {
+        storage.push_back(std::move(instruction));
+        if (source != nullptr) record_instruction_origin(origins, &storage.back(), source);
+        to.instructions.push_back(&storage.back());
+    };
+    const auto branch = [](const std::string& predicate, const std::string& target) {
+        Instruction instruction;
+        instruction.opcode = "bra";
+        instruction.predicate = predicate;
+        instruction.operands = {target};
+        instruction.supported = true;
+        return instruction;
+    };
+    const auto head = block;
+    RawBlock tail;
+    tail.id = builder.next_block();
+    tail.name = blocks[head].name + "_select_" + std::to_string(blocks.size());
+    tail.successors = blocks[head].successors;
+    tail.instructions.assign(blocks[head].instructions.begin() + static_cast<std::ptrdiff_t>(index) + 1,
+                             blocks[head].instructions.end());
+    // The tail is appended, so a fallthrough needs an explicit branch.
+    const bool has_branch = !tail.instructions.empty() &&
+        root_opcode(tail.instructions.back()->opcode) == "bra";
+    if (!has_branch && tail.successors.size() == 1)
+        append(tail, branch("", blocks[tail.successors[0]].name), nullptr);
+    const auto tail_index = blocks.size();
+    const std::string tail_name = tail.name;
+    blocks.push_back(std::move(tail));
+
+    std::array<std::size_t, 2> arms{};
+    for (std::size_t arm = 0; arm < 2; ++arm) {
+        RawBlock copy;
+        copy.id = builder.next_block();
+        copy.name = blocks[head].name + "_select_arm_" + std::to_string(blocks.size());
+        copy.successors = {tail_index};
+        Instruction move;
+        move.opcode = "mov." + select->opcode.substr(select->opcode.find('.') + 1);
+        move.operands = {select->operands[0], select->operands[arm == 0 ? 1 : 2]};
+        move.line = select->line;
+        move.supported = true;
+        append(copy, std::move(move), select);
+        append(copy, branch("", tail_name), nullptr);
+        arms[arm] = blocks.size();
+        blocks.push_back(std::move(copy));
+    }
+    // successors[0] is the taken edge: the true arm.
+    blocks[head].instructions.resize(index);
+    append(blocks[head], branch("@" + condition, blocks[arms[0]].name), nullptr);
+    blocks[head].successors = {arms[0], arms[1]};
+    remove_unreachable_blocks(blocks);
+    return true;
 }
 
 std::unordered_set<std::string> synchronizing_functions(

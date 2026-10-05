@@ -947,6 +947,19 @@ struct Importer {
     bool normalized_address_alignment = false;
     bool address_alignment_applied = false;
     bool local_zero_guards_applied = false;
+    // A join whose incoming pointers live in different concrete address
+    // spaces, with its predecessors grouped by space. The caller splits the
+    // block and imports the function again. Splits are named, not indexed:
+    // the next attempt rebuilds the CFG from PTX and finds blocks by label.
+    struct JoinSplit {
+        std::string block;
+        std::vector<std::vector<std::string>> groups;
+        // Set for a pointer select to turn into a branch: its index in `block`.
+        std::optional<std::size_t> select;
+        bool operator==(const JoinSplit&) const = default;
+    };
+    std::optional<JoinSplit> pending_join_split;
+    std::vector<JoinSplit> join_splits;
     std::size_t type_solver_step_limit = 0;
     std::unordered_set<ValueId> integer_zero_values;
     std::vector<RawBlock> raw_blocks;
@@ -1720,6 +1733,58 @@ struct Importer {
             for (const auto& operand : found->second->operands) text += " " + trim(operand);
             return text + ")";
         };
+        // `p = c ? private : device` is a join no single Metal pointer can
+        // carry. Ask for the join block to be split per address space; the
+        // copies then see one space each.
+        const auto request_join_split = [&](const Join& join) {
+            std::map<AddressSpace, std::vector<std::string>> by_space;
+            std::vector<std::string> nulls;
+            const auto& predecessors = raw_blocks[join.block].predecessors;
+            for (std::size_t i = 0; i < join.inputs.size() && i < predecessors.size(); ++i) {
+                const auto found = value_types.find(join.inputs[i]);
+                if (found == value_types.end()) return;
+                const auto& type = found->second;
+                const auto& name = raw_blocks[predecessors[i]].name;
+                if (type.is_pointer() && type.address_space != AddressSpace::kNone)
+                    by_space[type.address_space].push_back(name);
+                else if (type.is_pointer() || integer_zero_values.contains(join.inputs[i]))
+                    nulls.push_back(name);
+                else
+                    return;
+            }
+            if (by_space.size() < 2) return;
+            JoinSplit split{raw_blocks[join.block].name, {}};
+            for (auto& [space, group] : by_space) split.groups.push_back(std::move(group));
+            split.groups.front().insert(split.groups.front().end(), nulls.begin(), nulls.end());
+            pending_join_split = std::move(split);
+        };
+        // A select between pointers in two spaces has the same problem as a
+        // join, and its result type silently took the last operand's space.
+        if (validate) for (const auto& definition : definitions) {
+            const Instruction& instruction = *definition.instruction;
+            if (root_opcode(instruction.opcode) != "selp" || instruction.operands.size() != 4) continue;
+            std::optional<AddressSpace> spaces[2];
+            for (std::size_t i = 0; i < 2; ++i) {
+                const auto source = definition.sources.find(first_register(instruction.operands[i + 1]));
+                if (source == definition.sources.end()) continue;
+                const auto type = value_types.find(source->second);
+                if (type != value_types.end() && type->second.is_pointer() &&
+                    type->second.address_space != AddressSpace::kNone)
+                    spaces[i] = type->second.address_space;
+            }
+            if (!spaces[0] || !spaces[1] || *spaces[0] == *spaces[1]) continue;
+            for (const auto& block : raw_blocks) {
+                const auto found = std::find(block.instructions.begin(), block.instructions.end(),
+                                             definition.instruction);
+                if (found == block.instructions.end()) continue;
+                pending_join_split = JoinSplit{block.name, {},
+                    static_cast<std::size_t>(found - block.instructions.begin())};
+                break;
+            }
+            return fail(definition.instruction, "conflicting PTX incoming type: select mixes " +
+                        Type::pointer(Type::integer(8), *spaces[0]).str() + " and " +
+                        Type::pointer(Type::integer(8), *spaces[1]).str());
+        }
         if (validate) for (const auto& join : joins) {
             std::string evidence;
             bool has_pointer = false, has_nonzero_scalar = false;
@@ -1735,9 +1800,11 @@ struct Importer {
             if (has_pointer && has_nonzero_scalar)
                 return fail(nullptr, "PTX pointer branch argument requires a pointer or proven null: '" + join.name +
                     "' in block '" + raw_blocks[join.block].name + "'; incoming" + evidence);
-            if (!value_types.contains(join.result))
+            if (!value_types.contains(join.result)) {
+                request_join_split(join);
                 return fail(nullptr, "conflicting PTX incoming types for '" + join.name + "' in block '" +
                     raw_blocks[join.block].name + "':" + evidence);
+            }
             const auto& target = value_types.at(join.result);
             for (const auto value : join.inputs) {
                 if (!value_types.contains(value)) return fail(nullptr, "unresolved PTX incoming type for '" + join.name + "'");
@@ -1748,6 +1815,7 @@ struct Importer {
                 // Same-width scalar disagreement is a bit-container join; the
                 // branch edge bitcasts it in make_successor.
                 if (scalar_join_container(join.name, source, target) == target) continue;
+                request_join_split(join);
                 return fail(nullptr, "conflicting PTX incoming type for '" + join.name + "' in block '" + raw_blocks[join.block].name +
                     "': value %" + std::to_string(value) + " has " + source.str() + ", expected " + target.str());
             }
@@ -1797,6 +1865,7 @@ struct Importer {
     }
 
     bool resolve_types() {
+        pending_join_split.reset();
         for (const auto& parameter : entry->params) {
             parameter_types[parameter.name] = parameter_type(parameter);
         }
@@ -1818,7 +1887,8 @@ struct Importer {
         // the original path for functions that did not change.
         std::vector<const Instruction*> proof_instructions;
         std::optional<cumetal::ptx::EntryFunction> proof_entry;
-        if (address_cancellation_applied || address_alignment_applied || local_zero_guards_applied) {
+        if (address_cancellation_applied || address_alignment_applied || local_zero_guards_applied ||
+            !join_splits.empty()) {
             proof_entry = *entry;
             proof_entry->instructions.clear();
             for (const auto& block : raw_blocks)
@@ -3607,6 +3677,14 @@ struct Importer {
                                         {{"pointer_integer", "true"}});
             }
             if (byte_offset == 0) return base;
+            // A raw 64-bit address (say, a pointer reloaded from a stack cell)
+            // stays an integer, exactly as it is without a displacement.
+            // Relabelling the SSA value as a pointer would contradict its
+            // definition. The Metal backend reads it as device memory, and
+            // refuses that where a private pointer can become an integer.
+            if (base.kind == OperandKind::kValue && base.type == Type::integer(64))
+                return expressions.emit(OpCode::kAdd, Type::integer(64),
+                    {base, Operand::immediate(std::to_string(byte_offset), Type::integer(64))});
             if (!base.type.is_pointer()) base.type = fallback_pointer;
             Operation offset;
             offset.opcode = OpCode::kPointerOffset;
@@ -6422,8 +6500,8 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         }
     }
 
-    const auto import_function = [&](const cumetal::ptx::EntryFunction* function,
-                                     bool is_kernel) -> bool {
+    const auto import_attempt = [&](const cumetal::ptx::EntryFunction* function, bool is_kernel,
+                                    const std::vector<Importer::JoinSplit>& join_splits) -> bool {
         common::CompileTrace function_trace("ptx_import_function", 0, function->name);
         Importer next;
         next.type_solver_step_limit = importer.type_solver_step_limit;
@@ -6442,6 +6520,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         next.module_global_symbols = importer.module_global_symbols;
         next.helper_global_uses = importer.helper_global_uses;
         next.module_initialized_symbols = importer.module_initialized_symbols;
+        next.join_splits = join_splits;
 
         const cumetal::passes::PrintfLowerResult printf_lowered = [&] {
             common::CompileTrace trace("ptx_printf_lower", ptx.size(), function->name);
@@ -6496,6 +6575,32 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
             detail::remove_unreachable_blocks(next.raw_blocks);
             detail::remove_discarded_pack_halves(next.raw_blocks, next.normalized_instructions,
                                                next.entry, &next.instruction_origins);
+            for (const auto& split : next.join_splits) {
+                const auto index_of = [&](const std::string& name) -> std::optional<std::size_t> {
+                    for (std::size_t b = 0; b < next.raw_blocks.size(); ++b)
+                        if (next.raw_blocks[b].name == name) return b;
+                    return std::nullopt;
+                };
+                const auto block = index_of(split.block);
+                if (block && split.select) {
+                    if (detail::split_pointer_select(next.raw_blocks, next.builder, next.normalized_instructions,
+                            &next.instruction_origins, *block, *split.select)) continue;
+                }
+                std::vector<std::vector<std::size_t>> groups;
+                for (const auto& names : split.groups) {
+                    auto& group = groups.emplace_back();
+                    for (const auto& name : names)
+                        if (const auto predecessor = index_of(name)) group.push_back(*predecessor);
+                }
+                if (!block || !detail::split_join_block(next.raw_blocks, next.builder,
+                        next.normalized_instructions, &next.instruction_origins,
+                        next.synchronizing_functions, *block, groups)) {
+                    next.fail(nullptr, "cannot split PTX block '" + split.block +
+                                       "' by incoming pointer address space");
+                    importer = std::move(next);
+                    return false;
+                }
+            }
         }
         {
             common::CompileTrace trace("ptx_ssa", 0, function->name);
@@ -6529,6 +6634,30 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         }
         importer = std::move(next);
         return true;
+    };
+
+    // A join of private and device pointers fails type resolution with a
+    // split request. Retry the function with that block split; a derived
+    // pointer reaching a further join asks again, up to a bound.
+    const auto import_function = [&](const cumetal::ptx::EntryFunction* function,
+                                     bool is_kernel) -> bool {
+        std::vector<Importer::JoinSplit> join_splits;
+        for (;;) {
+            const Builder builder = importer.builder;
+            const auto warnings = importer.result.warnings.size();
+            const auto formats = importer.result.printf_formats.size();
+            if (import_attempt(function, is_kernel, join_splits)) return true;
+            auto request = std::exchange(importer.pending_join_split, std::nullopt);
+            if (!request || join_splits.size() >= 16 ||
+                std::find(join_splits.begin(), join_splits.end(), *request) != join_splits.end() ||
+                importer.result.error.find("conflicting PTX incoming type") == std::string::npos)
+                return false;
+            join_splits.push_back(std::move(*request));
+            importer.builder = builder;
+            importer.result.error.clear();
+            importer.result.warnings.resize(warnings);
+            importer.result.printf_formats.resize(formats);
+        }
     };
 
     for (const cumetal::ptx::EntryFunction* helper : reachable_helpers) {

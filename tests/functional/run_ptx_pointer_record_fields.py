@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 import subprocess
+import tempfile
 import sys
 
 
@@ -61,8 +62,21 @@ def run_case(build, case):
             'reject-narrow': 'ld.local.u32 %rd2, [%rd1];',
         }
         invalid = source.replace('ld.local.u64 %rd2, [%rd1];', definitions[case])
-        expect_compile_failure(build, invalid, 'integer_probe', 'does not match')
-        print('REJECTED ' + case.removeprefix('reject-') + ' pointer-field definition')
+        if case == 'reject-predicated':
+            expect_compile_failure(build, invalid, 'integer_probe', 'predicated non-branch operations')
+            print('REJECTED predicated pointer-field definition')
+            return
+        # A redefined or narrowed register is the integer PTX names, read as a
+        # raw address; it must not inherit the record field's pointer. Only the
+        # output field (+8) is then loaded as a device pointer.
+        with tempfile.TemporaryDirectory(prefix='cumetal-record-field-') as work:
+            ptx, msl = Path(work) / 'test.ptx', Path(work) / 'test.metal'
+            ptx.write_text(invalid)
+            subprocess.run([str(build / 'cumetalc'), str(ptx), '--backend=cumetal-ir', '--ptx-strict',
+                            '--entry', 'integer_probe', '--emit=msl', '-o', str(msl)], check=True)
+            pointer_fields = msl.read_text().count('*reinterpret_cast<device uchar* thread*>')
+        assert pointer_fields == 1, (case, pointer_fields)
+        print('KEPT ' + case.removeprefix('reject-') + ' pointer-field definition an integer')
 
 
 def main():
