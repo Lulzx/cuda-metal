@@ -49,9 +49,12 @@ workload, not general LAMMPS compatibility. See the
 LAMMPS' own force-style unit tests (`test_pair_style`, `test_bond_style`,
 `test_angle_style`, `test_dihedral_style`, `test_improper_style`,
 `test_fix_timestep`; MOLECULE, MANYBODY and KSPACE packages; `*kokkos*` cases)
-pass 715 of 716 yaml tests on the GPU build as of 2026-10-05, with no failing
-case (the Kokkos/OpenMP CPU control passes all 493 Kokkos cases). The one
-missing test is `KSpaceStyles`, which is not built. Run the tests serially: two
+pass 716 of 716 tests on the GPU build as of 2026-10-05 (the Kokkos/OpenMP
+CPU control passes all 493 Kokkos cases). One of the 716, `KSpaceStyles`
+(`test_kspace_styles`), runs no kernels: it excludes the `kk` suffix styles by
+design, so it checks the CPU kspace styles in a CuMetal-linked binary and adds
+no GPU coverage. Its 20 `*_omp` cases skip because the OPENMP package is not
+built. Run the tests serially: two
 test processes sharing one `CUMETAL_CACHE_DIR` produce spurious launch and
 Thrust failures.
 

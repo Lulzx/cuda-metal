@@ -63,9 +63,10 @@ if [[ "${CUMETAL_LAMMPS_TESTS:-0}" = 1 ]]; then
     COMMON+=(-DENABLE_TESTING=ON -DPKG_MOLECULE=ON -DPKG_MANYBODY=ON -DPKG_KSPACE=ON)
     # Every unittest executable statically links all of LAMMPS (hundreds of MB
     # each with Kokkos/CUDA; a full tree exceeded 22 GB). The force-style yaml
-    # tests run on these six.
+    # tests run on these six; test_kspace_styles is the CPU-only KSpaceStyles.
     TARGETS=(--target lmp test_pair_style test_bond_style test_angle_style
-        test_dihedral_style test_improper_style test_fix_timestep)
+        test_dihedral_style test_improper_style test_fix_timestep
+        test_kspace_styles)
 fi
 
 CPU_ONLY=0
