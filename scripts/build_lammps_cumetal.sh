@@ -6,6 +6,9 @@
 # CUMETAL_CLANG: CUDA-capable clang++; CUMETAL_JOBS: parallel build jobs.
 # CUMETAL_LAMMPS_TESTS=1: also build the LAMMPS unit tests plus the packages
 # whose Kokkos styles they cover, into separate *-tests build directories.
+# CUMETAL_LAMMPS_FFT_KOKKOS=CUFFT: route the GPU build's Kokkos FFTs through
+# CuMetal's cuFFT (into a separate *-cufft directory). LAMMPS defaults to the
+# KISS FFT, whose recursive kf_work Metal cannot run, so PPPM is refused.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,6 +18,7 @@ SRC="${CUMETAL_LAMMPS_DIR:-/tmp/cumetal-lammps-30Sep2026}"
 BUILD="${CUMETAL_BUILD_DIR:-${ROOT_DIR}/build}"
 CLANG="${CUMETAL_CLANG:-/opt/homebrew/opt/llvm/bin/clang++}"
 JOBS="${CUMETAL_JOBS:-6}"
+FFT_KOKKOS="${CUMETAL_LAMMPS_FFT_KOKKOS:-KISS}"
 MODE="${1:---gpu}"
 case "${MODE}" in
     --gpu|--gpu-double|--cpu|--cpu-double|--cpu-omp|--cpu-omp-double|--compare|--probe) ;;
@@ -26,6 +30,9 @@ esac
 }
 [[ -x "${CLANG}" ]] || { echo "Missing clang++: ${CLANG}" >&2; exit 2; }
 [[ "${JOBS}" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid CUMETAL_JOBS" >&2; exit 2; }
+[[ "${FFT_KOKKOS}" = KISS || "${FFT_KOKKOS}" = CUFFT ]] || {
+    echo "CUMETAL_LAMMPS_FFT_KOKKOS must be KISS or CUFFT." >&2; exit 2;
+}
 
 if [[ ! -e "${SRC}" ]]; then
     git clone --depth 1 --branch "${TAG}" https://github.com/lammps/lammps.git "${SRC}"
@@ -108,6 +115,7 @@ if [[ "${CPU_ONLY}" = 0 ]]; then
         GPU_BUILD="${SRC}/build-cumetal-cuda-double${SUFFIX}"
         GPU_PREC=double
     fi
+    [[ "${FFT_KOKKOS}" = CUFFT ]] && GPU_BUILD="${GPU_BUILD}-cufft"
     GPU_TESTS=()
     # The utils FFT tests link CUDA::cudart, which this configuration never
     # imports; the force-style tests that are compared do not need them.
@@ -116,7 +124,7 @@ if [[ "${CPU_ONLY}" = 0 ]]; then
         ${GPU_TESTS[@]+"${GPU_TESTS[@]}"} \
         -DCMAKE_CXX_COMPILER="${SRC}/lib/kokkos/bin/nvcc_wrapper" \
         -DKokkos_ENABLE_CUDA=ON -DKokkos_ARCH_AMPERE80=ON \
-        -DKokkos_ENABLE_CUDA_RELOCATABLE_DEVICE_CODE=OFF \
+        -DKokkos_ENABLE_CUDA_RELOCATABLE_DEVICE_CODE=OFF -DFFT_KOKKOS="${FFT_KOKKOS}" \
         -DCUDAToolkit_ROOT="${TOOLKIT}" \
         -DCMAKE_CXX_FLAGS="-mllvm -inline-threshold=100000" \
         -DCMAKE_EXE_LINKER_FLAGS="-L${BUILD} -Xlinker -rpath -Xlinker ${BUILD}"
