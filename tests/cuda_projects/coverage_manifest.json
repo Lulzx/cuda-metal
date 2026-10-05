@@ -221,6 +221,17 @@
       "expect_pattern": "PASS: fp64 emulation meets the ~48-bit significand contract"
     },
     {
+      "name": "fp64_reciprocal",
+      "subdir": "fp64_reciprocal",
+      "source": "fp64_reciprocal.cu",
+      "binary": "fp64_reciprocal",
+      "harness": "strict",
+      "expect_pattern": "PASS: fp64 reciprocal matches host on Apple GPU",
+      "backends": [
+        "cumetal-ir"
+      ]
+    },
+    {
       "name": "system_atomics",
       "subdir": "system_atomics",
       "source": "system_atomics.cu",

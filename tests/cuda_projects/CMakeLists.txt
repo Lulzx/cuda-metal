@@ -534,6 +534,32 @@ set_tests_properties(
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
 )
 
+# `1.0 / x` in double reached Metal as a division by the integer 1 (the
+# smallest subnormal), so every reciprocal was 0 and LAMMPS' double-precision
+# LJ forces vanished in every FP64 mode. The typed backend is the one that
+# accepts rcp.f64; the legacy PTX path refuses it.
+foreach(fp64_mode fast48 wide48 ieee64)
+    add_test(
+        NAME functional_cuda_projects_fp64_reciprocal_${fp64_mode}
+        COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}
+            fp64_reciprocal
+            fp64_reciprocal.cu
+            fp64_reciprocal_${fp64_mode}
+            "PASS: fp64 reciprocal matches host on Apple GPU"
+    )
+    set_tests_properties(
+        functional_cuda_projects_fp64_reciprocal_${fp64_mode}
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            RUN_SERIAL TRUE
+            ENVIRONMENT
+                "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_FP64_MODE=${fp64_mode}"
+    )
+endforeach()
+
 add_test(
     NAME functional_cuda_projects_ggml_output_ops
     COMMAND bash

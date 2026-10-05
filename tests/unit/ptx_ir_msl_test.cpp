@@ -2734,6 +2734,38 @@ TRAP:
         std::cerr << directed_probe.source << "\n";
     }
 
+    // rcp.rn.f64 imports as 1.0 / x. binary64 lowers to raw bits in a ulong,
+    // so the literal must be spelled as its bit pattern: a decimal `1.0`
+    // converts to the integer 1 (the smallest denormal) and every reciprocal
+    // underflows to zero. LAMMPS' double-precision LJ forces vanished this way.
+    const std::string rcp_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry rcp_probe(.param .u64 input, .param .u64 output) {
+    .reg .b64 %rd<6>;
+    ld.param.u64 %rd1, [input];
+    ld.param.u64 %rd2, [output];
+    ld.global.b64 %rd3, [%rd1];
+    rcp.rn.f64 %rd4, %rd3;
+    st.global.b64 [%rd2], %rd4;
+    ret;
+}
+)ptx";
+    for (const char* mode : {"fast48", "wide48", "ieee64"}) {
+        metal::PtxToMslOptions rcp_options;
+        rcp_options.fp64_mode = mode;
+        const metal::PtxToMslResult rcp_probe = metal::compile_ptx_to_msl(rcp_ptx, rcp_options);
+        const bool bits = rcp_probe.source.find("0x3ff0000000000000ul") != std::string::npos;
+        const bool decimal = rcp_probe.source.find("(1.0,") != std::string::npos;
+        ok &= expect(rcp_probe.ok && bits && !decimal,
+                     std::string("rcp.rn.f64 spells 1.0 as binary64 bits in ") + mode + ": " +
+                         rcp_probe.error);
+        if (rcp_probe.ok && (!bits || decimal)) {
+            std::cerr << rcp_probe.source << "\n";
+        }
+    }
+
     const std::string rint_ptx = R"ptx(
 .version 7.0
 .target sm_80

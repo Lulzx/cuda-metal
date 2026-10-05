@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <unordered_set>
 
 namespace cumetal::metal {
@@ -2501,6 +2502,23 @@ struct AstLowerer {
                                     operand.type.kind == ir::TypeKind::kInteger;
         if (scalar_operand && operand.type.bit_width == 64 && spelling.starts_with("0d")) {
             spelling = "0x" + spelling.substr(2) + "ul";
+        } else if (operand.type.kind == ir::TypeKind::kFloat && operand.type.bit_width == 64 &&
+                   !spelling.starts_with("0x")) {
+            // binary64 lowers to its raw bits in a ulong, so a decimal literal
+            // such as rcp's `1.0` would convert to the integer 1 -- the
+            // smallest denormal -- and 1/x would silently become 0.
+            char* end = nullptr;
+            const double value = std::strtod(spelling.c_str(), &end);
+            if (end == spelling.c_str() || *end != '\0') {
+                fail(nullptr, "unparseable binary64 literal '" + spelling + "'");
+            } else {
+                std::uint64_t bits = 0;
+                std::memcpy(&bits, &value, sizeof bits);
+                char hex[32];
+                std::snprintf(hex, sizeof hex, "0x%016llxul",
+                              static_cast<unsigned long long>(bits));
+                spelling = hex;
+            }
         }
         if (scalar_operand && operand.type.bit_width == 32 && is_ptx_hex_float_literal(spelling)) {
             spelling = operand.type.kind == ir::TypeKind::kFloat
