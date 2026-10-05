@@ -582,6 +582,31 @@ set_tests_properties(
             "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_FP64_MODE=ieee64"
 )
 
+# Native atom.add.f64, the form Kokkos emits for sm_60+ (the header's
+# atomicAdd(double*) is a CAS loop). It shares the 64-bit lock bank and adds
+# with the active FP64 mode; device and threadgroup memory are both contended.
+foreach(fp64_mode fast48 ieee64)
+    add_test(
+        NAME functional_cuda_projects_fp64_atomic_add_${fp64_mode}
+        COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}
+            fp64_atomic_add
+            fp64_atomic_add.cu
+            fp64_atomic_add_${fp64_mode}
+            "PASS: contended native double atomic add exact"
+    )
+    set_tests_properties(
+        functional_cuda_projects_fp64_atomic_add_${fp64_mode}
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            RUN_SERIAL TRUE
+            ENVIRONMENT
+                "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_FP64_MODE=${fp64_mode}"
+    )
+endforeach()
+
 # if (tid == 0) init; __syncthreads(); update; __syncthreads(); if (tid == 0)
 # read. Both guards share one predicate, and the PTX edge threader once cloned
 # the barrier region per edge; Metal paired the copies and lost lane 0's peers.

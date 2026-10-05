@@ -246,6 +246,17 @@
       }
     },
     {
+      "name": "fp64_atomic_add",
+      "subdir": "fp64_atomic_add",
+      "source": "fp64_atomic_add.cu",
+      "binary": "fp64_atomic_add",
+      "harness": "strict",
+      "expect_pattern": "PASS: contended native double atomic add exact",
+      "backends": [
+        "cumetal-ir"
+      ]
+    },
+    {
       "name": "barrier_edge_threading",
       "subdir": "barrier_edge_threading",
       "source": "barrier_edge_threading.cu",

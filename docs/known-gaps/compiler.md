@@ -59,8 +59,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/48 | **48/48** |
-| PTX / `--cuda-device` | **43/48** | **46/48** |
+| direct `.cu` | 0/49 | **49/49** |
+| PTX / `--cuda-device` | **44/49** | **47/49** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
@@ -201,7 +201,12 @@ emulation` semantic caveat in the generated source and report
 `semantic_emulation` quality; the registration-JIT PTX-to-LLVM path applies
 the same decode/evaluate/re-encode expansion in AIR text. All three paths
 report it at run time (and `cumetalc` at compile time) with a one-time
-warning; there is no binary64 implementation behind any of them yet. The double
+warning. Under `ieee64` the typed PTX and NVVM paths call VF64's correctly
+rounded binary64 functions for the 22 functions VF64 provides (`exp`, `log`,
+`pow`, trigonometric and hyperbolic families, `cbrt`, `hypot`, ...; see
+[FP64 policy](../fp64-policy.md)) and do not warn for them; `powi`, `exp10`,
+`log10`, the `erf` and gamma families, and every call under `fast48`/`wide48`
+or the legacy path remain binary32. The double
 pointer-out builtins `sincos`, `modf`, `frexp`, and `sincospi` follow the
 same fallback on all paths: out-params keep their ABI (`int` exponent for
 `frexp`, binary64 storage elsewhere), and `modf`'s integral part is

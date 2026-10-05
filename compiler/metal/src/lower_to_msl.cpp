@@ -316,6 +316,26 @@ MslFunction make_grid_sync_helper() {
     return helper;
 }
 
+// Metal has no 64-bit atomics. A binary64 atomic add takes the same
+// address-hashed lock as the 64-bit integer forms and adds with the active FP64
+// mode's software add over the raw storage bits.
+bool is_lock_backed_f64_add(const ir::Operation& operation) {
+    return operation.opcode == ir::OpCode::kMetalAtomic &&
+           operation.result_types.size() == 1 &&
+           operation.result_types.front() == ir::Type::floating(64) &&
+           operation.attributes.contains("atomic_op") &&
+           operation.attributes.at("atomic_op") == "add" && !operation.operands.empty();
+}
+
+std::string f64_atomic_operation(const ir::Module& module, const ir::Operation& operation) {
+    for (const auto* attributes : {&operation.attributes, &module.attributes}) {
+        if (const auto mode = attributes->find("fp64_mode"); mode != attributes->end()) {
+            return "fadd_" + mode->second;
+        }
+    }
+    return "fadd_fast48";
+}
+
 std::string wide_atomic_helper_name(std::string_view operation, bool is_signed,
                                     MslAddressSpace address_space) {
     return "cm_wide_atomic_" + std::string(operation) +
@@ -374,14 +394,26 @@ MslFunction make_wide_atomic_u64_helper(std::string operation, bool is_signed,
     const auto fence = [&]() {
         return MslStatement::expression(MslExpression::call(
             "atomic_thread_fence",
-            {MslExpression::literal("mem_flags::mem_device", MslType::uint()),
+            // The lock lives in device memory, so it only orders accesses
+            // the fence names: a threadgroup payload needs mem_threadgroup or
+            // the next holder can read a stale value and drop an update.
+            {MslExpression::literal(address_space == MslAddressSpace::kThreadgroup
+                                        ? "mem_flags::mem_device | mem_flags::mem_threadgroup"
+                                        : "mem_flags::mem_device",
+                                    MslType::uint()),
              MslExpression::identifier("memory_order_seq_cst", memory_order),
              MslExpression::identifier("thread_scope_device", thread_scope)},
             MslType::void_type()));
     };
 
     MslExpr updated;
-    if (operation == "exch" || operation == "xchg") {
+    if (operation.starts_with("fadd_")) {
+        const std::string mode = operation.substr(5);
+        updated = MslExpression::call(mode == "ieee64"   ? "vf64_add_rne"
+                                      : mode == "wide48" ? "vf64_wide_add"
+                                                         : "cm_fp64_fast_add",
+                                      {old, operand}, u64);
+    } else if (operation == "exch" || operation == "xchg") {
         updated = operand;
     } else if (operation == "cas") {
         updated = MslExpression::conditional(
@@ -2290,7 +2322,7 @@ WideAtomicUsageMap analyze_wide_atomic_usage(const ir::Module& module) {
         bool direct = false;
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::Operation& operation : block.operations) {
-                direct = direct ||
+                direct = direct || is_lock_backed_f64_add(operation) ||
                          (operation.opcode == ir::OpCode::kMetalAtomic &&
                           operation.result_types.size() == 1 &&
                           operation.result_types.front().kind ==
@@ -4826,14 +4858,15 @@ struct AstLowerer {
                 operation.results.size() == 1 && operation.result_types.size() == 1 &&
                 operation.result_types.front().kind == ir::TypeKind::kFloat &&
                 operation.result_types.front().bit_width == 32;
-            if (!float_result &&
+            const bool f64_add = is_lock_backed_f64_add(operation);
+            if (!float_result && !f64_add &&
                 (operation.results.size() != 1 || operation.result_types.size() != 1 ||
                  operation.result_types.front().kind != ir::TypeKind::kInteger ||
                  (operation.result_types.front().bit_width != 32 &&
                   operation.result_types.front().bit_width != 64))) {
                 fail(&operation,
                      "Metal atomic lowering requires one 32-bit integer or float, or "
-                     "lock-backed 64-bit integer result");
+                     "lock-backed 64-bit integer or binary64-add result");
                 return std::nullopt;
             }
             const auto atomic_op = operation.attributes.find("atomic_op");
@@ -5006,7 +5039,9 @@ struct AstLowerer {
                     "add", "and", "or", "xor", "min", "max", "exch", "xchg",
                     "cas",
                 };
-                if (!kWideAtomicOperations.contains(operation_name)) {
+                const std::string helper_operation =
+                    f64_add ? f64_atomic_operation(module, operation) : operation_name;
+                if (!f64_add && !kWideAtomicOperations.contains(operation_name)) {
                     fail(&operation, "unsupported lock-backed 64-bit Metal atomic '" +
                                          operation_name + "'");
                     return std::nullopt;
@@ -5029,7 +5064,7 @@ struct AstLowerer {
                 const MslExpr compare =
                     is_cas ? as_u64(operation.operands[1]) : zero;
                 MslExpr call = MslExpression::call(
-                    wide_atomic_helper_name(operation_name, is_signed, address_space),
+                    wide_atomic_helper_name(helper_operation, is_signed, address_space),
                     {payload, operand, compare,
                      MslExpression::identifier(
                          "cm_atomic_lock_bank",

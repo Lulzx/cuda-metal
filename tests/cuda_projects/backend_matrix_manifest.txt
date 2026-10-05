@@ -31,6 +31,7 @@ tests/cuda_projects/fp64/fp64_precision.cu fail pass pass pass
 tests/cuda_projects/fp64_atomic_add/fp64_atomic_add.cu fail pass pass pass
 tests/cuda_projects/fp64_device_calls/fp64_device_calls.cu fail pass fail fail
 tests/cuda_projects/fp64_reciprocal/fp64_reciprocal.cu fail pass fail pass
+tests/cuda_projects/fp64_vf64_math/fp64_vf64_math.cu fail pass pass pass
 tests/cuda_projects/ggml_output_ops/ggml_output_ops.cu fail pass pass pass
 tests/cuda_projects/initialized_global/initialized_global.cu fail pass pass pass
 tests/cuda_projects/inline_ptx_idioms/inline_ptx_idioms.cu fail pass pass pass

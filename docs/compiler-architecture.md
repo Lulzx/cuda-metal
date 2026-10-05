@@ -145,8 +145,8 @@ uses CUDA Clang 21-23:
 
 | Input corpus | `legacy` | `cumetal-ir` |
 | --- | ---: | ---: |
-| direct `.cu` | 0/48 | **48/48** |
-| `.cu --cuda-device` / PTX | **43/48** | **46/48** |
+| direct `.cu` | 0/49 | **49/49** |
+| `.cu --cuda-device` / PTX | **44/49** | **47/49** |
 
 Direct `.cu` therefore defaults to `cumetal-ir`; PTX and `--cuda-device`
 default to `legacy`. Reproduce the reviewed per-file baseline with:
