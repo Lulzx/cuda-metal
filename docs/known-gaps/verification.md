@@ -49,18 +49,18 @@ workload, not general LAMMPS compatibility. See the
 LAMMPS' own force-style unit tests (`test_pair_style`, `test_bond_style`,
 `test_angle_style`, `test_dihedral_style`, `test_improper_style`,
 `test_fix_timestep`; MOLECULE, MANYBODY and KSPACE packages; `*kokkos*` cases)
-pass 711 of 716 yaml tests on the GPU build as of 2026-10-05 (the Kokkos/OpenMP
-CPU control passes all 493 Kokkos cases). `KSpaceStyles` is not built. Run the
-tests serially: two test processes sharing one `CUMETAL_CACHE_DIR` produce
-spurious launch and Thrust failures. The 4 failures are compile refusals that
-Kokkos reports as `cudaErrorInvalidValue`, none of them a wrong answer:
+pass 715 of 716 yaml tests on the GPU build as of 2026-10-05, with no failing
+case (the Kokkos/OpenMP CPU control passes all 493 Kokkos cases). The one
+missing test is `KSpaceStyles`, which is not built. Run the tests serially: two
+test processes sharing one `CUMETAL_CACHE_DIR` produce spurious launch and
+Thrust failures.
 
-- PPPM (`pppm_tip4p`, `_nozforce`, `_slab`, `pppm_tri_slab`) uses the KISS FFT,
-  whose `kf_work` recurses; Metal has no recursion, so the FFT kernel is
-  refused (the double atomic add in `make_rho_atomic` now lowers). The test
-  build chose KISS (`FFT_KOKKOS=KISS`); a build with `FFT_KOKKOS=CUFFT` would
-  route the FFT through CuMetal's cuFFT instead, and has not been tried.
-
+PPPM needs the build with `CUMETAL_LAMMPS_FFT_KOKKOS=CUFFT`
+(`scripts/build_lammps_cumetal.sh`). LAMMPS defaults to the KISS FFT, whose
+recursive `kf_work` Metal cannot run, so the four PPPM tests are refused in a
+KISS build. Under cuFFT they exposed two runtime bugs: a CPU transform
+dereferencing a Metal GPU address, and CPU-backed library calls on stream 0
+that did not wait for Kokkos' blocking stream (forces off by up to 4e8).
 `coul_long`, `coul_table` and `hybrid-scaled` passed once a register joining
 the functor's stack copy and the device view (`itype < 13 ? m_params :
 params`) was split per address space.

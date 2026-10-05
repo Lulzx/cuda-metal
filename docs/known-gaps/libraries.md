@@ -47,6 +47,12 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   output counts that exceed the tracked allocation remainder before enqueue;
   complete distributions, state
   serialization, and device API parity remain open.
+- **CPU-backed library calls and streams:** cuFFT, cuBLAS, cuBLASLt, cuSPARSE,
+  cuSOLVER, cuDNN and cuRAND compute some calls on the CPU. Those calls first
+  wait for the handle's stream, and on the legacy default stream for the whole
+  device, since CUDA orders a default-stream call after every blocking stream.
+  The device-wide wait also covers non-blocking streams, which costs
+  concurrency, not correctness.
 - **cuFFT:** ranks 1 to 3 execute for every transform type, including cuFFT's
   advanced data layout (`inembed`/`onembed`/stride/dist), which is what a padded
   grid such as GROMACS's PME mesh needs. Eligible dense, out-of-place rank-3
