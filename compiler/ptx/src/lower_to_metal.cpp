@@ -4,6 +4,7 @@
 #include "cumetal/passes/phase1_pipeline.h"
 #include "cumetal/ptx/parser.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -3461,6 +3462,10 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
         result.entry_name = compiled.gpu_ir.functions.front().name;
         result.lowering_kind = MetalLoweringKind::kGenericCumetalIr;
         result.printf_formats = compiled.printf_formats;
+        const auto& caveats = compiled.gpu_ir.semantic_caveats;
+        result.fp64_libdevice_via_f32 =
+            std::find(caveats.begin(), caveats.end(),
+                      cumetal::ir::kFp64LibdeviceViaF32Caveat) != caveats.end();
         result.metal_source =
             "// cumetal-provenance: generic_ptx_lowering\n"
             "// cumetal-lowering: generic_ptx\n" +

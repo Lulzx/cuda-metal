@@ -193,7 +193,9 @@ overflows to `inf` near 88 rather than ~709. On the typed source/PTX-to-MSL
 paths modules carry the `FP64 libdevice calls evaluate through binary32 under
 emulation` semantic caveat in the generated source and report
 `semantic_emulation` quality; the registration-JIT PTX-to-LLVM path applies
-the same decode/evaluate/re-encode expansion in AIR text. The double
+the same decode/evaluate/re-encode expansion in AIR text. All three paths
+report it at run time (and `cumetalc` at compile time) with a one-time
+warning; there is no binary64 implementation behind any of them yet. The double
 pointer-out builtins `sincos`, `modf`, `frexp`, and `sincospi` follow the
 same fallback on all paths: out-params keep their ABI (`int` exponent for
 `frexp`, binary64 storage elsewhere), and `modf`'s integral part is

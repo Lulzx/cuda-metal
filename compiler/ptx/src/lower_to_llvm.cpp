@@ -289,6 +289,7 @@ struct GenericLlvmBodyResult {
     bool uses_device_heap = false;
     bool uses_device_launch_queue = false;
     bool uses_device_clock = false;
+    bool fp64_libdevice_via_f32 = false;
     std::string body_ir;
     std::string helper_ir;
     std::vector<ParamInfo> builtin_params;
@@ -1275,6 +1276,7 @@ class GenericLlvmEmitter {
         result.uses_device_heap = uses_device_heap_;
         result.uses_device_launch_queue = module_uses_device_launch_queue_;
         result.uses_device_clock = module_uses_device_clock_;
+        result.fp64_libdevice_via_f32 = fp64_libdevice_via_f32_;
         result.body_ir = body_.str();
         result.declarations.assign(declarations_.begin(), declarations_.end());
         result.builtin_params = builtin_params_added_;
@@ -1390,6 +1392,7 @@ class GenericLlvmEmitter {
 
     std::unordered_set<std::string> declarations_;
     std::vector<std::string> warnings_;
+    bool fp64_libdevice_via_f32_ = false;
     std::string error_;
 
     std::ostringstream entry_allocas_;
@@ -7271,6 +7274,7 @@ class GenericLlvmEmitter {
             -> std::optional<std::string> {
             auto bits = load_call_slot_value(emit_os, slot_name, 64);
             if (!bits) return std::nullopt;
+            fp64_libdevice_via_f32_ = true;
             const std::string value = next_tmp("f64via32_in");
             if (cumetal::ptx::fp64_mode_links_vf64_support(fp64_mode_)) {
                 declarations_.insert("declare i32 @vf64_f64_to_f32(i64, i32)");
@@ -10354,6 +10358,7 @@ GenericLlvmBodyResult try_emit_generic_llvm_body(std::string_view ptx_source,
                 helper_ir << function_arg_decls[i];
             }
             helper_ir << ") {\nentry:\n" << function_body.body_ir << "}\n\n";
+            out.fp64_libdevice_via_f32 |= function_body.fp64_libdevice_via_f32;
             helper_declarations.insert(function_body.declarations.begin(),
                                        function_body.declarations.end());
         }
@@ -11324,6 +11329,7 @@ LowerToLlvmResult lower_ptx_to_llvm_ir(std::string_view ptx, const LowerToLlvmOp
     }
     result.uses_device_launch_queue =
         use_generic_body && generic_body.uses_device_launch_queue;
+    result.fp64_libdevice_via_f32 = use_generic_body && generic_body.fp64_libdevice_via_f32;
     result.warnings = pipeline.warnings;
     result.warnings.insert(result.warnings.end(), device_printf_warnings.begin(),
                            device_printf_warnings.end());

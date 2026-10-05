@@ -335,6 +335,12 @@ struct ExternalSymbol {
     std::vector<std::uint8_t> initializer;
 };
 
+// Recorded when a double libdevice call (exp, log, pow, trig, ...) has no
+// binary64 implementation and is evaluated in binary32 instead, under every
+// FP64 mode including ieee64. The runtime turns it into a visible warning.
+inline constexpr const char* kFp64LibdeviceViaF32Caveat =
+    "FP64 libdevice calls evaluate through binary32 under emulation";
+
 struct Module {
     std::string source_name;
     IrStage stage = IrStage::kGpuSemantic;

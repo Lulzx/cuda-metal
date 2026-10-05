@@ -569,7 +569,8 @@ bool parse_ptx_image(const void* image, std::string* out_ptx) {
            cumetal::fatbin::ElfPtxStatus::kFound;
 }
 
-bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path) {
+bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path,
+                               bool* toolchain_missing) {
     if (ptx.empty() || out_path == nullptr) {
         return false;
     }
@@ -602,6 +603,9 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path) {
                          lowered.error.empty() ? "empty LLVM IR" : lowered.error.c_str());
         }
         return false;
+    }
+    if (lowered.fp64_libdevice_via_f32) {
+        cumetal::warn_fp64_libdevice_via_f32(cumetal::ptx::fp64_mode_name(lower_opts.fp64_mode));
     }
 
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -654,6 +658,18 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path) {
                          emitted.error.empty() ? "empty output path" : emitted.error.c_str());
         }
         std::filesystem::remove(metallib_path, ec);
+        return false;
+    }
+    if (emitted.mode_used == cumetal::air_emitter::EmitMode::kExperimentalContainer) {
+        // A test container without AIR: loading it would succeed and every
+        // launch would then fail without naming the cause.
+        cumetal::warn_once(
+            "metal-toolchain-missing",
+            "kernel JIT needs Apple's offline Metal compiler (`xcrun metal`), which was "
+            "not found; kernels that require it cannot run. Install Xcode, then run "
+            "`xcodebuild -downloadComponent MetalToolchain`.");
+        std::filesystem::remove(emitted.output, ec);
+        *toolchain_missing = true;
         return false;
     }
 
@@ -1620,7 +1636,8 @@ CUresult cuModuleLoadData(CUmodule* module, const void* image) {
     std::string ptx_text;
     if (parse_ptx_image(image, &ptx_text)) {
         std::string compiled_metallib_path;
-        if (emit_ptx_to_temp_metallib(ptx_text, &compiled_metallib_path)) {
+        bool toolchain_missing = false;
+        if (emit_ptx_to_temp_metallib(ptx_text, &compiled_metallib_path, &toolchain_missing)) {
             const CUresult load_status =
                 create_module_from_path(compiled_metallib_path, /*owns_path=*/true, module);
             if (load_status != CUDA_SUCCESS) {
@@ -1628,6 +1645,9 @@ CUresult cuModuleLoadData(CUmodule* module, const void* image) {
                 std::filesystem::remove(compiled_metallib_path, ec);
             }
             return load_status;
+        }
+        if (toolchain_missing) {
+            return CUDA_ERROR_JIT_COMPILER_NOT_FOUND;
         }
     }
 
@@ -2670,6 +2690,9 @@ CUresult cuGetErrorName(CUresult error, const char** pStr) {
             break;
         case CUDA_ERROR_NO_BINARY_FOR_GPU:
             *pStr = "CUDA_ERROR_NO_BINARY_FOR_GPU";
+            break;
+        case CUDA_ERROR_JIT_COMPILER_NOT_FOUND:
+            *pStr = "CUDA_ERROR_JIT_COMPILER_NOT_FOUND";
             break;
         case CUDA_ERROR_NOT_FOUND:
             *pStr = "CUDA_ERROR_NOT_FOUND";

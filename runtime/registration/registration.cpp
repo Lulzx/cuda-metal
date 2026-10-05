@@ -69,6 +69,8 @@ struct RegistrationCacheMetadata {
     std::vector<std::string> printf_formats;
     bool uses_device_heap = false;
     bool uses_device_launch_queue = false;
+    // A double libdevice call runs in binary32; kept so warm cache hits warn too.
+    bool fp64_libdevice_via_f32 = false;
 };
 
 // Identity of the libcumetal binary currently executing, taken from its Mach-O LC_UUID.
@@ -296,6 +298,7 @@ bool write_registration_metadata(const std::filesystem::path& artifact_path,
     std::uint32_t flags = 0;
     if (metadata.uses_device_heap) flags |= 1u;
     if (metadata.uses_device_launch_queue) flags |= 2u;
+    if (metadata.fp64_libdevice_via_f32) flags |= 4u;
     append_u32_le(&bytes, flags);
     append_u32_le(&bytes, static_cast<std::uint32_t>(metadata.printf_formats.size()));
     for (const std::string& format : metadata.printf_formats) {
@@ -342,13 +345,14 @@ bool read_registration_metadata(const std::filesystem::path& artifact_path,
     std::uint32_t count = 0;
     if (!consume_u32_le(bytes, &offset, &flags) ||
         !consume_u32_le(bytes, &offset, &count) ||
-        (flags & ~3u) != 0 || count > kMaxRegistrationPrintfFormats) {
+        (flags & ~7u) != 0 || count > kMaxRegistrationPrintfFormats) {
         return false;
     }
 
     RegistrationCacheMetadata parsed;
     parsed.uses_device_heap = (flags & 1u) != 0;
     parsed.uses_device_launch_queue = (flags & 2u) != 0;
+    parsed.fp64_libdevice_via_f32 = (flags & 4u) != 0;
     parsed.printf_formats.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
         std::uint32_t size = 0;
@@ -1008,6 +1012,12 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         if (out_uses_device_launch_queue != nullptr) {
             *out_uses_device_launch_queue = metadata.uses_device_launch_queue;
         }
+        if (metadata.fp64_libdevice_via_f32) {
+            // The MSL only carries this as a comment; nobody running the
+            // program reads that, and a cached metallib has no comments.
+            cumetal::warn_fp64_libdevice_via_f32(
+                cumetal::ptx::fp64_mode_name(cumetal::ptx::fp64_mode_from_env()));
+        }
     };
 
     // Check the persistent artifact and its metadata sidecar before invoking
@@ -1102,6 +1112,7 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         .printf_formats = lowered_metal.printf_formats,
         .uses_device_heap = lowered_metal.uses_device_heap,
     };
+    metadata.fp64_libdevice_via_f32 = lowered_metal.fp64_libdevice_via_f32;
     if (ptx_source.find("cudaLaunchDevice") != std::string::npos ||
         ptx_source.find("cudaMemcpyAsync") != std::string::npos) {
         cumetal::ptx::LowerToLlvmOptions metadata_options;
@@ -1253,6 +1264,7 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         metadata.printf_formats = lowered.printf_formats;
         metadata.uses_device_heap = lowered.uses_device_heap;
         metadata.uses_device_launch_queue = lowered.uses_device_launch_queue;
+        metadata.fp64_libdevice_via_f32 |= lowered.fp64_libdevice_via_f32;
         const std::vector<std::uint8_t> ll_bytes(lowered.llvm_ir.begin(), lowered.llvm_ir.end());
         if (!cumetal::common::write_file_bytes(ll_path, ll_bytes, &io_error)) {
             REG_DEBUG("write LLVM IR failed: %s", io_error.c_str());
@@ -1319,6 +1331,13 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
                   "(metal toolchain was not available during lowering/JIT) - this kernel "
                   "is not executable on Metal; refusing to cache or use it",
                   kernel_name.c_str());
+        // The launch error this produces (often cudaErrorInvalidValue from
+        // cudaFuncGetAttributes) does not name the cause, so say it once.
+        cumetal::warn_once(
+            "metal-toolchain-missing",
+            "kernel JIT needs Apple's offline Metal compiler (`xcrun metal`), which was "
+            "not found; kernels that require it cannot run. Install Xcode, then run "
+            "`xcodebuild -downloadComponent MetalToolchain`.");
         remove_path_if_exists(emitted.output.string());
         // Do not treat as success; caller will fall back (leading to clear launch error)
         return false;

@@ -70,7 +70,11 @@ storage. This applies under every mode, including `ieee64`, so a kernel that
 calls `exp` on a `double` gets binary32 precision and binary32 range (`exp`
 overflows to `inf` near 88, not ~709). The generated module records the
 `FP64 libdevice calls evaluate through binary32 under emulation` semantic
-caveat rather than implying binary64 coverage. The double pointer-out
+caveat rather than implying binary64 coverage. Because that caveat is only an
+MSL comment, the runtime also prints a one-time `CUMETAL WARNING` naming the
+active `CUMETAL_FP64_MODE` the first time such a kernel is resolved -- from the
+JIT metadata on a warm cache hit too -- on the registration and driver paths,
+and `cumetalc` prints the same warning when it compiles one. The double pointer-out
 builtins `sincos`, `modf`, `frexp`, and `sincospi` evaluate the same way on
 every path, re-encoding each binary32 out-value into binary64 storage (or the
 `int` exponent slot for `frexp`) before the store.

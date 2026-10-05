@@ -451,6 +451,10 @@ add_executable(cumetal_runtime_fp64_ops_test
     runtime_fp64_ops_test.cpp
 )
 
+add_executable(cumetal_driver_jit_compiler_missing_test
+    driver_jit_compiler_missing_test.cpp
+)
+
 add_executable(cumetal_runtime_rope_neox_test
     runtime_rope_neox_test.cpp
 )
@@ -1162,6 +1166,11 @@ target_link_libraries(cumetal_runtime_grid_3d_test
 )
 
 target_link_libraries(cumetal_runtime_fp64_ops_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_driver_jit_compiler_missing_test
     PRIVATE
         cumetal_runtime
 )
@@ -3361,6 +3370,26 @@ add_test(
 )
 
 set_tests_properties(functional_runtime_fp64_ops PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_runtime_fp64_libdevice_warning
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_fp64_libdevice_warning.sh
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(functional_runtime_fp64_libdevice_warning PROPERTIES
+    SKIP_RETURN_CODE 77
+    RUN_SERIAL TRUE
+    ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}")
+
+add_test(
+    NAME functional_driver_jit_compiler_missing
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_driver_jit_compiler_missing.sh
+            $<TARGET_FILE:cumetal_driver_jit_compiler_missing_test>
+            ${CMAKE_CURRENT_SOURCE_DIR}/reference/fp64_mul_add.ptx
+)
 
 add_test(
     NAME functional_runtime_rope_neox

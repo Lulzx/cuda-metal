@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 
 namespace cumetal {
@@ -50,6 +51,20 @@ inline void warn_once(const std::string& key, const std::string& message) {
     }
     std::fprintf(stderr, "CUMETAL WARNING: %s\n", message.c_str());
     std::fflush(stderr);
+}
+
+// A kernel's double libdevice calls (exp, log, pow, trig, ...) have no binary64
+// implementation and were lowered through binary32. The generated MSL records
+// this only as a comment, so it has to be said at run time.
+inline void warn_fp64_libdevice_via_f32(std::string_view fp64_mode) {
+    warn_once("fp64-libdevice-via-f32",
+              std::string("a kernel calls double-precision math functions (exp, log, pow, "
+                          "trig, erf, ...) that have no binary64 implementation; they run in "
+                          "binary32 (about 7 significant digits, float range) even though "
+                          "CUMETAL_FP64_MODE=") +
+                  std::string(fp64_mode) +
+                  ". Only FP64 arithmetic, sqrt and fma follow that mode. See "
+                  "docs/fp64-policy.md.");
 }
 
 }  // namespace cumetal

@@ -82,6 +82,9 @@ struct LowerToLlvmResult {
     // monotonic/wraparound control-flow semantics without claiming timing
     // accuracy.
     bool uses_device_clock = false;
+    // A double libdevice call (exp, log, pow, trig, ...) has no binary64
+    // implementation and was evaluated in binary32, under every FP64 mode.
+    bool fp64_libdevice_via_f32 = false;
     std::vector<std::string> warnings;
     std::string error;
 };

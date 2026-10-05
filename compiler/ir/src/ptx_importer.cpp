@@ -5082,8 +5082,7 @@ struct Importer {
                 if (result.module.semantic_quality == SemanticQuality::kExact) {
                     result.module.semantic_quality = SemanticQuality::kSemanticEmulation;
                 }
-                const std::string caveat =
-                    "FP64 libdevice calls evaluate through binary32 under emulation";
+                const std::string caveat = kFp64LibdeviceViaF32Caveat;
                 if (std::find(result.module.semantic_caveats.begin(),
                               result.module.semantic_caveats.end(), caveat) ==
                     result.module.semantic_caveats.end()) {

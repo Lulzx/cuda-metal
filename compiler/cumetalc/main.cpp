@@ -504,6 +504,21 @@ bool write_text_output(const std::filesystem::path& output, std::string_view tex
     return cumetal::common::write_file_bytes(output, bytes, error);
 }
 
+// Double libdevice calls with no binary64 implementation are lowered through
+// binary32 in every FP64 mode. Say so where the user is looking.
+void warn_fp64_libdevice_via_f32(bool used, std::string_view fp64_mode) {
+    if (!used) return;
+    std::cerr << "cumetalc: warning: double-precision math functions (exp, log, pow, trig, "
+                 "erf, ...) have no binary64 implementation and are compiled to binary32 "
+                 "even with --fp64="
+              << fp64_mode << "; only FP64 arithmetic, sqrt and fma follow that mode\n";
+}
+
+bool uses_fp64_libdevice_via_f32(const cumetal::ir::Module& module) {
+    return std::find(module.semantic_caveats.begin(), module.semantic_caveats.end(),
+                     cumetal::ir::kFp64LibdeviceViaF32Caveat) != module.semantic_caveats.end();
+}
+
 bool emit_inspection_stage(const cumetal::metal::PtxToMslResult& compiled,
                            EmitStage stage, const std::filesystem::path& output,
                            bool overwrite, std::string* error) {
@@ -1724,6 +1739,8 @@ int main(int argc, char** argv) {
             lower_options.fp64_mode = ptx_fp64_mode;
             const auto lowered =
                 cumetal::ptx::lower_ptx_to_llvm_ir(std::string_view(ptx_source), lower_options);
+            warn_fp64_libdevice_via_f32(lowered.fp64_libdevice_via_f32,
+                                        cumetal::ptx::fp64_mode_name(ptx_fp64_mode));
             if (!lowered.ok ||
                 !write_text_output(options.output, lowered.llvm_ir, options.overwrite, &io_error)) {
                 std::cerr << "cumetalc failed: "
@@ -1746,6 +1763,8 @@ int main(int argc, char** argv) {
             for (const std::string& warning : compiled.warnings) {
                 std::cerr << "ptx warning: " << warning << "\n";
             }
+            warn_fp64_libdevice_via_f32(uses_fp64_libdevice_via_f32(compiled.gpu_ir),
+                                        compile_options.fp64_mode);
             if (!compiled.ok) {
                 std::cerr << "cumetalc failed: " << compiled.error << "\n";
                 return 1;
@@ -1798,6 +1817,8 @@ int main(int argc, char** argv) {
             for (const auto& warning : lowered_metal.warnings) {
                 std::cerr << "ptx warning: " << warning << "\n";
             }
+            warn_fp64_libdevice_via_f32(lowered_metal.fp64_libdevice_via_f32,
+                                        lower_to_metal_options.fp64_mode);
             if (!lowered_metal.ok) {
                 std::cerr << "cumetalc failed: PTX->Metal lowering failed: "
                           << lowered_metal.error << "\n";
@@ -1839,6 +1860,8 @@ int main(int argc, char** argv) {
                 const auto lowered =
                     cumetal::ptx::lower_ptx_to_llvm_ir(
                         std::string_view(ptx_source), lower_options);
+                warn_fp64_libdevice_via_f32(lowered.fp64_libdevice_via_f32,
+                                            cumetal::ptx::fp64_mode_name(ptx_fp64_mode));
                 if (!lowered.ok) {
                     std::cerr << "cumetalc failed: PTX lowering failed: "
                               << lowered.error << "\n";
@@ -1876,6 +1899,8 @@ int main(int argc, char** argv) {
             const auto compiled =
                 cumetal::metal::compile_nvvm_to_msl(llvm_ir, options.input.string(),
                     ptx_entry_name, cumetal::ptx::fp64_mode_name(ptx_fp64_mode));
+            warn_fp64_libdevice_via_f32(compiled.ok && uses_fp64_libdevice_via_f32(compiled.gpu_ir),
+                                        cumetal::ptx::fp64_mode_name(ptx_fp64_mode));
             if (!compiled.ok) {
                 std::cerr << "cumetalc failed: " << compiled.error << "\n";
                 return 1;
@@ -2020,6 +2045,8 @@ int main(int argc, char** argv) {
             const auto compiled = cumetal::metal::compile_nvvm_to_msl(
                 llvm_ir, original_input.string(), ptx_entry_name,
                 cumetal::ptx::fp64_mode_name(ptx_fp64_mode));
+            warn_fp64_libdevice_via_f32(compiled.ok && uses_fp64_libdevice_via_f32(compiled.gpu_ir),
+                                        cumetal::ptx::fp64_mode_name(ptx_fp64_mode));
             if (!compiled.ok) {
                 std::cerr << "cumetalc failed: " << compiled.error << "\n";
                 return 1;
