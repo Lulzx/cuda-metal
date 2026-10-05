@@ -5136,7 +5136,15 @@ struct Importer {
                     result.module.semantic_caveats.push_back(caveat);
                 }
             }
-            if (builtin_call && signature->fp64_via_f32) {
+            // Under ieee64 lower_to_msl calls VF64's correctly rounded
+            // binary64 function instead of the binary32 fallback.
+            const auto mode = result.module.attributes.find("fp64_mode");
+            const bool vf64_math = builtin_call && signature->fp64_via_f32 &&
+                mode != result.module.attributes.end() && mode->second == "ieee64" &&
+                is_vf64_correctly_rounded_math(signature->metal_name) &&
+                std::all_of(signature->argument_types.begin(), signature->argument_types.end(),
+                            [](const Type& type) { return type == Type::floating(64); });
+            if (builtin_call && signature->fp64_via_f32 && !vf64_math) {
                 if (result.module.semantic_quality == SemanticQuality::kExact) {
                     result.module.semantic_quality = SemanticQuality::kSemanticEmulation;
                 }

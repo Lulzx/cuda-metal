@@ -153,6 +153,14 @@ def load_manifest(path: Path, fixtures_root: Path) -> list[dict[str, str]]:
             if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
                 raise ValueError(f"invalid timeout for {project['name']}")
             project["timeout"] = float(timeout)
+        if "env" in raw:
+            env = raw["env"]
+            if not isinstance(env, dict) or not all(
+                isinstance(key, str) and key.startswith("CUMETAL_") and isinstance(value, str)
+                for key, value in env.items()
+            ):
+                raise ValueError(f"invalid env for {project['name']}")
+            project["env"] = dict(env)
         if project["name"] in names:
             raise ValueError(f"duplicate project name: {project['name']}")
         if project["harness"] not in ("standard", "strict"):
@@ -288,6 +296,9 @@ def main() -> int:
         project_cache.mkdir()
         project_env = env.copy()
         project_env["CUMETAL_CACHE_DIR"] = str(project_cache)
+        # A fixture whose contract belongs to one runtime mode (an FP64 mode,
+        # for instance) declares it rather than failing under the default.
+        project_env.update(project.get("env", {}))
         if project["name"] == "ggml_output_ops" and args.backend == "legacy":
             project_env["CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS"] = "1"
         elif project["name"] == "ggml_output_ops":

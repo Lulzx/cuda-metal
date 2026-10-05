@@ -336,10 +336,23 @@ struct ExternalSymbol {
 };
 
 // Recorded when a double libdevice call (exp, log, pow, trig, ...) has no
-// binary64 implementation and is evaluated in binary32 instead, under every
-// FP64 mode including ieee64. The runtime turns it into a visible warning.
+// binary64 implementation and is evaluated in binary32 instead. The runtime
+// turns it into a visible warning.
 inline constexpr const char* kFp64LibdeviceViaF32Caveat =
     "FP64 libdevice calls evaluate through binary32 under emulation";
+
+// Metal builtin names (as both importers spell double libdevice calls) that
+// VF64's support ABI implements as correctly rounded binary64 functions,
+// `vf64_<name>_rne` over raw bits. They carry an ieee64 contract only; under
+// fast48 and wide48 these calls still evaluate through binary32.
+inline bool is_vf64_correctly_rounded_math(std::string_view name) {
+    static const std::unordered_set<std::string_view> kNames = {
+        "exp",  "exp2", "expm1", "log",  "log2", "log1p", "cbrt",  "hypot",
+        "pow",  "atan", "atan2", "asin", "acos", "sin",   "cos",   "tan",
+        "sinh", "cosh", "tanh",  "asinh", "acosh", "atanh",
+    };
+    return kNames.contains(name);
+}
 
 struct Module {
     std::string source_name;

@@ -232,6 +232,20 @@
       ]
     },
     {
+      "name": "fp64_vf64_math",
+      "subdir": "fp64_vf64_math",
+      "source": "fp64_vf64_math.cu",
+      "binary": "fp64_vf64_math",
+      "harness": "strict",
+      "expect_pattern": "PASS: 22 double libdevice functions within 1 ulp on Apple GPU",
+      "backends": [
+        "cumetal-ir"
+      ],
+      "env": {
+        "CUMETAL_FP64_MODE": "ieee64"
+      }
+    },
+    {
       "name": "barrier_edge_threading",
       "subdir": "barrier_edge_threading",
       "source": "barrier_edge_threading.cu",

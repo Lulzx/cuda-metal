@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Double libdevice calls (exp, log, pow, ...) run in binary32 under every FP64
-# mode. That used to be recorded only as a comment in the generated MSL; the
-# runtime must now say so once per process -- on a warm JIT cache hit too,
-# where no MSL is generated -- and stay quiet for pure FP64 arithmetic.
+# Double libdevice calls (exp, log, pow, ...) run in binary32 except where the
+# typed backend calls VF64's correctly rounded functions under ieee64. The
+# runtime must say so once per process when the fallback applies -- on a warm
+# JIT cache hit too, where no MSL is generated -- and stay quiet for pure FP64
+# arithmetic and for the ieee64 VF64 calls.
 set -euo pipefail
 
 ROOT_DIR="${1:?}"
@@ -50,28 +51,37 @@ expect() {
     fi
 }
 
-for backend in cumetal-ir legacy; do
-    expect "${backend}" ieee64 exp 1 "${backend} cold compile"
-    expect "${backend}" ieee64 exp 1 "${backend} warm cache hit"
-    expect "${backend}" ieee64 arith 0 "${backend} pure arithmetic"
-done
-expect cumetal-ir wide48 exp 1 "cumetal-ir wide48"
+expect legacy ieee64 exp 1 "legacy cold compile"
+expect legacy ieee64 exp 1 "legacy warm cache hit"
+expect legacy ieee64 arith 0 "legacy pure arithmetic"
+expect cumetal-ir wide48 exp 1 "cumetal-ir wide48 cold compile"
+expect cumetal-ir wide48 exp 1 "cumetal-ir wide48 warm cache hit"
+expect cumetal-ir ieee64 exp 0 "cumetal-ir ieee64 calls VF64 exp"
+expect cumetal-ir ieee64 arith 0 "cumetal-ir pure arithmetic"
 
 # The offline compiler says the same thing, and only when it applies.
 CUMETALC="${CUMETAL_BUILD_DIR:-${ROOT_DIR}/build}/cumetalc"
 OFFLINE="cumetalc: warning: double-precision math functions"
 for frontend in direct ptx; do
-    flags=(--fp64=ieee64 --emit=msl --overwrite)
+    flags=(--emit=msl --overwrite)
     [ "${frontend}" = ptx ] && flags+=(--cuda-device --backend=cumetal-ir)
-    with_exp="$("${CUMETALC}" "${SRC_DIR}/fp64_libdevice_warning.cu" "${flags[@]}" \
+    with_exp="$("${CUMETALC}" "${SRC_DIR}/fp64_libdevice_warning.cu" --fp64=wide48 "${flags[@]}" \
         -o "${OUT_DIR}/offline-${frontend}.metal" 2>&1)"
+    vf64_exp="$("${CUMETALC}" "${SRC_DIR}/fp64_libdevice_warning.cu" --fp64=ieee64 "${flags[@]}" \
+        -o "${OUT_DIR}/offline-${frontend}-ieee64.metal" 2>&1)"
     without="$("${CUMETALC}" "${ROOT_DIR}/tests/cuda_projects/fp64_reciprocal/fp64_reciprocal.cu" \
-        "${flags[@]}" -o "${OUT_DIR}/offline-${frontend}-arith.metal" 2>&1)"
-    if ! grep -q "${OFFLINE}" <<<"${with_exp}" || grep -q "${OFFLINE}" <<<"${without}"; then
+        --fp64=wide48 "${flags[@]}" -o "${OUT_DIR}/offline-${frontend}-arith.metal" 2>&1)"
+    if ! grep -q "${OFFLINE}" <<<"${with_exp}" || grep -q "${OFFLINE}" <<<"${vf64_exp}" ||
+        grep -q "${OFFLINE}" <<<"${without}"; then
         echo "${with_exp}"
+        echo "${vf64_exp}"
         echo "${without}"
-        echo "FAIL: cumetalc ${frontend}: warning missing for exp or present for pure arithmetic"
+        echo "FAIL: cumetalc ${frontend}: warning missing for wide48 exp, or present for ieee64 exp or pure arithmetic"
+        exit 1
+    fi
+    if ! grep -q 'vf64_exp_rne(' "${OUT_DIR}/offline-${frontend}-ieee64.metal"; then
+        echo "FAIL: cumetalc ${frontend}: ieee64 exp does not call vf64_exp_rne"
         exit 1
     fi
 done
-echo "PASS: binary32 fallback for double libdevice calls is reported at run time"
+echo "PASS: binary32 fallback for double libdevice calls is reported; ieee64 VF64 calls are not"

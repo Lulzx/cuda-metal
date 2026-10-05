@@ -3,6 +3,16 @@
 #include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Pair/Codec.metal"
 #include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/IEEE/Arithmetic.metal"
 #include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Wide/Arithmetic.metal"
+#include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Math/WideFloat.metal"
+#include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Math/Wide3.metal"
+#include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Math/Exp.metal"
+#include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Math/Log.metal"
+#include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Math/ExpVariants.metal"
+#include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Math/Algebraic.metal"
+#include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Math/Atan.metal"
+#include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Math/Pow.metal"
+#include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Math/Trig.metal"
+#include "../../../third_party/VF64-metal/Sources/VF64Metal/Shaders/Math/Hyperbolic.metal"
 
 // Private helpers for typed MSL. These deliberately live in the kernel's
 // translation unit: [[visible]] functions require MTL function stitching at
@@ -173,6 +183,45 @@ inline ulong vf64_fma_rne(ulong a, ulong b, ulong c) {
     uint flags = 0;
     return soft_fma64_status(a, b, c, soft_round_near_even, flags);
 }
+
+// VF64 M9 correctly rounded transcendentals (ieee64 only), matching the
+// flag-free vf64_<name>_rne support-ABI symbols; the certificate is discarded.
+#define CM_VF64_M9_UNARY(name, soft) \
+inline ulong vf64_##name##_rne(ulong a) { \
+    uint flags = 0; \
+    bool certified = true; \
+    return soft_##soft##_certified(a, soft_round_near_even, flags, certified); \
+}
+#define CM_VF64_M9_BINARY(name, soft) \
+inline ulong vf64_##name##_rne(ulong a, ulong b) { \
+    uint flags = 0; \
+    bool certified = true; \
+    return soft_##soft##_certified(a, b, soft_round_near_even, flags, certified); \
+}
+CM_VF64_M9_UNARY(exp, exp64)
+CM_VF64_M9_UNARY(exp2, exp2_64)
+CM_VF64_M9_UNARY(expm1, expm1_64)
+CM_VF64_M9_UNARY(log, log64)
+CM_VF64_M9_UNARY(log2, log2_64)
+CM_VF64_M9_UNARY(log1p, log1p64)
+CM_VF64_M9_UNARY(cbrt, cbrt64)
+CM_VF64_M9_UNARY(atan, atan64)
+CM_VF64_M9_UNARY(asin, asin64)
+CM_VF64_M9_UNARY(acos, acos64)
+CM_VF64_M9_UNARY(sin, sin64)
+CM_VF64_M9_UNARY(cos, cos64)
+CM_VF64_M9_UNARY(tan, tan64)
+CM_VF64_M9_UNARY(sinh, sinh64)
+CM_VF64_M9_UNARY(cosh, cosh64)
+CM_VF64_M9_UNARY(tanh, tanh64)
+CM_VF64_M9_UNARY(asinh, asinh64)
+CM_VF64_M9_UNARY(acosh, acosh64)
+CM_VF64_M9_UNARY(atanh, atanh64)
+CM_VF64_M9_BINARY(hypot, hypot64)
+CM_VF64_M9_BINARY(pow, pow64)
+CM_VF64_M9_BINARY(atan2, atan2_64)
+#undef CM_VF64_M9_UNARY
+#undef CM_VF64_M9_BINARY
 
 // Directed-rounding variants used by the __nv_*_{rd,ru,rz} libdevice
 // intrinsics. They are correctly rounded under every mode: the mode argument

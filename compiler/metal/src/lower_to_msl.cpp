@@ -3083,6 +3083,16 @@ struct AstLowerer {
                         arguments.push_back(MslExpression::literal(
                             "false", MslType::boolean()));
                     }
+                } else if (mode == "ieee64" &&
+                           ir::is_vf64_correctly_rounded_math(callee->second) &&
+                           std::all_of(operation.operands.begin(), operation.operands.end(),
+                                       [](const ir::Operand& operand) {
+                                           return operand.type == ir::Type::floating(64);
+                                       })) {
+                    // VF64's correctly rounded binary64 transcendentals over raw
+                    // bits. They are an ieee64 contract; the other modes keep
+                    // the binary32 evaluation below.
+                    target = "vf64_" + callee->second + "_rne";
                 } else {
                     // No software-ALU primitive exists for transcendental
                     // libdevice calls. Evaluate them in binary32: decode each
@@ -7250,14 +7260,17 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::Operation& operation : block.operations) {
                 needs_fp64_support |= operation.attributes.contains("fp64_mode");
-                if (operation.opcode == ir::OpCode::kMetalAtomic &&
+                const bool f64_add = is_lock_backed_f64_add(operation);
+                needs_fp64_support |= f64_add;
+                if (f64_add || (operation.opcode == ir::OpCode::kMetalAtomic &&
                     operation.result_types.size() == 1 &&
                     operation.result_types.front().kind == ir::TypeKind::kInteger &&
                     operation.result_types.front().bit_width == 64 &&
                     operation.attributes.contains("atomic_op") &&
-                    !operation.operands.empty()) {
-                    const std::string& atomic_op =
-                        operation.attributes.at("atomic_op");
+                    !operation.operands.empty())) {
+                    const std::string atomic_op = f64_add
+                        ? f64_atomic_operation(metal_module, operation)
+                        : operation.attributes.at("atomic_op");
                     const bool is_signed =
                         operation.attributes.contains("signed") &&
                         operation.attributes.at("signed") == "true" &&
@@ -7459,6 +7472,28 @@ ulong vf64_mul_rne(ulong, ulong);
 ulong vf64_div_rne(ulong, ulong);
 ulong vf64_sqrt_rne(ulong);
 ulong vf64_fma_rne(ulong, ulong, ulong);
+ulong vf64_exp_rne(ulong);
+ulong vf64_exp2_rne(ulong);
+ulong vf64_expm1_rne(ulong);
+ulong vf64_log_rne(ulong);
+ulong vf64_log2_rne(ulong);
+ulong vf64_log1p_rne(ulong);
+ulong vf64_cbrt_rne(ulong);
+ulong vf64_hypot_rne(ulong, ulong);
+ulong vf64_pow_rne(ulong, ulong);
+ulong vf64_atan_rne(ulong);
+ulong vf64_atan2_rne(ulong, ulong);
+ulong vf64_asin_rne(ulong);
+ulong vf64_acos_rne(ulong);
+ulong vf64_sin_rne(ulong);
+ulong vf64_cos_rne(ulong);
+ulong vf64_tan_rne(ulong);
+ulong vf64_sinh_rne(ulong);
+ulong vf64_cosh_rne(ulong);
+ulong vf64_tanh_rne(ulong);
+ulong vf64_asinh_rne(ulong);
+ulong vf64_acosh_rne(ulong);
+ulong vf64_atanh_rne(ulong);
 ulong vf64_add_round(ulong, ulong, uint);
 ulong vf64_sub_round(ulong, ulong, uint);
 ulong vf64_mul_round(ulong, ulong, uint);

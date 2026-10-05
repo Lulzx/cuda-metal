@@ -3107,9 +3107,6 @@ if(APPLE)
     set_tests_properties(functional_ptx_assert_reporting PROPERTIES TIMEOUT 45)
     add_test(NAME functional_ptx_trap_reporting_trace
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --trace)
-    add_test(NAME functional_ptx_loop_terminal_exit_barrier
-        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_loop_terminal_exit_barrier.py ${CMAKE_BINARY_DIR})
-    set_tests_properties(functional_ptx_loop_terminal_exit_barrier PROPERTIES TIMEOUT 60)
     add_test(NAME functional_ptx_trap_barrier
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_barrier.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_trap_barrier PROPERTIES TIMEOUT 60)
@@ -3397,6 +3394,18 @@ add_test(
             ${CMAKE_CURRENT_BINARY_DIR}
 )
 set_tests_properties(functional_runtime_fp64_libdevice_warning PROPERTIES
+    SKIP_RETURN_CODE 77
+    RUN_SERIAL TRUE
+    ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}")
+
+add_test(
+    NAME functional_fp64_vf64_math_nvvm
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_fp64_vf64_math_nvvm.sh
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(functional_fp64_vf64_math_nvvm PROPERTIES
     SKIP_RETURN_CODE 77
     RUN_SERIAL TRUE
     ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}")

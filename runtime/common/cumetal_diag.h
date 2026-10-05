@@ -59,12 +59,12 @@ inline void warn_once(const std::string& key, const std::string& message) {
 inline void warn_fp64_libdevice_via_f32(std::string_view fp64_mode) {
     warn_once("fp64-libdevice-via-f32",
               std::string("a kernel calls double-precision math functions (exp, log, pow, "
-                          "trig, erf, ...) that have no binary64 implementation; they run in "
-                          "binary32 (about 7 significant digits, float range) even though "
-                          "CUMETAL_FP64_MODE=") +
+                          "trig, erf, ...) that have no binary64 implementation on this path; "
+                          "they run in binary32 (about 7 significant digits, float range) even "
+                          "though CUMETAL_FP64_MODE=") +
                   std::string(fp64_mode) +
-                  ". Only FP64 arithmetic, sqrt and fma follow that mode. See "
-                  "docs/fp64-policy.md.");
+                  ". Only the typed backend under ieee64 calls VF64's correctly rounded "
+                  "exp/log/pow/trig/hyperbolic/cbrt/hypot. See docs/fp64-policy.md.");
 }
 
 }  // namespace cumetal

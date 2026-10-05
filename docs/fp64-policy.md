@@ -66,9 +66,24 @@ primitive -- `exp`/`log`/trigonometric/hyperbolic families, `pow`, `fmod`,
 `erfinv`/`erfcinv`, and `tgamma`/`lgamma` -- evaluate through
 binary32: each binary64 operand decodes to `float`, the Metal binary32 builtin
 or typed expansion computes the result, and it re-encodes into binary64
-storage. This applies under every mode, including `ieee64`, so a kernel that
-calls `exp` on a `double` gets binary32 precision and binary32 range (`exp`
-overflows to `inf` near 88, not ~709). The generated module records the
+storage, so a kernel that calls `exp` on a `double` gets binary32 precision
+and binary32 range (`exp` overflows to `inf` near 88, not ~709).
+
+Under `ieee64`, the typed PTX and NVVM paths instead call VF64's correctly
+rounded binary64 functions (`vf64_<name>_rne`, VF64 `8dae385`) for `exp`,
+`exp2`, `expm1`, `log`, `log2`, `log1p`, `cbrt`, `hypot`, `pow`, `atan`,
+`atan2`, `asin`, `acos`, `sin`, `cos`, `tan`, `sinh`, `cosh`, `tanh`, `asinh`,
+`acosh`, and `atanh` with binary64 operands. `cbrt` and `hypot` are correctly
+rounded for every argument; the other twenty are correctly rounded wherever
+VF64's certificate holds (every published MPFR comparison) and faithfully
+rounded by their error bound otherwise. `powi`, `exp10`, `log10`, the `erf`
+and gamma families, and the rest of the list above stay on the binary32 path
+under `ieee64`; `fast48`, `wide48`, and the legacy PTX-to-LLVM path use it for
+all of them. `functional_cuda_projects_fp64_vf64_math_ieee64` (PTX) and
+`functional_fp64_vf64_math_nvvm` (native NVVM build) check all 22 within one
+ulp of the host libm, including arguments outside binary32 range.
+
+Where the binary32 fallback applies, the generated module records the
 `FP64 libdevice calls evaluate through binary32 under emulation` semantic
 caveat rather than implying binary64 coverage. Because that caveat is only an
 MSL comment, the runtime also prints a one-time `CUMETAL WARNING` naming the

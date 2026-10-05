@@ -509,9 +509,10 @@ bool write_text_output(const std::filesystem::path& output, std::string_view tex
 void warn_fp64_libdevice_via_f32(bool used, std::string_view fp64_mode) {
     if (!used) return;
     std::cerr << "cumetalc: warning: double-precision math functions (exp, log, pow, trig, "
-                 "erf, ...) have no binary64 implementation and are compiled to binary32 "
+                 "erf, ...) have no binary64 implementation here and are compiled to binary32 "
                  "even with --fp64="
-              << fp64_mode << "; only FP64 arithmetic, sqrt and fma follow that mode\n";
+              << fp64_mode << "; only --fp64=ieee64 calls VF64's correctly rounded "
+                 "exp/log/pow/trig/hyperbolic/cbrt/hypot (see docs/fp64-policy.md)\n";
 }
 
 bool uses_fp64_libdevice_via_f32(const cumetal::ir::Module& module) {
