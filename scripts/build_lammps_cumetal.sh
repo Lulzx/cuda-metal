@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Compile pinned LAMMPS with its bundled Kokkos, using CuMetal or Serial.
-# Usage: bash scripts/build_lammps_cumetal.sh [--gpu|--cpu|--cpu-double|--compare|--probe]
+# Compile pinned LAMMPS with its bundled Kokkos, using CuMetal, Serial or OpenMP.
+# Usage: bash scripts/build_lammps_cumetal.sh
+#   [--gpu|--gpu-double|--cpu|--cpu-double|--cpu-omp|--cpu-omp-double|--compare|--probe]
 # CUMETAL_LAMMPS_DIR: external checkout; CUMETAL_BUILD_DIR: CuMetal build tree.
 # CUMETAL_CLANG: CUDA-capable clang++; CUMETAL_JOBS: parallel build jobs.
+# CUMETAL_LAMMPS_TESTS=1: also build the LAMMPS unit tests plus the packages
+# whose Kokkos styles they cover, into separate *-tests build directories.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,8 +17,8 @@ CLANG="${CUMETAL_CLANG:-/opt/homebrew/opt/llvm/bin/clang++}"
 JOBS="${CUMETAL_JOBS:-6}"
 MODE="${1:---gpu}"
 case "${MODE}" in
-    --gpu|--cpu|--cpu-double|--compare|--probe) ;;
-    -h|--help) sed -n '2,5p' "$0"; exit 0 ;;
+    --gpu|--gpu-double|--cpu|--cpu-double|--cpu-omp|--cpu-omp-double|--compare|--probe) ;;
+    -h|--help) sed -n '2,6p' "$0"; exit 0 ;;
     *) echo "Unknown mode: ${MODE}" >&2; exit 2 ;;
 esac
 [[ "${SRC}" = /* && "${BUILD}" = /* ]] || {
@@ -46,21 +49,44 @@ COMMON=(
     -DDOWNLOAD_POTENTIALS=OFF
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 )
+SUFFIX=
+TARGETS=()
+if [[ "${CUMETAL_LAMMPS_TESTS:-0}" = 1 ]]; then
+    SUFFIX=-tests
+    COMMON+=(-DENABLE_TESTING=ON -DPKG_MOLECULE=ON -DPKG_MANYBODY=ON -DPKG_KSPACE=ON)
+    # Every unittest executable statically links all of LAMMPS (hundreds of MB
+    # each with Kokkos/CUDA; a full tree exceeded 22 GB). The force-style yaml
+    # tests run on these six.
+    TARGETS=(--target lmp test_pair_style test_bond_style test_angle_style
+        test_dihedral_style test_improper_style test_fix_timestep)
+fi
 
-if [[ "${MODE}" = --cpu || "${MODE}" = --cpu-double || "${MODE}" = --compare ]]; then
+CPU_ONLY=0
+case "${MODE}" in --cpu|--cpu-double|--cpu-omp|--cpu-omp-double) CPU_ONLY=1 ;; esac
+if [[ "${CPU_ONLY}" = 1 || "${MODE}" = --compare ]]; then
     CPU_BUILD="${SRC}/build-cumetal-reference"
     CPU_PREC=single
-    if [[ "${MODE}" = --cpu-double ]]; then
-        CPU_BUILD="${SRC}/build-cumetal-reference-double"
-        CPU_PREC=double
+    [[ "${MODE}" = *-double ]] && CPU_PREC=double
+    [[ "${CPU_PREC}" = double ]] && CPU_BUILD="${CPU_BUILD}-double"
+    CPU_BACKEND=()
+    if [[ "${MODE}" = --cpu-omp* ]]; then
+        # Kokkos OpenMP needs LAMMPS BUILD_OMP. Homebrew LLVM ships libomp;
+        # Apple Clang has the pragmas but no runtime.
+        OMP_LIB="$(dirname "${CLANG}")/../lib"
+        [[ -f "${OMP_LIB}/libomp.dylib" ]] || { echo "Missing ${OMP_LIB}/libomp.dylib" >&2; exit 2; }
+        CPU_BUILD="${SRC}/build-cumetal-openmp${CPU_BUILD#${SRC}/build-cumetal-reference}"
+        CPU_BACKEND=(-DKokkos_ENABLE_OPENMP=ON -DBUILD_OMP=ON
+            -DCMAKE_EXE_LINKER_FLAGS="-Xlinker -rpath -Xlinker ${OMP_LIB}")
     fi
+    CPU_BUILD="${CPU_BUILD}${SUFFIX}"
     cmake -S "${SRC}/cmake" -B "${CPU_BUILD}" "${COMMON[@]}" \
-        -DCMAKE_CXX_COMPILER="${CLANG}" -DKokkos_ENABLE_CUDA=OFF -DKOKKOS_PREC="${CPU_PREC}"
-    cmake --build "${CPU_BUILD}" -j"${JOBS}"
+        -DCMAKE_CXX_COMPILER="${CLANG}" -DKokkos_ENABLE_CUDA=OFF -DKOKKOS_PREC="${CPU_PREC}" \
+        ${CPU_BACKEND[@]+"${CPU_BACKEND[@]}"}
+    cmake --build "${CPU_BUILD}" -j"${JOBS}" ${TARGETS[@]+"${TARGETS[@]}"}
     echo "CPU lmp: ${CPU_BUILD}/lmp"
 fi
 
-if [[ "${MODE}" != --cpu && "${MODE}" != --cpu-double ]]; then
+if [[ "${CPU_ONLY}" = 0 ]]; then
     [[ -f "${BUILD}/libcumetal.dylib" ]] || {
         echo "Build CuMetal first: cmake -B build && cmake --build build" >&2; exit 2;
     }
@@ -74,8 +100,20 @@ if [[ "${MODE}" != --cpu && "${MODE}" != --cpu-double ]]; then
     TOOLKIT="${BUILD}/cumetal-cuda-toolkit"
     export PATH="${TOOLKIT}/bin:${PATH}" CUDA_ROOT="${TOOLKIT}"
     export NVCC_WRAPPER_DEFAULT_COMPILER="${CLANG}"
-    GPU_BUILD="${SRC}/build-cumetal-cuda"
-    cmake -S "${SRC}/cmake" -B "${GPU_BUILD}" "${COMMON[@]}" \
+    GPU_BUILD="${SRC}/build-cumetal-cuda${SUFFIX}"
+    GPU_PREC=single
+    if [[ "${MODE}" = --gpu-double ]]; then
+        # FP64 arithmetic runs in CuMetal's software modes; pick one at run
+        # time with CUMETAL_FP64_MODE (ieee64 is correctly rounded binary64).
+        GPU_BUILD="${SRC}/build-cumetal-cuda-double${SUFFIX}"
+        GPU_PREC=double
+    fi
+    GPU_TESTS=()
+    # The utils FFT tests link CUDA::cudart, which this configuration never
+    # imports; the force-style tests that are compared do not need them.
+    [[ -n "${SUFFIX}" ]] && GPU_TESTS=(-DSKIP_FFT_TESTS=ON)
+    cmake -S "${SRC}/cmake" -B "${GPU_BUILD}" "${COMMON[@]}" -DKOKKOS_PREC="${GPU_PREC}" \
+        ${GPU_TESTS[@]+"${GPU_TESTS[@]}"} \
         -DCMAKE_CXX_COMPILER="${SRC}/lib/kokkos/bin/nvcc_wrapper" \
         -DKokkos_ENABLE_CUDA=ON -DKokkos_ARCH_AMPERE80=ON \
         -DKokkos_ENABLE_CUDA_RELOCATABLE_DEVICE_CODE=OFF \
@@ -85,7 +123,7 @@ if [[ "${MODE}" != --cpu && "${MODE}" != --cpu-double ]]; then
     if [[ "${MODE}" = --probe ]]; then
         python3 "${ROOT_DIR}/demos/lammps/probe.py" "${GPU_BUILD}"
     else
-        cmake --build "${GPU_BUILD}" -j"${JOBS}"
+        cmake --build "${GPU_BUILD}" -j"${JOBS}" ${TARGETS[@]+"${TARGETS[@]}"}
         echo "GPU lmp: ${GPU_BUILD}/lmp"
     fi
 fi

@@ -1,0 +1,38 @@
+# Stock bench/in.lj system, run long enough to measure NVE energy conservation.
+# Differences from bench/in.lj: neighbour lists are checked every step, so
+# missed pairs cannot masquerade as precision drift; the pair energy is
+# shifted to zero at the cutoff, so pairs crossing it do not inject energy
+# jumps that swamp rounding (unshifted, every build drifts an identical
+# 1.98e-3); and thermo is sampled.
+
+variable        x index 1
+variable        y index 1
+variable        z index 1
+variable        steps index 10000
+
+variable        xx equal 20*$x
+variable        yy equal 20*$y
+variable        zz equal 20*$z
+
+units           lj
+atom_style      atomic
+
+lattice         fcc 0.8442
+region          box block 0 ${xx} 0 ${yy} 0 ${zz}
+create_box      1 box
+create_atoms    1 box
+mass            1 1.0
+
+velocity        all create 1.44 87287 loop geom
+
+pair_style      lj/cut 2.5
+pair_coeff      1 1 1.0 1.0 2.5
+pair_modify     shift yes
+
+neighbor        0.3 bin
+neigh_modify    delay 0 every 1 check yes
+
+fix             1 all nve
+
+thermo          250
+run             ${steps}
