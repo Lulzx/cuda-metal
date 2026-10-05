@@ -85,7 +85,7 @@ ret;
     const auto rejected_barrier = metal::compile_ptx_to_msl(nested_barrier);
     ok &= expect(!rejected_barrier.ok &&
                      rejected_barrier.error.find(
-                         "barriers, collectives, or printf") !=
+                         "barriers or collectives in a function that traps directly") !=
                          std::string::npos,
                  "barriers in guarded call graphs remain rejected: " +
                      rejected_barrier.error);

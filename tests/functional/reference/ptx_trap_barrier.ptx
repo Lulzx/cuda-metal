@@ -1,0 +1,62 @@
+.version 7.1
+.target sm_80
+.address_size 64
+// Kokkos' shape: a block reduction around a functor call whose error path
+// reaches a trapping helper (Kokkos::abort -> trap; exit).
+.func check(.param .u32 mode, .param .u32 tid) {
+.reg .b32 %r<4>;
+.reg .pred %p<4>;
+ld.param.u32 %r1, [mode];
+ld.param.u32 %r2, [tid];
+setp.eq.u32 %p1, %r1, 1;
+@%p1 bra FAULT;
+setp.eq.u32 %p2, %r1, 2;
+and.b32 %r3, %r2, 1;
+setp.ne.u32 %p3, %r3, 0;
+and.pred %p1, %p2, %p3;
+@%p1 bra FAULT;
+setp.eq.u32 %p1, %r1, 3;
+@!%p1 bra DONE;
+// One lane traps while every peer goes on to wait at the next barrier.
+setp.eq.u32 %p1, %r2, 5;
+@%p1 bra FAULT;
+DONE:
+ret;
+FAULT:
+trap;
+}
+.visible .entry trap_probe(.param .u64 output, .param .u32 mode) {
+.shared .align 4 .b8 tile[256];
+.reg .b64 %rd<8>;
+.reg .b32 %r<10>;
+.param .u32 m;
+.param .u32 t;
+ld.param.u64 %rd1, [output];
+ld.param.u32 %r1, [mode];
+mov.u32 %r2, %tid.x;
+mov.u64 %rd2, tile;
+mul.wide.u32 %rd3, %r2, 4;
+add.u64 %rd4, %rd2, %rd3;
+st.shared.u32 [%rd4], %r2;
+bar.sync 0;
+add.u32 %r3, %r2, 1;
+and.b32 %r3, %r3, 63;
+mul.wide.u32 %rd5, %r3, 4;
+add.u64 %rd5, %rd2, %rd5;
+ld.shared.u32 %r4, [%rd5];
+st.param.u32 [m], %r1;
+st.param.u32 [t], %r2;
+call.uni check, (m, t);
+bar.sync 0;
+st.shared.u32 [%rd4], %r4;
+bar.sync 0;
+add.u32 %r5, %r2, 63;
+and.b32 %r5, %r5, 63;
+mul.wide.u32 %rd6, %r5, 4;
+add.u64 %rd6, %rd2, %rd6;
+ld.shared.u32 %r6, [%rd6];
+add.u32 %r6, %r6, 1;
+add.u64 %rd7, %rd1, %rd3;
+st.global.u32 [%rd7], %r6;
+ret;
+}

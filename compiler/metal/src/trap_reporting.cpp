@@ -9,10 +9,13 @@
 namespace cumetal::metal {
 namespace {
 
-bool unsupported_in_guarded_graph(ir::OpCode opcode) {
+// Barriers and SIMD/CTA collectives cannot hang on a lane that has already
+// left the kernel, so cancellation only has to keep their functions out of
+// the per-lane dispatcher: a barrier inside divergent switch arms would pair
+// lanes waiting at different barriers on the ordinary, non-trapping path.
+bool synchronizes(ir::OpCode opcode) {
     using ir::OpCode;
     switch (opcode) {
-    case OpCode::kPrintf:
     case OpCode::kBarrier:
     case OpCode::kMetalBarrier:
     case OpCode::kShuffle:
@@ -119,6 +122,7 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
         }
     }
 
+    const std::unordered_set<std::string> direct_trap = graph->trapping;
     bool changed = true;
     while (changed) {
         changed = false;
@@ -138,6 +142,8 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
         }
     }
 
+    // Function -> location of the synchronizing operation it reaches.
+    std::unordered_map<std::string, std::string> synchronizing;
     std::unordered_set<std::string> trap_reachable;
     std::vector<const Function*> pending;
     for (const Function& function : module.functions) {
@@ -152,12 +158,14 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
             continue;
         for (const BasicBlock& block : function->blocks) {
             for (const Operation& operation : block.operations) {
-                if (unsupported_in_guarded_graph(operation.opcode)) {
+                if (operation.opcode == OpCode::kPrintf) {
                     *error = "trap reporting through device helpers does not "
                              "support " +
-                             operation.location.str() +
-                             " barriers, collectives, or printf";
+                             operation.location.str() + " printf";
                     return false;
+                }
+                if (synchronizes(operation.opcode)) {
+                    synchronizing.emplace(function->name, operation.location.str());
                 }
                 if (operation.opcode != OpCode::kCall)
                     continue;
@@ -165,6 +173,13 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
                 if (callee == operation.attributes.end()) {
                     *error = "trap reporting requires direct device calls";
                     return false;
+                }
+                // CTA votes are barrier-backed and block-scoped like
+                // bar.sync. A grid barrier spins on lanes that may have left,
+                // so it stays unsupported below.
+                if (callee->second == "cm_cta_any" || callee->second == "cm_cta_count") {
+                    synchronizing.emplace(function->name, operation.location.str());
+                    continue;
                 }
                 const auto target = functions.find(callee->second);
                 if (target != functions.end() && !target->second->is_kernel &&
@@ -181,9 +196,46 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
         }
     }
 
+    // A caller of a synchronizing helper synchronizes too: dispatching it
+    // would put the helper's barrier in divergent arms.
+    changed = true;
+    while (changed) {
+        changed = false;
+        for (const Function& function : module.functions) {
+            if (!trap_reachable.contains(function.name) ||
+                synchronizing.contains(function.name)) {
+                continue;
+            }
+            for (const BasicBlock& block : function.blocks) {
+                for (const Operation& operation : block.operations) {
+                    const auto callee = operation.attributes.find("callee");
+                    if (operation.opcode == OpCode::kCall &&
+                        callee != operation.attributes.end() &&
+                        synchronizing.contains(callee->second)) {
+                        changed |= synchronizing
+                                       .emplace(function.name,
+                                                synchronizing.at(callee->second))
+                                       .second;
+                    }
+                }
+            }
+        }
+    }
+    // The structured emitter has no trap terminator, so a synchronizing
+    // function may only reach traps through calls.
+    for (const Function& function : module.functions) {
+        const auto sync = synchronizing.find(function.name);
+        if (sync != synchronizing.end() && direct_trap.contains(function.name)) {
+            *error = "trap reporting does not support " + sync->second +
+                     " barriers or collectives in a function that traps directly";
+            return false;
+        }
+    }
+
     graph->guarded = graph->trapping;
     for (const Function& function : module.functions) {
-        if (trap_reachable.contains(function.name) && cfg_is_cyclic(function)) {
+        if (trap_reachable.contains(function.name) && cfg_is_cyclic(function) &&
+            !synchronizing.contains(function.name)) {
             graph->guarded.insert(function.name);
             graph->dispatch.insert(function.name);
         }
