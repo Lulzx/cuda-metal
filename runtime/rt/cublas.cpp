@@ -13,6 +13,7 @@
 #include <mutex>
 #include <new>
 #include <string>
+#include <type_traits>
 #include <vector>
 #include <Accelerate/Accelerate.h>
 
@@ -4334,6 +4335,920 @@ cublasStatus_t cublasZgemmStridedBatched(cublasHandle_t handle,
                     beta, C + (size_t)b * strideC, ldc);
     }
     return CUBLAS_STATUS_SUCCESS;
+}
+
+}  // extern "C"
+
+// ── CuPy surface: complex level-1/2/3, geam/dgmm, packed/banded, LU helpers ───
+//
+// Everything below runs on the CPU against unified-memory pointers after the
+// handle's stream has drained, like the complex GEMM above. The arithmetic is
+// written once over float/double/cuComplex/cuDoubleComplex through Ops<T>.
+
+namespace {
+
+template <class T>
+struct Ops;
+
+#define CUMETAL_REAL_OPS(T)                                                       \
+    template <>                                                                    \
+    struct Ops<T> {                                                                \
+        using Real = T;                                                            \
+        static T zero() { return 0; }                                              \
+        static T one() { return 1; }                                               \
+        static T make(double r, double) { return static_cast<T>(r); }              \
+        static T mul(T a, T b) { return a * b; }                                   \
+        static T add(T a, T b) { return a + b; }                                   \
+        static T sub(T a, T b) { return a - b; }                                   \
+        static T div(T a, T b) { return a / b; }                                   \
+        static T conj(T a) { return a; }                                           \
+        static double re(T a) { return a; }                                        \
+        static double im(T) { return 0.0; }                                        \
+        static double abs1(T a) { return std::fabs(a); }                           \
+        static bool is_zero(T a) { return a == 0; }                                \
+    }
+
+#define CUMETAL_COMPLEX_OPS(T, R)                                                  \
+    template <>                                                                    \
+    struct Ops<T> {                                                                \
+        using Real = R;                                                            \
+        static T zero() { return T{0, 0}; }                                        \
+        static T one() { return T{1, 0}; }                                         \
+        static T make(double r, double i) {                                        \
+            return T{static_cast<R>(r), static_cast<R>(i)};                        \
+        }                                                                          \
+        static T mul(T a, T b) {                                                   \
+            return T{a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x};                \
+        }                                                                          \
+        static T add(T a, T b) { return T{a.x + b.x, a.y + b.y}; }                 \
+        static T sub(T a, T b) { return T{a.x - b.x, a.y - b.y}; }                 \
+        static T div(T a, T b) {                                                   \
+            const R d = b.x * b.x + b.y * b.y;                                     \
+            return T{(a.x * b.x + a.y * b.y) / d, (a.y * b.x - a.x * b.y) / d};    \
+        }                                                                          \
+        static T conj(T a) { return T{a.x, -a.y}; }                                \
+        static double re(T a) { return a.x; }                                      \
+        static double im(T a) { return a.y; }                                      \
+        static double abs1(T a) { return std::fabs(a.x) + std::fabs(a.y); }        \
+        static bool is_zero(T a) { return a.x == 0 && a.y == 0; }                  \
+    }
+
+CUMETAL_REAL_OPS(float);
+CUMETAL_REAL_OPS(double);
+CUMETAL_COMPLEX_OPS(cuComplex, float);
+CUMETAL_COMPLEX_OPS(cuDoubleComplex, double);
+#undef CUMETAL_REAL_OPS
+#undef CUMETAL_COMPLEX_OPS
+
+// Scalar inputs honor the handle's pointer mode; in device mode the value is
+// fetched through the tracked allocation, in host mode it is read in place.
+template <class S>
+bool load_scalar(cublasHandle_t handle, const S* p, S* out) {
+    if (p == nullptr) return false;
+    cublasPointerMode_t mode;
+    {
+        std::lock_guard<std::mutex> lock(handle->mutex);
+        mode = handle->pointer_mode;
+    }
+    if (mode == CUBLAS_POINTER_MODE_DEVICE) {
+        cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+        if (cumetal::rt::resolve_allocation_for_pointer(p, &resolved)) {
+            if (resolved.buffer == nullptr || resolved.buffer->contents() == nullptr ||
+                resolved.remaining_size < sizeof(S)) {
+                return false;
+            }
+            std::memcpy(out,
+                        static_cast<const unsigned char*>(resolved.buffer->contents()) +
+                            resolved.offset,
+                        sizeof(S));
+            return true;
+        }
+    }
+    *out = *p;
+    return true;
+}
+
+// Scalar outputs: same rule, returning where to store the result.
+template <class S>
+S* result_slot(cublasHandle_t handle, S* p) {
+    if (p == nullptr) return nullptr;
+    cublasPointerMode_t mode;
+    {
+        std::lock_guard<std::mutex> lock(handle->mutex);
+        mode = handle->pointer_mode;
+    }
+    if (mode == CUBLAS_POINTER_MODE_DEVICE) {
+        cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+        if (cumetal::rt::resolve_allocation_for_pointer(p, &resolved)) {
+            if (resolved.buffer == nullptr || resolved.buffer->contents() == nullptr ||
+                resolved.remaining_size < sizeof(S)) {
+                return nullptr;
+            }
+            return reinterpret_cast<S*>(
+                static_cast<unsigned char*>(resolved.buffer->contents()) + resolved.offset);
+        }
+    }
+    return p;
+}
+
+// BLAS element index for a vector of length n with stride inc (inc < 0 walks
+// backwards from the end, as in reference BLAS).
+inline std::size_t vec_index(int i, int n, int inc) {
+    return inc > 0 ? static_cast<std::size_t>(i) * inc
+                   : static_cast<std::size_t>(n - 1 - i) * (-static_cast<long long>(inc));
+}
+
+// ── level 1 ──
+
+template <class T>
+cublasStatus_t axpy_impl(cublasHandle_t handle, int n, const T* alpha, const T* x, int incx,
+                         T* y, int incy) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (n < 0 || incx == 0 || incy == 0) return CUBLAS_STATUS_INVALID_VALUE;
+    T a;
+    if (!load_scalar(handle, alpha, &a)) return CUBLAS_STATUS_INVALID_VALUE;
+    if (n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (x == nullptr || y == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    if (Ops<T>::is_zero(a)) return CUBLAS_STATUS_SUCCESS;
+    for (int i = 0; i < n; ++i) {
+        T& yi = y[vec_index(i, n, incy)];
+        yi = Ops<T>::add(yi, Ops<T>::mul(a, x[vec_index(i, n, incx)]));
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// x *= alpha, where alpha is either the element type or its real type.
+template <class T, class A>
+cublasStatus_t scal_impl(cublasHandle_t handle, int n, const A* alpha, T* x, int incx) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (n < 0 || incx <= 0) return CUBLAS_STATUS_INVALID_VALUE;
+    A a;
+    if (!load_scalar(handle, alpha, &a)) return CUBLAS_STATUS_INVALID_VALUE;
+    if (n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (x == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    for (int i = 0; i < n; ++i) {
+        T& xi = x[static_cast<std::size_t>(i) * incx];
+        if constexpr (std::is_same<A, T>::value) {
+            xi = Ops<T>::mul(a, xi);
+        } else {
+            xi = Ops<T>::make(static_cast<double>(a) * Ops<T>::re(xi),
+                              static_cast<double>(a) * Ops<T>::im(xi));
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+template <class T>
+cublasStatus_t dot_impl(cublasHandle_t handle, int n, const T* x, int incx, const T* y, int incy,
+                        T* result, bool conj_x) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    T* out = result_slot(handle, result);
+    if (n < 0 || incx == 0 || incy == 0 || out == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (n == 0) {
+        *out = Ops<T>::zero();
+        return CUBLAS_STATUS_SUCCESS;
+    }
+    if (x == nullptr || y == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    double sr = 0.0, si = 0.0;
+    for (int i = 0; i < n; ++i) {
+        T xv = x[vec_index(i, n, incx)];
+        if (conj_x) xv = Ops<T>::conj(xv);
+        const T yv = y[vec_index(i, n, incy)];
+        sr += Ops<T>::re(xv) * Ops<T>::re(yv) - Ops<T>::im(xv) * Ops<T>::im(yv);
+        si += Ops<T>::re(xv) * Ops<T>::im(yv) + Ops<T>::im(xv) * Ops<T>::re(yv);
+    }
+    *out = Ops<T>::make(sr, si);
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// kind: 0 = asum (|re|+|im|), 1 = nrm2.
+template <class T>
+cublasStatus_t norm_impl(cublasHandle_t handle, int n, const T* x, int incx,
+                         typename Ops<T>::Real* result, int kind) {
+    using R = typename Ops<T>::Real;
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    R* out = result_slot(handle, result);
+    if (n < 0 || incx <= 0 || out == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (n == 0) {
+        *out = 0;
+        return CUBLAS_STATUS_SUCCESS;
+    }
+    if (x == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    if (kind == 0) {
+        double sum = 0.0;
+        for (int i = 0; i < n; ++i) sum += Ops<T>::abs1(x[static_cast<std::size_t>(i) * incx]);
+        *out = static_cast<R>(sum);
+        return CUBLAS_STATUS_SUCCESS;
+    }
+    // Scaled sum of squares so large FP64 entries do not overflow.
+    double scale = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const T v = x[static_cast<std::size_t>(i) * incx];
+        scale = std::max(scale, std::max(std::fabs(Ops<T>::re(v)), std::fabs(Ops<T>::im(v))));
+    }
+    if (scale == 0.0 || !std::isfinite(scale)) {
+        *out = static_cast<R>(scale);
+        return CUBLAS_STATUS_SUCCESS;
+    }
+    double ssq = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const T v = x[static_cast<std::size_t>(i) * incx];
+        const double r = Ops<T>::re(v) / scale, m = Ops<T>::im(v) / scale;
+        ssq += r * r + m * m;
+    }
+    *out = static_cast<R>(scale * std::sqrt(ssq));
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// First index (1-based) of the largest (find_max) or smallest |re|+|im|.
+template <class T>
+cublasStatus_t iamaxmin_impl(cublasHandle_t handle, int n, const T* x, int incx, int* result,
+                             bool find_max) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    int* out = result_slot(handle, result);
+    if (n < 0 || incx <= 0 || out == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (n == 0) {
+        *out = 0;
+        return CUBLAS_STATUS_SUCCESS;
+    }
+    if (x == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    int best = 0;
+    double best_value = Ops<T>::abs1(x[0]);
+    for (int i = 1; i < n; ++i) {
+        const double v = Ops<T>::abs1(x[static_cast<std::size_t>(i) * incx]);
+        if (find_max ? (v > best_value) : (v < best_value)) {
+            best_value = v;
+            best = i;
+        }
+    }
+    *out = best + 1;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── level 2 ──
+
+template <class T>
+cublasStatus_t ger_impl(cublasHandle_t handle, int m, int n, const T* alpha, const T* x, int incx,
+                        const T* y, int incy, T* A, int lda, bool conj_y) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (m < 0 || n < 0 || incx == 0 || incy == 0 || lda < std::max(1, m)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    T a;
+    if (!load_scalar(handle, alpha, &a)) return CUBLAS_STATUS_INVALID_VALUE;
+    if (m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (x == nullptr || y == nullptr || A == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    if (Ops<T>::is_zero(a)) return CUBLAS_STATUS_SUCCESS;
+    for (int j = 0; j < n; ++j) {
+        T yj = y[vec_index(j, n, incy)];
+        if (conj_y) yj = Ops<T>::conj(yj);
+        const T t = Ops<T>::mul(a, yj);
+        for (int i = 0; i < m; ++i) {
+            T& aij = A[static_cast<std::size_t>(j) * lda + i];
+            aij = Ops<T>::add(aij, Ops<T>::mul(x[vec_index(i, m, incx)], t));
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── extensions ──
+
+template <class T>
+T op_element(const T* A, int ld, cublasOperation_t op, int row, int col) {
+    if (op == CUBLAS_OP_N) return A[static_cast<std::size_t>(col) * ld + row];
+    const T v = A[static_cast<std::size_t>(row) * ld + col];
+    return op == CUBLAS_OP_C ? Ops<T>::conj(v) : v;
+}
+
+template <class T>
+cublasStatus_t geam_impl(cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb,
+                         int m, int n, const T* alpha, const T* A, int lda, const T* beta,
+                         const T* B, int ldb, T* C, int ldc) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_operation(transa) || !is_valid_operation(transb) || m < 0 || n < 0) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    T a, b;
+    if (!load_scalar(handle, alpha, &a) || !load_scalar(handle, beta, &b)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || B == nullptr || C == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (lda < std::max(1, transa == CUBLAS_OP_N ? m : n) ||
+        ldb < std::max(1, transb == CUBLAS_OP_N ? m : n) || ldc < std::max(1, m)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    // In-place use is only well defined for the untransposed, same-layout case.
+    if ((C == A && (transa != CUBLAS_OP_N || lda != ldc)) ||
+        (C == B && (transb != CUBLAS_OP_N || ldb != ldc))) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < m; ++i) {
+            C[static_cast<std::size_t>(j) * ldc + i] =
+                Ops<T>::add(Ops<T>::mul(a, op_element(A, lda, transa, i, j)),
+                            Ops<T>::mul(b, op_element(B, ldb, transb, i, j)));
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+template <class T>
+cublasStatus_t dgmm_impl(cublasHandle_t handle, cublasSideMode_t mode, int m, int n, const T* A,
+                         int lda, const T* x, int incx, T* C, int ldc) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if ((mode != CUBLAS_SIDE_LEFT && mode != CUBLAS_SIDE_RIGHT) || m < 0 || n < 0 || incx == 0) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || x == nullptr || C == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    if (lda < std::max(1, m) || ldc < std::max(1, m)) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    const int xlen = (mode == CUBLAS_SIDE_LEFT) ? m : n;
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < m; ++i) {
+            const T xv = x[vec_index(mode == CUBLAS_SIDE_LEFT ? i : j, xlen, incx)];
+            C[static_cast<std::size_t>(j) * ldc + i] =
+                Ops<T>::mul(A[static_cast<std::size_t>(j) * lda + i], xv);
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+template <class T>
+cublasStatus_t tpttr_impl(cublasHandle_t handle, cublasFillMode_t uplo, int n, const T* AP, T* A,
+                          int lda) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_fill_mode(uplo) || n < 0 || lda < std::max(1, n)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (AP == nullptr || A == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    std::size_t k = 0;
+    for (int j = 0; j < n; ++j) {
+        const int lo = (uplo == CUBLAS_FILL_MODE_UPPER) ? 0 : j;
+        const int hi = (uplo == CUBLAS_FILL_MODE_UPPER) ? j : n - 1;
+        for (int i = lo; i <= hi; ++i) A[static_cast<std::size_t>(j) * lda + i] = AP[k++];
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+template <class T>
+cublasStatus_t trttp_impl(cublasHandle_t handle, cublasFillMode_t uplo, int n, const T* A, int lda,
+                          T* AP) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_fill_mode(uplo) || n < 0 || lda < std::max(1, n)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (AP == nullptr || A == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    std::size_t k = 0;
+    for (int j = 0; j < n; ++j) {
+        const int lo = (uplo == CUBLAS_FILL_MODE_UPPER) ? 0 : j;
+        const int hi = (uplo == CUBLAS_FILL_MODE_UPPER) ? j : n - 1;
+        for (int i = lo; i <= hi; ++i) AP[k++] = A[static_cast<std::size_t>(j) * lda + i];
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+template <class T>
+cublasStatus_t sbmv_impl(cublasHandle_t handle, cublasFillMode_t uplo, int n, int k, const T* alpha,
+                         const T* A, int lda, const T* x, int incx, const T* beta, T* y, int incy) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_fill_mode(uplo) || n < 0 || k < 0 || lda < k + 1 || incx == 0 || incy == 0) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    T a, b;
+    if (!load_scalar(handle, alpha, &a) || !load_scalar(handle, beta, &b)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || x == nullptr || y == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    // Band storage: upper keeps A(i,j) at A[(k + i - j) + j*lda] for j-k <= i <= j;
+    // lower keeps it at A[(i - j) + j*lda] for j <= i <= j+k.
+    std::vector<double> acc(static_cast<std::size_t>(n), 0.0);
+    for (int j = 0; j < n; ++j) {
+        const double xj = x[vec_index(j, n, incx)];
+        const int lo = (uplo == CUBLAS_FILL_MODE_UPPER) ? std::max(0, j - k) : j;
+        const int hi = (uplo == CUBLAS_FILL_MODE_UPPER) ? j : std::min(n - 1, j + k);
+        for (int i = lo; i <= hi; ++i) {
+            const std::size_t off = (uplo == CUBLAS_FILL_MODE_UPPER)
+                                        ? static_cast<std::size_t>(k + i - j)
+                                        : static_cast<std::size_t>(i - j);
+            const double v = A[off + static_cast<std::size_t>(j) * lda];
+            acc[i] += v * xj;
+            if (i != j) acc[j] += v * x[vec_index(i, n, incx)];
+        }
+    }
+    for (int i = 0; i < n; ++i) {
+        T& yi = y[vec_index(i, n, incy)];
+        const T scaled = (b == static_cast<T>(0)) ? static_cast<T>(0) : b * yi;
+        yi = scaled + a * static_cast<T>(acc[i]);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── complex level 3 via Accelerate ──
+
+inline CBLAS_UPLO to_cblas_uplo(cublasFillMode_t u) {
+    return u == CUBLAS_FILL_MODE_UPPER ? CblasUpper : CblasLower;
+}
+
+inline cublasStatus_t check_trsm_args(cublasSideMode_t side, cublasFillMode_t uplo,
+                                      cublasOperation_t trans, cublasDiagType_t diag, int m, int n,
+                                      int lda, int ldb) {
+    if ((side != CUBLAS_SIDE_LEFT && side != CUBLAS_SIDE_RIGHT) || !is_valid_fill_mode(uplo) ||
+        !is_valid_operation(trans) ||
+        (diag != CUBLAS_DIAG_NON_UNIT && diag != CUBLAS_DIAG_UNIT) || m < 0 || n < 0) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const int adim = (side == CUBLAS_SIDE_LEFT) ? m : n;
+    if (lda < std::max(1, adim) || ldb < std::max(1, m)) return CUBLAS_STATUS_INVALID_VALUE;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+template <class T>
+cublasStatus_t ctrsm_core(cublasHandle_t handle, cublasSideMode_t side, cublasFillMode_t uplo,
+                          cublasOperation_t trans, cublasDiagType_t diag, int m, int n, T a,
+                          const T* A, int lda, T* B, int ldb) {
+    if (m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || B == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    const CBLAS_SIDE cside = (side == CUBLAS_SIDE_LEFT) ? CblasLeft : CblasRight;
+    const CBLAS_DIAG cdiag = (diag == CUBLAS_DIAG_UNIT) ? CblasUnit : CblasNonUnit;
+    if constexpr (std::is_same<T, cuComplex>::value) {
+        cblas_ctrsm(CblasColMajor, cside, to_cblas_uplo(uplo), cublas_to_cblas_trans(trans), cdiag,
+                    m, n, &a, A, lda, B, ldb);
+    } else {
+        cblas_ztrsm(CblasColMajor, cside, to_cblas_uplo(uplo), cublas_to_cblas_trans(trans), cdiag,
+                    m, n, &a, A, lda, B, ldb);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+template <class T>
+cublasStatus_t ctrsm_impl(cublasHandle_t handle, cublasSideMode_t side, cublasFillMode_t uplo,
+                          cublasOperation_t trans, cublasDiagType_t diag, int m, int n,
+                          const T* alpha, const T* A, int lda, T* B, int ldb) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    const cublasStatus_t chk = check_trsm_args(side, uplo, trans, diag, m, n, lda, ldb);
+    if (chk != CUBLAS_STATUS_SUCCESS) return chk;
+    T a;
+    if (!load_scalar(handle, alpha, &a)) return CUBLAS_STATUS_INVALID_VALUE;
+    return ctrsm_core(handle, side, uplo, trans, diag, m, n, a, A, lda, B, ldb);
+}
+
+template <class T>
+cublasStatus_t csyrk_impl(cublasHandle_t handle, cublasFillMode_t uplo, cublasOperation_t trans,
+                          int n, int k, const T* alpha, const T* A, int lda, const T* beta, T* C,
+                          int ldc) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    // Complex SYRK is defined for N and T only; C belongs to HERK.
+    if (!is_valid_fill_mode(uplo) || (trans != CUBLAS_OP_N && trans != CUBLAS_OP_T) || n < 0 ||
+        k < 0) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (lda < std::max(1, trans == CUBLAS_OP_N ? n : k) || ldc < std::max(1, n)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    T a, b;
+    if (!load_scalar(handle, alpha, &a) || !load_scalar(handle, beta, &b)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || C == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    if constexpr (std::is_same<T, cuComplex>::value) {
+        cblas_csyrk(CblasColMajor, to_cblas_uplo(uplo), cublas_to_cblas_trans(trans), n, k, &a, A,
+                    lda, &b, C, ldc);
+    } else {
+        cblas_zsyrk(CblasColMajor, to_cblas_uplo(uplo), cublas_to_cblas_trans(trans), n, k, &a, A,
+                    lda, &b, C, ldc);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+template <class T>
+cublasStatus_t trsm_batched_impl(cublasHandle_t handle, cublasSideMode_t side,
+                                 cublasFillMode_t uplo, cublasOperation_t trans,
+                                 cublasDiagType_t diag, int m, int n, const T* alpha,
+                                 const T* const A[], int lda, T* const B[], int ldb,
+                                 int batch_count) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    const cublasStatus_t chk = check_trsm_args(side, uplo, trans, diag, m, n, lda, ldb);
+    if (chk != CUBLAS_STATUS_SUCCESS || batch_count < 0) return CUBLAS_STATUS_INVALID_VALUE;
+    T a;
+    if (!load_scalar(handle, alpha, &a)) return CUBLAS_STATUS_INVALID_VALUE;
+    if (batch_count == 0) return CUBLAS_STATUS_SUCCESS;
+    std::vector<void*> as, bs;
+    if (!read_pointer_table(A, batch_count, &as) || !read_pointer_table(B, batch_count, &bs)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    for (int i = 0; i < batch_count; ++i) {
+        const cublasStatus_t s =
+            ctrsm_core(handle, side, uplo, trans, diag, m, n, a, static_cast<const T*>(as[i]), lda,
+                       static_cast<T*>(bs[i]), ldb);
+        if (s != CUBLAS_STATUS_SUCCESS) return s;
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// ── batched LU ──
+
+// LU with partial pivoting (LAPACK getrf semantics: 1-based pivots, info = first
+// zero U(k,k), elimination continues). ipiv == nullptr factors without pivoting.
+template <class T>
+int lu_factor(int n, T* a, int lda, int* ipiv) {
+    int info = 0;
+    auto at = [&](int i, int j) -> T& { return a[static_cast<std::size_t>(j) * lda + i]; };
+    for (int k = 0; k < n; ++k) {
+        int p = k;
+        if (ipiv != nullptr) {
+            double best = Ops<T>::abs1(at(k, k));
+            for (int i = k + 1; i < n; ++i) {
+                const double v = Ops<T>::abs1(at(i, k));
+                if (v > best) {
+                    best = v;
+                    p = i;
+                }
+            }
+            ipiv[k] = p + 1;
+        }
+        if (Ops<T>::is_zero(at(p, k))) {
+            if (info == 0) info = k + 1;
+            continue;
+        }
+        if (p != k) {
+            for (int j = 0; j < n; ++j) std::swap(at(k, j), at(p, j));
+        }
+        const T pivot = at(k, k);
+        for (int i = k + 1; i < n; ++i) at(i, k) = Ops<T>::div(at(i, k), pivot);
+        for (int j = k + 1; j < n; ++j) {
+            const T u = at(k, j);
+            for (int i = k + 1; i < n; ++i) {
+                at(i, j) = Ops<T>::sub(at(i, j), Ops<T>::mul(at(i, k), u));
+            }
+        }
+    }
+    return info;
+}
+
+// Solve op(A) X = B in place given the LU factors and pivots from lu_factor.
+template <class T>
+void lu_solve(cublasOperation_t trans, int n, int nrhs, const T* lu, int lda, const int* ipiv,
+              T* b, int ldb) {
+    auto L = [&](int i, int j) { return lu[static_cast<std::size_t>(j) * lda + i]; };
+    auto swap_rows = [&](int col, int from, int to, int step) {
+        for (int i = from; i != to; i += step) {
+            const int p = (ipiv != nullptr ? ipiv[i] : i + 1) - 1;
+            if (p != i) std::swap(b[static_cast<std::size_t>(col) * ldb + i],
+                                  b[static_cast<std::size_t>(col) * ldb + p]);
+        }
+    };
+    for (int c = 0; c < nrhs; ++c) {
+        T* x = b + static_cast<std::size_t>(c) * ldb;
+        if (trans == CUBLAS_OP_N) {
+            swap_rows(c, 0, n, 1);
+            for (int i = 0; i < n; ++i)
+                for (int j = 0; j < i; ++j) x[i] = Ops<T>::sub(x[i], Ops<T>::mul(L(i, j), x[j]));
+            for (int i = n - 1; i >= 0; --i) {
+                for (int j = i + 1; j < n; ++j) x[i] = Ops<T>::sub(x[i], Ops<T>::mul(L(i, j), x[j]));
+                x[i] = Ops<T>::div(x[i], L(i, i));
+            }
+        } else {
+            const bool cj = (trans == CUBLAS_OP_C);
+            auto E = [&](int i, int j) { return cj ? Ops<T>::conj(L(i, j)) : L(i, j); };
+            // (P^T L U)^T = U^T L^T P : solve U^T, then L^T, then undo the swaps.
+            for (int i = 0; i < n; ++i) {
+                for (int j = 0; j < i; ++j) x[i] = Ops<T>::sub(x[i], Ops<T>::mul(E(j, i), x[j]));
+                x[i] = Ops<T>::div(x[i], E(i, i));
+            }
+            for (int i = n - 1; i >= 0; --i)
+                for (int j = i + 1; j < n; ++j) x[i] = Ops<T>::sub(x[i], Ops<T>::mul(E(j, i), x[j]));
+            swap_rows(c, n - 1, -1, -1);
+        }
+    }
+}
+
+template <class T>
+cublasStatus_t getrf_batched_any(cublasHandle_t handle, int n, T* const A[], int lda, int* P,
+                                 int* info, int batch) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (n < 0 || batch < 0 || lda < std::max(1, n)) return CUBLAS_STATUS_INVALID_VALUE;
+    if (n == 0 || batch == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || info == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    std::vector<void*> mats;
+    if (!read_pointer_table(A, batch, &mats)) return CUBLAS_STATUS_INVALID_VALUE;
+    for (int b = 0; b < batch; ++b) {
+        if (mats[b] == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+        info[b] = lu_factor(n, static_cast<T*>(mats[b]), lda,
+                            P != nullptr ? P + static_cast<std::size_t>(b) * n : nullptr);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// info is a host array here, as in cuBLAS getrsBatched.
+template <class T>
+cublasStatus_t getrs_batched_any(cublasHandle_t handle, cublasOperation_t trans, int n, int nrhs,
+                                 const T* const A[], int lda, const int* ipiv, T* const B[],
+                                 int ldb, int* info, int batch) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_operation(trans) || n < 0 || nrhs < 0 || batch < 0 || lda < std::max(1, n) ||
+        ldb < std::max(1, n) || info == nullptr) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    *info = 0;
+    if (n == 0 || nrhs == 0 || batch == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || B == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    std::vector<void*> as, bs;
+    if (!read_pointer_table(A, batch, &as) || !read_pointer_table(B, batch, &bs)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    for (int b = 0; b < batch; ++b) {
+        if (as[b] == nullptr || bs[b] == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+        lu_solve(trans, n, nrhs, static_cast<const T*>(as[b]), lda,
+                 ipiv != nullptr ? ipiv + static_cast<std::size_t>(b) * n : nullptr,
+                 static_cast<T*>(bs[b]), ldb);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+// C = inv(A) from getrf factors by solving LU X = I; info[b] = k > 0 marks a
+// singular matrix (U(k,k) == 0), whose C is left untouched.
+template <class T>
+cublasStatus_t getri_batched_any(cublasHandle_t handle, int n, const T* const A[], int lda,
+                                 const int* P, T* const C[], int ldc, int* info, int batch) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (n < 0 || batch < 0 || lda < std::max(1, n) || ldc < std::max(1, n)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (n == 0 || batch == 0) return CUBLAS_STATUS_SUCCESS;
+    if (A == nullptr || C == nullptr || info == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    std::vector<void*> as, cs;
+    if (!read_pointer_table(A, batch, &as) || !read_pointer_table(C, batch, &cs)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    for (int b = 0; b < batch; ++b) {
+        if (as[b] == nullptr || cs[b] == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
+        const T* lu = static_cast<const T*>(as[b]);
+        T* out = static_cast<T*>(cs[b]);
+        int singular = 0;
+        for (int k = 0; k < n && singular == 0; ++k) {
+            if (Ops<T>::is_zero(lu[static_cast<std::size_t>(k) * lda + k])) singular = k + 1;
+        }
+        info[b] = singular;
+        if (singular != 0) continue;
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < n; ++i)
+                out[static_cast<std::size_t>(j) * ldc + i] = (i == j) ? Ops<T>::one() : Ops<T>::zero();
+        lu_solve(CUBLAS_OP_N, n, n, lu, lda,
+                 P != nullptr ? P + static_cast<std::size_t>(b) * n : nullptr, out, ldc);
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+template <class T>
+cublasStatus_t gemm_batched_any(cublasHandle_t handle, cublasOperation_t transa,
+                                cublasOperation_t transb, int m, int n, int k, const T* alpha,
+                                const T* const A[], int lda, const T* const B[], int ldb,
+                                const T* beta, T* const C[], int ldc, int batch) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    if (!is_valid_operation(transa) || !is_valid_operation(transb) || m < 0 || n < 0 || k < 0 ||
+        batch < 0) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    T a, b;
+    if (!load_scalar(handle, alpha, &a) || !load_scalar(handle, beta, &b)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    if (batch == 0 || m == 0 || n == 0) return CUBLAS_STATUS_SUCCESS;
+    if (lda < std::max(1, transa == CUBLAS_OP_N ? m : k) ||
+        ldb < std::max(1, transb == CUBLAS_OP_N ? k : n) || ldc < std::max(1, m)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    std::vector<void*> as, bs, cs;
+    if (!read_pointer_table(A, batch, &as) || !read_pointer_table(B, batch, &bs) ||
+        !read_pointer_table(C, batch, &cs)) {
+        return CUBLAS_STATUS_INVALID_VALUE;
+    }
+    const cublasStatus_t st = synchronize_handle_stream(handle);
+    if (st != CUBLAS_STATUS_SUCCESS) return st;
+    for (int i = 0; i < batch; ++i) {
+        if (as[i] == nullptr || bs[i] == nullptr || cs[i] == nullptr) {
+            return CUBLAS_STATUS_INVALID_VALUE;
+        }
+        if constexpr (std::is_same<T, cuComplex>::value) {
+            cblas_cgemm(CblasColMajor, cublas_to_cblas_trans(transa), cublas_to_cblas_trans(transb),
+                        m, n, k, &a, as[i], lda, bs[i], ldb, &b, cs[i], ldc);
+        } else {
+            cblas_zgemm(CblasColMajor, cublas_to_cblas_trans(transa), cublas_to_cblas_trans(transb),
+                        m, n, k, &a, as[i], lda, bs[i], ldb, &b, cs[i], ldc);
+        }
+    }
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+}  // namespace
+
+extern "C" {
+
+#define CUMETAL_CX_LEVEL1(P, C, R)                                                                  \
+    cublasStatus_t cublas##P##axpy(cublasHandle_t h, int n, const C* alpha, const C* x, int incx,  \
+                                   C* y, int incy) {                                                \
+        return axpy_impl(h, n, alpha, x, incx, y, incy);                                            \
+    }                                                                                               \
+    cublasStatus_t cublas##P##scal(cublasHandle_t h, int n, const C* alpha, C* x, int incx) {       \
+        return scal_impl(h, n, alpha, x, incx);                                                     \
+    }                                                                                               \
+    cublasStatus_t cublas##P##dotu(cublasHandle_t h, int n, const C* x, int incx, const C* y,       \
+                                   int incy, C* result) {                                           \
+        return dot_impl(h, n, x, incx, y, incy, result, false);                                     \
+    }                                                                                               \
+    cublasStatus_t cublas##P##dotc(cublasHandle_t h, int n, const C* x, int incx, const C* y,       \
+                                   int incy, C* result) {                                           \
+        return dot_impl(h, n, x, incx, y, incy, result, true);                                      \
+    }                                                                                               \
+    cublasStatus_t cublas##P##geru(cublasHandle_t h, int m, int n, const C* alpha, const C* x,      \
+                                   int incx, const C* y, int incy, C* A, int lda) {                 \
+        return ger_impl(h, m, n, alpha, x, incx, y, incy, A, lda, false);                           \
+    }                                                                                               \
+    cublasStatus_t cublas##P##gerc(cublasHandle_t h, int m, int n, const C* alpha, const C* x,      \
+                                   int incx, const C* y, int incy, C* A, int lda) {                 \
+        return ger_impl(h, m, n, alpha, x, incx, y, incy, A, lda, true);                            \
+    }                                                                                               \
+    cublasStatus_t cublas##P##syrk(cublasHandle_t h, cublasFillMode_t uplo,                         \
+                                   cublasOperation_t trans, int n, int k, const C* alpha,           \
+                                   const C* A, int lda, const C* beta, C* Cm, int ldc) {            \
+        return csyrk_impl(h, uplo, trans, n, k, alpha, A, lda, beta, Cm, ldc);                      \
+    }                                                                                               \
+    cublasStatus_t cublas##P##trsm(cublasHandle_t h, cublasSideMode_t side, cublasFillMode_t uplo,  \
+                                   cublasOperation_t trans, cublasDiagType_t diag, int m, int n,    \
+                                   const C* alpha, const C* A, int lda, C* B, int ldb) {            \
+        return ctrsm_impl(h, side, uplo, trans, diag, m, n, alpha, A, lda, B, ldb);                 \
+    }                                                                                               \
+    cublasStatus_t cublas##P##trsmBatched(cublasHandle_t h, cublasSideMode_t side,                  \
+                                          cublasFillMode_t uplo, cublasOperation_t trans,           \
+                                          cublasDiagType_t diag, int m, int n, const C* alpha,      \
+                                          const C* const A[], int lda, C* const B[], int ldb,       \
+                                          int batchCount) {                                         \
+        return trsm_batched_impl(h, side, uplo, trans, diag, m, n, alpha, A, lda, B, ldb,           \
+                                 batchCount);                                                       \
+    }                                                                                               \
+    cublasStatus_t cublas##P##gemmBatched(cublasHandle_t h, cublasOperation_t ta,                   \
+                                          cublasOperation_t tb, int m, int n, int k,                \
+                                          const C* alpha, const C* const A[], int lda,              \
+                                          const C* const B[], int ldb, const C* beta,               \
+                                          C* const Cm[], int ldc, int batchCount) {                 \
+        return gemm_batched_any(h, ta, tb, m, n, k, alpha, A, lda, B, ldb, beta, Cm, ldc,           \
+                                batchCount);                                                        \
+    }                                                                                               \
+    cublasStatus_t cublas##P##getrfBatched(cublasHandle_t h, int n, C* const A[], int lda,          \
+                                           int* piv, int* info, int batchSize) {                    \
+        return getrf_batched_any(h, n, A, lda, piv, info, batchSize);                               \
+    }
+
+#define CUMETAL_ANY_LU_AND_EXT(P, T)                                                                \
+    cublasStatus_t cublas##P##geam(cublasHandle_t h, cublasOperation_t ta, cublasOperation_t tb,    \
+                                   int m, int n, const T* alpha, const T* A, int lda,               \
+                                   const T* beta, const T* B, int ldb, T* Cm, int ldc) {            \
+        return geam_impl(h, ta, tb, m, n, alpha, A, lda, beta, B, ldb, Cm, ldc);                    \
+    }                                                                                               \
+    cublasStatus_t cublas##P##dgmm(cublasHandle_t h, cublasSideMode_t mode, int m, int n,           \
+                                   const T* A, int lda, const T* x, int incx, T* Cm, int ldc) {     \
+        return dgmm_impl(h, mode, m, n, A, lda, x, incx, Cm, ldc);                                  \
+    }                                                                                               \
+    cublasStatus_t cublas##P##getrsBatched(cublasHandle_t h, cublasOperation_t trans, int n,        \
+                                           int nrhs, const T* const A[], int lda, const int* ipiv,  \
+                                           T* const B[], int ldb, int* info, int batchSize) {       \
+        return getrs_batched_any(h, trans, n, nrhs, A, lda, ipiv, B, ldb, info, batchSize);         \
+    }                                                                                               \
+    cublasStatus_t cublas##P##getriBatched(cublasHandle_t h, int n, const T* const A[], int lda,    \
+                                           const int* piv, T* const Cm[], int ldc, int* info,       \
+                                           int batchSize) {                                         \
+        return getri_batched_any(h, n, A, lda, piv, Cm, ldc, info, batchSize);                      \
+    }
+
+CUMETAL_CX_LEVEL1(C, cuComplex, float)
+CUMETAL_CX_LEVEL1(Z, cuDoubleComplex, double)
+CUMETAL_ANY_LU_AND_EXT(S, float)
+CUMETAL_ANY_LU_AND_EXT(D, double)
+CUMETAL_ANY_LU_AND_EXT(C, cuComplex)
+CUMETAL_ANY_LU_AND_EXT(Z, cuDoubleComplex)
+
+#undef CUMETAL_CX_LEVEL1
+#undef CUMETAL_ANY_LU_AND_EXT
+
+cublasStatus_t cublasIcamax(cublasHandle_t h, int n, const cuComplex* x, int incx, int* result) {
+    return iamaxmin_impl(h, n, x, incx, result, true);
+}
+cublasStatus_t cublasIcamin(cublasHandle_t h, int n, const cuComplex* x, int incx, int* result) {
+    return iamaxmin_impl(h, n, x, incx, result, false);
+}
+cublasStatus_t cublasIzamax(cublasHandle_t h, int n, const cuDoubleComplex* x, int incx,
+                            int* result) {
+    return iamaxmin_impl(h, n, x, incx, result, true);
+}
+cublasStatus_t cublasIzamin(cublasHandle_t h, int n, const cuDoubleComplex* x, int incx,
+                            int* result) {
+    return iamaxmin_impl(h, n, x, incx, result, false);
+}
+
+cublasStatus_t cublasScasum(cublasHandle_t h, int n, const cuComplex* x, int incx, float* r) {
+    return norm_impl(h, n, x, incx, r, 0);
+}
+cublasStatus_t cublasScnrm2(cublasHandle_t h, int n, const cuComplex* x, int incx, float* r) {
+    return norm_impl(h, n, x, incx, r, 1);
+}
+cublasStatus_t cublasDzasum(cublasHandle_t h, int n, const cuDoubleComplex* x, int incx,
+                            double* r) {
+    return norm_impl(h, n, x, incx, r, 0);
+}
+cublasStatus_t cublasDznrm2(cublasHandle_t h, int n, const cuDoubleComplex* x, int incx,
+                            double* r) {
+    return norm_impl(h, n, x, incx, r, 1);
+}
+
+cublasStatus_t cublasCsscal(cublasHandle_t h, int n, const float* alpha, cuComplex* x, int incx) {
+    return scal_impl(h, n, alpha, x, incx);
+}
+cublasStatus_t cublasZdscal(cublasHandle_t h, int n, const double* alpha, cuDoubleComplex* x,
+                            int incx) {
+    return scal_impl(h, n, alpha, x, incx);
+}
+
+cublasStatus_t cublasSsbmv(cublasHandle_t h, cublasFillMode_t uplo, int n, int k, const float* alpha,
+                           const float* A, int lda, const float* x, int incx, const float* beta,
+                           float* y, int incy) {
+    return sbmv_impl(h, uplo, n, k, alpha, A, lda, x, incx, beta, y, incy);
+}
+cublasStatus_t cublasDsbmv(cublasHandle_t h, cublasFillMode_t uplo, int n, int k,
+                           const double* alpha, const double* A, int lda, const double* x, int incx,
+                           const double* beta, double* y, int incy) {
+    return sbmv_impl(h, uplo, n, k, alpha, A, lda, x, incx, beta, y, incy);
+}
+
+cublasStatus_t cublasStpttr(cublasHandle_t h, cublasFillMode_t uplo, int n, const float* AP,
+                            float* A, int lda) {
+    return tpttr_impl(h, uplo, n, AP, A, lda);
+}
+cublasStatus_t cublasDtpttr(cublasHandle_t h, cublasFillMode_t uplo, int n, const double* AP,
+                            double* A, int lda) {
+    return tpttr_impl(h, uplo, n, AP, A, lda);
+}
+cublasStatus_t cublasStrttp(cublasHandle_t h, cublasFillMode_t uplo, int n, const float* A, int lda,
+                            float* AP) {
+    return trttp_impl(h, uplo, n, A, lda, AP);
+}
+cublasStatus_t cublasDtrttp(cublasHandle_t h, cublasFillMode_t uplo, int n, const double* A,
+                            int lda, double* AP) {
+    return trttp_impl(h, uplo, n, A, lda, AP);
+}
+
+cublasStatus_t cublasSgemmEx(cublasHandle_t handle, cublasOperation_t transa,
+                             cublasOperation_t transb, int m, int n, int k, const float* alpha,
+                             const void* A, cudaDataType_t Atype, int lda, const void* B,
+                             cudaDataType_t Btype, int ldb, const float* beta, void* C,
+                             cudaDataType_t Ctype, int ldc) {
+    if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
+    // GemmEx falls through to a zero-filling reader for types it does not know,
+    // so refuse anything outside the float formats it converts.
+    auto supported = [](cudaDataType_t t) {
+        return t == CUDA_R_32F || t == CUDA_R_16F || t == CUDA_R_16BF;
+    };
+    if (!supported(Atype) || !supported(Btype) || !supported(Ctype)) {
+        return CUBLAS_STATUS_NOT_SUPPORTED;
+    }
+    return cublasGemmEx(handle, transa, transb, m, n, k, alpha, A, Atype, lda, B, Btype, ldb, beta,
+                        C, Ctype, ldc, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
 }
 
 }  // extern "C"

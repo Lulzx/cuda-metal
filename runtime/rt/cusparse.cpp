@@ -7,6 +7,8 @@
 #include "library_kernel_source.h"
 
 #include <algorithm>
+#include <cmath>
+#include <complex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +18,7 @@
 #include <mutex>
 #include <new>
 #include <string>
+#include <numeric>
 #include <vector>
 
 // ── cuSPARSE shim ───────────────────────────────────────────────────────────
@@ -68,7 +71,35 @@ struct cusparseSpMatDescr {
     std::int64_t longest_row = -1;
 };
 
-struct csrilu02Info {};
+// Incomplete-factorization state. Positions are stored zero-based (-1 = none)
+// and converted to the matrix's index base only when reported.
+struct csrilu02Info {
+    int zero_pivot = -1;
+    int base = 0;
+    bool boost_enabled = false;
+    double boost_tol = 0.0;
+    std::complex<double> boost_value{0.0, 0.0};
+};
+
+struct csric02Info {
+    int zero_pivot = -1;
+    int base = 0;
+};
+
+// Block factorizations are not implemented; the info objects exist so that
+// callers can create and destroy them, and every compute call refuses.
+struct bsrilu02Info { char reserved = 0; };
+struct bsric02Info { char reserved = 0; };
+
+struct cusparseSpVecDescr {
+    int64_t size = 0;
+    int64_t nnz = 0;
+    void* indices = nullptr;
+    void* values = nullptr;
+    cusparseIndexType_t idxType = CUSPARSE_INDEX_32I;
+    cusparseIndexBase_t idxBase = CUSPARSE_INDEX_BASE_ZERO;
+    cudaDataType valueType = CUDA_R_32F;
+};
 
 struct cusparseDnVecDescr {
     int64_t size = 0;
@@ -83,6 +114,10 @@ struct cusparseDnMatDescr {
     void* values = nullptr;
     cudaDataType valueType = CUDA_R_32F;
     cusparseOrder_t order = CUSPARSE_ORDER_COL;
+    // Set through cusparseDnMatSetStridedBatch. The product kernels address one
+    // matrix only, so those that cannot honour a batch refuse when this is > 1.
+    int batchCount = 1;
+    int64_t batchStride = 0;
 };
 
 // Handle management
@@ -144,13 +179,31 @@ static bool valid_operation(cusparseOperation_t operation) {
 
 static bool valid_spmv_algorithm(cusparseSpMVAlg_t algorithm) {
     return algorithm == CUSPARSE_SPMV_ALG_DEFAULT ||
+           algorithm == CUSPARSE_SPMV_COO_ALG1 ||
            algorithm == CUSPARSE_SPMV_CSR_ALG1 ||
-           algorithm == CUSPARSE_SPMV_CSR_ALG2;
+           algorithm == CUSPARSE_SPMV_CSR_ALG2 ||
+           algorithm == CUSPARSE_SPMV_COO_ALG2;
+}
+
+// A COO algorithm names a storage format just as a CSR one does. All of them
+// compute the same product here, so the only question is whether the request
+// is coherent: CSR_ALG* on a COO matrix (or COO_ALG* on a compressed one) is
+// the caller asking for something cuSPARSE itself refuses.
+static bool spmv_algorithm_fits_format(cusparseSpMVAlg_t algorithm, SpMatFormat format) {
+    const bool coo_alg = algorithm == CUSPARSE_SPMV_COO_ALG1 ||
+                         algorithm == CUSPARSE_SPMV_COO_ALG2;
+    const bool csr_alg = algorithm == CUSPARSE_SPMV_CSR_ALG1 ||
+                         algorithm == CUSPARSE_SPMV_CSR_ALG2;
+    return format == CUMETAL_SPMAT_COO ? !csr_alg : !coo_alg;
 }
 
 static bool valid_spmm_algorithm(cusparseSpMMAlg_t algorithm) {
     return algorithm == CUSPARSE_SPMM_ALG_DEFAULT ||
+           algorithm == CUSPARSE_SPMM_COO_ALG1 ||
+           algorithm == CUSPARSE_SPMM_COO_ALG2 ||
+           algorithm == CUSPARSE_SPMM_COO_ALG3 ||
            algorithm == CUSPARSE_SPMM_CSR_ALG1 ||
+           algorithm == CUSPARSE_SPMM_COO_ALG4 ||
            algorithm == CUSPARSE_SPMM_CSR_ALG2 ||
            algorithm == CUSPARSE_SPMM_CSR_ALG3;
 }
@@ -245,7 +298,7 @@ cusparseStatus_t cusparseGetPointerMode(cusparseHandle_t handle, cusparsePointer
 cusparseStatus_t cusparseGetVersion(cusparseHandle_t handle, int* version) {
     if (handle == nullptr) return CUSPARSE_STATUS_NOT_INITIALIZED;
     if (version == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
-    *version = 12000;
+    *version = CUSPARSE_VERSION;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
@@ -491,65 +544,8 @@ cusparseStatus_t cusparseDestroyCsrilu02Info(csrilu02Info_t info) {
     return CUSPARSE_STATUS_SUCCESS;
 }
 
-cusparseStatus_t cusparseScsrilu02_bufferSize(cusparseHandle_t handle, int m, int nnz,
-                                              const cusparseMatDescr_t,
-                                              float* csrValA, const int* csrRowPtrA,
-                                              const int* csrColIndA, csrilu02Info_t info,
-                                              int* bufferSize) {
-    if (!handle || m < 0 || nnz < 0 || !csrValA || !csrRowPtrA || !csrColIndA ||
-        !info || !bufferSize) return CUSPARSE_STATUS_INVALID_VALUE;
-    *bufferSize = 1;
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-cusparseStatus_t cusparseScsrilu02_analysis(cusparseHandle_t handle, int m, int nnz,
-                                            const cusparseMatDescr_t,
-                                            const float* csrValA, const int* csrRowPtrA,
-                                            const int* csrColIndA, csrilu02Info_t info,
-                                            cusparseSolvePolicy_t, void*) {
-    if (!handle || m < 0 || nnz < 0 || !csrValA || !csrRowPtrA || !csrColIndA || !info)
-        return CUSPARSE_STATUS_INVALID_VALUE;
-    synchronize_handle_stream(handle);
-    return CUSPARSE_STATUS_SUCCESS;
-}
-
-cusparseStatus_t cusparseScsrilu02(cusparseHandle_t handle, int m, int nnz,
-                                   const cusparseMatDescr_t descrA,
-                                   float* csrValA, const int* csrRowPtrA,
-                                   const int* csrColIndA, csrilu02Info_t info,
-                                   cusparseSolvePolicy_t, void*) {
-    if (!handle || m < 0 || nnz < 0 || !csrValA || !csrRowPtrA || !csrColIndA || !info)
-        return CUSPARSE_STATUS_INVALID_VALUE;
-    synchronize_handle_stream(handle);
-    const int base = descrA && descrA->base == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
-    auto find_in_row = [&](int row, int column) -> int {
-        for (int p = csrRowPtrA[row] - base; p < csrRowPtrA[row + 1] - base; ++p) {
-            const int current = csrColIndA[p] - base;
-            if (current == column) return p;
-            if (current > column) break;
-        }
-        return -1;
-    };
-    for (int row = 0; row < m; ++row) {
-        const int row_begin = csrRowPtrA[row] - base;
-        const int row_end = csrRowPtrA[row + 1] - base;
-        for (int p = row_begin; p < row_end; ++p) {
-            const int lower_column = csrColIndA[p] - base;
-            if (lower_column >= row) break;
-            const int diagonal = find_in_row(lower_column, lower_column);
-            if (diagonal < 0 || csrValA[diagonal] == 0.0f)
-                return CUSPARSE_STATUS_ZERO_PIVOT;
-            const float multiplier = csrValA[p] / csrValA[diagonal];
-            csrValA[p] = multiplier;
-            for (int q = diagonal + 1; q < csrRowPtrA[lower_column + 1] - base; ++q) {
-                const int upper_column = csrColIndA[q] - base;
-                const int destination = find_in_row(row, upper_column);
-                if (destination >= 0) csrValA[destination] -= multiplier * csrValA[q];
-            }
-        }
-    }
-    return CUSPARSE_STATUS_SUCCESS;
-}
+// The csrilu02 / csric02 entry points (all four precisions) are defined with
+// the other incomplete-factorization code at the end of this file.
 
 cusparseStatus_t cusparseCreateDnVec(cusparseDnVecDescr_t* dnVecDescr,
                                       int64_t size, void* values, cudaDataType valueType) {
@@ -657,8 +653,7 @@ cusparseStatus_t cusparseSpMV_bufferSize(cusparseHandle_t handle,
     if (!valid_operation(opA) || !valid_spmv_algorithm(alg)) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
-    if (matA->format == CUMETAL_SPMAT_COO &&
-        alg != CUSPARSE_SPMV_ALG_DEFAULT) {
+    if (!spmv_algorithm_fits_format(alg, matA->format)) {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
     }
     if (scalar_pointer_for_mode(handle->pointer_mode, alpha, computeType) == nullptr ||
@@ -793,6 +788,106 @@ static void cumetal_sparse_view(const cusparseSpMatDescr* mat, cusparseOperation
 // int* would read half of each entry, so refuse rather than compute garbage.
 static bool cumetal_sparse_indices_are_32bit(const cusparseSpMatDescr* mat) {
     return mat->rowType == CUSPARSE_INDEX_32I && mat->colType == CUSPARSE_INDEX_32I;
+}
+
+}  // extern "C++"
+
+extern "C++" {
+
+// ── type plumbing for the typed (S/D/C/Z) entry points ──────────────────────
+//
+// The public API spells complex values as cuComplex / cuDoubleComplex. They
+// have the layout of std::complex, so one set of templates serves all four
+// precisions and the C wrappers only reinterpret pointers.
+template <typename C> struct NativeOf { using type = C; };
+template <> struct NativeOf<cuComplex> { using type = std::complex<float>; };
+template <> struct NativeOf<cuDoubleComplex> { using type = std::complex<double>; };
+template <typename C> using native_t = typename NativeOf<C>::type;
+
+static_assert(sizeof(std::complex<float>) == sizeof(cuComplex), "cuComplex layout");
+static_assert(sizeof(std::complex<double>) == sizeof(cuDoubleComplex), "cuDoubleComplex layout");
+
+template <typename C> static native_t<C>* nat(C* p) {
+    return reinterpret_cast<native_t<C>*>(p);
+}
+template <typename C> static const native_t<C>* cnat(const C* p) {
+    return reinterpret_cast<const native_t<C>*>(p);
+}
+inline float to_native(float v) { return v; }
+inline double to_native(double v) { return v; }
+inline std::complex<float> to_native(cuComplex v) { return {v.x, v.y}; }
+inline std::complex<double> to_native(cuDoubleComplex v) { return {v.x, v.y}; }
+
+template <typename T> inline double mag(const T& v) { return std::abs(v); }
+template <typename T> inline T conj_of(const T& v) { return v; }
+template <typename T> inline std::complex<T> conj_of(const std::complex<T>& v) {
+    return std::conj(v);
+}
+template <typename T> inline double real_part(const T& v) { return static_cast<double>(v); }
+template <typename T> inline double real_part(const std::complex<T>& v) { return v.real(); }
+
+// ── index arrays of any cusparseIndexType_t ─────────────────────────────────
+static int64_t idx_at(const void* p, cusparseIndexType_t t, int64_t i) {
+    switch (t) {
+        case CUSPARSE_INDEX_16U: return static_cast<const std::uint16_t*>(p)[i];
+        case CUSPARSE_INDEX_64I: return static_cast<const std::int64_t*>(p)[i];
+        default: return static_cast<const std::int32_t*>(p)[i];
+    }
+}
+
+static void idx_put(void* p, cusparseIndexType_t t, int64_t i, int64_t v) {
+    switch (t) {
+        case CUSPARSE_INDEX_16U: static_cast<std::uint16_t*>(p)[i] = static_cast<std::uint16_t>(v); break;
+        case CUSPARSE_INDEX_64I: static_cast<std::int64_t*>(p)[i] = v; break;
+        default: static_cast<std::int32_t*>(p)[i] = static_cast<std::int32_t>(v); break;
+    }
+}
+
+// Solve R^t * x = rhs in place, where R is the matrix the CSR arrays describe
+// and `fill` names the triangle of R that holds data. Entries in the other
+// triangle are ignored, as in cuSPARSE.
+//
+// Non-transpose gathers along rows. Transpose cannot: R^t's rows are R's
+// columns, which CSR cannot walk. It scatters instead -- once x[i] is final,
+// subtract its contribution from every equation that still needs it. The
+// direction flips with the transpose (R lower => R^t upper => solve backward).
+//
+// Returns false on a zero or missing diagonal entry.
+template <typename T>
+static bool cumetal_tri_solve(int64_t n, const int* offsets, const int* indices, const T* vals,
+                              int base, cusparseFillMode_t fill, bool unit_diag,
+                              bool transpose, bool conjugate, T* x) {
+    auto value = [&](int k) { return conjugate ? conj_of(vals[k]) : vals[k]; };
+    const bool forward = transpose ? (fill == CUSPARSE_FILL_MODE_UPPER)
+                                   : (fill == CUSPARSE_FILL_MODE_LOWER);
+    for (int64_t step = 0; step < n; ++step) {
+        const int64_t i = forward ? step : n - 1 - step;
+        const int begin = offsets[i] - base;
+        const int end = offsets[i + 1] - base;
+        T diag = static_cast<T>(1);
+        bool have_diag = unit_diag;
+        T acc = x[i];
+        for (int k = begin; k < end; ++k) {
+            const int64_t c = indices[k] - base;
+            if (c == i) {
+                if (!unit_diag) {
+                    diag = value(k);
+                    have_diag = true;
+                }
+            } else if (!transpose && (forward ? c < i : c > i)) {
+                acc -= value(k) * x[c];
+            }
+        }
+        if (!have_diag || diag == static_cast<T>(0)) return false;
+        x[i] = acc / diag;
+        if (transpose) {
+            for (int k = begin; k < end; ++k) {
+                const int64_t c = indices[k] - base;
+                if (c != i && (forward ? c > i : c < i)) x[c] -= value(k) * x[i];
+            }
+        }
+    }
+    return true;
 }
 
 }  // extern "C++"
@@ -1218,8 +1313,7 @@ cusparseStatus_t cusparseSpMV_preprocess(cusparseHandle_t handle,
     if (!valid_operation(opA) || !valid_spmv_algorithm(alg)) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
-    if (matA->format == CUMETAL_SPMAT_COO &&
-        alg != CUSPARSE_SPMV_ALG_DEFAULT) {
+    if (!spmv_algorithm_fits_format(alg, matA->format)) {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
     }
     if (scalar_pointer_for_mode(handle->pointer_mode, alpha, computeType) == nullptr ||
@@ -1267,8 +1361,7 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
     if (!valid_operation(opA) || !valid_spmv_algorithm(alg)) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
-    if (matA->format == CUMETAL_SPMAT_COO &&
-        alg != CUSPARSE_SPMV_ALG_DEFAULT) {
+    if (!spmv_algorithm_fits_format(alg, matA->format)) {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
     }
     if (!cumetal_sparse_indices_are_32bit(matA)) {
@@ -1436,6 +1529,7 @@ cusparseStatus_t cusparseSpMM_bufferSize(cusparseHandle_t handle,
     if (opB != CUSPARSE_OPERATION_NON_TRANSPOSE ||
         matB->order != CUSPARSE_ORDER_COL ||
         matC->order != CUSPARSE_ORDER_COL ||
+        matB->batchCount != 1 || matC->batchCount != 1 ||
         !cumetal_sparse_indices_are_32bit(matA)) {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
     }
@@ -1478,6 +1572,11 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t handle,
     // dimension and read B in its stored orientation.
     if (opB != CUSPARSE_OPERATION_NON_TRANSPOSE) return CUSPARSE_STATUS_NOT_SUPPORTED;
     if (matB->order != CUSPARSE_ORDER_COL || matC->order != CUSPARSE_ORDER_COL) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    // Only one matrix is addressed; a strided batch would silently compute the
+    // first member and leave the rest of C untouched.
+    if (matB->batchCount != 1 || matC->batchCount != 1) {
         return CUSPARSE_STATUS_NOT_SUPPORTED;
     }
 
@@ -1733,59 +1832,2414 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t handle,
     alpha = scalar_pointer_for_mode(handle->pointer_mode, alpha, computeType);
     if (alpha == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
 
+    if (!cumetal_sparse_indices_are_32bit(matA)) return CUSPARSE_STATUS_NOT_SUPPORTED;
+
     const int* rowPtr = static_cast<const int*>(matA->rowOffsets);
     const int* colIdx = static_cast<const int*>(matA->colInd);
     const int base = (matA->idxBase == CUSPARSE_INDEX_BASE_ONE) ? 1 : 0;
     const int64_t n = matA->rows;
-    const bool forward =
-        (matA->fill == CUSPARSE_FILL_MODE_LOWER) ==
-        (opA == CUSPARSE_OPERATION_NON_TRANSPOSE);
+    const bool transpose = opA != CUSPARSE_OPERATION_NON_TRANSPOSE;
+    const bool unit = matA->diag == CUSPARSE_DIAG_TYPE_UNIT;
+    bool ok = true;
 
-    // Forward substitution: solve L*y = alpha*x row by row
+    // y = alpha * x, then solve op(A) * y = y in place. The solve walks the
+    // CSR arrays through cumetal_tri_solve, which handles the transposed
+    // operation by scattering; reading A's rows as if they were op(A)'s rows
+    // would be a different (wrong) system.
     if (computeType == CUDA_R_64F) {
         const double a = *static_cast<const double*>(alpha);
         const double* vals = static_cast<const double*>(matA->values);
         const double* x = static_cast<const double*>(vecX->values);
         double* y = static_cast<double*>(vecY->values);
-        for (int64_t step = 0; step < n; ++step) {
-            const int64_t i = forward ? step : n - 1 - step;
-            double rhs = a * x[i];
-            double diag = matA->diag == CUSPARSE_DIAG_TYPE_UNIT ? 1.0 : 0.0;
-            const int rs = rowPtr[i] - base;
-            const int re = rowPtr[i + 1] - base;
-            for (int j = rs; j < re; ++j) {
-                const int c = colIdx[j] - base;
-                if (c == i && matA->diag != CUSPARSE_DIAG_TYPE_UNIT) { diag = vals[j]; }
-                else if ((forward && c < i) || (!forward && c > i)) {
-                    rhs -= vals[j] * y[c];
-                }
-            }
-            if (diag == 0.0) return CUSPARSE_STATUS_ZERO_PIVOT;
-            y[i] = rhs / diag;
-        }
+        for (int64_t i = 0; i < n; ++i) y[i] = a * x[i];
+        ok = cumetal_tri_solve(n, rowPtr, colIdx, vals, base, matA->fill, unit, transpose,
+                               false, y);
     } else {
         const float a = *static_cast<const float*>(alpha);
         const float* vals = static_cast<const float*>(matA->values);
         const float* x = static_cast<const float*>(vecX->values);
         float* y = static_cast<float*>(vecY->values);
-        for (int64_t step = 0; step < n; ++step) {
-            const int64_t i = forward ? step : n - 1 - step;
-            float rhs = a * x[i];
-            float diag = matA->diag == CUSPARSE_DIAG_TYPE_UNIT ? 1.0f : 0.0f;
-            const int rs = rowPtr[i] - base;
-            const int re = rowPtr[i + 1] - base;
-            for (int j = rs; j < re; ++j) {
-                const int c = colIdx[j] - base;
-                if (c == i && matA->diag != CUSPARSE_DIAG_TYPE_UNIT) { diag = vals[j]; }
-                else if ((forward && c < i) || (!forward && c > i)) {
-                    rhs -= vals[j] * y[c];
-                }
+        for (int64_t i = 0; i < n; ++i) y[i] = a * x[i];
+        ok = cumetal_tri_solve(n, rowPtr, colIdx, vals, base, matA->fill, unit, transpose,
+                               false, y);
+    }
+    if (!ok) return CUSPARSE_STATUS_ZERO_PIVOT;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Format conversion, sorting, nnz counting, tridiagonal/pentadiagonal solvers,
+// incomplete factorizations and the rest of the generic API.
+//
+// Everything below computes on the CPU over unified memory, like the SpMV/SpMM
+// paths above: synchronize the handle's stream, then read and write the
+// operands directly. None of it needs scratch from the caller, so every
+// *_bufferSize query returns a small non-zero size (callers often allocate it
+// unconditionally and some allocators hand back null for zero bytes).
+// ═════════════════════════════════════════════════════════════════════════════
+
+extern "C++" {
+
+#define SP_NEED_HANDLE(h)                                               \
+    do {                                                                \
+        if ((h) == nullptr) return CUSPARSE_STATUS_NOT_INITIALIZED;     \
+    } while (0)
+
+constexpr std::size_t kNoWorkspaceBytes = 128;
+
+static int base_of(const cusparseMatDescr* descr) {
+    return descr != nullptr && descr->base == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
+}
+
+// An offset array is usable when it starts at the index base, never decreases
+// and ends at nnz. cuSPARSE does not check this; reading past a malformed one
+// would walk off the allocation, so refuse here.
+static bool offsets_valid(int64_t rows, int64_t nnz, const int* ptr, int base) {
+    if (rows < 0 || nnz < 0 || ptr == nullptr) return false;
+    if (ptr[0] - base != 0 || ptr[rows] - base != nnz) return false;
+    for (int64_t r = 0; r < rows; ++r) {
+        if (ptr[r + 1] < ptr[r]) return false;
+    }
+    return true;
+}
+
+static bool csr_structure_valid(int64_t rows, int64_t cols, int64_t nnz, const int* ptr,
+                                const int* ind, int base) {
+    if (!offsets_valid(rows, nnz, ptr, base)) return false;
+    if (nnz == 0) return true;
+    if (ind == nullptr) return false;
+    for (int64_t e = 0; e < nnz; ++e) {
+        const int c = ind[e] - base;
+        if (c < 0 || c >= cols) return false;
+    }
+    return true;
+}
+
+static std::size_t value_size(cudaDataType type) {
+    switch (type) {
+        case CUDA_R_16F:
+        case CUDA_R_16BF: return 2;
+        case CUDA_C_16F:
+        case CUDA_C_16BF: return 4;
+        case CUDA_R_32F:
+        case CUDA_R_32I: return 4;
+        case CUDA_C_32F:
+        case CUDA_R_64F: return 8;
+        case CUDA_C_64F: return 16;
+        case CUDA_R_8I:
+        case CUDA_R_8U: return 1;
+    }
+    return 0;
+}
+
+// Whether the element at `p` is a stored nonzero. Zero of either sign is zero.
+static bool value_nonzero(cudaDataType type, const void* p) {
+    switch (type) {
+        case CUDA_R_16F:
+        case CUDA_R_16BF: return (*static_cast<const std::uint16_t*>(p) & 0x7fffu) != 0;
+        case CUDA_C_16F:
+        case CUDA_C_16BF: {
+            const auto* h = static_cast<const std::uint16_t*>(p);
+            return (h[0] & 0x7fffu) != 0 || (h[1] & 0x7fffu) != 0;
+        }
+        case CUDA_R_32F: return *static_cast<const float*>(p) != 0.0f;
+        case CUDA_C_32F: {
+            const auto* f = static_cast<const float*>(p);
+            return f[0] != 0.0f || f[1] != 0.0f;
+        }
+        case CUDA_R_64F: return *static_cast<const double*>(p) != 0.0;
+        case CUDA_C_64F: {
+            const auto* d = static_cast<const double*>(p);
+            return d[0] != 0.0 || d[1] != 0.0;
+        }
+        case CUDA_R_8I:
+        case CUDA_R_8U: return *static_cast<const std::uint8_t*>(p) != 0;
+        case CUDA_R_32I: return *static_cast<const std::int32_t*>(p) != 0;
+    }
+    return false;
+}
+
+// Dispatch a generic-API call on its compute type. `f` receives a value of the
+// native element type (float, double, std::complex<float>, std::complex<double>)
+// purely as a tag.
+template <typename F>
+static cusparseStatus_t dispatch_compute_type(cudaDataType type, F&& f) {
+    switch (type) {
+        case CUDA_R_32F: return f(float{});
+        case CUDA_R_64F: return f(double{});
+        case CUDA_C_32F: return f(std::complex<float>{});
+        case CUDA_C_64F: return f(std::complex<double>{});
+        default: return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+}
+
+// Overwrite `out` with the double-precision complex `v`, narrowing as needed.
+inline void assign_from_cd(float& out, const std::complex<double>& v) { out = static_cast<float>(v.real()); }
+inline void assign_from_cd(double& out, const std::complex<double>& v) { out = v.real(); }
+inline void assign_from_cd(std::complex<float>& out, const std::complex<double>& v) {
+    out = std::complex<float>(static_cast<float>(v.real()), static_cast<float>(v.imag()));
+}
+inline void assign_from_cd(std::complex<double>& out, const std::complex<double>& v) { out = v; }
+
+inline std::complex<double> to_cd(float v) { return {v, 0.0}; }
+inline std::complex<double> to_cd(double v) { return {v, 0.0}; }
+inline std::complex<double> to_cd(const std::complex<float>& v) { return {v.real(), v.imag()}; }
+inline std::complex<double> to_cd(const std::complex<double>& v) { return v; }
+
+// ── coordinate / compressed sorting ─────────────────────────────────────────
+
+template <typename T>
+static void apply_permutation(T* data, const std::vector<int>& perm, int64_t offset = 0) {
+    std::vector<T> scratch(perm.size());
+    for (std::size_t i = 0; i < perm.size(); ++i) scratch[i] = data[offset + perm[i]];
+    for (std::size_t i = 0; i < perm.size(); ++i) data[offset + i] = scratch[i];
+}
+
+static cusparseStatus_t coo_sort_impl(cusparseHandle_t handle, int m, int n, int nnz,
+                                      int* rows, int* cols, int* P, bool by_row) {
+    SP_NEED_HANDLE(handle);
+    if (m < 0 || n < 0 || nnz < 0 || (nnz > 0 && (rows == nullptr || cols == nullptr))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    synchronize_handle_stream(handle);
+    std::vector<int> perm(static_cast<std::size_t>(nnz));
+    std::iota(perm.begin(), perm.end(), 0);
+    // Stable, so equal coordinates keep their incoming order and P stays a
+    // deterministic permutation.
+    std::stable_sort(perm.begin(), perm.end(), [&](int a, int b) {
+        const int ka = by_row ? rows[a] : cols[a];
+        const int kb = by_row ? rows[b] : cols[b];
+        if (ka != kb) return ka < kb;
+        return by_row ? cols[a] < cols[b] : rows[a] < rows[b];
+    });
+    apply_permutation(rows, perm);
+    apply_permutation(cols, perm);
+    // P is both input and output: sorted_values = values(P), so P composes with
+    // whatever permutation the caller already had in it.
+    if (P != nullptr) apply_permutation(P, perm);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Sort the index array within each segment of a compressed format. `segments`
+// is the length of the offset array minus one (m for CSR, n for CSC) and
+// `bound` the exclusive limit of the indices it holds.
+static cusparseStatus_t sort_compressed_impl(cusparseHandle_t handle, int segments, int bound,
+                                             int nnz, const cusparseMatDescr_t descr,
+                                             const int* ptr, int* ind, int* P) {
+    SP_NEED_HANDLE(handle);
+    if (descr == nullptr || segments < 0 || bound < 0 || nnz < 0 ||
+        (nnz > 0 && ind == nullptr)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const int base = base_of(descr);
+    synchronize_handle_stream(handle);
+    if (!csr_structure_valid(segments, bound, nnz, ptr, ind, base)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    std::vector<int> perm;
+    for (int s = 0; s < segments; ++s) {
+        const int begin = ptr[s] - base;
+        const int end = ptr[s + 1] - base;
+        perm.resize(static_cast<std::size_t>(end - begin));
+        std::iota(perm.begin(), perm.end(), 0);
+        std::stable_sort(perm.begin(), perm.end(),
+                         [&](int a, int b) { return ind[begin + a] < ind[begin + b]; });
+        apply_permutation(ind, perm, begin);
+        if (P != nullptr) apply_permutation(P, perm, begin);
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── nnz counting and compression ────────────────────────────────────────────
+
+template <typename C>
+static cusparseStatus_t nnz_dense_impl(cusparseHandle_t handle, cusparseDirection_t dirA, int m,
+                                       int n, const cusparseMatDescr_t descrA, const C* A,
+                                       int lda, int* nnzPerRowColumn, int* nnzTotal) {
+    using T = native_t<C>;
+    SP_NEED_HANDLE(handle);
+    if (descrA == nullptr || m < 0 || n < 0 || lda < std::max(1, m) || nnzTotal == nullptr ||
+        (dirA != CUSPARSE_DIRECTION_ROW && dirA != CUSPARSE_DIRECTION_COLUMN)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (descrA->type != CUSPARSE_MATRIX_TYPE_GENERAL) {
+        return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    }
+    const bool by_row = dirA == CUSPARSE_DIRECTION_ROW;
+    const int count = by_row ? m : n;
+    if ((m > 0 && n > 0 && A == nullptr) || (count > 0 && nnzPerRowColumn == nullptr)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    synchronize_handle_stream(handle);
+    const T* a = cnat(A);
+    std::vector<int> per(static_cast<std::size_t>(count), 0);
+    int total = 0;
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < m; ++i) {
+            if (a[i + static_cast<int64_t>(j) * lda] != T(0)) {
+                ++per[static_cast<std::size_t>(by_row ? i : j)];
+                ++total;
             }
-            if (diag == 0.0f) return CUSPARSE_STATUS_ZERO_PIVOT;
-            y[i] = rhs / diag;
+        }
+    }
+    for (int k = 0; k < count; ++k) nnzPerRowColumn[k] = per[static_cast<std::size_t>(k)];
+    *nnzTotal = total;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// An entry survives compression when its magnitude exceeds the tolerance's.
+template <typename T>
+static bool keeps_entry(const T& v, const T& tol) { return mag(v) > mag(tol); }
+
+template <typename C>
+static cusparseStatus_t nnz_compress_impl(cusparseHandle_t handle, int m,
+                                          const cusparseMatDescr_t descr, const C* val,
+                                          const int* rowPtr, int* nnzPerRow, int* nnzC, C tol) {
+    using T = native_t<C>;
+    SP_NEED_HANDLE(handle);
+    if (descr == nullptr || m < 0 || rowPtr == nullptr || nnzC == nullptr ||
+        (m > 0 && nnzPerRow == nullptr)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const int base = base_of(descr);
+    synchronize_handle_stream(handle);
+    const int64_t nnz = static_cast<int64_t>(rowPtr[m]) - base;
+    if (!offsets_valid(m, nnz, rowPtr, base) || (nnz > 0 && val == nullptr)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const T* v = cnat(val);
+    const T t = to_native(tol);
+    int total = 0;
+    for (int i = 0; i < m; ++i) {
+        int row_count = 0;
+        for (int k = rowPtr[i] - base; k < rowPtr[i + 1] - base; ++k) {
+            if (keeps_entry(v[k], t)) ++row_count;
+        }
+        nnzPerRow[i] = row_count;
+        total += row_count;
+    }
+    *nnzC = total;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t csr2csr_compress_impl(cusparseHandle_t handle, int m, int n,
+                                              const cusparseMatDescr_t descrA, const C* inVal,
+                                              const int* inColInd, const int* inRowPtr, int inNnz,
+                                              int* nnzPerRow, C* outVal, int* outColInd,
+                                              int* outRowPtr, C tol) {
+    using T = native_t<C>;
+    SP_NEED_HANDLE(handle);
+    if (descrA == nullptr || m < 0 || n < 0 || inNnz < 0 || inRowPtr == nullptr ||
+        outRowPtr == nullptr || (m > 0 && nnzPerRow == nullptr) ||
+        (inNnz > 0 && (inVal == nullptr || inColInd == nullptr))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const int base = base_of(descrA);
+    synchronize_handle_stream(handle);
+    if (!csr_structure_valid(m, n, inNnz, inRowPtr, inColInd, base)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const T* v = cnat(inVal);
+    const T t = to_native(tol);
+    // nnzPerRow comes from the matching *nnz_compress call. Check it against
+    // what this call would keep before writing anything, so a mismatched tol
+    // fails cleanly instead of overrunning the output arrays.
+    int64_t total = 0;
+    for (int i = 0; i < m; ++i) {
+        int row_count = 0;
+        for (int k = inRowPtr[i] - base; k < inRowPtr[i + 1] - base; ++k) {
+            if (keeps_entry(v[k], t)) ++row_count;
+        }
+        if (row_count != nnzPerRow[i]) return CUSPARSE_STATUS_INVALID_VALUE;
+        total += row_count;
+    }
+    if (total > 0 && (outVal == nullptr || outColInd == nullptr)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    T* out = nat(outVal);
+    int64_t w = 0;
+    outRowPtr[0] = base;
+    for (int i = 0; i < m; ++i) {
+        for (int k = inRowPtr[i] - base; k < inRowPtr[i + 1] - base; ++k) {
+            if (!keeps_entry(v[k], t)) continue;
+            out[w] = v[k];
+            outColInd[w] = inColInd[k];
+            ++w;
+        }
+        outRowPtr[i + 1] = static_cast<int>(w) + base;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── csrgeam2: C = alpha*A + beta*B ──────────────────────────────────────────
+
+static cusparseStatus_t geam2_validate(cusparseHandle_t handle, int m, int n,
+                                       const cusparseMatDescr_t descrA, int nnzA,
+                                       const int* ptrA, const int* colA,
+                                       const cusparseMatDescr_t descrB, int nnzB,
+                                       const int* ptrB, const int* colB,
+                                       const cusparseMatDescr_t descrC) {
+    SP_NEED_HANDLE(handle);
+    if (m < 0 || n < 0 || nnzA < 0 || nnzB < 0 || descrA == nullptr || descrB == nullptr ||
+        descrC == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (descrA->type != CUSPARSE_MATRIX_TYPE_GENERAL ||
+        descrB->type != CUSPARSE_MATRIX_TYPE_GENERAL ||
+        descrC->type != CUSPARSE_MATRIX_TYPE_GENERAL) {
+        return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
+    }
+    synchronize_handle_stream(handle);
+    if (!csr_structure_valid(m, n, nnzA, ptrA, colA, base_of(descrA)) ||
+        !csr_structure_valid(m, n, nnzB, ptrB, colB, base_of(descrB))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t geam2_buffer_size(cusparseHandle_t handle, int m, int n, const C* alpha,
+                                          const cusparseMatDescr_t descrA, int nnzA,
+                                          const C* valA, const int* ptrA, const int* colA,
+                                          const C* beta, const cusparseMatDescr_t descrB,
+                                          int nnzB, const C* valB, const int* ptrB,
+                                          const int* colB, const cusparseMatDescr_t descrC,
+                                          C* valC, int* ptrC, int* colC, size_t* size) {
+    if (alpha == nullptr || beta == nullptr || ptrC == nullptr || size == nullptr ||
+        (nnzA > 0 && valA == nullptr) || (nnzB > 0 && valB == nullptr)) {
+        return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED
+                                 : CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    (void)valC;
+    (void)colC;
+    const cusparseStatus_t status =
+        geam2_validate(handle, m, n, descrA, nnzA, ptrA, colA, descrB, nnzB, ptrB, colB, descrC);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    *size = kNoWorkspaceBytes;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// One row of A and B as sorted, de-duplicated 0-based column lists.
+static void geam2_row_columns(const int* ptrA, const int* colA, int baseA, const int* ptrB,
+                              const int* colB, int baseB, int row, std::vector<int>* cols) {
+    cols->clear();
+    for (int k = ptrA[row] - baseA; k < ptrA[row + 1] - baseA; ++k) cols->push_back(colA[k] - baseA);
+    for (int k = ptrB[row] - baseB; k < ptrB[row + 1] - baseB; ++k) cols->push_back(colB[k] - baseB);
+    std::sort(cols->begin(), cols->end());
+    cols->erase(std::unique(cols->begin(), cols->end()), cols->end());
+}
+
+template <typename C>
+static cusparseStatus_t geam2_compute(cusparseHandle_t handle, int m, int n, const C* alphaC,
+                                      const cusparseMatDescr_t descrA, int nnzA, const C* valA,
+                                      const int* ptrA, const int* colA, const C* betaC,
+                                      const cusparseMatDescr_t descrB, int nnzB, const C* valB,
+                                      const int* ptrB, const int* colB,
+                                      const cusparseMatDescr_t descrC, C* valC, int* ptrC,
+                                      int* colC) {
+    using T = native_t<C>;
+    if (alphaC == nullptr || betaC == nullptr || ptrC == nullptr ||
+        (nnzA > 0 && valA == nullptr) || (nnzB > 0 && valB == nullptr)) {
+        return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED
+                                 : CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    cusparseStatus_t status =
+        geam2_validate(handle, m, n, descrA, nnzA, ptrA, colA, descrB, nnzB, ptrB, colB, descrC);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    const void* alpha_ptr = scalar_pointer_for_mode_size(handle->pointer_mode, alphaC, sizeof(T));
+    const void* beta_ptr = scalar_pointer_for_mode_size(handle->pointer_mode, betaC, sizeof(T));
+    if (alpha_ptr == nullptr || beta_ptr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    const T alpha = *static_cast<const T*>(alpha_ptr);
+    const T beta = *static_cast<const T*>(beta_ptr);
+    const int baseA = base_of(descrA), baseB = base_of(descrB), baseC = base_of(descrC);
+    const int64_t nnzC = static_cast<int64_t>(ptrC[m]) - baseC;
+    if (!offsets_valid(m, nnzC, ptrC, baseC) ||
+        (nnzC > 0 && (valC == nullptr || colC == nullptr))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const T* va = cnat(valA);
+    const T* vb = cnat(valB);
+    T* vc = nat(valC);
+    std::vector<int> cols;
+    std::vector<std::pair<int, T>> entries;
+    // Check every row against the offsets the Nnz call produced before writing
+    // anything, so a stale csrRowPtrC fails cleanly.
+    for (int i = 0; i < m; ++i) {
+        geam2_row_columns(ptrA, colA, baseA, ptrB, colB, baseB, i, &cols);
+        if (static_cast<int64_t>(cols.size()) != static_cast<int64_t>(ptrC[i + 1]) - ptrC[i]) {
+            return CUSPARSE_STATUS_INVALID_VALUE;
+        }
+    }
+    for (int i = 0; i < m; ++i) {
+        entries.clear();
+        for (int k = ptrA[i] - baseA; k < ptrA[i + 1] - baseA; ++k)
+            entries.emplace_back(colA[k] - baseA, alpha * va[k]);
+        for (int k = ptrB[i] - baseB; k < ptrB[i + 1] - baseB; ++k)
+            entries.emplace_back(colB[k] - baseB, beta * vb[k]);
+        std::stable_sort(entries.begin(), entries.end(),
+                         [](const auto& x, const auto& y) { return x.first < y.first; });
+        int64_t w = static_cast<int64_t>(ptrC[i]) - baseC;
+        for (std::size_t e = 0; e < entries.size();) {
+            const int col = entries[e].first;
+            T sum = entries[e].second;
+            for (++e; e < entries.size() && entries[e].first == col; ++e) sum += entries[e].second;
+            colC[w] = col + baseC;
+            vc[w] = sum;
+            ++w;
         }
     }
     return CUSPARSE_STATUS_SUCCESS;
 }
+
+// ── incomplete factorizations (zero fill-in) ────────────────────────────────
+
+template <typename C>
+static cusparseStatus_t incomplete_validate(cusparseHandle_t handle, int m, int nnz,
+                                            const cusparseMatDescr_t descrA, const C* val,
+                                            const int* ptr, const int* col, const void* info) {
+    SP_NEED_HANDLE(handle);
+    if (m < 0 || nnz < 0 || info == nullptr || ptr == nullptr || (nnz > 0 && (val == nullptr || col == nullptr))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    synchronize_handle_stream(handle);
+    if (!csr_structure_valid(m, m, nnz, ptr, col, base_of(descrA))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// First row whose diagonal entry is absent from the pattern, or -1.
+static int first_missing_diagonal(int m, const int* ptr, const int* col, int base,
+                                  std::vector<int>* diagpos) {
+    diagpos->assign(static_cast<std::size_t>(m), -1);
+    for (int i = 0; i < m; ++i) {
+        for (int k = ptr[i] - base; k < ptr[i + 1] - base; ++k) {
+            if (col[k] - base == i) {
+                (*diagpos)[static_cast<std::size_t>(i)] = k;
+                break;
+            }
+        }
+    }
+    for (int i = 0; i < m; ++i) {
+        if ((*diagpos)[static_cast<std::size_t>(i)] < 0) return i;
+    }
+    return -1;
+}
+
+template <typename C>
+static cusparseStatus_t csrilu02_analysis_impl(cusparseHandle_t handle, int m, int nnz,
+                                               const cusparseMatDescr_t descrA, const C* val,
+                                               const int* ptr, const int* col,
+                                               csrilu02Info_t info) {
+    cusparseStatus_t status = incomplete_validate(handle, m, nnz, descrA, val, ptr, col, info);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    // A structural zero (no diagonal entry) is visible from the pattern alone,
+    // so the analysis phase already reports it through zeroPivot.
+    std::vector<int> diagpos;
+    info->base = base_of(descrA);
+    info->zero_pivot = first_missing_diagonal(m, ptr, col, info->base, &diagpos);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t csrilu02_impl(cusparseHandle_t handle, int m, int nnz,
+                                      const cusparseMatDescr_t descrA, C* valC, const int* ptr,
+                                      const int* col, csrilu02Info_t info) {
+    using T = native_t<C>;
+    cusparseStatus_t status = incomplete_validate(handle, m, nnz, descrA, valC, ptr, col, info);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    T* val = nat(valC);
+    const int base = base_of(descrA);
+    info->base = base;
+
+    std::vector<int> diagpos;
+    int pivot = first_missing_diagonal(m, ptr, col, base, &diagpos);
+    auto note = [&](int row) {
+        if (pivot < 0 || row < pivot) pivot = row;
+    };
+
+    T boost{};
+    if (info->boost_enabled) assign_from_cd(boost, info->boost_value);
+
+    // Row-wise IKJ elimination restricted to the existing pattern. `pos` maps a
+    // column to its slot in the current row, so updates to positions outside
+    // the pattern (fill-in) are dropped.
+    std::vector<int> pos(static_cast<std::size_t>(m), -1);
+    std::vector<int> lower;
+    for (int i = 0; i < m; ++i) {
+        const int begin = ptr[i] - base;
+        const int end = ptr[i + 1] - base;
+        lower.clear();
+        for (int k = begin; k < end; ++k) {
+            pos[static_cast<std::size_t>(col[k] - base)] = k;
+            if (col[k] - base < i) lower.push_back(k);
+        }
+        std::sort(lower.begin(), lower.end(), [&](int a, int b) { return col[a] < col[b]; });
+        for (int k : lower) {
+            const int kc = col[k] - base;
+            const int dp = diagpos[static_cast<std::size_t>(kc)];
+            if (dp < 0 || val[dp] == T(0)) {
+                note(kc);  // elimination by a zero pivot is undefined; skip it
+                continue;
+            }
+            val[k] /= val[dp];
+            const T multiplier = val[k];
+            for (int q = ptr[kc] - base; q < ptr[kc + 1] - base; ++q) {
+                const int j = col[q] - base;
+                if (j <= kc) continue;
+                const int slot = pos[static_cast<std::size_t>(j)];
+                if (slot >= 0) val[slot] -= multiplier * val[q];
+            }
+        }
+        const int dp = diagpos[static_cast<std::size_t>(i)];
+        if (dp >= 0) {
+            if (info->boost_enabled && mag(val[dp]) <= info->boost_tol) {
+                val[dp] = boost;
+            } else if (val[dp] == T(0)) {
+                note(i);
+            }
+        }
+        for (int k = begin; k < end; ++k) pos[static_cast<std::size_t>(col[k] - base)] = -1;
+    }
+    info->zero_pivot = pivot;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t csrilu02_boost_impl(cusparseHandle_t handle, csrilu02Info_t info,
+                                            int enable_boost, double* tol, C* boost_val) {
+    SP_NEED_HANDLE(handle);
+    if (info == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (enable_boost == 0) {
+        info->boost_enabled = false;
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+    if (tol == nullptr || boost_val == nullptr || !(*tol >= 0.0)) return CUSPARSE_STATUS_INVALID_VALUE;
+    info->boost_enabled = true;
+    info->boost_tol = *tol;
+    info->boost_value = to_cd(to_native(*boost_val));
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t csric02_analysis_impl(cusparseHandle_t handle, int m, int nnz,
+                                              const cusparseMatDescr_t descrA, const C* val,
+                                              const int* ptr, const int* col,
+                                              csric02Info_t info) {
+    cusparseStatus_t status = incomplete_validate(handle, m, nnz, descrA, val, ptr, col, info);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    std::vector<int> diagpos;
+    info->base = base_of(descrA);
+    info->zero_pivot = first_missing_diagonal(m, ptr, col, info->base, &diagpos);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Incomplete Cholesky, A ~= L*L^H (lower) or U^H*U (upper), on A's own pattern.
+// Only the triangle named by the descriptor's fill mode is read and written.
+// A diagonal that is missing, zero or (for the real part) not positive is
+// reported as a zero pivot rather than turned into a NaN.
+template <typename C>
+static cusparseStatus_t csric02_impl(cusparseHandle_t handle, int m, int nnz,
+                                     const cusparseMatDescr_t descrA, C* valC, const int* ptr,
+                                     const int* col, csric02Info_t info) {
+    using T = native_t<C>;
+    cusparseStatus_t status = incomplete_validate(handle, m, nnz, descrA, valC, ptr, col, info);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    T* val = nat(valC);
+    const int base = base_of(descrA);
+    const bool lower = descrA == nullptr || descrA->fill == CUSPARSE_FILL_MODE_LOWER;
+    info->base = base;
+
+    std::vector<int> diagpos;
+    int pivot = first_missing_diagonal(m, ptr, col, base, &diagpos);
+    auto note = [&](int row) {
+        if (pivot < 0 || row < pivot) pivot = row;
+    };
+
+    // Per-row (column, position) lists sorted by column, so entries can be
+    // found by binary search whether or not the caller sorted its CSR.
+    std::vector<std::vector<std::pair<int, int>>> rows(static_cast<std::size_t>(m));
+    for (int i = 0; i < m; ++i) {
+        auto& row = rows[static_cast<std::size_t>(i)];
+        for (int k = ptr[i] - base; k < ptr[i + 1] - base; ++k) row.emplace_back(col[k] - base, k);
+        std::sort(row.begin(), row.end());
+    }
+    auto find = [&](int r, int c) -> int {
+        const auto& row = rows[static_cast<std::size_t>(r)];
+        auto it = std::lower_bound(row.begin(), row.end(), std::make_pair(c, -1));
+        return it != row.end() && it->first == c ? it->second : -1;
+    };
+
+    if (lower) {
+        // Left-looking: row i of L from rows 0..i-1.
+        for (int i = 0; i < m; ++i) {
+            const auto& row_i = rows[static_cast<std::size_t>(i)];
+            for (const auto& [j, p] : row_i) {
+                if (j > i) break;
+                T s = val[p];
+                for (const auto& [k, pk] : row_i) {
+                    if (k >= j) break;
+                    const int pjk = find(j, k);
+                    if (pjk >= 0) s -= val[pk] * conj_of(val[pjk]);
+                }
+                if (j < i) {
+                    const int dp = diagpos[static_cast<std::size_t>(j)];
+                    if (dp < 0 || val[dp] == T(0)) {
+                        note(j);
+                        continue;
+                    }
+                    val[p] = s / val[dp];
+                } else if (real_part(s) <= 0.0) {
+                    note(i);
+                    val[p] = s;
+                } else {
+                    val[p] = std::sqrt(s);
+                }
+            }
+        }
+    } else {
+        // Right-looking over the upper triangle: finish row k of U, then
+        // subtract its outer product from the trailing rows.
+        for (int k = 0; k < m; ++k) {
+            const int dp = diagpos[static_cast<std::size_t>(k)];
+            if (dp < 0) {
+                note(k);
+                continue;
+            }
+            if (real_part(val[dp]) <= 0.0) {
+                note(k);
+                continue;
+            }
+            const T root = std::sqrt(val[dp]);
+            val[dp] = root;
+            const auto& row_k = rows[static_cast<std::size_t>(k)];
+            for (const auto& [j, p] : row_k) {
+                if (j > k) val[p] /= root;
+            }
+            for (const auto& [i, pi] : row_k) {
+                if (i <= k) continue;
+                for (const auto& [j, pj] : row_k) {
+                    if (j < i) continue;
+                    const int q = find(i, j);
+                    if (q >= 0) val[q] -= conj_of(val[pi]) * val[pj];
+                }
+            }
+        }
+    }
+    info->zero_pivot = pivot;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── tridiagonal / pentadiagonal solvers ─────────────────────────────────────
+
+// Banded Gaussian elimination with partial pivoting for a matrix with `kl`
+// sub- and `ku` super-diagonals, `nrhs` right-hand sides. Rows are held in
+// windows of 3*kl+ku+1 columns starting at column (row - kl): pivoting can
+// widen the upper band by up to kl, and a row swapped into position i has no
+// entries left of column i. Returns false on an exactly singular pivot column.
+//
+// `a` is m rows of that window, `b` is m rows of nrhs values (row-major).
+template <typename T>
+static bool band_solve(int m, int kl, int ku, int nrhs, std::vector<T>* a_ptr,
+                       std::vector<T>* b_ptr) {
+    std::vector<T>& a = *a_ptr;
+    std::vector<T>& b = *b_ptr;
+    const int W = 3 * kl + ku + 1;
+    auto at = [&](int r, int c) -> T& {
+        return a[static_cast<std::size_t>(r) * W + static_cast<std::size_t>(c - r + kl)];
+    };
+    for (int i = 0; i < m; ++i) {
+        const int last_row = std::min(i + kl, m - 1);
+        const int last_col = std::min(i + kl + ku, m - 1);
+        int pivot = i;
+        double best = mag(at(i, i));
+        for (int r = i + 1; r <= last_row; ++r) {
+            const double v = mag(at(r, i));
+            if (v > best) {
+                best = v;
+                pivot = r;
+            }
+        }
+        if (best == 0.0) return false;
+        if (pivot != i) {
+            for (int c = i; c <= last_col; ++c) std::swap(at(i, c), at(pivot, c));
+            for (int j = 0; j < nrhs; ++j) {
+                std::swap(b[static_cast<std::size_t>(i) * nrhs + j],
+                          b[static_cast<std::size_t>(pivot) * nrhs + j]);
+            }
+        }
+        for (int r = i + 1; r <= last_row; ++r) {
+            const T factor = at(r, i) / at(i, i);
+            if (factor == T(0)) continue;
+            for (int c = i + 1; c <= last_col; ++c) at(r, c) -= factor * at(i, c);
+            at(r, i) = T(0);
+            for (int j = 0; j < nrhs; ++j) {
+                b[static_cast<std::size_t>(r) * nrhs + j] -=
+                    factor * b[static_cast<std::size_t>(i) * nrhs + j];
+            }
+        }
+    }
+    for (int i = m - 1; i >= 0; --i) {
+        const int last_col = std::min(i + kl + ku, m - 1);
+        for (int j = 0; j < nrhs; ++j) {
+            T s = b[static_cast<std::size_t>(i) * nrhs + j];
+            for (int c = i + 1; c <= last_col; ++c) {
+                s -= at(i, c) * b[static_cast<std::size_t>(c) * nrhs + j];
+            }
+            b[static_cast<std::size_t>(i) * nrhs + j] = s / at(i, i);
+        }
+    }
+    return true;
+}
+
+// Thomas algorithm (no pivoting) for one tridiagonal system with `nrhs`
+// right-hand sides. Element i of each diagonal sits at diag[i * dstride]; of
+// right-hand side j at x[i * xstride + j * xcolstride]. dl[0] and du[m-1] are
+// never read. Returns false on a zero pivot.
+template <typename T>
+static bool thomas_solve(int m, const T* dl, const T* d, const T* du, std::ptrdiff_t dstride,
+                         T* x, std::ptrdiff_t xstride, int nrhs, std::ptrdiff_t xcolstride) {
+    if (m == 0) return true;
+    std::vector<T> cprime(static_cast<std::size_t>(m));
+    T denom = d[0];
+    if (denom == T(0)) return false;
+    cprime[0] = m > 1 ? du[0] / denom : T(0);
+    for (int j = 0; j < nrhs; ++j) x[j * xcolstride] /= denom;
+    for (int i = 1; i < m; ++i) {
+        denom = d[i * dstride] - dl[i * dstride] * cprime[static_cast<std::size_t>(i - 1)];
+        if (denom == T(0)) return false;
+        cprime[static_cast<std::size_t>(i)] = i + 1 < m ? du[i * dstride] / denom : T(0);
+        for (int j = 0; j < nrhs; ++j) {
+            T* xi = x + i * xstride + j * xcolstride;
+            *xi = (*xi - dl[i * dstride] * *(xi - xstride)) / denom;
+        }
+    }
+    for (int i = m - 2; i >= 0; --i) {
+        for (int j = 0; j < nrhs; ++j) {
+            T* xi = x + i * xstride + j * xcolstride;
+            *xi -= cprime[static_cast<std::size_t>(i)] * *(xi + xstride);
+        }
+    }
+    return true;
+}
+
+template <typename C>
+static cusparseStatus_t gtsv2_check(cusparseHandle_t handle, int m, int n, const C* dl,
+                                    const C* d, const C* du, const C* B, int ldb) {
+    SP_NEED_HANDLE(handle);
+    if (m < 0 || n < 0 || ldb < std::max(1, m)) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (m > 0 && (dl == nullptr || d == nullptr || du == nullptr || (n > 0 && B == nullptr))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t gtsv2_buffer_size(cusparseHandle_t handle, int m, int n, const C* dl,
+                                          const C* d, const C* du, const C* B, int ldb,
+                                          size_t* size) {
+    if (size == nullptr) return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    const cusparseStatus_t status = gtsv2_check(handle, m, n, dl, d, du, B, ldb);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    *size = kNoWorkspaceBytes;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// A X = B for tridiagonal A and an m-by-n column-major B, overwritten with X.
+// dl, d and du are not modified. `pivot` selects partial pivoting (gtsv2) or
+// the plain Thomas recurrence (gtsv2_nopivot).
+template <typename C>
+static cusparseStatus_t gtsv2_impl(cusparseHandle_t handle, int m, int n, const C* dlC,
+                                   const C* dC, const C* duC, C* BC, int ldb, bool pivot) {
+    using T = native_t<C>;
+    cusparseStatus_t status = gtsv2_check(handle, m, n, dlC, dC, duC, BC, ldb);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    synchronize_handle_stream(handle);
+    if (m == 0 || n == 0) return CUSPARSE_STATUS_SUCCESS;
+    const T* dl = cnat(dlC);
+    const T* d = cnat(dC);
+    const T* du = cnat(duC);
+    T* B = nat(BC);
+    std::vector<T> x(static_cast<std::size_t>(m) * n);
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < m; ++i) x[static_cast<std::size_t>(i) * n + j] = B[i + static_cast<int64_t>(j) * ldb];
+    bool ok;
+    if (pivot) {
+        std::vector<T> a(static_cast<std::size_t>(m) * 5, T(0));
+        auto at = [&](int r, int c) -> T& { return a[static_cast<std::size_t>(r) * 5 + (c - r + 1)]; };
+        for (int r = 0; r < m; ++r) {
+            at(r, r) = d[r];
+            if (r > 0) at(r, r - 1) = dl[r];
+            if (r + 1 < m) at(r, r + 1) = du[r];
+        }
+        ok = band_solve(m, 1, 1, n, &a, &x);
+    } else {
+        // Row-major copy: x[i * n + j], so the row stride is n and the column stride 1.
+        ok = thomas_solve(m, dl, d, du, 1, x.data(), n, n, 1);
+    }
+    if (!ok) return CUSPARSE_STATUS_ZERO_PIVOT;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < m; ++i) B[i + static_cast<int64_t>(j) * ldb] = x[static_cast<std::size_t>(i) * n + j];
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t gtsv2_strided_check(cusparseHandle_t handle, int m, const C* dl,
+                                            const C* d, const C* du, const C* x, int batchCount,
+                                            int batchStride) {
+    SP_NEED_HANDLE(handle);
+    if (m < 0 || batchCount < 1 || batchStride < m) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (m > 0 && (dl == nullptr || d == nullptr || du == nullptr || x == nullptr)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t gtsv2_strided_buffer_size(cusparseHandle_t handle, int m, const C* dl,
+                                                  const C* d, const C* du, const C* x,
+                                                  int batchCount, int batchStride, size_t* size) {
+    if (size == nullptr) return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    const cusparseStatus_t status = gtsv2_strided_check(handle, m, dl, d, du, x, batchCount, batchStride);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    *size = kNoWorkspaceBytes;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// batchCount independent systems; system b starts batchStride elements after
+// system b-1 in each of dl, d, du and x. x is overwritten with the solutions.
+template <typename C>
+static cusparseStatus_t gtsv2_strided_impl(cusparseHandle_t handle, int m, const C* dlC,
+                                           const C* dC, const C* duC, C* xC, int batchCount,
+                                           int batchStride) {
+    using T = native_t<C>;
+    cusparseStatus_t status = gtsv2_strided_check(handle, m, dlC, dC, duC, xC, batchCount, batchStride);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    synchronize_handle_stream(handle);
+    const T* dl = cnat(dlC);
+    const T* d = cnat(dC);
+    const T* du = cnat(duC);
+    T* x = nat(xC);
+    for (int b = 0; b < batchCount; ++b) {
+        const std::ptrdiff_t off = static_cast<std::ptrdiff_t>(b) * batchStride;
+        if (!thomas_solve(m, dl + off, d + off, du + off, 1, x + off, 1, 1, 0)) {
+            return CUSPARSE_STATUS_ZERO_PIVOT;
+        }
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t gtsv_interleaved_check(cusparseHandle_t handle, int algo, int m,
+                                               const C* dl, const C* d, const C* du, const C* x,
+                                               int batchCount) {
+    SP_NEED_HANDLE(handle);
+    // 0 = Thomas, 1 = LU with partial pivoting, 2 = QR.
+    if (algo < 0 || algo > 2 || m < 0 || batchCount < 1) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (m > 0 && (dl == nullptr || d == nullptr || du == nullptr || x == nullptr)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t gtsv_interleaved_buffer_size(cusparseHandle_t handle, int algo, int m,
+                                                     const C* dl, const C* d, const C* du,
+                                                     const C* x, int batchCount, size_t* size) {
+    if (size == nullptr) return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    const cusparseStatus_t status = gtsv_interleaved_check(handle, algo, m, dl, d, du, x, batchCount);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    *size = kNoWorkspaceBytes;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Interleaved layout: element i of system b lives at [i * batchCount + b].
+// Algorithm 0 is the Thomas recurrence; 1 and 2 (LU with pivoting, QR) both
+// map to pivoted elimination here, which has at least QR's stability.
+template <typename C>
+static cusparseStatus_t gtsv_interleaved_impl(cusparseHandle_t handle, int algo, int m, C* dlC,
+                                              C* dC, C* duC, C* xC, int batchCount) {
+    using T = native_t<C>;
+    cusparseStatus_t status = gtsv_interleaved_check(handle, algo, m, dlC, dC, duC, xC, batchCount);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    synchronize_handle_stream(handle);
+    T* dl = nat(dlC);
+    T* d = nat(dC);
+    T* du = nat(duC);
+    T* x = nat(xC);
+    for (int b = 0; b < batchCount; ++b) {
+        if (algo == 0) {
+            if (!thomas_solve(m, dl + b, d + b, du + b, batchCount, x + b, batchCount, 1, 0)) {
+                return CUSPARSE_STATUS_ZERO_PIVOT;
+            }
+            continue;
+        }
+        std::vector<T> a(static_cast<std::size_t>(m) * 5, T(0));
+        std::vector<T> rhs(static_cast<std::size_t>(m));
+        auto at = [&](int r, int c) -> T& { return a[static_cast<std::size_t>(r) * 5 + (c - r + 1)]; };
+        for (int r = 0; r < m; ++r) {
+            const std::size_t k = static_cast<std::size_t>(r) * batchCount + b;
+            at(r, r) = d[k];
+            if (r > 0) at(r, r - 1) = dl[k];
+            if (r + 1 < m) at(r, r + 1) = du[k];
+            rhs[static_cast<std::size_t>(r)] = x[k];
+        }
+        if (!band_solve(m, 1, 1, 1, &a, &rhs)) return CUSPARSE_STATUS_ZERO_PIVOT;
+        for (int r = 0; r < m; ++r) x[static_cast<std::size_t>(r) * batchCount + b] = rhs[static_cast<std::size_t>(r)];
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t gpsv_interleaved_check(cusparseHandle_t handle, int algo, int m,
+                                               const C* ds, const C* dl, const C* d, const C* du,
+                                               const C* dw, const C* x, int batchCount) {
+    SP_NEED_HANDLE(handle);
+    // Only algorithm 0 (QR) exists for the pentadiagonal solver.
+    if (algo != 0 || m < 0 || batchCount < 1) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (m > 0 && (ds == nullptr || dl == nullptr || d == nullptr || du == nullptr ||
+                  dw == nullptr || x == nullptr)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+template <typename C>
+static cusparseStatus_t gpsv_interleaved_buffer_size(cusparseHandle_t handle, int algo, int m,
+                                                     const C* ds, const C* dl, const C* d,
+                                                     const C* du, const C* dw, const C* x,
+                                                     int batchCount, size_t* size) {
+    if (size == nullptr) return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    const cusparseStatus_t status = gpsv_interleaved_check(handle, algo, m, ds, dl, d, du, dw, x, batchCount);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    *size = kNoWorkspaceBytes;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Pentadiagonal: ds, dl, d, du, dw hold the diagonals at offsets -2..+2.
+template <typename C>
+static cusparseStatus_t gpsv_interleaved_impl(cusparseHandle_t handle, int algo, int m, C* dsC,
+                                              C* dlC, C* dC, C* duC, C* dwC, C* xC,
+                                              int batchCount) {
+    using T = native_t<C>;
+    cusparseStatus_t status =
+        gpsv_interleaved_check(handle, algo, m, dsC, dlC, dC, duC, dwC, xC, batchCount);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    synchronize_handle_stream(handle);
+    const T* ds = cnat(dsC);
+    const T* dl = cnat(dlC);
+    const T* d = cnat(dC);
+    const T* du = cnat(duC);
+    const T* dw = cnat(dwC);
+    T* x = nat(xC);
+    const int W = 3 * 2 + 2 + 1;
+    std::vector<T> a;
+    std::vector<T> rhs;
+    for (int b = 0; b < batchCount; ++b) {
+        a.assign(static_cast<std::size_t>(m) * W, T(0));
+        rhs.assign(static_cast<std::size_t>(m), T(0));
+        auto at = [&](int r, int c) -> T& { return a[static_cast<std::size_t>(r) * W + (c - r + 2)]; };
+        for (int r = 0; r < m; ++r) {
+            const std::size_t k = static_cast<std::size_t>(r) * batchCount + b;
+            if (r >= 2) at(r, r - 2) = ds[k];
+            if (r >= 1) at(r, r - 1) = dl[k];
+            at(r, r) = d[k];
+            if (r + 1 < m) at(r, r + 1) = du[k];
+            if (r + 2 < m) at(r, r + 2) = dw[k];
+            rhs[static_cast<std::size_t>(r)] = x[k];
+        }
+        if (!band_solve(m, 2, 2, 1, &a, &rhs)) return CUSPARSE_STATUS_ZERO_PIVOT;
+        for (int r = 0; r < m; ++r) x[static_cast<std::size_t>(r) * batchCount + b] = rhs[static_cast<std::size_t>(r)];
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+}  // extern "C++"
+
+extern "C++" {
+
+// ── generic API helpers ─────────────────────────────────────────────────────
+
+template <typename T>
+static T& dense_at(const cusparseDnMatDescr* mat, int64_t i, int64_t j) {
+    T* v = static_cast<T*>(mat->values);
+    return mat->order == CUSPARSE_ORDER_COL ? v[i + j * mat->ld] : v[i * mat->ld + j];
+}
+
+static cusparseFormat_t format_of(const cusparseSpMatDescr* mat) {
+    switch (mat->format) {
+        case CUMETAL_SPMAT_COO: return CUSPARSE_FORMAT_COO;
+        case CUMETAL_SPMAT_CSC: return CUSPARSE_FORMAT_CSC;
+        default: return CUSPARSE_FORMAT_CSR;
+    }
+}
+
+static int base_of(const cusparseSpMatDescr* mat) {
+    return mat->idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
+}
+
+// ── SpSM ────────────────────────────────────────────────────────────────────
+
+static cusparseStatus_t spsm_validate(cusparseHandle_t handle, cusparseOperation_t opA,
+                                      cusparseOperation_t opB, const void* alpha,
+                                      cusparseSpMatDescr_t matA, cusparseDnMatDescr_t matB,
+                                      cusparseDnMatDescr_t matC, cudaDataType computeType,
+                                      cusparseSpSMAlg_t alg) {
+    SP_NEED_HANDLE(handle);
+    if (alpha == nullptr || matA == nullptr || matB == nullptr || matC == nullptr ||
+        !valid_operation(opA) || !valid_operation(opB) || alg != CUSPARSE_SPSM_ALG_DEFAULT) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (computeType != CUDA_R_32F && computeType != CUDA_R_64F && computeType != CUDA_C_32F &&
+        computeType != CUDA_C_64F) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (matA->valueType != computeType || matB->valueType != computeType ||
+        matC->valueType != computeType || matA->format == CUMETAL_SPMAT_COO ||
+        !cumetal_sparse_indices_are_32bit(matA) || matB->batchCount != 1 ||
+        matC->batchCount != 1) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    const int64_t n = matA->rows;
+    const int64_t nrhs = matC->cols;
+    const bool b_transposed = opB != CUSPARSE_OPERATION_NON_TRANSPOSE;
+    if (matA->rows != matA->cols || matC->rows != n ||
+        (b_transposed ? (matB->rows != nrhs || matB->cols != n)
+                      : (matB->rows != n || matB->cols != nrhs))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (scalar_pointer_for_mode_size(handle->pointer_mode, alpha, value_size(computeType)) ==
+        nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// op(A) * C = alpha * op(B), solved one column at a time.
+static cusparseStatus_t spsm_solve_impl(cusparseHandle_t handle, cusparseOperation_t opA,
+                                        cusparseOperation_t opB, const void* alpha,
+                                        cusparseSpMatDescr_t matA, cusparseDnMatDescr_t matB,
+                                        cusparseDnMatDescr_t matC, cudaDataType computeType) {
+    synchronize_handle_stream(handle);
+    const void* alpha_ptr =
+        scalar_pointer_for_mode_size(handle->pointer_mode, alpha, value_size(computeType));
+    bool transpose = false;
+    int64_t axis = 0;
+    cumetal_sparse_view(matA, opA, &transpose, &axis);
+    // A CSC descriptor's arrays are CSR of A-transpose, so the triangle that
+    // holds data flips with it.
+    cusparseFillMode_t fill = matA->fill;
+    if (matA->format == CUMETAL_SPMAT_CSC) {
+        fill = fill == CUSPARSE_FILL_MODE_LOWER ? CUSPARSE_FILL_MODE_UPPER
+                                                : CUSPARSE_FILL_MODE_LOWER;
+    }
+    const bool unit = matA->diag == CUSPARSE_DIAG_TYPE_UNIT;
+    const bool conjugate = opA == CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE;
+    const int base = base_of(matA);
+    const int* offsets = static_cast<const int*>(matA->rowOffsets);
+    const int* indices = static_cast<const int*>(matA->colInd);
+    const bool b_transposed = opB != CUSPARSE_OPERATION_NON_TRANSPOSE;
+    const bool b_conjugate = opB == CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE;
+    const int64_t n = matA->rows;
+    const int64_t nrhs = matC->cols;
+
+    return dispatch_compute_type(computeType, [&](auto tag) -> cusparseStatus_t {
+        using T = decltype(tag);
+        const T a = *static_cast<const T*>(alpha_ptr);
+        const T* vals = static_cast<const T*>(matA->values);
+        std::vector<T> x(static_cast<std::size_t>(n));
+        for (int64_t j = 0; j < nrhs; ++j) {
+            for (int64_t i = 0; i < n; ++i) {
+                T b = b_transposed ? dense_at<T>(matB, j, i) : dense_at<T>(matB, i, j);
+                if (b_conjugate) b = conj_of(b);
+                x[static_cast<std::size_t>(i)] = a * b;
+            }
+            if (!cumetal_tri_solve(n, offsets, indices, vals, base, fill, unit, transpose,
+                                   conjugate, x.data())) {
+                return CUSPARSE_STATUS_ZERO_PIVOT;
+            }
+            for (int64_t i = 0; i < n; ++i) dense_at<T>(matC, i, j) = x[static_cast<std::size_t>(i)];
+        }
+        return CUSPARSE_STATUS_SUCCESS;
+    });
+}
+
+// ── SpGEMM ──────────────────────────────────────────────────────────────────
+
+}  // extern "C++"
+
+// The product is computed in cusparseSpGEMM_compute and parked here until
+// cusparseSpGEMM_copy writes it into the caller's arrays: cuSPARSE's protocol
+// has the caller size C from cusparseSpMatGetSize between those two calls.
+struct cusparseSpGEMMDescr {
+    bool computed = false;
+    int64_t rows = 0;
+    int64_t cols = 0;
+    cudaDataType valueType = CUDA_R_32F;
+    std::vector<int64_t> rowptr;  // 0-based
+    std::vector<int64_t> colind;  // 0-based, ascending within a row
+    std::vector<unsigned char> values;
+};
+
+extern "C++" {
+
+static cusparseStatus_t spgemm_validate(cusparseHandle_t handle, cusparseOperation_t opA,
+                                        cusparseOperation_t opB, const void* alpha,
+                                        cusparseSpMatDescr_t matA, cusparseSpMatDescr_t matB,
+                                        const void* beta, cusparseSpMatDescr_t matC,
+                                        cudaDataType computeType, cusparseSpGEMMAlg_t alg,
+                                        cusparseSpGEMMDescr_t descr) {
+    SP_NEED_HANDLE(handle);
+    if (alpha == nullptr || beta == nullptr || matA == nullptr || matB == nullptr ||
+        matC == nullptr || descr == nullptr || !valid_operation(opA) || !valid_operation(opB) ||
+        alg < CUSPARSE_SPGEMM_DEFAULT || alg > CUSPARSE_SPGEMM_ALG3) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (opA != CUSPARSE_OPERATION_NON_TRANSPOSE || opB != CUSPARSE_OPERATION_NON_TRANSPOSE ||
+        matA->format != CUMETAL_SPMAT_CSR || matB->format != CUMETAL_SPMAT_CSR ||
+        matC->format != CUMETAL_SPMAT_CSR) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (computeType != CUDA_R_32F && computeType != CUDA_R_64F && computeType != CUDA_C_32F &&
+        computeType != CUDA_C_64F) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (matA->valueType != computeType || matB->valueType != computeType ||
+        matC->valueType != computeType) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (matA->cols != matB->rows || matC->rows != matA->rows || matC->cols != matB->cols) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const std::size_t scalar_size = value_size(computeType);
+    if (scalar_pointer_for_mode_size(handle->pointer_mode, alpha, scalar_size) == nullptr ||
+        scalar_pointer_for_mode_size(handle->pointer_mode, beta, scalar_size) == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Gustavson's row-by-row product. Structural entries are kept even when they
+// cancel to zero, as cuSPARSE does.
+template <typename T>
+static cusparseStatus_t spgemm_compute_impl(const cusparseSpMatDescr* A,
+                                            const cusparseSpMatDescr* B, T alpha,
+                                            cusparseSpGEMMDescr* d) {
+    const int64_t m = A->rows;
+    const int64_t n = B->cols;
+    const int baseA = base_of(A), baseB = base_of(B);
+    const T* av = static_cast<const T*>(A->values);
+    const T* bv = static_cast<const T*>(B->values);
+    std::vector<T> acc(static_cast<std::size_t>(n));
+    std::vector<int64_t> mark(static_cast<std::size_t>(n), -1);
+    std::vector<int64_t> touched;
+    std::vector<T> out;
+    d->rowptr.assign(static_cast<std::size_t>(m) + 1, 0);
+    d->colind.clear();
+    for (int64_t i = 0; i < m; ++i) {
+        touched.clear();
+        const int64_t a_begin = idx_at(A->rowOffsets, A->rowType, i) - baseA;
+        const int64_t a_end = idx_at(A->rowOffsets, A->rowType, i + 1) - baseA;
+        for (int64_t ka = a_begin; ka < a_end; ++ka) {
+            const int64_t k = idx_at(A->colInd, A->colType, ka) - baseA;
+            if (k < 0 || k >= B->rows) return CUSPARSE_STATUS_INVALID_VALUE;
+            const int64_t b_begin = idx_at(B->rowOffsets, B->rowType, k) - baseB;
+            const int64_t b_end = idx_at(B->rowOffsets, B->rowType, k + 1) - baseB;
+            for (int64_t kb = b_begin; kb < b_end; ++kb) {
+                const int64_t j = idx_at(B->colInd, B->colType, kb) - baseB;
+                if (j < 0 || j >= n) return CUSPARSE_STATUS_INVALID_VALUE;
+                if (mark[static_cast<std::size_t>(j)] != i) {
+                    mark[static_cast<std::size_t>(j)] = i;
+                    acc[static_cast<std::size_t>(j)] = T(0);
+                    touched.push_back(j);
+                }
+                acc[static_cast<std::size_t>(j)] += av[ka] * bv[kb];
+            }
+        }
+        std::sort(touched.begin(), touched.end());
+        for (int64_t j : touched) {
+            d->colind.push_back(j);
+            out.push_back(alpha * acc[static_cast<std::size_t>(j)]);
+        }
+        d->rowptr[static_cast<std::size_t>(i) + 1] = static_cast<int64_t>(d->colind.size());
+    }
+    d->values.resize(out.size() * sizeof(T));
+    if (!out.empty()) std::memcpy(d->values.data(), out.data(), d->values.size());
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// The offsets of an operand are only trustworthy once checked: a descriptor can
+// be built over anything.
+static bool spgemm_operand_valid(const cusparseSpMatDescr* M) {
+    if (M->rowOffsets == nullptr || (M->nnz > 0 && (M->colInd == nullptr || M->values == nullptr))) {
+        return false;
+    }
+    const int base = base_of(M);
+    if (idx_at(M->rowOffsets, M->rowType, 0) - base != 0 ||
+        idx_at(M->rowOffsets, M->rowType, M->rows) - base != M->nnz) {
+        return false;
+    }
+    for (int64_t r = 0; r < M->rows; ++r) {
+        if (idx_at(M->rowOffsets, M->rowType, r + 1) < idx_at(M->rowOffsets, M->rowType, r)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ── dense <-> sparse ────────────────────────────────────────────────────────
+
+static cusparseStatus_t dense_sparse_validate(cusparseHandle_t handle,
+                                              const cusparseDnMatDescr* dense,
+                                              const cusparseSpMatDescr* sparse) {
+    SP_NEED_HANDLE(handle);
+    if (dense == nullptr || sparse == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (dense->valueType != sparse->valueType || value_size(dense->valueType) == 0 ||
+        dense->batchCount != 1) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (dense->rows != sparse->rows || dense->cols != sparse->cols) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+static const void* dense_element(const cusparseDnMatDescr* mat, int64_t i, int64_t j) {
+    const std::size_t size = value_size(mat->valueType);
+    const auto* v = static_cast<const unsigned char*>(mat->values);
+    const int64_t at = mat->order == CUSPARSE_ORDER_COL ? i + j * mat->ld : i * mat->ld + j;
+    return v + static_cast<std::size_t>(at) * size;
+}
+
+// Stored nonzeros of a dense matrix in the order the sparse format lists them:
+// row-major for CSR and COO, column-major for CSC. `emit` receives (row, col,
+// element pointer).
+template <typename F>
+static void for_each_dense_nonzero(const cusparseDnMatDescr* dense, bool column_major, F&& emit) {
+    if (column_major) {
+        for (int64_t j = 0; j < dense->cols; ++j)
+            for (int64_t i = 0; i < dense->rows; ++i) {
+                const void* e = dense_element(dense, i, j);
+                if (value_nonzero(dense->valueType, e)) emit(i, j, e);
+            }
+    } else {
+        for (int64_t i = 0; i < dense->rows; ++i)
+            for (int64_t j = 0; j < dense->cols; ++j) {
+                const void* e = dense_element(dense, i, j);
+                if (value_nonzero(dense->valueType, e)) emit(i, j, e);
+            }
+    }
+}
+
+}  // extern "C++"
+
+// ── sparse vectors ──────────────────────────────────────────────────────────
+
+cusparseStatus_t cusparseCreateSpVec(cusparseSpVecDescr_t* spVecDescr, int64_t size, int64_t nnz,
+                                     void* indices, void* values, cusparseIndexType_t idxType,
+                                     cusparseIndexBase_t idxBase, cudaDataType valueType) {
+    if (spVecDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *spVecDescr = nullptr;
+    if (size < 0 || nnz < 0 || nnz > size || (nnz > 0 && (indices == nullptr || values == nullptr)) ||
+        !valid_index_type(idxType) || !valid_index_base(idxBase) || !valid_data_type(valueType)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    auto* v = new (std::nothrow) cusparseSpVecDescr();
+    if (v == nullptr) return CUSPARSE_STATUS_ALLOC_FAILED;
+    v->size = size;
+    v->nnz = nnz;
+    v->indices = indices;
+    v->values = values;
+    v->idxType = idxType;
+    v->idxBase = idxBase;
+    v->valueType = valueType;
+    *spVecDescr = v;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDestroySpVec(cusparseSpVecDescr_t spVecDescr) {
+    delete spVecDescr;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpVecGet(cusparseSpVecDescr_t spVecDescr, int64_t* size, int64_t* nnz,
+                                  void** indices, void** values, cusparseIndexType_t* idxType,
+                                  cusparseIndexBase_t* idxBase, cudaDataType* valueType) {
+    if (spVecDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (size != nullptr) *size = spVecDescr->size;
+    if (nnz != nullptr) *nnz = spVecDescr->nnz;
+    if (indices != nullptr) *indices = spVecDescr->indices;
+    if (values != nullptr) *values = spVecDescr->values;
+    if (idxType != nullptr) *idxType = spVecDescr->idxType;
+    if (idxBase != nullptr) *idxBase = spVecDescr->idxBase;
+    if (valueType != nullptr) *valueType = spVecDescr->valueType;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpVecGetIndexBase(cusparseSpVecDescr_t spVecDescr,
+                                           cusparseIndexBase_t* idxBase) {
+    if (spVecDescr == nullptr || idxBase == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *idxBase = spVecDescr->idxBase;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpVecGetValues(cusparseSpVecDescr_t spVecDescr, void** values) {
+    if (spVecDescr == nullptr || values == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *values = spVecDescr->values;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpVecSetValues(cusparseSpVecDescr_t spVecDescr, void* values) {
+    if (spVecDescr == nullptr || (values == nullptr && spVecDescr->nnz > 0)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    spVecDescr->values = values;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── sparse / dense matrix accessors ─────────────────────────────────────────
+
+cusparseStatus_t cusparseCooGet(cusparseSpMatDescr_t spMatDescr, int64_t* rows, int64_t* cols,
+                                int64_t* nnz, void** cooRowInd, void** cooColInd,
+                                void** cooValues, cusparseIndexType_t* idxType,
+                                cusparseIndexBase_t* idxBase, cudaDataType* valueType) {
+    if (spMatDescr == nullptr || spMatDescr->format != CUMETAL_SPMAT_COO) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (rows != nullptr) *rows = spMatDescr->rows;
+    if (cols != nullptr) *cols = spMatDescr->cols;
+    if (nnz != nullptr) *nnz = spMatDescr->nnz;
+    if (cooRowInd != nullptr) *cooRowInd = spMatDescr->rowOffsets;
+    if (cooColInd != nullptr) *cooColInd = spMatDescr->colInd;
+    if (cooValues != nullptr) *cooValues = spMatDescr->values;
+    if (idxType != nullptr) *idxType = spMatDescr->rowType;
+    if (idxBase != nullptr) *idxBase = spMatDescr->idxBase;
+    if (valueType != nullptr) *valueType = spMatDescr->valueType;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseCsrGet(cusparseSpMatDescr_t spMatDescr, int64_t* rows, int64_t* cols,
+                                int64_t* nnz, void** csrRowOffsets, void** csrColInd,
+                                void** csrValues, cusparseIndexType_t* csrRowOffsetsType,
+                                cusparseIndexType_t* csrColIndType, cusparseIndexBase_t* idxBase,
+                                cudaDataType* valueType) {
+    if (spMatDescr == nullptr || spMatDescr->format != CUMETAL_SPMAT_CSR) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (rows != nullptr) *rows = spMatDescr->rows;
+    if (cols != nullptr) *cols = spMatDescr->cols;
+    if (nnz != nullptr) *nnz = spMatDescr->nnz;
+    if (csrRowOffsets != nullptr) *csrRowOffsets = spMatDescr->rowOffsets;
+    if (csrColInd != nullptr) *csrColInd = spMatDescr->colInd;
+    if (csrValues != nullptr) *csrValues = spMatDescr->values;
+    if (csrRowOffsetsType != nullptr) *csrRowOffsetsType = spMatDescr->rowType;
+    if (csrColIndType != nullptr) *csrColIndType = spMatDescr->colType;
+    if (idxBase != nullptr) *idxBase = spMatDescr->idxBase;
+    if (valueType != nullptr) *valueType = spMatDescr->valueType;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseCsrSetPointers(cusparseSpMatDescr_t spMatDescr, void* csrRowOffsets,
+                                        void* csrColInd, void* csrValues) {
+    if (spMatDescr == nullptr || spMatDescr->format != CUMETAL_SPMAT_CSR ||
+        csrRowOffsets == nullptr ||
+        (spMatDescr->nnz > 0 && (csrColInd == nullptr || csrValues == nullptr))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    spMatDescr->rowOffsets = csrRowOffsets;
+    spMatDescr->colInd = csrColInd;
+    spMatDescr->values = csrValues;
+    // The structure changed: the cached longest row (see the INVARIANT on the
+    // descriptor) describes the old offsets.
+    spMatDescr->longest_row = -1;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpMatGetFormat(cusparseSpMatDescr_t spMatDescr, cusparseFormat_t* format) {
+    if (spMatDescr == nullptr || format == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *format = format_of(spMatDescr);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpMatGetIndexBase(cusparseSpMatDescr_t spMatDescr,
+                                           cusparseIndexBase_t* idxBase) {
+    if (spMatDescr == nullptr || idxBase == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *idxBase = spMatDescr->idxBase;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpMatGetValues(cusparseSpMatDescr_t spMatDescr, void** values) {
+    if (spMatDescr == nullptr || values == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *values = spMatDescr->values;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Values may be rewritten in place; only the sparsity structure is fixed.
+cusparseStatus_t cusparseSpMatSetValues(cusparseSpMatDescr_t spMatDescr, void* values) {
+    if (spMatDescr == nullptr || (values == nullptr && spMatDescr->nnz > 0)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    spMatDescr->values = values;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpMatGetSize(cusparseSpMatDescr_t spMatDescr, int64_t* rows,
+                                      int64_t* cols, int64_t* nnz) {
+    if (spMatDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (rows != nullptr) *rows = spMatDescr->rows;
+    if (cols != nullptr) *cols = spMatDescr->cols;
+    if (nnz != nullptr) *nnz = spMatDescr->nnz;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Sparse matrices are not batched here, so the count is always one.
+cusparseStatus_t cusparseSpMatGetStridedBatch(cusparseSpMatDescr_t spMatDescr, int* batchCount) {
+    if (spMatDescr == nullptr || batchCount == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *batchCount = 1;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDnMatGet(cusparseDnMatDescr_t dnMatDescr, int64_t* rows, int64_t* cols,
+                                  int64_t* ld, void** values, cudaDataType* valueType,
+                                  cusparseOrder_t* order) {
+    if (dnMatDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (rows != nullptr) *rows = dnMatDescr->rows;
+    if (cols != nullptr) *cols = dnMatDescr->cols;
+    if (ld != nullptr) *ld = dnMatDescr->ld;
+    if (values != nullptr) *values = dnMatDescr->values;
+    if (valueType != nullptr) *valueType = dnMatDescr->valueType;
+    if (order != nullptr) *order = dnMatDescr->order;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDnMatGetValues(cusparseDnMatDescr_t dnMatDescr, void** values) {
+    if (dnMatDescr == nullptr || values == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *values = dnMatDescr->values;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDnMatSetValues(cusparseDnMatDescr_t dnMatDescr, void* values) {
+    if (dnMatDescr == nullptr || (values == nullptr && dnMatDescr->rows > 0 && dnMatDescr->cols > 0)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    dnMatDescr->values = values;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDnMatGetStridedBatch(cusparseDnMatDescr_t dnMatDescr, int* batchCount,
+                                              int64_t* batchStride) {
+    if (dnMatDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (batchCount != nullptr) *batchCount = dnMatDescr->batchCount;
+    if (batchStride != nullptr) *batchStride = dnMatDescr->batchStride;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDnMatSetStridedBatch(cusparseDnMatDescr_t dnMatDescr, int batchCount,
+                                              int64_t batchStride) {
+    if (dnMatDescr == nullptr || batchCount < 1 || batchStride < 0) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    dnMatDescr->batchCount = batchCount;
+    dnMatDescr->batchStride = batchStride;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── SpVV / Gather ───────────────────────────────────────────────────────────
+
+static cusparseStatus_t spvv_validate(cusparseHandle_t handle, cusparseOperation_t opX,
+                                      cusparseSpVecDescr_t vecX, cusparseDnVecDescr_t vecY,
+                                      const void* result, cudaDataType computeType) {
+    SP_NEED_HANDLE(handle);
+    if (vecX == nullptr || vecY == nullptr || result == nullptr || !valid_operation(opX) ||
+        vecX->size != vecY->size) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    if (computeType != CUDA_R_32F && computeType != CUDA_R_64F && computeType != CUDA_C_32F &&
+        computeType != CUDA_C_64F) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    if (vecX->valueType != computeType || vecY->valueType != computeType) {
+        return CUSPARSE_STATUS_NOT_SUPPORTED;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpVV_bufferSize(cusparseHandle_t handle, cusparseOperation_t opX,
+                                         cusparseSpVecDescr_t vecX, cusparseDnVecDescr_t vecY,
+                                         const void* result, cudaDataType computeType,
+                                         size_t* bufferSize) {
+    if (bufferSize == nullptr) {
+        return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const cusparseStatus_t status = spvv_validate(handle, opX, vecX, vecY, result, computeType);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    *bufferSize = 1;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// result = sum_i x_i * y[idx_i], with x conjugated for the conjugate-transpose
+// operation. `result` is a host or device pointer according to the handle's
+// pointer mode; both are directly writable over unified memory.
+cusparseStatus_t cusparseSpVV(cusparseHandle_t handle, cusparseOperation_t opX,
+                              cusparseSpVecDescr_t vecX, cusparseDnVecDescr_t vecY, void* result,
+                              cudaDataType computeType, void* /*externalBuffer*/) {
+    cusparseStatus_t status = spvv_validate(handle, opX, vecX, vecY, result, computeType);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    synchronize_handle_stream(handle);
+    const int base = vecX->idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
+    const bool conjugate = opX == CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE;
+    return dispatch_compute_type(computeType, [&](auto tag) -> cusparseStatus_t {
+        using T = decltype(tag);
+        const T* x = static_cast<const T*>(vecX->values);
+        const T* y = static_cast<const T*>(vecY->values);
+        T acc{};
+        for (int64_t e = 0; e < vecX->nnz; ++e) {
+            const int64_t i = idx_at(vecX->indices, vecX->idxType, e) - base;
+            if (i < 0 || i >= vecY->size) return CUSPARSE_STATUS_INVALID_VALUE;
+            acc += (conjugate ? conj_of(x[e]) : x[e]) * y[i];
+        }
+        *static_cast<T*>(result) = acc;
+        return CUSPARSE_STATUS_SUCCESS;
+    });
+}
+
+// x.values[e] = y[x.indices[e]]
+cusparseStatus_t cusparseGather(cusparseHandle_t handle, cusparseDnVecDescr_t vecY,
+                                cusparseSpVecDescr_t vecX) {
+    SP_NEED_HANDLE(handle);
+    if (vecX == nullptr || vecY == nullptr || vecX->size != vecY->size ||
+        (vecX->nnz > 0 && (vecX->indices == nullptr || vecX->values == nullptr))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const std::size_t size = value_size(vecX->valueType);
+    if (vecX->valueType != vecY->valueType || size == 0) return CUSPARSE_STATUS_NOT_SUPPORTED;
+    synchronize_handle_stream(handle);
+    const int base = vecX->idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
+    const auto* y = static_cast<const unsigned char*>(vecY->values);
+    auto* x = static_cast<unsigned char*>(vecX->values);
+    for (int64_t e = 0; e < vecX->nnz; ++e) {
+        const int64_t i = idx_at(vecX->indices, vecX->idxType, e) - base;
+        if (i < 0 || i >= vecY->size) return CUSPARSE_STATUS_INVALID_VALUE;
+        std::memcpy(x + static_cast<std::size_t>(e) * size, y + static_cast<std::size_t>(i) * size, size);
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── SpSM ────────────────────────────────────────────────────────────────────
+
+// Nothing to carry between phases: the solve reads the CSR arrays directly.
+struct cusparseSpSMDescr { char reserved = 0; };
+
+cusparseStatus_t cusparseSpSM_createDescr(cusparseSpSMDescr_t* descr) {
+    if (descr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *descr = new (std::nothrow) cusparseSpSMDescr();
+    return *descr == nullptr ? CUSPARSE_STATUS_ALLOC_FAILED : CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpSM_destroyDescr(cusparseSpSMDescr_t descr) {
+    delete descr;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpSM_bufferSize(cusparseHandle_t handle, cusparseOperation_t opA,
+                                         cusparseOperation_t opB, const void* alpha,
+                                         cusparseSpMatDescr_t matA, cusparseDnMatDescr_t matB,
+                                         cusparseDnMatDescr_t matC, cudaDataType computeType,
+                                         cusparseSpSMAlg_t alg, cusparseSpSMDescr_t spsmDescr,
+                                         size_t* bufferSize) {
+    if (spsmDescr == nullptr || bufferSize == nullptr) {
+        return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const cusparseStatus_t status =
+        spsm_validate(handle, opA, opB, alpha, matA, matB, matC, computeType, alg);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    *bufferSize = kNoWorkspaceBytes;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// The solve walks the CSR arrays directly, so there is nothing to analyse.
+cusparseStatus_t cusparseSpSM_analysis(cusparseHandle_t handle, cusparseOperation_t opA,
+                                       cusparseOperation_t opB, const void* alpha,
+                                       cusparseSpMatDescr_t matA, cusparseDnMatDescr_t matB,
+                                       cusparseDnMatDescr_t matC, cudaDataType computeType,
+                                       cusparseSpSMAlg_t alg, cusparseSpSMDescr_t spsmDescr,
+                                       void* /*externalBuffer*/) {
+    if (spsmDescr == nullptr) {
+        return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    return spsm_validate(handle, opA, opB, alpha, matA, matB, matC, computeType, alg);
+}
+
+cusparseStatus_t cusparseSpSM_solve(cusparseHandle_t handle, cusparseOperation_t opA,
+                                    cusparseOperation_t opB, const void* alpha,
+                                    cusparseSpMatDescr_t matA, cusparseDnMatDescr_t matB,
+                                    cusparseDnMatDescr_t matC, cudaDataType computeType,
+                                    cusparseSpSMAlg_t alg, cusparseSpSMDescr_t spsmDescr) {
+    if (spsmDescr == nullptr) {
+        return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const cusparseStatus_t status =
+        spsm_validate(handle, opA, opB, alpha, matA, matB, matC, computeType, alg);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    return spsm_solve_impl(handle, opA, opB, alpha, matA, matB, matC, computeType);
+}
+
+// ── SpGEMM ──────────────────────────────────────────────────────────────────
+
+cusparseStatus_t cusparseSpGEMM_createDescr(cusparseSpGEMMDescr_t* descr) {
+    if (descr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *descr = new (std::nothrow) cusparseSpGEMMDescr();
+    return *descr == nullptr ? CUSPARSE_STATUS_ALLOC_FAILED : CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseSpGEMM_destroyDescr(cusparseSpGEMMDescr_t descr) {
+    delete descr;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// cuSPARSE's three-phase protocol sizes two scratch buffers. None is needed
+// here, but the sizes are reported non-zero and a null buffer means "query
+// only" exactly as it does there.
+cusparseStatus_t cusparseSpGEMM_workEstimation(
+    cusparseHandle_t handle, cusparseOperation_t opA, cusparseOperation_t opB, const void* alpha,
+    cusparseSpMatDescr_t matA, cusparseSpMatDescr_t matB, const void* beta,
+    cusparseSpMatDescr_t matC, cudaDataType computeType, cusparseSpGEMMAlg_t alg,
+    cusparseSpGEMMDescr_t spgemmDescr, size_t* bufferSize1, void* externalBuffer1) {
+    const cusparseStatus_t status = spgemm_validate(handle, opA, opB, alpha, matA, matB, beta, matC,
+                                                    computeType, alg, spgemmDescr);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    if (bufferSize1 == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (externalBuffer1 == nullptr) *bufferSize1 = kNoWorkspaceBytes;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Computes C = alpha * A * B when given a buffer; with a null buffer it only
+// reports the size. After the computing call cusparseSpMatGetSize(C) reports
+// the product's nnz so the caller can allocate C's index and value arrays.
+cusparseStatus_t cusparseSpGEMM_compute(
+    cusparseHandle_t handle, cusparseOperation_t opA, cusparseOperation_t opB, const void* alpha,
+    cusparseSpMatDescr_t matA, cusparseSpMatDescr_t matB, const void* beta,
+    cusparseSpMatDescr_t matC, cudaDataType computeType, cusparseSpGEMMAlg_t alg,
+    cusparseSpGEMMDescr_t spgemmDescr, size_t* bufferSize2, void* externalBuffer2) {
+    cusparseStatus_t status = spgemm_validate(handle, opA, opB, alpha, matA, matB, beta, matC,
+                                              computeType, alg, spgemmDescr);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    if (bufferSize2 == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (externalBuffer2 == nullptr) {
+        *bufferSize2 = kNoWorkspaceBytes;
+        return CUSPARSE_STATUS_SUCCESS;
+    }
+    synchronize_handle_stream(handle);
+    const std::size_t scalar_size = value_size(computeType);
+    const void* alpha_ptr = scalar_pointer_for_mode_size(handle->pointer_mode, alpha, scalar_size);
+    const void* beta_ptr = scalar_pointer_for_mode_size(handle->pointer_mode, beta, scalar_size);
+    // C = alpha*A*B + beta*C is only defined here for beta == 0: the product's
+    // pattern replaces C's, so a nonzero beta would need C's old contents merged.
+    const bool beta_zero = dispatch_compute_type(computeType, [&](auto tag) -> cusparseStatus_t {
+        using T = decltype(tag);
+        return *static_cast<const T*>(beta_ptr) == T(0) ? CUSPARSE_STATUS_SUCCESS
+                                                         : CUSPARSE_STATUS_INVALID_VALUE;
+    }) == CUSPARSE_STATUS_SUCCESS;
+    if (!beta_zero) return CUSPARSE_STATUS_NOT_SUPPORTED;
+    if (!spgemm_operand_valid(matA) || !spgemm_operand_valid(matB)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    status = dispatch_compute_type(computeType, [&](auto tag) -> cusparseStatus_t {
+        using T = decltype(tag);
+        return spgemm_compute_impl<T>(matA, matB, *static_cast<const T*>(alpha_ptr), spgemmDescr);
+    });
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    spgemmDescr->computed = true;
+    spgemmDescr->rows = matA->rows;
+    spgemmDescr->cols = matB->cols;
+    spgemmDescr->valueType = computeType;
+    matC->nnz = static_cast<int64_t>(spgemmDescr->colind.size());
+    matC->longest_row = -1;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Writes the product computed by cusparseSpGEMM_compute into C's arrays. C's
+// row-offset array must already be set, and its index/value arrays must hold
+// the nnz that cusparseSpMatGetSize reported.
+cusparseStatus_t cusparseSpGEMM_copy(
+    cusparseHandle_t handle, cusparseOperation_t opA, cusparseOperation_t opB, const void* alpha,
+    cusparseSpMatDescr_t matA, cusparseSpMatDescr_t matB, const void* beta,
+    cusparseSpMatDescr_t matC, cudaDataType computeType, cusparseSpGEMMAlg_t alg,
+    cusparseSpGEMMDescr_t spgemmDescr) {
+    const cusparseStatus_t status = spgemm_validate(handle, opA, opB, alpha, matA, matB, beta, matC,
+                                                    computeType, alg, spgemmDescr);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    const int64_t nnz = static_cast<int64_t>(spgemmDescr->colind.size());
+    if (!spgemmDescr->computed || spgemmDescr->valueType != computeType ||
+        spgemmDescr->rows != matC->rows || spgemmDescr->cols != matC->cols ||
+        matC->nnz != nnz || matC->rowOffsets == nullptr ||
+        (nnz > 0 && (matC->colInd == nullptr || matC->values == nullptr))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    synchronize_handle_stream(handle);
+    const int base = base_of(matC);
+    for (int64_t i = 0; i <= matC->rows; ++i) {
+        idx_put(matC->rowOffsets, matC->rowType, i, spgemmDescr->rowptr[static_cast<std::size_t>(i)] + base);
+    }
+    for (int64_t e = 0; e < nnz; ++e) {
+        idx_put(matC->colInd, matC->colType, e, spgemmDescr->colind[static_cast<std::size_t>(e)] + base);
+    }
+    if (nnz > 0) std::memcpy(matC->values, spgemmDescr->values.data(), spgemmDescr->values.size());
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── dense <-> sparse ────────────────────────────────────────────────────────
+
+cusparseStatus_t cusparseSparseToDense_bufferSize(cusparseHandle_t handle,
+                                                  cusparseSpMatDescr_t matA,
+                                                  cusparseDnMatDescr_t matB,
+                                                  cusparseSparseToDenseAlg_t alg,
+                                                  size_t* bufferSize) {
+    if (bufferSize == nullptr || alg != CUSPARSE_SPARSETODENSE_ALG_DEFAULT) {
+        return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const cusparseStatus_t status = dense_sparse_validate(handle, matB, matA);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    *bufferSize = kNoWorkspaceBytes;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// B = dense(A). Every element of B is written, zeros included.
+cusparseStatus_t cusparseSparseToDense(cusparseHandle_t handle, cusparseSpMatDescr_t matA,
+                                       cusparseDnMatDescr_t matB, cusparseSparseToDenseAlg_t alg,
+                                       void* /*externalBuffer*/) {
+    cusparseStatus_t status = dense_sparse_validate(handle, matB, matA);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    if (alg != CUSPARSE_SPARSETODENSE_ALG_DEFAULT) return CUSPARSE_STATUS_INVALID_VALUE;
+    if ((matB->rows > 0 && matB->cols > 0 && matB->values == nullptr) ||
+        (matA->nnz > 0 && (matA->colInd == nullptr || matA->values == nullptr)) ||
+        matA->rowOffsets == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    synchronize_handle_stream(handle);
+    const std::size_t size = value_size(matA->valueType);
+    const int base = base_of(matA);
+    auto* out = static_cast<unsigned char*>(matB->values);
+    auto cell = [&](int64_t i, int64_t j) {
+        const int64_t at = matB->order == CUSPARSE_ORDER_COL ? i + j * matB->ld : i * matB->ld + j;
+        return out + static_cast<std::size_t>(at) * size;
+    };
+    // Validate every coordinate before touching B, so a malformed matrix does
+    // not leave B half-written.
+    auto coordinate_ok = [&](int64_t r, int64_t c) {
+        return r >= 0 && r < matA->rows && c >= 0 && c < matA->cols;
+    };
+    const auto* values = static_cast<const unsigned char*>(matA->values);
+    const int64_t axis = matA->format == CUMETAL_SPMAT_CSC ? matA->cols : matA->rows;
+    if (matA->format != CUMETAL_SPMAT_COO) {
+        if (idx_at(matA->rowOffsets, matA->rowType, 0) - base != 0 ||
+            idx_at(matA->rowOffsets, matA->rowType, axis) - base != matA->nnz) {
+            return CUSPARSE_STATUS_INVALID_VALUE;
+        }
+        for (int64_t s = 0; s < axis; ++s) {
+            const int64_t begin = idx_at(matA->rowOffsets, matA->rowType, s) - base;
+            const int64_t end = idx_at(matA->rowOffsets, matA->rowType, s + 1) - base;
+            if (begin > end || end > matA->nnz) return CUSPARSE_STATUS_INVALID_VALUE;
+            for (int64_t e = begin; e < end; ++e) {
+                const int64_t other = idx_at(matA->colInd, matA->colType, e) - base;
+                if (!(matA->format == CUMETAL_SPMAT_CSC ? coordinate_ok(other, s)
+                                                       : coordinate_ok(s, other))) {
+                    return CUSPARSE_STATUS_INVALID_VALUE;
+                }
+            }
+        }
+    } else {
+        for (int64_t e = 0; e < matA->nnz; ++e) {
+            if (!coordinate_ok(idx_at(matA->rowOffsets, matA->rowType, e) - base,
+                               idx_at(matA->colInd, matA->colType, e) - base)) {
+                return CUSPARSE_STATUS_INVALID_VALUE;
+            }
+        }
+    }
+    for (int64_t j = 0; j < matB->cols; ++j)
+        for (int64_t i = 0; i < matB->rows; ++i) std::memset(cell(i, j), 0, size);
+    auto store = [&](int64_t r, int64_t c, int64_t e) {
+        std::memcpy(cell(r, c), values + static_cast<std::size_t>(e) * size, size);
+    };
+    if (matA->format == CUMETAL_SPMAT_COO) {
+        for (int64_t e = 0; e < matA->nnz; ++e)
+            store(idx_at(matA->rowOffsets, matA->rowType, e) - base,
+                  idx_at(matA->colInd, matA->colType, e) - base, e);
+    } else {
+        for (int64_t s = 0; s < axis; ++s) {
+            const int64_t begin = idx_at(matA->rowOffsets, matA->rowType, s) - base;
+            const int64_t end = idx_at(matA->rowOffsets, matA->rowType, s + 1) - base;
+            for (int64_t e = begin; e < end; ++e) {
+                const int64_t other = idx_at(matA->colInd, matA->colType, e) - base;
+                if (matA->format == CUMETAL_SPMAT_CSC) store(other, s, e);
+                else store(s, other, e);
+            }
+        }
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDenseToSparse_bufferSize(cusparseHandle_t handle,
+                                                  cusparseDnMatDescr_t matA,
+                                                  cusparseSpMatDescr_t matB,
+                                                  cusparseDenseToSparseAlg_t alg,
+                                                  size_t* bufferSize) {
+    if (bufferSize == nullptr || alg != CUSPARSE_DENSETOSPARSE_ALG_DEFAULT) {
+        return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const cusparseStatus_t status = dense_sparse_validate(handle, matA, matB);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    *bufferSize = kNoWorkspaceBytes;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Counts A's nonzeros and fixes B's nnz and (for CSR/CSC) its offset array.
+// The caller then allocates B's index and value arrays, points B at them with
+// cusparseCsrSetPointers, and calls cusparseDenseToSparse_convert.
+cusparseStatus_t cusparseDenseToSparse_analysis(cusparseHandle_t handle,
+                                                cusparseDnMatDescr_t matA,
+                                                cusparseSpMatDescr_t matB,
+                                                cusparseDenseToSparseAlg_t alg,
+                                                void* /*externalBuffer*/) {
+    cusparseStatus_t status = dense_sparse_validate(handle, matA, matB);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    if (alg != CUSPARSE_DENSETOSPARSE_ALG_DEFAULT) return CUSPARSE_STATUS_INVALID_VALUE;
+    if ((matA->rows > 0 && matA->cols > 0 && matA->values == nullptr) ||
+        (matB->format != CUMETAL_SPMAT_COO && matB->rowOffsets == nullptr)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    synchronize_handle_stream(handle);
+    const bool column_major = matB->format == CUMETAL_SPMAT_CSC;
+    const int64_t axis = column_major ? matB->cols : matB->rows;
+    std::vector<int64_t> counts(static_cast<std::size_t>(axis), 0);
+    int64_t total = 0;
+    for_each_dense_nonzero(matA, column_major, [&](int64_t i, int64_t j, const void*) {
+        ++counts[static_cast<std::size_t>(column_major ? j : i)];
+        ++total;
+    });
+    if (matB->format != CUMETAL_SPMAT_COO) {
+        const int base = base_of(matB);
+        int64_t running = 0;
+        idx_put(matB->rowOffsets, matB->rowType, 0, base);
+        for (int64_t s = 0; s < axis; ++s) {
+            running += counts[static_cast<std::size_t>(s)];
+            idx_put(matB->rowOffsets, matB->rowType, s + 1, running + base);
+        }
+    }
+    matB->nnz = total;
+    matB->longest_row = -1;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDenseToSparse_convert(cusparseHandle_t handle, cusparseDnMatDescr_t matA,
+                                               cusparseSpMatDescr_t matB,
+                                               cusparseDenseToSparseAlg_t alg,
+                                               void* /*externalBuffer*/) {
+    cusparseStatus_t status = dense_sparse_validate(handle, matA, matB);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    if (alg != CUSPARSE_DENSETOSPARSE_ALG_DEFAULT) return CUSPARSE_STATUS_INVALID_VALUE;
+    if ((matA->rows > 0 && matA->cols > 0 && matA->values == nullptr) ||
+        (matB->nnz > 0 && (matB->colInd == nullptr || matB->values == nullptr)) ||
+        matB->rowOffsets == nullptr) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    synchronize_handle_stream(handle);
+    const bool column_major = matB->format == CUMETAL_SPMAT_CSC;
+    const bool coo = matB->format == CUMETAL_SPMAT_COO;
+    const int base = base_of(matB);
+    const std::size_t size = value_size(matB->valueType);
+    // The matrix must still have the nnz the analysis counted; if A changed in
+    // between, the arrays the caller sized no longer fit.
+    int64_t total = 0;
+    for_each_dense_nonzero(matA, column_major, [&](int64_t, int64_t, const void*) { ++total; });
+    if (total != matB->nnz) return CUSPARSE_STATUS_INVALID_VALUE;
+    int64_t e = 0;
+    auto* out = static_cast<unsigned char*>(matB->values);
+    for_each_dense_nonzero(matA, column_major, [&](int64_t i, int64_t j, const void* element) {
+        if (coo) {
+            idx_put(matB->rowOffsets, matB->rowType, e, i + base);
+            idx_put(matB->colInd, matB->colType, e, j + base);
+        } else {
+            idx_put(matB->colInd, matB->colType, e, (column_major ? i : j) + base);
+        }
+        std::memcpy(out + static_cast<std::size_t>(e) * size, element, size);
+        ++e;
+    });
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── CSR -> CSC ──────────────────────────────────────────────────────────────
+
+static cusparseStatus_t csr2csc_validate(cusparseHandle_t handle, int m, int n, int nnz,
+                                         const void* csrVal, const int* csrRowPtr,
+                                         const int* csrColInd, void* cscVal, int* cscColPtr,
+                                         int* cscRowInd, cudaDataType valType,
+                                         cusparseAction_t copyValues, cusparseIndexBase_t idxBase,
+                                         cusparseCsr2CscAlg_t alg) {
+    SP_NEED_HANDLE(handle);
+    if (m < 0 || n < 0 || nnz < 0 || !valid_index_base(idxBase) ||
+        (copyValues != CUSPARSE_ACTION_SYMBOLIC && copyValues != CUSPARSE_ACTION_NUMERIC) ||
+        (alg != CUSPARSE_CSR2CSC_ALG1 && alg != CUSPARSE_CSR2CSC_ALG2) ||
+        value_size(valType) == 0 || csrRowPtr == nullptr || cscColPtr == nullptr ||
+        (nnz > 0 && (csrColInd == nullptr || cscRowInd == nullptr)) ||
+        (copyValues == CUSPARSE_ACTION_NUMERIC && nnz > 0 && (csrVal == nullptr || cscVal == nullptr))) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseCsr2cscEx2_bufferSize(cusparseHandle_t handle, int m, int n, int nnz,
+                                               const void* csrVal, const int* csrRowPtr,
+                                               const int* csrColInd, void* cscVal, int* cscColPtr,
+                                               int* cscRowInd, cudaDataType valType,
+                                               cusparseAction_t copyValues,
+                                               cusparseIndexBase_t idxBase,
+                                               cusparseCsr2CscAlg_t alg, size_t* bufferSize) {
+    if (bufferSize == nullptr) {
+        return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const cusparseStatus_t status = csr2csc_validate(handle, m, n, nnz, csrVal, csrRowPtr, csrColInd,
+                                                     cscVal, cscColPtr, cscRowInd, valType,
+                                                     copyValues, idxBase, alg);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    *bufferSize = kNoWorkspaceBytes;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// Counting-sort transpose. Rows are visited in ascending order, so each column
+// lists its row indices ascending. With CUSPARSE_ACTION_SYMBOLIC only the
+// structure is produced and the value arrays are never touched.
+cusparseStatus_t cusparseCsr2cscEx2(cusparseHandle_t handle, int m, int n, int nnz,
+                                    const void* csrVal, const int* csrRowPtr,
+                                    const int* csrColInd, void* cscVal, int* cscColPtr,
+                                    int* cscRowInd, cudaDataType valType,
+                                    cusparseAction_t copyValues, cusparseIndexBase_t idxBase,
+                                    cusparseCsr2CscAlg_t alg, void* /*buffer*/) {
+    cusparseStatus_t status = csr2csc_validate(handle, m, n, nnz, csrVal, csrRowPtr, csrColInd,
+                                               cscVal, cscColPtr, cscRowInd, valType, copyValues,
+                                               idxBase, alg);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    synchronize_handle_stream(handle);
+    const int base = idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
+    if (!csr_structure_valid(m, n, nnz, csrRowPtr, csrColInd, base)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    std::vector<int> next(static_cast<std::size_t>(n) + 1, 0);
+    for (int e = 0; e < nnz; ++e) ++next[static_cast<std::size_t>(csrColInd[e] - base) + 1];
+    for (int c = 0; c < n; ++c) next[static_cast<std::size_t>(c) + 1] += next[static_cast<std::size_t>(c)];
+    for (int c = 0; c <= n; ++c) cscColPtr[c] = next[static_cast<std::size_t>(c)] + base;
+    const std::size_t size = value_size(valType);
+    const auto* in = static_cast<const unsigned char*>(csrVal);
+    auto* out = static_cast<unsigned char*>(cscVal);
+    for (int r = 0; r < m; ++r) {
+        for (int e = csrRowPtr[r] - base; e < csrRowPtr[r + 1] - base; ++e) {
+            const int dest = next[static_cast<std::size_t>(csrColInd[e] - base)]++;
+            cscRowInd[dest] = r + base;
+            if (copyValues == CUSPARSE_ACTION_NUMERIC) {
+                std::memcpy(out + static_cast<std::size_t>(dest) * size,
+                            in + static_cast<std::size_t>(e) * size, size);
+            }
+        }
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── COO <-> CSR, sorting, permutation ───────────────────────────────────────
+
+cusparseStatus_t cusparseXcoo2csr(cusparseHandle_t handle, const int* cooRowInd, int nnz, int m,
+                                  int* csrSortedRowPtr, cusparseIndexBase_t idxBase) {
+    SP_NEED_HANDLE(handle);
+    if (m < 0 || nnz < 0 || !valid_index_base(idxBase) || csrSortedRowPtr == nullptr ||
+        (nnz > 0 && cooRowInd == nullptr)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    synchronize_handle_stream(handle);
+    const int base = idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
+    std::vector<int> counts(static_cast<std::size_t>(m), 0);
+    for (int e = 0; e < nnz; ++e) {
+        const int r = cooRowInd[e] - base;
+        if (r < 0 || r >= m) return CUSPARSE_STATUS_INVALID_VALUE;
+        ++counts[static_cast<std::size_t>(r)];
+    }
+    csrSortedRowPtr[0] = base;
+    for (int r = 0; r < m; ++r) csrSortedRowPtr[r + 1] = csrSortedRowPtr[r] + counts[static_cast<std::size_t>(r)];
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseXcsr2coo(cusparseHandle_t handle, const int* csrSortedRowPtr, int nnz,
+                                  int m, int* cooRowInd, cusparseIndexBase_t idxBase) {
+    SP_NEED_HANDLE(handle);
+    if (m < 0 || nnz < 0 || !valid_index_base(idxBase) || csrSortedRowPtr == nullptr ||
+        (nnz > 0 && cooRowInd == nullptr)) {
+        return CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const int base = idxBase == CUSPARSE_INDEX_BASE_ONE ? 1 : 0;
+    synchronize_handle_stream(handle);
+    if (!offsets_valid(m, nnz, csrSortedRowPtr, base)) return CUSPARSE_STATUS_INVALID_VALUE;
+    for (int r = 0; r < m; ++r) {
+        for (int e = csrSortedRowPtr[r] - base; e < csrSortedRowPtr[r + 1] - base; ++e) {
+            cooRowInd[e] = r + base;
+        }
+    }
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseCreateIdentityPermutation(cusparseHandle_t handle, int n, int* p) {
+    SP_NEED_HANDLE(handle);
+    if (n < 0 || (n > 0 && p == nullptr)) return CUSPARSE_STATUS_INVALID_VALUE;
+    synchronize_handle_stream(handle);
+    for (int i = 0; i < n; ++i) p[i] = i;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+static cusparseStatus_t sort_buffer_size(cusparseHandle_t handle, int m, int n, int nnz,
+                                         size_t* size) {
+    SP_NEED_HANDLE(handle);
+    if (m < 0 || n < 0 || nnz < 0 || size == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *size = kNoWorkspaceBytes;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseXcoosort_bufferSizeExt(cusparseHandle_t handle, int m, int n, int nnz,
+                                                const int*, const int*, size_t* pBufferSizeInBytes) {
+    return sort_buffer_size(handle, m, n, nnz, pBufferSizeInBytes);
+}
+
+cusparseStatus_t cusparseXcoosortByRow(cusparseHandle_t handle, int m, int n, int nnz,
+                                       int* cooRows, int* cooCols, int* P, void*) {
+    return coo_sort_impl(handle, m, n, nnz, cooRows, cooCols, P, true);
+}
+
+cusparseStatus_t cusparseXcoosortByColumn(cusparseHandle_t handle, int m, int n, int nnz,
+                                          int* cooRows, int* cooCols, int* P, void*) {
+    return coo_sort_impl(handle, m, n, nnz, cooRows, cooCols, P, false);
+}
+
+cusparseStatus_t cusparseXcsrsort_bufferSizeExt(cusparseHandle_t handle, int m, int n, int nnz,
+                                                const int*, const int*, size_t* pBufferSizeInBytes) {
+    return sort_buffer_size(handle, m, n, nnz, pBufferSizeInBytes);
+}
+
+cusparseStatus_t cusparseXcsrsort(cusparseHandle_t handle, int m, int n, int nnz,
+                                  const cusparseMatDescr_t descrA, const int* csrRowPtr,
+                                  int* csrColInd, int* P, void*) {
+    return sort_compressed_impl(handle, m, n, nnz, descrA, csrRowPtr, csrColInd, P);
+}
+
+cusparseStatus_t cusparseXcscsort_bufferSizeExt(cusparseHandle_t handle, int m, int n, int nnz,
+                                                const int*, const int*, size_t* pBufferSizeInBytes) {
+    return sort_buffer_size(handle, m, n, nnz, pBufferSizeInBytes);
+}
+
+cusparseStatus_t cusparseXcscsort(cusparseHandle_t handle, int m, int n, int nnz,
+                                  const cusparseMatDescr_t descrA, const int* cscColPtr,
+                                  int* cscRowInd, int* P, void*) {
+    return sort_compressed_impl(handle, n, m, nnz, descrA, cscColPtr, cscRowInd, P);
+}
+
+// ── csrgeam2 pattern ────────────────────────────────────────────────────────
+
+// Row pointers and nnz of C = A + B: the union of the two patterns, row by row.
+cusparseStatus_t cusparseXcsrgeam2Nnz(cusparseHandle_t handle, int m, int n,
+                                      const cusparseMatDescr_t descrA, int nnzA,
+                                      const int* csrRowPtrA, const int* csrColIndA,
+                                      const cusparseMatDescr_t descrB, int nnzB,
+                                      const int* csrRowPtrB, const int* csrColIndB,
+                                      const cusparseMatDescr_t descrC, int* csrRowPtrC,
+                                      int* nnzTotalDevHostPtr, void* /*workspace*/) {
+    if (csrRowPtrC == nullptr || nnzTotalDevHostPtr == nullptr) {
+        return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
+    }
+    const cusparseStatus_t status = geam2_validate(handle, m, n, descrA, nnzA, csrRowPtrA, csrColIndA,
+                                                   descrB, nnzB, csrRowPtrB, csrColIndB, descrC);
+    if (status != CUSPARSE_STATUS_SUCCESS) return status;
+    const int baseA = base_of(descrA), baseB = base_of(descrB), baseC = base_of(descrC);
+    std::vector<int> cols;
+    int64_t total = 0;
+    csrRowPtrC[0] = baseC;
+    for (int i = 0; i < m; ++i) {
+        geam2_row_columns(csrRowPtrA, csrColIndA, baseA, csrRowPtrB, csrColIndB, baseB, i, &cols);
+        total += static_cast<int64_t>(cols.size());
+        csrRowPtrC[i + 1] = static_cast<int>(total) + baseC;
+    }
+    *nnzTotalDevHostPtr = static_cast<int>(total);
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// ── incomplete factorization info objects ───────────────────────────────────
+
+cusparseStatus_t cusparseCreateCsric02Info(csric02Info_t* info) {
+    if (info == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *info = new (std::nothrow) csric02Info();
+    return *info == nullptr ? CUSPARSE_STATUS_ALLOC_FAILED : CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDestroyCsric02Info(csric02Info_t info) {
+    delete info;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseCreateBsrilu02Info(bsrilu02Info_t* info) {
+    if (info == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *info = new (std::nothrow) bsrilu02Info();
+    return *info == nullptr ? CUSPARSE_STATUS_ALLOC_FAILED : CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDestroyBsrilu02Info(bsrilu02Info_t info) {
+    delete info;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseCreateBsric02Info(bsric02Info_t* info) {
+    if (info == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    *info = new (std::nothrow) bsric02Info();
+    return *info == nullptr ? CUSPARSE_STATUS_ALLOC_FAILED : CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseDestroyBsric02Info(bsric02Info_t info) {
+    delete info;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+// *position = -1 and success when no zero pivot was seen; otherwise the first
+// one, in the matrix's own index base, with CUSPARSE_STATUS_ZERO_PIVOT.
+cusparseStatus_t cusparseXcsrilu02_zeroPivot(cusparseHandle_t handle, csrilu02Info_t info,
+                                             int* position) {
+    SP_NEED_HANDLE(handle);
+    if (info == nullptr || position == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (info->zero_pivot >= 0) {
+        *position = info->zero_pivot + info->base;
+        return CUSPARSE_STATUS_ZERO_PIVOT;
+    }
+    *position = -1;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseXcsric02_zeroPivot(cusparseHandle_t handle, csric02Info_t info,
+                                            int* position) {
+    SP_NEED_HANDLE(handle);
+    if (info == nullptr || position == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
+    if (info->zero_pivot >= 0) {
+        *position = info->zero_pivot + info->base;
+        return CUSPARSE_STATUS_ZERO_PIVOT;
+    }
+    *position = -1;
+    return CUSPARSE_STATUS_SUCCESS;
+}
+
+cusparseStatus_t cusparseXbsrilu02_zeroPivot(cusparseHandle_t handle, bsrilu02Info_t,
+                                             int*) {
+    SP_NEED_HANDLE(handle);
+    return CUSPARSE_STATUS_NOT_SUPPORTED;
+}
+
+cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info_t, int*) {
+    SP_NEED_HANDLE(handle);
+    return CUSPARSE_STATUS_NOT_SUPPORTED;
+}
+
+// ── per-precision wrappers ──────────────────────────────────────────────────
+
+#define CUMETAL_SP_DEFINE_TYPED(P, C)                                                            \
+    cusparseStatus_t cusparse##P##nnz(cusparseHandle_t handle, cusparseDirection_t dirA, int m,   \
+                                      int n, const cusparseMatDescr_t descrA, const C* A,        \
+                                      int lda, int* nnzPerRowColumn, int* nnzTotalDevHostPtr) {  \
+        return nnz_dense_impl<C>(handle, dirA, m, n, descrA, A, lda, nnzPerRowColumn,            \
+                                 nnzTotalDevHostPtr);                                            \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##nnz_compress(                                                  \
+        cusparseHandle_t handle, int m, const cusparseMatDescr_t descr, const C* csrSortedValA,  \
+        const int* csrSortedRowPtrA, int* nnzPerRow, int* nnzC, C tol) {                         \
+        return nnz_compress_impl<C>(handle, m, descr, csrSortedValA, csrSortedRowPtrA,           \
+                                    nnzPerRow, nnzC, tol);                                       \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##csr2csr_compress(                                              \
+        cusparseHandle_t handle, int m, int n, const cusparseMatDescr_t descrA,                  \
+        const C* csrSortedValA, const int* csrSortedColIndA, const int* csrSortedRowPtrA,        \
+        int nnzA, int* nnzPerRow, C* csrSortedValC, int* csrSortedColIndC,                       \
+        int* csrSortedRowPtrC, C tol) {                                                          \
+        return csr2csr_compress_impl<C>(handle, m, n, descrA, csrSortedValA, csrSortedColIndA,   \
+                                        csrSortedRowPtrA, nnzA, nnzPerRow, csrSortedValC,        \
+                                        csrSortedColIndC, csrSortedRowPtrC, tol);                \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##csrgeam2_bufferSizeExt(                                        \
+        cusparseHandle_t handle, int m, int n, const C* alpha, const cusparseMatDescr_t descrA,  \
+        int nnzA, const C* csrSortedValA, const int* csrSortedRowPtrA,                           \
+        const int* csrSortedColIndA, const C* beta, const cusparseMatDescr_t descrB, int nnzB,   \
+        const C* csrSortedValB, const int* csrSortedRowPtrB, const int* csrSortedColIndB,        \
+        const cusparseMatDescr_t descrC, C* csrSortedValC, int* csrSortedRowPtrC,                \
+        int* csrSortedColIndC, size_t* pBufferSizeInBytes) {                                     \
+        return geam2_buffer_size<C>(handle, m, n, alpha, descrA, nnzA, csrSortedValA,            \
+                                    csrSortedRowPtrA, csrSortedColIndA, beta, descrB, nnzB,      \
+                                    csrSortedValB, csrSortedRowPtrB, csrSortedColIndB, descrC,   \
+                                    csrSortedValC, csrSortedRowPtrC, csrSortedColIndC,           \
+                                    pBufferSizeInBytes);                                         \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##csrgeam2(                                                      \
+        cusparseHandle_t handle, int m, int n, const C* alpha, const cusparseMatDescr_t descrA,  \
+        int nnzA, const C* csrSortedValA, const int* csrSortedRowPtrA,                           \
+        const int* csrSortedColIndA, const C* beta, const cusparseMatDescr_t descrB, int nnzB,   \
+        const C* csrSortedValB, const int* csrSortedRowPtrB, const int* csrSortedColIndB,        \
+        const cusparseMatDescr_t descrC, C* csrSortedValC, int* csrSortedRowPtrC,                \
+        int* csrSortedColIndC, void*) {                                                          \
+        return geam2_compute<C>(handle, m, n, alpha, descrA, nnzA, csrSortedValA,                \
+                                csrSortedRowPtrA, csrSortedColIndA, beta, descrB, nnzB,          \
+                                csrSortedValB, csrSortedRowPtrB, csrSortedColIndB, descrC,       \
+                                csrSortedValC, csrSortedRowPtrC, csrSortedColIndC);              \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##csrilu02_numericBoost(cusparseHandle_t handle,                 \
+                                                        csrilu02Info_t info, int enable_boost,   \
+                                                        double* tol, C* boost_val) {             \
+        return csrilu02_boost_impl<C>(handle, info, enable_boost, tol, boost_val);               \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##csrilu02_bufferSize(                                           \
+        cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
+        C* csrSortedValA, const int* csrSortedRowPtrA, const int* csrSortedColIndA,              \
+        csrilu02Info_t info, int* pBufferSizeInBytes) {                                          \
+        const cusparseStatus_t status = incomplete_validate<C>(                                  \
+            handle, m, nnz, descrA, csrSortedValA, csrSortedRowPtrA, csrSortedColIndA, info);    \
+        if (status != CUSPARSE_STATUS_SUCCESS) return status;                                    \
+        if (pBufferSizeInBytes == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;                 \
+        *pBufferSizeInBytes = 1;                                                                 \
+        return CUSPARSE_STATUS_SUCCESS;                                                          \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##csrilu02_analysis(                                             \
+        cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
+        const C* csrSortedValA, const int* csrSortedRowPtrA, const int* csrSortedColIndA,        \
+        csrilu02Info_t info, cusparseSolvePolicy_t, void*) {                                     \
+        return csrilu02_analysis_impl<C>(handle, m, nnz, descrA, csrSortedValA,                  \
+                                         csrSortedRowPtrA, csrSortedColIndA, info);              \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##csrilu02(                                                      \
+        cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
+        C* csrSortedValA_valM, const int* csrSortedRowPtrA, const int* csrSortedColIndA,         \
+        csrilu02Info_t info, cusparseSolvePolicy_t, void*) {                                     \
+        return csrilu02_impl<C>(handle, m, nnz, descrA, csrSortedValA_valM, csrSortedRowPtrA,    \
+                                csrSortedColIndA, info);                                         \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##csric02_bufferSize(                                            \
+        cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
+        C* csrSortedValA, const int* csrSortedRowPtrA, const int* csrSortedColIndA,              \
+        csric02Info_t info, int* pBufferSizeInBytes) {                                           \
+        const cusparseStatus_t status = incomplete_validate<C>(                                  \
+            handle, m, nnz, descrA, csrSortedValA, csrSortedRowPtrA, csrSortedColIndA, info);    \
+        if (status != CUSPARSE_STATUS_SUCCESS) return status;                                    \
+        if (pBufferSizeInBytes == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;                 \
+        *pBufferSizeInBytes = 1;                                                                 \
+        return CUSPARSE_STATUS_SUCCESS;                                                          \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##csric02_analysis(                                              \
+        cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
+        const C* csrSortedValA, const int* csrSortedRowPtrA, const int* csrSortedColIndA,        \
+        csric02Info_t info, cusparseSolvePolicy_t, void*) {                                      \
+        return csric02_analysis_impl<C>(handle, m, nnz, descrA, csrSortedValA,                   \
+                                        csrSortedRowPtrA, csrSortedColIndA, info);               \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##csric02(                                                       \
+        cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
+        C* csrSortedValA_valM, const int* csrSortedRowPtrA, const int* csrSortedColIndA,         \
+        csric02Info_t info, cusparseSolvePolicy_t, void*) {                                      \
+        return csric02_impl<C>(handle, m, nnz, descrA, csrSortedValA_valM, csrSortedRowPtrA,     \
+                               csrSortedColIndA, info);                                          \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##bsrilu02_numericBoost(cusparseHandle_t handle,                 \
+                                                        bsrilu02Info_t, int, double*, C*) {      \
+        SP_NEED_HANDLE(handle);                                                                  \
+        return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##bsrilu02_bufferSize(                                           \
+        cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t, C*,    \
+        const int*, const int*, int, bsrilu02Info_t, int*) {                                     \
+        SP_NEED_HANDLE(handle);                                                                  \
+        return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##bsrilu02_analysis(                                             \
+        cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t, C*,    \
+        const int*, const int*, int, bsrilu02Info_t, cusparseSolvePolicy_t, void*) {             \
+        SP_NEED_HANDLE(handle);                                                                  \
+        return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##bsrilu02(                                                      \
+        cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t, C*,    \
+        const int*, const int*, int, bsrilu02Info_t, cusparseSolvePolicy_t, void*) {             \
+        SP_NEED_HANDLE(handle);                                                                  \
+        return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##bsric02_bufferSize(                                            \
+        cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t, C*,    \
+        const int*, const int*, int, bsric02Info_t, int*) {                                      \
+        SP_NEED_HANDLE(handle);                                                                  \
+        return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##bsric02_analysis(                                              \
+        cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t,        \
+        const C*, const int*, const int*, int, bsric02Info_t, cusparseSolvePolicy_t, void*) {    \
+        SP_NEED_HANDLE(handle);                                                                  \
+        return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##bsric02(                                                       \
+        cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t, C*,    \
+        const int*, const int*, int, bsric02Info_t, cusparseSolvePolicy_t, void*) {              \
+        SP_NEED_HANDLE(handle);                                                                  \
+        return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##gtsv2_bufferSizeExt(                                           \
+        cusparseHandle_t handle, int m, int n, const C* dl, const C* d, const C* du,             \
+        const C* B, int ldb, size_t* bufferSizeInBytes) {                                        \
+        return gtsv2_buffer_size<C>(handle, m, n, dl, d, du, B, ldb, bufferSizeInBytes);         \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##gtsv2(cusparseHandle_t handle, int m, int n, const C* dl,      \
+                                        const C* d, const C* du, C* B, int ldb, void*) {         \
+        return gtsv2_impl<C>(handle, m, n, dl, d, du, B, ldb, true);                             \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##gtsv2_nopivot_bufferSizeExt(                                   \
+        cusparseHandle_t handle, int m, int n, const C* dl, const C* d, const C* du,             \
+        const C* B, int ldb, size_t* bufferSizeInBytes) {                                        \
+        return gtsv2_buffer_size<C>(handle, m, n, dl, d, du, B, ldb, bufferSizeInBytes);         \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##gtsv2_nopivot(cusparseHandle_t handle, int m, int n,           \
+                                                const C* dl, const C* d, const C* du, C* B,      \
+                                                int ldb, void*) {                                \
+        return gtsv2_impl<C>(handle, m, n, dl, d, du, B, ldb, false);                            \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##gtsv2StridedBatch_bufferSizeExt(                               \
+        cusparseHandle_t handle, int m, const C* dl, const C* d, const C* du, const C* x,        \
+        int batchCount, int batchStride, size_t* bufferSizeInBytes) {                            \
+        return gtsv2_strided_buffer_size<C>(handle, m, dl, d, du, x, batchCount, batchStride,    \
+                                            bufferSizeInBytes);                                  \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##gtsv2StridedBatch(                                             \
+        cusparseHandle_t handle, int m, const C* dl, const C* d, const C* du, C* x,              \
+        int batchCount, int batchStride, void*) {                                                \
+        return gtsv2_strided_impl<C>(handle, m, dl, d, du, x, batchCount, batchStride);          \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##gtsvInterleavedBatch_bufferSizeExt(                            \
+        cusparseHandle_t handle, int algo, int m, const C* dl, const C* d, const C* du,          \
+        const C* x, int batchCount, size_t* pBufferSizeInBytes) {                                \
+        return gtsv_interleaved_buffer_size<C>(handle, algo, m, dl, d, du, x, batchCount,        \
+                                               pBufferSizeInBytes);                              \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##gtsvInterleavedBatch(                                          \
+        cusparseHandle_t handle, int algo, int m, C* dl, C* d, C* du, C* x, int batchCount,      \
+        void*) {                                                                                 \
+        return gtsv_interleaved_impl<C>(handle, algo, m, dl, d, du, x, batchCount);              \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##gpsvInterleavedBatch_bufferSizeExt(                            \
+        cusparseHandle_t handle, int algo, int m, const C* ds, const C* dl, const C* d,          \
+        const C* du, const C* dw, const C* x, int batchCount, size_t* pBufferSizeInBytes) {      \
+        return gpsv_interleaved_buffer_size<C>(handle, algo, m, ds, dl, d, du, dw, x,            \
+                                               batchCount, pBufferSizeInBytes);                  \
+    }                                                                                            \
+    cusparseStatus_t cusparse##P##gpsvInterleavedBatch(                                          \
+        cusparseHandle_t handle, int algo, int m, C* ds, C* dl, C* d, C* du, C* dw, C* x,        \
+        int batchCount, void*) {                                                                 \
+        return gpsv_interleaved_impl<C>(handle, algo, m, ds, dl, d, du, dw, x, batchCount);      \
+    }
+
+CUMETAL_CUSPARSE_FOR_EACH_TYPE(CUMETAL_SP_DEFINE_TYPED)
+#undef CUMETAL_SP_DEFINE_TYPED
+#undef SP_NEED_HANDLE
 
 }  // extern "C"

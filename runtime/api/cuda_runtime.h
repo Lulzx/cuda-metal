@@ -186,6 +186,7 @@ typedef enum cudaError {
     cudaErrorInvalidPc = 718,
     cudaErrorLaunchFailure = 719,
     cudaErrorCooperativeLaunchTooLarge = 720,
+    cudaErrorContextIsDestroyed = 709,
     cudaErrorNotPermitted = 800,
     cudaErrorNotSupported = 801,
     // What cudart returns when a driver entry point is too new for the
@@ -312,68 +313,111 @@ static inline constexpr double2 make_double2(double x, double y) { return {x, y}
 static inline constexpr double4 make_double4(double x, double y, double z, double w) { return {x,y,z,w}; }
 #endif
 
-typedef struct cudaUUID_t { unsigned char bytes[16]; } cudaUUID_t;
+// CUDA declares the identity bytes as plain char.
+typedef struct cudaUUID_t { char bytes[16]; } cudaUUID_t;
 
+// Field order, types and the reserved tail follow the CUDA 12 runtime
+// definition. Callers compiled against NVIDIA's header (the binary-shim path)
+// stack-allocate this struct and read fields by offset, and source callers
+// read every member by name, so a CuMetal-private layout is wrong for both.
+// tests/functional/runtime_device_properties_ext_test.cpp pins the offsets.
 typedef struct cudaDeviceProp {
     char name[256];
+    cudaUUID_t uuid;
+    char luid[8];
+    unsigned int luidDeviceNodeMask;
     size_t totalGlobalMem;
+    size_t sharedMemPerBlock;
+    int regsPerBlock;
     int warpSize;
-    int multiProcessorCount;
+    size_t memPitch;
     int maxThreadsPerBlock;
     int maxThreadsDim[3];
     int maxGridSize[3];
-    int sharedMemPerBlock;
-    size_t sharedMemPerBlockOptin;
-    int regsPerBlock;
+    int clockRate;
+    size_t totalConstMem;
     int major;
     int minor;
-    int unifiedAddressing;          // Always 1 on Apple Silicon (UMA)
-    int managedMemory;              // Always 1 on Apple Silicon (UMA)
-    int concurrentManagedAccess;    // Always 1 on Apple Silicon (UMA)
-    int maxBufferArguments;         // 31 (Metal buffer argument limit)
-    // Additional fields — populated by cudaGetDeviceProperties (spec §6.8)
-    int clockRate;                  // GPU clock in kHz
-    int memoryClockRate;            // Memory clock in kHz (same as GPU on UMA)
-    int memoryBusWidth;             // Memory bus width in bits
-    size_t totalConstMem;           // Constant memory size (64 KB)
-    size_t sharedMemPerMultiprocessor; // Shared mem per SM
-    int maxThreadsPerMultiProcessor; // Max threads per SM
-    int l2CacheSize;                // L2 cache size in bytes
-    int canMapHostMemory;           // Always 1 on UMA (host pointers are device pointers)
-    int integrated;                 // Always 1 (Apple Silicon is integrated GPU)
-    int concurrentKernels;          // 1 (Metal supports concurrent dispatches)
-    int asyncEngineCount;           // 0 (UMA makes async memcpy effectively free)
-    int computeMode;                // 0 = cudaComputeModeDefault
-    int pciBusID;                   // 0 (no PCI on Apple Silicon)
-    int pciDeviceID;                // 0
-    int pciDomainID;                // 0
-    int tccDriver;                  // 0 (not a Tesla compute cluster)
-    int kernelExecTimeoutEnabled;   // 0 (Metal does not enforce GPU timeout by default)
-    int pageableMemoryAccess;       // 0 (arbitrary malloc pointers are not Metal-bound)
-    int pageableMemoryAccessUsesHostPageTables; // 0 (CuMetal requires tracked allocations)
-    int cooperativeLaunch;          // 1 for resident-grid barrier emulation
-    int cooperativeMultiDeviceLaunch; // 0 (single device)
-    // Growing this struct breaks any consumer binary built against an older
-    // header: callers stack-allocate a cudaDeviceProp and cudaGetDeviceProperties
-    // writes past the end of the smaller frame. Real CUDA absorbs new fields into
-    // fixed-size reserved space; do the same so the next addition is free. Take a
-    // slot from here rather than appending, and rebuild consumers if you cannot.
-    int persistingL2CacheMaxSize;    // accepted performance-hint budget
-    int accessPolicyMaxWindowSize;   // accepted stream access-window budget
-    int ECCEnabled;                  // 0 (Apple Silicon unified memory has no ECC)
-    cudaUUID_t uuid;                 // Stable CuMetal device identity
-    // Consumed from cumetalReserved so earlier field offsets are unchanged.
-    // 1: the occupancy API guarantees one resident block per reported
-    // processor, and this must not overstate that.
-    int maxBlocksPerMultiProcessor;
-    // Synthetic budget: Metal does not expose a register file. Kept equal to
-    // regsPerBlock so occupancy arithmetic cannot derive more resident blocks
-    // than maxBlocksPerMultiProcessor promises.
+    size_t textureAlignment;
+    size_t texturePitchAlignment;
+    int deviceOverlap;
+    int multiProcessorCount;
+    int kernelExecTimeoutEnabled;
+    int integrated;
+    int canMapHostMemory;
+    int computeMode;
+    int maxTexture1D;
+    int maxTexture1DMipmap;
+    int maxTexture1DLinear;
+    int maxTexture2D[2];
+    int maxTexture2DMipmap[2];
+    int maxTexture2DLinear[3];
+    int maxTexture2DGather[2];
+    int maxTexture3D[3];
+    int maxTexture3DAlt[3];
+    int maxTextureCubemap;
+    int maxTexture1DLayered[2];
+    int maxTexture2DLayered[3];
+    int maxTextureCubemapLayered[2];
+    int maxSurface1D;
+    int maxSurface2D[2];
+    int maxSurface3D[3];
+    int maxSurface1DLayered[2];
+    int maxSurface2DLayered[3];
+    int maxSurfaceCubemap;
+    int maxSurfaceCubemapLayered[2];
+    size_t surfaceAlignment;
+    int concurrentKernels;
+    int ECCEnabled;
+    int pciBusID;
+    int pciDeviceID;
+    int pciDomainID;
+    int tccDriver;
+    int asyncEngineCount;
+    int unifiedAddressing;
+    int memoryClockRate;
+    int memoryBusWidth;
+    int l2CacheSize;
+    int persistingL2CacheMaxSize;
+    int maxThreadsPerMultiProcessor;
+    int streamPrioritiesSupported;
+    int globalL1CacheSupported;
+    int localL1CacheSupported;
+    size_t sharedMemPerMultiprocessor;
     int regsPerMultiprocessor;
-    // Metal reserves no hidden per-block shared memory. Consume three reserved
-    // words (including alignment) so sizeof and existing public offsets stay fixed.
+    int managedMemory;
+    int isMultiGpuBoard;
+    int multiGpuBoardGroupID;
+    int hostNativeAtomicSupported;
+    int singleToDoublePrecisionPerfRatio;
+    int pageableMemoryAccess;
+    int concurrentManagedAccess;
+    int computePreemptionSupported;
+    int canUseHostPointerForRegisteredMem;
+    int cooperativeLaunch;
+    int cooperativeMultiDeviceLaunch;
+    size_t sharedMemPerBlockOptin;
+    int pageableMemoryAccessUsesHostPageTables;
+    int directManagedMemAccessFromHost;
+    int maxBlocksPerMultiProcessor;
+    int accessPolicyMaxWindowSize;
     size_t reservedSharedMemPerBlock;
-    int cumetalReserved[50];
+    int hostRegisterSupported;
+    int sparseCudaArraySupported;
+    int hostRegisterReadOnlySupported;
+    int timelineSemaphoreInteropSupported;
+    int memoryPoolsSupported;
+    int gpuDirectRDMASupported;
+    unsigned int gpuDirectRDMAFlushWritesOptions;
+    int gpuDirectRDMAWritesOrdering;
+    unsigned int memoryPoolSupportedHandleTypes;
+    int deferredMappingCudaArraySupported;
+    int ipcEventSupported;
+    int clusterLaunch;
+    int unifiedFunctionPointers;
+    int reserved2[2];
+    int reserved1[1];
+    int reserved[60];
 } cudaDeviceProp;
 
 typedef enum cudaDeviceAttr {
@@ -918,6 +962,9 @@ cudaError_t cudaStreamCreate(cudaStream_t* stream);
 __host__ __device__ cudaError_t cudaStreamCreateWithFlags(cudaStream_t* stream, unsigned int flags);
 cudaError_t cudaStreamCreateWithPriority(cudaStream_t* stream, unsigned int flags, int priority);
 cudaError_t cudaStreamGetFlags(cudaStream_t stream, unsigned int* flags);
+// Metal has no stream priorities; every stream reports the single level 0
+// that cudaDeviceGetStreamPriorityRange advertises.
+cudaError_t cudaStreamGetPriority(cudaStream_t stream, int* priority);
 cudaError_t cudaStreamSetAttribute(cudaStream_t stream, cudaStreamAttrID attr,
                                    const cudaStreamAttrValue* value);
 cudaError_t cudaStreamGetAttribute(cudaStream_t stream, cudaStreamAttrID attr,
@@ -1018,6 +1065,26 @@ cudaError_t cudaPointerGetAttributes(cudaPointerAttributes* attributes, const vo
 cudaError_t cudaChooseDevice(int* device, const cudaDeviceProp* prop);
 // Peer access — Apple Silicon has a single GPU; peer access is unsupported (spec §2.2).
 cudaError_t cudaDeviceCanAccessPeer(int* can_access_peer, int device, int peer_device);
+// The one CuMetal device has the PCI identity 0000:00:00.0 that
+// cudaGetDeviceProperties reports.
+cudaError_t cudaDeviceGetPCIBusId(char* pciBusId, int len, int device);
+cudaError_t cudaDeviceGetByPCIBusId(int* device, const char* pciBusId);
+
+// Interprocess memory and event sharing: a Metal buffer cannot be opened from
+// another process through this path, so every IPC call is cudaErrorNotSupported.
+#define CUDA_IPC_HANDLE_SIZE 64
+#define cudaIpcMemLazyEnablePeerAccess 0x01
+typedef struct cudaIpcEventHandle_st {
+    char reserved[CUDA_IPC_HANDLE_SIZE];
+} cudaIpcEventHandle_t;
+typedef struct cudaIpcMemHandle_st {
+    char reserved[CUDA_IPC_HANDLE_SIZE];
+} cudaIpcMemHandle_t;
+cudaError_t cudaIpcGetEventHandle(cudaIpcEventHandle_t* handle, cudaEvent_t event);
+cudaError_t cudaIpcOpenEventHandle(cudaEvent_t* event, cudaIpcEventHandle_t handle);
+cudaError_t cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle, void* devPtr);
+cudaError_t cudaIpcOpenMemHandle(void** devPtr, cudaIpcMemHandle_t handle, unsigned int flags);
+cudaError_t cudaIpcCloseMemHandle(void* devPtr);
 cudaError_t cudaDeviceEnablePeerAccess(int peer_device, unsigned int flags);
 cudaError_t cudaDeviceDisablePeerAccess(int peer_device);
 // Peer memcpy — single GPU on Apple Silicon; peer copies are local copies.
@@ -1100,6 +1167,15 @@ cudaError_t cudaMemcpy2DToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
 cudaError_t cudaMemcpy2DFromArray(void* dst, size_t dpitch, cudaArray_const_t src,
                                    size_t wOffset, size_t hOffset, size_t width,
                                    size_t height, cudaMemcpyKind kind);
+cudaError_t cudaMemcpy2DToArrayAsync(cudaArray_t dst, size_t wOffset, size_t hOffset,
+                                     const void* src, size_t spitch, size_t width,
+                                     size_t height, cudaMemcpyKind kind,
+                                     cudaStream_t stream);
+cudaError_t cudaMemcpy2DFromArrayAsync(void* dst, size_t dpitch, cudaArray_const_t src,
+                                       size_t wOffset, size_t hOffset, size_t width,
+                                       size_t height, cudaMemcpyKind kind,
+                                       cudaStream_t stream);
+cudaError_t cudaGetChannelDesc(cudaChannelFormatDesc* desc, cudaArray_const_t array);
 cudaError_t cudaMemcpyToArray(cudaArray_t dst, size_t wOffset, size_t hOffset,
                                const void* src, size_t count, cudaMemcpyKind kind);
 cudaError_t cudaMemcpyFromArray(void* dst, cudaArray_const_t src, size_t wOffset,
@@ -1196,6 +1272,8 @@ cudaError_t cudaMemPoolDestroy(cudaMemPool_t pool);
 cudaError_t cudaMemPoolSetAttribute(cudaMemPool_t pool, cudaMemPoolAttr attr, void* value);
 cudaError_t cudaMemPoolGetAttribute(cudaMemPool_t pool, cudaMemPoolAttr attr, void* value);
 cudaError_t cudaDeviceGetDefaultMemPool(cudaMemPool_t* pool, int device);
+cudaError_t cudaDeviceGetMemPool(cudaMemPool_t* pool, int device);
+cudaError_t cudaMemPoolTrimTo(cudaMemPool_t pool, size_t minBytesToKeep);
 cudaError_t cudaDeviceSetMemPool(int device, cudaMemPool_t pool);
 cudaError_t cudaMallocFromPoolAsync(void** dev_ptr, size_t size, cudaMemPool_t pool, cudaStream_t stream);
 // Peer access control for a memory pool. CuMetal presents one device, so the

@@ -13,6 +13,7 @@
 // cublasFillMode_t and cublasSideMode_t are owned by cublas_v2.h; including it
 // here keeps one definition in either include order.
 #include "cublas_v2.h"
+#include "cuComplex.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -225,6 +226,190 @@ cusolverStatus_t cusolverDnDsyevjBatched(cusolverDnHandle_t handle,
                                         int lda, double* W, double* work,
                                         int lwork, int* devInfo,
                                         syevjInfo_t params, int batchSize);
+
+// ── Surface required by CuPy: complex dense, QR helpers, batched Cholesky,
+// symmetric-indefinite LDL, bidiagonalisation, Jacobi SVD/EVD, approximate
+// SVD and the iterative-refinement (IRS) gesv/gels families. ────────────────
+//
+// All of these run on Accelerate LAPACK over unified-memory pointers. Workspace
+// queries report what the call needs from the caller; routines that allocate
+// scratch internally (gesvdj, gesvda, IRS) report a minimal size and accept it.
+
+// gesvdj configuration: tolerance, max_sweeps and sort_svd are stored and
+// returned. The decomposition itself is computed by LAPACK's SVD, so the
+// executed-sweep count is always 0 and the residual is measured explicitly as
+// ||diag(S) - U^H*A*V||_F from the result.
+cusolverStatus_t cusolverDnCreateGesvdjInfo(gesvdjInfo_t* info);
+cusolverStatus_t cusolverDnDestroyGesvdjInfo(gesvdjInfo_t info);
+cusolverStatus_t cusolverDnXgesvdjSetTolerance(gesvdjInfo_t info, double tolerance);
+cusolverStatus_t cusolverDnXgesvdjSetMaxSweeps(gesvdjInfo_t info, int max_sweeps);
+cusolverStatus_t cusolverDnXgesvdjSetSortEig(gesvdjInfo_t info, int sort_svd);
+cusolverStatus_t cusolverDnXgesvdjGetResidual(cusolverDnHandle_t handle,
+                                              gesvdjInfo_t info, double* residual);
+cusolverStatus_t cusolverDnXgesvdjGetSweeps(cusolverDnHandle_t handle,
+                                            gesvdjInfo_t info, int* executed_sweeps);
+
+// Entry points present for all of S, D, C and Z. ORG/ORM/EVJ are the real
+// (orgqr, ormqr, syevj) or complex (ungqr, unmqr, heevj) spellings.
+#define CUMETAL_CUSOLVER_DN_COMMON(PFX, ELEM, REAL, ORG, ORM, EVJ)                          \
+    cusolverStatus_t cusolverDn##PFX##ORG##_bufferSize(                                     \
+        cusolverDnHandle_t handle, int m, int n, int k, const ELEM* A, int lda,             \
+        const ELEM* tau, int* lwork);                                                       \
+    cusolverStatus_t cusolverDn##PFX##ORG(                                                  \
+        cusolverDnHandle_t handle, int m, int n, int k, ELEM* A, int lda, const ELEM* tau,  \
+        ELEM* work, int lwork, int* info);                                                  \
+    cusolverStatus_t cusolverDn##PFX##ORM##_bufferSize(                                     \
+        cusolverDnHandle_t handle, cublasSideMode_t side, cublasOperation_t trans, int m,   \
+        int n, int k, const ELEM* A, int lda, const ELEM* tau, const ELEM* C, int ldc,      \
+        int* lwork);                                                                        \
+    cusolverStatus_t cusolverDn##PFX##ORM(                                                  \
+        cusolverDnHandle_t handle, cublasSideMode_t side, cublasOperation_t trans, int m,   \
+        int n, int k, const ELEM* A, int lda, const ELEM* tau, ELEM* C, int ldc,            \
+        ELEM* work, int lwork, int* devInfo);                                               \
+    cusolverStatus_t cusolverDn##PFX##potrfBatched(                                         \
+        cusolverDnHandle_t handle, cublasFillMode_t uplo, int n, ELEM* Aarray[], int lda,   \
+        int* infoArray, int batchSize);                                                     \
+    cusolverStatus_t cusolverDn##PFX##potrsBatched(                                         \
+        cusolverDnHandle_t handle, cublasFillMode_t uplo, int n, int nrhs, ELEM* A[],       \
+        int lda, ELEM* B[], int ldb, int* d_info, int batchSize);                           \
+    cusolverStatus_t cusolverDn##PFX##sytrf_bufferSize(                                     \
+        cusolverDnHandle_t handle, int n, ELEM* A, int lda, int* lwork);                    \
+    cusolverStatus_t cusolverDn##PFX##sytrf(                                                \
+        cusolverDnHandle_t handle, cublasFillMode_t uplo, int n, ELEM* A, int lda,          \
+        int* ipiv, ELEM* work, int lwork, int* info);                                       \
+    cusolverStatus_t cusolverDn##PFX##gebrd_bufferSize(                                     \
+        cusolverDnHandle_t handle, int m, int n, int* Lwork);                               \
+    cusolverStatus_t cusolverDn##PFX##gebrd(                                                \
+        cusolverDnHandle_t handle, int m, int n, ELEM* A, int lda, REAL* D, REAL* E,        \
+        ELEM* TAUQ, ELEM* TAUP, ELEM* Work, int Lwork, int* devInfo);                       \
+    cusolverStatus_t cusolverDn##PFX##EVJ##_bufferSize(                                     \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, cublasFillMode_t uplo, int n,    \
+        const ELEM* A, int lda, const REAL* W, int* lwork, syevjInfo_t params);             \
+    cusolverStatus_t cusolverDn##PFX##EVJ(                                                  \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, cublasFillMode_t uplo, int n,    \
+        ELEM* A, int lda, REAL* W, ELEM* work, int lwork, int* info, syevjInfo_t params);   \
+    cusolverStatus_t cusolverDn##PFX##gesvdj_bufferSize(                                    \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, int econ, int m, int n,          \
+        const ELEM* A, int lda, const REAL* S, const ELEM* U, int ldu, const ELEM* V,       \
+        int ldv, int* lwork, gesvdjInfo_t params);                                          \
+    cusolverStatus_t cusolverDn##PFX##gesvdj(                                               \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, int econ, int m, int n, ELEM* A, \
+        int lda, REAL* S, ELEM* U, int ldu, ELEM* V, int ldv, ELEM* work, int lwork,        \
+        int* info, gesvdjInfo_t params);                                                    \
+    cusolverStatus_t cusolverDn##PFX##gesvdjBatched_bufferSize(                             \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, int m, int n, const ELEM* A,     \
+        int lda, const REAL* S, const ELEM* U, int ldu, const ELEM* V, int ldv, int* lwork, \
+        gesvdjInfo_t params, int batchSize);                                                \
+    cusolverStatus_t cusolverDn##PFX##gesvdjBatched(                                        \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, int m, int n, ELEM* A, int lda,  \
+        REAL* S, ELEM* U, int ldu, ELEM* V, int ldv, ELEM* work, int lwork, int* info,      \
+        gesvdjInfo_t params, int batchSize);                                                \
+    cusolverStatus_t cusolverDn##PFX##gesvdaStridedBatched_bufferSize(                      \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, int rank, int m, int n,          \
+        const ELEM* d_A, int lda, long long int strideA, const REAL* d_S,                   \
+        long long int strideS, const ELEM* d_U, int ldu, long long int strideU,             \
+        const ELEM* d_V, int ldv, long long int strideV, int* lwork, int batchSize);        \
+    cusolverStatus_t cusolverDn##PFX##gesvdaStridedBatched(                                 \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, int rank, int m, int n,          \
+        const ELEM* d_A, int lda, long long int strideA, REAL* d_S, long long int strideS,  \
+        ELEM* d_U, int ldu, long long int strideU, ELEM* d_V, int ldv,                      \
+        long long int strideV, ELEM* d_work, int lwork, int* d_info, double* h_R_nrmF,      \
+        int batchSize);
+
+// Entry points that exist only in complex precision here (the real ones are
+// declared above). EVD/EVJ are heevd/heevj.
+#define CUMETAL_CUSOLVER_DN_COMPLEX(PFX, ELEM, REAL, EVD, EVJ)                              \
+    cusolverStatus_t cusolverDn##PFX##getrf_bufferSize(                                     \
+        cusolverDnHandle_t handle, int m, int n, ELEM* A, int lda, int* Lwork);             \
+    cusolverStatus_t cusolverDn##PFX##getrf(                                                \
+        cusolverDnHandle_t handle, int m, int n, ELEM* A, int lda, ELEM* Workspace,         \
+        int* devIpiv, int* devInfo);                                                        \
+    cusolverStatus_t cusolverDn##PFX##getrs(                                                \
+        cusolverDnHandle_t handle, cublasOperation_t trans, int n, int nrhs, const ELEM* A, \
+        int lda, const int* devIpiv, ELEM* B, int ldb, int* devInfo);                       \
+    cusolverStatus_t cusolverDn##PFX##geqrf_bufferSize(                                     \
+        cusolverDnHandle_t handle, int m, int n, ELEM* A, int lda, int* Lwork);             \
+    cusolverStatus_t cusolverDn##PFX##geqrf(                                                \
+        cusolverDnHandle_t handle, int m, int n, ELEM* A, int lda, ELEM* TAU,               \
+        ELEM* Workspace, int Lwork, int* devInfo);                                          \
+    cusolverStatus_t cusolverDn##PFX##potrf_bufferSize(                                     \
+        cusolverDnHandle_t handle, cublasFillMode_t uplo, int n, ELEM* A, int lda,          \
+        int* Lwork);                                                                        \
+    cusolverStatus_t cusolverDn##PFX##potrf(                                                \
+        cusolverDnHandle_t handle, cublasFillMode_t uplo, int n, ELEM* A, int lda,          \
+        ELEM* Workspace, int Lwork, int* devInfo);                                          \
+    cusolverStatus_t cusolverDn##PFX##potrs(                                                \
+        cusolverDnHandle_t handle, cublasFillMode_t uplo, int n, int nrhs, const ELEM* A,   \
+        int lda, ELEM* B, int ldb, int* devInfo);                                           \
+    cusolverStatus_t cusolverDn##PFX##gesvd_bufferSize(                                     \
+        cusolverDnHandle_t handle, int m, int n, int* lwork);                               \
+    cusolverStatus_t cusolverDn##PFX##gesvd(                                                \
+        cusolverDnHandle_t handle, signed char jobu, signed char jobvt, int m, int n,       \
+        ELEM* A, int lda, REAL* S, ELEM* U, int ldu, ELEM* VT, int ldvt, ELEM* work,        \
+        int lwork, REAL* rwork, int* devInfo);                                              \
+    cusolverStatus_t cusolverDn##PFX##EVD##_bufferSize(                                     \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, cublasFillMode_t uplo, int n,    \
+        const ELEM* A, int lda, const REAL* W, int* lwork);                                 \
+    cusolverStatus_t cusolverDn##PFX##EVD(                                                  \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, cublasFillMode_t uplo, int n,    \
+        ELEM* A, int lda, REAL* W, ELEM* work, int lwork, int* devInfo);                    \
+    cusolverStatus_t cusolverDn##PFX##EVJ##Batched_bufferSize(                              \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, cublasFillMode_t uplo, int n,    \
+        const ELEM* A, int lda, const REAL* W, int* lwork, syevjInfo_t params,              \
+        int batchSize);                                                                     \
+    cusolverStatus_t cusolverDn##PFX##EVJ##Batched(                                         \
+        cusolverDnHandle_t handle, cusolverEigMode_t jobz, cublasFillMode_t uplo, int n,    \
+        ELEM* A, int lda, REAL* W, ELEM* work, int lwork, int* info, syevjInfo_t params,    \
+        int batchSize);
+
+CUMETAL_CUSOLVER_DN_COMMON(S, float, float, orgqr, ormqr, syevj)
+CUMETAL_CUSOLVER_DN_COMMON(D, double, double, orgqr, ormqr, syevj)
+CUMETAL_CUSOLVER_DN_COMMON(C, cuComplex, float, ungqr, unmqr, heevj)
+CUMETAL_CUSOLVER_DN_COMMON(Z, cuDoubleComplex, double, ungqr, unmqr, heevj)
+CUMETAL_CUSOLVER_DN_COMPLEX(C, cuComplex, float, heevd, heevj)
+CUMETAL_CUSOLVER_DN_COMPLEX(Z, cuDoubleComplex, double, heevd, heevj)
+
+#undef CUMETAL_CUSOLVER_DN_COMMON
+#undef CUMETAL_CUSOLVER_DN_COMPLEX
+
+// Iterative-refinement solvers. The two letters are (main precision, lowest
+// precision): the pointers are always in the main precision. CuMetal solves in
+// the main precision directly with LAPACK (LU for gesv, QR for gels) and never
+// uses the lower one, so *niter is always 0 (no refinement iterations) and the
+// answer is at least as accurate as NVIDIA's. dA is preserved. Workspace is a
+// fixed minimal size and is not otherwise used. gels needs m >= n.
+#define CUMETAL_CUSOLVER_DN_IRS(PP, ELEM)                                                   \
+    cusolverStatus_t cusolverDn##PP##gesv_bufferSize(                                       \
+        cusolverDnHandle_t handle, int n, int nrhs, ELEM* dA, int ldda, int* dipiv,         \
+        ELEM* dB, int lddb, ELEM* dX, int lddx, void* dWorkspace, size_t* lwork_bytes);     \
+    cusolverStatus_t cusolverDn##PP##gesv(                                                  \
+        cusolverDnHandle_t handle, int n, int nrhs, ELEM* dA, int ldda, int* dipiv,         \
+        ELEM* dB, int lddb, ELEM* dX, int lddx, void* dWorkspace, size_t lwork_bytes,       \
+        int* iter, int* d_info);                                                            \
+    cusolverStatus_t cusolverDn##PP##gels_bufferSize(                                       \
+        cusolverDnHandle_t handle, int m, int n, int nrhs, ELEM* dA, int ldda, ELEM* dB,    \
+        int lddb, ELEM* dX, int lddx, void* dWorkspace, size_t* lwork_bytes);               \
+    cusolverStatus_t cusolverDn##PP##gels(                                                  \
+        cusolverDnHandle_t handle, int m, int n, int nrhs, ELEM* dA, int ldda, ELEM* dB,    \
+        int lddb, ELEM* dX, int lddx, void* dWorkspace, size_t lwork_bytes, int* iter,      \
+        int* d_info);
+
+CUMETAL_CUSOLVER_DN_IRS(DD, double)
+CUMETAL_CUSOLVER_DN_IRS(DS, double)
+CUMETAL_CUSOLVER_DN_IRS(DH, double)
+CUMETAL_CUSOLVER_DN_IRS(DX, double)
+CUMETAL_CUSOLVER_DN_IRS(SS, float)
+CUMETAL_CUSOLVER_DN_IRS(SH, float)
+CUMETAL_CUSOLVER_DN_IRS(SX, float)
+CUMETAL_CUSOLVER_DN_IRS(ZZ, cuDoubleComplex)
+CUMETAL_CUSOLVER_DN_IRS(ZC, cuDoubleComplex)
+CUMETAL_CUSOLVER_DN_IRS(ZK, cuDoubleComplex)
+CUMETAL_CUSOLVER_DN_IRS(ZY, cuDoubleComplex)
+CUMETAL_CUSOLVER_DN_IRS(CC, cuComplex)
+CUMETAL_CUSOLVER_DN_IRS(CK, cuComplex)
+CUMETAL_CUSOLVER_DN_IRS(CY, cuComplex)
+
+#undef CUMETAL_CUSOLVER_DN_IRS
 
 #ifdef __cplusplus
 }

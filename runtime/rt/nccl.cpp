@@ -1,6 +1,7 @@
 #include "nccl.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <new>
 
@@ -93,7 +94,10 @@ const char* ncclGetLastError(ncclComm_t comm) {
 
 ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId) {
     if (!uniqueId) return ncclInvalidArgument;
-    *uniqueId = 1;
+    // One process, one rank: the id carries no rendezvous state, but it is
+    // still a defined value rather than stack garbage.
+    std::memset(uniqueId->internal, 0, sizeof(uniqueId->internal));
+    std::memcpy(uniqueId->internal, "cumetal-nccl", 12);
     return ncclSuccess;
 }
 
@@ -113,7 +117,34 @@ ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId /*commI
 ncclResult_t ncclCommInitAll(ncclComm_t* comms, int ndev, const int* devlist) {
     if (!comms || ndev != 1 || (devlist && devlist[0] != 0))
         return ncclInvalidArgument;
-    return ncclCommInitRank(&comms[0], 1, 1, 0);
+    ncclUniqueId id;
+    ncclGetUniqueId(&id);
+    return ncclCommInitRank(&comms[0], 1, id, 0);
+}
+
+ncclResult_t ncclCommInitRankConfig(ncclComm_t* comm, int nranks, ncclUniqueId commId,
+                                    int rank, ncclConfig_t* /*config*/) {
+    // The config fields tune scheduling (blocking, CTA counts, network); none
+    // changes what a single-rank collective computes.
+    return ncclCommInitRank(comm, nranks, commId, rank);
+}
+
+ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int /*key*/, ncclComm_t* newcomm,
+                           ncclConfig_t* config) {
+    if (!valid_comm(comm) || !newcomm) return ncclInvalidArgument;
+    *newcomm = nullptr;
+    if (color == NCCL_SPLIT_NOCOLOR) return ncclSuccess;
+    if (color < 0) return ncclInvalidArgument;
+    ncclUniqueId id;
+    ncclGetUniqueId(&id);
+    return ncclCommInitRankConfig(newcomm, 1, id, 0, config);
+}
+
+ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t* asyncError) {
+    if (!valid_comm(comm) || !asyncError) return ncclInvalidArgument;
+    // Collectives complete synchronously or report through their return code.
+    *asyncError = ncclSuccess;
+    return ncclSuccess;
 }
 
 ncclResult_t ncclCommDestroy(ncclComm_t comm) {
@@ -164,6 +195,13 @@ ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count,
     size_t bytes = 0;
     ncclResult_t status = collective_bytes(comm, count, datatype, &bytes);
     return status == ncclSuccess ? enqueue_identity_copy(sendbuff, recvbuff, bytes, stream) : status;
+}
+
+ncclResult_t ncclBcast(void* buff, size_t count, ncclDataType_t datatype, int root,
+                       ncclComm_t comm, cudaStream_t /*stream*/) {
+    if (root != 0 || (count != 0 && !buff)) return ncclInvalidArgument;
+    size_t bytes = 0;
+    return collective_bytes(comm, count, datatype, &bytes);
 }
 
 ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count,

@@ -167,6 +167,25 @@ std::uint64_t stable_device_kernel_token(std::string_view symbol) {
     return hash == 0 ? 1 : hash;
 }
 
+// A cached metallib is reused only when it is a complete Metal library: the
+// MTLB magic and the file size its header declares. A torn or truncated file
+// (a process killed mid-write, a full disk) would otherwise fail every later
+// launch of that kernel with no recompile.
+bool cached_metallib_is_intact(const std::filesystem::path& path) {
+    std::error_code ec;
+    const std::uintmax_t size = std::filesystem::file_size(path, ec);
+    if (ec || size < 0x18) return false;
+    std::FILE* file = std::fopen(path.string().c_str(), "rb");
+    if (file == nullptr) return false;
+    unsigned char header[0x18] = {};
+    const std::size_t read = std::fread(header, 1, sizeof(header), file);
+    std::fclose(file);
+    if (read != sizeof(header) || std::memcmp(header, "MTLB", 4) != 0) return false;
+    std::uint64_t declared = 0;
+    std::memcpy(&declared, header + 0x10, sizeof(declared));
+    return declared == size;
+}
+
 std::uint64_t jit_cache_prefix_hash(const std::string& ptx_source) {
     // Hash incrementally instead of materializing another full-sized PTX blob.
     // GGML modules can exceed 10 MiB, and several kernels from the same module
@@ -1048,6 +1067,11 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
                           cached_metallib.c_str());
                 std::filesystem::remove(cached_metallib, ec);
                 std::filesystem::remove(jit_metadata_path_for(cached_metallib), ec);
+            } else if (!cached_metallib_is_intact(cached_metallib)) {
+                REG_DEBUG("jit cache hit is not a complete metallib; removing and treating as miss: %s",
+                          cached_metallib.c_str());
+                std::filesystem::remove(cached_metallib, ec);
+                std::filesystem::remove(jit_metadata_path_for(cached_metallib), ec);
             } else {
                 cached_hit_path = cached_metallib;
             }
@@ -1150,11 +1174,16 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     const std::filesystem::path tmp = std::filesystem::temp_directory_path();
     const std::filesystem::path ll_path    = tmp / ("cumetal-registration-" + std::to_string(stamp) + ".ll");
     const std::filesystem::path metal_path = tmp / ("cumetal-registration-" + std::to_string(stamp) + ".metal");
-    // Output goes to persistent cache if possible, otherwise /tmp.
+    // Output goes to persistent cache if possible, otherwise /tmp. A cache
+    // entry is compiled under a private name and renamed into place, so a
+    // concurrent reader or a process that dies mid-compile never leaves a torn
+    // file at the key's path.
     const std::filesystem::path metallib_path =
         cached_metallib.empty()
             ? tmp / ("cumetal-registration-" + std::to_string(stamp) + ".metallib")
-            : cached_metallib;
+            : cached_metallib.parent_path() /
+                  (cached_metallib.filename().string() + ".partial-" +
+                   std::to_string(::getpid()) + "-" + std::to_string(stamp) + ".metallib");
 
     cumetal::air_emitter::EmitOptions emit_options;
     emit_options.output = metallib_path;
@@ -1343,8 +1372,20 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         return false;
     }
 
-    REG_DEBUG("emit success: %s", emitted.output.c_str());
-    *out_path = emitted.output.string();
+    std::filesystem::path final_output = emitted.output;
+    if (!cached_metallib.empty()) {
+        std::error_code ec;
+        std::filesystem::rename(emitted.output, cached_metallib, ec);
+        if (ec) {
+            REG_DEBUG("could not publish jit cache entry %s: %s", cached_metallib.c_str(),
+                      ec.message().c_str());
+            remove_path_if_exists(emitted.output.string());
+            return false;
+        }
+        final_output = cached_metallib;
+    }
+    REG_DEBUG("emit success: %s", final_output.c_str());
+    *out_path = final_output.string();
     if (out_provenance != nullptr) {
         // A real translation of this kernel's PTX, via LLVM IR and AIR. It is
         // emitted as a .metallib, which the Metal backend would otherwise
@@ -1355,7 +1396,7 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     }
     publish_metadata(metadata);
     if (!cached_metallib.empty()) {
-        (void)write_registration_metadata(emitted.output, metadata);
+        (void)write_registration_metadata(final_output, metadata);
     }
     // Persistent cache entries (those routed through jit_cache_path_for) should
     // survive process exit and __cudaUnregisterFatBinary cleanup.

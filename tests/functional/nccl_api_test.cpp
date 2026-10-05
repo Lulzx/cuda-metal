@@ -102,7 +102,9 @@ static bool test_error_string() {
 
 static bool test_multi_rank_rejected() {
     ncclComm_t comm = nullptr;
-    ncclResult_t r = ncclCommInitRank(&comm, 2, 1, 0);
+    ncclUniqueId id;
+    ncclGetUniqueId(&id);
+    ncclResult_t r = ncclCommInitRank(&comm, 2, id, 0);
     if (r == ncclSuccess) {
         std::fprintf(stderr, "FAIL: multi-rank should be rejected\n");
         return false;
@@ -112,7 +114,7 @@ static bool test_multi_rank_rejected() {
 
 static bool test_single_rank_validation() {
     ncclComm_t comm = nullptr;
-    ncclUniqueId id = 0;
+    ncclUniqueId id{};
     ncclGetUniqueId(&id);
     if (ncclCommInitRank(&comm, 1, id, 0) != ncclSuccess) return false;
 

@@ -13,21 +13,18 @@
 
 #include "cuda_runtime.h"
 
+#include "cuComplex.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef int cufftHandle;
 
-typedef struct {
-    float x;
-    float y;
-} cufftComplex;
-
-typedef struct {
-    double x;
-    double y;
-} cufftDoubleComplex;
+// CUDA defines the cuFFT complex types as the cuComplex ones, and callers
+// pass cuComplex buffers to cufftExec* without a cast.
+typedef cuComplex cufftComplex;
+typedef cuDoubleComplex cufftDoubleComplex;
 
 typedef float cufftReal;
 typedef double cufftDoubleReal;
@@ -76,6 +73,7 @@ typedef cufftType cufftType_t;
 cufftResult cufftGetVersion(int* version);
 // SetWorkArea — ignored on UMA (vDSP manages its own scratch buffers).
 cufftResult cufftSetWorkArea(cufftHandle plan, void* workArea);
+cufftResult cufftSetAutoAllocation(cufftHandle plan, int autoAllocate);
 // Estimate* — return a conservative scratch-size estimate without building a plan.
 cufftResult cufftEstimate1d(int nx, cufftType type, int batch, size_t* workSize);
 cufftResult cufftEstimate2d(int nx, int ny, cufftType type, size_t* workSize);

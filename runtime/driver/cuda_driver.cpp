@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <map>
 #include <mutex>
@@ -247,41 +248,42 @@ bool parse_unsigned(const std::string& text, unsigned long long limit,
     return true;
 }
 
-void load_function_argument_count(CUfunc_st* function) {
-    if (function == nullptr || function->module == nullptr) {
-        return;
-    }
-    const std::filesystem::path abi_path =
-        function->module->metallib_path + ".cumetal-abi";
-    // A V2 sidecar carries one block per kernel in the metallib -- NVIDIA Warp
-    // emits a forward and a backward kernel per @wp.kernel, so a generated
-    // module routinely holds a dozen -- and the blocks are read by seeking the
-    // one naming this function. A V1 file holds exactly one block and parses the
-    // same way. Anything malformed is abandoned in favour of the scan below,
-    // which is correct, just slower and noisier.
+struct SidecarKernel {
+    std::string name;
+    std::vector<cumetalKernelArgInfo_t> info;
+    std::vector<DriverGlobalSymbol> globals;
+};
+
+// A V2 sidecar carries one block per kernel in the metallib -- NVIDIA Warp
+// emits a forward and a backward kernel per @wp.kernel, so a generated module
+// routinely holds a dozen. A V1 file holds exactly one block and parses the
+// same way. Returns false for a missing or malformed file; blocks before the
+// malformed one are kept.
+bool parse_abi_sidecar(const std::string& metallib_path, std::vector<SidecarKernel>* kernels) {
+    kernels->clear();
+    const std::filesystem::path abi_path = metallib_path + ".cumetal-abi";
     std::vector<std::string> tokens;
     {
         std::ifstream abi(abi_path);
         std::string header;
-        if (abi && std::getline(abi, header) &&
-            (header == "CUMETAL_ABI_V1" || header == "CUMETAL_ABI_V2")) {
-            for (std::string token; abi >> token;) {
-                if (tokens.size() >= 4096) {
-                    tokens.clear();
-                    break;
-                }
-                tokens.push_back(std::move(token));
+        if (!abi || !std::getline(abi, header) ||
+            (header != "CUMETAL_ABI_V1" && header != "CUMETAL_ABI_V2")) {
+            return false;
+        }
+        for (std::string token; abi >> token;) {
+            if (tokens.size() >= 4096) {
+                return false;
             }
+            tokens.push_back(std::move(token));
         }
     }
 
     for (std::size_t i = 0; i + 1 < tokens.size();) {
-        if (tokens[i] != "kernel") break;
-        const bool wanted = tokens[i + 1] == function->kernel_name;
+        if (tokens[i] != "kernel") return false;
+        SidecarKernel kernel;
+        kernel.name = tokens[i + 1];
         i += 2;
 
-        std::vector<cumetalKernelArgInfo_t> info;
-        std::vector<DriverGlobalSymbol> globals;
         bool valid = true;
         for (; i < tokens.size() && tokens[i] != "kernel";) {
             if (tokens[i] == "shared") {
@@ -334,7 +336,7 @@ void load_function_argument_count(CUfunc_st* function) {
                     }
                     if (!valid) break;
                 }
-                globals.push_back(std::move(symbol));
+                kernel.globals.push_back(std::move(symbol));
                 i += 5;
                 continue;
             }
@@ -342,22 +344,37 @@ void load_function_argument_count(CUfunc_st* function) {
             if (tokens[i] != "arg" || i + 2 >= tokens.size() ||
                 (tokens[i + 1] != "buffer" && tokens[i + 1] != "bytes") ||
                 !parse_unsigned(tokens[i + 2], 4096, &size) || size == 0 ||
-                info.size() >= 31) {
+                kernel.info.size() >= 31) {
                 valid = false;
                 break;
             }
-            info.push_back(cumetalKernelArgInfo_t{
+            kernel.info.push_back(cumetalKernelArgInfo_t{
                 .kind = tokens[i + 1] == "buffer" ? CUMETAL_ARG_BUFFER : CUMETAL_ARG_BYTES,
                 .size_bytes = static_cast<std::uint32_t>(size),
             });
             i += 3;
         }
-        if (!valid) break;
-        if (wanted && !info.empty()) {
-            function->argument_count = static_cast<std::uint32_t>(info.size());
+        if (!valid) return false;
+        kernels->push_back(std::move(kernel));
+    }
+    return true;
+}
+
+void load_function_argument_count(CUfunc_st* function) {
+    if (function == nullptr || function->module == nullptr) {
+        return;
+    }
+    // Blocks are read by seeking the one naming this function. Anything
+    // malformed is abandoned in favour of the scan below, which is correct,
+    // just slower and noisier.
+    std::vector<SidecarKernel> kernels;
+    parse_abi_sidecar(function->module->metallib_path, &kernels);
+    for (SidecarKernel& kernel : kernels) {
+        if (kernel.name == function->kernel_name && !kernel.info.empty()) {
+            function->argument_count = static_cast<std::uint32_t>(kernel.info.size());
             function->has_argument_count = true;
-            function->argument_info = std::move(info);
-            function->global_symbols = std::move(globals);
+            function->argument_info = std::move(kernel.info);
+            function->global_symbols = std::move(kernel.globals);
             return;
         }
     }
@@ -498,12 +515,35 @@ bool parse_direct_ptx_image(const void* image, std::string* out_ptx) {
         return false;
     }
 
-    const auto* bytes = static_cast<const std::uint8_t*>(image);
-    if (bytes[0] != static_cast<std::uint8_t>('.')) {
+    // PTX from NVRTC, nvcc and Clang opens with a `//` banner, so the first
+    // directive comes after any whitespace and comments. Only a bounded
+    // prefix is scanned: binary images must not be walked byte by byte.
+    const char* chars = static_cast<const char*>(image);
+    constexpr std::size_t kMaxPreamble = 64 * 1024;
+    std::size_t i = 0;
+    while (i < kMaxPreamble) {
+        const char c = chars[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            ++i;
+        } else if (c == '/' && chars[i + 1] == '/') {
+            while (i < kMaxPreamble && chars[i] != '\n' && chars[i] != '\0') ++i;
+        } else if (c == '/' && chars[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < kMaxPreamble && chars[i] != '\0' &&
+                   !(chars[i] == '*' && chars[i + 1] == '/')) {
+                ++i;
+            }
+            if (chars[i] == '\0' || i + 1 >= kMaxPreamble) return false;
+            i += 2;
+        } else {
+            break;
+        }
+    }
+    if (i >= kMaxPreamble || chars[i] != '.') {
         return false;
     }
 
-    return extract_ptx_cstr(static_cast<const char*>(image), 1ull << 20, out_ptx);
+    return extract_ptx_cstr(chars, 1ull << 20, out_ptx);
 }
 
 bool parse_fatbin_blob_ptx(const void* image, std::string* out_ptx) {
@@ -982,7 +1022,7 @@ CUresult cuDeviceGetAttribute(int* pi, CUdevice_attribute attrib, CUdevice dev) 
         // default the way NVIDIA's carve-out works, so the opt-in query answers
         // with the same budget rather than refusing.
         case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN:
-            *pi = prop.sharedMemPerBlock;
+            *pi = static_cast<int>(prop.sharedMemPerBlock);
             break;
         // Apple Silicon exposes no PCI enumeration. A host asking for the PCI
         // triple is building a device identity or comparing two ordinals, and
@@ -1562,19 +1602,28 @@ CUresult cuModuleGetGlobal(CUdeviceptr* dptr, size_t* bytes,
             return CUDA_ERROR_INVALID_VALUE;
         }
     }
+    const auto resolve = [&](const DriverGlobalSymbol& symbol) -> CUresult {
+        void* storage = nullptr;
+        const CUresult ready = ensure_module_global_storage(hmod, symbol, &storage);
+        if (ready != CUDA_SUCCESS) return ready;
+        if (dptr) {
+            *dptr = static_cast<CUdeviceptr>(reinterpret_cast<std::uintptr_t>(storage));
+        }
+        if (bytes) *bytes = symbol.size;
+        return CUDA_SUCCESS;
+    };
     for (const CUfunc_st* function : hmod->functions) {
         for (const DriverGlobalSymbol& symbol : function->global_symbols) {
-            if (symbol.name != name) continue;
-            void* storage = nullptr;
-            const CUresult ready =
-                ensure_module_global_storage(hmod, symbol, &storage);
-            if (ready != CUDA_SUCCESS) return ready;
-            if (dptr) {
-                *dptr = static_cast<CUdeviceptr>(
-                    reinterpret_cast<std::uintptr_t>(storage));
-            }
-            if (bytes) *bytes = symbol.size;
-            return CUDA_SUCCESS;
+            if (symbol.name == name) return resolve(symbol);
+        }
+    }
+    // A global is part of the module, not of whichever kernels the caller has
+    // looked up so far: read every kernel block the compiler recorded.
+    std::vector<SidecarKernel> kernels;
+    parse_abi_sidecar(hmod->metallib_path, &kernels);
+    for (const SidecarKernel& kernel : kernels) {
+        for (const DriverGlobalSymbol& symbol : kernel.globals) {
+            if (symbol.name == name) return resolve(symbol);
         }
     }
     return CUDA_ERROR_NOT_FOUND;
@@ -1597,6 +1646,65 @@ CUresult cuModuleLoad(CUmodule* module, const char* fname) {
     }
 
     return create_module_from_path(fname, /*owns_path=*/false, module);
+}
+
+struct CUlinkState_st {
+    std::vector<char> image;
+    bool has_input = false;
+};
+
+CUresult cuLinkCreate(unsigned int /*numOptions*/, CUjit_option* /*options*/,
+                      void** /*optionValues*/, CUlinkState* stateOut) {
+    if (stateOut == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    *stateOut = new (std::nothrow) CUlinkState_st();
+    return *stateOut != nullptr ? CUDA_SUCCESS : CUDA_ERROR_OUT_OF_MEMORY;
+}
+
+CUresult cuLinkAddData(CUlinkState state, CUjitInputType type, void* data, size_t size,
+                       const char* /*name*/, unsigned int /*numOptions*/,
+                       CUjit_option* /*options*/, void** /*optionValues*/) {
+    if (state == nullptr || data == nullptr || size == 0) return CUDA_ERROR_INVALID_VALUE;
+    if (type != CU_JIT_INPUT_CUBIN && type != CU_JIT_INPUT_PTX &&
+        type != CU_JIT_INPUT_FATBINARY) {
+        // Relocatable objects, archives and NVVM IR need a device linker.
+        return type >= CU_JIT_NUM_INPUT_TYPES ? CUDA_ERROR_INVALID_VALUE
+                                              : CUDA_ERROR_NOT_SUPPORTED;
+    }
+    // Resolving symbols across two images is the linker's job; refuse rather
+    // than hand back only one of them.
+    if (state->has_input) return CUDA_ERROR_NOT_SUPPORTED;
+    const char* bytes = static_cast<const char*>(data);
+    state->image.assign(bytes, bytes + size);
+    // PTX is text and cuModuleLoadData reads it as a C string.
+    if (type == CU_JIT_INPUT_PTX && state->image.back() != '\0') state->image.push_back('\0');
+    state->has_input = true;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuLinkAddFile(CUlinkState state, CUjitInputType type, const char* path,
+                       unsigned int numOptions, CUjit_option* options, void** optionValues) {
+    if (state == nullptr || path == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return CUDA_ERROR_FILE_NOT_FOUND;
+    std::vector<char> bytes((std::istreambuf_iterator<char>(file)),
+                            std::istreambuf_iterator<char>());
+    if (bytes.empty()) return CUDA_ERROR_INVALID_IMAGE;
+    return cuLinkAddData(state, type, bytes.data(), bytes.size(), path, numOptions, options,
+                         optionValues);
+}
+
+CUresult cuLinkComplete(CUlinkState state, void** cubinOut, size_t* sizeOut) {
+    if (state == nullptr || cubinOut == nullptr) return CUDA_ERROR_INVALID_VALUE;
+    if (!state->has_input) return CUDA_ERROR_INVALID_VALUE;
+    *cubinOut = state->image.data();
+    if (sizeOut != nullptr) *sizeOut = state->image.size();
+    return CUDA_SUCCESS;
+}
+
+CUresult cuLinkDestroy(CUlinkState state) {
+    if (state == nullptr) return CUDA_ERROR_INVALID_HANDLE;
+    delete state;
+    return CUDA_SUCCESS;
 }
 
 CUresult cuModuleLoadData(CUmodule* module, const void* image) {
@@ -2694,6 +2802,9 @@ CUresult cuGetErrorName(CUresult error, const char** pStr) {
         case CUDA_ERROR_JIT_COMPILER_NOT_FOUND:
             *pStr = "CUDA_ERROR_JIT_COMPILER_NOT_FOUND";
             break;
+        case CUDA_ERROR_FILE_NOT_FOUND:
+            *pStr = "CUDA_ERROR_FILE_NOT_FOUND";
+            break;
         case CUDA_ERROR_NOT_FOUND:
             *pStr = "CUDA_ERROR_NOT_FOUND";
             break;
@@ -3131,6 +3242,7 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int* numBlocks,
 CUresult cuOccupancyMaxPotentialBlockSize(int* minGridSize,
                                           int* blockSize,
                                           CUfunction func,
+                                          CUoccupancyB2DSize blockSizeToDynamicSMemSize,
                                           size_t dynamicSMemSize,
                                           int blockSizeLimit) {
     if (minGridSize == nullptr || blockSize == nullptr) {
@@ -3143,6 +3255,10 @@ CUresult cuOccupancyMaxPotentialBlockSize(int* minGridSize,
     if (blockSizeLimit > 0) chosen = std::min(chosen, blockSizeLimit);
     const int width = std::max(1, kernel.thread_execution_width);
     chosen = std::max(width, (chosen / width) * width);
+    // CUDA ignores dynamicSMemSize when the per-block-size callback is given.
+    if (blockSizeToDynamicSMemSize != nullptr) {
+        dynamicSMemSize = blockSizeToDynamicSMemSize(chosen);
+    }
     int active_blocks = 0;
     const CUresult occupancy = cuOccupancyMaxActiveBlocksPerMultiprocessor(
         &active_blocks, func, chosen, dynamicSMemSize);
@@ -3155,6 +3271,21 @@ CUresult cuOccupancyMaxPotentialBlockSize(int* minGridSize,
         *minGridSize = 16;
     }
     return CUDA_SUCCESS;
+}
+
+CUresult cuOccupancyMaxPotentialBlockSizeWithFlags(int* minGridSize,
+                                                   int* blockSize,
+                                                   CUfunction func,
+                                                   CUoccupancyB2DSize blockSizeToDynamicSMemSize,
+                                                   size_t dynamicSMemSize,
+                                                   int blockSizeLimit,
+                                                   unsigned int flags) {
+    if ((flags & ~static_cast<unsigned int>(CU_OCCUPANCY_DISABLE_CACHING_OVERRIDE)) != 0) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    return cuOccupancyMaxPotentialBlockSize(minGridSize, blockSize, func,
+                                            blockSizeToDynamicSMemSize, dynamicSMemSize,
+                                            blockSizeLimit);
 }
 
 CUresult cuFuncLoad(CUfunction function) {

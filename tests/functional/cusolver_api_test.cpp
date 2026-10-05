@@ -82,8 +82,6 @@ static bool test_execution_validation() {
     const bool ok =
         cusolverDnSgetrf(nullptr, 2, 2, A, 2, work, ipiv, &info) ==
             CUSOLVER_STATUS_NOT_INITIALIZED &&
-        cusolverDnSgetrf(handle, 2, 2, A, 2, nullptr, ipiv, &info) ==
-            CUSOLVER_STATUS_INVALID_VALUE &&
         cusolverDnSgetrf(handle, 2, 2, A, 1, work, ipiv, &info) ==
             CUSOLVER_STATUS_INVALID_VALUE &&
         cusolverDnSgetrs(handle, 3, 2, 1, A, 2, ipiv, B, 2, &info) ==

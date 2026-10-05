@@ -19,7 +19,13 @@ datatype, layout, pointer location, stream, capture, and error behavior.
 
 ## Library-specific boundaries
 
-- **cuBLAS/cublasLt:** incomplete routine/type/epilogue/algorithm surface; not all
+- **cuBLAS/cublasLt:** complex level-1/2/3 (`axpy`/`scal`/`dot`/`amax`/`asum`/
+  `nrm2`/`ger`/`syrk`/`trsm`), `geam`, `dgmm`, `sbmv`, `tpttr`/`trttp`, batched
+  `gemm`/`trsm`, and batched `getrf`/`getrs`/`getri` run on the CPU through
+  Accelerate or plain loops. A NULL `PivotArray` selects unpivoted LU.
+  `cublasSgemmEx` accepts only F32, F16 and BF16 operands. The cuBLAS 10
+  `cudaDataType` compute-type overloads of `GemmEx`/`GemmStridedBatchedEx`
+  map through `cublasMigrateComputeType`. Otherwise the routine/type/epilogue/algorithm surface is incomplete; not all
   batched, complex, tensor, or capture combinations are covered. The hardened
   cuBLASLt CPU fallback is a bounded FP32/FP64 column-major, exact-shape,
   non-overlapping strided-batch path; row-major/special layouts, mixed
@@ -49,8 +55,10 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   autosort and Bluestein GPU kernels; grids below a dispatch-cost threshold and
   every double-precision entry point stay on the CPU, since Metal has no FP64.
   `CUMETAL_FFT_VKFFT=0` explicitly disables the VkFFT route. Still absent:
-  callbacks, multi-GPU, the rest
-  of the Xt surface, and a GPU path for the double transforms. Implemented
+  callbacks (`cufftXtSetCallback` returns `CUFFT_NOT_SUPPORTED`), multi-GPU
+  (`cufftXtSetGPUs` accepts only device 0 alone; `cufftXtMemcpy` and the
+  descriptor executes return `CUFFT_NOT_SUPPORTED`), and a GPU path for the
+  double transforms. `cufftXtExec` dispatches to the plan's own transform type. Implemented
   execution rejects untracked, host, interior-short, and otherwise undersized
   input/output spans before dispatch; caller-supplied work areas are accepted
   for API compatibility but unused because both backends manage scratch.
@@ -71,8 +79,35 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   same Accelerate LAPACK path; other type combinations are rejected. Real
   Jacobi `cusolverDnS/DsyevjBatched` runs a CPU cyclic-Jacobi iteration that
   honors `syevjInfo_t` tolerance, max-sweeps, and ascending-sort controls and
-  reports per-matrix nonconvergence through `devInfo`; single-matrix `syevj`,
-  CSR sparse solvers, and other Jacobi variants remain absent.
+  reports per-matrix nonconvergence through `devInfo`.
+  The CuPy-driven additions all run on the CPU over unified memory:
+  - **cuSOLVER dense:** complex `getrf`/`getrs`/`geqrf`/`potrf`/`potrs`/`gesvd`/
+    `heevd`, `orgqr`/`ungqr`, `ormqr`/`unmqr`, `sytrf`, `gebrd`, batched
+    `potrf`/`potrs`, single and batched `syevj`/`heevj`, `gesvdj`/
+    `gesvdjBatched`, and `gesvdaStridedBatched`.
+    - `gesvdj` computes with LAPACK `gesvd`, not Jacobi sweeps.
+      `cusolverDnXgesvdjGetSweeps` reports 0. `GetResidual` is the explicitly
+      measured `||diag(S) - U^H A V||_F`.
+  - **IRS `gesv`/`gels` family:** solves in the main precision only and reports
+    `niter = 0`.
+  - **cuSOLVER sparse:** complex `csrlsvchol`/`csrlsvqr` and
+    `S`/`D`/`C`/`Zcsreigvsi` (shifted inverse iteration).
+  - **Status and pivot conventions:** LAPACK `info > 0` returns
+    `CUSOLVER_STATUS_SUCCESS` with `devInfo` set, and a NULL `devIpiv` selects
+    unpivoted LU, both as in cuSOLVER.
+  - **Remaining cuSOLVER limits:**
+    - Real `csrlsvchol`/`csrlsvqr` still reject `reorder != 0`.
+    - `cusolverDnXgeev` is absent.
+  - **cuSPARSE legacy and generic APIs:** format conversion and sorting,
+    `nnz`/`nnz_compress`/`csr2csr_compress`, `csrgeam2`, `csrilu02` and
+    `csric02` with truthful `zeroPivot`, the `gtsv2`/`gtsvInterleavedBatch`/
+    `gpsvInterleavedBatch` banded solvers, `SpVV`, `Gather`, `SpSM`, `SpGEMM`,
+    `SparseToDense`/`DenseToSparse`, and `Csr2cscEx2`.
+  - **cuSPARSE refusals (`CUSPARSE_STATUS_NOT_SUPPORTED`):**
+    - BSR incomplete factorizations (`bsrilu02`/`bsric02`).
+    - `SpGEMM` with transposed operands, non-CSR matrices, or `beta != 0`.
+    - `SpSM` with COO or batched dense matrices.
+    - Batched dense/sparse conversion.
   `cusolverGetProperty` reports CuMetal's own version, not an NVIDIA release.
   Broader dense/sparse routine,
   datatype, batched, analysis/reuse, and GPU execution coverage remains open.
@@ -101,7 +136,11 @@ datatype, layout, pointer location, stream, capture, and error behavior.
 - **NCCL:** single-device compatibility cannot provide collective multi-GPU
   semantics. The implemented one-rank collectives are identity copies, not a
   transport; only device zero and rank zero are accepted, point-to-point calls
-  fail, and multi-device initialization is rejected atomically.
+  fail, and multi-device initialization is rejected atomically. The header
+  reports NCCL 2.18.0 to match `ncclGetVersion`. `ncclCommInitRankConfig` and
+  `ncclCommSplit` produce one-rank communicators, and their config fields have no
+  effect. `ncclCommGetAsyncError` always reports success because collectives
+  finish synchronously.
 - **NVML:** compatibility queries cannot expose NVIDIA device management. The
   single synthetic device reports Apple unified system-memory information, not
   dedicated VRAM; utilization, temperature, power, and clock telemetry are

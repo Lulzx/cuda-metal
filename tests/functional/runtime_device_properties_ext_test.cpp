@@ -155,19 +155,18 @@ int main() {
         return 1;
     }
 
-    // The new fields must sit where the reserved tail began: inserting them
-    // beside older occupancy fields and shrinking the reserve keeps the total
-    // size but shifts every subsequent field's offset.
-    static_assert(offsetof(cudaDeviceProp, maxBlocksPerMultiProcessor) >
-                      offsetof(cudaDeviceProp, uuid),
-                  "occupancy fields must be consumed from the reserved tail");
-    static_assert(sizeof(cudaDeviceProp) == 680,
-                  "device-property additions must not grow the public allocation");
-    static_assert(offsetof(cudaDeviceProp, reservedSharedMemPerBlock) == 472,
-                  "shared-memory reservation must consume the reserved tail");
-    static_assert(offsetof(cudaDeviceProp, cumetalReserved) ==
-                      offsetof(cudaDeviceProp, reservedSharedMemPerBlock) + sizeof(size_t),
-                  "reserved tail must directly follow the shared-memory reservation");
+    // Binaries built against NVIDIA's CUDA 12 header allocate this struct and
+    // read it by offset, so the layout is the CUDA one, not a CuMetal choice.
+    static_assert(sizeof(cudaDeviceProp) == 1032, "CUDA 12 cudaDeviceProp is 1032 bytes");
+    static_assert(offsetof(cudaDeviceProp, uuid) == 256, "uuid follows name[256]");
+    static_assert(offsetof(cudaDeviceProp, totalGlobalMem) == 288, "CUDA 12 offset");
+    static_assert(offsetof(cudaDeviceProp, sharedMemPerBlock) == 296, "CUDA 12 offset");
+    static_assert(offsetof(cudaDeviceProp, major) == 360, "CUDA 12 offset");
+    static_assert(offsetof(cudaDeviceProp, multiProcessorCount) == 388, "CUDA 12 offset");
+    static_assert(offsetof(cudaDeviceProp, sharedMemPerBlockOptin) == 696, "CUDA 12 offset");
+    static_assert(offsetof(cudaDeviceProp, reservedSharedMemPerBlock) == 720, "CUDA 12 offset");
+    static_assert(offsetof(cudaDeviceProp, reserved) == 792, "CUDA 12 reserved tail");
+    static_assert(sizeof(prop.sharedMemPerBlock) == sizeof(size_t), "CUDA declares size_t");
     if (prop.reservedSharedMemPerBlock != 0) {
         std::fprintf(stderr, "FAIL: Metal has no hidden per-block shared reservation\n");
         return 1;

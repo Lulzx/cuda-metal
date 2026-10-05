@@ -79,7 +79,7 @@ int main() {
     int minGridSize = -1;
     int blockSize = -1;
     if (cuOccupancyMaxPotentialBlockSize(
-            &minGridSize, &blockSize, dummy_func, 0, 0) != CUDA_ERROR_INVALID_VALUE) {
+            &minGridSize, &blockSize, dummy_func, nullptr, 0, 0) != CUDA_ERROR_INVALID_VALUE) {
         std::fprintf(stderr, "FAIL: potential occupancy accepted an invalid function\n");
         return 1;
     }

@@ -1010,6 +1010,87 @@ cufftResult cufftSetWorkArea(cufftHandle plan, void* /*workArea*/) {
     return CUFFT_SUCCESS;
 }
 
+// Scratch is managed internally, so a caller that turns auto-allocation off and
+// supplies its own work area changes nothing about the transform itself.
+cufftResult cufftSetAutoAllocation(cufftHandle plan, int /*autoAllocate*/) {
+    CufftState& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (s.get(plan) == nullptr) return CUFFT_INVALID_PLAN;
+    return CUFFT_SUCCESS;
+}
+
+cufftResult cufftXtSetWorkArea(cufftHandle plan, void** workArea) {
+    return cufftSetWorkArea(plan, workArea != nullptr ? workArea[0] : nullptr);
+}
+
+cufftResult cufftXtSetGPUs(cufftHandle plan, int nGPUs, int* whichGPUs) {
+    {
+        CufftState& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.get(plan) == nullptr) return CUFFT_INVALID_PLAN;
+    }
+    if (nGPUs < 1 || whichGPUs == nullptr) return CUFFT_INVALID_VALUE;
+    for (int i = 0; i < nGPUs; ++i) {
+        if (whichGPUs[i] != 0) return CUFFT_INVALID_DEVICE;
+    }
+    // A multi-GPU plan over the one device would still need the descriptor
+    // data layout, which is not implemented.
+    if (nGPUs > 1) return CUFFT_NOT_SUPPORTED;
+    return CUFFT_SUCCESS;
+}
+
+cufftResult cufftXtExec(cufftHandle plan, void* input, void* output, int direction) {
+    cufftType type;
+    {
+        CufftState& s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        CufftPlanEntry* p = s.get(plan);
+        if (p == nullptr) return CUFFT_INVALID_PLAN;
+        type = p->type;
+    }
+    switch (type) {
+        case CUFFT_C2C:
+            return cufftExecC2C(plan, static_cast<cufftComplex*>(input),
+                                static_cast<cufftComplex*>(output), direction);
+        case CUFFT_Z2Z:
+            return cufftExecZ2Z(plan, static_cast<cufftDoubleComplex*>(input),
+                                static_cast<cufftDoubleComplex*>(output), direction);
+        case CUFFT_R2C:
+            return cufftExecR2C(plan, static_cast<cufftReal*>(input),
+                                static_cast<cufftComplex*>(output));
+        case CUFFT_C2R:
+            return cufftExecC2R(plan, static_cast<cufftComplex*>(input),
+                                static_cast<cufftReal*>(output));
+        case CUFFT_D2Z:
+            return cufftExecD2Z(plan, static_cast<cufftDoubleReal*>(input),
+                                static_cast<cufftDoubleComplex*>(output));
+        case CUFFT_Z2D:
+            return cufftExecZ2D(plan, static_cast<cufftDoubleComplex*>(input),
+                                static_cast<cufftDoubleReal*>(output));
+    }
+    return CUFFT_INVALID_TYPE;
+}
+
+cufftResult cufftXtMemcpy(cufftHandle /*plan*/, void* /*dstPointer*/, void* /*srcPointer*/,
+                          cufftXtCopyType /*type*/) {
+    return CUFFT_NOT_SUPPORTED;
+}
+
+cufftResult cufftXtExecDescriptorC2C(cufftHandle /*plan*/, cudaLibXtDesc* /*input*/,
+                                     cudaLibXtDesc* /*output*/, int /*direction*/) {
+    return CUFFT_NOT_SUPPORTED;
+}
+
+cufftResult cufftXtExecDescriptorZ2Z(cufftHandle /*plan*/, cudaLibXtDesc* /*input*/,
+                                     cudaLibXtDesc* /*output*/, int /*direction*/) {
+    return CUFFT_NOT_SUPPORTED;
+}
+
+cufftResult cufftXtSetCallback(cufftHandle /*plan*/, void** /*callbackRoutine*/,
+                               cufftXtCallbackType /*type*/, void** /*callerInfo*/) {
+    return CUFFT_NOT_SUPPORTED;
+}
+
 // ── Estimate* ────────────────────────────────────────────────────────────────
 // Return a conservative upper-bound on scratch memory without building a full plan.
 // On this implementation vDSP manages scratch internally, so 0 is a valid answer,

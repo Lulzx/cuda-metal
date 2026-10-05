@@ -62,11 +62,6 @@ int main() {
         return 1;
     }
 
-    if (prop.maxBufferArguments != 31) {
-        std::fprintf(stderr, "FAIL: maxBufferArguments should be 31 (Metal limit)\n");
-        return 1;
-    }
-
     if (cudaGetDeviceProperties(nullptr, 0) != cudaErrorInvalidValue) {
         std::fprintf(stderr, "FAIL: null properties pointer should fail\n");
         return 1;

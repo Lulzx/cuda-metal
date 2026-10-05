@@ -2985,7 +2985,6 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     // it failed, deterministically. With 0 it takes the serialized path the
     // attribute is there to select, and passes for the right reason.
     prop->concurrentManagedAccess = 0;
-    prop->maxBufferArguments = 31;      // Metal buffer argument limit per kernel
     // Additional fields (spec §6.8)
     prop->clockRate = 1296000;          // ~1.3 GHz in kHz (conservative estimate)
     prop->memoryClockRate = 1296000;    // Same as GPU clock on UMA (shared memory controller)
@@ -3038,9 +3037,34 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     // dividing the SM budget by the per-block budget get the same one-block
     // answer the occupancy API gives.
     prop->regsPerMultiprocessor = prop->regsPerBlock;
-    for (size_t i = 0; i < sizeof(prop->cumetalReserved) / sizeof(prop->cumetalReserved[0]); ++i) {
-        prop->cumetalReserved[i] = 0;
-    }
+    prop->memPitch = 2147483647;
+    prop->deviceOverlap = 1;            // Same answer as cudaDevAttrGpuOverlap
+    prop->memoryPoolsSupported = 1;     // Same answer as cudaDevAttrMemoryPoolsSupported
+    // CUDA arrays are buffer-backed, so these are the Metal texture limits the
+    // array shapes mirror. Mipmapped, cubemap and gather forms are not
+    // implemented and stay 0 rather than advertising a path that refuses.
+    prop->textureAlignment = 512;       // Same answer as cudaDevAttrTextureAlignment
+    prop->texturePitchAlignment = 32;
+    prop->surfaceAlignment = 512;
+    prop->maxTexture1D = 16384;
+    prop->maxTexture1DLinear = 1 << 27;
+    prop->maxTexture2D[0] = prop->maxTexture2D[1] = 16384;
+    prop->maxTexture2DLinear[0] = prop->maxTexture2DLinear[1] = 16384;
+    prop->maxTexture2DLinear[2] = 1 << 20;
+    prop->maxTexture3D[0] = prop->maxTexture3D[1] = prop->maxTexture3D[2] = 2048;
+    prop->maxTexture1DLayered[0] = 16384;
+    prop->maxTexture1DLayered[1] = 2048;
+    prop->maxTexture2DLayered[0] = prop->maxTexture2DLayered[1] = 16384;
+    prop->maxTexture2DLayered[2] = 2048;
+    prop->maxSurface1D = 16384;
+    prop->maxSurface2D[0] = prop->maxSurface2D[1] = 16384;
+    prop->maxSurface3D[0] = prop->maxSurface3D[1] = prop->maxSurface3D[2] = 2048;
+    prop->maxSurface1DLayered[0] = 16384;
+    prop->maxSurface1DLayered[1] = 2048;
+    prop->maxSurface2DLayered[0] = prop->maxSurface2DLayered[1] = 16384;
+    prop->maxSurface2DLayered[2] = 2048;
+    // FP64 runs as an FP32-pair emulation; NVIDIA consumer parts report 32-64.
+    prop->singleToDoublePrecisionPerfRatio = 32;
 
     return fail(cudaSuccess);
 }
@@ -3079,7 +3103,7 @@ cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device) {
             *value = prop.maxGridSize[2];
             break;
         case cudaDevAttrMaxSharedMemoryPerBlock:
-            *value = prop.sharedMemPerBlock;
+            *value = static_cast<int>(prop.sharedMemPerBlock);
             break;
         case cudaDevAttrWarpSize:
             *value = prop.warpSize;
@@ -3911,6 +3935,56 @@ cudaError_t cudaMemcpy2D(void* dst, size_t dpitch,
     return fail(cudaSuccess);
 }
 
+cudaError_t cudaMemcpy2DToArrayAsync(cudaArray_t dst, size_t wOffset, size_t hOffset,
+                                     const void* src, size_t spitch, size_t width,
+                                     size_t height, cudaMemcpyKind kind,
+                                     cudaStream_t stream) {
+    if (dst == nullptr || src == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    auto* a = resolve_array_handle(dst);
+    if (a == nullptr) return fail(cudaErrorInvalidResourceHandle);
+    const size_t elem_size = static_cast<size_t>(
+        (a->desc.x + a->desc.y + a->desc.z + a->desc.w + 7) / 8);
+    const size_t dpitch = a->width * elem_size;
+    if (wOffset > dpitch || width > dpitch - wOffset ||
+        hOffset > a->height || height > a->height - hOffset ||
+        spitch < width) {
+        return fail(cudaErrorInvalidValue);
+    }
+    auto* dst_base = static_cast<char*>(a->data) + hOffset * dpitch + wOffset;
+    return cudaMemcpy2DAsync(dst_base, dpitch, src, spitch, width, height, kind, stream);
+}
+
+cudaError_t cudaMemcpy2DFromArrayAsync(void* dst, size_t dpitch, cudaArray_const_t src,
+                                       size_t wOffset, size_t hOffset, size_t width,
+                                       size_t height, cudaMemcpyKind kind,
+                                       cudaStream_t stream) {
+    if (dst == nullptr || src == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const auto* a = resolve_array_handle(src);
+    if (a == nullptr) return fail(cudaErrorInvalidResourceHandle);
+    const size_t elem_size = static_cast<size_t>(
+        (a->desc.x + a->desc.y + a->desc.z + a->desc.w + 7) / 8);
+    const size_t spitch = a->width * elem_size;
+    if (wOffset > spitch || width > spitch - wOffset ||
+        hOffset > a->height || height > a->height - hOffset ||
+        dpitch < width) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const auto* src_base = static_cast<const char*>(a->data) + hOffset * spitch + wOffset;
+    return cudaMemcpy2DAsync(dst, dpitch, src_base, spitch, width, height, kind, stream);
+}
+
+cudaError_t cudaGetChannelDesc(cudaChannelFormatDesc* desc, cudaArray_const_t array) {
+    if (desc == nullptr || array == nullptr) return fail(cudaErrorInvalidValue);
+    const auto* a = resolve_array_handle(array);
+    if (a == nullptr) return fail(cudaErrorInvalidResourceHandle);
+    *desc = a->desc;
+    return fail(cudaSuccess);
+}
+
 cudaError_t cudaMemcpy2DAsync(void* dst, size_t dpitch,
                                const void* src, size_t spitch,
                                size_t width, size_t height,
@@ -4336,6 +4410,22 @@ cudaError_t cudaStreamGetFlags(cudaStream_t stream, unsigned int* flags) {
     if (!resolve_stream_flags(stream, flags)) {
         return fail(cudaErrorInvalidValue);
     }
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaStreamGetPriority(cudaStream_t stream, int* priority) {
+    if (priority == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+    unsigned int flags = 0;
+    if (!resolve_stream_flags(stream, &flags)) {
+        return fail(cudaErrorInvalidValue);
+    }
+    *priority = 0;
     return fail(cudaSuccess);
 }
 
@@ -7236,6 +7326,8 @@ const char* cudaGetErrorName(cudaError_t error) {
             return "cudaErrorAssert";
         case cudaErrorLaunchFailure:
             return "cudaErrorLaunchFailure";
+        case cudaErrorContextIsDestroyed:
+            return "cudaErrorContextIsDestroyed";
         case cudaErrorCooperativeLaunchTooLarge:
             return "cudaErrorCooperativeLaunchTooLarge";
         case cudaErrorNotPermitted:
@@ -7308,6 +7400,8 @@ const char* cudaGetErrorString(cudaError_t error) {
             return "device-side assert triggered";
         case cudaErrorLaunchFailure:
             return "unspecified launch failure";
+        case cudaErrorContextIsDestroyed:
+            return "context is destroyed";
         case cudaErrorNotPermitted:
             return "operation not permitted";
         case cudaErrorGraphExecUpdateFailure:
@@ -7768,7 +7862,27 @@ cudaError_t cudaDeviceGetDefaultMemPool(cudaMemPool_t* pool, int /*device*/) {
     return fail(cudaSuccess);
 }
 
-cudaError_t cudaDeviceSetMemPool(int /*device*/, cudaMemPool_t /*pool*/) {
+// cudaDeviceGetMemPool must return what cudaDeviceSetMemPool installed.
+static std::atomic<cudaMemPool_t> g_current_mempool{&g_default_mempool};
+
+cudaError_t cudaDeviceSetMemPool(int device, cudaMemPool_t pool) {
+    if (pool == nullptr) return fail(cudaErrorInvalidValue);
+    if (device != 0) return fail(cudaErrorInvalidDevice);
+    g_current_mempool.store(pool);
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaDeviceGetMemPool(cudaMemPool_t* pool, int device) {
+    if (pool == nullptr) return fail(cudaErrorInvalidValue);
+    if (device != 0) return fail(cudaErrorInvalidDevice);
+    *pool = g_current_mempool.load();
+    return fail(cudaSuccess);
+}
+
+// Stream-ordered frees release their memory when the stream reaches them, so a
+// pool never holds reserved-but-unused memory and there is nothing to trim.
+cudaError_t cudaMemPoolTrimTo(cudaMemPool_t pool, size_t /*minBytesToKeep*/) {
+    if (pool == nullptr) return fail(cudaErrorInvalidValue);
     return fail(cudaSuccess);
 }
 
@@ -7843,6 +7957,59 @@ cudaError_t cudaChooseDevice(int* device, const cudaDeviceProp* /*prop*/) {
     }
     *device = 0;
     return fail(cudaSuccess);
+}
+
+static constexpr char kCuMetalPciBusId[] = "0000:00:00.0";
+
+cudaError_t cudaDeviceGetPCIBusId(char* pciBusId, int len, int device) {
+    if (pciBusId == nullptr || len <= 0) return fail(cudaErrorInvalidValue);
+    if (device != 0) return fail(cudaErrorInvalidDevice);
+    if (static_cast<size_t>(len) < sizeof(kCuMetalPciBusId)) return fail(cudaErrorInvalidValue);
+    std::memcpy(pciBusId, kCuMetalPciBusId, sizeof(kCuMetalPciBusId));
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaDeviceGetByPCIBusId(int* device, const char* pciBusId) {
+    if (device == nullptr || pciBusId == nullptr) return fail(cudaErrorInvalidValue);
+    // CUDA accepts [domain]:[bus]:[device].[function] with the domain optional
+    // and hex fields of any width.
+    unsigned int domain = 0, bus = 0, dev = 0, function = 0;
+    char trailing = 0;
+    const bool parsed =
+        std::sscanf(pciBusId, "%x:%x:%x.%x%c", &domain, &bus, &dev, &function, &trailing) == 4 ||
+        std::sscanf(pciBusId, "%x:%x.%x%c", &bus, &dev, &function, &trailing) == 3;
+    if (!parsed) return fail(cudaErrorInvalidValue);
+    if (domain != 0 || bus != 0 || dev != 0 || function != 0) {
+        return fail(cudaErrorInvalidDevice);
+    }
+    *device = 0;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaIpcGetEventHandle(cudaIpcEventHandle_t* handle, cudaEvent_t /*event*/) {
+    if (handle == nullptr) return fail(cudaErrorInvalidValue);
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaIpcOpenEventHandle(cudaEvent_t* event, cudaIpcEventHandle_t /*handle*/) {
+    if (event == nullptr) return fail(cudaErrorInvalidValue);
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaIpcGetMemHandle(cudaIpcMemHandle_t* handle, void* devPtr) {
+    if (handle == nullptr || devPtr == nullptr) return fail(cudaErrorInvalidValue);
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaIpcOpenMemHandle(void** devPtr, cudaIpcMemHandle_t /*handle*/,
+                                 unsigned int /*flags*/) {
+    if (devPtr == nullptr) return fail(cudaErrorInvalidValue);
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaIpcCloseMemHandle(void* devPtr) {
+    if (devPtr == nullptr) return fail(cudaErrorInvalidValue);
+    return fail(cudaErrorNotSupported);
 }
 
 // Peer access — Apple Silicon has a single GPU; no peer-to-peer access (spec §2.2).

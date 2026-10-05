@@ -533,6 +533,22 @@ add_executable(cumetal_nvml_api_test
     nvml_api_test.cpp
 )
 
+add_executable(cumetal_runtime_cupy_surface_test
+    runtime_cupy_surface_test.cpp
+)
+
+add_executable(cumetal_cublas_cupy_surface_test
+    cublas_cupy_surface_test.cpp
+)
+
+add_executable(cumetal_cusolver_cupy_surface_test
+    cusolver_cupy_surface_test.cpp
+)
+
+add_executable(cumetal_cusparse_cupy_surface_test
+    cusparse_cupy_surface_test.cpp
+)
+
 add_executable(cumetal_nccl_api_test
     nccl_api_test.cpp
 )
@@ -1279,6 +1295,26 @@ target_link_libraries(cumetal_cudnn_api_test
 )
 
 target_link_libraries(cumetal_nvml_api_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_cupy_surface_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cublas_cupy_surface_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cusolver_cupy_surface_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cusparse_cupy_surface_test
     PRIVATE
         cumetal_runtime
 )
@@ -3520,6 +3556,17 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     set_tests_properties(functional_runtime_registration_jit_cache PROPERTIES SKIP_RETURN_CODE 77)
 
     add_test(
+        NAME functional_runtime_registration_jit_cache_corruption
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_registration_jit_cache_corruption_test.sh
+                $<TARGET_FILE:cumetal_runtime_registration_fatbin_ptx_test>
+                ${CMAKE_CURRENT_SOURCE_DIR}/reference/vector_add_shared.ptx
+    )
+
+    set_tests_properties(functional_runtime_registration_jit_cache_corruption
+                         PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
         NAME functional_runtime_msl_math_mode
         COMMAND bash
                 ${CMAKE_CURRENT_SOURCE_DIR}/run_msl_math_mode_test.sh
@@ -3615,6 +3662,26 @@ add_test(
 add_test(
     NAME functional_nvml_api
     COMMAND cumetal_nvml_api_test
+)
+
+add_test(
+    NAME functional_runtime_cupy_surface
+    COMMAND cumetal_runtime_cupy_surface_test
+)
+
+add_test(
+    NAME functional_cublas_cupy_surface
+    COMMAND cumetal_cublas_cupy_surface_test
+)
+
+add_test(
+    NAME functional_cusolver_cupy_surface
+    COMMAND cumetal_cusolver_cupy_surface_test
+)
+
+add_test(
+    NAME functional_cusparse_cupy_surface
+    COMMAND cumetal_cusparse_cupy_surface_test
 )
 
 add_test(

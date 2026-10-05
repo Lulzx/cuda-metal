@@ -76,9 +76,35 @@ int main(int argc, char** argv) {
             &active_blocks, matrix_mul, 64, 0) != CUDA_SUCCESS ||
         active_blocks <= 0 ||
         cuOccupancyMaxPotentialBlockSize(
-            &min_grid, &suggested_block, matrix_mul, 0, 0) != CUDA_SUCCESS ||
+            &min_grid, &suggested_block, matrix_mul, nullptr, 0, 0) != CUDA_SUCCESS ||
         min_grid <= 0 || suggested_block <= 0 || suggested_block > max_threads) {
         std::fprintf(stderr, "FAIL: Metal-backed function properties/occupancy failed\n");
+        return 1;
+    }
+
+    // The per-block-size shared-memory callback must be consulted, and the
+    // flags variant must agree with the plain query.
+    static int b2d_calls = 0;
+    b2d_calls = 0;
+    const CUoccupancyB2DSize b2d = [](int block) -> size_t {
+        ++b2d_calls;
+        return static_cast<size_t>(block) * sizeof(float);
+    };
+    int flagged_grid = 0, flagged_block = 0;
+    if (cuOccupancyMaxPotentialBlockSize(&min_grid, &suggested_block, matrix_mul, b2d, 0, 0) !=
+            CUDA_SUCCESS ||
+        b2d_calls == 0 ||
+        cuOccupancyMaxPotentialBlockSizeWithFlags(&flagged_grid, &flagged_block, matrix_mul,
+                                                  nullptr, 0, 0,
+                                                  CU_OCCUPANCY_DISABLE_CACHING_OVERRIDE) !=
+            CUDA_SUCCESS ||
+        cuOccupancyMaxPotentialBlockSize(&min_grid, &suggested_block, matrix_mul, nullptr, 0,
+                                         0) != CUDA_SUCCESS ||
+        flagged_grid != min_grid || flagged_block != suggested_block ||
+        cuOccupancyMaxPotentialBlockSizeWithFlags(&flagged_grid, &flagged_block, matrix_mul,
+                                                  nullptr, 0, 0, 0x80) !=
+            CUDA_ERROR_INVALID_VALUE) {
+        std::fprintf(stderr, "FAIL: occupancy callback/flags variant\n");
         return 1;
     }
 

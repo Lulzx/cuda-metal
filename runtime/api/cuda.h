@@ -109,6 +109,7 @@ typedef enum CUresult {
     CUDA_ERROR_INVALID_CONTEXT = 201,
     CUDA_ERROR_NO_BINARY_FOR_GPU = 209,
     CUDA_ERROR_JIT_COMPILER_NOT_FOUND = 221,
+    CUDA_ERROR_FILE_NOT_FOUND = 301,
     CUDA_ERROR_NOT_FOUND = 500,
     CUDA_ERROR_NOT_READY = 600,
     CUDA_ERROR_ILLEGAL_ADDRESS = 700,
@@ -140,6 +141,18 @@ typedef enum CUjit_option {
     CU_JIT_TARGET = 9,
     CU_JIT_FALLBACK_STRATEGY = 10,
 } CUjit_option;
+
+typedef enum CUjitInputType_enum {
+    CU_JIT_INPUT_CUBIN = 0,
+    CU_JIT_INPUT_PTX = 1,
+    CU_JIT_INPUT_FATBINARY = 2,
+    CU_JIT_INPUT_OBJECT = 3,
+    CU_JIT_INPUT_LIBRARY = 4,
+    CU_JIT_INPUT_NVVM = 5,
+    CU_JIT_NUM_INPUT_TYPES = 6
+} CUjitInputType;
+
+typedef struct CUlinkState_st* CUlinkState;
 
 typedef void (*CUstreamCallback)(CUstream hStream, CUresult status, void* userData);
 typedef void (*CUhostFn)(void* userData);
@@ -225,7 +238,7 @@ CUresult cuDevicePrimaryCtxSetFlags(CUdevice dev, unsigned int flags);
 CUresult cuDevicePrimaryCtxReset(CUdevice dev);
 
 // Device UUID.
-typedef struct { unsigned char bytes[16]; } CUuuid;
+typedef struct CUuuid_st { char bytes[16]; } CUuuid;
 CUresult cuDeviceGetUuid(CUuuid* uuid, CUdevice dev);
 
 CUresult cuStreamCreate(CUstream* phStream, unsigned int flags);
@@ -254,6 +267,19 @@ CUresult cuModuleLoad(CUmodule* module, const char* fname);
 CUresult cuModuleGetGlobal(CUdeviceptr* dptr, size_t* bytes,
                             CUmodule hmod, const char* name);
 CUresult cuModuleLoadData(CUmodule* module, const void* image);
+// CuMetal has no device-code linker: a link of exactly one CUBIN, PTX or
+// fatbinary image completes to that image, which cuModuleLoadData accepts.
+// A second input, an object or a library is CUDA_ERROR_NOT_SUPPORTED.
+CUresult cuLinkCreate(unsigned int numOptions, CUjit_option* options, void** optionValues,
+                      CUlinkState* stateOut);
+CUresult cuLinkAddData(CUlinkState state, CUjitInputType type, void* data, size_t size,
+                       const char* name, unsigned int numOptions, CUjit_option* options,
+                       void** optionValues);
+CUresult cuLinkAddFile(CUlinkState state, CUjitInputType type, const char* path,
+                       unsigned int numOptions, CUjit_option* options, void** optionValues);
+CUresult cuLinkComplete(CUlinkState state, void** cubinOut, size_t* sizeOut);
+CUresult cuLinkDestroy(CUlinkState state);
+
 CUresult cuModuleLoadDataEx(CUmodule* module,
                             const void* image,
                             unsigned int numOptions,
@@ -828,11 +854,26 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int* numBlocks,
                                                               int blockSize,
                                                               size_t dynamicSMemSize,
                                                               unsigned int flags);
+typedef size_t (*CUoccupancyB2DSize)(int blockSize);
 CUresult cuOccupancyMaxPotentialBlockSize(int* minGridSize,
                                           int* blockSize,
                                           CUfunction func,
+                                          CUoccupancyB2DSize blockSizeToDynamicSMemSize,
                                           size_t dynamicSMemSize,
                                           int blockSizeLimit);
+typedef enum CUoccupancy_flags_enum {
+    CU_OCCUPANCY_DEFAULT = 0x0,
+    CU_OCCUPANCY_DISABLE_CACHING_OVERRIDE = 0x1
+} CUoccupancy_flags;
+// The caching override concerns L1/shared carveout, which Metal does not
+// expose, so both flags compute the same answer.
+CUresult cuOccupancyMaxPotentialBlockSizeWithFlags(int* minGridSize,
+                                                   int* blockSize,
+                                                   CUfunction func,
+                                                   CUoccupancyB2DSize blockSizeToDynamicSMemSize,
+                                                   size_t dynamicSMemSize,
+                                                   int blockSizeLimit,
+                                                   unsigned int flags);
 // Explicit function preparation. cuModuleGetFunction resolves a handle
 // lazily, so a successful lookup does not prove the kernel compiled; these let
 // a caller draw that boundary itself and report a compilation failure before

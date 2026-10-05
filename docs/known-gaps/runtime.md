@@ -181,6 +181,25 @@ and both are also queryable through `cudaDeviceGetAttribute`/`cuDeviceGetAttribu
 They must not be used as proof that the corresponding NVIDIA hardware
 feature exists.
 
+`cudaDeviceProp` uses the CUDA 12 field order and size (1032 bytes). Earlier
+CuMetal releases used a private 680-byte layout, so anything compiled against
+the old header reads the wrong fields and must be rebuilt. The texture and
+surface limits describe CuMetal's buffer-backed arrays. The mipmapped, gather
+and cubemap limits are 0 because those forms are not implemented.
+
+Interprocess sharing (`cudaIpcGetMemHandle`, `cudaIpcOpenMemHandle` and the
+event equivalents) always returns `cudaErrorNotSupported`.
+
+`cuLinkCreate`/`cuLinkAddData`/`cuLinkComplete` cover only a link of exactly one
+CUBIN, PTX or fatbinary image, which completes to that same image. CuMetal has
+no device-code linker, so a second input, a relocatable object or a library
+such as `libcudadevrt.a` returns `CUDA_ERROR_NOT_SUPPORTED`.
+
+`cuModuleLoadData` accepts PTX text that opens with `//` or `/* */` comments,
+as NVRTC, nvcc and Clang output all do. `cuModuleGetGlobal` finds any global
+recorded in the module's ABI sidecar, whether or not a kernel that uses it has
+been looked up yet.
+
 `cudaFuncGetAttributes.numRegs` is a positive virtual occupancy cost derived
 from that register budget and the Metal pipeline's actual thread limit. It
 allows clients such as Kokkos to calculate nonempty launch sizes; it is not

@@ -19,9 +19,12 @@ typedef enum cusolverStatus_t {
     CUSOLVER_STATUS_ALLOC_FAILED = 2,
     CUSOLVER_STATUS_INVALID_VALUE = 3,
     CUSOLVER_STATUS_ARCH_MISMATCH = 4,
+    CUSOLVER_STATUS_MAPPING_ERROR = 5,
     CUSOLVER_STATUS_EXECUTION_FAILED = 6,
     CUSOLVER_STATUS_INTERNAL_ERROR = 7,
     CUSOLVER_STATUS_MATRIX_TYPE_NOT_SUPPORTED = 8,
+    CUSOLVER_STATUS_NOT_SUPPORTED = 9,
+    CUSOLVER_STATUS_ZERO_PIVOT = 10,
 } cusolverStatus_t;
 
 typedef enum cusolverEigType_t {
@@ -38,6 +41,9 @@ typedef enum cusolverEigMode_t {
 // Jacobi eigensolver configuration. sort_eig: 0 leaves eigenvalues unsorted,
 // non-zero sorts them ascending after convergence.
 typedef struct syevjInfo* syevjInfo_t;
+
+// Jacobi SVD configuration (tolerance, max_sweeps, sort_svd), see cusolverDn.h.
+typedef struct gesvdjInfo* gesvdjInfo_t;
 
 #ifdef __cplusplus
 }
