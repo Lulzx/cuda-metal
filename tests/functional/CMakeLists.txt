@@ -3078,6 +3078,15 @@ if(APPLE)
     target_link_libraries(cumetal_trap_binding_test PRIVATE cumetal_runtime)
     add_test(NAME functional_ptx_trap_reporting
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR})
+    add_test(NAME functional_ptx_block_dimension_assert
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_block_dimension_assert.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_block_dimension_assert PROPERTIES TIMEOUT 45)
+    add_test(NAME functional_ptx_scalar_zero_join
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_scalar_zero_join.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_scalar_zero_join PROPERTIES TIMEOUT 45)
+    add_test(NAME functional_ptx_assert_reporting
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --assert)
+    set_tests_properties(functional_ptx_assert_reporting PROPERTIES TIMEOUT 45)
     add_test(NAME functional_ptx_trap_reporting_trace
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_trap_reporting.py ${CMAKE_BINARY_DIR} --trace)
     add_test(NAME functional_ptx_trap_calls

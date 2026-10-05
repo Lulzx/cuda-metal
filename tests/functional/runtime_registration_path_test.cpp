@@ -130,10 +130,15 @@ int main(int argc, char** argv) {
     int min_grid = 0;
     int suggested_block = 0;
     cudaFuncAttributes attributes{};
+    cudaDeviceProp device_properties{};
     const void* registered_function =
         reinterpret_cast<const void*>(&vector_add_host_stub);
     if (cudaFuncGetAttributes(&attributes, registered_function) != cudaSuccess ||
         attributes.maxThreadsPerBlock <= 0 ||
+        attributes.numRegs <= 0 ||
+        cudaGetDeviceProperties(&device_properties, 0) != cudaSuccess ||
+        attributes.numRegs * attributes.maxThreadsPerBlock <
+            device_properties.regsPerBlock ||
         cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &active_blocks, registered_function, kThreadsPerBlock, 0) != cudaSuccess ||
         active_blocks <= 0 ||

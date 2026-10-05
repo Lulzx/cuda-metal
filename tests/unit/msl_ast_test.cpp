@@ -65,6 +65,33 @@ int main() {
                 .str() == "device uchar* threadgroup*",
         "nested MSL pointers place each address-space qualifier on its own pointer level");
 
+    const auto local_pointer = MslExpression::identifier("local_pointer",
+        MslType::pointer(MslType::uint(8), MslAddressSpace::kThread));
+    MslModule pointer_module;
+    MslFunction pointer_function;
+    pointer_function.name = "pointer_bits";
+    pointer_function.statements.push_back(MslStatement::variable(MslType::uint(64), "bits",
+        MslExpression::bitcast(MslType::uint(64), local_pointer)));
+    pointer_module.functions.push_back(pointer_function);
+    const auto pointer_printed = print_msl(pointer_module);
+    ok &= expect(pointer_printed.ok && pointer_printed.source.find("reinterpret_cast<ulong>(local_pointer)") != std::string::npos,
+                 "pointer storage words use an address reinterpretation");
+    pointer_module.functions[0].statements = {MslStatement::variable(MslType::uint(), "narrow",
+        MslExpression::bitcast(MslType::uint(), local_pointer))};
+    ok &= expect(!print_msl(pointer_module).ok, "narrow pointer bitcasts fail explicitly");
+    pointer_module.functions[0].statements = {
+        MslStatement::private_byte_array("private_record", 800, 16),
+        MslStatement::threadgroup_byte_array("shared_record", 48, 8),
+        MslStatement::variable(MslType::uint(), "aligned_word", std::nullopt, false, 8)};
+    const auto aligned = print_msl(pointer_module);
+    ok &= expect(aligned.ok &&
+        aligned.source.find("alignas(16) thread uchar private_record[800]") != std::string::npos &&
+        aligned.source.find("alignas(8) threadgroup uchar shared_record[48]") != std::string::npos &&
+        aligned.source.find("alignas(8) uint aligned_word") != std::string::npos,
+        "storage declarations retain their requested alignment");
+    pointer_module.functions[0].statements = {MslStatement::private_byte_array("bad", 16, 3)};
+    ok &= expect(!print_msl(pointer_module).ok, "non-power-of-two storage alignment is rejected");
+
     if (!ok) return 1;
     std::cout << "MSL AST tests passed\n";
     return 0;

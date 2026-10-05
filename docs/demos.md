@@ -166,6 +166,16 @@ the warp shuffle family had no `long` overloads; `cuPointerGetAttributes` and
 See [the AMReX guide](../demos/amrex/README.md) for the scope limits, the
 measured FP64 accuracy, and what the demo does not claim.
 
+## LAMMPS / Kokkos GPU demo
+
+Unmodified pinned LAMMPS/Kokkos compiles and completes the stock 32,000-atom,
+100-step Lennard-Jones benchmark on Apple M4 Pro in full/Newton-off and
+half/Newton-on modes. Both pass the fixed `5e-4` numerical gate against CPU
+double precision and analytic initial energy; maximum scaled CPU error is
+`5.91e-6`. FP64 is emulated, and cold half-neighbour pipeline compilation takes
+minutes. The original single-precision CPU mode-agreement failure is retained. The
+[experiment guide](../demos/lammps/README.md) records the pin and commands.
+
 ## Run one sample
 
 ```bash

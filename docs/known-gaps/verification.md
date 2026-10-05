@@ -33,6 +33,19 @@ external revisions, assets, models, or build systems. Each result applies only
 to its pinned revision and command. Focused success is not whole-project
 compatibility.
 
+The pinned LAMMPS `stable_30Sep2026` / Kokkos 5.2.1 GPU gate passed on 2026-10-04.
+The unmodified CUDA application compiles and links, and completes the stock
+32,000-atom, 100-step LJ benchmark in both full and half neighbour modes on
+Apple M4 Pro. Maximum scaled CPU-double error is `5.91e-6`, cross-mode
+difference `1.27e-6`, and analytic initial pair-energy error `1.26e-7`, all below
+the unchanged `5e-4` tolerance. Launches use generic typed PTX lowering with
+workload specializations disabled. FP64 emulation remains reduced precision;
+cold half-neighbour pipeline compilation takes minutes, and performance
+comparisons remain open. The single-precision CPU reference retains its failed
+mode agreement (`0.000578169` maximum scaled difference). This is one pinned
+workload, not general LAMMPS compatibility. See the
+[LAMMPS experiment](../../demos/lammps/README.md) for the exact scope and pin.
+
 The recorded GROMACS native-Metal comparison is pinned to MR !6137 commit
 `c7fc4ef64a23f2fe4795d6342af5bcb769d9ca9a`, one 96,000-atom water input, and a
 common GPU-nonbonded/PME task mix. Rematched warm medians are 2.726 ms/step for

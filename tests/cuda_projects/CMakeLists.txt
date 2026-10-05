@@ -617,3 +617,32 @@ if(CUMETAL_CUDA_PROJECTS_PYTHON3)
         )
     endif()
 endif()
+
+add_test(
+    NAME functional_cuda_projects_kokkos_compat
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+        kokkos_compat kokkos_compat.cu kokkos_compat
+        "PASS: Kokkos compatibility on Apple GPU"
+)
+set_tests_properties(functional_cuda_projects_kokkos_compat PROPERTIES
+    SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
+    ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_USE_METAL_DEVICE_ADDRESSES=1")
+
+add_test(NAME functional_cuda_projects_cta_reduce
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+        cta_reduce cta_reduce.cu cta_reduce
+        "PASS: CTA reductions across SIMD groups on Apple GPU")
+set_tests_properties(functional_cuda_projects_cta_reduce PROPERTIES
+    SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
+    ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir")
+
+add_test(NAME functional_cuda_projects_thrust_gpu_sort
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+        thrust_gpu_sort thrust_gpu_sort.cu thrust_gpu_sort
+        "PASS: CUDA-policy Thrust sort on Apple GPU")
+set_tests_properties(functional_cuda_projects_thrust_gpu_sort PROPERTIES
+    SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
+    ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_USE_METAL_DEVICE_ADDRESSES=1")

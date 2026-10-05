@@ -107,8 +107,15 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   dedicated VRAM; utilization, temperature, power, and clock telemetry are
   explicitly unsupported through the public-API-only boundary.
 - **Thrust/CUB:** several algorithms are sequential/CPU over UMA; device-wide
-  performance and full template/API compatibility are not claimed. Those
-  host-backed `cub::Device*` entry points do now synchronize their stream before
+  performance and full template/API compatibility are not claimed. CUDA-source
+  `thrust::sort(cuda::par.on(stream), ...)` uses GPU merge and copy kernels,
+  including a device-callable comparator, and completes the selected stream
+  before releasing its temporary allocation. The gate covers signed integer
+  ordering, duplicates, custom iterators/comparators, producer ordering and
+  error paths. It is a correctness implementation, not a radix-sort performance
+  claim. CUDA-policy `sort_by_key` and policy sort instantiated by a non-CUDA
+  C++ compiler still refuse explicitly. Policy-free sort remains host-backed.
+  Those host-backed `cub::Device*` entry points do now synchronize their stream before
   reading the input, which is a correctness requirement rather than a
   performance choice: without it a scan or reduction of a buffer a kernel is
   still writing silently returns stale memory. The tested aggregate

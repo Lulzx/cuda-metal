@@ -19,14 +19,15 @@ compatibility claim. Implemented surfaces and detailed limitations remain in
   not substitute for a recurring verification mechanism or a commissioned GPU
   lane. GitHub Actions workflows are intentionally absent.
 - The typed shared-IR migration gate is not closed. With CUDA Clang 21-23, the
-  reviewed 42-file production-metallib matrix is 42/42 for direct `.cu` and 39/42 for PTX
-  through `cumetal-ir`, while the legacy PTX backend is 38/42 because it rejects
-  the flat and nested aggregate device-call ABIs. The authoritative reviewed manifest and gates are
+  reviewed 45-file production-metallib matrix is 45/45 for direct `.cu` and 43/45 for PTX
+  through `cumetal-ir`, while the legacy PTX backend is 41/45 because it rejects
+  the flat and nested aggregate calls, descriptor copies, and FP64 device calls.
+  The authoritative reviewed manifest and gates are
   `tests/cuda_projects/backend_matrix_manifest.txt` and
   `conformance_compiler_backend_matrix{,_versions}`. The matrix is compile
   evidence only; promotion still requires numerical GPU tests.
-- The exact 28-project in-tree corpus now passes 28/28 through typed PTX and
-  28/28 through direct native AOT on Apple M4 Pro with workload
+- The exact in-tree corpus now passes 40/40 typed-PTX enrollments and
+  43/43 direct native-AOT enrollments on Apple M4 Pro (2026-10-04) with workload
   specializations disabled. Native ABI v3 carries kernel, symbol, and device
   `printf` metadata and performs no first-launch PTX JIT. This closes the
   reviewed numerical corpus, not the residual language combinations in P1.

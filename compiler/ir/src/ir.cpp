@@ -304,6 +304,7 @@ std::string_view opcode_name(OpCode opcode) {
         case OpCode::kAggregateExtract: return "aggregate_extract";
         case OpCode::kConvert: return "convert";
         case OpCode::kAddressSpaceCast: return "addrspace_cast";
+        case OpCode::kAddressSpaceTest: return "addrspace_test";
         case OpCode::kAlloca: return "alloca";
         case OpCode::kPointerOffset: return "pointer_offset";
         case OpCode::kLoad: return "load";
@@ -597,6 +598,18 @@ VerifyResult verify(const Module& module) {
                         add_diagnostic(&result, operation.location,
                                        "pointer subtraction requires a same-space pointer and 64-bit byte offset");
                     }
+                }
+                if (operation.opcode == OpCode::kAddressSpaceTest) {
+                    const auto query = operation.attributes.find("address_space");
+                    if (operation.operands.size() != 1 || !operation.operands[0].type.is_pointer() ||
+                        operation.result_types.size() != 1 || operation.result_types[0] != Type::predicate() ||
+                        query == operation.attributes.end() ||
+                        (query->second != "global" && query->second != "shared" &&
+                         query->second != "const" && query->second != "local")) {
+                        add_diagnostic(&result, operation.location, "invalid address-space predicate");
+                    }
+                    if (module.stage == IrStage::kMetalLegalized)
+                        add_diagnostic(&result, operation.location, "unresolved address-space predicate");
                 }
                 if (operation.opcode == OpCode::kAddressSpaceCast &&
                     (!operation.operands.empty() && !operation.result_types.empty())) {

@@ -24,6 +24,8 @@ demos/highs/out/
 demos/gromacs/out/
 # AMReX demo artifacts (build logs, generated inputs, plotfiles, fcompare output)
 demos/amrex/out/
+# Pinned LAMMPS compile experiment logs and reference runs
+demos/lammps/out/
 __pycache__/
 demos/highs/lpfeas/lps/
 demos/highs/lpfeas/results/

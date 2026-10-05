@@ -22,6 +22,20 @@ def main():
     api('cuCtxCreate', [c.POINTER(ptr), u32, c.c_int], c.byref(context), 0, 0)
     fixture = 'ptx_trap_calls.ptx' if '--calls' in sys.argv else 'ptx_trap_reporting.ptx'
     source = (Path(__file__).parent / 'reference' / fixture).read_text()
+    if '--assert' in sys.argv:
+        source = source.replace('trap;', '''{
+.param .b64 assert_message;
+.param .b64 assert_file;
+.param .b32 assert_line;
+.param .b64 assert_function;
+.param .b64 assert_char_size;
+st.param.b64 [assert_message], 0;
+st.param.b64 [assert_file], 0;
+st.param.b32 [assert_line], 0;
+st.param.b64 [assert_function], 0;
+st.param.b64 [assert_char_size], 1;
+call.uni __assertfail, (assert_message, assert_file, assert_line, assert_function, assert_char_size);
+}''')
     with tempfile.TemporaryDirectory(prefix='cumetal-trap-') as work:
         ptx, msl = Path(work) / 'test.ptx', Path(work) / 'test.metal'
         ptx.write_text(source)

@@ -15,6 +15,7 @@
 #include <string.h>
 
 #ifdef __cplusplus
+#include "cumetal_float16_convert.h"
 
 #ifndef __host__
 #define __host__
@@ -31,13 +32,7 @@
 #endif
 
 static __host__ __device__ __forceinline__ uint16_t __cumetal_float_to_bf16_bits(float f) {
-    uint32_t bits;
-    __builtin_memcpy(&bits, &f, sizeof(bits));
-
-    // Round-to-nearest-even on truncation to BF16.
-    const uint32_t lsb = (bits >> 16) & 1u;
-    bits += 0x7fffu + lsb;
-    return static_cast<uint16_t>(bits >> 16);
+    return cumetal_float16::from_float<8, 7>(f);
 }
 
 static __host__ __device__ __forceinline__ float __cumetal_bf16_bits_to_float(uint16_t bits16) {
@@ -90,5 +85,108 @@ static __host__ __device__ __forceinline__ nv_bfloat16 __nv_cvt_e8m0_to_bf16raw(
     out.__x = static_cast<uint16_t>(x) << 7;
     return out;
 }
+
+
+CUMETAL_F16_HD inline __nv_bfloat16 __cumetal_bfloat_from_bits(uint16_t bits) {
+    __nv_bfloat16 out; out.__x = bits; return out;
+}
+CUMETAL_F16_HD inline __nv_bfloat16 __double2bfloat16(double value) {
+    return __cumetal_bfloat_from_bits(cumetal_float16::from_double<8, 7>(value));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 __short2bfloat16_rn(short value) {
+    const uint64_t magnitude = value < 0 ? uint64_t(0) - static_cast<uint64_t>(value) : static_cast<uint64_t>(value);
+    return __cumetal_bfloat_from_bits(cumetal_float16::pack<8, 7>(value < 0, magnitude, 0));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 __ushort2bfloat16_rn(unsigned short value) {
+    const uint64_t magnitude = static_cast<uint64_t>(value);
+    return __cumetal_bfloat_from_bits(cumetal_float16::pack<8, 7>(false, magnitude, 0));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 __int2bfloat16_rn(int value) {
+    const uint64_t magnitude = value < 0 ? uint64_t(0) - static_cast<uint64_t>(value) : static_cast<uint64_t>(value);
+    return __cumetal_bfloat_from_bits(cumetal_float16::pack<8, 7>(value < 0, magnitude, 0));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 __uint2bfloat16_rn(unsigned int value) {
+    const uint64_t magnitude = static_cast<uint64_t>(value);
+    return __cumetal_bfloat_from_bits(cumetal_float16::pack<8, 7>(false, magnitude, 0));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 __ll2bfloat16_rn(long long value) {
+    const uint64_t magnitude = value < 0 ? uint64_t(0) - static_cast<uint64_t>(value) : static_cast<uint64_t>(value);
+    return __cumetal_bfloat_from_bits(cumetal_float16::pack<8, 7>(value < 0, magnitude, 0));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 __ull2bfloat16_rn(unsigned long long value) {
+    const uint64_t magnitude = static_cast<uint64_t>(value);
+    return __cumetal_bfloat_from_bits(cumetal_float16::pack<8, 7>(false, magnitude, 0));
+}
+CUMETAL_F16_HD inline short __bfloat162short_rz(__nv_bfloat16 value) {
+    return static_cast<short>(cumetal_float16::signed_integer<16>(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline unsigned short __bfloat162ushort_rz(__nv_bfloat16 value) {
+    return static_cast<unsigned short>(cumetal_float16::unsigned_integer<16>(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline int __bfloat162int_rz(__nv_bfloat16 value) {
+    return static_cast<int>(cumetal_float16::signed_integer<32>(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline unsigned int __bfloat162uint_rz(__nv_bfloat16 value) {
+    return static_cast<unsigned int>(cumetal_float16::unsigned_integer<32>(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline long long __bfloat162ll_rz(__nv_bfloat16 value) {
+    return static_cast<long long>(cumetal_float16::signed_integer<64>(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline unsigned long long __bfloat162ull_rz(__nv_bfloat16 value) {
+    return static_cast<unsigned long long>(cumetal_float16::unsigned_integer<64>(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hexp(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(__builtin_expf(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hexp2(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(__builtin_exp2f(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hlog(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(__builtin_logf(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hlog2(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(__builtin_log2f(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hlog10(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(__builtin_log10f(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hsqrt(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(__builtin_sqrtf(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hsin(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(__builtin_sinf(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hcos(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(__builtin_cosf(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hceil(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(__builtin_ceilf(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hfloor(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(__builtin_floorf(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 htrunc(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(__builtin_truncf(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hrint(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(cumetal_float16::round_even(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 __habs(__nv_bfloat16 value) {
+    value.__x &= 0x7fff; return value;
+}
+CUMETAL_F16_HD inline __nv_bfloat16 __hmax(__nv_bfloat16 a, __nv_bfloat16 b) {
+    return __float2bfloat16_rn(__builtin_fmaxf(__bfloat162float(a), __bfloat162float(b)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 __hmin(__nv_bfloat16 a, __nv_bfloat16 b) {
+    return __float2bfloat16_rn(__builtin_fminf(__bfloat162float(a), __bfloat162float(b)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hrsqrt(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(1.0f / __builtin_sqrtf(__bfloat162float(value)));
+}
+CUMETAL_F16_HD inline __nv_bfloat16 hrcp(__nv_bfloat16 value) {
+    return __float2bfloat16_rn(1.0f / __bfloat162float(value));
+}
+CUMETAL_F16_HD inline bool __hisnan(__nv_bfloat16 value) { return __builtin_isnan(__bfloat162float(value)); }
+CUMETAL_F16_HD inline bool __hisinf(__nv_bfloat16 value) { return __builtin_isinf(__bfloat162float(value)); }
 
 #endif  // __cplusplus

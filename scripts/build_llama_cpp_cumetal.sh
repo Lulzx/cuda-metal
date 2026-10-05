@@ -218,10 +218,18 @@ ARGS=()
 SKIP_NEXT=0
 OPTIONS_FILE_NEXT=0
 XCOMPILER_NEXT=0
+XLINKER_NEXT=0
 HAS_CUDA_SOURCE=0
 COMPILE_ONLY=0
 IS_CMAKE_PROBE=0
 for arg in "\$@"; do
+    if [[ \$XLINKER_NEXT -eq 1 ]]; then
+        OLDIFS="\$IFS"; IFS=','
+        for linkflag in \$arg; do ARGS+=(-Xlinker "\$(unquote "\$linkflag")"); done
+        IFS="\$OLDIFS"
+        XLINKER_NEXT=0
+        continue
+    fi
     if [[ \$XCOMPILER_NEXT -eq 1 ]]; then
         OLDIFS="\$IFS"; IFS=','
         for hostflag in \$arg; do ARGS+=("\$(unquote "\$hostflag")"); done
@@ -266,6 +274,13 @@ for arg in "\$@"; do
         -Xcompiler=*|--compiler-options=*)
             OLDIFS="\$IFS"; IFS=','
             for hostflag in \${arg#*=}; do ARGS+=("\$(unquote "\$hostflag")"); done
+            IFS="\$OLDIFS"
+            continue ;;
+        # nvcc linker options are comma-separated, including Kokkos's -Wl overlay.
+        -Xlinker|--linker-options)             XLINKER_NEXT=1; continue ;;
+        -Xlinker=*|--linker-options=*)
+            OLDIFS="\$IFS"; IFS=','
+            for linkflag in \${arg#*=}; do ARGS+=(-Xlinker "\$(unquote "\$linkflag")"); done
             IFS="\$OLDIFS"
             continue ;;
         # Flags for nvcc-internal sub-tools that clang has no equivalent for.
@@ -361,6 +376,9 @@ CUDA_MODE_FLAGS=(
     -DCUDART_VERSION=11060
     -D__CUDACC__=1
     -D__NVCC__=1
+    -D__CUDACC_VER_MAJOR__=12
+    -D__CUDACC_VER_MINOR__=2
+    -D__CUDACC_VER_BUILD__=140
     -Wno-pass-failed
     -Wno-unknown-cuda-version
     -Wno-unused-command-line-argument

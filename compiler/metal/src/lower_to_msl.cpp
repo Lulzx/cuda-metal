@@ -165,6 +165,40 @@ MslFunction make_device_clock_helper() {
     return helper;
 }
 
+MslFunction make_cta_any_helper(bool count = false) {
+    const auto pointer = MslType::pointer(atomic_uint_type(), MslAddressSpace::kThreadgroup);
+    const auto uint3 = MslType::vector(MslType::uint(), 3);
+    const auto scratch = MslExpression::identifier("scratch", pointer);
+    const auto position = MslExpression::identifier("position", uint3);
+    const auto zero = MslExpression::literal("0u", MslType::uint());
+    const auto order = MslExpression::identifier("memory_order_relaxed", memory_order_type());
+    const auto component = [&](const char* name) { return MslExpression::member(position, name, MslType::uint()); };
+    const auto leader = MslExpression::binary("==", MslExpression::binary("|",
+        MslExpression::binary("|", component("x"), component("y"), MslType::uint()),
+        component("z"), MslType::uint()), zero, MslType::boolean());
+    const auto barrier = [] { return MslStatement::expression(MslExpression::call(
+        "threadgroup_barrier", {MslExpression::literal("mem_flags::mem_threadgroup | mem_flags::mem_device", MslType::uint())}, MslType::void_type())); };
+    MslFunction helper;
+    helper.name = count ? "cm_cta_count" : "cm_cta_any";
+    const auto result_type = count ? MslType::uint() : MslType::boolean();
+    helper.return_type = result_type;
+    helper.parameters = {{.type=MslType::boolean(), .name="predicate"},
+        {.type=pointer, .name="scratch"}, {.type=uint3, .name="position"}};
+    helper.statements.push_back(MslStatement::if_statement(leader, {
+        MslStatement::expression(MslExpression::call("atomic_store_explicit", {scratch, zero, order}, MslType::void_type()))}));
+    helper.statements.push_back(barrier());
+    helper.statements.push_back(MslStatement::expression(MslExpression::call(count ? "atomic_fetch_add_explicit" : "atomic_fetch_or_explicit",
+        {scratch, MslExpression::cast(MslType::uint(), MslExpression::identifier("predicate", MslType::boolean())), order}, MslType::uint())));
+    helper.statements.push_back(barrier());
+    const auto loaded = MslExpression::call("atomic_load_explicit", {scratch, order}, MslType::uint());
+    helper.statements.push_back(MslStatement::variable(result_type, "result", count ? loaded :
+        MslExpression::binary("!=", loaded, zero, MslType::boolean())));
+    // Every thread reads the current generation before any following reduction resets it.
+    helper.statements.push_back(barrier());
+    helper.statements.push_back(MslStatement::return_statement(MslExpression::identifier("result", result_type)));
+    return helper;
+}
+
 MslFunction make_grid_sync_helper() {
     const MslType atomic_uint = atomic_uint_type();
     const MslType atomic_pointer =
@@ -2019,6 +2053,7 @@ struct BuiltinUsage {
     bool lane_id = false;
     bool device_clock = false;
     bool grid_barrier = false;
+    bool cta_any = false;
 
     bool merge(const BuiltinUsage& other) {
         const BuiltinUsage before = *this;
@@ -2029,13 +2064,14 @@ struct BuiltinUsage {
         lane_id = lane_id || other.lane_id;
         device_clock = device_clock || other.device_clock;
         grid_barrier = grid_barrier || other.grid_barrier;
+        cta_any = cta_any || other.cta_any;
         return thread_position != before.thread_position ||
                threadgroup_position != before.threadgroup_position ||
                threads_per_threadgroup != before.threads_per_threadgroup ||
                threadgroups_per_grid != before.threadgroups_per_grid ||
                lane_id != before.lane_id ||
                device_clock != before.device_clock ||
-               grid_barrier != before.grid_barrier;
+               grid_barrier != before.grid_barrier || cta_any != before.cta_any;
     }
 };
 
@@ -2123,6 +2159,10 @@ BuiltinUsageMap analyze_builtin_usage(const ir::Module& module) {
                     if (callee != operation.attributes.end() &&
                         callee->second == "cm_device_clock") {
                         direct.device_clock = true;
+                    }
+                    if (callee != operation.attributes.end() && (callee->second == "cm_cta_any" || callee->second == "cm_cta_count")) {
+                        direct.cta_any = true;
+                        direct.thread_position = true;
                     }
                     if (callee != operation.attributes.end() &&
                         callee->second == "cm_grid_sync") {
@@ -2213,7 +2253,9 @@ BarrierUsageMap analyze_barrier_usage(const ir::Module& module) {
         bool direct = false;
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::Operation& operation : block.operations) {
-                direct = direct || operation.opcode == ir::OpCode::kMetalBarrier;
+                direct = direct || operation.opcode == ir::OpCode::kMetalBarrier ||
+                    (operation.opcode == ir::OpCode::kCall && operation.attributes.contains("callee") &&
+                     (operation.attributes.at("callee") == "cm_cta_any" || operation.attributes.at("callee") == "cm_cta_count"));
             }
         }
         usage[function.name] = direct;
@@ -2303,6 +2345,12 @@ struct AstLowerer {
         MslExpr continue_enclosing;
     };
     std::vector<LoopEscapeContext> loop_escape_stack;
+    struct DeferredLoopExits {
+        std::size_t header;
+        std::map<std::size_t, unsigned> targets;
+        MslExpr selector;
+    };
+    std::vector<DeferredLoopExits> deferred_loop_exits;
     bool needs_thread_position = false;
     bool needs_threadgroup_position = false;
     bool needs_threads_per_threadgroup = false;
@@ -2312,6 +2360,7 @@ struct AstLowerer {
     bool reports_traps = false;
     bool needs_device_clock = false;
     bool needs_grid_barrier = false;
+    bool needs_cta_any = false;
     bool cfg_dispatcher_mode = false;
     bool predeclared_ssa_storage = false;
     bool force_cfg_dispatcher = false;
@@ -2348,6 +2397,7 @@ struct AstLowerer {
         needs_lane_id = required.lane_id;
         needs_device_clock = required.device_clock;
         needs_grid_barrier = required.grid_barrier;
+        needs_cta_any = required.cta_any;
         needs_wide_atomic_lock_bank = wide_atomic_usage.at(function.name);
     }
 
@@ -2644,6 +2694,27 @@ struct AstLowerer {
                 left = MslExpression::cast(signed_type, left);
                 right = MslExpression::cast(signed_type, right);
                 expression_type = signed_type;
+            }
+            if ((operation.opcode == ir::OpCode::kShiftLeft ||
+                 operation.opcode == ir::OpCode::kShiftRight) &&
+                operation.attributes.contains("shift_clamp")) {
+                // PTX clamps shifts at the register width; C++/MSL leaves an
+                // overshift undefined. Establish the unsigned count first.
+                const auto bits = operation.operands[0].type.bit_width;
+                const auto count = MslExpression::cast(MslType::uint(32), right);
+                const auto limit = MslExpression::literal(std::to_string(bits), MslType::uint(32));
+                const auto in_range = MslExpression::binary("<", count, limit, MslType::boolean());
+                const bool signed_right = operation.opcode == ir::OpCode::kShiftRight &&
+                    operation.attributes.contains("signed") && operation.attributes.at("signed") == "true";
+                // Inline PTX can bind an LLVM signed constant to an unsigned
+                // shift. The PTX opcode determines the reading of its bits.
+                left = MslExpression::cast(signed_right ? MslType::sint(bits) : MslType::uint(bits), left);
+                const auto shifted = MslExpression::binary(binary, left, count, expression_type);
+                const auto overflow = signed_right
+                    ? MslExpression::binary(">>", left,
+                          MslExpression::literal(std::to_string(bits - 1), MslType::uint(32)), expression_type)
+                    : MslExpression::literal("0", expression_type);
+                return declare_result(operation, MslExpression::conditional(in_range, shifted, overflow, expression_type));
             }
             MslExpr expression;
             if (operation.opcode == ir::OpCode::kPointerOffset &&
@@ -3462,6 +3533,15 @@ struct AstLowerer {
                         ? tick
                         : MslExpression::cast(return_type, tick));
             }
+            if ((callee->second == "cm_cta_any" || callee->second == "cm_cta_count")) {
+                const auto scratch_type = MslType::pointer(atomic_uint_type(), MslAddressSpace::kThreadgroup);
+                return declare_result(operation, MslExpression::call(callee->second,
+                    {expression_for(operation.operands.front()),
+                     MslExpression::cast(scratch_type, MslExpression::identifier("cm_cta_scratch",
+                         MslType::pointer(MslType::uint(8), MslAddressSpace::kThreadgroup)), true),
+                     MslExpression::identifier("cm_thread_position", MslType::vector(MslType::uint(),3))},
+                    callee->second == "cm_cta_count" ? MslType::uint() : MslType::boolean()));
+            }
             if (callee->second == "cm_grid_sync") {
                 return MslStatement::expression(MslExpression::call(
                     "cm_grid_sync",
@@ -3870,6 +3950,8 @@ struct AstLowerer {
                         MslType::pointer(atomic_uint_type(),
                                          MslAddressSpace::kDevice)));
                 }
+                if (required.cta_any) arguments.push_back(MslExpression::identifier("cm_cta_scratch",
+                    MslType::pointer(MslType::uint(8), MslAddressSpace::kThreadgroup)));
                 if (required.thread_position) {
                     arguments.push_back(MslExpression::identifier(
                         "cm_thread_position", MslType::vector(MslType::uint(), 3)));
@@ -4066,17 +4148,31 @@ struct AstLowerer {
                     operation.attributes.at("fp64_mode") == "fast48"
                         ? "cm_fp64_fast_"
                         : "vf64_";
-                bool invert = predicate == "ne" || predicate == "neu";
+                const auto boolean = [&](const char* op, MslExpr a, MslExpr b) {
+                    return MslExpression::binary(op, std::move(a), std::move(b), MslType::boolean());
+                };
+                const auto negate = [&](MslExpr value) {
+                    return MslExpression::unary("!", std::move(value), MslType::boolean());
+                };
+                const MslExpr unordered = boolean("||",
+                    MslExpression::call("cm_fp64_nan", {left}, MslType::boolean()),
+                    MslExpression::call("cm_fp64_nan", {right}, MslType::boolean()));
+                if (predicate == "nan" || predicate == "num")
+                    return declare_result(operation, predicate == "nan" ? unordered : negate(unordered));
+                const bool unordered_relation = predicate == "equ" || predicate == "ltu" ||
+                    predicate == "leu" || predicate == "gtu" || predicate == "geu";
+                std::string ordered = predicate;
+                if (unordered_relation) ordered.pop_back();
+                const bool invert = ordered == "ne" || ordered == "neu" || ordered == "one";
                 std::string relation = "eq";
-                if (predicate == "lt" || predicate == "gt") relation = "lt";
-                if (predicate == "le" || predicate == "ge") relation = "le";
-                if (predicate == "gt" || predicate == "ge") std::swap(left, right);
+                if (ordered == "lt" || ordered == "gt") relation = "lt";
+                if (ordered == "le" || ordered == "ge") relation = "le";
+                if (ordered == "gt" || ordered == "ge") std::swap(left, right);
                 MslExpr compared = MslExpression::call(
                     prefix + relation, {left, right}, MslType::boolean());
-                if (invert) {
-                    compared = MslExpression::unary(
-                        "!", compared, MslType::boolean());
-                }
+                if (invert) compared = negate(compared);
+                if (unordered_relation) compared = boolean("||", compared, unordered);
+                else if (ordered == "one") compared = boolean("&&", compared, negate(unordered));
                 return declare_result(operation, compared);
             }
             if (operation.attributes.contains("signed") &&
@@ -4394,6 +4490,8 @@ struct AstLowerer {
                 return std::nullopt;
             }
             const ir::ValueId result_value = operation.results.front();
+            const auto alignment = operation.attributes.contains("alignment")
+                ? std::stoull(operation.attributes.at("alignment")) : 0;
             if (const auto byte_size = operation.attributes.find("byte_size");
                 byte_size != operation.attributes.end()) {
                 const std::string storage_name = value_name(result_value) + "_storage";
@@ -4404,7 +4502,7 @@ struct AstLowerer {
                     return std::nullopt;
                 }
                 return MslStatement::private_byte_array(
-                    storage_name, std::stoull(byte_size->second));
+                    storage_name, std::stoull(byte_size->second), std::max<std::uint64_t>(1, alignment));
             }
             const MslType storage_type =
                 lower_type(*operation.result_types.front().pointee());
@@ -4416,7 +4514,7 @@ struct AstLowerer {
             if (cfg_dispatcher_mode || predeclared_ssa_storage) {
                 return std::nullopt;
             }
-            return MslStatement::variable(storage_type, storage_name, std::nullopt, false);
+            return MslStatement::variable(storage_type, storage_name, std::nullopt, false, alignment);
         }
 
         if (operation.opcode == ir::OpCode::kLoad) {
@@ -5484,12 +5582,10 @@ struct AstLowerer {
 
     std::optional<std::size_t> natural_loop_exit_index(
         std::size_t header_index) const {
-        if (const auto canonical = loop_body_and_exit(header_index)) {
-            return canonical->second;
-        }
+        const auto canonical = loop_body_and_exit(header_index);
         const std::unordered_set<std::size_t> loop =
             natural_loop_nodes(header_index);
-        if (loop.size() <= 1) return std::nullopt;
+        if (loop.size() <= 1) return canonical ? std::optional(canonical->second) : std::nullopt;
         std::vector<std::size_t> exits;
         for (const std::size_t source : loop) {
             const ir::Operation& terminator =
@@ -5581,6 +5677,17 @@ struct AstLowerer {
         std::optional<std::size_t> active_loop_header_index,
         const ir::Successor* incoming,
                           std::vector<MslStmt>* statements) {
+        if (active_loop_header_index && !deferred_loop_exits.empty()) {
+            const auto& deferred = deferred_loop_exits.back();
+            if (deferred.header == *active_loop_header_index && deferred.targets.contains(block_index)) {
+                if (incoming != nullptr && !assign_loop_arguments(function.blocks[block_index], *incoming, statements))
+                    return false;
+                statements->push_back(MslStatement::assignment(deferred.selector,
+                    MslExpression::literal(std::to_string(deferred.targets.at(block_index)), MslType::uint())));
+                statements->push_back(MslStatement::break_statement());
+                return true;
+            }
+        }
         if (!loop_escape_stack.empty() &&
             block_index == loop_escape_stack.back().enclosing_header_index) {
             if (incoming == nullptr) {
@@ -5611,6 +5718,13 @@ struct AstLowerer {
             if (incoming == nullptr) return true;
             return assign_loop_arguments(function.blocks[block_index], *incoming,
                                          statements);
+        }
+        if (active_loop_header_index.has_value() &&
+            natural_loop_exit_index(*active_loop_header_index) == block_index) {
+            if (incoming != nullptr && !assign_loop_arguments(function.blocks[block_index], *incoming, statements))
+                return false;
+            statements->push_back(MslStatement::break_statement());
+            return true;
         }
         if (natural_loop_exit_index(block_index).has_value()) {
             return emit_natural_loop(block_index, incoming, statements,
@@ -5698,7 +5812,10 @@ struct AstLowerer {
             const std::size_t exit_index =
                 block_indices.at(terminator.successors[exit_successor_index].block);
             std::vector<MslStmt> exit_statements;
-            if (exit_index == *enclosing_loop_exit) {
+            const bool deferred_exit = !deferred_loop_exits.empty() &&
+                deferred_loop_exits.back().header == *active_loop_header_index &&
+                deferred_loop_exits.back().targets.contains(exit_index);
+            if (exit_index == *enclosing_loop_exit && !deferred_exit) {
                 const ir::BasicBlock& exit_block = function.blocks[exit_index];
                 if (!assign_join_arguments(
                         exit_block, terminator.successors[exit_successor_index],
@@ -5820,6 +5937,53 @@ struct AstLowerer {
             }
         } escape_guard{&loop_escape_stack, exits_enclosing_loop};
 
+        // Keep distinct exit paths outside the loop instead of copying every
+        // path's tail into all nested break sites. SSA exit arguments live in
+        // parent scope and the selector records which edge supplied them.
+        std::optional<DeferredLoopExits> deferred;
+        const auto loop_nodes_for_exits = natural_loop_nodes(header_index);
+        std::map<std::size_t, unsigned> exit_targets;
+        for (const auto node : loop_nodes_for_exits)
+            for (const auto& edge : function.blocks[node].operations.back().successors) {
+                const auto target = block_indices.at(edge.block);
+                if (!loop_nodes_for_exits.contains(target)) exit_targets.emplace(target, 0);
+            }
+        if (exit_targets.size() > 1) {
+            unsigned index = 0;
+            for (auto& [target, value] : exit_targets) {
+                value = index++;
+                for (const auto& argument : function.blocks[target].arguments)
+                    declare_block_argument(argument, statements);
+            }
+            const auto name = "cm_loop_exit_" + std::to_string(loop_escape_index++);
+            statements->push_back(MslStatement::variable(MslType::uint(), name,
+                MslExpression::literal("0", MslType::uint()), false));
+            deferred = DeferredLoopExits{header_index, exit_targets,
+                MslExpression::identifier(name, MslType::uint())};
+            deferred_loop_exits.push_back(*deferred);
+        }
+        struct DeferredExitGuard {
+            std::vector<DeferredLoopExits>* stack;
+            bool active;
+            void close() { if (active) { stack->pop_back(); active = false; } }
+            ~DeferredExitGuard() { close(); }
+        } deferred_guard{&deferred_loop_exits, deferred.has_value()};
+        const auto emit_deferred_exits = [&]() {
+            deferred_guard.close();
+            if (!deferred) return true;
+            for (const auto& [target, index] : deferred->targets) {
+                if (target == exit_index) continue;
+                std::vector<MslStmt> path;
+                if (!emit_loop_region(target, exit_index, enclosing_header_index, nullptr, &path))
+                    return false;
+                statements->push_back(MslStatement::if_statement(
+                    MslExpression::binary("==", deferred->selector,
+                        MslExpression::literal(std::to_string(index), MslType::uint()), MslType::boolean()),
+                    std::move(path)));
+            }
+            return true;
+        };
+
         std::vector<MslStmt> loop_statements;
         if (trap_guarded) {
             loop_statements.push_back(MslStatement::if_statement(
@@ -5844,6 +6008,7 @@ struct AstLowerer {
                 statements->push_back(MslStatement::while_statement(
                     MslExpression::literal("true", MslType::boolean()),
                     std::move(loop_statements)));
+                if (!emit_deferred_exits()) return false;
                 if (exits_enclosing_loop) {
                     statements->push_back(MslStatement::if_statement(
                         *continue_enclosing,
@@ -5875,20 +6040,33 @@ struct AstLowerer {
                             "general natural loop header has an unrecognized exit");
             }
             const auto join = find_nearest_common_successor(first, second);
-            if (!join || !loop_nodes.contains(*join)) {
-                return fail(&terminator,
-                            "general natural loop header paths do not reconverge in-loop");
+            if (!join) return fail(&terminator, "general natural loop header has no reconvergence");
+            const bool joins_outside_loop = !loop_nodes.contains(*join);
+            if (joins_outside_loop) {
+                // Duplicating a barrier-free tail into the two header paths
+                // preserves the backedge and break edges. Synchronized tails
+                // must reconverge at one static barrier site instead.
+                const auto barriers = analyze_barrier_usage(module);
+                for (const auto node : loop_nodes) for (const auto& op : function.blocks[node].operations) {
+                    const auto callee = op.attributes.find("callee");
+                    if (op.opcode == ir::OpCode::kMetalBarrier ||
+                        (op.opcode == ir::OpCode::kCall && callee != op.attributes.end() &&
+                         (callee->second == "cm_cta_any" || callee->second == "cm_cta_count" ||
+                          (barriers.contains(callee->second) && barriers.at(callee->second)))))
+                        return fail(&terminator, "general natural loop header paths do not reconverge in-loop before synchronization");
+                }
             }
-            const ir::BasicBlock& join_block = function.blocks[*join];
+            const auto region_stop = joins_outside_loop ? header_index : *join;
+            const ir::BasicBlock& join_block = function.blocks[region_stop];
             for (const ir::BlockArgument& argument : join_block.arguments) {
                 declare_block_argument(argument, &loop_statements);
             }
             std::vector<MslStmt> first_statements;
             std::vector<MslStmt> second_statements;
-            if (!emit_loop_region(first, *join, header_index,
+            if (!emit_loop_region(first, region_stop, header_index,
                                   &terminator.successors[0],
                                   &first_statements) ||
-                !emit_loop_region(second, *join, header_index,
+                !emit_loop_region(second, region_stop, header_index,
                                   &terminator.successors[1],
                                   &second_statements)) {
                 return false;
@@ -5896,13 +6074,14 @@ struct AstLowerer {
             loop_statements.push_back(MslStatement::if_statement(
                 branch_condition(terminator),
                 std::move(first_statements), std::move(second_statements)));
-            if (!emit_loop_region(*join, header_index, header_index, nullptr,
+            if (!joins_outside_loop && !emit_loop_region(*join, header_index, header_index, nullptr,
                                   &loop_statements)) {
                 return false;
             }
             statements->push_back(MslStatement::while_statement(
                 MslExpression::literal("true", MslType::boolean()),
                 std::move(loop_statements)));
+            if (!emit_deferred_exits()) return false;
             if (exits_enclosing_loop) {
                 statements->push_back(MslStatement::if_statement(
                     *continue_enclosing,
@@ -5930,7 +6109,18 @@ struct AstLowerer {
         MslExpr exit_condition =
             MslExpression::unary("!", continue_condition, MslType::boolean());
         std::vector<MslStmt> exit_statements;
-        const bool assigned_exit = exits_to_enclosing_header
+        bool assigned_exit;
+        if (deferred) {
+            assigned_exit = emit_loop_region(body_and_exit->second, header_index,
+                header_index, &terminator.successors[exit_successor_index], &exit_statements);
+        } else if (body_and_exit->second != exit_index) {
+            // The header's ordinary exhausted edge and a break from inside
+            // the body can reconverge later. Emit the ordinary exit's work
+            // up to that common exit before breaking this Metal loop.
+            assigned_exit = emit_loop_region(body_and_exit->second, exit_index,
+                header_index, &terminator.successors[exit_successor_index], &exit_statements);
+        } else {
+            assigned_exit = exits_to_enclosing_header
                                        ? assign_loop_arguments(
                                              exit_block,
                                              terminator.successors[exit_successor_index],
@@ -5939,9 +6129,8 @@ struct AstLowerer {
                                              exit_block,
                                              terminator.successors[exit_successor_index],
                                              &exit_statements);
-        if (!assigned_exit) {
-            return false;
         }
+        if (!assigned_exit) return false;
         exit_statements.push_back(MslStatement::break_statement());
         loop_statements.push_back(MslStatement::if_statement(
             exit_condition, std::move(exit_statements)));
@@ -5953,6 +6142,7 @@ struct AstLowerer {
         statements->push_back(MslStatement::while_statement(
             MslExpression::literal("true", MslType::boolean()),
             std::move(loop_statements)));
+        if (!emit_deferred_exits()) return false;
         if (exits_enclosing_loop) {
             statements->push_back(MslStatement::if_statement(
                 *continue_enclosing, {MslStatement::continue_statement()}));
@@ -6263,11 +6453,14 @@ struct AstLowerer {
     }
 
     LowerToMslResult run() {
+        const bool block_assertion = function.is_kernel &&
+            module.attributes.contains("required_power_of_two_block_axes");
+        if (block_assertion) needs_threads_per_threadgroup = true;
         reports_traps = false;
         for (const auto& block : function.blocks)
             for (const auto& operation : block.operations)
                 reports_traps |= operation.opcode == ir::OpCode::kTrap;
-        if (trap_guarded) {
+        if (trap_guarded || block_assertion) {
             for (std::size_t i = 0; i < function.arguments.size(); ++i) {
                 bool collision = function.is_kernel &&
                                  i == abi::kTrapStatusBindingIndex;
@@ -6391,7 +6584,7 @@ struct AstLowerer {
                         }
                         output.statements.push_back(
                             MslStatement::threadgroup_byte_array(name,
-                                                                 declaration->byte_size));
+                                                                 declaration->byte_size, declaration->alignment));
                     }
                 } else {
                     output.parameters.push_back({
@@ -6445,6 +6638,33 @@ struct AstLowerer {
             });
         }
 
+        if (needs_cta_any) {
+            if (function.is_kernel)
+                output.statements.push_back(MslStatement::threadgroup_byte_array("cm_cta_scratch", 4, 4));
+            else output.parameters.push_back({
+                .type=MslType::pointer(MslType::uint(8), MslAddressSpace::kThreadgroup), .name="cm_cta_scratch"});
+        }
+
+        if (block_assertion) {
+            for (char axis : module.attributes.at("required_power_of_two_block_axes")) {
+                if (axis != 'x' && axis != 'y' && axis != 'z') {
+                    fail(nullptr, "invalid block assertion axis"); return result;
+                }
+                const MslExpr dimension = MslExpression::member(
+                    MslExpression::identifier("cm_threads_per_threadgroup", MslType::vector(MslType::uint(), 3)),
+                    std::string(1, axis), MslType::uint());
+                const MslExpr invalid = MslExpression::binary("!=",
+                    MslExpression::binary("&", dimension,
+                        MslExpression::binary("-", dimension, MslExpression::literal("1u", MslType::uint()), MslType::uint()),
+                        MslType::uint()), MslExpression::literal("0u", MslType::uint()), MslType::boolean());
+                output.statements.push_back(MslStatement::if_statement(invalid, {
+                    MslStatement::expression(MslExpression::call("atomic_fetch_or_explicit", {
+                        MslExpression::identifier(abi::kTrapStatusName, MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice)),
+                        MslExpression::literal("1u", MslType::uint()),
+                        MslExpression::identifier("memory_order_relaxed", MslType::uint())}, MslType::uint())),
+                    MslStatement::return_statement()}));
+            }
+        }
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::BlockArgument& argument : block.arguments) {
                 declare_block_argument(argument, &output.statements);
@@ -6475,11 +6695,13 @@ struct AstLowerer {
                         };
                     }
                     const ir::ValueId value = operation.results.front();
+                    const auto alignment = operation.attributes.contains("alignment")
+                        ? std::stoull(operation.attributes.at("alignment")) : 0;
                     if (const auto byte_size = operation.attributes.find("byte_size");
                         byte_size != operation.attributes.end()) {
                         const std::string storage_name = value_name(value) + "_storage";
                         output.statements.push_back(MslStatement::private_byte_array(
-                            storage_name, std::stoull(byte_size->second)));
+                            storage_name, std::stoull(byte_size->second), std::max<std::uint64_t>(1, alignment)));
                         values[value] = MslExpression::identifier(
                             storage_name, lower_result_type(operation));
                         continue;
@@ -6488,7 +6710,7 @@ struct AstLowerer {
                         lower_type(*operation.result_types.front().pointee());
                     const std::string storage_name = value_name(value) + "_storage";
                     output.statements.push_back(MslStatement::variable(
-                        storage_type, storage_name, std::nullopt, false));
+                        storage_type, storage_name, std::nullopt, false, alignment));
                     values[value] = MslExpression::unary(
                         "&", MslExpression::identifier(storage_name, storage_type),
                         lower_result_type(operation));
@@ -6554,7 +6776,7 @@ struct AstLowerer {
                 .attributes = builtin_attributes("thread_index_in_simdgroup"),
             });
         }
-        if (trap_guarded) {
+        if (trap_guarded || block_assertion) {
             std::vector<MslAttribute> attributes;
             if (function.is_kernel) {
                 attributes.push_back(MslAttribute{
@@ -6680,6 +6902,21 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
         for (ir::BasicBlock& block : function.blocks) {
             for (ir::Operation& operation : block.operations) {
                 switch (operation.opcode) {
+                    case ir::OpCode::kAddressSpaceTest: {
+                        const auto space = operation.operands.front().type.address_space;
+                        if (space == ir::AddressSpace::kNone) {
+                            result.error = operation.location.str() + ": address-space predicate requires proven pointer provenance";
+                            return result;
+                        }
+                        const auto& query = operation.attributes.at("address_space");
+                        const bool matches = (query == "global" && space == ir::AddressSpace::kDevice) ||
+                            (query == "shared" && space == ir::AddressSpace::kThreadgroup) ||
+                            (query == "const" && space == ir::AddressSpace::kConstant) ||
+                            (query == "local" && space == ir::AddressSpace::kPrivate);
+                        operation.opcode = ir::OpCode::kConstant;
+                        operation.operands = {ir::Operand::immediate(matches ? "true" : "false", ir::Type::predicate())};
+                        break;
+                    }
                     case ir::OpCode::kThreadId:
                         operation.opcode = ir::OpCode::kMetalThreadPosition;
                         break;
@@ -6954,6 +7191,11 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     const bool needs_grid_barrier = std::any_of(
         builtin_usage.begin(), builtin_usage.end(),
         [](const auto& item) { return item.second.grid_barrier; });
+    if (std::any_of(builtin_usage.begin(), builtin_usage.end(),
+            [](const auto& item) { return item.second.cta_any; })) {
+        result.ast.functions.push_back(make_cta_any_helper());
+        result.ast.functions.push_back(make_cta_any_helper(true));
+    }
     if (needs_device_clock) result.ast.functions.push_back(make_device_clock_helper());
     if (needs_grid_barrier) result.ast.functions.push_back(make_grid_sync_helper());
     for (const ir::Function& function : metal_module.functions) {

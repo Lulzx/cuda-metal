@@ -54,5 +54,10 @@ bool symbol_is_written(const cumetal::ptx::ModuleInfo& module, std::string_view 
 bool resolve_immutable_table_pointers(cumetal::ptx::ModuleInfo& module,
                                       const InitializedByteArrayScan& initialized_arrays,
                                       std::string* error);
+// Recognize a terminal device assertion of n & (n - 1), where every
+// definition of n is the same block dimension. Supported launches enforce
+// that dimension at kernel entry, before any barrier or divergent work.
+std::unordered_map<std::string, std::string> normalize_block_dimension_assertions(
+    cumetal::ptx::ModuleInfo& module);
 
 }  // namespace cumetal::ir::detail

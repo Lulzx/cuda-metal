@@ -342,22 +342,26 @@ InitializedByteArrayScan scan_initialized_byte_arrays(
 }
 
 std::vector<ModuleConstantSymbol> scan_module_constant_symbols(std::string_view ptx) {
+    // Registered constants may be typed scalars (not only byte arrays).
+    // Keep offsets in declaration order, including unreferenced constants,
+    // to agree with the runtime's packed constant-symbol buffer.
     const std::regex declaration(
-        R"((?:\.visible\s+|\.extern\s+)?\.const\s+\.align\s+([0-9]+)\s+\.b8\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*;)"
+        R"((?:\.visible\s+|\.extern\s+|\.weak\s+)?\.const\s+(?:\.align\s+([0-9]+)\s+)?\.[busf](8|16|32|64)\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*(?:\[\s*([0-9]+)\s*\])?\s*;)"
     );
     std::vector<ModuleConstantSymbol> symbols;
     std::uint64_t cursor = 0;
     for_each_regex_candidate(ptx, ".const", declaration, [&](const auto& match) {
-        const std::uint32_t alignment =
-            static_cast<std::uint32_t>(std::stoul(match[1].str()));
+        const std::uint32_t alignment = match[1].matched
+            ? static_cast<std::uint32_t>(std::stoul(match[1].str())) : 1;
+        const std::uint64_t element_bytes = std::stoull(match[2].str()) / 8;
+        const std::uint64_t count = match[4].matched ? std::stoull(match[4].str()) : 1;
+        if (alignment == 0 || count == 0 || count > UINT64_MAX / element_bytes ||
+            cursor > UINT64_MAX - alignment) return;
         cursor = (cursor + alignment - 1) / alignment * alignment;
-        const std::uint64_t size = std::stoull(match[3].str());
-        symbols.push_back({
-            .name = match[2].str(),
-            .offset = cursor,
-            .byte_size = size,
-            .alignment = alignment,
-        });
+        const std::uint64_t size = element_bytes * count;
+        if (cursor > UINT64_MAX - size) return;
+        symbols.push_back({.name = match[3].str(), .offset = cursor,
+                           .byte_size = size, .alignment = alignment});
         cursor += size;
     });
     return symbols;
@@ -702,6 +706,108 @@ bool resolve_immutable_table_pointers(cumetal::ptx::ModuleInfo& module,
         rewrite.instruction->operands[1] = rewrite.target;
     }
     return true;
+}
+
+
+std::unordered_map<std::string, std::string> normalize_block_dimension_assertions(
+    cumetal::ptx::ModuleInfo& module) {
+    std::unordered_set<std::string> aborts;
+    // Only straight-line, side-effect-free forwarding wrappers qualify.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& fn : module.functions) {
+            if (aborts.contains(fn.name)) continue;
+            bool calls_abort = false, valid = !fn.instructions.empty();
+            for (const auto& ins : fn.instructions) {
+                const auto root = root_opcode(ins.opcode);
+                if (!ins.predicate.empty()) { valid = false; break; }
+                if (calls_abort && root != "exit" && root != "ret") {
+                    valid = false; break;
+                }
+                if (!calls_abort && (root == "exit" || root == "ret")) {
+                    valid = false; break;
+                }
+                if (root == "call") {
+                    const auto target = direct_call_target(ins);
+                    const bool assertion = target == "__assertfail" && ins.operands.size() == 2 &&
+                        grouped_names(ins.operands.back()).size() == 5;
+                    if (calls_abort || !target || (!assertion && !aborts.contains(*target))) {
+                        valid = false; break;
+                    }
+                    calls_abort = true;
+                } else if (root == "st") {
+                    if (ins.opcode.find("st.param.") != 0 && ins.opcode.find("st.local.") != 0)
+                        valid = false;
+                } else if (root == "ld") {
+                    if (ins.opcode.find("ld.param.") != 0) valid = false;
+                } else if (root != "mov" && root != "cvta" && root != "add" &&
+                           root != "exit" && root != "ret") valid = false;
+            }
+            if (valid && calls_abort) changed |= aborts.insert(fn.name).second;
+        }
+    }
+    std::unordered_map<std::string, std::string> requirements;
+    const auto normalize = [&](auto& fn) {
+        auto& code = fn.instructions;
+        for (std::size_t i = 3; i < code.size(); ++i) {
+            const auto& add = code[i-3]; const auto& bit_and = code[i-2];
+            const auto& cmp = code[i-1]; const auto& branch = code[i];
+            if (add.opcode != "add.s32" || bit_and.opcode != "and.b32" ||
+                cmp.opcode != "setp.eq.b32" || branch.opcode != "bra" ||
+                add.operands.size() != 3 || bit_and.operands.size() != 3 ||
+                cmp.operands.size() != 3 || branch.operands.size() != 1 ||
+                !add.predicate.empty() || !bit_and.predicate.empty() || !cmp.predicate.empty() ||
+                trim(add.operands[2]) != "-1" || bit_and.operands[1] != add.operands[1] ||
+                bit_and.operands[2] != add.operands[0] || cmp.operands[1] != bit_and.operands[0] ||
+                trim(cmp.operands[2]) != "0" || normalized_predicate(branch.predicate) != std::pair{cmp.operands[0], true}) continue;
+            std::string axis;
+            bool dimension = true;
+            for (const auto& ins : code) {
+                const auto dst = destination_registers(ins);
+                if (std::find(dst.begin(), dst.end(), add.operands[1]) == dst.end()) continue;
+                if (ins.opcode != "mov.u32" || !ins.predicate.empty() || ins.operands.size() != 2 ||
+                    (ins.operands[1] != "%ntid.x" && ins.operands[1] != "%ntid.y" && ins.operands[1] != "%ntid.z")) {
+                    dimension = false; break;
+                }
+                const auto next = ins.operands[1].substr(6);
+                if (!axis.empty() && axis != next) { dimension = false; break; }
+                axis = next;
+            }
+            if (!dimension || axis.empty()) continue;
+            const auto label = std::find_if(code.begin()+i+1, code.end(), [&](const auto& ins) {
+                return ins.opcode == "ptx.label" && branch_target(ins) == branch_target(branch);
+            });
+            if (label == code.end() || label == code.begin() ||
+                !is_terminating_instruction(*(label-1)) || !(label-1)->predicate.empty()) continue;
+            bool terminal_assert = false, valid = true;
+            for (auto it = label+1; it != code.end(); ++it) {
+                if (it->opcode == "ptx.label" || !it->predicate.empty()) { valid = false; break; }
+                if (const auto target = direct_call_target(*it)) {
+                    if (terminal_assert || !aborts.contains(*target)) { valid = false; break; }
+                    terminal_assert = true;
+                } else {
+                    const auto root = root_opcode(it->opcode);
+                    const bool ending = root == "exit" || root == "ret";
+                    if ((ending && !terminal_assert) || (!ending && terminal_assert) ||
+                        (root != "mov" && root != "cvta" && !ending &&
+                         it->opcode.find("st.param.") != 0)) { valid = false; break; }
+                }
+            }
+            const auto refs = std::count_if(code.begin(), code.end(), [&](const auto& ins) {
+                return root_opcode(ins.opcode) == "bra" && branch_target(ins) == branch_target(branch);
+            });
+            if (!valid || !terminal_assert || refs != 1) continue;
+            auto& axes = requirements[fn.name];
+            if (axes.find(axis) == std::string::npos) axes += axis;
+            code.erase(label, code.end());
+            code.erase(code.begin()+i); // Accepted launches never take the assertion edge.
+            --i;
+        }
+    };
+    for (auto& fn : module.functions) normalize(fn);
+    for (auto& fn : module.entries) normalize(fn);
+    return requirements;
 }
 
 }  // namespace cumetal::ir::detail

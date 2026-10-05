@@ -48,7 +48,7 @@ std::string first_register(std::string_view input) {
 std::vector<std::string> destination_registers(const Instruction& instruction) {
     const std::string root = root_opcode(instruction.opcode);
     if (instruction.opcode == "ptx.label" || instruction.operands.empty() ||
-        root == "st" || root == "bra" || root == "bar" || root == "membar" ||
+        root == "st" || root == "red" || root == "bra" || (root == "bar" && !starts_with(instruction.opcode, "bar.red.")) || root == "membar" ||
         root == "fence" || root == "ret" || root == "exit" || root == "trap" ||
         root == "call") {
         return {};

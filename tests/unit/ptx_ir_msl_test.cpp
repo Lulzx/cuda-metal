@@ -1403,6 +1403,54 @@ bool test_byte_permute_builtin_whitelists() {
 int main() {
     using namespace cumetal;
     bool ok = true;
+    const auto packed_atomic = metal::compile_ptx_to_msl(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry packed_atomic(.param .align 8 .b8 record[16]) {
+ .reg .b64 %pointer;
+ .reg .b32 %old;
+ ld.param.u64 %pointer, [record];
+ atom.add.global.relaxed.gpu.s32 %old, [%pointer], 1;
+ ret;
+}
+)ptx");
+    ok &= expect(packed_atomic.ok && packed_atomic.source.find("device atomic_") != std::string::npos,
+                 "zero-offset atomic addresses from packed records retain device storage: " + packed_atomic.error);
+    const auto dynamic_parameter = metal::compile_ptx_to_msl(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry parameter_byte(.param .align 8 .b8 packed[16], .param .u32 index, .param .u64 .ptr .global output) {
+ .reg .b64 %base, %offset, %address, %out;
+ .reg .b32 %index, %value;
+ ld.param.u32 %index, [index];
+ cvt.u64.u32 %offset, %index;
+ mov.u64 %base, packed;
+ add.u64 %address, %base, %offset;
+ ld.param.u8 %value, [%address];
+ ld.param.u64 %out, [output];
+ st.global.u32 [%out], %value;
+ ret;
+}
+)ptx");
+    ok &= expect(dynamic_parameter.ok, "dynamic aggregate parameter byte access: " + dynamic_parameter.error);
+    if (dynamic_parameter.ok) {
+        bool byte_offset = false;
+        for (const auto& function : dynamic_parameter.metal_ir.functions)
+            for (const auto& block : function.blocks)
+                for (const auto& operation : block.operations)
+                    if (operation.opcode == ir::OpCode::kPointerOffset &&
+                        operation.attributes.contains("ptx_opcode") &&
+                        operation.attributes.at("ptx_opcode") == "add.u64")
+                        byte_offset |= operation.attributes.contains("offset_unit") &&
+                            operation.attributes.at("offset_unit") == "bytes";
+        ok &= expect(byte_offset, "PTX aggregate pointer addition retains byte units");
+        ok &= expect(dynamic_parameter.source.find("reinterpret_cast<thread cm_alias_uchar*>") != std::string::npos,
+                     "aggregate offset casts the base to a byte pointer before arithmetic");
+        ok &= expect(dynamic_parameter.source.find("alignas(8) CuMetalPackedParam16") != std::string::npos,
+                     "materialized aggregate parameter retains PTX alignment");
+    }
     ok &= test_instruction_result_contracts();
     ok &= test_float_to_integer_contracts();
     ok &= test_call_return_slot_definitions();
@@ -2032,6 +2080,16 @@ BODY:
                      module_constant.source.find(" + 16") != std::string::npos,
                  "PTX module constants use reserved binding 30 and byte offsets");
     if (!module_constant.ok) std::cerr << module_constant.error << "\n";
+
+    auto scalar_constant_ptx = module_constant_ptx;
+    const std::string declaration = ".visible .const .align 16 .b8 table[32];";
+    scalar_constant_ptx.replace(scalar_constant_ptx.find(declaration), declaration.size(),
+        ".visible .const .align 8 .u64 unused;\n.visible .const .align 8 .u32 table[8];");
+    const auto scalar_constant = metal::compile_ptx_to_msl(scalar_constant_ptx);
+    ok &= expect(scalar_constant.ok &&
+        scalar_constant.source.find("[[buffer(30)]]") != std::string::npos &&
+        scalar_constant.source.find(" + 24") != std::string::npos,
+        "typed scalar and array constants retain offsets after unused declarations: " + scalar_constant.error);
 
     const std::string module_global_ptx = R"ptx(
 .version 7.0
@@ -3191,6 +3249,7 @@ ret;
     ld.param.u64 %rd1, [output];
     mov.f32 %f1, 0f3F800000;
     atom.global.add.f32 %f2, [%rd1], %f1;
+    red.add.global.relaxed.gpu.f32 [%rd1], %f1;
     st.global.f32 [%rd1+4], %f2;
     ret;
 }
@@ -3201,8 +3260,15 @@ ret;
                      atomic_f32.source.find(
                          "atomic_fetch_add_explicit(reinterpret_cast<device atomic_float*>") !=
                          std::string::npos,
-                 "PTX atom.add.f32 lowers to Metal's native device atomic_float add: " +
+                 "PTX atom/red.add.f32 lower to Metal's native device atomic_float add: " +
                      atomic_f32.error);
+    std::string invalid_reduction = atomic_f32_ptx;
+    invalid_reduction.replace(invalid_reduction.find("red.add.global.relaxed.gpu.f32"),
+        std::string("red.add.global.relaxed.gpu.f32").size(), "red.cas.global.relaxed.gpu.b32");
+    const auto refused_reduction = metal::compile_ptx_to_msl(invalid_reduction);
+    ok &= expect(!refused_reduction.ok &&
+                     refused_reduction.error.find("red does not support compare-and-swap") != std::string::npos,
+                 "PTX reduction rejects compare-and-swap rather than inventing a discarded return ABI");
 
     const std::string atomic32_ptx = R"ptx(
 .version 8.8
@@ -3481,7 +3547,7 @@ LOAD_PARAMETER:
     const metal::PtxToMslResult out_of_order_parameter =
         metal::compile_ptx_to_msl(out_of_order_parameter_ptx);
     ok &= expect(out_of_order_parameter.ok &&
-                     out_of_order_parameter.source.find("input + 8") !=
+                     out_of_order_parameter.source.find("(input) + 8") !=
                          std::string::npos,
                  "dispatcher binds CFG-dominating parameters before source-ordered block emission");
     if (!out_of_order_parameter.ok) std::cerr << out_of_order_parameter.error << "\n";
@@ -3703,6 +3769,77 @@ ret;
     const auto merged_cast = metal::compile_ptx_to_msl(merged_pointer_cast);
     ok &= expect(!merged_cast.ok && merged_cast.error.find("observable pointer-to-integer") != std::string::npos,
                  "pointer truncation passed as a CFG block argument remains observable");
+    const auto warp_sync = metal::compile_ptx_to_msl(R"ptx(
+.version 7.1
+.target sm_80
+.visible .entry warp_sync() {
+bar.warp.sync -1;
+ret;
+}
+)ptx");
+    ok &= expect(warp_sync.ok && warp_sync.source.find("simdgroup_barrier(") != std::string::npos &&
+                     warp_sync.source.find("threadgroup_barrier(") == std::string::npos,
+                 "PTX warp synchronization retains SIMD-group scope: " + warp_sync.error);
+    const auto malformed_warp_sync = metal::compile_ptx_to_msl(R"ptx(
+.version 7.1
+.target sm_80
+.visible .entry bad_warp_sync() {
+bar.warp.sync;
+ret;
+}
+)ptx");
+    ok &= expect(!malformed_warp_sync.ok && malformed_warp_sync.error.find("member mask") != std::string::npos,
+                 "PTX warp synchronization rejects missing member masks");
+    const auto scalar_zero_join = metal::compile_ptx_to_msl(R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry scalar_zero_join(.param .u64 output) {
+.reg .b64 %rd1;
+.reg .b32 %r<5>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [output];
+mov.u32 %r1, %tid.x;
+mov.b32 %r2, 0;
+setp.eq.u32 %p1, %r1, 0;
+@%p1 bra JOIN;
+mov.u32 %r3, 0;
+LOOP:
+add.f32 %r2, %r2, 0f3F800000;
+add.u32 %r3, %r3, 1;
+setp.lt.u32 %p1, %r3, 3;
+@%p1 bra LOOP;
+JOIN:
+shfl.sync.idx.b32 %r4, %r2, 1, 31, -1;
+st.global.b32 [%rd1], %r4;
+ret;
+}
+)ptx");
+    ok &= expect(scalar_zero_join.ok,
+                 "float loop accumulator joins integer-zero seed as register bits: " + scalar_zero_join.error);
+    const auto captured_pointer_spill = metal::compile_ptx_to_msl(R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry captured_pointer_spill(.param .align 8 .b8 capture[16], .param .u64 output) {
+.local .align 8 .b8 depot[8];
+.reg .b64 %rd<8>;
+.reg .b32 %r1;
+ld.param.b64 %rd1, [capture];
+ld.param.u64 %rd2, [output];
+cvta.to.global.u64 %rd3, %rd1;
+mov.b64 %rd4, depot;
+st.local.b64 [%rd4], %rd1;
+ld.local.b64 %rd5, [%rd4];
+mov.u64 %rd6, 4;
+add.u64 %rd7, %rd5, %rd6;
+ld.b32 %r1, [%rd7+-4];
+st.global.b32 [%rd2], %r1;
+ret;
+}
+)ptx");
+    ok &= expect(captured_pointer_spill.ok,
+                 "captured address with global conversion retains type through spill: " + captured_pointer_spill.error);
     if (!ok) return 1;
     std::cout << "PTX -> CuMetal IR -> typed MSL tests passed\n";
     return 0;

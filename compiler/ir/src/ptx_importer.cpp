@@ -1409,6 +1409,18 @@ struct Importer {
                 }
             }
         }
+        // A dynamic ld.param address cannot be represented by a fixed
+        // aggregate field extraction. Materialize that parameter's bytes so
+        // the compiler-generated copy loop retains real pointer arithmetic.
+        for (const auto& definition : definitions) {
+            const auto& instruction = *definition.instruction;
+            if (!starts_with(instruction.opcode, "ld.param") || instruction.operands.size() < 2) continue;
+            const auto input = definition.sources.find(first_register(instruction.operands[1]));
+            if (input == definition.sources.end()) continue;
+            const auto sources = address_sources.find(input->second);
+            if (sources != address_sources.end() && sources->second.kind == detail::AddressDemandKind::kOther &&
+                !sources->second.inputs.empty()) local_address_values.insert(input->second);
+        }
         std::deque<ValueId> address_pending(local_address_values.begin(), local_address_values.end());
         while (!address_pending.empty()) {
             const auto value = address_pending.front();
@@ -1515,6 +1527,22 @@ struct Importer {
                     else if (!aggregate) aggregate = alias->second;
                     else same_aggregate &= *aggregate == alias->second;
                 }
+                // Deferring integer zero permits a later pointer edge to
+                // prove a null join. For a scalar join, however, zero still
+                // contributes its register bit-container type: otherwise a
+                // float loop latch leaves an i32 zero edge targeting f32.
+                if (merged && !merged->is_pointer()) {
+                    for (const auto value : join.inputs) {
+                        const auto input = value_types.find(value);
+                        if (input != value_types.end() && input->second != *merged &&
+                            (integer_zero_values.contains(value) ||
+                             provisional_zero_seeds.contains(value))) {
+                            if (const auto container = scalar_join_container(
+                                    join.name, *merged, input->second))
+                                merged = *container;
+                        }
+                    }
+                }
                 // A zero is still a typed integer seed for a loop. Its
                 // null proof does not propagate until every input proves zero,
                 // and the seeded type stays revisable until real evidence
@@ -1567,7 +1595,7 @@ struct Importer {
                 if (inferred.kind == TypeKind::kVoid) return fail(&instruction, "void PTX call has a return slot");
             } else if (root == "clz" || root == "popc") inferred = Type::integer(32);
             else if (root == "cvt") inferred = ptx_cvt_result_type(instruction.opcode);
-            else if (root == "setp") inferred = Type::predicate();
+            else if (root == "setp" || root == "isspacep" || instruction.opcode == "bar.red.or.pred") inferred = Type::predicate();
             else if (root == "vote") inferred = instruction.opcode.find(".ballot.") != std::string::npos
                 ? Type::integer(32) : Type::predicate();
             else if (root == "mov" && instruction.operands.size() == 2 &&
@@ -1664,7 +1692,7 @@ struct Importer {
                         type = *storage;
                     }
                 }
-                if (root == "ld" && !starts_with(instruction.opcode, "ld.param") && type.kind == TypeKind::kInteger) {
+                if (root == "ld" && type.kind == TypeKind::kInteger) {
                     const auto storage = register_contract(destinations[i]);
                     if (storage) type = Type::integer(std::max(type.bit_width, storage->bit_width));
                 }
@@ -3513,10 +3541,15 @@ struct Importer {
             }
             const std::int64_t byte_offset =
                 memory_operand_offset(instruction.operands[index]);
-            if (byte_offset == 0) return base;
-            if (!base.type.is_pointer()) {
-                base.type = fallback_pointer;
+            if ((root == "atom" || root == "red") && base.type == Type::integer(64) && address_space != AddressSpace::kNone) {
+                // PTX addresses loaded from by-value records and constant
+                // symbols are raw 64-bit addresses. Preserve their SSA type
+                // and express the space-specific interpretation as a real cast.
+                base = expressions.emit(OpCode::kConvert, fallback_pointer, {base},
+                                        {{"pointer_integer", "true"}});
             }
+            if (byte_offset == 0) return base;
+            if (!base.type.is_pointer()) base.type = fallback_pointer;
             Operation offset;
             offset.opcode = OpCode::kPointerOffset;
             offset.location = operation.location;
@@ -3908,6 +3941,11 @@ struct Importer {
             }
             return true;
         } else if (starts_with(instruction.opcode, "ld.param")) {
+            const auto memory_type = ptx_scalar_type(instruction.opcode);
+            if (operation.result_types.size() == 1 && memory_type.kind == TypeKind::kInteger &&
+                operation.result_types.front().kind == TypeKind::kInteger &&
+                operation.result_types.front().bit_width > memory_type.bit_width)
+                operation.result_types.front() = memory_type;
             if (instruction.operands.size() < 2 || operation.results.empty()) {
                 return fail(&instruction, "malformed ld.param instruction");
             }
@@ -3953,8 +3991,12 @@ struct Importer {
                                indirect_type.pointee()->kind == TypeKind::kAggregate) {
                         const auto offset = memory_operand_offset(instruction.operands[1]);
                         const auto size = type_size(operation.result_types.front());
-                        if (offset < 0 || size == 0 ||
-                            static_cast<std::uint64_t>(offset) + size > type_size(*indirect_type.pointee()))
+                        // An aggregate pointee describes storage, not the current
+                        // position of a computed address. A byte-copy loop may
+                        // use base+8+index followed by a -8 displacement.
+                        const bool object_base = aggregate_parameter_addresses.contains(indirect->second);
+                        if (size == 0 || (object_base && (offset < 0 ||
+                            static_cast<std::uint64_t>(offset) + size > type_size(*indirect_type.pointee()))))
                             return fail(&instruction, "indirect private aggregate parameter load exceeds the object");
                         operation.opcode = OpCode::kLoad;
                         operation.operands = {memory_address_operand(1, indirect_type.address_space)};
@@ -4038,10 +4080,49 @@ struct Importer {
             } else {
                 const Type& argument_type = parameter_types[name];
                 if (argument_type.kind == TypeKind::kAggregate) {
-                    const std::int64_t byte_offset =
-                        memory_operand_offset(instruction.operands[1]);
+                    const auto checked_offset = parameter_slot_offset(instruction.operands[1], base_register.empty() ? name : base_register);
+                    if (!checked_offset) return fail(&instruction, "invalid PTX parameter slot byte offset");
+                    const std::int64_t byte_offset = *checked_offset;
                     const std::uint32_t loaded_size =
                         type_size(operation.result_types.front());
+                    const Type memory_type = ptx_scalar_type(instruction.opcode);
+                    const std::uint32_t memory_bytes = type_size(memory_type);
+                    const bool packed_words = std::all_of(argument_type.elements.begin(), argument_type.elements.end(),
+                        [](const Type& field) { return field == Type::integer(32); });
+                    if (packed_words && memory_type.kind == TypeKind::kInteger && memory_bytes < 4 &&
+                        memory_bytes != 0 && byte_offset >= 0 && byte_offset % memory_bytes == 0 &&
+                        static_cast<std::uint64_t>(byte_offset) + memory_bytes <= type_size(argument_type)) {
+                        const Operand aggregate = Operand::value_ref(argument->second, argument_type);
+                        Operand bits = expressions.emit(OpCode::kAggregateExtract, Type::integer(32),
+                            {aggregate, Operand::immediate(std::to_string(byte_offset / 4), Type::integer(32))});
+                        bits = expressions.emit(OpCode::kShiftRight, Type::integer(32),
+                            {bits, Operand::immediate(std::to_string((byte_offset % 4) * 8), Type::integer(32))});
+                        bits = expressions.emit(OpCode::kBitAnd, Type::integer(32),
+                            {bits, Operand::immediate(memory_bytes == 1 ? "255" : "65535", Type::integer(32))});
+                        if (has_signed_integer_type(instruction.opcode))
+                            bits = expressions.emit(OpCode::kConvert, memory_type, {bits});
+                        operation.opcode = OpCode::kConvert;
+                        operation.operands = {bits};
+                        if (has_signed_integer_type(instruction.opcode)) operation.attributes["signed_input"] = "true";
+                    } else if (loaded_size == 8 && byte_offset >= 0 && byte_offset % 8 == 0 &&
+                        static_cast<std::uint64_t>(byte_offset) + 8 <= type_size(argument_type) &&
+                        std::all_of(argument_type.elements.begin(), argument_type.elements.end(),
+                            [](const Type& field) { return field == Type::integer(32); })) {
+                        const Operand aggregate = Operand::value_ref(argument->second, argument_type);
+                        const auto word = [&](std::int64_t index) {
+                            const Operand value = expressions.emit(OpCode::kAggregateExtract, Type::integer(32),
+                                {aggregate, Operand::immediate(std::to_string(index), Type::integer(32))});
+                            return expressions.emit(OpCode::kConvert, Type::integer(64), {value});
+                        };
+                        const Operand low = word(byte_offset / 4);
+                        const Operand high = expressions.emit(OpCode::kShiftLeft, Type::integer(64),
+                            {word(byte_offset / 4 + 1), Operand::immediate("32", Type::integer(64))});
+                        const Operand combined = expressions.emit(OpCode::kBitOr, Type::integer(64), {low, high});
+                        operation.opcode = OpCode::kConvert;
+                        operation.operands = {combined};
+                        if (operation.result_types.front().is_pointer())
+                            operation.attributes["pointer_integer"] = "true";
+                    } else {
                     if (byte_offset < 0 || loaded_size == 0 ||
                         argument_type.elements.empty() ||
                         type_size(argument_type.elements.front()) != loaded_size ||
@@ -4057,6 +4138,7 @@ struct Importer {
                     operation.operands.push_back(Operand::immediate(
                         std::to_string(byte_offset / loaded_size),
                         Type::integer(32)));
+                    }
                 } else {
                     operation.opcode = OpCode::kParameter;
                     operation.operands.push_back(
@@ -4107,6 +4189,11 @@ struct Importer {
             operation.opcode = OpCode::kConvert;
             operation.operands.push_back(
                 bit_container_operand(1, operation.result_types.front()));
+        } else if (root == "isspacep") {
+            operation.opcode = OpCode::kAddressSpaceTest;
+            const auto space = instruction.opcode.substr(std::string("isspacep.").size());
+            operation.attributes["address_space"] = space;
+            operation.operands.push_back(source_operand(1));
         } else if (root == "cvta") {
             operation.opcode = OpCode::kAddressSpaceCast;
             if (instruction.opcode == "cvta.global.u64" || instruction.opcode == "cvta.to.global.u64") {
@@ -4124,6 +4211,10 @@ struct Importer {
                 // followed by `cvta.to.global`. Preserve that provenance instead
                 // of presenting an untyped integer to the address-space cast.
                 source = Operand::immediate("null", operation.result_types.front());
+            }
+            if (source.type == Type::integer(64)) {
+                operation.opcode = OpCode::kConvert;
+                operation.attributes["pointer_integer"] = "true";
             }
             operation.operands.push_back(std::move(source));
             if (!operation.results.empty() && operation.operands.front().kind == OperandKind::kValue) {
@@ -4332,6 +4423,9 @@ struct Importer {
             operation.operands.push_back(
                 bit_container_operand(2, ptx_scalar_type(instruction.opcode)));
             operation.attributes["predicate"] = comparison_predicate(instruction.opcode);
+            if (ptx_scalar_type(instruction.opcode).kind == TypeKind::kFloat &&
+                operation.attributes["predicate"] == "ne")
+                operation.attributes["predicate"] = "one";
             if (has_signed_integer_type(instruction.opcode)) {
                 operation.attributes["signed"] = "true";
             }
@@ -4350,12 +4444,23 @@ struct Importer {
                 bit_container_operand(1, operation.result_types.front()));
             operation.operands.push_back(
                 bit_container_operand(2, operation.result_types.front()));
+        } else if (root == "bar" && starts_with(instruction.opcode, "bar.red.")) {
+            if ((instruction.opcode != "bar.red.or.pred" && instruction.opcode != "bar.red.popc.u32") || instruction.operands.size() != 3 ||
+                trim(instruction.operands[1]) != "0" || !instruction.predicate.empty())
+                return fail(&instruction, "unsupported PTX barrier reduction (requires full CTA or.pred/popc.u32 on barrier 0)");
+            operation.opcode = OpCode::kCall;
+            operation.attributes["callee"] = instruction.opcode == "bar.red.popc.u32" ? "cm_cta_count" : "cm_cta_any";
+            operation.attributes["builtin"] = "true";
+            operation.operands = {source_operand(2, Type::predicate())};
         } else if (root == "bar") {
+            if (instruction.opcode == "bar.warp.sync" && instruction.operands.size() != 1)
+                return fail(&instruction, "warp synchronization requires one member mask");
             if (!instruction.predicate.empty()) {
                 operation.attributes["predicate"] = instruction.predicate;
             }
             operation.opcode = OpCode::kBarrier;
-            operation.memory_scope = MemoryScope::kThreadgroup;
+            operation.memory_scope = instruction.opcode == "bar.warp.sync"
+                ? MemoryScope::kSimdgroup : MemoryScope::kThreadgroup;
         } else if (root == "membar" || root == "fence") {
             operation.opcode = OpCode::kFence;
             operation.memory_scope = memory_scope_from_opcode(instruction.opcode);
@@ -4364,7 +4469,7 @@ struct Importer {
             if (operation.memory_scope == MemoryScope::kSystem) {
                 operation.attributes["metal_uma_system_scope"] = "true";
             }
-        } else if (root == "atom") {
+        } else if (root == "atom" || root == "red") {
             operation.opcode = OpCode::kAtomic;
             operation.memory_scope = memory_scope_from_opcode(instruction.opcode);
             operation.memory_ordering = memory_ordering_from_opcode(instruction.opcode);
@@ -4402,15 +4507,28 @@ struct Importer {
                     operation.attributes["cuda_fenced_acquire_atomic"] = "true";
                 }
             }
-            if (instruction.operands.size() < 3) {
+            const bool reduction = root == "red";
+            if (reduction && atomic_operation == "cas") {
+                return fail(&instruction, "PTX red does not support compare-and-swap");
+            }
+            if (instruction.operands.size() != (reduction ? 2u : atomic_operation == "cas" ? 4u : 3u)) {
                 return fail(&instruction, "malformed PTX atomic instruction");
+            }
+            if (reduction) {
+                // A reduction discards the old value. Reuse the atomic ALU
+                // contract with a fresh, intentionally unused SSA result.
+                const auto value = builder.next_value();
+                const auto type = ptx_scalar_type(instruction.opcode);
+                operation.results = {value};
+                operation.result_types = {type};
+                value_types[value] = type;
             }
             const AddressSpace atomic_address_space =
                 instruction.opcode.find(".shared.") != std::string::npos
                     ? AddressSpace::kThreadgroup
                     : AddressSpace::kDevice;
-            operation.operands.push_back(memory_address_operand(1, atomic_address_space));
-            for (std::size_t i = 2; i < instruction.operands.size(); ++i) {
+            operation.operands.push_back(memory_address_operand(reduction ? 0 : 1, atomic_address_space));
+            for (std::size_t i = reduction ? 1 : 2; i < instruction.operands.size(); ++i) {
                 operation.operands.push_back(
                     source_operand(i, ptx_scalar_type(instruction.opcode)));
             }
@@ -5068,6 +5186,7 @@ struct Importer {
                     operation.attributes["offset_unit"] = "bytes";
                 } else {
                     operation.opcode = OpCode::kPointerOffset;
+                    operation.attributes["offset_unit"] = "bytes";
                 }
                 for (const Operand& operand : operation.operands) {
                     if (operand.kind != OperandKind::kValue) continue;
@@ -5091,10 +5210,13 @@ struct Importer {
                 (root == "div" || root == "rem" || root == "shr")) {
                 operation.attributes["signed"] = "true";
             }
+            if (root == "shl" || root == "shr") {
+                operation.attributes["shift_clamp"] = "true";
+            }
         }
 
         if (!append_guard(&operation, instruction, *environment)) return false;
-        if (root == "cvt" && operation.results.size() == 1 &&
+        if ((root == "cvt" || starts_with(instruction.opcode, "ld.param")) && operation.results.size() == 1 &&
             operation.result_types.size() == 1 &&
             value_types.at(operation.results.front()) != operation.result_types.front()) {
             const auto destination = operation.results.front();
@@ -5118,7 +5240,8 @@ struct Importer {
             extension.result_types = {storage};
             extension.operands = {bits};
             extension.attributes["ptx_opcode"] = instruction.opcode;
-            if (format.kind == TypeKind::kInteger && cvt_has_signed_destination(instruction.opcode))
+            if (format.kind == TypeKind::kInteger &&
+                (root == "cvt" ? cvt_has_signed_destination(instruction.opcode) : has_signed_integer_type(instruction.opcode)))
                 extension.attributes["signed_input"] = "true";
             if (!append_guard(&extension, instruction, *environment)) return false;
             block->operations.push_back(std::move(extension));
@@ -5802,7 +5925,25 @@ InlineAsmResult lower_inline_ptx_asm(const InlineAsmRequest& request, Builder* b
         const std::string name = "%cm_asm_" + std::to_string(i);
         importer.register_contracts[name] = binding.type;
         if (binding.is_immediate || !binding.input.has_value()) continue;
-        const Operand& input = *binding.input;
+        Operand input = *binding.input;
+        // NVVM generic pointers have a provisional storage type until whole-
+        // function legalization. Do not turn that placeholder into a concrete
+        // private-space cast inside an inline PTX memory operand.
+        if (input.kind == OperandKind::kValue && input.type.is_pointer() &&
+            function->generic_pointer_values.contains(input.value)) {
+            Type generic = input.type;
+            generic.address_space = AddressSpace::kNone;
+            const ValueId pointer = importer.builder.next_value();
+            Operation cast;
+            cast.opcode = OpCode::kConvert;
+            cast.operands = {input};
+            cast.results = {pointer};
+            cast.result_types = {generic};
+            cast.location = {.file = request.source_name, .line = request.line};
+            block->operations.push_back(std::move(cast));
+            input = Operand::value_ref(pointer, generic);
+            function->generic_pointer_values.insert(pointer);
+        }
         ValueId value = kInvalidValue;
         if (input.kind == OperandKind::kValue) {
             value = input.value;
@@ -5922,6 +6063,22 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         return importer.result;
     }
     importer.result.warnings = parsed.warnings;
+    const auto block_requirements = detail::normalize_block_dimension_assertions(parsed.module);
+    // A device assertion is a nonreturning fault. The guarded trap ABI keeps
+    // divergent and spinning peers from hanging; synchronized graphs remain
+    // rejected by its existing barrier/collective validation.
+    const auto normalize_assert_calls = [](auto& function) {
+        for (auto& instruction : function.instructions) {
+            if (direct_call_target(instruction) != "__assertfail" ||
+                instruction.operands.size() != 2 || !instruction.predicate.empty() ||
+                grouped_names(instruction.operands.back()).size() != 5) continue;
+            instruction.opcode = "trap";
+            instruction.operands.clear();
+            instruction.supported = true;
+        }
+    };
+    for (auto& function : parsed.module.functions) normalize_assert_calls(function);
+    for (auto& entry : parsed.module.entries) normalize_assert_calls(entry);
     // Normalize copies before capturing pointers into the parsed function list.
     for (auto& function : parsed.module.functions) {
         common::CompileTrace trace("ptx_normalize_function", 0, function.name);
@@ -5987,6 +6144,15 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         return importer.result;
     }
     std::unordered_set<int> decoded_printf_scaffold_lines;
+    std::string required_block_axes;
+    for (const auto& name : visited) {
+        const auto requirement = block_requirements.find(name);
+        if (requirement == block_requirements.end()) continue;
+        for (char axis : requirement->second)
+            if (required_block_axes.find(axis) == std::string::npos) required_block_axes += axis;
+    }
+    if (!required_block_axes.empty())
+        importer.result.module.attributes["required_power_of_two_block_axes"] = required_block_axes;
     const auto collect_printf_scaffold = [&](
         const cumetal::ptx::EntryFunction& function) {
         common::CompileTrace trace("ptx_printf_scaffold", ptx.size(), function.name);

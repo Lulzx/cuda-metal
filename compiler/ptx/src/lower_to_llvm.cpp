@@ -4252,6 +4252,7 @@ class GenericLlvmEmitter {
         else if (instr.opcode.find(".nan") != std::string::npos) cmp = "nan";
         else return fail(instr, "unsupported setp comparison");
 
+        const bool unordered_relation = instr.opcode.find("." + cmp + "u.") != std::string::npos;
         std::string pred_value;
         if (ty.kind == PtxTypeSpec::Kind::kFloat) {
             if (ty.bits == 64 && uses_vf64_support()) {
@@ -4295,6 +4296,17 @@ class GenericLlvmEmitter {
                     } else {
                         pred_value = compared;
                     }
+                }
+                if (unordered_relation) {
+                    const auto with_nan = next_tmp("vf64_cmp_unordered");
+                    os << "  " << with_nan << " = or i1 " << pred_value << ", " << either_nan << "\n";
+                    pred_value = with_nan;
+                } else if (cmp == "ne") {
+                    const auto ordered = next_tmp("vf64_cmp_ordered");
+                    os << "  " << ordered << " = xor i1 " << either_nan << ", true\n";
+                    const auto ordered_ne = next_tmp("vf64_cmp_ordered_ne");
+                    os << "  " << ordered_ne << " = and i1 " << pred_value << ", " << ordered << "\n";
+                    pred_value = ordered_ne;
                 }
                 return emit_store_reg_bits(os, dst, 1, pred_value, 1);
             }
@@ -4340,6 +4352,22 @@ class GenericLlvmEmitter {
                         pred_value = strict;
                     }
                 }
+                if (unordered_relation || cmp == "ne") {
+                    const auto an = next_tmp("fp64_cmp_an"), bn = next_tmp("fp64_cmp_bn");
+                    const auto un = next_tmp("fp64_cmp_un");
+                    os << "  " << an << " = fcmp uno float " << a->hi << ", " << a->hi << "\n";
+                    os << "  " << bn << " = fcmp uno float " << b->hi << ", " << b->hi << "\n";
+                    os << "  " << un << " = or i1 " << an << ", " << bn << "\n";
+                    const auto out = next_tmp("fp64_cmp_nan_result");
+                    if (unordered_relation)
+                        os << "  " << out << " = or i1 " << pred_value << ", " << un << "\n";
+                    else {
+                        const auto ordered = next_tmp("fp64_cmp_ord");
+                        os << "  " << ordered << " = xor i1 " << un << ", true\n";
+                        os << "  " << out << " = and i1 " << pred_value << ", " << ordered << "\n";
+                    }
+                    pred_value = out;
+                }
                 return emit_store_reg_bits(os, dst, 1, pred_value, 1);
             }
             auto a = decode_float_operand(os, instr.operands[1], ty.bits);
@@ -4355,6 +4383,7 @@ class GenericLlvmEmitter {
             else if (cmp == "ge") cc = "oge";
             else if (cmp == "num") cc = "ord";
             else cc = "uno";
+            if (unordered_relation && cc.front() == 'o') cc.front() = 'u';
             os << "  " << out << " = fcmp " << cc << " " << llvm_float_type(ty.bits)
                << " " << a->ir << ", " << b->ir << "\n";
             pred_value = out;
@@ -9520,6 +9549,14 @@ class GenericLlvmEmitter {
             else if (instr.opcode.find(".gt.") != std::string::npos) cmp_op = "ogt";
             else if (instr.opcode.find(".ge.") != std::string::npos) cmp_op = "oge";
             else if (instr.opcode.find(".ne.") != std::string::npos) cmp_op = "one";
+            else if (instr.opcode.find(".equ.") != std::string::npos) cmp_op = "ueq";
+            else if (instr.opcode.find(".neu.") != std::string::npos) cmp_op = "une";
+            else if (instr.opcode.find(".ltu.") != std::string::npos) cmp_op = "ult";
+            else if (instr.opcode.find(".leu.") != std::string::npos) cmp_op = "ule";
+            else if (instr.opcode.find(".gtu.") != std::string::npos) cmp_op = "ugt";
+            else if (instr.opcode.find(".geu.") != std::string::npos) cmp_op = "uge";
+            else if (instr.opcode.find(".num.") != std::string::npos) cmp_op = "ord";
+            else if (instr.opcode.find(".nan.") != std::string::npos) cmp_op = "uno";
             cmp_result = next_tmp("set_cmp");
             os << "  " << cmp_result << " = fcmp " << cmp_op << " " << fty << " " << fa->ir << ", " << fb->ir << "\n";
         } else {

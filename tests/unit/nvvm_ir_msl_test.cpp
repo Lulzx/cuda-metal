@@ -1811,8 +1811,10 @@ int main() {
     ok &= expect(inline_asm_idioms.ok &&
                      inline_asm_idioms.source.find("half(") != std::string::npos &&
                      inline_asm_idioms.source.find(" / ") != std::string::npos &&
-                     inline_asm_idioms.source.find(">> 32u") != std::string::npos &&
-                     inline_asm_idioms.source.find("<< 3") != std::string::npos,
+                     inline_asm_idioms.source.find(">> ") != std::string::npos &&
+                     inline_asm_idioms.source.find("32u") != std::string::npos &&
+                     inline_asm_idioms.source.find("<< uint(3)") != std::string::npos &&
+                     inline_asm_idioms.source.find("uint(3) < 32") != std::string::npos,
                  "inline PTX idioms lower through the PTX instruction importer: " +
                      inline_asm_idioms.error);
 

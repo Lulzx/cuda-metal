@@ -23,7 +23,6 @@ bool has_integer_64_bit_type(std::string_view opcode) {
 
 bool is_64_bit_load(const Instruction& instruction) {
     return root_opcode(instruction.opcode) == "ld" &&
-        !starts_with(instruction.opcode, "ld.param") &&
         instruction.operands.size() == 2 && has_integer_64_bit_type(instruction.opcode);
 }
 
@@ -182,6 +181,22 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
             const std::string source = first_register(instruction.operands[1]);
             require_pointer(source, AddressSpace::kNone);
         }
+        // A kernel's captured address is a raw field, not a scalar ABI
+        // parameter. An explicit global conversion of its unique ld.param
+        // definition establishes how that field is interpreted, including
+        // later spills of the original generic representation.
+        if (is_kernel && instruction.opcode == "cvta.to.global.u64" &&
+            instruction.predicate.empty() && instruction.operands.size() == 2) {
+            const auto source = first_register(instruction.operands[1]);
+            const auto definition = defining_instructions.find(source);
+            if (definition != defining_instructions.end() && definitions[source] == 1 &&
+                starts_with(definition->second->opcode, "ld.param.") &&
+                is_64_bit_load(*definition->second) && definition->second->predicate.empty()) {
+                const auto parameter = parameter_types.find(parameter_name_from_operand(definition->second->operands[1]));
+                if (parameter != parameter_types.end() && parameter->second.kind == TypeKind::kAggregate)
+                    require_pointer(source, AddressSpace::kDevice);
+            }
+        }
         if (root != "ld" && root != "st") continue;
         if (instruction.opcode.find(".param") != std::string::npos ||
             instruction.opcode.find(".shared") != std::string::npos ||
@@ -213,7 +228,11 @@ PointerInference infer_entry_pointer_types(const ptx::EntryFunction& entry, cons
             // or pointers in a different address space. Keep the same unique,
             // unconditional-definition boundary as scalar load recovery.
             // The cell address does not inherit its payload's address space.
-            if (!is_kernel && is_64_bit_load(instruction) && instruction.predicate.empty()) {
+            if (((!is_kernel && !starts_with(instruction.opcode, "ld.param")) ||
+                 (is_kernel && starts_with(instruction.opcode, "ld.param.") &&
+                  instruction.operands.size() == 2 && parameter_types.contains(parameter_name_from_operand(instruction.operands[1])) &&
+                  parameter_types.at(parameter_name_from_operand(instruction.operands[1])).kind == TypeKind::kAggregate)) &&
+                is_64_bit_load(instruction) && instruction.predicate.empty()) {
                 for (std::size_t lane = 0; lane < destinations.size(); ++lane) {
                     const auto& destination = destinations[lane];
                     const auto required = required_pointers.find(destination);

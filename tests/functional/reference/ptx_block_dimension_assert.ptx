@@ -1,0 +1,46 @@
+.version 7.1
+.target sm_80
+.address_size 64
+.extern .func __assertfail(.param .b64 a, .param .b64 b, .param .b32 c, .param .b64 d, .param .b64 e);
+.func abort_dimension() {
+.param .b64 a;
+.param .b64 b;
+.param .b32 c;
+.param .b64 d;
+.param .b64 e;
+st.param.b64 [a], 0;
+st.param.b64 [b], 0;
+st.param.b32 [c], 0;
+st.param.b64 [d], 0;
+st.param.b64 [e], 1;
+call.uni __assertfail, (a,b,c,d,e);
+exit;
+}
+.func checked_work(.param .u64 output) {
+.reg .b32 %r<6>;
+.reg .b64 %rd<4>;
+.reg .pred %p1;
+ld.param.u64 %rd1, [output];
+mov.u32 %r1, %ntid.y;
+add.s32 %r2, %r1, -1;
+and.b32 %r3, %r1, %r2;
+setp.eq.b32 %p1, %r3, 0;
+@!%p1 bra ASSERT;
+bar.sync 0;
+mov.u32 %r4, %tid.y;
+mul.wide.u32 %rd2, %r4, 4;
+add.u64 %rd3, %rd1, %rd2;
+st.global.u32 [%rd3], %r1;
+ret;
+ASSERT:
+call.uni abort_dimension, ();
+exit;
+}
+.visible .entry block_assert(.param .u64 output) {
+.reg .b64 %rd1;
+.param .u64 arg;
+ld.param.u64 %rd1, [output];
+st.param.u64 [arg], %rd1;
+call.uni checked_work, (arg);
+ret;
+}

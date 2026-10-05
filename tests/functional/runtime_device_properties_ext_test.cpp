@@ -161,9 +161,17 @@ int main() {
     static_assert(offsetof(cudaDeviceProp, maxBlocksPerMultiProcessor) >
                       offsetof(cudaDeviceProp, uuid),
                   "occupancy fields must be consumed from the reserved tail");
+    static_assert(sizeof(cudaDeviceProp) == 680,
+                  "device-property additions must not grow the public allocation");
+    static_assert(offsetof(cudaDeviceProp, reservedSharedMemPerBlock) == 472,
+                  "shared-memory reservation must consume the reserved tail");
     static_assert(offsetof(cudaDeviceProp, cumetalReserved) ==
-                      offsetof(cudaDeviceProp, regsPerMultiprocessor) + sizeof(int),
-                  "reserved tail must directly follow the occupancy fields");
+                      offsetof(cudaDeviceProp, reservedSharedMemPerBlock) + sizeof(size_t),
+                  "reserved tail must directly follow the shared-memory reservation");
+    if (prop.reservedSharedMemPerBlock != 0) {
+        std::fprintf(stderr, "FAIL: Metal has no hidden per-block shared reservation\n");
+        return 1;
+    }
 
     // Verify cudaComputeMode enum values compile correctly.
     static_assert(cudaComputeModeDefault         == 0, "cudaComputeModeDefault should be 0");

@@ -781,6 +781,7 @@ install(FILES
     runtime/api/cublas_v2.h
     runtime/api/cuda.h
     runtime/api/cuda_fp16.h
+    runtime/api/cumetal_float16_convert.h
     runtime/api/cuda_runtime.h
     runtime/api/cuda_runtime_api.h
     runtime/api/cufft.h

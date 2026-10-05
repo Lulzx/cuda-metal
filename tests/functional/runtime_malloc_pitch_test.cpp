@@ -18,6 +18,22 @@ int main() {
 
     // Test 1: cudaMallocPitch — null pitch pointer is rejected.
     void* ptr = nullptr;
+    size_t free_before=0, total_before=0, free_after=0, total_after=0;
+    if (cudaMemGetInfo(&free_before, &total_before) != cudaSuccess) return 1;
+    ptr = reinterpret_cast<void*>(0xdeadbeef);
+    if (cudaMalloc(&ptr, 0) != cudaSuccess || ptr != nullptr || cudaFree(ptr) != cudaSuccess ||
+        cudaMemGetInfo(&free_after, &total_after) != cudaSuccess ||
+        free_before != free_after || total_before != total_after) {
+        std::fprintf(stderr,"FAIL: zero-byte cudaMalloc must return null without an allocation\n");return 1;
+    }
+    if (cudaMalloc(nullptr,0) != cudaErrorInvalidValue || cudaGetLastError() != cudaErrorInvalidValue)
+        return 1;
+    ptr = reinterpret_cast<void*>(0xdeadbeef);
+    if (cudaMallocManaged(&ptr,0,cudaMemAttachGlobal) != cudaErrorInvalidValue ||
+        ptr != reinterpret_cast<void*>(0xdeadbeef) || cudaGetLastError() != cudaErrorInvalidValue) {
+        std::fprintf(stderr,"FAIL: managed zero-byte allocation remains invalid and transactional\n");return 1;
+    }
+    ptr = nullptr;
     if (cudaMallocPitch(&ptr, nullptr, kCols * sizeof(float), kRows) != cudaErrorInvalidValue) {
         std::fprintf(stderr, "FAIL: null pitch ptr should be rejected\n");
         return 1;

@@ -235,7 +235,13 @@ private:
                     // Metal rejects `as_type` between pointer types. A bitcast
                     // that lands on a pointer is a reinterpretation of the
                     // address, which is what reinterpret_cast spells.
-                    if (node.bitcast && node.target.kind == MslTypeKind::kPointer) {
+                    if (node.bitcast && node.operand->type.kind == MslTypeKind::kPointer &&
+                        node.target.kind != MslTypeKind::kPointer &&
+                        node.target != MslType::uint(64) && node.target != MslType::sint(64)) {
+                        errors_.push_back("pointer bitcast requires a pointer or 64-bit integer target");
+                        out_ << "/* invalid pointer bitcast */";
+                    } else if (node.bitcast && (node.target.kind == MslTypeKind::kPointer ||
+                               node.operand->type.kind == MslTypeKind::kPointer)) {
                         out_ << "reinterpret_cast<" << may_alias_spelling(node.target) << ">(";
                         print_expression(node.operand);
                         out_ << ")";
@@ -287,6 +293,9 @@ private:
                 using Node = std::decay_t<decltype(node)>;
                 if constexpr (std::is_same_v<Node, MslVariableDeclaration>) {
                     indent(depth);
+                    if (node.alignment && (node.alignment & (node.alignment - 1)))
+                        errors_.push_back("MSL storage alignment must be a power of two");
+                    if (node.alignment) out_ << "alignas(" << node.alignment << ") ";
                     out_ << node.type.str();
                     if (node.is_const) out_ << " const";
                     out_ << " " << sanitize_identifier(node.name);
@@ -333,10 +342,16 @@ private:
                     out_ << "}\n";
                 } else if constexpr (std::is_same_v<Node, MslThreadgroupByteArray>) {
                     indent(depth);
+                    if (!node.alignment || (node.alignment & (node.alignment - 1)))
+                        errors_.push_back("MSL storage alignment must be a positive power of two");
+                    if (node.alignment > 1) out_ << "alignas(" << node.alignment << ") ";
                     out_ << "threadgroup uchar " << sanitize_identifier(node.name)
                          << "[" << node.byte_size << "];\n";
                 } else if constexpr (std::is_same_v<Node, MslPrivateByteArray>) {
                     indent(depth);
+                    if (!node.alignment || (node.alignment & (node.alignment - 1)))
+                        errors_.push_back("MSL storage alignment must be a positive power of two");
+                    if (node.alignment > 1) out_ << "alignas(" << node.alignment << ") ";
                     out_ << "thread uchar " << sanitize_identifier(node.name)
                          << "[" << node.byte_size << "];\n";
                 } else if constexpr (std::is_same_v<Node, MslSwitch>) {
@@ -608,13 +623,14 @@ MslExpr MslExpression::vote_mask(MslExpr vote) {
 }
 
 MslStmt MslStatement::variable(MslType type, std::string name,
-                               std::optional<MslExpr> initializer, bool is_const) {
+                               std::optional<MslExpr> initializer, bool is_const, std::uint64_t alignment) {
     return std::make_shared<MslStatement>(MslStatement{
         .value = MslVariableDeclaration{
             .type = std::move(type),
             .name = std::move(name),
             .initializer = std::move(initializer),
             .is_const = is_const,
+            .alignment = alignment,
         },
     });
 }
@@ -650,21 +666,23 @@ MslStmt MslStatement::while_statement(MslExpr condition, std::vector<MslStmt> st
 }
 
 MslStmt MslStatement::threadgroup_byte_array(std::string name,
-                                              std::uint64_t byte_size) {
+                                              std::uint64_t byte_size, std::uint64_t alignment) {
     return std::make_shared<MslStatement>(MslStatement{
         .value = MslThreadgroupByteArray{
             .name = std::move(name),
             .byte_size = byte_size,
+            .alignment = alignment,
         },
     });
 }
 
 MslStmt MslStatement::private_byte_array(std::string name,
-                                         std::uint64_t byte_size) {
+                                         std::uint64_t byte_size, std::uint64_t alignment) {
     return std::make_shared<MslStatement>(MslStatement{
         .value = MslPrivateByteArray{
             .name = std::move(name),
             .byte_size = byte_size,
+            .alignment = alignment,
         },
     });
 }

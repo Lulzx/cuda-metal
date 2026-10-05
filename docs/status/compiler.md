@@ -18,20 +18,21 @@ GPU correctness, and cache hits and the NVVM/legacy compiler paths are untraced.
   production libraries.
 - Direct AIR generation remains tooling/research only.
 
-With CUDA Clang 21-23, the reviewed manifest-controlled 42-file
+With CUDA Clang 21-23, the reviewed manifest-controlled 45-file
 production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/42 | **42/42** |
-| PTX / `--cuda-device` | **38/42** | **39/42** |
+| direct `.cu` | 0/45 | **45/45** |
+| PTX / `--cuda-device` | **41/45** | **43/45** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler
 identity and requires the same manifest with CUDA Clang 21, 22, and 23.
 
-The separate exact `coverage_manifest.json` numerical corpus passes all 27
-projects through both typed PTX and direct native AOT on Apple M4 Pro. Both
+The separate exact `coverage_manifest.json` numerical corpus passes all 40
+typed-PTX enrollments and all 43 direct native-AOT enrollments on Apple M4 Pro
+(2026-10-04). Both
 gates disable workload specializations and require every enrolled project to
 pass. The native-AOT gate launches embedded metallibs without registration JIT
 or first-launch PTX compilation. Device `printf` uses native ABI version 3 so

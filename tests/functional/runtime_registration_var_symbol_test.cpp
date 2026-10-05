@@ -33,6 +33,8 @@ unsigned char g_host_symbol[kSymbolSize] = {};
 unsigned char g_device_symbol[kSymbolSize] = {};
 int g_managed_host_symbol = 0;
 int g_managed_device_symbol = 0;
+int* g_host_pointer_symbol = nullptr;
+int* g_device_pointer_symbol = nullptr;
 
 bool bytes_equal(const std::vector<unsigned char>& lhs, const std::vector<unsigned char>& rhs) {
     return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
@@ -129,6 +131,38 @@ int main() {
         std::fprintf(stderr, "FAIL: managed var registration mapping did not apply\n");
         return 1;
     }
+
+    // Pointer-valued symbols must resolve by host-shadow address, while explicit
+    // pointer arguments (including lvalues) retain the C entry point semantics.
+    __cudaRegisterVar(fatbin_handle,
+                      reinterpret_cast<char*>(&g_host_pointer_symbol),
+                      reinterpret_cast<char*>(&g_device_pointer_symbol),
+                      "g_pointer_symbol", 0, sizeof(int*), 0, 1);
+    int pointee = 7;
+    int* pointer_value = &pointee;
+    (void)cudaGetLastError();
+    if (cudaMemcpyToSymbol(g_host_pointer_symbol, &pointer_value, sizeof(pointer_value)) != cudaSuccess ||
+        g_host_pointer_symbol != nullptr || g_device_pointer_symbol != pointer_value) {
+        std::fprintf(stderr, "FAIL: pointer-valued symbol lost registered identity\n");
+        return 1;
+    }
+    int* observed_pointer = nullptr;
+    if (cudaMemcpyFromSymbol(&observed_pointer, g_host_pointer_symbol, sizeof(observed_pointer)) != cudaSuccess ||
+        observed_pointer != pointer_value) return 1;
+    void* symbol_address = nullptr;
+    if (cudaGetSymbolAddress(&symbol_address, g_host_pointer_symbol) != cudaSuccess ||
+        symbol_address != &g_device_pointer_symbol) return 1;
+    int** explicit_address = &g_host_pointer_symbol;
+    if (cudaMemcpyToSymbol(explicit_address, &pointer_value, sizeof(pointer_value), 0,
+                           cudaMemcpyHostToDevice) != cudaSuccess ||
+        g_device_pointer_symbol != pointer_value ||
+        cudaMemcpyToSymbol(g_host_pointer_symbol, &pointer_value, sizeof(pointer_value) + 1) !=
+            cudaErrorInvalidValue) return 1;
+    (void)cudaGetLastError();
+    if (cudaMemcpyToSymbolAsync(g_host_pointer_symbol, &pointer_value, sizeof(pointer_value),
+                                0, cudaMemcpyHostToDevice, nullptr) != cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess || g_device_pointer_symbol != pointer_value)
+        return 1;
 
     __cudaUnregisterFatBinary(fatbin_handle);
 

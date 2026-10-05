@@ -20,6 +20,7 @@
 #include <string.h>
 
 #ifdef __cplusplus
+#include "cumetal_float16_convert.h"
 
 // ── Host-side __half (not compiled with CUDA device target) ─────────────────
 #if !(defined(__clang__) && defined(__CUDA__))
@@ -29,22 +30,8 @@ struct __half {
 
     __half() = default;
 
-    // Conversion from float
-    explicit __half(float f) {
-        // IEEE 754 float-to-half conversion
-        uint32_t bits;
-        memcpy(&bits, &f, 4);
-        uint32_t sign = (bits >> 16) & 0x8000u;
-        int32_t exp = static_cast<int32_t>((bits >> 23) & 0xff) - 127 + 15;
-        uint32_t mant = bits & 0x7fffffu;
-        if (exp <= 0) {
-            __x = static_cast<uint16_t>(sign);
-        } else if (exp >= 31) {
-            __x = static_cast<uint16_t>(sign | 0x7c00u);
-        } else {
-            __x = static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13));
-        }
-    }
+    // Round once to binary16, including subnormals and NaNs.
+    explicit __half(float f) : __x(cumetal_float16::from_float<5, 10>(f)) {}
 
     // Conversion to float
     explicit operator float() const {
@@ -53,7 +40,14 @@ struct __half {
         uint32_t mant = __x & 0x3ffu;
         uint32_t bits;
         if (exp == 0) {
-            bits = (sign << 31);
+            if (mant == 0) {
+                bits = sign << 31;
+            } else {
+                int unbiased = -14;
+                while ((mant & 0x400u) == 0) { mant <<= 1; --unbiased; }
+                bits = (sign << 31) | (static_cast<uint32_t>(unbiased + 127) << 23) |
+                       ((mant & 0x3ffu) << 13);
+            }
         } else if (exp == 31) {
             bits = (sign << 31) | 0x7f800000u | (mant << 13);
         } else {
@@ -168,15 +162,6 @@ inline __half __hmax(const __half& a, const __half& b) {
 inline __half __hmin(const __half& a, const __half& b) {
     return static_cast<float>(a) < static_cast<float>(b) ? a : b;
 }
-// Half ↔ integer conversions.
-inline int   __half2int_rn(const __half& h)    { return static_cast<int>(static_cast<float>(h)); }
-inline unsigned int __half2uint_rn(const __half& h) { return static_cast<unsigned int>(static_cast<float>(h)); }
-inline short __half2short_rn(const __half& h)  { return static_cast<short>(static_cast<float>(h)); }
-inline long long __half2ll_rn(const __half& h) { return static_cast<long long>(static_cast<float>(h)); }
-inline __half __int2half_rn(int i)   { return __half(static_cast<float>(i)); }
-inline __half __uint2half_rn(unsigned int i) { return __half(static_cast<float>(i)); }
-inline __half __short2half_rn(short s) { return __half(static_cast<float>(s)); }
-inline __half __ll2half_rn(long long l) { return __half(static_cast<float>(l)); }
 
 inline __half operator+(const __half& a, const __half& b) { return __hadd(a, b); }
 inline __half operator-(const __half& a, const __half& b) { return __hsub(a, b); }
@@ -209,17 +194,17 @@ typedef struct __attribute__((aligned(4))) __half2 {
 typedef __half half;
 typedef __half2 half2;
 
-static __device__ __forceinline__ __half __float2half(float f) {
+static __host__ __device__ __forceinline__ __half __float2half(float f) {
     return static_cast<__half>(f);
 }
-static __device__ __forceinline__ __half __float2half_rn(float f) {
+static __host__ __device__ __forceinline__ __half __float2half_rn(float f) {
     return static_cast<__half>(f);
 }
 static __device__ __forceinline__ __half2 __float2half2_rn(float f) {
     const __half h = __float2half_rn(f);
     return {h, h};
 }
-static __device__ __forceinline__ float __half2float(__half h) {
+static __host__ __device__ __forceinline__ float __half2float(__half h) {
     return static_cast<float>(h);
 }
 static __device__ __forceinline__ __half2 make_half2(__half x, __half y) { return {x, y}; }
@@ -228,8 +213,8 @@ static __device__ __forceinline__ __half2 __floats2half2_rn(float x, float y) {
 }
 static __device__ __forceinline__ __half __low2half(__half2 h2) { return h2.x; }
 static __device__ __forceinline__ __half __high2half(__half2 h2) { return h2.y; }
-static __device__ __forceinline__ float __low2float(__half2 h2) { return __half2float(h2.x); }
-static __device__ __forceinline__ float __high2float(__half2 h2) { return __half2float(h2.y); }
+static __host__ __device__ __forceinline__ float __low2float(__half2 h2) { return __half2float(h2.x); }
+static __host__ __device__ __forceinline__ float __high2float(__half2 h2) { return __half2float(h2.y); }
 static __device__ __forceinline__ __half2 __half2half2(__half h) { return {h, h}; }
 static __device__ __forceinline__ __half2 __hadd2(__half2 a, __half2 b) {
     return {a.x + b.x, a.y + b.y};
@@ -332,12 +317,6 @@ static __device__ __forceinline__ __half2 operator*(__half2 a, __half2 b) { retu
 static __device__ __forceinline__ __half2& operator+=(__half2& a, __half2 b) { a = __hadd2(a, b); return a; }
 static __device__ __forceinline__ __half2& operator-=(__half2& a, __half2 b) { a = __hsub2(a, b); return a; }
 static __device__ __forceinline__ __half2& operator*=(__half2& a, __half2 b) { a = __hmul2(a, b); return a; }
-// Half ↔ integer conversions for device code.
-static __device__ __forceinline__ int __half2int_rn(__half h) { return static_cast<int>(h); }
-static __device__ __forceinline__ unsigned int __half2uint_rn(__half h) { return static_cast<unsigned int>(h); }
-static __device__ __forceinline__ __half __int2half_rn(int i) { return static_cast<__half>(i); }
-static __device__ __forceinline__ __half __uint2half_rn(unsigned int i) { return static_cast<__half>(i); }
-
 // atomicAdd for __half via CAS loop (spec §8: "Software emulation via CAS loop").
 // Uses the 32-bit word containing the 16-bit element for the CAS operation.
 static __device__ __forceinline__ __half atomicAdd(__half* addr, __half val) {
@@ -368,6 +347,126 @@ static __device__ __forceinline__ __half atomicAdd(__half* addr, __half val) {
 }
 
 #endif  // device vs host
+
+
+// Conversion entry points needed by templated CUDA libraries. Keep host and
+// device behavior identical; integer and double inputs never round via FP32.
+CUMETAL_F16_HD inline __half __cumetal_half_from_bits(uint16_t bits) {
+    __half out;
+#if defined(__clang__) && defined(__CUDA__)
+    __builtin_memcpy(&out, &bits, sizeof(bits));
+#else
+    out.__x = bits;
+#endif
+    return out;
+}
+CUMETAL_F16_HD inline __half __double2half(double value) {
+    return __cumetal_half_from_bits(cumetal_float16::from_double<5, 10>(value));
+}
+CUMETAL_F16_HD inline __half __short2half_rn(short value) {
+    const uint64_t magnitude = value < 0 ? uint64_t(0) - static_cast<uint64_t>(value) : static_cast<uint64_t>(value);
+    return __cumetal_half_from_bits(cumetal_float16::pack<5, 10>(value < 0, magnitude, 0));
+}
+CUMETAL_F16_HD inline __half __ushort2half_rn(unsigned short value) {
+    const uint64_t magnitude = static_cast<uint64_t>(value);
+    return __cumetal_half_from_bits(cumetal_float16::pack<5, 10>(false, magnitude, 0));
+}
+CUMETAL_F16_HD inline __half __int2half_rn(int value) {
+    const uint64_t magnitude = value < 0 ? uint64_t(0) - static_cast<uint64_t>(value) : static_cast<uint64_t>(value);
+    return __cumetal_half_from_bits(cumetal_float16::pack<5, 10>(value < 0, magnitude, 0));
+}
+CUMETAL_F16_HD inline __half __uint2half_rn(unsigned int value) {
+    const uint64_t magnitude = static_cast<uint64_t>(value);
+    return __cumetal_half_from_bits(cumetal_float16::pack<5, 10>(false, magnitude, 0));
+}
+CUMETAL_F16_HD inline __half __ll2half_rn(long long value) {
+    const uint64_t magnitude = value < 0 ? uint64_t(0) - static_cast<uint64_t>(value) : static_cast<uint64_t>(value);
+    return __cumetal_half_from_bits(cumetal_float16::pack<5, 10>(value < 0, magnitude, 0));
+}
+CUMETAL_F16_HD inline __half __ull2half_rn(unsigned long long value) {
+    const uint64_t magnitude = static_cast<uint64_t>(value);
+    return __cumetal_half_from_bits(cumetal_float16::pack<5, 10>(false, magnitude, 0));
+}
+CUMETAL_F16_HD inline short __half2short_rz(__half value) {
+    return static_cast<short>(cumetal_float16::signed_integer<16, false>(__half2float(value)));
+}
+CUMETAL_F16_HD inline short __half2short_rn(__half value) {
+    return static_cast<short>(cumetal_float16::signed_integer<16, true>(__half2float(value)));
+}
+CUMETAL_F16_HD inline unsigned short __half2ushort_rz(__half value) {
+    return static_cast<unsigned short>(cumetal_float16::unsigned_integer<16, false>(__half2float(value)));
+}
+CUMETAL_F16_HD inline unsigned short __half2ushort_rn(__half value) {
+    return static_cast<unsigned short>(cumetal_float16::unsigned_integer<16, true>(__half2float(value)));
+}
+CUMETAL_F16_HD inline int __half2int_rz(__half value) {
+    return static_cast<int>(cumetal_float16::signed_integer<32, false>(__half2float(value)));
+}
+CUMETAL_F16_HD inline int __half2int_rn(__half value) {
+    return static_cast<int>(cumetal_float16::signed_integer<32, true>(__half2float(value)));
+}
+CUMETAL_F16_HD inline unsigned int __half2uint_rz(__half value) {
+    return static_cast<unsigned int>(cumetal_float16::unsigned_integer<32, false>(__half2float(value)));
+}
+CUMETAL_F16_HD inline unsigned int __half2uint_rn(__half value) {
+    return static_cast<unsigned int>(cumetal_float16::unsigned_integer<32, true>(__half2float(value)));
+}
+CUMETAL_F16_HD inline long long __half2ll_rz(__half value) {
+    return static_cast<long long>(cumetal_float16::signed_integer<64, false>(__half2float(value)));
+}
+CUMETAL_F16_HD inline long long __half2ll_rn(__half value) {
+    return static_cast<long long>(cumetal_float16::signed_integer<64, true>(__half2float(value)));
+}
+CUMETAL_F16_HD inline unsigned long long __half2ull_rz(__half value) {
+    return static_cast<unsigned long long>(cumetal_float16::unsigned_integer<64, false>(__half2float(value)));
+}
+CUMETAL_F16_HD inline unsigned long long __half2ull_rn(__half value) {
+    return static_cast<unsigned long long>(cumetal_float16::unsigned_integer<64, true>(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hexp(__half value) {
+    return __float2half_rn(__builtin_expf(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hexp2(__half value) {
+    return __float2half_rn(__builtin_exp2f(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hlog(__half value) {
+    return __float2half_rn(__builtin_logf(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hlog2(__half value) {
+    return __float2half_rn(__builtin_log2f(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hlog10(__half value) {
+    return __float2half_rn(__builtin_log10f(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hsqrt(__half value) {
+    return __float2half_rn(__builtin_sqrtf(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hsin(__half value) {
+    return __float2half_rn(__builtin_sinf(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hcos(__half value) {
+    return __float2half_rn(__builtin_cosf(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hceil(__half value) {
+    return __float2half_rn(__builtin_ceilf(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hfloor(__half value) {
+    return __float2half_rn(__builtin_floorf(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half htrunc(__half value) {
+    return __float2half_rn(__builtin_truncf(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hrint(__half value) {
+    return __float2half_rn(cumetal_float16::round_even(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hrsqrt(__half value) {
+    return __float2half_rn(1.0f / __builtin_sqrtf(__half2float(value)));
+}
+CUMETAL_F16_HD inline __half hrcp(__half value) {
+    return __float2half_rn(1.0f / __half2float(value));
+}
+CUMETAL_F16_HD inline bool __hisnan(__half value) { return __builtin_isnan(__half2float(value)); }
+CUMETAL_F16_HD inline bool __hisinf(__half value) { return __builtin_isinf(__half2float(value)); }
 
 #else  // !__cplusplus
 

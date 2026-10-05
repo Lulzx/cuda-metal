@@ -3192,13 +3192,17 @@ cudaError_t cudaMemGetInfo(size_t* free_bytes, size_t* total_bytes) {
 }
 
 cudaError_t cudaMalloc(void** dev_ptr, size_t size) {
-    if (dev_ptr == nullptr || size == 0) {
+    if (dev_ptr == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
 
     const cudaError_t init_status = ensure_initialized();
     if (init_status != cudaSuccess) {
         return fail(init_status);
+    }
+    if (size == 0) {
+        *dev_ptr = nullptr;
+        return fail(cudaSuccess);
     }
 
     std::shared_ptr<cumetal::metal_backend::Buffer> buffer;
@@ -3253,7 +3257,7 @@ cudaError_t cudaMallocManaged(void** dev_ptr, size_t size, unsigned int flags) {
     // storage on Apple Silicon already has that property, and later stream
     // attachment is an ordering hint rather than a migration. SINGLE still
     // needs per-stream accessibility state and remains unsupported.
-    if (flags != 0 && flags != cudaMemAttachGlobal && flags != cudaMemAttachHost) {
+    if (size == 0 || (flags != 0 && flags != cudaMemAttachGlobal && flags != cudaMemAttachHost)) {
         return fail(cudaErrorInvalidValue);
     }
     return cudaMalloc(dev_ptr, size);
@@ -3614,6 +3618,16 @@ cudaError_t cudaMemcpyAsync(void* dst,
         trace_op("CPYA", buf);
     }
     return fail(cudaSuccess);
+}
+
+const void* __cumetalResolveSymbolReference(const void* reference, const void* pointerValue) {
+    const void* resolved = nullptr;
+    std::size_t size = 0;
+    if (cumetal::native_registration::lookup_symbol(reference, &resolved, &size) ||
+        cumetal::registration::lookup_registered_symbol(reference, &resolved, &size)) {
+        return reference;
+    }
+    return pointerValue;
 }
 
 cudaError_t cudaMemcpyToSymbol(const void* symbol,
@@ -5040,6 +5054,61 @@ cudaError_t cudaGraphGetRootNodes(cudaGraph_t graph, cudaGraphNode_t* pRootNodes
         *pNumRootNodes = count;
     }
     return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphAddEmptyNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                 const cudaGraphNode_t* pDependencies, size_t numDependencies) {
+    if (pGraphNode == nullptr || graph == nullptr) return fail(cudaErrorInvalidValue);
+    auto* node = new (std::nothrow) cudaGraphNode_st();
+    if (node == nullptr) return fail(cudaErrorMemoryAllocation);
+    node->type = cudaGraphNodeTypeEmpty;
+    if (!assign_graph_dependencies(graph, node, pDependencies, numDependencies)) {
+        delete node;
+        return fail(cudaErrorInvalidValue);
+    }
+    graph->nodes.push_back(node);
+    *pGraphNode = node;
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphAddDependencies(cudaGraph_t graph, const cudaGraphNode_t* from,
+                                    const cudaGraphNode_t* to, size_t count) {
+    if (graph == nullptr || (count != 0 && (from == nullptr || to == nullptr)))
+        return fail(cudaErrorInvalidValue);
+    std::vector<std::pair<cudaGraphNode_t, cudaGraphNode_t>> edges;
+    edges.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto edge = std::make_pair(from[i], to[i]);
+        if (!graph_contains_node(graph, from[i]) || !graph_contains_node(graph, to[i]) ||
+            from[i] == to[i] ||
+            std::find(to[i]->dependencies.begin(), to[i]->dependencies.end(), from[i]) !=
+                to[i]->dependencies.end() ||
+            std::find(edges.begin(), edges.end(), edge) != edges.end())
+            return fail(cudaErrorInvalidValue);
+        edges.push_back(edge);
+    }
+    for (const auto& edge : edges) edge.second->dependencies.push_back(edge.first);
+    std::vector<cudaGraphNode_t> ordered;
+    if (!topologically_order_graph(graph, &ordered)) {
+        // Invalid topology must not partially mutate the graph.
+        for (auto it = edges.rbegin(); it != edges.rend(); ++it)
+            it->second->dependencies.pop_back();
+        return fail(cudaErrorInvalidValue);
+    }
+    return fail(cudaSuccess);
+}
+
+cudaError_t cudaGraphAddChildGraphNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                      const cudaGraphNode_t* dependencies, size_t count,
+                                      cudaGraph_t childGraph) {
+    if (pGraphNode == nullptr || graph == nullptr || childGraph == nullptr || graph == childGraph)
+        return fail(cudaErrorInvalidValue);
+    cudaGraphNode_st candidate;
+    if (!assign_graph_dependencies(graph, &candidate, dependencies, count))
+        return fail(cudaErrorInvalidValue);
+    // Child graph replay/lifetime is intentionally not implemented.
+    *pGraphNode = nullptr;
+    return fail(cudaErrorNotSupported);
 }
 
 cudaError_t cudaGraphAddKernelNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
@@ -7133,6 +7202,16 @@ const char* cudaGetErrorName(cudaError_t error) {
             return "cudaErrorPeerAccessNotEnabled";
         case cudaErrorIllegalAddress:
             return "cudaErrorIllegalAddress";
+        case cudaErrorHardwareStackError:
+            return "cudaErrorHardwareStackError";
+        case cudaErrorIllegalInstruction:
+            return "cudaErrorIllegalInstruction";
+        case cudaErrorMisalignedAddress:
+            return "cudaErrorMisalignedAddress";
+        case cudaErrorInvalidAddressSpace:
+            return "cudaErrorInvalidAddressSpace";
+        case cudaErrorInvalidPc:
+            return "cudaErrorInvalidPc";
         case cudaErrorNotSupported:
             return "cudaErrorNotSupported";
         case cudaErrorCudartUnloading:
@@ -7193,6 +7272,16 @@ const char* cudaGetErrorString(cudaError_t error) {
             return "cudaErrorPeerAccessNotEnabled";
         case cudaErrorIllegalAddress:
             return "cudaErrorIllegalAddress";
+        case cudaErrorHardwareStackError:
+            return "cudaErrorHardwareStackError";
+        case cudaErrorIllegalInstruction:
+            return "cudaErrorIllegalInstruction";
+        case cudaErrorMisalignedAddress:
+            return "cudaErrorMisalignedAddress";
+        case cudaErrorInvalidAddressSpace:
+            return "cudaErrorInvalidAddressSpace";
+        case cudaErrorInvalidPc:
+            return "cudaErrorInvalidPc";
         case cudaErrorNotSupported:
             return "operation not supported";
         case cudaErrorCudartUnloading:
@@ -7332,6 +7421,13 @@ cudaError_t cudaFuncGetAttributes(cudaFuncAttributes* attr, const void* func) {
         return fail(cudaErrorInvalidValue);
     *attr = {};
     attr->maxThreadsPerBlock = kernel.max_threads_per_threadgroup;
+    // Metal does not expose physical register usage. Supply a positive virtual
+    // occupancy cost consistent with our advertised one-block register budget
+    // and the actual pipeline thread limit. CUDA clients (including Kokkos)
+    // divide by numRegs when choosing launch sizes.
+    const int thread_limit = std::max(1, attr->maxThreadsPerBlock);
+    attr->numRegs = std::max(1, (device.regsPerBlock + thread_limit - 1) /
+                                  thread_limit);
     attr->sharedSizeBytes = kernel.static_threadgroup_memory_bytes;
     attr->maxDynamicSharedSizeBytes =
         kernel.static_threadgroup_memory_bytes >=

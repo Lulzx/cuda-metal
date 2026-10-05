@@ -106,6 +106,21 @@ static void expect(const char* what, double got, double want, double tol) {
     printf("  %-30s got %-24.17g want %-24.17g %s\n", what, got, want, ok ? "ok" : "FAIL");
 }
 
+__global__ void unordered_fp64(unsigned* out, const double* values) {
+    unsigned i=threadIdx.x;
+    if(i>=49) return;
+    double a=values[i/7], b=values[i%7];
+#define CM_COMPARE(P, SLOT) asm volatile("{\n .reg .pred %%p;\n setp." P ".f64 %%p, %1, %2;\n selp.u32 %0, 1, 0, %%p;\n }" : "=r"(out[i*14+SLOT]) : "d"(a), "d"(b))
+    CM_COMPARE("eq",0); CM_COMPARE("ne",1);
+    CM_COMPARE("lt",2); CM_COMPARE("le",3);
+    CM_COMPARE("gt",4); CM_COMPARE("ge",5);
+    CM_COMPARE("equ",6); CM_COMPARE("neu",7);
+    CM_COMPARE("ltu",8); CM_COMPARE("leu",9);
+    CM_COMPARE("gtu",10); CM_COMPARE("geu",11);
+    CM_COMPARE("num",12); CM_COMPARE("nan",13);
+#undef CM_COMPARE
+}
+
 int main() {
     const char* fp64_mode = getenv("CUMETAL_FP64_MODE");
     const bool exact_mode = fp64_mode && strcmp(fp64_mode, "ieee64") == 0;
@@ -375,6 +390,28 @@ int main() {
         }
     }
     report("remainder and round-to-int", rounding_bad, 6, 0.0, "rel");
+
+    {
+        const double values[7]={-INFINITY,-1.0,-0.0,0.0,1.0,INFINITY,NAN};
+        unsigned actual[49*14]={};
+        cudaMemcpy(d_in,values,sizeof values,cudaMemcpyHostToDevice);
+        unordered_fp64<<<1,64>>>(reinterpret_cast<unsigned*>(d_z),d_in);
+        if(cudaGetLastError()!=cudaSuccess || cudaDeviceSynchronize()!=cudaSuccess ||
+           cudaMemcpy(actual,d_z,sizeof actual,cudaMemcpyDeviceToHost)!=cudaSuccess) return 1;
+        int bad=0;
+        for(unsigned i=0;i<49;++i) {
+            double a=values[i/7],b=values[i%7];
+            bool u=std::isnan(a)||std::isnan(b);
+            // PTX ne is ordered; neu is true for unordered operands.
+            const bool expected[14]={a==b,!u&&a!=b,a<b,a<=b,a>b,a>=b,
+                u||a==b,u||a!=b,u||a<b,u||a<=b,u||a>b,u||a>=b,!u,u};
+            for(unsigned j=0;j<14;++j) if(actual[i*14+j]!=unsigned(expected[j])) {
+                if(bad<8) printf("    comparison pair=%u predicate=%u actual=%u expected=%u\n",i,j,actual[i*14+j],unsigned(expected[j]));
+                ++bad;
+            }
+        }
+        report("ordered/unordered comparisons",bad,49*14,0.0,"exact");
+    }
 
     if (failures == 0) printf("PASS: fp64 emulation meets the ~48-bit significand contract\n");
     else printf("FAIL: %d fp64 contract violation(s)\n", failures);

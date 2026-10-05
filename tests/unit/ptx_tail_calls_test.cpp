@@ -69,6 +69,82 @@ int main(int argc, char** argv) {
         const auto rejected = metal::compile_ptx_to_msl(invalid);
         ok &= expect(!rejected.ok, "malformed, misaligned and predicated vector parameter transfers rejected");
     }
+    for (unsigned width : {2u, 4u}) {
+        const std::string tuple = width == 2 ? "{%r1, %r2}" : "{%r1, %r2, %r3, %r4}";
+        const std::string opcode = "ld.param.v" + std::to_string(width) + ".b32";
+        std::string source = ".version 7.0\n.target sm_80\n.address_size 64\n"
+            ".visible .entry vector_input(.param .align 16 .b8 input[16], .param .u64 output) {\n"
+            ".reg .b32 %r<5>;\n.reg .b64 %rd1;\nld.param.u64 %rd1, [output];\n" +
+            opcode + " " + tuple + ", [input];\n";
+        for (unsigned i = 0; i < width; ++i)
+            source += "st.global.b32 [%rd1+" + std::to_string(4*i) + "], %r" + std::to_string(i+1) + ";\n";
+        source += "ret;\n}\n";
+        const auto result = metal::compile_ptx_to_msl(source);
+        ok &= expect(result.ok, "32-bit vector parameter lanes preserve aggregate fields: " + result.error);
+        auto indirect = source;
+        indirect.replace(indirect.find(".reg .b64 %rd1;"), 15, ".reg .b64 %rd<3>;");
+        indirect.insert(indirect.find(opcode), "mov.b64 %rd2, input;\n");
+        indirect.replace(indirect.find("[input];"), 8, "[%rd2];");
+        const auto indirect_result = metal::compile_ptx_to_msl(indirect);
+        ok &= expect(indirect_result.ok, "indirect parameter vector lanes retain bounds and provenance: " + indirect_result.error);
+        for (const auto& [from,to] : std::vector<std::pair<std::string,std::string>>{
+            {tuple, "{%r1, %r1}"}, {"[input];", "[input+4];"},
+            {opcode, "@%p1 " + opcode}}) {
+            auto invalid = source;
+            invalid.replace(invalid.find(from), from.size(), to);
+            ok &= expect(!metal::compile_ptx_to_msl(invalid).ok,
+                "duplicate, misaligned, and predicated vector parameter lanes fail");
+        }
+    }
+    const std::string packed_wide = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry packed_wide(.param .align 8 .b8 input[64], .param .u64 output) {
+.reg .b32 %r<3>;
+.reg .b64 %rd<3>;
+ld.param.u64 %rd1, [output];
+ld.param.v2.b32 {%r1,%r2}, [input+48];
+ld.param.b64 %rd2, [input+8];
+st.global.b32 [%rd1], %r1;
+st.global.b32 [%rd1+4], %r2;
+st.global.b64 [%rd1+8], %rd2;
+ret;
+})ptx";
+    const auto packed_result = metal::compile_ptx_to_msl(packed_wide);
+    ok &= expect(packed_result.ok, "Kokkos mixed 32/64-bit parameter record loads: " + packed_result.error);
+    for (const auto& offset : {"+4]", "+60]", "+unknown]"}) {
+        auto invalid = packed_wide;
+        invalid.replace(invalid.find("+8]"), 3, offset);
+        ok &= expect(!metal::compile_ptx_to_msl(invalid).ok,
+                     "unaligned, partial, and malformed wide parameter loads fail");
+    }
+    const std::string cta_reduce = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry cta_reduce(.param .u64 output) {
+.reg .pred %p<3>;
+.reg .b32 %r1;
+.reg .b64 %rd1;
+ld.param.u64 %rd1,[output];
+mov.pred %p1,1;
+bar.red.or.pred %p2,0,%p1;
+selp.u32 %r1,1,0,%p2;
+st.global.u32 [%rd1],%r1;
+ret;
+})ptx";
+    const auto cta_result = metal::compile_ptx_to_msl(cta_reduce);
+    ok &= expect(cta_result.ok && cta_result.source.find("cm_cta_any") != std::string::npos,
+                 "CTA reduction defines its predicate result: " + cta_result.error);
+    for (const auto& replacement : {"bar.red.and.pred %p2,0,%p1;", "bar.red.or.pred %p2,1,%p1;",
+                                    "bar.red.or.pred %p2,0,32,%p1;", "@%p1 bar.red.or.pred %p2,0,%p1;"}) {
+        auto invalid = cta_reduce;
+        const std::string original = "bar.red.or.pred %p2,0,%p1;";
+        invalid.replace(invalid.find(original), original.size(), replacement);
+        ok &= expect(!metal::compile_ptx_to_msl(invalid).ok,
+                     "unsupported reduction operation, barrier ID, count, and predicate fail");
+    }
     const std::string scalar_tail = fixture("ptx_scalar_tail_call.ptx");
     const auto tail_result = metal::compile_ptx_to_msl(scalar_tail);
     ok &= expect(tail_result.ok, "scalar aggregate-return tail call becomes a loop: " + tail_result.error);

@@ -40,7 +40,7 @@ tests/cuda_projects/partial_lane_shuffle_guard/partial_lane_shuffle_guard.cu fai
 tests/cuda_projects/ptx_idioms/ptx_idioms.cu fail pass pass pass
 tests/cuda_projects/raytracer/rtiow.cu fail pass pass pass
 tests/cuda_projects/reduction/reduction_standalone.cu fail pass pass pass
-tests/cuda_projects/ref_return/ref_return.cu fail pass pass fail
+tests/cuda_projects/ref_return/ref_return.cu fail pass pass pass
 tests/cuda_projects/reserved_bindings/reserved_bindings.cu fail pass pass pass
 tests/cuda_projects/sgemm/sgemm_2d.cu fail pass pass pass
 tests/cuda_projects/sgemm/sgemm_naive.cu fail pass pass pass
@@ -50,3 +50,6 @@ tests/cuda_projects/system_atomics/system_atomics.cu fail pass pass pass
 tests/cuda_projects/transpose/transpose_standalone.cu fail pass pass pass
 tests/cuda_projects/vector_add/vector_add.cu fail pass pass pass
 tests/cuda_projects/wide_atomics/wide_atomics.cu fail pass pass pass
+tests/cuda_projects/cta_reduce/cta_reduce.cu fail pass pass pass
+tests/cuda_projects/kokkos_compat/kokkos_compat.cu fail pass pass pass
+tests/cuda_projects/thrust_gpu_sort/thrust_gpu_sort.cu fail pass pass pass

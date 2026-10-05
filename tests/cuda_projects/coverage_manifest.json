@@ -256,10 +256,7 @@
       "subdir": "ref_return",
       "source": "ref_return.cu",
       "binary": "ref_return",
-      "harness": "standard",
-      "backends": [
-        "native-aot"
-      ]
+      "harness": "standard"
     },
     {
       "name": "local_const_tables",
@@ -299,6 +296,27 @@
       "binary": "amrex_device_idioms",
       "harness": "strict",
       "expect_pattern": "PASS: AMReX device idioms match host references on Apple GPU"
+    },
+    {
+      "name": "cta_reduce",
+      "subdir": "cta_reduce",
+      "source": "cta_reduce.cu",
+      "binary": "cta_reduce",
+      "harness": "standard"
+    },
+    {
+      "name": "kokkos_compat",
+      "subdir": "kokkos_compat",
+      "source": "kokkos_compat.cu",
+      "binary": "kokkos_compat",
+      "harness": "standard"
+    },
+    {
+      "name": "thrust_gpu_sort",
+      "subdir": "thrust_gpu_sort",
+      "source": "thrust_gpu_sort.cu",
+      "binary": "thrust_gpu_sort",
+      "harness": "standard"
     }
   ]
 }

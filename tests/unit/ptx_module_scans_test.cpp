@@ -127,7 +127,7 @@ ld.shared.u32 %r0, [%rd0]; st.local.b8 [%rd1], 0;
 ld.const.b32 %r1, [c0]; st.global.u64 [%rd2], %rd3;
 .sharedX .localX .constX .globalX // implicit-defX: %ignored
 .shared .align 8 .b128 bad[1]; .local .align 8 .u8 bad[1];
-.const .align 8 .b8 missing_extent; .global .align 8 .b8 missing_semicolon[1]
+.const .align 8 .b128 missing_type; .global .align 8 .b8 missing_semicolon[1]
 .local .align 8 .b8 broken[ .local .align 4 .b8 recovered[2];
 .shared .align x .u32 bad[1]; .shared .align 2 .u16 recovered[3];
 .const .align 8 .b8 initialized[1] = {0}; .global .align 8 .b8 initialized[1] = {0};

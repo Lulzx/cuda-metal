@@ -1609,6 +1609,14 @@ struct Importer {
         operation->attributes["llvm_intrinsic"] = name;
 
         if (name == "vprintf") return import_vprintf(call, state, operation);
+        if (name.starts_with("llvm.nvvm.isspacep.")) {
+            operation->opcode = OpCode::kAddressSpaceTest;
+            operation->attributes["address_space"] = name.substr(std::string("llvm.nvvm.isspacep.").size());
+            for (const llvm::Use& argument : call.args())
+                operation->operands.push_back(import_operand(*argument.get(), *state));
+            return true;
+        }
+
 
         auto dimension = [&](std::string_view prefix, OpCode opcode) {
             if (!name.starts_with(prefix)) return false;

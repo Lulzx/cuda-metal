@@ -179,6 +179,11 @@ typedef enum cudaError {
     cudaErrorDevicesUnavailable = 46,
     cudaErrorIllegalAddress = 700,
     cudaErrorLaunchOutOfResources = 701,
+    cudaErrorHardwareStackError = 714,
+    cudaErrorIllegalInstruction = 715,
+    cudaErrorMisalignedAddress = 716,
+    cudaErrorInvalidAddressSpace = 717,
+    cudaErrorInvalidPc = 718,
     cudaErrorLaunchFailure = 719,
     cudaErrorCooperativeLaunchTooLarge = 720,
     cudaErrorNotPermitted = 800,
@@ -365,7 +370,10 @@ typedef struct cudaDeviceProp {
     // regsPerBlock so occupancy arithmetic cannot derive more resident blocks
     // than maxBlocksPerMultiProcessor promises.
     int regsPerMultiprocessor;
-    int cumetalReserved[53];
+    // Metal reserves no hidden per-block shared memory. Consume three reserved
+    // words (including alignment) so sizeof and existing public offsets stay fixed.
+    size_t reservedSharedMemPerBlock;
+    int cumetalReserved[50];
 } cudaDeviceProp;
 
 typedef enum cudaDeviceAttr {
@@ -840,6 +848,9 @@ cudaError_t cudaMemcpyToSymbol(const void* symbol,
                                size_t count,
                                size_t offset,
                                cudaMemcpyKind kind);
+// Internal source-overload bridge: preserves a registered pointer variable's
+// identity while ordinary pointer arguments retain the C API spelling.
+const void* __cumetalResolveSymbolReference(const void* reference, const void* pointerValue);
 cudaError_t cudaMemcpyFromSymbol(void* dst,
                                  const void* symbol,
                                  size_t count,
@@ -1222,6 +1233,13 @@ typedef struct cudaHostNodeParams {
 cudaError_t cudaGraphAddKernelNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
                                     const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                     const cudaKernelNodeParams* pNodeParams);
+cudaError_t cudaGraphAddEmptyNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                 const cudaGraphNode_t* pDependencies, size_t numDependencies);
+cudaError_t cudaGraphAddDependencies(cudaGraph_t graph, const cudaGraphNode_t* from,
+                                    const cudaGraphNode_t* to, size_t numDependencies);
+cudaError_t cudaGraphAddChildGraphNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
+                                      const cudaGraphNode_t* pDependencies,
+                                      size_t numDependencies, cudaGraph_t childGraph);
 cudaError_t cudaGraphAddMemcpyNode(cudaGraphNode_t* pGraphNode, cudaGraph_t graph,
                                     const cudaGraphNode_t* pDependencies, size_t numDependencies,
                                     const cudaMemcpy3DParms* pCopyParams);
@@ -1777,15 +1795,11 @@ static inline cudaError_t cudaStreamCreateWithFlags(cudaStream_t* stream) {
 // __device__ variables are passed to the symbol APIs by reference, not by address:
 // `cudaMemcpyToSymbol(devVar, &host, n)`. The C entry point takes the address.
 //
-// The reference overloads must NOT swallow pointer arguments. `cudaMemcpyToSymbol(&var, ...)`
-// and `cudaMemcpyToSymbol(nullptr, ...)` are the C spelling, and a `const T &`
-// template binds them exactly -- beating the `const void *` entry point, which needs
-// a pointer conversion -- so the address of the *pointer variable* would be handed to
-// the runtime instead of the symbol. Constrain the templates to non-pointer T.
+// Pointer-valued device symbols need the address of the registered host shadow,
+// while ordinary pointer arguments need their value. Resolve that distinction
+// through registration without touching the CUDA per-thread error state.
 template <typename T>
 struct cumetal_symbol_by_ref { static const bool value = true; };
-template <typename T>
-struct cumetal_symbol_by_ref<T*> { static const bool value = false; };
 template <>
 struct cumetal_symbol_by_ref<decltype(nullptr)> { static const bool value = false; };
 
@@ -1798,30 +1812,40 @@ struct cumetal_symbol_enable_if<true, T> { typedef T type; };
     typename cumetal_symbol_enable_if<cumetal_symbol_by_ref<T>::value, cudaError_t>::type
 
 template <typename T>
+static inline const void* cumetal_symbol_address(const T& symbol) {
+    return reinterpret_cast<const void*>(&symbol);
+}
+template <typename T>
+static inline const void* cumetal_symbol_address(T* const& symbol) {
+    return __cumetalResolveSymbolReference(reinterpret_cast<const void*>(&symbol),
+                                           reinterpret_cast<const void*>(symbol));
+}
+
+template <typename T>
 static inline CUMETAL_SYMBOL_BY_REF(T) cudaMemcpyToSymbol(const T& symbol, const void* src, size_t count,
                                              size_t offset = 0,
                                              cudaMemcpyKind kind = cudaMemcpyHostToDevice) {
-    return ::cudaMemcpyToSymbol(reinterpret_cast<const void*>(&symbol), src, count, offset, kind);
+    return ::cudaMemcpyToSymbol(cumetal_symbol_address(symbol), src, count, offset, kind);
 }
 
 template <typename T>
 static inline CUMETAL_SYMBOL_BY_REF(T) cudaMemcpyFromSymbol(void* dst, const T& symbol, size_t count,
                                                size_t offset = 0,
                                                cudaMemcpyKind kind = cudaMemcpyDeviceToHost) {
-    return ::cudaMemcpyFromSymbol(dst, reinterpret_cast<const void*>(&symbol), count, offset, kind);
+    return ::cudaMemcpyFromSymbol(dst, cumetal_symbol_address(symbol), count, offset, kind);
 }
 
 template <typename T>
 static inline CUMETAL_SYMBOL_BY_REF(T) cudaMemcpyToSymbolAsync(const T& symbol, const void* src, size_t count,
                                                   size_t offset, cudaMemcpyKind kind,
                                                   cudaStream_t stream) {
-    return ::cudaMemcpyToSymbolAsync(reinterpret_cast<const void*>(&symbol), src, count, offset,
+    return ::cudaMemcpyToSymbolAsync(cumetal_symbol_address(symbol), src, count, offset,
                                      kind, stream);
 }
 
 template <typename T>
 static inline CUMETAL_SYMBOL_BY_REF(T) cudaGetSymbolAddress(void** devPtr, const T& symbol) {
-    return ::cudaGetSymbolAddress(devPtr, reinterpret_cast<const void*>(&symbol));
+    return ::cudaGetSymbolAddress(devPtr, cumetal_symbol_address(symbol));
 }
 #endif
 
@@ -1887,6 +1911,20 @@ static inline CUMETAL_SYMBOL_BY_REF(T) cudaGetSymbolAddress(void** devPtr, const
 #include <__clang_cuda_libdevice_declares.h>
 #include <__clang_cuda_device_functions.h>
 #include <__clang_cuda_math.h>
+
+// Generic-pointer address-space predicates used by CUDA atomic libraries.
+static __device__ __forceinline__ unsigned int __isGlobal(const void* pointer) {
+    return __nvvm_isspacep_global(pointer);
+}
+static __device__ __forceinline__ unsigned int __isShared(const void* pointer) {
+    return __nvvm_isspacep_shared(pointer);
+}
+static __device__ __forceinline__ unsigned int __isConstant(const void* pointer) {
+    return __nvvm_isspacep_const(pointer);
+}
+static __device__ __forceinline__ unsigned int __isLocal(const void* pointer) {
+    return __nvvm_isspacep_local(pointer);
+}
 
 // Apple's assert() expands to __assert_rtn, which is __host__, so any assert
 // inside a __global__/__device__ function is rejected -- in both compilation
@@ -2136,6 +2174,13 @@ static __device__ __forceinline__ long abs(long x) { return labs(x); }
 static __device__ __forceinline__ long long abs(long long x) { return llabs(x); }
 
 static __device__ __forceinline__ float ldexp(float x, int e) { return ldexpf(x, e); }
+// Integral mantissas follow the C++ math promotion to double.
+template <class T, class = __cumetal_math_if_integral<T>>
+static __device__ __forceinline__ double ldexp(T x, int e) { return ldexp(static_cast<double>(x), e); }
+template <class T, class = __cumetal_math_if_integral<T>>
+static __device__ __forceinline__ double scalbn(T x, int e) { return scalbn(static_cast<double>(x), e); }
+template <class T, class = __cumetal_math_if_integral<T>>
+static __device__ __forceinline__ double scalbln(T x, long e) { return scalbln(static_cast<double>(x), e); }
 static __device__ __forceinline__ float scalbn(float x, int e) { return scalbnf(x, e); }
 static __device__ __forceinline__ float scalbln(float x, long e) { return scalblnf(x, e); }
 static __device__ __forceinline__ float frexp(float x, int* e) { return frexpf(x, e); }

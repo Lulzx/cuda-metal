@@ -39,6 +39,8 @@ build/cumetalc samples/vectorAdd/vectorAdd.cu -o vectorAdd
 
 See [demos](docs/demos.md) for larger workloads and [testing](docs/testing.md)
 for validation commands.
+The [LAMMPS/Kokkos GPU demo](demos/lammps/README.md) compiles unmodified LAMMPS
+and passes the stock 32,000-atom, 100-step full/half-neighbour numerical gate.
 
 ## How it works
 

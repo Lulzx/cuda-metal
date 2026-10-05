@@ -28,6 +28,14 @@
   quantum. They preserve wait-loop progress and unsigned wraparound behavior,
   but values are not GPU cycles and cannot be used for cycle-accurate timing.
 
+## Zero-size allocation
+
+`cudaMalloc(&pointer, 0)` succeeds, writes a null pointer, and consumes no
+tracked allocation or reported free memory. A null output argument is invalid.
+`cudaMallocManaged`, `cudaMallocAsync`, and driver `cuMemAlloc` still reject
+zero sizes; this change covers the ordinary allocation used by Kokkos scratch
+storage.
+
 ## Function preparation
 
 `cuFuncLoad` prepares a function through the same path launches and attribute
@@ -172,3 +180,23 @@ one-resident-block occupancy guarantee, not an NVIDIA architectural limit --
 and both are also queryable through `cudaDeviceGetAttribute`/`cuDeviceGetAttribute`.
 They must not be used as proof that the corresponding NVIDIA hardware
 feature exists.
+
+`cudaFuncGetAttributes.numRegs` is a positive virtual occupancy cost derived
+from that register budget and the Metal pipeline's actual thread limit. It
+allows clients such as Kokkos to calculate nonempty launch sizes; it is not
+measured physical register usage or an NVIDIA occupancy prediction.
+
+### Device assertions in synchronized kernels
+
+The typed PTX path recognizes a narrow, proven terminal assertion of
+`blockDim.axis & (blockDim.axis - 1)`. It restricts accepted launches to a
+power-of-two dimension and checks the constraint at kernel entry before any
+barrier or divergent work. This includes straight-line assertion forwarding
+helpers. The launch reports `cudaErrorLaunchFailure` on an invalid shape.
+Five-argument void `__assertfail` calls in kernels without barriers,
+collectives, or device printf use the per-launch trap status and report
+`cudaErrorLaunchFailure`; divergent and spinning peers are cancelled.
+General assertions in synchronized kernels still refuse. Assertion messages
+and exact `cudaErrorAssert` status are not implemented.
+The constraint also applies when the assertion's original path would have been
+untaken, so this is a deliberately narrower supported launch domain.

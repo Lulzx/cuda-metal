@@ -219,7 +219,30 @@ static bool test_segmented_algorithms_and_stream_ordering() {
     return true;
 }
 
+static bool test_cuda_policy_refuses_host_sort() {
+    cudaStream_t stream = nullptr;
+    if (cudaStreamCreate(&stream) != cudaSuccess) return false;
+    const auto policy = thrust::cuda::par.on(stream);
+    bool ok = policy.stream == stream;
+    int keys[] = {3,1,2}, values[] = {30,10,20};
+    unsigned refusals = 0;
+    const auto expect_refusal = [&](auto operation) {
+        try { operation(); }
+        catch (const std::runtime_error& error) {
+            if (std::strstr(error.what(), "cudaErrorNotSupported")) ++refusals;
+        }
+    };
+    expect_refusal([&] { thrust::sort(policy, keys, keys+3); });
+    expect_refusal([&] { thrust::sort(policy, keys, keys+3, thrust::less<int>()); });
+    expect_refusal([&] { thrust::sort_by_key(policy, keys, keys+3, values); });
+    expect_refusal([&] { thrust::sort_by_key(policy, keys, keys+3, values, thrust::less<int>()); });
+    ok = ok && refusals == 4 && keys[0] == 3 && keys[1] == 1 && values[0] == 30;
+    cudaStreamDestroy(stream);
+    return ok;
+}
+
 int main() {
+    if (!test_cuda_policy_refuses_host_sort()) return 1;
     if (!test_device_vector()) return 1;
     if (!test_host_device_copy()) return 1;
     if (!test_sort()) return 1;

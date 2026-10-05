@@ -94,6 +94,36 @@ if grep -qE 'cvt\.f64\.f32|__nv_rsqrt([^fA-Za-z0-9_]|$)|__nv_fma([^fA-Za-z0-9_]|
     exit 1
 fi
 
+# Exercise the NVVM frontend too; the functional CUDA project tests PTX JIT.
+root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+"$cumetalc" "$root_dir/tests/cuda_projects/kokkos_compat/kokkos_compat.cu" \
+    --backend=cumetal-ir --emit=msl --overwrite -o "$workdir/kokkos_compat.metal"
+grep -q 'cumetal-provenance: generic_nvvm_lowering' "$workdir/kokkos_compat.metal"
+grep -q '= true;' "$workdir/kokkos_compat.metal"
+grep -q '= false;' "$workdir/kokkos_compat.metal"
+
+# Kokkos selects its CUDA implementation using these nvcc version macros.
+cat > "$workdir/version.cu" <<'CU'
+#if __CUDACC_VER_MAJOR__ != 12 || __CUDACC_VER_MINOR__ != 2 || __CUDACC_VER_BUILD__ != 140
+#error inconsistent CUDA compiler version macros
+#endif
+__global__ void version_kernel(int* out) { *out = __CUDACC_VER_MAJOR__; }
+CU
+"$nvcc" -S --cuda-device-only "$workdir/version.cu" -o "$workdir/version.ptx"
+grep -q 'version_kernel' "$workdir/version.ptx"
+# Kokkos forwards CMake's rpath as one comma-separated nvcc linker argument.
+# Verify the executable links and carries the intended Mach-O load command.
+cat > "$workdir/linker.cpp" <<'CPP'
+int main() { return 0; }
+CPP
+"$nvcc" "$workdir/linker.cpp" -Xlinker "-rpath,$workdir" -Xlinker -rpath -Xlinker "$(dirname "$cumetalc")" -o "$workdir/linker"
+"$workdir/linker"
+otool -l "$workdir/linker" > "$workdir/load_commands.txt"
+grep -F "path $workdir (offset" "$workdir/load_commands.txt"
+"$nvcc" "$workdir/linker.cpp" "-Xlinker=-rpath,$workdir" "-Xlinker=-rpath,$(dirname "$cumetalc")" -o "$workdir/linker-equals"
+"$workdir/linker-equals"
+
+
 if "$cumetalc" "$unsupported" --backend=cumetal-ir --emit=msl \
     --overwrite -o "$workdir/unsupported.metal" \
     >"$workdir/unsupported.stdout" 2>"$workdir/unsupported.stderr"; then

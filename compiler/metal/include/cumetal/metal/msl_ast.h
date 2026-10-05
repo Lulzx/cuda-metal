@@ -143,6 +143,7 @@ struct MslVariableDeclaration {
     std::string name;
     std::optional<MslExpr> initializer;
     bool is_const = false;
+    std::uint64_t alignment = 0;
 };
 
 struct MslAssignment {
@@ -168,11 +169,13 @@ struct MslWhile {
 struct MslThreadgroupByteArray {
     std::string name;
     std::uint64_t byte_size = 0;
+    std::uint64_t alignment = 1;
 };
 
 struct MslPrivateByteArray {
     std::string name;
     std::uint64_t byte_size = 0;
+    std::uint64_t alignment = 1;
 };
 
 struct MslSwitchCase {
@@ -201,14 +204,14 @@ struct MslStatement {
 
     static MslStmt variable(MslType type, std::string name,
                             std::optional<MslExpr> initializer = std::nullopt,
-                            bool is_const = false);
+                            bool is_const = false, std::uint64_t alignment = 0);
     static MslStmt assignment(MslExpr target, MslExpr value);
     static MslStmt expression(MslExpr expression);
     static MslStmt if_statement(MslExpr condition, std::vector<MslStmt> then_statements,
                                 std::vector<MslStmt> else_statements = {});
     static MslStmt while_statement(MslExpr condition, std::vector<MslStmt> statements);
-    static MslStmt threadgroup_byte_array(std::string name, std::uint64_t byte_size);
-    static MslStmt private_byte_array(std::string name, std::uint64_t byte_size);
+    static MslStmt threadgroup_byte_array(std::string name, std::uint64_t byte_size, std::uint64_t alignment = 1);
+    static MslStmt private_byte_array(std::string name, std::uint64_t byte_size, std::uint64_t alignment = 1);
     static MslStmt switch_statement(MslExpr selector, std::vector<MslSwitchCase> cases);
     static MslStmt return_statement(std::optional<MslExpr> value = std::nullopt);
     static MslStmt break_statement();

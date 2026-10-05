@@ -362,6 +362,26 @@ int main() {
         ok &= expect(!verify(invalid).ok, "invalid pointer subtraction contract is rejected");
     }
 
+    Module address_test = pointer_offset;
+    auto& query = address_test.functions[0].blocks[0].operations[0];
+    query.opcode = OpCode::kAddressSpaceTest;
+    query.operands = {Operand::value_ref(1, local_pointer)};
+    query.result_types = {Type::predicate()};
+    query.attributes = {{"address_space", "local"}};
+    ok &= expect(verify(address_test).ok, "valid address-space query");
+    for (int invalid_case = 0; invalid_case < 5; ++invalid_case) {
+        Module invalid = address_test;
+        auto& operation = invalid.functions[0].blocks[0].operations[0];
+        switch (invalid_case) {
+            case 0: operation.operands.clear(); break;
+            case 1: operation.operands[0].type = Type::integer(64); break;
+            case 2: operation.result_types[0] = Type::integer(32); break;
+            case 3: operation.attributes["address_space"] = "unknown"; break;
+            case 4: invalid.stage = IrStage::kMetalLegalized; break;
+        }
+        ok &= expect(!verify(invalid).ok, "invalid address-space query is rejected");
+    }
+
     if (!ok) return 1;
     std::cout << "CuMetal IR tests passed\n";
     return 0;

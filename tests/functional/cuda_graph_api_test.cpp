@@ -1082,8 +1082,61 @@ static bool test_graph_memory_nodes() {
     return true;
 }
 
+static void graph_host_set(void* data) { *static_cast<int*>(data) = 4; }
+static void graph_host_multiply(void* data) { *static_cast<int*>(data) *= 3; }
+
+static bool test_empty_nodes_and_added_dependencies() {
+    cudaGraph_t graph = nullptr, child = nullptr;
+    cudaGraphNode_t multiply = nullptr, empty = nullptr, set = nullptr, spare = nullptr;
+    int value = 0;
+    cudaHostNodeParams multiply_params{graph_host_multiply, &value};
+    cudaHostNodeParams set_params{graph_host_set, &value};
+    if (cudaGraphCreate(&graph, 0) != cudaSuccess || cudaGraphCreate(&child, 0) != cudaSuccess ||
+        cudaGraphAddHostNode(&multiply, graph, nullptr, 0, &multiply_params) != cudaSuccess ||
+        cudaGraphAddEmptyNode(&empty, graph, nullptr, 0) != cudaSuccess ||
+        cudaGraphAddHostNode(&set, graph, nullptr, 0, &set_params) != cudaSuccess ||
+        cudaGraphAddEmptyNode(&spare, graph, nullptr, 0) != cudaSuccess) return false;
+    cudaGraphNode_t from[] = {set, empty}, to[] = {empty, multiply};
+    if (cudaGraphAddDependencies(graph, from, to, 2) != cudaSuccess ||
+        cudaGraphAddDependencies(graph, nullptr, nullptr, 0) != cudaSuccess) return false;
+    cudaGraphNodeType type;
+    if (cudaGraphNodeGetType(empty, &type) != cudaSuccess || type != cudaGraphNodeTypeEmpty)
+        return false;
+    // A valid first edge followed by a cycle must roll back the entire batch.
+    cudaGraphNode_t cycle_from[] = {set, multiply}, cycle_to[] = {spare, set};
+    if (cudaGraphAddDependencies(graph, cycle_from, cycle_to, 2) != cudaErrorInvalidValue ||
+        cudaGraphAddDependencies(graph, from, to, 2) != cudaErrorInvalidValue ||
+        cudaGraphAddDependencies(graph, &empty, &empty, 1) != cudaErrorInvalidValue ||
+        cudaGraphAddDependencies(graph, nullptr, to, 1) != cudaErrorInvalidValue ||
+        cudaGraphAddDependencies(nullptr, from, to, 1) != cudaErrorInvalidValue ||
+        cudaGraphAddEmptyNode(nullptr, graph, nullptr, 0) != cudaErrorInvalidValue) return false;
+    size_t roots = 0;
+    if (cudaGraphGetRootNodes(graph, nullptr, &roots) != cudaSuccess || roots != 2) return false;
+    cudaGraphNode_t foreign = nullptr;
+    if (cudaGraphAddEmptyNode(&foreign, child, nullptr, 0) != cudaSuccess ||
+        cudaGraphAddDependencies(graph, &foreign, &set, 1) != cudaErrorInvalidValue) return false;
+    cudaGraphNode_t refused = reinterpret_cast<cudaGraphNode_t>(1);
+    if (cudaGraphAddChildGraphNode(&refused, graph, nullptr, 0, child) != cudaErrorNotSupported ||
+        refused != nullptr ||
+        cudaGraphAddChildGraphNode(&refused, graph, nullptr, 0, graph) != cudaErrorInvalidValue)
+        return false;
+    (void)cudaGetLastError();
+    cudaGraphExec_t exec = nullptr;
+    if (cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0) != cudaSuccess ||
+        cudaGraphLaunch(exec, nullptr) != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess ||
+        value != 12) {
+        std::fprintf(stderr, "FAIL: graph added dependencies did not preserve host-node order\n");
+        return false;
+    }
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(child);
+    cudaGraphDestroy(graph);
+    return true;
+}
+
 int main() {
     if (!test_graph_create_destroy()) return 1;
+    if (!test_empty_nodes_and_added_dependencies()) return 1;
     if (!test_graph_instantiate_launch()) return 1;
     if (!test_stream_capture_status()) return 1;
     if (!test_event_linked_capture_lifetime()) return 1;

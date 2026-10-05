@@ -1,0 +1,246 @@
+{
+  "status": "pass",
+  "atoms": 32000,
+  "steps": 100,
+  "lammps_revision": "8de817dd79bfe4525d5d39246a212d833e6dee07",
+  "backend": "cumetal-ir",
+  "tolerance": 0.0005,
+  "comparisons": [
+    {
+      "mode": "full",
+      "step": 0,
+      "field": "temperature",
+      "gpu": 1.44,
+      "cpu_double": 1.44,
+      "scaled_error": 0.0
+    },
+    {
+      "mode": "full",
+      "step": 0,
+      "field": "pair_energy",
+      "gpu": -6.7733672,
+      "cpu_double": -6.7733681,
+      "scaled_error": 1.328733337051838e-07
+    },
+    {
+      "mode": "full",
+      "step": 0,
+      "field": "molecular_energy",
+      "gpu": 0.0,
+      "cpu_double": 0.0,
+      "scaled_error": 0.0
+    },
+    {
+      "mode": "full",
+      "step": 0,
+      "field": "total_energy",
+      "gpu": -4.6134347,
+      "cpu_double": -4.6134356,
+      "scaled_error": 1.9508238065777847e-07
+    },
+    {
+      "mode": "full",
+      "step": 0,
+      "field": "pressure",
+      "gpu": -5.0197085,
+      "cpu_double": -5.0197073,
+      "scaled_error": 2.390577633505567e-07
+    },
+    {
+      "mode": "full",
+      "step": 100,
+      "field": "temperature",
+      "gpu": 0.7574534,
+      "cpu_double": 0.7574531,
+      "scaled_error": 3.0000000006413785e-07
+    },
+    {
+      "mode": "full",
+      "step": 100,
+      "field": "pair_energy",
+      "gpu": -5.7585068,
+      "cpu_double": -5.7585055,
+      "scaled_error": 2.2575301874642535e-07
+    },
+    {
+      "mode": "full",
+      "step": 100,
+      "field": "molecular_energy",
+      "gpu": 0.0,
+      "cpu_double": 0.0,
+      "scaled_error": 0.0
+    },
+    {
+      "mode": "full",
+      "step": 100,
+      "field": "total_energy",
+      "gpu": -4.6223622,
+      "cpu_double": -4.6223613,
+      "scaled_error": 1.9470568013528606e-07
+    },
+    {
+      "mode": "full",
+      "step": 100,
+      "field": "pressure",
+      "gpu": 0.20725641,
+      "cpu_double": 0.20726105,
+      "scaled_error": 4.6400000000001995e-06
+    },
+    {
+      "mode": "half",
+      "step": 0,
+      "field": "temperature",
+      "gpu": 1.44,
+      "cpu_double": 1.44,
+      "scaled_error": 0.0
+    },
+    {
+      "mode": "half",
+      "step": 0,
+      "field": "pair_energy",
+      "gpu": -6.7733682,
+      "cpu_double": -6.7733681,
+      "scaled_error": 1.4763703788729764e-08
+    },
+    {
+      "mode": "half",
+      "step": 0,
+      "field": "molecular_energy",
+      "gpu": 0.0,
+      "cpu_double": 0.0,
+      "scaled_error": 0.0
+    },
+    {
+      "mode": "half",
+      "step": 0,
+      "field": "total_energy",
+      "gpu": -4.6134357,
+      "cpu_double": -4.6134356,
+      "scaled_error": 2.1675820137259817e-08
+    },
+    {
+      "mode": "half",
+      "step": 0,
+      "field": "pressure",
+      "gpu": -5.0197097,
+      "cpu_double": -5.0197073,
+      "scaled_error": 4.781155267011134e-07
+    },
+    {
+      "mode": "half",
+      "step": 100,
+      "field": "temperature",
+      "gpu": 0.7574534,
+      "cpu_double": 0.7574531,
+      "scaled_error": 3.0000000006413785e-07
+    },
+    {
+      "mode": "half",
+      "step": 100,
+      "field": "pair_energy",
+      "gpu": -5.7585078,
+      "cpu_double": -5.7585055,
+      "scaled_error": 3.994091870247708e-07
+    },
+    {
+      "mode": "half",
+      "step": 100,
+      "field": "molecular_energy",
+      "gpu": 0.0,
+      "cpu_double": 0.0,
+      "scaled_error": 0.0
+    },
+    {
+      "mode": "half",
+      "step": 100,
+      "field": "total_energy",
+      "gpu": -4.6223632,
+      "cpu_double": -4.6223613,
+      "scaled_error": 4.110453243884516e-07
+    },
+    {
+      "mode": "half",
+      "step": 100,
+      "field": "pressure",
+      "gpu": 0.20725514,
+      "cpu_double": 0.20726105,
+      "scaled_error": 5.909999999997861e-06
+    }
+  ],
+  "max_scaled_cpu_double_error": 5.909999999997861e-06,
+  "max_scaled_mode_difference": 1.2699999999976619e-06,
+  "analytic_initial_pair_energy": -6.773368053252957,
+  "max_scaled_analytic_initial_error": 1.2597173968249147e-07,
+  "date": "2026-10-04",
+  "hardware": "Apple M4 Pro",
+  "os": "macOS 27.0.1 (26A434)",
+  "toolchain": {
+    "clang": "23.1.0",
+    "cmake": "4.4.3",
+    "build_type": "Release",
+    "binary_shim": false,
+    "source_registration": true
+  },
+  "configuration": {
+    "kokkos": "5.2.1",
+    "kokkos_precision": "single",
+    "cuda_arch": "sm_80",
+    "workload_specializations": false,
+    "metal_device_addresses": true,
+    "cpu_reference_precision": "double"
+  },
+  "evidence_directory": "demos/lammps/out/gpu.CHtxEp",
+  "reference_directory": "demos/lammps/out/reference.aKdfsP",
+  "gpu_runs": {
+    "full": {
+      "successful_apple_gpu_launches": 826,
+      "cold_launches": 2,
+      "loop_seconds": 4.6715,
+      "total_wall_time": "0:00:18",
+      "provenance_classes": [
+        "generic_ptx_lowering",
+        "generic_ptx_lowering_fp64_emulated"
+      ]
+    },
+    "half": {
+      "successful_apple_gpu_launches": 1534,
+      "cold_launches": 2,
+      "loop_seconds": 6.77027,
+      "total_wall_time": "0:09:14",
+      "provenance_classes": [
+        "generic_ptx_lowering",
+        "generic_ptx_lowering_fp64_emulated"
+      ]
+    }
+  },
+  "limitations": [
+    "FP64 uses reduced-precision software emulation.",
+    "Half-neighbour cold pipeline compilation takes minutes.",
+    "Concurrent regression runs invalidate performance comparisons.",
+    "This validates the pinned stock 100-step LJ workload, not general LAMMPS compatibility."
+  ],
+  "regressions": {
+    "ctest_passed": 396,
+    "ctest_total": 396,
+    "skips": 0,
+    "execution": "Partitioned runs with the libdevice test isolated to avoid overlapping standalone artifacts.",
+    "logs": [
+      "demos/lammps/out/atomic-red-inner-tests.log",
+      "demos/lammps/out/libdevice-isolated-final-test.log",
+      "demos/lammps/out/atomic-red-external-tests.log",
+      "demos/lammps/out/atomic-red-phase4-test.log",
+      "demos/lammps/out/atomic-red-native-regressions.log",
+      "demos/lammps/out/atomic-red-typed-corpus.log",
+      "demos/lammps/out/atomic-red-matrix-tests.log"
+    ],
+    "typed_ptx_numerical_projects": 40,
+    "native_aot_numerical_projects": 43,
+    "cuda_samples": 83,
+    "cuda_clang_matrix": [
+      21,
+      22,
+      23
+    ],
+    "demo_validator_tests": 11
+  }
+}
