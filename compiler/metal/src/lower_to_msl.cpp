@@ -5498,8 +5498,15 @@ struct AstLowerer {
             }
         }
 
+        // Abort paths (a trapping call or trap, then return) never rejoin, so
+        // counting them as exits leaves the branch that guards them without a
+        // postdominator. Treat them like unreachable code here; the emitter
+        // still writes each one inline, ending in its return, wherever a
+        // branch reaches it.
+        const std::vector<bool> aborts = abort_regions();
         postdominators.assign(count, std::vector<bool>(count, true));
         for (std::size_t block = 0; block < count; ++block) {
+            if (aborts[block]) continue;
             if (!function.blocks[block].operations.back().successors.empty()) continue;
             std::fill(postdominators[block].begin(),
                       postdominators[block].end(), false);
@@ -5511,7 +5518,7 @@ struct AstLowerer {
             for (std::size_t block = 0; block < count; ++block) {
                 const ir::Operation& terminator =
                     function.blocks[block].operations.back();
-                if (terminator.successors.empty()) continue;
+                if (terminator.successors.empty() || aborts[block]) continue;
                 std::vector<bool> next(count, true);
                 for (const ir::Successor& successor : terminator.successors) {
                     const std::size_t target = block_indices.at(successor.block);
@@ -5528,6 +5535,55 @@ struct AstLowerer {
                 }
             }
         }
+    }
+
+    std::vector<bool> abort_regions() const {
+        const std::size_t count = function.blocks.size();
+        std::vector<bool> aborts(count, false);
+        const auto synchronizes = [](const ir::Operation& operation) {
+            const auto callee = operation.attributes.find("callee");
+            return operation.opcode == ir::OpCode::kMetalBarrier ||
+                   operation.opcode == ir::OpCode::kBarrier ||
+                   (operation.opcode == ir::OpCode::kCall &&
+                    callee != operation.attributes.end() &&
+                    (callee->second == "cm_cta_any" || callee->second == "cm_cta_count"));
+        };
+        for (std::size_t block = 0; block < count; ++block) {
+            const auto& operations = function.blocks[block].operations;
+            if (operations.back().opcode != ir::OpCode::kReturn) continue;
+            bool traps = false;
+            for (const ir::Operation& operation : operations) {
+                if (synchronizes(operation)) { traps = false; break; }
+                const auto callee = operation.attributes.find("callee");
+                traps |= operation.opcode == ir::OpCode::kTrap ||
+                         (operation.opcode == ir::OpCode::kCall &&
+                          callee != operation.attributes.end() &&
+                          guarded_trap_helpers.contains(callee->second));
+            }
+            aborts[block] = traps;
+        }
+        // Blocks that lead only into abort paths abort too.
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (std::size_t block = 0; block < count; ++block) {
+                const auto& operations = function.blocks[block].operations;
+                if (aborts[block] || operations.back().successors.empty() ||
+                    std::any_of(operations.begin(), operations.end(), synchronizes)) {
+                    continue;
+                }
+                const bool all = std::all_of(
+                    operations.back().successors.begin(), operations.back().successors.end(),
+                    [&](const ir::Successor& successor) {
+                        return aborts[block_indices.at(successor.block)];
+                    });
+                if (all) aborts[block] = changed = true;
+            }
+        }
+        // A function that always aborts has no ordinary exit to structure
+        // around; keep its real postdominators.
+        if (count == 0 || aborts[0]) return std::vector<bool>(count, false);
+        return aborts;
     }
 
     bool dominates(std::size_t dominator, std::size_t block) const {
@@ -5598,6 +5654,42 @@ struct AstLowerer {
                              : std::pair{second, first};
     }
 
+    bool terminal_exit_region(std::size_t exit,
+                              const std::unordered_set<std::size_t>& loop,
+                              const std::vector<std::size_t>& exits) const {
+        std::vector<std::size_t> pending{exit};
+        std::unordered_set<std::size_t> seen;
+        while (!pending.empty()) {
+            const std::size_t index = pending.back();
+            pending.pop_back();
+            if (!seen.insert(index).second) continue;
+            if (seen.size() > 64 || loop.contains(index)) return false;
+            if (index != exit &&
+                std::find(exits.begin(), exits.end(), index) != exits.end()) {
+                return false;
+            }
+            for (const ir::Operation& operation : function.blocks[index].operations) {
+                const auto callee = operation.attributes.find("callee");
+                if (operation.opcode == ir::OpCode::kMetalBarrier ||
+                    operation.opcode == ir::OpCode::kBarrier ||
+                    (operation.opcode == ir::OpCode::kCall &&
+                     callee != operation.attributes.end() &&
+                     (callee->second == "cm_cta_any" || callee->second == "cm_cta_count"))) {
+                    return false;
+                }
+            }
+            const ir::Operation& terminator = function.blocks[index].operations.back();
+            if (terminator.opcode == ir::OpCode::kReturn) continue;
+            if (terminator.successors.empty()) return false;
+            for (const ir::Successor& successor : terminator.successors) {
+                const std::size_t target = block_indices.at(successor.block);
+                if (dominates(target, index)) return false;
+                pending.push_back(target);
+            }
+        }
+        return true;
+    }
+
     std::optional<std::size_t> natural_loop_exit_index(
         std::size_t header_index) const {
         const auto canonical = loop_body_and_exit(header_index);
@@ -5618,6 +5710,14 @@ struct AstLowerer {
         }
         if (exits.empty()) return std::nullopt;
         if (exits.size() == 1) return exits.front();
+        // An exit whose region only returns (a Kokkos::abort path, say) never
+        // rejoins, so it has no postdominator in common with the real exit.
+        // The loop body emits it inline as a secondary exit ending in return.
+        std::vector<std::size_t> rejoining;
+        for (const std::size_t exit : exits) {
+            if (!terminal_exit_region(exit, loop, exits)) rejoining.push_back(exit);
+        }
+        if (rejoining.size() == 1) return rejoining.front();
         std::vector<std::size_t> common;
         for (std::size_t candidate = 0; candidate < function.blocks.size();
              ++candidate) {
@@ -6181,6 +6281,8 @@ struct AstLowerer {
         return emit_from(exit_index, statements);
     }
 
+    mutable std::string dispatcher_reason;
+
     bool requires_cfg_dispatcher() const {
         // A canonical loop header can have its ordinary exhausted edge while a
         // nested branch exits through a separate return/join block.  Treating
@@ -6203,7 +6305,11 @@ struct AstLowerer {
                         if (!loop.contains(target)) exits.insert(target);
                     }
                 }
-                if (exits.size() > 1) return true;
+                if (exits.size() > 1) {
+                    dispatcher_reason = "loop at '" + function.blocks[header].name +
+                                        "' has multiple exits";
+                    return true;
+                }
             }
         }
         for (std::size_t source = 0; source < function.blocks.size(); ++source) {
@@ -6212,6 +6318,8 @@ struct AstLowerer {
                 const std::size_t target = block_indices.at(successor.block);
                 if (target != source && dominates(target, source) &&
                     !natural_loop_exit_index(target).has_value()) {
+                    dispatcher_reason = "loop at '" + function.blocks[target].name +
+                                        "' has no single structured exit";
                     return true;
                 }
             }
@@ -6751,7 +6859,16 @@ struct AstLowerer {
             }
         }
 
-        if (reports_traps || force_cfg_dispatcher || requires_cfg_dispatcher()) {
+        const bool unstructured = !reports_traps && !force_cfg_dispatcher &&
+                                  requires_cfg_dispatcher();
+        if (unstructured && barrier_in_call_graph) {
+            // Dispatcher lanes advance independently, so lanes that leave a
+            // loop early would reach a barrier while their peers are still
+            // iterating, and Metal releases the barrier without them.
+            fail(nullptr, "CFG dispatcher cannot carry barriers: " + dispatcher_reason);
+            return result;
+        }
+        if (reports_traps || force_cfg_dispatcher || unstructured) {
             if (!emit_cfg_dispatcher(&output.statements)) return result;
         } else if (!emit_from(0, &output.statements)) {
             return result;

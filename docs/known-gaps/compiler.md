@@ -70,7 +70,12 @@ and checks the CUDA Clang 21, 22, and 23 identities separately.
 Remaining typed-path blockers include combinations of:
 
 - CFG structurization for residual irreducible or non-reconvergent
-  barrier-containing regions beyond the proven uniform multi-exit helper;
+  barrier-containing regions beyond the proven uniform multi-exit helper.
+  Loop exits and branch arms that only abort (a trapping call or `trap`, then
+  return) are structured as early returns; any other barrier or collective
+  call graph whose loop lacks a single structured exit is refused with `CFG
+  dispatcher cannot carry barriers`, because the per-lane dispatcher let a
+  Kokkos reduction compute wrong LAMMPS wall forces;
 - compound shared-memory layouts beyond the proven static arrays and single
   runtime-sized `extern __shared__` binding;
 - generic pointer provenance: the legalizer is total for well-formed CUDA

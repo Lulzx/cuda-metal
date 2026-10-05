@@ -1,0 +1,50 @@
+// A rotated loop (exit at the latch) with a second exit into a block that
+// only returns, then a barrier and a neighbour read. Kokkos reductions have
+// this shape: the second exit is the Kokkos::abort path. Each lane runs
+// tid + 1 iterations, so lanes leave the loop at different times. The
+// warp shuffle after the barrier needs every lane of the SIMD group there.
+.version 7.1
+.target sm_80
+.address_size 64
+.visible .entry loop_exit_barrier(.param .u64 out, .param .u32 limit) {
+.reg .b32 %r<12>;
+.reg .b64 %rd<11>;
+.reg .pred %p<4>;
+.shared .align 4 .b8 tile[256];
+ld.param.u64 %rd1, [out];
+ld.param.u32 %r1, [limit];
+mov.u32 %r2, %tid.x;
+mov.u32 %r3, 0;
+mov.u32 %r4, 0;
+bra.uni HEADER;
+LATCH:
+setp.le.u32 %p2, %r3, %r2;
+@!%p2 bra DONE;
+HEADER:
+add.u32 %r4, %r4, %r3;
+add.u32 %r3, %r3, 1;
+setp.gt.u32 %p1, %r4, %r1;
+@%p1 bra FAIL;
+bra.uni LATCH;
+DONE:
+mov.u64 %rd6, tile;
+mul.wide.u32 %rd7, %r2, 4;
+add.u64 %rd8, %rd6, %rd7;
+st.shared.u32 [%rd8], %r4;
+bar.sync 0;
+add.u32 %r8, %r2, 1;
+and.b32 %r8, %r8, 63;
+mul.wide.u32 %rd9, %r8, 4;
+add.u64 %rd10, %rd6, %rd9;
+ld.shared.u32 %r11, [%rd10];
+shfl.sync.bfly.b32 %r9, %r11, 1, 31, -1;
+add.u32 %r11, %r11, %r9;
+add.u64 %rd3, %rd1, %rd7;
+st.global.u32 [%rd3], %r11;
+ret;
+FAIL:
+mul.wide.u32 %rd4, %r2, 4;
+add.u64 %rd5, %rd1, %rd4;
+st.global.u32 [%rd5], 0xffffffff;
+ret;
+}
