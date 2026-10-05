@@ -246,7 +246,13 @@ void maybe_dump_ptx_for_llvm_debug(const std::string& kernel_name, const std::st
         return;
     }
 
-    const std::filesystem::path out = dir / (sanitize_filename_component(kernel_name) + ".ptx");
+    // Kokkos and thrust names run past the 255-byte file-name limit; keep a
+    // readable prefix and disambiguate with the name hash.
+    std::string stem = sanitize_filename_component(kernel_name);
+    if (stem.size() > 160) {
+        stem = stem.substr(0, 160) + "-" + jit_cache_key(0, kernel_name);
+    }
+    const std::filesystem::path out = dir / (stem + ".ptx");
     if (std::filesystem::exists(out, ec) && !ec) {
         return;
     }
@@ -1130,6 +1136,7 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         // artifact rather than the compiler declining to lower this PTX.
         REG_DEBUG("lower_ptx_to_metal_source failed for kernel '%s': %s", kernel_name.c_str(),
                   lowered_metal.error.empty() ? "no diagnostic" : lowered_metal.error.c_str());
+        maybe_dump_ptx_for_llvm_debug(kernel_name, ptx_source);
         return false;
     }
     RegistrationCacheMetadata metadata{
