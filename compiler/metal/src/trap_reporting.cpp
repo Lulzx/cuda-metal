@@ -1,5 +1,7 @@
 #include "trap_reporting.h"
 
+#include "cumetal/ir/call_write_effects.h"
+
 #include <algorithm>
 #include <unordered_map>
 #include <vector>
@@ -35,6 +37,8 @@ bool is_bounded_builtin(const ir::Operation& operation) {
         operation.result_types.size() != 1) {
         return false;
     }
+    // Pure scalar builtins are straight-line: they cannot trap or loop.
+    if (ir::detail::is_read_only_scalar_builtin(operation)) return true;
     const std::string& name = operation.attributes.at("callee");
     const ir::Type& type = operation.result_types.front();
     const bool classify = name == "isfinite" || name == "isnan" ||

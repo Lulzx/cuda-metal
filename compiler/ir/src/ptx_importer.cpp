@@ -3005,6 +3005,60 @@ struct Importer {
         // Memory-cell proofs consume solved definitions, never the last type
         // assigned to a register name. Each round can add only a proven load;
         // dependent SSA contracts are then solved afresh from those facts.
+        // A kernel's captured fields are raw 64-bit words: an `ld.param` of an
+        // aggregate field has no type beyond its uses, which is why the
+        // pre-SSA recovery types a uniquely defined field by its cvta. When
+        // clang instead merges a field reload with an already-proven pointer
+        // (`mov %rd974, %rd37` on one edge, `ld.param.b64 %rd974, [p+1656]` on
+        // the other) the field is that same kind of pointer. Only direct,
+        // unpredicated aggregate-field loads qualify; any other scalar still
+        // refuses the join.
+        const auto parameter_field_join_proofs = [&]() {
+            PointerLoadTypes proofs;
+            if (!is_kernel) return proofs;
+            std::unordered_map<ValueId, std::pair<const Instruction*, std::size_t>> producers;
+            for (const auto& [instruction, values] : instruction_results)
+                for (std::size_t lane = 0; lane < values.size(); ++lane)
+                    producers.emplace(values[lane], std::pair{instruction, lane});
+            for (std::size_t b = 0; b < raw_blocks.size(); ++b) {
+                for (const auto& [name, result] : block_arguments[b]) {
+                    std::optional<Type> pointer;
+                    std::vector<std::pair<const Instruction*, std::size_t>> fields;
+                    bool other_scalar = false;
+                    for (const auto predecessor : raw_blocks[b].predecessors) {
+                        const auto edge = outgoing[predecessor].find(name);
+                        if (edge == outgoing[predecessor].end()) { other_scalar = true; break; }
+                        const auto value = edge->second;
+                        const auto type = value_types.find(value);
+                        if (type == value_types.end()) { other_scalar = true; break; }
+                        if (type->second.is_pointer()) {
+                            if (!pointer) pointer = type->second;
+                            continue;
+                        }
+                        if (integer_zero_values.contains(value)) continue;
+                        const auto producer = producers.find(value);
+                        const Instruction* load = producer == producers.end() ? nullptr : producer->second.first;
+                        if (load == nullptr || !load->predicate.empty() || type->second != Type::integer(64) ||
+                            !starts_with(load->opcode, "ld.param.") || load->operands.size() != 2 ||
+                            ptx_scalar_type(load->opcode).bit_width != 64) {
+                            other_scalar = true;
+                            break;
+                        }
+                        const auto parameter = parameter_types.find(parameter_name_from_operand(load->operands[1]));
+                        if (parameter == parameter_types.end() || parameter->second.kind != TypeKind::kAggregate) {
+                            other_scalar = true;
+                            break;
+                        }
+                        fields.emplace_back(load, producer->second.second);
+                    }
+                    if (other_scalar || !pointer || fields.empty() ||
+                        pointer->address_space == AddressSpace::kNone) continue;
+                    for (const auto& [load, lane] : fields)
+                        proofs[proof_key(load)][lane] = Type::pointer(Type::integer(8), pointer->address_space);
+                }
+            }
+            return proofs;
+        };
         const auto external_types = value_types;
         PointerLoadTypes local_load_proofs;
         for (;;) {
@@ -3033,6 +3087,9 @@ struct Importer {
                     }
                 }
             }
+            for (const auto& [instruction, lanes] : parameter_field_join_proofs())
+                for (const auto& [lane, type] : lanes)
+                    added |= pointer_load_types[instruction].emplace(lane, type).second;
             if (!added) {
                 const auto rebuild_type_inputs = [&]() {
                     return rebuild_ssa() && resolve_types();

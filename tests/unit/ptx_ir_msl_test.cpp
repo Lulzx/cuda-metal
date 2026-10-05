@@ -1398,6 +1398,105 @@ bool test_byte_permute_builtin_whitelists() {
     return ok;
 }
 
+bool test_parameter_field_pointer_join() {
+    using namespace cumetal;
+    bool ok = true;
+    // Kokkos' reduction epilogue: one edge copies an already-proven device
+    // pointer field, the other reloads a different 64-bit field of the same
+    // by-value functor, and the join is then converted and dereferenced.
+    // LAMMPS' fix addforce/efield/spring and group xcm kernels refused with
+    // "PTX pointer branch argument requires a pointer or proven null".
+    const auto source = [](const char* other_edge) {
+        return std::string(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry field_join(.param .align 8 .b8 functor[32]) {
+    .reg .pred %p<2>;
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<8>;
+    ld.param.b64 %rd1, [functor+8];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u32 %r1, %tid.x;
+    st.global.u32 [%rd2], %r1;
+    ld.param.b8 %r2, [functor+24];
+    setp.ne.b32 %p1, %r2, 0;
+    @%p1 bra $FIELD;
+    mov.b64 %rd3, %rd1;
+    bra.uni $JOIN;
+$FIELD:
+    )ptx") + other_edge + R"ptx(
+$JOIN:
+    cvta.to.global.u64 %rd4, %rd3;
+    st.global.u32 [%rd4+4], %r1;
+    ret;
+}
+)ptx";
+    };
+    const auto field = metal::compile_ptx_to_msl(source("ld.param.b64 %rd3, [functor+16];"));
+    ok &= expect(field.ok, "an aggregate-field reload joins a proven device pointer: " + field.error);
+    const auto scalar = metal::compile_ptx_to_msl(
+        source("cvt.u64.u32 %rd5, %r1;\n    add.s64 %rd3, %rd5, 64;"));
+    ok &= expect(!scalar.ok &&
+                     scalar.error.find("requires a pointer or proven null") != std::string::npos,
+                 "a computed integer still cannot join a pointer: " +
+                     (scalar.ok ? std::string("accepted") : scalar.error));
+    return ok;
+}
+
+bool test_trap_reporting_accepts_scalar_math_builtins() {
+    using namespace cumetal;
+    bool ok = true;
+    // A trapping kernel (Kokkos' abort path) whose body also calls libdevice
+    // math. Trap reporting and the call-effect summary must agree that pure
+    // scalar builtins are bounded; LAMMPS' fix wall/* kernels refused with
+    // "trap reporting requires defined device helper '__cumetal_ffs'" / "'exp'".
+    const struct {
+        const char* name;
+        const char* declaration;
+        const char* call;
+    } cases[] = {
+        {"ffs", ".extern .func (.param .b32 r) __nv_ffs(.param .b32 a);",
+         "call.uni (rv32), __nv_ffs, (a32); ld.param.b32 %w, [rv32];"},
+        {"expf", ".extern .func (.param .b32 r) __nv_expf(.param .b32 a);",
+         "call.uni (rv32), __nv_expf, (a32); ld.param.b32 %w, [rv32];"},
+        {"exp", ".extern .func (.param .b64 r) __nv_exp(.param .b64 a);",
+         "call.uni (rv64), __nv_exp, (a64); ld.param.b64 %d, [rv64]; cvt.rzi.u32.f64 %w, %d;"},
+    };
+    for (const auto& c : cases) {
+        const std::string source = std::string(R"ptx(
+.version 7.1
+.target sm_80
+.address_size 64
+)ptx") + c.declaration + R"ptx(
+.visible .entry math_trap(.param .u64 out) {
+    .reg .pred %p;
+    .reg .b32 %w;
+    .reg .b64 %d, %o;
+    .param .b32 a32;
+    .param .b32 rv32;
+    .param .b64 a64;
+    .param .b64 rv64;
+    ld.param.u64 %o, [out];
+    mov.u32 %w, %tid.x;
+    st.param.b32 [a32], %w;
+    cvt.rn.f64.u32 %d, %w;
+    st.param.b64 [a64], %d;
+    )ptx" + c.call + R"ptx(
+    setp.eq.u32 %p, %w, 77;
+    @%p trap;
+    st.global.u32 [%o], %w;
+    ret;
+}
+)ptx";
+        const auto compiled = metal::compile_ptx_to_msl(source);
+        ok &= expect(compiled.ok && compiled.source.find("cm_trap_status") != std::string::npos,
+                     std::string("trap reporting accepts the ") + c.name +
+                         " scalar builtin: " + compiled.error);
+    }
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -1464,6 +1563,8 @@ int main() {
     ok &= test_mutated_aggregate_pointer_copy();
     ok &= test_joined_aggregate_parameter_addresses();
     ok &= test_byte_permute_builtin_whitelists();
+    ok &= test_trap_reporting_accepts_scalar_math_builtins();
+    ok &= test_parameter_field_pointer_join();
 
     const std::string reused_register = R"ptx(
 .version 7.0

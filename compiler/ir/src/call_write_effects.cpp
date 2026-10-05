@@ -384,7 +384,11 @@ bool is_read_only_scalar_builtin(const Operation& operation) {
         "sqrt", "rsqrt", "sin", "cos", "tan", "exp", "exp2", "log", "log2", "pow",
         "floor", "ceil", "trunc", "rint", "round", "fabs", "abs", "fma", "fmin", "fmax",
         "min", "max", "clz", "popcount", "reverse_bits", "isnan", "isinf", "isfinite", "signbit", "copysign",
-        "__cumetal_byte_permute",
+        "exp10", "expm1", "log10", "log1p", "asin", "acos", "atan", "atan2", "sinh", "cosh",
+        "tanh", "asinh", "acosh", "atanh", "cbrt", "erf", "erfc", "fmod", "fdim", "hypot",
+        "remainder", "nextafter", "saturate",
+        "__cumetal_byte_permute", "__cumetal_ffs", "__cumetal_signed_abs", "__cumetal_rcbrt",
+        "__cumetal_fdivide",
     };
     if (!known.contains(name)) return false;
     const auto scalar = [](const Type& type) {
