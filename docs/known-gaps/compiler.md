@@ -282,6 +282,31 @@ not lower (tensor-core `mma`/`wmma`/`ldmatrix`, `mbarrier`, TMA, texture
 instructions). A template with no instruction (`asm volatile("" ::: "memory")`)
 lowers to nothing; it does not act as a compiler barrier for Metal. Predicated
 instructions inside a block follow the PTX path's predication rules.
+On the typed path any predicated non-branch instruction, including one with
+several results such as `shfl.sync ... %r|%p`, is split into a guarded block
+before SSA construction; the legacy emitters still refuse it. Predicated
+barriers and warp collectives (`bar`, `shfl`, `vote`, `match`, `redux`) stay
+refused on both paths, because a branch around them would change which threads
+take part. A guarded definition of a pointer with no earlier value is refused
+at the join. PTX that puts
+several statements on one line (`mov.b32 %r, %x; shfl.sync ...; @%p add ...`,
+the shape CUB's inline-asm warp scans expand to) is split into separate
+statements by the parser. Integer operations other than add/sub on a pointer
+operand (`ptr & 15` alignment tests) cast the pointer to `ulong`.
+
+## nvcc shim and bundled CCCL
+
+The fake toolkit's `nvcc` shim (`scripts/build_llama_cpp_cumetal.sh
+--toolkit-only`) defines `CUDA_VERSION`/`CUDART_VERSION` from
+`CUMETAL_CUDA_VERSION` (default 11060). Projects that bundle CCCL 3.x, such as
+CuPy, need `CUMETAL_CUDA_VERSION=12020`; otherwise CCCL reports that the
+compiler and toolkit are incompatible. CuMetal's headers are passed with
+`-isystem`, so a project's own CCCL headers take precedence over CuMetal's
+forwarding headers. `-Xfatbin` options are dropped. Under Clang CUDA,
+`cuda_runtime.h` defines `CCCL_DISABLE_FP16_SUPPORT`, `CCCL_DISABLE_NVTX` and
+`CCCL_DISABLE_PDL`, because CuMetal's `__half` is not CCCL's and NVTX and
+programmatic dependent launch are not implemented. CCCL's `__half` and
+`__nv_bfloat16` paths are therefore unavailable.
 
 ## Threadgroup float atomics
 

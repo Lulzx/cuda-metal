@@ -82,6 +82,29 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // CUB and Thrust choose tuning policies from the kernel's PTX version; 0
+    // matched no policy and every CCCL dispatch failed. It is the architecture
+    // the device reports, and NUM_REGS agrees with cudaFuncGetAttributes.
+    {
+        int major = 0, minor = 0, ptx = 0, binary = 0, regs = 0, bogus = 0;
+        cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, 0);
+        cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, 0);
+        if (cuFuncGetAttribute(&ptx, CU_FUNC_ATTRIBUTE_PTX_VERSION, matrix_mul) != CUDA_SUCCESS ||
+            cuFuncGetAttribute(&binary, CU_FUNC_ATTRIBUTE_BINARY_VERSION, matrix_mul) !=
+                CUDA_SUCCESS ||
+            cuFuncGetAttribute(&regs, CU_FUNC_ATTRIBUTE_NUM_REGS, matrix_mul) != CUDA_SUCCESS ||
+            ptx != major * 10 + minor || binary != ptx || ptx == 0 || regs <= 0) {
+            std::fprintf(stderr, "FAIL: ptx=%d binary=%d regs=%d for compute %d.%d\n", ptx, binary,
+                         regs, major, minor);
+            return 1;
+        }
+        if (cuFuncGetAttribute(&bogus, static_cast<CUfunction_attribute>(9999), matrix_mul) !=
+            CUDA_ERROR_INVALID_VALUE) {
+            std::fprintf(stderr, "FAIL: an unknown function attribute was answered\n");
+            return 1;
+        }
+    }
+
     // The per-block-size shared-memory callback must be consulted, and the
     // flags variant must agree with the plain query.
     static int b2d_calls = 0;

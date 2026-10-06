@@ -142,8 +142,10 @@ int main(int argc, char** argv) {
         }
         std::uint64_t sizes[2] = {0, 0};
         std::memcpy(sizes, cubin.data() + 8, sizeof(sizes));
-        if (!expect(sizes[0] > 4 && sizes[1] > 0 && kHeader + sizes[0] + sizes[1] == cubin.size(),
-                    "module image lengths cover the buffer exactly")) {
+        // Plus the trailing NUL that NVRTC's CUBIN size counts.
+        if (!expect(sizes[0] > 4 && sizes[1] > 0 &&
+                        kHeader + sizes[0] + sizes[1] + 1 == cubin.size(),
+                    "module image lengths cover the buffer up to its NUL")) {
             return 1;
         }
         if (!expect(std::memcmp(cubin.data() + kHeader, "MTLB", 4) == 0,
@@ -448,6 +450,18 @@ extern "C" __global__ void plain_kernel(float* out) { out[0] = device_bias; }
             !run(template_module, lowered[1].c_str(), 5.0f)) {
             return 1;
         }
+        // CuPy keeps nvrtcGetCUBINSize() - 1 bytes because NVRTC's size counts
+        // a trailing NUL. Before the shim appended one, that cut the sidecar's
+        // last byte and every CuPy launch failed with CUDA_ERROR_INVALID_VALUE.
+        if (!expect(!cubin.empty() && cubin.back() == '\0', "the CUBIN ends in a NUL")) return 1;
+        std::vector<char> stripped(cubin.begin(), cubin.end() - 1);
+        CUmodule stripped_module = nullptr;
+        if (!expect(cuModuleLoadData(&stripped_module, stripped.data()) == CUDA_SUCCESS,
+                    "cuModuleLoadData accepts the CUBIN without its NUL") ||
+            !run(stripped_module, "scale_kernel", 2.0f)) {
+            return 1;
+        }
+        cuModuleUnload(stripped_module);
         CUdeviceptr bias = 0;
         std::size_t bias_size = 0;
         float bias_value = 0.0f;

@@ -1,5 +1,7 @@
 #include "nvrtc_options.h"
 
+#include "cuda.h"
+
 #include <algorithm>
 #include <cstddef>
 
@@ -98,7 +100,14 @@ TranslatedOptions translate_options(const std::vector<std::string>& options) {
     // CuMetal's device line force-includes cuda_runtime.h, so the declarations
     // those branches expect to be built in are in fact present. Seeding it here
     // rather than appending means an explicit `--undefine-macro` still wins.
-    std::vector<std::string> defines{"__CUDACC_RTC__=1"};
+    // It also predefines its own version, which CCCL compares against
+    // CUDART_VERSION; derive it from the same CUDA_VERSION nvrtcVersion reports.
+    std::vector<std::string> defines{
+        "__CUDACC_RTC__=1",
+        "__CUDACC_VER_MAJOR__=" + std::to_string(CUDA_VERSION / 1000),
+        "__CUDACC_VER_MINOR__=" + std::to_string((CUDA_VERSION % 1000) / 10),
+        "__CUDACC_VER_BUILD__=0",
+    };
     bool arch_seen = false;
 
     const auto add_define = [&defines](const std::string& definition) {

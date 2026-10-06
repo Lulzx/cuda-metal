@@ -2606,6 +2606,24 @@ struct AstLowerer {
         return condition;
     }
 
+    // Statements an operation needs after its own: declarations of its second
+    // and later results. Flushed by the caller right after lower_operation.
+    std::vector<MslStmt> trailing_statements;
+
+    void declare_extra_result(const ir::Operation& operation, std::size_t index,
+                              MslExpr initializer) {
+        const ir::ValueId value = operation.results.at(index);
+        const MslType type = lower_type(operation.result_types.at(index));
+        values[value] = MslExpression::identifier(value_name(value), type);
+        if (cfg_dispatcher_mode || predeclared_ssa_storage) {
+            trailing_statements.push_back(
+                MslStatement::assignment(values.at(value), std::move(initializer)));
+        } else {
+            trailing_statements.push_back(
+                MslStatement::variable(type, value_name(value), std::move(initializer), true));
+        }
+    }
+
     MslStmt declare_result(const ir::Operation& operation, MslExpr initializer) {
         if (operation.results.empty() || initializer == nullptr) {
             fail(&operation, "operation has no result value or expression to declare");
@@ -2702,6 +2720,22 @@ struct AstLowerer {
             MslExpr left = expression_for(operation.operands[0]);
             MslExpr right = expression_for(operation.operands[1]);
             MslType expression_type = lower_result_type(operation);
+            // An integer-only operator on a pointer reads its numeric address:
+            // CUB tests `(uintptr_t)ptr & 15` before vectorizing loads. MSL
+            // rejects `ptr & 15` but accepts reinterpret_cast<ulong>(ptr), which
+            // yields the GPU address -- buffer base plus offset, so alignment
+            // agrees with the host's for the page-aligned buffers CuMetal maps.
+            // Pointer +/- integer stays pointer arithmetic (kPointerOffset).
+            if (operation.opcode != ir::OpCode::kAdd && operation.opcode != ir::OpCode::kSub &&
+                operation.opcode != ir::OpCode::kPointerOffset) {
+                const auto numeric = [](const ir::Operand& operand, MslExpr expression) {
+                    return operand.type.kind == ir::TypeKind::kPointer
+                               ? MslExpression::cast(MslType::uint(64), std::move(expression), true)
+                               : expression;
+                };
+                left = numeric(operation.operands[0], std::move(left));
+                right = numeric(operation.operands[1], std::move(right));
+            }
             if (operation.opcode == ir::OpCode::kMul &&
                 operation.attributes.contains("high_half") &&
                 operation.attributes.at("high_half") == "true") {
@@ -4806,10 +4840,22 @@ struct AstLowerer {
                                 MslType::boolean()),
                             MslType::boolean());
                     }
+                    // `shfl.sync.down.b32 r0|p, ...`: p reports whether the
+                    // source lane was in range. CUB's inline-asm warp reductions
+                    // guard their add on it; never declaring it left p false,
+                    // so every lane kept its own value and sums came out wrong.
+                    if (operation.results.size() > 1) {
+                        declare_extra_result(operation, 1, valid_lane);
+                    }
                     shuffle_index = MslExpression::conditional(
                         std::move(valid_lane),
                         requested_lane, lane, uint_type);
                 }
+            }
+            if (operation.results.size() > 1 &&
+                !values.contains(operation.results[1])) {
+                fail(&operation, "SIMD shuffle predicate result needs a PTX shuffle kind");
+                return std::nullopt;
             }
             return declare_result(
                 operation,
@@ -5370,9 +5416,12 @@ struct AstLowerer {
                 }
                 continue;
             }
+            trailing_statements.clear();
             const std::optional<MslStmt> lowered = lower_operation(operation);
             if (!result.error.empty()) return false;
             if (lowered.has_value()) statements->push_back(*lowered);
+            for (MslStmt& trailing : trailing_statements) statements->push_back(std::move(trailing));
+            trailing_statements.clear();
             if (trap_guarded && calls_guarded_helper(operation)) {
                 statements->push_back(MslStatement::if_statement(
                     trap_status_is_set(), {trap_cancel_return()}));

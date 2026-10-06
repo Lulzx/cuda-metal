@@ -229,8 +229,10 @@ int main() {
                "ld.global.u32 %r1, [%rd1];\nld.global.u64 %rd2, [%rd1];\n"
                "setp.eq.u32 %p1, %r1, 0;\n" + instruction + "\nret;\n}\n";
     };
+    // A predicated form is split into a guarded block like any other write.
     for (const auto* instruction : {"bfi.b32 %r2, %r1, 42, 3, 13;",
-                                    "bfi.b64 %rd2, %rd2, 42, %r1, 64;"}) {
+                                    "bfi.b64 %rd2, %rd2, 42, %r1, 64;",
+                                    "@%p1 bfi.b32 %r2, %r1, 0, 3, 13;"}) {
         const auto result = metal::compile_ptx_to_msl(bfi_module(instruction));
         ok &= expect(result.ok, "32/64-bit bit insertion supports register and immediate operands");
         if (!result.ok) std::cerr << result.error << "\n";
@@ -240,8 +242,7 @@ int main() {
                                     "bfi.b32.extra %r2, %r1, 0, 3, 13;",
                                     "bfi.b32 %r2, %r1, 0, 3;",
                                     "bfi.b32 %r2, %rd2, 0, 3, 13;",
-                                    "bfi.b32 %r2, %r1, 0, %rd2, 13;",
-                                    "@%p1 bfi.b32 %r2, %r1, 0, 3, 13;"}) {
+                                    "bfi.b32 %r2, %r1, 0, %rd2, 13;"}) {
         const auto result = metal::compile_ptx_to_msl(bfi_module(instruction));
         ok &= expect(!result.ok && result.error.find("bfi") != std::string::npos,
                      "unsupported bit-insertion forms and mismatched operands fail explicitly");
@@ -259,7 +260,8 @@ int main() {
     for (const auto* instruction : {"mov.b32 %r2, {%rs1, %rs2};",
                                     "mov.b32 {%rs3, %rs4}, %r1;",
                                     "mov.b32 {_, %rs4}, %r1;",
-                                    "mov.b32 {%rs3, _}, %r1;"}) {
+                                    "mov.b32 {%rs3, _}, %r1;",
+                                    "@%p1 mov.b32 %r2, {%rs1, %rs2};"}) {
         const auto result = metal::compile_ptx_to_msl(tuple_module(instruction));
         ok &= expect(result.ok, "mov.b32 halfword packing/unpacking and sink lanes compile");
         if (!result.ok) std::cerr << result.error << "\n";
@@ -271,8 +273,7 @@ int main() {
                                     "mov.b32 %r2, {%rs1, 7};",
                                     "mov.b32 {_, _}, %r1;",
                                     "mov.b32 {%rs3, %rs3}, %r1;",
-                                    "mov.b32 {%rs3, %rs4}, %rd1;",
-                                    "@%p1 mov.b32 %r2, {%rs1, %rs2};"}) {
+                                    "mov.b32 {%rs3, %rs4}, %rd1;"}) {
         const auto result = metal::compile_ptx_to_msl(tuple_module(instruction));
         ok &= expect(!result.ok && result.error.find("mov.b32") != std::string::npos,
                      "unsupported/malformed mov.b32 tuples are rejected rather than scalarized");

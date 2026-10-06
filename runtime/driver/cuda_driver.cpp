@@ -70,6 +70,8 @@ struct CUfunc_st {
 namespace {
 
 extern "C" int cumetalRuntimeIsDevicePointer(const void* ptr);
+extern "C" cudaError_t cumetalFuncAttributesFromKernelProperties(
+    const cumetal::metal_backend::KernelProperties& kernel, cudaFuncAttributes* attr);
 extern "C" int cumetalRuntimeGetAllocationInfo(const void* ptr, void** base_out, size_t* size_out);
 extern "C" int cumetalRuntimeIsManaged(const void* ptr);
 extern "C" void* cumetalRuntimeGetHostPointer(const void* ptr, size_t count);
@@ -186,9 +188,11 @@ CUresult map_cuda_error(cudaError_t error) {
         case cudaErrorGraphExecUpdateFailure:
             return CUDA_ERROR_GRAPH_EXEC_UPDATE_FAILURE;
         case cudaErrorUnknown:
+        default:
+            // The CUDA 12 enum has codes the driver never produces; report
+            // them as unknown rather than guessing a CUresult.
             return CUDA_ERROR_UNKNOWN;
     }
-    return CUDA_ERROR_UNKNOWN;
 }
 
 bool has_current_context_locked(const DriverState& state) {
@@ -1883,6 +1887,19 @@ CUresult cuModuleGetFunction(CUfunction* hfunc, CUmodule hmod, const char* name)
     return CUDA_SUCCESS;
 }
 
+CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** kernelParams,
+                          void** extra) {
+    if (config == nullptr || (config->numAttrs != 0 && config->attrs == nullptr)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    for (unsigned int i = 0; i < config->numAttrs; ++i) {
+        if (config->attrs[i].id != CU_LAUNCH_ATTRIBUTE_IGNORE) return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    return cuLaunchKernel(f, config->gridDimX, config->gridDimY, config->gridDimZ,
+                          config->blockDimX, config->blockDimY, config->blockDimZ,
+                          config->sharedMemBytes, config->hStream, kernelParams, extra);
+}
+
 CUresult cuLaunchKernel(CUfunction f,
                         unsigned int gridDimX,
                         unsigned int gridDimY,
@@ -3138,6 +3155,12 @@ CUresult cuPointerGetAttribute(void* data, CUpointer_attribute attribute, CUdevi
             cuCtxGetCurrent(out);
             return CUDA_SUCCESS;
         }
+        case CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL: {
+            // CUDA fails this for memory no device owns; there is one device.
+            if (!is_known) return CUDA_ERROR_INVALID_VALUE;
+            *static_cast<int*>(data) = 0;
+            return CUDA_SUCCESS;
+        }
         default:
             return CUDA_ERROR_INVALID_VALUE;
     }
@@ -3369,14 +3392,28 @@ CUresult cuFuncGetAttribute(int* pi, CUfunc_attribute attrib, CUfunction hfunc) 
                             kernel.static_threadgroup_memory_bytes);
             break;
         }
+        case CU_FUNC_ATTRIBUTE_NUM_REGS:
         case CU_FUNC_ATTRIBUTE_PTX_VERSION:
-        case CU_FUNC_ATTRIBUTE_BINARY_VERSION:
-            // A Metal pipeline has no NVIDIA PTX or SASS target version.
+        case CU_FUNC_ATTRIBUTE_BINARY_VERSION: {
+            // Same answers as cudaFuncGetAttributes: one source of truth.
+            cudaFuncAttributes attributes{};
+            const cudaError_t status = cumetalFuncAttributesFromKernelProperties(kernel, &attributes);
+            if (status != cudaSuccess) return CUDA_ERROR_INVALID_VALUE;
+            *pi = attrib == CU_FUNC_ATTRIBUTE_NUM_REGS      ? attributes.numRegs
+                  : attrib == CU_FUNC_ATTRIBUTE_PTX_VERSION ? attributes.ptxVersion
+                                                            : attributes.binaryVersion;
+            break;
+        }
+        case CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES:
+        case CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES:
+        case CU_FUNC_ATTRIBUTE_CACHE_MODE_CA:
+        case CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT:
+            // No user-visible constant bank, local frame, L1 cache mode or
+            // carveout on Metal; zero is the honest value.
             *pi = 0;
             break;
         default:
-            *pi = 0;
-            break;
+            return CUDA_ERROR_INVALID_VALUE;
     }
     return CUDA_SUCCESS;
 }

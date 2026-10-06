@@ -591,6 +591,9 @@ nvrtcResult nvrtcCompileProgram(nvrtcProgram prog, int numOptions, const char* c
         // loads, and the driver says so at launch.
         program->cubin = std::move(bytes);
     }
+    // NVRTC's CUBIN size counts a trailing NUL, and CuPy drops that last
+    // byte; without one it cut off the end of the ABI sidecar instead.
+    program->cubin.push_back('\0');
 
     program->compiled = true;
     program->log = std::move(log);

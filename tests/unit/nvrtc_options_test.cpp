@@ -1,4 +1,5 @@
 #include "nvrtc_options.h"
+#include "cuda.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -46,6 +47,16 @@ int main() {
         if (!expect(!result.ptx_requested, "no PTX requested by default")) return 1;
         if (!expect(contains_pair(result.compiler_args, "-D", "__CUDACC_RTC__=1"),
                     "__CUDACC_RTC__ is predefined as NVRTC does")) {
+            return 1;
+        }
+        // CCCL refuses to compile when the NVRTC version disagrees with
+        // CUDART_VERSION, and reads 0 (below 12) when it is missing.
+        if (!expect(contains_pair(result.compiler_args, "-D",
+                                  "__CUDACC_VER_MAJOR__=" + std::to_string(CUDA_VERSION / 1000)) &&
+                        contains_pair(result.compiler_args, "-D",
+                                      "__CUDACC_VER_MINOR__=" +
+                                          std::to_string((CUDA_VERSION % 1000) / 10)),
+                    "__CUDACC_VER_MAJOR__/MINOR__ match CUDA_VERSION")) {
             return 1;
         }
     }
@@ -158,9 +169,9 @@ int main() {
                     "unknown option reported")) {
             return 1;
         }
-        // --cuda-arch sm_80, -D __CUDACC_RTC__=1, the RTC-mode warning
-        // suppression, and nothing else.
-        if (!expect(result.compiler_args.size() == 5 &&
+        // --cuda-arch sm_80, -D __CUDACC_RTC__=1, the three -D version
+        // macros, the RTC-mode warning suppression, and nothing else.
+        if (!expect(result.compiler_args.size() == 11 &&
                         contains(result.compiler_args, "--clang-arg=-Wno-macro-redefined"),
                     "unknown option does not reach cumetalc")) {
             return 1;

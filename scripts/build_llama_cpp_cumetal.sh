@@ -284,8 +284,9 @@ for arg in "\$@"; do
             IFS="\$OLDIFS"
             continue ;;
         # Flags for nvcc-internal sub-tools that clang has no equivalent for.
-        -Xptxas|-Xcudafe|-Xnvlink|-Xarchive)   SKIP_NEXT=1; continue ;;
-        -Xptxas=*|-Xcudafe=*|-Xnvlink=*|-Xarchive=*) continue ;;
+        # CuPy passes -Xfatbin=-compress-all; there is no fatbinary to compress.
+        -Xptxas|-Xcudafe|-Xnvlink|-Xarchive|-Xfatbin)   SKIP_NEXT=1; continue ;;
+        -Xptxas=*|-Xcudafe=*|-Xnvlink=*|-Xarchive=*|-Xfatbin=*) continue ;;
         # nvcc diagnostic suppression; clang has no equivalent numbering.
         -diag-suppress|--diag-suppress)        SKIP_NEXT=1; continue ;;
         -diag-suppress=*|--diag-suppress=*)    continue ;;
@@ -359,7 +360,7 @@ if [[ \${IS_CMAKE_PROBE} -eq 1 && \${COMPILE_ONLY} -eq 0 ]]; then
     echo "\${REAL_CLANG} CMakeCUDACompilerId.o -lSystem -lc++" >&2
     exec "\${REAL_CLANG}" \\
         -x c++ \\
-        -I"\${CUMETAL_API}" \\
+        -isystem "\${CUMETAL_API}" \\
         -D__CUDACC__=1 \\
         -D__NVCC__=1 \\
         -Wno-unused-command-line-argument \\
@@ -369,11 +370,14 @@ fi
 CUDA_MODE_FLAGS=(
     -x cuda ${CUDA_DEVICE_FLAGS_STR}
     -nocudainc -nocudalib
-    -I"\${CUMETAL_API}"
+    # After the caller's -I paths, as nvcc searches its toolkit include dir:
+    # a project that bundles CCCL (CuPy) must get its own cub/thrust/cuda::std,
+    # not a mix with CuMetal's clean-room copies.
+    -isystem "\${CUMETAL_API}"
     -include cuda_runtime.h
     -DCUMETAL_NO_DEVICE_PRINTF=1
-    -DCUDA_VERSION=11060
-    -DCUDART_VERSION=11060
+    -DCUDA_VERSION=\${CUMETAL_CUDA_VERSION:-11060}
+    -DCUDART_VERSION=\${CUMETAL_CUDA_VERSION:-11060}
     -D__CUDACC__=1
     -D__NVCC__=1
     -D__CUDACC_VER_MAJOR__=12
@@ -381,6 +385,9 @@ CUDA_MODE_FLAGS=(
     -D__CUDACC_VER_BUILD__=140
     -Wno-pass-failed
     -Wno-unknown-cuda-version
+    # nvcc accepts a constexpr function that can never be constant-evaluated
+    # (CuPy's numeric_limits<__half>::infinity); clang errors by default.
+    -Wno-invalid-constexpr
     -Wno-unused-command-line-argument
 )
 

@@ -3520,6 +3520,26 @@ add_test(
 
 set_tests_properties(functional_runtime_ptx_lowering_regression PROPERTIES SKIP_RETURN_CODE 77)
 
+add_executable(cumetal_ptx_inline_asm_warp_test
+    ptx_inline_asm_warp_test.cpp
+)
+
+target_link_libraries(cumetal_ptx_inline_asm_warp_test
+    PRIVATE
+        cumetal_runtime
+)
+
+add_test(
+    NAME functional_ptx_inline_asm_warp
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_inline_asm_warp_test.sh
+            $<TARGET_FILE:cumetalc>
+            $<TARGET_FILE:cumetal_ptx_inline_asm_warp_test>
+            ${CMAKE_CURRENT_SOURCE_DIR}/reference/inline_asm_warp_sum.ptx
+)
+
+set_tests_properties(functional_ptx_inline_asm_warp PROPERTIES SKIP_RETURN_CODE 77)
+
 add_test(
     NAME functional_runtime_cooperative_launch
     COMMAND bash

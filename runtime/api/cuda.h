@@ -797,6 +797,7 @@ typedef enum CUpointer_attribute_enum {
     CU_POINTER_ATTRIBUTE_HOST_POINTER    = 4,
     CU_POINTER_ATTRIBUTE_MAPPED          = 7,
     CU_POINTER_ATTRIBUTE_IS_MANAGED      = 8,
+    CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL  = 9,
     // The memory pool an allocation came from, or a null handle when it came
     // from cuMemAlloc. Hosts query it to tell pooled allocations apart from
     // ordinary ones.
@@ -889,6 +890,96 @@ CUresult cuFuncIsLoaded(CUfunctionLoadingState* state, CUfunction function);
 CUresult cuFuncGetAttribute(int* pi, CUfunc_attribute attrib, CUfunction hfunc);
 CUresult cuFuncSetCacheConfig(CUfunction hfunc, CUfunc_cache config);
 CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunc_attribute attrib, int value);
+
+// ── Extended launch ──────────────────────────────────────────────────────────
+// cuLaunchKernelEx with no attributes is cuLaunchKernel. Every launch
+// attribute (clusters, cooperative, programmatic serialization, priority, ...)
+// changes scheduling Metal cannot express, so any attribute is refused with
+// CUDA_ERROR_NOT_SUPPORTED rather than silently dropped.
+typedef enum CUlaunchAttributeID_enum {
+    CU_LAUNCH_ATTRIBUTE_IGNORE = 0,
+    CU_LAUNCH_ATTRIBUTE_ACCESS_POLICY_WINDOW = 1,
+    CU_LAUNCH_ATTRIBUTE_COOPERATIVE = 2,
+    CU_LAUNCH_ATTRIBUTE_SYNCHRONIZATION_POLICY = 3,
+    CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION = 4,
+    CU_LAUNCH_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE = 5,
+    CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION = 6,
+    CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_EVENT = 7,
+    CU_LAUNCH_ATTRIBUTE_PRIORITY = 8,
+} CUlaunchAttributeID;
+
+typedef union CUlaunchAttributeValue_union {
+    char pad[64];
+    int cooperative;
+    struct { unsigned int x, y, z; } clusterDim;
+    int programmaticStreamSerializationAllowed;
+    int priority;
+} CUlaunchAttributeValue;
+
+typedef struct CUlaunchAttribute_st {
+    CUlaunchAttributeID id;
+    char pad[8 - sizeof(CUlaunchAttributeID)];
+    CUlaunchAttributeValue value;
+} CUlaunchAttribute;
+
+typedef struct CUlaunchConfig_st {
+    unsigned int gridDimX, gridDimY, gridDimZ;
+    unsigned int blockDimX, blockDimY, blockDimZ;
+    unsigned int sharedMemBytes;
+    CUstream hStream;
+    CUlaunchAttribute* attrs;
+    unsigned int numAttrs;
+} CUlaunchConfig;
+
+CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction f, void** kernelParams,
+                          void** extra);
+CUresult cuStreamGetId(CUstream hStream, unsigned long long* streamId);
+
+// ── Library/kernel management and kernel graph nodes ─────────────────────────
+// Declared with CUDA 12 signatures so libraries that resolve the driver at run
+// time (CCCL's cuda::__driver, via cudaGetDriverEntryPoint) compile. None are
+// implemented: cuGetProcAddress reports them as not found, and CCCL raises its
+// own error only if a caller reaches one.
+typedef struct CUlib_st* CUlibrary;
+typedef struct CUkern_st* CUkernel;
+
+typedef enum CUlibraryOption_enum {
+    CU_LIBRARY_HOST_UNIVERSAL_FUNCTION_AND_DATA_TABLE = 0,
+    CU_LIBRARY_BINARY_IS_PRESERVED = 1,
+    CU_LIBRARY_NUM_OPTIONS
+} CUlibraryOption;
+
+typedef CUlaunchAttributeID CUkernelNodeAttrID;
+typedef CUlaunchAttributeValue CUkernelNodeAttrValue;
+
+typedef struct CUDA_KERNEL_NODE_PARAMS_v2_st {
+    CUfunction func;
+    unsigned int gridDimX, gridDimY, gridDimZ;
+    unsigned int blockDimX, blockDimY, blockDimZ;
+    unsigned int sharedMemBytes;
+    void** kernelParams;
+    void** extra;
+    CUkernel kern;
+    CUcontext ctx;
+} CUDA_KERNEL_NODE_PARAMS;
+
+CUresult cuLibraryLoadData(CUlibrary* library, const void* code, CUjit_option* jitOptions,
+                           void** jitOptionsValues, unsigned int numJitOptions,
+                           CUlibraryOption* libraryOptions, void** libraryOptionValues,
+                           unsigned int numLibraryOptions);
+CUresult cuLibraryUnload(CUlibrary library);
+CUresult cuLibraryGetKernel(CUkernel* pKernel, CUlibrary library, const char* name);
+CUresult cuLibraryGetGlobal(CUdeviceptr* dptr, size_t* bytes, CUlibrary library,
+                            const char* name);
+CUresult cuLibraryGetManaged(CUdeviceptr* dptr, size_t* bytes, CUlibrary library,
+                             const char* name);
+CUresult cuKernelGetFunction(CUfunction* pFunc, CUkernel kernel);
+CUresult cuKernelGetAttribute(int* pi, CUfunction_attribute attrib, CUkernel kernel, CUdevice dev);
+CUresult cuGraphAddKernelNode(CUgraphNode* phGraphNode, CUgraph hGraph,
+                              const CUgraphNode* dependencies, size_t numDependencies,
+                              const CUDA_KERNEL_NODE_PARAMS* nodeParams);
+CUresult cuGraphKernelNodeSetAttribute(CUgraphNode hNode, CUkernelNodeAttrID attr,
+                                       const CUkernelNodeAttrValue* value);
 
 #ifdef __cplusplus
 }

@@ -63,7 +63,9 @@ def run_case(build, case):
         }
         invalid = source.replace('ld.local.u64 %rd2, [%rd1];', definitions[case])
         if case == 'reject-predicated':
-            expect_compile_failure(build, invalid, 'integer_probe', 'predicated non-branch operations')
+            # The guarded load becomes its own block; on the skipped edge the
+            # pointer has no value, so the join is refused.
+            expect_compile_failure(build, invalid, 'integer_probe', 'is undefined on an incoming edge')
             print('REJECTED predicated pointer-field definition')
             return
         # A redefined or narrowed register is the integer PTX names, read as a

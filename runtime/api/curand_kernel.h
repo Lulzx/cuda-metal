@@ -59,12 +59,15 @@ struct curandStatePhilox4_32_10 {
 
 typedef curandStatePhilox4_32_10 curandStatePhilox4_32_10_t;
 
-// MRG32k3a state
+// MRG32k3a state: cuRAND's layout. Components are kept below the moduli
+// (m1 = 2^32 - 209, m2 = 2^32 - 22853), never all zero.
 struct curandStateMRG32k3a {
-    double s1[3];
-    double s2[3];
+    unsigned int s1[3];
+    unsigned int s2[3];
     int boxmuller_flag;
-    double boxmuller_extra;
+    int boxmuller_flag_double;
+    float boxmuller_extra;
+    double boxmuller_extra_double;
 };
 
 typedef curandStateMRG32k3a curandStateMRG32k3a_t;
@@ -178,50 +181,127 @@ unsigned int curand(curandStatePhilox4_32_10_t* state) {
     return result;
 }
 
-// --- Uniform distribution [0, 1) ---
+// --- MRG32k3a (L'Ecuyer 1999) ---
+//
+// Exact 64-bit integer arithmetic: every product is below 2^53, so nothing
+// depends on CuMetal's emulated binary64.
+namespace curand_detail {
+static const int64_t kMrgM1 = 4294967087LL;
+static const int64_t kMrgM2 = 4294944443LL;
+
+static __host__ __device__ __forceinline__
+uint64_t splitmix64(uint64_t* x) {
+    uint64_t z = (*x += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+// One step; returns z in [1, m1].
+static __host__ __device__ __forceinline__
+uint32_t mrg32k3a_next(curandStateMRG32k3a* state) {
+    int64_t p1 = 1403580LL * state->s1[1] - 810728LL * state->s1[0];
+    p1 %= kMrgM1;
+    if (p1 < 0) p1 += kMrgM1;
+    state->s1[0] = state->s1[1];
+    state->s1[1] = state->s1[2];
+    state->s1[2] = (uint32_t)p1;
+    int64_t p2 = 527612LL * state->s2[2] - 1370589LL * state->s2[0];
+    p2 %= kMrgM2;
+    if (p2 < 0) p2 += kMrgM2;
+    state->s2[0] = state->s2[1];
+    state->s2[1] = state->s2[2];
+    state->s2[2] = (uint32_t)p2;
+    return (uint32_t)(p1 > p2 ? p1 - p2 : p1 - p2 + kMrgM1);
+}
+} // namespace curand_detail
+
+// Streams start at hashed points of the 2^191 period rather than at cuRAND's
+// 2^76-spaced subsequences, so values differ from NVIDIA's for the same seed.
+static __host__ __device__ __forceinline__
+void curand_init(unsigned long long seed, unsigned long long sequence,
+                 unsigned long long offset, curandStateMRG32k3a_t* state) {
+    uint64_t mix = seed;
+    uint64_t seq_mix = sequence;
+    mix ^= curand_detail::splitmix64(&seq_mix);
+    for (int i = 0; i < 3; i++) {
+        uint64_t r = curand_detail::splitmix64(&mix);
+        state->s1[i] = (uint32_t)((r & 0xFFFFFFFFULL) % (uint64_t)curand_detail::kMrgM1);
+        state->s2[i] = (uint32_t)((r >> 32) % (uint64_t)curand_detail::kMrgM2);
+    }
+    if ((state->s1[0] | state->s1[1] | state->s1[2]) == 0) state->s1[0] = 12345u;
+    if ((state->s2[0] | state->s2[1] | state->s2[2]) == 0) state->s2[0] = 12345u;
+    for (unsigned long long i = 0; i < offset; i++) curand_detail::mrg32k3a_next(state);
+    state->boxmuller_flag = 0;
+    state->boxmuller_flag_double = 0;
+    state->boxmuller_extra = 0.0f;
+    state->boxmuller_extra_double = 0.0;
+}
+
+static __host__ __device__ __forceinline__
+unsigned int curand(curandStateMRG32k3a_t* state) {
+    return curand_detail::mrg32k3a_next(state);
+}
+
+// --- Uniform distribution (0, 1] ---
+//
+// cuRAND documents (0, 1]: callers may take log(u) without a zero guard, and
+// CuPy maps an exact 1 back to 0 because it relies on that interval.
+
+namespace curand_detail {
+template <typename State>
+static __host__ __device__ __forceinline__ float uniform_float(State* state) {
+    return (float)((curand(state) >> 8) + 1u) * (1.0f / 16777216.0f);
+}
+} // namespace curand_detail
 
 static __host__ __device__ __forceinline__
 float curand_uniform(curandState_t* state) {
-    return (float)(curand(state) & 0x7FFFFFFFu) / (float)2147483648.0f;
+    return curand_detail::uniform_float(state);
 }
 
 static __host__ __device__ __forceinline__
 float curand_uniform(curandStatePhilox4_32_10_t* state) {
-    return (float)(curand(state) & 0x7FFFFFFFu) / (float)2147483648.0f;
+    return curand_detail::uniform_float(state);
+}
+
+// MRG32k3a draws lie in [1, m1], not over all 32 bits, so scale by 1/(m1 + 1).
+static __host__ __device__ __forceinline__
+float curand_uniform(curandStateMRG32k3a_t* state) {
+    return (float)curand(state) * 2.3283064365386963e-10f;
 }
 
 // Built from the bit pattern rather than by converting the 53-bit integer:
 // `(double)(u64)` lowers to PTX `cvt.rn.f64.u64`, which CuMetal's FP32-pair FP64
 // emulation has no primitive for, so the integer-divide spelling made the whole
 // kernel unlowerable. Setting the exponent to 1.0 and filling the 52-bit
-// mantissa gives [1,2) directly; subtracting one lands in [0,1) with uniform
-// 2^-52 spacing and no integer-to-float conversion at all.
+// mantissa gives [1,2) directly; subtracting from two lands in (0,1] with
+// uniform 2^-52 spacing and no integer-to-float conversion at all.
 static __host__ __device__ __forceinline__
 double __cumetal_curand_bits_to_unit_double(uint64_t bits) {
     const uint64_t pattern = 0x3FF0000000000000ULL | (bits >> 12);
     double value;
     __builtin_memcpy(&value, &pattern, sizeof(value));
-    return value - 1.0;
+    return 2.0 - value;
 }
 
-static __host__ __device__ __forceinline__
-double curand_uniform_double(curandState_t* state) {
+namespace curand_detail {
+template <typename State>
+static __host__ __device__ __forceinline__ double uniform_double(State* state) {
     uint32_t a = curand(state);
     uint32_t b = curand(state);
     return __cumetal_curand_bits_to_unit_double(((uint64_t)a << 32) | b);
 }
 
-// --- Normal distribution (Box-Muller) ---
-
-static __host__ __device__ __forceinline__
-float curand_normal(curandState_t* state) {
+// Box-Muller. u1 is in (0, 1], so log(u1) is finite.
+template <typename State>
+static __host__ __device__ __forceinline__ float normal_float(State* state) {
     if (state->boxmuller_flag) {
         state->boxmuller_flag = 0;
         return state->boxmuller_extra;
     }
     float u1 = curand_uniform(state);
     float u2 = curand_uniform(state);
-    if (u1 < 1e-12f) u1 = 1e-12f;
     float r = sqrtf(-2.0f * logf(u1));
     float theta = 2.0f * 3.14159265358979323846f * u2;
     state->boxmuller_flag = 1;
@@ -229,106 +309,29 @@ float curand_normal(curandState_t* state) {
     return r * cosf(theta);
 }
 
-static __host__ __device__ __forceinline__
-float curand_normal(curandStatePhilox4_32_10_t* state) {
-    if (state->boxmuller_flag) {
-        state->boxmuller_flag = 0;
-        return state->boxmuller_extra;
-    }
-    float u1 = curand_uniform(state);
-    float u2 = curand_uniform(state);
-    if (u1 < 1e-12f) u1 = 1e-12f;
-    float r = sqrtf(-2.0f * logf(u1));
-    float theta = 2.0f * 3.14159265358979323846f * u2;
-    state->boxmuller_flag = 1;
-    state->boxmuller_extra = r * sinf(theta);
-    return r * cosf(theta);
-}
-
-// --- Log-normal ---
-
-static __host__ __device__ __forceinline__
-float curand_log_normal(curandState_t* state, float mean, float stddev) {
-    return expf(mean + stddev * curand_normal(state));
-}
-
-static __host__ __device__ __forceinline__
-double curand_uniform_double(curandStatePhilox4_32_10_t* state) {
-    uint32_t a = curand(state);
-    uint32_t b = curand(state);
-    return __cumetal_curand_bits_to_unit_double(((uint64_t)a << 32) | b);
-}
-
-// --- Normal distribution, binary64 (Box-Muller) ---
-//
 // Drawn from curand_uniform_double, not from the binary32 stream: taking the
 // float path and widening would leave the low 29 bits of every sample zero,
 // which shows up as a visible lattice in a Gaussian tail and defeats the point
-// of asking for a double.
-#define CUMETAL_CURAND_NORMAL_DOUBLE_BODY(state)                             \
-    if ((state)->boxmuller_flag_double) {                                    \
-        (state)->boxmuller_flag_double = 0;                                  \
-        return (state)->boxmuller_extra_double;                              \
-    }                                                                        \
-    double u1 = curand_uniform_double(state);                                \
-    double u2 = curand_uniform_double(state);                                \
-    if (u1 < 1e-300) u1 = 1e-300;                                            \
-    double r = sqrt(-2.0 * log(u1));                                         \
-    double theta = 2.0 * 3.14159265358979323846 * u2;                        \
-    (state)->boxmuller_flag_double = 1;                                      \
-    (state)->boxmuller_extra_double = r * sin(theta);                        \
+// of asking for a double. The spare has its own slot so a mixed float/double
+// call sequence never hands back a value cached at the other precision.
+template <typename State>
+static __host__ __device__ __forceinline__ double normal_double(State* state) {
+    if (state->boxmuller_flag_double) {
+        state->boxmuller_flag_double = 0;
+        return state->boxmuller_extra_double;
+    }
+    double u1 = uniform_double(state);
+    double u2 = uniform_double(state);
+    double r = sqrt(-2.0 * log(u1));
+    double theta = 2.0 * 3.14159265358979323846 * u2;
+    state->boxmuller_flag_double = 1;
+    state->boxmuller_extra_double = r * sin(theta);
     return r * cos(theta);
-
-static __host__ __device__ __forceinline__
-double curand_normal_double(curandState_t* state) {
-    CUMETAL_CURAND_NORMAL_DOUBLE_BODY(state)
 }
 
-static __host__ __device__ __forceinline__
-double curand_normal_double(curandStatePhilox4_32_10_t* state) {
-    CUMETAL_CURAND_NORMAL_DOUBLE_BODY(state)
-}
-
-#undef CUMETAL_CURAND_NORMAL_DOUBLE_BODY
-
-static __host__ __device__ __forceinline__
-float curand_log_normal(curandStatePhilox4_32_10_t* state, float mean, float stddev) {
-    return expf(mean + stddev * curand_normal(state));
-}
-
-static __host__ __device__ __forceinline__
-double curand_log_normal_double(curandState_t* state, double mean, double stddev) {
-    return exp(mean + stddev * curand_normal_double(state));
-}
-
-static __host__ __device__ __forceinline__
-double curand_log_normal_double(curandStatePhilox4_32_10_t* state, double mean, double stddev) {
-    return exp(mean + stddev * curand_normal_double(state));
-}
-
-// --- Poisson (inverse transform for small lambda, normal approx for large) ---
-
-static __host__ __device__ __forceinline__
-unsigned int curand_poisson(curandState_t* state, double lambda) {
-    if (lambda < 30.0) {
-        double L = exp(-lambda);
-        unsigned int k = 0;
-        double p = 1.0;
-        do {
-            k++;
-            p *= curand_uniform(state);
-        } while (p > L);
-        return k - 1;
-    } else {
-        // Normal approximation for large lambda
-        float n = curand_normal(state);
-        int result = (int)(lambda + sqrt(lambda) * n + 0.5);
-        return result < 0 ? 0 : (unsigned int)result;
-    }
-}
-
-static __host__ __device__ __forceinline__
-unsigned int curand_poisson(curandStatePhilox4_32_10_t* state, double lambda) {
+// Inverse transform for small lambda, normal approximation for large.
+template <typename State>
+static __host__ __device__ __forceinline__ unsigned int poisson(State* state, double lambda) {
     if (lambda < 30.0) {
         double L = exp(-lambda);
         unsigned int k = 0;
@@ -339,10 +342,41 @@ unsigned int curand_poisson(curandStatePhilox4_32_10_t* state, double lambda) {
         } while (p > L);
         return k - 1;
     }
-    float n = curand_normal(state);
+    float n = normal_float(state);
     int result = (int)(lambda + sqrt(lambda) * n + 0.5);
     return result < 0 ? 0 : (unsigned int)result;
 }
+} // namespace curand_detail
+
+// One overload set per generator, all routed through the templates above.
+#define CUMETAL_CURAND_DISTRIBUTIONS(STATE)                                         \
+    static __host__ __device__ __forceinline__                                     \
+    double curand_uniform_double(STATE* state) {                                   \
+        return curand_detail::uniform_double(state);                               \
+    }                                                                              \
+    static __host__ __device__ __forceinline__                                     \
+    float curand_normal(STATE* state) { return curand_detail::normal_float(state); } \
+    static __host__ __device__ __forceinline__                                     \
+    double curand_normal_double(STATE* state) {                                    \
+        return curand_detail::normal_double(state);                                \
+    }                                                                              \
+    static __host__ __device__ __forceinline__                                     \
+    float curand_log_normal(STATE* state, float mean, float stddev) {              \
+        return expf(mean + stddev * curand_normal(state));                         \
+    }                                                                              \
+    static __host__ __device__ __forceinline__                                     \
+    double curand_log_normal_double(STATE* state, double mean, double stddev) {    \
+        return exp(mean + stddev * curand_normal_double(state));                   \
+    }                                                                              \
+    static __host__ __device__ __forceinline__                                     \
+    unsigned int curand_poisson(STATE* state, double lambda) {                     \
+        return curand_detail::poisson(state, lambda);                              \
+    }
+
+CUMETAL_CURAND_DISTRIBUTIONS(curandState_t)
+CUMETAL_CURAND_DISTRIBUTIONS(curandStatePhilox4_32_10_t)
+CUMETAL_CURAND_DISTRIBUTIONS(curandStateMRG32k3a_t)
+#undef CUMETAL_CURAND_DISTRIBUTIONS
 
 // --- Convenience: skip ahead ---
 

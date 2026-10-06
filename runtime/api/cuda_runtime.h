@@ -34,6 +34,22 @@
 #ifndef __CUDA_PROFILER_API_H__
 #define __CUDA_PROFILER_API_H__ 1
 #endif
+// Under clang CUDA, CuMetal's __half is a _Float16 typedef, not the struct
+// CCCL forward-declares when it finds cuda_fp16.h. Keep CCCL's NV fp16
+// integration off so its `struct __half;` does not collide with the typedef.
+#if defined(__clang__) && defined(__CUDA__) && !defined(CCCL_DISABLE_FP16_SUPPORT)
+#define CCCL_DISABLE_FP16_SUPPORT 1
+#endif
+// CuMetal's NVTX is a no-op subset of the C API; CCCL's C++ range wrappers
+// need all of NVTX v3, and would record nothing here anyway.
+#if !defined(CCCL_DISABLE_NVTX)
+#define CCCL_DISABLE_NVTX 1
+#endif
+// Metal has no programmatic dependent launch; CCCL then launches with <<<>>>
+// and never reaches cudaLaunchKernelEx.
+#if !defined(CCCL_DISABLE_PDL)
+#define CCCL_DISABLE_PDL 1
+#endif
 
 
 #include <stddef.h>
@@ -167,18 +183,103 @@ __device__ void free(void* pointer);
 #endif
 
 typedef enum cudaError {
+    // CUDA 12 numbering. Values are ABI: binaries built against an older
+    // CuMetal header (which used pre-CUDA-10.1 numbers for NotReady,
+    // InvalidDevice, LaunchTimeout and others) must be rebuilt.
     cudaSuccess = 0,
     cudaErrorInvalidValue = 1,
     cudaErrorMemoryAllocation = 2,
     cudaErrorInitializationError = 3,
-    cudaErrorLaunchTimeout = 6,
+    cudaErrorCudartUnloading = 4,
+    cudaErrorProfilerDisabled = 5,
+    cudaErrorProfilerNotInitialized = 6,
+    cudaErrorProfilerAlreadyStarted = 7,
+    cudaErrorProfilerAlreadyStopped = 8,
+    cudaErrorInvalidConfiguration = 9,
+    cudaErrorInvalidPitchValue = 12,
+    cudaErrorInvalidSymbol = 13,
+    cudaErrorInvalidHostPointer = 16,
     cudaErrorInvalidDevicePointer = 17,
-    cudaErrorNotReady = 34,
-    cudaErrorPeerAccessAlreadyEnabled = 50,
-    cudaErrorPeerAccessNotEnabled = 51,
+    cudaErrorInvalidTexture = 18,
+    cudaErrorInvalidTextureBinding = 19,
+    cudaErrorInvalidChannelDescriptor = 20,
+    cudaErrorInvalidMemcpyDirection = 21,
+    cudaErrorAddressOfConstant = 22,
+    cudaErrorTextureFetchFailed = 23,
+    cudaErrorTextureNotBound = 24,
+    cudaErrorSynchronizationError = 25,
+    cudaErrorInvalidFilterSetting = 26,
+    cudaErrorInvalidNormSetting = 27,
+    cudaErrorMixedDeviceExecution = 28,
+    cudaErrorNotYetImplemented = 31,
+    cudaErrorMemoryValueTooLarge = 32,
+    cudaErrorStubLibrary = 34,
+    cudaErrorInsufficientDriver = 35,
+    cudaErrorCallRequiresNewerDriver = 36,
+    cudaErrorInvalidSurface = 37,
+    cudaErrorDuplicateVariableName = 43,
+    cudaErrorDuplicateTextureName = 44,
+    cudaErrorDuplicateSurfaceName = 45,
     cudaErrorDevicesUnavailable = 46,
+    cudaErrorIncompatibleDriverContext = 49,
+    cudaErrorMissingConfiguration = 52,
+    cudaErrorPriorLaunchFailure = 53,
+    cudaErrorLaunchMaxDepthExceeded = 65,
+    cudaErrorLaunchFileScopedTex = 66,
+    cudaErrorLaunchFileScopedSurf = 67,
+    cudaErrorSyncDepthExceeded = 68,
+    cudaErrorLaunchPendingCountExceeded = 69,
+    cudaErrorInvalidDeviceFunction = 98,
+    cudaErrorNoDevice = 100,
+    cudaErrorInvalidDevice = 101,
+    cudaErrorDeviceNotLicensed = 102,
+    cudaErrorSoftwareValidityNotEstablished = 103,
+    cudaErrorStartupFailure = 127,
+    cudaErrorInvalidKernelImage = 200,
+    cudaErrorDeviceUninitialized = 201,
+    cudaErrorMapBufferObjectFailed = 205,
+    cudaErrorUnmapBufferObjectFailed = 206,
+    cudaErrorArrayIsMapped = 207,
+    cudaErrorAlreadyMapped = 208,
+    cudaErrorNoKernelImageForDevice = 209,
+    cudaErrorAlreadyAcquired = 210,
+    cudaErrorNotMapped = 211,
+    cudaErrorNotMappedAsArray = 212,
+    cudaErrorNotMappedAsPointer = 213,
+    cudaErrorECCUncorrectable = 214,
+    cudaErrorUnsupportedLimit = 215,
+    cudaErrorDeviceAlreadyInUse = 216,
+    cudaErrorPeerAccessUnsupported = 217,
+    cudaErrorInvalidPtx = 218,
+    cudaErrorInvalidGraphicsContext = 219,
+    cudaErrorNvlinkUncorrectable = 220,
+    cudaErrorJitCompilerNotFound = 221,
+    cudaErrorUnsupportedPtxVersion = 222,
+    cudaErrorJitCompilationDisabled = 223,
+    cudaErrorUnsupportedExecAffinity = 224,
+    cudaErrorUnsupportedDevSideSync = 225,
+    cudaErrorInvalidSource = 300,
+    cudaErrorFileNotFound = 301,
+    cudaErrorSharedObjectSymbolNotFound = 302,
+    cudaErrorSharedObjectInitFailed = 303,
+    cudaErrorOperatingSystem = 304,
+    cudaErrorInvalidResourceHandle = 400,
+    cudaErrorIllegalState = 401,
+    cudaErrorLossyQuery = 402,
+    cudaErrorSymbolNotFound = 500,
+    cudaErrorNotReady = 600,
     cudaErrorIllegalAddress = 700,
     cudaErrorLaunchOutOfResources = 701,
+    cudaErrorLaunchTimeout = 702,
+    cudaErrorLaunchIncompatibleTexturing = 703,
+    cudaErrorPeerAccessAlreadyEnabled = 704,
+    cudaErrorPeerAccessNotEnabled = 705,
+    cudaErrorSetOnActiveProcess = 708,
+    cudaErrorContextIsDestroyed = 709,
+    cudaErrorAssert = 710,
+    cudaErrorTooManyPeers = 711,
+    cudaErrorHostMemoryAlreadyRegistered = 712,
+    cudaErrorHostMemoryNotRegistered = 713,
     cudaErrorHardwareStackError = 714,
     cudaErrorIllegalInstruction = 715,
     cudaErrorMisalignedAddress = 716,
@@ -186,29 +287,34 @@ typedef enum cudaError {
     cudaErrorInvalidPc = 718,
     cudaErrorLaunchFailure = 719,
     cudaErrorCooperativeLaunchTooLarge = 720,
-    cudaErrorContextIsDestroyed = 709,
     cudaErrorNotPermitted = 800,
     cudaErrorNotSupported = 801,
-    // What cudart returns when a driver entry point is too new for the
-    // installed driver; hosts that resolve entry points themselves, such as
-    // NVIDIA Warp, return this when a lookup fails.
-    cudaErrorCallRequiresNewerDriver = 803,
+    cudaErrorSystemNotReady = 802,
+    cudaErrorSystemDriverMismatch = 803,
+    cudaErrorCompatNotSupportedOnDevice = 804,
+    cudaErrorMpsConnectionFailed = 805,
+    cudaErrorMpsRpcFailure = 806,
+    cudaErrorMpsServerNotReady = 807,
+    cudaErrorMpsMaxClientsReached = 808,
+    cudaErrorMpsMaxConnectionsReached = 809,
+    cudaErrorMpsClientTerminated = 810,
+    cudaErrorCdpNotSupported = 811,
+    cudaErrorCdpVersionMismatch = 812,
+    cudaErrorStreamCaptureUnsupported = 900,
+    cudaErrorStreamCaptureInvalidated = 901,
+    cudaErrorStreamCaptureMerge = 902,
+    cudaErrorStreamCaptureUnmatched = 903,
+    cudaErrorStreamCaptureUnjoined = 904,
+    cudaErrorStreamCaptureIsolation = 905,
+    cudaErrorStreamCaptureImplicit = 906,
+    cudaErrorCapturedEvent = 907,
+    cudaErrorStreamCaptureWrongThread = 908,
+    cudaErrorTimeout = 909,
     cudaErrorGraphExecUpdateFailure = 910,
+    cudaErrorExternalDevice = 911,
+    cudaErrorInvalidClusterSize = 912,
     cudaErrorUnknown = 999,
-    // Deprecated numbering CUDA keeps for source compatibility. cudaErrorAssert
-    // is what a device-side assert() reports; samples compare against it by name.
-    cudaErrorAssert = 710,
-    cudaErrorInvalidDeviceFunction = 8,
-    cudaErrorInvalidConfiguration = 9,
-    cudaErrorInvalidDevice = 10,
-    cudaErrorInvalidMemcpyDirection = 21,
-    cudaErrorInsufficientDriver = 35,
-    cudaErrorNoDevice = 100,
-    cudaErrorInvalidResourceHandle = 400,
-    // A host-side OS call failed. CuMetal reports it where an API writes a file
-    // on the host's behalf, such as cudaGraphDebugDotPrint.
-    cudaErrorOperatingSystem = 304,
-    cudaErrorCudartUnloading = 4,
+    cudaErrorApiFailureBase = 10000,
 } cudaError_t;
 
 typedef enum cudaMemcpyKind {
@@ -249,6 +355,19 @@ typedef struct __align__(16) float4 {
 } float4;
 
 // ── CUDA vector types ────────────────────────────────────────────────────────
+// One-component vectors (CUB derives its CubVector<T, 1> from these)
+typedef struct { char x; }                    char1;
+typedef struct { unsigned char x; }           uchar1;
+typedef struct { short x; }                   short1;
+typedef struct { unsigned short x; }          ushort1;
+typedef struct { int x; }                     int1;
+typedef struct { unsigned int x; }            uint1;
+typedef struct { long int x; }                long1;
+typedef struct { unsigned long int x; }       ulong1;
+typedef struct { long long int x; }           longlong1;
+typedef struct { unsigned long long int x; }  ulonglong1;
+typedef struct { float x; }                   float1;
+typedef struct { double x; }                  double1;
 // Signed integer vectors
 typedef struct { char x, y; }             char2;
 typedef struct { char x, y, z; }          char3;
@@ -260,8 +379,10 @@ typedef struct { int x, y; }              int2;
 typedef struct { int x, y, z; }           int3;
 typedef struct __align__(16) { int x, y, z, w; } int4;
 typedef struct { long int x, y; }         long2;
+typedef struct { long int x, y, z; }      long3;
 typedef struct { long int x, y, z, w; }   long4;
 typedef struct { long long int x, y; }    longlong2;
+typedef struct { long long int x, y, z; } longlong3;
 typedef struct { long long int x, y, z, w; } longlong4;
 // Unsigned integer vectors
 typedef struct { unsigned char x, y; }           uchar2;
@@ -273,8 +394,10 @@ typedef struct { unsigned short x, y, z, w; }     ushort4;
 typedef struct { unsigned int x, y; }                        uint2;
 typedef struct __align__(16) { unsigned int x, y, z, w; }   uint4;  // uint3 already defined above
 typedef struct { unsigned long int x, y; }        ulong2;
+typedef struct { unsigned long int x, y, z; }     ulong3;
 typedef struct { unsigned long int x, y, z, w; }  ulong4;
 typedef struct { unsigned long long int x, y; }   ulonglong2;
+typedef struct { unsigned long long int x, y, z; } ulonglong3;
 typedef struct { unsigned long long int x, y, z, w; } ulonglong4;
 // Floating-point vectors
 typedef struct { float x, y; }   float2;
@@ -702,6 +825,33 @@ typedef struct cumetalKernel {
 
 cudaError_t cudaInit(unsigned int flags);
 cudaError_t cudaDriverGetVersion(int* driver_version);
+
+// Driver entry points by name, through cuGetProcAddress. A symbol CuMetal does
+// not export returns cudaSuccess with cudaDriverEntryPointSymbolNotFound and a
+// null pointer, as CUDA does.
+typedef enum cudaDriverEntryPointQueryResult {
+    cudaDriverEntryPointSuccess = 0,
+    cudaDriverEntryPointSymbolNotFound = 1,
+    cudaDriverEntryPointVersionNotSufficent = 2,
+} cudaDriverEntryPointQueryResult;
+enum cudaGetDriverEntryPointFlags {
+    cudaEnableDefault = 0x0,
+    cudaEnableLegacyStream = 0x1,
+    cudaEnablePerThreadDefaultStream = 0x2,
+};
+#ifdef __cplusplus
+cudaError_t cudaGetDriverEntryPoint(const char* symbol, void** funcPtr, unsigned long long flags,
+                                    cudaDriverEntryPointQueryResult* driverStatus = NULL);
+cudaError_t cudaGetDriverEntryPointByVersion(const char* symbol, void** funcPtr,
+                                             unsigned int cudaVersion, unsigned long long flags,
+                                             cudaDriverEntryPointQueryResult* driverStatus = NULL);
+#else
+cudaError_t cudaGetDriverEntryPoint(const char* symbol, void** funcPtr, unsigned long long flags,
+                                    cudaDriverEntryPointQueryResult* driverStatus);
+cudaError_t cudaGetDriverEntryPointByVersion(const char* symbol, void** funcPtr,
+                                             unsigned int cudaVersion, unsigned long long flags,
+                                             cudaDriverEntryPointQueryResult* driverStatus);
+#endif
 cudaError_t cudaRuntimeGetVersion(int* runtime_version);
 cudaError_t cudaGetDeviceCount(int* count);
 cudaError_t cudaGetDevice(int* device);
@@ -2375,6 +2525,21 @@ static __device__ __forceinline__ unsigned int __cvta_generic_to_shared(const vo
     asm("cvta.to.shared.u32 %0, %1;" : "=r"(shared_ptr) : "l"(generic_ptr));
     return shared_ptr;
 }
+static __device__ __forceinline__ size_t __cvta_generic_to_global(const void* generic_ptr) {
+    size_t global_ptr;
+    asm("cvta.to.global.u64 %0, %1;" : "=l"(global_ptr) : "l"(generic_ptr));
+    return global_ptr;
+}
+static __device__ __forceinline__ void* __cvta_global_to_generic(size_t global_ptr) {
+    void* generic_ptr;
+    asm("cvta.global.u64 %0, %1;" : "=l"(generic_ptr) : "l"(global_ptr));
+    return generic_ptr;
+}
+static __device__ __forceinline__ void* __cvta_shared_to_generic(size_t shared_ptr) {
+    void* generic_ptr;
+    asm("cvta.shared.u64 %0, %1;" : "=l"(generic_ptr) : "l"(shared_ptr));
+    return generic_ptr;
+}
 
 // __ldg: load via read-only (texture) cache. On UMA Apple Silicon there is no
 // dedicated read-only cache, so this is a plain load — identical semantics,
@@ -2582,6 +2747,28 @@ static __device__ __forceinline__ unsigned int atomicDec(unsigned int* ptr, unsi
     } while (assumed != old);
     return old;
 }
+
+// Block-scope variants. Metal atomics are device scope, which is strictly
+// stronger than CUDA's thread-block scope, so each forwards to the
+// device-scope overload of the same name and argument types.
+#define CUMETAL_BLOCK_SCOPE_ATOMIC(name)                                       \
+    template <typename T, typename... U>                                       \
+    static __device__ __forceinline__ auto name##_block(T* ptr, U... vals)     \
+        -> decltype(name(ptr, vals...)) {                                      \
+        return name(ptr, vals...);                                             \
+    }
+CUMETAL_BLOCK_SCOPE_ATOMIC(atomicAdd)
+CUMETAL_BLOCK_SCOPE_ATOMIC(atomicSub)
+CUMETAL_BLOCK_SCOPE_ATOMIC(atomicExch)
+CUMETAL_BLOCK_SCOPE_ATOMIC(atomicMin)
+CUMETAL_BLOCK_SCOPE_ATOMIC(atomicMax)
+CUMETAL_BLOCK_SCOPE_ATOMIC(atomicInc)
+CUMETAL_BLOCK_SCOPE_ATOMIC(atomicDec)
+CUMETAL_BLOCK_SCOPE_ATOMIC(atomicCAS)
+CUMETAL_BLOCK_SCOPE_ATOMIC(atomicAnd)
+CUMETAL_BLOCK_SCOPE_ATOMIC(atomicOr)
+CUMETAL_BLOCK_SCOPE_ATOMIC(atomicXor)
+#undef CUMETAL_BLOCK_SCOPE_ATOMIC
 
 // System-scope variants use Clang's documented CUDA NVVM wrappers. On Apple
 // Silicon, managed allocations are shared UMA buffers, so these reach the same
@@ -3042,6 +3229,7 @@ static __device__ __forceinline__ unsigned long long __brevll(unsigned long long
     return __builtin_bitreverse64(x);
 }
 static __device__ __forceinline__ int __ffs(int x) { return __builtin_ffs(x); }
+
 static __device__ __forceinline__ int __ffsll(long long x) { return __builtin_ffsll(x); }
 
 // FMA helpers
@@ -3111,6 +3299,110 @@ static __device__ __forceinline__ float __frcp_rn(float x){ return 1.0f / x; }
 static __device__ __forceinline__ float __fsqrt_rn(float x){ return __builtin_sqrtf(x); }
 
 #endif  // !__CLANG_CUDA_DEVICE_FUNCTIONS_H__
+
+// Kept outside __CLANG_CUDA_DEVICE_FUNCTIONS_H__ (recent Clang defines that guard
+// without supplying them).
+// Funnel shifts: the 64-bit value hi:lo shifted, keeping one 32-bit half.
+// The plain forms take the shift mod 32; the _c forms clamp it to 32.
+static __device__ __forceinline__ unsigned int __funnelshift_l(unsigned int lo, unsigned int hi,
+                                                               unsigned int shift) {
+    const unsigned long long v = (static_cast<unsigned long long>(hi) << 32) | lo;
+    return static_cast<unsigned int>((v << (shift & 31u)) >> 32);
+}
+static __device__ __forceinline__ unsigned int __funnelshift_lc(unsigned int lo, unsigned int hi,
+                                                                unsigned int shift) {
+    const unsigned long long v = (static_cast<unsigned long long>(hi) << 32) | lo;
+    return static_cast<unsigned int>((v << (shift < 32u ? shift : 32u)) >> 32);
+}
+static __device__ __forceinline__ unsigned int __funnelshift_r(unsigned int lo, unsigned int hi,
+                                                               unsigned int shift) {
+    const unsigned long long v = (static_cast<unsigned long long>(hi) << 32) | lo;
+    return static_cast<unsigned int>(v >> (shift & 31u));
+}
+static __device__ __forceinline__ unsigned int __funnelshift_rc(unsigned int lo, unsigned int hi,
+                                                                unsigned int shift) {
+    const unsigned long long v = (static_cast<unsigned long long>(hi) << 32) | lo;
+    return static_cast<unsigned int>(v >> (shift < 32u ? shift : 32u));
+}
+
+// __match_all_sync: every lane in mask holds the same value. Compared
+// bit-for-bit against the lowest lane's value (so -0.0 and 0.0 differ, as in
+// PTX match.all.b32/b64).
+template <typename T>
+static __device__ __forceinline__ unsigned int __cumetal_match_all_bits(unsigned int mask, T bits,
+                                                                        int* pred) {
+    const T first = __shfl_sync(mask, bits, __ffs(static_cast<int>(mask)) - 1);
+    const bool all = __all_sync(mask, bits == first) != 0;
+    *pred = all ? 1 : 0;
+    return all ? mask : 0u;
+}
+static __device__ __forceinline__ unsigned int __match_all_sync(unsigned int mask, unsigned int value,
+                                                                int* pred) {
+    return __cumetal_match_all_bits(mask, value, pred);
+}
+static __device__ __forceinline__ unsigned int __match_all_sync(unsigned int mask, int value, int* pred) {
+    return __cumetal_match_all_bits(mask, static_cast<unsigned int>(value), pred);
+}
+static __device__ __forceinline__ unsigned int __match_all_sync(unsigned int mask, float value,
+                                                                int* pred) {
+    return __cumetal_match_all_bits(mask, __builtin_bit_cast(unsigned int, value), pred);
+}
+static __device__ __forceinline__ unsigned int __match_all_sync(unsigned int mask,
+                                                                unsigned long long value, int* pred) {
+    return __cumetal_match_all_bits(mask, value, pred);
+}
+static __device__ __forceinline__ unsigned int __match_all_sync(unsigned int mask, long long value,
+                                                                int* pred) {
+    return __cumetal_match_all_bits(mask, static_cast<unsigned long long>(value), pred);
+}
+static __device__ __forceinline__ unsigned int __match_all_sync(unsigned int mask, unsigned long value,
+                                                                int* pred) {
+    return __cumetal_match_all_bits(mask, static_cast<unsigned long long>(value), pred);
+}
+static __device__ __forceinline__ unsigned int __match_all_sync(unsigned int mask, long value, int* pred) {
+    return __cumetal_match_all_bits(mask, static_cast<unsigned long long>(value), pred);
+}
+static __device__ __forceinline__ unsigned int __match_all_sync(unsigned int mask, double value,
+                                                                int* pred) {
+    return __cumetal_match_all_bits(mask, __builtin_bit_cast(unsigned long long, value), pred);
+}
+
+// __match_any_sync: the lanes in mask whose value equals this lane's. One
+// shuffle per lane; the loop bound is uniform, so every lane takes each one.
+template <typename T>
+static __device__ __forceinline__ unsigned int __cumetal_match_any_bits(unsigned int mask, T bits) {
+    unsigned int result = 0u;
+    for (int lane = 0; lane < 32; ++lane) {
+        if (((mask >> lane) & 1u) == 0u) continue;
+        if (__shfl_sync(mask, bits, lane) == bits) result |= 1u << lane;
+    }
+    return result;
+}
+static __device__ __forceinline__ unsigned int __match_any_sync(unsigned int mask, unsigned int value) {
+    return __cumetal_match_any_bits(mask, value);
+}
+static __device__ __forceinline__ unsigned int __match_any_sync(unsigned int mask, int value) {
+    return __cumetal_match_any_bits(mask, static_cast<unsigned int>(value));
+}
+static __device__ __forceinline__ unsigned int __match_any_sync(unsigned int mask, float value) {
+    return __cumetal_match_any_bits(mask, __builtin_bit_cast(unsigned int, value));
+}
+static __device__ __forceinline__ unsigned int __match_any_sync(unsigned int mask,
+                                                                unsigned long long value) {
+    return __cumetal_match_any_bits(mask, value);
+}
+static __device__ __forceinline__ unsigned int __match_any_sync(unsigned int mask, long long value) {
+    return __cumetal_match_any_bits(mask, static_cast<unsigned long long>(value));
+}
+static __device__ __forceinline__ unsigned int __match_any_sync(unsigned int mask, unsigned long value) {
+    return __cumetal_match_any_bits(mask, static_cast<unsigned long long>(value));
+}
+static __device__ __forceinline__ unsigned int __match_any_sync(unsigned int mask, long value) {
+    return __cumetal_match_any_bits(mask, static_cast<unsigned long long>(value));
+}
+static __device__ __forceinline__ unsigned int __match_any_sync(unsigned int mask, double value) {
+    return __cumetal_match_any_bits(mask, __builtin_bit_cast(unsigned long long, value));
+}
 
 // CUDA's math headers make nan() callable from device code, but Clang's
 // -nocudainc wrapper leaves libc's declaration host-only. Keep this outside

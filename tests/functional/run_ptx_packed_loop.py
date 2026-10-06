@@ -35,5 +35,13 @@ for state in states:
         expected += [(state & ~0xffffffff) | ((state + count) & 0xffffffff), count]
 build = Path(sys.argv[1]).resolve()
 run_integer_case(build, source, values, expected, '64-bit packs through runtime loops', input_words=2)
-for pack in ('mov.b64 %rd7, {%r6, %r7, %r8};', '@%p2 mov.b64 %rd7, {%r6, %r7};'):
-    expect_compile_failure(build, source.replace('mov.b64 %rd7, {%r6, %r7};', pack), 'integer_probe', '')
+# A predicated pack is split into a guarded block. On the first iteration %p2
+# still holds `count == 0` (false), so that iteration's increment is dropped.
+guarded_expected = []
+for state in states:
+    for count in (0, 1, 7, 15, 31, 32, 63, 1024):
+        guarded_expected += [(state & ~0xffffffff) | ((state + max(count - 1, 0)) & 0xffffffff), count]
+run_integer_case(build, source.replace('mov.b64 %rd7, {%r6, %r7};', '@%p2 mov.b64 %rd7, {%r6, %r7};'),
+                 values, guarded_expected, 'predicated 64-bit pack through runtime loops', input_words=2)
+expect_compile_failure(build, source.replace('mov.b64 %rd7, {%r6, %r7};', 'mov.b64 %rd7, {%r6, %r7, %r8};'),
+                       'integer_probe', '')

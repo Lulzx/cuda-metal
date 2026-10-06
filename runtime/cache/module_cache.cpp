@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string_view>
+#include <vector>
 
 namespace cumetal::cache {
 namespace {
@@ -85,6 +86,19 @@ bool file_size_matches(const std::filesystem::path& path, std::size_t expected_s
     return !ec && size == expected_size;
 }
 
+// A published file is reused only if it holds exactly these bytes. Matching
+// the size alone kept a damaged file forever: a sidecar whose last byte had
+// been overwritten, or a zeroed metallib, is the same length as a good one.
+bool file_matches(const std::filesystem::path& path, const std::uint8_t* bytes, std::size_t size) {
+    if (!file_size_matches(path, size)) return false;
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) return false;
+    std::vector<char> existing(size);
+    in.read(existing.data(), static_cast<std::streamsize>(size));
+    return in.gcount() == static_cast<std::streamsize>(size) &&
+           std::memcmp(existing.data(), bytes, size) == 0;
+}
+
 }  // namespace
 
 bool stage_metallib_bytes(const void* image,
@@ -109,7 +123,7 @@ bool stage_metallib_bytes(const void* image,
         root / ("metallib-" + hash_to_hex(hash) + "-" + std::to_string(size) + ".metallib");
 
     std::error_code ec;
-    if (std::filesystem::exists(target, ec) && !ec && file_size_matches(target, size)) {
+    if (std::filesystem::exists(target, ec) && !ec && file_matches(target, bytes, size)) {
         *out_path = target;
         return true;
     }
@@ -124,7 +138,7 @@ bool stage_metallib_bytes(const void* image,
     ec.clear();
     std::filesystem::rename(temp, target, ec);
     if (ec) {
-        if (!std::filesystem::exists(target, ec) || ec || !file_size_matches(target, size)) {
+        if (!std::filesystem::exists(target, ec) || ec || !file_matches(target, bytes, size)) {
             std::filesystem::remove(temp, ec);
             if (error_message != nullptr) {
                 *error_message = "failed to publish cache file: " + target.string() + " (" +
@@ -152,7 +166,8 @@ bool stage_metallib_abi_sidecar(const std::filesystem::path& metallib_path,
 
     const std::filesystem::path target = metallib_path.string() + ".cumetal-abi";
     std::error_code ec;
-    if (std::filesystem::exists(target, ec) && !ec && file_size_matches(target, size)) {
+    if (std::filesystem::exists(target, ec) && !ec &&
+        file_matches(target, static_cast<const std::uint8_t*>(sidecar), size)) {
         return true;
     }
 

@@ -1,0 +1,29 @@
+// CUB's inline-asm warp reduction step, verbatim in shape: a scoped bare
+// register, a shuffle with a predicate output, and a guarded add, all on one
+// line. Lane i must produce v[i] + v[i+1] (lane 31 has no source: v[31]).
+.version 8.0
+.target sm_80
+.address_size 64
+
+.visible .entry warp_sum(
+	.param .u64 warp_sum_param_0
+)
+{
+	.reg .b32 	%r<12>;
+	.reg .b64 	%rd<4>;
+
+	ld.param.u64 	%rd1, [warp_sum_param_0];
+	cvta.to.global.u64 	%rd2, %rd1;
+	mov.u32 	%r1, %tid.x;
+	cvt.rn.f32.u32 	%r2, %r1;
+	mov.b32 	%r3, 1;
+	mov.b32 	%r4, 31;
+	mov.b32 	%r5, -1;
+	// begin inline asm
+	{  .reg .f32 r0;  .reg .pred p;  shfl.sync.down.b32 r0|p, %r2, %r3, %r4, %r5;  @p add.f32 r0, r0, %r2;  mov.f32 %r6, r0;}
+	// end inline asm
+	mul.wide.u32 	%rd3, %r1, 4;
+	add.s64 	%rd2, %rd2, %rd3;
+	st.global.f32 	[%rd2], %r6;
+	ret;
+}

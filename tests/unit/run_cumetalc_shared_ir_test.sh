@@ -111,6 +111,13 @@ __global__ void version_kernel(int* out) { *out = __CUDACC_VER_MAJOR__; }
 CU
 "$nvcc" -S --cuda-device-only "$workdir/version.cu" -o "$workdir/version.ptx"
 grep -q 'version_kernel' "$workdir/version.ptx"
+# CuPy's build_ext nvcc flags, verbatim apart from the paths.
+"$nvcc" -c "$workdir/version.cu" -o "$workdir/version_cupy.o" \
+    --generate-code=arch=compute_75,code=sm_75 \
+    --generate-code=arch=compute_90,code=compute_90 \
+    -Xfatbin=-compress-all -O2 '--compiler-options="-fPIC"' \
+    --expt-relaxed-constexpr --std=c++17 -t2
+test -s "$workdir/version_cupy.o"
 # Kokkos forwards CMake's rpath as one comma-separated nvcc linker argument.
 # Verify the executable links and carries the intended Mach-O load command.
 cat > "$workdir/linker.cpp" <<'CPP'

@@ -205,6 +205,34 @@ from that register budget and the Metal pipeline's actual thread limit. It
 allows clients such as Kokkos to calculate nonempty launch sizes; it is not
 measured physical register usage or an NVIDIA occupancy prediction.
 
+`cudaFuncAttributes.ptxVersion` and `binaryVersion` (and the driver's
+`CU_FUNC_ATTRIBUTE_PTX_VERSION`/`BINARY_VERSION`) report the device's
+synthetic compute capability (80), not the PTX ISA the kernel came from. CUB
+and Thrust choose their tuning policy from this value; a zero made CCCL select
+no policy and its algorithms silently returned nothing. Unknown function
+attributes return `CUDA_ERROR_INVALID_VALUE`.
+
+## Error codes and driver entry points
+
+`cudaError_t` uses CUDA 12's numbering (`cudaErrorNotReady` = 600,
+`cudaErrorInvalidDevice` = 101, `cudaErrorApiFailureBase` = 10000). Earlier
+CuMetal releases numbered the enum privately, so a binary compiled against the
+old header misreads every error code and must be rebuilt.
+
+`cudaGetDriverEntryPoint`/`cudaGetDriverEntryPointByVersion` resolve through
+`cuGetProcAddress`; a missing symbol returns `cudaSuccess` with
+`cudaDriverEntryPointSymbolNotFound`. The CUDA 12 library/kernel API
+(`cuLibrary*`, `cuKernel*`) and kernel graph nodes are declared in `cuda.h` so
+code that references them compiles, but they are not exported and
+`cuGetProcAddress` reports them as not found. `cuLaunchKernelEx` launches only
+when no attribute other than `CU_LAUNCH_ATTRIBUTE_IGNORE` is supplied; any
+real attribute (cluster dimension, programmatic stream serialization, priority)
+returns `CUDA_ERROR_NOT_SUPPORTED`. `cuStreamGetId` and the
+`CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL` query are implemented.
+
+NVRTC's CUBIN size includes a trailing NUL, matching real NVRTC; CuPy drops
+the last byte of every image it receives and the module image still loads.
+
 ### Device assertions in synchronized kernels
 
 The typed PTX path recognizes a narrow, proven terminal assertion of

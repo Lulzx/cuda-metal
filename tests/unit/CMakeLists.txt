@@ -238,6 +238,7 @@ add_executable(cumetal_nvrtc_options_test
 target_include_directories(cumetal_nvrtc_options_test
     PRIVATE
         ${CMAKE_SOURCE_DIR}/runtime/rt
+        ${CMAKE_SOURCE_DIR}/runtime/api
 )
 
 target_compile_options(cumetal_nvrtc_options_test

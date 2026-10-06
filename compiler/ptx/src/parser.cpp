@@ -791,6 +791,21 @@ void parse_instructions(const std::string& body,
                     assembly_error = "unbalanced PTX call parentheses at line " + std::to_string(current_line);
                 }
             }
+        } else if (const std::size_t semi = line_text.find(';');
+                   semi != std::string::npos && semi + 1 < line_text.size()) {
+            // Several statements on one line -- CUB's inline-asm warp reductions
+            // emit `{ .reg .f32 r0; shfl.sync.down.b32 r0|p, ...; @p add.f32 r0,
+            // r0, %r1; mov.f32 %r2, r0;}`. Parsing the line as one instruction
+            // folded the add and mov into the shuffle's operand list: the typed
+            // backend then saw %r2 used before definition, and the legacy one
+            // compiled the kernel without them. Parse the rest as its own line.
+            std::string rest = trim(line_text.substr(semi + 1));
+            if (!rest.empty()) {
+                remainder = std::move(rest) + std::string(pending_closes, '}');
+                remainder_line = current_line;
+                pending_closes = 0;
+                line_text.resize(semi + 1);
+            }
         }
         line_text = rename_bare_registers(line_text);
 

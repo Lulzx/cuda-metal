@@ -46,7 +46,13 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   proof of their sequence semantics. Implemented device generation rejects
   output counts that exceed the tracked allocation remainder before enqueue;
   complete distributions, state
-  serialization, and device API parity remain open.
+  serialization, and device API parity remain open. In `curand_kernel.h`,
+  `curand_uniform` returns (0, 1] as CUDA does. XORWOW, Philox and MRG32k3a
+  have uniform, normal (float and double), log-normal and Poisson
+  distributions. MRG32k3a's first draw from its default state matches the
+  L'Ecuyer reference, but `curand_init` derives each state by hashing seed and
+  subsequence rather than skipping 2^76 steps, so its streams are independent
+  but not NVIDIA's sequence.
 - **CPU-backed library calls and streams:** cuFFT, cuBLAS, cuBLASLt, cuSPARSE,
   cuSOLVER, cuDNN and cuRAND compute some calls on the CPU. Those calls first
   wait for the handle's stream, and on the legacy default stream for the whole

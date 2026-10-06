@@ -2,6 +2,7 @@
 #include "cumetal/ptx/lower_to_llvm.h"
 
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <string>
 
@@ -1318,6 +1319,46 @@ $L_done:
                     helper_only_constants.front().size_bytes == 16,
                 "external constant scan follows the reachable helper graph")) {
         return 1;
+    }
+
+    // The reachable-closure scan must not rescan the module per callee. CuPy's
+    // CUB module is 24 MB of PTX with hundreds of helpers per kernel; the
+    // per-callee rescans spent tens of minutes in the first launch. A 600-deep
+    // helper chain in ~6 MB of PTX took minutes that way; one indexed pass
+    // takes milliseconds.
+    {
+        std::string big = ".version 8.0\n.target sm_80\n"
+                          ".visible .global .align 4 .u32 deep_state;\n";
+        constexpr int kChain = 600;
+        for (int i = kChain - 1; i >= 0; --i) {
+            big += ".visible .func (.param .b32 rv) chain_" + std::to_string(i) + "()\n{\n"
+                   "    .reg .b32 %r<2>;\n    .reg .b64 %rd<2>;\n";
+            if (i == kChain - 1) {
+                big += "    mov.b64 %rd1, deep_state;\n    ld.global.u32 %r1, [%rd1];\n";
+            } else {
+                big += "    { .reg .b32 t; call.uni (t), chain_" + std::to_string(i + 1) +
+                       ", (); mov.b32 %r1, t; }\n";
+            }
+            big += "    st.param.b32 [rv], %r1;\n    ret;\n}\n";
+        }
+        for (int i = 0; i < 40000; ++i) {
+            big += ".visible .func filler_" + std::to_string(i) +
+                   "()\n{\n    .reg .b32 %r<4>;\n    mov.u32 %r1, 1;\n    ret;\n}\n";
+        }
+        big += ".visible .entry deep_kernel(.param .u64 deep_kernel_param_0)\n{\n"
+               "    .reg .b32 %r<2>;\n    { .reg .b32 t; call.uni (t), chain_0, (); }\n    ret;\n}\n";
+        const auto start = std::chrono::steady_clock::now();
+        const auto deep = cumetal::ptx::find_referenced_external_global_symbols(big, "deep_kernel");
+        const double seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (!expect(deep.size() == 1 && deep.front().name == "deep_state",
+                    "a global reached through a 600-deep helper chain is found")) {
+            return 1;
+        }
+        if (!expect(seconds < 5.0, "reachable-closure scan is not quadratic in module size")) {
+            std::fprintf(stderr, "  took %.2f s for %zu bytes\n", seconds, big.size());
+            return 1;
+        }
     }
 
     const std::string initialized_global_ptx = R"PTX(

@@ -49,6 +49,26 @@
 namespace cumetal::ir {
 namespace {
 
+// LLVM's own libm intrinsics (clang emits llvm.maxnum.f32 for fmaxf, and
+// llvm.floor/ceil/... for the rounding functions) mapped onto the same Metal
+// builtins the libdevice calls use. maxnum/minnum return the non-NaN operand,
+// as Metal's fmax/fmin do; the NaN-propagating llvm.maximum/minimum are not
+// listed and stay refused.
+const std::string* llvm_math_builtin(const std::string& name) {
+    static const std::unordered_map<std::string, std::string> kLlvmMath = {
+        {"sqrt", "sqrt"},   {"sin", "sin"},     {"cos", "cos"},       {"exp", "exp"},
+        {"log", "log"},     {"fabs", "fabs"},   {"acos", "acos"},     {"rint", "rint"},
+        {"maxnum", "fmax"}, {"minnum", "fmin"}, {"floor", "floor"},   {"ceil", "ceil"},
+        {"trunc", "trunc"}, {"round", "round"}, {"copysign", "copysign"},
+        {"exp2", "exp2"},   {"log2", "log2"},   {"pow", "pow"},
+    };
+    if (name.rfind("llvm.", 0) != 0) return nullptr;
+    const std::size_t end = name.find('.', 5);
+    if (end == std::string::npos) return nullptr;
+    const auto found = kLlvmMath.find(name.substr(5, end - 5));
+    return found == kLlvmMath.end() ? nullptr : &found->second;
+}
+
 class MarkSmallPrivateShuffleLoopsPass
     : public llvm::PassInfoMixin<MarkSmallPrivateShuffleLoopsPass> {
 public:
@@ -2100,13 +2120,9 @@ struct Importer {
                 name.find(".all.") != std::string::npos ? "all" : "any";
         }
         else if (name.find("llvm.fma.") == 0) operation->opcode = OpCode::kFma;
-        else if (name.find("llvm.sqrt.") == 0 || name.find("llvm.sin.") == 0 ||
-                 name.find("llvm.cos.") == 0 || name.find("llvm.exp.") == 0 ||
-                 name.find("llvm.log.") == 0 || name.find("llvm.fabs.") == 0 ||
-                 name.find("llvm.acos.") == 0 || name.find("llvm.rint.") == 0) {
+        else if (const std::string* builtin = llvm_math_builtin(name)) {
             operation->opcode = OpCode::kCall;
-            operation->attributes["callee"] =
-                name.substr(name.find('.') + 1, name.find('.', 5) - name.find('.') - 1);
+            operation->attributes["callee"] = *builtin;
             operation->attributes["builtin"] = "true";
         } else if (!callee->isDeclaration()) {
             operation->opcode = OpCode::kCall;

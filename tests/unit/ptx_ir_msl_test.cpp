@@ -2139,6 +2139,31 @@ BODY:
                          std::string::npos,
                  "predicated PTX barriers fail with an explicit diagnostic");
 
+    // Other predicated operations become guarded blocks, but a guarded warp
+    // collective would change which lanes take part, so it stays refused.
+    const std::string predicated_shuffle_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry predicated_shuffle(.param .u64 out) {
+    .reg .pred %p1;
+    .reg .b32 %r<4>;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [out];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, 0;
+    setp.ne.u32 %p1, %r1, 3;
+    @%p1 shfl.sync.down.b32 %r2, %r1, 1, 31, -1;
+    st.global.u32 [%rd1], %r2;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult predicated_shuffle =
+        metal::compile_ptx_to_msl(predicated_shuffle_ptx);
+    ok &= expect(!predicated_shuffle.ok && !predicated_shuffle.error.empty(),
+                 "predicated PTX warp collectives are refused, not branched around");
+    if (predicated_shuffle.ok) std::cerr << predicated_shuffle.source << "\n";
+
     const std::string local_depot_ptx = R"ptx(
 .version 7.0
 .target sm_80

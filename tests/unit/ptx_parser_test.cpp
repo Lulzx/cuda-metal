@@ -557,6 +557,33 @@ $L_one:
                 !nested_registers.register_declarations[0].function_scope &&
                 nested_registers.register_declarations[1].function_scope,
                 "nested declarations do not prove function-wide register locality")) return 1;
+    // Several statements on one line, as CUB's inline-asm warp reductions emit.
+    // Parsing it as one instruction folded the add and mov into the shuffle's
+    // operands; the legacy backend then compiled the kernel without them.
+    const auto inline_asm = cumetal::ptx::parse_instruction_block(
+        "{  .reg .f32 r0;  .reg .pred p;  shfl.sync.down.b32 r0|p, %r2, %r3, %r4, %r5;  "
+        "@p add.f32 r0, r0, %r2;  mov.f32 %r6, r0;}\nst.global.f32 [%rd1], %r6;\n",
+        1, nullptr);
+    if (!expect(inline_asm.instructions.size() == 4 &&
+                    inline_asm.instructions[0].opcode == "shfl.sync.down.b32" &&
+                    inline_asm.instructions[0].operands.size() == 5 &&
+                    inline_asm.instructions[0].operands[0] == "%f_cm_r0|%p_cm_p" &&
+                    inline_asm.instructions[1].opcode == "add.f32" &&
+                    inline_asm.instructions[1].predicate == "@%p_cm_p" &&
+                    inline_asm.instructions[2].opcode == "mov.f32" &&
+                    inline_asm.instructions[2].operands[0] == "%r6" &&
+                    inline_asm.instructions[2].operands[1] == "%f_cm_r0" &&
+                    inline_asm.instructions[3].opcode == "st.global.f32" &&
+                    inline_asm.instructions[3].operands[1] == "%r6",
+                "every statement on a multi-statement line is its own instruction, "
+                "and scoped names end with their braces")) {
+        for (const auto& instruction : inline_asm.instructions) {
+            std::fprintf(stderr, "  [%s] %s", instruction.predicate.c_str(), instruction.opcode.c_str());
+            for (const auto& operand : instruction.operands) std::fprintf(stderr, " <%s>", operand.c_str());
+            std::fprintf(stderr, "\n");
+        }
+        return 1;
+    }
     std::printf("PASS: ptx parser unit tests\n");
     return 0;
 }

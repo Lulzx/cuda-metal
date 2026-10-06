@@ -79,13 +79,6 @@ std::uint32_t ptx_type_bits(std::string_view type) {
     return 32;
 }
 
-// `.b8/.b16/.b32/.b64` are untyped bit containers, not a numeric format.
-bool ptx_type_is_bits(std::string_view spelling) {
-    for (const std::string_view token : {".b8", ".b16", ".b32", ".b64"})
-        if (spelling.find(token) != std::string_view::npos) return true;
-    return false;
-}
-
 Type ptx_scalar_type(std::string_view spelling) {
     if (spelling.find(".pred") != std::string_view::npos) {
         return Type::predicate();
@@ -1132,17 +1125,27 @@ struct Importer {
 
     void build_cfg() {
         const auto& instructions = entry->instructions;
-        const auto guarded_bit_count = [](const Instruction& instruction) {
-            return !instruction.predicate.empty() &&
-                   (instruction.opcode == "clz.b32" || instruction.opcode == "clz.b64" ||
-                    instruction.opcode == "popc.b32" || instruction.opcode == "popc.b64");
+        // Any predicated non-terminator (`@p add.f32 r0, r0, %r1` from CUB's
+        // inline-asm warp reductions, predicated bit counts, ...) becomes a
+        // branch around an unpredicated copy; see the rewrite below. Barriers
+        // and warp collectives are excluded: moving them under a divergent
+        // branch changes which threads take part, so they keep the explicit
+        // predicated-operation refusal.
+        const auto guarded_operation = [](const Instruction& instruction) {
+            if (instruction.predicate.empty() || is_terminating_instruction(instruction)) return false;
+            const std::string_view opcode = instruction.opcode;
+            const std::string_view base = opcode.substr(0, opcode.find('.'));
+            for (const std::string_view collective :
+                 {"bar", "barrier", "shfl", "vote", "match", "redux", "activemask"})
+                if (base == collective) return false;
+            return true;
         };
         std::set<std::size_t> leaders = {0};
         for (std::size_t i = 0; i < instructions.size(); ++i) {
             if (instructions[i].opcode == "ptx.label") {
                 leaders.insert(i);
             }
-            if ((is_terminating_instruction(instructions[i]) || guarded_bit_count(instructions[i])) &&
+            if ((is_terminating_instruction(instructions[i]) || guarded_operation(instructions[i])) &&
                 i + 1 < instructions.size()) {
                 leaders.insert(i + 1);
             }
@@ -1189,24 +1192,25 @@ struct Importer {
                 }
             }
         }
-        // Turn predicated bit counts into ordinary branches before SSA. The merge then
-        // retains the incoming destination when the predicate is false, even
-        // when its previous definition lives in another block or a loop.
+        // Turn predicated operations into ordinary branches before SSA. The merge
+        // then retains the incoming destination when the predicate is false,
+        // even when its previous definition lives in another block or a loop --
+        // which is PTX's meaning of a guarded write.
         const std::size_t original_blocks = raw_blocks.size();
         for (std::size_t i = 0; i < original_blocks; ++i) {
             if (raw_blocks[i].instructions.empty()) continue;
             const Instruction* instruction = raw_blocks[i].instructions.back();
-            if (!guarded_bit_count(*instruction)) continue;
+            if (!guarded_operation(*instruction)) continue;
             if (raw_blocks[i].successors.empty()) {
                 RawBlock continuation;
                 continuation.id = builder.next_block();
-                continuation.name = "bit_count_continue_" + std::to_string(continuation.id);
+                continuation.name = "guard_continue_" + std::to_string(continuation.id);
                 raw_blocks[i].successors = {raw_blocks.size()};
                 raw_blocks.push_back(std::move(continuation));
             }
             RawBlock taken;
             taken.id = builder.next_block();
-            taken.name = "bit_count_taken_" + std::to_string(taken.id);
+            taken.name = "guard_taken_" + std::to_string(taken.id);
             taken.successors = raw_blocks[i].successors;
             normalized_instructions.push_back(*instruction);
             normalized_instructions.back().predicate.clear();

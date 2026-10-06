@@ -366,7 +366,7 @@ int main() {
         const double umean = usum / n;
         const double nmean = nsum / n;
         const double nvar = nsq / n - nmean * nmean;
-        const bool ok = umin >= 0.0 && umax < 1.0 && std::fabs(umean - 0.5) < 0.05 &&
+        const bool ok = umin > 0.0 && umax <= 1.0 && std::fabs(umean - 0.5) < 0.05 &&
                         std::fabs(nmean) < 0.1 && std::fabs(nvar - 1.0) < 0.15 &&
                         distinct_low_bits > n / 2;
         char detail[128];

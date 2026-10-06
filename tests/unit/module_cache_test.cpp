@@ -96,6 +96,45 @@ int main() {
         return 1;
     }
 
+    // A damaged file at the content-addressed path must be replaced, not
+    // trusted because its size matches.
+    {
+        std::ofstream damage(staged_a, std::ios::binary | std::ios::trunc);
+        const std::vector<char> zeros(bytes.size(), 0);
+        damage.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+    }
+    std::filesystem::path staged_repaired;
+    if (!cumetal::cache::stage_metallib_bytes(bytes.data(), bytes.size(), &staged_repaired,
+                                              &error) ||
+        staged_repaired != staged_a || !read_bytes(staged_a, &roundtrip) || roundtrip != bytes) {
+        std::fprintf(stderr, "FAIL: a zeroed staged metallib was reused instead of rewritten\n");
+        return 1;
+    }
+
+    // Same for the ABI sidecar. A sidecar with its final newline replaced by a
+    // NUL -- what a caller dropping one trailing byte of the image produced --
+    // has the right length and must still be rewritten.
+    const std::string sidecar = "CUMETAL_ABI_V2\nkernel k\nshared 0\narg bytes 32\n";
+    if (!cumetal::cache::stage_metallib_abi_sidecar(staged_a, sidecar.data(), sidecar.size(),
+                                                    &error)) {
+        std::fprintf(stderr, "FAIL: stage_metallib_abi_sidecar failed: %s\n", error.c_str());
+        return 1;
+    }
+    const std::filesystem::path sidecar_path = staged_a.string() + ".cumetal-abi";
+    {
+        std::string damaged = sidecar;
+        damaged.back() = '\0';
+        std::ofstream damage(sidecar_path, std::ios::binary | std::ios::trunc);
+        damage.write(damaged.data(), static_cast<std::streamsize>(damaged.size()));
+    }
+    if (!cumetal::cache::stage_metallib_abi_sidecar(staged_a, sidecar.data(), sidecar.size(),
+                                                    &error) ||
+        !read_bytes(sidecar_path, &roundtrip) ||
+        std::string(roundtrip.begin(), roundtrip.end()) != sidecar) {
+        std::fprintf(stderr, "FAIL: a same-size damaged sidecar was kept\n");
+        return 1;
+    }
+
     bytes.back() ^= 0x7f;
     std::filesystem::path staged_c;
     if (!cumetal::cache::stage_metallib_bytes(bytes.data(), bytes.size(), &staged_c, &error)) {

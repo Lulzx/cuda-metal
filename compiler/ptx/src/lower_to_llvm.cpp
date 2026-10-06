@@ -10434,17 +10434,97 @@ std::optional<std::string> statement_call_target(std::string_view statement) {
 // promoted global referenced anywhere in its reachable helper graph, not just
 // in its own body. Registration metadata must describe the same closure, or the
 // binding is left unpopulated and the kernel silently reads zeroed storage.
+// Every callable body in the module, keyed by name, from one pass over the
+// text. The spans are exactly what extract_callable_body returns for the same
+// name (the first definition wins). The reachable-closure walk below looks up
+// every callee, and one extract_callable_body call is a scan of the whole
+// module: CuPy's CUB module is 24 MB of PTX with hundreds of helpers per
+// kernel, and the per-callee rescans took tens of minutes per kernel.
+std::unordered_map<std::string_view, std::string_view> index_callable_bodies(
+    std::string_view ptx_text) {
+    std::unordered_map<std::string_view, std::string_view> out;
+    const auto is_name_char = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' || c == '$' ||
+               c == '.';
+    };
+    std::size_t search_from = 0;
+    // Each keyword's next match is kept until passed: re-finding both from
+    // every callable would rescan to the end of a module whose only .entry
+    // comes last, for each .func before it.
+    std::size_t entry_pos = 0;
+    std::size_t function_pos = 0;
+    bool entry_stale = true;
+    bool function_stale = true;
+    while (true) {
+        if (entry_stale || (entry_pos != std::string_view::npos && entry_pos < search_from)) {
+            entry_pos = ptx_text.find(".entry", search_from);
+            entry_stale = false;
+        }
+        if (function_stale ||
+            (function_pos != std::string_view::npos && function_pos < search_from)) {
+            function_pos = ptx_text.find(".func", search_from);
+            function_stale = false;
+        }
+        const std::size_t callable_pos =
+            entry_pos == std::string_view::npos ? function_pos
+            : function_pos == std::string_view::npos ? entry_pos
+            : std::min(entry_pos, function_pos);
+        if (callable_pos == std::string_view::npos) break;
+        const std::size_t keyword_end = callable_pos + (callable_pos == entry_pos ? 6 : 5);
+        const std::size_t body_begin = ptx_text.find('{', callable_pos);
+        const std::size_t declaration_end = ptx_text.find(';', callable_pos);
+        if (body_begin == std::string_view::npos ||
+            (declaration_end != std::string_view::npos && declaration_end < body_begin)) {
+            search_from = callable_pos + 5;
+            continue;
+        }
+        // `.func (.param .b32 ret) name(...)`: skip the return list, then the
+        // name is the next token.
+        std::size_t pos = keyword_end;
+        const auto skip_space = [&] {
+            while (pos < body_begin && std::isspace(static_cast<unsigned char>(ptx_text[pos]))) ++pos;
+        };
+        skip_space();
+        if (pos < body_begin && ptx_text[pos] == '(') {
+            std::size_t depth = 0;
+            for (; pos < body_begin; ++pos) {
+                if (ptx_text[pos] == '(') ++depth;
+                else if (ptx_text[pos] == ')' && --depth == 0) { ++pos; break; }
+            }
+            skip_space();
+        }
+        const std::size_t name_begin = pos;
+        while (pos < body_begin && is_name_char(ptx_text[pos])) ++pos;
+        std::size_t depth = 1;
+        std::size_t body_end = body_begin + 1;
+        for (; body_end < ptx_text.size() && depth != 0; ++body_end) {
+            if (ptx_text[body_end] == '{') ++depth;
+            else if (ptx_text[body_end] == '}') --depth;
+        }
+        if (depth != 0) break;
+        if (pos > name_begin) {
+            out.emplace(ptx_text.substr(name_begin, pos - name_begin),
+                        ptx_text.substr(body_begin + 1, body_end - body_begin - 2));
+        }
+        search_from = body_end;
+    }
+    return out;
+}
+
 std::string extract_reachable_bodies(std::string_view ptx,
                                      std::string_view entry_name) {
-    std::string combined = extract_entry_body(ptx, entry_name);
+    const auto bodies = index_callable_bodies(ptx);
+    const auto body_of = [&bodies](std::string_view name) -> std::string {
+        const auto found = bodies.find(name);
+        return found == bodies.end() ? std::string() : std::string(found->second);
+    };
+    std::string combined = body_of(entry_name);
     if (combined.empty()) return combined;
     std::vector<std::string> pending{std::string(entry_name)};
     std::unordered_set<std::string> visited{std::string(entry_name)};
     std::size_t scanned = 0;
     while (scanned < pending.size()) {
-        const std::string body = scanned == 0
-                                     ? combined
-                                     : extract_callable_body(ptx, pending[scanned]);
+        const std::string body = scanned == 0 ? combined : body_of(pending[scanned]);
         ++scanned;
         std::size_t begin = 0;
         while (begin < body.size()) {
@@ -10455,7 +10535,7 @@ std::string extract_reachable_bodies(std::string_view ptx,
             if (const std::optional<std::string> target =
                     statement_call_target(statement);
                 target.has_value() && visited.insert(*target).second) {
-                const std::string callee_body = extract_callable_body(ptx, *target);
+                const std::string callee_body = body_of(*target);
                 if (!callee_body.empty()) {
                     pending.push_back(*target);
                     combined += "\n";
