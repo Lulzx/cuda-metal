@@ -4595,9 +4595,21 @@ struct AstLowerer {
                 return declare_result(operation, signed_output
                     ? MslExpression::bitcast(lower_result_type(operation), converted) : converted);
             }
-            if (operation.attributes.contains("signed_input") &&
-                operation.attributes.at("signed_input") == "true" &&
-                operation.operands.front().type.kind == ir::TypeKind::kInteger) {
+            const bool signed_input = operation.attributes.contains("signed_input") &&
+                                      operation.attributes.at("signed_input") == "true";
+            const ir::Type& source_type = operation.operands.front().type;
+            if (signed_input && operation.result_types.front().kind == ir::TypeKind::kInteger &&
+                (source_type.kind == ir::TypeKind::kPredicate ||
+                 (source_type.kind == ir::TypeKind::kInteger && source_type.bit_width == 1))) {
+                // A sign-extended true bit is all ones, not the 1 that a bool
+                // numeric cast yields.
+                const MslType result_type = lower_result_type(operation);
+                return declare_result(operation, MslExpression::conditional(
+                    input, MslExpression::cast(result_type, MslExpression::literal(
+                               "-1", MslType::sint(operation.result_types.front().bit_width))),
+                    MslExpression::literal("0", result_type), result_type));
+            }
+            if (signed_input && source_type.kind == ir::TypeKind::kInteger) {
                 input = MslExpression::cast(
                     MslType::sint(operation.operands.front().type.bit_width), input);
             } else if (operation.operands.front().type.kind == ir::TypeKind::kInteger &&

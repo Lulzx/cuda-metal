@@ -1543,6 +1543,90 @@ entry:
 }
 )llvm";
 
+// LLVM integers are signless; sext carries the sign. It was imported as a
+// plain widening, so (long long)-10 came out as 4294967286 and a sign-extended
+// true bit came out as 1 instead of all ones.
+constexpr const char* kNvvmSignExtend = R"llvm(
+target datalayout = "e-i64:64-i128:128-v16:16-v32:32-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define void @sign_extend(ptr addrspace(1) %in, ptr addrspace(1) %flags, ptr addrspace(1) %wide) {
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %idx = zext i32 %tid to i64
+  %p = getelementptr inbounds i32, ptr addrspace(1) %in, i64 %idx
+  %v = load i32, ptr addrspace(1) %p, align 4
+  %c = icmp sgt i32 %v, 0
+  %mask = sext i1 %c to i32
+  %f = getelementptr inbounds i32, ptr addrspace(1) %flags, i64 %idx
+  store i32 %mask, ptr addrspace(1) %f, align 4
+  %w = sext i32 %v to i64
+  %q = getelementptr inbounds i64, ptr addrspace(1) %wide, i64 %idx
+  store i64 %w, ptr addrspace(1) %q, align 8
+  ret void
+}
+declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+!nvvm.annotations = !{!0}
+!0 = !{ptr @sign_extend, !"kernel", i32 1}
+)llvm";
+
+// A written by-value kernel aggregate gets a private per-thread copy; a
+// read-only one keeps reading the bound bytes, so a large functor costs no copy.
+constexpr const char* kNvvmByValue = R"llvm(
+target datalayout = "e-i64:64-i128:128-v16:16-v32:32-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+%struct.Cursor = type { i64, [2 x i64] }
+
+define ptx_kernel void @written(ptr byval(%struct.Cursor) align 8 %c, ptr addrspace(1) %out) {
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %t = zext i32 %tid to i64
+  store i64 %t, ptr %c, align 8
+  %v = load i64, ptr %c, align 8
+  %q = getelementptr inbounds i64, ptr addrspace(1) %out, i64 %t
+  store i64 %v, ptr addrspace(1) %q, align 8
+  ret void
+}
+
+define ptx_kernel void @read_only(ptr byval(%struct.Cursor) align 8 %c, ptr addrspace(1) %out) {
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %t = zext i32 %tid to i64
+  %f = getelementptr inbounds %struct.Cursor, ptr %c, i64 0, i32 1, i64 1
+  %v = load i64, ptr %f, align 8
+  %q = getelementptr inbounds i64, ptr addrspace(1) %out, i64 %t
+  store i64 %v, ptr addrspace(1) %q, align 8
+  ret void
+}
+define void @cursor_set(ptr %c, i64 %v) {
+  store i64 %v, ptr %c, align 8
+  ret void
+}
+
+define i64 @cursor_get(ptr %c) {
+  %f = getelementptr inbounds %struct.Cursor, ptr %c, i64 0, i32 1, i64 0
+  %v = load i64, ptr %f, align 8
+  ret i64 %v
+}
+
+define ptx_kernel void @written_by_helper(ptr byval(%struct.Cursor) align 8 %c, ptr addrspace(1) %out) {
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %t = zext i32 %tid to i64
+  call void @cursor_set(ptr %c, i64 %t)
+  %v = load i64, ptr %c, align 8
+  %q = getelementptr inbounds i64, ptr addrspace(1) %out, i64 %t
+  store i64 %v, ptr addrspace(1) %q, align 8
+  ret void
+}
+
+define ptx_kernel void @read_by_helper(ptr byval(%struct.Cursor) align 8 %c, ptr addrspace(1) %out) {
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %t = zext i32 %tid to i64
+  %v = call i64 @cursor_get(ptr %c)
+  %q = getelementptr inbounds i64, ptr addrspace(1) %out, i64 %t
+  store i64 %v, ptr addrspace(1) %q, align 8
+  ret void
+}
+declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+)llvm";
+
 int main() {
     using namespace cumetal;
     if (!ir::llvm_frontend_available()) {
@@ -2497,6 +2581,27 @@ int main() {
                      malformed_printf.error.find("32/64-bit scalar") !=
                          std::string::npos,
                  "typed NVVM rejects unrepresentable printf tuples explicitly");
+
+    for (const auto& [entry, copied] : {std::pair{"written", true}, std::pair{"read_only", false},
+                                   std::pair{"written_by_helper", true},
+                                   std::pair{"read_by_helper", false}}) {
+        ir::NvvmImportOptions byval_options;
+        byval_options.entry_name = entry;
+        const ir::NvvmImportResult byval = ir::import_nvvm_llvm_ir(kNvvmByValue, byval_options);
+        const bool has_copy = byval.ok && ir::print(byval.module).find("alloca") != std::string::npos;
+        ok &= expect(byval.ok && has_copy == copied,
+                     std::string("by-value kernel aggregate '") + entry +
+                         (copied ? "' gets a private copy" : "' is read in place"));
+        if (!byval.ok) std::cerr << byval.error << "\n";
+    }
+
+    const metal::NvvmToMslResult sign_extend =
+        metal::compile_nvvm_to_msl(kNvvmSignExtend, "sign-extend.ll", "sign_extend");
+    ok &= expect(sign_extend.ok && sign_extend.source.find("? uint(-1) : 0") != std::string::npos,
+                 "typed NVVM sign-extends an i1 to all ones");
+    ok &= expect(sign_extend.ok && sign_extend.source.find("ulong(int(") != std::string::npos,
+                 "typed NVVM sign-extends i32 to i64 through int");
+    if (!sign_extend.ok) std::cerr << sign_extend.error << "\n";
 
     if (!ok) return 1;
     std::cout << "NVVM -> CuMetal IR -> typed MSL tests passed\n";

@@ -23,6 +23,12 @@
   at compile time. Kernels that use none of them may bind all 31 slots; the
   runtime detects a launch argument occupying a reserved index and skips the
   hidden binding rather than overwriting the caller's buffer.
+- A by-value aggregate kernel argument is bound as one buffer that every thread
+  reads. When the source frontend (direct `.cu`, NVRTC) finds a kernel that may
+  write the aggregate, directly or through a helper it calls, it gives each
+  thread a private copy at entry, which costs a copy of the aggregate per
+  thread. Kernels that only read it, such as large functors, keep reading the
+  shared bytes.
 - Stream priorities are reported as zero and are not Metal priority queues.
 - CUDA device clocks use a device-wide atomic counter with a fixed monotonic
   quantum. They preserve wait-loop progress and unsigned wraparound behavior,
@@ -229,6 +235,10 @@ when no attribute other than `CU_LAUNCH_ATTRIBUTE_IGNORE` is supplied; any
 real attribute (cluster dimension, programmatic stream serialization, priority)
 returns `CUDA_ERROR_NOT_SUPPORTED`. `cuStreamGetId` and the
 `CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL` query are implemented.
+
+CPU-backed library calls wait for the device before reading their inputs. That
+wait leaves a failed earlier launch pending for the caller's own synchronize,
+so a refused kernel does not turn into an unrelated `CUBLAS_STATUS_EXECUTION_FAILED`.
 
 NVRTC's CUBIN size includes a trailing NUL, matching real NVRTC; CuPy drops
 the last byte of every image it receives and the module image still loads.

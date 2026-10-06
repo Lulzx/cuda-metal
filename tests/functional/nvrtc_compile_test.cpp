@@ -5,6 +5,7 @@
 // caller uses -- create, compile, read the "CUBIN", hand it to
 // cuModuleLoadDataEx -- and checks the failure paths report themselves through
 // the program log rather than silently producing something unloadable.
+#include <algorithm>
 #include "cuda.h"
 #include "nvPTXCompiler.h"
 #include "nvrtc.h"
@@ -56,6 +57,62 @@ std::string program_log(nvrtcProgram program) {
     std::vector<char> log(size);
     if (nvrtcGetProgramLog(program, log.data()) != NVRTC_SUCCESS) return {};
     return std::string(log.data());
+}
+
+// Integer min/max reach libdevice (__nv_min, __nv_umin, __nv_llmin,
+// __nv_ullmax) through clang's CUDA math header. CuPy's argmax failed to
+// compile on the first of them. Mixed signs make a signedness mix-up visible,
+// and also cover sign extension: the source frontend once lowered every sext
+// as a zext, so (long long)-10 * 3000000000LL came out as -5.56e18, and a
+// sign-extended true bit came out as 1 instead of -1.
+const char* const kMinMaxSource = R"(
+extern "C" __global__ void minmax_kernel(float* out, const float* in, int count) {
+    int i = threadIdx.x;
+    if (i >= count) return;
+    int v = (int)in[i];
+    long long w = (long long)v * 3000000000LL;
+    out[i] = (float)(min(v, 5) + max(v, -3)) +
+             (float)(llmin(w, 6000000000LL) / 1000000000LL) +
+             (float)(llmax(w, -9000000000LL) / 1000000000LL) +
+             (float)umin((unsigned)v, 20u) / 4096.0f +
+             (float)(umax((unsigned)v, 7u) >> 28) +
+             (float)(ullmin((unsigned long long)w, 1ULL << 40) >> 30) +
+             (float)(ullmax((unsigned long long)w, 0ULL) >> 62) +
+             (float)(-(int)(v > 2)) * 100.0f + (float)((long long)(short)(v * 1000) >> 3);
+}
+)";
+
+// A by-value kernel parameter is each thread's own copy. CuPy's elementwise
+// kernels advance a by-value CIndexer per thread; when the aggregate was bound
+// as one shared buffer, threads overwrote each other's index and every
+// non-contiguous elementwise op came out mostly zero. The barrier makes any
+// sharing visible: a thread would read back another thread's write.
+const char* const kByValueSource = R"(
+struct Cursor {
+    int offset;
+    long long slot[3];
+};
+extern "C" __global__ void byval_kernel(float* out, const float* in, int count, Cursor cursor) {
+    int i = threadIdx.x;
+    cursor.slot[i % 3] = i;
+    __syncthreads();
+    if (i < count) out[i] = in[i] + (float)cursor.slot[i % 3] + (float)cursor.offset;
+}
+)";
+
+float host_minmax(float x) {
+    const int v = static_cast<int>(x);
+    const long long w = static_cast<long long>(v) * 3000000000LL;
+    const unsigned long long uw = static_cast<unsigned long long>(w);
+    return static_cast<float>(std::min(v, 5) + std::max(v, -3)) +
+           static_cast<float>(std::min(w, 6000000000LL) / 1000000000LL) +
+           static_cast<float>(std::max(w, -9000000000LL) / 1000000000LL) +
+           static_cast<float>(std::min(static_cast<unsigned>(v), 20u)) / 4096.0f +
+           static_cast<float>(std::max(static_cast<unsigned>(v), 7u) >> 28) +
+           static_cast<float>(std::min(uw, 1ULL << 40) >> 30) +
+           static_cast<float>(std::max(uw, 0ULL) >> 62) +
+           static_cast<float>(-static_cast<int>(v > 2)) * 100.0f +
+           static_cast<float>(static_cast<long long>(static_cast<short>(v * 1000)) >> 3);
 }
 
 bool compile_ok(const char* source,
@@ -462,6 +519,73 @@ extern "C" __global__ void plain_kernel(float* out) { out[0] = device_bias; }
             return 1;
         }
         cuModuleUnload(stripped_module);
+
+        std::vector<char> minmax_image;
+        CUmodule minmax_module = nullptr;
+        CUfunction minmax = nullptr;
+        if (!compile_ok(kMinMaxSource, "minmax_module", kWarpLikeOptions, &minmax_image) ||
+            !expect(cuModuleLoadData(&minmax_module, minmax_image.data()) == CUDA_SUCCESS &&
+                        cuModuleGetFunction(&minmax, minmax_module, "minmax_kernel") ==
+                            CUDA_SUCCESS,
+                    "integer min/max module loads")) {
+            return 1;
+        }
+        {
+            int count = kCount;
+            void* args[] = {&out, &in, &count};
+            if (!expect(cuLaunchKernel(minmax, 1, 1, 1, kCount, 1, 1, 0, nullptr, args,
+                                       nullptr) == CUDA_SUCCESS &&
+                            cuCtxSynchronize() == CUDA_SUCCESS,
+                        "integer min/max launch")) {
+                return 1;
+            }
+            std::vector<float> result(kCount);
+            cuMemcpyDtoH(result.data(), out, kCount * sizeof(float));
+            for (int i = 0; i < kCount; ++i) {
+                if (result[i] != host_minmax(host[i])) {
+                    std::fprintf(stderr, "FAIL: minmax_kernel[%d] = %f, want %f\n", i,
+                                 result[i], host_minmax(host[i]));
+                    return 1;
+                }
+            }
+        }
+        cuModuleUnload(minmax_module);
+
+        std::vector<char> byval_image;
+        CUmodule byval_module = nullptr;
+        CUfunction byval = nullptr;
+        if (!compile_ok(kByValueSource, "byval_module", kWarpLikeOptions, &byval_image) ||
+            !expect(cuModuleLoadData(&byval_module, byval_image.data()) == CUDA_SUCCESS &&
+                        cuModuleGetFunction(&byval, byval_module, "byval_kernel") ==
+                            CUDA_SUCCESS,
+                    "by-value parameter module loads")) {
+            return 1;
+        }
+        {
+            struct Cursor {
+                int offset;
+                long long slot[3];
+            } cursor{7, {-1, -1, -1}};
+            int count = kCount;
+            void* args[] = {&out, &in, &count, &cursor};
+            if (!expect(cuLaunchKernel(byval, 1, 1, 1, kCount, 1, 1, 0, nullptr, args,
+                                       nullptr) == CUDA_SUCCESS &&
+                            cuCtxSynchronize() == CUDA_SUCCESS,
+                        "by-value parameter launch")) {
+                return 1;
+            }
+            std::vector<float> result(kCount);
+            cuMemcpyDtoH(result.data(), out, kCount * sizeof(float));
+            for (int i = 0; i < kCount; ++i) {
+                const float want = host[i] + static_cast<float>(i) + 7.0f;
+                if (result[i] != want) {
+                    std::fprintf(stderr, "FAIL: byval_kernel[%d] = %f, want %f (threads share "
+                                         "the by-value parameter)\n", i, result[i], want);
+                    return 1;
+                }
+            }
+        }
+        cuModuleUnload(byval_module);
         CUdeviceptr bias = 0;
         std::size_t bias_size = 0;
         float bias_value = 0.0f;

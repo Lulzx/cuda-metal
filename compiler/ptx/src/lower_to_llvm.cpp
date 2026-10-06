@@ -6782,29 +6782,27 @@ class GenericLlvmEmitter {
             return store_ret_bits(bits, 32);
         }
 
-        if (callee == "__nv_min" || callee == "__nv_umin") {
+        // Integer min/max at both widths: __nv_{,u,ll,ull}{min,max}.
+        if (callee == "__nv_min" || callee == "__nv_umin" || callee == "__nv_llmin" ||
+            callee == "__nv_ullmin" || callee == "__nv_max" || callee == "__nv_umax" ||
+            callee == "__nv_llmax" || callee == "__nv_ullmax") {
             if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
-            auto a = load_call_slot_value(os, arg_names[0], 32);
-            auto b = load_call_slot_value(os, arg_names[1], 32);
+            const bool wide = callee.find("ll") != std::string::npos;
+            const bool is_unsigned = callee.rfind("__nv_u", 0) == 0;
+            const bool is_min = callee.ends_with("min");
+            const int bits = wide ? 64 : 32;
+            const std::string ty = wide ? "i64" : "i32";
+            auto a = load_call_slot_value(os, arg_names[0], bits);
+            auto b = load_call_slot_value(os, arg_names[1], bits);
             if (!a || !b) return fail(instr, callee + " args missing");
-            const std::string cmp = next_tmp("min_cmp");
-            os << "  " << cmp << " = icmp " << (callee == "__nv_umin" ? "ult" : "slt")
-               << " i32 " << *a << ", " << *b << "\n";
-            const std::string sel = next_tmp("min_sel");
-            os << "  " << sel << " = select i1 " << cmp << ", i32 " << *a << ", i32 " << *b << "\n";
-            return store_ret_bits(sel, 32);
-        }
-        if (callee == "__nv_max" || callee == "__nv_umax") {
-            if (arg_names.size() < 2) return fail(instr, callee + " expects 2 args");
-            auto a = load_call_slot_value(os, arg_names[0], 32);
-            auto b = load_call_slot_value(os, arg_names[1], 32);
-            if (!a || !b) return fail(instr, callee + " args missing");
-            const std::string cmp = next_tmp("max_cmp");
-            os << "  " << cmp << " = icmp " << (callee == "__nv_umax" ? "ugt" : "sgt")
-               << " i32 " << *a << ", " << *b << "\n";
-            const std::string sel = next_tmp("max_sel");
-            os << "  " << sel << " = select i1 " << cmp << ", i32 " << *a << ", i32 " << *b << "\n";
-            return store_ret_bits(sel, 32);
+            const std::string cmp = next_tmp(is_min ? "min_cmp" : "max_cmp");
+            os << "  " << cmp << " = icmp "
+               << (is_min ? (is_unsigned ? "ult" : "slt") : (is_unsigned ? "ugt" : "sgt"))
+               << " " << ty << " " << *a << ", " << *b << "\n";
+            const std::string sel = next_tmp(is_min ? "min_sel" : "max_sel");
+            os << "  " << sel << " = select i1 " << cmp << ", " << ty << " " << *a << ", " << ty
+               << " " << *b << "\n";
+            return store_ret_bits(sel, bits);
         }
         if (callee == "__nv_fast_sincosf" || callee == "__nv_sincosf") {
             if (arg_names.size() < 3) return fail(instr, callee + " expects 3 args");

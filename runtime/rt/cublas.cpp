@@ -429,6 +429,23 @@ cublasStatus_t map_cuda_status_to_cublas(cudaError_t status) {
     return CUBLAS_STATUS_EXECUTION_FAILED;
 }
 
+// beta * C as BLAS defines it: when beta is zero, C is not read. C is often
+// uninitialized (a recycled pool buffer), so 0 * NaN must not leak into the
+// result -- CuPy's float64 matmul came back half NaN after an int kernel had
+// left NaN bit patterns in the reused output buffer.
+template <typename T>
+T beta_times(T beta, T c) {
+    return beta == static_cast<T>(0) ? static_cast<T>(0) : beta * c;
+}
+static inline cuComplex beta_times(cuComplex beta, cuComplex c) {
+    if (beta.x == 0.0f && beta.y == 0.0f) return cuComplex{0.0f, 0.0f};
+    return cuComplex{beta.x * c.x - beta.y * c.y, beta.x * c.y + beta.y * c.x};
+}
+static inline cuDoubleComplex beta_times(cuDoubleComplex beta, cuDoubleComplex c) {
+    if (beta.x == 0.0 && beta.y == 0.0) return cuDoubleComplex{0.0, 0.0};
+    return cuDoubleComplex{beta.x * c.x - beta.y * c.y, beta.x * c.y + beta.y * c.x};
+}
+
 template <typename T>
 T sym_element(const T* a, int lda, int row, int col, cublasFillMode_t uplo) {
     if (uplo == CUBLAS_FILL_MODE_UPPER) {
@@ -1645,7 +1662,7 @@ cublasStatus_t cublasDgemm(cublasHandle_t handle,
                 const double b_value = (transb == CUBLAS_OP_N) ? b[p + col * ldb] : b[col + p * ldb];
                 sum += a_value * b_value;
             }
-            c[row + col * ldc] = alpha_value * sum + beta_value * c[row + col * ldc];
+            c[row + col * ldc] = alpha_value * sum + beta_times(beta_value, c[row + col * ldc]);
         }
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -1707,7 +1724,7 @@ cublasStatus_t cublasDgemmStridedBatched(cublasHandle_t handle,
                                                                   : b_batch[col + p * ldb];
                     sum += a_val * b_val;
                 }
-                c_batch[row + col * ldc] = alpha_value * sum + beta_value * c_batch[row + col * ldc];
+                c_batch[row + col * ldc] = alpha_value * sum + beta_times(beta_value, c_batch[row + col * ldc]);
             }
         }
     }
@@ -1764,7 +1781,7 @@ cublasStatus_t cublasSgemv(cublasHandle_t handle,
             for (int col = 0; col < n; ++col) {
                 sum += a[row + col * lda] * x[col * incx];
             }
-            y[row * incy] = alpha_value * sum + beta_value * y[row * incy];
+            y[row * incy] = alpha_value * sum + beta_times(beta_value, y[row * incy]);
         }
     } else {
         for (int col = 0; col < n; ++col) {
@@ -1772,7 +1789,7 @@ cublasStatus_t cublasSgemv(cublasHandle_t handle,
             for (int row = 0; row < m; ++row) {
                 sum += a[row + col * lda] * x[row * incx];
             }
-            y[col * incy] = alpha_value * sum + beta_value * y[col * incy];
+            y[col * incy] = alpha_value * sum + beta_times(beta_value, y[col * incy]);
         }
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -1828,7 +1845,7 @@ cublasStatus_t cublasDgemv(cublasHandle_t handle,
             for (int col = 0; col < n; ++col) {
                 sum += a[row + col * lda] * x[col * incx];
             }
-            y[row * incy] = alpha_value * sum + beta_value * y[row * incy];
+            y[row * incy] = alpha_value * sum + beta_times(beta_value, y[row * incy]);
         }
     } else {
         for (int col = 0; col < n; ++col) {
@@ -1836,7 +1853,7 @@ cublasStatus_t cublasDgemv(cublasHandle_t handle,
             for (int row = 0; row < m; ++row) {
                 sum += a[row + col * lda] * x[row * incx];
             }
-            y[col * incy] = alpha_value * sum + beta_value * y[col * incy];
+            y[col * incy] = alpha_value * sum + beta_times(beta_value, y[col * incy]);
         }
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -1978,7 +1995,7 @@ cublasStatus_t cublasSsymv(cublasHandle_t handle,
         for (int col = 0; col < n; ++col) {
             sum += sym_element(a, lda, row, col, uplo) * x[col * incx];
         }
-        y[row * incy] = alpha_value * sum + beta_value * y[row * incy];
+        y[row * incy] = alpha_value * sum + beta_times(beta_value, y[row * incy]);
     }
     return CUBLAS_STATUS_SUCCESS;
 }
@@ -2029,7 +2046,7 @@ cublasStatus_t cublasDsymv(cublasHandle_t handle,
         for (int col = 0; col < n; ++col) {
             sum += sym_element(a, lda, row, col, uplo) * x[col * incx];
         }
-        y[row * incy] = alpha_value * sum + beta_value * y[row * incy];
+        y[row * incy] = alpha_value * sum + beta_times(beta_value, y[row * incy]);
     }
     return CUBLAS_STATUS_SUCCESS;
 }
@@ -2997,7 +3014,7 @@ cublasStatus_t cublasSsyrk(cublasHandle_t handle,
                 const float aj = no_trans ? a[j + l * lda] : a[l + j * lda];
                 sum += ai * aj;
             }
-            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+            c[i + j * ldc] = av * sum + beta_times(bv, c[i + j * ldc]);
         }
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -3032,7 +3049,7 @@ cublasStatus_t cublasDsyrk(cublasHandle_t handle,
                 const double aj = no_trans ? a[j + l * lda] : a[l + j * lda];
                 sum += ai * aj;
             }
-            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+            c[i + j * ldc] = av * sum + beta_times(bv, c[i + j * ldc]);
         }
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -3073,7 +3090,7 @@ cublasStatus_t cublasSsyr2k(cublasHandle_t handle,
                 const float aj = no_trans ? a[j + l * lda] : a[l + j * lda];
                 sum += ai * bj + bi * aj;
             }
-            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+            c[i + j * ldc] = av * sum + beta_times(bv, c[i + j * ldc]);
         }
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -3113,7 +3130,7 @@ cublasStatus_t cublasDsyr2k(cublasHandle_t handle,
                 const double aj = no_trans ? a[j + l * lda] : a[l + j * lda];
                 sum += ai * bj + bi * aj;
             }
-            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+            c[i + j * ldc] = av * sum + beta_times(bv, c[i + j * ldc]);
         }
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -3217,7 +3234,7 @@ cublasStatus_t cublasSsymm(cublasHandle_t handle,
                     sum += b[i + k * ldb] * symm_elem(a, lda, k, j, upper);
                 }
             }
-            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+            c[i + j * ldc] = av * sum + beta_times(bv, c[i + j * ldc]);
         }
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -3261,7 +3278,7 @@ cublasStatus_t cublasDsymm(cublasHandle_t handle,
                     sum += b[i + k * ldb] * symm_elem(a, lda, k, j, upper);
                 }
             }
-            c[i + j * ldc] = av * sum + bv * c[i + j * ldc];
+            c[i + j * ldc] = av * sum + beta_times(bv, c[i + j * ldc]);
         }
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -3900,7 +3917,7 @@ cublasStatus_t cublasChemv(cublasHandle_t handle, cublasFillMode_t uplo,
         cuComplex dot = {0.0f, 0.0f};
         for (int j = 0; j < n; ++j)
             dot = cadd_f(dot, cmul_f(herm_elem_f(A, lda, i, j, upper), x[(size_t)j * incx]));
-        y[(size_t)i * incy] = cadd_f(cmul_f(al, dot), cmul_f(be, y[(size_t)i * incy]));
+        y[(size_t)i * incy] = cadd_f(cmul_f(al, dot), beta_times(be, y[(size_t)i * incy]));
     }
     return CUBLAS_STATUS_SUCCESS;
 }
@@ -3924,7 +3941,7 @@ cublasStatus_t cublasZhemv(cublasHandle_t handle, cublasFillMode_t uplo,
         cuDoubleComplex dot = {0.0, 0.0};
         for (int j = 0; j < n; ++j)
             dot = cadd_d(dot, cmul_d(herm_elem_d(A, lda, i, j, upper), x[(size_t)j * incx]));
-        y[(size_t)i * incy] = cadd_d(cmul_d(al, dot), cmul_d(be, y[(size_t)i * incy]));
+        y[(size_t)i * incy] = cadd_d(cmul_d(al, dot), beta_times(be, y[(size_t)i * incy]));
     }
     return CUBLAS_STATUS_SUCCESS;
 }
@@ -4073,8 +4090,8 @@ cublasStatus_t cublasCherk(cublasHandle_t handle, cublasFillMode_t uplo,
                 sum = cadd_f(sum, cmul_f(ai, aj_c));
             }
             cuComplex& cij = C[i + (size_t)j * ldc];
-            cij.x = av * sum.x + bv * cij.x;
-            cij.y = av * sum.y + bv * cij.y;
+            cij.x = av * sum.x + beta_times(bv, cij.x);
+            cij.y = av * sum.y + beta_times(bv, cij.y);
         }
         // Force diagonal imaginary to zero.
         C[j + (size_t)j * ldc].y = 0.0f;
@@ -4110,8 +4127,8 @@ cublasStatus_t cublasZherk(cublasHandle_t handle, cublasFillMode_t uplo,
                 sum = cadd_d(sum, cmul_d(ai, aj_c));
             }
             cuDoubleComplex& cij = C[i + (size_t)j * ldc];
-            cij.x = av * sum.x + bv * cij.x;
-            cij.y = av * sum.y + bv * cij.y;
+            cij.x = av * sum.x + beta_times(bv, cij.x);
+            cij.y = av * sum.y + beta_times(bv, cij.y);
         }
         C[j + (size_t)j * ldc].y = 0.0;
     }
@@ -4157,8 +4174,8 @@ cublasStatus_t cublasCher2k(cublasHandle_t handle, cublasFillMode_t uplo,
             }
             cuComplex update = cadd_f(cmul_f(al, s1), cmul_f(al_c, s2));
             cuComplex& cij = C[i + (size_t)j * ldc];
-            cij.x = update.x + bv * cij.x;
-            cij.y = update.y + bv * cij.y;
+            cij.x = update.x + beta_times(bv, cij.x);
+            cij.y = update.y + beta_times(bv, cij.y);
         }
         C[j + (size_t)j * ldc].y = 0.0f;
     }
@@ -4202,8 +4219,8 @@ cublasStatus_t cublasZher2k(cublasHandle_t handle, cublasFillMode_t uplo,
             }
             cuDoubleComplex update = cadd_d(cmul_d(al, s1), cmul_d(al_c, s2));
             cuDoubleComplex& cij = C[i + (size_t)j * ldc];
-            cij.x = update.x + bv * cij.x;
-            cij.y = update.y + bv * cij.y;
+            cij.x = update.x + beta_times(bv, cij.x);
+            cij.y = update.y + beta_times(bv, cij.y);
         }
         C[j + (size_t)j * ldc].y = 0.0;
     }
@@ -4239,7 +4256,7 @@ cublasStatus_t cublasChemm(cublasHandle_t handle, cublasSideMode_t side, cublasF
                                          : B[i + (size_t)l * ldb];
                 sum = cadd_f(sum, cmul_f(h, b));
             }
-            C[i + (size_t)j * ldc] = cadd_f(cmul_f(al, sum), cmul_f(be, C[i + (size_t)j * ldc]));
+            C[i + (size_t)j * ldc] = cadd_f(cmul_f(al, sum), beta_times(be, C[i + (size_t)j * ldc]));
         }
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -4273,7 +4290,7 @@ cublasStatus_t cublasZhemm(cublasHandle_t handle, cublasSideMode_t side, cublasF
                                                : B[i + (size_t)l * ldb];
                 sum = cadd_d(sum, cmul_d(h, b));
             }
-            C[i + (size_t)j * ldc] = cadd_d(cmul_d(al, sum), cmul_d(be, C[i + (size_t)j * ldc]));
+            C[i + (size_t)j * ldc] = cadd_d(cmul_d(al, sum), beta_times(be, C[i + (size_t)j * ldc]));
         }
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -4657,11 +4674,14 @@ cublasStatus_t geam_impl(cublasHandle_t handle, cublasOperation_t transa, cublas
     }
     const cublasStatus_t st = synchronize_handle_stream(handle);
     if (st != CUBLAS_STATUS_SUCCESS) return st;
+    // As in cuBLAS, B is not read when beta is zero.
+    const bool b_zero = Ops<T>::re(b) == 0.0 && Ops<T>::im(b) == 0.0;
     for (int j = 0; j < n; ++j) {
         for (int i = 0; i < m; ++i) {
             C[static_cast<std::size_t>(j) * ldc + i] =
                 Ops<T>::add(Ops<T>::mul(a, op_element(A, lda, transa, i, j)),
-                            Ops<T>::mul(b, op_element(B, ldb, transb, i, j)));
+                            b_zero ? Ops<T>::zero()
+                                   : Ops<T>::mul(b, op_element(B, ldb, transb, i, j)));
         }
     }
     return CUBLAS_STATUS_SUCCESS;

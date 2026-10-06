@@ -2742,7 +2742,15 @@ cudaError_t resolve_backend_stream(cudaStream_t stream,
 cudaError_t synchronize_for_host_library(cudaStream_t stream) {
     // Waiting for non-blocking streams as well is more than CUDA orders, but
     // only costs time; missing a blocking stream reads data still in flight.
-    if (stream == nullptr || stream == cudaStreamLegacy) return cudaDeviceSynchronize();
+    // The device wait must not take the pending launch error: that failure
+    // belongs to the caller's earlier launch and is reported by the caller's
+    // own next synchronize, not by this library call.
+    if (stream == nullptr || stream == cudaStreamLegacy) {
+        const cudaError_t init_status = ensure_initialized();
+        if (init_status != cudaSuccess) return fail(init_status);
+        std::string error;
+        return fail(cumetal::metal_backend::synchronize(&error));
+    }
     return cudaStreamSynchronize(stream);
 }
 

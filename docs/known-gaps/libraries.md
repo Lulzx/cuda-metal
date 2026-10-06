@@ -37,6 +37,8 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   tracked allocation, NULL selects the default pool, `cublasSetStream` resets
   it unconditionally), but the recorded span is handle state only -- the
   backends still manage their own scratch rather than sub-allocating from it.
+- **BLAS beta:** as in BLAS, routines do not read C (or `geam`'s B) when beta is
+  zero, so NaN in a recycled output buffer cannot leak into the result.
 - **cuRAND:** the default and MTGP32 compatibility generators are not claimed
   as NVIDIA bitstream parity; MTGP32 is proven only for host/device
   self-consistency in the enrolled NVIDIA sample. Named XORWOW, MRG32k3a,

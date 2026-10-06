@@ -224,7 +224,27 @@ static double host_normcdfinv(double p) {
     X(normcdfinv_d, (float)normcdfinv((double)x),                            \
                   (float)host_normcdfinv(x),                    2e-3f)
 
+// Integer min/max: libdevice __nv_min/__nv_umin/__nv_llmin/__nv_ullmin and the
+// max forms. Inputs are shifted to straddle zero, so a signed/unsigned mix-up
+// picks the other operand; the unsigned forms see negatives as huge values.
+#define SI(v) ((int)(((v) - 0.5f) * 2000.0f))
+#define SL(v) ((long long)(((v) - 0.5f) * 2e12f))
+template <typename T> static T host_min(T a, T b) { return a < b ? a : b; }
+template <typename T> static T host_max(T a, T b) { return a > b ? a : b; }
+
 #define BINARY_LIST(X)                                                         \
+    X(imin,   (float)min(SI(x), SI(y)),         (float)host_min(SI(x), SI(y)), 0.0f) \
+    X(imax,   (float)max(SI(x), SI(y)),         (float)host_max(SI(x), SI(y)), 0.0f) \
+    X(umin,   (float)umin((unsigned)SI(x), (unsigned)SI(y)),                   \
+              (float)host_min((unsigned)SI(x), (unsigned)SI(y)),          0.0f) \
+    X(umax,   (float)umax((unsigned)SI(x), (unsigned)SI(y)),                   \
+              (float)host_max((unsigned)SI(x), (unsigned)SI(y)),          0.0f) \
+    X(llmin,  (float)llmin(SL(x), SL(y)),       (float)host_min(SL(x), SL(y)), 0.0f) \
+    X(llmax,  (float)llmax(SL(x), SL(y)),       (float)host_max(SL(x), SL(y)), 0.0f) \
+    X(ullmin, (float)ullmin((unsigned long long)SL(x), (unsigned long long)SL(y)), \
+              (float)host_min((unsigned long long)SL(x), (unsigned long long)SL(y)), 0.0f) \
+    X(ullmax, (float)ullmax((unsigned long long)SL(x), (unsigned long long)SL(y)), \
+              (float)host_max((unsigned long long)SL(x), (unsigned long long)SL(y)), 0.0f) \
     X(fmaxf,      fmaxf(x, y),      fmaxf(x, y),                  0.0f)        \
     X(fminf,      fminf(x, y),      fminf(x, y),                  0.0f)        \
     X(powf,       powf(x, y),       powf(x, y),                   2e-3f)       \

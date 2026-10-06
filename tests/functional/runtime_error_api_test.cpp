@@ -1,3 +1,4 @@
+#include "cublas_v2.h"
 #include "cuda_runtime.h"
 
 #include <cstdio>
@@ -183,6 +184,42 @@ int main(int argc, char** argv) {
     if (cudaDeviceSynchronize() != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaDeviceSynchronize should consume the launch error once\n");
         return 1;
+    }
+
+    // A CPU-backed library call waits for the device before it runs. That wait
+    // must leave an earlier failed launch for the caller's own synchronize: it
+    // made CuPy's cuBLAS matmul fail after an unrelated refused CUB kernel.
+    {
+        cublasHandle_t blas = nullptr;
+        float* d = nullptr;
+        if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS ||
+            cudaMalloc(reinterpret_cast<void**>(&d), 3 * sizeof(float)) != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: cuBLAS setup failed\n");
+            return 1;
+        }
+        const float host[3] = {2.0f, 3.0f, 0.0f};
+        cudaMemcpy(d, host, sizeof(host), cudaMemcpyHostToDevice);
+        (void)cudaLaunchKernel(&missing_kernel, dim3(1), dim3(1), nullptr, 0, nullptr);
+        (void)cudaGetLastError();
+        const float one = 1.0f, zero = 0.0f;
+        const cublasStatus_t gemm = cublasSgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, 1, 1, 1, &one,
+                                                d, 1, d + 1, 1, &zero, d + 2, 1);
+        float out = 0.0f;
+        cudaMemcpy(&out, d + 2, sizeof(float), cudaMemcpyDeviceToHost);
+        if (gemm != CUBLAS_STATUS_SUCCESS || out != 6.0f) {
+            std::fprintf(stderr,
+                         "FAIL: cuBLAS after an unrelated failed launch: status=%d out=%g\n",
+                         static_cast<int>(gemm), out);
+            return 1;
+        }
+        if (cudaDeviceSynchronize() != cudaErrorInvalidValue ||
+            cudaDeviceSynchronize() != cudaSuccess) {
+            std::fprintf(stderr,
+                         "FAIL: a library call consumed the caller's pending launch error\n");
+            return 1;
+        }
+        cudaFree(d);
+        cublasDestroy(blas);
     }
 
     // Lazy registration/JIT validation fails before Metal submission. This

@@ -214,6 +214,25 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
             {"__nv_finitef", {"isfinite", 32}},  {"__nv_isfinited", {"isfinite", 64}},
             {"__nv_signbitf", {"signbit", 32}},  {"__nv_signbitd", {"signbit", 64}},
         };
+    // Integer min/max lower like PTX min.s32/max.u64: a builtin whose
+    // signedness is an attribute.
+    static const std::unordered_map<std::string_view, std::tuple<const char*, unsigned, bool>>
+        kIntegerMinMax = {
+            {"__nv_min", {"min", 32, true}},     {"__nv_max", {"max", 32, true}},
+            {"__nv_umin", {"min", 32, false}},   {"__nv_umax", {"max", 32, false}},
+            {"__nv_llmin", {"min", 64, true}},   {"__nv_llmax", {"max", 64, true}},
+            {"__nv_ullmin", {"min", 64, false}}, {"__nv_ullmax", {"max", 64, false}},
+        };
+    if (const auto minmax = kIntegerMinMax.find(name); minmax != kIntegerMinMax.end()) {
+        const auto& [callee, bits, is_signed] = minmax->second;
+        BuiltinSignature signature{
+            .metal_name = callee,
+            .return_type = Type::integer(bits),
+            .argument_types = {Type::integer(bits), Type::integer(bits)},
+        };
+        if (is_signed) signature.attributes.emplace_back("signed", "true");
+        return signature;
+    }
     const auto classify = kClassifyBuiltins.find(std::string(name));
     if (classify != kClassifyBuiltins.end()) {
         return BuiltinSignature{

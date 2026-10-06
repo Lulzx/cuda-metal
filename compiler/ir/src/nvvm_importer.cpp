@@ -6,6 +6,7 @@
 
 #if CUMETAL_HAVE_LLVM
 
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/StringRef.h>
@@ -25,6 +26,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Operator.h>
 #include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/Passes/PassBuilder.h>
@@ -1819,6 +1821,27 @@ struct Importer {
             }
         }
 
+        // Integer min/max (`min(int, int)` in clang's CUDA math header, which
+        // CuPy's argmax reaches). Same form as PTX min.s32/max.u64: a builtin
+        // call whose signedness is an attribute, not part of the name.
+        static const std::unordered_map<std::string_view, std::pair<const char*, bool>>
+            kIntegerMinMax = {
+                {"__nv_min", {"min", true}},     {"__nv_max", {"max", true}},
+                {"__nv_umin", {"min", false}},   {"__nv_umax", {"max", false}},
+                {"__nv_llmin", {"min", true}},   {"__nv_llmax", {"max", true}},
+                {"__nv_ullmin", {"min", false}}, {"__nv_ullmax", {"max", false}},
+            };
+        if (const auto minmax = kIntegerMinMax.find(name); minmax != kIntegerMinMax.end()) {
+            operation->opcode = OpCode::kCall;
+            operation->attributes["callee"] = minmax->second.first;
+            operation->attributes["builtin"] = "true";
+            if (minmax->second.second) operation->attributes["signed"] = "true";
+            for (const llvm::Use& argument : call.args()) {
+                operation->operands.push_back(import_operand(*argument.get(), *state));
+            }
+            return true;
+        }
+
         static const std::unordered_map<std::string, std::string> kCudaBuiltins = {
             // Classification: Metal's builtins test the bit pattern and are
             // immune to fast-math folding; the double forms are lowered on the
@@ -2008,6 +2031,7 @@ struct Importer {
             {"__nv_popc", "popcount"},
             {"__nv_clz", "clz"},
             {"__nv_abs", "__cumetal_signed_abs"},
+            {"__nv_llabs", "__cumetal_signed_abs"},
             {"__nv_ffs", "__cumetal_ffs"},
             // Float -> integer. The rounding mode in the name applies to the
             // float *before* the cast, and the cast itself truncates; folding it
@@ -2664,6 +2688,10 @@ struct Importer {
                                        : OpCode::kConvert;
                 if (llvm::isa<llvm::BitCastInst>(cast)) {
                     operation.attributes["bitcast"] = "true";
+                } else if (llvm::isa<llvm::SExtInst>(cast)) {
+                    // Signless integers: without this a sext became a zext, so
+                    // (long long)-10 * 3000000000LL produced -5.56e18.
+                    operation.attributes["signed_input"] = "true";
                 } else if (llvm::isa<llvm::SIToFPInst>(cast) &&
                            !cast->getType()->isDoubleTy()) {
                     // CuMetal integer types are signless bit containers.  LLVM
@@ -3360,6 +3388,81 @@ struct Importer {
     }
 };
 
+// True unless every use of a by-value kernel aggregate provably only reads it:
+// loads, address arithmetic, being the source of a copy, and passing it to a
+// defined function whose parameter is itself only read (or is a byval copy).
+// A store, a call to a declaration, or an escape counts as a write.
+bool pointer_may_be_written(const llvm::Value& root,
+                            llvm::SmallPtrSetImpl<const llvm::Argument*>& callee_arguments) {
+    llvm::SmallVector<const llvm::Value*, 16> pending = {&root};
+    llvm::SmallPtrSet<const llvm::Value*, 16> visited;
+    while (!pending.empty()) {
+        const llvm::Value* value = pending.pop_back_val();
+        if (!visited.insert(value).second) continue;
+        for (const llvm::Use& use : value->uses()) {
+            const llvm::User* user = use.getUser();
+            if (llvm::isa<llvm::LoadInst>(user)) continue;
+            if (llvm::isa<llvm::GetElementPtrInst, llvm::BitCastInst, llvm::AddrSpaceCastInst,
+                          llvm::PHINode, llvm::SelectInst>(user)) {
+                pending.push_back(user);
+                continue;
+            }
+            if (const auto* copy = llvm::dyn_cast<llvm::MemTransferInst>(user);
+                copy != nullptr && copy->getDest() != value && !copy->isVolatile()) {
+                continue;
+            }
+            if (const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
+                call != nullptr && call->isArgOperand(&use)) {
+                const llvm::Function* callee = call->getCalledFunction();
+                const unsigned index = call->getArgOperandNo(&use);
+                if (callee != nullptr && !callee->isDeclaration() &&
+                    index < callee->arg_size()) {
+                    const llvm::Argument* parameter = callee->getArg(index);
+                    if (parameter->hasByValAttr()) continue;
+                    // A cycle through recursion is already being checked.
+                    if (!callee_arguments.insert(parameter).second) continue;
+                    if (!pointer_may_be_written(*parameter, callee_arguments)) continue;
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool byval_argument_may_be_written(const llvm::Argument& argument) {
+    llvm::SmallPtrSet<const llvm::Argument*, 8> callee_arguments;
+    return pointer_may_be_written(argument, callee_arguments);
+}
+
+// A CUDA kernel parameter is a per-thread copy the kernel may modify; CuPy's
+// elementwise kernels advance a by-value CIndexer with `_ind.set(i)`. The Metal
+// signature binds the aggregate as one buffer shared by every thread, so a
+// written aggregate gets a private copy at entry -- what NVPTX's own argument
+// lowering does -- instead of every thread racing on the shared bytes.
+void copy_written_byval_kernel_arguments(llvm::Module& module) {
+    const llvm::DataLayout& layout = module.getDataLayout();
+    for (llvm::Function& function : module) {
+        if (function.isDeclaration() || !is_nvvm_kernel(function)) continue;
+        for (llvm::Argument& argument : function.args()) {
+            llvm::Type* const type = argument.getParamByValType();
+            if (type == nullptr || !byval_argument_may_be_written(argument)) continue;
+            llvm::IRBuilder<> builder(&*function.getEntryBlock().getFirstInsertionPt());
+            const llvm::Align alignment = argument.getParamAlign().valueOrOne();
+            llvm::AllocaInst* const copy = builder.CreateAlloca(
+                type, layout.getAllocaAddrSpace(), nullptr, argument.getName() + ".private");
+            copy->setAlignment(alignment);
+            llvm::Value* replacement = copy;
+            if (copy->getType() != argument.getType()) {
+                replacement = builder.CreateAddrSpaceCast(copy, argument.getType());
+            }
+            argument.replaceAllUsesWith(replacement);
+            builder.CreateMemCpy(copy, alignment, &argument, alignment,
+                                 layout.getTypeAllocSize(type));
+        }
+    }
+}
+
 NvvmImportResult parse_module(std::unique_ptr<llvm::MemoryBuffer> buffer,
                               const NvvmImportOptions& options) {
     llvm::LLVMContext context;
@@ -3391,6 +3494,8 @@ NvvmImportResult parse_module(std::unique_ptr<llvm::MemoryBuffer> buffer,
     // the requested lane (a float4 ShuffleIndex(..., 7) exposed this). LLVM's
     // loop unroller turns only provably bounded loops into the scalar register
     // shuffles the CUDA source denotes. Dynamic loops remain loops.
+    copy_written_byval_kernel_arguments(*module);
+
     llvm::LoopAnalysisManager loop_analyses;
     llvm::FunctionAnalysisManager function_analyses;
     llvm::CGSCCAnalysisManager cgscc_analyses;

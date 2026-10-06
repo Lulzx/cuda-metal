@@ -875,6 +875,145 @@ static void test_legacy_gemmex(cublasHandle_t h) {
     cudaFree(c);
 }
 
+// BLAS never reads C (or geam's B) when beta is zero. Outputs are often
+// recycled pool memory holding NaN bit patterns; CuPy's float64 matmul came
+// back half NaN when the reference loops computed 0 * NaN. Every output below
+// starts as NaN and every call passes beta = 0.
+template <class T>
+T* nan_buffer(size_t count) {
+    T* p = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&p), count * sizeof(T)) != cudaSuccess) return nullptr;
+    std::vector<unsigned char> bytes(count * sizeof(T), 0xff);  // all-ones is a NaN
+    std::copy(bytes.begin(), bytes.end(), reinterpret_cast<unsigned char*>(p));
+    return p;
+}
+
+template <class T>
+bool all_finite(const T* p, size_t count) {
+    const auto* r = reinterpret_cast<const typename Tr<T>::R*>(p);
+    const size_t n = count * (Tr<T>::is_complex ? 2 : 1);
+    for (size_t i = 0; i < n; ++i)
+        if (!std::isfinite(r[i])) return false;
+    return true;
+}
+
+template <class T>
+T* filled(size_t count, double seed) {
+    T* p = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&p), count * sizeof(T)) != cudaSuccess) return nullptr;
+    for (size_t i = 0; i < count; ++i)
+        p[i] = Tr<T>::make(std::sin(seed + 0.37 * static_cast<double>(i)),
+                           std::cos(seed + 0.11 * static_cast<double>(i)));
+    return p;
+}
+
+template <class T, class Gemm>
+void check_gemm_beta_zero(cublasHandle_t h, Gemm gemm, const char* name) {
+    const int m = 7, n = 5, k = 3;
+    T* a = filled<T>(m * k, 1.0);
+    T* b = filled<T>(k * n, 2.0);
+    T* c = nan_buffer<T>(m * n);
+    const T one = Tr<T>::make(1, 0), zero = Tr<T>::make(0, 0);
+    const bool ok = gemm(h, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &one, a, m, b, k, &zero, c, m) ==
+                    CUBLAS_STATUS_SUCCESS;
+    cudaDeviceSynchronize();
+    bool right = ok;
+    for (int j = 0; j < n && right; ++j)
+        for (int i = 0; i < m && right; ++i) {
+            T want = zero;
+            for (int l = 0; l < k; ++l) want = Tr<T>::add(want, Tr<T>::mul(a[i + l * m], b[l + j * k]));
+            right = close(c[i + j * m], want);
+        }
+    if (!right) std::fprintf(stderr, "FAIL: %s with beta = 0 read the NaN output\n", name);
+    CHECK(right);
+    cudaFree(a); cudaFree(b); cudaFree(c);
+}
+
+void test_beta_zero_ignores_output(cublasHandle_t h) {
+    check_gemm_beta_zero<float>(h, cublasSgemm, "Sgemm");
+    check_gemm_beta_zero<double>(h, cublasDgemm, "Dgemm");
+    check_gemm_beta_zero<cuComplex>(h, cublasCgemm, "Cgemm");
+    check_gemm_beta_zero<cuDoubleComplex>(h, cublasZgemm, "Zgemm");
+
+    const int n = 6, k = 4;
+    const float fone = 1, fzero = 0;
+    const double done = 1, dzero = 0;
+    const cuComplex cone{1, 0}, czero{0, 0};
+    const cuDoubleComplex zone{1, 0}, zzero{0, 0};
+    float* fa = filled<float>(n * n, 3.0);
+    double* da = filled<double>(n * n, 3.0);
+    double* db = filled<double>(n * n, 4.0);
+    cuComplex* ca = filled<cuComplex>(n * n, 3.0);
+    cuDoubleComplex* za = filled<cuDoubleComplex>(n * n, 3.0);
+    cuDoubleComplex* zb = filled<cuDoubleComplex>(n * n, 4.0);
+    float* fx = filled<float>(n, 5.0);
+    double* dx = filled<double>(n, 5.0);
+    cuComplex* cx = filled<cuComplex>(n, 5.0);
+
+    struct Case { const char* name; bool ok; bool finite; };
+    std::vector<Case> cases;
+    {
+        float* y = nan_buffer<float>(n);
+        bool ok = cublasSgemv(h, CUBLAS_OP_T, n, n, &fone, fa, n, fx, 1, &fzero, y, 1) == CUBLAS_STATUS_SUCCESS;
+        cudaDeviceSynchronize(); cases.push_back({"Sgemv", ok, all_finite(y, n)}); cudaFree(y);
+    }
+    {
+        double* y = nan_buffer<double>(n);
+        bool ok = cublasDgemv(h, CUBLAS_OP_N, n, n, &done, da, n, dx, 1, &dzero, y, 1) == CUBLAS_STATUS_SUCCESS;
+        cudaDeviceSynchronize(); cases.push_back({"Dgemv", ok, all_finite(y, n)}); cudaFree(y);
+    }
+    {
+        float* y = nan_buffer<float>(n);
+        bool ok = cublasSsymv(h, CUBLAS_FILL_MODE_LOWER, n, &fone, fa, n, fx, 1, &fzero, y, 1) == CUBLAS_STATUS_SUCCESS;
+        cudaDeviceSynchronize(); cases.push_back({"Ssymv", ok, all_finite(y, n)}); cudaFree(y);
+    }
+    {
+        double* c = nan_buffer<double>(n * n);
+        bool ok = cublasDsyrk(h, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, n, k, &done, da, n, &dzero, c, n) == CUBLAS_STATUS_SUCCESS;
+        cudaDeviceSynchronize();
+        bool finite = true;  // only the referenced triangle is written
+        for (int j = 0; j < n; ++j) finite &= all_finite(c + j * n, static_cast<size_t>(j + 1));
+        cases.push_back({"Dsyrk", ok, finite}); cudaFree(c);
+    }
+    {
+        double* c = nan_buffer<double>(n * n);
+        bool ok = cublasDsymm(h, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, n, n, &done, da, n, db, n, &dzero, c, n) == CUBLAS_STATUS_SUCCESS;
+        cudaDeviceSynchronize(); cases.push_back({"Dsymm", ok, all_finite(c, n * n)}); cudaFree(c);
+    }
+    {
+        cuComplex* y = nan_buffer<cuComplex>(n);
+        bool ok = cublasChemv(h, CUBLAS_FILL_MODE_LOWER, n, &cone, ca, n, cx, 1, &czero, y, 1) == CUBLAS_STATUS_SUCCESS;
+        cudaDeviceSynchronize(); cases.push_back({"Chemv", ok, all_finite(y, n)}); cudaFree(y);
+    }
+    {
+        cuComplex* c = nan_buffer<cuComplex>(n * n);
+        bool ok = cublasCherk(h, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, n, k, &fone, ca, n, &fzero, c, n) == CUBLAS_STATUS_SUCCESS;
+        cudaDeviceSynchronize();
+        bool finite = true;
+        for (int j = 0; j < n; ++j) finite &= all_finite(c + j * n, static_cast<size_t>(j + 1));
+        cases.push_back({"Cherk", ok, finite}); cudaFree(c);
+    }
+    {
+        cuDoubleComplex* c = nan_buffer<cuDoubleComplex>(n * n);
+        bool ok = cublasZhemm(h, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, n, n, &zone, za, n, zb, n, &zzero, c, n) == CUBLAS_STATUS_SUCCESS;
+        cudaDeviceSynchronize(); cases.push_back({"Zhemm", ok, all_finite(c, n * n)}); cudaFree(c);
+    }
+    {
+        double* b = nan_buffer<double>(n * n);  // geam: B is not read either
+        double* c = nan_buffer<double>(n * n);
+        bool ok = cublasDgeam(h, CUBLAS_OP_T, CUBLAS_OP_N, n, n, &done, da, n, &dzero, b, n, c, n) == CUBLAS_STATUS_SUCCESS;
+        cudaDeviceSynchronize(); cases.push_back({"Dgeam", ok, all_finite(c, n * n)}); cudaFree(b); cudaFree(c);
+    }
+    for (const Case& item : cases) {
+        if (!item.ok || !item.finite)
+            std::fprintf(stderr, "FAIL: %s with beta = 0: status_ok=%d finite=%d\n", item.name,
+                         item.ok, item.finite);
+        CHECK(item.ok && item.finite);
+    }
+    cudaFree(fa); cudaFree(da); cudaFree(db); cudaFree(ca); cudaFree(za); cudaFree(zb);
+    cudaFree(fx); cudaFree(dx); cudaFree(cx);
+}
+
 int main() {
     if (cudaInit(0) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaInit\n");
@@ -910,6 +1049,7 @@ int main() {
     test_banded_packed<double>(h, cublasDsbmv, cublasDtpttr, cublasDtrttp, "D");
     test_sgemmex(h);
     test_legacy_gemmex(h);
+    test_beta_zero_ignores_output(h);
 
     cublasDestroy(h);
     if (g_failures != 0) {
