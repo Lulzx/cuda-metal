@@ -6392,32 +6392,62 @@ class GenericLlvmEmitter {
             return store_ret_bits(product, 32);
         }
 
-        if (callee == "__nv_popc") {
-            if (arg_names.empty()) return fail(instr, "__nv_popc expects 1 arg");
-            auto value = load_call_slot_value(os, arg_names[0], 32);
-            if (!value) return fail(instr, "__nv_popc arg missing");
-            declarations_.insert("declare i32 @llvm.ctpop.i32(i32)");
-            const std::string count = next_tmp("popc");
-            os << "  " << count << " = call i32 @llvm.ctpop.i32(i32 " << *value << ")\n";
+        // Integer bit libdevice at both widths. popc/ffs return i32 for the
+        // 64-bit (ll) forms too; brev keeps its operand width.
+        if (callee == "__nv_popc" || callee == "__nv_popcll") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            const int bits = callee == "__nv_popcll" ? 64 : 32;
+            const std::string ty = bits == 64 ? "i64" : "i32";
+            auto value = load_call_slot_value(os, arg_names[0], bits);
+            if (!value) return fail(instr, callee + " arg missing");
+            declarations_.insert("declare " + ty + " @llvm.ctpop." + ty + "(" + ty + ")");
+            std::string count = next_tmp("popc");
+            os << "  " << count << " = call " << ty << " @llvm.ctpop." << ty << "(" << ty << " "
+               << *value << ")\n";
+            if (bits == 64) {
+                const std::string narrow = next_tmp("popc_i32");
+                os << "  " << narrow << " = trunc i64 " << count << " to i32\n";
+                count = narrow;
+            }
             return store_ret_bits(count, 32);
         }
 
-        if (callee == "__nv_ffs") {
-            if (arg_names.empty()) return fail(instr, "__nv_ffs expects 1 arg");
-            auto value = load_call_slot_value(os, arg_names[0], 32);
-            if (!value) return fail(instr, "__nv_ffs arg missing");
-            declarations_.insert("declare i32 @llvm.cttz.i32(i32, i1 immarg)");
-            const std::string trailing = next_tmp("ffs_cttz");
-            os << "  " << trailing << " = call i32 @llvm.cttz.i32(i32 " << *value
-               << ", i1 false)\n";
+        if (callee == "__nv_ffs" || callee == "__nv_ffsll") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            const int bits = callee == "__nv_ffsll" ? 64 : 32;
+            const std::string ty = bits == 64 ? "i64" : "i32";
+            auto value = load_call_slot_value(os, arg_names[0], bits);
+            if (!value) return fail(instr, callee + " arg missing");
+            declarations_.insert("declare " + ty + " @llvm.cttz." + ty + "(" + ty + ", i1 immarg)");
+            std::string trailing = next_tmp("ffs_cttz");
+            os << "  " << trailing << " = call " << ty << " @llvm.cttz." << ty << "(" << ty << " "
+               << *value << ", i1 false)\n";
+            if (bits == 64) {
+                const std::string narrow = next_tmp("ffs_cttz_i32");
+                os << "  " << narrow << " = trunc i64 " << trailing << " to i32\n";
+                trailing = narrow;
+            }
             const std::string one_based = next_tmp("ffs_one_based");
             os << "  " << one_based << " = add i32 " << trailing << ", 1\n";
             const std::string is_zero = next_tmp("ffs_zero");
-            os << "  " << is_zero << " = icmp eq i32 " << *value << ", 0\n";
+            os << "  " << is_zero << " = icmp eq " << ty << " " << *value << ", 0\n";
             const std::string result = next_tmp("ffs");
             os << "  " << result << " = select i1 " << is_zero << ", i32 0, i32 "
                << one_based << "\n";
             return store_ret_bits(result, 32);
+        }
+
+        if (callee == "__nv_brev" || callee == "__nv_brevll") {
+            if (arg_names.empty()) return fail(instr, callee + " expects 1 arg");
+            const int bits = callee == "__nv_brevll" ? 64 : 32;
+            const std::string ty = bits == 64 ? "i64" : "i32";
+            auto value = load_call_slot_value(os, arg_names[0], bits);
+            if (!value) return fail(instr, callee + " arg missing");
+            declarations_.insert("declare " + ty + " @llvm.bitreverse." + ty + "(" + ty + ")");
+            const std::string reversed = next_tmp("brev");
+            os << "  " << reversed << " = call " << ty << " @llvm.bitreverse." << ty << "(" << ty
+               << " " << *value << ")\n";
+            return store_ret_bits(reversed, bits);
         }
 
         if (callee == "__nv_rsqrtf") {

@@ -2361,6 +2361,8 @@ WideAtomicUsageMap analyze_wide_atomic_usage(const ir::Module& module) {
             for (const ir::Operation& operation : block.operations) {
                 direct = direct || is_lock_backed_f64_add(operation) ||
                          (operation.opcode == ir::OpCode::kMetalAtomic &&
+                          operation.attributes.contains("lock_backed")) ||
+                         (operation.opcode == ir::OpCode::kMetalAtomic &&
                           operation.result_types.size() == 1 &&
                           operation.result_types.front().kind ==
                               ir::TypeKind::kInteger &&
@@ -2609,6 +2611,113 @@ struct AstLowerer {
     // Statements an operation needs after its own: declarations of its second
     // and later results. Flushed by the caller right after lower_operation.
     std::vector<MslStmt> trailing_statements;
+    // Statements an operation needs before its own, e.g. the one call whose
+    // result several declarations read. Flushed right before it.
+    std::vector<MslStmt> leading_statements;
+    std::size_t scoped_temporaries = 0;
+
+    // PTX scoped loads/stores (see scoped_global_access in the PTX importer):
+    // 4 bytes as native relaxed device atomics, 8 and 16 bytes under the
+    // 64-bit lock bank so a {status, value} pair is read and written whole.
+    std::optional<MslStmt> lower_scoped_access(const ir::Operation& operation) {
+        const auto op = operation.attributes.find("atomic_op");
+        if (op == operation.attributes.end() || operation.operands.empty() ||
+            operation.results.empty()) {
+            fail(&operation, "malformed scoped PTX access");
+            return std::nullopt;
+        }
+        const MslExpr raw_pointer = expression_for(operation.operands.front());
+        const MslAddressSpace space =
+            raw_pointer->type.kind == MslTypeKind::kPointer
+                ? raw_pointer->type.address_space
+                : lower_address_space(operation.operands.front().type.address_space);
+        if (space != MslAddressSpace::kDevice) {
+            fail(&operation, "scoped PTX load/store requires device memory");
+            return std::nullopt;
+        }
+        const MslType u32 = MslType::uint();
+        const MslType u64 = MslType::uint(64);
+        const MslType atomic_uint = {.kind = MslTypeKind::kStruct, .struct_name = "atomic_uint"};
+        const MslExpr relaxed = MslExpression::identifier(
+            "memory_order_relaxed", {.kind = MslTypeKind::kStruct, .struct_name = "memory_order"});
+        const MslExpr lock_bank = MslExpression::identifier(
+            "cm_atomic_lock_bank", MslType::pointer(atomic_uint, MslAddressSpace::kDevice));
+        const auto word = [&](const ir::Operand& operand, const MslType& type) {
+            const MslExpr value = expression_for(operand);
+            return value->type == type ? value : MslExpression::cast(type, value);
+        };
+        const auto as_result = [&](MslExpr value) {
+            const MslType type = lower_result_type(operation);
+            return value->type == type ? value : MslExpression::cast(type, value);
+        };
+        const std::string& name = op->second;
+        const bool lock_backed = operation.attributes.contains("lock_backed");
+        if (!lock_backed && (name == "load" || name == "store")) {
+            const MslExpr pointer = MslExpression::cast(
+                MslType::pointer(atomic_uint, MslAddressSpace::kDevice), raw_pointer, true);
+            if (name == "load") {
+                return declare_result(operation, as_result(MslExpression::call(
+                    "atomic_load_explicit", {pointer, relaxed}, u32)));
+            }
+            if (operation.operands.size() != 2) {
+                fail(&operation, "scoped PTX store requires a value");
+                return std::nullopt;
+            }
+            leading_statements.push_back(MslStatement::expression(MslExpression::call(
+                "atomic_store_explicit", {pointer, word(operation.operands[1], u32), relaxed},
+                MslType::void_type())));
+            return declare_result(operation, as_result(MslExpression::literal("0u", u32)));
+        }
+        if (lock_backed && (name == "load" || name == "store")) {
+            const MslExpr payload =
+                MslExpression::cast(MslType::pointer(u64, MslAddressSpace::kDevice), raw_pointer, true);
+            if (name == "load") {
+                return declare_result(operation, as_result(MslExpression::call(
+                    "cm_scoped_load_u64", {payload, lock_bank}, u64)));
+            }
+            if (operation.operands.size() != 2) {
+                fail(&operation, "scoped PTX store requires a value");
+                return std::nullopt;
+            }
+            leading_statements.push_back(MslStatement::expression(MslExpression::call(
+                "cm_scoped_store_u64", {payload, word(operation.operands[1], u64), lock_bank},
+                MslType::void_type())));
+            return declare_result(operation, as_result(MslExpression::literal("0ul", u64)));
+        }
+        if (lock_backed && (name == "load128" || name == "store128")) {
+            const MslType pair = MslType::vector(u64, 2);
+            const MslExpr payload =
+                MslExpression::cast(MslType::pointer(pair, MslAddressSpace::kDevice), raw_pointer, true);
+            if (name == "load128") {
+                if (operation.results.size() != 2) {
+                    fail(&operation, "scoped 16-byte PTX load requires two words");
+                    return std::nullopt;
+                }
+                const std::string temporary = "cm_scoped_pair" + std::to_string(scoped_temporaries++);
+                leading_statements.push_back(MslStatement::variable(
+                    pair, temporary,
+                    MslExpression::call("cm_scoped_load_u128", {payload, lock_bank}, pair), true));
+                const MslExpr loaded = MslExpression::identifier(temporary, pair);
+                declare_extra_result(operation, 1, MslExpression::member(loaded, "y", u64));
+                return declare_result(operation, MslExpression::member(loaded, "x", u64));
+            }
+            if (operation.operands.size() != 3) {
+                fail(&operation, "scoped 16-byte PTX store requires two words");
+                return std::nullopt;
+            }
+            leading_statements.push_back(MslStatement::expression(MslExpression::call(
+                "cm_scoped_store_u128",
+                {payload,
+                 MslExpression::call("ulong2",
+                                     {word(operation.operands[1], u64), word(operation.operands[2], u64)},
+                                     pair),
+                 lock_bank},
+                MslType::void_type())));
+            return declare_result(operation, as_result(MslExpression::literal("0ul", u64)));
+        }
+        fail(&operation, "unsupported scoped PTX access '" + name + "'");
+        return std::nullopt;
+    }
 
     void declare_extra_result(const ir::Operation& operation, std::size_t index,
                               MslExpr initializer) {
@@ -4944,6 +5053,10 @@ struct AstLowerer {
                 MslExpression::cast(lower_result_type(operation), voted));
         }
 
+        if (operation.opcode == ir::OpCode::kMetalAtomic &&
+            operation.attributes.contains("scoped_access")) {
+            return lower_scoped_access(operation);
+        }
         if (operation.opcode == ir::OpCode::kMetalAtomic) {
             const bool float_result =
                 operation.results.size() == 1 && operation.result_types.size() == 1 &&
@@ -5429,8 +5542,11 @@ struct AstLowerer {
                 continue;
             }
             trailing_statements.clear();
+            leading_statements.clear();
             const std::optional<MslStmt> lowered = lower_operation(operation);
             if (!result.error.empty()) return false;
+            for (MslStmt& leading : leading_statements) statements->push_back(std::move(leading));
+            leading_statements.clear();
             if (lowered.has_value()) statements->push_back(*lowered);
             for (MslStmt& trailing : trailing_statements) statements->push_back(std::move(trailing));
             trailing_statements.clear();
@@ -7702,6 +7818,77 @@ long vf64_f64_to_i64(ulong, uint, bool);
             return result;
         }
         result.source.insert(insertion + anchor.size(), kFp64Declarations);
+    }
+    if (result.source.find("cm_scoped_") != std::string::npos) {
+        // Same lock slot as the 64-bit atomics, so a scoped access and an
+        // atom.cas on one word serialize together. The device-scope fences
+        // publish the payload before the lock is released and observe the
+        // last holder's writes after it is taken.
+        static constexpr std::string_view kScopedAccessHelpers = R"msl(
+#define CM_SCOPED_LOCK(p) (&lock_bank[uint(reinterpret_cast<ulong>(p) >> 3u) * 2654435769u >> 22u])
+#define CM_SCOPED_FENCE() atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device)
+static ulong cm_scoped_load_u64(device ulong* payload, device atomic_uint* lock_bank) {
+    ulong result = 0ul;
+    bool done = false;
+    while (!done) {
+        if (atomic_exchange_explicit(CM_SCOPED_LOCK(payload), 1u, memory_order_relaxed) == 0u) {
+            CM_SCOPED_FENCE();
+            result = *payload;
+            CM_SCOPED_FENCE();
+            atomic_exchange_explicit(CM_SCOPED_LOCK(payload), 0u, memory_order_relaxed);
+            done = true;
+        }
+    }
+    return result;
+}
+static void cm_scoped_store_u64(device ulong* payload, ulong value, device atomic_uint* lock_bank) {
+    bool done = false;
+    while (!done) {
+        if (atomic_exchange_explicit(CM_SCOPED_LOCK(payload), 1u, memory_order_relaxed) == 0u) {
+            CM_SCOPED_FENCE();
+            *payload = value;
+            CM_SCOPED_FENCE();
+            atomic_exchange_explicit(CM_SCOPED_LOCK(payload), 0u, memory_order_relaxed);
+            done = true;
+        }
+    }
+}
+static ulong2 cm_scoped_load_u128(device ulong2* payload, device atomic_uint* lock_bank) {
+    ulong2 result = ulong2(0ul);
+    bool done = false;
+    while (!done) {
+        if (atomic_exchange_explicit(CM_SCOPED_LOCK(payload), 1u, memory_order_relaxed) == 0u) {
+            CM_SCOPED_FENCE();
+            result = *payload;
+            CM_SCOPED_FENCE();
+            atomic_exchange_explicit(CM_SCOPED_LOCK(payload), 0u, memory_order_relaxed);
+            done = true;
+        }
+    }
+    return result;
+}
+static void cm_scoped_store_u128(device ulong2* payload, ulong2 value, device atomic_uint* lock_bank) {
+    bool done = false;
+    while (!done) {
+        if (atomic_exchange_explicit(CM_SCOPED_LOCK(payload), 1u, memory_order_relaxed) == 0u) {
+            CM_SCOPED_FENCE();
+            *payload = value;
+            CM_SCOPED_FENCE();
+            atomic_exchange_explicit(CM_SCOPED_LOCK(payload), 0u, memory_order_relaxed);
+            done = true;
+        }
+    }
+}
+#undef CM_SCOPED_FENCE
+#undef CM_SCOPED_LOCK
+)msl";
+        const std::string anchor = "using namespace metal;\n";
+        const std::size_t insertion = result.source.find(anchor);
+        if (insertion == std::string::npos) {
+            result.error = "typed MSL scoped access helper anchor is missing";
+            return result;
+        }
+        result.source.insert(insertion + anchor.size(), kScopedAccessHelpers);
     }
     if (result.source.find("cm_libdevice_") != std::string::npos) {
         static constexpr std::string_view kLibdeviceDeclarations = R"msl(

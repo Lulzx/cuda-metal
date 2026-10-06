@@ -5,6 +5,7 @@
 #include "cumetal/ptx/parser.h"
 
 #include <algorithm>
+#include <optional>
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -3439,8 +3440,52 @@ bool ptx_uses_unsupported_global_access(std::string_view ptx) {
 
 }  // namespace
 
+// `.relaxed`/`.acquire`/`.release` at gpu/sys scope, or `.volatile`, on
+// global memory: accesses PTX makes single-copy atomic across thread blocks.
+// Mirrors scoped_global_access in the typed PTX importer.
+static bool is_scoped_global_access(std::string_view opcode) {
+    if (opcode.rfind("ld", 0) != 0 && opcode.rfind("st", 0) != 0) return false;
+    for (const std::string_view space : {".shared", ".local", ".const", ".param"})
+        if (opcode.find(space) != std::string_view::npos) return false;
+    if (opcode.find(".volatile") != std::string_view::npos) return true;
+    const bool ordered = opcode.find(".relaxed") != std::string_view::npos ||
+                         opcode.find(".acquire") != std::string_view::npos ||
+                         opcode.find(".release") != std::string_view::npos;
+    return ordered && (opcode.find(".gpu") != std::string_view::npos ||
+                       opcode.find(".sys") != std::string_view::npos);
+}
+
 LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerToMetalOptions& options) {
     LowerToMetalResult result;
+
+    std::optional<cumetal::passes::Phase1PipelineOutput> legacy_pipeline;
+    if (options.backend != PtxMetalBackend::kCumetalIr) {
+        // Neither legacy emitter makes these accesses atomic: both split a
+        // {status, value} pair into plain device loads and stores, and CUB's
+        // decoupled look-back then summed stale prefixes without an error.
+        // Only the typed backend lowers them correctly, so such a kernel is
+        // routed there, and refused if the typed backend cannot take it.
+        cumetal::passes::Phase1PipelineOptions probe_options;
+        probe_options.strict = options.strict;
+        probe_options.entry_name = options.entry_name;
+        legacy_pipeline = cumetal::passes::run_phase1_pipeline(ptx, probe_options);
+        const auto& probe = *legacy_pipeline;
+        if (probe.ok &&
+            std::any_of(probe.lowered_instructions.begin(), probe.lowered_instructions.end(),
+                        [](const auto& instruction) {
+                            return is_scoped_global_access(instruction.opcode);
+                        })) {
+            LowerToMetalOptions typed = options;
+            typed.backend = PtxMetalBackend::kCumetalIr;
+            LowerToMetalResult routed = lower_ptx_to_metal_source(ptx, typed);
+            if (!routed.ok) {
+                routed.error = "kernel uses scoped (.relaxed/.acquire/.release/.volatile) global "
+                               "loads or stores, which only the typed backend makes atomic: " +
+                               routed.error;
+            }
+            return routed;
+        }
+    }
 
     if (options.backend == PtxMetalBackend::kCumetalIr) {
         cumetal::metal::PtxToMslOptions compile_options;
@@ -3473,10 +3518,8 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
         return result;
     }
 
-    cumetal::passes::Phase1PipelineOptions pipeline_options;
-    pipeline_options.strict = options.strict;
-    pipeline_options.entry_name = options.entry_name;
-    const auto pipeline = cumetal::passes::run_phase1_pipeline(ptx, pipeline_options);
+    // The probe above already ran the legacy pipeline with these options.
+    const cumetal::passes::Phase1PipelineOutput pipeline = std::move(*legacy_pipeline);
     if (!pipeline.ok) {
         result.error = pipeline.error;
         return result;

@@ -230,9 +230,35 @@ static double host_normcdfinv(double p) {
 #define SI(v) ((int)(((v) - 0.5f) * 2000.0f))
 #define SL(v) ((long long)(((v) - 0.5f) * 2e12f))
 template <typename T> static T host_min(T a, T b) { return a < b ? a : b; }
+// Integer bit functions (__brev, __popcll, __clzll, __ffsll, __mulhi, ...).
+// U spreads (0,1) over the 32-bit range; W packs two of them into 64 bits.
+#define U(v) ((unsigned)((v) * 4294967040.0f))
+#define W(a, b) (((unsigned long long)U(a) << 32) | (unsigned long long)U(b))
+static unsigned host_brev(unsigned v) {
+    unsigned r = 0;
+    for (int i = 0; i < 32; ++i) r |= ((v >> i) & 1u) << (31 - i);
+    return r;
+}
+static unsigned long long host_brevll(unsigned long long v) {
+    return ((unsigned long long)host_brev((unsigned)v) << 32) | host_brev((unsigned)(v >> 32));
+}
+static int host_popcll(unsigned long long v) { int n = 0; for (; v; v &= v - 1) ++n; return n; }
+static int host_clzll(unsigned long long v) { int n = 0; for (int i = 63; i >= 0 && !((v >> i) & 1); --i) ++n; return n; }
+static int host_ffsll(unsigned long long v) { for (int i = 0; i < 64; ++i) if ((v >> i) & 1) return i + 1; return 0; }
 template <typename T> static T host_max(T a, T b) { return a > b ? a : b; }
 
 #define BINARY_LIST(X)                                                         \
+    X(brev,    (float)__brev(U(x)),                (float)host_brev(U(x)),             0.0f) \
+    X(brevll,  (float)(__brevll(W(x, y)) >> 20),   (float)(host_brevll(W(x, y)) >> 20), 0.0f) \
+    X(popcll,  (float)__popcll(W(x, y)),           (float)host_popcll(W(x, y)),        0.0f) \
+    X(clzll,   (float)__clzll(W(x, y) >> (U(y) & 63)),                                 \
+               (float)host_clzll(W(x, y) >> (U(y) & 63)),                          0.0f) \
+    X(ffsll,   (float)__ffsll(W(x, y) << (U(x) & 63)),                                 \
+               (float)host_ffsll(W(x, y) << (U(x) & 63)),                          0.0f) \
+    X(umulhi,  (float)__umulhi(U(x), U(y)),                                            \
+               (float)(unsigned)(((unsigned long long)U(x) * U(y)) >> 32),         0.0f) \
+    X(mulhi,   (float)__mulhi(SI(x) * 1000000, SI(y) * 1000000),                       \
+               (float)(int)(((long long)(SI(x) * 1000000) * (SI(y) * 1000000)) >> 32), 0.0f) \
     X(imin,   (float)min(SI(x), SI(y)),         (float)host_min(SI(x), SI(y)), 0.0f) \
     X(imax,   (float)max(SI(x), SI(y)),         (float)host_max(SI(x), SI(y)), 0.0f) \
     X(umin,   (float)umin((unsigned)SI(x), (unsigned)SI(y)),                   \

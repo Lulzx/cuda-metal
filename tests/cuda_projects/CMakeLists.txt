@@ -763,3 +763,60 @@ add_test(NAME functional_cuda_projects_thrust_gpu_sort
 set_tests_properties(functional_cuda_projects_thrust_gpu_sort PROPERTIES
     SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
     ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_USE_METAL_DEVICE_ADDRESSES=1")
+
+# Decoupled look-back (CUB DeviceScan/DeviceSelect/onesweep): scoped PTX
+# {status, value} descriptors must be single-copy atomic across blocks.
+foreach(backend IN ITEMS legacy cumetal-ir)
+    if(backend STREQUAL "legacy")
+        set(lookback_test functional_cuda_projects_lookback_scan)
+    else()
+        set(lookback_test functional_cuda_projects_lookback_scan_typed)
+    endif()
+    add_test(
+        NAME ${lookback_test}
+        COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}
+            lookback_scan
+            lookback_scan.cu
+            lookback_scan
+            "PASS: decoupled look-back scan with scoped PTX descriptors"
+    )
+    set_tests_properties(
+        ${lookback_test}
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            RUN_SERIAL TRUE
+            TIMEOUT 300
+            ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=${backend}"
+    )
+endforeach()
+
+# %lanemask_* special registers (CUB's warp scan and radix rank read them).
+foreach(backend IN ITEMS legacy cumetal-ir)
+    if(backend STREQUAL "legacy")
+        set(lanemask_test functional_cuda_projects_lanemask)
+    else()
+        set(lanemask_test functional_cuda_projects_lanemask_typed)
+    endif()
+    add_test(
+        NAME ${lanemask_test}
+        COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}
+            lanemask
+            lanemask.cu
+            lanemask
+            "PASS: lanemask special registers"
+    )
+    set_tests_properties(
+        ${lanemask_test}
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            RUN_SERIAL TRUE
+            TIMEOUT 300
+            ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=${backend}"
+    )
+endforeach()

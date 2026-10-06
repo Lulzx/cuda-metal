@@ -387,6 +387,35 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
             .argument_types = {Type::integer(32)},
         };
     }
+    // 64-bit bit counts return a 32-bit int; bit reversal keeps its width.
+    if (name == "__nv_popcll" || name == "__nv_clzll" || name == "__nv_ffsll") {
+        return BuiltinSignature{
+            .metal_name = name == "__nv_popcll" ? "popcount" :
+                          name == "__nv_clzll" ? "clz" : "__cumetal_ffs",
+            .return_type = Type::integer(32),
+            .argument_types = {Type::integer(64)},
+        };
+    }
+    if (name == "__nv_brev" || name == "__nv_brevll") {
+        const unsigned bits = name == "__nv_brevll" ? 64 : 32;
+        return BuiltinSignature{
+            .metal_name = "reverse_bits",
+            .return_type = Type::integer(bits),
+            .argument_types = {Type::integer(bits)},
+        };
+    }
+    // The high half of a 32x32 product, as for PTX mul.hi.u32/.s32 (the 64-bit
+    // forms are below).
+    if (name == "__nv_umulhi" || name == "__nv_mulhi") {
+        BuiltinSignature signature{
+            .attributes = {{"high_half", "true"}},
+            .return_type = Type::integer(32),
+            .argument_types = {Type::integer(32), Type::integer(32)},
+            .opcode = OpCode::kMul,
+        };
+        if (name == "__nv_mulhi") signature.attributes.emplace_back("signed", "true");
+        return signature;
+    }
     if (name == "__nv_popc" || name == "__nv_clz" || name == "__nv_abs" ||
         name == "__nv_ffs") {
         return BuiltinSignature{
@@ -915,6 +944,28 @@ MemoryOrdering memory_ordering_from_opcode(std::string_view opcode) {
     if (opcode.find(".release") != std::string_view::npos) return MemoryOrdering::kRelease;
     if (opcode.find(".sc") != std::string_view::npos) return MemoryOrdering::kSequentiallyConsistent;
     return MemoryOrdering::kRelaxed;
+}
+
+// A load or store that PTX makes single-copy atomic and visible across thread
+// blocks: `.relaxed`/`.acquire`/`.release` at `.gpu`/`.sys` scope, or
+// `.volatile`, on global (or generic) memory. CUB's decoupled look-back publishes
+// each tile's {status, value} pair this way (`st.relaxed.gpu.v2.u32`), and a
+// reader must never see the new status with the old value. Plain Metal device
+// accesses guarantee neither atomicity nor cross-threadgroup visibility.
+bool scoped_global_access(std::string_view opcode) {
+    if (opcode.find(".shared") != std::string_view::npos ||
+        opcode.find(".local") != std::string_view::npos ||
+        opcode.find(".const") != std::string_view::npos ||
+        opcode.find(".param") != std::string_view::npos) {
+        return false;
+    }
+    if (opcode.find(".volatile") != std::string_view::npos) return true;
+    const bool ordered = opcode.find(".relaxed") != std::string_view::npos ||
+                         opcode.find(".acquire") != std::string_view::npos ||
+                         opcode.find(".release") != std::string_view::npos;
+    const bool wide_scope = opcode.find(".gpu") != std::string_view::npos ||
+                            opcode.find(".sys") != std::string_view::npos;
+    return ordered && wide_scope;
 }
 
 std::string atomic_operation_from_opcode(std::string_view opcode) {
@@ -4341,6 +4392,46 @@ struct Importer {
                    instruction.operands[1].find("%laneid") != std::string::npos) {
             operation.opcode = OpCode::kLaneId;
         } else if (root == "mov" && instruction.operands.size() >= 2 &&
+                   trim(instruction.operands[1]).starts_with("%lanemask_")) {
+            // Pure functions of the lane index (CUB's radix sort reads
+            // %lanemask_le): eq = 1<<L, lt = eq-1, le = (2<<L)-1, ge = ~lt,
+            // gt = ~le. At L = 31, 2<<31 wraps to 0 and le is all ones.
+            const std::string kind = trim(instruction.operands[1]).substr(10);
+            if (kind != "eq" && kind != "lt" && kind != "le" && kind != "ge" && kind != "gt") {
+                return fail(&instruction, "unknown PTX lane mask register");
+            }
+            const Type type = Type::integer(32);
+            const auto emit = [&](OpCode opcode, std::vector<Operand> operands) {
+                Operation step;
+                step.opcode = opcode;
+                step.location = operation.location;
+                step.operands = std::move(operands);
+                const ValueId value = builder.next_value();
+                step.results = {value};
+                step.result_types = {type};
+                value_types[value] = type;
+                block->operations.push_back(std::move(step));
+                return Operand::value_ref(value, type);
+            };
+            const Operand lane = emit(OpCode::kLaneId, {});
+            const bool inclusive = kind == "le" || kind == "gt";
+            const Operand bit = Operand::immediate(inclusive ? "2" : "1", type);
+            if (kind == "eq") {
+                operation.opcode = OpCode::kShiftLeft;
+                operation.operands = {bit, lane};
+            } else {
+                const Operand below = emit(OpCode::kShiftLeft, {bit, lane});
+                if (kind == "lt" || kind == "le") {
+                    operation.opcode = OpCode::kSub;
+                    operation.operands = {below, Operand::immediate("1", type)};
+                } else {
+                    const Operand mask = emit(OpCode::kSub, {below, Operand::immediate("1", type)});
+                    operation.opcode = OpCode::kBitXor;
+                    operation.operands = {mask, Operand::immediate("4294967295", type)};
+                }
+            }
+            operation.result_types.front() = type;
+        } else if (root == "mov" && instruction.operands.size() >= 2 &&
                    instruction.operands[1].find("%activemask") != std::string::npos) {
             operation.opcode = OpCode::kBallot;
             operation.attributes["kind"] = "active_mask";
@@ -4382,6 +4473,150 @@ struct Importer {
                 if (provenance != function->pointer_provenance.end()) {
                     function->pointer_provenance[operation.results.front()] = provenance->second;
                 }
+            }
+        } else if ((root == "ld" || root == "st") && scoped_global_access(instruction.opcode)) {
+            // Lowered as atomics: 4 bytes natively, 8 and 16 bytes through the
+            // lock bank as one unit. Vector lanes are packed into 64-bit words.
+            const bool is_load = root == "ld";
+            if (instruction.operands.size() != 2) return fail(&instruction, "malformed scoped PTX access");
+            const std::size_t lanes = memory_vector_width(instruction.opcode);
+            const Type element_type = ptx_scalar_type(instruction.opcode);
+            const std::uint32_t total_bits = static_cast<std::uint32_t>(lanes) * element_type.bit_width;
+            if ((total_bits != 32 && total_bits != 64 && total_bits != 128) ||
+                (element_type.bit_width != 32 && element_type.bit_width != 64)) {
+                return fail(&instruction, "scoped PTX " + std::string(is_load ? "load" : "store") +
+                                              " must move 4, 8 or 16 bytes of 32- or 64-bit lanes");
+            }
+            const std::uint32_t word_bits = total_bits == 32 ? 32 : 64;
+            const Type word_type = Type::integer(word_bits);
+            const std::size_t words = total_bits == 128 ? 2 : 1;
+            const MemoryOrdering ordering = memory_ordering_from_opcode(instruction.opcode);
+            const auto emit = [&](Operation step, const Type& type) {
+                step.location = operation.location;
+                const ValueId value = builder.next_value();
+                step.results = {value};
+                step.result_types = {type};
+                value_types[value] = type;
+                block->operations.push_back(std::move(step));
+                return Operand::value_ref(value, type);
+            };
+            const auto convert = [&](Operand value, const Type& type) {
+                if (value.type == type) return value;
+                Operation conversion;
+                conversion.opcode = OpCode::kConvert;
+                conversion.operands = {value};
+                if (value.type.is_pointer() || type.is_pointer())
+                    conversion.attributes["pointer_integer"] = "true";
+                else if (value.type.kind != type.kind)
+                    conversion.attributes["bitcast"] = "true";
+                return emit(std::move(conversion), type);
+            };
+            const auto binary = [&](OpCode opcode, Operand left, Operand right) {
+                Operation step;
+                step.opcode = opcode;
+                step.operands = {std::move(left), std::move(right)};
+                return emit(std::move(step), word_type);
+            };
+            const auto fence = [&]() {
+                Operation barrier;
+                barrier.opcode = OpCode::kFence;
+                barrier.location = operation.location;
+                barrier.memory_scope = MemoryScope::kDevice;
+                barrier.memory_ordering = MemoryOrdering::kAcquireRelease;
+                barrier.attributes["cuda_membar"] = "true";
+                block->operations.push_back(std::move(barrier));
+            };
+            Operation access;
+            access.opcode = OpCode::kAtomic;
+            access.location = operation.location;
+            access.memory_scope = MemoryScope::kDevice;
+            access.memory_ordering = MemoryOrdering::kRelaxed;
+            access.attributes["scoped_access"] = "true";
+            if (word_bits == 64) access.attributes["lock_backed"] = "true";
+            access.operands.push_back(memory_address_operand(is_load ? 1 : 0, AddressSpace::kDevice));
+            if (is_load) {
+                access.attributes["atomic_op"] = words == 2 ? "load128" : "load";
+                for (std::size_t w = 0; w < words; ++w) {
+                    const ValueId value = builder.next_value();
+                    access.results.push_back(value);
+                    access.result_types.push_back(word_type);
+                    value_types[value] = word_type;
+                }
+                std::vector<Operand> loaded;
+                for (std::size_t w = 0; w < words; ++w)
+                    loaded.push_back(Operand::value_ref(access.results[w], word_type));
+                block->operations.push_back(std::move(access));
+                if (ordering == MemoryOrdering::kAcquire || ordering == MemoryOrdering::kAcquireRelease)
+                    fence();
+                if (operation.results.size() != lanes)
+                    return fail(&instruction, "scoped PTX load destination tuple width mismatch");
+                // Lane i holds bits [i*width, (i+1)*width) of the packed words.
+                std::vector<Operand> lane_values;
+                for (std::size_t lane = 0; lane < lanes; ++lane) {
+                    const std::size_t bit = lane * element_type.bit_width;
+                    Operand word = loaded[bit / 64 < words ? bit / 64 : 0];
+                    const std::size_t shift = word_bits == 64 ? bit % 64 : 0;
+                    if (shift != 0)
+                        word = binary(OpCode::kShiftRight, word,
+                                      Operand::immediate(std::to_string(shift), word_type));
+                    const Type lane_bits = Type::integer(element_type.bit_width);
+                    lane_values.push_back(convert(convert(word, lane_bits),
+                                                  operation.result_types[lane]));
+                }
+                // Lanes after the first are copies; the instruction itself
+                // keeps lane 0 so result bookkeeping is unchanged.
+                for (std::size_t lane = 1; lane < lanes; ++lane) {
+                    Operation copy;
+                    copy.opcode = OpCode::kConvert;
+                    copy.location = operation.location;
+                    copy.operands = {lane_values[lane]};
+                    copy.results = {operation.results[lane]};
+                    copy.result_types = {operation.result_types[lane]};
+                    block->operations.push_back(std::move(copy));
+                }
+                operation.opcode = OpCode::kConvert;
+                operation.operands = {lane_values[0]};
+                operation.results.resize(1);
+                operation.result_types.resize(1);
+            } else {
+                std::vector<std::string> lane_tokens;
+                if (lanes > 1) {
+                    for (const std::string& name : grouped_names(instruction.operands[1]))
+                        lane_tokens.push_back(name);
+                    if (lane_tokens.size() != lanes)
+                        return fail(&instruction, "scoped PTX store source tuple width mismatch");
+                } else {
+                    lane_tokens.push_back(trim(instruction.operands[1]));
+                }
+                std::vector<Operand> packed(words);
+                for (std::size_t lane = 0; lane < lanes; ++lane) {
+                    const Type lane_bits = Type::integer(element_type.bit_width);
+                    Operand value = convert(operand_for(lane_tokens[lane], *environment, element_type),
+                                            element_type);
+                    value = convert(value, lane_bits);
+                    if (value.type.is_pointer())
+                        return fail(&instruction, "scoped PTX store of a pointer value is unsupported");
+                    value = convert(value, word_type);
+                    const std::size_t bit = lane * element_type.bit_width;
+                    const std::size_t shift = word_bits == 64 ? bit % 64 : 0;
+                    if (shift != 0)
+                        value = binary(OpCode::kShiftLeft, value,
+                                       Operand::immediate(std::to_string(shift), word_type));
+                    Operand& slot = packed[bit / 64 < words ? bit / 64 : 0];
+                    slot = slot.type.kind == TypeKind::kVoid ? value
+                                                             : binary(OpCode::kBitOr, slot, value);
+                }
+                if (ordering == MemoryOrdering::kRelease || ordering == MemoryOrdering::kAcquireRelease)
+                    fence();
+                access.attributes["atomic_op"] = words == 2 ? "store128" : "store";
+                for (const Operand& word : packed) access.operands.push_back(word);
+                // A store has no value; keep the atomic ALU contract with an
+                // intentionally unused result, as PTX red does.
+                const ValueId unused = builder.next_value();
+                access.results = {unused};
+                access.result_types = {word_type};
+                value_types[unused] = word_type;
+                operation = std::move(access);
             }
         } else if (root == "ld") {
             operation.opcode = OpCode::kLoad;
@@ -5994,13 +6229,34 @@ static bool substitute_inline_asm_operands(const InlineAsmRequest& request,
                                            std::string* text, std::string* error) {
     text->clear();
     const std::string& in = request.text;
+    // A `{` at the start of a statement opens a scope block and goes on its
+    // own line. One after an opcode is a vector operand (`st.v2.u32 [a],
+    // {x, y};`) and stays in the statement, as does its matching `}`.
+    bool statement_start = true;
+    bool in_vector_operand = false;
     for (std::size_t i = 0; i < in.size(); ++i) {
         const char c = in[i];
+        if (c == '{' && !statement_start) {
+            in_vector_operand = true;
+            *text += c;
+            continue;
+        }
+        if (c == '}' && in_vector_operand) {
+            in_vector_operand = false;
+            *text += c;
+            continue;
+        }
         if (c == '{' || c == '}') {
             *text += '\n';
             *text += c;
             *text += '\n';
+            statement_start = true;
             continue;
+        }
+        if (c == ';' || c == '\n') {
+            statement_start = true;
+        } else if (!std::isspace(static_cast<unsigned char>(c))) {
+            statement_start = false;
         }
         if (c != '$') {
             *text += c;

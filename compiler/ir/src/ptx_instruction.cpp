@@ -89,7 +89,8 @@ std::vector<std::string> source_registers(const Instruction& instruction) {
         return starts_with(name, "%tid.") || starts_with(name, "%ctaid.") ||
                starts_with(name, "%ntid.") || starts_with(name, "%nctaid.") ||
                name == "%laneid" || name == "%warpid" || name == "%smid" ||
-               name == "%activemask" || starts_with(name, "%clock");
+               name == "%activemask" || starts_with(name, "%lanemask_") ||
+               starts_with(name, "%clock");
     });
     return sources;
 }

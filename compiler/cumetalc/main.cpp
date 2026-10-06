@@ -1695,7 +1695,9 @@ int main(int argc, char** argv) {
         command += cuda_inline_flags(compiler, cuda_inline_threshold);
         if (std::filesystem::exists(runtime_api_dir) &&
             std::filesystem::is_directory(runtime_api_dir)) {
-            command += " -I " + quote_shell(runtime_api_dir.string()) +
+            // -isystem, not -I: the caller's include paths (CCCL, for
+            // one) must win over CuMetal's clean-room cub/ and cuda/.
+            command += " -isystem " + quote_shell(runtime_api_dir.string()) +
                        " -include " + quote_shell("cuda_runtime.h");
         }
         for (const auto& include_dir : cuda_include_dirs) {
@@ -2000,7 +2002,7 @@ int main(int argc, char** argv) {
                 command += "-Xclang -target-feature -Xclang " +
                            quote_shell(ptx_feature) + " ";
             }
-            command += "-D__CUDACC__=1 -D__NVCC__=1 -I " +
+            command += "-D__CUDACC__=1 -D__NVCC__=1 -isystem " +
                        quote_shell(runtime_api_dir.string()) +
                        " -include cuda_runtime.h ";
             if (device_default_execution_space) {
@@ -2133,7 +2135,7 @@ int main(int argc, char** argv) {
             "-D__global__= -D__host__= -D__device__= -D__shared__= -D__constant__= "
             "-D__managed__= " +
             ((std::filesystem::exists(runtime_api_dir) && std::filesystem::is_directory(runtime_api_dir))
-                 ? ("-I " + quote_shell(runtime_api_dir.string()) + " ")
+                 ? ("-isystem " + quote_shell(runtime_api_dir.string()) + " ")
                  : "") +
             quote_shell(options.input.string()) + " -o " + quote_shell(temp_stage_file.string()) + " 2>&1";
         const CommandResult result = run_command_capture(command);

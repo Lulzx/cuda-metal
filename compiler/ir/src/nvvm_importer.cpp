@@ -1759,10 +1759,12 @@ struct Importer {
         // this for PTX mul.hi, and a libdevice mapping has to reach every
         // frontend: supporting it only on the PTX path left the direct .cu
         // frontend refusing every AMReX ParallelFor.
-        if (name == "__nv_umul64hi" || name == "__nv_mul64hi") {
+        if (name == "__nv_umul64hi" || name == "__nv_mul64hi" || name == "__nv_umulhi" ||
+            name == "__nv_mulhi") {
             operation->opcode = OpCode::kMul;
             operation->attributes["high_half"] = "true";
-            if (name == "__nv_mul64hi") operation->attributes["signed"] = "true";
+            if (name == "__nv_mul64hi" || name == "__nv_mulhi")
+                operation->attributes["signed"] = "true";
             for (const llvm::Use& argument : call.args()) {
                 operation->operands.push_back(import_operand(*argument.get(), *state));
             }
@@ -2029,7 +2031,12 @@ struct Importer {
             {"__nv_double2hiint", "double2hiint"},
             {"__nv_double2loint", "double2loint"},
             {"__nv_popc", "popcount"},
+            {"__nv_popcll", "popcount"},
             {"__nv_clz", "clz"},
+            {"__nv_clzll", "clz"},
+            {"__nv_brev", "reverse_bits"},
+            {"__nv_brevll", "reverse_bits"},
+            {"__nv_ffsll", "__cumetal_ffs"},
             {"__nv_abs", "__cumetal_signed_abs"},
             {"__nv_llabs", "__cumetal_signed_abs"},
             {"__nv_ffs", "__cumetal_ffs"},

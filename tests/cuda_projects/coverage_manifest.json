@@ -364,6 +364,22 @@
       "source": "thrust_gpu_sort.cu",
       "binary": "thrust_gpu_sort",
       "harness": "standard"
+    },
+    {
+      "name": "lookback_scan",
+      "subdir": "lookback_scan",
+      "source": "lookback_scan.cu",
+      "binary": "lookback_scan",
+      "harness": "strict",
+      "expect_pattern": "PASS: decoupled look-back scan with scoped PTX descriptors"
+    },
+    {
+      "name": "lanemask",
+      "subdir": "lanemask",
+      "source": "lanemask.cu",
+      "binary": "lanemask",
+      "harness": "strict",
+      "expect_pattern": "PASS: lanemask special registers"
     }
   ]
 }

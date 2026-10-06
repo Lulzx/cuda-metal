@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -289,6 +290,47 @@ extern "C" __global__ void unannotated_kernel(float* out, const float* in, int c
                     "without --device-as-default-execution-space an unannotated helper is "
                     "host-only")) {
             std::fprintf(stderr, "%s\n", log.c_str());
+            return 1;
+        }
+    }
+
+    // CuPy hands NVRTC the CCCL include paths and compiles CUB block algorithms
+    // with --device-as-default-execution-space. Two things broke that: CuMetal's
+    // own clean-room cub/ headers shadowed the caller's (so CCCL's util_ptx.cuh
+    // found CuMetal's util_type.cuh and no constant_t), and CCCL, seeing Clang
+    // rather than NVRTC, includes <ostream>, whose libc++ classes failed to
+    // compile once forced __host__ __device__.
+    {
+        const std::filesystem::path include_root =
+            std::filesystem::temp_directory_path() /
+            ("cumetal-nvrtc-include-order-" + std::to_string(::getpid()));
+        std::filesystem::create_directories(include_root / "cub");
+        {
+            std::FILE* header = std::fopen((include_root / "cub" / "util_type.cuh").c_str(), "w");
+            if (!expect(header != nullptr, "write the caller's cub/util_type.cuh")) {
+                return 1;
+            }
+            std::fputs("#pragma once\nnamespace caller_cub { constexpr int marker = 41; }\n",
+                       header);
+            std::fclose(header);
+        }
+        const char* const source = R"(
+#include <cub/util_type.cuh>
+#include <ostream>
+inline float plus_marker(float x) { return x + caller_cub::marker; }
+extern "C" __global__ void include_order_kernel(float* out, const float* in, int count) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < count) out[index] = plus_marker(in[index]);
+}
+)";
+        const std::string include_option = "--include-path=" + include_root.string();
+        std::vector<const char*> options = kWarpLikeOptions;
+        options.push_back(include_option.c_str());
+        std::vector<char> image;
+        const bool compiled = compile_ok(source, "include_order_module", options, &image);
+        std::filesystem::remove_all(include_root);
+        if (!expect(compiled, "the caller's include path wins over CuMetal's cub/, and "
+                              "<ostream> compiles under device-default execution space")) {
             return 1;
         }
     }

@@ -274,8 +274,8 @@ current target.
 Inline `asm` in CUDA source is lowered by the same PTX instruction importer
 the PTX frontend uses: operands are bound to synthetic registers from the
 constraint string (`r`, `h`, `c`, `l`, `f`, `d`, `b`, immediates, tied `+r`
-operands, multiple outputs) and the template's instructions are lowered in
-place, so any instruction the typed PTX path supports works inside `asm`.
+operands, multiple outputs, vector operands such as `{$1, $2}`) and the
+template's instructions are lowered in place, so any instruction the typed PTX path supports works inside `asm`.
 Refused with a diagnostic: control flow inside the template (`bra`, `call`,
 `ret`), `${N:modifier}` operand modifiers, and instructions the PTX path does
 not lower (tensor-core `mma`/`wmma`/`ldmatrix`, `mbarrier`, TMA, texture
@@ -294,6 +294,37 @@ the shape CUB's inline-asm warp scans expand to) is split into separate
 statements by the parser. Integer operations other than add/sub on a pointer
 operand (`ptr & 15` alignment tests) cast the pointer to `ulong`.
 
+## Scoped global loads and stores
+
+PTX `ld`/`st` with `.relaxed`, `.acquire` or `.release` at `.gpu` or `.sys`
+scope, or with `.volatile`, on global memory are single-copy atomic in CUDA.
+CUB's decoupled look-back (DeviceScan, DeviceSelect, onesweep radix sort)
+relies on it: each tile publishes a `{status, value}` pair with one
+`st.relaxed.gpu.v2` and later tiles poll it with one load. The typed backend
+lowers a 4-byte access to a relaxed Metal `atomic_uint` load or store, and an
+8- or 16-byte access (one 64-bit lane, or two 32- or 64-bit lanes packed) to a
+critical section on the same address-hashed lock bank that implements 64-bit
+atomics, so a reader sees both halves of the same write. `.acquire` adds a
+device fence after the load and `.release` one before the store. Other sizes
+are refused. The cost is a lock round trip per access, which only these
+descriptor and flag accesses pay.
+
+The legacy emitters split such accesses into plain device loads and stores,
+and CUB's scans then summed stale prefixes in whole tiles without an error.
+The legacy backend therefore routes any kernel containing one to the typed
+backend; if the typed backend cannot lower it, the kernel is refused with
+"kernel uses scoped (.relaxed/.acquire/.release/.volatile) global loads or
+stores, which only the typed backend makes atomic". Look-back also assumes
+forward progress between blocks; tile ids from an atomic counter keep the wait
+on blocks that are already running, which holds on Apple GPUs in practice but
+is not a Metal guarantee.
+
+CUB's `DeviceRadixSortOnesweepKernel` is still refused on the typed backend
+("conditional CFG has no forward reconvergence" in a barrier-containing call
+graph), so radix sorts that dispatch it fail with `cudaErrorInvalidValue`
+rather than returning unsorted data. CuPy's `cupy.sort` of `float64`, which
+goes through thrust to onesweep, is one of them.
+
 ## nvcc shim and bundled CCCL
 
 The fake toolkit's `nvcc` shim (`scripts/build_llama_cpp_cumetal.sh
@@ -302,7 +333,9 @@ The fake toolkit's `nvcc` shim (`scripts/build_llama_cpp_cumetal.sh
 CuPy, need `CUMETAL_CUDA_VERSION=12020`; otherwise CCCL reports that the
 compiler and toolkit are incompatible. CuMetal's headers are passed with
 `-isystem`, so a project's own CCCL headers take precedence over CuMetal's
-forwarding headers. `-Xfatbin` options are dropped. Under Clang CUDA,
+forwarding headers. `cumetalc` does the same for its `.cu` and NVRTC
+compiles: the caller's `-I`/`--include-path` directories are searched before
+CuMetal's clean-room `cub/` and `cuda/`. `-Xfatbin` options are dropped. Under Clang CUDA,
 `cuda_runtime.h` defines `CCCL_DISABLE_FP16_SUPPORT`, `CCCL_DISABLE_NVTX` and
 `CCCL_DISABLE_PDL`, because CuMetal's `__half` is not CCCL's and NVTX and
 programmatic dependent launch are not implemented. CCCL's `__half` and
@@ -328,7 +361,13 @@ the reason in the program log. `--device-as-default-execution-space` makes
 unannotated functions `__host__ __device__` (Clang has no device-only
 default), so a function that also has an explicit `__host__` declaration in the
 SDK headers keeps that declaration; programs still see the macOS SDK headers
-rather than NVRTC's freestanding set. `--ftz`, `--prec-div` and `--prec-sqrt`
+rather than NVRTC's freestanding set. Because standard library classes
+would also turn `__host__ __device__` and break `override`, the header that
+opens the region first includes the libc++ headers CCCL reaches (`<exception>`,
+`<functional>`, `<memory>`, `<new>`, `<optional>`, `<ostream>`,
+`<stdexcept>`, `<tuple>`, `<typeinfo>`, `<utility>`); CCCL sees Clang, not
+NVRTC, and takes its host-compiler branches. A standard header outside that
+list, first included by the program, can still fail this way. `--ftz`, `--prec-div` and `--prec-sqrt`
 have no Metal knob and are accepted as no-ops. An `sm_XX` request produces a
 metallib, so `nvrtcGetPTX` fails for it. A `compute_XX` request produces Clang's
 NVPTX output (`cumetalc --emit ptx`), which `cuModuleLoadData` lowers at load

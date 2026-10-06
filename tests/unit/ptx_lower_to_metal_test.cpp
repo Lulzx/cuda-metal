@@ -1523,6 +1523,55 @@ $L__BB0_2:
     if (!expect(reused_gid.ok && reused_gid.matched,
                 "a gid chain that reuses registers still lowers")) return 1;
 
+    // Scoped global accesses (CUB's decoupled look-back descriptors) must be
+    // single-copy atomic. The legacy emitters split them into plain accesses,
+    // so the legacy backend hands such a kernel to the typed backend, and
+    // refuses it, naming why, when the typed backend cannot take it either.
+    const auto scoped_ptx = [](const char* access) {
+        return std::string(R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry scoped(.param .u64 scoped_param_0)
+{
+    .reg .u64 %rd<2>;
+    .reg .u32 %r<3>;
+    .reg .b16 %h<2>;
+    ld.param.u64 %rd0, [scoped_param_0];
+    cvta.to.global.u64 %rd1, %rd0;
+    mov.u32 %r0, 2;
+    mov.u32 %r1, 7;
+    mov.b16 %h0, 7;
+)PTX") + access + R"PTX(
+    ret;
+}
+)PTX";
+    };
+    cumetal::ptx::LowerToMetalOptions scoped_options;
+    scoped_options.entry_name = "scoped";
+    const auto scoped_pair = cumetal::ptx::lower_ptx_to_metal_source(
+        scoped_ptx("    st.relaxed.gpu.global.v2.u32 [%rd1], {%r0, %r1};"), scoped_options);
+    if (!expect(scoped_pair.ok &&
+                    scoped_pair.metal_source.find("cm_scoped_store_u64(",
+                                                 scoped_pair.metal_source.find(
+                                                     "void cm_scoped_store_u64(") + 1) !=
+                        std::string::npos,
+                "a scoped v2.u32 store lowers through the typed backend as one 64-bit "
+                "lock-bank store")) {
+        std::fprintf(stderr, "%s\n%s\n", scoped_pair.error.c_str(),
+                     scoped_pair.metal_source.c_str());
+        return 1;
+    }
+    const auto scoped_half = cumetal::ptx::lower_ptx_to_metal_source(
+        scoped_ptx("    st.relaxed.gpu.global.u16 [%rd1], %h0;"), scoped_options);
+    if (!expect(!scoped_half.ok &&
+                    scoped_half.error.find("only the typed backend makes atomic") !=
+                        std::string::npos,
+                "a scoped 16-bit store the typed backend cannot take is refused, not split")) {
+        std::fprintf(stderr, "%s\n", scoped_half.error.c_str());
+        return 1;
+    }
+
     std::printf("PASS: ptx lower-to-metal unit tests\n");
     return 0;
 }

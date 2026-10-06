@@ -1531,6 +1531,26 @@ entry:
 }
 )llvm";
 
+// A vector operand's braces (`{$1, $2}`) belong to the statement; only a
+// brace at a statement start opens a scope block. Splitting both made the
+// importer read `%cm_asm_1,` as an opcode. CUB's look-back descriptors are
+// published and polled this way, inside a scope block or not.
+constexpr const char* kNvvmInlineAsmVectorOperands = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @asm_vector(ptr %slot, ptr %out, i32 %status, i32 %value) {
+entry:
+  call void asm sideeffect "{ st.relaxed.gpu.global.v2.u32 [$0], {$1, $2}; }", "l,r,r,~{memory}"(ptr %slot, i32 %status, i32 %value)
+  %pair = call { i32, i32 } asm sideeffect "ld.relaxed.gpu.global.v2.u32 {$0, $1}, [$2];", "=r,=r,l,~{memory}"(ptr %slot)
+  %s = extractvalue { i32, i32 } %pair, 0
+  %v = extractvalue { i32, i32 } %pair, 1
+  %sum = add i32 %s, %v
+  store i32 %sum, ptr %out, align 4
+  ret void
+}
+)llvm";
+
 constexpr const char* kNvvmInlineAsmControlFlow = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1901,6 +1921,22 @@ int main() {
                      inline_asm_idioms.source.find("uint(3) < 32") != std::string::npos,
                  "inline PTX idioms lower through the PTX instruction importer: " +
                      inline_asm_idioms.error);
+
+    const metal::NvvmToMslResult inline_asm_vector =
+        metal::compile_nvvm_to_msl(kNvvmInlineAsmVectorOperands, "inline-asm-vector.ll",
+                                   "asm_vector");
+    ok &= expect(inline_asm_vector.ok &&
+                     inline_asm_vector.source.find(
+                         "cm_scoped_store_u64(",
+                         inline_asm_vector.source.find("void cm_scoped_store_u64(") + 1) !=
+                         std::string::npos &&
+                     inline_asm_vector.source.find(
+                         "cm_scoped_load_u64(",
+                         inline_asm_vector.source.find("ulong cm_scoped_load_u64(") + 1) !=
+                         std::string::npos,
+                 "inline PTX vector operands stay in their statement and the scoped "
+                 "pair lowers to one lock-bank store and load: " +
+                     inline_asm_vector.error);
 
     const metal::NvvmToMslResult inline_asm_control_flow =
         metal::compile_nvvm_to_msl(kNvvmInlineAsmControlFlow, "inline-asm-branch.ll",
