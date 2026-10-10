@@ -5005,24 +5005,22 @@ struct Importer {
                     source_operand(i, Type::integer(32)));
             }
         } else if (root == "vote") {
-            const bool ballot =
-                instruction.opcode.find(".ballot.") != std::string::npos;
-            const bool sync =
-                instruction.opcode.find(".sync.") != std::string::npos;
-            if (instruction.operands.size() < 2 ||
-                (sync && instruction.operands.size() < 3)) {
+            const bool sync = starts_with(instruction.opcode, "vote.sync.");
+            const std::string mode = starts_with(instruction.opcode, "vote.")
+                                         ? instruction.opcode.substr(sync ? 10 : 5)
+                                         : std::string{};
+            std::string kind;
+            if (mode == "ballot.b32") kind = "ballot";
+            else if (mode == "all.pred") kind = "all";
+            else if (mode == "any.pred") kind = "any";
+            else if (mode == "uni.pred") kind = "uni";
+            else return fail(&instruction, "unsupported PTX vote instruction '" +
+                                          instruction.opcode + "'");
+            if (instruction.operands.size() != (sync ? 3 : 2)) {
                 return fail(&instruction, "malformed PTX vote instruction");
             }
-            if (instruction.opcode.find(".uni.") != std::string::npos) {
-                return fail(&instruction,
-                            "vote.uni is not supported by the typed Metal backend");
-            }
-            operation.opcode = ballot ? OpCode::kBallot : OpCode::kVote;
-            operation.attributes["kind"] =
-                ballot ? "ballot"
-                       : (instruction.opcode.find(".all.") != std::string::npos
-                              ? "all"
-                              : "any");
+            operation.opcode = kind == "ballot" ? OpCode::kBallot : OpCode::kVote;
+            operation.attributes["kind"] = kind;
             // The canonical GPU IR operand order is member-mask, predicate,
             // matching LLVM's nvvm.vote.*.sync intrinsics. PTX spells these as
             // destination, predicate, member-mask, so reorder rather than
@@ -5030,7 +5028,13 @@ struct Importer {
             operation.operands.push_back(
                 sync ? source_operand(2, Type::integer(32))
                      : Operand::immediate("4294967295", Type::integer(32)));
-            operation.operands.push_back(source_operand(1, Type::predicate()));
+            Operand predicate = source_operand(1, Type::predicate());
+            if (normalized_predicate(instruction.operands[1]).second) {
+                predicate = expressions.emit(
+                    OpCode::kBitXor, Type::predicate(),
+                    {predicate, Operand::immediate("true", Type::predicate())});
+            }
+            operation.operands.push_back(predicate);
         } else if (root == "redux") {
             operation.opcode = OpCode::kReduction;
             for (std::size_t i = 1; i < instruction.operands.size(); ++i) {

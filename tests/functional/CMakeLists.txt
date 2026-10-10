@@ -62,6 +62,10 @@ add_executable(cumetal_runtime_warp_mask_votes_test
     runtime_warp_mask_votes_test.cpp
 )
 
+add_executable(cumetal_runtime_warp_uniform_vote_test
+    runtime_warp_uniform_vote_test.cpp
+)
+
 add_executable(cumetal_runtime_warp_size_lane_test
     runtime_warp_size_lane_test.cpp
 )
@@ -671,6 +675,11 @@ target_link_libraries(cumetal_runtime_warp_partial_mask_test
 )
 
 target_link_libraries(cumetal_runtime_warp_mask_votes_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_warp_uniform_vote_test
     PRIVATE
         cumetal_runtime
 )
@@ -1503,6 +1512,13 @@ target_compile_options(cumetal_runtime_warp_partial_mask_test
 )
 
 target_compile_options(cumetal_runtime_warp_mask_votes_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_runtime_warp_uniform_vote_test
     PRIVATE
         -Wall
         -Wextra
@@ -2350,6 +2366,21 @@ add_test(
 )
 
 set_tests_properties(functional_runtime_warp_mask_votes_cu PROPERTIES SKIP_RETURN_CODE 77)
+
+foreach(frontend direct ptx)
+    add_test(
+        NAME functional_typed_${frontend}_warp_uniform_vote
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_uniform_vote.sh
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_runtime_warp_uniform_vote_test>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/warp_uniform_vote.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/warp_uniform_vote.${frontend}.metallib
+                ${frontend}
+    )
+    set_tests_properties(functional_typed_${frontend}_warp_uniform_vote PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 120 LABELS "gpu;functional")
+endforeach()
 
 add_test(
     NAME functional_runtime_warp_size_lane

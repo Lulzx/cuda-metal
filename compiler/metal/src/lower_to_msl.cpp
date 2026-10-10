@@ -5025,23 +5025,48 @@ struct AstLowerer {
                 fail(&operation, "malformed SIMD vote");
                 return std::nullopt;
             }
+            const auto kind = operation.attributes.find("kind");
+            if (kind == operation.attributes.end() ||
+                (kind->second != "all" && kind->second != "any" && kind->second != "uni")) {
+                fail(&operation, "unsupported SIMD vote kind");
+                return std::nullopt;
+            }
             const MslType vote_type{
                 .kind = MslTypeKind::kStruct, .struct_name = "simd_vote"};
             const MslExpr member_mask = expression_for(operation.operands[0]);
             const MslExpr ballot = MslExpression::vote_mask(MslExpression::call(
                 "simd_ballot", {expression_for(operation.operands[1])}, vote_type));
-            const MslExpr masked_ballot = MslExpression::binary(
+            MslExpr masked_ballot = MslExpression::binary(
                 "&", ballot, member_mask, MslType::uint());
-            const bool all = operation.attributes.contains("kind") &&
-                             operation.attributes.at("kind") == "all";
             MslExpr voted;
-            if (all) {
+            if (kind->second == "all" || kind->second == "uni") {
                 const MslExpr active = MslExpression::vote_mask(
                     MslExpression::call("simd_active_threads_mask", {}, vote_type));
-                const MslExpr expected = MslExpression::binary(
+                MslExpr expected = MslExpression::binary(
                     "&", active, member_mask, MslType::uint());
+                if (kind->second == "uni") {
+                    // Both collectives must run before the short-circuit OR:
+                    // caller masks can differ between logical groups in a SIMD group.
+                    const std::string suffix = std::to_string(operation.results.front());
+                    const std::string ballot_name = "cm_vote_ballot_" + suffix;
+                    const std::string members_name = "cm_vote_members_" + suffix;
+                    leading_statements.push_back(MslStatement::variable(
+                        MslType::uint(), ballot_name, masked_ballot, true));
+                    leading_statements.push_back(MslStatement::variable(
+                        MslType::uint(), members_name, expected, true));
+                    masked_ballot = MslExpression::identifier(ballot_name, MslType::uint());
+                    expected = MslExpression::identifier(members_name, MslType::uint());
+                }
                 voted = MslExpression::binary(
                     "==", masked_ballot, expected, MslType::boolean());
+                if (kind->second == "uni") {
+                    voted = MslExpression::binary(
+                        "||", MslExpression::binary(
+                            "==", masked_ballot,
+                            MslExpression::literal("0u", MslType::uint()),
+                            MslType::boolean()),
+                        voted, MslType::boolean());
+                }
             } else {
                 voted = MslExpression::binary(
                     "!=", masked_ballot,
