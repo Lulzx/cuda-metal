@@ -1937,6 +1937,17 @@ int main() {
                  "inline PTX vector operands stay in their statement and the scoped "
                  "pair lowers to one lock-bank store and load: " +
                      inline_asm_vector.error);
+    ok &= expect(inline_asm_vector.ok &&
+                     inline_asm_vector.source.find(
+                         "cm_scoped_store_u64(coherent(device) device ulong* payload") !=
+                         std::string::npos &&
+                     inline_asm_vector.source.find(
+                         "cm_scoped_load_u64(coherent(device) device ulong* payload") !=
+                         std::string::npos &&
+                     inline_asm_vector.source.find(
+                         "reinterpret_cast<coherent(device) device cm_alias_ulong*>") !=
+                         std::string::npos,
+                 "direct-source scoped vector accesses preserve device-coherent payload pointers");
 
     const metal::NvvmToMslResult inline_asm_control_flow =
         metal::compile_nvvm_to_msl(kNvvmInlineAsmControlFlow, "inline-asm-branch.ll",

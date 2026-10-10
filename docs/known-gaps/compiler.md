@@ -294,6 +294,23 @@ the shape CUB's inline-asm warp scans expand to) is split into separate
 statements by the parser. Integer operations other than add/sub on a pointer
 operand (`ptr & 15` alignment tests) cast the pointer to `ulong`.
 
+## Device coherence for lock-backed accesses
+
+The typed backend qualifies device payloads in its 64-bit atomic and scoped
+64/128-bit helpers with `coherent(device)`. Apple's
+[MSL specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
+§4.8 gives ordinary device accesses threadgroup coherence by default; a shared
+lock and device fences alone do not give those accesses device coherence.
+The qualifier and existing fences require Metal 3.2 or later. Threadgroup
+payloads keep their threadgroup address space.
+
+On an M1 Pro, an unqualified 64-block, 256-thread unit counter returned 8,192
+instead of 16,384, with duplicated atomic return values. The focused integer
+regression checks every old value from 16,384 adds and 4,096 CAS increments,
+including nonzero high bits and a carry across the low 32-bit word. Existing
+binary64-add and look-back tests cover FP64 modes and scoped descriptors.
+This is device-side synchronization, not a CPU/GPU system-atomic guarantee.
+
 ## Scoped global loads and stores
 
 PTX `ld`/`st` with `.relaxed`, `.acquire` or `.release` at `.gpu` or `.sys`
@@ -303,8 +320,9 @@ relies on it: each tile publishes a `{status, value}` pair with one
 `st.relaxed.gpu.v2` and later tiles poll it with one load. The typed backend
 lowers a 4-byte access to a relaxed Metal `atomic_uint` load or store, and an
 8- or 16-byte access (one 64-bit lane, or two 32- or 64-bit lanes packed) to a
-critical section on the same address-hashed lock bank that implements 64-bit
-atomics, so a reader sees both halves of the same write. `.acquire` adds a
+critical section with a device-coherent payload on the same address-hashed lock
+bank that implements 64-bit atomics, so a reader sees both halves of the same
+write. `.acquire` adds a
 device fence after the load and `.release` one before the store. Other sizes
 are refused. The cost is a lock round trip per access, which only these
 descriptor and flag accesses pay.

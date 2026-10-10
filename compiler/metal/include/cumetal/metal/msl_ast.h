@@ -39,6 +39,7 @@ struct MslType {
     MslAddressSpace address_space = MslAddressSpace::kNone;
     std::shared_ptr<MslType> element;
     std::string struct_name;
+    bool device_coherent = false;  // Coherence of a pointer/reference's pointee.
 
     static MslType void_type();
     static MslType boolean();

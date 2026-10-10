@@ -81,6 +81,10 @@ definedness checks.
 A single-use 64-bit pack followed by unsigned 16/32-bit narrowing can discard
 its unobserved high half when declared widths and an unchanged low source prove
 the replacement. Other uses retain their original definedness requirements.
+Typed lock-backed 64-bit atomics and scoped 64/128-bit accesses use
+device-coherent payload pointers as well as device fences. Focused M1 Pro tests
+check contended integer add/CAS return values, binary64 addition, and cross-block
+scan descriptors; these paths require Metal 3.2 or later.
 See [known gaps](docs/known-gaps.md) for memory-provenance and legacy-backend
 limits, and
 [compiler architecture](docs/compiler-architecture.md) for backend details.

@@ -3528,6 +3528,60 @@ ret;
                          std::string::npos,
                  "typed PTX lowers device and static-shared 64-bit atomics through the lock-bank ABI");
     if (!wide_atomic.ok) std::cerr << wide_atomic.error << "\n";
+    ok &= expect(wide_atomic.ok &&
+                     wide_atomic.source.find(
+                         "cm_wide_atomic_add_device_u64(coherent(device) device ulong* payload") !=
+                         std::string::npos &&
+                     wide_atomic.source.find(
+                         "reinterpret_cast<coherent(device) device cm_alias_ulong*>") !=
+                         std::string::npos &&
+                     wide_atomic.source.find(
+                         "cm_wide_atomic_cas_threadgroup_u64(threadgroup ulong* payload") !=
+                         std::string::npos,
+                 "lock-backed wide atomics use device-coherent payloads only for device memory");
+
+    const std::string scoped_wide_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry scoped_wide(.param .u64 slot) {
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [slot];
+    mov.u32 %r1, 1;
+    mov.u32 %r2, 2;
+    st.relaxed.gpu.global.v2.u32 [%rd1], {%r1, %r2};
+    ld.relaxed.gpu.global.v2.u32 {%r1, %r2}, [%rd1];
+    mov.u64 %rd2, 1;
+    mov.u64 %rd3, 2;
+    st.relaxed.gpu.global.v2.u64 [%rd1], {%rd2, %rd3};
+    ld.relaxed.gpu.global.v2.u64 {%rd2, %rd3}, [%rd1];
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult scoped_wide =
+        metal::compile_ptx_to_msl(scoped_wide_ptx);
+    ok &= expect(scoped_wide.ok &&
+                     scoped_wide.source.find(
+                         "cm_scoped_load_u64(coherent(device) device ulong* payload") !=
+                         std::string::npos &&
+                     scoped_wide.source.find(
+                         "cm_scoped_store_u64(coherent(device) device ulong* payload") !=
+                         std::string::npos &&
+                     scoped_wide.source.find(
+                         "cm_scoped_load_u128(coherent(device) device ulong2* payload") !=
+                         std::string::npos &&
+                     scoped_wide.source.find(
+                         "cm_scoped_store_u128(coherent(device) device ulong2* payload") !=
+                         std::string::npos &&
+                     scoped_wide.source.find(
+                         "reinterpret_cast<coherent(device) device cm_alias_ulong*>") !=
+                         std::string::npos &&
+                     scoped_wide.source.find(
+                         "reinterpret_cast<coherent(device) device cm_alias_ulong2*>") !=
+                         std::string::npos,
+                 "64- and 128-bit scoped payloads retain device coherence in helpers and casts: " +
+                     scoped_wide.error);
 
     const std::string clang_printf_ptx = R"ptx(
 .version 7.0

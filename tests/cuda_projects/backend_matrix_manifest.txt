@@ -54,6 +54,7 @@ tests/cuda_projects/softmax/softmax.cu fail pass pass pass
 tests/cuda_projects/system_atomics/system_atomics.cu fail pass pass pass
 tests/cuda_projects/transpose/transpose_standalone.cu fail pass pass pass
 tests/cuda_projects/vector_add/vector_add.cu fail pass pass pass
+tests/cuda_projects/wide_atomic_contention/wide_atomic_contention.cu fail pass pass pass
 tests/cuda_projects/wide_atomics/wide_atomics.cu fail pass pass pass
 tests/cuda_projects/cta_reduce/cta_reduce.cu fail pass pass pass
 tests/cuda_projects/kokkos_compat/kokkos_compat.cu fail pass pass pass
