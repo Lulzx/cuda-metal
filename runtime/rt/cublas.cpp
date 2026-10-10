@@ -1192,11 +1192,14 @@ cublasStatus_t cublasSnrm2(cublasHandle_t handle, int n, const float* x, int inc
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
-    if (n < 0 || incx <= 0 || result == nullptr) {
+    float* result_ptr = scalar_pointer_for_mode(handle, result);
+    if (result_ptr == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
-    if (n == 0) {
-        *result = 0.0f;
+    if (n <= 0 || incx <= 0) {
+        const cublasStatus_t sync_status = synchronize_handle_stream(handle);
+        if (sync_status != CUBLAS_STATUS_SUCCESS) return sync_status;
+        *result_ptr = 0.0f;
         return CUBLAS_STATUS_SUCCESS;
     }
     if (x == nullptr) {
@@ -1205,10 +1208,6 @@ cublasStatus_t cublasSnrm2(cublasHandle_t handle, int n, const float* x, int inc
     if (cumetalRuntimeIsDevicePointer(x) == 0) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
-    if (cumetalRuntimeIsDevicePointer(result) != 0) {
-        return CUBLAS_STATUS_INVALID_VALUE;
-    }
-
     const cublasStatus_t sync_status = synchronize_handle_stream(handle);
     if (sync_status != CUBLAS_STATUS_SUCCESS) {
         return sync_status;
@@ -1219,7 +1218,7 @@ cublasStatus_t cublasSnrm2(cublasHandle_t handle, int n, const float* x, int inc
         const double v = static_cast<double>(x[i * incx]);
         sum_sq += v * v;
     }
-    *result = static_cast<float>(std::sqrt(sum_sq));
+    *result_ptr = static_cast<float>(std::sqrt(sum_sq));
     return CUBLAS_STATUS_SUCCESS;
 }
 
@@ -1231,11 +1230,14 @@ cublasStatus_t cublasDnrm2(cublasHandle_t handle,
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
-    if (n < 0 || incx <= 0 || result == nullptr) {
+    double* result_ptr = scalar_pointer_for_mode(handle, result);
+    if (result_ptr == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
-    if (n == 0) {
-        *result = 0.0;
+    if (n <= 0 || incx <= 0) {
+        const cublasStatus_t sync_status = synchronize_handle_stream(handle);
+        if (sync_status != CUBLAS_STATUS_SUCCESS) return sync_status;
+        *result_ptr = 0.0;
         return CUBLAS_STATUS_SUCCESS;
     }
     if (x == nullptr) {
@@ -1244,10 +1246,6 @@ cublasStatus_t cublasDnrm2(cublasHandle_t handle,
     if (cumetalRuntimeIsDevicePointer(x) == 0) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
-    if (cumetalRuntimeIsDevicePointer(result) != 0) {
-        return CUBLAS_STATUS_INVALID_VALUE;
-    }
-
     const cublasStatus_t sync_status = synchronize_handle_stream(handle);
     if (sync_status != CUBLAS_STATUS_SUCCESS) {
         return sync_status;
@@ -1255,7 +1253,7 @@ cublasStatus_t cublasDnrm2(cublasHandle_t handle,
 
     double sum_sq = 0.0;
     if (blas1_reduce("Dnrm2", handle, n, x, incx, nullptr, incx, kReduceOpSumSq, &sum_sq)) {
-        *result = std::sqrt(sum_sq);
+        *result_ptr = std::sqrt(sum_sq);
         return CUBLAS_STATUS_SUCCESS;
     }
 
@@ -1264,7 +1262,7 @@ cublasStatus_t cublasDnrm2(cublasHandle_t handle,
         const double v = x[i * incx];
         sum_sq += v * v;
     }
-    *result = std::sqrt(sum_sq);
+    *result_ptr = std::sqrt(sum_sq);
     return CUBLAS_STATUS_SUCCESS;
 }
 
