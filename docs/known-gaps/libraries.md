@@ -51,7 +51,14 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   serialization, and device API parity remain open. In `curand_kernel.h`,
   `curand_uniform` returns (0, 1] as CUDA does. XORWOW, Philox and MRG32k3a
   have uniform, normal (float and double), log-normal and Poisson
-  distributions. MRG32k3a's first draw from its default state matches the
+  distributions. Philox initialization positions its scalar offset across the
+  four-word cache and its subsequence in the upper counter words, following
+  [CUDA's documented 2^66-output subsequence spacing](https://docs.nvidia.com/cuda/curand/group__DEVICE.html).
+  Host tests verify scalar skip equivalence, cache boundaries, large counter
+  positions, and the adjacent-subsequence overlap regression. Direct CUDA and
+  PTX GPU tests check exact initialization results across 180 cases on Apple
+  Silicon. NVIDIA bitstream parity remains unverified; `curand4` is absent.
+  MRG32k3a's first draw from its default state matches the
   L'Ecuyer reference, but `curand_init` derives each state by hashing seed and
   subsequence rather than skipping 2^76 steps, so its streams are independent
   but not NVIDIA's sequence.
