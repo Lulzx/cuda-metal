@@ -392,6 +392,24 @@ set_tests_properties(
         ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
 )
 
+# More threadgroups than the small mixed-atomic fixture: a lock must publish its
+# 64-bit payload across GPU cores, preserving every add/CAS return value.
+add_test(
+    NAME functional_cuda_projects_wide_atomic_contention_typed_ptx
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/wide_atomic_contention/run.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(
+    functional_cuda_projects_wide_atomic_contention_typed_ptx
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        TIMEOUT 120
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
 cumetal_add_cuda_project_test(
     functional_cuda_projects_cooperative_thread_group
     cooperative_thread_group cooperative_thread_group.cu cooperative_thread_group

@@ -282,6 +282,17 @@
       "harness": "standard"
     },
     {
+      "name": "wide_atomic_contention",
+      "subdir": "wide_atomic_contention",
+      "source": "wide_atomic_contention.cu",
+      "binary": "wide_atomic_contention",
+      "harness": "strict",
+      "expect_pattern": "PASS: contended 64-bit integer atomics preserve every update",
+      "backends": [
+        "cumetal-ir"
+      ]
+    },
+    {
       "name": "float_atomics",
       "subdir": "float_atomics",
       "source": "float_atomics.cu",

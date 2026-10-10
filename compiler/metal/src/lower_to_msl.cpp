@@ -371,7 +371,10 @@ MslFunction make_wide_atomic_u64_helper(std::string operation, bool is_signed,
         .kind = MslTypeKind::kStruct,
         .struct_name = "thread_scope",
     };
-    const MslType payload_pointer = MslType::pointer(u64, address_space);
+    MslType payload_pointer = MslType::pointer(u64, address_space);
+    // The lock and fences synchronize groups, but the non-atomic payload
+    // also needs device coherence to observe the previous group's writes.
+    payload_pointer.device_coherent = address_space == MslAddressSpace::kDevice;
     const MslType lock_bank_pointer =
         MslType::pointer(atomic_uint, MslAddressSpace::kDevice);
     const MslExpr payload = MslExpression::identifier("payload", payload_pointer);
@@ -2669,8 +2672,10 @@ struct AstLowerer {
             return declare_result(operation, as_result(MslExpression::literal("0u", u32)));
         }
         if (lock_backed && (name == "load" || name == "store")) {
+            MslType payload_pointer = MslType::pointer(u64, MslAddressSpace::kDevice);
+            payload_pointer.device_coherent = true;
             const MslExpr payload =
-                MslExpression::cast(MslType::pointer(u64, MslAddressSpace::kDevice), raw_pointer, true);
+                MslExpression::cast(payload_pointer, raw_pointer, true);
             if (name == "load") {
                 return declare_result(operation, as_result(MslExpression::call(
                     "cm_scoped_load_u64", {payload, lock_bank}, u64)));
@@ -2686,8 +2691,10 @@ struct AstLowerer {
         }
         if (lock_backed && (name == "load128" || name == "store128")) {
             const MslType pair = MslType::vector(u64, 2);
+            MslType payload_pointer = MslType::pointer(pair, MslAddressSpace::kDevice);
+            payload_pointer.device_coherent = true;
             const MslExpr payload =
-                MslExpression::cast(MslType::pointer(pair, MslAddressSpace::kDevice), raw_pointer, true);
+                MslExpression::cast(payload_pointer, raw_pointer, true);
             if (name == "load128") {
                 if (operation.results.size() != 2) {
                     fail(&operation, "scoped 16-byte PTX load requires two words");
@@ -5251,8 +5258,10 @@ struct AstLowerer {
                     return std::nullopt;
                 }
                 const MslType u64 = MslType::uint(64);
-                const MslType payload_pointer =
+                MslType payload_pointer =
                     MslType::pointer(u64, address_space);
+                payload_pointer.device_coherent =
+                    address_space == MslAddressSpace::kDevice;
                 const MslExpr payload =
                     MslExpression::cast(payload_pointer, raw_pointer, true);
                 const auto as_u64 = [&](const ir::Operand& value) {
@@ -7827,7 +7836,7 @@ long vf64_f64_to_i64(ulong, uint, bool);
         static constexpr std::string_view kScopedAccessHelpers = R"msl(
 #define CM_SCOPED_LOCK(p) (&lock_bank[uint(reinterpret_cast<ulong>(p) >> 3u) * 2654435769u >> 22u])
 #define CM_SCOPED_FENCE() atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device)
-static ulong cm_scoped_load_u64(device ulong* payload, device atomic_uint* lock_bank) {
+static ulong cm_scoped_load_u64(coherent(device) device ulong* payload, device atomic_uint* lock_bank) {
     ulong result = 0ul;
     bool done = false;
     while (!done) {
@@ -7841,7 +7850,7 @@ static ulong cm_scoped_load_u64(device ulong* payload, device atomic_uint* lock_
     }
     return result;
 }
-static void cm_scoped_store_u64(device ulong* payload, ulong value, device atomic_uint* lock_bank) {
+static void cm_scoped_store_u64(coherent(device) device ulong* payload, ulong value, device atomic_uint* lock_bank) {
     bool done = false;
     while (!done) {
         if (atomic_exchange_explicit(CM_SCOPED_LOCK(payload), 1u, memory_order_relaxed) == 0u) {
@@ -7853,7 +7862,7 @@ static void cm_scoped_store_u64(device ulong* payload, ulong value, device atomi
         }
     }
 }
-static ulong2 cm_scoped_load_u128(device ulong2* payload, device atomic_uint* lock_bank) {
+static ulong2 cm_scoped_load_u128(coherent(device) device ulong2* payload, device atomic_uint* lock_bank) {
     ulong2 result = ulong2(0ul);
     bool done = false;
     while (!done) {
@@ -7867,7 +7876,7 @@ static ulong2 cm_scoped_load_u128(device ulong2* payload, device atomic_uint* lo
     }
     return result;
 }
-static void cm_scoped_store_u128(device ulong2* payload, ulong2 value, device atomic_uint* lock_bank) {
+static void cm_scoped_store_u128(coherent(device) device ulong2* payload, ulong2 value, device atomic_uint* lock_bank) {
     bool done = false;
     while (!done) {
         if (atomic_exchange_explicit(CM_SCOPED_LOCK(payload), 1u, memory_order_relaxed) == 0u) {
