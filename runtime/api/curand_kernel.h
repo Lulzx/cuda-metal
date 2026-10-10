@@ -101,19 +101,27 @@ void curand_init(unsigned long long seed, unsigned long long sequence,
 }
 
 static __host__ __device__ __forceinline__
+unsigned int curand(curandStatePhilox4_32_10_t* state);
+
+static __host__ __device__ __forceinline__
 void curand_init(unsigned long long seed, unsigned long long sequence,
                  unsigned long long offset, curandStatePhilox4_32_10_t* state) {
     state->key[0] = (uint32_t)(seed);
     state->key[1] = (uint32_t)(seed >> 32);
-    state->ctr[0] = (uint32_t)(sequence);
-    state->ctr[1] = (uint32_t)(sequence >> 32);
-    state->ctr[2] = (uint32_t)(offset);
-    state->ctr[3] = (uint32_t)(offset >> 32);
+    // CUDA specifies 2^66 scalar outputs per subsequence; Philox produces
+    // four outputs per counter. Position whole blocks, then consume the
+    // partial block through the same cache used by scalar generation.
+    // https://docs.nvidia.com/cuda/curand/group__DEVICE.html
+    state->ctr[0] = (uint32_t)(offset >> 2);
+    state->ctr[1] = (uint32_t)(offset >> 34);
+    state->ctr[2] = (uint32_t)(sequence);
+    state->ctr[3] = (uint32_t)(sequence >> 32);
     state->STATE = 0;
     state->boxmuller_flag = 0;
     state->boxmuller_extra = 0.0f;
     state->boxmuller_flag_double = 0;
     state->boxmuller_extra_double = 0.0;
+    for (unsigned int i = 0; i < (offset & 3ULL); ++i) (void)curand(state);
 }
 
 // --- Core generation ---

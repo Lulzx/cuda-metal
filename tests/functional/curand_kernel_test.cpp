@@ -75,6 +75,74 @@ static void test_philox_init_and_generate() {
     CHECK(u > 0.0f && u <= 1.0f, "curand_uniform Philox in (0, 1]");
 }
 
+static void test_philox_scalar_offsets() {
+    // Expected values come from scalar draws, independently of initialization's
+    // counter arithmetic. Cross partial/full four-word caches and a later block.
+    const unsigned long long seeds[] = {0ULL, 789ULL};
+    const unsigned long long subsequences[] = {0ULL, 7ULL, ~0ULL};
+    const unsigned long long offsets[] = {0ULL, 1ULL, 2ULL, 3ULL, 4ULL, 5ULL, 7ULL, 17ULL};
+    for (unsigned long long seed : seeds) {
+        for (unsigned long long subsequence : subsequences) {
+            for (unsigned long long offset : offsets) {
+                curandStatePhilox4_32_10_t skipped{}, initialized{};
+                curand_init(seed, subsequence, 0ULL, &skipped);
+                for (unsigned long long i = 0; i < offset; ++i) (void)curand(&skipped);
+                curand_init(seed, subsequence, offset, &initialized);
+                bool matches = true;
+                for (unsigned i = 0; i < 16; ++i) {
+                    const unsigned expected = curand(&skipped);
+                    const unsigned actual = curand(&initialized);
+                    if (actual != expected) {
+                        if (matches)
+                            fprintf(stderr, "Philox offset mismatch draw=%u got=0x%08x want=0x%08x\n",
+                                    i, actual, expected);
+                        matches = false;
+                    }
+                }
+                char msg[128];
+                snprintf(msg, sizeof msg, "Philox scalar skip seed=%llu subsequence=%llu offset=%llu",
+                         seed, subsequence, offset);
+                CHECK(matches, msg);
+            }
+        }
+    }
+}
+
+static void test_philox_initial_counter_positions() {
+    // CUDA specifies 2^66 scalar outputs per subsequence. Four outputs per
+    // counter put the subsequence in the upper 64 bits. Large offsets must be
+    // positioned directly; these cases include a carry across the low word.
+    constexpr unsigned long long seed = 0x123456789abcdef0ULL;
+    constexpr unsigned long long subsequence = 0xfedcba9876543210ULL;
+    const unsigned long long offsets[] = {0ULL, (1ULL << 34) - 1ULL, 1ULL << 34,
+                                         (1ULL << 34) + 1ULL, ~0ULL};
+    for (unsigned long long offset : offsets) {
+        curandStatePhilox4_32_10_t state{};
+        curand_init(seed, subsequence, offset, &state);
+        const unsigned long long next_block = (offset >> 2) + ((offset & 3ULL) != 0);
+        const bool positioned = state.ctr[0] == static_cast<unsigned>(next_block) &&
+            state.ctr[1] == static_cast<unsigned>(next_block >> 32) &&
+            state.ctr[2] == static_cast<unsigned>(subsequence) &&
+            state.ctr[3] == static_cast<unsigned>(subsequence >> 32) &&
+            state.STATE == static_cast<int>(offset & 3ULL) &&
+            state.key[0] == static_cast<unsigned>(seed) &&
+            state.key[1] == static_cast<unsigned>(seed >> 32);
+        char msg[96];
+        snprintf(msg, sizeof msg, "Philox counter and scalar-cache position offset=%llu", offset);
+        CHECK(positioned, msg);
+    }
+
+    // Neighboring subsequences previously reused the same stream four draws
+    // apart. Compare two complete blocks to catch that deterministic overlap.
+    curandStatePhilox4_32_10_t first{}, next{};
+    curand_init(789ULL, 0ULL, 0ULL, &first);
+    curand_init(789ULL, 1ULL, 0ULL, &next);
+    for (unsigned i = 0; i < 4; ++i) (void)curand(&first);
+    bool identical = true;
+    for (unsigned i = 0; i < 8; ++i) identical &= curand(&first) == curand(&next);
+    CHECK(!identical, "Philox adjacent subsequence avoids the four-draw stream overlap");
+}
+
 static void test_different_seeds_different_output() {
     curandState_t s1, s2;
     curand_init(100ULL, 0ULL, 0ULL, &s1);
@@ -198,6 +266,8 @@ int main() {
     test_uniform_mean();
     test_normal_distribution();
     test_philox_init_and_generate();
+    test_philox_scalar_offsets();
+    test_philox_initial_counter_positions();
     test_different_seeds_different_output();
     test_different_sequences_different_output();
     test_log_normal();
