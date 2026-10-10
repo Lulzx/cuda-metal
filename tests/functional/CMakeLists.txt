@@ -3875,6 +3875,20 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
     set_tests_properties(functional_cumetalc_link_executable PROPERTIES SKIP_RETURN_CODE 77)
 
+    if(CUMETAL_TRACE_PYTHON3_EXECUTABLE)
+        add_test(
+            NAME functional_vector_add_validation
+            COMMAND ${CUMETAL_TRACE_PYTHON3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/run_vector_add_validation.py
+                    $<TARGET_FILE:cumetalc>
+                    ${CMAKE_SOURCE_DIR}/samples/vectorAdd/vectorAdd.cu
+                    ${CMAKE_CURRENT_BINARY_DIR}/vector_add_validation
+                    $<TARGET_FILE:cumetal_runtime>
+        )
+        set_tests_properties(functional_vector_add_validation PROPERTIES
+            SKIP_RETURN_CODE 77 TIMEOUT 180 LABELS "gpu")
+    endif()
+
     add_test(
         NAME functional_cumetalc_native_aot_multi_kernel
         COMMAND bash
