@@ -53,8 +53,9 @@ BUILD_STATUS=0
 # primary installed-compiler gate.
 PATH_WITH_SPACES="${WORK_DIR}/toolbox scripts"
 mkdir -p "${PATH_WITH_SPACES}"
+# Bash 3.2 treats an empty array as unset under nounset; preserve zero arguments.
 PATH="${PATH_WITH_SPACES}:${PATH}" \
-  "${CUMETALC}" "${SOURCE_CU}" "${COMPILER_ARGS[@]}" -o "${OUT_BIN}" \
+  "${CUMETALC}" "${SOURCE_CU}" ${COMPILER_ARGS[@]+"${COMPILER_ARGS[@]}"} -o "${OUT_BIN}" \
   >"${BUILD_LOG}" 2>&1 || BUILD_STATUS=$?
 
 cat "${BUILD_LOG}"
