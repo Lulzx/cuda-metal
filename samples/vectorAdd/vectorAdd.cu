@@ -15,7 +15,7 @@ __global__ void vector_add(const float* a, const float* b, float* c, int n) {
 }
 
 int main() {
-    const int n = 1 << 14;
+    const int n = (1 << 14) + 17;  // Include a partial final block.
     const size_t bytes = static_cast<size_t>(n) * sizeof(float);
 
     float* host_a = static_cast<float*>(std::malloc(bytes));
@@ -47,6 +47,12 @@ int main() {
         return 1;
     }
 
+    // All-one float bits are NaN, so an unwritten output cannot pass validation.
+    if (cudaMemset(dev_c, 0xff, bytes) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaMemset output failed\n");
+        return 1;
+    }
+
     const int threads_per_block = 256;
     const int blocks = (n + threads_per_block - 1) / threads_per_block;
     vector_add<<<blocks, threads_per_block>>>(dev_a, dev_b, dev_c, n);
@@ -63,7 +69,7 @@ int main() {
 
     for (int i = 0; i < n; ++i) {
         const float expected = host_a[i] + host_b[i];
-        if (std::fabs(host_c[i] - expected) > 1e-5f) {
+        if (!std::isfinite(host_c[i]) || std::fabs(host_c[i] - expected) > 1e-5f) {
             std::fprintf(stderr,
                          "FAIL: mismatch at %d (got=%f expected=%f)\n",
                          i,
