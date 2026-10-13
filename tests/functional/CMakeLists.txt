@@ -589,6 +589,10 @@ add_executable(cumetal_curand_kernel_test
     curand_kernel_test.cpp
 )
 
+add_executable(cumetal_runtime_philox_offsets_test
+    runtime_philox_offsets_test.cpp
+)
+
 add_executable(cumetal_cusparse_fp64_test
     cusparse_fp64_test.cpp
 )
@@ -1377,6 +1381,9 @@ target_link_libraries(cumetal_curand_kernel_test
     PRIVATE
         cumetal_runtime
 )
+
+target_link_libraries(cumetal_runtime_philox_offsets_test PRIVATE cumetal_runtime)
+target_compile_options(cumetal_runtime_philox_offsets_test PRIVATE -Wall -Wextra -Wpedantic)
 
 target_link_libraries(cumetal_thrust_api_test
     PRIVATE
@@ -3785,6 +3792,21 @@ add_test(
     NAME functional_curand_kernel
     COMMAND cumetal_curand_kernel_test
 )
+
+foreach(frontend direct ptx)
+    add_test(
+        NAME functional_typed_${frontend}_philox_offsets
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_philox_offsets.sh
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_runtime_philox_offsets_test>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/philox_offsets.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/philox_offsets.${frontend}.metallib
+                ${frontend}
+    )
+    set_tests_properties(functional_typed_${frontend}_philox_offsets PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 120 LABELS "gpu;functional")
+endforeach()
 
 add_test(
     NAME functional_cusparse_fp64
