@@ -175,6 +175,13 @@ add_test(NAME unit_ptx_cfg COMMAND cumetal_ptx_cfg_test
 add_executable(cumetal_nvvm_ir_msl_test
     nvvm_ir_msl_test.cpp
 )
+# LLVM 23 upgrades legacy NVVM atomic calls before the importer sees them.
+if(LLVM_FOUND AND LLVM_PACKAGE_VERSION VERSION_GREATER_EQUAL 18
+   AND LLVM_PACKAGE_VERSION VERSION_LESS 23)
+    target_compile_definitions(cumetal_nvvm_ir_msl_test PRIVATE CUMETAL_TEST_LEGACY_NVVM_ATOMICS=1)
+else()
+    target_compile_definitions(cumetal_nvvm_ir_msl_test PRIVATE CUMETAL_TEST_LEGACY_NVVM_ATOMICS=0)
+endif()
 
 add_executable(cumetal_native_registration_test
     native_registration_test.cpp

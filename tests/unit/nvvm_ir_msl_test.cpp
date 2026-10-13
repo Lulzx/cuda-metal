@@ -736,6 +736,84 @@ entry:
 }
 )llvm";
 
+#if CUMETAL_TEST_LEGACY_NVVM_ATOMICS
+// LLVM 23+ upgrades these legacy intrinsic calls before NVVM import.
+std::string nvvm_system_atomic_ir(const std::string& intrinsic,
+                                  const std::string& result_type = "i32",
+                                  const std::string& pointer_type = "ptr",
+                                  const std::string& arguments = "i32 7",
+                                  const std::string& parameter_types = "i32") {
+    return "target datalayout = \"e-p:64:64-i64:64-n16:32:64\"\n"
+           "target triple = \"nvptx64-nvidia-cuda\"\n"
+           "define ptx_kernel void @system_atomic(" + pointer_type +
+           " %counter, ptr %old_out) {\n"
+           "entry:\n"
+           "  %old = call " + result_type + " @" + intrinsic + "(" +
+           pointer_type + " %counter, " + arguments + ")\n"
+           "  store " + result_type + " %old, ptr %old_out\n"
+           "  ret void\n"
+           "}\n"
+           "declare " + result_type + " @" + intrinsic + "(" + pointer_type +
+           ", " + parameter_types + ")\n";
+}
+
+constexpr const char* kNvvmSharedSystemAtomic = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+@shared_counter = internal addrspace(3) global i32 0, align 4
+
+define ptx_kernel void @shared_system_atomic(ptr %old_out) {
+entry:
+  %counter = addrspacecast ptr addrspace(3) @shared_counter to ptr
+  %old = call i32 @llvm.nvvm.atomic.add.gen.i.sys.i32.p0(ptr %counter, i32 7)
+  store i32 %old, ptr %old_out, align 4
+  ret void
+}
+declare i32 @llvm.nvvm.atomic.add.gen.i.sys.i32.p0(ptr, i32)
+)llvm";
+
+constexpr const char* kNvvmPrivateSystemAtomic = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @private_system_atomic(ptr %old_out) {
+entry:
+  %counter = alloca i32, align 4
+  store i32 0, ptr %counter, align 4
+  %old = call i32 @llvm.nvvm.atomic.add.gen.i.sys.i32.p0(ptr %counter, i32 7)
+  store i32 %old, ptr %old_out, align 4
+  ret void
+}
+declare i32 @llvm.nvvm.atomic.add.gen.i.sys.i32.p0(ptr, i32)
+)llvm";
+
+constexpr const char* kNvvmHelperSystemAtomic = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define i32 @system_atomic_helper(ptr %counter) {
+entry:
+  %old = call i32 @llvm.nvvm.atomic.add.gen.i.sys.i32.p0(ptr %counter, i32 7)
+  ret i32 %old
+}
+
+define ptx_kernel void @helper_system_atomic(ptr %a, ptr %b, ptr %old_out, i1 %choose) {
+entry:
+  br i1 %choose, label %left, label %right
+left:
+  br label %merge
+right:
+  br label %merge
+merge:
+  %counter = phi ptr [ %a, %left ], [ %b, %right ]
+  %old = call i32 @system_atomic_helper(ptr %counter)
+  store i32 %old, ptr %old_out, align 4
+  ret void
+}
+declare i32 @llvm.nvvm.atomic.add.gen.i.sys.i32.p0(ptr, i32)
+)llvm";
+#endif
+
 constexpr const char* kNvvmFloatAtomicAsm = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -2172,6 +2250,122 @@ int main() {
                      cuda_legacy_atomic.source.find("device atomic_uint*") !=
                          std::string::npos,
                  "legacy CUDA seq_cst atomicrmw spelling lowers with CUDA-relaxed Metal semantics");
+
+#if CUMETAL_TEST_LEGACY_NVVM_ATOMICS
+    struct SystemAtomicCase {
+        const char* intrinsic;
+        const char* operation;
+        const char* metal_callee;
+        bool is_signed = false;
+        bool is_cas = false;
+    };
+    const SystemAtomicCase system_atomic_cases[] = {
+        {"add.gen.i", "add", "atomic_fetch_add_explicit"},
+        {"exch.gen.i", "exch", "atomic_exchange_explicit"},
+        {"and.gen.i", "and", "atomic_fetch_and_explicit"},
+        {"or.gen.i", "or", "atomic_fetch_or_explicit"},
+        {"xor.gen.i", "xor", "atomic_fetch_xor_explicit"},
+        {"max.gen.i", "max", "atomic_fetch_max_explicit", true},
+        {"min.gen.i", "min", "atomic_fetch_min_explicit", true},
+        {"cas.gen.i", "cas", "cm_atomic_cas_device_u32", false, true},
+    };
+    for (const SystemAtomicCase& test : system_atomic_cases) {
+        for (unsigned address_space : {0u, 1u}) {
+            const std::string intrinsic = std::string("llvm.nvvm.atomic.") +
+                test.intrinsic + ".sys.i32.p" + std::to_string(address_space);
+            const metal::NvvmToMslResult compiled = metal::compile_nvvm_to_msl(
+                nvvm_system_atomic_ir(intrinsic, "i32",
+                                      address_space == 0 ? "ptr" : "ptr addrspace(1)",
+                                      test.is_cas ? "i32 7, i32 9" : "i32 7",
+                                      test.is_cas ? "i32, i32" : "i32"),
+                "system-atomic.ll", "system_atomic");
+            ok &= expect(compiled.ok, intrinsic + " lowers: " + compiled.error);
+            if (!compiled.ok) continue;
+
+            const ir::Operation* atomic = nullptr;
+            const ir::Operation* store = nullptr;
+            for (const auto& function : compiled.gpu_ir.functions) {
+                for (const auto& block : function.blocks) {
+                    for (const auto& operation : block.operations) {
+                        if (operation.opcode == ir::OpCode::kAtomic) atomic = &operation;
+                        if (operation.opcode == ir::OpCode::kStore) store = &operation;
+                    }
+                }
+            }
+            ok &= expect(atomic != nullptr, intrinsic + " imports a typed atomic");
+            if (atomic == nullptr) continue;
+            ok &= expect(atomic->memory_scope == ir::MemoryScope::kSystem &&
+                             atomic->memory_ordering == ir::MemoryOrdering::kRelaxed &&
+                             atomic->attributes.contains("metal_uma_system_scope") &&
+                             atomic->attributes.at("metal_uma_system_scope") == "true" &&
+                             atomic->attributes.contains("atomic_op") &&
+                             atomic->attributes.at("atomic_op") == test.operation,
+                         intrinsic + " retains relaxed system semantics");
+            const bool signed_atomic = atomic->attributes.contains("signed") &&
+                                       atomic->attributes.at("signed") == "true";
+            ok &= expect(signed_atomic == test.is_signed &&
+                             compiled.source.find(test.is_signed ? "device atomic_int*"
+                                                                 : "device atomic_uint*") !=
+                                 std::string::npos &&
+                             compiled.source.find(test.metal_callee) != std::string::npos,
+                         intrinsic + " selects the correct Metal operation and signedness");
+            ok &= expect(atomic->operands.size() == (test.is_cas ? 3u : 2u) &&
+                             atomic->operands[1].text == "7" &&
+                             (!test.is_cas || atomic->operands[2].text == "9"),
+                         intrinsic + " retains the value and CAS compare/replace order");
+            ok &= expect(atomic->results.size() == 1 &&
+                             atomic->result_types == std::vector{ir::Type::integer(32)} &&
+                             store != nullptr && store->operands.size() == 2 &&
+                             store->operands[1].kind == ir::OperandKind::kValue &&
+                             store->operands[1].value == atomic->results.front(),
+                         intrinsic + " returns the old value to its user");
+        }
+    }
+
+    const metal::NvvmToMslResult helper_system_atomic = metal::compile_nvvm_to_msl(
+        kNvvmHelperSystemAtomic, "helper-system-atomic.ll", "helper_system_atomic");
+    ok &= expect(helper_system_atomic.ok &&
+                     helper_system_atomic.source.find("system_atomic_helper(") !=
+                         std::string::npos &&
+                     helper_system_atomic.source.find("atomic_fetch_add_explicit") !=
+                         std::string::npos,
+                 "system atomics accept device pointers inferred through PHIs and generic helpers: " +
+                     helper_system_atomic.error);
+
+    struct InvalidSystemAtomicCase {
+        std::string input;
+        const char* description;
+        const char* diagnostic = "unsupported NVVM system atomic";
+    };
+    const InvalidSystemAtomicCase invalid_system_atomics[] = {
+        {nvvm_system_atomic_ir("llvm.nvvm.atomic.add.gen.i.sys.i64.p0", "i64", "ptr",
+                               "i64 7", "i64"), "64-bit system atomics"},
+        {nvvm_system_atomic_ir("llvm.nvvm.atomic.add.gen.f.sys.f32.p0", "float", "ptr",
+                               "float 1.0", "float"), "floating system atomics"},
+        {nvvm_system_atomic_ir("llvm.nvvm.atomic.unknown.gen.i.sys.i32.p0"),
+         "unknown system atomic operations"},
+        {nvvm_system_atomic_ir("llvm.nvvm.atomic.min.gen.ui.sys.i32.p0"),
+         "nonexistent unsigned system min intrinsics"},
+        // LLVM verifies recognized intrinsic signatures before import.
+        {nvvm_system_atomic_ir("llvm.nvvm.atomic.cas.gen.i.sys.i32.p0"),
+         "system CAS missing its replacement value", "invalid LLVM/NVVM module"},
+        {nvvm_system_atomic_ir("llvm.nvvm.atomic.add.gen.i.sys.i32.p0", "i64"),
+         "system atomics with a mismatched result type", "invalid LLVM/NVVM module"},
+        {nvvm_system_atomic_ir("llvm.nvvm.atomic.add.gen.i.sys.i32.p0", "i32", "ptr",
+                               "i64 7", "i64"), "system atomics with a mismatched value type",
+         "invalid LLVM/NVVM module"},
+        {kNvvmSharedSystemAtomic, "system atomics on shared storage cast to generic",
+         "NVVM system atomics require device storage"},
+        {kNvvmPrivateSystemAtomic, "system atomics on private storage",
+         "NVVM system atomics require device storage"},
+    };
+    for (const InvalidSystemAtomicCase& test : invalid_system_atomics) {
+        const metal::NvvmToMslResult rejected =
+            metal::compile_nvvm_to_msl(test.input, "invalid-system-atomic.ll");
+        ok &= expect(!rejected.ok && rejected.error.find(test.diagnostic) != std::string::npos,
+                     std::string(test.description) + " fail explicitly: " + rejected.error);
+    }
+#endif
 
     const metal::NvvmToMslResult xor_atomic =
         metal::compile_nvvm_to_msl(kNvvmUnsupportedAtomic,
