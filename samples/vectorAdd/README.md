@@ -12,8 +12,11 @@ launch in a single file, with no CuMetal-specific API calls. Build and run it:
 Expected output:
 
 ```
-PASS: samples/vectorAdd produced correct output for 16384 elements
+PASS: samples/vectorAdd produced correct output for 16401 elements
 ```
+
+The element count includes a partial final block. Output starts as NaN, and validation
+rejects non-finite values as well as wrong sums, so unwritten elements cannot report success.
 
 To confirm the kernel really executed on the Apple GPU rather than any host path:
 
