@@ -20,7 +20,8 @@ elif [[ "$5" != direct ]]; then
     exit 2
 fi
 
-"$1" "$3" "${frontend_args[@]}" --backend=cumetal-ir --emit=metallib \
+# Bash 3.2 treats an empty array as unset under nounset; preserve zero arguments.
+"$1" "$3" ${frontend_args[@]+"${frontend_args[@]}"} --backend=cumetal-ir --emit=metallib \
     --no-link --overwrite --fp64=fast48 -o "$4"
 if [[ $(grep -c '^arg bytes 4$' "$4.cumetal-abi") -ne 1 ]]; then
     echo "FAIL: typed printf hidden ring ABI leaked into caller arguments" >&2

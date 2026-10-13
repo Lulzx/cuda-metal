@@ -41,7 +41,8 @@ done
 LOG="$(mktemp -t cumetal-ctest)"
 trap 'rm -f "${LOG}"' EXIT
 
-ctest --test-dir "${BUILD_DIR}" --output-on-failure "${CTEST_ARGS[@]}" 2>&1 | tee "${LOG}"
+# Bash 3.2 treats an empty array as unset under nounset; preserve zero arguments.
+ctest --test-dir "${BUILD_DIR}" --output-on-failure ${CTEST_ARGS[@]+"${CTEST_ARGS[@]}"} 2>&1 | tee "${LOG}"
 CTEST_STATUS="${PIPESTATUS[0]}"
 
 TOTAL=$(grep -cE '^[[:space:]]*[0-9]+/[0-9]+ Test' "${LOG}" || true)
