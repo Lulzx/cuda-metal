@@ -23,8 +23,8 @@ production-metallib matrix records:
 
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/49 | **49/49** |
-| PTX / `--cuda-device` | **44/49** | **47/49** |
+| direct `.cu` | 0/52 | **52/52** |
+| PTX / `--cuda-device` | **47/52** | **50/52** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler
