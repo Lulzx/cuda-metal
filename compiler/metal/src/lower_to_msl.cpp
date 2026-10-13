@@ -278,6 +278,12 @@ MslFunction make_grid_sync_helper() {
     last_group.push_back(MslStatement::expression(MslExpression::call(
         "atomic_store_explicit", {count, zero, order("memory_order_relaxed")},
         MslType::void_type())));
+    // The reset must be visible before the generation flip releases waiters:
+    // relaxed atomics to different addresses do not order the two, so a
+    // waiter could enter the next sync, increment the stale count, and have
+    // the reset wipe its arrival, leaving the count short of the group
+    // total forever. The fence pairs with each waiter's post-spin fence.
+    last_group.push_back(device_fence());
     last_group.push_back(MslStatement::expression(MslExpression::call(
         "atomic_fetch_add_explicit",
         {generation, MslExpression::literal("1u", MslType::uint()),

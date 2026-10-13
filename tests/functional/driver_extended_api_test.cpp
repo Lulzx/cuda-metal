@@ -151,6 +151,41 @@ int main() {
 
     cuMemFree(dev16);
     cuMemFree(dev32);
+
+    // --- cuLaunchCooperativeKernel grid bound ---
+    // Grids above the resident-set bound are refused before any launch is
+    // attempted; a null function keeps the accepted-size case out of the GPU.
+    {
+        const CUresult too_large =
+            cuLaunchCooperativeKernel(nullptr, 5, 1, 1, 32, 1, 1, 0, nullptr, nullptr);
+        if (too_large != CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES) {
+            std::fprintf(stderr,
+                         "FAIL: cooperative 5-block launch status=%d (expected %d)\n",
+                         static_cast<int>(too_large),
+                         static_cast<int>(CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES));
+            return 1;
+        }
+        const CUresult empty =
+            cuLaunchCooperativeKernel(nullptr, 0, 1, 1, 32, 1, 1, 0, nullptr, nullptr);
+        if (empty != CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES) {
+            std::fprintf(stderr,
+                         "FAIL: cooperative 0-block launch status=%d (expected %d)\n",
+                         static_cast<int>(empty),
+                         static_cast<int>(CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES));
+            return 1;
+        }
+        const CUresult within_bound =
+            cuLaunchCooperativeKernel(nullptr, 4, 1, 1, 32, 1, 1, 0, nullptr, nullptr);
+        if (within_bound == CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES ||
+            within_bound == CUDA_ERROR_NOT_SUPPORTED || within_bound == CUDA_SUCCESS) {
+            std::fprintf(stderr,
+                         "FAIL: cooperative 4-block null-function launch status=%d "
+                         "(expected an invalid-handle error)\n",
+                         static_cast<int>(within_bound));
+            return 1;
+        }
+    }
+
     cuCtxDestroy(ctx);
 
     std::printf(

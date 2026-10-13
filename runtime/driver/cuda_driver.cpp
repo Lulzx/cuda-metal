@@ -2909,16 +2909,19 @@ CUresult cuCtxGetStreamPriorityRange(int* leastPriority, int* greatestPriority) 
     return CUDA_SUCCESS;
 }
 
-// Single-threadgroup cooperative launches are safe. Multi-threadgroup launches
-// are refused until grid-barrier kernel fission is implemented.
+// Cooperative launches share the runtime's device-wide sense-reversing
+// barrier and its conservative resident-set bound (four threadgroups), so a
+// waiting group cannot starve an undispatched one.
 CUresult cuLaunchCooperativeKernel(CUfunction f,
                                     unsigned int gridDimX, unsigned int gridDimY,
                                     unsigned int gridDimZ, unsigned int blockDimX,
                                     unsigned int blockDimY, unsigned int blockDimZ,
                                     unsigned int sharedMemBytes, CUstream hStream,
                                     void** kernelParams) {
-    if ((static_cast<std::uint64_t>(gridDimX) * gridDimY * gridDimZ) > 1) {
-        return CUDA_ERROR_NOT_SUPPORTED;
+    const std::uint64_t block_count =
+        static_cast<std::uint64_t>(gridDimX) * gridDimY * gridDimZ;
+    if (block_count == 0 || block_count > 4) {
+        return CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES;
     }
     return cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
                           sharedMemBytes, hStream, kernelParams, nullptr);

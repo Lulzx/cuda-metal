@@ -3016,6 +3016,16 @@ add_test(
 set_tests_properties(functional_cooperative_grid_barrier PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
 
 add_test(
+    NAME functional_cooperative_grid_barrier_stress
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cooperative_grid_barrier_stress.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/cooperative_grid_barrier_stress
+)
+set_tests_properties(functional_cooperative_grid_barrier_stress PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+
+add_test(
     NAME functional_driver_module_load_data_ptx
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_driver_module_load_data_ptx.sh
