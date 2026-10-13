@@ -12,6 +12,75 @@ bool nearly_equal(float a, float b) {
     return std::fabs(a - b) < 1e-5f;
 }
 
+template <typename T>
+bool test_nrm2_pointer_mode(cublasHandle_t handle, const char* name,
+                           cublasStatus_t (*nrm2)(cublasHandle_t, int, const T*, int, T*)) {
+    const T input[] = {T(3), T(99), T(4)};
+    T output[] = {T(-1), T(-2), T(-3)};
+    T* device_input = nullptr;
+    T* device_output = nullptr;
+    bool ok = cudaMalloc(reinterpret_cast<void**>(&device_input), sizeof(input)) == cudaSuccess &&
+              cudaMalloc(reinterpret_cast<void**>(&device_output), sizeof(output)) == cudaSuccess &&
+              cudaMemcpy(device_input, input, sizeof(input), cudaMemcpyHostToDevice) == cudaSuccess &&
+              cudaMemcpy(device_output, output, sizeof(output), cudaMemcpyHostToDevice) == cudaSuccess;
+    if (!ok) std::fprintf(stderr, "FAIL: %s pointer-mode setup\n", name);
+
+    // The result fits inside a tracked allocation; its neighbors must survive.
+    if (ok) {
+        const cublasStatus_t status = cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_DEVICE);
+        const cublasStatus_t norm_status = status == CUBLAS_STATUS_SUCCESS
+            ? nrm2(handle, 2, device_input, 2, device_output + 1) : status;
+        ok = norm_status == CUBLAS_STATUS_SUCCESS &&
+             cudaMemcpy(output, device_output, sizeof(output), cudaMemcpyDeviceToHost) == cudaSuccess &&
+             output[0] == T(-1) && output[1] == T(5) && output[2] == T(-3);
+        if (!ok) std::fprintf(stderr, "FAIL: %s device result: status=%d, expected norm 5\n",
+                              name, static_cast<int>(norm_status));
+    }
+    if (ok) {
+        T host_output = T(-7);
+        ok = nrm2(handle, 2, device_input, 2, &host_output) == CUBLAS_STATUS_INVALID_VALUE &&
+             nrm2(handle, 0, nullptr, 1, &host_output) == CUBLAS_STATUS_INVALID_VALUE &&
+             host_output == T(-7);
+        T* short_output = reinterpret_cast<T*>(
+            reinterpret_cast<unsigned char*>(device_output) + sizeof(output) - 1);
+        ok = nrm2(handle, 2, device_input, 2, short_output) == CUBLAS_STATUS_INVALID_VALUE &&
+             nrm2(handle, 0, nullptr, 1, short_output) == CUBLAS_STATUS_INVALID_VALUE && ok;
+        if (!ok) std::fprintf(stderr, "FAIL: %s accepts a wrong-location or short device result\n", name);
+    }
+    // CUDA sets the norm to zero for n <= 0 or incx <= 0, without reading x.
+    const int quick_returns[][2] = {{0, 1}, {-1, 1}, {2, 0}, {2, -1}};
+    for (const auto& quick : quick_returns) {
+        if (!ok) break;
+        output[1] = T(-2);
+        ok = cudaMemcpy(device_output, output, sizeof(output), cudaMemcpyHostToDevice) == cudaSuccess &&
+             nrm2(handle, quick[0], nullptr, quick[1], device_output + 1) == CUBLAS_STATUS_SUCCESS &&
+             cudaMemcpy(output, device_output, sizeof(output), cudaMemcpyDeviceToHost) == cudaSuccess &&
+             output[0] == T(-1) && output[1] == T(0) && output[2] == T(-3);
+        if (!ok) std::fprintf(stderr, "FAIL: %s device quick return n=%d incx=%d\n",
+                              name, quick[0], quick[1]);
+    }
+    if (ok) {
+        T host_output = T(-7);
+        ok = cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST) == CUBLAS_STATUS_SUCCESS &&
+             nrm2(handle, 2, device_input, 2, &host_output) == CUBLAS_STATUS_SUCCESS &&
+             host_output == T(5) &&
+             nrm2(handle, 2, device_input, 2, device_output + 1) == CUBLAS_STATUS_INVALID_VALUE &&
+             nrm2(handle, 0, nullptr, 1, device_output + 1) == CUBLAS_STATUS_INVALID_VALUE &&
+             nrm2(handle, 0, nullptr, 1, nullptr) == CUBLAS_STATUS_INVALID_VALUE;
+        for (const auto& quick : quick_returns) {
+            host_output = T(-7);
+            ok = nrm2(handle, quick[0], nullptr, quick[1], &host_output) == CUBLAS_STATUS_SUCCESS &&
+                 host_output == T(0) && ok;
+        }
+        if (!ok) std::fprintf(stderr, "FAIL: %s host pointer-mode or quick-return contract\n", name);
+    }
+    if (device_input) ok = cudaFree(device_input) == cudaSuccess && ok;
+    if (device_output) ok = cudaFree(device_output) == cudaSuccess && ok;
+    ok = cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST) == CUBLAS_STATUS_SUCCESS && ok;
+    if (ok) std::printf("PASS: %s honors result pointer mode and zero-norm quick returns\n", name);
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -90,6 +159,10 @@ int main() {
         std::fprintf(stderr, "FAIL: cuBLAS pointer-mode negative path mismatch\n");
         return 1;
     }
+    bool norm_pointer_mode_ok = test_nrm2_pointer_mode<float>(handle, "Snrm2", cublasSnrm2);
+    norm_pointer_mode_ok = test_nrm2_pointer_mode<double>(handle, "Dnrm2", cublasDnrm2) &&
+                           norm_pointer_mode_ok;
+    if (!norm_pointer_mode_ok) return 1;
 
     // cublasSetWorkspace: CUDA requires a 256-byte-aligned span inside one
     // tracked allocation; NULL selects the default pool and cublasSetStream
