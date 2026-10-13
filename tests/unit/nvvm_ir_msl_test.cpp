@@ -1258,6 +1258,7 @@ target triple = "nvptx64-nvidia-cuda"
 declare i32 @llvm.nvvm.vote.ballot.sync(i32, i1)
 declare i1 @llvm.nvvm.vote.any.sync(i32, i1)
 declare i1 @llvm.nvvm.vote.all.sync(i32, i1)
+declare i1 @llvm.nvvm.vote.uni.sync(i32, i1)
 declare i32 @llvm.nvvm.activemask()
 
 define ptx_kernel void @warp_votes(ptr %out, i32 %mask, i1 %predicate) {
@@ -1265,12 +1266,15 @@ entry:
   %ballot = call i32 @llvm.nvvm.vote.ballot.sync(i32 %mask, i1 %predicate)
   %any = call i1 @llvm.nvvm.vote.any.sync(i32 %mask, i1 %predicate)
   %all = call i1 @llvm.nvvm.vote.all.sync(i32 %mask, i1 %predicate)
+  %uni = call i1 @llvm.nvvm.vote.uni.sync(i32 %mask, i1 %predicate)
   %active = call i32 @llvm.nvvm.activemask()
   %any_i32 = zext i1 %any to i32
   %all_i32 = zext i1 %all to i32
+  %uni_i32 = zext i1 %uni to i32
   %sum0 = add i32 %ballot, %active
   %sum1 = add i32 %any_i32, %all_i32
-  %sum = add i32 %sum0, %sum1
+  %sum2 = add i32 %sum0, %sum1
+  %sum = add i32 %sum2, %uni_i32
   store i32 %sum, ptr %out, align 4
   ret void
 }
@@ -2499,6 +2503,11 @@ int main() {
     const metal::NvvmToMslResult warp_votes =
         metal::compile_nvvm_to_msl(kNvvmWarpVotes, "warp-votes.ll", "warp_votes");
     ok &= expect(warp_votes.ok &&
+                     ir::print(warp_votes.gpu_ir).find("kind=\"uni\"") !=
+                         std::string::npos &&
+                     warp_votes.source.find("cm_vote_ballot_") != std::string::npos &&
+                     warp_votes.source.find("cm_vote_members_") != std::string::npos &&
+                     warp_votes.source.find(" || ") != std::string::npos &&
                      warp_votes.source.find("simd_ballot(") != std::string::npos &&
                      warp_votes.source.find("simd_vote::vote_t(") != std::string::npos &&
                      warp_votes.source.find("simd_active_threads_mask()") !=
@@ -2508,6 +2517,22 @@ int main() {
                      warp_votes.source.find("thread_index_in_simdgroup") !=
                          std::string::npos,
                  "masked CUDA warp votes use per-lane logical-group ballot masks");
+    if (!warp_votes.ok) std::cerr << warp_votes.error << "\n";
+
+    std::string unknown_vote_nvvm = kNvvmWarpVotes;
+    const std::string known_vote = "llvm.nvvm.vote.uni.sync";
+    const std::string unknown_vote = "llvm.nvvm.vote.unknown.sync";
+    for (std::size_t position = unknown_vote_nvvm.find(known_vote);
+         position != std::string::npos;
+         position = unknown_vote_nvvm.find(known_vote, position + unknown_vote.size())) {
+        unknown_vote_nvvm.replace(position, known_vote.size(), unknown_vote);
+    }
+    const auto rejected_vote = metal::compile_nvvm_to_msl(
+        unknown_vote_nvvm, "unknown-vote.ll", "warp_votes");
+    ok &= expect(!rejected_vote.ok &&
+                     rejected_vote.error.find("unsupported LLVM/NVVM vote intrinsic") !=
+                         std::string::npos,
+                 "unknown NVVM vote modes fail instead of silently becoming any");
 
     const metal::NvvmToMslResult inline_active_mask =
         metal::compile_nvvm_to_msl(

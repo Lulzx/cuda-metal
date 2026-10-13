@@ -2139,7 +2139,7 @@ struct Importer {
                 name.find(".down.") != std::string::npos
                     ? "down"
                     : (name.find(".up.") != std::string::npos ? "up" : "index");
-        } else if (name.find("llvm.nvvm.vote.ballot") == 0) {
+        } else if (name == "llvm.nvvm.vote.ballot.sync") {
             operation->opcode = OpCode::kBallot;
             operation->attributes["kind"] = "ballot";
         } else if (name == "llvm.nvvm.activemask") {
@@ -2147,8 +2147,15 @@ struct Importer {
             operation->attributes["kind"] = "active_mask";
         } else if (name.find("llvm.nvvm.vote") == 0) {
             operation->opcode = OpCode::kVote;
-            operation->attributes["kind"] =
-                name.find(".all.") != std::string::npos ? "all" : "any";
+            if (name == "llvm.nvvm.vote.all.sync") {
+                operation->attributes["kind"] = "all";
+            } else if (name == "llvm.nvvm.vote.any.sync") {
+                operation->attributes["kind"] = "any";
+            } else if (name == "llvm.nvvm.vote.uni.sync") {
+                operation->attributes["kind"] = "uni";
+            } else {
+                return fail(&call, "unsupported LLVM/NVVM vote intrinsic '" + name + "'");
+            }
         }
         else if (name.find("llvm.fma.") == 0) operation->opcode = OpCode::kFma;
         else if (const std::string* builtin = llvm_math_builtin(name)) {

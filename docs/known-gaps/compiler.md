@@ -42,6 +42,12 @@ three to four times more emitted source.
 Extended-precision carry chains (`add.cc`, `addc`, `sub.cc`, `subc`, `mad.cc`,
 `madc`) are not supported by any PTX backend and refuse the kernel.
 
+The typed source and PTX paths preserve uniform-vote semantics: `vote.sync.uni`
+is true when every participating live lane has the same predicate, including
+when every predicate is false. The typed PTX path also preserves negated vote
+predicates. This uses the existing Metal SIMD mask model; it does not extend
+support to arbitrary divergent synchronization topologies.
+
 Integer min/max explicitly types MSL operands to preserve signed comparisons
 and select the correct overload for literals. Signed and unsigned 64-bit
 `mul.hi` lower to Metal's `mulhi`; mixed operand widths remain invalid.

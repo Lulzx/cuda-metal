@@ -2021,6 +2021,63 @@ LOOP:
                   << masked_vote_mul_hi.source << "\n";
     }
 
+    const std::string uniform_vote_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry uniform_vote(.param .u64 output) {
+    .reg .pred %p<3>;
+    .reg .b32 %r<3>;
+    .reg .b64 %rd1;
+    ld.param.u64 %rd1, [output];
+    mov.u32 %r1, %laneid;
+    setp.eq.u32 %p1, %r1, 0;
+    vote.sync.uni.pred %p2, !%p1, -1;
+    selp.u32 %r2, 1, 0, %p2;
+    st.global.u32 [%rd1], %r2;
+    ret;
+}
+)ptx";
+    const auto uniform_vote = metal::compile_ptx_to_msl(uniform_vote_ptx);
+    const std::string uniform_vote_ir = ir::print(uniform_vote.gpu_ir);
+    ok &= expect(uniform_vote.ok &&
+                     uniform_vote_ir.find("kind=\"uni\"") != std::string::npos &&
+                     uniform_vote_ir.find("xor") != std::string::npos &&
+                     uniform_vote.source.find("cm_vote_ballot_") != std::string::npos &&
+                     uniform_vote.source.find("cm_vote_members_") != std::string::npos &&
+                     uniform_vote.source.find(" || ") != std::string::npos &&
+                     uniform_vote.source.find("simd_ballot(") != std::string::npos &&
+                     uniform_vote.source.find("simd_ballot(",
+                         uniform_vote.source.find("simd_ballot(") + 1) == std::string::npos,
+                 "PTX uniform votes preserve predicate negation and evaluate the ballot once");
+    if (!uniform_vote.ok) std::cerr << uniform_vote.error << "\n";
+
+    const std::string vote_instruction = "vote.sync.uni.pred %p2, !%p1, -1;";
+    const auto with_vote = [&](const std::string& replacement, bool legacy = false) {
+        std::string source = uniform_vote_ptx;
+        source.replace(source.find(vote_instruction), vote_instruction.size(), replacement);
+        if (legacy) {
+            source.replace(source.find(".version 7.0"), 12, ".version 6.0");
+            source.replace(source.find(".target sm_80"), 13, ".target sm_60");
+        }
+        return metal::compile_ptx_to_msl(source);
+    };
+    const auto legacy_uniform_vote = with_vote("vote.uni.pred %p2, !%p1;", true);
+    ok &= expect(legacy_uniform_vote.ok &&
+                     ir::print(legacy_uniform_vote.gpu_ir).find("4294967295") !=
+                         std::string::npos,
+                 "legacy PTX uniform votes use the full active warp");
+    const auto unknown_vote = with_vote("vote.sync.unknown.pred %p2, !%p1, -1;");
+    ok &= expect(!unknown_vote.ok &&
+                     unknown_vote.error.find("unsupported PTX vote instruction") !=
+                         std::string::npos,
+                 "unknown PTX vote modes fail instead of silently becoming any");
+    const auto malformed_vote = with_vote("vote.sync.uni.pred %p2, !%p1;");
+    ok &= expect(!malformed_vote.ok &&
+                     malformed_vote.error.find("malformed PTX vote instruction") !=
+                         std::string::npos,
+                 "PTX sync votes require a member mask");
+
     const std::string barrier_self_loop_ptx = R"ptx(
 .version 7.0
 .target sm_80
