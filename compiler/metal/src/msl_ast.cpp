@@ -23,6 +23,11 @@ std::string address_space_spelling(MslAddressSpace address_space) {
     return "";
 }
 
+std::string qualified_address_space_spelling(const MslType& type) {
+    return (type.device_coherent ? "coherent(device) " : "") +
+           address_space_spelling(type.address_space);
+}
+
 int precedence(const MslExpression& expression) {
     if (std::holds_alternative<MslConditional>(expression.value)) return 2;
     if (const auto* binary = std::get_if<MslBinary>(&expression.value)) {
@@ -446,7 +451,8 @@ MslType MslType::reference(MslType referent, MslAddressSpace reference_address_s
 bool operator==(const MslType& left, const MslType& right) {
     if (left.kind != right.kind || left.lanes != right.lanes ||
         left.address_space != right.address_space ||
-        left.struct_name != right.struct_name) {
+        left.struct_name != right.struct_name ||
+        left.device_coherent != right.device_coherent) {
         return false;
     }
     if (left.element == nullptr || right.element == nullptr) {
@@ -474,7 +480,7 @@ std::string may_alias_spelling(const MslType& type) {
                          element.element->kind == MslTypeKind::kHalf ||
                          element.element->kind == MslTypeKind::kFloat);
     if (!scalar && !vector) return type.str();
-    const std::string address_space = address_space_spelling(type.address_space);
+    const std::string address_space = qualified_address_space_spelling(type);
     return (address_space.empty() ? std::string{} : address_space + " ") + "cm_alias_" +
            element.str() + (type.kind == MslTypeKind::kPointer ? "*" : "&");
 }
@@ -501,7 +507,7 @@ std::string MslType::str() const {
                    std::to_string(lanes);
         case MslTypeKind::kPointer:
         case MslTypeKind::kReference: {
-            const std::string address_space = address_space_spelling(this->address_space);
+            const std::string address_space = qualified_address_space_spelling(*this);
             if (element != nullptr &&
                 (element->kind == MslTypeKind::kPointer ||
                  element->kind == MslTypeKind::kReference)) {

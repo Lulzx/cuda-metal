@@ -65,6 +65,33 @@ int main() {
                 .str() == "device uchar* threadgroup*",
         "nested MSL pointers place each address-space qualifier on its own pointer level");
 
+    MslType coherent_pointer = MslType::pointer(MslType::uint(64), MslAddressSpace::kDevice);
+    coherent_pointer.device_coherent = true;
+    MslType coherent_reference = MslType::reference(MslType::uint(64), MslAddressSpace::kDevice);
+    coherent_reference.device_coherent = true;
+    ok &= expect(coherent_pointer.str() == "coherent(device) device ulong*" &&
+                     coherent_reference.str() == "coherent(device) device ulong&" &&
+                     coherent_pointer == coherent_pointer &&
+                     !(coherent_pointer ==
+                       MslType::pointer(MslType::uint(64), MslAddressSpace::kDevice)),
+                 "device coherence is retained in pointer/reference spelling and type identity");
+    MslFunction coherent_function;
+    coherent_function.name = "coherent_payload";
+    coherent_function.parameters = {{.type = coherent_pointer, .name = "payload"}};
+    coherent_function.statements.push_back(MslStatement::variable(
+        coherent_pointer, "alias", MslExpression::cast(coherent_pointer,
+            MslExpression::identifier("payload", coherent_pointer), true)));
+    MslModule coherent_module;
+    coherent_module.functions.push_back(coherent_function);
+    const auto coherent_printed = print_msl(coherent_module);
+    ok &= expect(coherent_printed.ok &&
+                     coherent_printed.source.find("coherent(device) device ulong* payload") !=
+                         std::string::npos &&
+                     coherent_printed.source.find(
+                         "reinterpret_cast<coherent(device) device cm_alias_ulong*>(payload)") !=
+                         std::string::npos,
+                 "the MSL printer preserves device coherence through may-alias pointer casts");
+
     const auto local_pointer = MslExpression::identifier("local_pointer",
         MslType::pointer(MslType::uint(8), MslAddressSpace::kThread));
     MslModule pointer_module;
