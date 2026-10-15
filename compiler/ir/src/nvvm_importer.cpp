@@ -1596,6 +1596,61 @@ struct Importer {
         return true;
     }
 
+    bool import_system_atomic(const llvm::CallBase& call, FunctionState* state,
+                              BasicBlock* output_block, Operation* operation) {
+        const std::string name = call.getCalledFunction()->getName().str();
+        // LLVM 21/22 retain these scoped NVVM calls instead of atomicrmw.
+        // Match only the documented 32-bit integer forms; .min/.max are signed.
+        static const std::unordered_map<std::string, std::string> kOperations = {
+            {"llvm.nvvm.atomic.add.gen.i.sys.i32", "add"},
+            {"llvm.nvvm.atomic.exch.gen.i.sys.i32", "exch"},
+            {"llvm.nvvm.atomic.min.gen.i.sys.i32", "min"},
+            {"llvm.nvvm.atomic.max.gen.i.sys.i32", "max"},
+            {"llvm.nvvm.atomic.and.gen.i.sys.i32", "and"},
+            {"llvm.nvvm.atomic.or.gen.i.sys.i32", "or"},
+            {"llvm.nvvm.atomic.xor.gen.i.sys.i32", "xor"},
+            {"llvm.nvvm.atomic.cas.gen.i.sys.i32", "cas"},
+        };
+        if (!name.ends_with(".p0") && !name.ends_with(".p1")) {
+            return fail(&call, "unsupported NVVM system atomic '" + name + "'");
+        }
+        const auto mapped = kOperations.find(name.substr(0, name.size() - 3));
+        if (mapped == kOperations.end()) {
+            return fail(&call, "unsupported NVVM system atomic '" + name + "'");
+        }
+        const unsigned address_space = name.ends_with(".p1") ? 1 : 0;
+        const std::size_t argument_count = mapped->second == "cas" ? 3 : 2;
+        if (!call.getType()->isIntegerTy(32) || call.arg_size() != argument_count ||
+            !call.getArgOperand(0)->getType()->isPointerTy() ||
+            call.getArgOperand(0)->getType()->getPointerAddressSpace() != address_space) {
+            return fail(&call, "malformed NVVM system atomic '" + name + "'");
+        }
+        for (std::size_t i = 1; i < argument_count; ++i) {
+            if (!call.getArgOperand(i)->getType()->isIntegerTy(32)) {
+                return fail(&call, "malformed NVVM system atomic '" + name + "'");
+            }
+        }
+        operation->opcode = OpCode::kAtomic;
+        operation->attributes["llvm_intrinsic"] = name;
+        operation->attributes["atomic_op"] = mapped->second;
+        operation->attributes["cuda_legacy_atomic"] = "true";
+        operation->attributes["metal_uma_system_scope"] = "true";
+        if (mapped->second == "min" || mapped->second == "max") {
+            operation->attributes["signed"] = "true";
+        }
+        operation->memory_scope = MemoryScope::kSystem;
+        operation->memory_ordering = MemoryOrdering::kRelaxed;
+        operation->operands.push_back(import_pointer_operand(
+            *call.getArgOperand(0), state, output_block, operation->location));
+        for (std::size_t i = 1; i < argument_count; ++i) {
+            operation->operands.push_back(import_operand(*call.getArgOperand(i), *state));
+        }
+        // Generic pointers in helpers/PHIs are resolved later. Metal legalization
+        // checks device storage after that resolution, rather than treating an
+        // unresolved placeholder as proof of an address space here.
+        return true;
+    }
+
     bool import_call(const llvm::CallBase& call, FunctionState* state, Operation* operation) {
         if (call.isInlineAsm()) {
             const auto* assembly = llvm::dyn_cast<llvm::InlineAsm>(call.getCalledOperand());
@@ -2914,7 +2969,13 @@ struct Importer {
                 output_block->operations.push_back(std::move(operation));
                 return true;
             }
-            if (!import_call(*call, state, &operation)) return false;
+            const llvm::Function* callee = call->getCalledFunction();
+            if (callee != nullptr && callee->getName().starts_with("llvm.nvvm.atomic.") &&
+                callee->getName().contains(".sys.")) {
+                if (!import_system_atomic(*call, state, output_block, &operation)) return false;
+            } else if (!import_call(*call, state, &operation)) {
+                return false;
+            }
         } else if (const auto* atomic = llvm::dyn_cast<llvm::AtomicRMWInst>(&instruction)) {
             operation.opcode = OpCode::kAtomic;
             operation.operands.push_back(import_pointer_operand(

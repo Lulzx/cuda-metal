@@ -176,6 +176,15 @@ Atomic support is form-specific. Wider, floating, system-scope, ordering, and
 address-space combinations outside focused tests remain gaps. Successful header
 compilation is not atomic contention proof.
 
+Direct NVVM system-atomic import is limited to relaxed 32-bit integer add,
+exchange, signed min/max, bitwise operations, and CAS on resolved device
+storage. The source overlay implements unsigned min/max and inc/dec through
+system CAS loops; in particular, [older Clang loses unsigned min/max semantics](https://github.com/llvm/llvm-project/pull/200735)
+when emitting its scoped NVVM intrinsics. Wide/floating system intrinsics,
+other scopes, and shared/private targets are not added by this path. The
+direct/PTX numerical gates cover GPU contention and a host update to managed
+storage, but do not guarantee that the CPU and GPU updates overlap in time.
+
 ## Device properties
 
 Several reported CUDA properties are conservative or synthetic compatibility

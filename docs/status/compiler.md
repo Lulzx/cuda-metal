@@ -57,8 +57,14 @@ functions without direct equivalents.
 The PTX typed path now preserves Clang call-sequence parameter slots and FP32
 bit containers for that same libdevice surface. Direct and PTX-produced typed
 artifacts have separate Apple-GPU numerical gates for the complete 32-bit CUDA
-atomic family, device/threadgroup fences, and host-concurrent system atomics;
+atomic family, device/threadgroup fences, and system atomics on managed storage;
 the broader libdevice numerical proof remains attributed to the direct path.
+The direct importer accepts the 32-bit integer system-atomic NVVM calls emitted
+by Clang 22, with relaxed ordering and the existing coherent-UMA policy. The
+system gates check 2,048 competing GPU threads plus a host atomic update, and 22
+single-thread cases check final and returned old values. Unsigned system min/max
+use CAS loops to avoid older Clang's signed-intrinsic emission. These gates do
+not prove simultaneous CPU/GPU execution or general concurrent managed access.
 The direct PTX path also lowers indirect-object
 `txq`/`suq` width, height, and depth queries through the public CuMetal
 descriptor ABI; the opcode sweep executes all six query forms with distinct

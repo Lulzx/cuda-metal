@@ -7438,6 +7438,15 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
                         operation.opcode = ir::OpCode::kMetalFence;
                         break;
                     case ir::OpCode::kAtomic:
+                        if (operation.memory_scope == ir::MemoryScope::kSystem &&
+                            operation.attributes.contains("llvm_intrinsic") &&
+                            operation.attributes.at("llvm_intrinsic").starts_with("llvm.nvvm.atomic.") &&
+                            (operation.operands.empty() ||
+                             operation.operands.front().type.address_space != ir::AddressSpace::kDevice)) {
+                            result.error = operation.location.str() +
+                                           ": NVVM system atomics require device storage";
+                            return result;
+                        }
                         if ((operation.memory_scope == ir::MemoryScope::kSystem &&
                              (!operation.attributes.contains("metal_uma_system_scope") ||
                               operation.attributes.at("metal_uma_system_scope") != "true")) ||
