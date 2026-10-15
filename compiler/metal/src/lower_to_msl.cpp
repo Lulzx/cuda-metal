@@ -3870,6 +3870,11 @@ struct AstLowerer {
                     binary("*", binary("*", polynomial, t), decay));
                 return MslExpression::call("copysign", {positive, input}, return_type);
             };
+            if (callee->second == "round" && arguments.size() == 1 &&
+                return_type == MslType::floating()) {
+                return declare_result(
+                    operation, unary_call("cm_libdevice_round", arguments[0]));
+            }
             if (callee->second == "expm1" && arguments.size() == 1) {
                 return declare_result(
                     operation,
@@ -7933,6 +7938,7 @@ static void cm_scoped_store_u128(coherent(device) device ulong2* payload, ulong2
     if (result.source.find("cm_libdevice_") != std::string::npos) {
         static constexpr std::string_view kLibdeviceDeclarations = R"msl(
 extern "C" float cm_libdevice_rne(float);
+extern "C" float cm_libdevice_round(float);
 extern "C" float cm_libdevice_erfcx(float);
 extern "C" float cm_libdevice_normcdf(float);
 extern "C" float cm_libdevice_normcdfinv(float);

@@ -148,6 +148,15 @@ atomics, constants/globals, bounded dynamic launch, graph-related workloads,
 and software FP64 paths exercised by focused tests. Instruction support is
 semantic and per-form; an accepted PTX version header is not blanket support.
 
+Legacy and typed `__nv_roundf` calls use an MSL `round(float)` helper with
+explicit signed-zero and non-finite handling. This also avoids a legacy
+Metal compute-pipeline compilation failure. The focused
+`functional_roundf_edges_{legacy,cumetal_ir}` tests require
+Apple-GPU dispatch and exact bits for finite results (including ties away
+from zero, neighboring binary32 values, subnormals, signed zero, and large
+integral values) and infinities. NaN cases check classification, not sign or
+payload preservation.
+
 ## Tools
 
 - `cumetalc`: frontend and emission driver

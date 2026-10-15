@@ -1,9 +1,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// CuMetal libdevice float helpers: functions with no Metal builtin, expressed
-// as numerically-tested binary32 expansions. The typed MSL backend includes
-// this file textually when generated source references cm_libdevice_*; the
+// CuMetal libdevice float helpers: binary32 expansions and Metal wrappers.
+// The typed MSL backend includes this file textually for cm_libdevice_* calls;
 // LLVM/AIR lowering links it as an additional input for the same symbols.
 // Both float and double device calls reach these helpers -- double calls
 // decode their binary64 storage to binary32 first (see docs/fp64-policy.md).
@@ -138,6 +137,21 @@ static float cm_lgamma_impl(float x) {
 }
 
 extern "C" float cm_libdevice_rne(float x) { return cm_rne_impl(x); }
+
+// llvm.round.f32 can survive offline AIR linking but fail during Metal pipeline
+// compilation. Compiling the public MSL builtin supplies its supported lowering.
+extern "C" float cm_libdevice_round(float x) {
+    const uint bits = as_type<uint>(x);
+    const uint magnitude = bits & 0x7fffffffu;
+    // Every finite binary32 value at or above 2^23 is already integral.
+    // Returning these bits also preserves infinities and NaNs without math.
+    if (magnitude >= 0x4b000000u) return x;
+    // Metal round can discard a zero's sign. Preserve it explicitly, including
+    // inputs whose magnitude rounds to zero and subnormals flushed by the ALU.
+    if (magnitude < 0x3f000000u) return as_type<float>(bits & 0x80000000u);
+    const uint rounded = as_type<uint>(round(x));
+    return as_type<float>((rounded & 0x7fffffffu) | (bits & 0x80000000u));
+}
 
 // erfcx(x) = exp(x^2) * erfc(x). The direct product overflows for x > ~9.4
 // (exp(x^2) -> inf while erfc(x) -> 0), so large x uses the asymptotic

@@ -2965,6 +2965,30 @@ add_test(
 )
 set_tests_properties(functional_byval_aggregate_launch PROPERTIES SKIP_RETURN_CODE 77)
 
+# roundf's LLVM intrinsic can survive metallib emission yet fail when Metal
+# creates its pipeline. Require a real dispatch and exact edge-case results.
+foreach(roundf_backend IN ITEMS legacy cumetal-ir)
+    string(REPLACE "-" "_" roundf_suffix "${roundf_backend}")
+    set(roundf_test "functional_roundf_edges_${roundf_suffix}")
+    add_test(
+        NAME ${roundf_test}
+        COMMAND bash
+            ${CMAKE_SOURCE_DIR}/tests/functional/run_roundf_edges.sh
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}
+            ../functional/fixtures
+            roundf_edges.cu
+            roundf_edges_${roundf_suffix}
+            "PASS: roundf ties, neighbors, signed zero, infinities and NaN on Apple GPU"
+    )
+    set_tests_properties(${roundf_test} PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        TIMEOUT 120
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=${roundf_backend}"
+    )
+endforeach()
+
 add_test(
     NAME functional_texture_descriptor_device
     COMMAND bash
