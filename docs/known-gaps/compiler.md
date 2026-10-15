@@ -238,6 +238,17 @@ for the JIT path. The expansions are binary32-quality approximations
 (Acklam inverse-normal, Lanczos gamma, Abramowitz-Stegun `erfc`), not
 libdevice's own implementations.
 
+The same support module wraps MSL `round(float)` for float `__nv_roundf`
+in the legacy and typed backends.
+Emitting `llvm.round.f32` directly can produce a valid metallib whose compute
+pipeline fails to compile on Apple GPU. The wrapper retains binary32 rounding
+with halfway cases away from zero. It classifies signed zero and non-finite
+inputs using their binary32 bits. Focused legacy and typed registration tests
+check exact finite and infinite results and NaN classification; they do not
+verify NaN sign or payload preservation.
+This does not extend double-precision rounding or the other approximate
+libdevice helpers described above.
+
 Two libdevice families are exact rather than approximate. The
 `__nv_{f,d}{add,sub,mul,div,rcp,sqrt}_{rd,ru,rz}` and `__nv_{fmaf,fma}_{rd,ru,rz}`
 interval intrinsics route through the correctly-rounded vf64 software ALU in
