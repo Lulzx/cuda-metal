@@ -3964,6 +3964,18 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
         PROPERTIES SKIP_RETURN_CODE 77)
 
     add_test(
+        NAME functional_cumetalc_native_aot_internal_kernels
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/native_internal_kernels.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_native_aot_internal_kernels
+                --expect-gpu-launches=3
+    )
+    set_tests_properties(functional_cumetalc_native_aot_internal_kernels
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 LABELS "gpu")
+
+    add_test(
         NAME functional_cumetalc_native_aot_symbols
         COMMAND bash
                 ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh

@@ -12,12 +12,8 @@
 #include <cstring>
 #include <curand_kernel.h>
 
-// A named namespace, not an anonymous one: `__global__` functions with
-// internal linkage cannot be referenced from the separate registration
-// translation unit cumetalc generates for a native AOT executable, so an
-// anonymous namespace here fails to link rather than testing anything. See
-// docs/known-gaps/compiler.md.
-namespace amrex_idioms {
+// Keep kernels local to this translation unit, as AMReX device helpers may be.
+namespace {
 
 int g_failures = 0;
 
@@ -158,9 +154,7 @@ bool close_rel(double got, double want, double tol) {
     return std::fabs(got - want) / denom <= tol;
 }
 
-}  // namespace amrex_idioms
-
-using namespace amrex_idioms;
+}  // namespace
 
 int main() {
     std::printf("AMReX device idioms\n");

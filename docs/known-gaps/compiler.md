@@ -443,10 +443,13 @@ compile the same source without producing the join. Tracked upstream as issue
 ## Native AOT linkage
 
 `cumetalc` builds a native AOT executable by generating a separate registration
-translation unit that names each kernel's host stub. A `__global__` function
-with internal linkage -- one declared in an anonymous namespace, or `static` --
-therefore fails to link, because the generated unit cannot reference the symbol.
-Give such kernels external linkage; the registration path itself is unaffected.
+translation unit that names each kernel's host stub. For `__global__` functions
+declared in an anonymous namespace or with `static`, it gives only the parsed
+host launch stubs external linkage before linking that registration object.
+Other internal host functions keep their linkage. The focused native-AOT gate
+checks anonymous, static, and external kernels together, with separate results
+and guard elements for each. This covers the single-source executable path;
+it does not establish general multi-translation-unit device linking.
 
 ## Guarded PTX definitions
 
