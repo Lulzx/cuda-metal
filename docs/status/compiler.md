@@ -18,6 +18,12 @@ GPU correctness, and cache hits and the NVVM/legacy compiler paths are untraced.
   production libraries.
 - Direct AIR generation remains tooling/research only.
 
+Native-AOT executables accept anonymous-namespace and `static` kernels alongside
+external kernels. Only their host launch stubs receive the linkage needed by the
+generated registration object; ordinary internal host helpers remain local.
+The focused gate verifies three numerical Apple-GPU launches and guard values,
+and the AMReX idiom fixture no longer needs a named-namespace workaround.
+
 With CUDA Clang 21-23, the reviewed manifest-controlled 49-file
 production-metallib matrix records:
 

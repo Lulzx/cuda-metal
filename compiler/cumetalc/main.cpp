@@ -667,6 +667,8 @@ int run_legacy_executable_driver(const ExecutableDriverOptions& options,
 struct NativeHostKernel {
     std::string stub_symbol;
     std::string metal_name;
+    std::size_t internal_linkage_offset = std::string::npos;
+    std::size_t internal_linkage_length = 0;
     std::vector<bool> pointer_arguments;
     std::vector<std::uint32_t> argument_sizes;
     std::vector<std::uint32_t> symbol_indices;
@@ -798,14 +800,14 @@ bool parse_native_host_kernels(std::string_view llvm_ir,
                                std::string* error) {
     const std::string source(llvm_ir);
     const std::regex header(
-        R"(define[^\n@]*@([^ (\n]+)\(([^\n]*)\)[^{\n]*\{)"
+        R"(define[ \t]+(internal[ \t]+)?[^\n@]*@([^ (\n]+)\(([^\n]*)\)[^{\n]*\{)"
     );
     const std::regex setup(
         R"(@cudaSetupArgument\(ptr [^,%]*?(%[-A-Za-z0-9._]+), i64 ([0-9]+), i64 ([0-9]+)\))"
     );
     for (std::sregex_iterator it(source.begin(), source.end(), header), end;
          it != end; ++it) {
-        const std::string stub = (*it)[1].str();
+        const std::string stub = (*it)[2].str();
         if (stub.find("__device_stub__") == std::string::npos) continue;
         const std::string metal_name = device_symbol_from_stub(stub);
         if (metal_name.empty()) {
@@ -822,6 +824,9 @@ bool parse_native_host_kernels(std::string_view llvm_ir,
         NativeHostKernel kernel{
             .stub_symbol = stub,
             .metal_name = metal_name,
+            .internal_linkage_offset = (*it)[1].matched
+                ? static_cast<std::size_t>((*it).position(1)) : std::string::npos,
+            .internal_linkage_length = static_cast<std::size_t>((*it).length(1)),
         };
         const std::string body = source.substr(body_begin, body_end - body_begin);
         std::size_t setup_call_count = 0;
@@ -1210,21 +1215,31 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
             }
         }
     }
-    if (!symbols.empty()) {
-        std::string rewritten_host(host_llvm_bytes.begin(), host_llvm_bytes.end());
-        for (const NativeSourceSymbol& symbol : symbols) {
-            if (symbol.module_private) continue;
-            const std::string internal = "@" + symbol.name + " = internal global";
-            const std::size_t at = rewritten_host.find(internal);
-            if (at == std::string::npos) {
-                cleanup();
-                std::cerr << "cumetalc failed: native CUDA symbol '" << symbol.name
-                          << "' has no host shadow with supported linkage\n";
-                return 1;
-            }
-            rewritten_host.replace(at, internal.size(),
-                                   "@" + symbol.name + " = global");
+    std::string rewritten_host(host_llvm_bytes.begin(), host_llvm_bytes.end());
+    bool host_linkage_changed = false;
+    // Registration lives in a separate object and must reference every launch stub,
+    // including static and anonymous-namespace kernels. Change only the parsed stub
+    // definitions; keeping their names and call sites preserves launch identity.
+    // Walk backwards so the recorded offsets remain valid after each removal.
+    for (auto it = kernels.rbegin(); it != kernels.rend(); ++it) {
+        if (it->internal_linkage_offset == std::string::npos) continue;
+        rewritten_host.erase(it->internal_linkage_offset, it->internal_linkage_length);
+        host_linkage_changed = true;
+    }
+    for (const NativeSourceSymbol& symbol : symbols) {
+        if (symbol.module_private) continue;
+        const std::string internal = "@" + symbol.name + " = internal global";
+        const std::size_t at = rewritten_host.find(internal);
+        if (at == std::string::npos) {
+            cleanup();
+            std::cerr << "cumetalc failed: native CUDA symbol '" << symbol.name
+                      << "' has no host shadow with supported linkage\n";
+            return 1;
         }
+        rewritten_host.replace(at, internal.size(), "@" + symbol.name + " = global");
+        host_linkage_changed = true;
+    }
+    if (host_linkage_changed) {
         if (!write_text_output(host_llvm, rewritten_host, true, &io_error)) {
             cleanup();
             std::cerr << "cumetalc failed: " << io_error << "\n";
@@ -1237,7 +1252,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         if (!recompiled.started || recompiled.exit_code != 0) {
             if (!recompiled.output.empty()) std::cerr << recompiled.output;
             cleanup();
-            std::cerr << "cumetalc failed: native symbol host-linkage rewrite failed\n";
+            std::cerr << "cumetalc failed: native host-linkage rewrite failed\n";
             return 1;
         }
     }

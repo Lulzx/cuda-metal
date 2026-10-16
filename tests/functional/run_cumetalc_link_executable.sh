@@ -15,9 +15,14 @@ shift 3
 COMPILER_ARGS=()
 EXPECT_OUTPUT="PASS:"
 EXPECT_NATIVE=1
+EXPECT_GPU_LAUNCHES=""
 for arg in "$@"; do
     if [[ "${arg}" == --expect-output=* ]]; then
         EXPECT_OUTPUT="${arg#--expect-output=}"
+        continue
+    fi
+    if [[ "${arg}" == --expect-gpu-launches=* ]]; then
+        EXPECT_GPU_LAUNCHES="${arg#--expect-gpu-launches=}"
         continue
     fi
     COMPILER_ARGS+=("${arg}")
@@ -106,6 +111,23 @@ fi
 if ! grep -q "launch_success=true" <<<"${RUN_OUTPUT}"; then
     echo "FAIL: provenance does not report a successful launch"
     exit 1
+fi
+if [[ -n "${EXPECT_GPU_LAUNCHES}" ]]; then
+    GPU_LAUNCHES=$(awk '
+        /CUMETAL_PROVENANCE event=kernel_launch/ && /device=apple_gpu/ && /launch_success=true/ {
+            for (i = 1; i <= NF; ++i) {
+                if ($i ~ /^duration_ns=/) {
+                    split($i, duration, "=")
+                    if (duration[2] > 0) ++count
+                }
+            }
+        }
+        END { print count + 0 }
+    ' <<<"${RUN_OUTPUT}")
+    if [[ "${GPU_LAUNCHES}" != "${EXPECT_GPU_LAUNCHES}" ]]; then
+        echo "FAIL: expected ${EXPECT_GPU_LAUNCHES} completed Apple GPU launches with positive duration, got ${GPU_LAUNCHES}"
+        exit 1
+    fi
 fi
 if [[ ${EXPECT_NATIVE} -eq 1 ]] &&
    { grep -q -E 'JIT compiling|registration-jit' <<<"${RUN_OUTPUT}" ||
