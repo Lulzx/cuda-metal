@@ -70,9 +70,15 @@ Optional external-project tests may still report explicit skips.
 The report policy flags are intentionally distinct:
 
 - `--require-tests` rejects an empty CTest label or regex selection.
-- `--require-no-skips` rejects any skip in a prerequisite-complete proof gate.
+- `--require-no-skips` rejects any skip, including a disabled test, in a
+  prerequisite-complete proof gate.
 - The full suite should not use `--require-no-skips`, because optional llm.c,
   llama.cpp, PhysX, and multi-Xcode checks are environment-dependent.
+
+The report counts timeouts, exceptions, and tests that cannot run (for example,
+a missing executable) as failures. Explicitly disabled tests count as skipped.
+Both groups are listed by name, and the script preserves CTest's failure exit
+status in addition to enforcing the policy flags.
 
 Runtime execution tests
 -----------------------
