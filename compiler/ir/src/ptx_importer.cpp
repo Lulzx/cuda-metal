@@ -3706,13 +3706,13 @@ struct Importer {
         if (opcode.find(".x1") != std::string::npos) matrices = 1;
         else if (opcode.find(".x2") != std::string::npos) matrices = 2;
         else if (opcode.find(".x4") != std::string::npos) matrices = 4;
+        const bool transposed = opcode.find(".trans") != std::string::npos;
         if (opcode.find(".m8n8") == std::string::npos ||
             opcode.find(".shared") == std::string::npos ||
-            opcode.find(".b16") == std::string::npos || matrices == 0 ||
-            opcode.find(".trans") != std::string::npos) {
+            opcode.find(".b16") == std::string::npos || matrices == 0) {
             return fail(&instruction,
                         "only ldmatrix.sync.aligned.m8n8.x1/x2/x4.shared.b16 "
-                        "(no .trans) is supported: '" +
+                        "is supported: '" +
                             opcode + "'");
         }
         if (instruction.operands.size() < 2 ||
@@ -3894,13 +3894,48 @@ struct Importer {
         if (results.size() != destinations.size())
             return fail(&instruction, "ldmatrix result count mismatch");
         for (int m = 0; m < matrices; ++m) {
-            const Operand index = expressions.emit(
-                OpCode::kAdd, i32,
-                {expressions.emit(OpCode::kMul, i32, {imm32(m), imm32(32)}),
-                 expressions.emit(OpCode::kAdd, i32,
-                                  {expressions.emit(OpCode::kMul, i32, {dest_row, imm32(4)}),
-                                   dest_pair})});
-            const Operand packed = emit_load(stage_address(index), i32);
+            Operand packed;
+            if (transposed) {
+                // Transposed fragment element e is the staged original
+                // element (dest_col + e, dest_row): read the packed word
+                // holding it and extract the matching half.
+                std::vector<Operand> halves;
+                for (int e = 0; e < 2; ++e) {
+                    const Operand orig_row = expressions.emit(
+                        OpCode::kAdd, i32,
+                        {expressions.emit(OpCode::kMul, i32, {dest_pair, imm32(2)}),
+                         imm32(e)});
+                    const Operand word_index = expressions.emit(
+                        OpCode::kAdd, i32,
+                        {expressions.emit(OpCode::kMul, i32, {imm32(m), imm32(32)}),
+                         expressions.emit(OpCode::kAdd, i32,
+                                          {expressions.emit(OpCode::kMul, i32, {orig_row, imm32(4)}),
+                                           expressions.emit(OpCode::kShiftRight, i32, {dest_row, imm32(1)})})});
+                    const Operand word = emit_load(stage_address(word_index), i32);
+                    const Operand shifted = expressions.emit(
+                        OpCode::kSelect, i32,
+                        {expressions.emit(OpCode::kCompare, Type::predicate(),
+                                          {expressions.emit(OpCode::kBitAnd, i32, {dest_row, imm32(1)}),
+                                           imm32(1)},
+                                          {{"predicate", "eq"}}),
+                         expressions.emit(OpCode::kShiftRight, i32, {word, imm32(16)}),
+                         word});
+                    halves.push_back(expressions.emit(
+                        OpCode::kBitAnd, i32, {shifted, imm32(0xffff)}));
+                }
+                packed = expressions.emit(
+                    OpCode::kBitOr, i32,
+                    {halves[0],
+                     expressions.emit(OpCode::kShiftLeft, i32, {halves[1], imm32(16)})});
+            } else {
+                const Operand index = expressions.emit(
+                    OpCode::kAdd, i32,
+                    {expressions.emit(OpCode::kMul, i32, {imm32(m), imm32(32)}),
+                     expressions.emit(OpCode::kAdd, i32,
+                                      {expressions.emit(OpCode::kMul, i32, {dest_row, imm32(4)}),
+                                       dest_pair})});
+                packed = emit_load(stage_address(index), i32);
+            }
             const ValueId dest_id = results[static_cast<std::size_t>(m)];
             value_types[dest_id] = i32;
             Operation copy;
