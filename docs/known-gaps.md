@@ -49,11 +49,12 @@ holds the exact boundary.
 **Compiler** ([details](known-gaps/compiler.md), [why a kernel is refused](ptx-proof-contracts.md))
 
 - Recursive or indirect device-call graphs.
-- Raw PTX tensor-core `ldmatrix` `.trans` and non-b16 variants,
+- Raw PTX tensor-core `ldmatrix` non-b16 variants,
   `mbarrier`, TMA/cluster operations, FP8, and direct-PTX texture
   sampling/surface access. (Raw PTX `wmma` m16n16k16 with f16 inputs and
   an f32 accumulator, `mma.sync` m16n8k16 row.col f16/f32, and
-  `ldmatrix` m8n8 x1/x2/x4 shared b16 do lower through the typed importer
+  `ldmatrix` m8n8 x1/x2/x4 shared b16, with or without `.trans`, do lower
+  through the typed importer
   to `simdgroup_matrix`, as does CUDA-source WMMA via `mma.h` markers in
   both backends; other tensor-core shapes and element types are refused.)
 - Inline `asm` containing control flow (`bra`, `call`, `ret`) or `${N:modifier}`

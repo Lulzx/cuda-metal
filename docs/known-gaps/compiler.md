@@ -286,7 +286,7 @@ operands, multiple outputs, vector operands such as `{$1, $2}`) and the
 template's instructions are lowered in place, so any instruction the typed PTX path supports works inside `asm`.
 Refused with a diagnostic: control flow inside the template (`bra`, `call`,
 `ret`), `${N:modifier}` operand modifiers, and instructions the PTX path does
-not lower (tensor-core `ldmatrix` `.trans`/non-b16, non-m16n8k16
+not lower (tensor-core `ldmatrix` non-b16, non-m16n8k16
 `mma.sync`, non-m16n16k16 or non-f16 `wmma`, `mbarrier`, TMA, texture
 instructions). A template with no instruction (`asm volatile("" ::: "memory")`)
 lowers to nothing; it does not act as a compiler barrier for Metal. Predicated
