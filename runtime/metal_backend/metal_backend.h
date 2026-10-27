@@ -104,6 +104,13 @@ bool kernel_pipeline_is_ready(const std::string& metallib_path,
 cudaError_t allocate_buffer(std::size_t size,
                             std::shared_ptr<Buffer>* out_buffer,
                             std::string* error_message);
+// Zero-copy wrap of page-aligned caller-owned host memory
+// (newBufferWithBytesNoCopy). The caller keeps owning the memory; the
+// returned Buffer does not free it. Fails for non-page-aligned pointers.
+cudaError_t wrap_host_buffer(void* ptr,
+                             std::size_t size,
+                             std::shared_ptr<Buffer>* out_buffer,
+                             std::string* error_message);
 cudaError_t create_stream(std::shared_ptr<Stream>* out_stream,
                           std::string* error_message,
                           bool participates_in_legacy_sync = true);
@@ -247,6 +254,42 @@ cudaError_t gemm_strided_batched_f32(bool transa,
                                      int batch_count,
                                      const std::shared_ptr<Stream>& stream,
                                      std::string* error_message);
+enum class GemmEpilogue : std::uint8_t {
+    kNone,
+    kRelu,
+    kBias,
+    kReluBias,
+    kGelu,
+    kGeluBias,
+};
+
+// FP32 GEMM with a fused epilogue (bias/relu/gelu) via MPSGraph, encoded
+// on the caller's stream. D may differ from C. bias_buffer may be null for
+// epilogues without bias. Any failure is reported so callers can fall back.
+cudaError_t gemm_f32_epilogue(bool transa,
+                              bool transb,
+                              int m,
+                              int n,
+                              int k,
+                              float alpha,
+                              const std::shared_ptr<Buffer>& a_buffer,
+                              std::size_t a_offset_bytes,
+                              int lda,
+                              const std::shared_ptr<Buffer>& b_buffer,
+                              std::size_t b_offset_bytes,
+                              int ldb,
+                              float beta,
+                              const std::shared_ptr<Buffer>& c_buffer,
+                              std::size_t c_offset_bytes,
+                              int ldc,
+                              const std::shared_ptr<Buffer>& d_buffer,
+                              std::size_t d_offset_bytes,
+                              int ldd,
+                              const std::shared_ptr<Buffer>& bias_buffer,
+                              std::size_t bias_offset_bytes,
+                              GemmEpilogue epilogue,
+                              const std::shared_ptr<Stream>& stream,
+                              std::string* error_message);
 cudaError_t synchronize(std::string* error_message);
 
 }  // namespace cumetal::metal_backend

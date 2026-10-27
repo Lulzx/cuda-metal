@@ -7,6 +7,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+#import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -25,7 +26,9 @@
 #include <cstring>
 
 #include "cumetal_diag.h"
+#include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <map>
@@ -33,6 +36,7 @@
 #include <mutex>
 #include <string>
 #include <tuple>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -695,6 +699,10 @@ struct BackendState {
     // carried alongside it: the metallib is the only thing that knows for
     // certain, and reading it there stays right whichever path -- runtime,
     // driver, or a prebuilt library -- produced the kernel.
+    // Disk-backed MTLBinaryArchive per metallib, keyed by content hash, OS
+    // build and GPU. Turns cold-process PSO creation into an archive load.
+    std::unordered_map<std::string, id<MTLBinaryArchive>> binary_archives;
+    std::unordered_map<std::string, std::string> binary_archive_paths;
     std::unordered_map<std::string, bool> pipeline_uses_lock_bank;
     std::unordered_map<std::string, bool> pipeline_uses_trap_status;
     std::unordered_map<std::string, bool> pipeline_uses_device_clock;
@@ -1210,6 +1218,96 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
     }
 }
 
+bool binary_archive_enabled() {
+    const char* value = std::getenv("CUMETAL_BINARY_ARCHIVE");
+    return value == nullptr || (std::strcmp(value, "0") != 0 &&
+                                std::strcmp(value, "false") != 0 &&
+                                std::strcmp(value, "FALSE") != 0);
+}
+
+std::string fnv1a_file_hex(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return {};
+    std::uint64_t hash = 1469598103934665603ull;
+    std::array<char, 16384> chunk{};
+    while (input) {
+        input.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        const std::streamsize count = input.gcount();
+        for (std::streamsize i = 0; i < count; ++i) {
+            hash ^= static_cast<unsigned char>(chunk[static_cast<std::size_t>(i)]);
+            hash *= 1099511628211ull;
+        }
+    }
+    char buffer[17];
+    std::snprintf(buffer, sizeof(buffer), "%016llx",
+                  static_cast<unsigned long long>(hash));
+    return buffer;
+}
+
+std::string sanitize_archive_component(std::string value) {
+    for (char& c : value) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '-') {
+            c = '_';
+        }
+    }
+    return value;
+}
+
+// Returns the per-metallib binary archive, creating or loading it from the
+// on-disk cache on first use. Any failure returns nil and the caller falls
+// back to ordinary pipeline creation; the archive is purely an accelerator.
+id<MTLBinaryArchive> load_binary_archive_locked(BackendState& backend,
+                                                const std::string& metallib_path) {
+    if (!binary_archive_enabled() || backend.device == nil) return nil;
+    const auto cached = backend.binary_archives.find(metallib_path);
+    if (cached != backend.binary_archives.end()) return cached->second;
+
+    const std::string hash = fnv1a_file_hex(metallib_path);
+    if (hash.empty()) return nil;
+
+    std::string directory;
+    if (const char* env_dir = std::getenv("CUMETAL_BINARY_ARCHIVE_DIR");
+        env_dir != nullptr && env_dir[0] != '\0') {
+        directory = env_dir;
+    } else if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+        directory = std::string(home) + "/Library/Caches/cumetal/binary-archives";
+    } else {
+        return nil;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec) return nil;
+
+    const std::string gpu = sanitize_archive_component(
+        backend.device.name != nil ? std::string([backend.device.name UTF8String])
+                                   : "unknown-gpu");
+    const std::string os = sanitize_archive_component(std::string(
+        [[[NSProcessInfo processInfo] operatingSystemVersionString] UTF8String]));
+    const std::string archive_path =
+        directory + "/" + hash + "-" + gpu + "-" + os + ".archive";
+
+    NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:archive_path.c_str()]];
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        MTLBinaryArchiveDescriptor* descriptor = [MTLBinaryArchiveDescriptor new];
+        // A URL for a not-yet-existing archive is an error, not a creation
+        // request: start empty and serialize to the path after adding
+        // pipelines.
+        descriptor.url = std::filesystem::exists(archive_path) ? url : nil;
+        NSError* archive_error = nil;
+        id<MTLBinaryArchive> archive =
+            [backend.device newBinaryArchiveWithDescriptor:descriptor error:&archive_error];
+        if (archive != nil) {
+            backend.binary_archives.emplace(metallib_path, archive);
+            backend.binary_archive_paths.emplace(metallib_path, archive_path);
+            return archive;
+        }
+        // A corrupt or stale archive must not break launches: drop it and
+        // retry once with a fresh archive at the same path.
+        std::filesystem::remove(archive_path, ec);
+    }
+    return nil;
+}
+
 id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
                                                  const std::string& metallib_path,
                                                  const std::string& kernel_name,
@@ -1244,13 +1342,51 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
 
         NSError* pipeline_error = nil;
         MTLComputePipelineReflection* reflection = nil;
-        id<MTLComputePipelineState> pipeline = [&] {
-            common::CompileTrace trace("metal_new_compute_pipeline");
-            return [backend.device newComputePipelineStateWithFunction:function
-                                                              options:MTLPipelineOptionBindingInfo
-                                                           reflection:&reflection
-                                                                error:&pipeline_error];
-        }();
+        id<MTLBinaryArchive> binary_archive =
+            load_binary_archive_locked(backend, metallib_path);
+        MTLComputePipelineDescriptor* pipeline_descriptor = nil;
+        id<MTLComputePipelineState> pipeline = nil;
+        if (binary_archive != nil) {
+            pipeline_descriptor = [MTLComputePipelineDescriptor new];
+            pipeline_descriptor.computeFunction = function;
+            pipeline_descriptor.binaryArchives = @[ binary_archive ];
+            pipeline = [&] {
+                common::CompileTrace trace("metal_new_compute_pipeline");
+                return [backend.device
+                    newComputePipelineStateWithDescriptor:pipeline_descriptor
+                                                  options:MTLPipelineOptionBindingInfo
+                                               reflection:&reflection
+                                                    error:&pipeline_error];
+            }();
+            if (pipeline == nil) {
+                pipeline_descriptor = nil;
+                pipeline_error = nil;
+            }
+        }
+        if (pipeline == nil) {
+            pipeline = [&] {
+                common::CompileTrace trace("metal_new_compute_pipeline");
+                return [backend.device newComputePipelineStateWithFunction:function
+                                                                  options:MTLPipelineOptionBindingInfo
+                                                               reflection:&reflection
+                                                                    error:&pipeline_error];
+            }();
+        } else {
+            // Record the new pipeline in the archive and persist it so the
+            // next process skips Apple's backend compile for this kernel.
+            NSError* add_error = nil;
+            if ([binary_archive addComputePipelineFunctionsWithDescriptor:pipeline_descriptor
+                                                                    error:&add_error]) {
+                const auto path_found = backend.binary_archive_paths.find(metallib_path);
+                if (path_found != backend.binary_archive_paths.end()) {
+                    NSURL* archive_url = [NSURL
+                        fileURLWithPath:[NSString
+                                            stringWithUTF8String:path_found->second.c_str()]];
+                    NSError* serialize_error = nil;
+                    [binary_archive serializeToURL:archive_url error:&serialize_error];
+                }
+            }
+        }
         if (pipeline == nil) {
             if (error_message != nullptr) {
                 *error_message = "failed to create compute pipeline for function: " + kernel_name;
@@ -1840,6 +1976,52 @@ cudaError_t allocate_buffer(std::size_t size,
     return cudaSuccess;
 }
 
+cudaError_t wrap_host_buffer(void* ptr,
+                             std::size_t size,
+                             std::shared_ptr<Buffer>* out_buffer,
+                             std::string* error_message) {
+    if (ptr == nullptr || size == 0 || out_buffer == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "wrap_host_buffer invalid argument";
+        }
+        return cudaErrorInvalidValue;
+    }
+    const long page = ::sysconf(_SC_PAGESIZE);
+    if (page <= 0 ||
+        reinterpret_cast<std::uintptr_t>(ptr) % static_cast<std::uintptr_t>(page) != 0) {
+        if (error_message != nullptr) {
+            *error_message = "wrap_host_buffer requires page-aligned host memory";
+        }
+        return cudaErrorInvalidValue;
+    }
+    if (!ensure_initialized(error_message)) {
+        return cudaErrorInitializationError;
+    }
+    BackendState& backend = state();
+    std::lock_guard<std::mutex> lock(backend.mutex);
+    const std::size_t rounded =
+        ((size + static_cast<std::size_t>(page) - 1) / static_cast<std::size_t>(page)) *
+        static_cast<std::size_t>(page);
+    // Nil deallocator: the caller owns the memory and cudaHostUnregister
+    // (or process teardown) ends the registration; Metal must not free it.
+    id<MTLBuffer> buffer = [backend.device newBufferWithBytesNoCopy:ptr
+                                                             length:rounded
+                                                            options:MTLResourceStorageModeShared
+                                                        deallocator:nil];
+    if (buffer == nil) {
+        if (error_message != nullptr) {
+            *error_message = "newBufferWithBytesNoCopy failed";
+        }
+        return cudaErrorMemoryAllocation;
+    }
+    if (error_message != nullptr) {
+        error_message->clear();
+    }
+    backend.live_buffers.push_back(buffer);
+    *out_buffer = std::make_shared<BufferImpl>(buffer, false);
+    return cudaSuccess;
+}
+
 cudaError_t create_stream(std::shared_ptr<Stream>* out_stream,
                           std::string* error_message,
                           bool participates_in_legacy_sync) {
@@ -2256,6 +2438,265 @@ cudaError_t gemm_f32(bool transa,
             return cudaSuccess;
         }
 
+        [command_buffer waitUntilCompleted];
+        return check_command_buffer_status(command_buffer, error_message);
+    }
+}
+
+cudaError_t gemm_f32_epilogue(bool transa,
+                              bool transb,
+                              int m,
+                              int n,
+                              int k,
+                              float alpha,
+                              const std::shared_ptr<Buffer>& a_buffer,
+                              std::size_t a_offset_bytes,
+                              int lda,
+                              const std::shared_ptr<Buffer>& b_buffer,
+                              std::size_t b_offset_bytes,
+                              int ldb,
+                              float beta,
+                              const std::shared_ptr<Buffer>& c_buffer,
+                              std::size_t c_offset_bytes,
+                              int ldc,
+                              const std::shared_ptr<Buffer>& d_buffer,
+                              std::size_t d_offset_bytes,
+                              int ldd,
+                              const std::shared_ptr<Buffer>& bias_buffer,
+                              std::size_t bias_offset_bytes,
+                              GemmEpilogue epilogue,
+                              const std::shared_ptr<Stream>& stream,
+                              std::string* error_message) {
+    const bool synchronous_default = stream == nullptr;
+    const bool has_bias = epilogue == GemmEpilogue::kBias ||
+                          epilogue == GemmEpilogue::kReluBias ||
+                          epilogue == GemmEpilogue::kGeluBias;
+    if (m < 0 || n < 0 || k < 0 || lda <= 0 || ldb <= 0 || ldc <= 0 || ldd <= 0 ||
+        a_buffer == nullptr || b_buffer == nullptr || c_buffer == nullptr ||
+        d_buffer == nullptr || (has_bias && bias_buffer == nullptr) ||
+        epilogue == GemmEpilogue::kNone) {
+        if (error_message != nullptr) *error_message = "gemm_f32_epilogue invalid argument";
+        return cudaErrorInvalidValue;
+    }
+    if (m == 0 || n == 0 || k == 0) return cudaSuccess;
+    if (!ensure_initialized(error_message)) return cudaErrorInitializationError;
+
+    auto* a_impl = dynamic_cast<BufferImpl*>(a_buffer.get());
+    auto* b_impl = dynamic_cast<BufferImpl*>(b_buffer.get());
+    auto* c_impl = dynamic_cast<BufferImpl*>(c_buffer.get());
+    auto* d_impl = dynamic_cast<BufferImpl*>(d_buffer.get());
+    auto* bias_impl = bias_buffer ? dynamic_cast<BufferImpl*>(bias_buffer.get()) : nullptr;
+    if (a_impl == nullptr || b_impl == nullptr || c_impl == nullptr || d_impl == nullptr ||
+        (has_bias && bias_impl == nullptr)) {
+        if (error_message != nullptr) *error_message = "gemm_f32_epilogue unexpected buffer type";
+        return cudaErrorInvalidValue;
+    }
+    const std::size_t a_cols = static_cast<std::size_t>(transa ? m : k);
+    const std::size_t b_cols = static_cast<std::size_t>(transb ? k : n);
+    if (!checked_matrix_span_bytes(a_offset_bytes,
+                                   static_cast<std::size_t>(lda) * a_cols * sizeof(float),
+                                   a_impl->length(), "A", error_message) ||
+        !checked_matrix_span_bytes(b_offset_bytes,
+                                   static_cast<std::size_t>(ldb) * b_cols * sizeof(float),
+                                   b_impl->length(), "B", error_message) ||
+        !checked_matrix_span_bytes(c_offset_bytes,
+                                   static_cast<std::size_t>(ldc) * static_cast<std::size_t>(n) * sizeof(float),
+                                   c_impl->length(), "C", error_message) ||
+        !checked_matrix_span_bytes(d_offset_bytes,
+                                   static_cast<std::size_t>(ldd) * static_cast<std::size_t>(n) * sizeof(float),
+                                   d_impl->length(), "D", error_message) ||
+        (has_bias && !checked_matrix_span_bytes(bias_offset_bytes,
+                                                static_cast<std::size_t>(m) * sizeof(float),
+                                                bias_impl->length(), "bias", error_message))) {
+        return cudaErrorInvalidValue;
+    }
+
+    std::shared_ptr<StreamImpl> stream_impl;
+    id<MTLCommandQueue> queue = nil;
+    const cudaError_t queue_status =
+        resolve_queue_for_stream(stream, &stream_impl, &queue, error_message);
+    if (queue_status != cudaSuccess) return queue_status;
+    std::unique_lock<std::mutex> batch_lock(state().batch_mutex);
+    std::unique_lock<std::mutex> submission_lock(stream_impl->submission_mutex());
+    (void)stream_impl->flush_open_batch_locked();
+    flush_other_open_batches(stream_impl);
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+        if (command_buffer == nil) {
+            if (error_message != nullptr) *error_message = "gemm_f32_epilogue failed to create command buffer";
+            return cudaErrorUnknown;
+        }
+
+        // MPSMatrix views of column-major storage are the transposed
+        // matrices; the graph transposes back where the math requires it.
+        const int a_stored_rows = transa ? k : m;
+        const int a_stored_cols = transa ? m : k;
+        const int b_stored_rows = transb ? n : k;
+        const int b_stored_cols = transb ? k : n;
+        auto shape2 = [](int rows, int cols) {
+            return @[ @(rows), @(cols) ];
+        };
+
+        // Compiled executables are cached per (shape, transpose, epilogue);
+        // leading dimensions and buffer offsets are per-call tensor data.
+        static std::mutex cache_mutex;
+        static NSMutableDictionary<NSString*, NSDictionary*>* cache = nil;
+        NSString* key = [NSString stringWithFormat:@"%d,%d,%d,%d,%d,%d",
+                                                   m, n, k, transa ? 1 : 0,
+                                                   transb ? 1 : 0,
+                                                   static_cast<int>(epilogue)];
+        NSDictionary* entry = nil;
+        {
+            std::lock_guard<std::mutex> guard(cache_mutex);
+            if (cache == nil) cache = [[NSMutableDictionary alloc] init];
+            entry = cache[key];
+        }
+        MPSGraphExecutable* executable = nil;
+        NSArray<MPSGraphTensor*>* graph_inputs = nil;
+        MPSGraphTensor* graph_target = nil;
+        if (entry != nil) {
+            executable = entry[@"exec"];
+            graph_inputs = entry[@"inputs"];
+            graph_target = entry[@"target"];
+        } else {
+            MPSGraph* graph = [[MPSGraph alloc] init];
+            MPSGraphTensor* a_ph = [graph placeholderWithShape:shape2(a_stored_cols, a_stored_rows)
+                                                      dataType:MPSDataTypeFloat32 name:@"a"];
+            MPSGraphTensor* b_ph = [graph placeholderWithShape:shape2(b_stored_cols, b_stored_rows)
+                                                      dataType:MPSDataTypeFloat32 name:@"b"];
+            MPSGraphTensor* c_ph = [graph placeholderWithShape:shape2(n, m)
+                                                      dataType:MPSDataTypeFloat32 name:@"c"];
+            MPSGraphTensor* bias_ph = nil;
+            if (has_bias) {
+                bias_ph = [graph placeholderWithShape:shape2(m, 1)
+                                             dataType:MPSDataTypeFloat32 name:@"bias"];
+            }
+            MPSGraphTensor* op_a = transa ? a_ph
+                                          : [graph transposeTensor:a_ph dimension:0
+                                                     withDimension:1 name:@"op_a"];
+            MPSGraphTensor* op_b = transb ? b_ph
+                                          : [graph transposeTensor:b_ph dimension:0
+                                                     withDimension:1 name:@"op_b"];
+            MPSGraphTensor* product = [graph matrixMultiplicationWithPrimaryTensor:op_a
+                                                                   secondaryTensor:op_b
+                                                                              name:@"gemm"];
+            MPSGraphTensor* scaled = [graph multiplicationWithPrimaryTensor:product
+                                                            secondaryTensor:[graph constantWithScalar:alpha
+                                                                                             dataType:MPSDataTypeFloat32]
+                                                                       name:@"alpha"];
+            MPSGraphTensor* c_math = [graph transposeTensor:c_ph dimension:0
+                                              withDimension:1 name:@"c_math"];
+            MPSGraphTensor* beta_c = [graph multiplicationWithPrimaryTensor:c_math
+                                                            secondaryTensor:[graph constantWithScalar:beta
+                                                                                             dataType:MPSDataTypeFloat32]
+                                                                       name:@"beta"];
+            MPSGraphTensor* value = [graph additionWithPrimaryTensor:scaled
+                                                     secondaryTensor:beta_c name:@"accumulate"];
+            if (has_bias) {
+                value = [graph additionWithPrimaryTensor:value
+                                         secondaryTensor:bias_ph name:@"bias_add"];
+            }
+            if (epilogue == GemmEpilogue::kRelu || epilogue == GemmEpilogue::kReluBias) {
+                value = [graph reLUWithTensor:value name:@"relu"];
+            } else if (epilogue == GemmEpilogue::kGelu || epilogue == GemmEpilogue::kGeluBias) {
+                // tanh-approximation GELU, matching the host epilogue.
+                MPSGraphTensor* x2 = [graph multiplicationWithPrimaryTensor:value
+                                                            secondaryTensor:value name:@"x2"];
+                MPSGraphTensor* x3 = [graph multiplicationWithPrimaryTensor:x2
+                                                            secondaryTensor:value name:@"x3"];
+                MPSGraphTensor* inner_term = [graph multiplicationWithPrimaryTensor:x3
+                                                                    secondaryTensor:[graph constantWithScalar:0.044715
+                                                                                                     dataType:MPSDataTypeFloat32]
+                                                                               name:@"x3_scaled"];
+                MPSGraphTensor* inner_sum = [graph additionWithPrimaryTensor:value
+                                                             secondaryTensor:inner_term name:@"gelu_sum"];
+                MPSGraphTensor* inner = [graph multiplicationWithPrimaryTensor:inner_sum
+                                                               secondaryTensor:[graph constantWithScalar:0.7978845608
+                                                                                                dataType:MPSDataTypeFloat32]
+                                                                          name:@"gelu_inner"];
+                MPSGraphTensor* tanh_inner = [graph tanhWithTensor:inner name:@"gelu_tanh"];
+                MPSGraphTensor* one_plus = [graph additionWithPrimaryTensor:tanh_inner
+                                                            secondaryTensor:[graph constantWithScalar:1.0
+                                                                                             dataType:MPSDataTypeFloat32]
+                                                                       name:@"gelu_one_plus"];
+                MPSGraphTensor* half_x = [graph multiplicationWithPrimaryTensor:value
+                                                                secondaryTensor:[graph constantWithScalar:0.5
+                                                                                                 dataType:MPSDataTypeFloat32]
+                                                                           name:@"gelu_half"];
+                value = [graph multiplicationWithPrimaryTensor:half_x
+                                               secondaryTensor:one_plus name:@"gelu"];
+            }
+            graph_target = [graph transposeTensor:value dimension:0
+                                    withDimension:1 name:@"d_transposed"];
+            NSMutableArray<MPSGraphTensor*>* inputs = [NSMutableArray arrayWithObjects:a_ph, b_ph, c_ph, nil];
+            NSMutableDictionary<MPSGraphTensor*, MPSGraphShapedType*>* feeds =
+                [NSMutableDictionary dictionary];
+            feeds[a_ph] = [[MPSGraphShapedType alloc] initWithShape:shape2(a_stored_cols, a_stored_rows)
+                                                           dataType:MPSDataTypeFloat32];
+            feeds[b_ph] = [[MPSGraphShapedType alloc] initWithShape:shape2(b_stored_cols, b_stored_rows)
+                                                           dataType:MPSDataTypeFloat32];
+            feeds[c_ph] = [[MPSGraphShapedType alloc] initWithShape:shape2(n, m)
+                                                           dataType:MPSDataTypeFloat32];
+            if (bias_ph != nil) {
+                [inputs addObject:bias_ph];
+                feeds[bias_ph] = [[MPSGraphShapedType alloc] initWithShape:shape2(m, 1)
+                                                                  dataType:MPSDataTypeFloat32];
+            }
+            graph_inputs = inputs;
+            executable = [graph compileWithDevice:[MPSGraphDevice deviceWithMTLDevice:state().device]
+                                            feeds:feeds
+                                    targetTensors:@[ graph_target ]
+                                 targetOperations:nil
+                            compilationDescriptor:nil];
+            if (executable == nil) {
+                if (error_message != nullptr) *error_message = "gemm_f32_epilogue failed to compile MPSGraph";
+                return cudaErrorUnknown;
+            }
+            std::lock_guard<std::mutex> guard(cache_mutex);
+            cache[key] = @{@"exec" : executable, @"inputs" : graph_inputs, @"target" : graph_target};
+        }
+
+        auto make_matrix = [](BufferImpl* impl, std::size_t offset, int rows, int cols, int ld) {
+            MPSMatrixDescriptor* descriptor =
+                [MPSMatrixDescriptor matrixDescriptorWithRows:static_cast<NSUInteger>(rows)
+                                                      columns:static_cast<NSUInteger>(cols)
+                                                     rowBytes:static_cast<NSUInteger>(ld) * sizeof(float)
+                                                     dataType:MPSDataTypeFloat32];
+            return [[MPSMatrix alloc] initWithBuffer:impl->handle()
+                                              offset:static_cast<NSUInteger>(offset)
+                                          descriptor:descriptor];
+        };
+        MPSMatrix* matrix_a = make_matrix(a_impl, a_offset_bytes, a_stored_cols, a_stored_rows, lda);
+        MPSMatrix* matrix_b = make_matrix(b_impl, b_offset_bytes, b_stored_cols, b_stored_rows, ldb);
+        MPSMatrix* matrix_c = make_matrix(c_impl, c_offset_bytes, n, m, ldc);
+        MPSMatrix* matrix_d = make_matrix(d_impl, d_offset_bytes, n, m, ldd);
+        NSMutableArray<MPSGraphTensorData*>* input_data =
+            [NSMutableArray arrayWithObjects:[[MPSGraphTensorData alloc] initWithMPSMatrix:matrix_a],
+                                             [[MPSGraphTensorData alloc] initWithMPSMatrix:matrix_b],
+                                             [[MPSGraphTensorData alloc] initWithMPSMatrix:matrix_c],
+                                             nil];
+        if (has_bias) {
+            MPSMatrix* matrix_bias = make_matrix(bias_impl, bias_offset_bytes, m, 1, 1);
+            [input_data addObject:[[MPSGraphTensorData alloc] initWithMPSMatrix:matrix_bias]];
+        }
+        MPSGraphTensorData* result_data = [[MPSGraphTensorData alloc] initWithMPSMatrix:matrix_d];
+
+        MPSCommandBuffer* mps_buffer = [MPSCommandBuffer commandBufferWithCommandBuffer:command_buffer];
+        std::vector<BufferImpl*> fence_buffers{a_impl, b_impl, c_impl, d_impl};
+        if (bias_impl != nullptr) fence_buffers.push_back(bias_impl);
+        const auto fences = encode_submission_waits(command_buffer, stream_impl, fence_buffers);
+        [executable encodeToCommandBuffer:mps_buffer
+                              inputsArray:input_data
+                             resultsArray:@[ result_data ]
+                      executionDescriptor:nil];
+        encode_resource_signals(command_buffer, fences);
+        [command_buffer commit];
+
+        if (!synchronous_default) {
+            stream_impl->add_pending(command_buffer);
+            return cudaSuccess;
+        }
         [command_buffer waitUntilCompleted];
         return check_command_buffer_status(command_buffer, error_message);
     }

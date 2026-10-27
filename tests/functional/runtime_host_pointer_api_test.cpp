@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 int main() {
     if (cudaInit(0) != cudaSuccess) {
@@ -174,6 +176,58 @@ int main() {
     if (cudaFreeHost(mapped_host_ptr) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaFreeHost(mapped) failed\n");
         return 1;
+    }
+
+    // Zero-copy cudaHostRegister: page-aligned caller memory becomes a
+    // resolvable host allocation without a staging copy.
+    {
+        void* raw = nullptr;
+        if (posix_memalign(&raw, 16384, kBytes) != 0 || raw == nullptr) {
+            std::fprintf(stderr, "FAIL: posix_memalign failed\n");
+            return 1;
+        }
+        auto* floats = static_cast<float*>(raw);
+        for (std::size_t i = 0; i < kBytes / sizeof(float); ++i) {
+            floats[i] = static_cast<float>(i) * 0.5f;
+        }
+        if (cudaHostRegister(raw, kBytes, cudaHostRegisterMapped) != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: cudaHostRegister failed\n");
+            return 1;
+        }
+        if (cudaHostRegister(raw, kBytes, cudaHostRegisterMapped) !=
+            cudaErrorHostMemoryAlreadyRegistered) {
+            std::fprintf(stderr, "FAIL: double cudaHostRegister should be rejected\n");
+            return 1;
+        }
+        void* registered_alias = nullptr;
+        if (cudaHostGetDevicePointer(&registered_alias, raw, 0) != cudaSuccess ||
+            registered_alias != raw) {
+            std::fprintf(stderr, "FAIL: registered memory should map to itself\n");
+            return 1;
+        }
+        void* copy_dst = nullptr;
+        if (cudaMalloc(&copy_dst, kBytes) != cudaSuccess ||
+            cudaMemcpy(copy_dst, raw, kBytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: memcpy from registered memory failed\n");
+            return 1;
+        }
+        std::memset(raw, 0, kBytes);
+        if (cudaMemcpy(raw, copy_dst, kBytes, cudaMemcpyDeviceToHost) != cudaSuccess ||
+            floats[17] != 8.5f) {
+            std::fprintf(stderr, "FAIL: memcpy into registered memory mismatch\n");
+            return 1;
+        }
+        if (cudaFree(copy_dst) != cudaSuccess ||
+            cudaHostUnregister(raw) != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: registered memory teardown failed\n");
+            return 1;
+        }
+        if (cudaHostGetDevicePointer(&registered_alias, raw, 0) !=
+            cudaErrorInvalidValue) {
+            std::fprintf(stderr, "FAIL: unregistered memory should not resolve\n");
+            return 1;
+        }
+        std::free(raw);
     }
 
     std::printf("PASS: runtime host pointer mapping APIs behave correctly\n");
