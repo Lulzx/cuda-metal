@@ -451,6 +451,10 @@ add_executable(cumetal_runtime_ptx_device_heap_test
     runtime_ptx_device_heap_test.cpp
 )
 
+add_executable(cumetal_runtime_ptx_ldmatrix_trans_test
+    runtime_ptx_ldmatrix_trans_test.cpp
+)
+
 add_executable(cumetal_runtime_atomic_shared_test
     runtime_atomic_shared_test.cpp
 )
@@ -1227,6 +1231,11 @@ target_link_libraries(cumetal_runtime_ptx_ldmatrix_test
 )
 
 target_link_libraries(cumetal_runtime_ptx_device_heap_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_ptx_ldmatrix_trans_test
     PRIVATE
         cumetal_runtime
 )
@@ -2164,6 +2173,13 @@ target_compile_options(cumetal_runtime_ptx_ldmatrix_test
 )
 
 target_compile_options(cumetal_runtime_ptx_device_heap_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_runtime_ptx_ldmatrix_trans_test
     PRIVATE
         -Wall
         -Wextra
@@ -4141,6 +4157,28 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 ${CMAKE_CURRENT_BINARY_DIR}/ptx_device_heap.metal
     )
     set_tests_properties(functional_ptx_device_heap PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_nvvm_device_heap
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_source_heap.sh
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_runtime_ptx_device_heap_test>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_heap_typed.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/device_heap_typed.metal
+    )
+    set_tests_properties(functional_nvvm_device_heap PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_ptx_ldmatrix_trans_numeric
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_ptx_wmma.sh
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_runtime_ptx_ldmatrix_trans_test>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ptx_ldmatrix_x4_trans.ptx
+                ${CMAKE_CURRENT_BINARY_DIR}/ptx_ldmatrix_x4_trans.metal
+    )
+    set_tests_properties(functional_ptx_ldmatrix_trans_numeric PROPERTIES SKIP_RETURN_CODE 77)
 
     # Device-side new/delete uses a persistent bounded heap shared by kernels.
     # Exercise cross-launch pointer lifetime, free-list reuse, exhaustion, and

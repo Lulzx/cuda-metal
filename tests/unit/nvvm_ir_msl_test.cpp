@@ -147,6 +147,23 @@ constexpr const char* kPtxMaxntid = R"ptx(
 }
 )ptx";
 
+constexpr const char* kNvvmHeap = R"llvm(
+target datalayout = "e-p:64:64-p3:32:32-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @heap_kernel(ptr %out) {
+entry:
+  %p = call ptr @malloc(i64 32)
+  %q = ptrtoint ptr %p to i64
+  store i64 %q, ptr %out, align 8
+  call void @free(ptr %p)
+  ret void
+}
+
+declare ptr @malloc(i64)
+declare void @free(ptr)
+)llvm";
+
 constexpr const char* kPtxWmma = R"ptx(
 .version 8.0
 .target sm_80
@@ -3025,6 +3042,23 @@ int main() {
         std::cerr << redux.error << "\n";
     }
 
+    // Device malloc/free through the NVVM importer take the hidden heap
+    // buffer argument and lower to the MSL heap allocator helpers.
+    const metal::NvvmToMslResult heap_nvvm =
+        metal::compile_nvvm_to_msl(kNvvmHeap, "heap.ll", "heap_kernel");
+    ok &= expect(heap_nvvm.ok, "NVVM device malloc/free kernel lowers");
+    if (heap_nvvm.ok) {
+        ok &= expect(heap_nvvm.source.find("cm_device_malloc") != std::string::npos &&
+                         heap_nvvm.source.find("cm_device_free") != std::string::npos,
+                     "NVVM heap calls lower to heap allocator helpers");
+        ok &= expect(heap_nvvm.source.find("__cumetal_device_heap") != std::string::npos,
+                     "NVVM heap kernel takes the hidden heap buffer");
+        ok &= expect(heap_nvvm.uses_device_heap,
+                     "NVVM heap kernel reports uses_device_heap");
+    } else {
+        std::cerr << heap_nvvm.error << "\n";
+    }
+
     // Raw PTX wmma m16n16k16 (f16 inputs, f32 accumulator) lowers through
     // the typed importer: pointer parameters used only as wmma bracket
     // addresses must classify as buffers, and the mma must reach the 8x8
@@ -3073,9 +3107,15 @@ int main() {
     const std::string ldmatrix_trans =
         std::string(kPtxLdmatrix).replace(
             std::string(kPtxLdmatrix).find(".x4"), 3, ".x4.trans");
-    const metal::PtxToMslResult ldmatrix_bad =
+    const metal::PtxToMslResult ldmatrix_transposed =
         metal::compile_ptx_to_msl(ldmatrix_trans, ldmatrix_options);
-    ok &= expect(!ldmatrix_bad.ok, "PTX ldmatrix .trans is refused");
+    ok &= expect(ldmatrix_transposed.ok,
+                 "PTX ldmatrix .trans lowers through typed IR");
+    const std::string ldmatrix_b8 = std::string(kPtxLdmatrix).replace(
+        std::string(kPtxLdmatrix).find(".b16"), 4, ".b8");
+    const metal::PtxToMslResult ldmatrix_bad =
+        metal::compile_ptx_to_msl(ldmatrix_b8, ldmatrix_options);
+    ok &= expect(!ldmatrix_bad.ok, "PTX ldmatrix non-b16 is refused");
 
     const std::string mma_bad_shape = std::string(kPtxMmaSync).replace(
         std::string(kPtxMmaSync).find("m16n8k16"), 8, "m16n8k8");
