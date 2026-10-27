@@ -28,8 +28,14 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   map through `cublasMigrateComputeType`. Otherwise the routine/type/epilogue/algorithm surface is incomplete; not all
   batched, complex, tensor, or capture combinations are covered. The hardened
   cuBLASLt CPU fallback is a bounded FP32/FP64 column-major, exact-shape,
-  non-overlapping strided-batch path; row-major/special layouts, mixed
-  datatypes, FP16/TF32 Lt compute, broadcast batches, general algorithm objects,
+  non-overlapping strided-batch path. Plain FP32 Lt matmuls run on MPS;
+  FP16 Lt matmuls (16F compute/FP16 out, or 32F compute/FP32 out) run on
+  MPS for single-batch device buffers and otherwise decode through a
+  float-domain host path with epilogues; BF16 Lt inputs (32F compute,
+  BF16 or FP32 output) use the same float-domain host path. Single-batch
+  FP32 Lt matmuls with BIAS/RELU/GELU epilogues on device buffers run
+  fused on the GPU via a cached MPSGraph executable. Row-major/
+  special layouts, TF32 Lt compute, broadcast batches, general algorithm objects,
   and FP64 epilogues are rejected rather than emulated. Tracked allocations are
   range-checked across their full strided-batch footprints; untracked host
   buffers remain accepted specifically for the CPU fallback. `cublasSetWorkspace`

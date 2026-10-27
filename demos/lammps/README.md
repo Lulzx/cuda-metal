@@ -1,5 +1,6 @@
 # LAMMPS / Kokkos GPU demo
 
+<!-- cw:block lammps.status -->
 **Status: numerical GPU gate passed on 2026-10-04.** The unmodified CUDA
 application compiles, links, and completes the stock 32,000-atom, 100-step
 Lennard-Jones benchmark on Apple M4 Pro in both neighbour modes. The fixed
@@ -13,6 +14,7 @@ clean-room toolkit, one process, C++20, `KOKKOS_PREC=single`, CUDA architecture
 `sm_80`, and no relocatable device code. Source registration is enabled;
 the `libcuda.dylib` binary alias is not required.
 
+<!-- cw:block lammps.recorded_result -->
 The [recorded result](results/2026-10-04-m4-pro.json) reports maximum scaled
 CPU-double error `5.91e-6`, cross-mode difference `1.27e-6`, and analytic initial
 pair-energy error `1.26e-7`. Full/Newton-off records 826 successful Apple-GPU
@@ -21,6 +23,7 @@ FP64 uses reduced-precision software emulation, identified in the trace.
 Raw logs are retained locally in `out/gpu.CHtxEp`, with CPU-double reference
 `out/reference.aKdfsP` and earlier failed attempts in separate directories.
 
+<!-- cw:block lammps.loops -->
 The measured simulation loops took 4.67 seconds (full) and 6.77 seconds (half),
 but regression runs were concurrent, so these are completion receipts rather
 than performance comparisons. Cold half-neighbour pipeline compilation took
@@ -34,6 +37,7 @@ PTX/native-AOT numerical corpora. The demo validator's 11 tests also pass.
 On Apple M4 Pro, Release builds with single precision complete the stock
 32,000-atom, 100-step benchmark with these warm simulation-loop medians:
 
+<!-- cw:table lammps.warm -->
 | Neighbour mode | CPU Serial, one thread | GPU | GPU speedup |
 | --- | ---: | ---: | ---: |
 | Full / Newton off | 1.780 s | 0.866 s | **2.06×** |
@@ -96,6 +100,7 @@ to avoid `nvcc_wrapper` comma quoting. The shim also splits comma-separated
 Apple M4 Pro, Homebrew Clang 23.1.0, CMake 4.4.3, CuMetal Release with source
 registration enabled and binary shim disabled:
 
+<!-- cw:table lammps.cpu_checks -->
 | Check | Result |
 | --- | --- |
 | CPU LAMMPS/Kokkos Serial build | Compiles and links |
@@ -183,6 +188,7 @@ CuMetal's CUDA-header gaps.
 
 ## Numerical GPU acceptance gate
 
+<!-- cw:block lammps.gate -->
 The numerical gate requires the unmodified stock `bench/in.lj` workload to
 complete 32,000 atoms and 100 steps in both full/Newton-off and half/Newton-on
 modes. It checks temperature, pair and molecular energy, total energy, and

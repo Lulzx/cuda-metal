@@ -200,6 +200,7 @@ ctest --test-dir build -R unit_install_uninstall_scripts --output-on-failure
 Conformance suite
 -----------------
 
+<!-- cw:block testing.phase4 -->
 Phase 4 conformance gate over the reviewed 185-test functional manifest:
 
 ```bash

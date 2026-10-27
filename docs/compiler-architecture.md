@@ -143,10 +143,11 @@ The default follows measured production-metallib compilation coverage rather
 than treating either backend as universally complete. The reviewed table below
 uses CUDA Clang 21-23:
 
+<!-- cw:table architecture.backend_matrix -->
 | Input corpus | `legacy` | `cumetal-ir` |
 | --- | ---: | ---: |
 | direct `.cu` | 0/52 | **52/52** |
-| `.cu --cuda-device` / PTX | **47/52** | **50/52** |
+| `.cu --cuda-device` / PTX | **47/52** | **52/52** |
 
 Direct `.cu` therefore defaults to `cumetal-ir`; PTX and `--cuda-device`
 default to `legacy`. Reproduce the reviewed per-file baseline with:

@@ -63,10 +63,11 @@ prove downstream kernel correctness.
 
 With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 
+<!-- cw:table known_gaps_compiler.backend_matrix -->
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
 | direct `.cu` | 0/52 | **52/52** |
-| PTX / `--cuda-device` | **47/52** | **50/52** |
+| PTX / `--cuda-device` | **47/52** | **52/52** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
@@ -156,14 +157,15 @@ the checklist for flipping the default:
 
 | Blocker | Kind | Test |
 | --- | --- | --- |
-| device `malloc`/`free` (no typed PTX definition) | typed gap | `functional_device_heap` |
+| device `malloc`/`free` | typed PTX channel landed (hidden heap buffer, free-list/bump allocator in MSL; `functional_ptx_device_heap`); the probe fixture also needs device vtables, which remain a typed gap | `functional_device_heap` |
 | device-side kernel launch queue | typed gap | `functional_device_launch_queue` |
-| tf32 WMMA helper `__cumetal_wmma_f32_mma_8x8` | typed gap | `functional_wmma_numeric` |
+| tf32 WMMA helper `__cumetal_wmma_f32_mma_8x8` | closed: typed backend lowers both WMMA markers to `simdgroup_matrix` (unit-tested; GPU numeric gate still needs the Metal toolchain) | `functional_wmma_numeric` |
 | pointer loaded from a local pointer array by an unrolled cursor loop | typed gap | `reserved_bindings` (enrolled for legacy and native AOT only) |
 | string literal passed directly as a `vprintf` argument | nonstandard fixture PTX | `functional_runtime_registration_{printf,metadata_cache}` |
 | `ret`-only PTX body served by a name-matched workload template | legacy-only fixture | `functional_runtime_rope_neox` |
 
-The first four are real typed-backend work. The last two are fixtures written
+The device-heap, device-launch-queue and pointer-array rows are real
+typed-backend work (the WMMA row has since closed). The last two are fixtures written
 for the legacy path and need real PTX before the flip. None of the six was a
 wrong answer on the typed backend.
 
@@ -284,7 +286,8 @@ operands, multiple outputs, vector operands such as `{$1, $2}`) and the
 template's instructions are lowered in place, so any instruction the typed PTX path supports works inside `asm`.
 Refused with a diagnostic: control flow inside the template (`bra`, `call`,
 `ret`), `${N:modifier}` operand modifiers, and instructions the PTX path does
-not lower (tensor-core `mma`/`wmma`/`ldmatrix`, `mbarrier`, TMA, texture
+not lower (tensor-core `ldmatrix` `.trans`/non-b16, non-m16n8k16
+`mma.sync`, non-m16n16k16 or non-f16 `wmma`, `mbarrier`, TMA, texture
 instructions). A template with no instruction (`asm volatile("" ::: "memory")`)
 lowers to nothing; it does not act as a compiler barrier for Metal. Predicated
 instructions inside a block follow the PTX path's predication rules.

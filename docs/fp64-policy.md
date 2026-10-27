@@ -15,7 +15,11 @@ devices.
 ## Modes
 
 `cumetalc --fp64=MODE` selects an offline mode. Runtime-registered CUDA code uses
-the same names through `CUMETAL_FP64_MODE=MODE`.
+the same names through `CUMETAL_FP64_MODE=MODE`. When the typed `cumetal-ir`
+backend is selected and no mode is given explicitly, the default is `fast48`
+(the typed path lowers through MSL and cannot emit native binary64); the
+legacy PTX path keeps the historical `native` default. An explicit
+`--fp64=native` with the typed backend is rejected rather than reinterpreted.
 
 | Mode | Contract | Range | Current role |
 | --- | --- | --- | --- |

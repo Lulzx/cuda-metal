@@ -21,10 +21,11 @@ GPU correctness, and cache hits and the NVVM/legacy compiler paths are untraced.
 With CUDA Clang 21-23, the reviewed manifest-controlled 49-file
 production-metallib matrix records:
 
+<!-- cw:table status_compiler.backend_matrix -->
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
 | direct `.cu` | 0/52 | **52/52** |
-| PTX / `--cuda-device` | **47/52** | **50/52** |
+| PTX / `--cuda-device` | **47/52** | **52/52** |
 
 The legacy direct path is a qualifier-stripping prototype, not a fallback.
 Matrix results prove compilation only. The versioned gate records each compiler

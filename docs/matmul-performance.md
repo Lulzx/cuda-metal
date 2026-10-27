@@ -15,6 +15,7 @@ This page records the original source-tuning experiment. The later
 
 ## Outcome
 
+<!-- cw:block matmul.outcome -->
 The article's basic optimization story reproduces, but its final vectorization
 step is slower on this machine. A new portable CUDA tile variant improves on
 that final kernel by **1.48x**, reaching **2.03 TFLOP/s**, or **40.1% of MPS**.
@@ -34,6 +35,7 @@ GFLOP/s is derived from that time using `2*M*K*N`. Times are synchronized wall
 times including launch/encode/wait, excluding compilation, allocation and
 transfers. They are not GPU timestamp-only kernel times.
 
+<!-- cw:table matmul.comparison -->
 | Implementation | Time (ms) | GFLOP/s | MPS fraction |
 |---|---:|---:|---:|
 | Article naive | 406.266 | 338.3 | 6.7% |

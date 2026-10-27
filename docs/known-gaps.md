@@ -13,6 +13,7 @@ current status must be backed by tests and evidence.
 
 ## Highest-priority open work
 
+<!-- cw:block known_gaps.next_steps -->
 1. Expand typed CuMetal IR beyond the now-matched reviewed compile corpus and
    broaden numerical coverage.
 2. Establish a recurring verification mechanism outside GitHub Actions and
@@ -48,8 +49,13 @@ holds the exact boundary.
 **Compiler** ([details](known-gaps/compiler.md), [why a kernel is refused](ptx-proof-contracts.md))
 
 - Recursive or indirect device-call graphs.
-- Tensor-core `mma`/`wmma`/`ldmatrix`, `mbarrier`, TMA/cluster operations, FP8,
-  and direct-PTX texture sampling/surface access.
+- Raw PTX tensor-core `ldmatrix` `.trans` and non-b16 variants,
+  `mbarrier`, TMA/cluster operations, FP8, and direct-PTX texture
+  sampling/surface access. (Raw PTX `wmma` m16n16k16 with f16 inputs and
+  an f32 accumulator, `mma.sync` m16n8k16 row.col f16/f32, and
+  `ldmatrix` m8n8 x1/x2/x4 shared b16 do lower through the typed importer
+  to `simdgroup_matrix`, as does CUDA-source WMMA via `mma.h` markers in
+  both backends; other tensor-core shapes and element types are refused.)
 - Inline `asm` containing control flow (`bra`, `call`, `ret`) or `${N:modifier}`
   operands; an empty `asm volatile("" ::: "memory")` is not a Metal barrier.
 - Threadgroup float atomics other than add (add is a CAS loop, not hardware).

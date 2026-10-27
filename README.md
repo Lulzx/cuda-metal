@@ -37,6 +37,7 @@ build/cumetalc samples/vectorAdd/vectorAdd.cu -o vectorAdd
 ./vectorAdd
 ```
 
+<!-- cw:block readme.lammps -->
 See [demos](docs/demos.md) for larger workloads and [testing](docs/testing.md)
 for validation commands.
 The [LAMMPS/Kokkos GPU demo](demos/lammps/README.md) compiles unmodified LAMMPS

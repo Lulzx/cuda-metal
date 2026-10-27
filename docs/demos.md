@@ -168,6 +168,7 @@ measured FP64 accuracy, and what the demo does not claim.
 
 ## LAMMPS / Kokkos GPU demo
 
+<!-- cw:block demos.lammps -->
 Unmodified pinned LAMMPS/Kokkos compiles and completes the stock 32,000-atom,
 100-step Lennard-Jones benchmark on Apple M4 Pro in full/Newton-off and
 half/Newton-on modes. Both pass the fixed `5e-4` numerical gate against CPU

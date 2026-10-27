@@ -60,6 +60,7 @@ These are numerical/runtime results, separate from the 29-file cross-Clang
 compile matrix. Embedded read-only module-constant strings remain outside this
 proved subset, as does CUDA's circular overwrite policy.
 
+<!-- cw:block verified_results.phase4 -->
 The reviewed Phase 4 manifest ran 185/185 required functional tests on
 2026-08-29 with zero failures and zero skips. This includes native-AOT numerical
 Apple-GPU execution for by-value aggregates containing device pointers, the
@@ -304,6 +305,7 @@ boundaries live in [the Apple-GPU execution record](apple-gpu-execution.md),
 
 ## NVIDIA cuda-samples conformance snapshot
 
+<!-- cw:block verified_results.samples_snapshot -->
 The manifest snapshot recorded on 2026-08-29 classifies all 83 enrolled
 headless samples as runtime passes, with no waivers or nonpassing entries.
 Every entry must build, run, and satisfy its available numerical/output checks.

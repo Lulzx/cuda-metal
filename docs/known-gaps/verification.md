@@ -4,6 +4,7 @@
 
 ## Conformance denominator
 
+<!-- cw:block known_gaps_verification.denominator -->
 The Phase 4 denominator is the reviewed 185-test manifest at
 `tests/conformance/phase4_functional_manifest.txt`. Every entry has expected
 outcome `pass`; skips and waivers are not removed from the denominator. The
@@ -34,6 +35,7 @@ to its pinned revision and command. Focused success is not whole-project
 compatibility.
 
 The pinned LAMMPS `stable_30Sep2026` / Kokkos 5.2.1 GPU gate passed on 2026-10-04.
+<!-- cw:block known_gaps_verification.lammps -->
 The unmodified CUDA application compiles and links, and completes the stock
 32,000-atom, 100-step LJ benchmark in both full and half neighbour modes on
 Apple M4 Pro. Maximum scaled CPU-double error is `5.91e-6`, cross-mode
