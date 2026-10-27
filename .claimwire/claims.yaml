@@ -1,0 +1,292 @@
+schema: claimwire/v1
+
+aliases:
+  variant:
+    naive: ["Article naive"]
+    coalesced: ["Naive with coalesced thread axes"]
+    tiled: ["Article shared-memory tiled"]
+    registers: ["Article 2x2 register tiled"]
+    vectorized: ["Article float4 register tiled"]
+    block64_32: ["New CUDA 64x64 tile, K=32"]
+    accelerate: ["Accelerate SGEMM"]
+    cublas_mps: ["CuMetal cuBLAS -> MPS"]
+    mps: ["Direct MPS"]
+  mode:
+    full: ["Full / Newton off"]
+    half: ["Half / Newton on"]
+
+constants:
+  # Recorded runs that the docs cite but whose logs are not checked in.
+  phase4.recorded_pass: { type: Count, value: "185" }
+
+families:
+  matmul:
+    producer: cumetal.matmul
+    dimensions: [variant]
+    metrics:
+      time:   { type: Duration, format: "{:.3f [ms]}" }
+      gflops: { type: Float,    format: "{:,.1f}" }
+    derivations:
+      mps_fraction:
+        type: Ratio
+        expr: "gflops / matmul[mps].gflops"
+        format: "{:.1f%}"
+
+  lammps_warm:
+    producer: cumetal.lammps_warm
+    dimensions: [mode]
+    metrics:
+      cpu: { type: Duration, format: "{:.3f s}" }
+      gpu: { type: Duration, format: "{:.3f s}" }
+    derivations:
+      speedup:
+        type: Ratio
+        expr: "cpu / gpu"
+        format: "{:.2f×}"
+
+claims:
+  matrix.total:         { kind: source, producer: cumetal.backend_matrix, metric: total,         type: Count }
+  matrix.direct_legacy: { kind: source, producer: cumetal.backend_matrix, metric: direct_legacy, type: Count }
+  matrix.direct_typed:  { kind: source, producer: cumetal.backend_matrix, metric: direct_typed,  type: Count }
+  matrix.ptx_legacy:    { kind: source, producer: cumetal.backend_matrix, metric: ptx_legacy,    type: Count }
+  matrix.ptx_typed:     { kind: source, producer: cumetal.backend_matrix, metric: ptx_typed,     type: Count }
+
+  samples.total: { kind: source, producer: cumetal.samples_sweep, metric: total, type: Count }
+  samples.pass:  { kind: source, producer: cumetal.samples_sweep, metric: pass,  type: Count }
+  samples.waive: { kind: source, producer: cumetal.samples_sweep, metric: waive, type: Count }
+
+  phase4.total: { kind: source, producer: cumetal.phase4_manifest, metric: total, type: Count }
+
+  corpus.total:      { kind: source, producer: cumetal.coverage_manifest, metric: total,      type: Count }
+  corpus.typed_ptx:  { kind: source, producer: cumetal.coverage_manifest, metric: typed_ptx,  type: Count }
+  corpus.native_aot: { kind: source, producer: cumetal.coverage_manifest, metric: native_aot, type: Count }
+
+  lammps.atoms:               { kind: source, producer: cumetal.lammps_gate, metric: atoms,               type: Count }
+  lammps.steps:               { kind: source, producer: cumetal.lammps_gate, metric: steps,               type: Count }
+  lammps.tolerance:           { kind: source, producer: cumetal.lammps_gate, metric: tolerance,           type: Float }
+  lammps.cpu_double_error:    { kind: source, producer: cumetal.lammps_gate, metric: cpu_double_error,    type: Float }
+  lammps.mode_difference:     { kind: source, producer: cumetal.lammps_gate, metric: mode_difference,     type: Float }
+  lammps.analytic_error:      { kind: source, producer: cumetal.lammps_gate, metric: analytic_error,      type: Float }
+  lammps.full_launches:       { kind: source, producer: cumetal.lammps_gate, metric: full_launches,       type: Count }
+  lammps.half_launches:       { kind: source, producer: cumetal.lammps_gate, metric: half_launches,       type: Count }
+  lammps.full_loop:           { kind: source, producer: cumetal.lammps_gate, metric: full_loop,           type: Duration }
+  lammps.half_loop:           { kind: source, producer: cumetal.lammps_gate, metric: half_loop,           type: Duration }
+  lammps.full_wall:           { kind: source, producer: cumetal.lammps_gate, metric: full_wall,           type: Duration }
+  lammps.half_wall:           { kind: source, producer: cumetal.lammps_gate, metric: half_wall,           type: Duration }
+  lammps.ctest_passed:        { kind: source, producer: cumetal.lammps_gate, metric: ctest_passed,        type: Count }
+  lammps.ctest_total:         { kind: source, producer: cumetal.lammps_gate, metric: ctest_total,         type: Count }
+  lammps.typed_ptx_projects:  { kind: source, producer: cumetal.lammps_gate, metric: typed_ptx_projects,  type: Count }
+  lammps.native_aot_projects: { kind: source, producer: cumetal.lammps_gate, metric: native_aot_projects, type: Count }
+  lammps.cuda_samples:        { kind: source, producer: cumetal.lammps_gate, metric: cuda_samples,        type: Count }
+  lammps.validator_tests:     { kind: source, producer: cumetal.lammps_gate, metric: validator_tests,     type: Count }
+
+  matmul.tile_vs_article:
+    kind: derive
+    type: Ratio
+    expr: "matmul[block64_32].gflops / matmul[vectorized].gflops"
+    format: "{:.2fx}"
+  matmul.tile_tflops:
+    kind: derive
+    type: Float
+    expr: "matmul[block64_32].gflops / 1000"
+    format: "{:.2f}"
+
+assertions:
+  # The current roadmap claims an all-pass, zero-waiver sample snapshot.
+  check.samples_all_pass:
+    expr: "samples.pass == samples.total"
+  check.samples_no_waivers:
+    expr: "samples.waive == 0"
+  # Docs quote the recorded 185/185 Phase 4 run as covering the current manifest.
+  check.phase4_run_covers_manifest:
+    expr: "phase4.recorded_pass == phase4.total"
+  # The 2026-10-04 LAMMPS regression run is cited as covering the exact in-tree
+  # corpus and every enrolled cuda-sample.
+  check.lammps_run_covers_typed_ptx_corpus:
+    expr: "lammps.typed_ptx_projects == corpus.typed_ptx"
+  check.lammps_run_covers_native_aot_corpus:
+    expr: "lammps.native_aot_projects == corpus.native_aot"
+  check.lammps_run_covers_samples:
+    expr: "lammps.cuda_samples == samples.total"
+  check.lammps_ctest_all_pass:
+    expr: "lammps.ctest_passed == lammps.ctest_total"
+
+blocks:
+  # Patterns are fragments: each must match exactly once in the block below its directive,
+  # and only the matched text is owned, so surrounding prose can be reworded or rewrapped.
+  status.snapshot:
+    file: docs/status.md
+    lines:
+      - "`cuda-samples`: **{samples.pass}/{samples.total} pass**"
+      - "**{matrix.direct_typed}/{matrix.total}**, typed PTX **{matrix.ptx_typed}/{matrix.total}**, legacy PTX **{matrix.ptx_legacy}/{matrix.total}**"
+      - "typed PTX **{lammps.typed_ptx_projects}/{lammps.typed_ptx_projects}** and direct native AOT"
+      - "**{lammps.native_aot_projects}/{lammps.native_aot_projects}** on Apple M4 Pro"
+
+  roadmap.evidence_boundary:
+    file: docs/spec-closure-roadmap.md
+    lines:
+      - "sample gate contains {samples.total} enrolled headless samples"
+      - "{phase4.total}-test Phase 4 functional denominator."
+      - "denominator passed {phase4.recorded_pass}/{phase4.recorded_pass} with zero skips"
+      - "reviewed {matrix.total}-file production-metallib matrix is {matrix.direct_typed}/{matrix.total} for direct `.cu` and {matrix.ptx_typed}/{matrix.total} for PTX"
+      - "legacy PTX backend is {matrix.ptx_legacy}/{matrix.total} because"
+      - "corpus now passes {lammps.typed_ptx_projects}/{lammps.typed_ptx_projects} typed-PTX enrollments"
+      - "{lammps.native_aot_projects}/{lammps.native_aot_projects} direct native-AOT enrollments"
+      - "manifest still contains {samples.total} enrolled headless samples"
+      - "rerun passes {samples.pass}/{samples.total}."
+
+  known_gaps_verification.denominator:
+    file: docs/known-gaps/verification.md
+    lines:
+      - "reviewed {phase4.total}-test manifest"
+      - "run passed all {phase4.recorded_pass} with zero skips"
+      - "manifest has {samples.total} enrolled headless samples; all {samples.pass} pass."
+
+  known_gaps_verification.lammps:
+    file: docs/known-gaps/verification.md
+    lines:
+      - "{lammps.atoms:,}-atom, {lammps.steps}-step LJ benchmark"
+      - "CPU-double error is `{lammps.cpu_double_error:.2e}`"
+      - "difference `{lammps.mode_difference:.2e}`, and analytic initial pair-energy error `{lammps.analytic_error:.2e}`"
+
+  status_verification.gates:
+    file: docs/status/verification.md
+    lines:
+      - "- {phase4.recorded_pass}/{phase4.recorded_pass} required Phase 4 functional tests"
+      - "- {samples.total}-entry `cuda-samples` coverage manifest"
+      - "- {matrix.total}-file four-cell frontend/backend production-metallib matrix"
+
+  testing.phase4:
+    file: docs/testing.md
+    lines:
+      - "reviewed {phase4.total}-test functional manifest"
+
+  known_gaps.next_steps:
+    file: docs/known-gaps.md
+    lines:
+      - "the fixed {phase4.total}-test Phase 4 denominator"
+
+  verified_results.phase4:
+    file: docs/verified-results.md
+    lines:
+      - "Phase 4 manifest ran {phase4.recorded_pass}/{phase4.recorded_pass} required functional tests"
+
+  verified_results.samples_snapshot:
+    file: docs/verified-results.md
+    lines:
+      - "classifies all {samples.total} enrolled"
+
+  readme.lammps:
+    file: README.md
+    lines:
+      - "stock {lammps.atoms:,}-atom, {lammps.steps}-step full/half-neighbour numerical gate"
+
+  demos.lammps:
+    file: docs/demos.md
+    lines:
+      - "the stock {lammps.atoms:,}-atom,"
+      - "{lammps.steps}-step Lennard-Jones benchmark"
+      - "fixed `{lammps.tolerance:.0e}` numerical gate"
+
+  lammps.status:
+    file: demos/lammps/README.md
+    lines:
+      - "the stock {lammps.atoms:,}-atom, {lammps.steps}-step"
+      - "`{lammps.tolerance:.0e}` CPU-double, cross-mode, and analytic initial-energy checks"
+
+  lammps.recorded_result:
+    file: demos/lammps/README.md
+    lines:
+      - "CPU-double error `{lammps.cpu_double_error:.2e}`, cross-mode difference `{lammps.mode_difference:.2e}`"
+      - "pair-energy error `{lammps.analytic_error:.2e}`. Full/Newton-off records {lammps.full_launches:,} successful"
+      - "half/Newton-on records {lammps.half_launches:,}."
+
+  lammps.loops:
+    file: demos/lammps/README.md
+    lines:
+      - "took {lammps.full_loop:.2f [s]} seconds (full) and {lammps.half_loop:.2f [s]} seconds (half)"
+      - "versus {lammps.full_wall:.0f [s]} seconds for full"
+      - "All {lammps.ctest_passed} CuMetal CTest gates passed"
+      - "{lammps.cuda_samples} enrolled CUDA samples"
+      - "validator's {lammps.validator_tests} tests also pass"
+
+  lammps.gate:
+    file: demos/lammps/README.md
+    lines:
+      - "complete {lammps.atoms:,} atoms and {lammps.steps} steps"
+
+  matmul.outcome:
+    file: docs/matmul-performance.md
+    lines:
+      - "by **{matmul.tile_vs_article}**, reaching **{matmul.tile_tflops} TFLOP/s**, or **{matmul[block64_32].mps_fraction} of MPS**"
+      - "already reaches **{matmul[cublas_mps].mps_fraction} of direct MPS**"
+
+tables:
+  status_compiler.backend_matrix:
+    file: docs/status/compiler.md
+    mode: checklist
+    key_column: Frontend
+    rows:
+      "direct `.cu`":
+        "Legacy": "{matrix.direct_legacy}/{matrix.total}"
+        "Typed CuMetal IR": "{matrix.direct_typed}/{matrix.total}"
+      "PTX / `--cuda-device`":
+        "Legacy": "{matrix.ptx_legacy}/{matrix.total}"
+        "Typed CuMetal IR": "{matrix.ptx_typed}/{matrix.total}"
+
+  known_gaps_compiler.backend_matrix:
+    file: docs/known-gaps/compiler.md
+    mode: checklist
+    key_column: Frontend
+    rows:
+      "direct `.cu`":
+        "Legacy": "{matrix.direct_legacy}/{matrix.total}"
+        "Typed CuMetal IR": "{matrix.direct_typed}/{matrix.total}"
+      "PTX / `--cuda-device`":
+        "Legacy": "{matrix.ptx_legacy}/{matrix.total}"
+        "Typed CuMetal IR": "{matrix.ptx_typed}/{matrix.total}"
+
+  architecture.backend_matrix:
+    file: docs/compiler-architecture.md
+    mode: checklist
+    key_column: Input corpus
+    rows:
+      "direct `.cu`":
+        "`legacy`": "{matrix.direct_legacy}/{matrix.total}"
+        "`cumetal-ir`": "{matrix.direct_typed}/{matrix.total}"
+      "`.cu --cuda-device` / PTX":
+        "`legacy`": "{matrix.ptx_legacy}/{matrix.total}"
+        "`cumetal-ir`": "{matrix.ptx_typed}/{matrix.total}"
+
+  matmul.comparison:
+    file: docs/matmul-performance.md
+    mode: records
+    family: matmul
+    key_columns: { Implementation: variant }
+    columns:
+      "Time (ms)": "{time:.3f [ms]}"
+      "GFLOP/s": "{gflops:,.1f}"
+      "MPS fraction": "{mps_fraction:.1f%}"
+    row_overrides:
+      "[mps]":
+        "MPS fraction": "{mps_fraction:.0f%}"
+
+  lammps.warm:
+    file: demos/lammps/README.md
+    mode: records
+    family: lammps_warm
+    key_columns: { "Neighbour mode": mode }
+    columns:
+      "CPU Serial, one thread": "{cpu:.3f s}"
+      "GPU": "{gpu:.3f s}"
+      "GPU speedup": "{speedup:.2f×}"
+
+  lammps.cpu_checks:
+    file: demos/lammps/README.md
+    mode: checklist
+    key_column: Check
+    rows:
+      "Stock CPU `bench/in.lj`, full/Newton-off neighbours":
+        "Result": "Completes {lammps.atoms:,} atoms, {lammps.steps} steps"
+      "Stock CPU `bench/in.lj`, half/Newton-on neighbours":
+        "Result": "Completes {lammps.atoms:,} atoms, {lammps.steps} steps"

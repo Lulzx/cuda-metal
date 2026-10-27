@@ -1,0 +1,103 @@
+{
+  "schema": "claimwire-run/v1",
+  "run_id": "matmul-6febf65a",
+  "producer": "cumetal.matmul",
+  "timestamp": "2026-10-16T15:12:00Z",
+  "git_commit": "7f9e42f",
+  "git_dirty": true,
+  "hardware": "Apple M4 Pro",
+  "command": [
+    "scripts/claimwire_evidence.py",
+    "matmul"
+  ],
+  "input_set_digest": "blake3:6febf65aee0d40b2ae1fa6a02b845fc6c849ed7b7c01bb4973e76cd437a2be7f",
+  "input_files": {
+    "docs/evidence/matmul-2026-09-06/results.json": "blake3:85577a72ab5702edc57a9ab37f7887f50954a9c83d6fdd4e0811c2dce2b40361",
+    "scripts/claimwire_evidence.py": "blake3:3c46dc5f6ddbcac1a1679652e0a6737b42809c2d2182b660ef524ae50652df0e"
+  },
+  "families": {
+    "matmul": [
+      {
+        "scope": {
+          "variant": "mps"
+        },
+        "metrics": {
+          "time": 27157165.0,
+          "gflops": 5060.873
+        }
+      },
+      {
+        "scope": {
+          "variant": "naive"
+        },
+        "metrics": {
+          "time": 406265612.0,
+          "gflops": 338.298
+        }
+      },
+      {
+        "scope": {
+          "variant": "coalesced"
+        },
+        "metrics": {
+          "time": 298755977.0,
+          "gflops": 460.038
+        }
+      },
+      {
+        "scope": {
+          "variant": "tiled"
+        },
+        "metrics": {
+          "time": 176547825.0,
+          "gflops": 778.48
+        }
+      },
+      {
+        "scope": {
+          "variant": "registers"
+        },
+        "metrics": {
+          "time": 92346421.0,
+          "gflops": 1488.298
+        }
+      },
+      {
+        "scope": {
+          "variant": "vectorized"
+        },
+        "metrics": {
+          "time": 100046635.0,
+          "gflops": 1373.749
+        }
+      },
+      {
+        "scope": {
+          "variant": "block64_32"
+        },
+        "metrics": {
+          "time": 67671225.0,
+          "gflops": 2030.981
+        }
+      },
+      {
+        "scope": {
+          "variant": "cublas_mps"
+        },
+        "metrics": {
+          "time": 27198279.0,
+          "gflops": 5053.222
+        }
+      },
+      {
+        "scope": {
+          "variant": "accelerate"
+        },
+        "metrics": {
+          "time": 47927254.0,
+          "gflops": 2867.658
+        }
+      }
+    ]
+  }
+}

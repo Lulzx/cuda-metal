@@ -1,0 +1,845 @@
+{
+  "schema": "claimwire-lock/v3",
+  "producers": {
+    "cumetal.backend_matrix": {
+      "epochs": {
+        "current": {
+          "run_id": "backend_matrix-0dc61dbd",
+          "git_commit": "7f9e42f",
+          "git_dirty": true,
+          "input_set_digest": "blake3:0dc61dbd2c888dfc9e87f7fdf80649a796f90f6433baff13dacd762e56775439"
+        }
+      }
+    },
+    "cumetal.samples_sweep": {
+      "epochs": {
+        "current": {
+          "run_id": "samples_sweep-c72955cc",
+          "git_commit": "7f9e42f",
+          "git_dirty": true,
+          "input_set_digest": "blake3:c72955cc06932aaaaa88f217da961f9e07c9276cd437b5044da9f17c2f379b64"
+        }
+      }
+    },
+    "cumetal.phase4_manifest": {
+      "epochs": {
+        "current": {
+          "run_id": "phase4_manifest-96f67461",
+          "git_commit": "7f9e42f",
+          "git_dirty": true,
+          "input_set_digest": "blake3:96f6746116ae2feb894baebb3064168b7ed4423a3132a928b3831138b6239379"
+        }
+      }
+    },
+    "cumetal.coverage_manifest": {
+      "epochs": {
+        "current": {
+          "run_id": "coverage_manifest-c7de473d",
+          "git_commit": "7f9e42f",
+          "git_dirty": true,
+          "input_set_digest": "blake3:c7de473d7697e01ffadce3a24f5fce565fe839cccda1a4786544168ce83d7fbe"
+        }
+      }
+    },
+    "cumetal.matmul": {
+      "epochs": {
+        "current": {
+          "run_id": "matmul-6febf65a",
+          "git_commit": "7f9e42f",
+          "git_dirty": true,
+          "input_set_digest": "blake3:6febf65aee0d40b2ae1fa6a02b845fc6c849ed7b7c01bb4973e76cd437a2be7f"
+        }
+      }
+    },
+    "cumetal.lammps_gate": {
+      "epochs": {
+        "current": {
+          "run_id": "lammps_gate-b0ef96de",
+          "git_commit": "7f9e42f",
+          "git_dirty": true,
+          "input_set_digest": "blake3:b0ef96deea99793b1a2008998486e1a97b4d046c42b24b29f1f9ceee67a791b0"
+        }
+      }
+    },
+    "cumetal.lammps_warm": {
+      "epochs": {
+        "current": {
+          "run_id": "lammps_warm-47f35575",
+          "git_commit": "7f9e42f",
+          "git_dirty": true,
+          "input_set_digest": "blake3:47f35575cb369edc1e0ad0897e838c0f91a7250666f17c5160eef6f38e693477"
+        }
+      }
+    }
+  },
+  "evaluated_claims": {
+    "phase4.recorded_pass": {
+      "value": 185,
+      "unit": "count"
+    },
+    "matmul[mps].time": {
+      "value": 27157165,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "matmul[mps].gflops": {
+      "value": 5060.873,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "matmul[naive].time": {
+      "value": 406265612,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "matmul[naive].gflops": {
+      "value": 338.298,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "matmul[coalesced].time": {
+      "value": 298755977,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "matmul[coalesced].gflops": {
+      "value": 460.038,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "matmul[tiled].time": {
+      "value": 176547825,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "matmul[tiled].gflops": {
+      "value": 778.48,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "matmul[registers].time": {
+      "value": 92346421,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "matmul[registers].gflops": {
+      "value": 1488.298,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "matmul[vectorized].time": {
+      "value": 100046635,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "matmul[vectorized].gflops": {
+      "value": 1373.749,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "matmul[block64_32].time": {
+      "value": 67671225,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "matmul[block64_32].gflops": {
+      "value": 2030.981,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "matmul[cublas_mps].time": {
+      "value": 27198279,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "matmul[cublas_mps].gflops": {
+      "value": 5053.222,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "matmul[accelerate].time": {
+      "value": 47927254,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "matmul[accelerate].gflops": {
+      "value": 2867.658,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "lammps_warm[full].cpu": {
+      "value": 1779730000,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "lammps_warm[full].gpu": {
+      "value": 865527000,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "lammps_warm[half].cpu": {
+      "value": 853047000,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "lammps_warm[half].gpu": {
+      "value": 592622000,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "matmul[mps].mps_fraction": {
+      "value": 1,
+      "unit": "ratio"
+    },
+    "matmul[naive].mps_fraction": {
+      "value": 0.0668457793744281,
+      "unit": "ratio"
+    },
+    "matmul[coalesced].mps_fraction": {
+      "value": 0.09090091768752151,
+      "unit": "ratio"
+    },
+    "matmul[tiled].mps_fraction": {
+      "value": 0.15382326329864435,
+      "unit": "ratio"
+    },
+    "matmul[registers].mps_fraction": {
+      "value": 0.29407930212830874,
+      "unit": "ratio"
+    },
+    "matmul[vectorized].mps_fraction": {
+      "value": 0.2714450649127137,
+      "unit": "ratio"
+    },
+    "matmul[block64_32].mps_fraction": {
+      "value": 0.4013104063271298,
+      "unit": "ratio"
+    },
+    "matmul[cublas_mps].mps_fraction": {
+      "value": 0.9984882054934001,
+      "unit": "ratio"
+    },
+    "matmul[accelerate].mps_fraction": {
+      "value": 0.5666330690376937,
+      "unit": "ratio"
+    },
+    "lammps_warm[full].speedup": {
+      "value": 2.0562385691029856,
+      "unit": "ratio"
+    },
+    "lammps_warm[half].speedup": {
+      "value": 1.4394453800230163,
+      "unit": "ratio"
+    },
+    "matrix.total": {
+      "value": 52,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "matrix.direct_legacy": {
+      "value": 0,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "matrix.direct_typed": {
+      "value": 52,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "matrix.ptx_legacy": {
+      "value": 47,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "matrix.ptx_typed": {
+      "value": 52,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "samples.total": {
+      "value": 83,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "samples.pass": {
+      "value": 83,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "samples.waive": {
+      "value": 0,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "phase4.total": {
+      "value": 185,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "corpus.total": {
+      "value": 50,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "corpus.typed_ptx": {
+      "value": 47,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "corpus.native_aot": {
+      "value": 45,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "lammps.atoms": {
+      "value": 32000,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "lammps.steps": {
+      "value": 100,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "lammps.tolerance": {
+      "value": 0.0005,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "lammps.cpu_double_error": {
+      "value": 5.909999999997861e-6,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "lammps.mode_difference": {
+      "value": 1.269999999997662e-6,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "lammps.analytic_error": {
+      "value": 1.259717396824915e-7,
+      "unit": "ratio",
+      "epoch": "current"
+    },
+    "lammps.full_launches": {
+      "value": 826,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "lammps.half_launches": {
+      "value": 1534,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "lammps.full_loop": {
+      "value": 4671500000,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "lammps.half_loop": {
+      "value": 6770270000,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "lammps.full_wall": {
+      "value": 18000000000,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "lammps.half_wall": {
+      "value": 554000000000,
+      "unit": "ns",
+      "epoch": "current"
+    },
+    "lammps.ctest_passed": {
+      "value": 396,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "lammps.ctest_total": {
+      "value": 396,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "lammps.typed_ptx_projects": {
+      "value": 40,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "lammps.native_aot_projects": {
+      "value": 43,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "lammps.cuda_samples": {
+      "value": 83,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "lammps.validator_tests": {
+      "value": 11,
+      "unit": "count",
+      "epoch": "current"
+    },
+    "matmul.tile_vs_article": {
+      "value": 1.478422186294585,
+      "unit": "ratio"
+    },
+    "matmul.tile_tflops": {
+      "value": 2.030981,
+      "unit": "ratio"
+    }
+  },
+  "locations": {
+    "README.md::block:readme.lammps#0": {
+      "rendered": "stock 32,000-atom, 100-step full/half-neighbour numerical gate",
+      "rendered_digest": "blake3:db01877ab832c836c03c498c538f621af6ffc3ec43657de9238d60859484c8dc",
+      "context_digest": "blake3:6f9da38606f1fa995130664dd038fc733f2d5fe5fe7bf4973ba61f3a5d65d8a4"
+    },
+    "demos/lammps/README.md::block:lammps.status#0": {
+      "rendered": "the stock 32,000-atom, 100-step",
+      "rendered_digest": "blake3:c17fb88061053f94bdcbd146f85450456f9a06990b608525196b13be65964498",
+      "context_digest": "blake3:e248b376e28158af18eb1e4e8ad38c6fa8165a7038c93f3538ea3227511757e1"
+    },
+    "demos/lammps/README.md::block:lammps.status#1": {
+      "rendered": "`5e-4` CPU-double, cross-mode, and analytic initial-energy checks",
+      "rendered_digest": "blake3:31a9285793189a1410e823816fb9d2067a1f0f330695f6fc8dc371f4257351a0",
+      "context_digest": "blake3:9d75e3067d652d064fd0f9ef5463c4a876d208ed5af32a93860a2892b23d9535"
+    },
+    "demos/lammps/README.md::block:lammps.recorded_result#0": {
+      "rendered": "CPU-double error `5.91e-6`, cross-mode difference `1.27e-6`",
+      "rendered_digest": "blake3:6aba52f17c44a9d0274ebc32a57e6b1c1a7cd5becf7815af8ba7644a5b40f8fb",
+      "context_digest": "blake3:b28478355e0446e987acf91567886a7a6e2e2ce6d7d89eea16c251ce01c9459d"
+    },
+    "demos/lammps/README.md::block:lammps.recorded_result#1": {
+      "rendered": "pair-energy error `1.26e-7`. Full/Newton-off records 826 successful",
+      "rendered_digest": "blake3:16332f208f32fd829473ce209e41ce0b967c8d6e57bc1819974e1bc90238687a",
+      "context_digest": "blake3:20da7da9334c663c00060b7a4e8971aa7d51d9c8ec197d735b3bf7de9a4bc857"
+    },
+    "demos/lammps/README.md::block:lammps.recorded_result#2": {
+      "rendered": "half/Newton-on records 1,534.",
+      "rendered_digest": "blake3:e5b588654d67288f552f51269459de9e6a8c2d950277de4f742620f43087b747",
+      "context_digest": "blake3:6e153e514bd30f8d67c03178810c74b1ffc63256fdeb5dc48df700d0f51cb68f"
+    },
+    "demos/lammps/README.md::block:lammps.loops#0": {
+      "rendered": "took 4.67 seconds (full) and 6.77 seconds (half)",
+      "rendered_digest": "blake3:6ca43c0fc70ddfcbf6329181002ecdb2df3607001ea4c5484531b5bb362a5777",
+      "context_digest": "blake3:6bcea0766e9fc5f6e430bb4fec4be3d157d6827bb65754d6862089535b90d098"
+    },
+    "demos/lammps/README.md::block:lammps.loops#1": {
+      "rendered": "versus 18 seconds for full",
+      "rendered_digest": "blake3:e2282fdd5593f40257ff3873681111067222f051e7360c51e19c43029b2370f4",
+      "context_digest": "blake3:1308d8d33d33d32b866b7ac4673a47ea3525cbeff4fe591454012c3d707c8d03"
+    },
+    "demos/lammps/README.md::block:lammps.loops#2": {
+      "rendered": "All 396 CuMetal CTest gates passed",
+      "rendered_digest": "blake3:c974d92ed2b02a57882d61e8d5cb3a19fb579b4756c01c5e98739080bd602b11",
+      "context_digest": "blake3:ff9ca666dcb5f38fc51a4ebb743f7fd128b47d5b57f590dc17ced7be8abe98b4"
+    },
+    "demos/lammps/README.md::block:lammps.loops#3": {
+      "rendered": "83 enrolled CUDA samples",
+      "rendered_digest": "blake3:d6cd2418a9cd4efc19264d4ea7b8dd84c3d43007999ff4f6a5744addb482906c",
+      "context_digest": "blake3:a9653ed8173770ebf8d1b2d91b687443d84f3891c3be45d05652a332e5f4ab42"
+    },
+    "demos/lammps/README.md::block:lammps.loops#4": {
+      "rendered": "validator's 11 tests also pass",
+      "rendered_digest": "blake3:85ba22999ae109f598c87ad7abf3505278e3b0e702488dd7fc3727bc841f2db3",
+      "context_digest": "blake3:06ac87a86da9298b155e7c31eb486d4d54f10141dec91f829acb0f0a5cbccb86"
+    },
+    "demos/lammps/README.md::block:lammps.gate#0": {
+      "rendered": "complete 32,000 atoms and 100 steps",
+      "rendered_digest": "blake3:389caaa89d1a2d0b6eabcfeb3781f2fe30e5805925145adab57d0b20d7b662a2",
+      "context_digest": "blake3:43c791ea12c42045b22d68ec4e52864295126bde5bb432b6fa5cc3d474087296"
+    },
+    "demos/lammps/README.md::table:lammps.warm::[full]::CPU Serial, one thread": {
+      "rendered": "1.780 s",
+      "rendered_digest": "blake3:fcc76cb783a7f95a5e639ddeb6c06ffffdf7f8d2f8788f3e6c5edabbc5ddd8bc",
+      "context_digest": "blake3:dc5b22016b3ee37f6e1842d95ac72f6e4fafc91280d189cb32f47655266cd8e0"
+    },
+    "demos/lammps/README.md::table:lammps.warm::[full]::GPU": {
+      "rendered": "0.866 s",
+      "rendered_digest": "blake3:ffb584721c6918444c64ab2a2aad8778f09b6469426757a29e6588449a39908e",
+      "context_digest": "blake3:7e5d7187c0e7fa039de4176114bbc41a29f7c33608cb595f5e1a2cf6314b7add"
+    },
+    "demos/lammps/README.md::table:lammps.warm::[full]::GPU speedup": {
+      "rendered": "**2.06×**",
+      "rendered_digest": "blake3:19e6f28b7ba38b7674b3a2293781ba20702ff8866a5ba18bdbab73f80fab8822",
+      "context_digest": "blake3:f6b8ec81336deb07aca6e37f6dd99e022f86b6b5e72e5e92471b5011bc83d615"
+    },
+    "demos/lammps/README.md::table:lammps.warm::[half]::CPU Serial, one thread": {
+      "rendered": "0.853 s",
+      "rendered_digest": "blake3:06105c9a879c19115fefe573d05b1d072590fb307dee5f8aa895ebb15bdcc3c9",
+      "context_digest": "blake3:90856fa5b0940fb0b083d9c2d96c8411a509b438b325f06ec8801335ab1e79d4"
+    },
+    "demos/lammps/README.md::table:lammps.warm::[half]::GPU": {
+      "rendered": "0.593 s",
+      "rendered_digest": "blake3:2973634f55d4e61b2dff4185fd5a8e3a9544623b7d4101eac3ba70b9d503be54",
+      "context_digest": "blake3:8a33d9ea73c5fb3c07115970943007171b35e37fe3230be22ee66204eb64e924"
+    },
+    "demos/lammps/README.md::table:lammps.warm::[half]::GPU speedup": {
+      "rendered": "**1.44×**",
+      "rendered_digest": "blake3:9d6eff16f9838e733af4054827c418a764d928b51db1373d69a30f0c14cdafef",
+      "context_digest": "blake3:a4be15b19ecaec61e83abff11136d8258c98e6e28c0e3e77453595c2238fdce2"
+    },
+    "demos/lammps/README.md::table:lammps.cpu_checks::Stock CPU `bench/in.lj`, full/Newton-off neighbours::Result": {
+      "rendered": "Completes 32,000 atoms, 100 steps",
+      "rendered_digest": "blake3:f1dc26d3e8c20b16ded8d2be9cf7535c7200782972d9648070c10faf04630b79",
+      "context_digest": "blake3:81cc6a74c0a3dc31c9af9dcf9c0ad2c2b450a3ce3057c59c36b48b876efdac16"
+    },
+    "demos/lammps/README.md::table:lammps.cpu_checks::Stock CPU `bench/in.lj`, half/Newton-on neighbours::Result": {
+      "rendered": "Completes 32,000 atoms, 100 steps",
+      "rendered_digest": "blake3:f1dc26d3e8c20b16ded8d2be9cf7535c7200782972d9648070c10faf04630b79",
+      "context_digest": "blake3:5b90484f57a77cfd1941496fe5e219c1b0977d7d029d906a90591f8e7bfd160b"
+    },
+    "docs/compiler-architecture.md::table:architecture.backend_matrix::direct `.cu`::`legacy`": {
+      "rendered": "0/52",
+      "rendered_digest": "blake3:af6e3427592d3e64fe319d230f07d37c6cd4181debce711fb0d3d7c8ddeea08a",
+      "context_digest": "blake3:31e75c35fb7e919f1bc81bfb521e43c819f9b9f01ca589442a9924187dd0826f"
+    },
+    "docs/compiler-architecture.md::table:architecture.backend_matrix::direct `.cu`::`cumetal-ir`": {
+      "rendered": "**52/52**",
+      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "context_digest": "blake3:9155d5578ec8526b0aebe956acbe678f6be48b3aee7a820f41c62f52bb5a1dcd"
+    },
+    "docs/compiler-architecture.md::table:architecture.backend_matrix::`.cu --cuda-device` / PTX::`legacy`": {
+      "rendered": "**47/52**",
+      "rendered_digest": "blake3:b96d0e8e3b12ad394f8c100a1aa30bcbdeab42ef49c589423ec55bfc0de13b3a",
+      "context_digest": "blake3:b757e4400302783720eeb375c121e32c69e4a4741632e311e6d3724324fe1696"
+    },
+    "docs/compiler-architecture.md::table:architecture.backend_matrix::`.cu --cuda-device` / PTX::`cumetal-ir`": {
+      "rendered": "**52/52**",
+      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "context_digest": "blake3:bdce3f702c4a167a19bdae350d0d374235835ecda8ab8ca29ded89cbe30e7810"
+    },
+    "docs/demos.md::block:demos.lammps#0": {
+      "rendered": "the stock 32,000-atom,",
+      "rendered_digest": "blake3:0147939e4c36694226415d26022db66ee9f276f0d72d78f4c1f1b98e7cb4f811",
+      "context_digest": "blake3:ce26784b84762f2cab2856f9344221879e01104d85a45c8afc4f44083e30b2d9"
+    },
+    "docs/demos.md::block:demos.lammps#1": {
+      "rendered": "100-step Lennard-Jones benchmark",
+      "rendered_digest": "blake3:f5a13814155e30cb8b1b78af1c4b909ceaa07cbe60ffbf56901bbd560e75e9e5",
+      "context_digest": "blake3:bd9457a969e28e9704a21180d9679fd229f7254a3cbb2ad2b31e75f04be7e543"
+    },
+    "docs/demos.md::block:demos.lammps#2": {
+      "rendered": "fixed `5e-4` numerical gate",
+      "rendered_digest": "blake3:50bb14d0c9f977b0e21440ec1d49169de61b281377cb3ee159444db65866af7d",
+      "context_digest": "blake3:d7a7db7c2fce649ee9071416686cdd67fea7e96dc71bfcf2f6307a984b8c84c2"
+    },
+    "docs/known-gaps.md::block:known_gaps.next_steps#0": {
+      "rendered": "the fixed 185-test Phase 4 denominator",
+      "rendered_digest": "blake3:0fa77db25cb418583e5504caf5f2b2988e34a67e61a8a2f9f1030f49082fcff9",
+      "context_digest": "blake3:d8a70511fd164cfe578a7f533bd44ab7d8193ceee744502b51f46c72371d8967"
+    },
+    "docs/known-gaps/compiler.md::table:known_gaps_compiler.backend_matrix::direct `.cu`::Legacy": {
+      "rendered": "0/52",
+      "rendered_digest": "blake3:af6e3427592d3e64fe319d230f07d37c6cd4181debce711fb0d3d7c8ddeea08a",
+      "context_digest": "blake3:abfe279f01044b64e2f586527023868253aae07800a16008ded0e57dc938bfee"
+    },
+    "docs/known-gaps/compiler.md::table:known_gaps_compiler.backend_matrix::direct `.cu`::Typed CuMetal IR": {
+      "rendered": "**52/52**",
+      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "context_digest": "blake3:a7c0673a1575a5a85dd0133879b54daa9444b54ed3baea8d2847bb12866517ae"
+    },
+    "docs/known-gaps/compiler.md::table:known_gaps_compiler.backend_matrix::PTX / `--cuda-device`::Legacy": {
+      "rendered": "**47/52**",
+      "rendered_digest": "blake3:b96d0e8e3b12ad394f8c100a1aa30bcbdeab42ef49c589423ec55bfc0de13b3a",
+      "context_digest": "blake3:0fc5e6d94931781b1e56277d2d485254f8770ea3f30d9074aaac591bd3a92bbb"
+    },
+    "docs/known-gaps/compiler.md::table:known_gaps_compiler.backend_matrix::PTX / `--cuda-device`::Typed CuMetal IR": {
+      "rendered": "**52/52**",
+      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "context_digest": "blake3:8868447ce462e2aae1f30668d0cb6eab3b6c1b86edb234e8a9a197c050935a18"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#0": {
+      "rendered": "reviewed 185-test manifest",
+      "rendered_digest": "blake3:dd44cac90120dbbfea7a2766b494f6cfcf2712f10ecc1650c1414152bbcc015c",
+      "context_digest": "blake3:7d22391d68bf10d84a046ebcbbb78232c93bb70f163fb04ca4098aa486d9f186"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#1": {
+      "rendered": "run passed all 185 with zero skips",
+      "rendered_digest": "blake3:93549b859501cada92c42ce5dc6c5adfcc7e0c69fa7827afae38243257777e14",
+      "context_digest": "blake3:5cd9bb2bfc3536c8724bb1b2d4637d56d7b1ace200553c463849fb69eeb77418"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#2": {
+      "rendered": "manifest has 83 enrolled headless samples; all 83 pass.",
+      "rendered_digest": "blake3:09c56097962d05afd4e38cfc22202c2a3743c33fcc5157e6dd072b6639c1d2db",
+      "context_digest": "blake3:5a4fe60eb6a4a784c124fda80a94de9f3ba91e080c95d600c0287e2e92be6f65"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#0": {
+      "rendered": "32,000-atom, 100-step LJ benchmark",
+      "rendered_digest": "blake3:f4021e5287341426e46e60b529d4860b14955abe4e07e8b1ca8e868c5e33f601",
+      "context_digest": "blake3:a8bec03f37916f89cf53f25be59f6fe272528e73d9fc4de2b29e3c6f82c5d41f"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#1": {
+      "rendered": "CPU-double error is `5.91e-6`",
+      "rendered_digest": "blake3:069fc4c2f57450eab4591995c200063eb8b0b4209203f48429aa9c351a9ead9e",
+      "context_digest": "blake3:fa2bf0e2bacded74c4d0d6d42e02d61b164a3a47f66dc48ef5cf228169356f94"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#2": {
+      "rendered": "difference `1.27e-6`, and analytic initial pair-energy error `1.26e-7`",
+      "rendered_digest": "blake3:a35a4612da87f7cf5fa3ba2e0a996f3e5f010132e808f8923ff9b3faf1cf673e",
+      "context_digest": "blake3:d96af433710eb7e901951027a2e815fd6eabadf2f2a9474bf808a2d22cbf31a6"
+    },
+    "docs/matmul-performance.md::block:matmul.outcome#0": {
+      "rendered": "by **1.48x**, reaching **2.03 TFLOP/s**, or **40.1% of MPS**",
+      "rendered_digest": "blake3:39d4acbf5e0560c0e6bc123021c83ed35d7a5378df34661869538b9ea5760474",
+      "context_digest": "blake3:e1e8898d0b6427473faa379f9b0efb668911bf99cfb6d5b1c695ffa769db0738"
+    },
+    "docs/matmul-performance.md::block:matmul.outcome#1": {
+      "rendered": "already reaches **99.8% of direct MPS**",
+      "rendered_digest": "blake3:04d89b4ebc0b13c3384baa8be380fcc8821e3328dd6820314ac6a37870786acb",
+      "context_digest": "blake3:7cfde84dfd0cc4aaf9179ae9104bf3a247e4dde77a7202b7e676b4678ca041fb"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[naive]::Time (ms)": {
+      "rendered": "406.266",
+      "rendered_digest": "blake3:23bb6a7433e69fbd7d7269ad3f4b23099f35e90cbbbf6873566f7239c2b6b1cc",
+      "context_digest": "blake3:95c0896b250d881caf237bfa2b334b9c7f3ff587b92317f654661f29b047013e"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[naive]::GFLOP/s": {
+      "rendered": "338.3",
+      "rendered_digest": "blake3:03428805fb03467cc50af3e17799cf1f4e54da1436c29acf57cb09447cc5dd19",
+      "context_digest": "blake3:a5b8b0f63193a8886da1118310dbc1993e5f406b0fe3d5e9eab7ce6b3ea7ee42"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[naive]::MPS fraction": {
+      "rendered": "6.7%",
+      "rendered_digest": "blake3:bc6d439b1af0660eb31659cf33196702d644eacea2630793439fef64fce9cb3d",
+      "context_digest": "blake3:a65b4ca5c7d8ee5af386cf8840a81b0b2f978c2ae612d1fcce57e33e5c6c9b04"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[coalesced]::Time (ms)": {
+      "rendered": "298.756",
+      "rendered_digest": "blake3:7d9004a0949c5fca72fa3545060bb4dc7343979b44fe98bdacdd6c7049468636",
+      "context_digest": "blake3:e016624d3027ac89db73780c473f6f4cd74cb11e133d78a74d460685767054c5"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[coalesced]::GFLOP/s": {
+      "rendered": "460.0",
+      "rendered_digest": "blake3:728ea45040589e60d326f38a400bf0d4386997d709b7f6fe8ef37c590123320e",
+      "context_digest": "blake3:cb11e1d4105a278f939c41add29879bff09a8e77be28497d9998e5b4222fcba4"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[coalesced]::MPS fraction": {
+      "rendered": "9.1%",
+      "rendered_digest": "blake3:a3f35d992e97bca920671dee4293da457b92f6d31f41cce88b9fde6262df9e29",
+      "context_digest": "blake3:3d6c9f511b18713d3f47a3ed557097227b8fb006f12979300c3906a7416d1d4b"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[tiled]::Time (ms)": {
+      "rendered": "176.548",
+      "rendered_digest": "blake3:31d9de8af561485b1b07fbfab8f5e6095b7825d59e6bec43ba7ea48b726313bd",
+      "context_digest": "blake3:eb4274b98ff6140d2c41631f264f76854691bc9fe8c051ec6c0df0bc750c0c05"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[tiled]::GFLOP/s": {
+      "rendered": "778.5",
+      "rendered_digest": "blake3:67058f057f5a60178dd2261665f72b5fcd4d600284c44e4607f77a36cab85511",
+      "context_digest": "blake3:8d04cd2630efa68ce4e04b41ef162f6b161fe98ebe0c0f99192772006f9ff60d"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[tiled]::MPS fraction": {
+      "rendered": "15.4%",
+      "rendered_digest": "blake3:f05ef6e163d8ccefc4b0e5dc601516b19127087deffdf7d25fd5c4c842f513b4",
+      "context_digest": "blake3:49f60d5d8a88a841b19e4a39fc4fa7d33c37f5106de70096db38d9373ecafd29"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[registers]::Time (ms)": {
+      "rendered": "92.346",
+      "rendered_digest": "blake3:1f2c50355bc7c0092324d164923d3c9ec046a0fa487d6094b2374720c3cd3ade",
+      "context_digest": "blake3:b800f7638861e6cffd34083381328d1a237d250c15b36bfd64ff723ef61f37c1"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[registers]::GFLOP/s": {
+      "rendered": "1,488.3",
+      "rendered_digest": "blake3:e77982969bd9b1b1c08b129526c3b46b450933ef6b01a5ffe2419aaef0bacc16",
+      "context_digest": "blake3:d5892bbe7860de14e10e87a6b4178d87a89e8c314bb52c83af0b47b80862eaee"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[registers]::MPS fraction": {
+      "rendered": "29.4%",
+      "rendered_digest": "blake3:0ec91392468f156ea1850e0536add34c018debb870846bbcea0dc2e4aec40c2f",
+      "context_digest": "blake3:8adf25e2f6ec027443bcc9aed957166bdf06438472feedab28f6a41628845663"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[vectorized]::Time (ms)": {
+      "rendered": "100.047",
+      "rendered_digest": "blake3:d7eaa694c5dc80cc2ce2b19cac93693a01aa66e7c5558726dd65f5be890245d5",
+      "context_digest": "blake3:509bf1c0b09081b4d1ae0a612c263ebb9d3000ab190ab5ecc25eebfd2c3e02b9"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[vectorized]::GFLOP/s": {
+      "rendered": "1,373.7",
+      "rendered_digest": "blake3:add7bf606f95e5a4dc768c0e3e0b945d0acd4cd2ed25e426781f536262a0722a",
+      "context_digest": "blake3:e7e01f38f5ddb4bd5c0b2dae47655e2ce9d47f550f61914e85090d6cfc74f5a8"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[vectorized]::MPS fraction": {
+      "rendered": "27.1%",
+      "rendered_digest": "blake3:ef1100994333cce2c4abbef1e3f4838b1106853c9868b7651d6c28827f7eb7d9",
+      "context_digest": "blake3:629dfcaeb43a48857ae406ce378a7fe44faccbf2243c8c0721d8410c22583664"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[block64_32]::Time (ms)": {
+      "rendered": "**67.671**",
+      "rendered_digest": "blake3:ba0187515a1e524c8154e1285ff5881d17bc71efcbcdee185fc74070e68a41ba",
+      "context_digest": "blake3:abf2e54816efa7450ae4cc8d24752b6689a14b74c929f8d4e176c549948a463d"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[block64_32]::GFLOP/s": {
+      "rendered": "**2,031.0**",
+      "rendered_digest": "blake3:1b8a992ecaaf98f17509154ede881794a91ee3e6ea817befa8ded74e5bcb92be",
+      "context_digest": "blake3:71256667751e64db42d7afd53ed8f916471f5696ede4c1e0142f23501a50c026"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[block64_32]::MPS fraction": {
+      "rendered": "**40.1%**",
+      "rendered_digest": "blake3:c63b5302f82ea69c98a46159e218b095a6a6b708e0cde61249f45facecd7e026",
+      "context_digest": "blake3:464f8f54d1ad3593b4b638ba0fcff4715799212cf6f2a993b64d81208a0d2e46"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[accelerate]::Time (ms)": {
+      "rendered": "47.927",
+      "rendered_digest": "blake3:fd2c6c54a9ef6ff5a3db770a14007eb3e72a7b1e6e6ecec6cd0b916b99fa6d5a",
+      "context_digest": "blake3:1767b838baaca3c72d1f66615832a3a8354bd04cc5b2b4c7ea0ceb15f641ad79"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[accelerate]::GFLOP/s": {
+      "rendered": "2,867.7",
+      "rendered_digest": "blake3:b0e33295bebee8a89f32da761e72b253476c904d9115141cd93d901da6dbc334",
+      "context_digest": "blake3:3c2bc90b06c73512ae00745bff3dc5b8a963f1cb614610ca8129dfbef80dd489"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[accelerate]::MPS fraction": {
+      "rendered": "56.7%",
+      "rendered_digest": "blake3:56d3c97cc51e50cf0566057e7b2450bec5d687d8b37af0eb27832ba6d9808108",
+      "context_digest": "blake3:9273fec4968c54432eff3039599d76ee3e6037e988c3443d2c02bdac8bf1b0aa"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[cublas_mps]::Time (ms)": {
+      "rendered": "27.198",
+      "rendered_digest": "blake3:95fc07e4c628bf03f0c7db815a94698437caafaf4ec33cc3d623a35d02b70250",
+      "context_digest": "blake3:d6d914a129c2d65e11c3e40aa726366ecefba663fcc5111bbac92fcf297827d8"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[cublas_mps]::GFLOP/s": {
+      "rendered": "5,053.2",
+      "rendered_digest": "blake3:ba7d5db3f79fb06b39f2ec30ea81e0e70e0e20eb0d51907abd284b7fe34603ba",
+      "context_digest": "blake3:3efabfbc7355c375a56f6a495ef5488d6af6899beeec55fb045ad4bb7fd16228"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[cublas_mps]::MPS fraction": {
+      "rendered": "99.8%",
+      "rendered_digest": "blake3:b026e666858a49ee48b79def08b3095e247767b3cb81f8feb150b819687e25d6",
+      "context_digest": "blake3:74c72e68c1e1847c27e4be14f2443609960f1c6a4143e57233af93b7db8dcf8d"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[mps]::Time (ms)": {
+      "rendered": "27.157",
+      "rendered_digest": "blake3:b44b4840a857e00a1c1810214807e1fe867fa9c9543837c2e24d03c08b2a96a6",
+      "context_digest": "blake3:db975a6a538ec7970d6341d7bdfd6d60ba1670612eac540b3e3a3878163ac5a1"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[mps]::GFLOP/s": {
+      "rendered": "5,060.9",
+      "rendered_digest": "blake3:c8bb29ea934589a27dc6e1c29a4ccf36aab1c73dc1d0dd5280f376f308cf5c5b",
+      "context_digest": "blake3:1dc6469b1db756ec470ae2519a793c62dd959ca0b7855860b882461b2ad0c00e"
+    },
+    "docs/matmul-performance.md::table:matmul.comparison::[mps]::MPS fraction": {
+      "rendered": "100%",
+      "rendered_digest": "blake3:d9a5660d46876803fa7277583fe97b4758cee3d885b2696b5e97fb99b52d0182",
+      "context_digest": "blake3:b0fdafd148c1d039c639d221031be290cc428912ec4c8b9f2d45f27923542480"
+    },
+    "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#0": {
+      "rendered": "sample gate contains 83 enrolled headless samples",
+      "rendered_digest": "blake3:56345aa850daf8fb70fa78f2608bf9c85d1729a0df05219671bc1a447c106b17",
+      "context_digest": "blake3:7087c5713d32737d8065950159647d03fad3af47e364d43a3f5ecf8691aed664"
+    },
+    "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#1": {
+      "rendered": "185-test Phase 4 functional denominator.",
+      "rendered_digest": "blake3:514fc78d5173f3c94a7c368c13be8730397fd207c786e988663ab5b7407311d5",
+      "context_digest": "blake3:35bcf0ab0d8e1b3f7849e466c4da9ffc00cd8df1529bbec53fed9d1a888c7c86"
+    },
+    "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#2": {
+      "rendered": "denominator passed 185/185 with zero skips",
+      "rendered_digest": "blake3:dcf179bf76809395e2f5b0567b75ebcb2b703144d6600ae3f5609e89dbba77aa",
+      "context_digest": "blake3:7a9c789317475dd5e86e248e23619e3a9b4629e6552b7392f430bcf292da1ffa"
+    },
+    "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#3": {
+      "rendered": "reviewed 52-file production-metallib matrix is 52/52 for direct `.cu` and 52/52 for PTX",
+      "rendered_digest": "blake3:119bfa84a0ad902df1373de2a8edd703380667906b5cc70514383ec202600f24",
+      "context_digest": "blake3:53e51b353f952a9515c3440ea7cd70a36e579f8142051698be9636a907103a8d"
+    },
+    "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#4": {
+      "rendered": "legacy PTX backend is 47/52 because",
+      "rendered_digest": "blake3:bb56a83242c3fd0e8dc816131a8bf50dda49e2cc9c02828f3c77b1c412e9566a",
+      "context_digest": "blake3:1609b6cb82cb9a4e21e36974cd8ae4b9095e895df5aa066ba120b65e27c94e70"
+    },
+    "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#5": {
+      "rendered": "corpus now passes 40/40 typed-PTX enrollments",
+      "rendered_digest": "blake3:acb0d8d16b8205f2294a8a067bf779207772a92d3373ea7e9bd5ded365e9c8c0",
+      "context_digest": "blake3:94e3e75e7c303838716bb354c46cef7c77e2c2dfba17f2c9bcf237d81d1bb471"
+    },
+    "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#6": {
+      "rendered": "43/43 direct native-AOT enrollments",
+      "rendered_digest": "blake3:49c2aede4939f14ca2a7b5039addcb676de2f714d993e40647cd277016307fb2",
+      "context_digest": "blake3:80f1d1809b99ada1dfb947c71cd269e6d7f9942d9351a394a22b2f039368dae1"
+    },
+    "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#7": {
+      "rendered": "manifest still contains 83 enrolled headless samples",
+      "rendered_digest": "blake3:500e3ffe52d69db037add347fc357bc2804d8fe23d3d7e45f2ed8cd4f7a8696c",
+      "context_digest": "blake3:068f2ca4e353b5ec3c4d748ebc775f893d6dcb97e5a10b950632daf8201eee97"
+    },
+    "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#8": {
+      "rendered": "rerun passes 83/83.",
+      "rendered_digest": "blake3:8f699b4e59301b784523798262c138620c1f7fe3ee9260c582c3d0eecb344a39",
+      "context_digest": "blake3:f6c5cdafab1b906337e8fc48cf7b71cc068d128f3a779a0085e486252c88278d"
+    },
+    "docs/status.md::block:status.snapshot#0": {
+      "rendered": "`cuda-samples`: **83/83 pass**",
+      "rendered_digest": "blake3:ae6f154969025f821cf5ee0f2b845455fae069cc719cb2760d640eedfee81ced",
+      "context_digest": "blake3:58314b1865745b3cdaa5a7c28ed1b49e37ae18ddf45d077120468a14495cf689"
+    },
+    "docs/status.md::block:status.snapshot#1": {
+      "rendered": "**52/52**, typed PTX **52/52**, legacy PTX **47/52**",
+      "rendered_digest": "blake3:4ae917bac1eac373e039a7929b25460399004fecf6978afea09c52e2b1025ed0",
+      "context_digest": "blake3:1dd821a5aafe4c957f95c29cca5d001b715595bc9cca388d2864dd900ffe6c19"
+    },
+    "docs/status.md::block:status.snapshot#2": {
+      "rendered": "typed PTX **40/40** and direct native AOT",
+      "rendered_digest": "blake3:c2a84a884550865089584aacb8a7fe016d7e57bb6d449f31eb71c64bc5d33a74",
+      "context_digest": "blake3:589a17f920f7584ce9c8d29f213766db200f77a2e09a44e6edb7d4dd5b880747"
+    },
+    "docs/status.md::block:status.snapshot#3": {
+      "rendered": "**43/43** on Apple M4 Pro",
+      "rendered_digest": "blake3:9c56ec87d254e523c8fbc2471e8eb0893842e296b9e297dd61450206d4f13fb0",
+      "context_digest": "blake3:d571e0fd916d07fd7237df0381627650ba8e95b865821c138968c576c18128b7"
+    },
+    "docs/status/compiler.md::table:status_compiler.backend_matrix::direct `.cu`::Legacy": {
+      "rendered": "0/52",
+      "rendered_digest": "blake3:af6e3427592d3e64fe319d230f07d37c6cd4181debce711fb0d3d7c8ddeea08a",
+      "context_digest": "blake3:abfe279f01044b64e2f586527023868253aae07800a16008ded0e57dc938bfee"
+    },
+    "docs/status/compiler.md::table:status_compiler.backend_matrix::direct `.cu`::Typed CuMetal IR": {
+      "rendered": "**52/52**",
+      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "context_digest": "blake3:a7c0673a1575a5a85dd0133879b54daa9444b54ed3baea8d2847bb12866517ae"
+    },
+    "docs/status/compiler.md::table:status_compiler.backend_matrix::PTX / `--cuda-device`::Legacy": {
+      "rendered": "**47/52**",
+      "rendered_digest": "blake3:b96d0e8e3b12ad394f8c100a1aa30bcbdeab42ef49c589423ec55bfc0de13b3a",
+      "context_digest": "blake3:0fc5e6d94931781b1e56277d2d485254f8770ea3f30d9074aaac591bd3a92bbb"
+    },
+    "docs/status/compiler.md::table:status_compiler.backend_matrix::PTX / `--cuda-device`::Typed CuMetal IR": {
+      "rendered": "**52/52**",
+      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "context_digest": "blake3:8868447ce462e2aae1f30668d0cb6eab3b6c1b86edb234e8a9a197c050935a18"
+    },
+    "docs/status/verification.md::block:status_verification.gates#0": {
+      "rendered": "- 185/185 required Phase 4 functional tests",
+      "rendered_digest": "blake3:a1179c6dc663cda8953bb6236f2761d31fbbe539ab1ea78345281c8a7436593c",
+      "context_digest": "blake3:c0e49450a31be78db36788781a42546c5a264ee1caeae68adef3fe5872936cc0"
+    },
+    "docs/status/verification.md::block:status_verification.gates#1": {
+      "rendered": "- 83-entry `cuda-samples` coverage manifest",
+      "rendered_digest": "blake3:ebf3bb1af905c8324dfb98c88ed57eb8ea8922b3733a822f1b45b84227b24bb7",
+      "context_digest": "blake3:a0cc66a482ca44a1d04c9b955c35d1c95e472d89f66981b2a827f521d0a8eb38"
+    },
+    "docs/status/verification.md::block:status_verification.gates#2": {
+      "rendered": "- 52-file four-cell frontend/backend production-metallib matrix",
+      "rendered_digest": "blake3:579a9e670687972dbfab1209fe5e158c6bf1cfd97fbbd1e545dab3d1632c0fd7",
+      "context_digest": "blake3:07f3d48f4b0ea637b16b7f4ad84101061056c8eafd2221076e66bfa991306cbf"
+    },
+    "docs/testing.md::block:testing.phase4#0": {
+      "rendered": "reviewed 185-test functional manifest",
+      "rendered_digest": "blake3:4990dc92a3783a8d94f634ce7bca351dc4b656ec6edec3cc2625d4de14f73b25",
+      "context_digest": "blake3:58e873112e052326b3d4967fbe143924a8d0fef0b43e5324d196e654f659df4e"
+    },
+    "docs/verified-results.md::block:verified_results.phase4#0": {
+      "rendered": "Phase 4 manifest ran 185/185 required functional tests",
+      "rendered_digest": "blake3:f16cb78004ee6a8a1ce2f422f4c6b81e9bf68f5dd8f7c3d9c42f933c6875dc34",
+      "context_digest": "blake3:80255dc7151817111b3ebe7d4183912b6f714cb213559af4f45633794a1d8785"
+    },
+    "docs/verified-results.md::block:verified_results.samples_snapshot#0": {
+      "rendered": "classifies all 83 enrolled",
+      "rendered_digest": "blake3:f9e4f5671d5f9e4cf390353f1e786cbd9b8c78b510ded68570bccc9b221464c0",
+      "context_digest": "blake3:0846777d18aa97c4b094961572562bc14351a15643a6e67b13bb82e50ce8adcd"
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "schema": "claimwire-run/v1",
+  "run_id": "lammps_warm-47f35575",
+  "producer": "cumetal.lammps_warm",
+  "timestamp": "2026-10-16T15:12:01Z",
+  "git_commit": "7f9e42f",
+  "git_dirty": true,
+  "hardware": "Apple M4 Pro",
+  "command": [
+    "scripts/claimwire_evidence.py",
+    "lammps-warm"
+  ],
+  "input_set_digest": "blake3:47f35575cb369edc1e0ad0897e838c0f91a7250666f17c5160eef6f38e693477",
+  "input_files": {
+    "demos/lammps/results/2026-10-05-m4-pro-warm.json": "blake3:b7ffca195f84284ebce46cdf03be0ee9d79d54e384870aeaad356617f68a5b56",
+    "scripts/claimwire_evidence.py": "blake3:3c46dc5f6ddbcac1a1679652e0a6737b42809c2d2182b660ef524ae50652df0e"
+  },
+  "families": {
+    "lammps_warm": [
+      {
+        "scope": {
+          "mode": "full"
+        },
+        "metrics": {
+          "cpu": 1779730000.0,
+          "gpu": 865527000.0
+        }
+      },
+      {
+        "scope": {
+          "mode": "half"
+        },
+        "metrics": {
+          "cpu": 853047000.0,
+          "gpu": 592622000.0
+        }
+      }
+    ]
+  }
+}

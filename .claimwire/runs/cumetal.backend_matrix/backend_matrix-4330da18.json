@@ -1,0 +1,25 @@
+{
+  "schema": "claimwire-run/v1",
+  "run_id": "backend_matrix-4330da18",
+  "producer": "cumetal.backend_matrix",
+  "timestamp": "2026-10-27T18:27:28Z",
+  "git_commit": "7f9e42f",
+  "git_dirty": true,
+  "hardware": "Apple M4 Pro",
+  "command": [
+    "scripts/claimwire_evidence.py",
+    "backend-matrix"
+  ],
+  "input_set_digest": "blake3:4330da18069a14eb1c197e4826daa0f0f8d147cccf9beda923301b1b8b886279",
+  "input_files": {
+    "scripts/claimwire_evidence.py": "blake3:3c46dc5f6ddbcac1a1679652e0a6737b42809c2d2182b660ef524ae50652df0e",
+    "tests/cuda_projects/backend_matrix_manifest.txt": "blake3:b888ed04ec1a0d8e8a6ca26b8537692cb745b622784d089832964f2baba19a73"
+  },
+  "scalars": {
+    "total": 52.0,
+    "direct_legacy": 0.0,
+    "direct_typed": 52.0,
+    "ptx_legacy": 47.0,
+    "ptx_typed": 51.0
+  }
+}

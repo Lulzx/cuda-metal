@@ -1,0 +1,23 @@
+{
+  "schema": "claimwire-run/v1",
+  "run_id": "samples_sweep-c72955cc",
+  "producer": "cumetal.samples_sweep",
+  "timestamp": "2026-10-16T15:12:00Z",
+  "git_commit": "7f9e42f",
+  "git_dirty": true,
+  "hardware": "Apple M4 Pro",
+  "command": [
+    "scripts/claimwire_evidence.py",
+    "samples-sweep"
+  ],
+  "input_set_digest": "blake3:c72955cc06932aaaaa88f217da961f9e07c9276cd437b5044da9f17c2f379b64",
+  "input_files": {
+    "scripts/claimwire_evidence.py": "blake3:3c46dc5f6ddbcac1a1679652e0a6737b42809c2d2182b660ef524ae50652df0e",
+    "tests/cuda_projects/cuda_samples_sweep_manifest.txt": "blake3:5042792c99187748b1da0785c4003ee61fc973abe3c9f7b7dd61efb09364e62d"
+  },
+  "scalars": {
+    "total": 83.0,
+    "pass": 83.0,
+    "waive": 0.0
+  }
+}

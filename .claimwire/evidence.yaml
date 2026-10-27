@@ -1,0 +1,82 @@
+schema: claimwire/v1
+
+# Numbers quoted in docs come from checked-in manifests and recorded results,
+# not live measurement. Refresh after editing a source:
+#   cw capture --producer <id> && cw sync
+producers:
+  cumetal.backend_matrix:
+    command: ["scripts/claimwire_evidence.py", "backend-matrix"]
+    families: []
+    inputs:
+      files:
+        - "tests/cuda_projects/backend_matrix_manifest.txt"
+        - "scripts/claimwire_evidence.py"
+    on_stale: error
+    epochs:
+      current: backend_matrix-0dc61dbd
+
+  cumetal.samples_sweep:
+    command: ["scripts/claimwire_evidence.py", "samples-sweep"]
+    families: []
+    inputs:
+      files:
+        - "tests/cuda_projects/cuda_samples_sweep_manifest.txt"
+        - "scripts/claimwire_evidence.py"
+    on_stale: error
+    epochs:
+      current: samples_sweep-c72955cc
+
+  cumetal.phase4_manifest:
+    command: ["scripts/claimwire_evidence.py", "phase4-manifest"]
+    families: []
+    inputs:
+      files:
+        - "tests/conformance/phase4_functional_manifest.txt"
+        - "scripts/claimwire_evidence.py"
+    on_stale: error
+    epochs:
+      current: phase4_manifest-96f67461
+
+  cumetal.coverage_manifest:
+    command: ["scripts/claimwire_evidence.py", "coverage-manifest"]
+    families: []
+    inputs:
+      files:
+        - "tests/cuda_projects/coverage_manifest.json"
+        - "scripts/claimwire_evidence.py"
+    on_stale: error
+    epochs:
+      current: coverage_manifest-c7de473d
+
+  cumetal.matmul:
+    command: ["scripts/claimwire_evidence.py", "matmul"]
+    families: [matmul]
+    inputs:
+      files:
+        - "docs/evidence/matmul-2026-09-06/results.json"
+        - "scripts/claimwire_evidence.py"
+    on_stale: error
+    epochs:
+      current: matmul-6febf65a
+
+  cumetal.lammps_gate:
+    command: ["scripts/claimwire_evidence.py", "lammps-gate"]
+    families: []
+    inputs:
+      files:
+        - "demos/lammps/results/2026-10-04-m4-pro.json"
+        - "scripts/claimwire_evidence.py"
+    on_stale: error
+    epochs:
+      current: lammps_gate-b0ef96de
+
+  cumetal.lammps_warm:
+    command: ["scripts/claimwire_evidence.py", "lammps-warm"]
+    families: [lammps_warm]
+    inputs:
+      files:
+        - "demos/lammps/results/2026-10-05-m4-pro-warm.json"
+        - "scripts/claimwire_evidence.py"
+    on_stale: error
+    epochs:
+      current: lammps_warm-47f35575
