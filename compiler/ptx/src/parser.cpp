@@ -138,7 +138,7 @@ bool is_supported_opcode(const std::string& opcode) {
         "rcp",       "redux",      "rem",       "ret",   "rsqrt", "sad",      "selp",  "set",
         "setp",      "shl",        "shr",       "shf",   "shfl",  "sin",   "sqrt",     "st",    "sub",
         "fence",     "prefetch",   "prefetchu", "red",   "suq",   "testp",    "trap",  "txq",
-        "vote",      "xor",
+        "vote",      "xor",        "wmma",  "mma",  "ldmatrix",
     };
     return kSupportedRoots.contains(root);
 }
@@ -152,9 +152,6 @@ bool is_explicitly_unsupported(const std::string& opcode) {
            opcode.rfind("cp.async.bulk.tensor", 0) == 0 ||
            opcode.rfind("cvt.rn.f8x2", 0) == 0 ||
            opcode.rfind("cvt.rn.f8.", 0) == 0 ||
-           opcode.rfind("wmma.", 0) == 0 ||
-           opcode.rfind("mma.sync", 0) == 0 ||
-           opcode.rfind("ldmatrix.", 0) == 0 ||
            opcode.rfind("tex.", 0) == 0 ||
            opcode.rfind("tld4.", 0) == 0 ||
            opcode.rfind("sust.", 0) == 0 ||
@@ -176,12 +173,6 @@ std::string targeted_unsupported_message(const std::string& opcode) {
     if (opcode.rfind("cvt.rn.f8x2", 0) == 0 || opcode.rfind("cvt.rn.f8.", 0) == 0) {
         return "unsupported opcode '" + opcode +
                "' (FP8 / Transformer Engine types have no Metal equivalent)";
-    }
-    if (opcode.rfind("wmma.", 0) == 0 || opcode.rfind("mma.sync", 0) == 0 ||
-        opcode.rfind("ldmatrix.", 0) == 0) {
-        return "unsupported opcode '" + opcode +
-               "' (tensor core ops (wmma/mma/ldmatrix) have no Metal equivalent; "
-               "use MPSMatrixMultiplication for GEMM workloads)";
     }
     if (opcode.rfind("tex.", 0) == 0 || opcode.rfind("tld4.", 0) == 0 ||
         opcode.rfind("sust.", 0) == 0 ||
@@ -334,6 +325,13 @@ bool is_memory_opcode(const std::string& opcode) {
     // implying a pointer the ABI sidecar labelled the buffer as eight
     // by-value bytes -- every query then returned zero.
     if (root == "txq" || root == "suq") {
+        return true;
+    }
+    // `wmma.load` / `wmma.store` dereference their bracketed address
+    // operand; without this a wmma-only pointer parameter is invisible to
+    // the address-use scan and misclassified as a by-value scalar.
+    if (root == "wmma" && (opcode.find(".load.") != std::string::npos ||
+                           opcode.find(".store.") != std::string::npos)) {
         return true;
     }
     if (root != "ld" && root != "st" && root != "atom") {
@@ -940,7 +938,8 @@ ParseResult parse_ptx(std::string_view text, const ParseOptions& options) {
     }
 
     const std::regex entry_regex(
-        R"(\.entry\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\(([^;{}]*?)\)\s*(?:\.[^\n{};]*\s*)*\{)");
+        R"(\.entry\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\(([^;{}]*?)\)\s*((?:\.[^\n{};]*\s*)*)\{)");
+    const std::regex maxntid_regex(R"(\.maxntid\s+([0-9]+)(?:\s*,\s*([0-9]+))?(?:\s*,\s*([0-9]+))?)");
     const std::regex param_decl_regex(R"(\.param\s+([^,\n\)]+))");
 
     const auto parse_parameters = [&](const std::string& params_blob) {
@@ -1015,12 +1014,35 @@ ParseResult parse_ptx(std::string_view text, const ParseOptions& options) {
     const std::sregex_iterator end;
 
     for (; iter != end; ++iter) {
-        if (iter->size() < 3) {
+        if (iter->size() < 4) {
             continue;
         }
 
         EntryFunction entry;
         entry.name = (*iter)[1].str();
+
+        // .maxntid X[,Y[,Z]] entry property (in the blob before the body).
+        {
+            const std::string properties = (*iter)[3].str();
+            std::smatch maxntid_match;
+            if (std::regex_search(properties, maxntid_match, maxntid_regex)) {
+                std::uint64_t product = 1;
+                bool valid = true;
+                for (std::size_t axis = 1; axis < maxntid_match.size(); ++axis) {
+                    if (!maxntid_match[axis].matched) continue;
+                    int dim = 0;
+                    if (!parse_number(maxntid_match[axis].str(), &dim) || dim <= 0) {
+                        valid = false;
+                        break;
+                    }
+                    product *= static_cast<std::uint64_t>(dim);
+                }
+                if (valid && product <= 1024) {
+                    entry.max_threads_per_threadgroup =
+                        static_cast<std::uint32_t>(product);
+                }
+            }
+        }
 
         entry.params = parse_parameters((*iter)[2].str());
 

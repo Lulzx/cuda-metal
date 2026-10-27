@@ -53,7 +53,23 @@ std::vector<std::string> destination_registers(const Instruction& instruction) {
         root == "call") {
         return {};
     }
+    // `wmma.store.d` writes memory: its first operand is the address.
+    if (root == "wmma" && instruction.opcode.find(".store") != std::string::npos) {
+        return {};
+    }
     std::vector<std::string> destinations = registers_in(instruction.operands.front());
+    // `wmma.load` / `wmma.mma` define every register of their result tuple.
+    if (root == "wmma") {
+        return destinations;
+    }
+    // `mma.sync` also defines every register of its result tuple.
+    if (root == "mma") {
+        return destinations;
+    }
+    // `ldmatrix` defines every register of its result tuple.
+    if (root == "ldmatrix") {
+        return destinations;
+    }
     const bool tuple_move = root == "mov" &&
                             (instruction.opcode == "mov.b32" ||
                              instruction.opcode.find(".b64") != std::string::npos);

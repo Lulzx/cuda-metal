@@ -44,6 +44,7 @@ struct PtxToMslResult {
     std::string source;
     std::vector<std::string> warnings;
     std::vector<std::string> printf_formats;
+    bool uses_device_heap = false;
     std::string error;
 };
 

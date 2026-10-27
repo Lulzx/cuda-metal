@@ -989,6 +989,7 @@ struct Importer {
     std::unordered_map<std::string, const cumetal::ptx::EntryFunction*>
         device_functions;
     std::unordered_set<std::string> printf_functions;
+    std::unordered_set<std::string> heap_functions;
     std::unordered_set<std::string> synchronizing_functions;
     std::unordered_map<std::string, Type> parameter_types;
     std::unordered_map<std::string, ValueId> parameter_values;
@@ -1055,6 +1056,7 @@ struct Importer {
     std::unordered_set<int> printf_scaffold_lines;
     std::optional<Operand> printf_buffer;
     std::optional<Operand> printf_capacity;
+    std::optional<Operand> heap_buffer;
     std::optional<Operand> function_return;
     std::map<std::int64_t, Operand> function_return_fields;
 
@@ -1082,32 +1084,72 @@ struct Importer {
             return std::nullopt;
         }
         auto normalized_fields = fields;
-        // PTX parameter arrays are byte storage. A pair of b64 stores may
-        // populate an ABI aggregate represented as four u32 fields. Split only
-        // complete, contiguous integer words; holes/overlaps still fail below.
-        const bool u32_layout = std::all_of(type.elements.begin(), type.elements.end(),
-            [](const Type& element) { return element == Type::integer(32); });
-        if (u32_layout && fields.size() * 2 == type.elements.size()) {
-            bool complete_u64 = true;
-            std::int64_t expected_offset = 0;
-            for (const auto& [offset, value] : fields) {
-                complete_u64 &= offset == expected_offset && value.type == Type::integer(64);
-                expected_offset += 8;
+        // PTX parameter arrays are byte storage over an aggregate laid out
+        // as consecutive elements. Normalize the stored words against that
+        // layout: a b64 store covering a pair of u32 elements splits into
+        // its two words, and trailing elements whose bytes were never
+        // stored (ABI padding -- reading them in PTX is undefined) are
+        // zero-filled. Interior holes, misaligned or overlapping stores
+        // still fail below.
+        {
+            std::vector<std::int64_t> element_offsets;
+            std::int64_t cursor = 0;
+            for (const Type& element : type.elements) {
+                element_offsets.push_back(cursor);
+                cursor += static_cast<std::int64_t>(type_size(element));
             }
-            if (complete_u64) {
-                normalized_fields.clear();
-                for (const auto& [offset, value] : fields) {
+            std::map<std::int64_t, Operand> split_fields;
+            bool overlap = false;
+            auto insert_field = [&](std::int64_t offset, Operand value) {
+                if (!split_fields.emplace(offset, std::move(value)).second)
+                    overlap = true;
+            };
+            for (const auto& [offset, value] : normalized_fields) {
+                const auto element = std::find(element_offsets.begin(),
+                                               element_offsets.end(), offset);
+                const std::size_t index = static_cast<std::size_t>(
+                    element - element_offsets.begin());
+                if (element != element_offsets.end() &&
+                    type.elements[index] == Type::integer(32) &&
+                    (value.type == Type::integer(64) ||
+                     value.type == Type::floating(64)) &&
+                    index + 1 < type.elements.size() &&
+                    type.elements[index + 1] == Type::integer(32)) {
                     detail::PtxValueBuilder expressions(builder, *block, value_types,
                         {result.module.source_name, static_cast<std::uint32_t>(
                             std::max(0, instruction == nullptr ? 0 : instruction->line)), 0});
-                    // Materialize immediates as ulong before shifting: `1 >> 32`
-                    // would otherwise use a 32-bit Metal literal.
-                    const Operand wide = expressions.emit(OpCode::kConvert, Type::integer(64), {value});
-                    normalized_fields[offset] = expressions.emit(OpCode::kConvert, Type::integer(32), {wide});
+                    // Reinterpret (never numerically convert) the 64-bit
+                    // word, then split it into its two u32 halves.
+                    const Operand wide =
+                        expressions.bit_container(value, Type::integer(64));
+                    insert_field(offset, expressions.emit(OpCode::kConvert, Type::integer(32), {wide}));
                     const Operand high = expressions.emit(OpCode::kShiftRight, Type::integer(64),
                         {wide, Operand::immediate("32", Type::integer(64))});
-                    normalized_fields[offset + 4] = expressions.emit(OpCode::kConvert, Type::integer(32), {high});
+                    insert_field(offset + 4, expressions.emit(OpCode::kConvert, Type::integer(32), {high}));
+                } else {
+                    insert_field(offset, value);
                 }
+            }
+            normalized_fields = std::move(split_fields);
+            if (overlap) {
+                fail(instruction, std::string(description) +
+                                      " has missing, partial, or overlapping fields");
+                return std::nullopt;
+            }
+            // Only trailing elements may be padding: an interior hole is a
+            // genuinely missing field and still fails below.
+            const std::int64_t last_stored =
+                normalized_fields.empty() ? -1 : normalized_fields.rbegin()->first;
+            for (std::size_t i = 0; i < type.elements.size(); ++i) {
+                if (normalized_fields.contains(element_offsets[i]) ||
+                    element_offsets[i] < last_stored)
+                    continue;
+                const Type& element = type.elements[i];
+                if (element.kind != TypeKind::kInteger &&
+                    element.kind != TypeKind::kFloat)
+                    continue; // Non-scalar holes still fail below.
+                normalized_fields[element_offsets[i]] =
+                    Operand::immediate("0", element);
             }
         }
         if (normalized_fields.size() != type.elements.size()) {
@@ -1345,9 +1387,31 @@ struct Importer {
         return Type::integer(left.bit_width);
     }
 
+    static bool is_heap_alloc_callee(const std::string& callee) {
+        return callee == "malloc" || callee == "_Znwm" || callee == "_Znam";
+    }
+    static bool is_heap_free_callee(const std::string& callee) {
+        return callee == "free" || callee == "_ZdlPv" || callee == "_ZdaPv" ||
+               callee == "_ZdlPvm" || callee == "_ZdaPvm";
+    }
+
     std::optional<BuiltinSignature> call_signature(const Instruction& instruction,
                                                   const std::string& callee) {
         if (auto builtin = cuda_builtin_signature(callee)) return builtin;
+        if (is_heap_alloc_callee(callee)) {
+            BuiltinSignature signature;
+            signature.return_type =
+                Type::pointer(Type::integer(8), AddressSpace::kDevice);
+            signature.argument_types = {Type::integer(64)};
+            return signature;
+        }
+        if (is_heap_free_callee(callee)) {
+            BuiltinSignature signature;
+            signature.return_type = Type::void_type();
+            signature.argument_types = {
+                Type::pointer(Type::integer(8), AddressSpace::kDevice)};
+            return signature;
+        }
         const auto target = device_functions.find(callee);
         if (target == device_functions.end()) {
             fail(&instruction, "device call target '" + callee + "' has no typed PTX definition");
@@ -3627,6 +3691,949 @@ struct Importer {
         return true;
     }
 
+    // Raw PTX wmma (m16n16k16, f16 inputs, f32 accumulator) using the
+    // same linear fragment mapping as the CUDA-source mma.h path
+    // (logical element = lane * 8 + i). Loads/stores are per-element
+    // scalar accesses; mma exchanges fragments with warp shuffles and
+    // scalar FMAs. Semantically exact; a simdgroup_matrix fast path is
+    // future work, so the module is marked performance-degraded.
+    bool translate_ldmatrix(BasicBlock* block, const Instruction& instruction,
+                            std::unordered_map<std::string, ValueId>* environment,
+                            const std::vector<std::string>& destinations,
+                            const SourceLocation& location) {
+        const std::string& opcode = instruction.opcode;
+        int matrices = 0;
+        if (opcode.find(".x1") != std::string::npos) matrices = 1;
+        else if (opcode.find(".x2") != std::string::npos) matrices = 2;
+        else if (opcode.find(".x4") != std::string::npos) matrices = 4;
+        if (opcode.find(".m8n8") == std::string::npos ||
+            opcode.find(".shared") == std::string::npos ||
+            opcode.find(".b16") == std::string::npos || matrices == 0 ||
+            opcode.find(".trans") != std::string::npos) {
+            return fail(&instruction,
+                        "only ldmatrix.sync.aligned.m8n8.x1/x2/x4.shared.b16 "
+                        "(no .trans) is supported: '" +
+                            opcode + "'");
+        }
+        if (instruction.operands.size() < 2 ||
+            destinations.size() != static_cast<std::size_t>(matrices))
+            return fail(&instruction, "malformed ldmatrix fragment");
+        if (result.module.semantic_quality == SemanticQuality::kExact ||
+            result.module.semantic_quality == SemanticQuality::kToleranceBounded) {
+            result.module.semantic_quality = SemanticQuality::kPerformanceDegraded;
+        }
+        const std::string caveat =
+            "raw PTX ldmatrix uses threadgroup-staged fragment exchange";
+        if (std::find(result.module.semantic_caveats.begin(),
+                      result.module.semantic_caveats.end(), caveat) ==
+            result.module.semantic_caveats.end()) {
+            result.module.semantic_caveats.push_back(caveat);
+        }
+
+        detail::PtxValueBuilder expressions(builder, *block, value_types, location);
+        const Type i32 = Type::integer(32);
+        const Type i64 = Type::integer(64);
+        auto imm32 = [](std::int64_t value) {
+            return Operand::immediate(std::to_string(value), Type::integer(32));
+        };
+        auto emit_load = [&](const Operand& address, const Type& type) {
+            Operation load;
+            load.opcode = OpCode::kLoad;
+            load.location = location;
+            const ValueId id = builder.next_value();
+            load.results = {id};
+            load.result_types = {type};
+            value_types[id] = type;
+            load.operands = {address};
+            block->operations.push_back(std::move(load));
+            return Operand::value_ref(id, type);
+        };
+        auto emit_store = [&](const Operand& address, const Operand& value) {
+            Operation store;
+            store.opcode = OpCode::kStore;
+            store.location = location;
+            store.operands = {address, value};
+            block->operations.push_back(std::move(store));
+        };
+        Operation lane_op;
+        lane_op.opcode = OpCode::kLaneId;
+        lane_op.location = location;
+        const ValueId lane_id = builder.next_value();
+        lane_op.results = {lane_id};
+        lane_op.result_types = {i32};
+        value_types[lane_id] = i32;
+        block->operations.push_back(std::move(lane_op));
+        const Operand lane = Operand::value_ref(lane_id, i32);
+
+        // Shared address supplied by this thread (row lane%8 of matrix
+        // lane/8). Reinterpret integer shared addresses as threadgroup
+        // pointers, matching the generic shared-load path.
+        Operand base = operand_for(instruction.operands[1], *environment,
+                                   Type::pointer(Type::integer(8), AddressSpace::kThreadgroup));
+        if (!base.type.is_pointer()) {
+            if (base.type.kind != TypeKind::kInteger)
+                return fail(&instruction, "ldmatrix address is not a pointer");
+            Operation bitcast;
+            bitcast.opcode = OpCode::kConvert;
+            bitcast.location = location;
+            bitcast.attributes["bitcast"] = "true";
+            const ValueId pointer_id = builder.next_value();
+            const Type pointer_type =
+                Type::pointer(Type::integer(8), AddressSpace::kThreadgroup);
+            bitcast.results = {pointer_id};
+            bitcast.result_types = {pointer_type};
+            value_types[pointer_id] = pointer_type;
+            bitcast.operands = {base};
+            block->operations.push_back(std::move(bitcast));
+            base = Operand::value_ref(pointer_id, pointer_type);
+        }
+        std::int64_t bracket_offset = 0;
+        if (const std::size_t plus = instruction.operands[1].find('+');
+            plus != std::string::npos) {
+            const std::size_t end = instruction.operands[1].find(']', plus);
+            try {
+                bracket_offset = std::stoll(trim(instruction.operands[1].substr(
+                    plus + 1, end == std::string::npos ? std::string::npos : end - plus - 1)));
+            } catch (const std::exception&) {
+                bracket_offset = 0;
+            }
+        }
+
+        auto special = [&](OpCode special_opcode, const char* dimension) {
+            Operation op;
+            op.opcode = special_opcode;
+            op.location = location;
+            op.attributes["dimension"] = dimension;
+            const ValueId id = builder.next_value();
+            op.results = {id};
+            op.result_types = {i32};
+            value_types[id] = i32;
+            block->operations.push_back(std::move(op));
+            return Operand::value_ref(id, i32);
+        };
+        const Operand linear = [&] {
+            const Operand tidx = special(OpCode::kThreadId, "x");
+            const Operand tidy = special(OpCode::kThreadId, "y");
+            const Operand tidz = special(OpCode::kThreadId, "z");
+            const Operand ntidx = special(OpCode::kThreadgroupSize, "x");
+            const Operand ntidy = special(OpCode::kThreadgroupSize, "y");
+            const Operand inner = expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {tidz, ntidy}), tidy});
+            return expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {inner, ntidx}), tidx});
+        }();
+        const Operand warp = expressions.emit(OpCode::kShiftRight, i32, {linear, imm32(5)});
+
+        // Exchange buffer: per warp, 4 matrices x 8 rows x 4 packed u32
+        // column pairs, plus one scratch slot (index 128).
+        const std::string stage_name = "__cumetal_ptx_ldmatrix";
+        bool exists = false;
+        for (const GlobalThreadgroup& global : result.module.global_threadgroups)
+            exists |= global.name == stage_name;
+        if (!exists) {
+            result.module.global_threadgroups.push_back(
+                {.name = stage_name, .byte_size = 32ull * 129 * sizeof(std::uint32_t), .alignment = 16});
+        }
+        threadgroup_symbols.insert(stage_name);
+        const Operand stage_base = Operand::symbol(
+            stage_name, Type::pointer(i32, AddressSpace::kThreadgroup));
+        auto stage_address = [&](const Operand& index) {
+            const Operand slot = expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {warp, imm32(129)}), index});
+            const Operand bytes = expressions.emit(
+                OpCode::kMul, i64,
+                {expressions.emit(OpCode::kConvert, i64, {slot}),
+                 Operand::immediate("4", i64)});
+            return expressions.emit(OpCode::kPointerOffset,
+                                    Type::pointer(i32, AddressSpace::kThreadgroup),
+                                    {stage_base, bytes}, {{"offset_unit", "bytes"}});
+        };
+        auto syncwarp = [&]() {
+            Operation barrier;
+            barrier.opcode = OpCode::kBarrier;
+            barrier.location = location;
+            barrier.memory_scope = MemoryScope::kSimdgroup;
+            block->operations.push_back(std::move(barrier));
+        };
+
+        // Stage this thread's supplied row as 4 packed u32 column pairs;
+        // lanes beyond 8*matrices write the scratch slot.
+        const Operand matrix = expressions.emit(OpCode::kShiftRight, i32, {lane, imm32(3)});
+        const Operand row = expressions.emit(OpCode::kBitAnd, i32, {lane, imm32(7)});
+        const Operand valid = expressions.emit(
+            OpCode::kCompare, Type::predicate(), {lane, imm32(8 * matrices)},
+            {{"predicate", "lt"}});
+        for (int j = 0; j < 4; ++j) {
+            const Operand address = expressions.emit(
+                OpCode::kPointerOffset, base.type,
+                {base, Operand::immediate(
+                           std::to_string(bracket_offset + j * 4), i64)},
+                {{"offset_unit", "bytes"}});
+            const Operand word = emit_load(address, i32);
+            const Operand real_index = expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {matrix, imm32(32)}),
+                 expressions.emit(OpCode::kAdd, i32,
+                                  {expressions.emit(OpCode::kMul, i32, {row, imm32(4)}),
+                                   imm32(j)})});
+            const Operand index = expressions.emit(
+                OpCode::kSelect, i32, {valid, real_index, imm32(128)});
+            emit_store(stage_address(index), word);
+        }
+        syncwarp();
+
+        // Destination fragment layout (matches the mma.sync fragment
+        // layout): this thread's register for matrix m is the packed
+        // column pair (lane%4) of row lane/4.
+        const Operand dest_row = expressions.emit(OpCode::kShiftRight, i32, {lane, imm32(2)});
+        const Operand dest_pair = expressions.emit(OpCode::kBitAnd, i32, {lane, imm32(3)});
+        const auto& results = instruction_results[&instruction];
+        if (results.size() != destinations.size())
+            return fail(&instruction, "ldmatrix result count mismatch");
+        for (int m = 0; m < matrices; ++m) {
+            const Operand index = expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {imm32(m), imm32(32)}),
+                 expressions.emit(OpCode::kAdd, i32,
+                                  {expressions.emit(OpCode::kMul, i32, {dest_row, imm32(4)}),
+                                   dest_pair})});
+            const Operand packed = emit_load(stage_address(index), i32);
+            const ValueId dest_id = results[static_cast<std::size_t>(m)];
+            value_types[dest_id] = i32;
+            Operation copy;
+            copy.opcode = OpCode::kConvert;
+            copy.location = location;
+            copy.operands = {packed};
+            copy.results = {dest_id};
+            copy.result_types = {i32};
+            block->operations.push_back(std::move(copy));
+            (*environment)[destinations[static_cast<std::size_t>(m)]] = dest_id;
+        }
+        return true;
+    }
+
+    bool translate_mma_sync(BasicBlock* block, const Instruction& instruction,
+                            std::unordered_map<std::string, ValueId>* environment,
+                            const std::vector<std::string>& destinations,
+                            const SourceLocation& location) {
+        const std::string& opcode = instruction.opcode;
+        if (opcode.find("m16n8k16") == std::string::npos ||
+            opcode.find(".row.col.") == std::string::npos ||
+            opcode.find(".f16") == std::string::npos ||
+            opcode.find(".f32") == std::string::npos) {
+            return fail(&instruction,
+                        "only mma.sync m16n8k16 row.col f16/f32 is supported: '" +
+                            opcode + "'");
+        }
+        if (instruction.operands.size() < 4 || destinations.size() != 4)
+            return fail(&instruction, "malformed mma.sync fragment");
+        const std::vector<std::string> a_regs = registers_in(instruction.operands[1]);
+        const std::vector<std::string> b_regs = registers_in(instruction.operands[2]);
+        const std::vector<std::string> c_regs = registers_in(instruction.operands[3]);
+        if (a_regs.size() != 4 || b_regs.size() != 2 || c_regs.size() != 4)
+            return fail(&instruction, "mma.sync fragment sizes are unsupported");
+        if (result.module.semantic_quality == SemanticQuality::kExact ||
+            result.module.semantic_quality == SemanticQuality::kToleranceBounded) {
+            result.module.semantic_quality = SemanticQuality::kPerformanceDegraded;
+        }
+        const std::string caveat =
+            "raw PTX mma.sync uses threadgroup-staged simdgroup matrix multiply";
+        if (std::find(result.module.semantic_caveats.begin(),
+                      result.module.semantic_caveats.end(), caveat) ==
+            result.module.semantic_caveats.end()) {
+            result.module.semantic_caveats.push_back(caveat);
+        }
+
+        detail::PtxValueBuilder expressions(builder, *block, value_types, location);
+        const Type i32 = Type::integer(32);
+        const Type i64 = Type::integer(64);
+        const Type f32 = Type::floating(32);
+        auto imm32 = [](std::int64_t value) {
+            return Operand::immediate(std::to_string(value), Type::integer(32));
+        };
+        auto emit_load = [&](const Operand& address, const Type& type) {
+            Operation load;
+            load.opcode = OpCode::kLoad;
+            load.location = location;
+            const ValueId id = builder.next_value();
+            load.results = {id};
+            load.result_types = {type};
+            value_types[id] = type;
+            load.operands = {address};
+            block->operations.push_back(std::move(load));
+            return Operand::value_ref(id, type);
+        };
+        auto emit_store = [&](const Operand& address, const Operand& value) {
+            Operation store;
+            store.opcode = OpCode::kStore;
+            store.location = location;
+            store.operands = {address, value};
+            block->operations.push_back(std::move(store));
+        };
+        Operation lane_op;
+        lane_op.opcode = OpCode::kLaneId;
+        lane_op.location = location;
+        const ValueId lane_id = builder.next_value();
+        lane_op.results = {lane_id};
+        lane_op.result_types = {i32};
+        value_types[lane_id] = i32;
+        block->operations.push_back(std::move(lane_op));
+        const Operand lane = Operand::value_ref(lane_id, i32);
+        // PTX ISA fragment layout for m16n8k16: group = lane / 4 selects
+        // the row band, lane % 4 selects the column pair.
+        const Operand group = expressions.emit(OpCode::kShiftRight, i32, {lane, imm32(2)});
+        const Operand tig = expressions.emit(OpCode::kBitAnd, i32, {lane, imm32(3)});
+        const Operand t2 = expressions.emit(OpCode::kMul, i32, {tig, imm32(2)});
+        const Operand t2p1 = expressions.emit(OpCode::kAdd, i32, {t2, imm32(1)});
+        const Operand t2p8 = expressions.emit(OpCode::kAdd, i32, {t2, imm32(8)});
+        const Operand t2p9 = expressions.emit(OpCode::kAdd, i32, {t2, imm32(9)});
+        const Operand gp8 = expressions.emit(OpCode::kAdd, i32, {group, imm32(8)});
+
+        auto special = [&](OpCode special_opcode, const char* dimension) {
+            Operation op;
+            op.opcode = special_opcode;
+            op.location = location;
+            op.attributes["dimension"] = dimension;
+            const ValueId id = builder.next_value();
+            op.results = {id};
+            op.result_types = {i32};
+            value_types[id] = i32;
+            block->operations.push_back(std::move(op));
+            return Operand::value_ref(id, i32);
+        };
+        const Operand linear = [&] {
+            const Operand tidx = special(OpCode::kThreadId, "x");
+            const Operand tidy = special(OpCode::kThreadId, "y");
+            const Operand tidz = special(OpCode::kThreadId, "z");
+            const Operand ntidx = special(OpCode::kThreadgroupSize, "x");
+            const Operand ntidy = special(OpCode::kThreadgroupSize, "y");
+            const Operand inner = expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {tidz, ntidy}), tidy});
+            return expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {inner, ntidx}), tidx});
+        }();
+        const Operand warp = expressions.emit(OpCode::kShiftRight, i32, {linear, imm32(5)});
+        auto stage_base = [&](const std::string& name) {
+            bool exists = false;
+            for (const GlobalThreadgroup& global : result.module.global_threadgroups)
+                exists |= global.name == name;
+            if (!exists) {
+                result.module.global_threadgroups.push_back(
+                    {.name = name, .byte_size = 32ull * 65 * sizeof(float), .alignment = 16});
+            }
+            threadgroup_symbols.insert(name);
+            return Operand::symbol(name, Type::pointer(f32, AddressSpace::kThreadgroup));
+        };
+        auto stage_address = [&](const std::string& name, const Operand& index) {
+            const Operand base = stage_base(name);
+            const Operand slot = expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {warp, imm32(65)}), index});
+            const Operand bytes = expressions.emit(
+                OpCode::kMul, i64,
+                {expressions.emit(OpCode::kConvert, i64, {slot}),
+                 Operand::immediate("4", i64)});
+            return expressions.emit(OpCode::kPointerOffset,
+                                    Type::pointer(f32, AddressSpace::kThreadgroup),
+                                    {base, bytes}, {{"offset_unit", "bytes"}});
+        };
+        auto syncwarp = [&]() {
+            Operation barrier;
+            barrier.opcode = OpCode::kBarrier;
+            barrier.location = location;
+            barrier.memory_scope = MemoryScope::kSimdgroup;
+            block->operations.push_back(std::move(barrier));
+        };
+        auto in_tile = [&](const Operand& coord, int tile) {
+            const Operand ge = expressions.emit(
+                OpCode::kCompare, Type::predicate(), {coord, imm32(tile * 8)},
+                {{"predicate", "ge"}});
+            const Operand lt = expressions.emit(
+                OpCode::kCompare, Type::predicate(), {coord, imm32(tile * 8 + 8)},
+                {{"predicate", "lt"}});
+            return expressions.emit(OpCode::kBitAnd, Type::predicate(), {ge, lt});
+        };
+        auto stage_element = [&](const std::string& name, const Operand& value,
+                                 const Operand& row, const Operand& col,
+                                 int row_tile, int col_tile) {
+            const Operand row_ok = in_tile(row, row_tile);
+            const Operand col_ok = in_tile(col, col_tile);
+            const Operand inside = expressions.emit(OpCode::kBitAnd,
+                                                    Type::predicate(), {row_ok, col_ok});
+            const Operand tile_index = expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32,
+                                  {expressions.emit(OpCode::kSub, i32, {row, imm32(row_tile * 8)}),
+                                   imm32(8)}),
+                 expressions.emit(OpCode::kSub, i32, {col, imm32(col_tile * 8)})});
+            const Operand index = expressions.emit(
+                OpCode::kSelect, i32, {inside, tile_index, imm32(64)});
+            emit_store(stage_address(name, index), value);
+        };
+        auto unpack_half = [&](const std::vector<std::string>& regs, int count) {
+            std::vector<Operand> elements;
+            for (int local = 0; local < count; ++local) {
+                const Operand packed = operand_for(
+                    regs[static_cast<std::size_t>(local / 2)], *environment, i32);
+                Operand word = packed;
+                if (local % 2 == 1)
+                    word = expressions.emit(OpCode::kShiftRight, i32, {packed, imm32(16)});
+                const Operand u16 = expressions.emit(OpCode::kConvert, Type::integer(16), {word});
+                Operation bitcast;
+                bitcast.opcode = OpCode::kConvert;
+                bitcast.location = location;
+                bitcast.attributes["bitcast"] = "true";
+                const ValueId f16_id = builder.next_value();
+                bitcast.results = {f16_id};
+                bitcast.result_types = {Type::floating(16)};
+                value_types[f16_id] = Type::floating(16);
+                bitcast.operands = {u16};
+                block->operations.push_back(std::move(bitcast));
+                elements.push_back(expressions.emit(
+                    OpCode::kConvert, f32,
+                    {Operand::value_ref(f16_id, Type::floating(16))}));
+            }
+            return elements;
+        };
+
+        const std::vector<Operand> a_elements = unpack_half(a_regs, 8);
+        const std::vector<Operand> b_elements = unpack_half(b_regs, 4);
+        std::vector<Operand> d_elements;
+        for (const std::string& reg : c_regs)
+            d_elements.push_back(operand_for(reg, *environment, f32));
+
+        const std::vector<std::pair<Operand, Operand>> a_positions = {
+            {group, t2}, {group, t2p1}, {gp8, t2}, {gp8, t2p1},
+            {group, t2p8}, {group, t2p9}, {gp8, t2p8}, {gp8, t2p9}};
+        const std::vector<std::pair<Operand, Operand>> b_positions = {
+            {t2, group}, {t2p1, group}, {t2p8, group}, {t2p9, group}};
+        const std::vector<std::pair<Operand, Operand>> c_positions = {
+            {group, t2}, {group, t2p1}, {gp8, t2}, {gp8, t2p1}};
+
+        const std::string stage_a = "__cumetal_ptx_wmma_a";
+        const std::string stage_b = "__cumetal_ptx_wmma_b";
+        const std::string stage_c = "__cumetal_ptx_wmma_c";
+        for (int row_tile = 0; row_tile < 2; ++row_tile) {
+            for (int i = 0; i < 4; ++i)
+                stage_element(stage_c, d_elements[static_cast<std::size_t>(i)],
+                              c_positions[static_cast<std::size_t>(i)].first,
+                              c_positions[static_cast<std::size_t>(i)].second,
+                              row_tile, 0);
+            syncwarp();
+            for (int inner_tile = 0; inner_tile < 2; ++inner_tile) {
+                for (int i = 0; i < 8; ++i)
+                    stage_element(stage_a, a_elements[static_cast<std::size_t>(i)],
+                                  a_positions[static_cast<std::size_t>(i)].first,
+                                  a_positions[static_cast<std::size_t>(i)].second,
+                                  row_tile, inner_tile);
+                for (int i = 0; i < 4; ++i)
+                    stage_element(stage_b, b_elements[static_cast<std::size_t>(i)],
+                                  b_positions[static_cast<std::size_t>(i)].first,
+                                  b_positions[static_cast<std::size_t>(i)].second,
+                                  inner_tile, 0);
+                syncwarp();
+                Operation marker;
+                marker.opcode = OpCode::kCall;
+                marker.location = location;
+                marker.attributes["callee"] = "__cumetal_wmma_f32_mma_8x8";
+                marker.attributes["wmma_8x8"] = "f32";
+                marker.operands = {
+                    stage_address(stage_c, imm32(0)),
+                    stage_address(stage_a, imm32(0)),
+                    stage_address(stage_b, imm32(0)),
+                };
+                block->operations.push_back(std::move(marker));
+                syncwarp();
+            }
+            for (int i = 0; i < 4; ++i) {
+                const auto& [row, col] = c_positions[static_cast<std::size_t>(i)];
+                const Operand row_ok = in_tile(row, row_tile);
+                const Operand col_ok = in_tile(col, 0);
+                const Operand inside = expressions.emit(
+                    OpCode::kBitAnd, Type::predicate(), {row_ok, col_ok});
+                const Operand tile_index = expressions.emit(
+                    OpCode::kAdd, i32,
+                    {expressions.emit(OpCode::kMul, i32,
+                                      {expressions.emit(OpCode::kSub, i32, {row, imm32(row_tile * 8)}),
+                                       imm32(8)}),
+                     expressions.emit(OpCode::kSub, i32, {col, imm32(0)})});
+                const Operand read_index = expressions.emit(
+                    OpCode::kSelect, i32, {inside, tile_index, imm32(0)});
+                const Operand staged = emit_load(stage_address(stage_c, read_index), f32);
+                d_elements[static_cast<std::size_t>(i)] = expressions.emit(
+                    OpCode::kSelect, f32,
+                    {inside, staged, d_elements[static_cast<std::size_t>(i)]});
+            }
+            syncwarp();
+        }
+
+        const auto& results = instruction_results[&instruction];
+        if (results.size() != destinations.size())
+            return fail(&instruction, "mma.sync result count mismatch");
+        for (std::size_t d = 0; d < destinations.size(); ++d) {
+            const ValueId dest_id = results[d];
+            value_types[dest_id] = f32;
+            Operation copy;
+            copy.opcode = OpCode::kConvert;
+            copy.location = location;
+            copy.operands = {d_elements[d]};
+            copy.results = {dest_id};
+            copy.result_types = {f32};
+            block->operations.push_back(std::move(copy));
+            (*environment)[destinations[d]] = dest_id;
+        }
+        return true;
+    }
+
+    bool translate_wmma(BasicBlock* block, const Instruction& instruction,
+                        std::unordered_map<std::string, ValueId>* environment,
+                        const std::vector<std::string>& destinations,
+                        const SourceLocation& location) {
+        const std::string& opcode = instruction.opcode;
+        std::vector<std::string> qualifiers;
+        for (std::size_t begin = 0; begin <= opcode.size();) {
+            const std::size_t dot = opcode.find('.', begin);
+            qualifiers.push_back(opcode.substr(
+                begin, dot == std::string::npos ? std::string::npos : dot - begin));
+            if (dot == std::string::npos) break;
+            begin = dot + 1;
+        }
+        auto has_qualifier = [&](const char* token) {
+            return std::find(qualifiers.begin(), qualifiers.end(), token) !=
+                   qualifiers.end();
+        };
+        if (!has_qualifier("m16n16k16") || !has_qualifier("sync")) {
+            return fail(&instruction,
+                        "only wmma m16n16k16 sync shapes are supported: '" + opcode + "'");
+        }
+        const bool is_load = has_qualifier("load");
+        const bool is_mma = has_qualifier("mma");
+        const bool is_store = has_qualifier("store");
+        if (!is_load && !is_mma && !is_store) {
+            return fail(&instruction, "unsupported wmma instruction '" + opcode + "'");
+        }
+        char role = 'c';
+        if (is_load) {
+            if (has_qualifier("a")) role = 'a';
+            else if (has_qualifier("b")) role = 'b';
+            else if (has_qualifier("c")) role = 'c';
+            else return fail(&instruction, "wmma.load is missing its matrix role");
+        }
+        const bool row_major = !has_qualifier("col");
+        if (!is_mma && !has_qualifier("global")) {
+            return fail(&instruction, "only wmma global-space accesses are supported");
+        }
+        const bool half_inputs = opcode.find(".f16") != std::string::npos;
+        if ((role == 'a' || role == 'b' || is_mma) && !half_inputs) {
+            return fail(&instruction, "only f16 wmma inputs are supported");
+        }
+        if (result.module.semantic_quality == SemanticQuality::kExact ||
+            result.module.semantic_quality == SemanticQuality::kToleranceBounded) {
+            result.module.semantic_quality = SemanticQuality::kPerformanceDegraded;
+        }
+        const std::string caveat =
+            "raw PTX wmma uses scalar fragment loads/stores with threadgroup-staged simdgroup matrix multiply";
+        if (std::find(result.module.semantic_caveats.begin(),
+                      result.module.semantic_caveats.end(), caveat) ==
+            result.module.semantic_caveats.end()) {
+            result.module.semantic_caveats.push_back(caveat);
+        }
+
+        detail::PtxValueBuilder expressions(builder, *block, value_types, location);
+        auto emit_load = [&](const Operand& address, const Type& type) {
+            Operation load;
+            load.opcode = OpCode::kLoad;
+            load.location = location;
+            const ValueId id = builder.next_value();
+            load.results = {id};
+            load.result_types = {type};
+            value_types[id] = type;
+            load.operands = {address};
+            block->operations.push_back(std::move(load));
+            return Operand::value_ref(id, type);
+        };
+        auto emit_store = [&](const Operand& address, const Operand& value) {
+            Operation store;
+            store.opcode = OpCode::kStore;
+            store.location = location;
+            store.operands = {address, value};
+            block->operations.push_back(std::move(store));
+        };
+        const Type i32 = Type::integer(32);
+        const Type i64 = Type::integer(64);
+        auto imm32 = [](std::int64_t value) {
+            return Operand::immediate(std::to_string(value), Type::integer(32));
+        };
+        auto lane_value = [&]() {
+            Operation lane;
+            lane.opcode = OpCode::kLaneId;
+            lane.location = location;
+            const ValueId value_id = builder.next_value();
+            lane.results = {value_id};
+            lane.result_types = {i32};
+            value_types[value_id] = i32;
+            block->operations.push_back(std::move(lane));
+            return Operand::value_ref(value_id, i32);
+        };
+        // This thread's fragment element (linear mapping): row/col of
+        // logical element lane*8+i in a 16x16 matrix.
+        auto element_row_col = [&](const Operand& lane, int i) {
+            const Operand logical = expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {lane, imm32(8)}), imm32(i)});
+            const Operand row = expressions.emit(OpCode::kDiv, i32, {logical, imm32(16)});
+            const Operand col = expressions.emit(OpCode::kRemainder, i32, {logical, imm32(16)});
+            return std::pair<Operand, Operand>{row, col};
+        };
+        auto address_of = [&](const std::string& operand_token,
+                              std::size_t stride_index,
+                              const Operand& row, const Operand& col,
+                              bool matrix_row_major,
+                              std::size_t element_size) -> std::optional<Operand> {
+            Operand base = operand_for(operand_token, *environment,
+                                       Type::pointer(Type::integer(8), AddressSpace::kDevice));
+            if (!base.type.is_pointer()) {
+                if (base.type.kind != TypeKind::kInteger || base.type.bit_width != 64)
+                    return std::nullopt;
+                // Address held in a 64-bit register: reinterpret as a
+                // generic device pointer.
+                Operation bitcast;
+                bitcast.opcode = OpCode::kConvert;
+                bitcast.location = location;
+                bitcast.attributes["bitcast"] = "true";
+                const ValueId pointer_id = builder.next_value();
+                const Type pointer_type =
+                    Type::pointer(Type::integer(8), AddressSpace::kDevice);
+                bitcast.results = {pointer_id};
+                bitcast.result_types = {pointer_type};
+                value_types[pointer_id] = pointer_type;
+                bitcast.operands = {base};
+                block->operations.push_back(std::move(bitcast));
+                base = Operand::value_ref(pointer_id, pointer_type);
+            }
+            std::int64_t bracket_offset = 0;
+            if (const std::size_t plus = operand_token.find('+');
+                plus != std::string::npos) {
+                const std::size_t end = operand_token.find(']', plus);
+                const std::string text = operand_token.substr(
+                    plus + 1, end == std::string::npos ? std::string::npos : end - plus - 1);
+                try {
+                    bracket_offset = std::stoll(trim(text));
+                } catch (const std::exception&) {
+                    bracket_offset = 0;
+                }
+            }
+            Operand stride = operand_for(instruction.operands[stride_index],
+                                         *environment, i32);
+            Operand elements;
+            if (matrix_row_major) {
+                elements = expressions.emit(OpCode::kAdd, i32,
+                    {expressions.emit(OpCode::kMul, i32, {row, stride}), col});
+            } else {
+                elements = expressions.emit(OpCode::kAdd, i32,
+                    {expressions.emit(OpCode::kMul, i32, {col, stride}), row});
+            }
+            Operand bytes = expressions.emit(
+                OpCode::kMul, i64,
+                {expressions.emit(OpCode::kConvert, i64, {elements}),
+                 Operand::immediate(std::to_string(element_size), i64)});
+            if (bracket_offset != 0) {
+                bytes = expressions.emit(OpCode::kAdd, i64,
+                    {bytes, Operand::immediate(std::to_string(bracket_offset), i64)});
+            }
+            return expressions.emit(OpCode::kPointerOffset, base.type,
+                                    {base, bytes}, {{"offset_unit", "bytes"}});
+        };
+
+        if (is_store) {
+            if (instruction.operands.size() < 3 || destinations.size() != 0)
+                return fail(&instruction, "malformed wmma.store");
+            const std::vector<std::string> sources =
+                registers_in(instruction.operands[1]);
+            if (sources.size() != 8)
+                return fail(&instruction, "wmma.store expects an 8-element fragment");
+            const Operand lane = lane_value();
+            for (int i = 0; i < 8; ++i) {
+                const auto [row, col] = element_row_col(lane, i);
+                const auto address = address_of(instruction.operands[0], 2, row, col,
+                                                row_major, sizeof(float));
+                if (!address) return fail(&instruction, "wmma.store address is not a pointer");
+                const Operand value = operand_for(sources[static_cast<std::size_t>(i)],
+                                                  *environment, Type::floating(32));
+                emit_store(*address, value);
+            }
+            return true;
+        }
+
+        if (is_load) {
+            const std::size_t expected = role == 'c' ? 8 : 4;
+            if (instruction.operands.size() < 3 || destinations.size() != expected)
+                return fail(&instruction, "malformed wmma.load fragment");
+            const Type element_type = role == 'c' ? Type::floating(32) : Type::floating(16);
+            const Operand lane = lane_value();
+            std::vector<Operand> elements;
+            for (int i = 0; i < 8; ++i) {
+                const auto [row, col] = element_row_col(lane, i);
+                const auto address = address_of(instruction.operands[1], 2, row, col,
+                                                row_major,
+                                                role == 'c' ? sizeof(float) : sizeof(std::uint16_t));
+                if (!address) return fail(&instruction, "wmma.load address is not a pointer");
+                elements.push_back(emit_load(*address, element_type));
+            }
+            const auto& results = instruction_results[&instruction];
+            if (results.size() != destinations.size())
+                return fail(&instruction, "wmma.load result count mismatch");
+            for (std::size_t d = 0; d < destinations.size(); ++d) {
+                Operand computed;
+                Type dest_type;
+                if (role == 'c') {
+                    computed = elements[d];
+                    dest_type = Type::floating(32);
+                } else {
+                    // Pack two f16 elements into one b32 register (low first).
+                    const Operand low = expressions.bit_container(elements[2 * d], Type::integer(16));
+                    const Operand high = expressions.bit_container(elements[2 * d + 1], Type::integer(16));
+                    const Operand low32 = expressions.emit(OpCode::kConvert, i32,
+                        {expressions.emit(OpCode::kConvert, i32, {low})});
+                    const Operand high32 = expressions.emit(OpCode::kShiftLeft, i32,
+                        {expressions.emit(OpCode::kConvert, i32, {high}), imm32(16)});
+                    computed = expressions.emit(OpCode::kBitOr, i32, {low32, high32});
+                    dest_type = i32;
+                }
+                const ValueId dest_id = results[d];
+                value_types[dest_id] = dest_type;
+                Operation copy;
+                copy.opcode = OpCode::kConvert;
+                copy.location = location;
+                copy.operands = {computed};
+                copy.results = {dest_id};
+                copy.result_types = {dest_type};
+                block->operations.push_back(std::move(copy));
+                (*environment)[destinations[d]] = dest_id;
+            }
+            return true;
+        }
+
+        // wmma.mma via threadgroup staging and the same 8x8 simdgroup
+        // marker operations the CUDA-source mma.h path uses: stage this
+        // warp's A/B/C 8x8 tiles (one 65-float slot per warp, index 64 is
+        // a never-read scratch slot for out-of-tile elements), run the
+        // marker, and read this thread's accumulator elements back.
+        if (instruction.operands.size() < 4 || destinations.size() != 8)
+            return fail(&instruction, "malformed wmma.mma fragment");
+        const std::vector<std::string> a_regs = registers_in(instruction.operands[1]);
+        const std::vector<std::string> b_regs = registers_in(instruction.operands[2]);
+        const std::vector<std::string> c_regs = registers_in(instruction.operands[3]);
+        if (a_regs.size() != 4 || b_regs.size() != 4 || c_regs.size() != 8)
+            return fail(&instruction, "wmma.mma fragment sizes are unsupported");
+        const Operand lane = lane_value();
+        const Type f32 = Type::floating(32);
+
+        auto special = [&](OpCode opcode, const char* dimension) {
+            Operation op;
+            op.opcode = opcode;
+            op.location = location;
+            op.attributes["dimension"] = dimension;
+            const ValueId id = builder.next_value();
+            op.results = {id};
+            op.result_types = {i32};
+            value_types[id] = i32;
+            block->operations.push_back(std::move(op));
+            return Operand::value_ref(id, i32);
+        };
+        const Operand linear = [&] {
+            const Operand tidx = special(OpCode::kThreadId, "x");
+            const Operand tidy = special(OpCode::kThreadId, "y");
+            const Operand tidz = special(OpCode::kThreadId, "z");
+            const Operand ntidx = special(OpCode::kThreadgroupSize, "x");
+            const Operand ntidy = special(OpCode::kThreadgroupSize, "y");
+            const Operand inner = expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {tidz, ntidy}), tidy});
+            return expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {inner, ntidx}), tidx});
+        }();
+        const Operand warp = expressions.emit(OpCode::kShiftRight, i32, {linear, imm32(5)});
+
+        auto stage_base = [&](const std::string& name) {
+            bool exists = false;
+            for (const GlobalThreadgroup& global : result.module.global_threadgroups)
+                exists |= global.name == name;
+            if (!exists) {
+                result.module.global_threadgroups.push_back(
+                    {.name = name, .byte_size = 32ull * 65 * sizeof(float), .alignment = 16});
+            }
+            threadgroup_symbols.insert(name);
+            return Operand::symbol(name, Type::pointer(f32, AddressSpace::kThreadgroup));
+        };
+        auto stage_address = [&](const std::string& name, const Operand& index) {
+            const Operand base = stage_base(name);
+            const Operand slot = expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32, {warp, imm32(65)}), index});
+            const Operand bytes = expressions.emit(
+                OpCode::kMul, i64,
+                {expressions.emit(OpCode::kConvert, i64, {slot}),
+                 Operand::immediate("4", i64)});
+            return expressions.emit(OpCode::kPointerOffset,
+                                    Type::pointer(f32, AddressSpace::kThreadgroup),
+                                    {base, bytes}, {{"offset_unit", "bytes"}});
+        };
+        auto syncwarp = [&]() {
+            Operation barrier;
+            barrier.opcode = OpCode::kBarrier;
+            barrier.location = location;
+            barrier.memory_scope = MemoryScope::kSimdgroup;
+            block->operations.push_back(std::move(barrier));
+        };
+        auto in_tile = [&](const Operand& coord, int tile) {
+            const Operand ge = expressions.emit(
+                OpCode::kCompare, Type::predicate(), {coord, imm32(tile * 8)},
+                {{"predicate", "ge"}});
+            const Operand lt = expressions.emit(
+                OpCode::kCompare, Type::predicate(), {coord, imm32(tile * 8 + 8)},
+                {{"predicate", "lt"}});
+            return expressions.emit(OpCode::kBitAnd, Type::predicate(), {ge, lt});
+        };
+        // Store one fragment element into a staged tile, diverting
+        // out-of-tile writes to the never-read scratch slot 64.
+        auto stage_element = [&](const std::string& name, const Operand& value,
+                                 const Operand& row, const Operand& col,
+                                 int row_tile, int col_tile) {
+            const Operand row_ok = in_tile(row, row_tile);
+            const Operand col_ok = in_tile(col, col_tile);
+            const Operand inside = expressions.emit(OpCode::kBitAnd,
+                                                    Type::predicate(), {row_ok, col_ok});
+            const Operand tile_index = expressions.emit(
+                OpCode::kAdd, i32,
+                {expressions.emit(OpCode::kMul, i32,
+                                  {expressions.emit(OpCode::kSub, i32, {row, imm32(row_tile * 8)}),
+                                   imm32(8)}),
+                 expressions.emit(OpCode::kSub, i32, {col, imm32(col_tile * 8)})});
+            const Operand index = expressions.emit(
+                OpCode::kSelect, i32, {inside, tile_index, imm32(64)});
+            emit_store(stage_address(name, index), value);
+        };
+
+        // Unpack this thread's fragment elements as f32 values.
+        auto unpack_half = [&](const std::vector<std::string>& regs) {
+            std::vector<Operand> elements;
+            for (int local = 0; local < 8; ++local) {
+                const Operand packed = operand_for(
+                    regs[static_cast<std::size_t>(local / 2)], *environment, i32);
+                Operand word = packed;
+                if (local % 2 == 1)
+                    word = expressions.emit(OpCode::kShiftRight, i32, {packed, imm32(16)});
+                const Operand u16 = expressions.emit(OpCode::kConvert, Type::integer(16), {word});
+                Operation bitcast;
+                bitcast.opcode = OpCode::kConvert;
+                bitcast.location = location;
+                bitcast.attributes["bitcast"] = "true";
+                const ValueId f16_id = builder.next_value();
+                bitcast.results = {f16_id};
+                bitcast.result_types = {Type::floating(16)};
+                value_types[f16_id] = Type::floating(16);
+                bitcast.operands = {u16};
+                block->operations.push_back(std::move(bitcast));
+                elements.push_back(expressions.emit(
+                    OpCode::kConvert, f32,
+                    {Operand::value_ref(f16_id, Type::floating(16))}));
+            }
+            return elements;
+        };
+        const std::vector<Operand> a_elements = unpack_half(a_regs);
+        const std::vector<Operand> b_elements = unpack_half(b_regs);
+        std::vector<Operand> d_elements;
+        for (const std::string& reg : c_regs)
+            d_elements.push_back(operand_for(reg, *environment, f32));
+
+        std::vector<std::pair<Operand, Operand>> positions;
+        for (int i = 0; i < 8; ++i) positions.push_back(element_row_col(lane, i));
+
+        const std::string stage_a = "__cumetal_ptx_wmma_a";
+        const std::string stage_b = "__cumetal_ptx_wmma_b";
+        const std::string stage_c = "__cumetal_ptx_wmma_c";
+        for (int row_tile = 0; row_tile < 2; ++row_tile) {
+            for (int col_tile = 0; col_tile < 2; ++col_tile) {
+                for (int i = 0; i < 8; ++i)
+                    stage_element(stage_c, d_elements[static_cast<std::size_t>(i)],
+                                  positions[static_cast<std::size_t>(i)].first,
+                                  positions[static_cast<std::size_t>(i)].second,
+                                  row_tile, col_tile);
+                syncwarp();
+                for (int inner_tile = 0; inner_tile < 2; ++inner_tile) {
+                    for (int i = 0; i < 8; ++i) {
+                        stage_element(stage_a, a_elements[static_cast<std::size_t>(i)],
+                                      positions[static_cast<std::size_t>(i)].first,
+                                      positions[static_cast<std::size_t>(i)].second,
+                                      row_tile, inner_tile);
+                        stage_element(stage_b, b_elements[static_cast<std::size_t>(i)],
+                                      positions[static_cast<std::size_t>(i)].first,
+                                      positions[static_cast<std::size_t>(i)].second,
+                                      inner_tile, col_tile);
+                    }
+                    syncwarp();
+                    Operation marker;
+                    marker.opcode = OpCode::kCall;
+                    marker.location = location;
+                    marker.attributes["callee"] = "__cumetal_wmma_f32_mma_8x8";
+                    marker.attributes["wmma_8x8"] = "f32";
+                    marker.operands = {
+                        stage_address(stage_c, imm32(0)),
+                        stage_address(stage_a, imm32(0)),
+                        stage_address(stage_b, imm32(0)),
+                    };
+                    block->operations.push_back(std::move(marker));
+                    syncwarp();
+                }
+                for (int i = 0; i < 8; ++i) {
+                    const auto& [row, col] = positions[static_cast<std::size_t>(i)];
+                    const Operand row_ok = in_tile(row, row_tile);
+                    const Operand col_ok = in_tile(col, col_tile);
+                    const Operand inside = expressions.emit(
+                        OpCode::kBitAnd, Type::predicate(), {row_ok, col_ok});
+                    const Operand tile_index = expressions.emit(
+                        OpCode::kAdd, i32,
+                        {expressions.emit(OpCode::kMul, i32,
+                                          {expressions.emit(OpCode::kSub, i32, {row, imm32(row_tile * 8)}),
+                                           imm32(8)}),
+                         expressions.emit(OpCode::kSub, i32, {col, imm32(col_tile * 8)})});
+                    const Operand read_index = expressions.emit(
+                        OpCode::kSelect, i32, {inside, tile_index, imm32(0)});
+                    const Operand staged = emit_load(
+                        stage_address(stage_c, read_index), f32);
+                    d_elements[static_cast<std::size_t>(i)] = expressions.emit(
+                        OpCode::kSelect, f32,
+                        {inside, staged, d_elements[static_cast<std::size_t>(i)]});
+                }
+                syncwarp();
+            }
+        }
+
+        const auto& results = instruction_results[&instruction];
+        if (results.size() != destinations.size())
+            return fail(&instruction, "wmma.mma result count mismatch");
+        for (std::size_t d = 0; d < destinations.size(); ++d) {
+            const ValueId dest_id = results[d];
+            value_types[dest_id] = f32;
+            Operation copy;
+            copy.opcode = OpCode::kConvert;
+            copy.location = location;
+            copy.operands = {d_elements[d]};
+            copy.results = {dest_id};
+            copy.result_types = {f32};
+            block->operations.push_back(std::move(copy));
+            (*environment)[destinations[d]] = dest_id;
+        }
+        return true;
+    }
+
     bool translate_instruction(Function* function, BasicBlock* block,
                                const Instruction& instruction,
                                std::unordered_map<std::string, ValueId>* environment) {
@@ -3775,6 +4782,19 @@ struct Importer {
             block->operations.push_back(std::move(offset));
             return Operand::value_ref(pointer, base.type);
         };
+
+        if (root == "wmma") {
+            return translate_wmma(block, instruction, environment, destinations,
+                                  operation.location);
+        }
+        if (root == "mma") {
+            return translate_mma_sync(block, instruction, environment,
+                                      destinations, operation.location);
+        }
+        if (root == "ldmatrix") {
+            return translate_ldmatrix(block, instruction, environment,
+                                      destinations, operation.location);
+        }
 
         if (root == "mov" && destinations.size() == 1 &&
             instruction.operands.size() >= 2) {
@@ -5037,6 +6057,17 @@ struct Importer {
             operation.operands.push_back(predicate);
         } else if (root == "redux") {
             operation.opcode = OpCode::kReduction;
+            for (const char* kind : {"add", "min", "max", "and", "or", "xor"}) {
+                if (instruction.opcode.find(std::string(".") + kind + ".") !=
+                    std::string::npos) {
+                    operation.attributes["kind"] = kind;
+                    break;
+                }
+            }
+            if (instruction.opcode.find(".s32") != std::string::npos ||
+                instruction.opcode.find(".s64") != std::string::npos) {
+                operation.attributes["signed"] = "true";
+            }
             for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
                 operation.operands.push_back(source_operand(i, ptx_scalar_type(instruction.opcode)));
             }
@@ -5347,6 +6378,57 @@ struct Importer {
                 block->operations.push_back(std::move(operation));
                 return true;
             }
+            if (is_heap_alloc_callee(callee) || is_heap_free_callee(callee)) {
+                if (!heap_buffer.has_value()) {
+                    return fail(&instruction,
+                                "device heap call is missing its hidden heap binding");
+                }
+                const std::vector<std::string> heap_argument_names =
+                    grouped_names(instruction.operands[arguments_index]);
+                if (heap_argument_names.size() != 1) {
+                    return fail(&instruction, "device heap call expects one argument");
+                }
+                const auto heap_slot =
+                    call_parameter_slots.find(heap_argument_names.front());
+                if (heap_slot == call_parameter_slots.end()) {
+                    return fail(&instruction, "device heap call argument slot '" +
+                                                  heap_argument_names.front() +
+                                                  "' was not initialized");
+                }
+                Operand heap_argument = heap_slot->second;
+                call_parameter_slots.erase(heap_argument_names.front());
+                if (is_heap_alloc_callee(callee)) {
+                    if (heap_argument.type != Type::integer(64)) {
+                        Operation widen;
+                        widen.opcode = OpCode::kConvert;
+                        widen.location = operation.location;
+                        widen.operands = {heap_argument};
+                        const ValueId widened = builder.next_value();
+                        widen.results = {widened};
+                        widen.result_types = {Type::integer(64)};
+                        value_types[widened] = Type::integer(64);
+                        block->operations.push_back(std::move(widen));
+                        heap_argument =
+                            Operand::value_ref(widened, Type::integer(64));
+                    }
+                    operation.opcode = OpCode::kDeviceMalloc;
+                    operation.operands = {*heap_buffer, heap_argument};
+                    operation.result_types = {
+                        Type::pointer(Type::integer(8), AddressSpace::kDevice)};
+                    if (!has_return || destinations.empty()) {
+                        return fail(&instruction,
+                                    "device allocation result was not captured");
+                    }
+                    (*environment)[destinations.front()] = operation.results.front();
+                } else {
+                    operation.opcode = OpCode::kDeviceFree;
+                    operation.operands = {*heap_buffer, heap_argument};
+                    operation.result_types = {};
+                }
+                if (!append_guard(&operation, instruction, *environment)) return false;
+                block->operations.push_back(std::move(operation));
+                return true;
+            }
             const bool builtin_call = cuda_builtin_signature(callee).has_value();
             const auto signature = call_signature(instruction, callee);
             if (!signature) return false;
@@ -5450,6 +6532,13 @@ struct Importer {
                         operation.operands.push_back(binding->second);
                     }
                 }
+            }
+            if (!builtin_call && heap_functions.contains(callee)) {
+                if (!heap_buffer.has_value()) {
+                    return fail(&instruction,
+                                "missing transitive device heap binding for PTX device helper");
+                }
+                operation.operands.push_back(*heap_buffer);
             }
             if (!builtin_call && printf_functions.contains(callee)) {
                 if (!printf_buffer.has_value() || !printf_capacity.has_value()) {
@@ -5705,7 +6794,11 @@ struct Importer {
         function.return_type = entry->return_params.empty()
                                    ? Type::void_type()
                                    : parameter_type(entry->return_params.front());
-        if (is_kernel) function.kernel_abi = KernelAbi{};
+        if (is_kernel) {
+            function.kernel_abi = KernelAbi{};
+            function.kernel_abi->max_threads_per_threadgroup =
+                entry->max_threads_per_threadgroup;
+        }
 
         for (std::size_t index = 0; index < entry->params.size(); ++index) {
             const auto& parameter = entry->params[index];
@@ -5840,6 +6933,55 @@ struct Importer {
                     .known_byte_offset = 0,
                     .alignment = symbol->alignment,
                 };
+            }
+        }
+
+        if (heap_functions.contains(entry->name)) {
+            const std::uint32_t binding_index =
+                static_cast<std::uint32_t>(function.arguments.size());
+            if (is_kernel && binding_index >= 29u) {
+                return fail(nullptr,
+                            "typed device heap hidden argument conflicts with reserved Metal bindings");
+            }
+            const Type heap_type =
+                Type::pointer(Type::integer(32), AddressSpace::kDevice);
+            const ValueId heap_value = builder.next_value();
+            value_types[heap_value] = heap_type;
+            heap_buffer = Operand::value_ref(heap_value, heap_type);
+            function.arguments.push_back({
+                .value = heap_value,
+                .name = "__cumetal_device_heap",
+                .type = heap_type,
+            });
+            function.pointer_provenance[heap_value] = {
+                .base_kind = PointerBaseKind::kAllocation,
+                .base_name = "__cumetal_device_heap",
+                .known_byte_offset = 0,
+                .alignment = 4,
+            };
+            if (is_kernel) {
+                const std::uint32_t logical_index =
+                    static_cast<std::uint32_t>(
+                        function.kernel_abi->arguments.size());
+                function.kernel_abi->arguments.push_back({
+                    .name = "__cumetal_device_heap",
+                    .kind = ArgumentKind::kPointer,
+                    .type = heap_type,
+                    .size = 8,
+                    .alignment = 8,
+                    .address_space = AddressSpace::kDevice,
+                    .binding_indices = {binding_index},
+                    .hidden_role = "device_heap",
+                });
+                function.kernel_abi->bindings.push_back({
+                    .kind = BindingKind::kBuffer,
+                    .binding_index = binding_index,
+                    .logical_argument_index = logical_index,
+                    .type = heap_type,
+                    .size = 0,
+                    .alignment = 4,
+                    .hidden_role = "device_heap",
+                });
             }
         }
 
@@ -6217,6 +7359,9 @@ struct Importer {
                 }
             }
         }
+        if (function.is_kernel && function.kernel_abi.has_value())
+            function.kernel_abi->estimated_register_pressure =
+                estimate_register_pressure(function);
         result.module.functions.push_back(std::move(function));
         return true;
     }
@@ -6537,6 +7682,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
             return std::nullopt;
         }
         bool uses_printf = false;
+        bool uses_heap = false;
         for (const Instruction& instruction : function.instructions) {
             if (options.strict && !instruction.supported) {
                 importer.fail(&instruction, "unsupported opcode '" + instruction.opcode + "'");
@@ -6548,16 +7694,23 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
                 uses_printf = true;
                 continue;
             }
+            if (Importer::is_heap_alloc_callee(*target) ||
+                Importer::is_heap_free_callee(*target)) {
+                uses_heap = true;
+                continue;
+            }
             const auto callee = importer.device_functions.find(*target);
             if (callee == importer.device_functions.end()) continue;
             const std::optional<bool> child_uses_printf =
                 self(self, *callee->second);
             if (!child_uses_printf.has_value()) return std::nullopt;
             uses_printf |= *child_uses_printf;
+            uses_heap |= importer.heap_functions.contains(*target);
         }
         visiting.erase(function.name);
         visited.insert(function.name);
         if (uses_printf) importer.printf_functions.insert(function.name);
+        if (uses_heap) importer.heap_functions.insert(function.name);
         if (!function.name.empty() && function.name != importer.entry->name &&
             importer.device_functions.contains(function.name)) {
             reachable_helpers.push_back(&function);
@@ -6794,6 +7947,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         next.is_kernel = is_kernel;
         next.device_functions = importer.device_functions;
         next.printf_functions = importer.printf_functions;
+        next.heap_functions = importer.heap_functions;
         next.threadgroup_symbols = importer.threadgroup_symbols;
         next.promoted_global_symbols = importer.promoted_global_symbols;
         next.local_depots = importer.local_depots;
@@ -6965,6 +8119,8 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         importer.result.error = error.str();
         return importer.result;
     }
+    importer.result.uses_device_heap =
+        importer.heap_functions.contains(selected_entry->name);
     importer.result.ok = true;
     return importer.result;
 }

@@ -159,6 +159,62 @@ MslType memory_order_type() {
     return MslType{.kind = MslTypeKind::kStruct, .struct_name = "memory_order"};
 }
 
+std::string warp_aggregated_atomic_helper_name(MslAddressSpace space) {
+    return space == MslAddressSpace::kThreadgroup
+               ? "cm_atomic_add_warp_aggregated_threadgroup"
+               : "cm_atomic_add_warp_aggregated_device";
+}
+
+// One atomic per warp for a contended add: every lane contributes through
+// simd_sum, lane 0 performs the single atomic, and each lane reconstructs
+// its own old value as leader_old + exclusive prefix. Only emitted for
+// atomics the legalizer proved warp-uniform (uniform address in
+// warp-uniform control flow), so all 32 lanes execute this together.
+MslFunction make_warp_aggregated_atomic_add_helper(MslAddressSpace space) {
+    const MslType atomic_pointer =
+        MslType::pointer(atomic_uint_type(), space);
+    const MslType uint_type = MslType::uint();
+    const MslExpr pointer = MslExpression::identifier("pointer", atomic_pointer);
+    const MslExpr value = MslExpression::identifier("value", uint_type);
+    const MslExpr lane = MslExpression::identifier("lane", uint_type);
+    const MslExpr total = MslExpression::identifier("total", uint_type);
+    const MslExpr leader_old = MslExpression::identifier("leader_old", uint_type);
+    const MslExpr relaxed = MslExpression::identifier(
+        "memory_order_relaxed", memory_order_type());
+
+    MslFunction helper;
+    helper.name = warp_aggregated_atomic_helper_name(space);
+    helper.return_type = uint_type;
+    helper.parameters = {
+        {.type = atomic_pointer, .name = "pointer"},
+        {.type = uint_type, .name = "value"},
+        {.type = uint_type, .name = "lane"},
+    };
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "total",
+        MslExpression::call("simd_sum", {value}, uint_type)));
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "leader_old", MslExpression::literal("0u", uint_type)));
+    helper.statements.push_back(MslStatement::if_statement(
+        MslExpression::binary("==", lane,
+                              MslExpression::literal("0u", uint_type),
+                              MslType::boolean()),
+        {MslStatement::assignment(
+            leader_old,
+            MslExpression::call("atomic_fetch_add_explicit",
+                                {pointer, total, relaxed}, uint_type))}));
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "base",
+        MslExpression::call("simd_broadcast_first", {leader_old}, uint_type)));
+    helper.statements.push_back(MslStatement::return_statement(
+        MslExpression::binary(
+            "+", MslExpression::identifier("base", uint_type),
+            MslExpression::call("simd_prefix_exclusive_sum", {value},
+                                uint_type),
+            uint_type)));
+    return helper;
+}
+
 MslFunction make_device_clock_helper() {
     const MslType atomic_uint = atomic_uint_type();
     const MslType pointer =
@@ -174,6 +230,217 @@ MslFunction make_device_clock_helper() {
              MslExpression::literal("1024u", MslType::uint()),
              MslExpression::identifier("memory_order_relaxed", memory_order_type())},
             MslType::uint())));
+    return helper;
+}
+
+// Device heap layout (shared with the legacy PTX lowering and the runtime
+// initializer): word 0 is the bump offset in bytes, word 1 is the free-list
+// head (byte offset of a freed block header, 0 = empty), word 2 is the
+// capacity in bytes. Each block header is 16 bytes: word 0 of the header
+// holds the total block size, word 1 the next free block offset. Payloads
+// start 16 bytes after the header and stay 16-byte aligned.
+MslFunction make_device_malloc_helper() {
+    const MslType uint_type = MslType::uint();
+    const MslType ulong_type = MslType::uint(64);
+    const MslType heap_type =
+        MslType::pointer(uint_type, MslAddressSpace::kDevice);
+    const MslType byte_pointer =
+        MslType::pointer(MslType::uint(8), MslAddressSpace::kDevice);
+    const MslType atomic_pointer =
+        MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice);
+    const MslExpr heap = MslExpression::identifier("heap", heap_type);
+    const MslExpr requested = MslExpression::identifier("requested", ulong_type);
+    const MslExpr relaxed = MslExpression::identifier(
+        "memory_order_relaxed", memory_order_type());
+    const auto literal = [&](const char* text, MslType type) {
+        return MslExpression::literal(text, type);
+    };
+    const auto ident = [&](const char* name, MslType type) {
+        return MslExpression::identifier(name, type);
+    };
+    const auto word = [&](MslExpr index) {
+        return MslExpression::subscript(heap, std::move(index), uint_type);
+    };
+    const auto atomic_at = [&](MslExpr index) {
+        return MslExpression::cast(
+            atomic_pointer,
+            MslExpression::binary("+", heap, std::move(index), heap_type), true);
+    };
+
+    MslFunction helper;
+    helper.name = "cm_device_malloc";
+    helper.return_type = byte_pointer;
+    helper.parameters = {
+        {.type = heap_type, .name = "heap"},
+        {.type = ulong_type, .name = "requested"},
+    };
+    const MslExpr capacity = ident("capacity", uint_type);
+    const MslExpr total = ident("total", uint_type);
+    const MslExpr chosen = ident("chosen", uint_type);
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "capacity", word(literal("2u", uint_type))));
+    helper.statements.push_back(MslStatement::if_statement(
+        MslExpression::binary(">", requested,
+                              MslExpression::cast(ulong_type, capacity),
+                              MslType::boolean()),
+        {MslStatement::return_statement(
+            MslExpression::literal("nullptr", byte_pointer))}));
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "total",
+        MslExpression::binary(
+            "&",
+            MslExpression::binary(
+                "+", MslExpression::cast(uint_type, requested),
+                literal("31u", uint_type), uint_type),
+            literal("~15u", uint_type), uint_type)));
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "chosen", literal("0u", uint_type)));
+    const MslExpr head = ident("head", uint_type);
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "head",
+        MslExpression::call("atomic_load_explicit",
+                            {atomic_at(literal("1u", uint_type)), relaxed},
+                            uint_type)));
+    const MslExpr expected = ident("expected", uint_type);
+    const MslExpr next = ident("next", uint_type);
+    helper.statements.push_back(MslStatement::if_statement(
+        MslExpression::binary(
+            "&&",
+            MslExpression::binary("!=", head, literal("0u", uint_type),
+                                  MslType::boolean()),
+            MslExpression::binary(
+                ">=",
+                word(MslExpression::binary("/", head, literal("4u", uint_type),
+                                           uint_type)),
+                total, MslType::boolean()),
+            MslType::boolean()),
+        {MslStatement::variable(
+             uint_type, "next",
+             word(MslExpression::binary(
+                 "+",
+                 MslExpression::binary("/", head, literal("4u", uint_type),
+                                       uint_type),
+                 literal("1u", uint_type), uint_type))),
+         MslStatement::variable(uint_type, "expected", head),
+         MslStatement::if_statement(
+             MslExpression::call(
+                 "atomic_compare_exchange_weak_explicit",
+                 {atomic_at(literal("1u", uint_type)),
+                  MslExpression::unary(
+                      "&", expected,
+                      MslType::pointer(uint_type, MslAddressSpace::kThread)),
+                  next, relaxed, relaxed},
+                 MslType::boolean()),
+             {MslStatement::assignment(chosen, head)})}));
+    const MslExpr bump = ident("bump", uint_type);
+    helper.statements.push_back(MslStatement::if_statement(
+        MslExpression::binary("==", chosen, literal("0u", uint_type),
+                              MslType::boolean()),
+        {MslStatement::variable(
+             uint_type, "bump",
+             MslExpression::call("atomic_fetch_add_explicit",
+                                 {atomic_at(literal("0u", uint_type)), total,
+                                  relaxed},
+                                 uint_type)),
+         MslStatement::if_statement(
+             MslExpression::binary(
+                 ">",
+                 MslExpression::binary("+", bump, total, uint_type), capacity,
+                 MslType::boolean()),
+             {MslStatement::return_statement(
+                 MslExpression::literal("nullptr", byte_pointer))}),
+         MslStatement::assignment(chosen, bump)}));
+    helper.statements.push_back(MslStatement::assignment(
+        word(MslExpression::binary("/", chosen, literal("4u", uint_type),
+                                   uint_type)),
+        total));
+    helper.statements.push_back(MslStatement::return_statement(
+        MslExpression::binary(
+            "+",
+            MslExpression::cast(byte_pointer, heap, true),
+            MslExpression::binary("+", chosen, literal("16u", uint_type),
+                                  uint_type),
+            byte_pointer)));
+    return helper;
+}
+
+MslFunction make_device_free_helper() {
+    const MslType uint_type = MslType::uint();
+    const MslType heap_type =
+        MslType::pointer(uint_type, MslAddressSpace::kDevice);
+    const MslType byte_pointer =
+        MslType::pointer(MslType::uint(8), MslAddressSpace::kDevice);
+    const MslType atomic_pointer =
+        MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice);
+    const MslExpr heap = MslExpression::identifier("heap", heap_type);
+    const MslExpr pointer = MslExpression::identifier("pointer", byte_pointer);
+    const MslExpr relaxed = MslExpression::identifier(
+        "memory_order_relaxed", memory_order_type());
+    const auto literal = [&](const char* text, MslType type) {
+        return MslExpression::literal(text, type);
+    };
+    const auto ident = [&](const char* name, MslType type) {
+        return MslExpression::identifier(name, type);
+    };
+
+    MslFunction helper;
+    helper.name = "cm_device_free";
+    helper.return_type = MslType::void_type();
+    helper.parameters = {
+        {.type = heap_type, .name = "heap"},
+        {.type = byte_pointer, .name = "pointer"},
+    };
+    helper.statements.push_back(MslStatement::if_statement(
+        MslExpression::binary("==", pointer,
+                              MslExpression::literal("nullptr", byte_pointer),
+                              MslType::boolean()),
+        {MslStatement::return_statement(std::nullopt)}));
+    const MslExpr offset = ident("offset", uint_type);
+    const MslExpr old_head = ident("old_head", uint_type);
+    const MslExpr expected = ident("expected", uint_type);
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "offset",
+        MslExpression::binary(
+            "-",
+            MslExpression::cast(
+                uint_type,
+                MslExpression::binary(
+                    "-", pointer,
+                    MslExpression::cast(byte_pointer, heap, true),
+                    MslType::sint(64))),
+            literal("16u", uint_type), uint_type)));
+    const MslExpr head_atomic = MslExpression::cast(
+        atomic_pointer,
+        MslExpression::binary("+", heap, literal("1u", uint_type), heap_type),
+        true);
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "old_head",
+        MslExpression::call("atomic_load_explicit", {head_atomic, relaxed},
+                            uint_type)));
+    helper.statements.push_back(MslStatement::while_statement(
+        literal("true", MslType::boolean()),
+        {MslStatement::assignment(
+             MslExpression::subscript(
+                 heap,
+                 MslExpression::binary(
+                     "+",
+                     MslExpression::binary("/", offset,
+                                           literal("4u", uint_type), uint_type),
+                     literal("1u", uint_type), uint_type),
+                 uint_type),
+             old_head),
+         MslStatement::variable(uint_type, "expected", old_head),
+         MslStatement::if_statement(
+             MslExpression::call(
+                 "atomic_compare_exchange_weak_explicit",
+                 {head_atomic,
+                  MslExpression::unary(
+                      "&", expected,
+                      MslType::pointer(uint_type, MslAddressSpace::kThread)),
+                  offset, relaxed, relaxed},
+                 MslType::boolean()),
+             {MslStatement::break_statement()}),
+         MslStatement::assignment(old_head, expected)}));
     return helper;
 }
 
@@ -2432,6 +2699,7 @@ struct AstLowerer {
         MslExpr selector;
     };
     std::vector<DeferredLoopExits> deferred_loop_exits;
+    std::size_t wmma_counter = 0;
     bool needs_thread_position = false;
     bool needs_threadgroup_position = false;
     bool needs_threads_per_threadgroup = false;
@@ -5384,16 +5652,76 @@ struct AstLowerer {
                          atomic_word(operation.operands[2])},
                         word_type)));
             }
+            if (operation.attributes.contains("warp_aggregated")) {
+                // Legalizer-proven warp-uniform add: one atomic per warp
+                // via the aggregation helper. The lane id expression is
+                // the same builtin other warp operations use.
+                needs_lane_id = true;
+                const MslType aggregated_pointer = MslType::pointer(
+                    atomic_uint_type(), address_space);
+                const MslExpr aggregated = MslExpression::call(
+                    warp_aggregated_atomic_helper_name(address_space),
+                    {MslExpression::cast(aggregated_pointer, raw_pointer, true),
+                     MslExpression::cast(MslType::uint(),
+                                         atomic_word(operation.operands[1])),
+                     MslExpression::identifier("cm_lane_id", MslType::uint())},
+                    MslType::uint());
+                return declare_result(operation,
+                                      atomic_result(std::move(aggregated)));
+            }
             MslExpr call = MslExpression::call(
                 callee, {pointer, atomic_word(operation.operands[1]), ordering}, word_type);
             return declare_result(operation, atomic_result(std::move(call)));
         }
 
         if (operation.opcode == ir::OpCode::kMetalReduction) {
-            fail(&operation, "Metal semantic operation '" +
-                                 std::string(ir::opcode_name(operation.opcode)) +
-                                 "' is represented but not yet MSL-emittable");
-            return std::nullopt;
+            if (operation.operands.empty() || operation.results.empty()) {
+                fail(&operation, "malformed warp reduction");
+                return std::nullopt;
+            }
+            // A partial membermask has no exact Metal simd_* equivalent
+            // (those reduce over all converged lanes); only a provably
+            // full mask may take the hardware path.
+            if (operation.operands.size() >= 2 &&
+                operation.operands[1].kind == ir::OperandKind::kImmediate) {
+                const std::string& mask = operation.operands[1].text;
+                if (mask != "4294967295" && mask != "-1" && mask != "0xffffffff" &&
+                    mask != "0xFFFFFFFF") {
+                    fail(&operation,
+                         "warp reduction with a partial membermask is unsupported");
+                    return std::nullopt;
+                }
+            }
+            const std::string kind = operation.attributes.contains("kind")
+                                         ? operation.attributes.at("kind")
+                                         : "add";
+            const char* fn = kind == "min"   ? "simd_min"
+                             : kind == "max" ? "simd_max"
+                             : kind == "and" ? "simd_and"
+                             : kind == "or"  ? "simd_or"
+                             : kind == "xor" ? "simd_xor"
+                                             : "simd_sum";
+            const MslType result_type = lower_result_type(operation);
+            MslExpr value = expression_for(operation.operands[0]);
+            const bool signed_int =
+                operation.attributes.contains("signed") &&
+                operation.attributes.at("signed") == "true" &&
+                operation.operands[0].type.kind == ir::TypeKind::kInteger &&
+                (kind == "min" || kind == "max");
+            if (signed_int) {
+                const MslType sint_type =
+                    MslType::sint(operation.operands[0].type.bit_width);
+                return declare_result(
+                    operation,
+                    MslExpression::cast(
+                        result_type,
+                        MslExpression::call(
+                            fn, {MslExpression::cast(sint_type, std::move(value))},
+                            sint_type)));
+            }
+            return declare_result(
+                operation,
+                MslExpression::call(fn, {std::move(value)}, result_type));
         }
 
         fail(&operation, "operation '" + std::string(ir::opcode_name(operation.opcode)) +
@@ -5431,6 +5759,108 @@ struct AstLowerer {
     bool emit_operations(const ir::BasicBlock& block, std::vector<MslStmt>* statements) {
         for (const ir::Operation& operation : block.operations) {
             if (operation.is_terminator()) continue;
+            if (operation.opcode == ir::OpCode::kCall &&
+                operation.attributes.contains("wmma_8x8")) {
+                // 8x8 threadgroup-tile multiply-accumulate marker from
+                // runtime/api/mma.h, lowered to simdgroup_matrix hardware
+                // ops. Staged tiles are row-major with leading dimension 8,
+                // matching the legacy AIR lowering of the same markers.
+                if (operation.operands.size() != 3) {
+                    return fail(&operation, "WMMA 8x8 marker expects destination, A, B");
+                }
+                const std::string suffix = "_" + std::to_string(wmma_counter++);
+                const std::string input_element =
+                    operation.attributes.at("wmma_8x8") == "bf16" ? "bfloat" : "float";
+                const MslType input_matrix{.kind = MslTypeKind::kStruct,
+                                           .struct_name = "simdgroup_matrix<" +
+                                                          input_element + ", 8, 8>"};
+                const MslType accum_matrix{.kind = MslTypeKind::kStruct,
+                                           .struct_name =
+                                               "simdgroup_matrix<float, 8, 8>"};
+                const std::string a_name = "cm_wmma_a" + suffix;
+                const std::string b_name = "cm_wmma_b" + suffix;
+                const std::string c_name = "cm_wmma_c" + suffix;
+                const std::string d_name = "cm_wmma_d" + suffix;
+                statements->push_back(MslStatement::variable(input_matrix, a_name));
+                statements->push_back(MslStatement::variable(input_matrix, b_name));
+                statements->push_back(MslStatement::variable(accum_matrix, c_name));
+                statements->push_back(MslStatement::variable(accum_matrix, d_name));
+                // Markers receive the staged tiles as byte pointers in the
+                // typed IR; simdgroup_load needs typed threadgroup pointers.
+                const auto typed_ptr = [&](MslExpr expr, const std::string& element) {
+                    const MslType element_type =
+                        element == "float"
+                            ? MslType::floating(32)
+                            : MslType{.kind = MslTypeKind::kStruct,
+                                      .struct_name = element};
+                    return MslExpression::bitcast(
+                        MslType::pointer(element_type, MslAddressSpace::kThreadgroup),
+                        std::move(expr));
+                };
+                const MslExpr destination =
+                    typed_ptr(expression_for(operation.operands[0]), "float");
+                const MslExpr a_ptr =
+                    typed_ptr(expression_for(operation.operands[1]), input_element);
+                const MslExpr b_ptr =
+                    typed_ptr(expression_for(operation.operands[2]), input_element);
+                const auto stride = [&]() {
+                    return MslExpression::literal("8", MslType::uint(64));
+                };
+                const auto call_stmt = [&](const char* callee,
+                                           std::vector<MslExpr> args) {
+                    return MslStatement::expression(MslExpression::call(
+                        callee, std::move(args), MslType::void_type()));
+                };
+                statements->push_back(call_stmt(
+                    "simdgroup_load",
+                    {MslExpression::identifier(a_name, input_matrix), a_ptr, stride()}));
+                statements->push_back(call_stmt(
+                    "simdgroup_load",
+                    {MslExpression::identifier(b_name, input_matrix), b_ptr, stride()}));
+                statements->push_back(call_stmt(
+                    "simdgroup_load",
+                    {MslExpression::identifier(c_name, accum_matrix), destination,
+                     stride()}));
+                statements->push_back(call_stmt(
+                    "simdgroup_multiply_accumulate",
+                    {MslExpression::identifier(d_name, accum_matrix),
+                     MslExpression::identifier(a_name, input_matrix),
+                     MslExpression::identifier(b_name, input_matrix),
+                     MslExpression::identifier(c_name, accum_matrix)}));
+                statements->push_back(call_stmt(
+                    "simdgroup_store",
+                    {MslExpression::identifier(d_name, accum_matrix), destination,
+                     stride()}));
+                continue;
+            }
+            if (operation.opcode == ir::OpCode::kDeviceMalloc ||
+                operation.opcode == ir::OpCode::kDeviceFree) {
+                if (operation.operands.size() != 2) {
+                    return fail(&operation, "malformed typed device heap record");
+                }
+                const MslExpr heap_argument = expression_for(operation.operands[0]);
+                const MslExpr value_argument = expression_for(operation.operands[1]);
+                if (operation.opcode == ir::OpCode::kDeviceMalloc) {
+                    statements->push_back(declare_result(
+                        operation,
+                        MslExpression::call(
+                            "cm_device_malloc",
+                            {heap_argument, value_argument},
+                            MslType::pointer(MslType::uint(8),
+                                             MslAddressSpace::kDevice))));
+                } else {
+                    statements->push_back(MslStatement::expression(
+                        MslExpression::call(
+                            "cm_device_free",
+                            {heap_argument,
+                             MslExpression::cast(
+                                 MslType::pointer(MslType::uint(8),
+                                                  MslAddressSpace::kDevice),
+                                 value_argument, true)},
+                            MslType::void_type())));
+                }
+                continue;
+            }
             if (operation.opcode == ir::OpCode::kPrintf) {
                 if (operation.attributes.contains("null_format") &&
                     operation.attributes.at("null_format") == "true") {
@@ -6919,6 +7349,15 @@ struct AstLowerer {
             output.return_type = lower_type(function.return_type);
         }
         output.is_kernel = function.is_kernel;
+        // A declared launch bound lets Apple's compiler size register
+        // allocation for the real threadgroup instead of assuming 1024.
+        if (function.is_kernel && function.kernel_abi.has_value() &&
+            function.kernel_abi->max_threads_per_threadgroup > 0) {
+            output.attributes.push_back(MslAttribute{
+                .name = "max_total_threads_per_threadgroup",
+                .index = function.kernel_abi->max_threads_per_threadgroup,
+            });
+        }
         for (std::size_t i = 0; i < function.arguments.size(); ++i) {
             const ir::FunctionArgument& argument = function.arguments[i];
             MslType type;
@@ -7353,6 +7792,569 @@ std::optional<std::string> raw_address_refusal(const ir::Module& module) {
            escape->location.str();
 }
 
+// Butterfly warp-reduction pattern: five shfl_xor steps (widths 16,8,4,2,1)
+// each combined into an accumulator with the same commutative operator is
+// exactly a full-warp reduction, and Metal has a single instruction for it.
+// Rewrite the final combine into kReduction and erase the dead chain. The
+// match is deliberately strict -- full-warp shuffle controls, single-use
+// intermediates, 32-bit scalar values -- so anything unusual keeps the
+// per-step shuffle lowering.
+bool parse_immediate_i64(const ir::Operand& operand, std::int64_t* out) {
+    if (operand.kind != ir::OperandKind::kImmediate) return false;
+    try {
+        std::size_t consumed = 0;
+        const long long value = std::stoll(operand.text, &consumed, 0);
+        if (consumed != operand.text.size()) return false;
+        *out = static_cast<std::int64_t>(value);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool is_full_warp_mask(const ir::Operand& operand) {
+    std::int64_t value = 0;
+    if (!parse_immediate_i64(operand, &value)) return false;
+    return value == -1 || static_cast<std::uint64_t>(value) == 0xffffffffull;
+}
+
+std::string reduction_kind_for_combine(const ir::Operation& operation,
+                                       bool* signed_out) {
+    *signed_out = operation.attributes.contains("signed") &&
+                  operation.attributes.at("signed") == "true";
+    switch (operation.opcode) {
+        case ir::OpCode::kAdd: return "add";
+        case ir::OpCode::kBitAnd: return "and";
+        case ir::OpCode::kBitOr: return "or";
+        case ir::OpCode::kBitXor: return "xor";
+        case ir::OpCode::kCall:
+            if (operation.attributes.contains("builtin") &&
+                operation.attributes.at("builtin") == "true" &&
+                operation.attributes.contains("callee")) {
+                const std::string& callee = operation.attributes.at("callee");
+                if (callee == "min" || callee == "fmin") return "min";
+                if (callee == "max" || callee == "fmax") return "max";
+            }
+            return {};
+        default: return {};
+    }
+}
+
+void fold_butterfly_reductions(ir::Function& function) {
+    for (ir::BasicBlock& block : function.blocks) {
+        std::vector<ir::Operation>& ops = block.operations;
+        // Use counts and defining-op indices, rebuilt after each rewrite.
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            std::unordered_map<ir::ValueId, std::size_t> uses;
+            std::unordered_map<ir::ValueId, std::size_t> definer;
+            for (std::size_t i = 0; i < ops.size(); ++i) {
+                for (const ir::ValueId result : ops[i].results) definer[result] = i;
+                for (const ir::Operand& operand : ops[i].operands) {
+                    if (operand.kind == ir::OperandKind::kValue) uses[operand.value]++;
+                }
+                for (const ir::Successor& successor : ops[i].successors) {
+                    for (const ir::ValueId arg : successor.arguments) uses[arg]++;
+                }
+            }
+            std::function<std::optional<std::int64_t>(const ir::Operand&, int)>
+                fold_constant = [&](const ir::Operand& operand,
+                                    int depth) -> std::optional<std::int64_t> {
+                std::int64_t immediate = 0;
+                if (parse_immediate_i64(operand, &immediate)) return immediate;
+                if (operand.kind != ir::OperandKind::kValue || depth <= 0) {
+                    return std::nullopt;
+                }
+                const auto found = definer.find(operand.value);
+                if (found == definer.end()) return std::nullopt;
+                const ir::Operation& definition = ops[found->second];
+                if (definition.opcode == ir::OpCode::kConstant &&
+                    !definition.operands.empty()) {
+                    return fold_constant(definition.operands[0], depth - 1);
+                }
+                if (definition.opcode == ir::OpCode::kConvert &&
+                    definition.operands.size() == 1) {
+                    return fold_constant(definition.operands[0], depth - 1);
+                }
+                if (definition.opcode == ir::OpCode::kNegate &&
+                    definition.operands.size() == 1) {
+                    const auto inner = fold_constant(definition.operands[0], depth - 1);
+                    if (inner) return -*inner;
+                    return std::nullopt;
+                }
+                if (definition.operands.size() != 2) return std::nullopt;
+                const auto lhs = fold_constant(definition.operands[0], depth - 1);
+                const auto rhs = fold_constant(definition.operands[1], depth - 1);
+                if (!lhs || !rhs) return std::nullopt;
+                switch (definition.opcode) {
+                    case ir::OpCode::kAdd: return *lhs + *rhs;
+                    case ir::OpCode::kSub: return *lhs - *rhs;
+                    case ir::OpCode::kMul: return *lhs * *rhs;
+                    case ir::OpCode::kBitAnd: return *lhs & *rhs;
+                    case ir::OpCode::kBitOr: return *lhs | *rhs;
+                    case ir::OpCode::kBitXor: return *lhs ^ *rhs;
+                    case ir::OpCode::kShiftLeft: return *lhs << *rhs;
+                    case ir::OpCode::kShiftRight:
+                        return static_cast<std::int64_t>(
+                            static_cast<std::uint64_t>(*lhs) >> *rhs);
+                    default: return std::nullopt;
+                }
+            };
+            auto shuffle_width = [&](const ir::Operation& shuffle,
+                                     std::int64_t* width_out) -> bool {
+                // Returns the xor butterfly width if this shuffle exchanges
+                // lane pairs across the full 32-lane warp, in either the
+                // PTX .bfly form (kind=xor, immediate delta) or the
+                // header __shfl_xor_sync form (kind=index, lane^width).
+                if (shuffle.operands.size() < 3 ||
+                    shuffle.operands[0].kind != ir::OperandKind::kValue) {
+                    return false;
+                }
+                const std::string& shuffle_kind = shuffle.attributes.at("kind");
+                const auto clamp = fold_constant(shuffle.operands[2], 8);
+                if (!clamp || (*clamp & 31) != 31 || ((*clamp >> 8) & 31) != 0) {
+                    return false;
+                }
+                if (shuffle.operands.size() >= 4) {
+                    const auto mask = fold_constant(shuffle.operands[3], 8);
+                    if (mask && *mask != -1 &&
+                        static_cast<std::uint64_t>(*mask) != 0xffffffffull) {
+                        return false;
+                    }
+                    if (!mask &&
+                        shuffle.operands[3].kind == ir::OperandKind::kImmediate) {
+                        return false;
+                    }
+                }
+                if (shuffle_kind == "xor") {
+                    const auto delta = fold_constant(shuffle.operands[1], 8);
+                    if (!delta) return false;
+                    *width_out = *delta;
+                    return true;
+                }
+                if (shuffle_kind == "index") {
+                    if (shuffle.operands[1].kind != ir::OperandKind::kValue) {
+                        return false;
+                    }
+                    const auto found = definer.find(shuffle.operands[1].value);
+                    if (found == definer.end()) return false;
+                    const ir::Operation& delta_op = ops[found->second];
+                    if (delta_op.opcode != ir::OpCode::kBitXor ||
+                        delta_op.operands.size() != 2) {
+                        return false;
+                    }
+                    for (int side = 0; side < 2; ++side) {
+                        const ir::Operand& lane_operand = delta_op.operands[side];
+                        const ir::Operand& width_operand =
+                            delta_op.operands[1 - side];
+                        if (lane_operand.kind != ir::OperandKind::kValue) continue;
+                        const auto lane_def = definer.find(lane_operand.value);
+                        if (lane_def == definer.end() ||
+                            ops[lane_def->second].opcode != ir::OpCode::kLaneId) {
+                            continue;
+                        }
+                        const auto width = fold_constant(width_operand, 8);
+                        if (!width) return false;
+                        *width_out = *width;
+                        return true;
+                    }
+                    return false;
+                }
+                return false;
+            };
+            auto unwrap = [&](ir::ValueId value) {
+                // Follow single-use bit-container converts emitted around
+                // shuffles (float values shuffled as .b32).
+                while (true) {
+                    const auto found = definer.find(value);
+                    if (found == definer.end()) return value;
+                    const ir::Operation& definition = ops[found->second];
+                    if (definition.opcode != ir::OpCode::kConvert ||
+                        definition.operands.size() != 1 ||
+                        definition.operands[0].kind != ir::OperandKind::kValue ||
+                        uses[value] != 1) {
+                        return value;
+                    }
+                    value = definition.operands[0].value;
+                }
+            };
+            for (std::size_t start = 0; start < ops.size() && !changed; ++start) {
+                const ir::Operation& first = ops[start];
+                if (first.opcode != ir::OpCode::kShuffle || first.results.size() != 1 ||
+                    !first.attributes.contains("kind") ||
+                    (first.attributes.at("kind") != "xor" &&
+                     first.attributes.at("kind") != "index") ||
+                    first.operands.size() < 3 ||
+                    first.operands[0].kind != ir::OperandKind::kValue) {
+                    continue;
+                }
+                const ir::Type value_type = first.result_types.empty()
+                                                ? ir::Type{}
+                                                : first.result_types[0];
+                if (!value_type.is_scalar() || value_type.bit_width != 32 ||
+                    (value_type.kind != ir::TypeKind::kInteger &&
+                     value_type.kind != ir::TypeKind::kFloat)) {
+                    continue;
+                }
+                // Chain state: accumulator value feeding the next shuffle.
+                ir::ValueId accumulator = first.operands[0].value;
+                ir::Operand original_value = first.operands[0];
+                // If the shuffled value is a bit-container convert of the
+                // real accumulator, reduce the real value instead so the
+                // reduction operand type matches the result type.
+                if (const auto found = definer.find(original_value.value);
+                    found != definer.end() &&
+                    ops[found->second].opcode == ir::OpCode::kConvert &&
+                    ops[found->second].operands.size() == 1) {
+                    original_value = ops[found->second].operands[0];
+                }
+                std::vector<std::size_t> chain_ops;
+                std::string kind;
+                bool signed_flag = false;
+                bool ok = true;
+                std::size_t shuffle_index = start;
+                for (const std::int64_t width : {16, 8, 4, 2, 1}) {
+                    const ir::Operation& shuffle = ops[shuffle_index];
+                    std::int64_t delta = 0;
+                    if (shuffle.opcode != ir::OpCode::kShuffle ||
+                        shuffle.results.size() != 1 ||
+                        !shuffle.attributes.contains("kind") ||
+                        shuffle.operands.size() < 3 ||
+                        shuffle.operands[0].kind != ir::OperandKind::kValue ||
+                        unwrap(shuffle.operands[0].value) != unwrap(accumulator) ||
+                        !shuffle_width(shuffle, &delta) || delta != width) {
+                        ok = false;
+                        break;
+                    }
+                    // Find the unique combine consuming this shuffle result,
+                    // possibly through one bit-container convert (float
+                    // values shuffled as .b32 are converted back first).
+                    std::size_t combine_index = ops.size();
+                    for (std::size_t i = shuffle_index + 1; i < ops.size(); ++i) {
+                        bool consumes = false;
+                        for (const ir::Operand& operand : ops[i].operands) {
+                            if (operand.kind == ir::OperandKind::kValue &&
+                                operand.value == shuffle.results[0]) {
+                                consumes = true;
+                                break;
+                            }
+                        }
+                        if (!consumes) continue;
+                        combine_index = i;
+                        if (ops[i].opcode == ir::OpCode::kConvert &&
+                            ops[i].results.size() == 1) {
+                            combine_index = ops.size();
+                            for (std::size_t j = i + 1; j < ops.size(); ++j) {
+                                for (const ir::Operand& operand : ops[j].operands) {
+                                    if (operand.kind == ir::OperandKind::kValue &&
+                                        operand.value == ops[i].results[0]) {
+                                        combine_index = j;
+                                        break;
+                                    }
+                                }
+                                if (combine_index != ops.size()) break;
+                            }
+                        }
+                        break;
+                    }
+                    if (combine_index == ops.size() ||
+                        uses[shuffle.results[0]] != 1) {
+                        ok = false;
+                        break;
+                    }
+                    const ir::Operation& combine = ops[combine_index];
+                    bool combine_signed = false;
+                    const std::string combine_kind =
+                        reduction_kind_for_combine(combine, &combine_signed);
+                    if (combine_kind.empty() || combine.results.size() != 1 ||
+                        combine.operands.size() != 2 ||
+                        combine.operands[0].kind != ir::OperandKind::kValue ||
+                        combine.operands[1].kind != ir::OperandKind::kValue) {
+                        ok = false;
+                        break;
+                    }
+                    const ir::ValueId lhs = unwrap(combine.operands[0].value);
+                    const ir::ValueId rhs = unwrap(combine.operands[1].value);
+                    if (!((lhs == unwrap(accumulator) &&
+                           rhs == unwrap(shuffle.results[0])) ||
+                          (rhs == unwrap(accumulator) &&
+                           lhs == unwrap(shuffle.results[0])))) {
+                        ok = false;
+                        break;
+                    }
+                    if (kind.empty()) {
+                        kind = combine_kind;
+                        signed_flag = combine_signed;
+                    } else if (combine_kind != kind) {
+                        ok = false;
+                        break;
+                    }
+                    chain_ops.push_back(shuffle_index);
+                    if (width == 1) {
+                        // Final combine becomes the reduction itself.
+                        ir::Operation& final_op = ops[combine_index];
+                        const ir::ValueId result = final_op.results[0];
+                        const ir::Type result_type = final_op.result_types.empty()
+                                                         ? value_type
+                                                         : final_op.result_types[0];
+                        final_op.opcode = ir::OpCode::kReduction;
+                        final_op.operands = {
+                            original_value,
+                            ir::Operand::immediate("4294967295",
+                                                   ir::Type::integer(32))};
+                        final_op.results = {result};
+                        final_op.result_types = {result_type};
+                        final_op.attributes.clear();
+                        final_op.attributes["kind"] = kind;
+                        if (signed_flag) final_op.attributes["signed"] = "true";
+                        final_op.attributes["butterfly_fold"] = "true";
+                    } else {
+                        chain_ops.push_back(combine_index);
+                        accumulator = combine.results[0];
+                        // Next shuffle must be defined after this combine.
+                        std::size_t next = ops.size();
+                        for (std::size_t i = combine_index + 1; i < ops.size();
+                             ++i) {
+                            if (ops[i].opcode == ir::OpCode::kShuffle &&
+                                ops[i].operands.size() >= 1 &&
+                                ops[i].operands[0].kind ==
+                                    ir::OperandKind::kValue &&
+                                unwrap(ops[i].operands[0].value) ==
+                                    unwrap(accumulator)) {
+                                next = i;
+                                break;
+                            }
+                        }
+                        if (next == ops.size()) {
+                            ok = false;
+                            break;
+                        }
+                        shuffle_index = next;
+                    }
+                }
+                if (!ok || kind.empty()) continue;
+                // Erase the dead chain (shuffles + intermediate combines),
+                // highest indices first. Converts left dead by the fold are
+                // harmless declarations and stay.
+                std::sort(chain_ops.begin(), chain_ops.end(),
+                          std::greater<std::size_t>());
+                for (const std::size_t index : chain_ops) {
+                    ops.erase(ops.begin() + static_cast<std::ptrdiff_t>(index));
+                }
+                // Sweep bit-container converts left dead by the fold; they
+                // would otherwise reference erased shuffle results.
+                bool swept = true;
+                while (swept) {
+                    swept = false;
+                    std::unordered_map<ir::ValueId, std::size_t> live_uses;
+                    for (const ir::Operation& op : ops) {
+                        for (const ir::Operand& operand : op.operands) {
+                            if (operand.kind == ir::OperandKind::kValue) {
+                                live_uses[operand.value]++;
+                            }
+                        }
+                        for (const ir::Successor& successor : op.successors) {
+                            for (const ir::ValueId arg : successor.arguments) {
+                                live_uses[arg]++;
+                            }
+                        }
+                    }
+                    for (std::size_t i = 0; i < ops.size(); ++i) {
+                        if (ops[i].opcode == ir::OpCode::kConvert &&
+                            ops[i].results.size() == 1 &&
+                            live_uses[ops[i].results[0]] == 0) {
+                            ops.erase(ops.begin() +
+                                      static_cast<std::ptrdiff_t>(i));
+                            swept = true;
+                            break;
+                        }
+                    }
+                }
+                changed = true;
+            }
+        }
+    }
+}
+
+// Warp-aggregated atomics: an integer `add` atomic may be executed once
+// per warp (simd_sum + leader atomic + prefix reconstruction) only when
+// (a) its address is warp-uniform -- no lane-dependent value feeds it --
+// and (b) it executes in warp-uniform control flow: no lane-dependent
+// conditional branch dominates it, and no lane-dependent branch shares a
+// loop cycle with it. Both are proved conservatively here; anything else
+// keeps the per-lane atomic.
+void mark_warp_aggregated_atomics(ir::Function& function) {
+    const std::size_t count = function.blocks.size();
+    if (count == 0 || count > 512) return;
+    std::unordered_map<ir::BlockId, std::size_t> index_of;
+    for (std::size_t i = 0; i < count; ++i) index_of[function.blocks[i].id] = i;
+    std::vector<std::vector<std::size_t>> successors(count), predecessors(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        for (const ir::Operation& operation : function.blocks[i].operations) {
+            for (const ir::Successor& successor : operation.successors) {
+                const auto found = index_of.find(successor.block);
+                if (found == index_of.end()) continue;
+                successors[i].push_back(found->second);
+                predecessors[found->second].push_back(i);
+            }
+        }
+    }
+
+    // Lane dependence, propagated to a fixpoint (block arguments can carry
+    // lane-dependent values around loops).
+    std::unordered_set<ir::ValueId> lane_dependent;
+    auto operand_lane_dependent = [&](const ir::Operand& operand) {
+        return operand.kind == ir::OperandKind::kValue &&
+               lane_dependent.contains(operand.value);
+    };
+    for (bool changed = true; changed;) {
+        changed = false;
+        auto mark = [&](ir::ValueId value, bool dependent) {
+            if (dependent && value != ir::kInvalidValue &&
+                lane_dependent.insert(value).second)
+                changed = true;
+        };
+        for (std::size_t i = 0; i < count; ++i) {
+            const ir::BasicBlock& block = function.blocks[i];
+            // Incoming successor arguments feed this block's arguments.
+            std::vector<bool> argument_dependent(block.arguments.size(), false);
+            for (const std::size_t pred : predecessors[i]) {
+                for (const ir::Operation& operation : function.blocks[pred].operations) {
+                    for (const ir::Successor& successor : operation.successors) {
+                        if (successor.block != block.id) continue;
+                        for (std::size_t a = 0; a < successor.arguments.size() &&
+                                            a < argument_dependent.size(); ++a)
+                            argument_dependent[a] =
+                                argument_dependent[a] ||
+                                lane_dependent.contains(successor.arguments[a]);
+                    }
+                }
+            }
+            for (std::size_t a = 0; a < block.arguments.size(); ++a)
+                mark(block.arguments[a].value, argument_dependent[a]);
+            for (const ir::Operation& operation : block.operations) {
+                bool dependent = false;
+                switch (operation.opcode) {
+                    case ir::OpCode::kLaneId:
+                    case ir::OpCode::kThreadId:
+                    case ir::OpCode::kMetalLaneId:
+                    case ir::OpCode::kMetalThreadPosition:
+                    case ir::OpCode::kShuffle:
+                    case ir::OpCode::kMetalShuffle:
+                    case ir::OpCode::kCall:
+                    case ir::OpCode::kMetalBufferArgument:
+                        dependent = true;
+                        break;
+                    case ir::OpCode::kReduction:
+                    case ir::OpCode::kBallot:
+                    case ir::OpCode::kVote:
+                    case ir::OpCode::kMetalReduction:
+                    case ir::OpCode::kMetalBallot:
+                    case ir::OpCode::kMetalVote:
+                        dependent = false; // Uniform across the warp.
+                        break;
+                    default:
+                        dependent = std::any_of(operation.operands.begin(),
+                                                operation.operands.end(),
+                                                operand_lane_dependent);
+                        break;
+                }
+                if (operation.opcode == ir::OpCode::kAtomic ||
+                    operation.opcode == ir::OpCode::kMetalAtomic)
+                    dependent = true; // Old values are per-thread.
+                for (const ir::ValueId result : operation.results)
+                    mark(result, dependent);
+            }
+        }
+    }
+
+    // Iterative dominators (entry is block 0).
+    const std::size_t words = (count + 63) / 64;
+    std::vector<std::vector<std::uint64_t>> dominators(
+        count, std::vector<std::uint64_t>(words, ~0ull));
+    for (std::size_t i = 0; i < count; ++i)
+        dominators[i][i / 64] = 1ull << (i % 64);
+    dominators[0].assign(words, 0);
+    dominators[0][0] = 1ull;
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (std::size_t i = 1; i < count; ++i) {
+            std::vector<std::uint64_t> next(words, ~0ull);
+            bool has_predecessor = false;
+            for (const std::size_t pred : predecessors[i]) {
+                has_predecessor = true;
+                for (std::size_t w = 0; w < words; ++w) next[w] &= dominators[pred][w];
+            }
+            if (!has_predecessor) next.assign(words, 0);
+            next[i / 64] |= 1ull << (i % 64);
+            if (next != dominators[i]) {
+                dominators[i] = std::move(next);
+                changed = true;
+            }
+        }
+    }
+    auto dominates = [&](std::size_t a, std::size_t b) {
+        return (dominators[b][a / 64] >> (a % 64)) & 1ull;
+    };
+
+    // Reachability, for loop-cycle membership.
+    std::vector<std::vector<std::uint64_t>> reachable(
+        count, std::vector<std::uint64_t>(words, 0));
+    for (std::size_t i = 0; i < count; ++i) {
+        std::vector<std::size_t> stack = successors[i];
+        while (!stack.empty()) {
+            const std::size_t node = stack.back();
+            stack.pop_back();
+            if ((reachable[i][node / 64] >> (node % 64)) & 1ull) continue;
+            reachable[i][node / 64] |= 1ull << (node % 64);
+            for (const std::size_t next : successors[node]) stack.push_back(next);
+        }
+    }
+
+    std::vector<bool> divergent_branch(count, false);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (function.blocks[i].operations.empty()) continue;
+        const ir::Operation& terminator = function.blocks[i].operations.back();
+        divergent_branch[i] =
+            terminator.opcode == ir::OpCode::kCondBranch &&
+            !terminator.operands.empty() &&
+            operand_lane_dependent(terminator.operands.front());
+    }
+
+    for (std::size_t i = 0; i < count; ++i) {
+        bool uniform_block = true;
+        for (std::size_t x = 0; x < count && uniform_block; ++x)
+            if (divergent_branch[x] && x != i && dominates(x, i))
+                uniform_block = false;
+        const bool in_cycle = (reachable[i][i / 64] >> (i % 64)) & 1ull;
+        if (in_cycle) {
+            for (std::size_t y = 0; y < count && uniform_block; ++y) {
+                const bool same_cycle =
+                    ((reachable[i][y / 64] >> (y % 64)) & 1ull) &&
+                    ((reachable[y][i / 64] >> (i % 64)) & 1ull);
+                if (same_cycle && divergent_branch[y]) uniform_block = false;
+            }
+        }
+        if (!uniform_block) continue;
+        for (ir::Operation& operation : function.blocks[i].operations) {
+            if (operation.opcode != ir::OpCode::kAtomic) continue;
+            const auto atomic_op = operation.attributes.find("atomic_op");
+            if (atomic_op == operation.attributes.end() || atomic_op->second != "add")
+                continue;
+            if (operation.results.size() != 1 || operation.result_types.size() != 1 ||
+                operation.result_types.front().kind != ir::TypeKind::kInteger ||
+                operation.result_types.front().bit_width != 32 ||
+                operation.operands.size() != 2 ||
+                operation.memory_ordering != ir::MemoryOrdering::kRelaxed ||
+                operation.memory_scope == ir::MemoryScope::kSystem)
+                continue;
+            if (operand_lane_dependent(operation.operands.front())) continue;
+            operation.attributes["warp_aggregated"] = "true";
+        }
+    }
+}
+
 MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     MetalLegalizeResult result;
     const ir::VerifyResult input_verification = ir::verify(module);
@@ -7373,6 +8375,12 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     if (const auto error = raw_address_refusal(result.module)) {
         result.error = *error;
         return result;
+    }
+    for (ir::Function& function : result.module.functions) {
+        fold_butterfly_reductions(function);
+    }
+    for (ir::Function& function : result.module.functions) {
+        mark_warp_aggregated_atomics(function);
     }
 
     for (ir::Function& function : result.module.functions) {
@@ -7547,6 +8555,25 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     for (const std::string& caveat : metal_module.semantic_caveats) {
         result.ast.comments.push_back("cumetal-semantic-caveat: " + caveat);
     }
+    for (const ir::Function& function : metal_module.functions) {
+        if (!function.is_kernel || !function.kernel_abi.has_value() ||
+            function.kernel_abi->estimated_register_pressure == 0)
+            continue;
+        // Above roughly 104 registers/thread Apple GPUs lose occupancy
+        // quickly; without a declared bound the shader compiler must also
+        // assume a 1024-thread threadgroup. Surface both facts only in
+        // that case: an always-on comment would perturb source searches
+        // for kernel names.
+        if (function.kernel_abi->estimated_register_pressure > 104 &&
+            function.kernel_abi->max_threads_per_threadgroup == 0) {
+            result.ast.comments.push_back(
+                "cumetal-register-pressure-warning: " + function.name +
+                " estimated_register_pressure=" +
+                std::to_string(
+                    function.kernel_abi->estimated_register_pressure) +
+                " with no declared launch bound; consider __launch_bounds__");
+        }
+    }
     for (const ir::ExternalSymbol& symbol : metal_module.external_symbols) {
         result.ast.comments.push_back(
             "cumetal-native-symbol: " +
@@ -7581,6 +8608,8 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     bool needs_threadgroup_cas = false;
     bool needs_fp64_support = false;
     bool needs_threadgroup_float_add = false;
+    bool needs_warp_aggregated_device = false;
+    bool needs_warp_aggregated_threadgroup = false;
     std::unordered_set<std::string> wide_atomic_helpers;
     std::vector<MslFunction> wide_atomic_helper_functions;
     for (const ir::Function& function : metal_module.functions) {
@@ -7633,6 +8662,16 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                         MslAddressSpace::kThreadgroup) {
                     needs_threadgroup_float_add = true;
                 }
+                if (operation.opcode == ir::OpCode::kMetalAtomic &&
+                    operation.attributes.contains("warp_aggregated") &&
+                    !operation.operands.empty()) {
+                    const MslAddressSpace space = lower_address_space(
+                        operation.operands.front().type.address_space);
+                    needs_warp_aggregated_device |=
+                        space == MslAddressSpace::kDevice;
+                    needs_warp_aggregated_threadgroup |=
+                        space == MslAddressSpace::kThreadgroup;
+                }
                 if (operation.opcode != ir::OpCode::kMetalAtomic ||
                     !operation.attributes.contains("atomic_op") ||
                     operation.attributes.at("atomic_op") != "cas" ||
@@ -7658,6 +8697,14 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     if (needs_threadgroup_float_add) {
         result.ast.functions.push_back(make_threadgroup_float_add_helper());
     }
+    if (needs_warp_aggregated_device) {
+        result.ast.functions.push_back(
+            make_warp_aggregated_atomic_add_helper(MslAddressSpace::kDevice));
+    }
+    if (needs_warp_aggregated_threadgroup) {
+        result.ast.functions.push_back(
+            make_warp_aggregated_atomic_add_helper(MslAddressSpace::kThreadgroup));
+    }
     result.ast.functions.insert(result.ast.functions.end(),
                                 wide_atomic_helper_functions.begin(),
                                 wide_atomic_helper_functions.end());
@@ -7679,6 +8726,24 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     }
     if (needs_device_clock) result.ast.functions.push_back(make_device_clock_helper());
     if (needs_grid_barrier) result.ast.functions.push_back(make_grid_sync_helper());
+    const bool needs_device_heap = std::any_of(
+        metal_module.functions.begin(), metal_module.functions.end(),
+        [](const ir::Function& function) {
+            return std::any_of(
+                function.blocks.begin(), function.blocks.end(),
+                [](const ir::BasicBlock& block) {
+                    return std::any_of(
+                        block.operations.begin(), block.operations.end(),
+                        [](const ir::Operation& operation) {
+                            return operation.opcode == ir::OpCode::kDeviceMalloc ||
+                                   operation.opcode == ir::OpCode::kDeviceFree;
+                        });
+                });
+        });
+    if (needs_device_heap) {
+        result.ast.functions.push_back(make_device_malloc_helper());
+        result.ast.functions.push_back(make_device_free_helper());
+    }
     for (const ir::Function& function : metal_module.functions) {
         const StructurizeResult structurized = check_structurizable(function);
         if (!structurized.ok) {
@@ -7978,6 +9043,7 @@ PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& o
     ir::PtxImportResult imported = ir::import_ptx(ptx, import_options);
     result.warnings = imported.warnings;
     result.printf_formats = imported.printf_formats;
+    result.uses_device_heap = imported.uses_device_heap;
     if (!imported.ok) {
         result.error = imported.error;
         return result;
@@ -8005,6 +9071,9 @@ PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& o
     }
     result.ast = std::move(lowered.ast);
     result.source = std::move(lowered.source);
+    if (result.uses_device_heap) {
+        result.source.insert(0, "// cumetal-uses-device-heap: 1\n");
+    }
     for (auto format = result.printf_formats.rbegin();
          format != result.printf_formats.rend(); ++format) {
         static constexpr char kHex[] = "0123456789abcdef";
@@ -8033,6 +9102,7 @@ NvvmToMslResult compile_nvvm_to_msl(std::string_view llvm_ir,
     ir::NvvmImportResult imported = ir::import_nvvm_llvm_ir(llvm_ir, options);
     result.warnings = imported.warnings;
     result.printf_formats = imported.printf_formats;
+    result.uses_device_heap = imported.uses_device_heap;
     if (!imported.ok) {
         result.error = imported.error;
         return result;
@@ -8054,6 +9124,9 @@ NvvmToMslResult compile_nvvm_to_msl(std::string_view llvm_ir,
     }
     result.ast = std::move(lowered.ast);
     result.source = std::move(lowered.source);
+    if (result.uses_device_heap) {
+        result.source.insert(0, "// cumetal-uses-device-heap: 1\n");
+    }
     for (auto format = result.printf_formats.rbegin();
          format != result.printf_formats.rend(); ++format) {
         static constexpr char kHex[] = "0123456789abcdef";

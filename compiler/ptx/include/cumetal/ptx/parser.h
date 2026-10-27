@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,6 +18,8 @@ struct Parameter {
 
 struct EntryFunction {
     std::string name;
+    // .maxntid launch bound as x*y*z, or 0 when undeclared/undeclarable.
+    std::uint32_t max_threads_per_threadgroup = 0;
     std::vector<Parameter> params;
     // `.func` definitions may return one or more values through PTX return
     // parameters. Kernel entries leave this empty.
