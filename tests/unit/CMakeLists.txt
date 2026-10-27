@@ -555,6 +555,14 @@ add_test(
 )
 
 add_test(
+    NAME unit_cumetalc_nvcc_flags
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_nvcc_flags_test.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_SOURCE_DIR}/tests/cuda_projects/vector_add/vector_add.cu
+)
+
+add_test(
     NAME unit_intrinsic_lower
     COMMAND cumetal_intrinsic_lower_test
 )

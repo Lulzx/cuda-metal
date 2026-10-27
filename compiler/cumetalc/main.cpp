@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -237,7 +238,10 @@ void print_usage(const char* argv0) {
                  " [--backend legacy|cumetal-ir]"
                  " [--emit llvm|cumetal-ir|metal-ir|msl|metallib|ptx|exe]"
                  " [--link|--no-link] [--save-temps]"
-                 " [--fp64=fast48|wide48|ieee64|native|emulate|warn]\n";
+                 " [--fp64=fast48|wide48|ieee64|native|emulate|warn]"
+                 " [-gencode arch=compute_XX,code=sm_XX] [-arch sm_XX]"
+                 " [-Xcompiler flag] [--expt-relaxed-constexpr]"
+                 " [--expt-extended-lambda] [-rdc=false] [-c]\n";
 }
 
 std::string lower_ext(const std::filesystem::path& path) {
@@ -556,6 +560,8 @@ struct ExecutableDriverOptions {
     std::vector<std::filesystem::path> include_dirs;
     std::vector<std::string> defines;
     std::vector<std::filesystem::path> forced_includes;
+    // nvcc -Xcompiler flags, forwarded to the host Clang invocations.
+    std::vector<std::string> host_compiler_flags;
     BackendKind backend = BackendKind::kCumetalIr;
     cumetal::ptx::Fp64Mode fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
     bool keep_intermediates = false;
@@ -671,6 +677,7 @@ struct NativeHostKernel {
     std::vector<std::uint32_t> argument_sizes;
     std::vector<std::uint32_t> symbol_indices;
     std::vector<std::string> printf_formats;
+    bool uses_device_heap = false;
 };
 
 struct NativeSourceSymbol {
@@ -868,10 +875,29 @@ std::uint32_t native_alignment(std::uint32_t size) {
     return 1;
 }
 
+// Assembly stub embedding the metallib via .incbin in its own Mach-O
+// section. Replaces a multi-megabyte ASCII C array, whose parse dominated
+// registration compilation for large modules.
+std::string native_metallib_asm_source(const std::filesystem::path& metallib) {
+    std::string escaped;
+    for (const char c : metallib.string()) {
+        if (c == '\\' || c == '"') escaped += '\\';
+        escaped += c;
+    }
+    return "\t.section __CUMETAL,__metallib\n"
+           "\t.globl _cm_metallib_data\n"
+           "\t.globl _cm_metallib_end\n"
+           "\t.p2align 3\n"
+           "_cm_metallib_data:\n"
+           "\t.incbin \"" +
+           escaped +
+           "\"\n"
+           "_cm_metallib_end:\n";
+}
+
 std::string native_registration_source(
     const std::vector<NativeHostKernel>& kernels,
     const std::vector<NativeSourceSymbol>& symbols,
-    const std::vector<std::uint8_t>& metallib,
     std::string_view provenance,
     std::string_view semantic_quality) {
     std::ostringstream out;
@@ -890,12 +916,8 @@ std::string native_registration_source(
                 << symbols[i].name << "\");\n";
         }
     }
-    out << "\nstatic const unsigned char cm_metallib[] = {";
-    for (std::size_t i = 0; i < metallib.size(); ++i) {
-        if (i % 16 == 0) out << "\n  ";
-        out << static_cast<unsigned>(metallib[i]) << ',';
-    }
-    out << "\n};\n";
+    out << "\nextern \"C\" const unsigned char cm_metallib_data[];\n"
+           "extern \"C\" const unsigned char cm_metallib_end[];\n";
 
     for (std::size_t i = 0; i < symbols.size(); ++i) {
         if (symbols[i].initializer.empty()) continue;
@@ -976,7 +998,7 @@ std::string native_registration_source(
             << (kernels[i].printf_formats.empty()
                     ? "nullptr"
                     : "cm_printf_formats_" + std::to_string(i))
-            << "},\n";
+            << ',' << (kernels[i].uses_device_heap ? 1 : 0) << "},\n";
     }
     out << "};\n";
     if (!symbols.empty()) {
@@ -1000,7 +1022,8 @@ std::string native_registration_source(
         }
     }
     out << "  const CuMetalModuleDescriptor descriptor = {"
-        << "CUMETAL_NATIVE_ABI_VERSION,cm_metallib,sizeof(cm_metallib),"
+        << "CUMETAL_NATIVE_ABI_VERSION,cm_metallib_data,"
+           "static_cast<size_t>(cm_metallib_end - cm_metallib_data),"
         << kernels.size() << ",cm_kernels," << binding_base << ','
         << (binding_base == 0 ? "nullptr" : "cm_bindings") << ",\""
         << provenance << "\",\"" << semantic_quality << "\"," << symbols.size()
@@ -1047,9 +1070,11 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     const std::filesystem::path metallib = make_temp_path(".metallib");
     const std::filesystem::path registration_source = make_temp_path(".native.cpp");
     const std::filesystem::path registration_object = make_temp_path(".native.o");
+    const std::filesystem::path metallib_asm = make_temp_path(".metallib.s");
+    const std::filesystem::path metallib_object = make_temp_path(".metallib.o");
     const std::vector<std::filesystem::path> intermediates = {
         object_file, host_llvm, metal_source, metallib,
-        registration_source, registration_object,
+        registration_source, registration_object, metallib_asm, metallib_object,
     };
     const auto cleanup = [&]() {
         if (options.keep_intermediates) {
@@ -1085,46 +1110,17 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     for (const auto& forced : options.forced_includes) {
         host_flags += " -include " + quote_shell(forced.string());
     }
-    const std::string compile = host_flags + " -O2 -c " +
-        quote_shell(options.input.string()) + " -o " +
-        quote_shell(object_file.string()) + " 2>&1";
-
-    const CommandResult compile_result = run_command_capture(compile);
-    if (!compile_result.output.empty()) {
-        std::cerr << compile_result.output;
-        if (compile_result.output.back() != '\n') std::cerr << '\n';
+    for (const auto& flag : options.host_compiler_flags) {
+        host_flags += " " + quote_shell(flag);
     }
-    if (!compile_result.started || compile_result.exit_code != 0 ||
-        !std::filesystem::exists(object_file)) {
-        cleanup();
-        std::cerr << "cumetalc failed: CUDA compilation of " << options.input << " failed\n";
-        return 1;
-    }
-
+    // Single host frontend parse: emit LLVM IR once, parse launch-stub
+    // metadata and rewrite symbol linkage in that text below, then lower
+    // the (possibly rewritten) IR to the host object at -O2. This replaces
+    // a separate -O2 -c C++ parse plus a second -O0 -emit-llvm parse.
     const std::string host_ir_command = host_flags +
         " -O0 -Xclang -disable-O0-optnone -S -emit-llvm " +
         quote_shell(options.input.string()) + " -o " + quote_shell(host_llvm.string()) +
         " 2>&1";
-    const CommandResult host_ir_result = run_command_capture(host_ir_command);
-    if (!host_ir_result.started || host_ir_result.exit_code != 0) {
-        if (!host_ir_result.output.empty()) std::cerr << host_ir_result.output;
-        cleanup();
-        std::cerr << "cumetalc failed: could not inspect native host launch stubs\n";
-        return 1;
-    }
-    std::string io_error;
-    const auto host_llvm_bytes = cumetal::common::read_file_bytes(host_llvm, &io_error);
-    std::vector<NativeHostKernel> kernels;
-    if (!io_error.empty() ||
-        !parse_native_host_kernels(
-            std::string_view(reinterpret_cast<const char*>(host_llvm_bytes.data()),
-                             host_llvm_bytes.size()),
-            &kernels, &io_error)) {
-        cleanup();
-        std::cerr << "cumetalc failed: " << io_error << "\n";
-        return 1;
-    }
-
     const std::filesystem::path self = executable_path(argv0);
     if (self.empty()) {
         cleanup();
@@ -1151,7 +1147,34 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         device_compile += " -include " + quote_shell(forced.string());
     }
     device_compile += " -o " + quote_shell(metal_source.string()) + " 2>&1";
-    const CommandResult device_result = run_command_capture(device_compile);
+    // Host frontend and device frontend are independent until symbol
+    // reconciliation below; run them concurrently.
+    CommandResult host_ir_result;
+    CommandResult device_result;
+    {
+        std::thread device_thread(
+            [&]() { device_result = run_command_capture(device_compile); });
+        host_ir_result = run_command_capture(host_ir_command);
+        device_thread.join();
+    }
+    if (!host_ir_result.started || host_ir_result.exit_code != 0) {
+        if (!host_ir_result.output.empty()) std::cerr << host_ir_result.output;
+        cleanup();
+        std::cerr << "cumetalc failed: could not inspect native host launch stubs\n";
+        return 1;
+    }
+    std::string io_error;
+    const auto host_llvm_bytes = cumetal::common::read_file_bytes(host_llvm, &io_error);
+    std::vector<NativeHostKernel> kernels;
+    if (!io_error.empty() ||
+        !parse_native_host_kernels(
+            std::string_view(reinterpret_cast<const char*>(host_llvm_bytes.data()),
+                             host_llvm_bytes.size()),
+            &kernels, &io_error)) {
+        cleanup();
+        std::cerr << "cumetalc failed: " << io_error << "\n";
+        return 1;
+    }
     if (!device_result.started || device_result.exit_code != 0) {
         if (!device_result.output.empty()) std::cerr << device_result.output;
         cleanup();
@@ -1170,8 +1193,21 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     const std::vector<std::string> printf_formats =
         parse_native_printf_formats(metal_text);
     for (NativeHostKernel& kernel : kernels) {
-        const std::string kernel_prefix = "kernel void " + kernel.metal_name + "(";
-        const std::size_t signature_begin = metal_text.find(kernel_prefix);
+        // Kernel attributes (e.g. [[max_total_threads_per_threadgroup(N)]])
+        // may sit between the kernel name and its parameter list, so match
+        // the name with a word boundary rather than the '(' directly.
+        const std::string kernel_prefix = "kernel void " + kernel.metal_name;
+        std::size_t signature_begin = std::string::npos;
+        for (std::size_t at = metal_text.find(kernel_prefix); at != std::string::npos;
+             at = metal_text.find(kernel_prefix, at + 1)) {
+            const std::size_t after = at + kernel_prefix.size();
+            if (after >= metal_text.size() ||
+                !(std::isalnum(static_cast<unsigned char>(metal_text[after])) ||
+                  metal_text[after] == '_')) {
+                signature_begin = at;
+                break;
+            }
+        }
         if (signature_begin ==
             std::string::npos) {
             cleanup();
@@ -1199,6 +1235,8 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
             }
             kernel.printf_formats = printf_formats;
         }
+        kernel.uses_device_heap =
+            signature.find("cm___cumetal_device_heap") != std::string_view::npos;
         const bool uses_constants =
             signature.find("cm___cumetal_constant_symbols") != std::string_view::npos;
         for (std::size_t i = 0; i < symbols.size(); ++i) {
@@ -1230,14 +1268,19 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
             std::cerr << "cumetalc failed: " << io_error << "\n";
             return 1;
         }
-        const std::string recompile_host = quote_shell(compiler.string()) +
+    }
+    // Lower the single host IR (rewritten above when device symbols exist)
+    // to the host object. No second C++ frontend parse is involved.
+    {
+        const std::string lower_host = quote_shell(compiler.string()) +
             " -O2 -c " + quote_shell(host_llvm.string()) + " -o " +
             quote_shell(object_file.string()) + " 2>&1";
-        const CommandResult recompiled = run_command_capture(recompile_host);
-        if (!recompiled.started || recompiled.exit_code != 0) {
-            if (!recompiled.output.empty()) std::cerr << recompiled.output;
+        const CommandResult lowered = run_command_capture(lower_host);
+        if (!lowered.started || lowered.exit_code != 0 ||
+            !std::filesystem::exists(object_file)) {
+            if (!lowered.output.empty()) std::cerr << lowered.output;
             cleanup();
-            std::cerr << "cumetalc failed: native symbol host-linkage rewrite failed\n";
+            std::cerr << "cumetalc failed: native host IR lowering failed\n";
             return 1;
         }
     }
@@ -1267,10 +1310,9 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         std::cerr << "cumetalc failed: " << emitted.error << "\n";
         return 1;
     }
-    const auto metallib_bytes = cumetal::common::read_file_bytes(metallib, &io_error);
-    if (!io_error.empty()) {
+    if (!std::filesystem::exists(metallib)) {
         cleanup();
-        std::cerr << "cumetalc failed: " << io_error << "\n";
+        std::cerr << "cumetalc failed: emitted metallib is missing\n";
         return 1;
     }
     const auto comment_value = [&](std::string_view key, std::string_view fallback) {
@@ -1281,12 +1323,28 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         return metal_text.substr(begin, end == std::string::npos ? end : end - begin);
     };
     const std::string generated = native_registration_source(
-        kernels, symbols, metallib_bytes,
+        kernels, symbols,
         comment_value("// cumetal-provenance: ", "generic_nvvm_lowering"),
         comment_value("// cumetal-semantic-quality: ", "unsupported"));
     if (!write_text_output(registration_source, generated, true, &io_error)) {
         cleanup();
         std::cerr << "cumetalc failed: " << io_error << "\n";
+        return 1;
+    }
+    if (!write_text_output(metallib_asm, native_metallib_asm_source(metallib),
+                           true, &io_error)) {
+        cleanup();
+        std::cerr << "cumetalc failed: " << io_error << "\n";
+        return 1;
+    }
+    const std::string metallib_compile = quote_shell(compiler.string()) + " -c " +
+        quote_shell(metallib_asm.string()) + " -o " +
+        quote_shell(metallib_object.string()) + " 2>&1";
+    const CommandResult metallib_result = run_command_capture(metallib_compile);
+    if (!metallib_result.started || metallib_result.exit_code != 0) {
+        if (!metallib_result.output.empty()) std::cerr << metallib_result.output;
+        cleanup();
+        std::cerr << "cumetalc failed: native metallib embedding failed\n";
         return 1;
     }
     const std::string registration_compile = quote_shell(compiler.string()) +
@@ -1305,7 +1363,8 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     // DYLD_LIBRARY_PATH first.
     const std::string link = quote_shell(compiler.string()) + " " +
                              quote_shell(object_file.string()) + " " +
-                             quote_shell(registration_object.string()) + " -L " +
+                             quote_shell(registration_object.string()) + " " +
+                             quote_shell(metallib_object.string()) + " -L " +
                              quote_shell(layout.lib_dir.string()) + " -lcumetal -Wl,-rpath," +
                              quote_shell(layout.lib_dir.string()) + " -o " +
                              quote_shell(options.output.string()) + " 2>&1";
@@ -1350,6 +1409,7 @@ int main(int argc, char** argv) {
     std::string cuda_inline_threshold;
     std::vector<std::filesystem::path> cuda_include_dirs;
     std::vector<std::string> cuda_defines;
+    std::vector<std::string> host_compiler_flags;
     std::vector<std::filesystem::path> cuda_forced_includes;
     std::vector<std::string> cuda_undefines;
     std::vector<std::string> extra_clang_args;
@@ -1516,6 +1576,116 @@ int main(int argc, char** argv) {
             // Accepted for nvcc/NVRTC command-line compatibility. Device
             // optimisation happens in Apple's Metal compiler at its default
             // level; the LLVM pipeline the importer consumes is fixed.
+        } else if (arg == "-gencode" || arg == "--generate-code" ||
+                   arg.rfind("-gencode=", 0) == 0 ||
+                   arg.rfind("--generate-code=", 0) == 0) {
+            // nvcc: -gencode arch=compute_XX,code=sm_XX (uses the last one,
+            // matching nvcc's "last gencode wins" for the native target).
+            std::string spec = arg;
+            if (arg == "-gencode" || arg == "--generate-code") {
+                if (i + 1 >= argc) {
+                    std::cerr << arg << " expects a value such as arch=compute_80,code=sm_80\n";
+                    return 2;
+                }
+                spec = argv[++i];
+            } else {
+                spec = arg.substr(arg.find('=') + 1);
+            }
+            const std::size_t sm_at = spec.rfind("sm_");
+            if (sm_at == std::string::npos) {
+                std::cerr << "cumetalc: -gencode spec '" << spec
+                          << "' names no sm_XX target\n";
+                return 2;
+            }
+            std::string digits;
+            for (std::size_t k = sm_at + 3;
+                 k < spec.size() && std::isdigit(static_cast<unsigned char>(spec[k]));
+                 ++k) {
+                digits += spec[k];
+            }
+            if (digits.empty()) {
+                std::cerr << "cumetalc: -gencode spec '" << spec
+                          << "' names no sm_XX target\n";
+                return 2;
+            }
+            cuda_arch = "sm_" + digits;
+        } else if (arg == "-arch" || arg == "--gpu-architecture" ||
+                   arg.rfind("-arch=", 0) == 0 ||
+                   arg.rfind("--gpu-architecture=", 0) == 0) {
+            std::string value = arg;
+            if (arg == "-arch" || arg == "--gpu-architecture") {
+                if (i + 1 >= argc) {
+                    std::cerr << arg << " expects a value such as sm_80\n";
+                    return 2;
+                }
+                value = argv[++i];
+            } else {
+                value = arg.substr(arg.find('=') + 1);
+            }
+            const std::size_t sm_at = value.rfind("sm_");
+            const std::size_t compute_at = value.rfind("compute_");
+            const std::size_t at = sm_at != std::string::npos ? sm_at : compute_at;
+            if (at == std::string::npos) {
+                std::cerr << "cumetalc: -arch value '" << value
+                          << "' names no sm_XX/compute_XX target\n";
+                return 2;
+            }
+            std::string digits;
+            for (std::size_t k = at + (sm_at != std::string::npos ? 3 : 8);
+                 k < value.size() && std::isdigit(static_cast<unsigned char>(value[k]));
+                 ++k) {
+                digits += value[k];
+            }
+            if (digits.empty()) {
+                std::cerr << "cumetalc: -arch value '" << value << "' is malformed\n";
+                return 2;
+            }
+            cuda_arch = "sm_" + digits;
+        } else if (arg == "-Xcompiler" || arg.rfind("-Xcompiler=", 0) == 0 ||
+                   arg.rfind("--compiler-options=", 0) == 0) {
+            // nvcc forwards the next argument (possibly comma-separated) to
+            // the host compiler.
+            std::string value = arg;
+            if (arg == "-Xcompiler") {
+                if (i + 1 >= argc) {
+                    std::cerr << "-Xcompiler expects a host compiler argument\n";
+                    return 2;
+                }
+                value = argv[++i];
+            } else {
+                value = arg.substr(arg.find('=') + 1);
+            }
+            std::size_t begin = 0;
+            while (begin <= value.size()) {
+                const std::size_t comma = value.find(',', begin);
+                const std::string piece = value.substr(
+                    begin, comma == std::string::npos ? comma : comma - begin);
+                if (!piece.empty()) host_compiler_flags.push_back(piece);
+                if (comma == std::string::npos) break;
+                begin = comma + 1;
+            }
+        } else if (arg == "--expt-relaxed-constexpr" ||
+                   arg == "--expt-extended-lambda" || arg == "--extended-lambda" ||
+                   arg == "-g" || arg == "--generate-line-info" || arg == "-lineinfo") {
+            // Accepted for nvcc compatibility. Clang's CUDA frontend already
+            // permits extended device lambdas; relaxed-constexpr and debug
+            // info requests have no separate switch to forward.
+        } else if (arg.rfind("-rdc=", 0) == 0 || arg.rfind("--relocatable-device-code=", 0) == 0) {
+            const std::string value = arg.substr(arg.find('=') + 1);
+            if (value == "true" || value == "1") {
+                std::cerr << "cumetalc: relocatable device code (-rdc=true) is not "
+                             "supported; compile without separate device linking\n";
+                return 2;
+            }
+            // -rdc=false is the default single-pass mode; accept it.
+        } else if (arg == "-rdc" || arg == "--relocatable-device-code") {
+            std::cerr << "cumetalc: relocatable device code (-rdc) is not supported; "
+                         "compile without separate device linking\n";
+            return 2;
+        } else if (arg == "-c" || arg == "--compile") {
+            // nvcc compile-only: emit the metallib, do not link an executable.
+            link_executable = false;
+            link_requested_explicitly = true;
         } else if (arg == "--clang-arg") {
             if (i + 1 >= argc) {
                 std::cerr << "--clang-arg expects an argument\n";
@@ -1604,12 +1774,13 @@ int main(int argc, char** argv) {
     if (!backend_set_explicitly && lower_ext(options.input) == ".cu" && !cuda_device_frontend) {
         backend = BackendKind::kCumetalIr;
     }
-    // Direct source compilation selects the typed backend by default, so give
-    // it the same usable software-FP64 default as runtime/JIT registration.
-    // PTX/offline compatibility retains the historical native default, and an
-    // explicit --fp64 policy always wins.
-    if (!fp64_mode_set_explicitly && backend == BackendKind::kCumetalIr &&
-        lower_ext(options.input) == ".cu" && !cuda_device_frontend) {
+    // The typed backend cannot emit native AIR binary64 (it lowers through
+    // MSL), so whenever it is selected -- directly, via --cuda-device, or
+    // for a .ptx input -- give it the same usable software-FP64 default as
+    // runtime/JIT registration. The legacy PTX path retains the historical
+    // native default, and an explicit --fp64 policy always wins (an
+    // explicit native request with the typed backend fails explicitly).
+    if (!fp64_mode_set_explicitly && backend == BackendKind::kCumetalIr) {
         ptx_fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
     }
 
@@ -1647,6 +1818,7 @@ int main(int argc, char** argv) {
         driver.include_dirs = cuda_include_dirs;
         driver.defines = cuda_defines;
         driver.forced_includes = cuda_forced_includes;
+        driver.host_compiler_flags = host_compiler_flags;
         driver.backend = backend;
         driver.fp64_mode = ptx_fp64_mode;
         driver.keep_intermediates = keep_intermediates;
