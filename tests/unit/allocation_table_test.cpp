@@ -141,6 +141,90 @@ int main() {
         return 1;
     }
 
+    // Relocation identity: default FakeBuffer device address == contents.
+    {
+        cumetal::rt::AllocationTable identity_table;
+        std::uintptr_t mem[16]{};
+        auto identity_buffer = std::make_shared<FakeBuffer>(&mem[0], sizeof(mem));
+        if (!expect(identity_table.pointer_relocation_is_identity(true),
+                    "empty table relocation is identity (device)")) {
+            return 1;
+        }
+        if (!expect(identity_table.insert(&mem[0], sizeof(mem),
+                                          cumetal::rt::AllocationKind::kDevice, 0,
+                                          identity_buffer, &error),
+                    "insert identity allocation")) {
+            return 1;
+        }
+        if (!expect(identity_table.pointer_relocation_is_identity(true),
+                    "host==device relocation is identity (device)")) {
+            return 1;
+        }
+        if (!expect(identity_table.pointer_relocation_is_identity(false),
+                    "host==device relocation is identity (host)")) {
+            return 1;
+        }
+        cumetal::rt::AllocationTable shifted_table;
+        auto shifted_buffer = std::make_shared<FakeBuffer>(
+            &mem[0], sizeof(mem), reinterpret_cast<std::uintptr_t>(&mem[0]) + 0x100000);
+        if (!expect(shifted_table.insert(&mem[0], sizeof(mem),
+                                         cumetal::rt::AllocationKind::kDevice, 0,
+                                         shifted_buffer, &error),
+                    "insert shifted allocation")) {
+            return 1;
+        }
+        if (!expect(!shifted_table.pointer_relocation_is_identity(true),
+                    "shifted device address is not identity (device)")) {
+            return 1;
+        }
+        if (!expect(shifted_table.pointer_relocation_is_identity(false),
+                    "shifted device address is identity (host)")) {
+            return 1;
+        }
+    }
+
+    // MRU cache must not serve stale results across erase + reinsert.
+    {
+        cumetal::rt::AllocationTable mru_table;
+        std::uintptr_t mem[64]{};
+        auto mru_buffer = std::make_shared<FakeBuffer>(&mem[0], sizeof(mem));
+        if (!expect(mru_table.insert(&mem[0], sizeof(mem),
+                                     cumetal::rt::AllocationKind::kDevice, 0,
+                                     mru_buffer, &error),
+                    "insert MRU allocation")) {
+            return 1;
+        }
+        cumetal::rt::AllocationTable::ResolvedAllocation mru_resolved;
+        void* inner = reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(&mem[0]) + 32);
+        if (!expect(mru_table.resolve(inner, &mru_resolved) && mru_resolved.offset == 32,
+                    "MRU first resolve")) {
+            return 1;
+        }
+        if (!expect(mru_table.resolve(inner, &mru_resolved) && mru_resolved.offset == 32 &&
+                        mru_resolved.kind == cumetal::rt::AllocationKind::kDevice,
+                    "MRU cached resolve")) {
+            return 1;
+        }
+        if (!expect(mru_table.erase(&mem[0]), "MRU erase")) {
+            return 1;
+        }
+        if (!expect(!mru_table.resolve(inner, &mru_resolved),
+                    "MRU invalidated after erase")) {
+            return 1;
+        }
+        if (!expect(mru_table.insert(&mem[0], sizeof(mem),
+                                     cumetal::rt::AllocationKind::kHost, 0,
+                                     mru_buffer, &error),
+                    "MRU reinsert as host")) {
+            return 1;
+        }
+        if (!expect(mru_table.resolve(inner, &mru_resolved) &&
+                        mru_resolved.kind == cumetal::rt::AllocationKind::kHost,
+                    "MRU sees reinserted kind, not stale cache")) {
+            return 1;
+        }
+    }
+
     std::printf("PASS: allocation table unit tests\n");
     return 0;
 }

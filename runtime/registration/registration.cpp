@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -487,6 +488,9 @@ struct RegistrationState {
     std::unordered_map<void*, std::unique_ptr<RegistrationModule>> modules;
     std::unordered_map<const void*, RegistrationRecord> kernels;
     std::unordered_map<const void*, RegistrationSymbolRecord> symbols;
+    // Bumped (under mutex) on every kernels/symbols mutation so the
+    // thread-local lookup cache below can validate without locking.
+    std::atomic<std::uint64_t> generation{0};
 };
 
 RegistrationState& state() {
@@ -1735,7 +1739,25 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
         return false;
     }
 
+    // Thread-local MRU for the record-resolution phase: repeated launches
+    // of the same kernel (tight loops, graph replay) skip the registry
+    // mutex and the record copy. Symbol bindings below still resolve
+    // fresh on every lookup, and any registry mutation bumps the
+    // generation and invalidates this entry.
+    struct LookupMru {
+        const void* host_function = nullptr;
+        std::uint64_t generation = 0;
+        RegistrationRecord record;
+    };
+    static thread_local LookupMru lookup_mru;
+    const std::uint64_t registry_generation =
+        state().generation.load(std::memory_order_acquire);
     RegistrationRecord record;
+    const bool record_cached = lookup_mru.host_function == host_function &&
+                               lookup_mru.generation == registry_generation;
+    if (record_cached) {
+        record = lookup_mru.record;
+    } else {
     {
         RegistrationState& s = state();
         std::lock_guard<std::mutex> lock(s.mutex);
@@ -1813,6 +1835,13 @@ bool lookup_registered_kernel(const void* host_function, RegisteredKernel* out) 
             found->second.provenance = std::move(provenance);
         }
         record = found->second;
+    }
+    if (!record.metallib_path.empty()) {
+        lookup_mru.host_function = host_function;
+        lookup_mru.generation =
+            state().generation.load(std::memory_order_acquire);
+        lookup_mru.record = record;
+    }
     }
 
     out->module_handle = record.module_handle;
@@ -1968,6 +1997,7 @@ bool lookup_device_kernel_alias(void* module_handle,
                 cumetal::ptx::find_referenced_external_global_symbols(
                     *module.ptx_source, record.kernel_name);
             s.kernels.emplace(alias, std::move(record));
+            s.generation.fetch_add(1, std::memory_order_release);
             module.device_kernel_aliases.emplace(token, std::move(storage));
         }
     }
@@ -2050,6 +2080,7 @@ void clear() {
         s.kernels.clear();
         s.symbols.clear();
         s.modules.clear();
+        s.generation.fetch_add(1, std::memory_order_release);
         tls_launch_stack.clear();
     }
     remove_owned_metallibs(owned);
@@ -2148,6 +2179,7 @@ void __cudaUnregisterFatBinary(void** fat_cubin_handle) {
             owned = cumetal::registration::release_owned_metallibs_locked(module->second.get());
         }
         s.modules.erase(handle);
+        s.generation.fetch_add(1, std::memory_order_release);
     }
     cumetal::registration::remove_owned_metallibs(owned);
 }
@@ -2217,6 +2249,7 @@ void __cudaRegisterFunction(void** fat_cubin_handle,
         .arg_info_resolved = false,
         .printf_formats = std::move(printf_formats),
     };
+    s.generation.fetch_add(1, std::memory_order_release);
     REG_DEBUG("__cudaRegisterFunction: registered host_fn=%p", host_function);
 }
 
@@ -2292,6 +2325,7 @@ void __cudaRegisterVar(void** fat_cubin_handle,
         .constant = constant != 0,
         .requires_metal_storage = device_address_is_name || device_address == nullptr,
     };
+    s.generation.fetch_add(1, std::memory_order_release);
 }
 
 void __cudaRegisterManagedVar(void** fat_cubin_handle,

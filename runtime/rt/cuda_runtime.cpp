@@ -1356,6 +1356,14 @@ void relocate_embedded_device_pointers(
     std::vector<std::shared_ptr<cumetal::metal_backend::Buffer>>* resident_buffers = nullptr) {
     if (data == nullptr || size < sizeof(std::uintptr_t)) return;
     RuntimeState& state = runtime_state();
+    // Skip the O(size) word scan when every allocation's public base already
+    // is its device address: rewriting would store each word unchanged.
+    // Kernel-argument calls (resident_buffers != nullptr) must still scan,
+    // since the scan also collects buffer residency for the launch.
+    if (resident_buffers == nullptr &&
+        state.allocations.pointer_relocation_is_identity(/*to_device=*/true)) {
+        return;
+    }
     const auto ranges = state.allocations.snapshot_ranges();
     if (ranges.empty()) return;
     // CUDA permits aggregates passed by value to contain device pointers. The
@@ -1395,6 +1403,9 @@ void relocate_embedded_device_pointers(
 void restore_embedded_host_pointers(std::uint8_t* data, std::size_t size) {
     if (data == nullptr || size < sizeof(std::uintptr_t)) return;
     RuntimeState& state = runtime_state();
+    if (state.allocations.pointer_relocation_is_identity(/*to_device=*/false)) {
+        return;
+    }
     const auto ranges = state.allocations.snapshot_ranges();
     if (ranges.empty()) return;
     for (std::size_t offset = 0; offset + sizeof(std::uintptr_t) <= size;
@@ -3430,7 +3441,36 @@ cudaError_t cudaHostRegister(void* ptr, size_t size, unsigned int flags) {
         return fail(init_status);
     }
 
-    // CuMetal uses unified memory on Apple Silicon; host registration is a compatibility no-op.
+    RuntimeState& state = runtime_state();
+    cumetal::rt::AllocationTable::ResolvedAllocation existing;
+    if (state.allocations.resolve(ptr, &existing) && existing.offset == 0) {
+        return fail(cudaErrorHostMemoryAlreadyRegistered);
+    }
+
+    // Zero-copy registration: wrap page-aligned host memory in an MTLBuffer
+    // without copying and make it resolvable, so kernels and memcpys can use
+    // it (and cudaHostGetDevicePointer succeeds) with no staging copy.
+    // Non-page-aligned pointers cannot be wrapped by Metal; they keep the
+    // historical compatibility no-op behavior.
+    std::shared_ptr<cumetal::metal_backend::Buffer> buffer;
+    std::string error;
+    if (cumetal::metal_backend::wrap_host_buffer(ptr, size, &buffer, &error) ==
+            cudaSuccess &&
+        buffer != nullptr) {
+        if (!state.allocations.insert(ptr, size, cumetal::rt::AllocationKind::kHost,
+                                      flags, buffer, &error)) {
+            return fail(cudaErrorMemoryAllocation);
+        }
+        void* device_alias = reinterpret_cast<void*>(buffer->device_address());
+        if (device_alias != nullptr && device_alias != ptr) {
+            if (!state.allocations.insert(device_alias, size,
+                                          cumetal::rt::AllocationKind::kHost, flags,
+                                          buffer, &error, /*alias=*/true)) {
+                state.allocations.erase(ptr);
+                return fail(cudaErrorMemoryAllocation);
+            }
+        }
+    }
     return fail(cudaSuccess);
 }
 
@@ -3444,6 +3484,10 @@ cudaError_t cudaHostUnregister(void* ptr) {
         return fail(init_status);
     }
 
+    // Removes a zero-copy registration when one exists; unregistering
+    // never-registered memory stays a successful no-op for compatibility.
+    RuntimeState& state = runtime_state();
+    state.allocations.erase(ptr);
     return fail(cudaSuccess);
 }
 

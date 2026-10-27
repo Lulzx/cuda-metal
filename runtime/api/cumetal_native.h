@@ -79,6 +79,8 @@ typedef struct CuMetalKernelDescriptor {
     /* Module-wide format ids used by this kernel's hidden device-printf ring. */
     uint32_t printf_format_count;
     const char* const* printf_formats;
+    /* Nonzero when the kernel takes the hidden device-heap buffer argument. */
+    uint32_t uses_device_heap;
 } CuMetalKernelDescriptor;
 
 typedef enum CuMetalSymbolKind {

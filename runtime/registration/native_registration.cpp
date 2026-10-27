@@ -4,6 +4,7 @@
 #include "cumetal_native.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -38,6 +39,8 @@ struct State {
     std::unordered_map<CuMetalModuleHandle, std::unique_ptr<NativeModule>> modules;
     std::unordered_map<const void*, cumetal::registration::RegisteredKernel> kernels;
     std::unordered_map<const void*, NativeSymbol> symbols;
+    // Bumped on every registry mutation; validates the lookup MRU below.
+    std::atomic<std::uint64_t> generation{0};
 };
 
 State& state() {
@@ -180,10 +183,27 @@ bool lookup_kernel(const void* host_function,
                    cumetal::registration::RegisteredKernel* out) {
     if (host_function == nullptr || out == nullptr) return false;
     State& s = state();
+    // Thread-local MRU: repeated launches of one kernel (loops, graph
+    // replay) skip the registry mutex. Native records are immutable after
+    // registration, and any register/unregister/clear bumps the generation.
+    struct LookupMru {
+        const void* host_function = nullptr;
+        std::uint64_t generation = 0;
+        cumetal::registration::RegisteredKernel kernel;
+    };
+    static thread_local LookupMru lookup_mru;
+    if (lookup_mru.host_function == host_function &&
+        lookup_mru.generation == s.generation.load(std::memory_order_acquire)) {
+        *out = lookup_mru.kernel;
+        return true;
+    }
     std::lock_guard<std::mutex> lock(s.mutex);
     const auto found = s.kernels.find(host_function);
     if (found == s.kernels.end()) return false;
     *out = found->second;
+    lookup_mru.host_function = host_function;
+    lookup_mru.generation = s.generation.load(std::memory_order_acquire);
+    lookup_mru.kernel = found->second;
     return true;
 }
 
@@ -223,6 +243,7 @@ void clear() {
     s.kernels.clear();
     s.symbols.clear();
     s.modules.clear();
+    s.generation.fetch_add(1, std::memory_order_release);
 }
 
 }  // namespace cumetal::native_registration
@@ -296,6 +317,7 @@ CuMetalModuleHandle cumetalRegisterModule(
         record.semantic_quality = descriptor->semantic_quality != nullptr
                                       ? descriptor->semantic_quality
                                       : "exact";
+        record.uses_device_heap = kernel.uses_device_heap != 0;
         record.printf_formats.reserve(kernel.printf_format_count);
         for (std::uint32_t format = 0; format < kernel.printf_format_count;
              ++format) {
@@ -353,6 +375,7 @@ CuMetalModuleHandle cumetalRegisterModule(
     for (auto& [host_stub, kernel] : prepared_kernels)
         s.kernels.emplace(host_stub, std::move(kernel));
     s.modules[handle] = std::move(module);
+    s.generation.fetch_add(1, std::memory_order_release);
     return handle;
 }
 
@@ -370,6 +393,7 @@ void cumetalUnregisterModule(CuMetalModuleHandle module_handle) {
         s.symbols.erase(host_symbol);
     }
     s.modules.erase(module);
+    s.generation.fetch_add(1, std::memory_order_release);
 }
 
 }  // extern "C"

@@ -51,6 +51,7 @@ bool AllocationTable::insert(void* base,
         .buffer = std::move(buffer),
         .alias = alias,
     };
+    generation_.fetch_add(1, std::memory_order_release);
     return true;
 }
 
@@ -74,6 +75,7 @@ bool AllocationTable::erase(void* base) {
             ++it;
         }
     }
+    generation_.fetch_add(1, std::memory_order_release);
     return true;
 }
 
@@ -83,6 +85,27 @@ bool AllocationTable::resolve(const void* ptr, ResolvedAllocation* resolved) con
     }
 
     const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(ptr);
+
+    // Thread-local 1-entry MRU: consecutive launches/memcpys almost always
+    // resolve pointers into the same allocation. Valid only for the exact
+    // table generation it was filled under; any insert/erase/clear bumps
+    // the generation and invalidates it without taking the lock.
+    struct MruCache {
+        const AllocationTable* table = nullptr;
+        std::uint64_t generation = 0;
+        std::uintptr_t base = 0;
+        std::uintptr_t end = 0;
+        ResolvedAllocation proto;
+    };
+    static thread_local MruCache mru;
+    const std::uint64_t generation = generation_.load(std::memory_order_acquire);
+    if (mru.table == this && mru.generation == generation && address >= mru.base &&
+        address < mru.end) {
+        *resolved = mru.proto;
+        resolved->offset = static_cast<std::size_t>(address - mru.base);
+        resolved->remaining_size = static_cast<std::size_t>(mru.end - address);
+        return true;
+    }
 
     std::shared_lock lock(mutex_);
     auto upper = entries_.upper_bound(address);
@@ -103,6 +126,26 @@ bool AllocationTable::resolve(const void* ptr, ResolvedAllocation* resolved) con
     resolved->remaining_size = entry.size - resolved->offset;
     resolved->kind = entry.kind;
     resolved->host_alloc_flags = entry.host_alloc_flags;
+    // Refill only if no mutation raced us while the lock was held.
+    if (generation_.load(std::memory_order_acquire) == generation) {
+        mru.table = this;
+        mru.generation = generation;
+        mru.base = base;
+        mru.end = base + entry.size;
+        mru.proto = *resolved;
+    }
+    return true;
+}
+
+bool AllocationTable::pointer_relocation_is_identity(bool to_device) const {
+    std::shared_lock lock(mutex_);
+    for (const auto& [base, entry] : entries_) {
+        if (entry.buffer == nullptr) return false;
+        const std::uintptr_t target =
+            to_device ? entry.buffer->device_address()
+                      : reinterpret_cast<std::uintptr_t>(entry.buffer->contents());
+        if (target == 0 || target != base) return false;
+    }
     return true;
 }
 
@@ -131,6 +174,7 @@ std::size_t AllocationTable::total_allocated_size() const {
 void AllocationTable::clear() {
     std::unique_lock lock(mutex_);
     entries_.clear();
+    generation_.fetch_add(1, std::memory_order_release);
 }
 
 }  // namespace cumetal::rt
