@@ -628,6 +628,7 @@ struct FunctionState {
     std::unordered_set<const llvm::AllocaInst*> printf_argument_allocas;
     std::optional<Operand> printf_buffer;
     std::optional<Operand> printf_capacity;
+    std::optional<Operand> heap_buffer;
 };
 
 struct Importer {
@@ -759,6 +760,34 @@ struct Importer {
             return false;
         };
         return references(references, function);
+    }
+
+    static bool is_heap_alloc_callee(llvm::StringRef name) {
+        return name == "malloc" || name == "_Znwm" || name == "_Znam";
+    }
+    static bool is_heap_free_callee(llvm::StringRef name) {
+        return name == "free" || name == "_ZdlPv" || name == "_ZdaPv" ||
+               name == "_ZdlPvm" || name == "_ZdaPvm";
+    }
+    static bool function_uses_heap(const llvm::Function& function) {
+        std::unordered_set<const llvm::Function*> visited;
+        const auto uses_heap = [&](const auto& self,
+                                   const llvm::Function& candidate) -> bool {
+            if (!visited.insert(&candidate).second) return false;
+            for (const llvm::BasicBlock& block : candidate) {
+                for (const llvm::Instruction& instruction : block) {
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    const llvm::Function* callee =
+                        call == nullptr ? nullptr : call->getCalledFunction();
+                    if (callee == nullptr) continue;
+                    if (is_heap_alloc_callee(callee->getName()) ||
+                        is_heap_free_callee(callee->getName())) return true;
+                    if (!callee->isDeclaration() && self(self, *callee)) return true;
+                }
+            }
+            return false;
+        };
+        return uses_heap(uses_heap, function);
     }
 
     static bool function_uses_vprintf(const llvm::Function& function) {
@@ -1336,6 +1365,50 @@ struct Importer {
             });
         }
 
+        if (function_uses_heap(function)) {
+            if (state->output.is_kernel && argument_index >= 29u) {
+                return fail(nullptr,
+                            "typed device heap hidden argument conflicts with reserved Metal bindings");
+            }
+            const Type heap_type =
+                Type::pointer(Type::integer(32), AddressSpace::kDevice);
+            const ValueId heap_value = builder.next_value();
+            state->value_types[heap_value] = heap_type;
+            state->heap_buffer = Operand::value_ref(heap_value, heap_type);
+            state->output.arguments.push_back({
+                .value = heap_value, .name = "__cumetal_device_heap", .type = heap_type});
+            state->output.pointer_provenance[heap_value] = {
+                .base_kind = PointerBaseKind::kAllocation,
+                .base_name = "__cumetal_device_heap",
+                .known_byte_offset = 0,
+                .alignment = 4,
+            };
+            if (state->output.is_kernel) {
+                const std::uint32_t heap_logical =
+                    static_cast<std::uint32_t>(state->output.kernel_abi->arguments.size());
+                state->output.kernel_abi->arguments.push_back({
+                    .name = "__cumetal_device_heap",
+                    .kind = ArgumentKind::kPointer,
+                    .type = heap_type,
+                    .size = 8,
+                    .alignment = 8,
+                    .address_space = AddressSpace::kDevice,
+                    .binding_indices = {argument_index},
+                    .hidden_role = "device_heap",
+                });
+                state->output.kernel_abi->bindings.push_back({
+                    .kind = BindingKind::kBuffer,
+                    .binding_index = argument_index++,
+                    .logical_argument_index = heap_logical,
+                    .type = heap_type,
+                    .size = 0,
+                    .alignment = 4,
+                    .hidden_role = "device_heap",
+                });
+            }
+            if (state->output.is_kernel) result.uses_device_heap = true;
+        }
+
         if (function_uses_vprintf(function)) {
             if (state->output.is_kernel && argument_index + 1 >= 29u) {
                 return fail(nullptr,
@@ -1712,6 +1785,20 @@ struct Importer {
         operation->attributes["llvm_intrinsic"] = name;
 
         if (name == "vprintf") return import_vprintf(call, state, operation);
+        if (is_heap_alloc_callee(name) || is_heap_free_callee(name)) {
+            if (!state->heap_buffer.has_value()) {
+                return fail(&call, "device heap call is missing its hidden heap binding");
+            }
+            if (call.arg_size() != 1) {
+                return fail(&call, "device heap call expects one argument");
+            }
+            operation->opcode = is_heap_alloc_callee(name)
+                                    ? OpCode::kDeviceMalloc
+                                    : OpCode::kDeviceFree;
+            operation->operands = {*state->heap_buffer,
+                                   import_operand(*call.getArgOperand(0), *state)};
+            return true;
+        }
         if (name.starts_with("llvm.nvvm.isspacep.")) {
             operation->opcode = OpCode::kAddressSpaceTest;
             operation->attributes["address_space"] = name.substr(std::string("llvm.nvvm.isspacep.").size());
@@ -2302,6 +2389,13 @@ struct Importer {
                 if (info.constant && passed_constant_symbols) continue;
                 operation->operands.push_back(binding->second.base);
                 passed_constant_symbols |= info.constant;
+            }
+            if (function_uses_heap(*callee)) {
+                if (!state->heap_buffer.has_value()) {
+                    return fail(&call,
+                                "missing transitive device heap binding for device helper");
+                }
+                operation->operands.push_back(*state->heap_buffer);
             }
             if (function_uses_vprintf(*callee)) {
                 if (!state->printf_buffer.has_value() ||
