@@ -235,6 +235,7 @@ struct MslFunction {
     MslType return_type = MslType::void_type();
     bool is_kernel = false;
     std::vector<MslParameter> parameters;
+    std::vector<MslAttribute> attributes;
     std::vector<MslStmt> statements;
 };
 

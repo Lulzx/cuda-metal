@@ -311,6 +311,8 @@ std::string_view opcode_name(OpCode opcode) {
         case OpCode::kStore: return "store";
         case OpCode::kCall: return "call";
         case OpCode::kPrintf: return "gpu.printf";
+        case OpCode::kDeviceMalloc: return "gpu.device_malloc";
+        case OpCode::kDeviceFree: return "gpu.device_free";
         case OpCode::kThreadId: return "gpu.thread_id";
         case OpCode::kThreadgroupId: return "gpu.threadgroup_id";
         case OpCode::kThreadgroupSize: return "gpu.threadgroup_size";
@@ -344,6 +346,89 @@ std::string_view opcode_name(OpCode opcode) {
         case OpCode::kMetalThreadgroupArgument: return "metal.threadgroup_argument";
     }
     return "unknown";
+}
+
+namespace {
+
+std::uint32_t register_width(const Type& type) {
+    switch (type.kind) {
+        case TypeKind::kVoid: return 0;
+        case TypeKind::kPredicate: return 1;
+        case TypeKind::kPointer: return 2; // 64-bit address
+        case TypeKind::kVector: {
+            std::uint32_t element = 1;
+            if (!type.elements.empty()) element = register_width(type.elements.front());
+            return element * std::max(1u, type.lanes);
+        }
+        case TypeKind::kAggregate: {
+            std::uint32_t total = 0;
+            for (const Type& element : type.elements) total += register_width(element);
+            return total;
+        }
+        case TypeKind::kInteger:
+        case TypeKind::kFloat:
+            return type.bit_width > 32 ? 2 : 1;
+    }
+    return 1;
+}
+
+} // namespace
+
+std::uint32_t estimate_register_pressure(const Function& function) {
+    struct Interval {
+        std::uint32_t def = 0;
+        std::uint32_t last_use = 0;
+        std::uint32_t width = 0;
+    };
+    std::unordered_map<ValueId, Interval> intervals;
+    std::uint32_t index = 0;
+    auto define = [&](ValueId value, const Type& type, std::uint32_t at) {
+        if (value != kInvalidValue)
+            intervals[value] = {.def = at, .last_use = at, .width = register_width(type)};
+    };
+    auto use = [&](ValueId value, std::uint32_t at) {
+        auto found = intervals.find(value);
+        if (found != intervals.end()) found->second.last_use = std::max(found->second.last_use, at);
+    };
+    for (const FunctionArgument& argument : function.arguments)
+        define(argument.value, argument.type, 0);
+    for (const BasicBlock& block : function.blocks) {
+        for (const BlockArgument& argument : block.arguments)
+            define(argument.value, argument.type, index);
+        for (const Operation& operation : block.operations) {
+            ++index;
+            for (const Operand& operand : operation.operands)
+                if (operand.kind == OperandKind::kValue) use(operand.value, index);
+            for (const Successor& successor : operation.successors)
+                for (ValueId argument : successor.arguments) use(argument, index);
+            for (std::size_t i = 0; i < operation.results.size(); ++i)
+                define(operation.results[i],
+                       i < operation.result_types.size() ? operation.result_types[i]
+                                                          : Type::void_type(),
+                       index);
+        }
+    }
+    // Sweep line: a value occupies registers from its definition through
+    // its last use (inclusive), then frees them.
+    std::vector<std::pair<std::uint32_t, std::int64_t>> events;
+    events.reserve(intervals.size() * 2);
+    for (const auto& [_, interval] : intervals) {
+        if (interval.width == 0) continue;
+        events.emplace_back(interval.def, static_cast<std::int64_t>(interval.width));
+        events.emplace_back(interval.last_use + 1, -static_cast<std::int64_t>(interval.width));
+    }
+    std::sort(events.begin(), events.end());
+    std::int64_t live = 0;
+    std::int64_t peak = 0;
+    for (std::size_t i = 0; i < events.size();) {
+        const std::uint32_t at = events[i].first;
+        while (i < events.size() && events[i].first == at) {
+            live += events[i].second;
+            ++i;
+        }
+        peak = std::max(peak, live);
+    }
+    return static_cast<std::uint32_t>(peak);
 }
 
 VerifyResult verify(const Module& module) {
@@ -669,12 +754,14 @@ VerifyResult verify(const Module& module) {
                                        "device calls must be direct and resolve within the module");
                     } else if ((!operation.attributes.contains("builtin") ||
                                 operation.attributes.at("builtin") != "true") &&
+                               !operation.attributes.contains("wmma_8x8") &&
                                !function_names.contains(callee->second)) {
                         add_diagnostic(&result, operation.location,
                                        "device call target '" + callee->second +
                                            "' is not defined in the module");
-                    } else if (!operation.attributes.contains("builtin") ||
-                               operation.attributes.at("builtin") != "true") {
+                    } else if ((!operation.attributes.contains("builtin") ||
+                                operation.attributes.at("builtin") != "true") &&
+                               !operation.attributes.contains("wmma_8x8")) {
                         call_graph[function.name].insert(callee->second);
                     }
                 }

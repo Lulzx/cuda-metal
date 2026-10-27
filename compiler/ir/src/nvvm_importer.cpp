@@ -530,6 +530,83 @@ bool is_nvvm_kernel(const llvm::Function& function) {
     return false;
 }
 
+// __launch_bounds__ / .maxntid arrives as nvvm.annotations key/value pairs:
+// (function, "maxntidx", N, "maxntidy", N, "maxntidz", N).
+std::uint32_t nvvm_max_threads_per_threadgroup(const llvm::Function& function) {
+    // Modern clang spells __launch_bounds__ as function attributes:
+    // "nvvm.maxntid" (total) or "nvvm.maxntidx/y/z" (per axis).
+    {
+        std::uint64_t dims[3] = {1, 1, 1};
+        bool any_axis = false;
+        for (int axis = 0; axis < 3; ++axis) {
+            const char* keys[3] = {"nvvm.maxntidx", "nvvm.maxntidy", "nvvm.maxntidz"};
+            const llvm::Attribute attribute = function.getFnAttribute(keys[axis]);
+            if (attribute.isValid()) {
+                std::uint64_t parsed = 0;
+                if (!attribute.getValueAsString().getAsInteger(10, parsed) &&
+                    parsed > 0) {
+                    dims[axis] = parsed;
+                    any_axis = true;
+                }
+            }
+        }
+        if (any_axis) {
+            const std::uint64_t product = dims[0] * dims[1] * dims[2];
+            return product > 0 && product <= 1024
+                       ? static_cast<std::uint32_t>(product)
+                       : 0;
+        }
+        const llvm::Attribute total = function.getFnAttribute("nvvm.maxntid");
+        if (total.isValid()) {
+            std::uint64_t parsed = 0;
+            if (!total.getValueAsString().getAsInteger(10, parsed) && parsed > 0 &&
+                parsed <= 1024) {
+                return static_cast<std::uint32_t>(parsed);
+            }
+            return 0;
+        }
+    }
+    const llvm::Module* module = function.getParent();
+    const llvm::NamedMDNode* annotations =
+        module != nullptr ? module->getNamedMetadata("nvvm.annotations") : nullptr;
+    if (annotations == nullptr) return 0;
+    std::uint64_t dims[3] = {1, 1, 1};
+    bool found = false;
+    for (const llvm::MDNode* annotation : annotations->operands()) {
+        if (annotation == nullptr || annotation->getNumOperands() < 3) continue;
+        const auto* annotated_value =
+            llvm::dyn_cast_or_null<llvm::ValueAsMetadata>(
+                annotation->getOperand(0).get());
+        if (annotated_value == nullptr || annotated_value->getValue() != &function) {
+            continue;
+        }
+        for (std::size_t i = 1; i + 1 < annotation->getNumOperands(); i += 2) {
+            const auto* property = llvm::dyn_cast_or_null<llvm::MDString>(
+                annotation->getOperand(i).get());
+            const auto* wrapped = llvm::dyn_cast_or_null<llvm::ConstantAsMetadata>(
+                annotation->getOperand(i + 1).get());
+            const llvm::ConstantInt* value =
+                wrapped != nullptr
+                    ? llvm::dyn_cast_or_null<llvm::ConstantInt>(wrapped->getValue())
+                    : nullptr;
+            if (property == nullptr || value == nullptr) continue;
+            const llvm::StringRef key = property->getString();
+            const std::size_t axis = key == "maxntidx"   ? 0
+                                     : key == "maxntidy" ? 1
+                                     : key == "maxntidz" ? 2
+                                                         : 3;
+            if (axis < 3) {
+                dims[axis] = value->getZExtValue();
+                found = true;
+            }
+        }
+    }
+    if (!found) return 0;
+    const std::uint64_t product = dims[0] * dims[1] * dims[2];
+    if (product == 0 || product > 1024) return 0;
+    return static_cast<std::uint32_t>(product);
+}
+
 struct FunctionState {
     Function output;
     std::unordered_map<const llvm::Value*, ValueId> values;
@@ -1131,7 +1208,11 @@ struct Importer {
         state->output.generic_pointer_return =
             function.getReturnType()->isPointerTy() &&
             function.getReturnType()->getPointerAddressSpace() == 0;
-        if (state->output.is_kernel) state->output.kernel_abi = KernelAbi{};
+        if (state->output.is_kernel) {
+            state->output.kernel_abi = KernelAbi{};
+            state->output.kernel_abi->max_threads_per_threadgroup =
+                nvvm_max_threads_per_threadgroup(function);
+        }
 
         std::uint32_t argument_index = 0;
         for (const llvm::Argument& argument : function.args()) {
@@ -2138,7 +2219,11 @@ struct Importer {
             operation->attributes["kind"] =
                 name.find(".down.") != std::string::npos
                     ? "down"
-                    : (name.find(".up.") != std::string::npos ? "up" : "index");
+                    : (name.find(".up.") != std::string::npos
+                           ? "up"
+                           : (name.find(".bfly.") != std::string::npos
+                                  ? "xor"
+                                  : "index"));
         } else if (name == "llvm.nvvm.vote.ballot.sync") {
             operation->opcode = OpCode::kBallot;
             operation->attributes["kind"] = "ballot";
@@ -2157,6 +2242,21 @@ struct Importer {
                 return fail(&call, "unsupported LLVM/NVVM vote intrinsic '" + name + "'");
             }
         }
+        else if (name == "__cumetal_wmma_f32_mma_8x8" ||
+                 name == "__cumetal_wmma_bf16_mma_8x8") {
+            // WMMA marker from runtime/api/mma.h: an 8x8 threadgroup-tile
+            // multiply-accumulate. The MSL emitter turns it into
+            // simdgroup_matrix operations; it is not a real device call.
+            operation->opcode = OpCode::kCall;
+            operation->attributes["callee"] = name;
+            operation->attributes["wmma_8x8"] =
+                name.find("bf16") != std::string::npos ? "bf16" : "f32";
+        }
+        else if (name.find("llvm.nvvm.redux") == 0) {
+            // Opcode/attributes finalized after operand import below, where
+            // the (value, membermask) order is already canonical.
+            operation->opcode = OpCode::kReduction;
+        }
         else if (name.find("llvm.fma.") == 0) operation->opcode = OpCode::kFma;
         else if (const std::string* builtin = llvm_math_builtin(name)) {
             operation->opcode = OpCode::kCall;
@@ -2170,6 +2270,26 @@ struct Importer {
         }
         for (const llvm::Use& argument : call.args()) {
             operation->operands.push_back(import_operand(*argument.get(), *state));
+        }
+        // NVVM shfl intrinsics take (membermask, value, delta, clamp); the
+        // canonical IR/MSL order is (value, delta, clamp). Drop the mask,
+        // matching the PTX importer's treatment of the trailing membermask.
+        if (operation->opcode == OpCode::kShuffle &&
+            name.find("llvm.nvvm.shfl") == 0 && operation->operands.size() >= 4) {
+            operation->operands.erase(operation->operands.begin());
+        }
+        if (name.find("llvm.nvvm.redux") == 0) {
+            operation->opcode = OpCode::kReduction;
+            for (const char* kind : {"add", "min", "max", "and", "or", "xor"}) {
+                if (name.find(std::string(".") + kind + ".") != std::string::npos) {
+                    operation->attributes["kind"] = kind;
+                    break;
+                }
+            }
+            if (name.find(".s32") != std::string::npos ||
+                name.find(".s64") != std::string::npos) {
+                operation->attributes["signed"] = "true";
+            }
         }
         if (!callee->isDeclaration()) {
             bool passed_constant_symbols = false;
@@ -3149,6 +3269,9 @@ struct Importer {
             }
             block.operations.push_back(std::move(terminator));
         }
+        if (state.output.is_kernel && state.output.kernel_abi.has_value())
+            state.output.kernel_abi->estimated_register_pressure =
+                estimate_register_pressure(state.output);
         result.module.functions.push_back(std::move(state.output));
         return true;
     }

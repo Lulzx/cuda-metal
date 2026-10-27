@@ -158,7 +158,17 @@ public:
             if (function.is_kernel) {
                 out_ << "kernel ";
             }
-            out_ << function.return_type.str() << " " << name << "(\n";
+            out_ << function.return_type.str() << " " << name;
+            // Kernel attributes (e.g. max_total_threads_per_threadgroup)
+            // sit between the function name and the parameter list in MSL.
+            for (const MslAttribute& attribute : function.attributes) {
+                out_ << " [[" << attribute.name;
+                if (attribute.index.has_value()) {
+                    out_ << "(" << *attribute.index << ")";
+                }
+                out_ << "]]";
+            }
+            out_ << "(\n";
             std::unordered_set<std::string> parameter_names;
             for (std::size_t i = 0; i < function.parameters.size(); ++i) {
                 const MslParameter& parameter = function.parameters[i];
@@ -519,7 +529,11 @@ std::string MslType::str() const {
                    (element == nullptr ? std::string("void") : element->str()) +
                    (kind == MslTypeKind::kPointer ? "*" : "&");
         }
-        case MslTypeKind::kStruct: return sanitize_identifier(struct_name);
+        case MslTypeKind::kStruct:
+            // Template spellings (e.g. simdgroup_matrix<float, 8, 8>) are
+            // already valid MSL type names, not identifiers to sanitize.
+            if (struct_name.find('<') != std::string::npos) return struct_name;
+            return sanitize_identifier(struct_name);
     }
     return "void";
 }

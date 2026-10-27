@@ -123,6 +123,13 @@ struct BindingDescriptor {
 struct KernelAbi {
     std::vector<ArgumentDescriptor> arguments;
     std::vector<BindingDescriptor> bindings;
+    // Declared launch bound (PTX .maxntid / NVVM maxntid annotation /
+    // __launch_bounds__): x*y*z, or 0 when undeclared.
+    std::uint32_t max_threads_per_threadgroup = 0;
+    // Liveness-based estimate of simultaneously live 32-bit registers per
+    // thread (see estimate_register_pressure). 0 when not computed. This is
+    // guidance for launch-bound/unroll decisions, never a correctness input.
+    std::uint32_t estimated_register_pressure = 0;
     std::uint32_t static_threadgroup_memory = 0;
     std::uint32_t required_simd_width = 32;
     std::vector<std::string> required_metal_features;
@@ -197,6 +204,12 @@ enum class OpCode : std::uint16_t {
     // the hidden buffer, capacity, then raw payload values; attributes carry
     // the format id and per-argument ABI widths.
     kPrintf,
+    // Device heap allocation over the hidden heap buffer. kDeviceMalloc
+    // operands are the heap buffer (device u32 pointer) and the requested
+    // byte size (i64); the result is a device byte pointer (or null).
+    // kDeviceFree operands are the heap buffer and the pointer to release.
+    kDeviceMalloc,
+    kDeviceFree,
     kThreadId,
     kThreadgroupId,
     kThreadgroupSize,
@@ -386,6 +399,12 @@ private:
     BlockId next_block_ = 1;
 };
 
+// Conservative linear-scan liveness estimate: the maximum, over the
+// function's linearized operations, of the summed 32-bit register widths
+// of values live at that point. Loops are not re-walked, so values carried
+// around a back edge are counted once; treat the result as a lower-bound
+// guide, not an allocation promise.
+[[nodiscard]] std::uint32_t estimate_register_pressure(const Function& function);
 [[nodiscard]] VerifyResult verify(const Module& module);
 [[nodiscard]] std::string print(const Module& module);
 [[nodiscard]] std::string_view opcode_name(OpCode opcode);
