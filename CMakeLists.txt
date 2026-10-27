@@ -347,6 +347,7 @@ target_link_libraries(cumetal_runtime
         "-framework Foundation"
         "-framework Metal"
         "-framework MetalPerformanceShaders"
+        "-framework MetalPerformanceShadersGraph"
         "-framework QuartzCore"
         ${CUMETAL_LZ4_LIBRARY}
         ${CUMETAL_ZSTD_LIBRARY}

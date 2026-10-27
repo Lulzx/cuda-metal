@@ -1,5 +1,7 @@
 #include "cublasLt.h"
 #include "cuda_runtime.h"
+#include "cuda_fp16.h"
+#include "cuda_bf16.h"
 
 #include <cmath>
 #include <cstdio>
@@ -213,6 +215,274 @@ static bool test_epilogue_bias() {
     return true;
 }
 
+static bool test_hgemm_via_lt() {
+    // Same 2x2 product as the FP32 test, in FP16 on host buffers
+    // (float-domain fallback) and on device buffers (MPS fast path).
+    const float a_vals[] = {1, 2, 3, 4};
+    const float b_vals[] = {5, 6, 7, 8};
+    const float expected[] = {23, 34, 31, 46};
+    __half A[4], B[4], C[4] = {}, D[4] = {};
+    for (int i = 0; i < 4; ++i) {
+        A[i] = static_cast<__half>(a_vals[i]);
+        B[i] = static_cast<__half>(b_vals[i]);
+    }
+    float alpha = 1.0f, beta = 0.0f;
+
+    cublasLtHandle_t handle = nullptr;
+    cublasLtCreate(&handle);
+    cublasLtMatmulDesc_t desc = nullptr;
+    if (cublasLtMatmulDescCreate(&desc, CUBLAS_COMPUTE_16F, CUDA_R_32F) !=
+        CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: FP16 Lt desc create\n");
+        return false;
+    }
+    cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr,
+                           Ddesc = nullptr;
+    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_16F, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_16F, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_16F, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Ddesc, CUDA_R_16F, 2, 2, 2);
+
+    cublasStatus_t st = cublasLtMatmul(handle, desc, &alpha, A, Adesc, B, Bdesc,
+                                       &beta, C, Cdesc, D, Ddesc, nullptr,
+                                       nullptr, 0, nullptr);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: host FP16 LtMatmul returned %d\n", st);
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(static_cast<float>(D[i]) - expected[i]) > 0.05f) {
+            std::fprintf(stderr, "FAIL: host FP16 D[%d] = %f, expected %f\n", i,
+                         static_cast<float>(D[i]), expected[i]);
+            return false;
+        }
+    }
+
+    // Device buffers exercise the MPS gemm_f16 path.
+    __half *dA = nullptr, *dB = nullptr, *dC = nullptr, *dD = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&dA), sizeof(A)) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&dB), sizeof(B)) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&dC), sizeof(C)) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&dD), sizeof(D)) != cudaSuccess ||
+        cudaMemcpy(dA, A, sizeof(A), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dB, B, sizeof(B), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dC, C, sizeof(C), cudaMemcpyHostToDevice) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: FP16 Lt device setup\n");
+        return false;
+    }
+    st = cublasLtMatmul(handle, desc, &alpha, dA, Adesc, dB, Bdesc, &beta, dC,
+                        Cdesc, dD, Ddesc, nullptr, nullptr, 0, nullptr);
+    __half out[4] = {};
+    cudaMemcpy(out, dD, sizeof(out), cudaMemcpyDeviceToHost);
+    cudaFree(dA); cudaFree(dB); cudaFree(dC); cudaFree(dD);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: device FP16 LtMatmul returned %d\n", st);
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(static_cast<float>(out[i]) - expected[i]) > 0.05f) {
+            std::fprintf(stderr, "FAIL: device FP16 D[%d] = %f, expected %f\n",
+                         i, static_cast<float>(out[i]), expected[i]);
+            return false;
+        }
+    }
+
+    // Mixed precision: FP16 inputs, FP32 output, 32F compute.
+    cublasLtMatmulDesc_t desc32 = nullptr;
+    cublasLtMatrixLayout_t C32 = nullptr, D32 = nullptr;
+    cublasLtMatmulDescCreate(&desc32, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    cublasLtMatrixLayoutCreate(&C32, CUDA_R_32F, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&D32, CUDA_R_32F, 2, 2, 2);
+    float hostC[4] = {}, hostD[4] = {};
+    st = cublasLtMatmul(handle, desc32, &alpha, A, Adesc, B, Bdesc, &beta,
+                        hostC, C32, hostD, D32, nullptr, nullptr, 0, nullptr);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: mixed FP16->FP32 LtMatmul returned %d\n", st);
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(hostD[i] - expected[i]) > 1e-4f) {
+            std::fprintf(stderr, "FAIL: mixed D[%d] = %f, expected %f\n", i,
+                         hostD[i], expected[i]);
+            return false;
+        }
+    }
+
+    cublasLtMatrixLayoutDestroy(D32);
+    cublasLtMatrixLayoutDestroy(C32);
+    cublasLtMatmulDescDestroy(desc32);
+    cublasLtMatrixLayoutDestroy(Ddesc);
+    cublasLtMatrixLayoutDestroy(Cdesc);
+    cublasLtMatrixLayoutDestroy(Bdesc);
+    cublasLtMatrixLayoutDestroy(Adesc);
+    cublasLtMatmulDescDestroy(desc);
+    cublasLtDestroy(handle);
+    return true;
+}
+
+static bool test_epilogue_device() {
+    // BIAS and GELU epilogues on device buffers exercise the MPSGraph
+    // backend path (host buffers keep the CPU epilogue path).
+    float A[] = {1, 0, 0, 1};
+    float B[] = {2, -3, 4, -5};
+    float C[] = {0, 0, 0, 0};
+    float bias[] = {10, 20};
+    float alpha = 1.0f, beta = 0.0f;
+
+    float *dA = nullptr, *dB = nullptr, *dC = nullptr, *dD = nullptr,
+          *dBias = nullptr;
+    if (cudaMalloc(reinterpret_cast<void**>(&dA), sizeof(A)) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&dB), sizeof(B)) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&dC), sizeof(C)) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&dD), 4 * sizeof(float)) != cudaSuccess ||
+        cudaMalloc(reinterpret_cast<void**>(&dBias), sizeof(bias)) != cudaSuccess ||
+        cudaMemcpy(dA, A, sizeof(A), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dB, B, sizeof(B), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dC, C, sizeof(C), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dBias, bias, sizeof(bias), cudaMemcpyHostToDevice) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: epilogue device setup\n");
+        return false;
+    }
+
+    cublasLtHandle_t handle = nullptr;
+    cublasLtCreate(&handle);
+    cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr,
+                           Ddesc = nullptr;
+    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_32F, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_32F, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_32F, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Ddesc, CUDA_R_32F, 2, 2, 2);
+
+    auto run_epilogue = [&](cublasLtEpilogue_t epi, float* out) {
+        cublasLtMatmulDesc_t desc = nullptr;
+        cublasLtMatmulDescCreate(&desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+        cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_EPILOGUE,
+                                       &epi, sizeof(epi));
+        if (epi == CUBLASLT_EPILOGUE_BIAS || epi == CUBLASLT_EPILOGUE_GELU_BIAS) {
+            const void* bp = dBias;
+            cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER,
+                                           &bp, sizeof(bp));
+        }
+        cublasStatus_t st = cublasLtMatmul(handle, desc, &alpha, dA, Adesc, dB,
+                                           Bdesc, &beta, dC, Cdesc, dD, Ddesc,
+                                           nullptr, nullptr, 0, nullptr);
+        cublasLtMatmulDescDestroy(desc);
+        if (st != CUBLAS_STATUS_SUCCESS) return false;
+        return cudaMemcpy(out, dD, 4 * sizeof(float),
+                          cudaMemcpyDeviceToHost) == cudaSuccess;
+    };
+
+    float out[4] = {};
+    // I*B + bias = [2+10, -3+20, 4+10, -5+20] (col-major)
+    if (!run_epilogue(CUBLASLT_EPILOGUE_BIAS, out)) {
+        std::fprintf(stderr, "FAIL: device BIAS epilogue run\n");
+        return false;
+    }
+    const float expected_bias[] = {12, 17, 14, 15};
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(out[i] - expected_bias[i]) > 1e-4f) {
+            std::fprintf(stderr, "FAIL: device BIAS D[%d] = %f, expected %f\n",
+                         i, out[i], expected_bias[i]);
+            return false;
+        }
+    }
+    // GELU over I*B = [2, -3, 4, -5]
+    if (!run_epilogue(CUBLASLT_EPILOGUE_GELU, out)) {
+        std::fprintf(stderr, "FAIL: device GELU epilogue run\n");
+        return false;
+    }
+    auto gelu = [](float x) {
+        return x * 0.5f * (1.0f + std::tanh(0.7978845608f * (x + 0.044715f * x * x * x)));
+    };
+    const float gelu_in[] = {2, -3, 4, -5};
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(out[i] - gelu(gelu_in[i])) > 2e-3f) {
+            std::fprintf(stderr, "FAIL: device GELU D[%d] = %f, expected %f\n",
+                         i, out[i], gelu(gelu_in[i]));
+            return false;
+        }
+    }
+
+    cudaFree(dA); cudaFree(dB); cudaFree(dC); cudaFree(dD); cudaFree(dBias);
+    cublasLtMatrixLayoutDestroy(Ddesc);
+    cublasLtMatrixLayoutDestroy(Cdesc);
+    cublasLtMatrixLayoutDestroy(Bdesc);
+    cublasLtMatrixLayoutDestroy(Adesc);
+    cublasLtDestroy(handle);
+    return true;
+}
+
+static bool test_bf16_via_lt() {
+    // BF16 inputs under 32F compute, BF16 and FP32 outputs (host path).
+    const float a_vals[] = {1, 2, 3, 4};
+    const float b_vals[] = {5, 6, 7, 8};
+    const float expected[] = {23, 34, 31, 46};
+    __nv_bfloat16 A[4], B[4], C[4] = {}, D[4] = {};
+    for (int i = 0; i < 4; ++i) {
+        A[i] = static_cast<__nv_bfloat16>(a_vals[i]);
+        B[i] = static_cast<__nv_bfloat16>(b_vals[i]);
+    }
+    float alpha = 1.0f, beta = 0.0f;
+
+    cublasLtHandle_t handle = nullptr;
+    cublasLtCreate(&handle);
+    cublasLtMatmulDesc_t desc = nullptr;
+    if (cublasLtMatmulDescCreate(&desc, CUBLAS_COMPUTE_32F, CUDA_R_32F) !=
+        CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: BF16 Lt desc create\n");
+        return false;
+    }
+    cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr,
+                           Ddesc = nullptr;
+    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_16BF, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_16BF, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_16BF, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Ddesc, CUDA_R_16BF, 2, 2, 2);
+
+    cublasStatus_t st = cublasLtMatmul(handle, desc, &alpha, A, Adesc, B, Bdesc,
+                                       &beta, C, Cdesc, D, Ddesc, nullptr,
+                                       nullptr, 0, nullptr);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: BF16 LtMatmul returned %d\n", st);
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(static_cast<float>(D[i]) - expected[i]) > 0.5f) {
+            std::fprintf(stderr, "FAIL: BF16 D[%d] = %f, expected %f\n", i,
+                         static_cast<float>(D[i]), expected[i]);
+            return false;
+        }
+    }
+
+    cublasLtMatrixLayout_t C32 = nullptr, D32 = nullptr;
+    cublasLtMatrixLayoutCreate(&C32, CUDA_R_32F, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&D32, CUDA_R_32F, 2, 2, 2);
+    float hostC[4] = {}, hostD[4] = {};
+    st = cublasLtMatmul(handle, desc, &alpha, A, Adesc, B, Bdesc, &beta, hostC,
+                        C32, hostD, D32, nullptr, nullptr, 0, nullptr);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: BF16->FP32 LtMatmul returned %d\n", st);
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(hostD[i] - expected[i]) > 0.5f) {
+            std::fprintf(stderr, "FAIL: BF16->FP32 D[%d] = %f, expected %f\n", i,
+                         hostD[i], expected[i]);
+            return false;
+        }
+    }
+
+    cublasLtMatrixLayoutDestroy(D32);
+    cublasLtMatrixLayoutDestroy(C32);
+    cublasLtMatrixLayoutDestroy(Ddesc);
+    cublasLtMatrixLayoutDestroy(Cdesc);
+    cublasLtMatrixLayoutDestroy(Bdesc);
+    cublasLtMatrixLayoutDestroy(Adesc);
+    cublasLtMatmulDescDestroy(desc);
+    cublasLtDestroy(handle);
+    return true;
+}
+
 static bool test_null_args() {
     if (cublasLtCreate(nullptr) != CUBLAS_STATUS_INVALID_VALUE) return false;
     if (cublasLtDestroy(nullptr) != CUBLAS_STATUS_INVALID_VALUE) return false;
@@ -396,6 +666,9 @@ int main() {
     if (!test_matrix_layout()) return 1;
     if (!test_preference_and_heuristic()) return 1;
     if (!test_sgemm_via_lt()) return 1;
+    if (!test_hgemm_via_lt()) return 1;
+    if (!test_bf16_via_lt()) return 1;
+    if (!test_epilogue_device()) return 1;
     if (!test_epilogue_bias()) return 1;
     if (!test_null_args()) return 1;
     if (!test_validation_and_stream_ordering()) return 1;
